@@ -86,20 +86,10 @@ impl EventLoop {
 
         let cf_ids: Vec<u32> = self.state.column_families.keys().copied().collect();
         for cf_id in cf_ids {
-            if let Ok(flush_output) =
-                self.flush_actor
-                    .handle_flush(&mut self.state, cf_id, self.hybrid_storage.as_ref())
-            {
-                let _ = self.publish_flushed_sst_with_reservation(
-                    cf_id,
-                    &flush_output.sst_name,
-                    flush_output.sequence,
-                    flush_output.file_meta,
-                    flush_output.frozen_memtable.as_ref(),
-                    flush_output.reservation,
-                );
-            }
+            let _ = self.freeze_active_memtable(cf_id);
         }
+        self.schedule_next_flush_worker();
+        self.drain_inline_flush_worker();
         self.wake_write_stall_waiters();
 
         let new_epoch = self

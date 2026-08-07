@@ -2,6 +2,7 @@
 
 use crate::wal::policy::BatchConfig;
 use crate::wal::DurabilityPolicy;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -47,6 +48,9 @@ pub struct RuntimeConfig {
     pub hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
     pub hybrid_storage_events: Option<crossbeam::channel::Receiver<crate::storage::StorageEvent>>,
     pub cloud_metadata_storage: Option<Arc<crate::storage::cloud::CloudStorage>>,
+    /// Remote WAL segments replayed during startup and still eligible for
+    /// manifest-covered cleanup.
+    pub recovered_cloud_wal_segments: BTreeMap<u64, u64>,
     pub compression_policy: crate::sst::compression::CompressionPolicy,
     pub block_cache_size: usize,
     pub block_cache_policy: crate::sst::cache::CachePolicyType,
@@ -73,6 +77,7 @@ impl Default for RuntimeConfig {
             hybrid_storage: None,
             hybrid_storage_events: None,
             cloud_metadata_storage: None,
+            recovered_cloud_wal_segments: BTreeMap::new(),
             compression_policy: crate::sst::compression::CompressionPolicy::default(),
             block_cache_size: 128 * 1024 * 1024,
             block_cache_policy: crate::sst::cache::CachePolicyType::Lru,

@@ -117,7 +117,11 @@ impl HybridStorage {
     /// runtime may validate the bytes as WAL, SST, or metadata without giving
     /// those formats to the storage layer.
     pub(crate) fn remote_object_proof(&self, key: &str) -> Result<RemoteObjectProof, String> {
-        Self::stable_object_proof_from_backend(&self.cloud, key, self.callback_timeout)
+        Self::stable_object_proof_from_backend(
+            self.cloud_backend_for_key(key),
+            key,
+            self.callback_timeout,
+        )
     }
 
     /// Return a stable proof when the remote key exists, or `None` for a
@@ -127,7 +131,7 @@ impl HybridStorage {
         key: &str,
     ) -> Result<Option<RemoteObjectProof>, String> {
         let (tx, rx) = std::sync::mpsc::channel();
-        self.cloud.submit_head(key, tx);
+        self.cloud_backend_for_key(key).submit_head(key, tx);
         match rx.recv_timeout(self.callback_timeout) {
             Ok(StorageEvent::HeadComplete {
                 result: StorageOutcome::Ok(_),
@@ -174,7 +178,8 @@ impl HybridStorage {
         };
         let expected_bytes = data.clone();
         let (tx, rx) = std::sync::mpsc::channel();
-        self.cloud.submit_write_with_headers(key, data, headers, tx);
+        self.cloud_backend_for_key(key)
+            .submit_write_with_headers(key, data, headers, tx);
         match rx.recv_timeout(self.callback_timeout) {
             Ok(StorageEvent::WriteComplete {
                 result: StorageOutcome::Ok(()),
@@ -230,7 +235,7 @@ impl HybridStorage {
     /// before issuing the conditional delete.
     pub(crate) fn remote_identity_guard(&self, proof: &RemoteObjectProof) -> GuardedObjectProof {
         GuardedObjectProof::metadata_only(
-            Arc::clone(&self.cloud),
+            Arc::clone(self.cloud_backend_for_key(&proof.key)),
             proof.key.clone(),
             proof.metadata.clone(),
         )
@@ -291,7 +296,7 @@ impl HybridStorage {
             ));
         }
 
-        let cloud = Arc::clone(&self.cloud);
+        let cloud = Arc::clone(self.cloud_backend_for_key(&target.key));
         let target_guard = self.remote_identity_guard(&target);
         let target_key = target.key;
         let event_queue = Arc::clone(&self.event_queue);

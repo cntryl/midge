@@ -248,6 +248,66 @@ impl Engine {
         }
     }
 
+    fn schedule_runtime_fencing_cleanup(&mut self) -> MidgeResult<()> {
+        debug_assert!(self.pending_fencing_cleanup.is_none());
+        let runtime = self.runtime.take().ok_or_else(|| {
+            MidgeError::Internal("runtime cleanup requested without a runtime".to_string())
+        })?;
+        self.ingest_coordinators.clear();
+        let resources: FencingResources = (
+            self.lease_heartbeat.take(),
+            self.lease.take(),
+            self.lease_guard.take(),
+        );
+        let retained_cleanup = Arc::new(std::sync::Mutex::new(Some((runtime, resources))));
+        let worker_cleanup = Arc::clone(&retained_cleanup);
+        let (completion_tx, completion_rx) = crossbeam::channel::bounded(1);
+        let spawn_result = std::thread::Builder::new()
+            .name("midge-runtime-fencing-reaper".to_string())
+            .spawn(move || {
+                let cleanup = worker_cleanup
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                let Some((runtime, resources)) = cleanup else {
+                    return;
+                };
+                drop(runtime);
+                Self::release_fencing_parts(resources.0, resources.1, resources.2);
+                let _ = completion_tx.send(());
+                tracing::debug!("Engine runtime and fencing reaper cleanup complete");
+            });
+        match spawn_result {
+            Ok(worker) => {
+                drop(worker);
+                self.pending_fencing_cleanup = Some(PendingFencingCleanup {
+                    completion: completion_rx,
+                    terminal_result: Ok(()),
+                });
+                Ok(())
+            }
+            Err(error) => {
+                let (runtime, resources) = retained_cleanup
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                    .ok_or_else(|| {
+                        MidgeError::Internal(
+                            "runtime fencing resources disappeared after cleanup reaper spawn failure"
+                                .to_string(),
+                        )
+                    })?;
+                self.runtime = Some(runtime);
+                self.lease_heartbeat = resources.0;
+                self.lease = resources.1;
+                self.lease_guard = resources.2;
+                Err(MidgeError::ResourceLimit(format!(
+                    "failed to spawn runtime fencing cleanup reaper: {error}"
+                )))
+            }
+        }
+    }
+
     fn wait_for_fencing_cleanup(&mut self, timeout: Duration) -> MidgeResult<()> {
         let wait_result = self
             .pending_fencing_cleanup
@@ -645,7 +705,9 @@ impl Engine {
     /// Once shutdown begins, the engine remains in the closing state and
     /// rejects new work. `Busy` and `Timeout` leave it retryable; callers may
     /// release active transactions or wait for blocked storage I/O and invoke
-    /// this method again.
+    /// this method again. The timeout bounds the caller's wait; it does not
+    /// detach or cancel in-flight durability I/O. Writer fencing remains held
+    /// by the cleanup reaper until every runtime worker has actually exited.
     ///
     /// # Errors
     ///
@@ -667,10 +729,11 @@ impl Engine {
             return self.wait_for_fencing_cleanup(timeout.saturating_sub(started.elapsed()));
         };
         let shutdown_result = self.runtime_handle.shutdown(timeout);
-        if matches!(
-            &shutdown_result,
-            Err(MidgeError::Busy(_) | MidgeError::Timeout(_))
-        ) {
+        if matches!(&shutdown_result, Err(MidgeError::Busy(_))) {
+            return shutdown_result;
+        }
+        if matches!(&shutdown_result, Err(MidgeError::Timeout(_))) {
+            self.schedule_runtime_fencing_cleanup()?;
             return shutdown_result;
         }
 

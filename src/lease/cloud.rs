@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 const DEFAULT_CLOUD_LEASE_TTL_SECS: u64 = 30;
 
 /// Key used for the lease object in cloud storage.
-const LEASE_OBJECT_KEY: &str = "midge_primary_lease.json";
+const LEASE_OBJECT_KEY: &str = crate::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY;
 
 /// Cloud storage lease configuration.
 #[derive(Debug, Clone)]

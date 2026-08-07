@@ -1,8 +1,8 @@
 #![cfg(all(feature = "cloud-all", feature = "sqrzl-tests"))]
 
 use cntryl_midge::{
-    Bytes, CloudProviderConfig, ColumnFamilyHandle, Engine, MemoryBudget, OpenOptions,
-    TransactionMode, WriteOptions,
+    Bytes, CloudProviderConfig, CloudStorageBuckets, CloudStorageLocation, ColumnFamilyHandle,
+    Engine, MemoryBudget, OpenOptions, TransactionMode, WriteOptions,
 };
 use std::fmt::Write as _;
 use std::net::{SocketAddr, TcpStream};
@@ -14,7 +14,9 @@ const SQRZL_SOCKET: &str = "127.0.0.1:9000";
 const SQRZL_ACCESS_KEY: &str = "admin";
 const SQRZL_SECRET_KEY: &str = "easy-peasy";
 const REQUIRE_SQRZL_ENV: &str = "MIDGE_REQUIRE_SQRZL";
-const REAL_S3_BUCKET_ENV: &str = "MIDGE_REAL_S3_BUCKET";
+const REAL_S3_WAL_BUCKET_ENV: &str = "MIDGE_REAL_S3_WAL_BUCKET";
+const REAL_S3_SST_BUCKET_ENV: &str = "MIDGE_REAL_S3_SST_BUCKET";
+const REAL_S3_CONTROL_BUCKET_ENV: &str = "MIDGE_REAL_S3_CONTROL_BUCKET";
 const REAL_S3_ENDPOINT_ENV: &str = "MIDGE_REAL_S3_ENDPOINT";
 const REAL_S3_REGION_ENV: &str = "MIDGE_REAL_S3_REGION";
 const REAL_S3_ACCESS_KEY_ENV: &str = "MIDGE_REAL_S3_ACCESS_KEY";
@@ -24,10 +26,18 @@ const REAL_S3_PATH_STYLE_ENV: &str = "MIDGE_REAL_S3_PATH_STYLE";
 #[test]
 fn should_recover_engine_from_sqrzl_s3_after_local_cache_loss() {
     // Arrange
-    let provider = CloudProviderConfig::sqrzl_s3("midge-sqrzl-engine-s3");
+    let wal_provider = CloudProviderConfig::sqrzl_s3("midge-sqrzl-engine-s3-wal");
+    let sst_provider = CloudProviderConfig::sqrzl_s3("midge-sqrzl-engine-s3-sst");
+    let control_provider = CloudProviderConfig::sqrzl_s3("midge-sqrzl-engine-s3-control");
 
     // Act
-    engine_recovers_from_provider_after_local_cache_loss("sqrzl-engine", provider, true);
+    engine_recovers_from_provider_after_local_cache_loss(
+        "sqrzl-engine",
+        wal_provider,
+        sst_provider,
+        control_provider,
+        true,
+    );
 
     // Assert
     // The helper performs the provider-backed recovery assertions.
@@ -36,12 +46,19 @@ fn should_recover_engine_from_sqrzl_s3_after_local_cache_loss() {
 #[test]
 fn should_recover_engine_from_real_s3_after_local_cache_loss_if_configured() {
     // Arrange
-    let Some(provider) = configured_real_s3_provider() else {
+    let Some((wal_provider, sst_provider, control_provider)) = configured_real_s3_providers()
+    else {
         return;
     };
 
     // Act
-    engine_recovers_from_provider_after_local_cache_loss("real-s3-engine", provider, false);
+    engine_recovers_from_provider_after_local_cache_loss(
+        "real-s3-engine",
+        wal_provider,
+        sst_provider,
+        control_provider,
+        false,
+    );
 
     // Assert
     // The helper performs the provider-backed recovery assertions.
@@ -49,18 +66,31 @@ fn should_recover_engine_from_real_s3_after_local_cache_loss_if_configured() {
 
 fn real_cloud_engine_options(
     cache_path: PathBuf,
-    provider: CloudProviderConfig,
-    prefix: String,
+    wal_provider: CloudProviderConfig,
+    wal_prefix: String,
+    sst_provider: CloudProviderConfig,
+    sst_prefix: String,
+    control_provider: CloudProviderConfig,
+    control_prefix: String,
 ) -> OpenOptions {
-    OpenOptions::cloud(cache_path, provider, prefix)
-        .memory_budget(MemoryBudget::Bytes(8 * 1024 * 1024))
-        .build()
-        .expect("build provider engine options")
+    OpenOptions::cloud(
+        cache_path,
+        CloudStorageBuckets::new(
+            CloudStorageLocation::new(wal_provider, wal_prefix),
+            CloudStorageLocation::new(sst_provider, sst_prefix),
+            CloudStorageLocation::new(control_provider, control_prefix),
+        ),
+    )
+    .memory_budget(MemoryBudget::Bytes(8 * 1024 * 1024))
+    .build()
+    .expect("build provider engine options")
 }
 
 fn engine_recovers_from_provider_after_local_cache_loss(
     label: &str,
-    provider: CloudProviderConfig,
+    wal_provider: CloudProviderConfig,
+    sst_provider: CloudProviderConfig,
+    control_provider: CloudProviderConfig,
     prepare_namespace: bool,
 ) {
     if prepare_namespace && !sqrzl_available_or_skip(label) {
@@ -68,17 +98,30 @@ fn engine_recovers_from_provider_after_local_cache_loss(
     }
 
     if prepare_namespace {
-        ensure_sqrzl_s3_bucket(provider_bucket(&provider)).unwrap_or_else(|error| {
-            panic!("{label}: failed to prepare provider namespace: {error}");
-        });
+        for provider in [&wal_provider, &sst_provider, &control_provider] {
+            ensure_sqrzl_s3_bucket(provider_bucket(provider)).unwrap_or_else(|error| {
+                panic!("{label}: failed to prepare provider namespace: {error}");
+            });
+        }
     }
 
-    let prefix = format!("engine/{label}/{}/", uuid::Uuid::new_v4());
+    let database_prefix = format!("engine/{label}/{}/", uuid::Uuid::new_v4());
+    let wal_prefix = format!("{database_prefix}wal/");
+    let sst_prefix = format!("{database_prefix}sst/");
+    let control_prefix = format!("{database_prefix}control/");
     let cache_path =
         std::env::temp_dir().join(format!("midge-provider-engine-{}", uuid::Uuid::new_v4()));
     let _ = std::fs::remove_dir_all(&cache_path);
 
-    let opts = real_cloud_engine_options(cache_path.clone(), provider.clone(), prefix.clone());
+    let opts = real_cloud_engine_options(
+        cache_path.clone(),
+        wal_provider.clone(),
+        wal_prefix.clone(),
+        sst_provider.clone(),
+        sst_prefix.clone(),
+        control_provider.clone(),
+        control_prefix.clone(),
+    );
     let mut engine = Engine::open(opts).expect("open provider-backed engine");
     let default_handle = default_cf(&engine);
 
@@ -103,8 +146,12 @@ fn engine_recovers_from_provider_after_local_cache_loss(
 
     let mut reopened = Engine::open(real_cloud_engine_options(
         cache_path.clone(),
-        provider,
-        prefix,
+        wal_provider,
+        wal_prefix,
+        sst_provider,
+        sst_prefix,
+        control_provider,
+        control_prefix,
     ))
     .expect("reopen from provider");
     let reopened_cf = default_cf(&reopened);
@@ -134,8 +181,14 @@ fn provider_bucket(provider: &CloudProviderConfig) -> &str {
     }
 }
 
-fn configured_real_s3_provider() -> Option<CloudProviderConfig> {
-    let bucket = std::env::var(REAL_S3_BUCKET_ENV).ok()?;
+fn configured_real_s3_providers() -> Option<(
+    CloudProviderConfig,
+    CloudProviderConfig,
+    CloudProviderConfig,
+)> {
+    let wal_bucket = std::env::var(REAL_S3_WAL_BUCKET_ENV).ok()?;
+    let sst_bucket = std::env::var(REAL_S3_SST_BUCKET_ENV).ok()?;
+    let control_bucket = std::env::var(REAL_S3_CONTROL_BUCKET_ENV).ok()?;
     let endpoint = std::env::var(REAL_S3_ENDPOINT_ENV).ok()?;
     let access_key = std::env::var(REAL_S3_ACCESS_KEY_ENV).ok()?;
     let secret_key = std::env::var(REAL_S3_SECRET_KEY_ENV).ok()?;
@@ -144,13 +197,34 @@ fn configured_real_s3_provider() -> Option<CloudProviderConfig> {
         .ok()
         .is_none_or(|value| !matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "off"));
 
-    let provider =
-        CloudProviderConfig::s3_compatible(bucket, region, endpoint, access_key, secret_key);
-    Some(
-        provider
-            .with_path_style(path_style)
-            .expect("real S3 path-style override"),
+    let wal_provider = CloudProviderConfig::s3_compatible(
+        wal_bucket,
+        region.clone(),
+        endpoint.clone(),
+        access_key.clone(),
+        secret_key.clone(),
     )
+    .with_path_style(path_style)
+    .expect("real S3 WAL path-style override");
+    let sst_provider = CloudProviderConfig::s3_compatible(
+        sst_bucket,
+        region.clone(),
+        endpoint.clone(),
+        access_key.clone(),
+        secret_key.clone(),
+    )
+    .with_path_style(path_style)
+    .expect("real S3 SST path-style override");
+    let control_provider = CloudProviderConfig::s3_compatible(
+        control_bucket,
+        region,
+        endpoint,
+        access_key,
+        secret_key,
+    )
+    .with_path_style(path_style)
+    .expect("real S3 control path-style override");
+    Some((wal_provider, sst_provider, control_provider))
 }
 
 fn sqrzl_available_or_skip(label: &str) -> bool {

@@ -112,6 +112,9 @@ impl RuntimeState {
             cloud_eventual_flush_segment_gap: crate::runtime::CloudRuntimePolicy::default()
                 .eventual_flush_segment_gap,
             max_immutable_memtables: 10, // Hard limit on immutable memtable queue
+            next_flush_id: 1,
+            writer_epoch: 0,
+            flush_metrics: super::FlushRuntimeMetrics::default(),
             write_pressure: WritePressureState { stalled: false },
             total_memtable_bytes: 0,
             read_amp_metrics: ReadAmpMetrics::new(),

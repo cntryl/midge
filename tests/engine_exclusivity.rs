@@ -72,13 +72,13 @@ fn should_reject_second_engine_open_given_existing_primary_lease_when_starting()
         "second instance should fail to acquire lease"
     );
 
-    if let Err(MidgeError::Internal(msg)) = result {
+    if let Err(MidgeError::LeaseHeld(msg)) = result {
         assert!(
             msg.contains("another Midge instance") || msg.contains("already running"),
             "error message should indicate another instance is running, got: {msg}"
         );
     } else {
-        panic!("expected MidgeError::Internal with descriptive message");
+        panic!("expected MidgeError::LeaseHeld with descriptive message");
     }
 
     // First instance should still be healthy
@@ -224,7 +224,7 @@ fn should_provide_clear_error_message_when_lease_contention() {
     // Assert
     assert!(result.is_err());
 
-    if let Err(MidgeError::Internal(msg)) = result {
+    if let Err(MidgeError::LeaseHeld(msg)) = result {
         // Error message must be clear and actionable
         assert!(
             msg.to_lowercase().contains("another"),
@@ -236,6 +236,8 @@ fn should_provide_clear_error_message_when_lease_contention() {
                 || msg.to_lowercase().contains("holds"),
             "error should indicate an active instance"
         );
+    } else {
+        panic!("expected MidgeError::LeaseHeld with descriptive message");
     }
 }
 

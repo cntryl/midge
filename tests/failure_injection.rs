@@ -498,6 +498,64 @@ fn should_retry_flush_given_transient_publish_failure_when_reopening() {
 }
 
 #[test]
+fn should_preserve_flush_identity_order_when_oldest_publication_retries() {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let temp_dir = TempDir::new().expect("temp dir");
+    let engine = open_local_engine(temp_dir.path());
+    let cf = default_cf(&engine);
+    seed_range(&engine, &cf, 0..8, "oldest");
+    let scenario = fail::FailScenario::setup();
+    fail::cfg("midge::manifest::inject_no_space_on_add_sst_edit", "return")
+        .expect("configure oldest publication failure");
+    let first_error = engine
+        .flush_cf(&cf)
+        .expect_err("oldest publication should fail");
+    assert_no_space_like(&first_error);
+    fail::remove("midge::manifest::inject_no_space_on_add_sst_edit");
+
+    let mut later = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .expect("begin younger transaction");
+    later
+        .put(b"younger".to_vec(), vec![0x42; 512 * 1024], None)
+        .expect("put younger value");
+    later
+        .commit(WriteOptions::sync())
+        .expect("commit younger value");
+
+    // Act
+    engine
+        .flush_cf(&cf)
+        .expect("retry oldest then flush younger");
+    scenario.teardown();
+
+    // Assert
+    let layout = engine.get_storage_layout().expect("storage layout");
+    let mut names: Vec<_> = layout
+        .levels
+        .iter()
+        .flat_map(|level| level.files.iter())
+        .map(|file| file.name.clone())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "000000_00_00000000000000000001.sst".to_string(),
+            "000000_00_00000000000000000002.sst".to_string(),
+        ],
+        "the retained oldest immutable and younger flush need distinct stable identities"
+    );
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(temp_dir.path().join("manifest.json")).expect("read manifest"),
+    )
+    .expect("parse manifest");
+    assert_eq!(manifest["files"].as_array().map(Vec::len), Some(2));
+    assert_eq!(manifest["next_sst_seqs"][cf.id().to_string()], 3);
+}
+
+#[test]
 fn should_retry_frozen_memtable_when_sst_sequence_journal_recovers() {
     // Arrange
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");

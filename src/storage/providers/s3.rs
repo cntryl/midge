@@ -796,7 +796,10 @@ impl CloudBackend for S3Backend {
     ) {
         let key = key.to_string();
         let url = self.object_url(&key);
-        let mut request = CloudRequest::new(Method::PUT, url).with_body(data);
+        let content_length = data.len();
+        let mut request = CloudRequest::new(Method::PUT, url)
+            .with_body(data)
+            .with_header("Content-Length", content_length.to_string());
         // Apply provided headers (e.g. conditional headers like If-None-Match)
         for (name, value) in headers {
             request = request.with_header(name, value);
@@ -1195,7 +1198,66 @@ mod tests {
         receive_list_result, spawn_scripted_http_server,
     };
     use reqwest::Method;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::sync::Arc;
+
+    #[test]
+    fn should_send_zero_content_length_when_put_body_is_empty() {
+        // Arrange
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind strict PUT server");
+        let endpoint = format!("http://{}", listener.local_addr().expect("server address"));
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept PUT request");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .expect("set PUT request timeout");
+            let mut bytes = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).expect("read PUT request");
+                if read == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&chunk[..read]);
+            }
+            let request = String::from_utf8_lossy(&bytes).to_ascii_lowercase();
+            let status = if request.contains("\r\ncontent-length: 0\r\n") {
+                "200 OK"
+            } else {
+                "411 Length Required"
+            };
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .expect("write PUT response");
+            request
+        });
+        let config = S3Config::custom("bucket".into(), "us-east-1".into(), endpoint, true);
+        let backend = S3Backend::new(config, CloudExecutor::new(None).expect("cloud executor"));
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        // Act
+        backend.submit_put("metadata/manifest.journal", Vec::new(), Vec::new(), tx);
+
+        // Assert
+        let event = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("receive empty PUT result");
+        assert!(
+            matches!(
+                event,
+                CloudEvent::Put {
+                    result: CloudOutcome::Ok(()),
+                    ..
+                }
+            ),
+            "empty PUT should include Content-Length: 0: {event:?}"
+        );
+        let request = server.join().expect("strict PUT server panicked");
+        assert!(request.contains("\r\ncontent-length: 0\r\n"));
+    }
 
     #[test]
     fn should_reject_repeated_s3_list_continuation_token() {

@@ -759,6 +759,22 @@ pub fn append_edit_batch_with_fs(
         },
     )?;
 
+    crate::failpoints::fail_point!("midge::manifest::inject_no_space_on_append_edit", |_| Err(
+        crate::common::MidgeError::NoSpace(
+            "failpoint: no space on manifest journal append".to_string()
+        )
+    ));
+    if batch
+        .iter()
+        .any(|edit| matches!(edit, ManifestEdit::AddSst(_)))
+    {
+        crate::failpoints::fail_point!(
+            "midge::manifest::inject_no_space_on_add_sst_edit",
+            |_| Err(crate::common::MidgeError::NoSpace(
+                "failpoint: no space on manifest add_sst append".to_string()
+            ))
+        );
+    }
     crate::failpoints::fail_point!(
         "midge::manifest::inject_no_space_on_append_edit_batch",
         |_| Err(crate::common::MidgeError::NoSpace(

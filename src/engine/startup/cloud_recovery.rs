@@ -411,6 +411,9 @@ impl CloudStartupRecovery {
                         )));
                     }
                 }
+                if current == data {
+                    return Ok(());
+                }
                 vec![("If-Match".to_string(), etag)]
             }
             None => vec![("If-None-Match".to_string(), "*".to_string())],
@@ -670,6 +673,47 @@ impl CloudStartupRecovery {
         }
 
         Ok(recovery_wal_dir)
+    }
+
+    pub(crate) fn recovered_cloud_wal_cleanup_candidates(
+        recovery_wal_dir: &Path,
+    ) -> std::collections::BTreeMap<u64, u64> {
+        let mut candidates = std::collections::BTreeMap::new();
+        let Ok(entries) = std::fs::read_dir(recovery_wal_dir) else {
+            return candidates;
+        };
+
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            let file_name = file_name.to_string_lossy();
+            let Some(segment_id) = crate::wal::parse_segment_id(&file_name) else {
+                continue;
+            };
+            let data = match std::fs::read(entry.path()) {
+                Ok(data) => data,
+                Err(error) => {
+                    tracing::warn!(
+                        segment_id,
+                        %error,
+                        "Retaining recovered cloud WAL because its staged bytes are unreadable"
+                    );
+                    continue;
+                }
+            };
+            let key = crate::wal::cloud_segment_object_key(segment_id);
+            match crate::wal::cloud_segment::inspect_bytes(&key, &data) {
+                Ok(readback) => {
+                    candidates.insert(segment_id, readback.validation.max_sequence);
+                }
+                Err(error) => tracing::warn!(
+                    segment_id,
+                    %error,
+                    "Retaining recovered cloud WAL because cleanup validation failed"
+                ),
+            }
+        }
+
+        candidates
     }
 
     pub(crate) fn ensure_local_sst_cache_from_cloud_storage(

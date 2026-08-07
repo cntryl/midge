@@ -49,6 +49,12 @@ pub enum MidgeError {
     /// Writer fenced — epoch is stale, another leader has taken over
     Fenced(String),
 
+    /// A different writer currently owns the requested storage lease.
+    LeaseHeld(String),
+
+    /// The lease backend could not be reached or could not complete acquisition.
+    LeaseUnavailable(String),
+
     /// Transaction write conflict detected under strict conflict policy
     WriteConflict(String),
 
@@ -81,6 +87,8 @@ impl fmt::Display for MidgeError {
             MidgeError::WriteStall(msg) => write!(f, "Write stall: {msg}"),
             MidgeError::MemoryModeViolation(msg) => write!(f, "Memory mode violation: {msg}"),
             MidgeError::Fenced(msg) => write!(f, "Fenced: writer epoch is stale: {msg}"),
+            MidgeError::LeaseHeld(msg) => write!(f, "Writer lease held: {msg}"),
+            MidgeError::LeaseUnavailable(msg) => write!(f, "Writer lease unavailable: {msg}"),
             MidgeError::WriteConflict(msg) => write!(f, "Write conflict: {msg}"),
             MidgeError::Aborted(msg) => write!(f, "Aborted: {msg}"),
             MidgeError::Busy(msg) => write!(f, "Busy: {msg}"),

@@ -111,7 +111,7 @@ impl EngineStartup {
         let storage_path = StartupStoragePath::resolve(opts.storage());
         storage_path.prepare();
 
-        let startup_lease = StartupLease::acquire(opts.storage())?;
+        let startup_lease = StartupLease::acquire(opts)?;
         if !storage_path.memory_mode {
             crate::runtime::transaction_spill::cleanup_orphaned_runs(&storage_path.db_path)?;
         }
@@ -129,15 +129,27 @@ impl EngineStartup {
     }
 
     pub(super) fn trace_open(opts: &OpenOptions) {
-        if let Storage::Cloud { provider, .. } = opts.storage() {
-            let endpoint = provider_endpoint(provider).map_or_else(
+        if let Storage::Cloud { buckets, .. } = opts.storage() {
+            let wal_endpoint = provider_endpoint(buckets.wal().provider()).map_or_else(
+                || "<provider-default>".to_string(),
+                redact_endpoint_metadata,
+            );
+            let sst_endpoint = provider_endpoint(buckets.sst().provider()).map_or_else(
+                || "<provider-default>".to_string(),
+                redact_endpoint_metadata,
+            );
+            let control_endpoint = provider_endpoint(buckets.control().provider()).map_or_else(
                 || "<provider-default>".to_string(),
                 redact_endpoint_metadata,
             );
             tracing::debug!(
                 storage = "cloud",
-                provider = provider_kind(provider),
-                endpoint = %endpoint,
+                wal_provider = provider_kind(buckets.wal().provider()),
+                wal_endpoint = %wal_endpoint,
+                sst_provider = provider_kind(buckets.sst().provider()),
+                sst_endpoint = %sst_endpoint,
+                control_provider = provider_kind(buckets.control().provider()),
+                control_endpoint = %control_endpoint,
                 credentials = "[REDACTED]",
                 "opening midge engine"
             );

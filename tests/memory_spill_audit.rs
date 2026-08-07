@@ -50,8 +50,11 @@ fn should_commit_large_transaction_given_memory_budget_exceeded_when_committed()
 
 #[test]
 fn should_preserve_values_given_two_large_transactions_within_budget_when_read() {
-    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+    for_each_storage_mode(durable_storage_modes(), |mode, mut opts| {
         // Arrange
+        // Keep both commits in the active memtable so this exercises their
+        // simultaneous resident footprint rather than an intervening flush.
+        opts.memtable_size = 1024 * 1024;
         let engine = open_with_mode(&opts.memory_budget(256 * 1024), mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
@@ -65,7 +68,6 @@ fn should_preserve_values_given_two_large_transactions_within_budget_when_read()
         }
         tx1.commit(buffered_write_options(mode))
             .expect("commit first transaction");
-
         let mut tx2 = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin second transaction");

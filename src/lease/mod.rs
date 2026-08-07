@@ -31,6 +31,8 @@ mod traits;
 pub use cloud::{CloudLeaseConfig, CloudStorageLease};
 pub use filesystem::FileSystemLease;
 pub use heartbeat::LeaseHeartbeat;
+#[cfg(test)]
+pub(crate) use traits::LeaderRecord;
 pub(crate) use traits::LeaseValidity;
 pub use traits::{LeaderStore, LeaseError, LeaseGuard, PrimaryLease};
 
@@ -44,7 +46,12 @@ static INMEM_LEASE_COUNTER: AtomicU64 = AtomicU64::new(0);
 // conversion of its error into the shared public error type.
 impl From<LeaseError> for crate::common::MidgeError {
     fn from(error: LeaseError) -> Self {
-        Self::Fenced(error.to_string())
+        match error {
+            LeaseError::AcquisitionFailed(message) => Self::LeaseHeld(message),
+            LeaseError::IoError(message) => Self::LeaseUnavailable(message),
+            LeaseError::RenewalFailed(message) => Self::Fenced(message),
+            LeaseError::AlreadyReleased => Self::Fenced("lease already released".to_string()),
+        }
     }
 }
 
@@ -87,16 +94,21 @@ pub(crate) fn create_lease_with_validity(storage: &Storage) -> Result<CreatedLea
         }
         Storage::Cloud {
             local_cache_path,
-            provider,
-            prefix,
+            buckets,
         } => {
             // Cloud storage: use cloud lease with TTL-based coordination
+            let control = buckets.control();
+            let lease_provider = control.provider();
+            let lease_prefix = control.prefix();
             let config = CloudLeaseConfig {
-                bucket: provider.bucket_or_container().to_string(),
-                prefix: prefix.clone(),
+                bucket: lease_provider.bucket_or_container().to_string(),
+                prefix: lease_prefix.to_string(),
             };
-            let cloud = crate::storage::providers::build_cloud_storage(provider, prefix)
-                .map_err(|error| LeaseError::IoError(format!("cloud lease backend: {error}")))?;
+            let cloud =
+                crate::storage::providers::build_cloud_storage(lease_provider, lease_prefix)
+                    .map_err(|error| {
+                        LeaseError::IoError(format!("cloud lease backend: {error}"))
+                    })?;
             let lease = Arc::new(CloudStorageLease::new_provider_backed(
                 config,
                 local_cache_path.clone(),

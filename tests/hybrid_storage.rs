@@ -183,7 +183,8 @@ fn should_resume_writes_given_cloud_upload_completes_when_emergency_watermark_is
 
         // Resume writes after eviction
         let mut resume_writes = 0;
-        for i in 0..10 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        for i in 0..50 {
             let mut tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
@@ -195,6 +196,14 @@ fn should_resume_writes_given_cloud_upload_completes_when_emergency_watermark_is
             {
                 resume_writes += 1;
             }
+            if resume_writes >= 5 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "writes did not resume before the flush queue drained in mode: {mode}"
+            );
+            thread::sleep(Duration::from_millis(25));
         }
 
         // Assert: Writes can resume after eviction

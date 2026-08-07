@@ -182,6 +182,78 @@ fn hybrid_with_mock_cloud() -> (Arc<MockCloudBackend>, HybridStorage) {
     (mock_cloud, storage)
 }
 
+#[test]
+fn should_route_each_object_class_to_its_separate_cloud_store() {
+    // Arrange
+    let tmp = tempfile::tempdir().expect("create class-routing test dir");
+    let local = Arc::new(
+        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
+            .expect("create local backend"),
+    );
+    let wal_mock = Arc::new(MockCloudBackend::new());
+    let sst_mock = Arc::new(MockCloudBackend::new());
+    let control_mock = Arc::new(MockCloudBackend::new());
+    let wal_cloud = Arc::new(CloudStorage::new(wal_mock.clone(), String::new()));
+    let sst_cloud = Arc::new(CloudStorage::new(sst_mock.clone(), String::new()));
+    let control_cloud = Arc::new(CloudStorage::new(control_mock.clone(), String::new()));
+    let storage = HybridStorage::with_class_stores_policy_event_sender_and_limits(
+        local,
+        wal_cloud,
+        sst_cloud,
+        control_cloud,
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        None,
+        HybridQueueLimits::default(),
+    );
+    let wal_path = tmp.path().join("segment.wal");
+    std::fs::write(&wal_path, valid_wal_bytes(17)).expect("write WAL segment");
+
+    // Act
+    storage
+        .enqueue_wal_segment(17, &wal_path, 17)
+        .expect("enqueue WAL segment");
+    storage.process_uploads();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline && wal_mock.get_uploads().is_empty() {
+        std::thread::yield_now();
+        storage.process_uploads();
+    }
+    storage
+        .write_sst_object("000017.sst", valid_sst_bytes(b"key", b"value", 17))
+        .expect("publish SST");
+    storage
+        .compare_exchange_remote_object(
+            crate::runtime::ddl::REMOTE_DDL_REGISTRY_KEY,
+            None,
+            br#"{"epoch":17}"#.to_vec(),
+        )
+        .expect("publish control object");
+
+    // Assert
+    let wal_size = std::fs::metadata(&wal_path)
+        .expect("read WAL segment metadata")
+        .len();
+    assert_eq!(
+        wal_mock.get_uploads(),
+        vec![(crate::wal::cloud_segment::object_key(17), wal_size)]
+    );
+    assert_eq!(
+        sst_mock
+            .get_uploads()
+            .iter()
+            .map(|(key, _)| key.as_str())
+            .collect::<Vec<_>>(),
+        vec![crate::sst::object_key("000017.sst")]
+    );
+    assert_eq!(
+        control_mock.get_uploads(),
+        vec![(
+            crate::runtime::ddl::REMOTE_DDL_REGISTRY_KEY.to_string(),
+            br#"{"epoch":17}"#.len() as u64,
+        )]
+    );
+}
+
 fn valid_sst_bytes(key: &[u8], value: &[u8], seq: u64) -> Vec<u8> {
     let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
     let mut writer = factory.create().expect("create SST writer");

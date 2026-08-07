@@ -55,9 +55,32 @@ fn should_expose_local_engine_observability_surfaces() {
         metrics.wal_append_count >= metrics.wal_fsync_count,
         "WAL append counter should never be below fsync counter"
     );
+    assert!(metrics.flush_build_count >= 1);
+    assert!(metrics.flush_publish_count >= 1);
+    assert!(metrics.flush_enqueued_total >= metrics.flush_build_count);
+    assert!(metrics.flush_build_ns_total >= metrics.flush_build_ns_max);
+    assert!(metrics.flush_publish_ns_total >= metrics.flush_publish_ns_max);
+    assert_eq!(metrics.flush_queue_depth, 0);
+    assert_eq!(metrics.flush_inflight, 0);
+    assert_eq!(metrics.flush_failures_total, 0);
+    assert_eq!(metrics.flush_retries_total, 0);
+    if metrics.wal_fsync_count > 0 {
+        assert!(metrics.wal_fsync_ns_max > 0);
+        assert!(metrics.wal_fsync_ns_total >= metrics.wal_fsync_ns_max);
+    }
     assert_eq!(metrics.cache_hits + metrics.cache_misses, 0);
     assert_eq!(metrics.cloud_async_wal_uploads_failed, 0);
     assert_eq!(metrics.hybrid_pending_evictions, 0);
+    let sealed_local_wal = std::fs::read_dir(db_path.join("wal"))
+        .expect("list local WAL directory")
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "wal"))
+        .collect::<Vec<_>>();
+    assert!(
+        sealed_local_wal.is_empty(),
+        "manifest-covered sealed local WAL segments should be pruned: {sealed_local_wal:?}"
+    );
     assert_eq!(layout.health, EngineHealth::Healthy);
     assert!(
         layout

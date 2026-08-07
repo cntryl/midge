@@ -273,6 +273,21 @@ impl EventLoop {
         self.complete_durability_waiters(completed, CompletionSource::SealedGeneration);
         Ok(())
     }
+
+    /// Make all records already appended to the local WAL durable before a
+    /// flush-triggered rotation can expose sealed segments to pruning.
+    pub(super) fn sync_local_wal_before_prune_rotation(
+        &mut self,
+    ) -> crate::common::MidgeResult<()> {
+        if self.wal_actor.is_cloud_async() {
+            return Ok(());
+        }
+        let sealed_gen = self.wal_actor.sync(&mut self.state)?;
+        self.durability.rotate_to(sealed_gen + 1);
+        let completed = self.durability.complete_waiters_at(sealed_gen);
+        self.complete_durability_waiters(completed, CompletionSource::SealedGeneration);
+        Ok(())
+    }
 }
 
 #[cfg(test)]

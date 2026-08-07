@@ -1,6 +1,12 @@
 use super::{EventLoop, HandleOutcome};
 use crate::runtime::RuntimeResponse;
 
+#[derive(Debug, Clone, Copy)]
+pub(super) struct FlushBarrierWaiter {
+    pub(super) request_id: u64,
+    pub(super) frontier: u64,
+}
+
 pub(super) struct FlushCoordinator;
 
 impl FlushCoordinator {
@@ -9,31 +15,43 @@ impl FlushCoordinator {
         request_id: u64,
         cf_id: crate::types::ColumnFamilyId,
     ) -> HandleOutcome {
-        let resp = match event_loop.flush_actor.handle_flush(
-            &mut event_loop.state,
-            cf_id,
-            event_loop.hybrid_storage.as_ref(),
-        ) {
-            Ok(flush_output) => {
-                match event_loop.publish_flushed_sst_with_reservation(
-                    cf_id,
-                    &flush_output.sst_name,
-                    flush_output.sequence,
-                    flush_output.file_meta,
-                    flush_output.frozen_memtable.as_ref(),
-                    flush_output.reservation,
-                ) {
-                    Ok(()) => {
-                        event_loop.wake_write_stall_waiters();
-                        RuntimeResponse::Ok { request_id }
-                    }
-                    Err(error) => RuntimeResponse::Error { request_id, error },
-                }
-            }
-            Err(error) => RuntimeResponse::Error { request_id, error },
-        };
+        if event_loop.state.is_memory_mode() {
+            event_loop.respond(request_id, RuntimeResponse::Ok { request_id });
+            return HandleOutcome::Continue;
+        }
+        if event_loop.state.get_cf(cf_id).is_none() {
+            event_loop.respond(
+                request_id,
+                RuntimeResponse::Error {
+                    request_id,
+                    error: crate::common::MidgeError::InvalidArgument(format!(
+                        "column family {cf_id} does not exist"
+                    )),
+                },
+            );
+            return HandleOutcome::Continue;
+        }
 
-        event_loop.respond(request_id, resp);
+        let frontier = event_loop.state.sequence;
+        if let Err(error) = event_loop.freeze_active_memtable(cf_id) {
+            event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
+            return HandleOutcome::Continue;
+        }
+        if event_loop.flush_frontier_satisfied(cf_id, frontier) {
+            event_loop.respond(request_id, RuntimeResponse::Ok { request_id });
+            return HandleOutcome::Continue;
+        }
+
+        event_loop
+            .flush_barrier_waiters
+            .entry(cf_id)
+            .or_default()
+            .push(FlushBarrierWaiter {
+                request_id,
+                frontier,
+            });
+        event_loop.schedule_next_flush_worker();
+        event_loop.drain_inline_flush_worker();
         HandleOutcome::Continue
     }
 
@@ -41,18 +59,11 @@ impl FlushCoordinator {
     pub(super) fn flush_complete(
         event_loop: &mut EventLoop,
         request_id: u64,
-        cf_id: crate::types::ColumnFamilyId,
-        sst_name: &str,
-        sequence: u64,
+        _cf_id: crate::types::ColumnFamilyId,
+        _sst_name: &str,
+        _sequence: u64,
     ) -> HandleOutcome {
-        let resp = match event_loop.publish_flushed_sst(cf_id, sst_name, sequence, None, None) {
-            Ok(()) => {
-                event_loop.wake_write_stall_waiters();
-                RuntimeResponse::Ok { request_id }
-            }
-            Err(error) => RuntimeResponse::Error { request_id, error },
-        };
-        event_loop.respond(request_id, resp);
+        event_loop.respond(request_id, RuntimeResponse::Ok { request_id });
         HandleOutcome::Continue
     }
 }

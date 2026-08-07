@@ -39,19 +39,41 @@ const MAX_FLUSH_RETRY_BACKOFF: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ImmutableFlushPhase {
-    Pending,
-    Flushing,
+    Queued,
+    Building,
+    Built,
+    Publishing,
+    RetryPending,
 }
 
 #[derive(Clone)]
 pub(crate) struct ImmutableFlush {
+    pub flush_id: u64,
+    pub writer_epoch: u64,
     pub memtable: Arc<SkipListMemtable>,
-    pub sst_name: String,
-    pub sst_seq: u64,
+    pub sst_name: Option<String>,
+    pub sst_seq: Option<u64>,
     pub sequence: u64,
     pub phase: ImmutableFlushPhase,
+    pub built: Option<crate::runtime::actors::flush::FlushBuildOutput>,
     pub failures: u32,
     pub retry_at: Instant,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct FlushRuntimeMetrics {
+    pub enqueued_total: u64,
+    pub build_count: u64,
+    pub build_ns_total: u64,
+    pub build_ns_max: u64,
+    pub publish_count: u64,
+    pub publish_ns_total: u64,
+    pub publish_ns_max: u64,
+    pub failures_total: u64,
+    pub retries_total: u64,
+    pub write_stall_ns_total: u64,
+    pub write_stall_ns_max: u64,
+    pub write_stall_started_at: Option<Instant>,
 }
 
 /// Column family state
@@ -251,6 +273,11 @@ pub struct RuntimeState {
     pub total_memtable_bytes: usize,
     /// Maximum number of immutable memtables per CF before write stall
     pub max_immutable_memtables: usize,
+    /// Next process-local flush identity. Flush identities are stable for the
+    /// lifetime of an immutable and are never inferred from SST sequence state.
+    pub(crate) next_flush_id: u64,
+    pub(crate) writer_epoch: u64,
+    pub(crate) flush_metrics: FlushRuntimeMetrics,
 
     // === Observability ===
     /// Read amplification metrics across all reads
@@ -319,6 +346,7 @@ impl RuntimeState {
         )
     }
 
+    #[allow(clippy::too_many_lines)]
     pub fn runtime_metrics_snapshot(&self) -> crate::types::RuntimeMetricsSnapshot {
         let now = Instant::now();
         let (pinned_ssts, oldest_snapshot_age_seconds) = self.snapshot_retention_metrics(now);
@@ -326,6 +354,33 @@ impl RuntimeState {
         let (sst_count, sst_bytes) = self.sst_totals();
         let residue = self.storage_residue_assessment();
         let telemetry = crate::telemetry::Telemetry::global().map(|t| t.metrics().snapshot());
+        let flush_queue_depth = self
+            .column_families
+            .values()
+            .flat_map(|cf| &cf.immutable_flushes)
+            .filter(|flush| {
+                matches!(
+                    flush.phase,
+                    ImmutableFlushPhase::Queued | ImmutableFlushPhase::RetryPending
+                )
+            })
+            .count();
+        let flush_inflight = usize::from(self.column_families.values().any(|cf| {
+            cf.immutable_flushes.iter().any(|flush| {
+                matches!(
+                    flush.phase,
+                    ImmutableFlushPhase::Building
+                        | ImmutableFlushPhase::Built
+                        | ImmutableFlushPhase::Publishing
+                )
+            })
+        }));
+        let write_stall_active_ns = self
+            .flush_metrics
+            .write_stall_started_at
+            .map_or(0, |started| {
+                u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+            });
 
         crate::types::RuntimeMetricsSnapshot {
             health: self.health(),
@@ -380,6 +435,27 @@ impl RuntimeState {
             wal_fsync_count: telemetry.as_ref().map_or(0, |m| m.wal_fsync_count),
             wal_append_ns_total: telemetry.as_ref().map_or(0, |m| m.wal_append_ns_total),
             wal_fsync_ns_total: telemetry.as_ref().map_or(0, |m| m.wal_fsync_ns_total),
+            wal_fsync_ns_max: telemetry.as_ref().map_or(0, |m| m.wal_fsync_ns_max),
+            flush_queue_depth,
+            flush_inflight,
+            flush_enqueued_total: self.flush_metrics.enqueued_total,
+            flush_build_count: self.flush_metrics.build_count,
+            flush_build_ns_total: self.flush_metrics.build_ns_total,
+            flush_build_ns_max: self.flush_metrics.build_ns_max,
+            flush_publish_count: self.flush_metrics.publish_count,
+            flush_publish_ns_total: self.flush_metrics.publish_ns_total,
+            flush_publish_ns_max: self.flush_metrics.publish_ns_max,
+            flush_failures_total: self.flush_metrics.failures_total,
+            flush_retries_total: self.flush_metrics.retries_total,
+            write_stall_ns_total: self
+                .flush_metrics
+                .write_stall_ns_total
+                .saturating_add(write_stall_active_ns),
+            write_stall_ns_max: self
+                .flush_metrics
+                .write_stall_ns_max
+                .max(write_stall_active_ns),
+            write_stall_active_ns,
             cloud_async_wal_segments_sealed: telemetry
                 .as_ref()
                 .map_or(0, |m| m.cloud_async_wal_segments_sealed),

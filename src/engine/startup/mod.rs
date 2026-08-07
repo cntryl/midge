@@ -76,6 +76,7 @@ struct RuntimeStorageMaterialization {
     runtime_config: crate::runtime::RuntimeConfig,
     cloud_root: Option<PathBuf>,
     cloud_storage_for_restore: Option<Arc<crate::storage::cloud::CloudStorage>>,
+    cloud_metadata_storage_for_mirror: Option<Arc<crate::storage::cloud::CloudStorage>>,
 }
 
 struct RuntimeRecoveryMaterialization {

@@ -217,7 +217,7 @@ fn validate_remote_wal(
     })
 }
 
-fn wal_data_records_covered_by_manifest(
+pub(crate) fn wal_data_records_covered_by_manifest(
     data_records: &[DataCoverageRecord],
     manifest: &Manifest,
 ) -> bool {

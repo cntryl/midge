@@ -94,8 +94,12 @@ pub struct HybridStorageBudgetSnapshot {
 pub struct HybridStorage {
     /// Local storage backend (usually filesystem)
     local: Arc<dyn StorageBackend>,
-    /// Cloud storage backend (S3, GCS, Azure, etc.)
+    /// Immutable SST storage backend.
     cloud: Arc<dyn StorageBackend>,
+    /// Sealed WAL storage backend.
+    wal_cloud: Arc<dyn StorageBackend>,
+    /// Mutable lease/metadata/DDL storage backend.
+    control_cloud: Arc<dyn StorageBackend>,
     /// Storage Budget Actor for disk management
     budget_actor: Arc<Mutex<actor::StorageBudgetActor>>,
     /// Pending WAL segment uploads (`CloudAsync` mode)
@@ -144,6 +148,25 @@ impl HybridStorage {
         )
     }
 
+    /// Create hybrid storage with independently managed cloud object classes.
+    pub(crate) fn new_with_class_stores_and_event_sender(
+        local: Arc<dyn StorageBackend>,
+        wal_cloud: Arc<dyn StorageBackend>,
+        sst_cloud: Arc<dyn StorageBackend>,
+        control_cloud: Arc<dyn StorageBackend>,
+        external_event_tx: cb::Sender<StorageEvent>,
+    ) -> Self {
+        Self::with_class_stores_policy_event_sender_and_limits(
+            local,
+            wal_cloud,
+            sst_cloud,
+            control_cloud,
+            policy::StorageBudgetPolicy::default(),
+            Some(external_event_tx),
+            HybridQueueLimits::default(),
+        )
+    }
+
     /// Create a new hybrid storage with a custom storage budget policy
     #[cfg(test)]
     pub fn with_policy(
@@ -176,6 +199,26 @@ impl HybridStorage {
         external_event_tx: Option<cb::Sender<StorageEvent>>,
         limits: HybridQueueLimits,
     ) -> Self {
+        Self::with_class_stores_policy_event_sender_and_limits(
+            local,
+            Arc::clone(&cloud),
+            Arc::clone(&cloud),
+            cloud,
+            policy,
+            external_event_tx,
+            limits,
+        )
+    }
+
+    fn with_class_stores_policy_event_sender_and_limits(
+        local: Arc<dyn StorageBackend>,
+        wal_cloud: Arc<dyn StorageBackend>,
+        cloud: Arc<dyn StorageBackend>,
+        control_cloud: Arc<dyn StorageBackend>,
+        policy: policy::StorageBudgetPolicy,
+        external_event_tx: Option<cb::Sender<StorageEvent>>,
+        limits: HybridQueueLimits,
+    ) -> Self {
         let budget_actor = actor::StorageBudgetActor::new(policy);
 
         let upload_queue = Arc::new(Mutex::new(UploadQueue::new(
@@ -199,7 +242,7 @@ impl HybridStorage {
             mpsc::sync_channel::<UploadState>(limits.worker_entries.max(1));
         let (upload_worker_handle, upload_worker_failed) = Self::spawn_wal_upload_worker(
             wal_upload_rx,
-            cloud.clone(),
+            Arc::clone(&wal_cloud),
             event_queue.clone(),
             external_event_tx.clone(),
             limits.callback_timeout,
@@ -208,6 +251,8 @@ impl HybridStorage {
         Self {
             local,
             cloud,
+            wal_cloud,
+            control_cloud,
             budget_actor: Arc::new(Mutex::new(budget_actor)),
             upload_queue,
             event_queue,

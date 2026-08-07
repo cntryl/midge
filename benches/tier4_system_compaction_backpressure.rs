@@ -6,7 +6,7 @@
 #[path = "./stress_config.rs"]
 mod stress_config;
 
-use cntryl_midge::{MidgeEngine, WriteOptions};
+use cntryl_midge::{MidgeEngine, MidgeError, WriteOptions};
 use cntryl_stress::{stress, stress_main, StressContext};
 use stress_config::MidgeStressContextExt as _;
 
@@ -80,12 +80,19 @@ fn run_write_phase(
                         .expect("put compaction pressure value");
                 }
 
-                tx.commit(write_options())
-                    .expect("commit compaction pressure transaction");
-
-                if count {
-                    local_writes = local_writes.wrapping_add(WRITE_BATCH_SIZE as u64);
-                    local_transactions = local_transactions.wrapping_add(1);
+                match tx.commit(write_options()) {
+                    Ok(()) => {
+                        if count {
+                            local_writes = local_writes.wrapping_add(WRITE_BATCH_SIZE as u64);
+                            local_transactions = local_transactions.wrapping_add(1);
+                        }
+                    }
+                    Err(MidgeError::WriteStall(_)) => {
+                        let _ = engine
+                            .wait_for_write_stall_clear(cf_id, Duration::from_millis(500))
+                            .expect("wait for compaction pressure stall");
+                    }
+                    Err(error) => panic!("commit compaction pressure transaction: {error}"),
                 }
             }
 

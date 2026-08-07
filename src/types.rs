@@ -130,6 +130,26 @@ pub struct RuntimeMetricsSnapshot {
     pub wal_fsync_count: u64,
     pub wal_append_ns_total: u64,
     pub wal_fsync_ns_total: u64,
+    /// Maximum latency of one physical WAL fsync.
+    pub wal_fsync_ns_max: u64,
+    /// Immutable flushes waiting for the single worker. Gauge.
+    pub flush_queue_depth: usize,
+    /// Flush worker tasks currently executing. Gauge (zero or one).
+    pub flush_inflight: usize,
+    /// Immutable memtable generations enqueued since runtime startup. Counter.
+    pub flush_enqueued_total: u64,
+    pub flush_build_count: u64,
+    pub flush_build_ns_total: u64,
+    pub flush_build_ns_max: u64,
+    pub flush_publish_count: u64,
+    pub flush_publish_ns_total: u64,
+    pub flush_publish_ns_max: u64,
+    pub flush_failures_total: u64,
+    pub flush_retries_total: u64,
+    pub write_stall_ns_total: u64,
+    pub write_stall_ns_max: u64,
+    /// Elapsed nanoseconds in the currently active stall, or zero. Gauge.
+    pub write_stall_active_ns: u64,
     pub cloud_async_wal_segments_sealed: u64,
     pub cloud_async_wal_bytes_sealed: u64,
     pub cloud_async_wal_seal_latency_us: u64,

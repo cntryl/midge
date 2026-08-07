@@ -152,14 +152,30 @@ impl EventLoop {
         self.cloud_wal_prune_inflight.remove(&segment_id);
         match result {
             crate::storage::StorageOutcome::Ok(()) => {
+                self.cloud_wal_prune_retries.remove(&segment_id);
                 self.cloud_acked_wal_segments.remove(&segment_id);
+                self.next_background_compaction_check = std::time::Instant::now();
                 tracing::debug!(segment_id, "Pruned cloud-covered remote WAL segment");
             }
             crate::storage::StorageOutcome::Err(error) => {
+                let failures = self
+                    .cloud_wal_prune_retries
+                    .get(&segment_id)
+                    .map_or(1, |(failures, _)| failures.saturating_add(1));
+                let exponent = failures.saturating_sub(1).min(8);
+                let delay_ms = 25_u64.saturating_mul(1_u64 << exponent);
+                let retry_at = std::time::Instant::now()
+                    + std::time::Duration::from_millis(delay_ms.min(5_000));
+                self.cloud_wal_prune_retries
+                    .insert(segment_id, (failures, retry_at));
+                self.next_background_compaction_check =
+                    self.next_background_compaction_check.min(retry_at);
                 tracing::warn!(
                     segment_id,
+                    failures,
+                    ?retry_at,
                     error = %error,
-                    "Failed to prune cloud-covered remote WAL segment; will retry after a future checkpoint"
+                    "Failed to prune cloud-covered remote WAL segment; retaining it for bounded retry"
                 );
             }
         }

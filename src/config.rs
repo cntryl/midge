@@ -16,6 +16,82 @@ pub use provider::{
     GcsCredentialSource, S3CredentialSource,
 };
 
+/// One provider-backed bucket/container and object namespace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CloudStorageLocation {
+    provider: CloudProviderConfig,
+    prefix: String,
+}
+
+impl CloudStorageLocation {
+    /// Define one cloud storage location.
+    pub fn new(provider: CloudProviderConfig, prefix: impl Into<String>) -> Self {
+        Self {
+            provider,
+            prefix: prefix.into(),
+        }
+    }
+
+    /// Return the provider configuration.
+    #[must_use]
+    pub fn provider(&self) -> &CloudProviderConfig {
+        &self.provider
+    }
+
+    /// Return the object namespace.
+    #[must_use]
+    pub fn prefix(&self) -> &str {
+        &self.prefix
+    }
+}
+
+/// Independently managed cloud storage classes.
+///
+/// WAL, SST, and mutable control objects use separate provider locations so
+/// each class can have an independent versioning and lifecycle policy. The
+/// control location contains the primary lease, recovery metadata, and DDL
+/// registry. Configure it without object versioning whenever possible.
+///
+/// Midge never age-expires current WAL, SST, or metadata objects. Provider
+/// lifecycle rules must only bound noncurrent versions, delete markers, and
+/// incomplete multipart uploads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CloudStorageBuckets {
+    wal: CloudStorageLocation,
+    sst: CloudStorageLocation,
+    control: CloudStorageLocation,
+}
+
+impl CloudStorageBuckets {
+    /// Define independent WAL, SST, and control storage locations.
+    #[must_use]
+    pub fn new(
+        wal: CloudStorageLocation,
+        sst: CloudStorageLocation,
+        control: CloudStorageLocation,
+    ) -> Self {
+        Self { wal, sst, control }
+    }
+
+    /// Return the sealed-WAL storage location.
+    #[must_use]
+    pub fn wal(&self) -> &CloudStorageLocation {
+        &self.wal
+    }
+
+    /// Return the immutable-SST storage location.
+    #[must_use]
+    pub fn sst(&self) -> &CloudStorageLocation {
+        &self.sst
+    }
+
+    /// Return the lease and metadata storage location.
+    #[must_use]
+    pub fn control(&self) -> &CloudStorageLocation {
+        &self.control
+    }
+}
+
 /// Storage backend specification - MUST be explicit
 ///
 /// This enum enforces unambiguous storage selection. There are NO defaults,
@@ -46,10 +122,8 @@ pub enum Storage {
     Cloud {
         /// Local cache/staging path for performance
         local_cache_path: PathBuf,
-        /// Provider and credential configuration.
-        provider: CloudProviderConfig,
-        /// Object key prefix (e.g., "databases/myapp/")
-        prefix: String,
+        /// Required, independently managed WAL, SST, and control locations.
+        buckets: Box<CloudStorageBuckets>,
     },
 
     /// Filesystem-backed cloud simulation.

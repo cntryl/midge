@@ -850,6 +850,8 @@ fn duplicate_midge_error(error: &MidgeError) -> MidgeError {
             MidgeError::MemoryModeViolation(message.clone())
         }
         MidgeError::Fenced(message) => MidgeError::Fenced(message.clone()),
+        MidgeError::LeaseHeld(message) => MidgeError::LeaseHeld(message.clone()),
+        MidgeError::LeaseUnavailable(message) => MidgeError::LeaseUnavailable(message.clone()),
         MidgeError::WriteConflict(message) => MidgeError::WriteConflict(message.clone()),
         MidgeError::Aborted(message) => MidgeError::Aborted(message.clone()),
         MidgeError::Busy(message) => MidgeError::Busy(message.clone()),

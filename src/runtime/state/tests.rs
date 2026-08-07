@@ -78,16 +78,10 @@ fn should_select_due_pending_immutable_before_active_memtable() {
         .put_with_seq(b"older".to_vec(), b"value".to_vec(), 1, None)
         .expect("seed immutable");
     let tracked = state
-        .track_new_immutable_flush(
-            0,
-            Arc::clone(&immutable),
-            crate::sst::file_name(0, 0, 1),
-            1,
-            1,
-        )
+        .track_new_immutable_flush(0, Arc::clone(&immutable), 1)
         .expect("track immutable");
     state
-        .mark_immutable_flush_failed(0, &tracked.memtable)
+        .mark_immutable_flush_failed(tracked.flush_id)
         .expect("mark failed");
     state.make_immutable_flush_retry_due(0);
     state
@@ -116,25 +110,17 @@ fn should_cap_immutable_flush_retry_backoff_at_one_second() {
         .put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)
         .expect("seed immutable");
     let tracked = state
-        .track_new_immutable_flush(
-            0,
-            Arc::clone(&immutable),
-            crate::sst::file_name(0, 0, 1),
-            1,
-            1,
-        )
+        .track_new_immutable_flush(0, Arc::clone(&immutable), 1)
         .expect("track immutable");
 
     // Act
     let mut final_delay = Duration::ZERO;
     for _ in 0..32 {
         final_delay = state
-            .mark_immutable_flush_failed(0, &tracked.memtable)
+            .mark_immutable_flush_failed(tracked.flush_id)
             .expect("mark failed");
         state.make_immutable_flush_retry_due(0);
-        state
-            .begin_pending_immutable_flush(0, true)
-            .expect("begin retry");
+        state.begin_next_immutable_flush().expect("begin retry");
     }
 
     // Assert

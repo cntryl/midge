@@ -39,6 +39,7 @@ fn should_recover_cloud_strict_write_from_authoritative_remote_wal_after_local_c
         get_default(&reopened, b"strict-remote-key"),
         Some(Bytes::from_static(b"strict-remote-value"))
     );
+    shutdown_test_engine(reopened);
 }
 
 #[test]
@@ -83,6 +84,7 @@ fn should_remove_local_wal_segment_after_cloud_durable_upload() {
         get_default(&reopened, b"cloud-pruned-local-wal"),
         Some(Bytes::from_static(b"remote-wal-value"))
     );
+    shutdown_test_engine(reopened);
 }
 
 #[test]
@@ -129,6 +131,61 @@ fn should_prune_remote_wal_segment_after_cloud_sst_covers_it() {
         !list_files_with_extension(&db_path.join("sst"), "sst").is_empty(),
         "reopen should restore the covered value from cloud SST state"
     );
+    shutdown_test_engine(reopened);
+}
+
+#[test]
+fn should_prune_manifest_covered_remote_wal_after_restart() {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let opts = opts_for_mode("cloud");
+    let db_path = cloud_db_path(&opts);
+    let remote_wal_dir = db_path.join("cloud_store").join("wal");
+    let mut engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
+    put_default(
+        &engine,
+        b"restart-prune-key",
+        b"restart-prune-value",
+        WriteOptions::cloud_strict(),
+    );
+    let retained_segments = wait_for_remote_wal_count_at_least(&remote_wal_dir, 1)
+        .into_iter()
+        .map(|path| {
+            let bytes = fs::read(&path).expect("read remote WAL before simulated interruption");
+            (
+                path.file_name().expect("remote WAL filename").to_owned(),
+                bytes,
+            )
+        })
+        .collect::<Vec<_>>();
+    let default_cf = default_cf(&engine);
+    engine.flush_cf(&default_cf).expect("flush covered value");
+    assert!(wait_for_remote_wal_count(&remote_wal_dir, 0).is_empty());
+    engine
+        .shutdown(Duration::from_secs(5))
+        .expect("shutdown before restoring interrupted prune residue");
+
+    fs::create_dir_all(&remote_wal_dir).expect("recreate remote WAL directory");
+    for (name, bytes) in retained_segments {
+        fs::write(remote_wal_dir.join(name), bytes).expect("restore covered remote WAL residue");
+    }
+    reset_dir(&db_path.join("wal"));
+    reset_dir(&db_path.join("sst"));
+
+    // Act
+    let reopened = Engine::open(opts.to_open_options()).expect("reopen cloud engine");
+    let remaining = wait_for_remote_wal_count(&remote_wal_dir, 0);
+
+    // Assert
+    assert!(
+        remaining.is_empty(),
+        "startup maintenance should prune recovered WAL already covered by the manifest: {remaining:?}"
+    );
+    assert_eq!(
+        get_default(&reopened, b"restart-prune-key"),
+        Some(Bytes::from_static(b"restart-prune-value"))
+    );
+    shutdown_test_engine(reopened);
 }
 
 #[test]
@@ -192,6 +249,7 @@ fn should_recover_delete_range_given_remote_wal_only_when_local_cache_is_lost() 
         get_default(&reopened, b"range-25"),
         Some(Bytes::from_static(b"outside-delete-range"))
     );
+    shutdown_test_engine(reopened);
 }
 
 #[test]
@@ -248,6 +306,7 @@ fn should_preserve_remote_wal_when_unflushed_column_family_still_depends_on_it_g
         Some(Bytes::from_static(b"other-value")),
         "unflushed column family data should still recover from retained remote WAL"
     );
+    shutdown_test_engine(reopened);
 }
 
 #[test]
@@ -303,11 +362,13 @@ fn should_not_prune_remote_wal_given_manifest_validation_failure_when_gc_runs() 
         !retained_segments.is_empty(),
         "test must prove at least one later remote WAL segment survived partial cleanup"
     );
+    shutdown_test_engine(reopened);
 }
 
 #[test]
 fn should_reject_sync_buffered_options_given_cloud_storage_when_committing() {
     // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock cloud tests");
     let opts = opts_for_mode("cloud");
     let engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
 
@@ -326,6 +387,7 @@ fn should_reject_sync_buffered_options_given_cloud_storage_when_committing() {
     assert!(
         matches!(error, MidgeError::InvalidArgument(message) if message.contains("local-only"))
     );
+    shutdown_test_engine(engine);
 }
 
 #[cfg(feature = "failpoints")]
@@ -371,6 +433,7 @@ fn should_keep_cloud_async_commit_visible_given_cloud_upload_failure_when_commit
     reset_dir(&db_path.join("wal"));
     let reopened = Engine::open(opts.to_open_options()).expect("reopen cloud engine");
     assert_eq!(get_default(&reopened, b"buffered-local-only"), None);
+    shutdown_test_engine(reopened);
 }
 
 #[cfg(feature = "failpoints")]
@@ -421,6 +484,7 @@ fn should_fail_cloud_strict_commit_given_cloud_upload_failure_when_waiting_for_a
     reset_dir(&db_path.join("wal"));
     let reopened = Engine::open(opts.to_open_options()).expect("reopen cloud engine");
     assert_eq!(get_default(&reopened, b"cloud-strict-fail"), None);
+    shutdown_test_engine(reopened);
 }
 
 #[test]
@@ -470,6 +534,7 @@ fn should_salvage_valid_prefix_when_remote_wal_segment_is_corrupt() {
         Some(Bytes::from_static(b"prefix-value"))
     );
     assert_eq!(get_default(&salvaged, b"truncated-key"), None);
+    shutdown_test_engine(salvaged);
 }
 
 #[test]
@@ -506,6 +571,7 @@ fn should_restore_local_cache_given_authoritative_remote_sst_when_reopening_afte
         !list_files_with_extension(&db_path.join("sst"), "sst").is_empty(),
         "reopen should restore local SST cache from the authoritative cloud object"
     );
+    shutdown_test_engine(reopened);
 }
 
 #[test]
@@ -554,6 +620,12 @@ fn cloud_db_path(opts: &MidgeOptions) -> PathBuf {
         StorageMode::CloudBacked { local_cache_path } => local_cache_path.clone(),
         _ => panic!("expected cloud-backed storage mode"),
     }
+}
+
+fn shutdown_test_engine(mut engine: Engine) {
+    engine
+        .shutdown(Duration::from_secs(5))
+        .expect("shut down cloud test engine");
 }
 
 fn cloud_open_options(db_path: &Path, recovery_policy: RecoveryPolicy) -> OpenOptions {

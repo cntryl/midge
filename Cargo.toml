@@ -185,6 +185,11 @@ name = "chaos_compaction"
 path = "tests/chaos_compaction.rs"
 required-features = ["failpoints"]
 
+[[test]]
+name = "background_flush_pipeline"
+path = "tests/background_flush_pipeline.rs"
+required-features = ["failpoints"]
+
 
 # =============================================================================
 # Benchmarks — Active Targets

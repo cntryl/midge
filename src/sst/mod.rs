@@ -74,13 +74,19 @@ pub fn file_name(cf_id: u32, level: u32, sequence: u64) -> String {
 /// Format the cloud object key for an SST file.
 #[must_use]
 pub fn object_key(file_name: &str) -> String {
-    format!("sst/{file_name}")
+    format!(
+        "{}{file_name}",
+        crate::cloud_layout::CloudObjectLayout::SST_PREFIX
+    )
 }
 
 /// Format the temporary staging path for an SST file inside the local SST root.
 #[must_use]
 pub fn temp_object_key(file_name: &str) -> String {
-    format!("sst/{file_name}.tmp")
+    format!(
+        "{}{file_name}.tmp",
+        crate::cloud_layout::CloudObjectLayout::SST_PREFIX
+    )
 }
 
 type MemtableEntryWithMeta = (Vec<u8>, Option<Vec<u8>>, u64, Option<u64>, u8);

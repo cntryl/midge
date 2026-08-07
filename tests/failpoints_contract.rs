@@ -39,6 +39,7 @@ fn should_require_failpoints_feature_when_injection_only_targets_are_selected() 
         "chaos_real",
         "chaos_intent_log",
         "chaos_compaction",
+        "background_flush_pipeline",
     ];
 
     // Act

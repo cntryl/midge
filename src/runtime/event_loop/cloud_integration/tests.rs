@@ -690,6 +690,35 @@ fn should_not_overwrite_newer_remote_manifest_metadata_when_mirroring(
 }
 
 #[test]
+fn should_not_rewrite_unchanged_cloud_metadata_when_mirroring() -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
+        .map_err(crate::common::MidgeError::Internal)?;
+    let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+    let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
+        metadata_backend.clone(),
+        "metadata-idempotence".to_string(),
+    ));
+    el.cloud_metadata_storage = Some(metadata_storage);
+    el.mirror_metadata_to_authoritative_cloud()?;
+    metadata_backend.clear_history();
+
+    // Act
+    el.mirror_metadata_to_authoritative_cloud()?;
+
+    // Assert
+    assert!(
+        metadata_backend.get_uploads().is_empty(),
+        "unchanged metadata must not create new object versions"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn should_not_overwrite_manifest_metadata_advanced_after_preflight(
 ) -> crate::common::MidgeResult<()> {
     // Arrange

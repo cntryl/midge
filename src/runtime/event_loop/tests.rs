@@ -204,11 +204,21 @@ fn should_not_treat_blocked_auto_flush_candidate_as_standalone_actionable_work()
 
     // Act
     // Assert
-    assert_eq!(event_loop.drain_auto_flush_memtables(), 0);
+    assert_eq!(event_loop.drain_auto_flush_memtables(), 1);
+    assert_eq!(
+        event_loop
+            .state
+            .get_cf(0)
+            .expect("default cf")
+            .immutable_flushes
+            .len(),
+        1,
+        "the frozen memtable must remain queued for a bounded retry"
+    );
 
     assert!(
         !event_loop.has_actionable_work(),
-        "blocked auto-flush candidates should wait for a real state change before retrying"
+        "a retained flush with a future retry deadline must not spin the event loop"
     );
 }
 
@@ -255,6 +265,38 @@ fn should_schedule_compaction_after_l0_flush_when_threshold_reached(
     );
 
     Ok(())
+}
+
+#[test]
+fn should_schedule_compaction_from_existing_l0_files_during_startup_maintenance() {
+    // Arrange
+    let mut event_loop = create_test_local_event_loop().expect("create local event loop");
+    let (worker_tx, _worker_rx) = crossbeam::channel::unbounded();
+    event_loop.worker_msg_tx = Some(worker_tx);
+    event_loop.state.set_compaction_enabled(true);
+    for sequence in 1..=4 {
+        let name = format!("recovered-{sequence}.sst");
+        let _ = write_runtime_l0_sst_for_test(&event_loop, &name, sequence);
+        event_loop
+            .state
+            .manifest
+            .files
+            .push(test_manifest_l0_file_meta(&name, sequence));
+    }
+
+    // Act
+    event_loop.schedule_background_compaction_on_startup();
+
+    // Assert
+    assert_eq!(
+        event_loop
+            .state
+            .active_compactions
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "an eligible recovered L0 layout should compact without another flush"
+    );
+    assert_eq!(event_loop.state.compaction.compacting_ssts.len(), 4);
 }
 
 #[test]
@@ -475,6 +517,30 @@ fn should_defer_layout_completion_until_verification_barrier_releases() {
         1,
         "duplicate maintenance retries must be coalesced while verification is active"
     );
+}
+
+#[test]
+fn should_reject_storage_verification_while_flush_publication_is_active() {
+    // Arrange
+    let mut event_loop = create_test_local_event_loop().expect("create local event loop");
+    event_loop.manifest_publication_active = true;
+    let request_id = 104;
+    let response_rx = event_loop.router.register(request_id);
+
+    // Act
+    event_loop.begin_storage_verification(request_id);
+
+    // Assert
+    assert!(matches!(
+        response_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("verification response"),
+        RuntimeResponse::Error {
+            error: crate::common::MidgeError::Busy(_),
+            ..
+        }
+    ));
+    assert!(event_loop.verification_barrier_token.is_none());
 }
 
 #[test]

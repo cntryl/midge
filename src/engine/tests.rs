@@ -839,6 +839,32 @@ fn should_not_overwrite_newer_remote_manifest_metadata_during_engine_mirror() {
 }
 
 #[test]
+fn should_not_rewrite_unchanged_cloud_metadata_during_engine_mirror() {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+    let cloud = crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".to_string());
+    crate::metadata::ManifestPersistence::save(
+        temp_dir.path(),
+        &crate::metadata::Manifest::default(),
+    )
+    .expect("save local manifest");
+    Engine::mirror_cloud_metadata(&cloud, temp_dir.path(), RecoveryPolicy::Strict)
+        .expect("perform initial metadata mirror");
+    backend.clear_history();
+
+    // Act
+    Engine::mirror_cloud_metadata(&cloud, temp_dir.path(), RecoveryPolicy::Strict)
+        .expect("repeat unchanged metadata mirror");
+
+    // Assert
+    assert!(
+        backend.get_uploads().is_empty(),
+        "startup metadata convergence must not create duplicate object versions"
+    );
+}
+
+#[test]
 fn should_hydrate_cloud_metadata_when_listing_is_stale_but_object_is_readable() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");

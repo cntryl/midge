@@ -52,11 +52,16 @@ impl StartupStoragePath {
 }
 
 impl StartupLease {
-    pub(super) fn acquire(storage: &Storage) -> MidgeResult<Self> {
+    pub(super) fn acquire(opts: &OpenOptions) -> MidgeResult<Self> {
+        let storage = opts.storage();
         let created = crate::lease::create_lease_with_validity(storage).map_err(|error| {
-            MidgeError::Internal(format!(
-                "failed to create lease for storage backend: {error}"
-            ))
+            match MidgeError::from(error) {
+                MidgeError::LeaseHeld(message) => MidgeError::LeaseHeld(message),
+                MidgeError::LeaseUnavailable(message) => MidgeError::LeaseUnavailable(format!(
+                    "failed to create lease for storage backend: {message}"
+                )),
+                other => other,
+            }
         })?;
 
         Self::acquire_created(created.lease, created.validity, Some(storage))
@@ -76,14 +81,14 @@ impl StartupLease {
         storage: Option<&Storage>,
     ) -> MidgeResult<Self> {
         let lease_guard = lease.clone().try_acquire().map_err(|error| match error {
-            crate::lease::LeaseError::AcquisitionFailed(message) => MidgeError::Internal(format!(
-                "FATAL: another Midge instance is already running against this storage. \
-                 Only one writable instance is allowed at a time. Error: {message}"
+            crate::lease::LeaseError::AcquisitionFailed(message) => MidgeError::LeaseHeld(format!(
+                "another Midge instance is already running against this storage: {message}"
             )),
-            crate::lease::LeaseError::IoError(message) => {
-                MidgeError::Internal(format!("lease acquisition I/O error: {message}"))
+            crate::lease::LeaseError::IoError(message) => MidgeError::LeaseUnavailable(message),
+            crate::lease::LeaseError::RenewalFailed(message) => MidgeError::Fenced(message),
+            crate::lease::LeaseError::AlreadyReleased => {
+                MidgeError::Fenced("lease was released during acquisition".to_string())
             }
-            _ => MidgeError::Internal(format!("lease acquisition failed: {error}")),
         })?;
 
         tracing::warn!(
@@ -123,7 +128,7 @@ impl StartupLease {
         );
         lease_heartbeat.start();
         if !lease_heartbeat.is_healthy() {
-            return Err(MidgeError::Internal(
+            return Err(MidgeError::Fenced(
                 "lease heartbeat failed immediately after start".to_string(),
             ));
         }
@@ -178,15 +183,12 @@ impl RuntimeStorageMaterialization {
                 startup_lease,
                 cloud_runtime_policy,
             ),
-            Storage::Cloud {
-                provider, prefix, ..
-            } => Self::materialize_cloud(
+            Storage::Cloud { buckets, .. } => Self::materialize_cloud(
                 opts,
                 storage_path,
                 startup_lease,
                 cloud_runtime_policy,
-                provider,
-                prefix,
+                buckets,
             ),
             _ => Self::materialize_local(opts, storage_path, startup_lease, cloud_runtime_policy),
         }
@@ -209,6 +211,10 @@ impl RuntimeStorageMaterialization {
             Some(&cloud.recovery_cloud_wal_dir),
             opts.recovery_policy(),
         )?;
+        let recovered_cloud_wal_segments =
+            CloudStartupRecovery::recovered_cloud_wal_cleanup_candidates(
+                &cloud.recovery_cloud_wal_dir,
+            );
 
         let runtime_config = crate::runtime::RuntimeConfig {
             wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
@@ -216,6 +222,7 @@ impl RuntimeStorageMaterialization {
             cloud_runtime_policy,
             hybrid_storage: Some(cloud.hybrid_storage),
             hybrid_storage_events: Some(cloud.events),
+            recovered_cloud_wal_segments,
             compression_policy: opts.compression_policy().clone(),
             block_cache_size: opts.block_cache_size(),
             block_cache_policy: opts.block_cache_policy_type(),
@@ -232,6 +239,7 @@ impl RuntimeStorageMaterialization {
             runtime_config,
             cloud_root: Some(cloud.cloud_root.clone()),
             cloud_storage_for_restore: None,
+            cloud_metadata_storage_for_mirror: None,
         })
     }
 
@@ -240,34 +248,52 @@ impl RuntimeStorageMaterialization {
         storage_path: &StartupStoragePath,
         startup_lease: &StartupLease,
         cloud_runtime_policy: crate::runtime::CloudRuntimePolicy,
-        provider: &crate::config::CloudProviderConfig,
-        prefix: &str,
+        buckets: &crate::config::CloudStorageBuckets,
     ) -> MidgeResult<Self> {
-        let cloud_storage = crate::storage::providers::build_cloud_storage(provider, prefix)?;
+        let wal_storage = crate::storage::providers::build_cloud_storage(
+            buckets.wal().provider(),
+            buckets.wal().prefix(),
+        )?;
+        let sst_storage = crate::storage::providers::build_cloud_storage(
+            buckets.sst().provider(),
+            buckets.sst().prefix(),
+        )?;
+        let metadata_storage = crate::storage::providers::build_cloud_storage(
+            buckets.control().provider(),
+            buckets.control().prefix(),
+        )?;
         CloudStartupRecovery::hydrate_cloud_metadata(
-            &cloud_storage,
+            &metadata_storage,
             &storage_path.db_path,
             opts.recovery_policy(),
         )?;
         let recovery_wal_dir = CloudStartupRecovery::materialize_cloud_wal_recovery_dir(
-            &cloud_storage,
+            &wal_storage,
             &storage_path.db_path,
             opts.recovery_policy(),
         )?;
+        let recovered_cloud_wal_segments =
+            CloudStartupRecovery::recovered_cloud_wal_cleanup_candidates(&recovery_wal_dir);
 
         let local_backend = Arc::new(crate::storage::filesystem::FileSystem::new(
             storage_path.db_path.join("hybrid_local"),
         )?);
-        let cloud_backend: Arc<dyn crate::storage::StorageBackend> = cloud_storage.clone();
+        let wal_backend: Arc<dyn crate::storage::StorageBackend> = wal_storage;
+        let sst_backend: Arc<dyn crate::storage::StorageBackend> = sst_storage.clone();
+        let control_backend: Arc<dyn crate::storage::StorageBackend> = metadata_storage.clone();
 
         let (tx, rx) = crossbeam::channel::bounded::<crate::storage::StorageEvent>(
             crate::storage::hybrid::backend::HYBRID_STORAGE_EVENT_CHANNEL_CAPACITY,
         );
-        let hybrid_storage = Arc::new(crate::storage::HybridStorage::new_with_event_sender(
-            local_backend,
-            cloud_backend,
-            tx,
-        ));
+        let hybrid_storage = Arc::new(
+            crate::storage::HybridStorage::new_with_class_stores_and_event_sender(
+                local_backend,
+                wal_backend,
+                sst_backend,
+                control_backend,
+                tx,
+            ),
+        );
 
         let state = RuntimeState::try_new_with_recovery_dir(
             storage_path.db_path.clone(),
@@ -282,7 +308,8 @@ impl RuntimeStorageMaterialization {
             cloud_runtime_policy,
             hybrid_storage: Some(hybrid_storage),
             hybrid_storage_events: Some(rx),
-            cloud_metadata_storage: Some(cloud_storage.clone()),
+            cloud_metadata_storage: Some(metadata_storage.clone()),
+            recovered_cloud_wal_segments,
             compression_policy: opts.compression_policy().clone(),
             block_cache_size: opts.block_cache_size(),
             block_cache_policy: opts.block_cache_policy_type(),
@@ -298,7 +325,8 @@ impl RuntimeStorageMaterialization {
             state,
             runtime_config,
             cloud_root: None,
-            cloud_storage_for_restore: Some(cloud_storage),
+            cloud_storage_for_restore: Some(sst_storage),
+            cloud_metadata_storage_for_mirror: Some(metadata_storage),
         })
     }
 
@@ -335,6 +363,7 @@ impl RuntimeStorageMaterialization {
             runtime_config,
             cloud_root: None,
             cloud_storage_for_restore: None,
+            cloud_metadata_storage_for_mirror: None,
         })
     }
 }
@@ -370,7 +399,13 @@ impl RuntimeRecoveryMaterialization {
                 &mut materialized.state,
                 cloud_storage,
             )?;
-            CloudStartupRecovery::mirror_cloud_metadata(cloud_storage, db_path, recovery_policy)?;
+        }
+        if let Some(metadata_storage) = materialized.cloud_metadata_storage_for_mirror.as_deref() {
+            CloudStartupRecovery::mirror_cloud_metadata(
+                metadata_storage,
+                db_path,
+                recovery_policy,
+            )?;
         }
 
         materialized.state.cleanup_storage_residue();

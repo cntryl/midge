@@ -27,6 +27,7 @@ mod control;
 mod dispatch;
 mod durability_sync;
 mod flush;
+mod flush_pipeline;
 mod gc;
 mod ingest;
 mod manifest;
@@ -41,7 +42,10 @@ use crossbeam::channel::{Receiver, Sender, TryRecvError};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+const BACKGROUND_COMPACTION_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+const STARTUP_CLOUD_MAINTENANCE_DELAY: Duration = Duration::from_millis(100);
 
 #[cfg(test)]
 use super::actors::CloudActor;
@@ -52,6 +56,7 @@ use super::read_snapshot::ReadSnapshot;
 use super::snapshot_cache::{CfSnapshotData, PublishedSnapshot, SnapshotCache};
 use super::state::RuntimeState;
 use super::{ResponseRouter, RuntimeMsg, RuntimeResponse};
+use crate::runtime::actors::flush::FlushWorkerResult;
 
 type SstRuntimeResources = (Arc<dyn crate::sst::SstFactory>, Option<Arc<ReadResources>>);
 
@@ -65,6 +70,7 @@ pub(super) struct MetadataCleanupProof {
 /// Main synchronous event loop for the runtime.
 ///
 /// Owns all actors and is responsible for routing inbound messages.
+#[allow(clippy::struct_excessive_bools)]
 pub struct EventLoop {
     pub(super) state: RuntimeState,
 
@@ -86,7 +92,9 @@ pub struct EventLoop {
     pub(super) loop_debug_batch_total: u64,
     pub(super) cloud_acked_wal_segments: BTreeMap<u64, u64>,
     pub(super) cloud_wal_prune_inflight: HashSet<u64>,
+    cloud_wal_prune_retries: HashMap<u64, (u32, Instant)>,
     pub(super) cloud_metadata_cleanup_proofs: HashMap<String, MetadataCleanupProof>,
+    next_background_compaction_check: Instant,
 
     // Durability coordination (extracted to reduce EventLoop cognitive load)
     pub(super) durability: DurabilityCoordinator,
@@ -106,6 +114,15 @@ pub struct EventLoop {
     verification_barrier_token: Option<u64>,
     /// Internal completion messages held until the verification barrier releases.
     verification_deferred_messages: VecDeque<RuntimeMsg>,
+    /// Manifest-mutating messages held while a flush publication owns the
+    /// single authority-changing I/O slot.
+    publication_deferred_messages: VecDeque<RuntimeMsg>,
+    manifest_publication_active: bool,
+
+    pub(super) flush_worker_result_rx: crossbeam::channel::Receiver<FlushWorkerResult>,
+    flush_barrier_waiters: HashMap<crate::types::ColumnFamilyId, Vec<flush::FlushBarrierWaiter>>,
+    inline_flush_worker: bool,
+    shutting_down: bool,
 
     /// Sender that worker threads can use to post back completion messages
     /// (compaction threads will use this to report completion).
@@ -123,6 +140,8 @@ pub struct EventLoop {
     /// Shared flag from the lease heartbeat. When `false`, the event loop
     /// rejects new write operations with `MidgeError::Fenced`.
     lease_healthy: Option<Arc<std::sync::atomic::AtomicBool>>,
+    writer_epoch: u64,
+    leader_store: Option<Arc<dyn crate::lease::LeaderStore>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,10 +202,17 @@ impl EventLoop {
 
         let (sst_factory, read_resources) =
             Self::initialize_sst_resources(&state, &sst_dir, memory_mode, &config)?;
+        state.writer_epoch = config.writer_epoch;
+        let (flush_completion_tx, flush_worker_result_rx) =
+            crossbeam::channel::unbounded::<FlushWorkerResult>();
 
         // Create actors - they handle memory_mode internally
-        let flush_actor =
-            FlushActor::new(&sst_dir, memory_mode, config.compression_policy.clone())?;
+        let flush_actor = FlushActor::new(
+            &sst_dir,
+            memory_mode,
+            config.compression_policy.clone(),
+            flush_completion_tx,
+        )?;
         let mut wal_actor = WalActor::new(
             wal_dir,
             config.wal_durability_policy,
@@ -240,9 +266,11 @@ impl EventLoop {
             loop_debug: std::env::var_os("MIDGE_LOOP_DEBUG").is_some(),
             loop_debug_wakes: 0,
             loop_debug_batch_total: 0,
-            cloud_acked_wal_segments: BTreeMap::new(),
+            cloud_acked_wal_segments: config.recovered_cloud_wal_segments.clone(),
             cloud_wal_prune_inflight: HashSet::new(),
+            cloud_wal_prune_retries: HashMap::new(),
             cloud_metadata_cleanup_proofs: HashMap::new(),
+            next_background_compaction_check: Instant::now() + BACKGROUND_COMPACTION_CHECK_INTERVAL,
             durability: DurabilityCoordinator::new(
                 initial_durability_key,
                 is_cloud_async,
@@ -253,6 +281,12 @@ impl EventLoop {
             pending_msg: None,
             verification_barrier_token: None,
             verification_deferred_messages: VecDeque::new(),
+            publication_deferred_messages: VecDeque::new(),
+            manifest_publication_active: false,
+            flush_worker_result_rx,
+            flush_barrier_waiters: HashMap::new(),
+            inline_flush_worker: cfg!(test) && worker_msg_tx.is_none(),
+            shutting_down: false,
             worker_msg_tx,
 
             write_stall_waiters: HashMap::new(),
@@ -260,6 +294,8 @@ impl EventLoop {
             snapshot_cache: None,
             read_resources,
             lease_healthy: config.lease_healthy.clone(),
+            writer_epoch: config.writer_epoch,
+            leader_store: config.leader_store.clone(),
         };
 
         if let Some(storage) = config.hybrid_storage {
@@ -480,6 +516,48 @@ impl EventLoop {
         }
     }
 
+    fn background_maintenance_timeout(&self) -> Duration {
+        self.next_background_compaction_check
+            .saturating_duration_since(Instant::now())
+    }
+
+    fn run_background_compaction_maintenance_if_due(&mut self) {
+        if self.background_maintenance_timeout() != Duration::ZERO {
+            return;
+        }
+
+        self.next_background_compaction_check =
+            Instant::now() + BACKGROUND_COMPACTION_CHECK_INTERVAL;
+        if self.state.compaction_enabled()
+            && !self
+                .state
+                .ingest_active
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            match self.schedule_one_background_compaction_if_needed("periodic maintenance") {
+                Ok(true) => tracing::debug!("Scheduled background compaction during maintenance"),
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "Background compaction maintenance check failed");
+                }
+            }
+        }
+        self.prune_cloud_wal_segments_covered_by_manifest();
+    }
+
+    pub(super) fn schedule_background_compaction_on_startup(&mut self) {
+        self.next_background_compaction_check = Instant::now() + STARTUP_CLOUD_MAINTENANCE_DELAY;
+        if self.state.compaction_enabled() {
+            match self.schedule_one_background_compaction_if_needed("runtime startup") {
+                Ok(true) => {
+                    tracing::debug!("Scheduled background compaction during runtime startup");
+                }
+                Ok(false) => {}
+                Err(error) => tracing::warn!(%error, "Startup background compaction check failed"),
+            }
+        }
+    }
+
     fn mirror_ssts_to_authoritative_cloud(
         &self,
         sst_names: &[String],
@@ -624,6 +702,9 @@ impl EventLoop {
                         )));
                     }
                 }
+                if current == data {
+                    return Ok(());
+                }
                 vec![("If-Match".to_string(), etag)]
             }
             None => vec![("If-None-Match".to_string(), "*".to_string())],
@@ -702,187 +783,28 @@ impl EventLoop {
         sst_name: &str,
         sequence: u64,
         file_meta: Option<crate::runtime::FileMeta>,
-        frozen_memtable: Option<&std::sync::Arc<crate::sst::SkipListMemtable>>,
+        _frozen_memtable: Option<&std::sync::Arc<crate::sst::SkipListMemtable>>,
     ) -> crate::common::MidgeResult<()> {
-        self.publish_flushed_sst_with_reservation(
-            cf_id,
-            sst_name,
-            sequence,
-            file_meta,
-            frozen_memtable,
-            None,
-        )
-    }
-
-    fn publish_flushed_sst_with_reservation(
-        &mut self,
-        cf_id: crate::types::ColumnFamilyId,
-        sst_name: &str,
-        sequence: u64,
-        file_meta: Option<crate::runtime::FileMeta>,
-        frozen_memtable: Option<&std::sync::Arc<crate::sst::SkipListMemtable>>,
-        reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
-    ) -> crate::common::MidgeResult<()> {
-        let result = self.publish_flushed_sst_inner(
-            cf_id,
-            sst_name,
-            sequence,
-            file_meta,
-            frozen_memtable,
-            reservation,
-        );
-        if result.is_err() {
-            self.flush_actor
-                .handle_flush_failure(&mut self.state, cf_id, frozen_memtable);
-            if let (Some(hybrid), Some(token)) = (&self.hybrid_storage, reservation) {
-                hybrid.flush_failed_with_token(token);
-            }
-        }
-        result
-    }
-
-    fn publish_flushed_sst_inner(
-        &mut self,
-        cf_id: crate::types::ColumnFamilyId,
-        sst_name: &str,
-        sequence: u64,
-        file_meta: Option<crate::runtime::FileMeta>,
-        frozen_memtable: Option<&std::sync::Arc<crate::sst::SkipListMemtable>>,
-        reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
-    ) -> crate::common::MidgeResult<()> {
-        // Invariant: this is the flush authority switch. Before this point the
-        // WAL-backed state remains authoritative; after successful manifest
-        // publication the new SST may replace that state on restart.
         let Some(file_meta) = file_meta else {
             return Ok(());
         };
-        let actual_size = file_meta.size_bytes;
-
-        let mut cloud_manifest_published = false;
-        if !self.state.is_memory_mode() {
-            if !self.state.manifest_has_file(sst_name) {
-                self.manifest_actor.add_sst(&mut self.state, file_meta)?;
-            }
-            self.state.transition_flush_publication_intent(
-                sst_name,
-                crate::runtime::PublicationPhase::ManifestPublished,
-            )?;
-            if sequence > self.state.manifest.last_persisted_sequence {
-                self.state.manifest.last_persisted_sequence = sequence;
-            }
-            let manifest_persisted = match crate::runtime::actors::ManifestActor::persist(
-                &self.state,
-            ) {
-                Ok(()) => true,
-                Err(error) => {
-                    self.state.mark_persistence_anomaly();
-                    tracing::warn!(%error, sst_name, "manifest checkpoint after flush failed; journal remains authoritative");
-                    false
-                }
-            };
-
-            self.state.clear_flush_publication_intent(sst_name)?;
-            if manifest_persisted {
-                self.mirror_metadata_after_local_commit("flush manifest publish")?;
-                cloud_manifest_published = true;
-            }
+        if !self.state.manifest_has_file(sst_name) {
+            self.manifest_actor.add_sst(&mut self.state, file_meta)?;
         }
-
-        self.flush_actor.handle_flush_complete(
-            &mut self.state,
-            cf_id,
+        self.state.transition_flush_publication_intent(
             sst_name,
-            sequence,
-            frozen_memtable,
-        );
-        if let Some(hybrid) = &self.hybrid_storage {
-            if let Some(token) = reservation {
-                hybrid.flush_completed_with_token(token, actual_size);
-            }
-        }
-        if cloud_manifest_published {
-            self.prune_cloud_wal_segments_covered_by_manifest();
-        }
+            crate::runtime::PublicationPhase::ManifestPublished,
+        )?;
+        self.state.manifest.last_persisted_sequence =
+            self.state.manifest.last_persisted_sequence.max(sequence);
+        crate::runtime::actors::ManifestActor::persist(&self.state)?;
+        self.state.clear_flush_publication_intent(sst_name)?;
+        self.mirror_metadata_after_local_commit("test flush publication")?;
         self.publish_snapshot();
         self.schedule_compaction_after_flush_publication(sst_name);
+        self.prune_cloud_wal_segments_covered_by_manifest();
+        tracing::debug!(cf_id, sst_name, "test flush publication completed");
         Ok(())
-    }
-
-    fn drain_auto_flush_memtables(&mut self) -> usize {
-        if self.state.is_memory_mode() {
-            return 0;
-        }
-
-        let mut flushed = 0usize;
-        let mut attempted_cfs = HashSet::new();
-
-        loop {
-            let Some(candidate) = self
-                .state
-                .next_flush_candidate_skipping(self.wal_actor.is_cloud_async(), &attempted_cfs)
-            else {
-                return flushed;
-            };
-            attempted_cfs.insert(candidate.cf_id);
-
-            let wal_segment_gap = self.state.active_memtable_wal_segment_gap(candidate.cf_id);
-            match self.flush_actor.handle_flush(
-                &mut self.state,
-                candidate.cf_id,
-                self.hybrid_storage.as_ref(),
-            ) {
-                Ok(flush_output) => {
-                    if flush_output.file_meta.is_none() {
-                        tracing::trace!(
-                            cf_id = candidate.cf_id,
-                            reason = ?candidate.reason,
-                            wal_segment_gap,
-                            "auto-flush made no durable progress"
-                        );
-                        return flushed;
-                    }
-
-                    if let Err(error) = self.publish_flushed_sst_with_reservation(
-                        candidate.cf_id,
-                        &flush_output.sst_name,
-                        flush_output.sequence,
-                        flush_output.file_meta,
-                        flush_output.frozen_memtable.as_ref(),
-                        flush_output.reservation,
-                    ) {
-                        tracing::error!(
-                            %error,
-                            cf_id = candidate.cf_id,
-                            sst_name = %flush_output.sst_name,
-                            reason = ?candidate.reason,
-                            wal_segment_gap,
-                            "auto-flush publication failed"
-                        );
-                        return flushed;
-                    }
-
-                    self.wake_write_stall_waiters();
-                    tracing::debug!(
-                        cf_id = candidate.cf_id,
-                        sst_name = %flush_output.sst_name,
-                        reason = ?candidate.reason,
-                        wal_segment_gap,
-                        "Auto-flushed memtable"
-                    );
-                    flushed += 1;
-                }
-                Err(error) => {
-                    tracing::trace!(
-                        cf_id = candidate.cf_id,
-                        reason = ?candidate.reason,
-                        wal_segment_gap,
-                        error = %error,
-                        "Auto-flush skipped"
-                    );
-                    return flushed;
-                }
-            }
-        }
     }
 
     pub(super) fn register_inline_response(
@@ -938,7 +860,9 @@ impl EventLoop {
             .load(std::sync::atomic::Ordering::Acquire);
         let layout_is_changing = active_compactions > 0
             || self.state.compaction.pending_tasks > 0
-            || !self.state.compaction.compacting_ssts.is_empty();
+            || !self.state.compaction.compacting_ssts.is_empty()
+            || self.flush_actor.is_inflight()
+            || self.manifest_publication_active;
         if self.verification_barrier_token.is_some() || layout_is_changing {
             self.respond(
                 request_id,
@@ -999,6 +923,10 @@ impl EventLoop {
             return false;
         }
 
+        if !self.flush_worker_result_rx.is_empty() {
+            return true;
+        }
+
         if self.wal_actor.should_sync_batch() || self.wal_actor.has_pending_cloud_writes() {
             return true;
         }
@@ -1008,6 +936,10 @@ impl EventLoop {
         }
 
         if self.state.compaction.pending_tasks > 0 {
+            return true;
+        }
+
+        if self.background_maintenance_timeout() == Duration::ZERO {
             return true;
         }
 
@@ -1035,6 +967,10 @@ impl EventLoop {
             self.wal_actor.sync_deadline_timeout(),
             self.gc_actor.retry_deadline_timeout(),
             self.state.flush_retry_deadline_timeout(),
+            self.flush_actor
+                .is_inflight()
+                .then_some(Duration::from_millis(1)),
+            Some(self.background_maintenance_timeout()),
         ]
         .into_iter()
         .flatten()
@@ -1045,6 +981,7 @@ impl EventLoop {
         if self.verification_barrier_token.is_some() {
             return;
         }
+        self.drain_flush_worker_results();
         self.sync_batched_wal_if_needed(msg_rx);
         self.maybe_flush_cloud_async_wal();
         self.tick_hybrid_storage();
@@ -1053,6 +990,7 @@ impl EventLoop {
         self.gc_actor
             .retry_failed_cloud_deletes_if_due(&mut self.state, hybrid_storage);
         self.drain_auto_flush_memtables();
+        self.run_background_compaction_maintenance_if_due();
     }
 
     fn record_wake_batch(&mut self, batch: usize) {
@@ -1087,9 +1025,11 @@ impl EventLoop {
 
     fn process_one(&mut self, msg: RuntimeMsg, msg_rx: &Receiver<RuntimeMsg>) -> HandleOutcome {
         if self.verification_barrier_token.is_none() {
+            self.drain_flush_worker_results();
             self.maybe_flush_cloud_async_wal();
             self.tick_hybrid_storage();
             self.drain_hybrid_storage_events();
+            self.run_background_compaction_maintenance_if_due();
         }
         self.handle_runtime_msg(msg, msg_rx)
     }
@@ -1132,6 +1072,26 @@ impl EventLoop {
         }
     }
 
+    pub(super) fn restore_publication_deferred_message(&mut self) {
+        if !self.manifest_publication_active
+            && self.verification_barrier_token.is_none()
+            && self.pending_msg.is_none()
+        {
+            let eligible = self
+                .publication_deferred_messages
+                .front()
+                .is_some_and(|message| match message {
+                    RuntimeMsg::ManifestDropColumnFamily { cf_id, .. } => {
+                        !self.column_family_flush_pipeline_active(*cf_id)
+                    }
+                    _ => true,
+                });
+            if eligible {
+                self.pending_msg = self.publication_deferred_messages.pop_front();
+            }
+        }
+    }
+
     /// Main event loop — runs until Shutdown message or channel close.
     pub fn run(&mut self, msg_rx: &Receiver<RuntimeMsg>) {
         const MAX_DRAIN_WRITES_ON_WAKE: usize = 4096;
@@ -1139,6 +1099,7 @@ impl EventLoop {
 
         loop {
             self.restore_verification_deferred_message();
+            self.restore_publication_deferred_message();
             if let Some(pending) = self.pending_msg.take() {
                 let outcome = self.process_one(pending, msg_rx);
                 if outcome == HandleOutcome::Break {

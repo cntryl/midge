@@ -437,7 +437,10 @@ pub(crate) const CLOUD_METADATA_FILES: &[&str] = &[
 ];
 
 pub(crate) fn cloud_metadata_key(file_name: &str) -> String {
-    format!("metadata/{file_name}")
+    format!(
+        "{}{file_name}",
+        crate::cloud_layout::CloudObjectLayout::METADATA_PREFIX
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

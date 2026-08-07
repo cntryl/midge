@@ -12,43 +12,6 @@ impl RuntimeState {
         Ok(())
     }
 
-    /// Record one durable publication intent for a stable flush identity.
-    ///
-    /// A retry replaces any earlier intent for the same SST in a proposed copy
-    /// and installs that copy only after persistence succeeds. This prevents a
-    /// failed retry from accumulating duplicate intents or mutating live state.
-    pub(crate) fn record_flush_publication_intent(
-        &mut self,
-        cf_id: crate::types::ColumnFamilyId,
-        sequence: u64,
-        file_meta: crate::runtime::FileMeta,
-    ) -> MidgeResult<()> {
-        let sst_name = file_meta.name.clone();
-        let mut proposed = self.intent_log.clone();
-        proposed.retain(|entry| {
-            !matches!(
-                entry,
-                crate::runtime::IntentLogEntry::FlushPublish {
-                    file_meta: existing,
-                    ..
-                } if existing.name == sst_name
-            )
-        });
-        proposed.push(crate::runtime::IntentLogEntry::FlushPublish {
-            phase: PublicationPhase::OutputDurable,
-            cf_id,
-            sequence,
-            file_meta,
-        });
-
-        if !self.is_memory_mode() {
-            crate::runtime::IntentPersistence::save(&self.db_path, &proposed)
-                .map_err(crate::common::MidgeError::Internal)?;
-        }
-        self.intent_log = proposed;
-        Ok(())
-    }
-
     pub(super) fn persist_intent_entries(
         &self,
         intents: &[crate::runtime::IntentLogEntry],
@@ -90,6 +53,7 @@ impl RuntimeState {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn transition_flush_publication_intent(
         &mut self,
         sst_name: &str,
@@ -113,6 +77,7 @@ impl RuntimeState {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn clear_flush_publication_intent(&mut self, sst_name: &str) -> MidgeResult<()> {
         let mut proposed = self.intent_log.clone();
         proposed.retain(|entry| {

@@ -17,6 +17,25 @@ impl EventLoop {
     pub(super) fn handle_shutdown(&mut self, request_id: Option<u64>) -> HandleOutcome {
         tracing::info!("Runtime shutting down");
         let mut shutdown_error = None;
+        self.shutting_down = true;
+
+        // Drain the currently owned flush pipeline before releasing the writer
+        // epoch. No new immutable is scheduled once shutdown admission closes.
+        while self.flush_actor.is_inflight() {
+            match self
+                .flush_worker_result_rx
+                .recv_timeout(std::time::Duration::from_millis(25))
+            {
+                Ok(result) => self.handle_flush_worker_result(result),
+                Err(crossbeam::channel::RecvTimeoutError::Timeout) => {}
+                Err(crossbeam::channel::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        if let Err(error) = self.flush_actor.shutdown_and_join() {
+            if shutdown_error.is_none() {
+                shutdown_error = Some(error);
+            }
+        }
 
         // Stop compaction before the runtime drains cloud work. Its worker
         // owns staged SST output and must finish while this lease epoch is

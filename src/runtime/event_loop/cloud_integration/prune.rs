@@ -3,6 +3,9 @@
 use super::super::EventLoop;
 use crate::runtime::hybrid_persistence::{CloudWalPruneGuard, HybridPersistence};
 
+const MAX_WAL_PRUNE_VALIDATIONS_PER_PASS: usize = 16;
+const MAX_WAL_PRUNE_REQUESTS_PER_PASS: usize = 4;
+
 impl EventLoop {
     pub(crate) fn prune_cloud_wal_segments_covered_by_manifest(&mut self) {
         if !self.wal_actor.is_cloud_async() || self.state.is_memory_mode() {
@@ -16,19 +19,23 @@ impl EventLoop {
             return;
         };
         let persisted_sequence = self.state.manifest.last_persisted_sequence;
+        let now = std::time::Instant::now();
 
         let eligible_segments: Vec<(u64, u64)> = self
             .cloud_acked_wal_segments
             .iter()
+            .filter(|(segment_id, max_sequence)| {
+                **segment_id < recovery_floor_segment
+                    && **max_sequence <= self.state.wal.cloud_durable_seq
+                    && **max_sequence <= persisted_sequence
+                    && !self.cloud_wal_prune_inflight.contains(segment_id)
+                    && self
+                        .cloud_wal_prune_retries
+                        .get(segment_id)
+                        .is_none_or(|(_, retry_at)| *retry_at <= now)
+            })
+            .take(MAX_WAL_PRUNE_VALIDATIONS_PER_PASS)
             .filter_map(|(segment_id, max_sequence)| {
-                if !(*segment_id < recovery_floor_segment
-                    && *max_sequence <= self.state.wal.cloud_durable_seq
-                    && *max_sequence <= persisted_sequence
-                    && !self.cloud_wal_prune_inflight.contains(segment_id))
-                {
-                    return None;
-                }
-
                 let Ok(covered_by_manifest) = storage.remote_wal_segment_covered_by_manifest(
                     *segment_id,
                     *max_sequence,
@@ -39,6 +46,7 @@ impl EventLoop {
 
                 covered_by_manifest.then_some((*segment_id, *max_sequence))
             })
+            .take(MAX_WAL_PRUNE_REQUESTS_PER_PASS)
             .collect();
 
         if eligible_segments.is_empty() {

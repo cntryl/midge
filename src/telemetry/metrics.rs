@@ -39,6 +39,7 @@ pub struct Metrics {
     pub wal_fsync_count: Arc<AtomicU64>,
     pub wal_append_ns_total: Arc<AtomicU64>,
     pub wal_fsync_ns_total: Arc<AtomicU64>,
+    pub wal_fsync_ns_max: Arc<AtomicU64>,
 
     // Recovery operations
     pub wal_recovery_records_replayed: Arc<AtomicU64>,
@@ -163,6 +164,7 @@ impl Metrics {
             wal_fsync_count: Arc::new(AtomicU64::new(0)),
             wal_append_ns_total: Arc::new(AtomicU64::new(0)),
             wal_fsync_ns_total: Arc::new(AtomicU64::new(0)),
+            wal_fsync_ns_max: Arc::new(AtomicU64::new(0)),
 
             wal_recovery_records_replayed: Arc::new(AtomicU64::new(0)),
             wal_recovery_bytes_replayed: Arc::new(AtomicU64::new(0)),
@@ -425,6 +427,7 @@ impl Metrics {
     pub fn record_wal_fsync_ns(&self, ns: u64) {
         if self.enabled {
             self.wal_fsync_ns_total.fetch_add(ns, Ordering::Relaxed);
+            self.wal_fsync_ns_max.fetch_max(ns, Ordering::Relaxed);
         }
     }
 
@@ -754,6 +757,7 @@ impl Metrics {
             wal_fsync_count: self.wal_fsync_count.load(Ordering::Relaxed),
             wal_append_ns_total: self.wal_append_ns_total.load(Ordering::Relaxed),
             wal_fsync_ns_total: self.wal_fsync_ns_total.load(Ordering::Relaxed),
+            wal_fsync_ns_max: self.wal_fsync_ns_max.load(Ordering::Relaxed),
             cloud_async_wal_segments_sealed: self
                 .cloud_async_wal_segments_sealed
                 .load(Ordering::Relaxed),
@@ -845,6 +849,7 @@ pub struct MetricsSnapshot {
     pub wal_fsync_count: u64,
     pub wal_append_ns_total: u64,
     pub wal_fsync_ns_total: u64,
+    pub wal_fsync_ns_max: u64,
     pub cloud_async_wal_segments_sealed: u64,
     pub cloud_async_wal_bytes_sealed: u64,
     pub cloud_async_wal_seal_latency_us: u64,

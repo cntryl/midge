@@ -6,6 +6,16 @@ use super::{
 };
 
 impl HybridStorage {
+    pub(super) fn cloud_backend_for_key(&self, key: &str) -> &Arc<dyn StorageBackend> {
+        if key.starts_with(crate::cloud_layout::CloudObjectLayout::WAL_PREFIX) {
+            &self.wal_cloud
+        } else if key.starts_with(crate::cloud_layout::CloudObjectLayout::SST_PREFIX) {
+            &self.cloud
+        } else {
+            &self.control_cloud
+        }
+    }
+
     pub(super) fn read_cloud_object_from_backend_blocking(
         cloud: &Arc<dyn StorageBackend>,
         key: &str,
@@ -155,7 +165,7 @@ impl StorageBackend for HybridStorage {
         // Try local first, fall back to cloud
 
         let local_clone = Arc::clone(&self.local);
-        let cloud_clone = Arc::clone(&self.cloud);
+        let cloud_clone = Arc::clone(self.cloud_backend_for_key(key));
         let key = key.to_string();
 
         let (tx, rx) = std::sync::mpsc::channel();
@@ -207,7 +217,7 @@ impl StorageBackend for HybridStorage {
         // WAL durability uses enqueue_wal_segment() instead
 
         let local_clone = Arc::clone(&self.local);
-        let cloud_clone = Arc::clone(&self.cloud);
+        let cloud_clone = Arc::clone(self.cloud_backend_for_key(key));
         let data_clone = data.clone();
 
         // Always write to local first
@@ -270,7 +280,7 @@ impl StorageBackend for HybridStorage {
         // Delete from both local and cloud
 
         let local_clone = Arc::clone(&self.local);
-        let cloud_clone = Arc::clone(&self.cloud);
+        let cloud_clone = Arc::clone(self.cloud_backend_for_key(key));
         let key = key.to_string();
 
         let (tx_local, rx_local) = std::sync::mpsc::channel();
@@ -309,7 +319,7 @@ impl StorageBackend for HybridStorage {
         // Merge results from both local and cloud
 
         let local_clone = Arc::clone(&self.local);
-        let cloud_clone = Arc::clone(&self.cloud);
+        let cloud_clone = Arc::clone(self.cloud_backend_for_key(prefix));
         let prefix = prefix.to_string();
 
         let (tx_local, rx_local) = std::sync::mpsc::channel();

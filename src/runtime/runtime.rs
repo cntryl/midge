@@ -112,6 +112,7 @@ impl Runtime {
                     Ok(mut event_loop) => {
                         // Share the snapshot cache with the event loop
                         event_loop.set_snapshot_cache(snapshot_cache);
+                        event_loop.schedule_background_compaction_on_startup();
                         lifecycle_for_thread.mark_running();
                         // Signal successful initialization
                         let _ = init_tx.send(Ok(()));

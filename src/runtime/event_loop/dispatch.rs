@@ -211,6 +211,9 @@ impl RuntimeDispatcher {
         let Some(msg) = event_loop.gate_message_for_storage_verification(msg) else {
             return HandleOutcome::Continue;
         };
+        let Some(msg) = event_loop.gate_message_for_flush_publication(msg) else {
+            return HandleOutcome::Continue;
+        };
 
         match msg {
             RuntimeMsg::CheckWriteStall { .. }
@@ -680,6 +683,12 @@ impl RuntimeDispatcher {
         msg: RuntimeMsg,
         msg_rx: &Receiver<RuntimeMsg>,
     ) -> HandleOutcome {
+        if let RuntimeMsg::ManifestDropColumnFamily { cf_id, .. } = &msg {
+            if event_loop.column_family_flush_pipeline_active(*cf_id) {
+                event_loop.publication_deferred_messages.push_back(msg);
+                return HandleOutcome::Continue;
+            }
+        }
         match msg {
             RuntimeMsg::ManifestCreateColumnFamily { request_id, name } => Self::dispatch_manifest(
                 event_loop,

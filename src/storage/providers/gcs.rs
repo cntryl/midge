@@ -950,9 +950,11 @@ impl CloudBackend for GcsBackend {
             GcsBackendMode::Xml => Method::PUT,
         };
         let url = self.upload_url(&key);
+        let content_length = data.len();
         let mut request = CloudRequest::new(method, url)
             .with_body(data)
-            .with_header("Content-Type", "application/octet-stream");
+            .with_header("Content-Type", "application/octet-stream")
+            .with_header("Content-Length", content_length.to_string());
         // Attach any additional headers provided by caller (e.g. conditional headers)
         for (name, value) in headers {
             request = request.with_header(name, value);

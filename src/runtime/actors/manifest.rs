@@ -22,6 +22,7 @@ impl ManifestActor {
     }
 
     /// Add a new SST file to the manifest
+    #[cfg(test)]
     pub fn add_sst(&mut self, state: &mut RuntimeState, file_meta: FileMeta) -> MidgeResult<()> {
         // Validate SST file exists and is readable (defensive: avoid manifest pointing at corrupt file)
         if !state.is_memory_mode() {

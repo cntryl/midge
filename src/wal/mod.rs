@@ -37,7 +37,11 @@ pub fn segment_file_name(segment_id: u64) -> String {
 /// Format the full cloud object key for a sealed WAL segment.
 #[must_use]
 pub fn segment_object_key(segment_id: u64) -> String {
-    format!("wal/{}", segment_file_name(segment_id))
+    format!(
+        "{}{}",
+        crate::cloud_layout::CloudObjectLayout::WAL_PREFIX,
+        segment_file_name(segment_id)
+    )
 }
 
 /// Backward-compatible alias for callers that operate specifically on cloud WAL

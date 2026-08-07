@@ -30,8 +30,11 @@ use std::time::Duration;
 
 use crate::common::{MidgeError, MidgeResult};
 #[cfg(test)]
-use crate::config::{AzureCredentialSource, GcsApiStyle, GcsCredentialSource, S3CredentialSource};
-pub use crate::config::{CloudProviderConfig, RecoveryPolicy, Storage};
+use crate::config::{
+    AzureCredentialSource, CloudProviderConfig, GcsApiStyle, GcsCredentialSource,
+    S3CredentialSource,
+};
+pub use crate::config::{RecoveryPolicy, Storage};
 use crate::sst::cache::CachePolicyType;
 use crate::sst::compression::{CompressionAlgo, CompressionPolicy};
 
@@ -253,17 +256,19 @@ impl OpenOptions {
         OpenOptionsBuilder::new(Storage::Local { path: path.into() })
     }
 
-    /// Create a real cloud-backed database builder.
+    /// Create a real cloud-backed database with separate object-class stores.
+    ///
+    /// WAL, SST, and control locations must resolve to different provider
+    /// buckets/containers. This makes their versioning and lifecycle policies
+    /// independently enforceable.
     #[must_use]
-    pub fn cloud<P: Into<PathBuf>, S: Into<String>>(
+    pub fn cloud<P: Into<PathBuf>>(
         local_cache_path: P,
-        provider: CloudProviderConfig,
-        prefix: S,
+        buckets: crate::config::CloudStorageBuckets,
     ) -> OpenOptionsBuilder {
         OpenOptionsBuilder::new(Storage::Cloud {
             local_cache_path: local_cache_path.into(),
-            provider,
-            prefix: prefix.into(),
+            buckets: Box::new(buckets),
         })
     }
 
@@ -285,6 +290,15 @@ impl OpenOptions {
     #[must_use]
     pub fn storage(&self) -> &Storage {
         &self.storage
+    }
+
+    /// Return the configured WAL, SST, and control stores for cloud mode.
+    #[must_use]
+    pub fn cloud_storage_buckets(&self) -> Option<&crate::config::CloudStorageBuckets> {
+        match &self.storage {
+            Storage::Cloud { buckets, .. } => Some(buckets),
+            _ => None,
+        }
     }
 
     /// Return the configured optimization goal.
@@ -537,6 +551,8 @@ impl OpenOptionsBuilder {
             ));
         }
 
+        Self::validate_cloud_storage_buckets(&self.storage)?;
+
         let total_memory = self.resolve_total_memory()?;
         let pools = self.derive_memory_pools(total_memory)?;
 
@@ -590,6 +606,28 @@ impl OpenOptionsBuilder {
             simulated_cloud_local_storage_budget_bytes: self
                 .simulated_cloud_local_storage_budget_bytes,
         })
+    }
+
+    fn validate_cloud_storage_buckets(storage: &Storage) -> MidgeResult<()> {
+        let Storage::Cloud { buckets, .. } = storage else {
+            return Ok(());
+        };
+
+        let locations = [
+            ("WAL", buckets.wal()),
+            ("SST", buckets.sst()),
+            ("control", buckets.control()),
+        ];
+        for (index, (left_name, left)) in locations.iter().enumerate() {
+            for (right_name, right) in locations.iter().skip(index + 1) {
+                if left.provider().same_storage_location(right.provider()) {
+                    return Err(MidgeError::InvalidArgument(format!(
+                        "cloud {left_name} and {right_name} storage must use different buckets/containers"
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn resolve_total_memory(&self) -> MidgeResult<usize> {
@@ -1034,6 +1072,63 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn should_keep_each_object_class_storage_separate() {
+        // Arrange
+        let wal = crate::config::CloudStorageLocation::new(
+            CloudProviderConfig::aws_s3("wal-bucket", "us-east-1"),
+            "database-a",
+        );
+        let sst = crate::config::CloudStorageLocation::new(
+            CloudProviderConfig::aws_s3("sst-bucket", "us-east-1"),
+            "database-a",
+        );
+        let control = CloudProviderConfig::aws_s3("control-bucket", "us-east-1");
+        let buckets = crate::config::CloudStorageBuckets::new(
+            wal,
+            sst,
+            crate::config::CloudStorageLocation::new(control.clone(), "database-a"),
+        );
+
+        // Act
+        let options = OpenOptions::cloud("/tmp/midge-control-options", buckets)
+            .build()
+            .expect("build separated cloud options");
+
+        // Assert
+        let configured = options
+            .cloud_storage_buckets()
+            .expect("cloud buckets should be retained");
+        assert_eq!(configured.control().provider(), &control);
+        assert_eq!(configured.control().prefix(), "database-a");
+    }
+
+    #[test]
+    fn should_reject_cloud_storage_classes_when_bucket_is_shared() {
+        // Arrange
+        let wal_provider = CloudProviderConfig::aws_s3("shared-bucket", "us-east-1");
+        let sst_provider = CloudProviderConfig::aws_s3_static(
+            "shared-bucket",
+            "us-west-2",
+            "different-key",
+            "different-secret",
+        );
+        let control_provider = CloudProviderConfig::aws_s3("control-bucket", "us-east-1");
+        let buckets = crate::config::CloudStorageBuckets::new(
+            crate::config::CloudStorageLocation::new(wal_provider, "database-a/wal"),
+            crate::config::CloudStorageLocation::new(sst_provider, "database-a/sst"),
+            crate::config::CloudStorageLocation::new(control_provider, "database-a/control"),
+        );
+
+        // Act
+        let result = OpenOptions::cloud("/tmp/midge-shared-control-options", buckets).build();
+
+        // Assert
+        assert!(
+            matches!(result, Err(MidgeError::InvalidArgument(message)) if message.contains("different buckets"))
+        );
     }
 
     #[test]

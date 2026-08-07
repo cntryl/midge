@@ -154,12 +154,17 @@ fn write_fresh_adaptive_database(path: &Path, records: &[(Vec<u8>, Vec<u8>)]) {
 fn sorted_sst_files(path: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     let mut files: Vec<_> = fs::read_dir(path.join("sst"))
         .expect("read SST directory")
-        .map(|entry| {
+        .filter_map(|entry| {
             let entry = entry.expect("read SST entry");
-            (
-                PathBuf::from(entry.file_name()),
-                fs::read(entry.path()).expect("read SST file"),
-            )
+            let path = entry.path();
+            (path.is_file()
+                && path.extension().and_then(|extension| extension.to_str()) == Some("sst"))
+            .then(|| {
+                (
+                    PathBuf::from(entry.file_name()),
+                    fs::read(path).expect("read SST file"),
+                )
+            })
         })
         .collect();
     files.sort_by(|left, right| left.0.cmp(&right.0));

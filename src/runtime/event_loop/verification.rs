@@ -2,6 +2,37 @@ use super::EventLoop;
 use crate::runtime::{RuntimeMsg, RuntimeResponse};
 
 impl EventLoop {
+    pub(super) fn gate_message_for_flush_publication(
+        &mut self,
+        msg: RuntimeMsg,
+    ) -> Option<RuntimeMsg> {
+        if !self.manifest_publication_active {
+            return Some(msg);
+        }
+        let mutating = matches!(
+            &msg,
+            RuntimeMsg::ManifestPersist { .. }
+                | RuntimeMsg::ManifestCreateColumnFamily { .. }
+                | RuntimeMsg::ManifestDropColumnFamily { .. }
+                | RuntimeMsg::CompactionComplete { .. }
+                | RuntimeMsg::CompactAll { .. }
+        );
+        #[cfg(test)]
+        let mutating = mutating
+            || matches!(
+                &msg,
+                RuntimeMsg::ManifestAddSst { .. }
+                    | RuntimeMsg::ManifestCompactionComplete { .. }
+                    | RuntimeMsg::RunCompaction { .. }
+            );
+        if mutating {
+            self.publication_deferred_messages.push_back(msg);
+            None
+        } else {
+            Some(msg)
+        }
+    }
+
     pub(super) fn gate_message_for_storage_verification(
         &mut self,
         msg: RuntimeMsg,

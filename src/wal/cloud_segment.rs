@@ -39,6 +39,23 @@ pub(crate) fn validate_bytes(
     data: &[u8],
     expected_max_sequence: u64,
 ) -> Result<SegmentReadback, String> {
+    let readback = inspect_bytes(key, data)?;
+    let observed_max_sequence = readback.validation.max_sequence;
+    if observed_max_sequence < expected_max_sequence {
+        return Err(format!(
+            "cloud WAL segment '{key}' max sequence {observed_max_sequence} is below expected {expected_max_sequence}"
+        ));
+    }
+    if observed_max_sequence > expected_max_sequence {
+        return Err(format!(
+            "cloud WAL segment '{key}' max sequence {observed_max_sequence} exceeds expected {expected_max_sequence}"
+        ));
+    }
+
+    Ok(readback)
+}
+
+pub(crate) fn inspect_bytes(key: &str, data: &[u8]) -> Result<SegmentReadback, String> {
     if data.is_empty() {
         return Err(format!("cloud WAL segment '{key}' is empty"));
     }
@@ -82,17 +99,6 @@ pub(crate) fn validate_bytes(
     if records == 0 {
         return Err(format!("cloud WAL segment '{key}' contains no records"));
     }
-    if observed_max_sequence < expected_max_sequence {
-        return Err(format!(
-            "cloud WAL segment '{key}' max sequence {observed_max_sequence} is below expected {expected_max_sequence}"
-        ));
-    }
-    if observed_max_sequence > expected_max_sequence {
-        return Err(format!(
-            "cloud WAL segment '{key}' max sequence {observed_max_sequence} exceeds expected {expected_max_sequence}"
-        ));
-    }
-
     Ok(SegmentReadback {
         validation: SegmentValidation {
             max_sequence: observed_max_sequence,

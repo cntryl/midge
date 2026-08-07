@@ -878,6 +878,65 @@ impl CloudProviderConfig {
         }
     }
 
+    pub(crate) fn same_storage_location(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::AwsS3 { bucket: left, .. }, Self::AwsS3 { bucket: right, .. }) => left == right,
+            (
+                Self::AwsS3 { bucket: left, .. },
+                Self::S3Compatible {
+                    bucket: right,
+                    endpoint,
+                    ..
+                },
+            )
+            | (
+                Self::S3Compatible {
+                    bucket: left,
+                    endpoint,
+                    ..
+                },
+                Self::AwsS3 { bucket: right, .. },
+            ) => left == right && is_aws_s3_endpoint(endpoint),
+            (
+                Self::S3Compatible {
+                    bucket: left_bucket,
+                    endpoint: left_endpoint,
+                    ..
+                },
+                Self::S3Compatible {
+                    bucket: right_bucket,
+                    endpoint: right_endpoint,
+                    ..
+                },
+            ) => left_bucket == right_bucket && left_endpoint == right_endpoint,
+            (
+                Self::AzureBlob {
+                    account: left_account,
+                    container: left_container,
+                    ..
+                },
+                Self::AzureBlob {
+                    account: right_account,
+                    container: right_container,
+                    ..
+                },
+            ) => left_account == right_account && left_container == right_container,
+            (
+                Self::Gcs {
+                    bucket: left_bucket,
+                    endpoint: left_endpoint,
+                    ..
+                },
+                Self::Gcs {
+                    bucket: right_bucket,
+                    endpoint: right_endpoint,
+                    ..
+                },
+            ) => left_bucket == right_bucket && left_endpoint == right_endpoint,
+            _ => false,
+        }
+    }
+
     fn kind(&self) -> &'static str {
         match self {
             Self::AwsS3 { .. } | Self::S3Compatible { .. } => "S3-family",
@@ -885,6 +944,18 @@ impl CloudProviderConfig {
             Self::Gcs { .. } => "GCS",
         }
     }
+}
+
+fn is_aws_s3_endpoint(endpoint: &str) -> bool {
+    let endpoint = endpoint.trim().trim_end_matches('/').to_ascii_lowercase();
+    endpoint == "https://s3.amazonaws.com"
+        || endpoint == "http://s3.amazonaws.com"
+        || endpoint
+            .strip_prefix("https://s3.")
+            .is_some_and(|suffix| suffix.ends_with(".amazonaws.com"))
+        || endpoint
+            .strip_prefix("http://s3.")
+            .is_some_and(|suffix| suffix.ends_with(".amazonaws.com"))
 }
 
 impl CloudCredentialSource {
@@ -984,5 +1055,43 @@ mod tests {
         // Assert
         assert!(!output.contains("gcs-token-do-not-log"));
         assert!(output.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn should_match_cross_variant_configs_given_same_aws_bucket() {
+        // Arrange
+        let aws = CloudProviderConfig::aws_s3("shared-bucket", "us-east-1");
+        let compatible = CloudProviderConfig::s3_compatible(
+            "shared-bucket",
+            "us-east-1",
+            "https://s3.us-east-1.amazonaws.com/",
+            "access",
+            "secret",
+        );
+
+        // Act
+        let same_location = aws.same_storage_location(&compatible);
+
+        // Assert
+        assert!(same_location);
+    }
+
+    #[test]
+    fn should_not_match_cross_variant_configs_given_non_aws_endpoint() {
+        // Arrange
+        let aws = CloudProviderConfig::aws_s3("shared-bucket", "us-east-1");
+        let compatible = CloudProviderConfig::s3_compatible(
+            "shared-bucket",
+            "us-east-1",
+            "https://objects.example.test",
+            "access",
+            "secret",
+        );
+
+        // Act
+        let same_location = aws.same_storage_location(&compatible);
+
+        // Assert
+        assert!(!same_location);
     }
 }

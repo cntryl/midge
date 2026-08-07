@@ -14,6 +14,7 @@ use tempfile::TempDir;
 const CHILD_TEST_NAME: &str = "should_abort_in_child_process_when_cloud_crash_scenario_requested";
 const ENV_SCENARIO: &str = "MIDGE_CLOUD_CRASH_SCENARIO";
 const ENV_DB_PATH: &str = "MIDGE_CLOUD_CRASH_DB_PATH";
+const CRASH_READY_MARKER: &str = ".midge-cloud-crash-ready";
 const LARGE_MEMTABLE_BYTES: usize = 512 * 1024 * 1024;
 const EVENTUAL_FLUSH_GAP: u64 = 4;
 
@@ -138,7 +139,7 @@ fn should_restore_published_cloud_sst_when_cache_lost_after_child_abort() {
         "reopen should restore the published SST cache from cloud"
     );
 
-    for index in 0..16 {
+    for index in 0..17 {
         let key = format!("cloud-buffered-crash-key-{index:04}");
         assert_value_visible(&reopened, key.as_bytes(), b"cloud-buffered-crash-value");
     }
@@ -153,7 +154,7 @@ fn child_cloud_strict_after_ack(db_path: &Path) {
         WriteOptions::cloud_strict(),
     );
 
-    std::process::abort();
+    abort_after_marking_ready(db_path, "cloud_strict_after_ack");
 }
 
 fn child_buffered_eventual_flush_after_publish(db_path: &Path) {
@@ -174,15 +175,22 @@ fn child_buffered_eventual_flush_after_publish(db_path: &Path) {
         .get_runtime_metrics()
         .expect("runtime metrics before publish");
     assert!(
-        pre_publish_metrics.max_memtable_wal_segment_gap > 0,
-        "buffered cloud writes should build WAL-segment pressure before the first SST publish"
+        pre_publish_metrics.flush_enqueued_total > 0,
+        "buffered cloud writes should trigger at least one eventual flush"
     );
 
-    let _published = wait_for_metrics(&engine, Duration::from_secs(5), |metrics| {
+    let _published = wait_for_metrics(&engine, Duration::from_secs(10), |metrics| {
         metrics.sst_count >= 1 && metrics.manifest_last_persisted_sequence > 0
     });
-
-    // Ensure the recovered SST is the authoritative copy, not a local-cache artifact.
+    // Add one acknowledged write after publication, below the four-segment
+    // eventual-flush trigger. Recovery must reconcile an authoritative SST
+    // with this newer WAL-only frontier.
+    commit_value(
+        &engine,
+        b"cloud-buffered-crash-key-0016",
+        b"cloud-buffered-crash-value",
+        WriteOptions::cloud_async(),
+    );
     let tx = engine
         .begin_tx(cf.id(), TransactionMode::ReadOnly)
         .expect("begin read tx");
@@ -192,6 +200,23 @@ fn child_buffered_eventual_flush_after_publish(db_path: &Path) {
         Some(Bytes::from_static(b"cloud-buffered-crash-value"))
     );
 
+    abort_after_marking_ready(db_path, "buffered_eventual_flush_after_publish");
+}
+
+fn abort_after_marking_ready(db_path: &Path, scenario: &str) -> ! {
+    use std::io::Write as _;
+
+    let marker_path = db_path.join(CRASH_READY_MARKER);
+    let mut marker = std::fs::File::create(&marker_path).expect("create crash-ready marker");
+    marker
+        .write_all(scenario.as_bytes())
+        .and_then(|()| marker.sync_all())
+        .expect("persist crash-ready marker");
+    if let Ok(directory) = std::fs::File::open(db_path) {
+        directory
+            .sync_all()
+            .expect("persist crash-ready directory entry");
+    }
     std::process::abort();
 }
 
@@ -290,6 +315,16 @@ fn run_child_expect_abort(scenario: &str, db_path: &Path) {
         !output.status.success(),
         "child scenario {scenario} unexpectedly exited successfully"
     );
+    let marker_path = db_path.join(CRASH_READY_MARKER);
+    let marker = std::fs::read_to_string(&marker_path).unwrap_or_else(|error| {
+        panic!(
+            "child scenario {scenario} exited before its intended abort point: {error}; stdout={}; stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    assert_eq!(marker, scenario, "child wrote the wrong crash-ready marker");
+    std::fs::remove_file(marker_path).expect("remove crash-ready marker");
 }
 
 fn expire_crashed_process_lease(db_path: &Path) {

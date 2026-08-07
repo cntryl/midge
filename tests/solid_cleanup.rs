@@ -639,21 +639,33 @@ fn should_delegate_provider_construction_to_provider_family_resolvers() {
 #[test]
 fn should_select_same_storage_modes_from_open_options_constructors() {
     // Arrange
-    let provider = CloudProviderConfig::s3_compatible_static(
-        "bucket",
-        "http://localhost:9000",
-        "key",
-        "secret",
-    );
+    let location = |bucket| {
+        cntryl_midge::CloudStorageLocation::new(
+            CloudProviderConfig::s3_compatible_static(
+                bucket,
+                "http://localhost:9000",
+                "key",
+                "secret",
+            ),
+            "prefix",
+        )
+    };
 
     // Act
     let memory = OpenOptions::in_memory().build().expect("build options");
     let local = OpenOptions::local("/tmp/midge-solid-local")
         .build()
         .expect("build options");
-    let cloud = OpenOptions::cloud("/tmp/midge-solid-cloud", provider, "prefix")
-        .build()
-        .expect("build options");
+    let cloud = OpenOptions::cloud(
+        "/tmp/midge-solid-cloud",
+        cntryl_midge::CloudStorageBuckets::new(
+            location("wal-bucket"),
+            location("sst-bucket"),
+            location("control-bucket"),
+        ),
+    )
+    .build()
+    .expect("build options");
     let simulated = OpenOptions::cloud_simulated("/tmp/midge-solid-simulated", "bucket", "prefix")
         .build()
         .expect("build options");

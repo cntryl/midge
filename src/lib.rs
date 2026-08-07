@@ -24,6 +24,7 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
 // Foundation - no dependencies
+mod cloud_layout;
 #[doc(hidden)]
 pub mod common;
 #[doc(hidden)]
@@ -65,6 +66,7 @@ mod engine;
 // ---------------------------------------------------------------------------
 
 // Errors
+pub use cloud_layout::CloudObjectLayout;
 pub use common::{MidgeError, MidgeResult};
 
 // Engine / Transactions
@@ -79,8 +81,8 @@ pub use engine::{Direction, Query, ScanIterator};
 
 // Observability and diagnostics
 pub use config::{
-    AzureCredentialSource, CloudCredentialSource, CloudProviderConfig, EngineHealth, GcsApiStyle,
-    GcsCredentialSource, S3CredentialSource,
+    AzureCredentialSource, CloudCredentialSource, CloudProviderConfig, CloudStorageBuckets,
+    CloudStorageLocation, EngineHealth, GcsApiStyle, GcsCredentialSource, S3CredentialSource,
 };
 pub use types::{
     ReadAmpMetricsSnapshot, RecoveryMetricsSnapshot, RuntimeMetricsSnapshot, SnapshotPinSnapshot,

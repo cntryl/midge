@@ -1,8 +1,41 @@
 use super::*;
+use crate::common::MidgeError;
 
 struct StartupWatchdogLease {
     validity: std::sync::Arc<crate::lease::LeaseValidity>,
     renewals: std::sync::atomic::AtomicUsize,
+}
+
+struct AcquisitionFailureLease {
+    error: fn() -> crate::lease::LeaseError,
+}
+
+impl crate::lease::PrimaryLease for AcquisitionFailureLease {
+    fn try_acquire(
+        self: std::sync::Arc<Self>,
+    ) -> Result<crate::lease::LeaseGuard, crate::lease::LeaseError> {
+        Err((self.error)())
+    }
+
+    fn renew(&self) -> Result<(), crate::lease::LeaseError> {
+        unreachable!("an unacquired lease must never renew")
+    }
+
+    fn release(&self) -> Result<(), crate::lease::LeaseError> {
+        Ok(())
+    }
+
+    fn ttl(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(1)
+    }
+
+    fn holder_id(&self) -> String {
+        "acquisition-failure".to_string()
+    }
+
+    fn epoch(&self) -> u64 {
+        0
+    }
 }
 
 impl crate::lease::PrimaryLease for StartupWatchdogLease {
@@ -108,7 +141,21 @@ fn should_not_log_cloud_credentials_when_tracing_engine_startup() {
     // Act
     tracing::subscriber::with_default(subscriber, || {
         for provider in providers {
-            let opts = OpenOptions::cloud("/tmp/midge-redaction", provider, "prefix")
+            let buckets = crate::config::CloudStorageBuckets::new(
+                crate::config::CloudStorageLocation::new(provider, "prefix"),
+                crate::config::CloudStorageLocation::new(
+                    crate::config::CloudProviderConfig::aws_s3("redaction-sst-bucket", "us-east-1"),
+                    "prefix",
+                ),
+                crate::config::CloudStorageLocation::new(
+                    crate::config::CloudProviderConfig::aws_s3(
+                        "redaction-control-bucket",
+                        "us-east-1",
+                    ),
+                    "prefix",
+                ),
+            );
+            let opts = OpenOptions::cloud("/tmp/midge-redaction", buckets)
                 .build()
                 .expect("build redaction options");
             EngineStartup::trace_open(&opts);
@@ -142,7 +189,7 @@ fn should_apply_open_options_block_cache_policy_to_runtime_config() -> MidgeResu
         .build()?;
     let storage_path = StartupStoragePath::resolve(opts.storage());
     storage_path.prepare();
-    let startup_lease = StartupLease::acquire(opts.storage())?;
+    let startup_lease = StartupLease::acquire(&opts)?;
 
     // Act
     let materialized =
@@ -179,5 +226,61 @@ fn should_run_heartbeat_before_cloud_recovery_can_block_startup() -> MidgeResult
     assert!(startup_lease.lease_heartbeat.is_some());
     assert!(lease.renewals.load(std::sync::atomic::Ordering::Acquire) > 0);
     startup_lease.ensure_healthy("while recovery is blocked")?;
+    Ok(())
+}
+
+#[test]
+fn should_return_lease_held_given_active_writer_when_acquiring_startup_lease() {
+    // Arrange
+    let lease: std::sync::Arc<dyn crate::lease::PrimaryLease> =
+        std::sync::Arc::new(AcquisitionFailureLease {
+            error: || crate::lease::LeaseError::AcquisitionFailed("active writer".to_string()),
+        });
+
+    // Act
+    let result = StartupLease::acquire_for_test(lease, None);
+
+    // Assert
+    assert!(
+        matches!(result, Err(MidgeError::LeaseHeld(message)) if message.contains("active writer"))
+    );
+}
+
+#[test]
+fn should_return_lease_unavailable_given_backend_failure_when_acquiring_startup_lease() {
+    // Arrange
+    let lease: std::sync::Arc<dyn crate::lease::PrimaryLease> =
+        std::sync::Arc::new(AcquisitionFailureLease {
+            error: || crate::lease::LeaseError::IoError("backend unavailable".to_string()),
+        });
+
+    // Act
+    let result = StartupLease::acquire_for_test(lease, None);
+
+    // Assert
+    assert!(
+        matches!(result, Err(MidgeError::LeaseUnavailable(message)) if message.contains("backend unavailable"))
+    );
+}
+
+#[test]
+fn should_return_fenced_given_lease_loss_after_startup_acquisition() -> MidgeResult<()> {
+    // Arrange
+    let lease = std::sync::Arc::new(StartupWatchdogLease {
+        validity: std::sync::Arc::new(crate::lease::LeaseValidity::new()),
+        renewals: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let lease_object: std::sync::Arc<dyn crate::lease::PrimaryLease> = lease.clone();
+    let startup_lease =
+        StartupLease::acquire_for_test(lease_object, Some(std::sync::Arc::clone(&lease.validity)))?;
+
+    // Act
+    startup_lease
+        .lease_healthy
+        .store(false, std::sync::atomic::Ordering::Release);
+    let result = startup_lease.ensure_healthy("after acquisition");
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::Fenced(_))));
     Ok(())
 }
