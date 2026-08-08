@@ -7,8 +7,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RecoveredCloudWalSegment {
+    pub max_sequence: u64,
+    pub writer_epoch: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RecoveredCloudActiveWal {
     pub max_sequence: u64,
+    pub writer_epoch: u64,
     pub record_count: usize,
     pub valid_bytes: usize,
 }
@@ -58,10 +65,16 @@ pub struct RuntimeConfig {
     /// Remote WAL segments replayed during startup and still eligible for
     /// manifest-covered cleanup.
     pub recovered_cloud_wal_segments: BTreeMap<u64, u64>,
+    /// Writer epochs paired with `recovered_cloud_wal_segments` by segment id.
+    /// Kept crate-private so the existing public runtime configuration remains
+    /// source-compatible while engine startup retains recovery fencing proof.
+    pub(crate) recovered_cloud_wal_segment_epochs: BTreeMap<u64, u64>,
     /// Locally recovered sealed WAL segments that were not present in remote
     /// storage and must resume upload before later segments advance the cloud
     /// durability frontier.
     pub(crate) recovered_local_wal_segments: BTreeMap<u64, u64>,
+    /// Writer epochs paired with `recovered_local_wal_segments` by segment id.
+    pub(crate) recovered_local_wal_segment_epochs: BTreeMap<u64, u64>,
     /// A recovered active WAL file that must be sealed and enqueued after the
     /// runtime has installed its cloud upload pipeline.
     pub(crate) recovered_cloud_active_wal: Option<RecoveredCloudActiveWal>,
@@ -92,7 +105,9 @@ impl Default for RuntimeConfig {
             hybrid_storage_events: None,
             cloud_metadata_storage: None,
             recovered_cloud_wal_segments: BTreeMap::new(),
+            recovered_cloud_wal_segment_epochs: BTreeMap::new(),
             recovered_local_wal_segments: BTreeMap::new(),
+            recovered_local_wal_segment_epochs: BTreeMap::new(),
             recovered_cloud_active_wal: None,
             compression_policy: crate::sst::compression::CompressionPolicy::default(),
             block_cache_size: 128 * 1024 * 1024,

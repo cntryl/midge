@@ -81,10 +81,42 @@ struct RuntimeStorageMaterialization {
 
 pub(in crate::engine) struct CloudWalRecoveryPlan {
     pub(in crate::engine) replay_dir: PathBuf,
-    pub(in crate::engine) remote_segments: std::collections::BTreeMap<u64, u64>,
-    pub(in crate::engine) local_segments: std::collections::BTreeMap<u64, u64>,
+    pub(in crate::engine) remote_segments:
+        std::collections::BTreeMap<u64, crate::runtime::RecoveredCloudWalSegment>,
+    pub(in crate::engine) local_segments:
+        std::collections::BTreeMap<u64, crate::runtime::RecoveredCloudWalSegment>,
     pub(in crate::engine) active_wal: Option<crate::runtime::RecoveredCloudActiveWal>,
     pub(in crate::engine) opened_in_salvage_mode: bool,
+}
+
+impl CloudWalRecoveryPlan {
+    fn remote_max_sequences(&self) -> std::collections::BTreeMap<u64, u64> {
+        self.remote_segments
+            .iter()
+            .map(|(segment_id, segment)| (*segment_id, segment.max_sequence))
+            .collect()
+    }
+
+    fn remote_writer_epochs(&self) -> std::collections::BTreeMap<u64, u64> {
+        self.remote_segments
+            .iter()
+            .map(|(segment_id, segment)| (*segment_id, segment.writer_epoch))
+            .collect()
+    }
+
+    fn local_max_sequences(&self) -> std::collections::BTreeMap<u64, u64> {
+        self.local_segments
+            .iter()
+            .map(|(segment_id, segment)| (*segment_id, segment.max_sequence))
+            .collect()
+    }
+
+    fn local_writer_epochs(&self) -> std::collections::BTreeMap<u64, u64> {
+        self.local_segments
+            .iter()
+            .map(|(segment_id, segment)| (*segment_id, segment.writer_epoch))
+            .collect()
+    }
 }
 
 struct RuntimeRecoveryMaterialization {

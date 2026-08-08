@@ -2252,6 +2252,47 @@ fn should_reject_cloud_ack_given_remote_wal_from_different_writer_epoch(
 }
 
 #[test]
+fn should_reject_cloud_ack_given_writer_fenced_after_upload_was_enqueued(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let healthy = Arc::new(AtomicBool::new(true));
+    let mut event_loop = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    event_loop.lease_healthy = Some(Arc::clone(&healthy));
+    let (sequence, _) = event_loop.wal_actor.append(
+        &mut event_loop.state,
+        crate::runtime::actors::wal::AppendParams {
+            request_id: 503,
+            cf_id: 0,
+            key: Bytes::from_static(b"fenced-before-ack"),
+            value: Some(Bytes::from_static(b"value")),
+            insert_only: false,
+            ttl_seconds: None,
+        },
+    )?;
+    let (segment_id, max_sequence) = seal_segment_for_test(&mut event_loop)?;
+    assert_eq!(sequence, max_sequence);
+    let local_path = event_loop
+        .state
+        .wal_dir
+        .join(crate::wal::segment_file_name(segment_id));
+    healthy.store(false, Ordering::Release);
+
+    // Act
+    event_loop.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id,
+        max_sequence,
+    });
+
+    // Assert
+    assert_eq!(event_loop.state.wal.cloud_durable_seq, 0);
+    assert!(local_path.exists(), "fenced ACK must retain the local WAL");
+    assert!(event_loop.state.persistence_anomaly_detected());
+    Ok(())
+}
+
+#[test]
 fn should_not_advance_cloud_durability_across_unacked_segment_gap() -> crate::common::MidgeResult<()>
 {
     // Arrange

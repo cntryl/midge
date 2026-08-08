@@ -84,6 +84,37 @@ pub(in crate::runtime::event_loop) fn create_test_local_event_loop(
 }
 
 #[test]
+fn should_retain_writer_epochs_in_recovered_cloud_wal_runtime_config() {
+    // Arrange
+    let config = crate::runtime::RuntimeConfig {
+        recovered_cloud_wal_segments: [(1, 60)].into_iter().collect(),
+        recovered_cloud_wal_segment_epochs: [(1, 7)].into_iter().collect(),
+        recovered_local_wal_segments: [(2, 100)].into_iter().collect(),
+        recovered_local_wal_segment_epochs: [(2, 8)].into_iter().collect(),
+        ..crate::runtime::RuntimeConfig::default()
+    };
+
+    // Act
+    let recovered = RecoveredCloudWalConfig::from(&config);
+
+    // Assert
+    assert_eq!(
+        recovered.remote_segments.get(&1),
+        Some(&crate::runtime::RecoveredCloudWalSegment {
+            max_sequence: 60,
+            writer_epoch: 7,
+        })
+    );
+    assert_eq!(
+        recovered.local_segments.get(&2),
+        Some(&crate::runtime::RecoveredCloudWalSegment {
+            max_sequence: 100,
+            writer_epoch: 8,
+        })
+    );
+}
+
+#[test]
 fn should_return_invalid_argument_given_column_family_create_during_ingest() {
     // Arrange
     let mut event_loop = create_test_event_loop().expect("create event loop");
@@ -202,6 +233,8 @@ fn should_hold_cloud_frontier_at_local_recovery_gap_until_resumed_upload_is_ackn
 
     // Assert
     assert_eq!(event_loop.state.wal.cloud_durable_seq, 1);
+    assert_eq!(event_loop.cloud_wal_upload_backlog.get(&2), Some(&2));
+    event_loop.drain_cloud_wal_upload_backlog();
     assert_eq!(hybrid_storage.pending_upload_count(), 1);
     assert_eq!(
         event_loop.durability.inflight_segment_for_sequence(2),
@@ -1395,7 +1428,7 @@ fn cloud_recovery_wal_bytes(sequence: u64) -> Vec<u8> {
 }
 
 #[test]
-fn should_open_and_incrementally_drain_recovered_wal_given_bounded_upload_queue(
+fn should_incrementally_drain_recovered_wal_given_bounded_upload_queue_at_open(
 ) -> crate::common::MidgeResult<()> {
     // Arrange
     let db_path = unique_test_db_path("midge_recovered_wal_backlog");
@@ -1442,6 +1475,7 @@ fn should_open_and_incrementally_drain_recovered_wal_given_bounded_upload_queue(
         recovered_local_wal_segments: std::collections::BTreeMap::from([(1, 1), (2, 2)]),
         recovered_cloud_active_wal: Some(crate::runtime::RecoveredCloudActiveWal {
             max_sequence: 3,
+            writer_epoch: 0,
             record_count: 1,
             valid_bytes: active_bytes.len(),
         }),

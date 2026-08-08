@@ -124,6 +124,7 @@ impl From<MidgeError> for ReplayFailure {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct VerifiedWalPrefix {
     pub(crate) max_sequence: u64,
+    pub(crate) writer_epoch: u64,
     pub(crate) record_count: usize,
     pub(crate) valid_bytes: usize,
 }
@@ -246,6 +247,16 @@ pub(crate) fn inspect_active_wal_bytes(
                 return Err(wal_prefix_failure(prefix, ReplayFailure::Error(error)));
             }
         };
+        if prefix.record_count > 0 && record.writer_epoch != prefix.writer_epoch {
+            return Err(wal_prefix_failure(
+                prefix,
+                ReplayFailure::Error(MidgeError::Corruption(format!(
+                    "active WAL mixes writer epochs {} and {}",
+                    prefix.writer_epoch, record.writer_epoch
+                ))),
+            ));
+        }
+        prefix.writer_epoch = record.writer_epoch;
         prefix.max_sequence = prefix.max_sequence.max(record.seq);
         prefix.record_count = prefix.record_count.saturating_add(1);
         prefix.valid_bytes = payload_end;

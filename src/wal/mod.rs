@@ -11,6 +11,14 @@
 //!
 //! The `io::Fs` abstraction enables better testability with swappable implementations
 //! (Real, Mock, Chaos). All production code has been migrated to this interface.
+//!
+//! Cloud object names intentionally remain keyed by the monotonic segment id for
+//! on-disk and remote-layout compatibility. Fencing proof lives in every WAL
+//! record: a sealed segment must contain one writer epoch, recovery rejects an
+//! epoch regression across later segment ids, and an upload acknowledgement is
+//! accepted only after the remote bytes exactly match the locally sealed file.
+//! Lease validation also gates sealing and uploader admission, so WAL validation
+//! remains an independent defense against a stale create-once publisher.
 
 pub(crate) mod cloud_segment;
 pub mod encoding;

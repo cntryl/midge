@@ -61,16 +61,36 @@ use crate::runtime::actors::flush::FlushWorkerResult;
 type SstRuntimeResources = (Arc<dyn crate::sst::SstFactory>, Option<Arc<ReadResources>>);
 
 struct RecoveredCloudWalConfig {
-    remote_segments: BTreeMap<u64, u64>,
-    local_segments: BTreeMap<u64, u64>,
+    remote_segments: BTreeMap<u64, crate::runtime::RecoveredCloudWalSegment>,
+    local_segments: BTreeMap<u64, crate::runtime::RecoveredCloudWalSegment>,
     active_wal: Option<crate::runtime::RecoveredCloudActiveWal>,
 }
 
 impl From<&super::RuntimeConfig> for RecoveredCloudWalConfig {
     fn from(config: &super::RuntimeConfig) -> Self {
+        let with_epochs = |segments: &BTreeMap<u64, u64>, epochs: &BTreeMap<u64, u64>| {
+            segments
+                .iter()
+                .map(|(segment_id, max_sequence)| {
+                    (
+                        *segment_id,
+                        crate::runtime::RecoveredCloudWalSegment {
+                            max_sequence: *max_sequence,
+                            writer_epoch: epochs.get(segment_id).copied().unwrap_or_default(),
+                        },
+                    )
+                })
+                .collect()
+        };
         Self {
-            remote_segments: config.recovered_cloud_wal_segments.clone(),
-            local_segments: config.recovered_local_wal_segments.clone(),
+            remote_segments: with_epochs(
+                &config.recovered_cloud_wal_segments,
+                &config.recovered_cloud_wal_segment_epochs,
+            ),
+            local_segments: with_epochs(
+                &config.recovered_local_wal_segments,
+                &config.recovered_local_wal_segment_epochs,
+            ),
             active_wal: config.recovered_cloud_active_wal,
         }
     }
@@ -350,16 +370,18 @@ impl EventLoop {
         })?;
 
         let mut recovered_segments = remote_segments.clone();
-        for (&segment_id, &max_sequence) in local_segments {
-            if let Some(remote_max_sequence) = recovered_segments.insert(segment_id, max_sequence) {
+        for (&segment_id, &segment) in local_segments {
+            if let Some(remote_segment) = recovered_segments.insert(segment_id, segment) {
                 return Err(crate::common::MidgeError::RecoveryFailed(format!(
-                    "WAL segment {segment_id} is both remote and local-only during recovery: remote max {remote_max_sequence}, local max {max_sequence}"
+                    "WAL segment {segment_id} is both remote and local-only during recovery: remote max {}, local max {}",
+                    remote_segment.max_sequence,
+                    segment.max_sequence
                 )));
             }
         }
-        for (&segment_id, &max_sequence) in &recovered_segments {
+        for (&segment_id, segment) in &recovered_segments {
             self.durability
-                .record_cloud_segment_inflight(segment_id, max_sequence);
+                .record_cloud_segment_inflight(segment_id, segment.max_sequence);
         }
 
         let initially_durable = self
@@ -373,9 +395,9 @@ impl EventLoop {
             self.remove_cloud_durable_local_wal_segment(segment_id);
         }
 
-        for (&segment_id, &max_sequence) in local_segments {
+        for (&segment_id, segment) in local_segments {
             self.cloud_wal_upload_backlog
-                .insert(segment_id, max_sequence);
+                .insert(segment_id, segment.max_sequence);
         }
 
         if let Some(active_wal) = active_wal {

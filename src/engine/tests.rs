@@ -938,7 +938,7 @@ fn should_fail_strict_recovery_given_conflicting_duplicate_local_wal_aliases() {
 }
 
 #[test]
-fn should_canonicalize_and_remove_matching_legacy_local_wal_alias() {
+fn should_remove_matching_legacy_local_wal_alias_given_canonical_recovery() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
     let cloud_wal_dir = temp_dir.path().join("cloud_store").join("wal");
@@ -981,8 +981,122 @@ fn should_canonicalize_and_remove_matching_legacy_local_wal_alias() {
         std::fs::read(&canonical_path).expect("read canonical local WAL"),
         wal_bytes
     );
-    assert_eq!(plan.remote_segments.get(&1), Some(&1));
+    assert_eq!(
+        plan.remote_segments.get(&1),
+        Some(&crate::runtime::RecoveredCloudWalSegment {
+            max_sequence: 1,
+            writer_epoch: 0,
+        })
+    );
     assert!(plan.local_segments.is_empty());
+}
+
+#[test]
+fn should_fail_strict_recovery_given_later_local_wal_from_lower_writer_epoch() {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let cloud_wal_dir = temp_dir.path().join("cloud_store").join("wal");
+    let local_wal_dir = temp_dir.path().join("wal");
+    std::fs::create_dir_all(&cloud_wal_dir).expect("create simulated cloud WAL directory");
+    std::fs::create_dir_all(&local_wal_dir).expect("create local WAL directory");
+    let wal_bytes = |sequence: u64, writer_epoch: u64| {
+        let record = crate::wal::WalRecord::new(
+            crate::wal::WalOpKind::Put,
+            bytes::Bytes::from(format!("epoch-{writer_epoch}")),
+            Some(bytes::Bytes::from_static(b"value")),
+            sequence,
+            writer_epoch,
+        );
+        let payload = crate::wal::encoding::encode(&record).expect("encode WAL record");
+        let mut bytes = Vec::new();
+        crate::wal::frame::append_frame(&mut bytes, &payload).expect("frame WAL record");
+        bytes
+    };
+    std::fs::write(
+        cloud_wal_dir.join(crate::wal::cloud_segment_file_name(1)),
+        wal_bytes(60, 2),
+    )
+    .expect("write newer-epoch WAL segment");
+    std::fs::write(
+        local_wal_dir.join(crate::wal::segment_file_name(2)),
+        wal_bytes(100, 1),
+    )
+    .expect("write later local-only stale-epoch WAL segment");
+
+    // Act
+    let result = startup::CloudStartupRecovery::materialize_simulated_cloud_wal_recovery_dir(
+        &cloud_wal_dir,
+        temp_dir.path(),
+        RecoveryPolicy::Strict,
+    );
+
+    // Assert
+    assert!(matches!(
+        result,
+        Err(crate::common::MidgeError::RecoveryFailed(message))
+            if message.contains("writer epoch regression")
+                && message.contains("segment 2")
+                && message.contains("1 < 2")
+    ));
+}
+
+#[test]
+fn should_skip_later_local_wal_from_lower_writer_epoch_during_salvage() {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let cloud_wal_dir = temp_dir.path().join("cloud_store").join("wal");
+    let local_wal_dir = temp_dir.path().join("wal");
+    std::fs::create_dir_all(&cloud_wal_dir).expect("create simulated cloud WAL directory");
+    std::fs::create_dir_all(&local_wal_dir).expect("create local WAL directory");
+    let wal_bytes = |sequence: u64, writer_epoch: u64| {
+        let record = crate::wal::WalRecord::new(
+            crate::wal::WalOpKind::Put,
+            bytes::Bytes::from(format!("epoch-{writer_epoch}")),
+            Some(bytes::Bytes::from_static(b"value")),
+            sequence,
+            writer_epoch,
+        );
+        let payload = crate::wal::encoding::encode(&record).expect("encode WAL record");
+        let mut bytes = Vec::new();
+        crate::wal::frame::append_frame(&mut bytes, &payload).expect("frame WAL record");
+        bytes
+    };
+    let stale_source = local_wal_dir.join(crate::wal::segment_file_name(2));
+    let stale_bytes = wal_bytes(100, 1);
+    std::fs::write(
+        cloud_wal_dir.join(crate::wal::cloud_segment_file_name(1)),
+        wal_bytes(60, 2),
+    )
+    .expect("write newer-epoch WAL segment");
+    std::fs::write(&stale_source, &stale_bytes).expect("write later stale-epoch WAL segment");
+
+    // Act
+    let plan = startup::CloudStartupRecovery::materialize_simulated_cloud_wal_recovery_dir(
+        &cloud_wal_dir,
+        temp_dir.path(),
+        RecoveryPolicy::Salvage,
+    )
+    .expect("salvage later stale-epoch WAL segment");
+
+    // Assert
+    assert!(plan.opened_in_salvage_mode);
+    assert_eq!(
+        plan.remote_segments.get(&1),
+        Some(&crate::runtime::RecoveredCloudWalSegment {
+            max_sequence: 60,
+            writer_epoch: 2,
+        })
+    );
+    assert!(!plan.local_segments.contains_key(&2));
+    assert!(!plan
+        .replay_dir
+        .join(crate::wal::cloud_segment_file_name(2))
+        .exists());
+    assert_eq!(
+        std::fs::read(stale_source).expect("read authoritative stale-epoch WAL segment"),
+        stale_bytes,
+        "salvage must retain the authoritative source bytes"
+    );
 }
 
 #[test]
@@ -1041,7 +1155,7 @@ fn should_recover_valid_active_cloud_wal_prefix_given_zero_filled_tail() {
         bytes::Bytes::from_static(b"zero-tail-key"),
         Some(bytes::Bytes::from_static(b"zero-tail-value")),
         1,
-        0,
+        7,
     );
     let payload = crate::wal::encoding::encode(&record).expect("encode WAL record");
     let mut valid_bytes = Vec::new();
@@ -1064,6 +1178,7 @@ fn should_recover_valid_active_cloud_wal_prefix_given_zero_filled_tail() {
         plan.active_wal,
         Some(crate::runtime::RecoveredCloudActiveWal {
             max_sequence: 1,
+            writer_epoch: 7,
             record_count: 1,
             valid_bytes: valid_bytes.len(),
         })
@@ -1078,6 +1193,49 @@ fn should_recover_valid_active_cloud_wal_prefix_given_zero_filled_tail() {
             .expect("inspect truncated local active WAL")
             .len(),
         u64::try_from(valid_bytes.len()).expect("valid WAL length fits u64")
+    );
+}
+
+#[test]
+fn should_fail_strict_cloud_recovery_given_mixed_writer_epochs_in_active_wal() {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let cloud_wal_dir = temp_dir.path().join("cloud_store").join("wal");
+    let local_wal_dir = temp_dir.path().join("wal");
+    std::fs::create_dir_all(&cloud_wal_dir).expect("create cloud WAL directory");
+    std::fs::create_dir_all(&local_wal_dir).expect("create local WAL directory");
+    let mut active_bytes = Vec::new();
+    for (sequence, writer_epoch) in [(1, 7), (2, 8)] {
+        let record = crate::wal::WalRecord::new(
+            crate::wal::WalOpKind::Put,
+            bytes::Bytes::from(format!("epoch-{writer_epoch}")),
+            Some(bytes::Bytes::from_static(b"value")),
+            sequence,
+            writer_epoch,
+        );
+        let payload = crate::wal::encoding::encode(&record).expect("encode WAL record");
+        crate::wal::frame::append_frame(&mut active_bytes, &payload).expect("frame WAL record");
+    }
+    let active_path = local_wal_dir.join(crate::wal::ACTIVE_FILE_NAME);
+    std::fs::write(&active_path, &active_bytes).expect("write mixed-epoch active WAL");
+
+    // Act
+    let result = startup::CloudStartupRecovery::materialize_simulated_cloud_wal_recovery_dir(
+        &cloud_wal_dir,
+        temp_dir.path(),
+        RecoveryPolicy::Strict,
+    );
+
+    // Assert
+    assert!(matches!(
+        result,
+        Err(crate::common::MidgeError::RecoveryFailed(message))
+            if message.contains("mixes writer epochs 7 and 8")
+    ));
+    assert_eq!(
+        std::fs::read(active_path).expect("read authoritative active WAL after failed recovery"),
+        active_bytes,
+        "strict recovery must retain the mixed-epoch active WAL"
     );
 }
 

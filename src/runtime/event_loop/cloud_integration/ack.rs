@@ -63,6 +63,13 @@ impl EventLoop {
     }
 
     fn handle_storage_event_cloud_ack(&mut self, segment_id: u64, max_sequence: u64) {
+        if let Err(error) = self.validate_runtime_writer_lease() {
+            self.handle_cloud_upload_failure(
+                segment_id,
+                &format!("writer was fenced before cloud WAL acknowledgement: {error}"),
+            );
+            return;
+        }
         if let Err(error) = self.verify_remote_wal_segment_before_ack(segment_id, max_sequence) {
             self.handle_cloud_upload_failure(
                 segment_id,

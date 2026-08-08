@@ -645,7 +645,8 @@ impl CloudStartupRecovery {
             logical_keys.sort_by(|left, right| {
                 (left != &canonical_key, left).cmp(&(right != &canonical_key, right))
             });
-            let mut selected: Option<(String, Vec<u8>, u64)> = None;
+            let mut selected: Option<(String, Vec<u8>, crate::runtime::RecoveredCloudWalSegment)> =
+                None;
             for logical_key in logical_keys {
                 let data = match Self::blocking_cloud_get(cloud, &logical_key) {
                     Ok(data) => data,
@@ -660,7 +661,7 @@ impl CloudStartupRecovery {
                         )))
                     }
                 };
-                let Some(max_sequence) = Self::validate_sealed_recovery_wal(
+                let Some(segment) = Self::validate_sealed_recovery_wal(
                     &logical_key,
                     &data,
                     recovery_policy,
@@ -682,18 +683,19 @@ impl CloudStartupRecovery {
                     }
                     continue;
                 }
-                selected = Some((logical_key, data, max_sequence));
+                selected = Some((logical_key, data, segment));
             }
-            if let Some((_, data, max_sequence)) = selected {
+            if let Some((_, data, segment)) = selected {
                 Self::stage_recovery_wal_bytes(
                     &staging_fs,
                     &crate::wal::cloud_segment_file_name(segment_id),
                     &data,
                 )?;
-                plan.remote_segments.insert(segment_id, max_sequence);
+                plan.remote_segments.insert(segment_id, segment);
             }
         }
 
+        Self::enforce_recovered_wal_epoch_order(&mut plan, recovery_policy)?;
         Ok(plan)
     }
 
@@ -821,7 +823,8 @@ impl CloudStartupRecovery {
                 (left_name != canonical_name, left_name)
                     .cmp(&(right_name != canonical_name, right_name))
             });
-            let mut selected: Option<(PathBuf, Vec<u8>, u64)> = None;
+            let mut selected: Option<(PathBuf, Vec<u8>, crate::runtime::RecoveredCloudWalSegment)> =
+                None;
             for source_path in source_paths {
                 let data = match std::fs::read(&source_path) {
                     Ok(data) => data,
@@ -842,7 +845,7 @@ impl CloudStartupRecovery {
                     }
                 };
                 let key = source_path.to_string_lossy();
-                let Some(max_sequence) = Self::validate_sealed_recovery_wal(
+                let Some(segment) = Self::validate_sealed_recovery_wal(
                     &key,
                     &data,
                     recovery_policy,
@@ -866,15 +869,15 @@ impl CloudStartupRecovery {
                     }
                     continue;
                 }
-                selected = Some((source_path, data, max_sequence));
+                selected = Some((source_path, data, segment));
             }
-            if let Some((_, data, max_sequence)) = selected {
+            if let Some((_, data, segment)) = selected {
                 Self::stage_recovery_wal_bytes(
                     staging_fs,
                     &crate::wal::cloud_segment_file_name(segment_id),
                     &data,
                 )?;
-                plan.remote_segments.insert(segment_id, max_sequence);
+                plan.remote_segments.insert(segment_id, segment);
             }
         }
         Ok(())
@@ -970,24 +973,105 @@ impl CloudStartupRecovery {
     ) -> MidgeResult<()> {
         let local_wal_dir = db_path.join("wal");
         let staging_fs = Self::recovery_staging_fs(db_path)?;
-        let Some((segment_paths, active_path)) = Self::collect_local_wal_paths(
+        let local_paths = Self::collect_local_wal_paths(
             &local_wal_dir,
             recovery_policy,
             &mut plan.opened_in_salvage_mode,
-        )?
-        else {
-            return Ok(());
-        };
-        Self::merge_local_sealed_wal_segments(
-            segment_paths,
-            &local_wal_dir,
-            &staging_fs,
-            plan,
-            recovery_policy,
         )?;
+        if let Some((segment_paths, active_path)) = local_paths {
+            Self::merge_local_sealed_wal_segments(
+                segment_paths,
+                &local_wal_dir,
+                &staging_fs,
+                plan,
+                recovery_policy,
+            )?;
 
-        if let Some(active_path) = active_path {
-            Self::merge_active_local_wal(&active_path, &staging_fs, plan, recovery_policy)?;
+            if let Some(active_path) = active_path {
+                Self::merge_active_local_wal(&active_path, &staging_fs, plan, recovery_policy)?;
+            }
+        }
+
+        Self::enforce_recovered_wal_epoch_order(plan, recovery_policy)
+    }
+
+    fn enforce_recovered_wal_epoch_order(
+        plan: &mut CloudWalRecoveryPlan,
+        recovery_policy: RecoveryPolicy,
+    ) -> MidgeResult<()> {
+        let mut highest_epoch = 0_u64;
+        let mut stale_segments = Vec::new();
+        let segment_ids = plan
+            .remote_segments
+            .keys()
+            .chain(plan.local_segments.keys())
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+
+        for segment_id in segment_ids {
+            let segment = plan
+                .remote_segments
+                .get(&segment_id)
+                .or_else(|| plan.local_segments.get(&segment_id))
+                .expect("recovered segment id came from one recovery map");
+            if highest_epoch > 0 && segment.writer_epoch < highest_epoch {
+                let message = format!(
+                    "recovered WAL writer epoch regression at segment {segment_id}: {} < {highest_epoch}",
+                    segment.writer_epoch
+                );
+                if recovery_policy == RecoveryPolicy::Strict {
+                    return Err(MidgeError::RecoveryFailed(message));
+                }
+                plan.opened_in_salvage_mode = true;
+                stale_segments.push(segment_id);
+                tracing::warn!(%message, "skipping later stale-epoch WAL segment during salvage open");
+                continue;
+            }
+            highest_epoch = highest_epoch.max(segment.writer_epoch);
+        }
+
+        for segment_id in stale_segments {
+            let staged_path = plan
+                .replay_dir
+                .join(crate::wal::cloud_segment_file_name(segment_id));
+            match std::fs::remove_file(&staged_path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(MidgeError::RecoveryFailed(format!(
+                        "failed to remove stale-epoch staged WAL '{}': {error}",
+                        staged_path.display()
+                    )))
+                }
+            }
+            plan.remote_segments.remove(&segment_id);
+            plan.local_segments.remove(&segment_id);
+        }
+
+        if let Some(active_wal) = plan.active_wal {
+            if highest_epoch > 0 && active_wal.writer_epoch < highest_epoch {
+                let message = format!(
+                    "recovered WAL writer epoch regression at active WAL: {} < {highest_epoch}",
+                    active_wal.writer_epoch
+                );
+                if recovery_policy == RecoveryPolicy::Strict {
+                    return Err(MidgeError::RecoveryFailed(message));
+                }
+                plan.opened_in_salvage_mode = true;
+                let staged_path = plan.replay_dir.join(crate::wal::ACTIVE_FILE_NAME);
+                match std::fs::remove_file(&staged_path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(MidgeError::RecoveryFailed(format!(
+                            "failed to remove stale-epoch staged active WAL '{}': {error}",
+                            staged_path.display()
+                        )))
+                    }
+                }
+                plan.active_wal = None;
+                tracing::warn!(%message, "skipping later stale-epoch active WAL during salvage open");
+            }
         }
 
         Ok(())
@@ -1013,7 +1097,8 @@ impl CloudStartupRecovery {
                     .unwrap_or("");
                 (left_name != target_name, left_name).cmp(&(right_name != target_name, right_name))
             });
-            let mut selected: Option<(PathBuf, Vec<u8>, u64)> = None;
+            let mut selected: Option<(PathBuf, Vec<u8>, crate::runtime::RecoveredCloudWalSegment)> =
+                None;
             let mut other_aliases = Vec::new();
             for source_path in source_paths {
                 let local_bytes = match std::fs::read(&source_path) {
@@ -1036,7 +1121,7 @@ impl CloudStartupRecovery {
                     }
                 };
                 let key = source_path.to_string_lossy();
-                let Some(max_sequence) = Self::validate_sealed_recovery_wal(
+                let Some(segment) = Self::validate_sealed_recovery_wal(
                     &key,
                     &local_bytes,
                     recovery_policy,
@@ -1062,9 +1147,9 @@ impl CloudStartupRecovery {
                     other_aliases.push(source_path);
                     continue;
                 }
-                selected = Some((source_path, local_bytes, max_sequence));
+                selected = Some((source_path, local_bytes, segment));
             }
-            let Some((source_path, local_bytes, max_sequence)) = selected else {
+            let Some((source_path, local_bytes, segment)) = selected else {
                 continue;
             };
             let canonical_path = local_wal_dir.join(&target_name);
@@ -1092,7 +1177,7 @@ impl CloudStartupRecovery {
             }
 
             Self::stage_recovery_wal_bytes(staging_fs, &target_name, &local_bytes)?;
-            plan.local_segments.insert(segment_id, max_sequence);
+            plan.local_segments.insert(segment_id, segment);
         }
         Ok(())
     }
@@ -1199,9 +1284,12 @@ impl CloudStartupRecovery {
         data: &[u8],
         recovery_policy: RecoveryPolicy,
         opened_in_salvage_mode: &mut bool,
-    ) -> MidgeResult<Option<u64>> {
+    ) -> MidgeResult<Option<crate::runtime::RecoveredCloudWalSegment>> {
         match crate::wal::cloud_segment::inspect_bytes(key, data) {
-            Ok(readback) => Ok(Some(readback.validation.max_sequence)),
+            Ok(readback) => Ok(Some(crate::runtime::RecoveredCloudWalSegment {
+                max_sequence: readback.validation.max_sequence,
+                writer_epoch: readback.validation.writer_epoch,
+            })),
             Err(error) if recovery_policy == RecoveryPolicy::Salvage => {
                 *opened_in_salvage_mode = true;
                 tracing::warn!(%error, key, "skipping invalid sealed WAL during salvage open");
@@ -1298,6 +1386,7 @@ impl CloudStartupRecovery {
         )?;
         plan.active_wal = Some(crate::runtime::RecoveredCloudActiveWal {
             max_sequence: scan.max_sequence,
+            writer_epoch: scan.writer_epoch,
             record_count: scan.record_count,
             valid_bytes: scan.valid_bytes,
         });
