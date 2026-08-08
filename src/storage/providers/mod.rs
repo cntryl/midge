@@ -158,6 +158,14 @@ pub(crate) mod test_support {
         response_headers: Vec<(String, String)>,
         response_body: Vec<u8>,
     ) -> RecordingHttpServer {
+        spawn_recording_http_server_with_status(200, response_headers, response_body)
+    }
+
+    pub(crate) fn spawn_recording_http_server_with_status(
+        response_status: u16,
+        response_headers: Vec<(String, String)>,
+        response_body: Vec<u8>,
+    ) -> RecordingHttpServer {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind recording HTTP server");
         let endpoint = format!("http://{}", listener.local_addr().expect("server address"));
         let handle = std::thread::spawn(move || {
@@ -194,7 +202,7 @@ pub(crate) mod test_support {
                 .map(|(name, value)| (name.to_string(), value.trim().to_string()))
                 .collect::<Vec<_>>();
 
-            let mut response = String::from("HTTP/1.1 200 OK\r\n");
+            let mut response = format!("HTTP/1.1 {response_status} Test\r\n");
             for (name, value) in &response_headers {
                 use std::fmt::Write as _;
                 write!(&mut response, "{name}: {value}\r\n")

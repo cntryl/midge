@@ -36,6 +36,19 @@ impl CloudRequest {
         self.body = Some(body);
         self
     }
+
+    fn is_conditional_mutation(&self) -> bool {
+        if !matches!(self.method, Method::PUT | Method::POST | Method::DELETE) {
+            return false;
+        }
+        self.headers.iter().any(|(name, _)| {
+            name.eq_ignore_ascii_case("if-match")
+                || name.eq_ignore_ascii_case("if-none-match")
+                || name.eq_ignore_ascii_case("x-goog-if-generation-match")
+                || name.eq_ignore_ascii_case("x-goog-if-generation-not-match")
+        }) || self.url.contains("ifGenerationMatch=")
+            || self.url.contains("ifGenerationNotMatch=")
+    }
 }
 
 /// Minimal response representation returned by the executor.
@@ -183,17 +196,22 @@ impl CloudExecutor {
 
     async fn execute_request(client: Client, request: CloudRequest) -> MidgeResult<CloudResponse> {
         let mut attempt = 0u32;
+        let conditional_mutation = request.is_conditional_mutation();
         loop {
             match Self::execute_request_once(client.clone(), request.clone()).await {
                 Ok(response) if Self::is_transient_status(response.status) => {
-                    if attempt >= MAX_TRANSIENT_RETRIES {
+                    if conditional_mutation || attempt >= MAX_TRANSIENT_RETRIES {
                         return Ok(response);
                     }
                     tokio::time::sleep(Self::retry_delay(attempt)).await;
                     attempt += 1;
                 }
                 Ok(response) => return Ok(response),
-                Err(error) if error.transient && attempt < MAX_TRANSIENT_RETRIES => {
+                Err(error)
+                    if error.transient
+                        && !conditional_mutation
+                        && attempt < MAX_TRANSIENT_RETRIES =>
+                {
                     tokio::time::sleep(Self::retry_delay(attempt)).await;
                     attempt += 1;
                 }
@@ -322,7 +340,11 @@ impl Drop for CloudExecutor {
 
 #[cfg(test)]
 mod tests {
-    use super::append_bounded_response_chunk;
+    use super::{append_bounded_response_chunk, CloudExecutor, CloudRequest};
+    use reqwest::{Client, Method};
+    use std::io::{ErrorKind, Read, Write};
+    use std::net::TcpListener;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn should_reject_cloud_response_chunk_past_limit() {
@@ -335,5 +357,70 @@ mod tests {
         // Assert
         assert!(result.is_err());
         assert_eq!(body.len(), 4);
+    }
+
+    #[test]
+    fn should_not_retry_conditional_mutation_given_ambiguous_transient_response() {
+        // Arrange
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        listener
+            .set_nonblocking(true)
+            .expect("configure nonblocking test server");
+        let endpoint = format!(
+            "http://{}/object",
+            listener.local_addr().expect("server address")
+        );
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut served = 0;
+            let mut last_request: Option<Instant> = None;
+            while Instant::now() < deadline
+                && last_request.is_none_or(|last| last.elapsed() < Duration::from_millis(250))
+            {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut request = [0_u8; 2048];
+                        let _ = stream.read(&mut request);
+                        let status = if served == 0 {
+                            "503 Service Unavailable"
+                        } else {
+                            "412 Precondition Failed"
+                        };
+                        write!(
+                            stream,
+                            "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        )
+                        .expect("write test response");
+                        served += 1;
+                        last_request = Some(Instant::now());
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept test request: {error}"),
+                }
+            }
+            served
+        });
+        let request = CloudRequest::new(Method::PUT, endpoint)
+            .with_header("If-Match", "\"old-etag\"")
+            .with_body(b"new-value".to_vec());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+
+        // Act
+        let response = runtime
+            .block_on(CloudExecutor::execute_request(Client::new(), request))
+            .expect("transient HTTP response");
+        let request_count = server.join().expect("join test server");
+
+        // Assert
+        assert_eq!(response.status, 503);
+        assert_eq!(
+            request_count, 1,
+            "conditional mutation must not be replayed blindly"
+        );
     }
 }

@@ -1,16 +1,10 @@
 // Responsibilities for this WAL actor slice stay within the actor namespace.
-#[cfg(test)]
-use super::super::cloud_write_queue::PendingCloudWrite;
 use super::WalActor;
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::{Fs, FsError, FsPath};
 use crate::runtime::state::RuntimeState;
 use crate::wal::FsWalFactoryIo;
-#[cfg(test)]
-use bytes::Bytes;
 use std::sync::Arc;
-#[cfg(test)]
-use std::time::Instant;
 
 impl WalActor {
     /// Rotate to a new WAL segment
@@ -76,123 +70,6 @@ impl WalActor {
                     "failed to reopen active WAL writer after rotate failure"
                 );
             }
-        }
-    }
-
-    /// Handle cloud upload completion (`CloudAsync` durability)
-    ///
-    /// Updates `cloud_durable_seq` and completes any pending writes
-    /// by applying them to memtable.
-    #[cfg(test)]
-    fn apply_pending_cloud_write(
-        state: &mut RuntimeState,
-        pending: PendingCloudWrite,
-    ) -> MidgeResult<()> {
-        match pending {
-            PendingCloudWrite::Single {
-                cf_id,
-                key,
-                value,
-                sequence,
-                expiration,
-                enqueued_at,
-            } => {
-                let wait_time = Instant::now().duration_since(enqueued_at);
-                tracing::debug!(
-                    sequence,
-                    wait_ms = wait_time.as_millis(),
-                    "Applying pending single write after cloud durability"
-                );
-                let key_bytes = Bytes::from(key);
-                let value_bytes = value.map(Bytes::from);
-                Self::apply_to_memtable(
-                    state,
-                    sequence,
-                    cf_id,
-                    key_bytes,
-                    value_bytes,
-                    expiration,
-                )?;
-            }
-            PendingCloudWrite::DeleteRange {
-                cf_id,
-                start_key,
-                end_key,
-                sequence,
-                enqueued_at,
-            } => {
-                let wait_time = Instant::now().duration_since(enqueued_at);
-                tracing::debug!(
-                    cf_id,
-                    sequence,
-                    wait_ms = wait_time.as_millis(),
-                    start_len = start_key.len(),
-                    end_len = end_key.len(),
-                    "Applying pending delete_range after cloud durability"
-                );
-                Self::apply_delete_range_to_memtable(state, sequence, cf_id, &start_key, &end_key)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub fn handle_cloud_upload_complete(
-        &mut self,
-        state: &mut RuntimeState,
-        segment_id: u64,
-        max_seq_in_segment: u64,
-    ) -> MidgeResult<()> {
-        // Update cloud durability frontier
-        state.wal.cloud_durable_seq = state.wal.cloud_durable_seq.max(max_seq_in_segment);
-
-        tracing::debug!(
-            segment_id,
-            cloud_durable_seq = state.wal.cloud_durable_seq,
-            "Cloud upload complete"
-        );
-
-        // Apply pending writes to memtable.
-        #[cfg(test)]
-        {
-            let drained_writes = self
-                .cloud_write_queue
-                .drain_until(state.wal.cloud_durable_seq);
-
-            for pending in drained_writes {
-                Self::apply_pending_cloud_write(state, pending)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    #[cfg(not(test))]
-    pub fn handle_cloud_upload_complete(
-        &mut self,
-        state: &mut RuntimeState,
-        segment_id: u64,
-        max_seq_in_segment: u64,
-    ) {
-        state.wal.cloud_durable_seq = state.wal.cloud_durable_seq.max(max_seq_in_segment);
-        self.cloud_pending_writes = false;
-
-        tracing::debug!(
-            segment_id,
-            cloud_durable_seq = state.wal.cloud_durable_seq,
-            "Cloud upload complete"
-        );
-    }
-
-    pub fn handle_cloud_upload_failed(&mut self, segment_id: u64, error: &str) {
-        tracing::error!(segment_id, error, "Cloud upload failed");
-
-        #[cfg(test)]
-        self.cloud_write_queue.clear();
-        #[cfg(not(test))]
-        {
-            self.cloud_pending_writes = false;
         }
     }
 }

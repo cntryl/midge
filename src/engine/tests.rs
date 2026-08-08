@@ -760,7 +760,7 @@ fn should_stage_cloud_wal_segments_with_canonical_padded_names() {
     let canonical_bytes = wal_bytes(1, b"canonical");
     let second_bytes = wal_bytes(2, b"second");
 
-    Engine::blocking_cloud_put(&cloud, "wal/1.wal", b"legacy".to_vec())
+    Engine::blocking_cloud_put(&cloud, "wal/1.wal", canonical_bytes.clone())
         .expect("upload legacy wal object");
     Engine::blocking_cloud_put(
         &cloud,
@@ -806,6 +806,134 @@ fn should_stage_cloud_wal_segments_with_canonical_padded_names() {
             .expect("read staged wal 2"),
         second_bytes
     );
+}
+
+#[test]
+fn should_fail_strict_recovery_given_conflicting_duplicate_cloud_wal_aliases() {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+    let cloud = crate::storage::cloud::CloudStorage::new(backend, "midge".to_string());
+    let wal_bytes = |sequence: u64, key: &'static [u8]| {
+        let record = crate::wal::WalRecord::new(
+            crate::wal::WalOpKind::Put,
+            bytes::Bytes::from_static(key),
+            Some(bytes::Bytes::from_static(b"value")),
+            sequence,
+            0,
+        );
+        let payload = crate::wal::encoding::encode(&record).expect("encode WAL record");
+        let mut bytes = Vec::new();
+        crate::wal::frame::append_frame(&mut bytes, &payload).expect("frame WAL record");
+        bytes
+    };
+    Engine::blocking_cloud_put(&cloud, "wal/1.wal", wal_bytes(1, b"legacy"))
+        .expect("upload legacy WAL alias");
+    Engine::blocking_cloud_put(
+        &cloud,
+        &crate::wal::cloud_segment_object_key(1),
+        wal_bytes(1, b"canonical"),
+    )
+    .expect("upload canonical WAL object");
+
+    // Act
+    let result =
+        Engine::materialize_cloud_wal_recovery_dir(&cloud, temp_dir.path(), RecoveryPolicy::Strict);
+
+    // Assert
+    assert!(matches!(
+        result,
+        Err(crate::common::MidgeError::RecoveryFailed(message))
+            if message.contains("conflicting duplicate cloud WAL")
+    ));
+}
+
+#[test]
+fn should_fail_strict_recovery_given_conflicting_duplicate_simulated_cloud_wal_aliases() {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let cloud_wal_dir = temp_dir.path().join("cloud_store").join("wal");
+    std::fs::create_dir_all(&cloud_wal_dir).expect("create simulated cloud WAL directory");
+    let wal_bytes = |sequence: u64, key: &'static [u8]| {
+        let record = crate::wal::WalRecord::new(
+            crate::wal::WalOpKind::Put,
+            bytes::Bytes::from_static(key),
+            Some(bytes::Bytes::from_static(b"value")),
+            sequence,
+            0,
+        );
+        let payload = crate::wal::encoding::encode(&record).expect("encode WAL record");
+        let mut bytes = Vec::new();
+        crate::wal::frame::append_frame(&mut bytes, &payload).expect("frame WAL record");
+        bytes
+    };
+    std::fs::write(
+        cloud_wal_dir.join("wal_000001.log"),
+        wal_bytes(1, b"legacy"),
+    )
+    .expect("write legacy WAL alias");
+    std::fs::write(
+        cloud_wal_dir.join(crate::wal::cloud_segment_file_name(1)),
+        wal_bytes(1, b"canonical"),
+    )
+    .expect("write canonical WAL object");
+
+    // Act
+    let result = startup::CloudStartupRecovery::materialize_simulated_cloud_wal_recovery_dir(
+        &cloud_wal_dir,
+        temp_dir.path(),
+        RecoveryPolicy::Strict,
+    );
+
+    // Assert
+    assert!(matches!(
+        result,
+        Err(crate::common::MidgeError::RecoveryFailed(message))
+            if message.contains("conflicting duplicate cloud WAL")
+    ));
+}
+
+#[test]
+fn should_fail_strict_cloud_wal_recovery_given_list_budget_exhaustion() {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let inner = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+    let backend: Arc<dyn crate::storage::cloud::CloudBackend> =
+        Arc::new(ListOmittingCloudBackend::failing(inner, "wal/"));
+    let cloud = crate::storage::cloud::CloudStorage::new(backend, "midge".to_string());
+
+    // Act
+    let result =
+        Engine::materialize_cloud_wal_recovery_dir(&cloud, temp_dir.path(), RecoveryPolicy::Strict);
+
+    // Assert
+    assert!(matches!(
+        result,
+        Err(crate::common::MidgeError::RecoveryFailed(message))
+            if message.contains("LIST") && message.contains("budget")
+    ));
+}
+
+#[test]
+fn should_open_salvage_cloud_wal_recovery_degraded_given_list_budget_exhaustion() {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let inner = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+    let backend: Arc<dyn crate::storage::cloud::CloudBackend> =
+        Arc::new(ListOmittingCloudBackend::failing(inner, "wal/"));
+    let cloud = crate::storage::cloud::CloudStorage::new(backend, "midge".to_string());
+
+    // Act
+    let plan = startup::CloudStartupRecovery::materialize_cloud_wal_recovery_dir(
+        &cloud,
+        temp_dir.path(),
+        RecoveryPolicy::Salvage,
+    )
+    .expect("salvage cloud WAL materialization");
+
+    // Assert
+    assert!(plan.opened_in_salvage_mode);
+    assert!(plan.remote_segments.is_empty());
 }
 
 #[test]
@@ -1099,6 +1227,7 @@ fn should_salvage_mixed_cloud_manifest_metadata_by_retaining_highest_sequence() 
 struct ListOmittingCloudBackend {
     inner: Arc<crate::storage::cloud::MockCloudBackend>,
     omitted_prefix: String,
+    fail_list: bool,
 }
 
 impl ListOmittingCloudBackend {
@@ -1109,6 +1238,18 @@ impl ListOmittingCloudBackend {
         Self {
             inner,
             omitted_prefix: omitted_prefix.into(),
+            fail_list: false,
+        }
+    }
+
+    fn failing(
+        inner: Arc<crate::storage::cloud::MockCloudBackend>,
+        failed_prefix: impl Into<String>,
+    ) -> Self {
+        Self {
+            inner,
+            omitted_prefix: failed_prefix.into(),
+            fail_list: true,
         }
     }
 }
@@ -1149,6 +1290,17 @@ impl crate::storage::cloud::CloudBackend for ListOmittingCloudBackend {
 
     fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
         if prefix.ends_with(&self.omitted_prefix) {
+            if self.fail_list {
+                let _ = callback.send(crate::storage::cloud::CloudEvent::List {
+                    prefix: prefix.to_string(),
+                    result: crate::storage::cloud::CloudOutcome::Err(
+                        crate::storage::cloud::CloudError::ServerError(
+                            "cloud LIST item count exceeded safety budget".to_string(),
+                        ),
+                    ),
+                });
+                return;
+            }
             let _ = callback.send(crate::storage::cloud::CloudEvent::List {
                 prefix: prefix.to_string(),
                 result: crate::storage::cloud::CloudOutcome::Ok(Vec::new()),

@@ -70,10 +70,18 @@ pub(crate) trait HybridPersistence {
         max_sequence: u64,
     ) -> MidgeResult<()>;
 
+    #[cfg(test)]
     fn verify_remote_wal_segment(
         &self,
         segment_id: u64,
         expected_max_sequence: u64,
+    ) -> Result<(), String>;
+
+    fn verify_remote_wal_segment_matches_local(
+        &self,
+        segment_id: u64,
+        expected_max_sequence: u64,
+        local_path: &Path,
     ) -> Result<(), String>;
 
     fn remote_wal_segment_covered_by_manifest(
@@ -112,12 +120,38 @@ impl HybridPersistence for HybridStorage {
         )
     }
 
+    #[cfg(test)]
     fn verify_remote_wal_segment(
         &self,
         segment_id: u64,
         expected_max_sequence: u64,
     ) -> Result<(), String> {
         validate_remote_wal(self, segment_id, expected_max_sequence).map(|_| ())
+    }
+
+    fn verify_remote_wal_segment_matches_local(
+        &self,
+        segment_id: u64,
+        expected_max_sequence: u64,
+        local_path: &Path,
+    ) -> Result<(), String> {
+        let key = crate::wal::cloud_segment::object_key(segment_id);
+        let local_bytes = std::fs::read(local_path).map_err(|error| {
+            format!(
+                "failed to read local WAL segment '{}' before cloud acknowledgement: {error}",
+                local_path.display()
+            )
+        })?;
+        let local_readback =
+            crate::wal::cloud_segment::validate_bytes(&key, &local_bytes, expected_max_sequence)?;
+        let remote = validate_remote_wal(self, segment_id, expected_max_sequence)?;
+        if remote.proof.bytes() != local_bytes {
+            return Err(format!(
+                "cloud WAL segment {segment_id} does not match the locally sealed bytes for writer epoch {}",
+                local_readback.validation.writer_epoch
+            ));
+        }
+        Ok(())
     }
 
     fn remote_wal_segment_covered_by_manifest(

@@ -406,6 +406,16 @@ impl EventLoop {
         Ok(())
     }
 
+    fn validate_runtime_writer_lease(&self) -> crate::common::MidgeResult<()> {
+        self.check_lease_health()?;
+        if let Some(store) = &self.leader_store {
+            store
+                .validate_epoch(self.writer_epoch)
+                .map_err(|error| crate::common::MidgeError::Fenced(error.to_string()))?;
+        }
+        Ok(())
+    }
+
     /// Set the snapshot cache for read-path bypass.
     pub fn set_snapshot_cache(&mut self, cache: Arc<SnapshotCache>) {
         self.snapshot_cache = Some(cache);
@@ -1033,7 +1043,7 @@ impl EventLoop {
             return true;
         }
 
-        if self.wal_actor.should_sync_batch() || self.wal_actor.has_pending_cloud_writes() {
+        if self.wal_actor.should_sync_batch() || self.state.wal.pending_writes > 0 {
             return true;
         }
 

@@ -559,6 +559,13 @@ fn should_salvage_valid_prefix_when_remote_wal_segment_is_corrupt() {
         .expect("shutdown before reopen");
 
     let remote_wal_dir = db_path.join("cloud_store").join("wal");
+    let corrupt_remote_wal = std::fs::read_dir(&remote_wal_dir)
+        .expect("list remote WAL objects")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .max()
+        .expect("remote WAL object to corrupt");
     corrupt_last_file(&remote_wal_dir);
     reset_dir(&db_path.join("wal"));
 
@@ -581,6 +588,10 @@ fn should_salvage_valid_prefix_when_remote_wal_segment_is_corrupt() {
         Some(Bytes::from_static(b"prefix-value"))
     );
     assert_eq!(get_default(&salvaged, b"truncated-key"), None);
+    assert!(
+        corrupt_remote_wal.exists(),
+        "corrupt recovered WAL must be retained when it cannot be proven safe to delete"
+    );
     shutdown_test_engine(salvaged);
 }
 

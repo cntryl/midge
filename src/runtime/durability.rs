@@ -282,3 +282,49 @@ impl DurabilityCoordinator {
         self.last_cloud_flush = Instant::now();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cloud_coordinator() -> DurabilityCoordinator {
+        DurabilityCoordinator::new(0, true, crate::runtime::CloudRuntimePolicy::default())
+    }
+
+    #[test]
+    fn should_buffer_ack_given_earlier_segment_still_unacked_when_ack_arrives_out_of_order() {
+        // Arrange
+        let mut coordinator = cloud_coordinator();
+        coordinator.record_cloud_segment_inflight(1, 10);
+        coordinator.record_cloud_segment_inflight(2, 20);
+        let mut acknowledgements = BTreeMap::from([(2, 20)]);
+
+        // Act
+        let blocked = coordinator
+            .take_contiguous_acked_cloud_segments(&acknowledgements)
+            .expect("buffer later acknowledgement");
+        acknowledgements.insert(1, 10);
+        let ready = coordinator
+            .take_contiguous_acked_cloud_segments(&acknowledgements)
+            .expect("drain contiguous acknowledgements");
+
+        // Assert
+        assert!(blocked.is_empty());
+        assert_eq!(ready, vec![(1, 10), (2, 20)]);
+    }
+
+    #[test]
+    fn should_reject_ack_given_mismatched_max_sequence_when_segment_is_inflight() {
+        // Arrange
+        let mut coordinator = cloud_coordinator();
+        coordinator.record_cloud_segment_inflight(7, 70);
+        let acknowledgements = BTreeMap::from([(7, 71)]);
+
+        // Act
+        let result = coordinator.take_contiguous_acked_cloud_segments(&acknowledgements);
+
+        // Assert
+        assert!(matches!(result, Err(message) if message.contains("does not match")));
+        assert_eq!(coordinator.cloud_segment_max_sequence(7), Some(70));
+    }
+}

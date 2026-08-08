@@ -19,6 +19,7 @@ impl EventLoop {
         if self.state.is_memory_mode() || self.state.wal.pending_writes == 0 {
             return Ok(None);
         }
+        self.validate_runtime_writer_lease()?;
 
         let segment_id = self.state.wal.current_segment_id;
         let bytes_buffered = self.wal_actor.bytes_since_sync() as u64;
@@ -44,6 +45,11 @@ impl EventLoop {
 
         self.durability.rotate_to(self.state.wal.current_segment_id);
 
+        // Renewal I/O and WAL flush/rotation may take long enough for the
+        // watchdog to fence this writer. Revalidate immediately before the
+        // first remote mutation so a late shutdown seal cannot publish after
+        // lease loss.
+        self.validate_runtime_writer_lease()?;
         storage.enqueue_wal_segment(segment_id, &local_path, max_sequence)?;
         self.wal_actor.complete_cloud_upload_seal(&mut self.state);
 
@@ -115,7 +121,7 @@ impl EventLoop {
             if segment_id.is_multiple_of(1000) {
                 eprintln!(
                     "[midge] CloudAsync flush: segment_id={segment_id} max_sequence={max_sequence} pending_cloud={} ",
-                    self.wal_actor.has_pending_cloud_writes()
+                    self.state.wal.pending_writes > 0
                 );
             }
         }

@@ -2200,6 +2200,58 @@ fn should_validate_uncached_cloud_ack_before_local_wal_removal() -> crate::commo
 }
 
 #[test]
+fn should_reject_cloud_ack_given_remote_wal_from_different_writer_epoch(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut event_loop = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let (sequence, _) = event_loop.wal_actor.append(
+        &mut event_loop.state,
+        crate::runtime::actors::wal::AppendParams {
+            request_id: 502,
+            cf_id: 0,
+            key: Bytes::from_static(b"current-writer"),
+            value: Some(Bytes::from_static(b"value")),
+            insert_only: false,
+            ttl_seconds: None,
+        },
+    )?;
+    let (segment_id, max_sequence) = seal_segment_for_test(&mut event_loop)?;
+    assert_eq!(sequence, max_sequence);
+    let local_wal = event_loop
+        .state
+        .wal_dir
+        .join(crate::wal::segment_file_name(segment_id));
+    let stale_record = crate::wal::WalRecord::new(
+        crate::wal::WalOpKind::Put,
+        Bytes::from_static(b"stale-writer"),
+        Some(Bytes::from_static(b"value")),
+        max_sequence,
+        99,
+    );
+    let payload = crate::wal::encoding::encode(&stale_record).expect("encode stale WAL record");
+    let mut stale_bytes = Vec::new();
+    crate::wal::frame::append_frame(&mut stale_bytes, &payload).expect("frame stale WAL record");
+    write_test_file(
+        remote_wal_path_for_test(&event_loop, segment_id),
+        &stale_bytes,
+    );
+
+    // Act
+    event_loop.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id,
+        max_sequence,
+    });
+
+    // Assert
+    assert_eq!(event_loop.state.wal.cloud_durable_seq, 0);
+    assert!(local_wal.exists(), "unmatched local WAL must be retained");
+    assert!(event_loop.state.persistence_anomaly_detected());
+    Ok(())
+}
+
+#[test]
 fn should_not_advance_cloud_durability_across_unacked_segment_gap() -> crate::common::MidgeResult<()>
 {
     // Arrange
@@ -2263,10 +2315,9 @@ fn should_not_advance_cloud_durability_across_unacked_segment_gap() -> crate::co
         el.state.wal.cloud_durable_seq, 0,
         "cloud durable frontier must not jump across an unacked segment"
     );
-    assert_eq!(
-        el.wal_actor.pending_cloud_writes_len(),
-        2,
-        "pending CloudAsync writes must not become visible until the gap is closed"
+    assert!(
+        el.cloud_acked_wal_segments.contains_key(&second_segment),
+        "later acknowledgement must remain buffered until the earlier gap closes"
     );
     assert!(
         second_local_wal.exists(),
@@ -2282,10 +2333,11 @@ fn should_not_advance_cloud_durability_across_unacked_segment_gap() -> crate::co
         el.state.wal.cloud_durable_seq, second_max_sequence,
         "frontier should advance through the contiguous acked segment range once the gap closes"
     );
-    assert_eq!(
-        el.wal_actor.pending_cloud_writes_len(),
-        0,
-        "pending CloudAsync writes should drain after contiguous durability is proven"
+    assert!(
+        el.durability
+            .cloud_segment_max_sequence(second_segment)
+            .is_none(),
+        "contiguous inflight acknowledgement bookkeeping must drain after the gap closes"
     );
     assert!(
         !second_local_wal.exists(),
@@ -2366,11 +2418,7 @@ fn should_drop_buffered_cloud_acks_when_earlier_segment_fails() -> crate::common
         el.cloud_acked_wal_segments.contains_key(&second_segment),
         "later verified ACK bookkeeping must remain buffered behind an earlier gap"
     );
-    assert_eq!(
-        el.wal_actor.pending_cloud_writes_len(),
-        0,
-        "pending CloudAsync writes should be cleared after cloud upload failure"
-    );
+    assert!(el.state.persistence_anomaly_detected());
 
     Ok(())
 }
@@ -2683,7 +2731,7 @@ fn should_cloud_async_retry_after_ack_return_same_sequence_without_queueing(
         !deferred2,
         "retry after confirmation should not be deferred"
     );
-    assert_eq!(el.wal_actor.pending_cloud_writes_len(), 0);
+    assert_eq!(el.state.wal.pending_writes, 0);
 
     Ok(())
 }
@@ -3025,6 +3073,52 @@ fn should_seal_cloud_wal_with_segment_max_sequence_not_global_sequence(
         "unexpected overproof validation error: {overproof}"
     );
 
+    Ok(())
+}
+
+#[test]
+fn should_not_enqueue_cloud_wal_segment_given_lease_unhealthy_when_sealing(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut event_loop = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let ops = vec![crate::runtime::TransactionOp::Put {
+        cf_id: 0,
+        key: Bytes::from_static(b"fenced-seal-key"),
+        value: Bytes::from_static(b"fenced-seal-value"),
+        ttl_seconds: None,
+        insert_only: false,
+    }];
+    event_loop.wal_actor.append_transaction(
+        &mut event_loop.state,
+        crate::runtime::actors::wal::TransactionAppendParams {
+            request_id: 304,
+            ops,
+            assertions: Vec::new(),
+            durability_policy: Some(DurabilityPolicy::CloudAsync),
+            start_sequence: None,
+            conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+        },
+    )?;
+    event_loop.lease_healthy = Some(Arc::new(AtomicBool::new(false)));
+    let segment_id = event_loop.state.wal.current_segment_id;
+
+    // Act
+    let result = event_loop.seal_current_cloud_segment();
+
+    // Assert
+    assert!(matches!(result, Err(crate::common::MidgeError::Fenced(_))));
+    assert_eq!(event_loop.state.wal.current_segment_id, segment_id);
+    assert_eq!(
+        event_loop
+            .hybrid_storage
+            .as_ref()
+            .expect("hybrid storage")
+            .pending_upload_count(),
+        0,
+        "a fenced writer must not enqueue a cloud WAL mutation"
+    );
     Ok(())
 }
 

@@ -33,7 +33,7 @@ impl WalActor {
             }
             return Ok((state.sequence, 0, false));
         }
-        self.validate_spilled_transaction(
+        Self::validate_spilled_transaction(
             state,
             source,
             &assertions,
@@ -83,7 +83,6 @@ impl WalActor {
     }
 
     fn validate_spilled_transaction(
-        &self,
         state: &RuntimeState,
         source: &crate::runtime::transaction_spill::TransactionOpSource,
         assertions: &[crate::runtime::KeyAssertion],
@@ -128,7 +127,7 @@ impl WalActor {
                 let exists = match source.latest_before(ordinal, key)? {
                     Some(crate::runtime::transaction_spill::IntentLookup::Present(_)) => true,
                     Some(crate::runtime::transaction_spill::IntentLookup::Deleted) => false,
-                    None => self.key_exists_or_pending(state, *cf_id, key),
+                    None => Self::key_exists(state, *cf_id, key),
                 };
                 if exists {
                     return Err(MidgeError::InvalidArgument(
@@ -335,10 +334,6 @@ impl WalActor {
         effective_durability: DurabilityPolicy,
         commit_time_millis: u64,
     ) -> MidgeResult<()> {
-        #[cfg(test)]
-        if matches!(effective_durability, DurabilityPolicy::CloudAsync) {
-            self.validate_cloud_async_transaction_queue(source.len())?;
-        }
         let epoch = self.current_epoch;
         source.for_each(|ordinal, op| {
             let sequence = sequence_plan.first_op_seq.saturating_add(ordinal);

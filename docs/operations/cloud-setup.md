@@ -13,6 +13,14 @@ feature set. The default feature set currently includes the cloud integrations.
 state, so it is suitable for deterministic tests rather than service
 qualification.
 
+`cloud-oci` enables the generic S3-compatible backend; it is not a native OCI
+Object Storage client and does not add an OCI-specific configuration variant,
+credential resolver, signer, or error taxonomy. Configure OCI through
+`CloudProviderConfig::s3_compatible` and OCI's S3 Compatibility API. The
+isolated `cloud-oci` CI leg is compile-only, so operators must independently
+qualify conditional writes, missing-object responses, credentials, and endpoint
+behavior against the exact OCI tenancy before relying on it.
+
 ## Configuration
 
 Construct `CloudProviderConfig` with the provider-specific public credential

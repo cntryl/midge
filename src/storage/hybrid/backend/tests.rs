@@ -7,7 +7,7 @@ use crate::storage::cloud::{CloudStorage, MockCloudBackend};
 use bytes::Bytes;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc,
+    Arc, Barrier,
 };
 use std::time::{Duration, Instant};
 
@@ -17,6 +17,24 @@ fn should_classify_windows_missing_paths_as_absent() {
     let errors = [
         "read C:\\data\\missing.sst: The system cannot find the file specified. (os error 2)",
         "read C:\\data\\sst: The system cannot find the path specified. (os error 3)",
+    ];
+
+    // Act
+    let all_missing = errors
+        .iter()
+        .all(|error| HybridStorage::storage_error_indicates_missing(error));
+
+    // Assert
+    assert!(all_missing);
+}
+
+#[test]
+fn should_classify_provider_missing_object_errors_as_absent() {
+    // Arrange
+    let errors = [
+        "S3 GET failed: HTTP 404 NoSuchKey",
+        "Azure Blob request failed: 404 BlobNotFound",
+        "GCS object lookup returned NotFound: No such object",
     ];
 
     // Act
@@ -338,6 +356,102 @@ impl StorageBackend for AlwaysFailingWriteBackend {
 #[derive(Default)]
 struct NeverCompletesBackend {
     callbacks: Mutex<Vec<StorageCallback>>,
+}
+
+struct RacingReadDeleteBackend {
+    object: Mutex<Option<Vec<u8>>>,
+    read_started: Barrier,
+    release_read: Barrier,
+}
+
+impl RacingReadDeleteBackend {
+    fn new(bytes: Vec<u8>) -> Self {
+        Self {
+            object: Mutex::new(Some(bytes)),
+            read_started: Barrier::new(2),
+            release_read: Barrier::new(2),
+        }
+    }
+
+    fn metadata(bytes: &[u8]) -> StorageObjectMetadata {
+        StorageObjectMetadata {
+            size: bytes.len() as u64,
+            etag: "race-etag".to_string(),
+            generation: None,
+        }
+    }
+}
+
+impl StorageBackend for RacingReadDeleteBackend {
+    fn submit_read(&self, key: &str, callback: StorageCallback) {
+        let key = key.to_string();
+        let snapshot = self.object.lock().clone();
+        self.read_started.wait();
+        self.release_read.wait();
+        let result = snapshot.map_or_else(
+            || StorageOutcome::Err("object not found".to_string()),
+            StorageOutcome::Ok,
+        );
+        let _ = callback.send(StorageEvent::ReadComplete { key, result });
+    }
+
+    fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback) {
+        *self.object.lock() = Some(data);
+        let _ = callback.send(StorageEvent::WriteComplete {
+            key: key.to_string(),
+            result: StorageOutcome::Ok(()),
+        });
+    }
+
+    fn submit_delete(&self, key: &str, callback: StorageCallback) {
+        self.submit_delete_with_headers(key, Vec::new(), callback);
+    }
+
+    fn submit_delete_with_headers(
+        &self,
+        key: &str,
+        headers: Vec<(String, String)>,
+        callback: StorageCallback,
+    ) {
+        let expected = headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("if-match"))
+            .map(|(_, value)| value.trim_matches('"'));
+        let result = if expected.is_none_or(|value| value == "race-etag") {
+            self.object.lock().take();
+            StorageOutcome::Ok(())
+        } else {
+            StorageOutcome::Err("precondition failed".to_string())
+        };
+        let _ = callback.send(StorageEvent::DeleteComplete {
+            key: key.to_string(),
+            result,
+        });
+    }
+
+    #[cfg(test)]
+    fn submit_list(&self, prefix: &str, callback: StorageCallback) {
+        let objects = self
+            .object
+            .lock()
+            .as_ref()
+            .map_or_else(Vec::new, |_| vec![prefix.to_string()]);
+        let _ = callback.send(StorageEvent::ListComplete {
+            prefix: prefix.to_string(),
+            result: StorageOutcome::Ok(objects),
+        });
+    }
+
+    fn submit_head(&self, key: &str, callback: StorageCallback) {
+        let result = self.object.lock().as_deref().map_or_else(
+            || StorageOutcome::Err("object not found".to_string()),
+            |bytes| StorageOutcome::Ok(Self::metadata(bytes)),
+        );
+        let _ = callback.send(StorageEvent::HeadComplete {
+            key: key.to_string(),
+            result,
+        });
+    }
 }
 
 impl NeverCompletesBackend {
@@ -977,6 +1091,55 @@ fn should_not_prune_remote_wal_given_remote_sst_identity_change_when_gc_runs() {
         "stale WAL proof must make remote prune fail conservatively"
     );
     assert_cloud_object_exists(&storage, &key);
+}
+
+#[test]
+fn should_reject_reader_proof_when_guarded_prune_deletes_wal_during_download() {
+    // Arrange
+    let tmp = tempfile::tempdir().expect("create guarded-prune race test dir");
+    let local = Arc::new(
+        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
+            .expect("create local backend"),
+    );
+    let segment_id = 12;
+    let key = crate::wal::cloud_segment::object_key(segment_id);
+    let bytes = valid_wal_bytes(22);
+    let backend = Arc::new(RacingReadDeleteBackend::new(bytes.clone()));
+    let cloud: Arc<dyn StorageBackend> = backend.clone();
+    let storage = Arc::new(HybridStorage::with_policy(
+        local,
+        cloud,
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    ));
+    let target = RemoteObjectProof {
+        key: key.clone(),
+        bytes: bytes.clone(),
+        metadata: RacingReadDeleteBackend::metadata(&bytes),
+    };
+    let reader_storage = Arc::clone(&storage);
+    let reader_key = key.clone();
+    let reader = std::thread::spawn(move || reader_storage.remote_object_proof(&reader_key));
+    backend.read_started.wait();
+
+    // Act
+    storage
+        .delete_remote_object_guarded(segment_id, target, Vec::new())
+        .expect("schedule guarded WAL prune");
+    let prune_result = wait_for_wal_prune_result(&storage, segment_id);
+    backend.release_read.wait();
+    let reader_result = reader.join().expect("join concurrent WAL reader");
+
+    // Assert
+    assert!(
+        prune_result.is_ok(),
+        "guarded prune failed: {prune_result:?}"
+    );
+    let reader_error = reader_result.expect_err("racing read must not return a stale proof");
+    assert!(
+        reader_error.contains("unreadable"),
+        "unexpected racing reader error: {reader_error}"
+    );
+    assert_cloud_object_missing(&storage, &key);
 }
 
 #[test]

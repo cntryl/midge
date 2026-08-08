@@ -101,47 +101,32 @@ impl EventLoop {
             return;
         };
 
-        #[cfg(test)]
-        let upload_complete_result = self.wal_actor.handle_cloud_upload_complete(
-            &mut self.state,
-            durable_segment_id,
-            durable_max_sequence,
+        self.state.wal.cloud_durable_seq =
+            self.state.wal.cloud_durable_seq.max(durable_max_sequence);
+        tracing::debug!(
+            segment_id = durable_segment_id,
+            cloud_durable_seq = self.state.wal.cloud_durable_seq,
+            "Cloud upload complete"
         );
-        #[cfg(not(test))]
-        let upload_complete_result: crate::common::MidgeResult<()> = {
-            self.wal_actor.handle_cloud_upload_complete(
-                &mut self.state,
-                durable_segment_id,
-                durable_max_sequence,
-            );
-            Ok(())
-        };
 
-        match upload_complete_result {
-            Ok(()) => {
-                for (ready_segment_id, _) in &ready_segments {
-                    self.remove_cloud_durable_local_wal_segment(*ready_segment_id);
-                }
-
-                for (seg_id, _) in ready_segments {
-                    if let Some(enqueued_at) = self.durability.take_cloud_segment_timing(seg_id) {
-                        if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-                            telemetry.metrics().record_cloud_async_wal_ack_latency_us(
-                                Self::elapsed_micros_to_u64(enqueued_at.elapsed()),
-                            );
-                        }
-                    }
-
-                    let waiters = self.durability.complete_waiters_at(seg_id);
-                    self.complete_durability_waiters(waiters, CompletionSource::CloudAck);
-                }
-                self.prune_cloud_wal_segments_covered_by_manifest();
-                self.drain_auto_flush_memtables();
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "failed to apply cloud ack");
-            }
+        for (ready_segment_id, _) in &ready_segments {
+            self.remove_cloud_durable_local_wal_segment(*ready_segment_id);
         }
+
+        for (seg_id, _) in ready_segments {
+            if let Some(enqueued_at) = self.durability.take_cloud_segment_timing(seg_id) {
+                if let Some(telemetry) = crate::telemetry::Telemetry::global() {
+                    telemetry.metrics().record_cloud_async_wal_ack_latency_us(
+                        Self::elapsed_micros_to_u64(enqueued_at.elapsed()),
+                    );
+                }
+            }
+
+            let waiters = self.durability.complete_waiters_at(seg_id);
+            self.complete_durability_waiters(waiters, CompletionSource::CloudAck);
+        }
+        self.prune_cloud_wal_segments_covered_by_manifest();
+        self.drain_auto_flush_memtables();
     }
 
     fn handle_storage_event_cloud_wal_prune_complete(
@@ -189,7 +174,11 @@ impl EventLoop {
         let Some(storage) = self.hybrid_storage.as_ref() else {
             return Err("CloudAck received without HybridStorage".to_string());
         };
-        storage.verify_remote_wal_segment(segment_id, max_sequence)
+        let local_path = self
+            .state
+            .wal_dir
+            .join(crate::wal::segment_file_name(segment_id));
+        storage.verify_remote_wal_segment_matches_local(segment_id, max_sequence, &local_path)
     }
 
     fn handle_cloud_upload_failure(&mut self, segment_id: u64, error: &str) {
@@ -208,7 +197,7 @@ impl EventLoop {
         let failed_max_seq = self.durability.cloud_segment_max_sequence(segment_id);
 
         // Let WAL actor handle its internal failure handling and drop pending writes.
-        self.wal_actor.handle_cloud_upload_failed(segment_id, error);
+        tracing::error!(segment_id, error, "Cloud upload failed");
 
         // If we know the max_sequence for the failed segment, invalidate idempotency
         // allocations up to that sequence so retries will allocate fresh sequences.

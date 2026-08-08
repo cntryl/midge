@@ -614,7 +614,7 @@ impl CloudStartupRecovery {
             }
         };
 
-        let mut segment_keys: std::collections::BTreeMap<u64, String> =
+        let mut segment_keys: std::collections::BTreeMap<u64, Vec<String>> =
             std::collections::BTreeMap::new();
         let staging_fs = Self::recovery_staging_fs(db_path)?;
 
@@ -631,47 +631,64 @@ impl CloudStartupRecovery {
                 continue;
             };
 
-            let prefer_candidate = segment_keys.get(&segment_id).is_none_or(|existing_key| {
-                existing_key != &crate::wal::cloud_segment_object_key(segment_id)
-                    && logical_key == crate::wal::cloud_segment_object_key(segment_id)
-            });
-
-            if prefer_candidate {
-                segment_keys.insert(segment_id, logical_key.to_string());
+            let candidates = segment_keys.entry(segment_id).or_default();
+            if !candidates.iter().any(|candidate| candidate == logical_key) {
+                candidates.push(logical_key.to_string());
             }
         }
 
-        for (segment_id, logical_key) in segment_keys {
-            let data = match Self::blocking_cloud_get(cloud, &logical_key) {
-                Ok(data) => data,
-                Err(error) if recovery_policy == RecoveryPolicy::Salvage => {
-                    tracing::warn!(%error, key = %logical_key, "skipping cloud WAL object during salvage open");
-                    plan.opened_in_salvage_mode = true;
+        for (segment_id, mut logical_keys) in segment_keys {
+            let canonical_key = crate::wal::cloud_segment_object_key(segment_id);
+            logical_keys.sort_by(|left, right| {
+                (left != &canonical_key, left).cmp(&(right != &canonical_key, right))
+            });
+            let mut selected: Option<(String, Vec<u8>, u64)> = None;
+            for logical_key in logical_keys {
+                let data = match Self::blocking_cloud_get(cloud, &logical_key) {
+                    Ok(data) => data,
+                    Err(error) if recovery_policy == RecoveryPolicy::Salvage => {
+                        tracing::warn!(%error, key = %logical_key, "skipping cloud WAL object during salvage open");
+                        plan.opened_in_salvage_mode = true;
+                        continue;
+                    }
+                    Err(error) => {
+                        return Err(MidgeError::RecoveryFailed(format!(
+                            "failed to download cloud WAL '{logical_key}': {error}"
+                        )))
+                    }
+                };
+                let Some(max_sequence) = Self::validate_sealed_recovery_wal(
+                    &logical_key,
+                    &data,
+                    recovery_policy,
+                    &mut plan.opened_in_salvage_mode,
+                )?
+                else {
+                    continue;
+                };
+                if let Some((selected_key, selected_data, _)) = &selected {
+                    if selected_data != &data {
+                        let message = format!(
+                            "conflicting duplicate cloud WAL objects for segment {segment_id}: '{selected_key}' and '{logical_key}'"
+                        );
+                        if recovery_policy == RecoveryPolicy::Strict {
+                            return Err(MidgeError::RecoveryFailed(message));
+                        }
+                        plan.opened_in_salvage_mode = true;
+                        tracing::warn!(%message, "retaining canonical cloud WAL alias during salvage open");
+                    }
                     continue;
                 }
-                Err(error) => {
-                    return Err(MidgeError::RecoveryFailed(format!(
-                        "failed to download cloud WAL '{logical_key}': {error}"
-                    )))
-                }
-            };
-
-            let Some(max_sequence) = Self::validate_sealed_recovery_wal(
-                &logical_key,
-                &data,
-                recovery_policy,
-                &mut plan.opened_in_salvage_mode,
-            )?
-            else {
-                continue;
-            };
-
-            Self::stage_recovery_wal_bytes(
-                &staging_fs,
-                &crate::wal::cloud_segment_file_name(segment_id),
-                &data,
-            )?;
-            plan.remote_segments.insert(segment_id, max_sequence);
+                selected = Some((logical_key, data, max_sequence));
+            }
+            if let Some((_, data, max_sequence)) = selected {
+                Self::stage_recovery_wal_bytes(
+                    &staging_fs,
+                    &crate::wal::cloud_segment_file_name(segment_id),
+                    &data,
+                )?;
+                plan.remote_segments.insert(segment_id, max_sequence);
+            }
         }
 
         Ok(plan)
@@ -711,7 +728,7 @@ impl CloudStartupRecovery {
         cloud_wal_dir: &Path,
         recovery_policy: RecoveryPolicy,
         opened_in_salvage_mode: &mut bool,
-    ) -> MidgeResult<std::collections::BTreeMap<u64, PathBuf>> {
+    ) -> MidgeResult<std::collections::BTreeMap<u64, Vec<PathBuf>>> {
         let entries = match std::fs::read_dir(cloud_wal_dir) {
             Ok(entries) => Some(entries),
             Err(error) if recovery_policy == RecoveryPolicy::Salvage => {
@@ -730,7 +747,7 @@ impl CloudStartupRecovery {
                 )))
             }
         };
-        let mut segment_paths = std::collections::BTreeMap::<u64, PathBuf>::new();
+        let mut segment_paths = std::collections::BTreeMap::<u64, Vec<PathBuf>>::new();
         for entry_result in entries.into_iter().flatten() {
             let entry = match entry_result {
                 Ok(entry) => entry,
@@ -776,59 +793,86 @@ impl CloudStartupRecovery {
             let Some(segment_id) = crate::wal::parse_segment_id(file_name) else {
                 continue;
             };
-            let canonical_name = crate::wal::cloud_segment_file_name(segment_id);
-            let prefer_candidate = segment_paths.get(&segment_id).is_none_or(|existing| {
-                existing.file_name().and_then(|name| name.to_str()) != Some(&canonical_name)
-                    && file_name == canonical_name
-            });
-            if prefer_candidate {
-                segment_paths.insert(segment_id, path);
-            }
+            segment_paths.entry(segment_id).or_default().push(path);
         }
         Ok(segment_paths)
     }
 
     fn stage_simulated_cloud_wal_segments(
-        segment_paths: std::collections::BTreeMap<u64, PathBuf>,
+        segment_paths: std::collections::BTreeMap<u64, Vec<PathBuf>>,
         staging_fs: &Arc<dyn crate::io::traits::Fs>,
         recovery_policy: RecoveryPolicy,
         plan: &mut CloudWalRecoveryPlan,
     ) -> MidgeResult<()> {
-        for (segment_id, source_path) in segment_paths {
-            let data = match std::fs::read(&source_path) {
-                Ok(data) => data,
-                Err(error) if recovery_policy == RecoveryPolicy::Salvage => {
-                    tracing::warn!(
-                        %error,
-                        path = %source_path.display(),
-                        "skipping simulated cloud WAL object during salvage open"
-                    );
-                    plan.opened_in_salvage_mode = true;
+        for (segment_id, mut source_paths) in segment_paths {
+            let canonical_name = crate::wal::cloud_segment_file_name(segment_id);
+            source_paths.sort_by(|left, right| {
+                let left_name = left
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("");
+                let right_name = right
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("");
+                (left_name != canonical_name, left_name)
+                    .cmp(&(right_name != canonical_name, right_name))
+            });
+            let mut selected: Option<(PathBuf, Vec<u8>, u64)> = None;
+            for source_path in source_paths {
+                let data = match std::fs::read(&source_path) {
+                    Ok(data) => data,
+                    Err(error) if recovery_policy == RecoveryPolicy::Salvage => {
+                        tracing::warn!(
+                            %error,
+                            path = %source_path.display(),
+                            "skipping simulated cloud WAL object during salvage open"
+                        );
+                        plan.opened_in_salvage_mode = true;
+                        continue;
+                    }
+                    Err(error) => {
+                        return Err(MidgeError::RecoveryFailed(format!(
+                            "failed to read simulated cloud WAL '{}': {error}",
+                            source_path.display()
+                        )))
+                    }
+                };
+                let key = source_path.to_string_lossy();
+                let Some(max_sequence) = Self::validate_sealed_recovery_wal(
+                    &key,
+                    &data,
+                    recovery_policy,
+                    &mut plan.opened_in_salvage_mode,
+                )?
+                else {
+                    continue;
+                };
+                if let Some((selected_path, selected_data, _)) = &selected {
+                    if selected_data != &data {
+                        let message = format!(
+                            "conflicting duplicate cloud WAL objects for segment {segment_id}: '{}' and '{}'",
+                            selected_path.display(),
+                            source_path.display()
+                        );
+                        if recovery_policy == RecoveryPolicy::Strict {
+                            return Err(MidgeError::RecoveryFailed(message));
+                        }
+                        plan.opened_in_salvage_mode = true;
+                        tracing::warn!(%message, "retaining canonical simulated cloud WAL alias during salvage open");
+                    }
                     continue;
                 }
-                Err(error) => {
-                    return Err(MidgeError::RecoveryFailed(format!(
-                        "failed to read simulated cloud WAL '{}': {error}",
-                        source_path.display()
-                    )))
-                }
-            };
-            let key = crate::wal::cloud_segment_object_key(segment_id);
-            let Some(max_sequence) = Self::validate_sealed_recovery_wal(
-                &key,
-                &data,
-                recovery_policy,
-                &mut plan.opened_in_salvage_mode,
-            )?
-            else {
-                continue;
-            };
-            Self::stage_recovery_wal_bytes(
-                staging_fs,
-                &crate::wal::cloud_segment_file_name(segment_id),
-                &data,
-            )?;
-            plan.remote_segments.insert(segment_id, max_sequence);
+                selected = Some((source_path, data, max_sequence));
+            }
+            if let Some((_, data, max_sequence)) = selected {
+                Self::stage_recovery_wal_bytes(
+                    staging_fs,
+                    &crate::wal::cloud_segment_file_name(segment_id),
+                    &data,
+                )?;
+                plan.remote_segments.insert(segment_id, max_sequence);
+            }
         }
         Ok(())
     }
