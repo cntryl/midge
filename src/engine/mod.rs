@@ -390,6 +390,7 @@ impl Engine {
             db_path,
             recovery_policy,
         )
+        .map(|plan| plan.replay_dir)
     }
 
     #[cfg(test)]

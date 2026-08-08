@@ -60,6 +60,22 @@ use crate::runtime::actors::flush::FlushWorkerResult;
 
 type SstRuntimeResources = (Arc<dyn crate::sst::SstFactory>, Option<Arc<ReadResources>>);
 
+struct RecoveredCloudWalConfig {
+    remote_segments: BTreeMap<u64, u64>,
+    local_segments: BTreeMap<u64, u64>,
+    active_wal: Option<crate::runtime::RecoveredCloudActiveWal>,
+}
+
+impl From<&super::RuntimeConfig> for RecoveredCloudWalConfig {
+    fn from(config: &super::RuntimeConfig) -> Self {
+        Self {
+            remote_segments: config.recovered_cloud_wal_segments.clone(),
+            local_segments: config.recovered_local_wal_segments.clone(),
+            active_wal: config.recovered_cloud_active_wal,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct MetadataCleanupProof {
     len: u64,
@@ -199,6 +215,7 @@ impl EventLoop {
         let sst_dir = state.sst_dir.clone();
         let memory_mode = state.is_memory_mode();
         let initial_segment_id = state.wal.current_segment_id;
+        let recovered_cloud_wal = RecoveredCloudWalConfig::from(&config);
 
         let (sst_factory, read_resources) =
             Self::initialize_sst_resources(&state, &sst_dir, memory_mode, &config)?;
@@ -301,8 +318,76 @@ impl EventLoop {
         if let Some(storage) = config.hybrid_storage {
             event_loop.set_hybrid_storage(storage);
         }
+        event_loop.initialize_recovered_cloud_wal(&recovered_cloud_wal)?;
 
         Ok(event_loop)
+    }
+
+    fn initialize_recovered_cloud_wal(
+        &mut self,
+        config: &RecoveredCloudWalConfig,
+    ) -> crate::common::MidgeResult<()> {
+        let remote_segments = &config.remote_segments;
+        let local_segments = &config.local_segments;
+        let active_wal = config.active_wal;
+        if remote_segments.is_empty() && local_segments.is_empty() && active_wal.is_none() {
+            return Ok(());
+        }
+        if !self.wal_actor.is_cloud_async() {
+            return Err(crate::common::MidgeError::RecoveryFailed(
+                "cloud WAL recovery obligations installed outside CloudAsync mode".to_string(),
+            ));
+        }
+        let storage = self.hybrid_storage.clone().ok_or_else(|| {
+            crate::common::MidgeError::RecoveryFailed(
+                "cloud WAL recovery requires hybrid storage".to_string(),
+            )
+        })?;
+
+        let mut recovered_segments = remote_segments.clone();
+        for (&segment_id, &max_sequence) in local_segments {
+            if let Some(remote_max_sequence) = recovered_segments.insert(segment_id, max_sequence) {
+                return Err(crate::common::MidgeError::RecoveryFailed(format!(
+                    "WAL segment {segment_id} is both remote and local-only during recovery: remote max {remote_max_sequence}, local max {max_sequence}"
+                )));
+            }
+        }
+        for (&segment_id, &max_sequence) in &recovered_segments {
+            self.durability
+                .record_cloud_segment_inflight(segment_id, max_sequence);
+        }
+
+        let initially_durable = self
+            .durability
+            .take_contiguous_acked_cloud_segments(&self.cloud_acked_wal_segments)
+            .map_err(crate::common::MidgeError::RecoveryFailed)?;
+        if let Some((_, max_sequence)) = initially_durable.last() {
+            self.state.wal.cloud_durable_seq = self.state.wal.cloud_durable_seq.max(*max_sequence);
+        }
+
+        for (&segment_id, &max_sequence) in local_segments {
+            let local_path = self
+                .state
+                .wal_dir
+                .join(crate::wal::segment_file_name(segment_id));
+            storage.enqueue_wal_segment(segment_id, &local_path, max_sequence)?;
+            let resource = crate::wal::cloud_segment_object_key(segment_id);
+            if !self.state.cloud.pending_uploads.contains(&resource) {
+                self.state.cloud.pending_uploads.push(resource);
+            }
+        }
+
+        if let Some(active_wal) = active_wal {
+            self.wal_actor
+                .restore_recovered_cloud_active_wal(&mut self.state, active_wal)?;
+            if self.seal_current_cloud_segment()?.is_none() {
+                return Err(crate::common::MidgeError::RecoveryFailed(
+                    "recovered active cloud WAL was not sealed for resumed upload".to_string(),
+                ));
+            }
+        }
+
+        Ok(())
     }
 
     pub fn set_hybrid_storage(&mut self, storage: Arc<crate::storage::HybridStorage>) {

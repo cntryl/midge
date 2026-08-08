@@ -39,6 +39,7 @@ pub use read_snapshot::ReadSnapshot;
 pub use crate::types::ConflictPolicy;
 pub use state::RuntimeState;
 
+pub(crate) use config::RecoveredCloudActiveWal;
 pub use config::RuntimeConfig;
 pub(crate) use config::{CloudRuntimePolicy, CloudWalSealPolicy};
 pub use handle::RuntimeHandle;

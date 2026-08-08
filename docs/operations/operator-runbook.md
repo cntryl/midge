@@ -40,9 +40,11 @@ replacement procedure, not recovery.
 ## Cloud-specific notes
 
 `cloud_async()` acknowledges local visibility and lets cloud upload proceed in
-the background. `cloud_strict()` waits for the required cloud upload. A lost
-local cache is therefore recoverable only when the remote state and provider
-qualification support it. Test cache-loss and restart behavior with the exact
+the background. On a same-cache restart, Midge merges and replays intact local
+WAL with remote WAL before opening. This does not make `cloud_async()` durable
+against local cache loss: `cloud_strict()` waits for the required cloud upload,
+while an asynchronous write whose local bytes and unacknowledged upload are both
+lost cannot be recovered. Test cache-loss and restart behavior with the exact
 provider and feature set before relying on it.
 
 See [cloud setup](cloud-setup.md), the [durability contract](../user-guides/transaction-durability-contract.md),

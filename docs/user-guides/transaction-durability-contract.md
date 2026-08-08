@@ -128,7 +128,7 @@ A write can cross several boundaries:
 | `WriteOptions::sync()` | local WAL append and local fsync complete | Yes in local mode | local-disk write survives restart assuming local storage survives | WAL replay or later SST state |
 | `WriteOptions::buffered()` | local WAL append barrier and memtable apply complete | Not yet guaranteed in local mode | local-disk write may be lost if the process crashes before the later fsync | WAL replay only if the later fsync completed |
 | `WriteOptions::best_effort()` | memtable apply complete; WAL skipped | No | write is lost unless a later `flush_cf()` publishes it | SST state only if flush completed successfully |
-| `WriteOptions::cloud_async()` | cloud-backed WAL append barrier and memtable apply complete; seal and upload continue asynchronously | Not yet guaranteed | write may be lost if the process crashes before the sealed WAL upload is acknowledged | uploaded WAL segment or later SST state |
+| `WriteOptions::cloud_async()` | cloud-backed WAL append barrier and memtable apply complete; seal and upload continue asynchronously | Not yet guaranteed | an intact local WAL is replayed on same-cache restart; the write may be lost if local bytes do not survive and upload was not acknowledged | intact local WAL, uploaded WAL segment, or later SST state |
 | `WriteOptions::cloud_strict()` | cloud-backed WAL seal, rotate, upload, and acknowledgment complete | Cloud durable in cloud mode | write survives local cache loss after cloud acknowledgment | uploaded WAL segment or later SST state |
 
 ### `WriteOptions::sync()`
@@ -174,6 +174,12 @@ At return:
 - the transaction is not yet guaranteed to survive local cache loss
 - the runtime still owes the cloud `seal` and `upload` work for the covering WAL segment
 
+On a same-cache restart, cloud recovery merges intact local WAL files with the
+downloaded remote WAL set before replay. This closes the process-restart window
+without treating the local append barrier as an fsync or cloud-durability
+guarantee. If the local bytes are lost before upload acknowledgment, the write
+can still be lost.
+
 Use `cloud_async()` when the engine must stage the write for cloud durability but the caller does not need to wait for cloud acknowledgment.
 
 ### `WriteOptions::best_effort()`
@@ -211,7 +217,7 @@ Empty cloud-backed `cloud_strict()` transactions are allowed and do not invent a
 - After `sync()`: the write is recovered from the local durable prefix, either by WAL replay or already-published SST state.
 - After `buffered()`: the write is recovered only if the later fsync completed before the crash.
 - After `best_effort()`: the write is recovered only if a later `flush_cf()` successfully published it to SST state.
-- After `cloud_async()`: the write is recovered only if the later WAL `seal` and cloud `upload` completed before the crash or local cache loss event.
+- After `cloud_async()`: a same-cache restart replays an intact local WAL even if upload had not completed. If those local bytes did not survive, recovery requires a completed cloud upload or later SST publication.
 - After `cloud_strict()`: in cloud-backed mode, local cache loss after cloud acknowledgment should not lose the committed write.
 - During flush or compaction: output files may exist, but manifest-visible state remains authoritative until publication completes.
 

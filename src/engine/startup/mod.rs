@@ -79,6 +79,14 @@ struct RuntimeStorageMaterialization {
     cloud_metadata_storage_for_mirror: Option<Arc<crate::storage::cloud::CloudStorage>>,
 }
 
+pub(in crate::engine) struct CloudWalRecoveryPlan {
+    pub(in crate::engine) replay_dir: PathBuf,
+    pub(in crate::engine) remote_segments: std::collections::BTreeMap<u64, u64>,
+    pub(in crate::engine) local_segments: std::collections::BTreeMap<u64, u64>,
+    pub(in crate::engine) active_wal: Option<crate::runtime::RecoveredCloudActiveWal>,
+    pub(in crate::engine) opened_in_salvage_mode: bool,
+}
+
 struct RuntimeRecoveryMaterialization {
     state: RuntimeState,
     runtime_config: crate::runtime::RuntimeConfig,

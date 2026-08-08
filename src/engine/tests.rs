@@ -744,16 +744,31 @@ fn should_stage_cloud_wal_segments_with_canonical_padded_names() {
     let temp_dir = tempfile::tempdir().expect("create temp dir");
     let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let cloud = crate::storage::cloud::CloudStorage::new(backend, "midge".to_string());
+    let wal_bytes = |sequence: u64, key: &'static [u8]| {
+        let record = crate::wal::WalRecord::new(
+            crate::wal::WalOpKind::Put,
+            bytes::Bytes::from_static(key),
+            Some(bytes::Bytes::from_static(b"value")),
+            sequence,
+            0,
+        );
+        let payload = crate::wal::encoding::encode(&record).expect("encode WAL record");
+        let mut bytes = Vec::new();
+        crate::wal::frame::append_frame(&mut bytes, &payload).expect("frame WAL record");
+        bytes
+    };
+    let canonical_bytes = wal_bytes(1, b"canonical");
+    let second_bytes = wal_bytes(2, b"second");
 
     Engine::blocking_cloud_put(&cloud, "wal/1.wal", b"legacy".to_vec())
         .expect("upload legacy wal object");
     Engine::blocking_cloud_put(
         &cloud,
         &crate::wal::cloud_segment_object_key(1),
-        b"canonical".to_vec(),
+        canonical_bytes.clone(),
     )
     .expect("upload canonical wal object");
-    Engine::blocking_cloud_put(&cloud, "wal/wal_000002.log", b"second".to_vec())
+    Engine::blocking_cloud_put(&cloud, "wal/wal_000002.log", second_bytes.clone())
         .expect("upload legacy log-style wal object");
 
     let staged_dir =
@@ -784,12 +799,115 @@ fn should_stage_cloud_wal_segments_with_canonical_padded_names() {
     assert_eq!(
         std::fs::read(staged_dir.join(crate::wal::cloud_segment_file_name(1)))
             .expect("read staged wal 1"),
-        b"canonical"
+        canonical_bytes
     );
     assert_eq!(
         std::fs::read(staged_dir.join(crate::wal::cloud_segment_file_name(2)))
             .expect("read staged wal 2"),
-        b"second"
+        second_bytes
+    );
+}
+
+#[test]
+fn should_recover_valid_active_cloud_wal_prefix_given_zero_filled_tail() {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let cloud_wal_dir = temp_dir.path().join("cloud_store").join("wal");
+    let local_wal_dir = temp_dir.path().join("wal");
+    std::fs::create_dir_all(&cloud_wal_dir).expect("create cloud WAL directory");
+    std::fs::create_dir_all(&local_wal_dir).expect("create local WAL directory");
+    let record = crate::wal::WalRecord::new(
+        crate::wal::WalOpKind::Put,
+        bytes::Bytes::from_static(b"zero-tail-key"),
+        Some(bytes::Bytes::from_static(b"zero-tail-value")),
+        1,
+        0,
+    );
+    let payload = crate::wal::encoding::encode(&record).expect("encode WAL record");
+    let mut valid_bytes = Vec::new();
+    crate::wal::frame::append_frame(&mut valid_bytes, &payload).expect("frame WAL record");
+    let mut preallocated_bytes = valid_bytes.clone();
+    preallocated_bytes.resize(valid_bytes.len() + 4096, 0);
+    let active_path = local_wal_dir.join(crate::wal::ACTIVE_FILE_NAME);
+    std::fs::write(&active_path, preallocated_bytes).expect("write preallocated active WAL");
+
+    // Act
+    let plan = startup::CloudStartupRecovery::materialize_simulated_cloud_wal_recovery_dir(
+        &cloud_wal_dir,
+        temp_dir.path(),
+        RecoveryPolicy::Strict,
+    )
+    .expect("recover active WAL with zero-filled tail");
+
+    // Assert
+    assert_eq!(
+        plan.active_wal,
+        Some(crate::runtime::RecoveredCloudActiveWal {
+            max_sequence: 1,
+            record_count: 1,
+            valid_bytes: valid_bytes.len(),
+        })
+    );
+    assert_eq!(
+        std::fs::read(plan.replay_dir.join(crate::wal::ACTIVE_FILE_NAME))
+            .expect("read staged active WAL"),
+        valid_bytes
+    );
+    assert_eq!(
+        std::fs::metadata(active_path)
+            .expect("inspect truncated local active WAL")
+            .len(),
+        u64::try_from(valid_bytes.len()).expect("valid WAL length fits u64")
+    );
+}
+
+#[test]
+fn should_fail_strict_cloud_recovery_without_truncating_active_wal_given_corrupted_length_hides_valid_suffix(
+) {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let cloud_wal_dir = temp_dir.path().join("cloud_store").join("wal");
+    let local_wal_dir = temp_dir.path().join("wal");
+    std::fs::create_dir_all(&cloud_wal_dir).expect("create cloud WAL directory");
+    std::fs::create_dir_all(&local_wal_dir).expect("create local WAL directory");
+    let framed_record = |sequence, key: &'static [u8]| {
+        let record = crate::wal::WalRecord::new(
+            crate::wal::WalOpKind::Put,
+            bytes::Bytes::from_static(key),
+            Some(bytes::Bytes::from_static(b"value")),
+            sequence,
+            0,
+        );
+        let payload = crate::wal::encoding::encode(&record).expect("encode WAL record");
+        let mut frame = Vec::new();
+        crate::wal::frame::append_frame(&mut frame, &payload).expect("frame WAL record");
+        frame
+    };
+    let first = framed_record(1, b"first");
+    let second = framed_record(2, b"verified-suffix");
+    let mut corrupted_bytes = [first, second].concat();
+    let corrupt_length = u32::try_from(corrupted_bytes.len()).expect("WAL length fits u32");
+    corrupted_bytes[..4].copy_from_slice(&corrupt_length.to_le_bytes());
+    let active_path = local_wal_dir.join(crate::wal::ACTIVE_FILE_NAME);
+    std::fs::write(&active_path, &corrupted_bytes).expect("write corrupt active WAL");
+
+    // Act
+    let result = startup::CloudStartupRecovery::materialize_simulated_cloud_wal_recovery_dir(
+        &cloud_wal_dir,
+        temp_dir.path(),
+        RecoveryPolicy::Strict,
+    );
+
+    // Assert
+    assert!(matches!(
+        result,
+        Err(crate::common::MidgeError::RecoveryFailed(message))
+            if message.contains("hides a verified later frame")
+    ));
+    assert_eq!(
+        std::fs::read(active_path).expect("read authoritative active WAL after failed recovery"),
+        corrupted_bytes,
+        "strict recovery must not mutate the authoritative WAL before validation succeeds"
     );
 }
 

@@ -28,6 +28,9 @@ fn should_abort_in_child_process_when_cloud_crash_scenario_requested() {
     let db_path = PathBuf::from(std::env::var_os(ENV_DB_PATH).expect("db path env"));
     match scenario.to_string_lossy().as_ref() {
         "cloud_strict_after_ack" => child_cloud_strict_after_ack(&db_path),
+        "cloud_async_active_after_ack" => child_cloud_async_active_after_ack(&db_path),
+        #[cfg(feature = "failpoints")]
+        "cloud_async_local_wal_after_ack" => child_cloud_async_local_wal_after_ack(&db_path),
         "buffered_eventual_flush_after_publish" => {
             child_buffered_eventual_flush_after_publish(&db_path);
         }
@@ -105,6 +108,64 @@ fn should_recover_cloud_strict_write_when_cache_lost_after_child_abort() {
 }
 
 #[test]
+fn should_resume_cloud_upload_from_recovered_active_wal_after_child_abort() {
+    // Arrange
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
+
+    run_child_expect_abort("cloud_async_active_after_ack", db_path);
+    expire_crashed_process_lease(db_path);
+    let active_wal = db_path.join("wal").join("wal.log");
+    assert!(
+        std::fs::metadata(&active_wal).is_ok_and(|metadata| metadata.len() > 0),
+        "crashed child must leave the acknowledged write in the active WAL"
+    );
+
+    // Act
+    let reopened = open_cloud_engine(db_path, None);
+    let metrics = wait_for_metrics(&reopened, Duration::from_secs(10), |metrics| {
+        metrics.current_sequence >= 1 && metrics.wal_cloud_durable_seq >= metrics.current_sequence
+    });
+
+    // Assert
+    assert_value_visible(
+        &reopened,
+        b"cloud-async-active-crash-key",
+        b"cloud-async-active-crash-value",
+    );
+    assert!(metrics.wal_cloud_durable_seq >= metrics.current_sequence);
+    let remote_wal_dir = db_path.join("cloud_store").join("wal");
+    assert!(
+        std::fs::read_dir(&remote_wal_dir)
+            .expect("list resumed remote WAL")
+            .flatten()
+            .any(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("wal")),
+        "recovered active WAL must be sealed and uploaded"
+    );
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_recover_local_cloud_async_wal_when_child_aborts_before_upload() {
+    // Arrange
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
+
+    run_child_expect_abort("cloud_async_local_wal_after_ack", db_path);
+    expire_crashed_process_lease(db_path);
+
+    // Act
+    let reopened = open_cloud_engine(db_path, None);
+
+    // Assert
+    assert_value_visible(
+        &reopened,
+        b"cloud-async-local-crash-key",
+        b"cloud-async-local-crash-value",
+    );
+}
+
+#[test]
 fn should_restore_published_cloud_sst_when_cache_lost_after_child_abort() {
     // Arrange
     let temp_dir = TempDir::new().expect("temp dir");
@@ -155,6 +216,37 @@ fn child_cloud_strict_after_ack(db_path: &Path) {
     );
 
     abort_after_marking_ready(db_path, "cloud_strict_after_ack");
+}
+
+fn child_cloud_async_active_after_ack(db_path: &Path) {
+    let engine = open_cloud_engine(db_path, Some(unsealed_cloud_policy()));
+    commit_value(
+        &engine,
+        b"cloud-async-active-crash-key",
+        b"cloud-async-active-crash-value",
+        WriteOptions::cloud_async(),
+    );
+
+    abort_after_marking_ready(db_path, "cloud_async_active_after_ack");
+}
+
+#[cfg(feature = "failpoints")]
+fn child_cloud_async_local_wal_after_ack(db_path: &Path) {
+    let _scenario = fail::FailScenario::setup();
+    fail::cfg("midge::cloud::inject_fail_wal_upload", "return")
+        .expect("configure WAL upload failure");
+    let engine = open_cloud_engine(db_path, None);
+    commit_value(
+        &engine,
+        b"cloud-async-local-crash-key",
+        b"cloud-async-local-crash-value",
+        WriteOptions::cloud_async(),
+    );
+    wait_for_metrics(&engine, Duration::from_secs(10), |metrics| {
+        metrics.current_sequence >= 1 && metrics.wal_cloud_durable_seq < metrics.current_sequence
+    });
+
+    abort_after_marking_ready(db_path, "cloud_async_local_wal_after_ack");
 }
 
 fn child_buffered_eventual_flush_after_publish(db_path: &Path) {
@@ -229,6 +321,15 @@ fn buffered_cloud_policy() -> CloudWritePolicy {
         wal_seal_min_segment_bytes: usize::MAX,
         wal_seal_max_flush_delay: Duration::from_hours(1),
         wal_seal_max_pending_writes: 1,
+    }
+}
+
+fn unsealed_cloud_policy() -> CloudWritePolicy {
+    CloudWritePolicy {
+        eventual_flush_segment_gap: u64::MAX,
+        wal_seal_min_segment_bytes: usize::MAX,
+        wal_seal_max_flush_delay: Duration::from_hours(1),
+        wal_seal_max_pending_writes: usize::MAX,
     }
 }
 

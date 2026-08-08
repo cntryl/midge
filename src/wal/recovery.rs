@@ -121,6 +121,138 @@ impl From<MidgeError> for ReplayFailure {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct VerifiedWalPrefix {
+    pub(crate) max_sequence: u64,
+    pub(crate) record_count: usize,
+    pub(crate) valid_bytes: usize,
+}
+
+#[derive(Debug)]
+pub(crate) struct WalPrefixInspectionFailure {
+    verified_prefix: VerifiedWalPrefix,
+    failure: ReplayFailure,
+}
+
+impl WalPrefixInspectionFailure {
+    pub(crate) fn verified_prefix(&self) -> VerifiedWalPrefix {
+        self.verified_prefix
+    }
+
+    pub(crate) fn is_incomplete_tail(&self) -> bool {
+        self.failure.is_incomplete_tail()
+    }
+
+    pub(crate) fn error(&self) -> &MidgeError {
+        self.failure.error()
+    }
+}
+
+fn wal_prefix_failure(
+    verified_prefix: VerifiedWalPrefix,
+    failure: ReplayFailure,
+) -> WalPrefixInspectionFailure {
+    WalPrefixInspectionFailure {
+        verified_prefix,
+        failure,
+    }
+}
+
+pub(crate) fn inspect_active_wal_bytes(
+    data: &[u8],
+) -> Result<VerifiedWalPrefix, WalPrefixInspectionFailure> {
+    let mut prefix = VerifiedWalPrefix::default();
+    while prefix.valid_bytes < data.len() {
+        let Some(header_end) = prefix
+            .valid_bytes
+            .checked_add(super::frame::WAL_FRAME_HEADER_LEN)
+        else {
+            return Err(wal_prefix_failure(
+                prefix,
+                ReplayFailure::Error(MidgeError::Corruption(
+                    "active WAL frame offset overflow".to_string(),
+                )),
+            ));
+        };
+        if header_end > data.len() {
+            return Err(wal_prefix_failure(
+                prefix,
+                ReplayFailure::IncompleteTail(MidgeError::Corruption(format!(
+                    "Incomplete WAL frame header at pos {} (need {} bytes, have {})",
+                    prefix.valid_bytes,
+                    super::frame::WAL_FRAME_HEADER_LEN,
+                    data.len().saturating_sub(prefix.valid_bytes)
+                ))),
+            ));
+        }
+
+        let header = &data[prefix.valid_bytes..header_end];
+        if header.iter().all(|byte| *byte == 0)
+            && data[prefix.valid_bytes..].iter().all(|byte| *byte == 0)
+        {
+            return Err(wal_prefix_failure(
+                prefix,
+                ReplayFailure::IncompleteTail(MidgeError::Corruption(format!(
+                    "Zero-filled WAL tail at pos {}",
+                    prefix.valid_bytes
+                ))),
+            ));
+        }
+
+        let (payload_len, expected_crc) = match super::frame::decode_frame_header(header) {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                return Err(wal_prefix_failure(prefix, ReplayFailure::Error(error)));
+            }
+        };
+        let Some(payload_end) = header_end.checked_add(payload_len) else {
+            return Err(wal_prefix_failure(
+                prefix,
+                ReplayFailure::Error(MidgeError::Corruption(
+                    "active WAL payload offset overflow".to_string(),
+                )),
+            ));
+        };
+        if payload_end > data.len() {
+            let hides_verified_suffix = contains_verified_wal_frame(&data[header_end..]);
+            let error = MidgeError::Corruption(if hides_verified_suffix {
+                format!(
+                    "WAL frame length at pos {} overruns EOF and hides a verified later frame (len={payload_len}, file_len={})",
+                    prefix.valid_bytes,
+                    data.len()
+                )
+            } else {
+                format!(
+                    "Incomplete WAL record at pos {} (len={payload_len}, file_len={})",
+                    prefix.valid_bytes,
+                    data.len()
+                )
+            });
+            let failure = if hides_verified_suffix {
+                ReplayFailure::Error(error)
+            } else {
+                ReplayFailure::IncompleteTail(error)
+            };
+            return Err(wal_prefix_failure(prefix, failure));
+        }
+
+        let payload = &data[header_end..payload_end];
+        if let Err(error) = super::frame::verify_frame_crc(payload, expected_crc) {
+            return Err(wal_prefix_failure(prefix, ReplayFailure::Error(error)));
+        }
+        let record = match super::encoding::decode(payload) {
+            Ok(record) => record,
+            Err(error) => {
+                return Err(wal_prefix_failure(prefix, ReplayFailure::Error(error)));
+            }
+        };
+        prefix.max_sequence = prefix.max_sequence.max(record.seq);
+        prefix.record_count = prefix.record_count.saturating_add(1);
+        prefix.valid_bytes = payload_end;
+    }
+    Ok(prefix)
+}
+
 fn replay_error_action(
     replay_file: &ReplayFile,
     replay_policy: ReplayPolicy,

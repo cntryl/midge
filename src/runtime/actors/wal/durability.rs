@@ -6,6 +6,29 @@ use crate::wal::DurabilityPolicy;
 use std::time::{Duration, Instant};
 
 impl WalActor {
+    pub(crate) fn restore_recovered_cloud_active_wal(
+        &mut self,
+        state: &mut RuntimeState,
+        recovered: crate::runtime::RecoveredCloudActiveWal,
+    ) -> MidgeResult<()> {
+        if self.durability_policy != DurabilityPolicy::CloudAsync {
+            return Err(MidgeError::Internal(
+                "recovered cloud active WAL installed outside CloudAsync mode".to_string(),
+            ));
+        }
+        if recovered.record_count == 0 || recovered.valid_bytes == 0 {
+            return Err(MidgeError::RecoveryFailed(
+                "recovered cloud active WAL metadata is empty".to_string(),
+            ));
+        }
+
+        self.segment_max_sequence = recovered.max_sequence;
+        self.pending_sync_count = recovered.record_count;
+        self.bytes_since_sync = recovered.valid_bytes;
+        state.wal.pending_writes = recovered.record_count;
+        Ok(())
+    }
+
     pub(super) fn apply_transaction_durability(
         &mut self,
         state: &mut RuntimeState,

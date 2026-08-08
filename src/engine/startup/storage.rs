@@ -211,16 +211,22 @@ impl RuntimeStorageMaterialization {
             opts.simulated_cloud_local_storage_budget_bytes(),
         )?;
 
-        let state = RuntimeState::try_new_with_recovery_dir(
-            storage_path.db_path.clone(),
-            storage_path.memory_mode,
-            Some(&cloud.recovery_cloud_wal_dir),
+        let recovery_plan = CloudStartupRecovery::materialize_simulated_cloud_wal_recovery_dir(
+            &cloud.recovery_cloud_wal_dir,
+            &storage_path.db_path,
             opts.recovery_policy(),
         )?;
-        let recovered_cloud_wal_segments =
-            CloudStartupRecovery::recovered_cloud_wal_cleanup_candidates(
-                &cloud.recovery_cloud_wal_dir,
-            );
+
+        let mut state = RuntimeState::try_new_with_recovery_dir(
+            storage_path.db_path.clone(),
+            storage_path.memory_mode,
+            Some(&recovery_plan.replay_dir),
+            opts.recovery_policy(),
+        )?;
+        if recovery_plan.opened_in_salvage_mode {
+            state.mark_opened_in_salvage_mode();
+            state.mark_persistence_anomaly();
+        }
 
         let runtime_config = crate::runtime::RuntimeConfig {
             wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
@@ -228,7 +234,9 @@ impl RuntimeStorageMaterialization {
             cloud_runtime_policy,
             hybrid_storage: Some(cloud.hybrid_storage),
             hybrid_storage_events: Some(cloud.events),
-            recovered_cloud_wal_segments,
+            recovered_cloud_wal_segments: recovery_plan.remote_segments,
+            recovered_local_wal_segments: recovery_plan.local_segments,
+            recovered_cloud_active_wal: recovery_plan.active_wal,
             compression_policy: opts.compression_policy().clone(),
             block_cache_size: opts.block_cache_size(),
             block_cache_policy: opts.block_cache_policy_type(),
@@ -283,13 +291,16 @@ impl RuntimeStorageMaterialization {
             &storage_path.db_path,
             opts.recovery_policy(),
         )?;
-        let recovery_wal_dir = CloudStartupRecovery::materialize_cloud_wal_recovery_dir(
+        let mut recovery_plan = CloudStartupRecovery::materialize_cloud_wal_recovery_dir(
             &wal_storage,
             &storage_path.db_path,
             opts.recovery_policy(),
         )?;
-        let recovered_cloud_wal_segments =
-            CloudStartupRecovery::recovered_cloud_wal_cleanup_candidates(&recovery_wal_dir);
+        CloudStartupRecovery::merge_local_wal_into_recovery_dir(
+            &storage_path.db_path,
+            &mut recovery_plan,
+            opts.recovery_policy(),
+        )?;
 
         let local_backend = Arc::new(crate::storage::filesystem::FileSystem::new(
             storage_path.db_path.join("hybrid_local"),
@@ -311,12 +322,16 @@ impl RuntimeStorageMaterialization {
             ),
         );
 
-        let state = RuntimeState::try_new_with_recovery_dir(
+        let mut state = RuntimeState::try_new_with_recovery_dir(
             storage_path.db_path.clone(),
             storage_path.memory_mode,
-            Some(&recovery_wal_dir),
+            Some(&recovery_plan.replay_dir),
             opts.recovery_policy(),
         )?;
+        if recovery_plan.opened_in_salvage_mode {
+            state.mark_opened_in_salvage_mode();
+            state.mark_persistence_anomaly();
+        }
 
         let runtime_config = crate::runtime::RuntimeConfig {
             wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
@@ -325,7 +340,9 @@ impl RuntimeStorageMaterialization {
             hybrid_storage: Some(hybrid_storage),
             hybrid_storage_events: Some(rx),
             cloud_metadata_storage: Some(metadata_storage.clone()),
-            recovered_cloud_wal_segments,
+            recovered_cloud_wal_segments: recovery_plan.remote_segments,
+            recovered_local_wal_segments: recovery_plan.local_segments,
+            recovered_cloud_active_wal: recovery_plan.active_wal,
             compression_policy: opts.compression_policy().clone(),
             block_cache_size: opts.block_cache_size(),
             block_cache_policy: opts.block_cache_policy_type(),
@@ -422,6 +439,14 @@ impl RuntimeRecoveryMaterialization {
                 db_path,
                 recovery_policy,
             )?;
+        }
+
+        if materialized.runtime_config.wal_durability_policy
+            == crate::wal::DurabilityPolicy::CloudAsync
+        {
+            materialized
+                .state
+                .reset_cloud_durable_sequence_for_recovery();
         }
 
         materialized.state.cleanup_storage_residue();

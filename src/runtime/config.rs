@@ -6,6 +6,13 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RecoveredCloudActiveWal {
+    pub max_sequence: u64,
+    pub record_count: usize,
+    pub valid_bytes: usize,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct CloudWalSealPolicy {
     pub min_segment_bytes: usize,
@@ -51,6 +58,13 @@ pub struct RuntimeConfig {
     /// Remote WAL segments replayed during startup and still eligible for
     /// manifest-covered cleanup.
     pub recovered_cloud_wal_segments: BTreeMap<u64, u64>,
+    /// Locally recovered sealed WAL segments that were not present in remote
+    /// storage and must resume upload before later segments advance the cloud
+    /// durability frontier.
+    pub(crate) recovered_local_wal_segments: BTreeMap<u64, u64>,
+    /// A recovered active WAL file that must be sealed and enqueued after the
+    /// runtime has installed its cloud upload pipeline.
+    pub(crate) recovered_cloud_active_wal: Option<RecoveredCloudActiveWal>,
     pub compression_policy: crate::sst::compression::CompressionPolicy,
     pub block_cache_size: usize,
     pub block_cache_policy: crate::sst::cache::CachePolicyType,
@@ -78,6 +92,8 @@ impl Default for RuntimeConfig {
             hybrid_storage_events: None,
             cloud_metadata_storage: None,
             recovered_cloud_wal_segments: BTreeMap::new(),
+            recovered_local_wal_segments: BTreeMap::new(),
+            recovered_cloud_active_wal: None,
             compression_policy: crate::sst::compression::CompressionPolicy::default(),
             block_cache_size: 128 * 1024 * 1024,
             block_cache_policy: crate::sst::cache::CachePolicyType::Lru,

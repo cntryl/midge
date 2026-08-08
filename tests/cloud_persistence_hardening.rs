@@ -438,6 +438,53 @@ fn should_keep_cloud_async_commit_visible_given_cloud_upload_failure_when_commit
 
 #[cfg(feature = "failpoints")]
 #[test]
+fn should_recover_cloud_async_commit_given_intact_local_wal_when_upload_fails() {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let opts = opts_for_mode("cloud");
+    let db_path = cloud_db_path(&opts);
+    let remote_wal_dir = db_path.join("cloud_store").join("wal");
+    let scenario = fail::FailScenario::setup();
+    fail::cfg("midge::cloud::inject_fail_wal_upload", "return")
+        .expect("configure wal upload failure failpoint");
+
+    let mut engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
+    put_default(
+        &engine,
+        b"intact-local-cloud-async",
+        b"survives-same-node-restart",
+        WriteOptions::cloud_async(),
+    );
+    let _metrics = wait_for_cloud_gap(&engine, 1);
+    engine
+        .shutdown(std::time::Duration::from_secs(5))
+        .expect("shutdown before same-node reopen");
+
+    fail::remove("midge::cloud::inject_fail_wal_upload");
+    scenario.teardown();
+
+    // Act
+    let reopened = Engine::open(opts.to_open_options()).expect("reopen cloud engine");
+
+    // Assert
+    assert_eq!(
+        get_default(&reopened, b"intact-local-cloud-async"),
+        Some(Bytes::from_static(b"survives-same-node-restart"))
+    );
+    let durable = wait_for_cloud_catch_up(&reopened, 1);
+    assert!(
+        durable.wal_cloud_durable_seq >= durable.current_sequence,
+        "resumed upload must advance the cloud frontier only after acknowledgment"
+    );
+    assert!(
+        !wait_for_remote_wal_count_at_least(&remote_wal_dir, 1).is_empty(),
+        "same-node recovery must resume publication of the local-only WAL"
+    );
+    shutdown_test_engine(reopened);
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
 fn should_fail_cloud_strict_commit_given_cloud_upload_failure_when_waiting_for_ack() {
     // Arrange
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
@@ -702,6 +749,31 @@ fn wait_for_cloud_gap(engine: &Engine, min_sequence: u64) -> cntryl_midge::Runti
         assert!(
             Instant::now() < deadline,
             "timed out waiting for cloud durability gap; last metrics: seq={} cloud_seq={} health={:?}",
+            metrics.current_sequence,
+            metrics.wal_cloud_durable_seq,
+            metrics.health
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[cfg(feature = "failpoints")]
+fn wait_for_cloud_catch_up(
+    engine: &Engine,
+    min_sequence: u64,
+) -> cntryl_midge::RuntimeMetricsSnapshot {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+        if metrics.current_sequence >= min_sequence
+            && metrics.wal_cloud_durable_seq >= metrics.current_sequence
+        {
+            return metrics;
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for recovered WAL cloud acknowledgment; last metrics: seq={} cloud_seq={} health={:?}",
             metrics.current_sequence,
             metrics.wal_cloud_durable_seq,
             metrics.health

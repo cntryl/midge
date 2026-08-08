@@ -150,6 +150,80 @@ fn should_return_invalid_argument_given_column_family_drop_during_ingest() {
 }
 
 #[test]
+fn should_hold_cloud_frontier_at_local_recovery_gap_until_resumed_upload_is_acknowledged(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let db_path = unique_test_db_path("midge_recovered_cloud_wal_gap");
+    let wal_dir = db_path.join("wal");
+    let initialized = RuntimeState::new(db_path.clone(), false);
+    drop(initialized);
+    let local_segment = wal_dir.join(crate::wal::segment_file_name(2));
+    let record = crate::wal::WalRecord::new(
+        crate::wal::WalOpKind::Put,
+        bytes::Bytes::from_static(b"recovered-gap"),
+        Some(bytes::Bytes::from_static(b"value")),
+        2,
+        0,
+    );
+    let payload = crate::wal::encoding::encode(&record).expect("encode recovered WAL record");
+    let mut segment_bytes = Vec::new();
+    crate::wal::frame::append_frame(&mut segment_bytes, &payload)
+        .expect("frame recovered WAL record");
+    std::fs::write(&local_segment, &segment_bytes).expect("write recovered local WAL segment");
+
+    let mut state = RuntimeState::new(db_path.clone(), false);
+    state.sequence = 3;
+    state.wal.local_durable_seq = 3;
+    state.reset_cloud_durable_sequence_for_recovery();
+    let local = Arc::new(
+        crate::storage::filesystem::FileSystem::new(db_path.join("hybrid_local"))
+            .expect("create local backend"),
+    );
+    let cloud = Arc::new(
+        crate::storage::filesystem::FileSystem::new(db_path.join("cloud_store"))
+            .expect("create cloud backend"),
+    );
+    let hybrid_storage = Arc::new(crate::storage::HybridStorage::with_policy(
+        local,
+        cloud,
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    ));
+    let config = crate::runtime::RuntimeConfig {
+        wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
+        hybrid_storage: Some(Arc::clone(&hybrid_storage)),
+        recovered_cloud_wal_segments: [(1, 1), (3, 3)].into_iter().collect(),
+        recovered_local_wal_segments: [(2, 2)].into_iter().collect(),
+        ..crate::runtime::RuntimeConfig::default()
+    };
+    let router = Arc::new(ResponseRouter::new());
+
+    // Act
+    let mut event_loop = EventLoop::new(state, false, router, config, None)?;
+
+    // Assert
+    assert_eq!(event_loop.state.wal.cloud_durable_seq, 1);
+    assert_eq!(hybrid_storage.pending_upload_count(), 1);
+    assert_eq!(
+        event_loop.durability.inflight_segment_for_sequence(2),
+        Some(2)
+    );
+
+    let remote_segment = db_path
+        .join("cloud_store")
+        .join("wal")
+        .join(crate::wal::segment_file_name(2));
+    std::fs::create_dir_all(remote_segment.parent().expect("remote WAL parent"))
+        .expect("create remote WAL directory");
+    std::fs::write(remote_segment, segment_bytes).expect("publish resumed WAL segment");
+    event_loop.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id: 2,
+        max_sequence: 2,
+    });
+    assert_eq!(event_loop.state.wal.cloud_durable_seq, 3);
+    Ok(())
+}
+
+#[test]
 fn should_apply_runtime_config_block_cache_policy_to_read_resources_when_initializing_event_loop(
 ) -> crate::common::MidgeResult<()> {
     // Arrange
