@@ -107,10 +107,17 @@ struct TxnBatchHeader {
 }
 
 const TXN_BATCH_MIN_PREFIX_LEN: usize = 3 + (8 * 3) + 4;
-const TXN_BATCH_RECORD_FIXED_LEN: usize = 1 + 4 + 8 + 1 + 1 + 1;
+// op + cf_id + seq + expiration flag + value flag + range-end flag
+const TXN_BATCH_RECORD_ENCODE_FIXED_LEN: usize = 1 + 4 + 8 + 1 + 1 + 1;
+// Every record also carries the mandatory key-length prefix, even for an empty key.
+const TXN_BATCH_RECORD_MIN_LEN: usize = TXN_BATCH_RECORD_ENCODE_FIXED_LEN + 4;
 
 fn corruption(msg: impl Into<String>) -> MidgeError {
     MidgeError::Corruption(msg.into())
+}
+
+pub(super) fn has_current_record_prefix(data: &[u8]) -> bool {
+    data.len() >= PREFIX_LEN && data[..2] == MAGIC && data[2] == VERSION
 }
 
 fn payload_capacity(record: &WalRecord) -> MidgeResult<usize> {
@@ -491,7 +498,7 @@ fn txn_batch_payload_records_encoded_len(
 
     let mut len = TXN_BATCH_MIN_PREFIX_LEN;
     for record in records {
-        len = add_capacity(len, TXN_BATCH_RECORD_FIXED_LEN)?;
+        len = add_capacity(len, TXN_BATCH_RECORD_ENCODE_FIXED_LEN)?;
         if record.expiration.is_some() {
             len = add_capacity(len, 8)?;
         }
@@ -769,7 +776,7 @@ fn decode_txn_batch_records(
     begin_seq: u64,
     op_count: usize,
 ) -> MidgeResult<Vec<TxnBatchRecord>> {
-    if op_count > input.len() / TXN_BATCH_RECORD_FIXED_LEN {
+    if op_count > input.len() / TXN_BATCH_RECORD_MIN_LEN {
         return Err(corruption(
             "transaction batch payload op_count exceeds remaining bytes",
         ));
@@ -1140,6 +1147,32 @@ mod tests {
             MidgeError::Corruption(_) => {}
             other => panic!("expected corruption error, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn should_reject_transaction_batch_op_count_given_payload_below_true_per_record_minimum() {
+        // Arrange: one empty-key record needs 20 fixed bytes. This 19-byte
+        // payload has every fixed field except the final range-end flag.
+        let mut encoded_record = Vec::new();
+        encoded_record.push(WalOpKind::Put.to_wire_format());
+        encoded_record.extend_from_slice(&0_u32.to_le_bytes());
+        encoded_record.extend_from_slice(&1_u64.to_le_bytes());
+        encoded_record.push(0); // no expiration
+        encoded_record.extend_from_slice(&0_u32.to_le_bytes()); // empty key
+        encoded_record.push(0); // no value
+        assert_eq!(encoded_record.len() + 1, TXN_BATCH_RECORD_MIN_LEN);
+        let mut input = encoded_record.as_slice();
+
+        // Act
+        let error = decode_txn_batch_records(&mut input, 0, 1).unwrap_err();
+
+        // Assert
+        assert!(
+            error
+                .to_string()
+                .contains("op_count exceeds remaining bytes"),
+            "the allocation guard must reject below-minimum payloads before decoding: {error}"
+        );
     }
 
     #[test]
