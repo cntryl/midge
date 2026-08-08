@@ -74,24 +74,35 @@ impl ManifestCoordinator {
         }
 
         let result = event_loop.force_wal_sync(msg_rx).and_then(|()| {
-            if let Some(existing) = event_loop.state.manifest.get_column_family_by_name(name) {
-                let existing_id = existing.id;
-                return event_loop
-                    .mirror_metadata_after_local_commit("idempotent create column family")
-                    .map(|()| existing_id);
-            }
-            let edit = crate::runtime::ddl::create_edit(&event_loop.state, name)?;
-            let cf_id = match &edit {
-                crate::metadata::ManifestEdit::CreateColumnFamily { id, .. } => *id,
-                _ => unreachable!("create_edit returned a non-create edit"),
+            let cf_id = if let Some(existing) = event_loop
+                .state
+                .manifest
+                .get_column_family_by_name(name)
+            {
+                existing.id
+            } else {
+                let edit = crate::runtime::ddl::create_edit(&event_loop.state, name)?;
+                let cf_id = match &edit {
+                    crate::metadata::ManifestEdit::CreateColumnFamily { id, .. } => *id,
+                    _ => unreachable!("create_edit returned a non-create edit"),
+                };
+                crate::runtime::ddl::execute(
+                    &mut event_loop.state,
+                    event_loop.hybrid_storage.as_ref(),
+                    &edit,
+                )?;
+                event_loop.ddl_authority_ambiguous = false;
+                cf_id
             };
-            crate::runtime::ddl::execute(
-                &mut event_loop.state,
-                event_loop.hybrid_storage.as_ref(),
-                &edit,
-            )?;
-            event_loop.ddl_authority_ambiguous = false;
-            event_loop.mirror_metadata_after_local_commit("create column family")?;
+
+            // Local journal application (and remote DDL CAS in cloud mode) is
+            // the authority switch. A later auxiliary metadata mirror error
+            // must not report the create as rejected and strand Engine's
+            // public handle registry behind the runtime state.
+            if let Err(error) = Self::mirror_committed_create(event_loop) {
+                event_loop.state.mark_persistence_anomaly();
+                tracing::warn!(%error, cf_id, "column-family create committed but metadata mirror remains degraded");
+            }
             Ok(cf_id)
         });
         if let Err(error) = &result {
@@ -107,6 +118,16 @@ impl ManifestCoordinator {
         }
         event_loop.respond(request_id, resp);
         HandleOutcome::Continue
+    }
+
+    fn mirror_committed_create(event_loop: &mut EventLoop) -> crate::common::MidgeResult<()> {
+        crate::failpoints::fail_point!(
+            "midge::ddl::after_create_local_commit_before_metadata_mirror",
+            |_| Err(crate::common::MidgeError::Internal(
+                "failpoint: create metadata mirror failed after local commit".to_string()
+            ))
+        );
+        event_loop.mirror_metadata_after_local_commit("create column family")
     }
 
     pub(super) fn drop_column_family(

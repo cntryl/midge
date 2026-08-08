@@ -132,6 +132,90 @@ fn should_reconcile_remote_commit_when_local_commit_fails() {
 
 #[cfg(feature = "failpoints")]
 #[test]
+fn should_return_usable_column_family_when_create_metadata_mirror_fails_after_commit() {
+    // Arrange
+    let _guard = DDL_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("lock");
+    let temp = tempfile::tempdir().expect("temp dir");
+    let engine = open_cloud(temp.path());
+    let scenario = fail::FailScenario::setup();
+    fail::cfg(
+        "midge::ddl::after_create_local_commit_before_metadata_mirror",
+        "return",
+    )
+    .expect("configure post-commit create mirror failure");
+
+    // Act
+    let create_result = engine.create_column_family("committed-create");
+    fail::remove("midge::ddl::after_create_local_commit_before_metadata_mirror");
+    scenario.teardown();
+
+    // Assert: the DDL registry and local journal already made this create
+    // authoritative, so the public handle registry must adopt it even when an
+    // auxiliary manifest mirror is temporarily degraded.
+    let cf = create_result.expect("return committed column family");
+    assert_eq!(
+        engine
+            .get_column_family("committed-create")
+            .expect("registered committed column family")
+            .id(),
+        cf.id()
+    );
+    let mut writer = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .expect("begin transaction through committed handle");
+    writer
+        .put(b"key".to_vec(), b"value".to_vec(), None)
+        .expect("buffer write through committed handle");
+    writer
+        .commit(WriteOptions::cloud_async())
+        .expect("commit write through committed handle");
+    let reader = engine
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+        .expect("begin read through committed handle");
+    assert_eq!(
+        reader
+            .get(b"key")
+            .expect("read value through committed handle")
+            .as_deref(),
+        Some(b"value".as_slice())
+    );
+    drop(reader);
+
+    let retried = engine
+        .create_column_family("committed-create")
+        .expect("idempotently retry committed create");
+    assert_eq!(retried.id(), cf.id());
+    let registry = fs::read(temp.path().join("cloud_store/metadata/ddl.registry.json"))
+        .expect("read authoritative DDL registry");
+    let registry: serde_json::Value = serde_json::from_slice(&registry).expect("decode registry");
+    assert_eq!(registry["epoch"], 1);
+    assert_eq!(registry["operations"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        engine
+            .get_runtime_metrics()
+            .expect("degraded runtime metrics")
+            .health,
+        EngineHealth::Degraded
+    );
+    shutdown(engine);
+
+    let reopened = open_cloud(temp.path());
+    assert!(reopened.get_column_family("committed-create").is_some());
+    assert_eq!(
+        reopened
+            .get_runtime_metrics()
+            .expect("reconciled runtime metrics")
+            .health,
+        EngineHealth::Healthy
+    );
+    shutdown(reopened);
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
 fn should_fence_column_family_when_remote_drop_commits_before_local_commit() {
     // Arrange
     let _guard = DDL_TEST_LOCK

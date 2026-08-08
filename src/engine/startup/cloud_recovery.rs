@@ -2,7 +2,6 @@ use super::{CloudSstRecoveryProof, CloudStartupRecovery, CloudWalRecoveryPlan};
 use crate::common::{MidgeError, MidgeResult};
 use crate::config::RecoveryPolicy;
 use crate::io::Fs as _;
-use crate::runtime::hybrid_persistence::HybridPersistence;
 use crate::runtime::RuntimeState;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -52,7 +51,14 @@ impl CloudStartupRecovery {
                     Self::stage_sst_bytes(&state.fs, &file_meta.name, proof.bytes())?;
                 }
 
-                storage.delete_sst_object_blocking(&file_meta.name)?;
+                storage
+                    .delete_remote_object_guarded_blocking(proof)
+                    .map_err(|error| {
+                        MidgeError::RecoveryFailed(format!(
+                            "failed to conditionally delete remote compaction cleanup candidate '{}': {error}",
+                            file_meta.name
+                        ))
+                    })?;
             }
             cleaned.insert(file_meta.name.clone());
         }
