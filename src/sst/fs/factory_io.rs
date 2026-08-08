@@ -8,11 +8,11 @@ use std::sync::Arc;
 
 use crate::io::Fs;
 
+use crate::sst::bloom::{BlockBloomFilter, BloomWriter};
 use crate::sst::compression::CompressionPolicy;
 use crate::sst::encoding::EntryType;
 use crate::sst::index::profiler::{KeyStructureProfile, KeyStructureProfiler};
 use crate::sst::index::tuner::{IndexKind, IndexTuner};
-use crate::sst::sparse_index::IndexEntry;
 use crate::sst::trie::writer::TrieWriter;
 use crate::sst::types::{
     encode_range_tombstones, BlockHandle, Footer, KeyRangeMetadata, RangeTombstone, SstMetadata,
@@ -96,6 +96,7 @@ struct PendingEntry {
 struct FinalizedDataBlocks {
     file_bytes: Vec<u8>,
     block_index_entries: Vec<(Vec<u8>, BlockHandle)>,
+    block_bloom: BlockBloomFilter,
     key_profile: KeyStructureProfile,
     smallest_key: Option<Vec<u8>>,
     largest_key: Option<Vec<u8>>,
@@ -107,7 +108,9 @@ struct StreamingState {
     block_index_entries: Vec<(Vec<u8>, BlockHandle)>,
     key_profiler: KeyStructureProfiler,
     current_block: Vec<u8>,
+    current_block_keys: Vec<Vec<u8>>,
     current_first_key: Option<Vec<u8>>,
+    block_bloom: BlockBloomFilter,
     previous_key: Vec<u8>,
     last_key: Option<Vec<u8>>,
     last_sequence: u64,
@@ -123,7 +126,9 @@ impl StreamingState {
             block_index_entries: Vec::new(),
             key_profiler: KeyStructureProfiler::new(),
             current_block: Vec::new(),
+            current_block_keys: Vec::new(),
             current_first_key: None,
+            block_bloom: BlockBloomFilter::new(),
             previous_key: Vec::new(),
             last_key: None,
             last_sequence: 0,
@@ -152,13 +157,13 @@ impl InMemorySstWriter {
         use crate::sst::compression;
 
         let compressed = compression::compress_block_with_trailer(block_bytes, compression_policy)?;
-        let offset = file_bytes.len() as u64;
-        let size = 4 + compressed.len() as u64;
-        file_bytes.extend_from_slice(
-            &u32::try_from(compressed.len())
-                .unwrap_or(u32::MAX)
-                .to_le_bytes(),
-        );
+        let offset = u64::try_from(file_bytes.len()).map_err(|_| {
+            crate::common::MidgeError::ResourceLimit(
+                "SST output offset exceeds the supported range".to_string(),
+            )
+        })?;
+        let (payload_len, size) = Self::checked_block_payload_len(compressed.len())?;
+        file_bytes.extend_from_slice(&payload_len.to_le_bytes());
         file_bytes.extend_from_slice(&compressed);
         Ok(BlockHandle::new(offset, size))
     }
@@ -172,30 +177,48 @@ impl InMemorySstWriter {
         use crate::sst::compression;
 
         let compressed = compression::compress_block_with_trailer(block_bytes, compression_policy)?;
-        let payload_len = u32::try_from(compressed.len()).unwrap_or(u32::MAX);
-        let size = 4u64.saturating_add(u64::try_from(compressed.len()).unwrap_or(u64::MAX));
+        let (payload_len, size) = Self::checked_block_payload_len(compressed.len())?;
         let handle = BlockHandle::new(*offset, size);
         file.write_all(&payload_len.to_le_bytes())
             .map_err(crate::common::MidgeError::Io)?;
         file.write_all(&compressed)
             .map_err(crate::common::MidgeError::Io)?;
-        *offset = offset.saturating_add(size);
+        *offset = offset.checked_add(size).ok_or_else(|| {
+            crate::common::MidgeError::ResourceLimit(
+                "SST stream offset exceeds the supported range".to_string(),
+            )
+        })?;
         Ok(handle)
     }
 
-    fn serialize_index(index_entries: &[IndexEntry]) -> Vec<u8> {
+    fn checked_block_payload_len(payload_len: usize) -> MidgeResult<(u32, u64)> {
+        let encoded_len = u32::try_from(payload_len).map_err(|_| {
+            crate::common::MidgeError::ResourceLimit(
+                "compressed SST block exceeds the 4 GiB format limit".to_string(),
+            )
+        })?;
+        let total_len = 4u64.checked_add(u64::from(encoded_len)).ok_or_else(|| {
+            crate::common::MidgeError::ResourceLimit(
+                "encoded SST block length exceeds the supported range".to_string(),
+            )
+        })?;
+        Ok((encoded_len, total_len))
+    }
+
+    fn serialize_index(index_entries: &[(Vec<u8>, BlockHandle)]) -> MidgeResult<Vec<u8>> {
         let mut index_bytes = Vec::new();
-        for entry in index_entries {
-            index_bytes.extend_from_slice(
-                &u32::try_from(entry.key.len())
-                    .unwrap_or(u32::MAX)
-                    .to_le_bytes(),
-            );
-            index_bytes.extend_from_slice(&entry.key);
-            index_bytes.extend_from_slice(&entry.block_handle.offset.to_le_bytes());
-            index_bytes.extend_from_slice(&entry.block_handle.size.to_le_bytes());
+        for (key, handle) in index_entries {
+            let key_len = u32::try_from(key.len()).map_err(|_| {
+                crate::common::MidgeError::ResourceLimit(
+                    "SST index key exceeds the 4 GiB format limit".to_string(),
+                )
+            })?;
+            index_bytes.extend_from_slice(&key_len.to_le_bytes());
+            index_bytes.extend_from_slice(key);
+            index_bytes.extend_from_slice(&handle.offset.to_le_bytes());
+            index_bytes.extend_from_slice(&handle.size.to_le_bytes());
         }
-        index_bytes
+        Ok(index_bytes)
     }
 
     fn shared_prefix_len(previous_key: &[u8], key: &[u8]) -> u16 {
@@ -216,7 +239,7 @@ impl InMemorySstWriter {
         entries
     }
 
-    fn encode_pending_entry(previous_key: &[u8], entry: &PendingEntry) -> Vec<u8> {
+    fn encode_pending_entry(previous_key: &[u8], entry: &PendingEntry) -> MidgeResult<Vec<u8>> {
         let shared_len = Self::shared_prefix_len(previous_key, &entry.key);
         let key_delta = &entry.key[shared_len as usize..];
         crate::sst::encoding::encode_v2(
@@ -258,6 +281,8 @@ impl InMemorySstWriter {
         current_block: &mut Vec<u8>,
         current_first_key: &mut Option<Vec<u8>>,
         block_index_entries: &mut Vec<(Vec<u8>, BlockHandle)>,
+        current_block_keys: &mut Vec<Vec<u8>>,
+        block_bloom: &mut BlockBloomFilter,
         compression_policy: &CompressionPolicy,
     ) -> MidgeResult<()> {
         if current_block.is_empty() {
@@ -268,6 +293,11 @@ impl InMemorySstWriter {
         if let Some(first_key) = current_first_key.take() {
             block_index_entries.push((first_key, handle));
         }
+        let mut bloom = BloomWriter::with_defaults(current_block_keys.len().max(1));
+        for key in current_block_keys.drain(..) {
+            bloom.insert(&key);
+        }
+        block_bloom.add_block_bloom(&bloom);
         current_block.clear();
         Ok(())
     }
@@ -289,6 +319,11 @@ impl InMemorySstWriter {
         if let Some(first_key) = state.current_first_key.take() {
             state.block_index_entries.push((first_key, handle));
         }
+        let mut bloom = BloomWriter::with_defaults(state.current_block_keys.len().max(1));
+        for key in state.current_block_keys.drain(..) {
+            bloom.insert(&key);
+        }
+        state.block_bloom.add_block_bloom(&bloom);
         state.current_block.clear();
         Ok(())
     }
@@ -319,19 +354,20 @@ impl InMemorySstWriter {
         Self::update_key_bounds(&mut state.smallest_key, &mut state.largest_key, &entry.key);
 
         let target_block_size = block_size.max(4 * 1024);
-        let mut encoded = Self::encode_pending_entry(&state.previous_key, &entry);
+        let mut encoded = Self::encode_pending_entry(&state.previous_key, &entry)?;
         if !state.current_block.is_empty()
             && state.current_block.len().saturating_add(encoded.len()) > target_block_size
         {
             Self::flush_streaming_current_block(state, compression_policy)?;
             state.previous_key.clear();
-            encoded = Self::encode_pending_entry(&state.previous_key, &entry);
+            encoded = Self::encode_pending_entry(&state.previous_key, &entry)?;
         }
 
         if state.current_first_key.is_none() {
             state.current_first_key = Some(entry.key.clone());
         }
         state.current_block.extend_from_slice(&encoded);
+        state.current_block_keys.push(entry.key.clone());
         state.previous_key.clone_from(&entry.key);
         state.last_sequence = entry.sequence;
         state.last_key = Some(entry.key);
@@ -344,6 +380,8 @@ impl InMemorySstWriter {
         let mut block_index_entries = Vec::new();
         let mut key_profiler = KeyStructureProfiler::new();
         let mut current_block = Vec::new();
+        let mut current_block_keys = Vec::new();
+        let mut block_bloom = BlockBloomFilter::new();
         let mut current_first_key = None;
         let mut previous_key = Vec::new();
         let mut smallest_key = self
@@ -361,18 +399,21 @@ impl InMemorySstWriter {
             key_profiler.add_key(&entry.key);
             Self::update_key_bounds(&mut smallest_key, &mut largest_key, &entry.key);
 
-            let mut encoded = Self::encode_pending_entry(&previous_key, &entry);
-            if !current_block.is_empty() && current_block.len() + encoded.len() > target_block_size
+            let mut encoded = Self::encode_pending_entry(&previous_key, &entry)?;
+            if !current_block.is_empty()
+                && current_block.len().saturating_add(encoded.len()) > target_block_size
             {
                 Self::flush_current_block(
                     &mut file_bytes,
                     &mut current_block,
                     &mut current_first_key,
                     &mut block_index_entries,
+                    &mut current_block_keys,
+                    &mut block_bloom,
                     &self.compression_policy,
                 )?;
                 previous_key.clear();
-                encoded = Self::encode_pending_entry(&previous_key, &entry);
+                encoded = Self::encode_pending_entry(&previous_key, &entry)?;
             }
 
             if current_first_key.is_none() {
@@ -380,6 +421,7 @@ impl InMemorySstWriter {
             }
 
             current_block.extend_from_slice(&encoded);
+            current_block_keys.push(entry.key.clone());
             previous_key = entry.key;
         }
 
@@ -388,12 +430,15 @@ impl InMemorySstWriter {
             &mut current_block,
             &mut current_first_key,
             &mut block_index_entries,
+            &mut current_block_keys,
+            &mut block_bloom,
             &self.compression_policy,
         )?;
 
         Ok(FinalizedDataBlocks {
             file_bytes,
             block_index_entries,
+            block_bloom,
             key_profile: key_profiler.finish(),
             smallest_key,
             largest_key,
@@ -410,16 +455,6 @@ impl InMemorySstWriter {
 
         let block_bytes = encode_range_tombstones(&self.range_tombstones);
         Self::append_block(file_bytes, &block_bytes, &self.compression_policy).map(Some)
-    }
-
-    fn build_sparse_index_entries(
-        block_index_entries: &[(Vec<u8>, BlockHandle)],
-    ) -> Vec<IndexEntry> {
-        let mut sparse_index_entries = Vec::with_capacity(block_index_entries.len());
-        for (block_index, (first_key, handle)) in block_index_entries.iter().enumerate() {
-            sparse_index_entries.push(IndexEntry::new(first_key.clone(), *handle, block_index));
-        }
-        sparse_index_entries
     }
 
     fn append_trie_block(
@@ -449,16 +484,21 @@ impl InMemorySstWriter {
         file_bytes: &mut Vec<u8>,
         compression_policy: &CompressionPolicy,
         metadata: &SstMetadata,
-        sparse_index_entries: &[IndexEntry],
+        block_index_entries: &[(Vec<u8>, BlockHandle)],
         trie_handle: Option<BlockHandle>,
+        block_bloom: &BlockBloomFilter,
     ) -> MidgeResult<()> {
+        let block_bloom_handle =
+            Self::append_block(file_bytes, &block_bloom.serialize(), compression_policy)?;
         let meta_handle = Self::append_block(file_bytes, &metadata.encode(), compression_policy)?;
-        let index_bytes = Self::serialize_index(sparse_index_entries);
+        let index_bytes = Self::serialize_index(block_index_entries)?;
         let index_handle = Self::append_block(file_bytes, &index_bytes, compression_policy)?;
-        let footer = trie_handle.map_or_else(
-            || Footer::new(meta_handle, index_handle),
-            |handle| Footer::new(meta_handle, index_handle).with_trie(handle),
-        );
+        let footer = trie_handle
+            .map_or_else(
+                || Footer::new(meta_handle, index_handle),
+                |handle| Footer::new(meta_handle, index_handle).with_trie(handle),
+            )
+            .with_block_bloom(block_bloom_handle);
         file_bytes.extend_from_slice(&footer.encode());
         Ok(())
     }
@@ -512,26 +552,34 @@ impl InMemorySstWriter {
         state: &mut StreamingState,
         compression_policy: &CompressionPolicy,
         metadata: &SstMetadata,
-        sparse_index_entries: &[IndexEntry],
+        block_index_entries: &[(Vec<u8>, BlockHandle)],
         trie_handle: Option<BlockHandle>,
     ) -> MidgeResult<()> {
+        let block_bloom_handle = Self::append_block_to_stream(
+            state.scratch.as_file_mut(),
+            &mut state.offset,
+            &state.block_bloom.serialize(),
+            compression_policy,
+        )?;
         let meta_handle = Self::append_block_to_stream(
             state.scratch.as_file_mut(),
             &mut state.offset,
             &metadata.encode(),
             compression_policy,
         )?;
-        let index_bytes = Self::serialize_index(sparse_index_entries);
+        let index_bytes = Self::serialize_index(block_index_entries)?;
         let index_handle = Self::append_block_to_stream(
             state.scratch.as_file_mut(),
             &mut state.offset,
             &index_bytes,
             compression_policy,
         )?;
-        let footer = trie_handle.map_or_else(
-            || Footer::new(meta_handle, index_handle),
-            |handle| Footer::new(meta_handle, index_handle).with_trie(handle),
-        );
+        let footer = trie_handle
+            .map_or_else(
+                || Footer::new(meta_handle, index_handle),
+                |handle| Footer::new(meta_handle, index_handle).with_trie(handle),
+            )
+            .with_block_bloom(block_bloom_handle);
         let footer = footer.encode();
         state
             .scratch
@@ -569,7 +617,6 @@ impl InMemorySstWriter {
             range_tombstones,
             compression_policy,
         )?;
-        let sparse_index_entries = Self::build_sparse_index_entries(&state.block_index_entries);
         let index_kind = IndexTuner::decide(&std::mem::take(&mut state.key_profiler).finish());
         let trie_handle =
             Self::append_trie_block_to_stream(&mut state, compression_policy, index_kind)?;
@@ -586,11 +633,12 @@ impl InMemorySstWriter {
                     largest_key,
                 }),
         };
+        let block_index_entries = state.block_index_entries.clone();
         Self::append_metadata_index_and_footer_to_stream(
             &mut state,
             compression_policy,
             &metadata,
-            &sparse_index_entries,
+            &block_index_entries,
             trie_handle,
         )?;
         state
@@ -705,7 +753,6 @@ impl DynSstWriter for InMemorySstWriter {
         let mut finalized = writer.finalize_data_blocks(entries)?;
         let range_tombstone_handle =
             writer.append_range_tombstone_block(&mut finalized.file_bytes)?;
-        let sparse_index_entries = Self::build_sparse_index_entries(&finalized.block_index_entries);
         let index_kind = IndexTuner::decide(&finalized.key_profile);
         let trie_handle = Self::append_trie_block(
             &mut finalized.file_bytes,
@@ -728,8 +775,9 @@ impl DynSstWriter for InMemorySstWriter {
             &mut finalized.file_bytes,
             &writer.compression_policy,
             &metadata,
-            &sparse_index_entries,
+            &finalized.block_index_entries,
             trie_handle,
+            &finalized.block_bloom,
         )?;
         Ok(finalized.file_bytes)
     }
@@ -753,6 +801,22 @@ impl SstFactory for FsSstFactoryIo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn should_reject_unrepresentable_compressed_block_length_before_prefix_encoding() {
+        // Arrange
+        let too_large = usize::try_from(u64::from(u32::MAX) + 1).unwrap_or(usize::MAX);
+
+        // Act
+        let result = InMemorySstWriter::checked_block_payload_len(too_large);
+
+        // Assert
+        assert!(matches!(
+            result,
+            Err(crate::common::MidgeError::ResourceLimit(_))
+        ));
+    }
+
     #[test]
     fn should_create_factory_with_mock_fs() {
         // Arrange

@@ -16,7 +16,7 @@ use std::hash::{Hash, Hasher};
 /// Type of cached block
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum BlockType {
-    /// Index block (sparse index, block index)
+    /// Index block (block-first-key index or accelerator)
     Index,
     /// Data block (KV pairs)
     Data,

@@ -558,6 +558,8 @@ impl RuntimeState {
             return;
         }
 
+        self.cleanup_flush_staging_residue();
+
         let residue = self.storage_residue_assessment();
 
         for temp_name in residue.sst_temp_files {
@@ -606,6 +608,27 @@ impl RuntimeState {
         }
 
         self.cleanup_root_staging_residue();
+    }
+
+    fn cleanup_flush_staging_residue(&mut self) {
+        let staging_dir = self.sst_dir.join(".flush-staging");
+        match std::fs::remove_dir_all(&staging_dir) {
+            Ok(()) => {
+                tracing::info!(
+                    path = %staging_dir.display(),
+                    "deleted non-authoritative flush staging residue during startup"
+                );
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                self.mark_persistence_anomaly();
+                tracing::warn!(
+                    path = %staging_dir.display(),
+                    %error,
+                    "failed to delete non-authoritative flush staging residue"
+                );
+            }
+        }
     }
 
     fn cleanup_root_staging_residue(&mut self) {

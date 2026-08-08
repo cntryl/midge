@@ -100,8 +100,7 @@ impl ReadResources {
         let path_str = sst_path.to_string_lossy().to_string();
         let reader = Arc::new(
             SstFileIo::open(&path_str, Arc::clone(&self.sst_fs))?
-                .with_sst_id(sst_id)
-                .with_block_cache(Arc::clone(&self.block_cache))
+                .with_block_cache(Arc::clone(&self.block_cache), sst_id)
                 .with_read_path_diagnostics(Arc::clone(&self.diagnostics)),
         );
 

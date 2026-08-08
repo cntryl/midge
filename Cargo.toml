@@ -229,11 +229,6 @@ path = "benches/tier1_hotpath_sst.rs"
 harness = false
 
 [[bench]]
-name = "tier1_hotpath_sparse_index"
-path = "benches/tier1_hotpath_sparse_index.rs"
-harness = false
-
-[[bench]]
 name = "tier1_hotpath_trie"
 path = "benches/tier1_hotpath_trie.rs"
 harness = false
@@ -277,11 +272,6 @@ harness = false
 [[bench]]
 name = "tier2_subsystem_compression"
 path = "benches/tier2_subsystem_compression.rs"
-harness = false
-
-[[bench]]
-name = "tier2_subsystem_sst_point_read_bloom"
-path = "benches/tier2_subsystem_sst_point_read_bloom.rs"
 harness = false
 
 [[bench]]

@@ -30,12 +30,16 @@ impl TrieNode {
 
     /// Add a child edge to this node
     pub fn add_child(&mut self, edge: TrieEdge) {
-        // Insert in sorted order by first byte
-        let insert_pos = self
+        // A node can have at most one outgoing edge for a byte. Replacing the
+        // target preserves deterministic lookup and prevents an ambiguous
+        // serialized trie if a builder retries an edge.
+        match self
             .children
-            .binary_search_by_key(&edge.first_byte, |e| e.first_byte)
-            .unwrap_or_else(|pos| pos);
-        self.children.insert(insert_pos, edge);
+            .binary_search_by_key(&edge.first_byte, |existing| existing.first_byte)
+        {
+            Ok(index) => self.children[index] = edge,
+            Err(index) => self.children.insert(index, edge),
+        }
     }
 
     /// Find child by first byte
@@ -208,7 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn should_maintain_sort_order_with_duplicates() {
+    fn should_replace_duplicate_child_edge_when_byte_already_exists() {
         // Arrange
         let mut node = TrieNode::new(0, b"root".to_vec(), None);
 
@@ -218,15 +222,14 @@ mod tests {
         node.add_child(TrieEdge::new(b'z', 2)); // Duplicate byte, different index
         node.add_child(TrieEdge::new(b'm', 3));
 
-        // Assert - should be sorted by first_byte, with duplicates in insertion order within same byte
-        assert_eq!(node.children.len(), 4);
+        // Assert
+        assert_eq!(node.children.len(), 3);
         assert_eq!(node.children[0].first_byte, b'a');
         assert_eq!(node.children[0].child_index, 1);
         assert_eq!(node.children[1].first_byte, b'm');
         assert_eq!(node.children[1].child_index, 3);
         assert_eq!(node.children[2].first_byte, b'z');
-        // Both z entries should be present
-        assert_eq!(node.children[3].first_byte, b'z');
+        assert_eq!(node.children[2].child_index, 2);
     }
 
     #[test]

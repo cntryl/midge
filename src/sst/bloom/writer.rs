@@ -118,7 +118,9 @@ impl BloomWriter {
     /// where n = number of items, p = false positive rate, m = number of bits
     fn calculate_bit_size(n: usize, p: f64) -> usize {
         if n == 0 {
-            return 0;
+            // Keep the empty filter structurally valid. A zero-bit filter
+            // makes insert/contains perform modulo zero and can panic.
+            return 64;
         }
 
         let ln_p = p.ln();
@@ -216,6 +218,21 @@ fn usize_to_u32(value: usize) -> u32 {
 mod tests {
     use super::*;
     use crate::sst::bloom::BloomReader;
+
+    #[test]
+    fn should_support_insert_lookup_when_zero_items_are_estimated() {
+        // Arrange
+        let mut bloom = BloomWriter::with_defaults(0);
+
+        // Act
+        let absent_before_insert = bloom.contains(b"key");
+        bloom.insert(b"key");
+        let present_after_insert = bloom.contains(b"key");
+
+        // Assert
+        assert_eq!(absent_before_insert, BloomTestResult::DefinitelyNotPresent);
+        assert_eq!(present_after_insert, BloomTestResult::MightBePresent);
+    }
 
     #[test]
     fn should_contain_key_after_insert() {
@@ -385,7 +402,7 @@ mod tests {
 
         // Assert
         assert!(size_1 >= 64);
-        assert_eq!(size_0, 0); // Edge case: 0 keys
+        assert_eq!(size_0, 64);
     }
 
     #[test]

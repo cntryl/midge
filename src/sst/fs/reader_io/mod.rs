@@ -5,16 +5,14 @@
 
 use arc_swap::ArcSwapOption;
 use bytes::Bytes;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::{Fs, FsPath};
-use crate::sst::bloom::{BlockBloomFilter, BloomMetrics, BloomReader};
+use crate::sst::bloom::{BlockBloomFilter, BloomMetrics};
 use crate::sst::cache::BlockCache;
 use crate::sst::index::tuner::IndexKind;
 use crate::sst::read_amp_metrics::ReadAmpMetrics;
-use crate::sst::sparse_index::SparseIndexReader;
 use crate::sst::trie::TrieReader;
 use crate::sst::types::{BlockHandle, Footer, KeyState, RangeTombstone, SstEntry, SST_FORMAT_V1};
 
@@ -43,12 +41,12 @@ pub struct SstFileIo {
     path: FsPath,
     fs: Arc<dyn Fs>,
     footer: Option<Footer>,
+    /// Exclusive end of the block region (the footer starts here).
+    block_region_end: u64,
     sst_id: u64,
-    bloom_reader: Option<BloomReader>,
     block_bloom_filter: Option<BlockBloomFilter>,
     bloom_metrics: BloomMetrics,
     read_amp_metrics: ReadAmpMetrics,
-    sparse_index: Option<Arc<SparseIndexReader>>,
     trie_reader: Option<Arc<TrieReader>>,
     block_cache: Option<Arc<BlockCache>>,
     /// Runtime-owned read-path counters. Standalone readers use the legacy
@@ -306,30 +304,20 @@ mod scan;
 mod state;
 
 impl SstFileIo {
-    fn stable_sst_id(path: &str, fs: &Arc<dyn Fs>) -> u64 {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        path.hash(&mut hasher);
-        (Arc::as_ptr(fs).cast::<()>() as usize).hash(&mut hasher);
-        hasher.finish()
-    }
-
     /// Create a new SST reader using the provided filesystem
     #[must_use]
     pub fn new(path_str: &str, fs: Arc<dyn Fs>) -> Self {
-        let sst_id = Self::stable_sst_id(path_str, &fs);
         Self {
             path: FsPath::new(path_str),
             fs,
             footer: None,
-            // Standalone readers may be created without ReadResources. Derive
-            // an identity from the stable SST path so their shared block-cache
-            // keys cannot collide at the same block offset.
-            sst_id,
-            bloom_reader: None,
+            block_region_end: 0,
+            // Readers without a cache never consume this placeholder. Cache
+            // attachment requires a generation-scoped identity explicitly.
+            sst_id: 0,
             block_bloom_filter: None,
             bloom_metrics: BloomMetrics::new(),
             read_amp_metrics: ReadAmpMetrics::new(),
-            sparse_index: None,
             trie_reader: None,
             block_cache: None,
             diagnostics: crate::diagnostics::legacy_runtime_diagnostics(),
@@ -380,13 +368,6 @@ impl SstFileIo {
         Self::open_with_real_fs(path)?.summary()
     }
 
-    /// Enable bloom filter for this reader
-    #[must_use]
-    pub fn with_bloom(mut self, bloom: BloomReader) -> Self {
-        self.bloom_reader = Some(bloom);
-        self
-    }
-
     /// Enable block bloom filter for this reader
     #[must_use]
     pub fn with_block_bloom(mut self, block_bloom: BlockBloomFilter) -> Self {
@@ -410,16 +391,14 @@ impl SstFileIo {
         Ok(())
     }
 
-    /// Enable sparse index for this reader
+    /// Enable the block cache with a generation-scoped immutable SST identity.
+    ///
+    /// The identity must change when a logical path is replaced with different
+    /// contents. Keeping it in the same operation makes unsafe path-derived
+    /// cache identities unrepresentable.
     #[must_use]
-    pub fn with_sparse_index(mut self, index: SparseIndexReader) -> Self {
-        self.sparse_index = Some(Arc::new(index));
-        self
-    }
-
-    /// Enable block cache for this reader
-    #[must_use]
-    pub fn with_block_cache(mut self, cache: Arc<BlockCache>) -> Self {
+    pub fn with_block_cache(mut self, cache: Arc<BlockCache>, sst_id: u64) -> Self {
+        self.sst_id = sst_id;
         self.block_cache = Some(cache);
         self
     }
@@ -431,13 +410,6 @@ impl SstFileIo {
         diagnostics: Arc<crate::diagnostics::RuntimeDiagnostics>,
     ) -> Self {
         self.diagnostics = diagnostics;
-        self
-    }
-
-    /// Set the SST ID for cache key generation
-    #[must_use]
-    pub fn with_sst_id(mut self, id: u64) -> Self {
-        self.sst_id = id;
         self
     }
 

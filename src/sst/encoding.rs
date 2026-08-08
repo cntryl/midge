@@ -400,7 +400,6 @@ fn decode_value(
 
 /// Encode a v2 SST entry with persisted expiration metadata.
 #[inline]
-#[must_use]
 pub fn encode_v2(
     key_delta: &[u8],
     shared_len: u16,
@@ -408,9 +407,9 @@ pub fn encode_v2(
     seq: u64,
     entry_type: EntryType,
     expiration: Option<u64>,
-) -> Vec<u8> {
+) -> MidgeResult<Vec<u8>> {
     let val_len = value.map_or(0, <[u8]>::len);
-    let encoded_val_len = u32::try_from(val_len).unwrap_or(u32::MAX);
+    let (encoded_key_len, encoded_val_len) = checked_v2_lengths(key_delta.len(), val_len)?;
     let use_extended_lengths = key_delta.len() > MAX_INLINE_ENTRY_KEY_DELTA_LEN
         || (key_delta.len() == MAX_INLINE_ENTRY_KEY_DELTA_LEN
             && encoded_val_len == EXTENDED_VALUE_LEN_MARKER);
@@ -423,7 +422,9 @@ pub fn encode_v2(
     let cap = header
         .checked_add(key_len)
         .and_then(|s| s.checked_add(val_len))
-        .unwrap_or(header);
+        .ok_or_else(|| {
+            MidgeError::ResourceLimit("encoded SST entry length exceeds address space".to_string())
+        })?;
 
     let mut buf = BytesMut::with_capacity(cap);
     let val = value.unwrap_or(&[]);
@@ -440,12 +441,22 @@ pub fn encode_v2(
     buf.put_u8(entry_type as u8);
     buf.put_u64_le(expiration.unwrap_or(u64::MAX));
     if use_extended_lengths {
-        buf.put_u32_le(u32::try_from(key_delta.len()).unwrap_or(u32::MAX));
+        buf.put_u32_le(encoded_key_len);
         buf.put_u32_le(encoded_val_len);
     }
     buf.extend_from_slice(key_delta);
     buf.extend_from_slice(val);
-    buf.to_vec()
+    Ok(buf.to_vec())
+}
+
+fn checked_v2_lengths(key_len: usize, value_len: usize) -> MidgeResult<(u32, u32)> {
+    let encoded_key_len = u32::try_from(key_len).map_err(|_| {
+        MidgeError::ResourceLimit("SST key delta exceeds the 4 GiB format limit".to_string())
+    })?;
+    let encoded_value_len = u32::try_from(value_len).map_err(|_| {
+        MidgeError::ResourceLimit("SST value exceeds the 4 GiB format limit".to_string())
+    })?;
+    Ok((encoded_key_len, encoded_value_len))
 }
 
 #[cfg(test)]
@@ -498,5 +509,19 @@ mod tests {
         // Assert
         assert_eq!(entry.bytes_consumed, encoded.len());
         assert_eq!(consumed, encoded.len());
+    }
+
+    #[test]
+    fn should_reject_unrepresentable_v2_lengths_before_encoding() {
+        // Arrange
+        let too_large = usize::try_from(u64::from(u32::MAX) + 1).unwrap_or(usize::MAX);
+
+        // Act
+        let key_result = checked_v2_lengths(too_large, 0);
+        let value_result = checked_v2_lengths(0, too_large);
+
+        // Assert
+        assert!(key_result.is_err());
+        assert!(value_result.is_err());
     }
 }

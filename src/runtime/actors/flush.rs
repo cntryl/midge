@@ -445,7 +445,7 @@ impl FlushActor {
         crate::failpoints::fail_point!("midge::flush_worker::after_manifest_journal");
 
         validate_task_lease(task)?;
-        transition_and_clear_intent(task, &task.sst_name)?;
+        clear_manifest_published_intent(task, &task.sst_name)?;
         let persistence_anomaly =
             match crate::metadata::ManifestPersistence::save_snapshot_and_truncate_journal(
                 &task.db_path,
@@ -592,20 +592,8 @@ fn persist_output_durable_intent(
     crate::runtime::IntentPersistence::save(&task.db_path, &intents).map_err(MidgeError::Internal)
 }
 
-fn transition_and_clear_intent(task: &FlushPublishTask, sst_name: &str) -> MidgeResult<()> {
+fn clear_manifest_published_intent(task: &FlushPublishTask, sst_name: &str) -> MidgeResult<()> {
     let mut intents = load_intents(task)?;
-    for entry in &mut intents {
-        if let crate::runtime::IntentLogEntry::FlushPublish {
-            phase, file_meta, ..
-        } = entry
-        {
-            if file_meta.name == sst_name {
-                *phase = crate::runtime::PublicationPhase::ManifestPublished;
-            }
-        }
-    }
-    crate::runtime::IntentPersistence::save(&task.db_path, &intents)
-        .map_err(MidgeError::Internal)?;
     intents.retain(|entry| {
         !matches!(
             entry,
@@ -1060,6 +1048,35 @@ mod tests {
             .iter()
             .any(|file| file.name == sst_name));
         assert!(fixture.control_backend.get_uploads().is_empty());
+        Ok(())
+    }
+
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn should_persist_intents_twice_for_successful_flush_publication() -> MidgeResult<()> {
+        // Arrange
+        let _test_guard = crate::failpoints::test_failpoint_guard();
+        let scenario = fail::FailScenario::setup();
+        let fixture = publication_fixture(usize::MAX)?;
+        let saves = Arc::new(AtomicUsize::new(0));
+        let callback_saves = Arc::clone(&saves);
+        fail::cfg_callback("midge::intent::before_save", move || {
+            callback_saves.fetch_add(1, Ordering::SeqCst);
+        })
+        .expect("configure intent save observer");
+
+        // Act
+        let result = FlushActor::publish(&fixture.task);
+        fail::remove("midge::intent::before_save");
+        scenario.teardown();
+
+        // Assert
+        result?;
+        assert_eq!(
+            saves.load(Ordering::SeqCst),
+            2,
+            "publication needs one output-durable save and one durable clear"
+        );
         Ok(())
     }
 }

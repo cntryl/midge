@@ -203,15 +203,24 @@ impl EventLoop {
             .immutable_flush_by_id(completion.identity.flush_id)
             .is_some_and(|(_, flush)| Arc::ptr_eq(&flush.memtable, &completion.memtable));
         if !same_immutable {
-            self.flush_actor.finish_pipeline();
+            let error = crate::common::MidgeError::Fenced(format!(
+                "flush {} build completion no longer owns its immutable",
+                completion.identity.flush_id
+            ));
+            self.fail_flush_pipeline(
+                completion.identity.flush_id,
+                completion.reservation,
+                &error,
+                false,
+            );
             return false;
         }
         if let Err(error) = self.validate_flush_completion(completion.identity) {
-            self.flush_actor.finish_pipeline();
-            self.fail_flush_waiters(
-                completion.identity.cf_id,
-                completion.identity.sequence,
+            self.fail_flush_pipeline(
+                completion.identity.flush_id,
+                completion.reservation,
                 &error,
+                false,
             );
             return false;
         }
@@ -262,7 +271,11 @@ impl EventLoop {
         };
         let flush = {
             let Some((_, flush)) = self.state.immutable_flush_by_id_mut(identity.flush_id) else {
-                self.flush_actor.finish_pipeline();
+                let error = crate::common::MidgeError::Fenced(format!(
+                    "flush {} lost immutable ownership before publication",
+                    identity.flush_id
+                ));
+                self.fail_flush_pipeline(identity.flush_id, reservation, &error, false);
                 return;
             };
             flush.sst_name = Some(sst_name);
@@ -293,6 +306,7 @@ impl EventLoop {
         self.manifest_publication_active = false;
 
         if let Err(error) = self.validate_flush_completion(completion.identity) {
+            self.settle_stale_publish_reservation(&completion);
             self.flush_actor.finish_pipeline();
             self.fail_flush_waiters(
                 completion.identity.cf_id,
@@ -350,6 +364,9 @@ impl EventLoop {
         reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
     ) {
         let Some((cf_id, flush)) = self.state.immutable_flush_by_id(delta.identity.flush_id) else {
+            if let (Some(hybrid), Some(token)) = (&self.hybrid_storage, reservation) {
+                hybrid.flush_completed_with_token(token, delta.file_meta.size_bytes);
+            }
             self.flush_actor.finish_pipeline();
             return;
         };
@@ -398,6 +415,16 @@ impl EventLoop {
             self.prune_cloud_wal_segments_covered_by_manifest();
         } else {
             self.prune_local_wal_segments_covered_by_manifest();
+        }
+    }
+
+    fn settle_stale_publish_reservation(&self, completion: &FlushPublishCompletion) {
+        let (Some(hybrid), Some(token)) = (&self.hybrid_storage, completion.reservation) else {
+            return;
+        };
+        match &completion.result {
+            Ok(delta) => hybrid.flush_completed_with_token(token, delta.file_meta.size_bytes),
+            Err(_) => hybrid.flush_failed_with_token(token),
         }
     }
 
@@ -713,6 +740,110 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
 
+    fn event_loop_with_hybrid_storage(
+        directory: &tempfile::TempDir,
+    ) -> crate::common::MidgeResult<(EventLoop, Arc<crate::storage::HybridStorage>)> {
+        let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
+        let local = Arc::new(crate::storage::filesystem::FileSystem::new(
+            directory.path().join("hybrid-local"),
+        )?);
+        let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
+            Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+            String::new(),
+        ));
+        let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
+            local,
+            cloud,
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        ));
+        let config = crate::runtime::RuntimeConfig {
+            hybrid_storage: Some(Arc::clone(&hybrid)),
+            ..crate::runtime::RuntimeConfig::default()
+        };
+        let event_loop = EventLoop::new(
+            state,
+            false,
+            Arc::new(crate::runtime::ResponseRouter::new()),
+            config,
+            None,
+        )?;
+        Ok((event_loop, hybrid))
+    }
+
+    #[test]
+    fn should_release_storage_reservation_when_orphan_build_completion_is_discarded(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let directory = tempfile::tempdir()?;
+        let (mut event_loop, hybrid) = event_loop_with_hybrid_storage(&directory)?;
+        let reservation = hybrid
+            .reserve_for_flush_with_token(256)
+            .expect("reserve flush storage");
+        let identity = FlushIdentity {
+            flush_id: 99,
+            writer_epoch: 0,
+            cf_id: 0,
+            sequence: 1,
+        };
+        let completion = crate::runtime::actors::flush::FlushBuildCompletion {
+            identity,
+            memtable: Arc::new(crate::sst::SkipListMemtable::new()),
+            staging_path: directory.path().join("orphan.sst"),
+            reservation: Some(reservation),
+            build_ns: 1,
+            result: Err(crate::common::MidgeError::Fenced("orphan".to_string())),
+        };
+
+        // Act
+        let should_continue = event_loop.handle_flush_build_completion(completion);
+
+        // Assert
+        assert!(!should_continue);
+        assert_eq!(hybrid.budget_snapshot().total_committed_bytes, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn should_settle_storage_reservation_when_published_output_lost_immutable_owner(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let directory = tempfile::tempdir()?;
+        let (mut event_loop, hybrid) = event_loop_with_hybrid_storage(&directory)?;
+        let reservation = hybrid
+            .reserve_for_flush_with_token(256)
+            .expect("reserve flush storage");
+        let identity = FlushIdentity {
+            flush_id: 99,
+            writer_epoch: 0,
+            cf_id: 0,
+            sequence: 1,
+        };
+        let delta = FlushPublicationDelta {
+            identity,
+            file_meta: crate::runtime::FileMeta {
+                name: crate::sst::file_name(0, 0, 1),
+                level: 0,
+                size_bytes: 128,
+                content_crc32c: Some(1),
+                cf_id: 0,
+                smallest_key: Some(b"key".to_vec()),
+                largest_key: Some(b"key".to_vec()),
+                smallest_seq: Some(1),
+                largest_seq: Some(1),
+            },
+            next_sst_seq: 2,
+            cloud_metadata_published: false,
+            persistence_anomaly: false,
+        };
+
+        // Act
+        event_loop.install_flush_publication(&delta, Some(reservation));
+
+        // Assert
+        assert_eq!(hybrid.budget_snapshot().total_committed_bytes, 128);
+        Ok(())
+    }
+
     #[test]
     fn should_mark_anomaly_when_local_wal_directory_sync_fails_after_pruning(
     ) -> crate::common::MidgeResult<()> {
@@ -820,9 +951,22 @@ mod tests {
         let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
         let router = Arc::new(crate::runtime::ResponseRouter::new());
         let healthy = Arc::new(AtomicBool::new(true));
+        let local = Arc::new(crate::storage::filesystem::FileSystem::new(
+            directory.path().join("hybrid-local"),
+        )?);
+        let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
+            Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+            String::new(),
+        ));
+        let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
+            local,
+            cloud,
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        ));
         let config = crate::runtime::RuntimeConfig {
             writer_epoch: 7,
             lease_healthy: Some(Arc::clone(&healthy)),
+            hybrid_storage: Some(Arc::clone(&hybrid)),
             ..crate::runtime::RuntimeConfig::default()
         };
         let mut event_loop = EventLoop::new(state, false, router, config, None)?;
@@ -842,11 +986,14 @@ mod tests {
             cf_id: 0,
             sequence: 1,
         };
+        let reservation = hybrid
+            .reserve_for_flush_with_token(256)
+            .expect("reserve flush storage");
         healthy.store(false, std::sync::atomic::Ordering::Release);
         let result =
             FlushWorkerResult::Publish(crate::runtime::actors::flush::FlushPublishCompletion {
                 identity,
-                reservation: None,
+                reservation: Some(reservation),
                 publish_ns: 10,
                 result: Ok(FlushPublicationDelta {
                     identity,
@@ -873,6 +1020,11 @@ mod tests {
         // Assert
         assert!(event_loop.state.manifest.files.is_empty());
         assert_eq!(event_loop.state.wal.current_segment_id, 1);
+        assert_eq!(
+            hybrid.budget_snapshot().total_committed_bytes,
+            128,
+            "a published stale completion must settle its reservation to actual SST bytes"
+        );
         assert_eq!(
             event_loop
                 .state

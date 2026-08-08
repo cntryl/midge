@@ -203,39 +203,6 @@ fn usize_to_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
-impl BloomReader {
-    /// Batch query multiple keys for better CPU cache locality
-    ///
-    /// Returns results without allocating per-key; enables vectorized processing
-    /// and early termination for downstream pipelines.
-    #[must_use]
-    pub fn contains_batch(&self, keys: &[&[u8]]) -> super::batch::BatchBloomResults {
-        use super::batch::BatchBloomResults;
-
-        let mut results = BatchBloomResults::new(keys.len());
-        let mut positive_count = 0;
-        let mut negative_count = 0;
-
-        for (idx, key) in keys.iter().enumerate() {
-            let result = self.contains(key);
-            results.results[idx] = match result {
-                BloomTestResult::MightBePresent => {
-                    positive_count += 1;
-                    0
-                }
-                BloomTestResult::DefinitelyNotPresent => {
-                    negative_count += 1;
-                    1
-                }
-            };
-        }
-
-        results.positive_count = positive_count;
-        results.negative_count = negative_count;
-        results
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -621,85 +588,6 @@ mod tests {
             "FPR should be positive for full filter"
         );
         assert!(estimated_fpr < 0.05, "FPR should be reasonable (bounded)");
-    }
-
-    #[test]
-    fn should_query_batch_keys() {
-        // Arrange
-        let mut writer = BloomWriter::new(100, 0.01);
-        writer.insert(b"key1");
-        writer.insert(b"key2");
-        writer.insert(b"key3");
-        let reader = writer.finish();
-
-        let key_refs = vec![
-            b"key1".as_ref(),
-            b"key2".as_ref(),
-            b"key3".as_ref(),
-            b"key4".as_ref(),
-            b"key5".as_ref(),
-        ];
-
-        // Act
-        let results = reader.contains_batch(&key_refs);
-
-        // Assert
-        assert_eq!(results.results.len(), 5);
-        assert_eq!(results.positive_count, 3); // key1, key2, key3
-        assert_eq!(results.negative_count, 2); // key4, key5
-        assert!(results.is_positive(0)); // key1
-        assert!(results.is_positive(1)); // key2
-        assert!(results.is_positive(2)); // key3
-        assert!(results.is_negative(3)); // key4
-        assert!(results.is_negative(4)); // key5
-    }
-
-    #[test]
-    fn should_batch_results_match_individual_queries() {
-        // Arrange
-        let mut writer = BloomWriter::new(100, 0.01);
-        for i in 0..50 {
-            writer.insert(format!("key{i}").as_bytes());
-        }
-        let reader = writer.finish();
-
-        let test_keys = ["key0", "key25", "key49", "unknown1", "unknown2"];
-        let key_refs: Vec<&[u8]> = test_keys.iter().map(|k| k.as_bytes()).collect();
-
-        // Act
-        let batch_results = reader.contains_batch(&key_refs);
-        let individual_results: Vec<_> = test_keys
-            .iter()
-            .map(|k| reader.contains(k.as_bytes()))
-            .collect();
-
-        // Assert - batch results should match individual queries
-        for i in 0..test_keys.len() {
-            let batch_is_present = batch_results.is_positive(i);
-            let individual_is_present =
-                matches!(individual_results[i], BloomTestResult::MightBePresent);
-            assert_eq!(
-                batch_is_present, individual_is_present,
-                "Result mismatch at index {} for key '{}'",
-                i, test_keys[i]
-            );
-        }
-    }
-
-    #[test]
-    fn should_batch_with_empty_keys() {
-        // Arrange
-        let mut writer = BloomWriter::new(100, 0.01);
-        writer.insert(b"key1");
-        let reader = writer.finish();
-
-        // Act
-        let results = reader.contains_batch(&[]);
-
-        // Assert
-        assert_eq!(results.results.len(), 0);
-        assert_eq!(results.positive_count, 0);
-        assert_eq!(results.negative_count, 0);
     }
 
     #[test]

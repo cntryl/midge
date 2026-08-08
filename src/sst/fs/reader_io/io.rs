@@ -28,24 +28,24 @@ impl SstFileIo {
             .ok_or_else(|| MidgeError::Corruption("SST footer is missing".into()))?;
         let index = self.parse_index_entries()?;
 
-        Self::validate_block_handle(footer.meta_index_handle, file_size, "metadata")?;
-        Self::validate_block_handle(footer.index_handle, file_size, "index")?;
+        Self::validate_block_handle(footer.meta_index_handle, self.block_region_end, "metadata")?;
+        Self::validate_block_handle(footer.index_handle, self.block_region_end, "index")?;
         let _ = self.read_block(&footer.meta_index_handle)?;
         let _ = self.read_block(&footer.index_handle)?;
 
         if let Some(handle) = footer.trie_handle {
-            Self::validate_block_handle(handle, file_size, "trie")?;
+            Self::validate_block_handle(handle, self.block_region_end, "trie")?;
             let trie = self.read_block(&handle)?;
             let _ = TrieReader::new(&trie)?;
         }
         if let Some(handle) = footer.block_bloom_handle {
-            Self::validate_block_handle(handle, file_size, "block bloom")?;
+            Self::validate_block_handle(handle, self.block_region_end, "block bloom")?;
             let bloom = self.read_block(&handle)?;
             let _ = BlockBloomFilter::deserialize(&bloom)?;
         }
 
         for (_, handle) in &index {
-            Self::validate_block_handle(*handle, file_size, "data")?;
+            Self::validate_block_handle(*handle, self.block_region_end, "data")?;
             let block = self.read_block(handle)?;
             let _ = self.scan_block_entries_from_bytes(&block)?;
         }
@@ -56,13 +56,17 @@ impl SstFileIo {
         })
     }
 
-    fn validate_block_handle(handle: BlockHandle, file_size: u64, kind: &str) -> MidgeResult<()> {
+    fn validate_block_handle(
+        handle: BlockHandle,
+        block_region_end: u64,
+        kind: &str,
+    ) -> MidgeResult<()> {
         let end = handle.offset.checked_add(handle.size).ok_or_else(|| {
             MidgeError::Corruption(format!("SST {kind} block handle overflows file offsets"))
         })?;
-        if handle.size < 4 || end > file_size {
+        if handle.size < 4 || end > block_region_end {
             return Err(MidgeError::Corruption(format!(
-                "SST {kind} block [{}, {}) exceeds file length {file_size}",
+                "SST {kind} block [{}, {}) exceeds block region ending at {block_region_end}",
                 handle.offset, end
             )));
         }
@@ -90,6 +94,7 @@ impl SstFileIo {
 
         // Read footer from end of file
         let footer_offset = file_size - footer_size;
+        self.block_region_end = footer_offset;
         let footer_data = {
             let file = self.fs.open(
                 &self.path,
@@ -105,6 +110,7 @@ impl SstFileIo {
 
         self.footer = Some(Footer::decode(&footer_data)?);
         self.load_sst_metadata()?;
+        self.load_block_bloom()?;
 
         Ok(())
     }
@@ -175,6 +181,7 @@ impl SstFileIo {
     }
 
     pub(super) fn read_block(&self, handle: &BlockHandle) -> MidgeResult<bytes::Bytes> {
+        Self::validate_block_handle(*handle, self.block_region_end, "referenced")?;
         let file = self.fs.open(
             &self.path,
             crate::io::OpenOptions {
@@ -194,7 +201,10 @@ impl SstFileIo {
         }
 
         let len = u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
-        if len + 4 > buffer.len() {
+        if len
+            .checked_add(4)
+            .is_none_or(|encoded_len| encoded_len > buffer.len())
+        {
             return Err(MidgeError::Corruption("Block data truncated".into()));
         }
 
@@ -257,12 +267,30 @@ impl SstFileIo {
             return Ok(vec![block_data]);
         }
 
+        for handle in handles {
+            Self::validate_block_handle(*handle, self.block_region_end, "readahead")?;
+        }
+        if handles.windows(2).any(|pair| {
+            pair[0]
+                .offset
+                .checked_add(pair[0].size)
+                .is_none_or(|end| end > pair[1].offset)
+        }) {
+            return Err(MidgeError::Corruption(
+                "SST readahead handles are overlapping or out of order".into(),
+            ));
+        }
+
         // Compute contiguous read range
         let first = &handles[0];
         let last = &handles[handles.len() - 1];
         let read_start = first.offset;
-        let read_end = last.offset + last.size;
-        let total_len = read_end - read_start;
+        let read_end = last.offset.checked_add(last.size).ok_or_else(|| {
+            MidgeError::Corruption("SST readahead range overflows file offsets".into())
+        })?;
+        let total_len = read_end
+            .checked_sub(read_start)
+            .ok_or_else(|| MidgeError::Corruption("SST readahead range is out of order".into()))?;
 
         // Open file once for the entire window
         let file = self.fs.open(
@@ -287,13 +315,18 @@ impl SstFileIo {
         let strict_trailer = self.uses_block_trailers();
         for handle in handles {
             // Compute offset within the buffer
-            let buf_offset = usize::try_from(handle.offset - read_start).map_err(|_| {
+            let relative_offset = handle.offset.checked_sub(read_start).ok_or_else(|| {
+                MidgeError::Corruption("Block offset precedes readahead buffer".into())
+            })?;
+            let buf_offset = usize::try_from(relative_offset).map_err(|_| {
                 MidgeError::Corruption("Block offset exceeds addressable memory".into())
             })?;
             let handle_size = usize::try_from(handle.size).map_err(|_| {
                 MidgeError::Corruption("Block size exceeds addressable memory".into())
             })?;
-            let buf_end = buf_offset + handle_size;
+            let buf_end = buf_offset.checked_add(handle_size).ok_or_else(|| {
+                MidgeError::Corruption("Block extent exceeds addressable memory".into())
+            })?;
 
             if buf_end > buffer.len() {
                 return Err(MidgeError::Corruption(
@@ -315,7 +348,10 @@ impl SstFileIo {
                 block_slice[3],
             ]) as usize;
 
-            if len + 4 > block_slice.len() {
+            if len
+                .checked_add(4)
+                .is_none_or(|encoded_len| encoded_len > block_slice.len())
+            {
                 return Err(MidgeError::Corruption("Block data truncated".into()));
             }
 

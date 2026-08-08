@@ -38,6 +38,11 @@ impl File for CountingFile<'_> {
             .lock()
             .expect("read log lock")
             .push((offset, len));
+        if len > 1024 * 1024 {
+            return Err(crate::io::FsError::Corruption(
+                "test filesystem refused an oversized read".to_string(),
+            ));
+        }
         self.inner.read_at(offset, len)
     }
 
@@ -121,6 +126,18 @@ fn write_unique_key_sst(temp_dir: &tempfile::TempDir, name: &str) -> MidgeResult
     crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join(name))
 }
 
+fn write_single_value_sst(
+    temp_dir: &tempfile::TempDir,
+    name: &str,
+    value: &[u8],
+) -> MidgeResult<()> {
+    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+    let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+    let mut writer = factory.create()?;
+    writer.add_with_meta(b"key", Some(value), 1, 0, None)?;
+    crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join(name))
+}
+
 fn write_keyed_sst(
     temp_dir: &tempfile::TempDir,
     name: &str,
@@ -198,16 +215,44 @@ fn should_have_proper_type_safety() {
 }
 
 #[test]
-fn should_chain_with_sst_id() {
+fn should_require_generation_identity_when_attaching_block_cache() {
     // Arrange
     let fs = Arc::new(crate::io::MockFs::new());
     let reader = SstFileIo::new("test.sst", fs);
+    let cache = Arc::new(crate::sst::cache::BlockCache::new(
+        1024,
+        1,
+        crate::sst::cache::CachePolicyType::Lru,
+    ));
 
     // Act
-    let with_id = reader.with_sst_id(42);
+    let cached = reader.with_block_cache(cache, 42);
 
     // Assert
-    assert_eq!(with_id.sst_id, 42);
+    assert_eq!(cached.sst_id, 42);
+    assert!(cached.block_cache.is_some());
+}
+
+#[test]
+fn should_isolate_replaced_sst_cache_entries_by_generation_identity() -> MidgeResult<()> {
+    // Arrange
+    let temp_dir = tempfile::tempdir()?;
+    let cache = Arc::new(crate::sst::cache::BlockCache::new_default(1024 * 1024));
+    let shared_fs: Arc<dyn Fs> = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+    write_single_value_sst(&temp_dir, "replaced.sst", b"old")?;
+    let first = SstFileIo::open("replaced.sst", Arc::clone(&shared_fs))?
+        .with_block_cache(Arc::clone(&cache), 100);
+    assert_eq!(first.get(b"key")?.as_deref(), Some(b"old".as_slice()));
+
+    write_single_value_sst(&temp_dir, "replaced.sst", b"new")?;
+    let replacement = SstFileIo::open("replaced.sst", shared_fs)?.with_block_cache(cache, 101);
+
+    // Act
+    let value = replacement.get(b"key")?;
+
+    // Assert
+    assert_eq!(value.as_deref(), Some(b"new".as_slice()));
+    Ok(())
 }
 
 #[test]
@@ -264,8 +309,23 @@ fn should_get_state_at_read_only_candidate_block_when_key_missing() -> MidgeResu
         entries.len() >= 2,
         "target block should contain multiple keys"
     );
-    let mut missing_key = entries[1].key.clone();
-    missing_key.push(b'a');
+    let block_bloom = reader
+        .block_bloom_filter
+        .as_ref()
+        .expect("writer should persist and reader should load block blooms");
+    assert_eq!(block_bloom.num_blocks(), index.len());
+    let missing_key = (0..256u16)
+        .map(|suffix| {
+            let mut key = entries[1].key.clone();
+            key.extend_from_slice(format!("-missing-{suffix}").as_bytes());
+            key
+        })
+        .find(|key| {
+            block_bloom
+                .might_contain_in_block(target_block_idx, key)
+                .definitely_not_present()
+        })
+        .expect("test should find a deterministic bloom-negative key");
 
     counting_fs.clear_reads();
 
@@ -275,7 +335,10 @@ fn should_get_state_at_read_only_candidate_block_when_key_missing() -> MidgeResu
     // Assert
     assert_eq!(state, KeyState::Absent);
     let reads = data_block_reads(&counting_fs.reads(), index.as_ref());
-    assert_eq!(reads, vec![(target_handle.offset, target_handle.size)]);
+    assert!(
+        reads.is_empty(),
+        "persisted block bloom should reject the in-range miss before data I/O"
+    );
     Ok(())
 }
 
@@ -304,7 +367,7 @@ fn should_select_trie_metadata_for_structured_keys() -> MidgeResult<()> {
 }
 
 #[test]
-fn should_keep_sparse_metadata_for_small_ssts() -> MidgeResult<()> {
+fn should_keep_binary_index_metadata_for_small_ssts() -> MidgeResult<()> {
     // Arrange
     let temp_dir = tempfile::tempdir()?;
     let keys = (0..64)
@@ -532,5 +595,43 @@ fn should_reject_current_format_block_with_crc_mismatch() -> MidgeResult<()> {
         error.to_string().contains("CRC32C mismatch"),
         "expected CRC mismatch error, got {error}"
     );
+    Ok(())
+}
+
+#[test]
+fn should_reject_oversized_block_handle_before_issuing_filesystem_read() -> MidgeResult<()> {
+    // Arrange
+    let temp_dir = tempfile::tempdir()?;
+    write_unique_key_sst(&temp_dir, "oversized-handle.sst")?;
+    let (counting_fs, reader) = open_counting_reader(&temp_dir, "oversized-handle.sst")?;
+    counting_fs.clear_reads();
+
+    // Act
+    let result = reader.read_block(&BlockHandle::new(0, u64::MAX));
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::Corruption(_))));
+    assert!(
+        counting_fs.reads().is_empty(),
+        "corrupt handles must be rejected before a pre-read allocation is requested"
+    );
+    Ok(())
+}
+
+#[test]
+fn should_reject_out_of_order_readahead_handles_without_panicking() -> MidgeResult<()> {
+    // Arrange
+    let temp_dir = tempfile::tempdir()?;
+    write_unique_key_sst(&temp_dir, "reversed-handles.sst")?;
+    let (_counting_fs, reader) = open_counting_reader(&temp_dir, "reversed-handles.sst")?;
+    let index = reader.index_entries()?;
+    assert!(index.len() >= 2);
+    let handles = [index[1].1, index[0].1];
+
+    // Act
+    let result = reader.read_blocks_contiguous(&handles);
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::Corruption(_))));
     Ok(())
 }

@@ -1,11 +1,8 @@
 //! Block-level bloom filters for fine-grained negative lookups
 //!
-//! This module implements the second tier of Midge's two-tier bloom architecture:
-//! - SST-level bloom (coarse gate) — eliminates most SSTs
-//! - Block-level bloom (fine gate) — eliminates useless block reads
-//!
 //! Block blooms are stored in a dedicated filter block within the SST and checked
-//! after sparse index selection but before actual block I/O.
+//! after candidate-block selection but before actual block I/O. Persisted key-range
+//! metadata provides the coarse SST-level gate.
 
 use super::writer::{BloomFilterOps, BloomTestResult};
 use super::{BloomReader, BloomWriter};
@@ -83,7 +80,12 @@ impl BlockBloomFilter {
 
         let num_blocks = usize::try_from(u32::from_le_bytes([data[0], data[1], data[2], data[3]]))
             .unwrap_or(usize::MAX);
-        let expected_header_size = 4 + (num_blocks * 4);
+        let expected_header_size = num_blocks
+            .checked_mul(4)
+            .and_then(|offset_bytes| offset_bytes.checked_add(4))
+            .ok_or_else(|| {
+                crate::common::MidgeError::Corruption("Block bloom header length overflow".into())
+            })?;
 
         if data.len() < expected_header_size {
             return Err(crate::common::MidgeError::Corruption(
@@ -104,6 +106,28 @@ impl BlockBloomFilter {
         }
 
         let bloom_data = data[expected_header_size..].to_vec();
+
+        let mut previous = None;
+        for (block_index, &offset) in offsets.iter().enumerate() {
+            let offset = usize::try_from(offset).unwrap_or(usize::MAX);
+            if (block_index == 0 && offset != 0)
+                || offset > bloom_data.len()
+                || previous.is_some_and(|prior| offset <= prior)
+            {
+                return Err(crate::common::MidgeError::Corruption(format!(
+                    "Block bloom offset {block_index} is invalid"
+                )));
+            }
+            previous = Some(offset);
+        }
+        for block_index in 0..num_blocks {
+            let start = usize::try_from(offsets[block_index]).unwrap_or(usize::MAX);
+            let end = offsets
+                .get(block_index + 1)
+                .and_then(|offset| usize::try_from(*offset).ok())
+                .unwrap_or(bloom_data.len());
+            BloomReader::deserialize(&bloom_data[start..end])?;
+        }
 
         Ok(Self {
             num_blocks,
@@ -411,18 +435,15 @@ mod tests {
             serialized[16] = 99; // Set k to invalid value
         }
 
-        // Act - deserialize and query
+        // Act
         let result = BlockBloomFilter::deserialize(&serialized);
-        assert!(result.is_ok());
-        let corrupted_filter = result.unwrap();
 
-        // Assert - query should not panic, should conservatively return MightBePresent
-        let query_result = corrupted_filter.might_contain_in_block(0, b"any_key");
-        assert_eq!(query_result, BloomTestResult::MightBePresent);
+        // Assert
+        assert!(result.is_err());
     }
 
     #[test]
-    fn should_handle_offset_corruption_gracefully() {
+    fn should_reject_corrupt_block_bloom_offset_when_opening() {
         // Arrange - Create structure then corrupt offset metadata
         let mut filter = BlockBloomFilter::new();
         let mut bloom = BloomWriter::with_defaults(100);
@@ -442,13 +463,10 @@ mod tests {
             serialized[7] = 255;
         }
 
-        // Act - deserialize and query
+        // Act
         let result = BlockBloomFilter::deserialize(&serialized);
-        assert!(result.is_ok());
-        let corrupted_filter = result.unwrap();
 
-        // Assert - query should not panic, should conservatively return MightBePresent
-        let query_result = corrupted_filter.might_contain_in_block(0, b"any_key");
-        assert_eq!(query_result, BloomTestResult::MightBePresent);
+        // Assert
+        assert!(result.is_err());
     }
 }

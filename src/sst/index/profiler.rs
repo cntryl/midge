@@ -1,7 +1,7 @@
 //! Key structure profiler for auto-tuning SST index strategy
 //!
 //! Analyzes key patterns during SST writing to automatically choose between:
-//! - `SparseIndex` (for random/hash-like keys)
+//! - Full block-first-key binary index (for random/hash-like keys)
 //! - `TrieIndex` (for hierarchical/structured keys)
 
 use std::collections::HashMap;

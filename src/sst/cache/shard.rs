@@ -1,6 +1,6 @@
 //! Single cache shard with concurrent reads and synchronized writes
 
-use crate::sst::cache::key::{BlockType, CacheKey};
+use crate::sst::cache::key::CacheKey;
 use crate::sst::cache::metrics::CacheMetrics;
 use crate::sst::cache::policy::{CachePolicy, CachePolicyType};
 use crate::sst::cache::value::CacheValue;
@@ -76,7 +76,7 @@ impl CacheShard {
         let _lock = self.lock_mutation();
 
         let new_size = u64::try_from(value.len()).unwrap_or(u64::MAX);
-        if !self.can_fit_value(&key, new_size) {
+        if !self.can_fit_value(new_size) {
             return false;
         }
 
@@ -86,11 +86,11 @@ impl CacheShard {
         self.entries.contains_key(&key)
     }
 
-    /// Data blocks larger than a shard cannot remain visible after eviction.
-    /// Index and filter blocks are allowed through so the eviction policy can
-    /// continue to protect metadata blocks under ordinary pressure.
-    fn can_fit_value(&self, key: &CacheKey, value_size: u64) -> bool {
-        key.block_type != BlockType::Data || value_size <= self.max_bytes
+    /// No single allocation may make a shard permanently exceed capacity.
+    /// Metadata remains eviction-protected under ordinary pressure, but an
+    /// oversized index/filter block is rejected just like oversized data.
+    fn can_fit_value(&self, value_size: u64) -> bool {
+        value_size <= self.max_bytes
     }
 
     /// Insert value and update metrics accordingly
@@ -266,6 +266,7 @@ impl CacheShard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sst::cache::key::BlockType;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
@@ -463,6 +464,25 @@ mod tests {
         assert!(!inserted);
         assert!(retrieved.is_none());
         assert_eq!(shard.size_bytes(), 0);
+    }
+
+    #[test]
+    fn should_reject_oversized_metadata_block_without_exceeding_capacity() {
+        // Arrange
+        let shard = CacheShard::new(8, CachePolicyType::Lru);
+        let index_key = CacheKey::for_index(1, 0);
+        let filter_key = CacheKey::for_filter(1, 8);
+        let value = Bytes::from(vec![0u8; 16]);
+
+        // Act
+        let index_inserted = shard.put(index_key, &value);
+        let filter_inserted = shard.put(filter_key, &value);
+
+        // Assert
+        assert!(!index_inserted);
+        assert!(!filter_inserted);
+        assert_eq!(shard.size_bytes(), 0);
+        assert!(shard.is_empty());
     }
 
     #[test]

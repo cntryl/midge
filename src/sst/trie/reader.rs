@@ -26,10 +26,80 @@ impl TrieReader {
             return Err(MidgeError::Corruption("Empty trie".into()));
         }
 
+        Self::validate_graph(&nodes)?;
+
         Ok(Self {
             nodes,
             root_index: 0,
         })
+    }
+
+    fn validate_graph(nodes: &[TrieNode]) -> MidgeResult<()> {
+        let mut inbound_edges = vec![0usize; nodes.len()];
+        for (node_index, node) in nodes.iter().enumerate() {
+            if node_index > 0 && node.key_delta.is_empty() {
+                return Err(MidgeError::Corruption(format!(
+                    "Trie node {node_index} has an empty key delta"
+                )));
+            }
+            if node
+                .children
+                .windows(2)
+                .any(|pair| pair[0].first_byte >= pair[1].first_byte)
+            {
+                return Err(MidgeError::Corruption(format!(
+                    "Trie node {node_index} has duplicate or unsorted child edges"
+                )));
+            }
+            for edge in &node.children {
+                let child_index = usize::try_from(edge.child_index).unwrap_or(usize::MAX);
+                let child = nodes.get(child_index).ok_or_else(|| {
+                    MidgeError::Corruption(format!(
+                        "Trie node {node_index} references missing child {child_index}"
+                    ))
+                })?;
+                if child.key_delta.first().copied() != Some(edge.first_byte) {
+                    return Err(MidgeError::Corruption(format!(
+                        "Trie edge from node {node_index} does not match its child key delta"
+                    )));
+                }
+                inbound_edges[child_index] = inbound_edges[child_index]
+                    .checked_add(1)
+                    .ok_or_else(|| MidgeError::Corruption("Trie inbound edge overflow".into()))?;
+            }
+        }
+
+        if inbound_edges[0] != 0
+            || inbound_edges
+                .iter()
+                .enumerate()
+                .skip(1)
+                .any(|(_, count)| *count != 1)
+        {
+            return Err(MidgeError::Corruption(
+                "Trie graph is cyclic, shared, or disconnected".into(),
+            ));
+        }
+
+        let mut visited = vec![false; nodes.len()];
+        let mut stack = vec![0usize];
+        while let Some(node_index) = stack.pop() {
+            if std::mem::replace(&mut visited[node_index], true) {
+                return Err(MidgeError::Corruption("Trie graph contains a cycle".into()));
+            }
+            stack.extend(
+                nodes[node_index]
+                    .children
+                    .iter()
+                    .map(|edge| usize::try_from(edge.child_index).unwrap_or(usize::MAX)),
+            );
+        }
+        if visited.iter().any(|visited| !visited) {
+            return Err(MidgeError::Corruption(
+                "Trie graph contains unreachable nodes".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Find block ID for exact key lookup
@@ -324,7 +394,39 @@ impl TrieReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sst::trie::encoding::encode_trie;
+    use crate::sst::trie::node::{TrieEdge, TrieNode};
     use crate::sst::trie::TrieBuilder;
+
+    #[test]
+    fn should_reject_cyclic_trie_before_lookup() {
+        // Arrange
+        let mut root = TrieNode::new(0, Vec::new(), None);
+        root.add_child(TrieEdge::new(b'a', 1));
+        let mut child = TrieNode::new(0, b"a".to_vec(), None);
+        child.add_child(TrieEdge::new(b'a', 1));
+        let encoded = encode_trie(&[root, child]);
+
+        // Act
+        let result = TrieReader::new(&encoded);
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::Corruption(_))));
+    }
+
+    #[test]
+    fn should_reject_empty_child_delta_before_lookup() {
+        // Arrange
+        let mut root = TrieNode::new(0, Vec::new(), None);
+        root.add_child(TrieEdge::new(b'a', 1));
+        let encoded = encode_trie(&[root, TrieNode::new(0, Vec::new(), Some(1))]);
+
+        // Act
+        let result = TrieReader::new(&encoded);
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::Corruption(_))));
+    }
 
     fn build_test_trie() -> Vec<u8> {
         let mut builder = TrieBuilder::new();
