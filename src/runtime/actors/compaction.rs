@@ -22,6 +22,10 @@ pub struct CompactionActor {
     sst_factory: Arc<dyn SstFactory>,
     /// Compaction strategy
     compactor: Compactor,
+    /// Last column family selected for the global compaction slot. Planning
+    /// resumes after this ID so a perpetually eligible low ID cannot starve
+    /// unrelated families.
+    last_scheduled_cf: Option<crate::types::ColumnFamilyId>,
     /// Accounting reservation for the one active compaction. The actor
     /// serializes compactions, but the token still prevents a delayed terminal
     /// message from settling a later operation.
@@ -46,6 +50,7 @@ impl CompactionActor {
             compaction_running: false,
             sst_factory,
             compactor: Compactor::with_config(config),
+            last_scheduled_cf: None,
             storage_reservation: None,
             worker_cancel: Arc::new(AtomicBool::new(false)),
             worker_handle: None,
@@ -73,14 +78,14 @@ impl CompactionActor {
     pub fn check_compaction(
         &mut self,
         state: &RuntimeState,
-    ) -> Option<crate::compaction::CompactionPlan> {
+    ) -> MidgeResult<Option<crate::compaction::CompactionPlan>> {
         self.check_compaction_with_mode(state, true)
     }
 
     pub fn check_manual_compaction(
         &mut self,
         state: &RuntimeState,
-    ) -> Option<crate::compaction::CompactionPlan> {
+    ) -> MidgeResult<Option<crate::compaction::CompactionPlan>> {
         self.check_compaction_with_mode(state, false)
     }
 
@@ -88,15 +93,15 @@ impl CompactionActor {
         &mut self,
         state: &RuntimeState,
         respect_background_enabled: bool,
-    ) -> Option<crate::compaction::CompactionPlan> {
+    ) -> MidgeResult<Option<crate::compaction::CompactionPlan>> {
         // If compaction is disabled via runtime configuration, skip checks
         if respect_background_enabled && !state.compaction_enabled() {
             tracing::debug!("compaction disabled in runtime state");
-            return None;
+            return Ok(None);
         }
 
         if self.compaction_running {
-            return None;
+            return Ok(None);
         }
 
         // Count files per level for logging
@@ -117,15 +122,26 @@ impl CompactionActor {
 
         let mut cf_ids: Vec<u32> = state.column_families.keys().copied().collect();
         cf_ids.sort_unstable();
+        if let Some(last_scheduled) = self.last_scheduled_cf {
+            let next_index = cf_ids
+                .iter()
+                .position(|cf_id| *cf_id > last_scheduled)
+                .unwrap_or(0);
+            cf_ids.rotate_left(next_index);
+        }
 
         for cf_id in cf_ids {
-            if let Some(mut plan) = self.compactor.pick_compaction(&state.manifest.files, cf_id) {
+            if let Some(mut plan) = self
+                .compactor
+                .pick_compaction(&state.manifest.files, cf_id)?
+            {
                 plan.snapshot_horizon = state.oldest_active_snapshot_sequence();
-                return Some(plan);
+                self.last_scheduled_cf = Some(cf_id);
+                return Ok(Some(plan));
             }
         }
 
-        None
+        Ok(None)
     }
 
     /// Execute a compaction plan
@@ -405,6 +421,7 @@ impl Clone for CompactionActor {
             compaction_running: self.compaction_running,
             sst_factory: Arc::clone(&self.sst_factory),
             compactor: Compactor::with_config(self.compactor.config.clone()),
+            last_scheduled_cf: self.last_scheduled_cf,
             storage_reservation: self.storage_reservation,
             worker_cancel: Arc::clone(&self.worker_cancel),
             worker_handle: None,
@@ -548,6 +565,7 @@ mod tests {
 
         let plan = actor
             .check_compaction(&state)
+            .expect("compaction planning")
             .expect("expected compaction plan at configured file-count threshold");
 
         // Act
@@ -577,6 +595,7 @@ mod tests {
         // Act
         let plan = actor
             .check_compaction(&state)
+            .expect("compaction planning")
             .expect("expected compaction plan for non-default cf");
 
         // Assert
@@ -609,10 +628,58 @@ mod tests {
         // Act
         let plan = actor
             .check_compaction(&state)
+            .expect("compaction planning")
             .expect("expected compaction plan when multiple cfs need work");
 
         // Assert
         assert_eq!(plan.cf_id, cf1_id);
         assert!(plan.input_files.iter().all(|name| name.starts_with("cf1_")));
+    }
+
+    #[test]
+    fn should_service_next_column_family_across_compaction_completion_cycles() {
+        // Arrange
+        let mut actor = create_test_compaction_actor();
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
+        state.set_compaction_enabled(true);
+        let first_cf = state
+            .create_cf("first".to_string())
+            .expect("create first cf");
+        let second_cf = state
+            .create_cf("second".to_string())
+            .expect("create second cf");
+        for (cf_id, prefix) in [(first_cf, "first"), (second_cf, "second")] {
+            state.manifest.files.extend((0..4).map(|index| {
+                make_l0_file(
+                    &format!("{prefix}_{index}.sst"),
+                    cf_id,
+                    &[u8::try_from(index).expect("fixture index")],
+                    &[u8::try_from(index).expect("fixture index")],
+                )
+            }));
+        }
+
+        // Act
+        let first_plan = actor
+            .check_compaction(&state)
+            .expect("first compaction planning")
+            .expect("first eligible compaction plan");
+        actor.compaction_running = true;
+        let _ = actor.handle_complete(&mut state, &first_plan.input_files, &[]);
+        let second_plan = actor
+            .check_compaction(&state)
+            .expect("second compaction planning")
+            .expect("second eligible compaction plan");
+        actor.compaction_running = true;
+        let _ = actor.handle_complete(&mut state, &second_plan.input_files, &[]);
+        let wrapped_plan = actor
+            .check_compaction(&state)
+            .expect("wrapped compaction planning")
+            .expect("first column family remains eligible");
+
+        // Assert
+        assert_eq!(first_plan.cf_id, first_cf);
+        assert_eq!(second_plan.cf_id, second_cf);
+        assert_eq!(wrapped_plan.cf_id, first_cf);
     }
 }

@@ -191,113 +191,40 @@ impl ManifestActor {
         Ok(())
     }
 
-    /// Create a new column family
+    /// Create a column family through the same validation/edit path as the
+    /// runtime coordinator. This direct helper is retained only for focused
+    /// event-loop tests that do not run the DDL message protocol.
     #[cfg(test)]
-    #[allow(dead_code)]
     pub fn create_column_family(
         &mut self,
         state: &mut RuntimeState,
         name: &str,
     ) -> MidgeResult<u32> {
-        // If the CF already exists and is active, return its id (idempotent CF creation).
+        crate::runtime::ddl::validate_column_family_name(name)?;
         if let Some(existing) = state.manifest.get_column_family_by_name(name) {
-            let cf_id = existing.id;
-            // Ensure runtime state has a ColumnFamilyState for it (recovery path)
-            state.column_families.entry(cf_id).or_insert_with(|| {
-                crate::runtime::state::ColumnFamilyState::new(cf_id, name.to_string())
-            });
-            tracing::info!(cf_id = cf_id, cf_name = %name, "Manifest: column family already exists, returning existing id");
-            return Ok(cf_id);
+            return Ok(existing.id);
         }
-
-        let name = name.to_string();
-
-        let created_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-            .try_into()
-            .unwrap_or(u64::MAX);
-
-        let mut candidate_manifest = state.manifest.clone();
-        let cf_id = candidate_manifest.next_cf_id()?;
-        let edit = crate::metadata::ManifestEdit::CreateColumnFamily {
-            id: cf_id,
-            name: name.clone(),
-            created_at,
+        let edit = crate::runtime::ddl::create_edit(state, name)?;
+        let crate::metadata::ManifestEdit::CreateColumnFamily { id, .. } = &edit else {
+            unreachable!("create_edit returned a non-create edit");
         };
-        candidate_manifest.apply_edit(&edit);
-
-        // Append create CF to journal (skip in memory mode)
-        if !state.is_memory_mode() {
-            crate::metadata::append_edit(&state.db_path, &edit)?;
-        }
-
-        state.manifest = candidate_manifest;
-        self.pending_edits += 1;
-
-        // Create ColumnFamilyState for the new CF
-        let cf_state = crate::runtime::state::ColumnFamilyState::new(cf_id, name.clone());
-        state.column_families.insert(cf_id, cf_state);
-
-        tracing::info!(cf_id = cf_id, cf_name = %name, "Manifest: created column family");
-
+        let cf_id = *id;
+        crate::runtime::ddl::apply_local_edit(state, &edit)?;
+        self.pending_edits = self.pending_edits.saturating_add(1);
         Ok(cf_id)
     }
 
-    /// Drop a column family (soft delete for durability)
+    /// Safely drop an empty or flushed column family for focused event-loop
+    /// tests. Production callers use the serialized DDL message path.
     #[cfg(test)]
-    #[allow(dead_code)]
     pub fn drop_column_family(
         &mut self,
         state: &mut RuntimeState,
         cf_id: crate::types::ColumnFamilyId,
     ) -> MidgeResult<()> {
-        // Prevent dropping default CF
-        if cf_id == 0 {
-            return Err(crate::common::MidgeError::InvalidArgument(
-                "Cannot drop default column family".to_string(),
-            ));
-        }
-
-        let dropped_sst_names = state
-            .manifest
-            .files
-            .iter()
-            .filter(|file| file.cf_id == cf_id)
-            .map(|file| file.name.clone())
-            .collect::<Vec<_>>();
-        let drop_sequence = state.sequence;
-        let mut candidate_manifest = state.manifest.clone();
-        if !candidate_manifest.delete_column_family_with_reclamation(
-            cf_id,
-            drop_sequence,
-            dropped_sst_names.clone(),
-        ) {
-            return Err(crate::common::MidgeError::Internal(format!(
-                "Column family {cf_id} not found or already deleted"
-            )));
-        }
-
-        // Append drop CF edit to journal (skip in memory mode)
-        if !state.is_memory_mode() {
-            let edit = crate::metadata::ManifestEdit::DropColumnFamilyAt {
-                id: cf_id,
-                drop_sequence,
-                dropped_sst_names,
-            };
-            crate::metadata::append_edit(&state.db_path, &edit)?;
-        }
-
-        state.manifest = candidate_manifest;
-
-        // Remove ColumnFamilyState
-        state.column_families.remove(&cf_id);
-
-        self.pending_edits += 1;
-
-        tracing::info!(cf_id = cf_id, "Manifest: dropped column family");
-
+        let edit = crate::runtime::ddl::drop_edit(state, cf_id, false)?;
+        crate::runtime::ddl::apply_local_edit(state, &edit)?;
+        self.pending_edits = self.pending_edits.saturating_add(1);
         Ok(())
     }
 }

@@ -2,6 +2,7 @@ use super::{CloudSstRecoveryProof, CloudStartupRecovery, CloudWalRecoveryPlan};
 use crate::common::{MidgeError, MidgeResult};
 use crate::config::RecoveryPolicy;
 use crate::io::Fs as _;
+use crate::runtime::hybrid_persistence::HybridPersistence;
 use crate::runtime::RuntimeState;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,6 +14,51 @@ type LocalWalPaths = (
 );
 
 impl CloudStartupRecovery {
+    pub(crate) fn cleanup_non_authoritative_compaction_outputs(
+        state: &mut RuntimeState,
+        storage: &crate::storage::HybridStorage,
+        candidates: &[crate::runtime::FileMeta],
+    ) -> MidgeResult<std::collections::BTreeSet<String>> {
+        let mut cleaned = std::collections::BTreeSet::new();
+        for file_meta in candidates {
+            let key = crate::sst::object_key(&file_meta.name);
+            let proof = storage
+                .remote_object_proof_optional(&key)
+                .map_err(|error| {
+                    MidgeError::RecoveryFailed(format!(
+                        "failed to prove remote compaction cleanup candidate '{}': {error}",
+                        file_meta.name
+                    ))
+                })?;
+            if let Some(proof) = proof {
+                Self::validate_sst_bytes_against_proof(
+                    &file_meta.name,
+                    proof.bytes(),
+                    Some(file_meta.size_bytes),
+                    file_meta.content_crc32c,
+                )?;
+
+                // Replay validates the local output before rolling it back. If
+                // the cache was lost, preserve that validation path by staging
+                // the exact proven remote bytes before deleting the remote
+                // orphan.
+                let local_path = state.sst_dir.join(&file_meta.name);
+                if !Self::local_sst_file_matches_proof(
+                    &local_path,
+                    &file_meta.name,
+                    Some(file_meta.size_bytes),
+                    file_meta.content_crc32c,
+                ) {
+                    Self::stage_sst_bytes(&state.fs, &file_meta.name, proof.bytes())?;
+                }
+
+                storage.delete_sst_object_blocking(&file_meta.name)?;
+            }
+            cleaned.insert(file_meta.name.clone());
+        }
+        Ok(cleaned)
+    }
+
     pub(super) fn ensure_local_sst_cache_from_cloud(
         state: &mut RuntimeState,
         cloud_root: &Path,

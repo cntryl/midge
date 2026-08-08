@@ -289,14 +289,29 @@ impl Manifest {
     ) -> Vec<(u32, Vec<String>)> {
         self.column_families
             .iter()
-            .filter(|cf| cf.deleted_at.is_some() && !cf.reclaimed)
+            .filter(|cf| cf.deleted_at.is_some())
             .filter(|cf| {
                 let Some(drop_sequence) = cf.drop_sequence else {
                     return oldest_snapshot_sequence.is_none();
                 };
                 oldest_snapshot_sequence.is_none_or(|oldest| oldest > drop_sequence)
             })
-            .map(|cf| (cf.id, cf.dropped_sst_names.clone()))
+            .filter_map(|cf| {
+                let mut names = cf.dropped_sst_names.clone();
+                names.extend(
+                    self.files
+                        .iter()
+                        .filter(|file| file.cf_id == cf.id)
+                        .map(|file| file.name.clone()),
+                );
+                names.sort();
+                names.dedup();
+                if cf.reclaimed && names.is_empty() {
+                    None
+                } else {
+                    Some((cf.id, names))
+                }
+            })
             .collect()
     }
 
@@ -915,5 +930,28 @@ mod tests {
         assert_eq!(manifest.files.len(), 2);
         assert_eq!(manifest.files[0].cf_id, cf1_id);
         assert_eq!(manifest.files[1].cf_id, cf2_id);
+    }
+
+    #[test]
+    fn should_reclaim_late_manifest_file_when_column_family_was_already_reclaimed() {
+        // Arrange: model a legacy crash/race where compaction published after
+        // the drop's original frozen file set had already been reclaimed.
+        let mut manifest = Manifest::default();
+        let cf_id = manifest.create_column_family("dropped".to_string());
+        assert!(manifest.delete_column_family_with_reclamation(cf_id, 10, Vec::new()));
+        assert!(manifest.mark_column_family_reclaimed(cf_id, &[]));
+        let late_output = crate::sst::file_name(cf_id, 1, 99);
+        manifest.files.push(FileMeta {
+            name: late_output.clone(),
+            cf_id,
+            level: 1,
+            ..Default::default()
+        });
+
+        // Act
+        let candidates = manifest.reclaimable_column_family_files(None);
+
+        // Assert
+        assert_eq!(candidates, vec![(cf_id, vec![late_output])]);
     }
 }

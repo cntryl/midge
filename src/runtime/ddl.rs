@@ -3,14 +3,16 @@
 //! Column-family edits are small, but they change the set of readers and the
 //! files that are authoritative.  In hybrid mode the local manifest journal
 //! and the remote DDL registry therefore use an explicit prepare/CAS/commit
-//! protocol.  A local prepare survives a crash and is reconciled at startup;
-//! an operation is visible to the runtime only after the local journal append
-//! succeeds.
+//! protocol.  A local prepare survives a crash and is reconciled at startup.
+//! The remote CAS is authoritative in hybrid mode, so a confirmed remote
+//! commit is made visible immediately even when the local journal append must
+//! be retried during recovery.
 
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::traits::{FsPath, OpenMode, OpenOptions};
 use crate::metadata::{ColumnFamilyMeta, Manifest, ManifestEdit};
 use crate::runtime::RuntimeState;
+use crate::sst::Memtable;
 use crate::storage::hybrid::backend::{HybridStorage, RemoteObjectProof};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -18,6 +20,7 @@ use std::sync::Arc;
 pub(crate) const REMOTE_DDL_REGISTRY_KEY: &str = "metadata/ddl.registry.json";
 const LOCAL_DDL_PREPARE_FILE: &str = "ddl.prepare.json";
 const LOCAL_DDL_PREPARE_TEMP: &str = "ddl.prepare.json.tmp";
+pub(crate) const MAX_COLUMN_FAMILY_NAME_BYTES: usize = 255;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct DdlPrepare {
@@ -41,7 +44,27 @@ pub(crate) struct DdlRegistry {
     pub(crate) operations: Vec<DdlOperation>,
 }
 
+pub(crate) fn validate_column_family_name(name: &str) -> MidgeResult<()> {
+    if name.is_empty() {
+        return Err(MidgeError::InvalidArgument(
+            "column family name must not be empty".to_string(),
+        ));
+    }
+    if name.as_bytes().contains(&0) {
+        return Err(MidgeError::InvalidArgument(
+            "column family name must not contain NUL bytes".to_string(),
+        ));
+    }
+    if name.len() > MAX_COLUMN_FAMILY_NAME_BYTES {
+        return Err(MidgeError::InvalidArgument(format!(
+            "column family name exceeds the {MAX_COLUMN_FAMILY_NAME_BYTES}-byte limit"
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn create_edit(state: &RuntimeState, name: &str) -> MidgeResult<ManifestEdit> {
+    validate_column_family_name(name)?;
     if name == "default" {
         return Err(MidgeError::InvalidArgument(
             "column family name 'default' is reserved".to_string(),
@@ -65,7 +88,11 @@ pub(crate) fn create_edit(state: &RuntimeState, name: &str) -> MidgeResult<Manif
     })
 }
 
-pub(crate) fn drop_edit(state: &RuntimeState, cf_id: u32) -> MidgeResult<ManifestEdit> {
+pub(crate) fn drop_edit(
+    state: &RuntimeState,
+    cf_id: u32,
+    discard_unflushed: bool,
+) -> MidgeResult<ManifestEdit> {
     if cf_id == 0 {
         return Err(MidgeError::InvalidArgument(
             "Cannot drop default column family".to_string(),
@@ -80,6 +107,21 @@ pub(crate) fn drop_edit(state: &RuntimeState, cf_id: u32) -> MidgeResult<Manifes
     {
         return Err(MidgeError::InvalidArgument(format!(
             "Column family {cf_id} not found or already deleted"
+        )));
+    }
+    let cf_state = state.get_cf(cf_id).ok_or_else(|| {
+        MidgeError::InvalidArgument(format!(
+            "Column family {cf_id} not found or already deleted"
+        ))
+    })?;
+    if !cf_state.immutable_flushes.is_empty() {
+        return Err(MidgeError::Busy(format!(
+            "column family {cf_id} still has flush publication work in flight"
+        )));
+    }
+    if !discard_unflushed && cf_state.memtable.size_bytes() != 0 {
+        return Err(MidgeError::Busy(format!(
+            "column family {cf_id} contains unflushed committed data; flush it first or explicitly discard it"
         )));
     }
     let dropped_sst_names = state
@@ -215,6 +257,18 @@ fn read_remote_registry(
     Ok((Some(registry), Some(proof)))
 }
 
+fn reread_remote_registry_after_ambiguous_cas(
+    storage: &HybridStorage,
+) -> MidgeResult<(Option<DdlRegistry>, Option<RemoteObjectProof>)> {
+    crate::failpoints::fail_point!(
+        "midge::ddl::before_ambiguous_cas_authority_reread",
+        |_| Err(MidgeError::Internal(
+            "failpoint: DDL authority re-read failed".to_string()
+        ))
+    );
+    read_remote_registry(storage).map_err(MidgeError::Internal)
+}
+
 fn write_remote_registry(
     storage: &HybridStorage,
     registry: &DdlRegistry,
@@ -253,6 +307,24 @@ fn local_edit_matches(state: &RuntimeState, edit: &ManifestEdit) -> bool {
             cf.id == *id && cf.deleted_at.is_some() && cf.drop_sequence == Some(*drop_sequence)
         }),
         _ => false,
+    }
+}
+
+fn apply_remote_committed_visibility(state: &mut RuntimeState, edit: &ManifestEdit) {
+    if local_edit_matches(state, edit) {
+        return;
+    }
+    state.manifest.apply_edit(edit);
+    match edit {
+        ManifestEdit::CreateColumnFamily { id, name, .. } => {
+            state.column_families.entry(*id).or_insert_with(|| {
+                crate::runtime::state::ColumnFamilyState::new(*id, name.clone())
+            });
+        }
+        ManifestEdit::DropColumnFamily { id } | ManifestEdit::DropColumnFamilyAt { id, .. } => {
+            state.column_families.remove(id);
+        }
+        _ => {}
     }
 }
 
@@ -414,8 +486,38 @@ pub(crate) fn execute(
         op_id: prepare.op_id.clone(),
         edit: edit.clone(),
     });
-    write_remote_registry(storage, &registry, proof.as_ref())?;
-    apply_local_edit(state, edit)?;
+    if let Err(error) = write_remote_registry(storage, &registry, proof.as_ref()) {
+        // A provider can lose the successful CAS response. Resolve that
+        // ambiguity against the operation id before deciding whether the edit
+        // committed. A confirmed remote commit must immediately fence the old
+        // local view; otherwise later writes could vanish during recovery.
+        match reread_remote_registry_after_ambiguous_cas(storage) {
+            Ok((Some(remote), _)) if remote.operation(&prepare.op_id).is_some() => {
+                apply_remote_committed_visibility(state, edit);
+                state.mark_persistence_anomaly();
+                tracing::warn!(%error, "remote DDL CAS committed despite a lost response; retaining prepare for local reconciliation");
+                return Ok(());
+            }
+            Ok(_) => return Err(error),
+            Err(read_error) => {
+                state.mark_persistence_anomaly();
+                return Err(MidgeError::Fenced(format!(
+                    "DDL authority is ambiguous after a lost remote CAS response ({error}); authority re-read failed: {read_error}"
+                )));
+            }
+        }
+    }
+    if let Err(error) = apply_local_edit(state, edit) {
+        // The remote CAS is the authority switch for a hybrid DDL operation.
+        // Once it succeeds, continuing to expose the old local CF state could
+        // accept writes that recovery will later discard. Fence that state in
+        // memory immediately, retain the prepare for restart reconciliation,
+        // and report the operation as committed but degraded.
+        apply_remote_committed_visibility(state, edit);
+        state.mark_persistence_anomaly();
+        tracing::warn!(%error, "remote DDL committed; retaining prepare and applying authoritative visibility after local persistence failure");
+        return Ok(());
+    }
     if let Err(error) = clear_local_prepare(state) {
         tracing::warn!(%error, "cloud DDL committed but prepare cleanup will be retried");
     }

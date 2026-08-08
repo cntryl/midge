@@ -87,16 +87,107 @@ fn should_reject_default_named_column_family_given_reserved_name_when_creating()
 
 #[test]
 fn should_create_column_family_with_custom_config_given_config_when_creating() {
-    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, mut opts| {
         // Arrange
-        let _engine = Arc::new(open_with_mode(&opts, mode));
+        opts.memtable_size = 1024 * 1024;
+        let engine = Arc::new(open_with_mode(&opts, mode));
 
-        // Act - would need create_column_family_with_options(name, config)
-        // let config = ColumnFamilyConfig { memtable_size: 1024 * 1024 };
-        // let cf = engine.create_column_family_with_options("test_cf", config).unwrap();
+        // Act
+        let cf = engine
+            .create_column_family("test_cf")
+            .expect("create column family under configured engine");
+        let metrics = engine
+            .get_runtime_metrics()
+            .expect("read configured runtime metrics");
 
         // Assert
-        // assert_eq!(cf.name(), "test_cf");
+        assert_eq!(cf.name(), "test_cf");
+        assert_eq!(metrics.memtable_size_limit, 1024 * 1024);
+    });
+}
+
+#[test]
+fn should_reject_empty_column_family_name_before_manifest_persistence() {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange
+        let mut engine = open_with_mode(&opts, mode);
+
+        // Act
+        let result = engine.create_column_family("");
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::InvalidArgument(_))));
+        assert!(engine.get_column_family("").is_none());
+        engine
+            .shutdown(std::time::Duration::from_secs(5))
+            .expect("shutdown before checking durable manifest");
+        let reopened = open_with_mode(&opts, mode);
+        assert!(reopened.get_column_family("").is_none());
+    });
+}
+
+#[test]
+fn should_reject_nul_column_family_name_before_manifest_persistence() {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange
+        let mut engine = open_with_mode(&opts, mode);
+
+        // Act
+        let result = engine.create_column_family("tenant\0hidden");
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::InvalidArgument(_))));
+        assert!(engine.get_column_family("tenant\0hidden").is_none());
+        engine
+            .shutdown(std::time::Duration::from_secs(5))
+            .expect("shutdown before checking durable manifest");
+        let reopened = open_with_mode(&opts, mode);
+        assert!(reopened.get_column_family("tenant\0hidden").is_none());
+    });
+}
+
+#[test]
+fn should_reject_oversized_column_family_name_before_manifest_persistence() {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange
+        let mut engine = open_with_mode(&opts, mode);
+        let oversized = "x".repeat(256);
+
+        // Act
+        let result = engine.create_column_family(&oversized);
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::InvalidArgument(_))));
+        assert!(engine.get_column_family(&oversized).is_none());
+        engine
+            .shutdown(std::time::Duration::from_secs(5))
+            .expect("shutdown before checking durable manifest");
+        let reopened = open_with_mode(&opts, mode);
+        assert!(reopened.get_column_family(&oversized).is_none());
+    });
+}
+
+#[test]
+fn should_accept_column_family_name_at_maximum_byte_length() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = open_with_mode(&opts, mode);
+        let maximum = "x".repeat(255);
+
+        // Act
+        let cf = engine
+            .create_column_family(&maximum)
+            .expect("accept maximum-length column-family name");
+
+        // Assert
+        assert_eq!(cf.name(), maximum);
+        assert_eq!(
+            engine
+                .get_column_family(&maximum)
+                .expect("maximum-length CF is registered")
+                .id(),
+            cf.id()
+        );
     });
 }
 
@@ -122,7 +213,7 @@ fn should_drop_column_family_given_empty_cf_when_requested() {
 
 #[test]
 fn should_drop_column_family_given_flushed_data_when_requested() {
-    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
         let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test_cf").unwrap();
@@ -131,6 +222,7 @@ fn should_drop_column_family_given_flushed_data_when_requested() {
             .unwrap();
         tx.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
         tx.commit(buffered_write_options(mode)).unwrap();
+        engine.flush_cf(&cf).expect("flush column family");
         let cf_id = cf.id();
 
         // Act
@@ -154,12 +246,48 @@ fn should_fail_drop_column_family_given_unflushed_data_when_memtable_not_empty()
         tx.commit(buffered_write_options(mode)).unwrap();
         let cf_id = cf.id();
 
-        // Act - should fail if memtable not flushed
-        let _result = engine.drop_column_family(cf_id);
+        // Act
+        let result = engine.drop_column_family(cf_id);
 
-        // Assert - current behavior may allow drop, but safe behavior would prevent it
-        // This test documents desired behavior
-        // assert!(result.is_err());
+        // Assert
+        assert!(matches!(result, Err(MidgeError::Busy(_))));
+        let reader = engine
+            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+            .expect("column family must remain readable after rejected drop");
+        assert_eq!(
+            reader.get(b"key1").expect("read retained value"),
+            Some(Bytes::from_static(b"value1"))
+        );
+    });
+}
+
+#[test]
+fn should_discard_unflushed_data_given_explicit_destructive_drop() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(&opts, mode));
+        let cf = engine
+            .create_column_family("discard-me")
+            .expect("create cf");
+        let mut tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin write");
+        tx.put(b"key".to_vec(), b"value".to_vec(), None)
+            .expect("put value");
+        tx.commit(buffered_write_options(mode))
+            .expect("commit value");
+
+        // Act
+        engine
+            .drop_column_family_discarding_unflushed(cf.id())
+            .expect("explicit destructive drop");
+
+        // Assert
+        assert!(engine.get_column_family("discard-me").is_none());
+        assert!(matches!(
+            engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly),
+            Err(MidgeError::InvalidArgument(_))
+        ));
     });
 }
 
@@ -261,7 +389,9 @@ fn should_delete_cf_data_given_cf_dropped_when_persisted() {
                 .unwrap();
             tx.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
             tx.commit(buffered_write_options(mode)).unwrap();
-            engine.drop_column_family(cf.id()).unwrap();
+            engine
+                .drop_column_family_discarding_unflushed(cf.id())
+                .expect("explicitly discard unflushed column family");
             engine
                 .shutdown(std::time::Duration::from_secs(5))
                 .expect("shutdown before reopen");
@@ -269,8 +399,15 @@ fn should_delete_cf_data_given_cf_dropped_when_persisted() {
 
         // Assert (Phase 2) - dropped CF data should not be recovered
         {
-            let _engine = open_with_mode(&opts, mode);
-            // Would need get_column_family_by_name or list to verify CF is gone
+            let engine = open_with_mode(&opts, mode);
+            assert!(engine.get_column_family("test_cf").is_none());
+            let recreated = engine
+                .create_column_family("test_cf")
+                .expect("recreate dropped name");
+            let reader = engine
+                .begin_tx(recreated.id(), cntryl_midge::TransactionMode::ReadOnly)
+                .expect("read recreated family");
+            assert_eq!(reader.get(b"key1").expect("read old key"), None);
         }
     });
 }
@@ -286,7 +423,9 @@ fn should_allocate_monotonic_column_family_ids_given_deleted_column_family_when_
             .unwrap();
         tx.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
         tx.commit(buffered_write_options(mode)).unwrap();
-        engine.drop_column_family(cf1.id()).unwrap();
+        engine
+            .drop_column_family_discarding_unflushed(cf1.id())
+            .expect("explicitly discard first generation");
 
         // Act - recreate with same name
         let cf2 = engine.create_column_family("test_cf").unwrap();
@@ -499,46 +638,77 @@ fn should_isolate_data_given_different_data_volumes_when_reading() {
 
 #[test]
 fn should_isolate_compaction_given_per_cf_data_when_compacting() {
-    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
         let engine = Arc::new(open_with_mode(&opts, mode));
         let cf1 = engine.create_column_family("cf1").unwrap();
         let cf2 = engine.create_column_family("cf2").unwrap();
 
-        // Write data to both CFs
-        for i in 0..50 {
-            let key = format!("key{i}");
-            let mut tx1 = engine
-                .begin_tx(cf1.id(), cntryl_midge::TransactionMode::ReadWrite)
-                .unwrap();
-            tx1.put(key.as_bytes().to_vec(), b"value1".to_vec(), None)
-                .unwrap();
-            tx1.commit(buffered_write_options(mode)).unwrap();
-
-            let mut tx2 = engine
-                .begin_tx(cf2.id(), cntryl_midge::TransactionMode::ReadWrite)
-                .unwrap();
-            tx2.put(key.as_bytes().to_vec(), b"value2".to_vec(), None)
-                .unwrap();
-            tx2.commit(buffered_write_options(mode)).unwrap();
+        for generation in 0..4 {
+            for (cf, value) in [(&cf1, b"value1".as_slice()), (&cf2, b"value2".as_slice())] {
+                let mut tx = engine
+                    .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                    .expect("begin compaction seed");
+                tx.put(
+                    format!("key{generation}").into_bytes(),
+                    value.to_vec(),
+                    None,
+                )
+                .expect("put compaction seed");
+                tx.commit(buffered_write_options(mode))
+                    .expect("commit compaction seed");
+                engine.flush_cf(cf).expect("flush compaction generation");
+            }
         }
+        let layout_before = engine
+            .get_storage_layout()
+            .expect("layout before compact all");
+        let l0_before = layout_before
+            .levels
+            .iter()
+            .find(|level| level.level == 0)
+            .map_or(0, |level| level.file_count);
+        assert_eq!(l0_before, 8, "both families must have four L0 files");
 
-        // Act - compact CF1 only
-        // engine.compact_column_family(&cf1).unwrap();
+        // Act
+        engine
+            .compact_all()
+            .expect("compact both eligible families");
 
-        // Assert - both should still have their data
+        // Assert
+        let layout_after = engine
+            .get_storage_layout()
+            .expect("layout after compact all");
+        let l0_after = layout_after
+            .levels
+            .iter()
+            .find(|level| level.level == 0)
+            .map_or(0, |level| level.file_count);
+        let l1_after = layout_after
+            .levels
+            .iter()
+            .find(|level| level.level == 1)
+            .map_or(0, |level| level.file_count);
+        assert_eq!(
+            l0_after, 2,
+            "each family retains only the one L0 file outside its configured three-file batch"
+        );
+        assert_eq!(
+            l1_after, 2,
+            "each column family must publish its own L1 output in mode {mode}"
+        );
         let tx_read1 = engine
             .begin_tx(cf1.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
         assert_eq!(
-            tx_read1.get(b"key25").unwrap(),
+            tx_read1.get(b"key2").unwrap(),
             Some(Bytes::from_static(b"value1"))
         );
         let tx_read2 = engine
             .begin_tx(cf2.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
         assert_eq!(
-            tx_read2.get(b"key25").unwrap(),
+            tx_read2.get(b"key2").unwrap(),
             Some(Bytes::from_static(b"value2"))
         );
     });
@@ -587,6 +757,7 @@ fn should_persist_cf_data_given_restart_when_data_flushed() {
                 .unwrap();
             tx.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
             tx.commit(buffered_write_options(mode)).unwrap();
+            engine.flush_cf(&cf).expect("flush persisted value");
             engine
                 .shutdown(std::time::Duration::from_secs(5))
                 .expect("shutdown before reopen");
@@ -594,11 +765,17 @@ fn should_persist_cf_data_given_restart_when_data_flushed() {
 
         // Assert (Phase 2)
         {
-            let _engine = open_with_mode(&opts, mode);
-            // Would need get_column_family_by_name to retrieve CF handle
-            // let cf = engine.get_column_family_by_name("test_cf").unwrap();
-            // let result = engine.get(&cf, b"key1").unwrap();
-            // assert_eq!(result, Some(Bytes::from_static(b"value1")));
+            let engine = open_with_mode(&opts, mode);
+            let cf = engine
+                .get_column_family("test_cf")
+                .expect("recover column family by name");
+            let reader = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+                .expect("begin recovered read");
+            assert_eq!(
+                reader.get(b"key1").expect("read recovered value"),
+                Some(Bytes::from_static(b"value1"))
+            );
         }
     });
 }
@@ -650,9 +827,10 @@ fn should_persist_cf_drop_given_restart_when_cf_was_dropped() {
                 .unwrap();
             tx.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
             tx.commit(buffered_write_options(mode)).unwrap();
-            engine.flush_cf(&cf).ok(); // Flush before dropping
+            engine
+                .flush_cf(&cf)
+                .expect("flush committed data before safe drop");
             engine.drop_column_family(cf.id()).unwrap();
-            engine.flush_cf(&cf).ok(); // Flush after dropping to persist the deletion
             engine
                 .shutdown(std::time::Duration::from_secs(5))
                 .expect("shutdown before reopen");
@@ -683,24 +861,27 @@ fn should_get_column_family_by_name_given_existing_cf_when_querying() {
         engine.create_column_family("test_cf").unwrap();
 
         // Act
-        // let cf = engine.get_column_family_by_name("test_cf").unwrap();
+        let cf = engine
+            .get_column_family("test_cf")
+            .expect("get existing column family");
 
         // Assert
-        // assert_eq!(cf.name(), "test_cf");
+        assert_eq!(cf.name(), "test_cf");
+        assert_ne!(cf.id(), 0);
     });
 }
 
 #[test]
-fn should_fail_get_column_family_given_nonexistent_name_when_querying() {
+fn should_return_none_given_nonexistent_column_family_name_when_querying() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let _engine = Arc::new(open_with_mode(&opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
 
         // Act
-        // let result = engine.get_column_family_by_name("nonexistent");
+        let result = engine.get_column_family("nonexistent");
 
         // Assert
-        // assert!(result.is_err());
+        assert!(result.is_none());
     });
 }
 
@@ -725,7 +906,7 @@ fn should_get_default_column_family_given_fresh_engine_when_querying() {
 
 #[test]
 fn should_isolate_cf_after_flush_given_same_key_when_reading() {
-    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
         let engine = Arc::new(open_with_mode(&opts, mode));
         let cf1 = engine.create_column_family("cf1").unwrap();
@@ -743,7 +924,8 @@ fn should_isolate_cf_after_flush_given_same_key_when_reading() {
             .unwrap();
         tx2.put(b"key1".to_vec(), b"value2".to_vec(), None).unwrap();
         tx2.commit(buffered_write_options(mode)).unwrap();
-        // Flush would happen here if we had flush API
+        engine.flush_cf(&cf1).expect("flush first column family");
+        engine.flush_cf(&cf2).expect("flush second column family");
 
         // Assert - isolation maintained even after flush
         let tx_read1 = engine

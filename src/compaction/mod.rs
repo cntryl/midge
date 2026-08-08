@@ -1,6 +1,4 @@
 pub mod executor;
-#[cfg(test)]
-pub mod merge;
 pub mod strategy;
 
 pub use strategy::{CompactionPlan, Compactor, LeveledCompactionConfig};
@@ -46,16 +44,22 @@ pub fn execute_compaction(
     let output_file_str = output_file.to_str().ok_or(MidgeError::InvalidPath)?;
 
     // --- 3. K-way merge, deduplicate, and write directly to the output -----
-    // This plan does not carry a proof that all deeper levels were included,
-    // so the writer retains point tombstones even when a snapshot horizon
-    // exists. Range tombstones are retained for the same reason.
-    let _written = executor::write_merged_compaction_output_to_sst(
+    let output_written = executor::write_merged_compaction_output_to_sst(
         sst_factory,
         output_file_str,
         streams,
         &range_tombstones,
+        executor::TombstoneGcPolicy {
+            snapshot_horizon: plan.snapshot_horizon,
+            point_eligible: plan.point_tombstone_gc_eligible,
+            range_eligible: plan.range_tombstone_gc_eligible,
+        },
         abort_check,
     )?;
+
+    if !output_written {
+        return Ok(Vec::new());
+    }
 
     Ok(vec![output_file
         .file_name()
@@ -439,6 +443,285 @@ mod tests {
             other => panic!("expected preserved tombstone, got {other:?}"),
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn should_drop_obsolete_point_tombstone_when_compaction_has_bottommost_proof() -> MidgeResult<()>
+    {
+        // Arrange
+        let temp_dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let mut input_writer = factory.create()?;
+        input_writer.add_with_meta(b"alpha", None, 5, 2, None)?;
+        input_writer.add_with_meta(b"beta", Some(b"live"), 6, 0, None)?;
+        crate::sst::fs::finish_writer_to_path(input_writer, &temp_dir.path().join("input.sst"))?;
+        let mut plan = CompactionPlan::new(0, 5, 6)
+            .with_output_seq(45)
+            .with_tombstone_gc_eligibility(true, false);
+        plan.input_files.push("input.sst".to_string());
+
+        // Act
+        let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
+
+        // Assert
+        let reader = factory.open(std::path::Path::new(&output_names[0]))?;
+        assert!(matches!(
+            reader.get_state(b"alpha")?,
+            crate::sst::types::KeyState::Absent
+        ));
+        assert!(matches!(
+            reader.get_state(b"beta")?,
+            crate::sst::types::KeyState::Value(_, 6, _, _)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn should_reclaim_obsolete_point_tombstone_when_l0_to_l1_is_key_range_bottommost(
+    ) -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let input_name = crate::sst::file_name(0, 0, 1);
+        let mut input_writer = factory.create()?;
+        input_writer.add_with_meta(b"alpha", None, 5, 2, None)?;
+        input_writer.add_with_meta(b"beta", Some(b"live"), 6, 0, None)?;
+        crate::sst::fs::finish_writer_to_path(input_writer, &temp_dir.path().join(&input_name))?;
+        let input_size = std::fs::metadata(temp_dir.path().join(&input_name))?.len();
+        let files = vec![crate::metadata::FileMeta {
+            name: input_name,
+            level: 0,
+            size_bytes: input_size,
+            cf_id: 0,
+            smallest_key: Some(b"alpha".to_vec()),
+            largest_key: Some(b"beta".to_vec()),
+            ..Default::default()
+        }];
+        let compactor = Compactor::with_config(LeveledCompactionConfig {
+            l0_file_count_threshold: 1,
+            ..LeveledCompactionConfig::default()
+        });
+        let mut plan = compactor
+            .pick_compaction(&files, 0)?
+            .expect("single-file threshold should plan ordinary L0 to L1 compaction");
+        plan.output_seq = 50;
+
+        // Act
+        let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
+
+        // Assert
+        assert_eq!(plan.target_level, 1);
+        assert!(plan.point_tombstone_gc_eligible);
+        let reader = factory.open(std::path::Path::new(&output_names[0]))?;
+        assert!(matches!(
+            reader.get_state(b"alpha")?,
+            crate::sst::types::KeyState::Absent
+        ));
+        assert!(matches!(
+            reader.get_state(b"beta")?,
+            crate::sst::types::KeyState::Value(_, 6, _, _)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn should_retain_point_tombstone_when_selected_target_extends_into_deeper_overlap(
+    ) -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let source_name = crate::sst::file_name(0, 1, 1);
+        let target_name = crate::sst::file_name(0, 2, 2);
+
+        let mut source_writer = factory.create()?;
+        source_writer.add_with_meta(b"m", Some(b"live"), 6, 0, None)?;
+        crate::sst::fs::finish_writer_to_path(source_writer, &temp_dir.path().join(&source_name))?;
+        let mut target_writer = factory.create()?;
+        target_writer.add_with_meta(b"a", None, 5, 2, None)?;
+        target_writer.add_with_meta(b"z", Some(b"edge"), 4, 0, None)?;
+        crate::sst::fs::finish_writer_to_path(target_writer, &temp_dir.path().join(&target_name))?;
+
+        let files = vec![
+            crate::metadata::FileMeta {
+                name: source_name,
+                level: 1,
+                size_bytes: 2,
+                cf_id: 0,
+                smallest_key: Some(b"m".to_vec()),
+                largest_key: Some(b"m".to_vec()),
+                ..Default::default()
+            },
+            crate::metadata::FileMeta {
+                name: target_name,
+                level: 2,
+                size_bytes: 1,
+                cf_id: 0,
+                smallest_key: Some(b"a".to_vec()),
+                largest_key: Some(b"z".to_vec()),
+                ..Default::default()
+            },
+            crate::metadata::FileMeta {
+                name: crate::sst::file_name(0, 3, 3),
+                level: 3,
+                size_bytes: 1,
+                cf_id: 0,
+                smallest_key: Some(b"a".to_vec()),
+                largest_key: Some(b"b".to_vec()),
+                ..Default::default()
+            },
+        ];
+        let compactor = Compactor::with_config(LeveledCompactionConfig {
+            l1_target_size: 1,
+            ..LeveledCompactionConfig::default()
+        });
+        let mut plan = compactor
+            .pick_compaction(&files, 0)?
+            .expect("eligible inner-level compaction");
+        plan.output_seq = 50;
+
+        // Act
+        let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
+
+        // Assert
+        assert!(!plan.point_tombstone_gc_eligible);
+        let reader = factory.open(std::path::Path::new(&output_names[0]))?;
+        assert!(matches!(
+            reader.get_state(b"a")?,
+            crate::sst::types::KeyState::Tombstone(5)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn should_retain_tombstones_newer_than_snapshot_horizon_even_with_bottommost_proof(
+    ) -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let mut input_writer = factory.create()?;
+        input_writer.add_with_meta(b"point", None, 11, 2, None)?;
+        input_writer.add_range_tombstone(b"a", b"z", 11)?;
+        crate::sst::fs::finish_writer_to_path(input_writer, &temp_dir.path().join("input.sst"))?;
+        let mut plan = CompactionPlan::new(0, 5, 6)
+            .with_output_seq(49)
+            .with_snapshot_horizon(Some(10))
+            .with_tombstone_gc_eligibility(true, true);
+        plan.input_files.push("input.sst".to_string());
+
+        // Act
+        let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
+
+        // Assert
+        let reader = factory.open(std::path::Path::new(&output_names[0]))?;
+        assert!(matches!(
+            reader.get_state(b"point")?,
+            crate::sst::types::KeyState::Tombstone(11)
+        ));
+        assert_eq!(reader.range_tombstones().len(), 1);
+        assert_eq!(reader.range_tombstones()[0].seq, 11);
+        Ok(())
+    }
+
+    #[test]
+    fn should_remove_covered_value_before_dropping_obsolete_range_tombstone() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let mut value_writer = factory.create()?;
+        value_writer.add_with_meta(b"middle", Some(b"deleted"), 1, 0, None)?;
+        value_writer.add_with_meta(b"zulu", Some(b"live"), 3, 0, None)?;
+        crate::sst::fs::finish_writer_to_path(value_writer, &temp_dir.path().join("values.sst"))?;
+        let mut tombstone_writer = factory.create()?;
+        tombstone_writer.add_range_tombstone(b"a", b"z", 2)?;
+        crate::sst::fs::finish_writer_to_path(
+            tombstone_writer,
+            &temp_dir.path().join("range-delete.sst"),
+        )?;
+        let mut plan = CompactionPlan::new(0, 5, 6)
+            .with_output_seq(46)
+            .with_tombstone_gc_eligibility(true, true);
+        plan.input_files
+            .extend(["values.sst".to_string(), "range-delete.sst".to_string()]);
+
+        // Act
+        let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
+
+        // Assert
+        let reader = factory.open(std::path::Path::new(&output_names[0]))?;
+        assert!(matches!(
+            reader.get_state(b"middle")?,
+            crate::sst::types::KeyState::Absent
+        ));
+        assert!(reader.range_tombstones().is_empty());
+        assert!(matches!(
+            reader.get_state(b"zulu")?,
+            crate::sst::types::KeyState::Value(_, 3, _, _)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn should_publish_remove_only_compaction_when_all_entries_are_obsolete_tombstones(
+    ) -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let mut input_writer = factory.create()?;
+        input_writer.add_with_meta(b"deleted", None, 5, 2, None)?;
+        crate::sst::fs::finish_writer_to_path(input_writer, &temp_dir.path().join("input.sst"))?;
+        let mut plan = CompactionPlan::new(0, 5, 6)
+            .with_output_seq(47)
+            .with_tombstone_gc_eligibility(true, false);
+        plan.input_files.push("input.sst".to_string());
+
+        // Act
+        let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
+
+        // Assert
+        assert!(output_names.is_empty());
+        assert!(!temp_dir
+            .path()
+            .join(crate::sst::file_name(0, 6, 47))
+            .exists());
+        Ok(())
+    }
+
+    #[test]
+    fn should_fail_compaction_when_equal_key_and_sequence_have_conflicting_values(
+    ) -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        for (name, value) in [
+            ("first.sst", b"first".as_slice()),
+            ("second.sst", b"second"),
+        ] {
+            let mut writer = factory.create()?;
+            writer.add_with_meta(b"same", Some(value), 7, 0, None)?;
+            crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join(name))?;
+        }
+        let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(48);
+        plan.input_files
+            .extend(["first.sst".to_string(), "second.sst".to_string()]);
+
+        // Act
+        let error = execute_compaction(&plan, &factory, temp_dir.path(), None)
+            .expect_err("conflicting logical versions must not use input order as authority");
+
+        // Assert
+        assert!(matches!(error, MidgeError::Corruption(_)));
+        assert!(!temp_dir
+            .path()
+            .join(crate::sst::file_name(0, 1, 48))
+            .exists());
         Ok(())
     }
 

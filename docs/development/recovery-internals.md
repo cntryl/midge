@@ -133,7 +133,9 @@ Compaction follows the same publication pattern with a different state transitio
 
 - input SSTs remain authoritative
 - replacement SSTs must not be used for reads yet
-- recovery either publishes the replacement batch or keeps the input files authoritative
+- an `OutputDurable` intent is rolled back and its non-authoritative output is removed
+- a `ManifestPublished` intent may complete the replacement batch
+- if the manifest journal already contains the whole batch, that durable authority wins even if the intent phase update was interrupted
 
 #### Crash after manifest publish but before input cleanup
 

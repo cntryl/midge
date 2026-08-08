@@ -762,8 +762,11 @@ impl Engine {
     ///
     /// # Errors
     ///
-    /// Returns [`MidgeError::InvalidArgument`] when the reserved `default`
-    /// name is requested or DDL is attempted during ingest mode. Returns
+    /// Names must be non-empty UTF-8 strings of at most 255 bytes, must not
+    /// contain NUL, and must not be the reserved name `default`.
+    ///
+    /// Returns [`MidgeError::InvalidArgument`] when a name violates those
+    /// restrictions or DDL is attempted during ingest mode. Returns
     /// [`MidgeError::ResourceLimit`] when the column-family ID space is
     /// exhausted. Other errors report persistence or runtime failures.
     pub fn create_column_family(&self, name: &str) -> MidgeResult<ColumnFamilyHandle> {
@@ -805,19 +808,50 @@ impl Engine {
         }
     }
 
-    /// Drop a column family by ID
-    /// Drop a column family (used by tests)
+    /// Drop a column family by ID after all committed memtable data has been
+    /// flushed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MidgeError::InvalidArgument`] for the default, missing, or
+    /// already-dropped column family and when DDL is attempted during ingest
+    /// mode. Returns [`MidgeError::Busy`] when committed data remains in the
+    /// active memtable; call [`Self::drop_column_family_discarding_unflushed`]
+    /// only when intentionally discarding it. Other errors report persistence
+    /// or runtime failures.
+    pub fn drop_column_family(&self, cf_id: ColumnFamilyId) -> MidgeResult<()> {
+        self.drop_column_family_inner(cf_id, false)
+    }
+
+    /// Destructively drop a column family even when committed data remains in
+    /// its active memtable.
+    ///
+    /// Flush and compaction publication already in flight are still quiesced
+    /// before the drop. This method makes the otherwise rejected data loss
+    /// explicit at the call site.
     ///
     /// # Errors
     ///
     /// Returns [`MidgeError::InvalidArgument`] for the default, missing, or
     /// already-dropped column family and when DDL is attempted during ingest
     /// mode. Other errors report persistence or runtime failures.
-    pub fn drop_column_family(&self, cf_id: ColumnFamilyId) -> MidgeResult<()> {
+    pub fn drop_column_family_discarding_unflushed(
+        &self,
+        cf_id: ColumnFamilyId,
+    ) -> MidgeResult<()> {
+        self.drop_column_family_inner(cf_id, true)
+    }
+
+    fn drop_column_family_inner(
+        &self,
+        cf_id: ColumnFamilyId,
+        discard_unflushed: bool,
+    ) -> MidgeResult<()> {
         let response = self.runtime_handle.send_and_wait_filtered(
             RuntimeMsg::ManifestDropColumnFamily {
                 request_id: next_request_id()?,
                 cf_id,
+                discard_unflushed,
             },
             |resp| {
                 matches!(

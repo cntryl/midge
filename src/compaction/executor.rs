@@ -43,7 +43,7 @@ pub struct CompactionVersion {
 
 /// Stream-based deduplicator: yields only the first (highest-seq) version per key.
 ///
-/// This adapter sits between `MergeIterator` and the write path. It consumes
+/// This adapter sits between the version merge and the write path. It consumes
 /// the merged stream (which is already key-ascending, seq-descending) and emits
 /// exactly one entry per unique key—the first one it sees for that key.
 ///
@@ -107,10 +107,30 @@ fn is_expired(version: &CompactionVersion, now_millis: u64) -> bool {
     crate::common::time::is_expired_at(version.expiration, now_millis)
 }
 
+fn tombstone_is_obsolete(sequence: u64, snapshot_horizon: Option<u64>) -> bool {
+    snapshot_horizon.is_none_or(|horizon| sequence <= horizon)
+}
+
+fn ensure_compaction_not_aborted(abort_check: Option<&dyn Fn() -> bool>) -> MidgeResult<()> {
+    if abort_check.is_some_and(|check| check()) {
+        return Err(crate::common::MidgeError::Aborted(
+            "compaction aborted due to ingest epoch change".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SstCompactionInput {
     pub versions: Vec<CompactionVersion>,
     pub range_tombstones: Vec<RangeTombstone>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TombstoneGcPolicy {
+    pub(crate) snapshot_horizon: Option<u64>,
+    pub(crate) point_eligible: bool,
+    pub(crate) range_eligible: bool,
 }
 
 /// One sorted input and its current merge head.
@@ -366,18 +386,13 @@ pub fn filter_tombstones_with_horizon(
     versions: &[CompactionVersion],
     snapshot_horizon: Option<u64>,
 ) -> Vec<CompactionVersion> {
-    match snapshot_horizon {
-        Some(h) => versions
-            .iter()
-            .filter(|v| !(v.is_tombstone && v.seq <= h)) // drop tombstones older-or-equal to horizon
-            .cloned()
-            .collect(),
-        None => versions
-            .iter()
-            .filter(|v| !v.is_tombstone)
-            .cloned()
-            .collect(),
-    }
+    versions
+        .iter()
+        .filter(|version| {
+            !(version.is_tombstone && tombstone_is_obsolete(version.seq, snapshot_horizon))
+        })
+        .cloned()
+        .collect()
 }
 
 /// Merge, normalize, deduplicate, and write compaction versions without
@@ -387,21 +402,42 @@ pub(crate) fn write_merged_compaction_output_to_sst(
     output_filename: &str,
     streams: Vec<Vec<CompactionVersion>>,
     range_tombstones: &[RangeTombstone],
+    tombstone_gc: TombstoneGcPolicy,
     abort_check: Option<&dyn Fn() -> bool>,
-) -> MidgeResult<usize> {
+) -> MidgeResult<bool> {
     let mut writer = sst_factory.create()?;
     let now_millis = crate::common::time::unix_time_millis();
     let mut last_key: Option<Vec<u8>> = None;
     let mut written = 0usize;
+    let (obsolete_range_tombstones, retained_range_tombstones): (Vec<_>, Vec<_>) =
+        range_tombstones.iter().partition(|tombstone| {
+            tombstone_gc.range_eligible
+                && tombstone_is_obsolete(tombstone.seq, tombstone_gc.snapshot_horizon)
+        });
 
-    for (seen, mut version) in VersionMergeIterator::new(streams).enumerate() {
-        if seen % 1024 == 0 {
-            if let Some(check) = abort_check {
-                if check() {
-                    return Err(crate::common::MidgeError::Aborted(
-                        "compaction aborted due to ingest epoch change".to_string(),
-                    ));
-                }
+    let mut merged = VersionMergeIterator::new(streams).peekable();
+    let mut seen = 0usize;
+    while let Some(mut version) = merged.next() {
+        if seen.is_multiple_of(1024) {
+            ensure_compaction_not_aborted(abort_check)?;
+        }
+        seen = seen.saturating_add(1);
+
+        while merged
+            .peek()
+            .is_some_and(|candidate| candidate.key == version.key && candidate.seq == version.seq)
+        {
+            let duplicate = merged.next().expect("peeked compaction version exists");
+            seen = seen.saturating_add(1);
+            if seen.is_multiple_of(1024) {
+                ensure_compaction_not_aborted(abort_check)?;
+            }
+            if duplicate != version {
+                return Err(crate::common::MidgeError::Corruption(format!(
+                    "conflicting compaction versions for key {:?} at sequence {}",
+                    String::from_utf8_lossy(&version.key),
+                    version.seq
+                )));
             }
         }
 
@@ -416,6 +452,19 @@ pub(crate) fn write_merged_compaction_output_to_sst(
         }
         last_key = Some(version.key.clone());
 
+        if obsolete_range_tombstones
+            .iter()
+            .any(|tombstone| tombstone.covers(&version.key) && tombstone.seq >= version.seq)
+        {
+            continue;
+        }
+        if tombstone_gc.point_eligible
+            && version.is_tombstone
+            && tombstone_is_obsolete(version.seq, tombstone_gc.snapshot_horizon)
+        {
+            continue;
+        }
+
         writer.add_sorted_with_meta(
             &version.key,
             version.value.as_deref(),
@@ -426,29 +475,17 @@ pub(crate) fn write_merged_compaction_output_to_sst(
         written = written.saturating_add(1);
     }
 
-    for (index, tombstone) in range_tombstones.iter().enumerate() {
+    for (index, tombstone) in retained_range_tombstones.iter().enumerate() {
         if index % 1024 == 0 {
-            if let Some(check) = abort_check {
-                if check() {
-                    return Err(crate::common::MidgeError::Aborted(
-                        "compaction aborted due to ingest epoch change".to_string(),
-                    ));
-                }
-            }
+            ensure_compaction_not_aborted(abort_check)?;
         }
         writer.add_range_tombstone(&tombstone.start, &tombstone.end, tombstone.seq)?;
     }
 
-    if written == 0 && range_tombstones.is_empty() {
-        return Err(crate::common::MidgeError::Internal(
-            "compaction produced no output after filtering; inputs were not replaced".to_string(),
-        ));
-    }
+    ensure_compaction_not_aborted(abort_check)?;
 
-    if abort_check.is_some_and(|check| check()) {
-        return Err(crate::common::MidgeError::Aborted(
-            "compaction aborted due to ingest epoch change".to_string(),
-        ));
+    if written == 0 && retained_range_tombstones.is_empty() {
+        return Ok(false);
     }
 
     let output_path = Path::new(output_filename);
@@ -468,7 +505,7 @@ pub(crate) fn write_merged_compaction_output_to_sst(
         ));
     }
 
-    Ok(written)
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -604,6 +641,21 @@ mod tests {
     }
 
     #[test]
+    fn should_use_input_index_given_equal_key_sequence_when_merging() {
+        // Arrange
+        let first = vec![mk_version("same", 7, false, Some("first"), None)];
+        let second = vec![mk_version("same", 7, false, Some("second"), None)];
+
+        // Act
+        let merged: Vec<_> = VersionMergeIterator::new(vec![first, second]).collect();
+
+        // Assert
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].value.as_deref(), Some(b"first".as_ref()));
+        assert_eq!(merged[1].value.as_deref(), Some(b"second".as_ref()));
+    }
+
+    #[test]
     fn should_drop_expired_value_given_compaction_time_after_expiration() {
         let now = 1_000_000u64;
         let v = mk_version("k", 1, false, Some("v"), Some(now - 1));
@@ -707,53 +759,20 @@ mod tests {
 
     #[test]
     fn should_stream_deduplicate_multiple_versions_when_using_iterator() {
-        use crate::compaction::merge::{MergeEntry, MergeIterator};
-        use bytes::Bytes;
-
         // Arrange: Create two input iterators (simulating SST readers)
         let stream1 = vec![
-            MergeEntry {
-                key: Bytes::from(b"a".to_vec()),
-                value: Bytes::from(b"a3".to_vec()),
-                seq: 3,
-            },
-            MergeEntry {
-                key: Bytes::from(b"a".to_vec()),
-                value: Bytes::from(b"a1".to_vec()),
-                seq: 1,
-            },
-            MergeEntry {
-                key: Bytes::from(b"c".to_vec()),
-                value: Bytes::from(b"c2".to_vec()),
-                seq: 2,
-            },
+            mk_version("a", 3, false, Some("a3"), None),
+            mk_version("a", 1, false, Some("a1"), None),
+            mk_version("c", 2, false, Some("c2"), None),
         ];
 
         let stream2 = vec![
-            MergeEntry {
-                key: Bytes::from(b"a".to_vec()),
-                value: Bytes::from(b"a2".to_vec()),
-                seq: 2,
-            },
-            MergeEntry {
-                key: Bytes::from(b"b".to_vec()),
-                value: Bytes::from(b"b5".to_vec()),
-                seq: 5,
-            },
+            mk_version("a", 2, false, Some("a2"), None),
+            mk_version("b", 5, false, Some("b5"), None),
         ];
 
         // Act: Create merge iterator from both streams
-        let merge_iter =
-            MergeIterator::from_iterators(vec![stream1.into_iter(), stream2.into_iter()]);
-
-        // Convert MergeEntry to CompactionVersion
-        let version_iter = merge_iter.map(|entry| CompactionVersion {
-            key: entry.key.to_vec(),
-            seq: entry.seq,
-            is_tombstone: false,
-            value: Some(entry.value.to_vec()),
-            expiration: None,
-        });
+        let version_iter = VersionMergeIterator::new(vec![stream1, stream2]);
 
         // Stream deduplicate (keeps only first/highest-seq per key)
         let dedup_iter = StreamDeduplicate::new(version_iter);
@@ -854,29 +873,13 @@ mod tests {
     }
 
     #[test]
-    fn should_produce_no_output_given_empty_compaction_input() {
-        use crate::compaction::merge::{MergeEntry, MergeIterator};
-        use bytes::Bytes;
-
+    fn should_merge_nonempty_stream_when_another_input_stream_is_empty() {
         // Arrange
-        let stream1: Vec<MergeEntry> = vec![];
-        let stream2 = vec![MergeEntry {
-            key: Bytes::from(b"k".to_vec()),
-            value: Bytes::from(b"v".to_vec()),
-            seq: 10,
-        }];
+        let stream1 = vec![];
+        let stream2 = vec![mk_version("k", 10, false, Some("v"), None)];
 
         // Act
-        let merge_iter =
-            MergeIterator::from_iterators(vec![stream1.into_iter(), stream2.into_iter()]);
-
-        let version_iter = merge_iter.map(|entry| CompactionVersion {
-            key: entry.key.to_vec(),
-            seq: entry.seq,
-            is_tombstone: false,
-            value: Some(entry.value.to_vec()),
-            expiration: None,
-        });
+        let version_iter = VersionMergeIterator::new(vec![stream1, stream2]);
 
         let dedup_iter = StreamDeduplicate::new(version_iter);
         let result: Vec<_> = dedup_iter.collect();
@@ -890,58 +893,22 @@ mod tests {
 
     #[test]
     fn should_deduplicate_correctly_across_streams_with_overlapping_keys() {
-        use crate::compaction::merge::{MergeEntry, MergeIterator};
-        use bytes::Bytes;
-
         // Arrange
         // Stream 1: a(5), a(3), b(4)
         let stream1 = vec![
-            MergeEntry {
-                key: Bytes::from(b"a".to_vec()),
-                value: Bytes::from(b"a5".to_vec()),
-                seq: 5,
-            },
-            MergeEntry {
-                key: Bytes::from(b"a".to_vec()),
-                value: Bytes::from(b"a3".to_vec()),
-                seq: 3,
-            },
-            MergeEntry {
-                key: Bytes::from(b"b".to_vec()),
-                value: Bytes::from(b"b4".to_vec()),
-                seq: 4,
-            },
+            mk_version("a", 5, false, Some("a5"), None),
+            mk_version("a", 3, false, Some("a3"), None),
+            mk_version("b", 4, false, Some("b4"), None),
         ];
 
         // Stream 2: a(4), b(6), c(2)
         let stream2 = vec![
-            MergeEntry {
-                key: Bytes::from(b"a".to_vec()),
-                value: Bytes::from(b"a4".to_vec()),
-                seq: 4,
-            },
-            MergeEntry {
-                key: Bytes::from(b"b".to_vec()),
-                value: Bytes::from(b"b6".to_vec()),
-                seq: 6,
-            },
-            MergeEntry {
-                key: Bytes::from(b"c".to_vec()),
-                value: Bytes::from(b"c2".to_vec()),
-                seq: 2,
-            },
+            mk_version("a", 4, false, Some("a4"), None),
+            mk_version("b", 6, false, Some("b6"), None),
+            mk_version("c", 2, false, Some("c2"), None),
         ];
 
-        let merge_iter =
-            MergeIterator::from_iterators(vec![stream1.into_iter(), stream2.into_iter()]);
-
-        let version_iter = merge_iter.map(|entry| CompactionVersion {
-            key: entry.key.to_vec(),
-            seq: entry.seq,
-            is_tombstone: false,
-            value: Some(entry.value.to_vec()),
-            expiration: None,
-        });
+        let version_iter = VersionMergeIterator::new(vec![stream1, stream2]);
 
         // Act
         let dedup_iter = StreamDeduplicate::new(version_iter);

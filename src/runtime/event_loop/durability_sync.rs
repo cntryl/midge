@@ -256,12 +256,23 @@ impl EventLoop {
     ) -> crate::common::MidgeResult<()> {
         const MAX_DRAIN: usize = 4096;
 
+        // 🔑 Drain any pending writes so they are included in this sync.
+        // An unresolved remote DDL decision fences those writes in queue order
+        // until a DDL retry reconciles the durable prepare.
+        if !self.ddl_authority_ambiguous {
+            let _ = self.drain_pending_writes(msg_rx, MAX_DRAIN);
+        }
+
+        self.sync_current_wal()
+    }
+
+    /// Establish a WAL barrier without consuming messages ordered after the
+    /// current operation. DDL drop uses this so a later write cannot be
+    /// coalesced ahead of the drop and then silently discarded by it.
+    pub(super) fn sync_current_wal(&mut self) -> crate::common::MidgeResult<()> {
         if self.wal_actor.is_cloud_async() {
             return Ok(()); // CloudAsync has separate logic
         }
-
-        // 🔑 Drain any pending writes so they are included in this sync
-        let _ = self.drain_pending_writes(msg_rx, MAX_DRAIN);
 
         // Always sync to establish durability barrier
         // (even if no pending writes or waiters - we're being asked to guarantee durability)

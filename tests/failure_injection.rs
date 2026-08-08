@@ -52,6 +52,9 @@ fn should_keep_column_family_usable_when_drop_manifest_append_fails() {
         .create_column_family("drop-atomic")
         .expect("create column family");
     write_cf_value(&engine, &cf, b"key", b"value");
+    engine
+        .flush_cf(&cf)
+        .expect("flush before testing durable drop publication");
     let scenario = fail::FailScenario::setup();
     fail::cfg("midge::manifest::inject_no_space_on_append_edit", "return")
         .expect("configure manifest append no-space failpoint");
@@ -114,6 +117,9 @@ fn should_reject_column_family_drop_when_wal_sync_fails() {
         .create_column_family("sync-drop")
         .expect("create column family");
     write_cf_value(&engine, &cf, b"key", b"value");
+    engine
+        .flush_cf(&cf)
+        .expect("flush before testing durable drop WAL barrier");
     let scenario = fail::FailScenario::setup();
     fail::cfg("midge::wal::inject_no_space_on_sync", "return")
         .expect("configure WAL sync no-space failpoint");
@@ -134,6 +140,84 @@ fn should_reject_column_family_drop_when_wal_sync_fails() {
 
     let reopened = open_local_engine(db_path);
     assert!(reopened.get_column_family("sync-drop").is_none());
+}
+
+#[test]
+fn should_return_busy_before_wal_sync_failure_when_safe_drop_has_unflushed_data() {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
+    let engine = open_local_engine(db_path);
+    let cf = engine
+        .create_column_family("busy-before-sync")
+        .expect("create column family");
+    write_cf_value(&engine, &cf, b"key", b"value");
+    let scenario = fail::FailScenario::setup();
+    fail::cfg("midge::wal::inject_no_space_on_sync", "return")
+        .expect("configure WAL sync no-space failpoint");
+
+    // Act
+    let drop_result = engine.drop_column_family(cf.id());
+
+    // Assert
+    assert!(matches!(drop_result, Err(MidgeError::Busy(_))));
+    assert_eq!(
+        read_cf_value(&engine, &cf, b"key"),
+        Some(Bytes::from_static(b"value"))
+    );
+    fail::remove("midge::wal::inject_no_space_on_sync");
+    scenario.teardown();
+    engine.flush_cf(&cf).expect("flush retained data");
+    engine
+        .drop_column_family(cf.id())
+        .expect("drop after flushing retained data");
+}
+
+#[test]
+fn should_report_success_when_drop_metadata_mirror_fails_after_authority_switch() {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
+    let engine = open_local_engine(db_path);
+    let cf = engine
+        .create_column_family("committed-drop")
+        .expect("create column family");
+    let scenario = fail::FailScenario::setup();
+    fail::cfg(
+        "midge::ddl::after_drop_local_commit_before_metadata_mirror",
+        "return",
+    )
+    .expect("configure post-commit drop mirror failure");
+
+    // Act
+    let drop_result = engine.drop_column_family(cf.id());
+
+    // Assert: the local journal already made the drop authoritative. Returning
+    // an error here would leave Engine's handle registry split from runtime.
+    assert!(drop_result.is_ok());
+    assert!(engine.get_column_family("committed-drop").is_none());
+    assert_eq!(
+        engine
+            .get_runtime_metrics()
+            .expect("degraded runtime metrics")
+            .health,
+        EngineHealth::Degraded
+    );
+    fail::remove("midge::ddl::after_drop_local_commit_before_metadata_mirror");
+    scenario.teardown();
+    shutdown_engine(engine);
+
+    let reopened = open_local_engine(db_path);
+    assert!(reopened.get_column_family("committed-drop").is_none());
+    assert_eq!(
+        reopened
+            .get_runtime_metrics()
+            .expect("reopened runtime metrics")
+            .health,
+        EngineHealth::Healthy
+    );
 }
 
 #[test]
@@ -1186,7 +1270,7 @@ fn should_preserve_compacted_input_state_when_compaction_output_hits_no_space() 
 }
 
 #[test]
-fn should_publish_compaction_output_on_reopen_when_manifest_batch_append_hits_no_space() {
+fn should_publish_single_output_when_retrying_compaction_after_failed_manifest_restart() {
     // Arrange
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
     let temp_dir = TempDir::new().expect("temp dir");
@@ -1194,22 +1278,14 @@ fn should_publish_compaction_output_on_reopen_when_manifest_batch_append_hits_no
     let engine = open_local_engine(db_path);
     let cf = default_cf(&engine);
 
-    for batch in 0..6 {
-        for index in 0..25 {
-            let key = format!("cmp-recover-b{batch}-k{index:02}");
-            let value = format!("value-b{batch}-k{index:02}");
-            let mut tx = engine
-                .begin_tx(cf.id(), TransactionMode::ReadWrite)
-                .expect("begin batch tx");
-            tx.put(key.into_bytes(), value.into_bytes(), None)
-                .expect("put compaction seed");
-            tx.commit(WriteOptions::sync())
-                .expect("commit compaction seed");
-        }
-        engine.flush_cf(&cf).expect("flush compaction seed");
-    }
+    seed_compaction_batches(&engine, &cf, "cmp-recover", 4, 25);
 
     let initial_layout = engine.get_storage_layout().expect("initial storage layout");
+    let initial_sst_count = initial_layout
+        .levels
+        .iter()
+        .map(|level| level.file_count)
+        .sum::<usize>();
     assert!(
         !initial_layout
             .levels
@@ -1230,20 +1306,17 @@ fn should_publish_compaction_output_on_reopen_when_manifest_batch_append_hits_no
         .expect("compact_all returns after manifest batch failure");
     fail::remove("midge::manifest::inject_no_space_on_compaction_batch_edit");
     scenario.teardown();
+    let live_retry = engine.compact_all();
+
+    // Assert
+    assert!(matches!(live_retry, Err(MidgeError::Fenced(_))));
 
     shutdown_engine(engine);
 
     let reopened = open_local_engine(db_path);
     let reopened_cf = default_cf(&reopened);
 
-    // Assert
-    for batch in 0..6 {
-        for index in 0..25 {
-            let key = format!("cmp-recover-b{batch}-k{index:02}");
-            let value = format!("value-b{batch}-k{index:02}");
-            assert_visible(&reopened, &reopened_cf, key.as_bytes(), value.as_bytes());
-        }
-    }
+    assert_compaction_batches_visible(&reopened, &reopened_cf, "cmp-recover", 4, 25);
 
     let recovered_layout = reopened
         .get_storage_layout()
@@ -1252,8 +1325,502 @@ fn should_publish_compaction_output_on_reopen_when_manifest_batch_append_hits_no
         recovered_layout
             .levels
             .iter()
+            .all(|level| level.level == 0 || level.file_count == 0),
+        "OutputDurable recovery must not publish a compaction whose manifest batch failed"
+    );
+    assert_eq!(
+        recovered_layout
+            .levels
+            .iter()
+            .map(|level| level.file_count)
+            .sum::<usize>(),
+        initial_sst_count,
+        "rollback must retain every authoritative input and remove only the orphan output"
+    );
+
+    reopened
+        .compact_all()
+        .expect("retry compaction after rollback recovery");
+    let retried_layout = reopened.get_storage_layout().expect("retried layout");
+    assert_eq!(
+        retried_layout
+            .levels
+            .iter()
+            .find(|level| level.level == 1)
+            .map_or(0, |level| level.file_count),
+        1,
+        "successful retry must publish exactly one replacement output"
+    );
+    assert!(
+        retried_layout
+            .levels
+            .iter()
+            .find(|level| level.level == 0)
+            .map_or(0, |level| level.file_count)
+            < initial_sst_count,
+        "successful retry must consume the original L0 inputs"
+    );
+    shutdown_engine(reopened);
+
+    let final_reopen = open_local_engine(db_path);
+    let final_cf = default_cf(&final_reopen);
+    assert_compaction_batches_visible(&final_reopen, &final_cf, "cmp-recover", 4, 25);
+    let final_layout = final_reopen
+        .get_storage_layout()
+        .expect("final recovered layout");
+    assert_eq!(
+        final_layout
+            .levels
+            .iter()
+            .find(|level| level.level == 1)
+            .map_or(0, |level| level.file_count),
+        1,
+        "restart must not resurrect the failed output beside the retry output"
+    );
+}
+
+#[test]
+fn should_delete_untracked_compaction_output_on_reopen_when_intent_save_fails() {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
+    let engine = open_local_engine(db_path);
+    let cf = default_cf(&engine);
+    for batch in 0..6 {
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin compaction seed");
+        tx.put(
+            format!("intentless-output-{batch}").into_bytes(),
+            b"value".to_vec(),
+            None,
+        )
+        .expect("put compaction seed");
+        tx.commit(WriteOptions::best_effort())
+            .expect("commit compaction seed");
+        engine.flush_cf(&cf).expect("flush compaction seed");
+    }
+    let initial_sst_count = count_sst_files(db_path);
+    let scenario = fail::FailScenario::setup();
+    fail::cfg("midge::intent::inject_no_space_on_save", "return")
+        .expect("configure intent save failure");
+
+    // Act
+    engine
+        .compact_all()
+        .expect("compact_all returns after intent persistence failure");
+
+    // Assert: execution produced an output, but no intent or manifest entry
+    // owns it, so startup cleanup must remove exactly that residue.
+    assert!(count_sst_files(db_path) > initial_sst_count);
+    assert_eq!(
+        engine
+            .get_runtime_metrics()
+            .expect("degraded live metrics")
+            .health,
+        EngineHealth::Degraded
+    );
+    fail::remove("midge::intent::inject_no_space_on_save");
+    scenario.teardown();
+    shutdown_engine(engine);
+
+    let reopened = open_local_engine(db_path);
+    let metrics = reopened
+        .get_runtime_metrics()
+        .expect("reopened runtime metrics");
+    let layout = reopened
+        .get_storage_layout()
+        .expect("reopened storage layout");
+    assert_eq!(metrics.health, EngineHealth::Healthy);
+    assert_eq!(metrics.obsolete_file_backlog, 0);
+    assert_eq!(count_sst_files(db_path), initial_sst_count);
+    assert!(
+        layout
+            .levels
+            .iter()
+            .all(|level| level.level == 0 || level.file_count == 0),
+        "intentless output must not become manifest-authoritative"
+    );
+}
+
+#[test]
+fn should_fence_followup_compaction_when_phase_save_fails_after_authority_switch() {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
+    let engine = open_local_engine(db_path);
+    let cf = default_cf(&engine);
+    for batch in 0..6 {
+        for index in 0..25 {
+            let key = format!("phase-save-b{batch}-k{index:02}");
+            let value = format!("value-b{batch}-k{index:02}");
+            let mut tx = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .expect("begin compaction seed");
+            tx.put(key.into_bytes(), value.into_bytes(), None)
+                .expect("put compaction seed");
+            tx.commit(WriteOptions::best_effort())
+                .expect("commit compaction seed");
+        }
+        engine.flush_cf(&cf).expect("flush compaction seed");
+    }
+    let initial_sst_count = count_sst_files(db_path);
+    assert!(initial_sst_count >= 6);
+    let scenario = fail::FailScenario::setup();
+    fail::cfg(
+        "midge::compaction::inject_failure_after_manifest_batch",
+        "return",
+    )
+    .expect("configure post-manifest compaction failure");
+
+    // Act
+    engine
+        .compact_all()
+        .expect("compact_all returns after phase-save failure");
+
+    // Assert: the batch journal already made the output authoritative. The
+    // live engine must not roll that decision back or retain obsolete local
+    // inputs just because advancing the publication phase failed.
+    let live_layout = engine.get_storage_layout().expect("live storage layout");
+    let live_manifest_sst_count = live_layout
+        .levels
+        .iter()
+        .map(|level| level.file_count)
+        .sum::<usize>();
+    assert_eq!(live_layout.health, EngineHealth::Degraded);
+    assert!(
+        live_layout
+            .levels
+            .iter()
             .any(|level| level.level > 0 && level.file_count > 0),
-        "recovery should publish the durable compaction output into the manifest"
+        "durable manifest batch must remain authoritative"
+    );
+    assert!(live_manifest_sst_count < initial_sst_count);
+    assert_eq!(
+        count_sst_files(db_path),
+        live_manifest_sst_count,
+        "local inputs removed by the authoritative manifest must be reclaimed"
+    );
+    fail::remove("midge::compaction::inject_failure_after_manifest_batch");
+    scenario.teardown();
+    let followup = engine.compact_all();
+    assert!(matches!(followup, Err(MidgeError::Fenced(_))));
+    shutdown_engine(engine);
+
+    let reopened = open_local_engine(db_path);
+    let reopened_cf = default_cf(&reopened);
+    for batch in 0..6 {
+        for index in 0..25 {
+            let key = format!("phase-save-b{batch}-k{index:02}");
+            let value = format!("value-b{batch}-k{index:02}");
+            assert_visible(&reopened, &reopened_cf, key.as_bytes(), value.as_bytes());
+        }
+    }
+    let recovered_layout = reopened
+        .get_storage_layout()
+        .expect("recovered storage layout");
+    assert_eq!(recovered_layout.health, EngineHealth::Healthy);
+    assert!(
+        recovered_layout
+            .levels
+            .iter()
+            .any(|level| level.level > 0 && level.file_count > 0),
+        "intent replay must preserve the journal-authoritative compaction"
+    );
+    assert_eq!(count_sst_files(db_path), live_manifest_sst_count);
+}
+
+#[test]
+fn should_fence_followup_compaction_when_intent_clear_save_fails() {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
+    let engine = open_local_engine(db_path);
+    let cf = default_cf(&engine);
+    for batch in 0..4 {
+        let key = format!("clear-save-{batch}");
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin compaction seed");
+        tx.put(key.into_bytes(), b"value".to_vec(), None)
+            .expect("put compaction seed");
+        tx.commit(WriteOptions::best_effort())
+            .expect("commit compaction seed");
+        engine.flush_cf(&cf).expect("flush compaction seed");
+    }
+    let scenario = fail::FailScenario::setup();
+    fail::cfg(
+        "midge::compaction::inject_no_space_on_intent_clear",
+        "return",
+    )
+    .expect("configure compaction intent-clear failure");
+
+    // Act
+    engine
+        .compact_all()
+        .expect("authoritative compaction completes in degraded state");
+    fail::remove("midge::compaction::inject_no_space_on_intent_clear");
+    scenario.teardown();
+    let followup = engine.compact_all();
+
+    // Assert
+    assert!(matches!(followup, Err(MidgeError::Fenced(_))));
+    shutdown_engine(engine);
+    let reopened = open_local_engine(db_path);
+    let reopened_cf = default_cf(&reopened);
+    for batch in 0..4 {
+        let key = format!("clear-save-{batch}");
+        assert_visible(&reopened, &reopened_cf, key.as_bytes(), b"value");
+    }
+    assert_eq!(
+        reopened
+            .get_runtime_metrics()
+            .expect("reopened metrics")
+            .health,
+        EngineHealth::Healthy
+    );
+}
+
+#[test]
+fn should_fence_followup_compaction_when_manifest_sync_result_is_ambiguous() {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
+    let engine = open_local_engine(db_path);
+    let cf = default_cf(&engine);
+    for batch in 0..4 {
+        let key = format!("ambiguous-sync-{batch}");
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin compaction seed");
+        tx.put(key.into_bytes(), b"value".to_vec(), None)
+            .expect("put compaction seed");
+        tx.commit(WriteOptions::best_effort())
+            .expect("commit compaction seed");
+        engine.flush_cf(&cf).expect("flush compaction seed");
+    }
+    let scenario = fail::FailScenario::setup();
+    fail::cfg("midge::manifest::inject_required_sync_failure", "return")
+        .expect("configure ambiguous manifest sync failure");
+
+    // Act
+    engine
+        .compact_all()
+        .expect("compact_all returns after required sync failure");
+    fail::remove("midge::manifest::inject_required_sync_failure");
+    scenario.teardown();
+    let fenced_retry = engine.compact_all();
+    shutdown_engine(engine);
+    let recovered = open_local_engine(db_path);
+    shutdown_engine(recovered);
+    let reopened = open_local_engine(db_path);
+
+    // Assert
+    assert!(matches!(fenced_retry, Err(MidgeError::Fenced(_))));
+    let reopened_cf = default_cf(&reopened);
+    for batch in 0..4 {
+        let key = format!("ambiguous-sync-{batch}");
+        assert_visible(&reopened, &reopened_cf, key.as_bytes(), b"value");
+    }
+    let layout = reopened.get_storage_layout().expect("reopened layout");
+    assert_eq!(
+        layout
+            .levels
+            .iter()
+            .find(|level| level.level == 1)
+            .map_or(0, |level| level.file_count),
+        1,
+        "ambiguous sync recovery must select one authoritative L1 output: {layout:?}"
+    );
+}
+
+#[test]
+fn should_remove_remote_compaction_orphan_on_reopen_when_manifest_batch_fails() {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
+    let open_cloud = || {
+        Engine::open(
+            OpenOptions::cloud_simulated(db_path, "test-bucket", "compaction-cleanup")
+                .background_compaction(false)
+                .build()
+                .expect("build simulated cloud options"),
+        )
+        .expect("open simulated cloud engine")
+    };
+    let engine = open_cloud();
+    let cf = default_cf(&engine);
+    for batch in 0..4 {
+        let key = format!("remote-orphan-{batch}");
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin compaction seed");
+        tx.put(key.into_bytes(), b"value".to_vec(), None)
+            .expect("put compaction seed");
+        tx.commit(WriteOptions::cloud_async())
+            .expect("commit compaction seed");
+        engine.flush_cf(&cf).expect("flush compaction seed");
+    }
+    let cloud_root = db_path.join("cloud_store");
+    let initial_remote_count = count_sst_files(&cloud_root);
+    assert_eq!(initial_remote_count, 4);
+    let scenario = fail::FailScenario::setup();
+    fail::cfg(
+        "midge::manifest::inject_no_space_on_compaction_batch_edit",
+        "return",
+    )
+    .expect("configure manifest batch append failure");
+
+    // Act
+    engine
+        .compact_all()
+        .expect("compact_all returns after manifest batch failure");
+    fail::remove("midge::manifest::inject_no_space_on_compaction_batch_edit");
+    scenario.teardown();
+    assert_eq!(
+        count_sst_files(&cloud_root),
+        initial_remote_count + 1,
+        "failed publication should leave one tracked remote cleanup candidate"
+    );
+    shutdown_engine(engine);
+    let reopened = open_cloud();
+
+    // Assert
+    assert_eq!(count_sst_files(&cloud_root), initial_remote_count);
+    let reopened_cf = default_cf(&reopened);
+    for batch in 0..4 {
+        let key = format!("remote-orphan-{batch}");
+        assert_visible(&reopened, &reopened_cf, key.as_bytes(), b"value");
+    }
+}
+
+#[test]
+fn should_remove_remote_compaction_orphan_when_column_family_is_dropped_before_reopen() {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
+    let open_cloud = || {
+        Engine::open(
+            OpenOptions::cloud_simulated(db_path, "test-bucket", "dropped-cf-cleanup")
+                .background_compaction(false)
+                .build()
+                .expect("build simulated cloud options"),
+        )
+        .expect("open simulated cloud engine")
+    };
+    let engine = open_cloud();
+    let cf = engine
+        .create_column_family("drop-after-compaction-failure")
+        .expect("create compaction column family");
+    for batch in 0..4 {
+        let key = format!("dropped-remote-orphan-{batch}");
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin compaction seed");
+        tx.put(key.into_bytes(), b"value".to_vec(), None)
+            .expect("put compaction seed");
+        tx.commit(WriteOptions::cloud_async())
+            .expect("commit compaction seed");
+        engine.flush_cf(&cf).expect("flush compaction seed");
+    }
+    let cloud_root = db_path.join("cloud_store");
+    let initial_remote_files = sst_file_names(&cloud_root);
+    assert_eq!(initial_remote_files.len(), 4);
+    let scenario = fail::FailScenario::setup();
+    fail::cfg(
+        "midge::manifest::inject_no_space_on_compaction_batch_edit",
+        "return",
+    )
+    .expect("configure manifest batch append failure");
+
+    // Act: the output upload is tracked but not published. Dropping the CF
+    // then removes every input name that normally proves the intent is still
+    // prepublication.
+    engine
+        .compact_all()
+        .expect("compact_all returns after manifest batch failure");
+    fail::remove("midge::manifest::inject_no_space_on_compaction_batch_edit");
+    scenario.teardown();
+    let failed_remote_files = sst_file_names(&cloud_root);
+    let orphan_names = failed_remote_files
+        .difference(&initial_remote_files)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(orphan_names.len(), 1);
+    engine
+        .drop_column_family(cf.id())
+        .expect("drop column family after compaction failure");
+    shutdown_engine(engine);
+    let orphan_path = cloud_root.join("sst").join(&orphan_names[0]);
+    assert!(
+        orphan_path.exists(),
+        "drop GC must not mistake the unpublished output for an authoritative input"
+    );
+    let reopened = open_cloud();
+
+    // Assert
+    assert!(reopened
+        .get_column_family("drop-after-compaction-failure")
+        .is_none());
+    assert!(
+        !orphan_path.exists(),
+        "startup must delete the proven remote output before inactive-CF replay clears its intent"
+    );
+}
+
+#[test]
+fn should_not_upload_remote_compaction_output_when_intent_save_fails() {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
+    let engine = Engine::open(
+        OpenOptions::cloud_simulated(db_path, "test-bucket", "intent-before-upload")
+            .background_compaction(false)
+            .build()
+            .expect("build simulated cloud options"),
+    )
+    .expect("open simulated cloud engine");
+    let cf = default_cf(&engine);
+    for batch in 0..4 {
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin compaction seed");
+        tx.put(
+            format!("intent-first-{batch}").into_bytes(),
+            b"value".to_vec(),
+            None,
+        )
+        .expect("put compaction seed");
+        tx.commit(WriteOptions::cloud_async())
+            .expect("commit compaction seed");
+        engine.flush_cf(&cf).expect("flush compaction seed");
+    }
+    let cloud_root = db_path.join("cloud_store");
+    let initial_remote_count = count_sst_files(&cloud_root);
+    assert_eq!(initial_remote_count, 4);
+    let scenario = fail::FailScenario::setup();
+    fail::cfg("midge::intent::inject_no_space_on_save", "return")
+        .expect("configure intent persistence failure");
+
+    // Act
+    engine
+        .compact_all()
+        .expect("compact_all returns after intent persistence failure");
+    fail::remove("midge::intent::inject_no_space_on_save");
+    scenario.teardown();
+
+    // Assert
+    assert_eq!(
+        count_sst_files(&cloud_root),
+        initial_remote_count,
+        "remote upload must not precede its durable cleanup obligation"
     );
 }
 
@@ -1434,6 +2001,45 @@ fn seed_range_with_options(
     }
 }
 
+fn seed_compaction_batches(
+    engine: &Engine,
+    cf: &cntryl_midge::ColumnFamilyHandle,
+    prefix: &str,
+    batch_count: usize,
+    keys_per_batch: usize,
+) {
+    for batch in 0..batch_count {
+        for index in 0..keys_per_batch {
+            let key = format!("{prefix}-b{batch}-k{index:02}");
+            let value = format!("value-b{batch}-k{index:02}");
+            let mut tx = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .expect("begin batch tx");
+            tx.put(key.into_bytes(), value.into_bytes(), None)
+                .expect("put compaction seed");
+            tx.commit(WriteOptions::sync())
+                .expect("commit compaction seed");
+        }
+        engine.flush_cf(cf).expect("flush compaction seed");
+    }
+}
+
+fn assert_compaction_batches_visible(
+    engine: &Engine,
+    cf: &cntryl_midge::ColumnFamilyHandle,
+    prefix: &str,
+    batch_count: usize,
+    keys_per_batch: usize,
+) {
+    for batch in 0..batch_count {
+        for index in 0..keys_per_batch {
+            let key = format!("{prefix}-b{batch}-k{index:02}");
+            let value = format!("value-b{batch}-k{index:02}");
+            assert_visible(engine, cf, key.as_bytes(), value.as_bytes());
+        }
+    }
+}
+
 fn assert_visible(
     engine: &Engine,
     cf: &cntryl_midge::ColumnFamilyHandle,
@@ -1472,9 +2078,13 @@ fn assert_no_space_like(error: &MidgeError) {
 }
 
 fn count_sst_files(db_path: &Path) -> usize {
+    sst_file_names(db_path).len()
+}
+
+fn sst_file_names(db_path: &Path) -> std::collections::BTreeSet<String> {
     let sst_dir = db_path.join("sst");
     let Ok(entries) = std::fs::read_dir(&sst_dir) else {
-        return 0;
+        return std::collections::BTreeSet::new();
     };
     entries
         .flatten()
@@ -1485,5 +2095,6 @@ fn count_sst_files(db_path: &Path) -> usize {
                 .and_then(|ext| ext.to_str())
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("sst"))
         })
-        .count()
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect()
 }

@@ -209,6 +209,39 @@ impl StorageBudgetActor {
         true
     }
 
+    /// Settle a compaction whose local manifest authority switched but whose
+    /// later publication steps failed. Inputs remain physically retained, so
+    /// account the new outputs without subtracting their bytes. This may
+    /// conservatively overcount after a later recovery cleanup, but it must
+    /// never undercount live disk use while both generations remain present.
+    pub fn retain_compaction_inputs_for(
+        &mut self,
+        token: StorageReservationToken,
+        output_sizes: &[u64],
+    ) -> bool {
+        let Some(reservation) = self.compaction_reservations.remove(&token) else {
+            tracing::warn!(
+                ?token,
+                "ignoring unmatched retained-input compaction reservation"
+            );
+            return false;
+        };
+        let total_output: u64 = output_sizes.iter().sum();
+        self.disk_state.compaction_reserve = self
+            .disk_state
+            .compaction_reserve
+            .saturating_sub(reservation.estimated_output_bytes);
+        self.disk_state.sst_bytes = self.disk_state.sst_bytes.saturating_add(total_output);
+        self.check_watermarks();
+        tracing::warn!(
+            ?token,
+            input_bytes = reservation.input_bytes,
+            output_bytes = total_output,
+            "compaction publication incomplete; retaining and accounting both input and output generations"
+        );
+        true
+    }
+
     /// Release exactly one uncompleted compaction reservation.
     pub fn abort_compaction_for(&mut self, token: StorageReservationToken) -> bool {
         let Some(reservation) = self.compaction_reservations.remove(&token) else {
@@ -455,6 +488,23 @@ mod tests {
         let state = actor.disk_state();
         assert_eq!(state.compaction_reserve, 0);
         assert_eq!(state.sst_bytes, 150);
+    }
+
+    #[test]
+    fn should_account_both_generations_when_post_manifest_compaction_step_fails() {
+        // Arrange
+        let policy = StorageBudgetPolicy::new(1024 * 1024);
+        let mut actor = StorageBudgetActor::new(policy);
+        actor.disk_state.sst_bytes = 300;
+        let token = actor.plan_compaction_with_token(&[100, 100]);
+
+        // Act
+        assert!(actor.retain_compaction_inputs_for(token, &[50]));
+
+        // Assert
+        let state = actor.disk_state();
+        assert_eq!(state.compaction_reserve, 0);
+        assert_eq!(state.sst_bytes, 350);
     }
 
     #[test]

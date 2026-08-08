@@ -106,10 +106,13 @@ impl EventLoop {
             .ingest_active
             .store(false, std::sync::atomic::Ordering::SeqCst);
 
-        if let Some(plan) = self.compaction_actor.check_compaction(&self.state) {
-            if let Err(error) = self.launch_compaction(plan) {
-                tracing::warn!(%error, "EndIngest: failed to schedule follow-up compaction");
-            }
+        let followup = self
+            .compaction_actor
+            .check_compaction(&self.state)
+            .and_then(|plan| plan.map_or(Ok(()), |plan| self.launch_compaction(plan)));
+        if let Err(error) = followup {
+            self.state.mark_persistence_anomaly();
+            tracing::warn!(%error, "EndIngest: failed to schedule follow-up compaction");
         }
 
         self.respond(request_id, RuntimeResponse::Ok { request_id });

@@ -68,6 +68,17 @@ impl HybridStorage {
         let _ = actor.complete_compaction_for(token, output_sizes);
     }
 
+    /// Settle output accounting while retaining authoritative input bytes
+    /// after a post-manifest publication failure.
+    pub fn compaction_inputs_retained_with_token(
+        &self,
+        token: actor::StorageReservationToken,
+        output_sizes: &[u64],
+    ) {
+        let mut actor = self.budget_actor.lock();
+        let _ = actor.retain_compaction_inputs_for(token, output_sizes);
+    }
+
     /// Release the exact compaction reservation without deleting its inputs.
     pub fn compaction_aborted_with_token(&self, token: actor::StorageReservationToken) {
         let mut actor = self.budget_actor.lock();

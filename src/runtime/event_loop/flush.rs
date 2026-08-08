@@ -15,6 +15,18 @@ impl FlushCoordinator {
         request_id: u64,
         cf_id: crate::types::ColumnFamilyId,
     ) -> HandleOutcome {
+        if event_loop.ddl_authority_ambiguous {
+            event_loop.respond(
+                request_id,
+                RuntimeResponse::Error {
+                    request_id,
+                    error: crate::common::MidgeError::Fenced(
+                        "DDL authority is ambiguous; refusing flush until reconciliation".into(),
+                    ),
+                },
+            );
+            return HandleOutcome::Continue;
+        }
         if event_loop.state.is_memory_mode() {
             event_loop.respond(request_id, RuntimeResponse::Ok { request_id });
             return HandleOutcome::Continue;

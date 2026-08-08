@@ -8,6 +8,7 @@
 //!   - Keep read amplification low by honoring key-range overlap.
 //!   - Produce deterministic compaction plans.
 
+use crate::common::{MidgeError, MidgeResult};
 use crate::metadata::FileMeta;
 
 /// A compaction plan describing which SSTs to read and which level to promote into.
@@ -23,6 +24,14 @@ pub struct CompactionPlan {
     pub output_seq: u64,
     /// Oldest active snapshot sequence, if any, used for tombstone retention.
     pub snapshot_horizon: Option<u64>,
+    /// Point tombstones may be removed only when every unselected file whose
+    /// persisted point-key bounds overlap the plan is absent, so no older
+    /// point value can be resurrected at any configured level.
+    pub point_tombstone_gc_eligible: bool,
+    /// Range tombstones additionally require complete source/target coverage;
+    /// persisted legacy bounds are advisory and cannot prove a range delete
+    /// does not reach an otherwise unselected file.
+    pub range_tombstone_gc_eligible: bool,
 }
 
 impl CompactionPlan {
@@ -38,6 +47,8 @@ impl CompactionPlan {
             cf_id,
             output_seq: 0,
             snapshot_horizon: None,
+            point_tombstone_gc_eligible: false,
+            range_tombstone_gc_eligible: false,
         }
     }
 
@@ -52,6 +63,17 @@ impl CompactionPlan {
         self.snapshot_horizon = snapshot_horizon;
         self
     }
+
+    #[cfg(test)]
+    pub fn with_tombstone_gc_eligibility(
+        mut self,
+        point_tombstone_gc_eligible: bool,
+        range_tombstone_gc_eligible: bool,
+    ) -> Self {
+        self.point_tombstone_gc_eligible = point_tombstone_gc_eligible;
+        self.range_tombstone_gc_eligible = range_tombstone_gc_eligible;
+        self
+    }
 }
 
 /// Configuration for leveled compaction.
@@ -64,6 +86,10 @@ impl CompactionPlan {
 pub struct LeveledCompactionConfig {
     pub l0_compaction_threshold: u64,
     pub l0_file_count_threshold: usize,
+    /// Hard safety bound for the complete source-plus-target overlap closure.
+    /// Planning fails closed instead of truncating target overlaps, because a
+    /// partial closure can publish overlapping files or resurrect old values.
+    pub max_compaction_input_files: usize,
     pub level_multiplier: u64,
     pub l1_target_size: u64,
     pub max_levels: usize,
@@ -74,6 +100,7 @@ impl Default for LeveledCompactionConfig {
         Self {
             l0_compaction_threshold: 4 * 1024 * 1024, // 4MB
             l0_file_count_threshold: 4,
+            max_compaction_input_files: 64,
             level_multiplier: 10,
             l1_target_size: 40 * 1024 * 1024, // 40MB (4MB*10)
             max_levels: 7,
@@ -102,12 +129,17 @@ impl Compactor {
     ///   2. Check L1+ levels for size-overflow.
     ///
     /// NOTE: This picker is deterministic for a given metadata snapshot.
-    pub fn pick_compaction(&self, files: &[FileMeta], cf_id: u32) -> Option<CompactionPlan> {
+    pub fn pick_compaction(
+        &self,
+        files: &[FileMeta],
+        cf_id: u32,
+    ) -> MidgeResult<Option<CompactionPlan>> {
         // Only look at this CF's files
         let cf_files: Vec<&FileMeta> = files.iter().filter(|f| f.cf_id == cf_id).collect();
         if cf_files.is_empty() {
-            return None;
+            return Ok(None);
         }
+        self.validate_file_metadata(&cf_files, cf_id)?;
 
         // Group files by level
         let mut levels: Vec<Vec<&FileMeta>> = vec![Vec::new(); self.config.max_levels];
@@ -127,7 +159,7 @@ impl Compactor {
         if l0_size > self.config.l0_compaction_threshold
             || l0_count >= self.config.l0_file_count_threshold
         {
-            return Self::plan_zero_level(&levels, cf_id);
+            return self.plan_zero_level(&levels, cf_id);
         }
 
         // ---------------------------
@@ -139,11 +171,35 @@ impl Compactor {
                 self.level_target_size(u32::try_from(level).expect("level index fits in u32"));
 
             if level_size > target_size {
-                return Self::plan_inner_level(&levels, cf_id, level);
+                return self.plan_inner_level(&levels, cf_id, level);
             }
         }
 
-        None
+        Ok(None)
+    }
+
+    fn validate_file_metadata(&self, files: &[&FileMeta], cf_id: u32) -> MidgeResult<()> {
+        for file in files {
+            if file.level as usize >= self.config.max_levels {
+                return Err(MidgeError::Corruption(format!(
+                    "SST '{}' for column family {cf_id} has unsupported level {}",
+                    file.name, file.level
+                )));
+            }
+            let (Some(smallest), Some(largest)) = (&file.smallest_key, &file.largest_key) else {
+                return Err(MidgeError::Corruption(format!(
+                    "SST '{}' for column family {cf_id} is missing key-range metadata",
+                    file.name
+                )));
+            };
+            if smallest > largest {
+                return Err(MidgeError::Corruption(format!(
+                    "SST '{}' for column family {cf_id} has an inverted key range",
+                    file.name
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Classic leveled size rule:
@@ -167,29 +223,44 @@ impl Compactor {
     ///
     /// **Read-aware compaction**: Prioritizes files by read heat to reduce
     /// read amplification. Hot files (frequently accessed) are compacted first.
-    fn plan_zero_level(levels: &[Vec<&FileMeta>], cf_id: u32) -> Option<CompactionPlan> {
+    fn plan_zero_level(
+        &self,
+        levels: &[Vec<&FileMeta>],
+        cf_id: u32,
+    ) -> MidgeResult<Option<CompactionPlan>> {
         if levels[0].is_empty() {
-            return None;
+            return Ok(None);
         }
 
-        // Sort L0 files by read heat (hottest first)
+        // Always include the oldest file so read-heat skew cannot starve cold
+        // data. Fill the rest of the configured batch with the hottest files.
         let mut l0_sorted = levels[0].clone();
-        l0_sorted.sort_by_key(|f| std::cmp::Reverse(f.get_read_count()));
+        l0_sorted.sort_by(|left, right| {
+            right
+                .get_read_count()
+                .cmp(&left.get_read_count())
+                .then_with(|| file_age_key(left).cmp(&file_age_key(right)))
+        });
+        let oldest = levels[0]
+            .iter()
+            .copied()
+            .min_by_key(|file| file_age_key(file))
+            .expect("non-empty L0 has an oldest file");
+        l0_sorted.retain(|file| file.name != oldest.name);
 
-        // Pick top files to compact (limit batch size for incremental compaction)
-        let batch_size = std::cmp::min(l0_sorted.len(), 4); // Max 4 files per batch
-        let l0_batch: Vec<&FileMeta> = l0_sorted.into_iter().take(batch_size).collect();
+        let batch_size = levels[0]
+            .len()
+            .min(self.config.l0_file_count_threshold.max(1));
+        let mut l0_batch = Vec::with_capacity(batch_size);
+        l0_batch.push(oldest);
+        l0_batch.extend(l0_sorted.into_iter().take(batch_size.saturating_sub(1)));
 
-        let mut input_files: Vec<String> = l0_batch.iter().map(|f| f.name.clone()).collect();
+        let (input_files, _, _) =
+            self.bounded_overlap_closure(&mut l0_batch, &levels[1], cf_id, 0, 1)?;
+        let (point_tombstone_gc_eligible, range_tombstone_gc_eligible) =
+            Self::tombstone_gc_eligibility(levels, &input_files)?;
 
-        // Overlap detection: find L1 files whose ranges overlap the selected L0 batch
-        let (min_key, max_key) = smallest_and_largest(l0_batch.as_slice())?;
-        let mut l1_overlapping = overlap_with_range(&levels[1], &min_key, &max_key);
-
-        input_files.append(&mut l1_overlapping);
-        dedupe_sort(&mut input_files);
-
-        Some(CompactionPlan {
+        Ok(Some(CompactionPlan {
             input_files,
             #[cfg(test)]
             output_files: Vec::new(),
@@ -198,29 +269,43 @@ impl Compactor {
             cf_id,
             output_seq: 0,
             snapshot_horizon: None,
-        })
+            point_tombstone_gc_eligible,
+            range_tombstone_gc_eligible,
+        }))
     }
 
     /// Build a compaction plan for level N → N+1.
     fn plan_inner_level(
+        &self,
         levels: &[Vec<&FileMeta>],
         cf_id: u32,
         level: usize,
-    ) -> Option<CompactionPlan> {
+    ) -> MidgeResult<Option<CompactionPlan>> {
         if levels[level].is_empty() {
-            return None;
+            return Ok(None);
         }
 
-        let mut input_files: Vec<String> = levels[level].iter().map(|f| f.name.clone()).collect();
+        // Select a bounded, contiguous source-level range. Every overlapping
+        // target file is still included below; overlap completeness is a
+        // correctness requirement and must not be truncated to meet the cap.
+        let mut source_files = levels[level].clone();
+        source_files.sort_by(|left, right| {
+            left.smallest_key
+                .cmp(&right.smallest_key)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        source_files.truncate(self.config.l0_file_count_threshold.max(1));
+        let (input_files, _, _) = self.bounded_overlap_closure(
+            &mut source_files,
+            &levels[level + 1],
+            cf_id,
+            u32::try_from(level).expect("level index fits in u32"),
+            u32::try_from(level + 1).expect("level index fits in u32"),
+        )?;
+        let (point_tombstone_gc_eligible, range_tombstone_gc_eligible) =
+            Self::tombstone_gc_eligibility(levels, &input_files)?;
 
-        // Find overlapping files in next level
-        let (min_key, max_key) = smallest_and_largest(levels[level].as_slice())?;
-        let mut overlapping = overlap_with_range(&levels[level + 1], &min_key, &max_key);
-
-        input_files.append(&mut overlapping);
-        dedupe_sort(&mut input_files);
-
-        Some(CompactionPlan {
+        Ok(Some(CompactionPlan {
             input_files,
             #[cfg(test)]
             output_files: Vec::new(),
@@ -229,35 +314,169 @@ impl Compactor {
             cf_id,
             output_seq: 0,
             snapshot_horizon: None,
-        })
+            point_tombstone_gc_eligible,
+            range_tombstone_gc_eligible,
+        }))
+    }
+
+    fn tombstone_gc_eligibility(
+        levels: &[Vec<&FileMeta>],
+        input_files: &[String],
+    ) -> MidgeResult<(bool, bool)> {
+        let selected_names: std::collections::HashSet<_> =
+            input_files.iter().map(String::as_str).collect();
+        // Target files selected by the overlap closure can extend beyond the
+        // original source range. The proof must cover the full output range;
+        // otherwise a tombstone in that extension could be dropped while an
+        // unselected deeper file still contains the value it masks.
+        let selected_files = levels
+            .iter()
+            .flatten()
+            .filter(|file| selected_names.contains(file.name.as_str()))
+            .copied()
+            .collect::<Vec<_>>();
+        let (min_key, max_key) = smallest_and_largest(&selected_files)?;
+        let unselected_point_overlap = levels.iter().flatten().any(|file| {
+            !selected_names.contains(file.name.as_str())
+                && file
+                    .smallest_key
+                    .as_ref()
+                    .zip(file.largest_key.as_ref())
+                    .is_some_and(|(smallest, largest)| {
+                        smallest.as_slice() <= max_key.as_slice()
+                            && largest.as_slice() >= min_key.as_slice()
+                    })
+        });
+        let point_tombstone_gc_eligible = !unselected_point_overlap;
+
+        // Legacy file bounds can omit range-tombstone endpoints. Only a plan
+        // containing every file in the column family proves that dropping a
+        // range marker cannot expose a covered value outside the selected
+        // metadata range.
+        let total_files = levels.iter().map(Vec::len).sum::<usize>();
+        let range_tombstone_gc_eligible =
+            point_tombstone_gc_eligible && selected_names.len() == total_files;
+        Ok((point_tombstone_gc_eligible, range_tombstone_gc_eligible))
+    }
+
+    fn validate_input_fan_in(
+        &self,
+        input_files: &[String],
+        cf_id: u32,
+        source_level: u32,
+        target_level: u32,
+    ) -> MidgeResult<()> {
+        let limit = self.config.max_compaction_input_files.max(1);
+        if input_files.len() > limit {
+            return Err(MidgeError::ResourceLimit(format!(
+                "compaction L{source_level}->L{target_level} for column family {cf_id} requires {} source/overlap inputs, exceeding the configured safety limit {limit}; refusing to truncate the target overlap closure",
+                input_files.len()
+            )));
+        }
+        Ok(())
+    }
+
+    fn bounded_overlap_closure(
+        &self,
+        source_files: &mut Vec<&FileMeta>,
+        target_files: &[&FileMeta],
+        cf_id: u32,
+        source_level: u32,
+        target_level: u32,
+    ) -> MidgeResult<(Vec<String>, Vec<u8>, Vec<u8>)> {
+        loop {
+            let (min_key, max_key) = smallest_and_largest(source_files.as_slice())?;
+            let mut input_files = source_files
+                .iter()
+                .map(|file| file.name.clone())
+                .collect::<Vec<_>>();
+            input_files.extend(overlap_with_range(target_files, &min_key, &max_key)?);
+            dedupe_sort(&mut input_files);
+
+            match self.validate_input_fan_in(&input_files, cf_id, source_level, target_level) {
+                Ok(()) => return Ok((input_files, min_key, max_key)),
+                Err(MidgeError::ResourceLimit(_)) if source_files.len() > 1 => {
+                    // Decompose the source range and recompute the *complete*
+                    // target closure. Target files are never truncated.
+                    source_files.pop();
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 }
 
 /// Extract smallest and largest user keys across a slice of `FileMeta`.
-fn smallest_and_largest(files: &[&FileMeta]) -> Option<(Vec<u8>, Vec<u8>)> {
-    let smallest = files.iter().filter_map(|f| f.smallest_key.clone()).min();
-    let largest = files.iter().filter_map(|f| f.largest_key.clone()).max();
-
-    match (smallest, largest) {
-        (Some(s), Some(l)) => Some((s, l)),
-        _ => None,
-    }
+fn smallest_and_largest(files: &[&FileMeta]) -> MidgeResult<(Vec<u8>, Vec<u8>)> {
+    let smallest = files
+        .iter()
+        .map(|file| {
+            file.smallest_key.clone().ok_or_else(|| {
+                MidgeError::Corruption(format!(
+                    "SST '{}' is missing its smallest-key metadata",
+                    file.name
+                ))
+            })
+        })
+        .collect::<MidgeResult<Vec<_>>>()?
+        .into_iter()
+        .min()
+        .ok_or_else(|| MidgeError::Internal("compaction range has no input files".to_string()))?;
+    let largest = files
+        .iter()
+        .map(|file| {
+            file.largest_key.clone().ok_or_else(|| {
+                MidgeError::Corruption(format!(
+                    "SST '{}' is missing its largest-key metadata",
+                    file.name
+                ))
+            })
+        })
+        .collect::<MidgeResult<Vec<_>>>()?
+        .into_iter()
+        .max()
+        .ok_or_else(|| MidgeError::Internal("compaction range has no input files".to_string()))?;
+    Ok((smallest, largest))
 }
 
 /// Return names of files whose key-ranges overlap [`min_key`, `max_key`].
-fn overlap_with_range(files: &[&FileMeta], min_key: &[u8], max_key: &[u8]) -> Vec<String> {
+fn overlap_with_range(
+    files: &[&FileMeta],
+    min_key: &[u8],
+    max_key: &[u8],
+) -> MidgeResult<Vec<String>> {
     files
         .iter()
-        .filter_map(|f| {
-            let fs = f.smallest_key.as_ref()?;
-            let fl = f.largest_key.as_ref()?;
+        .map(|f| {
+            let fs = f.smallest_key.as_ref().ok_or_else(|| {
+                MidgeError::Corruption(format!(
+                    "SST '{}' is missing its smallest-key metadata",
+                    f.name
+                ))
+            })?;
+            let fl = f.largest_key.as_ref().ok_or_else(|| {
+                MidgeError::Corruption(format!(
+                    "SST '{}' is missing its largest-key metadata",
+                    f.name
+                ))
+            })?;
             if fs.as_slice() <= max_key && fl.as_slice() >= min_key {
-                Some(f.name.clone())
+                Ok(Some(f.name.clone()))
             } else {
-                None
+                Ok(None)
             }
         })
+        .filter_map(std::result::Result::transpose)
         .collect()
+}
+
+fn file_age_key(file: &FileMeta) -> (u64, &str) {
+    let encoded_sequence = std::path::Path::new(&file.name)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .and_then(|stem| stem.rsplit('_').next())
+        .and_then(|sequence| sequence.parse::<u64>().ok());
+    (file.sst_seq.max(encoded_sequence.unwrap_or(0)), &file.name)
 }
 
 /// Deduplicate + sort file list for deterministic plan output.
@@ -329,6 +548,7 @@ mod tests {
         // Assert
         assert_eq!(compactor.config.max_levels, 7);
         assert_eq!(compactor.config.l0_file_count_threshold, 4);
+        assert_eq!(compactor.config.max_compaction_input_files, 64);
     }
 
     #[test]
@@ -337,6 +557,7 @@ mod tests {
         let config = LeveledCompactionConfig {
             l0_compaction_threshold: 8 * 1024 * 1024,
             l0_file_count_threshold: 8,
+            max_compaction_input_files: 32,
             level_multiplier: 5,
             l1_target_size: 80 * 1024 * 1024,
             max_levels: 10,
@@ -349,6 +570,7 @@ mod tests {
         assert_eq!(compactor.config.l0_compaction_threshold, 8 * 1024 * 1024);
         assert_eq!(compactor.config.level_multiplier, 5);
         assert_eq!(compactor.config.max_levels, 10);
+        assert_eq!(compactor.config.max_compaction_input_files, 32);
     }
 
     // ============================================================================
@@ -474,7 +696,9 @@ mod tests {
         let empty_files = [];
 
         // Act
-        let plan = compactor.pick_compaction(&empty_files, 0);
+        let plan = compactor
+            .pick_compaction(&empty_files, 0)
+            .expect("compaction planning");
 
         // Assert
         assert!(plan.is_none());
@@ -504,7 +728,9 @@ mod tests {
         ];
 
         // Act: request compaction for different CF
-        let plan = compactor.pick_compaction(&files, 1);
+        let plan = compactor
+            .pick_compaction(&files, 1)
+            .expect("compaction planning");
 
         // Assert
         assert!(plan.is_none());
@@ -536,7 +762,9 @@ mod tests {
         ];
 
         // Act
-        let plan = compactor.pick_compaction(&files, 0);
+        let plan = compactor
+            .pick_compaction(&files, 0)
+            .expect("compaction planning");
 
         // Assert: should trigger L0 → L1 compaction
         assert!(plan.is_some());
@@ -567,7 +795,9 @@ mod tests {
         }
 
         // Act
-        let plan = compactor.pick_compaction(&files, 0);
+        let plan = compactor
+            .pick_compaction(&files, 0)
+            .expect("compaction planning");
 
         // Assert: should trigger due to file count
         assert!(plan.is_some());
@@ -601,7 +831,9 @@ mod tests {
         ];
 
         // Act
-        let plan = compactor.pick_compaction(&files, 0);
+        let plan = compactor
+            .pick_compaction(&files, 0)
+            .expect("compaction planning");
 
         // Assert: should trigger L1 → L2 compaction
         assert!(plan.is_some());
@@ -647,7 +879,9 @@ mod tests {
         ];
 
         // Act
-        let plan = compactor.pick_compaction(&files, 0);
+        let plan = compactor
+            .pick_compaction(&files, 0)
+            .expect("compaction planning");
 
         // Assert: L0 compaction should be picked first
         assert!(plan.is_some());
@@ -679,7 +913,9 @@ mod tests {
         ];
 
         // Act
-        let plan = compactor.pick_compaction(&files, 0);
+        let plan = compactor
+            .pick_compaction(&files, 0)
+            .expect("compaction planning");
 
         // Assert: no compaction triggered
         assert!(plan.is_none());
@@ -726,7 +962,9 @@ mod tests {
         ];
 
         // Act
-        let plan = compactor.pick_compaction(&files, 0);
+        let plan = compactor
+            .pick_compaction(&files, 0)
+            .expect("compaction planning");
 
         // Assert: plan includes overlapping file
         assert!(plan.is_some());
@@ -737,7 +975,7 @@ mod tests {
     }
 
     #[test]
-    fn should_handle_files_with_no_key_range() {
+    fn should_fail_compaction_planning_when_file_key_range_is_missing() {
         // Arrange
         let compactor = Compactor::new();
         let threshold = compactor.config.l0_compaction_threshold;
@@ -747,10 +985,59 @@ mod tests {
         ];
 
         // Act
-        let plan = compactor.pick_compaction(&files, 0);
+        let error = compactor
+            .pick_compaction(&files, 0)
+            .expect_err("missing persisted key-range metadata must fail closed");
 
-        // Assert: should handle gracefully (plan_zero_level returns None if no key range)
-        assert!(plan.is_none());
+        // Assert
+        assert!(matches!(error, crate::common::MidgeError::Corruption(_)));
+    }
+
+    #[test]
+    fn should_fail_compaction_planning_when_target_file_key_range_is_missing() {
+        // Arrange
+        let compactor = Compactor::new();
+        let files = vec![
+            make_file(
+                "source.sst",
+                0,
+                0,
+                compactor.config.l0_compaction_threshold + 1,
+                Some(b"a".to_vec()),
+                Some(b"z".to_vec()),
+            ),
+            make_file("unknown-target.sst", 0, 1, 1, None, None),
+        ];
+
+        // Act
+        let error = compactor
+            .pick_compaction(&files, 0)
+            .expect_err("unknown target overlap must fail closed");
+
+        // Assert
+        assert!(matches!(error, crate::common::MidgeError::Corruption(_)));
+    }
+
+    #[test]
+    fn should_fail_compaction_planning_when_file_key_range_is_inverted() {
+        // Arrange
+        let compactor = Compactor::new();
+        let files = vec![make_file(
+            "inverted.sst",
+            0,
+            0,
+            compactor.config.l0_compaction_threshold + 1,
+            Some(b"z".to_vec()),
+            Some(b"a".to_vec()),
+        )];
+
+        // Act
+        let error = compactor
+            .pick_compaction(&files, 0)
+            .expect_err("inverted range must fail closed");
+
+        // Assert
+        assert!(matches!(error, crate::common::MidgeError::Corruption(_)));
     }
 
     // ============================================================================
@@ -784,7 +1071,9 @@ mod tests {
         ];
 
         // Act
-        let plan = compactor.pick_compaction(&files, 0);
+        let plan = compactor
+            .pick_compaction(&files, 0)
+            .expect("compaction planning");
 
         // Assert: no duplicates in input_files
         let plan = plan.unwrap();
@@ -830,7 +1119,9 @@ mod tests {
         ];
 
         // Act
-        let plan = compactor.pick_compaction(&files, 0);
+        let plan = compactor
+            .pick_compaction(&files, 0)
+            .expect("compaction planning");
 
         // Assert: files should be sorted
         let plan = plan.unwrap();
@@ -869,8 +1160,12 @@ mod tests {
         ];
 
         // Act: run pick_compaction twice
-        let plan1 = compactor.pick_compaction(&files, 0);
-        let plan2 = compactor.pick_compaction(&files, 0);
+        let plan1 = compactor
+            .pick_compaction(&files, 0)
+            .expect("first compaction planning");
+        let plan2 = compactor
+            .pick_compaction(&files, 0)
+            .expect("second compaction planning");
 
         // Assert: plans should be identical
         assert_eq!(plan1.is_some(), plan2.is_some());
@@ -919,7 +1214,9 @@ mod tests {
         ];
 
         // Act
-        let plan = compactor.pick_compaction(&files, 0);
+        let plan = compactor
+            .pick_compaction(&files, 0)
+            .expect("compaction planning");
 
         // Assert: only CF 0 files in plan
         assert!(plan.is_some());
@@ -992,5 +1289,355 @@ mod tests {
         assert_eq!(plan.cf_id, 5);
         assert_eq!(plan.source_level, 2);
         assert_eq!(plan.target_level, 3);
+    }
+
+    #[test]
+    fn should_bound_l1_plus_compaction_batch_size_when_level_grows_large() {
+        // Arrange
+        let compactor = Compactor::new();
+        let mut files = Vec::new();
+        for index in 0..12_u8 {
+            files.push(make_file(
+                &format!("l1_{index:02}.sst"),
+                0,
+                1,
+                compactor.config.l1_target_size,
+                Some(vec![index]),
+                Some(vec![index]),
+            ));
+        }
+
+        // Act
+        let plan = compactor
+            .pick_compaction(&files, 0)
+            .expect("compaction planning")
+            .expect("oversized L1 should produce a compaction plan");
+
+        // Assert
+        assert!(
+            plan.input_files.len() <= compactor.config.l0_file_count_threshold,
+            "inner-level compaction must keep its input batch bounded: {:?}",
+            plan.input_files
+        );
+    }
+
+    #[test]
+    fn should_include_every_target_overlap_when_inner_source_batch_is_bounded() {
+        // Arrange
+        let compactor = Compactor::new();
+        let mut files = Vec::new();
+        for index in 0..8_u8 {
+            files.push(make_file(
+                &format!("source_{index}.sst"),
+                0,
+                1,
+                compactor.config.l1_target_size,
+                Some(vec![index]),
+                Some(vec![index]),
+            ));
+        }
+        for index in 0..6_u8 {
+            files.push(make_file(
+                &format!("target_{index}.sst"),
+                0,
+                2,
+                1,
+                Some(vec![0]),
+                Some(vec![3]),
+            ));
+        }
+
+        // Act
+        let plan = compactor
+            .pick_compaction(&files, 0)
+            .expect("compaction planning")
+            .expect("inner-level plan");
+
+        // Assert
+        assert_eq!(
+            plan.input_files
+                .iter()
+                .filter(|name| name.starts_with("source_"))
+                .count(),
+            compactor.config.l0_file_count_threshold
+        );
+        assert_eq!(
+            plan.input_files
+                .iter()
+                .filter(|name| name.starts_with("target_"))
+                .count(),
+            6,
+            "target overlap closure must never be truncated to the source cap"
+        );
+    }
+
+    #[test]
+    fn should_enable_tombstone_gc_with_key_range_bottommost_overlap_proof() {
+        // Arrange
+        let compactor = Compactor::with_config(LeveledCompactionConfig {
+            l1_target_size: 1,
+            ..LeveledCompactionConfig::default()
+        });
+        let complete_files = vec![
+            make_file(
+                "source.sst",
+                0,
+                1,
+                2,
+                Some(b"a".to_vec()),
+                Some(b"z".to_vec()),
+            ),
+            make_file(
+                "target.sst",
+                0,
+                2,
+                1,
+                Some(b"a".to_vec()),
+                Some(b"z".to_vec()),
+            ),
+        ];
+        let mut incomplete_files = complete_files.clone();
+        incomplete_files.push(make_file(
+            "unrelated-target.sst",
+            0,
+            2,
+            1,
+            Some(b"zz".to_vec()),
+            Some(b"zzz".to_vec()),
+        ));
+        let mut overlapping_upper_files = complete_files.clone();
+        overlapping_upper_files.push(make_file(
+            "overlapping-upper.sst",
+            0,
+            0,
+            1,
+            Some(b"m".to_vec()),
+            Some(b"n".to_vec()),
+        ));
+
+        // Act
+        let complete = compactor
+            .pick_compaction(&complete_files, 0)
+            .expect("complete planning")
+            .expect("complete plan");
+        let incomplete = compactor
+            .pick_compaction(&incomplete_files, 0)
+            .expect("incomplete planning")
+            .expect("incomplete plan");
+        let overlapping_upper = compactor
+            .pick_compaction(&overlapping_upper_files, 0)
+            .expect("overlapping upper-level planning")
+            .expect("overlapping upper-level plan");
+
+        // Assert
+        assert!(complete.point_tombstone_gc_eligible);
+        assert!(complete.range_tombstone_gc_eligible);
+        assert!(incomplete.point_tombstone_gc_eligible);
+        assert!(!incomplete.range_tombstone_gc_eligible);
+        assert!(!overlapping_upper.point_tombstone_gc_eligible);
+        assert!(!overlapping_upper.range_tombstone_gc_eligible);
+    }
+
+    #[test]
+    fn should_retain_point_tombstones_when_selected_target_extends_into_deeper_overlap() {
+        // Arrange
+        let compactor = Compactor::with_config(LeveledCompactionConfig {
+            l1_target_size: 1,
+            ..LeveledCompactionConfig::default()
+        });
+        let files = vec![
+            make_file(
+                "source.sst",
+                0,
+                1,
+                2,
+                Some(b"m".to_vec()),
+                Some(b"n".to_vec()),
+            ),
+            make_file(
+                "broad-target.sst",
+                0,
+                2,
+                1,
+                Some(b"a".to_vec()),
+                Some(b"z".to_vec()),
+            ),
+            make_file(
+                "deeper-value.sst",
+                0,
+                3,
+                1,
+                Some(b"a".to_vec()),
+                Some(b"b".to_vec()),
+            ),
+        ];
+
+        // Act
+        let plan = compactor
+            .pick_compaction(&files, 0)
+            .expect("plan compaction")
+            .expect("eligible inner-level plan");
+
+        // Assert
+        assert_eq!(
+            plan.input_files,
+            vec!["broad-target.sst".to_string(), "source.sst".to_string()]
+        );
+        assert!(!plan.point_tombstone_gc_eligible);
+        assert!(!plan.range_tombstone_gc_eligible);
+    }
+
+    #[test]
+    fn should_shrink_source_range_to_fit_complete_target_overlap_within_safety_limit() {
+        // Arrange
+        let compactor = Compactor::with_config(LeveledCompactionConfig {
+            l1_target_size: 1,
+            l0_file_count_threshold: 4,
+            max_compaction_input_files: 5,
+            ..LeveledCompactionConfig::default()
+        });
+        let mut files = Vec::new();
+        for index in 0..4_u8 {
+            files.push(make_file(
+                &format!("source-{index}.sst"),
+                0,
+                1,
+                1,
+                Some(vec![index]),
+                Some(vec![index]),
+            ));
+            files.push(make_file(
+                &format!("target-{index}.sst"),
+                0,
+                2,
+                1,
+                Some(vec![index]),
+                Some(vec![index]),
+            ));
+        }
+
+        // Act
+        let plan = compactor
+            .pick_compaction(&files, 0)
+            .expect("bounded planning")
+            .expect("decomposed inner-level plan");
+
+        // Assert
+        assert_eq!(
+            plan.input_files,
+            vec![
+                "source-0.sst".to_string(),
+                "source-1.sst".to_string(),
+                "target-0.sst".to_string(),
+                "target-1.sst".to_string(),
+            ]
+        );
+        assert!(plan.input_files.len() <= compactor.config.max_compaction_input_files);
+    }
+
+    #[test]
+    fn should_fail_closed_when_complete_target_overlap_exceeds_input_safety_limit() {
+        // Arrange
+        let compactor = Compactor::with_config(LeveledCompactionConfig {
+            l1_target_size: 1,
+            l0_file_count_threshold: 4,
+            max_compaction_input_files: 8,
+            ..LeveledCompactionConfig::default()
+        });
+        let mut files = vec![make_file(
+            "broad-source.sst",
+            0,
+            1,
+            2,
+            Some(b"a".to_vec()),
+            Some(b"z".to_vec()),
+        )];
+        for index in 0..8_u8 {
+            files.push(make_file(
+                &format!("target-{index}.sst"),
+                0,
+                2,
+                1,
+                Some(vec![b'a'.saturating_add(index)]),
+                Some(vec![b'a'.saturating_add(index)]),
+            ));
+        }
+
+        // Act
+        let error = compactor
+            .pick_compaction(&files, 0)
+            .expect_err("complete overlap closure exceeds finite fan-in budget");
+
+        // Assert
+        assert!(matches!(error, MidgeError::ResourceLimit(_)));
+        assert!(error.to_string().contains("refusing to truncate"));
+    }
+
+    #[test]
+    fn should_eventually_include_oldest_cold_l0_file_when_read_heat_is_skewed() {
+        // Arrange
+        let compactor = Compactor::new();
+        let mut files = Vec::new();
+        for sequence in 1..=6_u64 {
+            let name = crate::sst::file_name(0, 0, sequence);
+            let file = make_file(
+                &name,
+                0,
+                0,
+                1,
+                Some(vec![u8::try_from(sequence).expect("fixture sequence")]),
+                Some(vec![u8::try_from(sequence).expect("fixture sequence")]),
+            );
+            if sequence > 1 {
+                for _ in 0..sequence {
+                    file.record_read();
+                }
+            }
+            files.push(file);
+        }
+        let oldest_cold = crate::sst::file_name(0, 0, 1);
+
+        // Act
+        let plan = compactor
+            .pick_compaction(&files, 0)
+            .expect("compaction planning")
+            .expect("L0 threshold should produce a compaction plan");
+
+        // Assert
+        assert!(
+            plan.input_files.contains(&oldest_cold),
+            "every L0 batch must make progress on the oldest cold file"
+        );
+    }
+
+    #[test]
+    fn should_scale_l0_batch_size_with_configured_file_count_threshold() {
+        // Arrange
+        let configured_threshold = 6;
+        let compactor = Compactor::with_config(LeveledCompactionConfig {
+            l0_file_count_threshold: configured_threshold,
+            ..LeveledCompactionConfig::default()
+        });
+        let files: Vec<_> = (1..=8_u64)
+            .map(|sequence| {
+                make_file(
+                    &crate::sst::file_name(0, 0, sequence),
+                    0,
+                    0,
+                    1,
+                    Some(vec![u8::try_from(sequence).expect("fixture sequence")]),
+                    Some(vec![u8::try_from(sequence).expect("fixture sequence")]),
+                )
+            })
+            .collect();
+
+        // Act
+        let plan = compactor
+            .pick_compaction(&files, 0)
+            .expect("compaction planning")
+            .expect("L0 threshold should produce a compaction plan");
+
+        // Assert
+        assert_eq!(plan.input_files.len(), configured_threshold);
     }
 }
