@@ -15,7 +15,7 @@ pub mod iterator;
 pub mod query;
 
 pub use crate::types::ConflictPolicy;
-pub use iterator::{Direction, Iterator as ScanIterator};
+pub use iterator::{Direction, Iterator as ScanIterator, IteratorState};
 pub use kv::{Key, Value};
 pub use options::{
     BlockCachePolicy, CloudWritePolicy, Goal, MemoryBudget, OpenOptions, OpenOptionsBuilder,

@@ -1,6 +1,7 @@
 use super::*;
 use crate::io::traits::{DirEntry, Metadata};
-use crate::io::{Durability, File, Fs, FsPath, FsResult, OpenOptions};
+use crate::io::{Durability, File, Fs, FsError, FsPath, FsResult, OpenOptions};
+use crate::sst::compression::{CompressionAlgo, CompressionPolicy, BLOCK_TRAILER_SIZE};
 use crate::sst::traits::{SstFactory, SstReader, SstStateReader};
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -8,6 +9,7 @@ use std::sync::Mutex;
 struct CountingFs {
     inner: crate::io::RealFs,
     reads: Arc<Mutex<Vec<(u64, u64)>>>,
+    persistent_handles: bool,
 }
 
 impl CountingFs {
@@ -15,6 +17,14 @@ impl CountingFs {
         Ok(Self {
             inner: crate::io::RealFs::new(root)?,
             reads: Arc::new(Mutex::new(Vec::new())),
+            persistent_handles: true,
+        })
+    }
+
+    fn without_persistent_handles(root: &std::path::Path) -> FsResult<Self> {
+        Ok(Self {
+            persistent_handles: false,
+            ..Self::new(root)?
         })
     }
 
@@ -82,6 +92,11 @@ impl Fs for CountingFs {
     }
 
     fn open_persistent_handle(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
+        if !self.persistent_handles {
+            return Err(FsError::Unsupported(
+                "test backend uses path-based SST reads".to_string(),
+            ));
+        }
         self.inner.open_persistent_handle(path, opts)
     }
 
@@ -119,10 +134,14 @@ impl Fs for CountingFs {
 }
 
 fn write_unique_key_sst(temp_dir: &tempfile::TempDir, name: &str) -> MidgeResult<()> {
+    write_marked_key_sst(temp_dir, name, b'x')
+}
+
+fn write_marked_key_sst(temp_dir: &tempfile::TempDir, name: &str, marker: u8) -> MidgeResult<()> {
     let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
     let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
     let mut writer = factory.create()?;
-    let value = vec![b'x'; 256];
+    let value = vec![marker; 256];
 
     for i in 0..96u64 {
         let key = format!("key_{i:04}");
@@ -258,6 +277,133 @@ fn should_isolate_replaced_sst_cache_entries_by_generation_identity() -> MidgeRe
 
     // Assert
     assert_eq!(value.as_deref(), Some(b"new".as_slice()));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn should_finish_scan_from_open_handle_when_backing_sst_is_unlinked_mid_scan() -> MidgeResult<()> {
+    // Arrange
+    let temp_dir = tempfile::tempdir()?;
+    write_unique_key_sst(&temp_dir, "unlinked-scan.sst")?;
+    let reader = Arc::new(SstFileIo::open(
+        "unlinked-scan.sst",
+        Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+    )?);
+    let mut scan = reader.state_scan(None, None, false, u64::MAX, 0);
+    let first = scan.next().expect("first scan item")?;
+    std::fs::remove_file(temp_dir.path().join("unlinked-scan.sst"))?;
+
+    // Act
+    let remaining = scan.collect::<MidgeResult<Vec<_>>>()?;
+
+    // Assert
+    assert_eq!(first.0.as_ref(), b"key_0000");
+    assert_eq!(remaining.len(), 95);
+    assert_eq!(
+        remaining.last().map(|(key, _)| key.as_ref()),
+        Some(b"key_0095".as_slice())
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn should_finish_scan_from_original_handle_when_sst_path_is_replaced_mid_scan() -> MidgeResult<()> {
+    // Arrange
+    let temp_dir = tempfile::tempdir()?;
+    write_marked_key_sst(&temp_dir, "active.sst", b'o')?;
+    write_marked_key_sst(&temp_dir, "replacement.sst", b'n')?;
+    let fs: Arc<dyn Fs> = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+    let reader = Arc::new(SstFileIo::open("active.sst", Arc::clone(&fs))?);
+    let mut scan = reader.state_scan(None, None, false, u64::MAX, 0);
+    let first = scan.next().expect("first scan item")?;
+    std::fs::rename(
+        temp_dir.path().join("replacement.sst"),
+        temp_dir.path().join("active.sst"),
+    )?;
+
+    // Act
+    let remaining = scan.collect::<MidgeResult<Vec<_>>>()?;
+    let replacement = SstFileIo::open("active.sst", fs)?;
+
+    // Assert
+    let old_value = vec![b'o'; 256];
+    let new_value = vec![b'n'; 256];
+    assert!(
+        matches!(first.1, KeyState::Value(ref value, ..) if value.as_ref() == old_value.as_slice())
+    );
+    assert_eq!(remaining.len(), 95);
+    assert!(remaining.iter().all(|(_, state)| {
+        matches!(state, KeyState::Value(value, ..) if value.as_ref() == old_value.as_slice())
+    }));
+    assert_eq!(
+        replacement.get(b"key_0001")?.as_deref(),
+        Some(new_value.as_slice())
+    );
+    Ok(())
+}
+
+#[test]
+fn should_finish_scan_with_visible_error_when_backing_sst_is_deleted_mid_range_scan(
+) -> MidgeResult<()> {
+    // Arrange
+    let temp_dir = tempfile::tempdir()?;
+    write_unique_key_sst(&temp_dir, "deleted-scan.sst")?;
+    let fs = Arc::new(CountingFs::without_persistent_handles(temp_dir.path())?);
+    let reader = Arc::new(SstFileIo::open("deleted-scan.sst", fs)?);
+    let mut scan = reader.state_scan(None, None, false, u64::MAX, 0);
+    let first = scan.next().expect("first scan item")?;
+    std::fs::remove_file(temp_dir.path().join("deleted-scan.sst"))?;
+
+    // Act
+    let first_failure = scan
+        .find_map(Result::err)
+        .expect("path-based scan must observe deletion at a block transition");
+    let replayed_once = scan.next().expect("failed scan replays its error");
+    let replayed_twice = scan.next().expect("failed scan remains failed");
+
+    // Assert
+    assert_eq!(first.0.as_ref(), b"key_0000");
+    assert!(matches!(first_failure, MidgeError::NotFound));
+    assert!(matches!(replayed_once, Err(MidgeError::NotFound)));
+    assert!(matches!(replayed_twice, Err(MidgeError::NotFound)));
+    assert!(matches!(scan.lifecycle, SstScanLifecycle::Failed(_)));
+    Ok(())
+}
+
+#[test]
+fn should_classify_truncated_nonlegacy_sst_as_corruption() -> MidgeResult<()> {
+    // Arrange
+    let temp_dir = tempfile::tempdir()?;
+    std::fs::write(temp_dir.path().join("truncated.sst"), [0_u8; 32])?;
+    let fs: Arc<dyn Fs> = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+
+    // Act
+    let Err(error) = SstFileIo::open("truncated.sst", fs) else {
+        panic!("truncated SST must not open");
+    };
+
+    // Assert
+    assert!(matches!(error, MidgeError::Corruption(_)));
+    Ok(())
+}
+
+#[test]
+fn should_reject_legacy_v2_sst_without_falling_back_to_unchecksummed_blocks() -> MidgeResult<()> {
+    // Arrange
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/compatibility/v2_compressed_sst_db/sst");
+    let file_name = "000001_00_00000000000000000001.sst";
+    let fs: Arc<dyn Fs> = Arc::new(crate::io::RealFs::new(&fixture_dir)?);
+
+    // Act
+    let Err(error) = SstFileIo::open(file_name, fs) else {
+        panic!("legacy SST must not open in a V4-only build");
+    };
+
+    // Assert
+    assert!(matches!(error, MidgeError::CompatibilityError(_)));
     Ok(())
 }
 
@@ -605,6 +751,79 @@ fn should_reject_current_format_block_with_crc_mismatch() -> MidgeResult<()> {
 }
 
 #[test]
+fn should_report_corruption_given_shipping_codec_payload_when_reading_through_full_sst_path(
+) -> MidgeResult<()> {
+    // Arrange
+    let pattern = b"account=0042|region=east|status=active|segment=business|";
+    let value = pattern
+        .iter()
+        .copied()
+        .cycle()
+        .take(16 * 1024)
+        .collect::<Vec<_>>();
+    for algorithm in [
+        CompressionAlgo::Lz4,
+        CompressionAlgo::Zstd3,
+        CompressionAlgo::Zstd9,
+    ] {
+        let temp_dir = tempfile::tempdir()?;
+        let fs: Arc<dyn Fs> = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096)
+            .with_compression_policy(CompressionPolicy::Fixed(algorithm));
+        let mut writer = factory.create()?;
+        writer.add_with_meta(b"codec-key", Some(&value), 1, 0, None)?;
+        let path = temp_dir.path().join("codec.sst");
+        crate::sst::fs::finish_writer_to_path(writer, &path)?;
+        let reader = SstFileIo::open("codec.sst", Arc::clone(&fs))?;
+        let (_, handle) = reader
+            .index_entries()?
+            .first()
+            .cloned()
+            .expect("persisted SST has one data handle");
+        let mut bytes = std::fs::read(&path)?;
+        let data_start = usize::try_from(handle.offset).expect("data offset fits usize");
+        let data_size = usize::try_from(handle.size).expect("data size fits usize");
+        let data_end = data_start + data_size;
+        let payload_start = data_start + 4;
+        let algorithm_offset = data_end - BLOCK_TRAILER_SIZE;
+        let crc_offset = data_end - size_of::<u32>();
+        assert_eq!(bytes[algorithm_offset], algorithm.to_u8());
+        match algorithm {
+            CompressionAlgo::Lz4 => {
+                bytes[payload_start..payload_start + 4]
+                    .copy_from_slice(&(64 * 1024 * 1024_u32 + 1).to_le_bytes());
+            }
+            CompressionAlgo::Zstd3 | CompressionAlgo::Zstd9 => bytes[payload_start] ^= 0xff,
+            CompressionAlgo::None => panic!("test requires a genuinely compressed block"),
+        }
+        let crc = crc32c::crc32c(&bytes[payload_start..crc_offset]);
+        bytes[crc_offset..data_end].copy_from_slice(&crc.to_le_bytes());
+        std::fs::write(&path, bytes)?;
+
+        // Act
+        let point_error = SstFileIo::open("codec.sst", Arc::clone(&fs))?
+            .get(b"codec-key")
+            .expect_err("point read must surface compressed payload corruption");
+        let scan_error = SstFileIo::open("codec.sst", Arc::clone(&fs))?
+            .scan_range(None, None)
+            .expect_err("range read must surface compressed payload corruption");
+        let verify_error = SstFileIo::open("codec.sst", Arc::clone(&fs))?
+            .verify_all_blocks()
+            .expect_err("verification must surface compressed payload corruption");
+
+        // Assert
+        for error in [point_error, scan_error, verify_error] {
+            assert!(matches!(error, MidgeError::Corruption(_)));
+            assert!(
+                !error.to_string().contains("CRC32C mismatch"),
+                "{algorithm:?} must reach the codec decoder: {error}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn should_reject_oversized_block_handle_before_issuing_filesystem_read() -> MidgeResult<()> {
     // Arrange
     let temp_dir = tempfile::tempdir()?;
@@ -640,4 +859,21 @@ fn should_reject_out_of_order_readahead_handles_without_panicking() -> MidgeResu
     // Assert
     assert!(matches!(result, Err(MidgeError::Corruption(_))));
     Ok(())
+}
+
+#[test]
+fn should_reject_unreferenced_gap_between_v4_sst_blocks() {
+    // Arrange
+    let mut reader = SstFileIo::new("gap.sst", Arc::new(crate::io::MockFs::new()));
+    reader.block_region_end = 30;
+    reader.footer = Some(Footer::new(
+        BlockHandle::new(0, 9),
+        BlockHandle::new(20, 10),
+    ));
+
+    // Act
+    let result = reader.validate_nonoverlapping_references(&[]);
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::Corruption(_))));
 }

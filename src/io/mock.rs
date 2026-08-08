@@ -107,19 +107,21 @@ impl Fs for MockFs {
             return Err(FsError::AlreadyExists(path.0.clone()));
         }
 
-        files
+        let file_data = files
             .entry(path.0.clone())
             .or_insert_with(|| MockFileData { data: Vec::new() });
 
         if opts.truncate {
-            if let Some(file_data) = files.get_mut(&path.0) {
-                file_data.data.clear();
-            }
+            file_data.data.clear();
         }
+        let readonly_snapshot =
+            (opts.mode == super::traits::OpenMode::ReadOnly).then(|| file_data.data.clone());
+        drop(files);
 
         Ok(Box::new(MockPersistentFile {
             path: path.0.clone(),
             files: Arc::clone(&self.files),
+            readonly_snapshot,
         }))
     }
 
@@ -279,10 +281,15 @@ impl File for MockFile<'_> {
 pub struct MockPersistentFile {
     path: String,
     files: Arc<Mutex<HashMap<String, MockFileData>>>,
+    readonly_snapshot: Option<Vec<u8>>,
 }
 
 impl File for MockPersistentFile {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
+        if let Some(snapshot) = &self.readonly_snapshot {
+            let (start, end) = checked_range(offset, len, snapshot.len())?;
+            return Ok(Bytes::copy_from_slice(&snapshot[start..end]));
+        }
         let files = self.files.lock();
         if let Some(data) = files.get(&self.path) {
             let (start, end) = checked_range(offset, len, data.data.len())?;
@@ -294,6 +301,11 @@ impl File for MockPersistentFile {
     }
 
     fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()> {
+        if self.readonly_snapshot.is_some() {
+            return Err(FsError::Unsupported(
+                "cannot write through a read-only persistent mock handle".to_string(),
+            ));
+        }
         let mut files = self.files.lock();
         if let Some(file_data) = files.get_mut(&self.path) {
             let start = checked_write_start(offset)?;
@@ -313,6 +325,11 @@ impl File for MockPersistentFile {
     }
 
     fn append(&mut self, data: Bytes) -> FsResult<u64> {
+        if self.readonly_snapshot.is_some() {
+            return Err(FsError::Unsupported(
+                "cannot append through a read-only persistent mock handle".to_string(),
+            ));
+        }
         let mut files = self.files.lock();
         if let Some(file_data) = files.get_mut(&self.path) {
             let pos = file_data.data.len() as u64;
@@ -324,6 +341,9 @@ impl File for MockPersistentFile {
     }
 
     fn len(&self) -> FsResult<u64> {
+        if let Some(snapshot) = &self.readonly_snapshot {
+            return Ok(snapshot.len() as u64);
+        }
         let files = self.files.lock();
         if let Some(data) = files.get(&self.path) {
             Ok(data.data.len() as u64)
@@ -419,6 +439,42 @@ mod tests {
         fs.remove_file(&path)?;
 
         // Assert
+        assert!(!fs.exists(&path)?);
+        Ok(())
+    }
+
+    #[test]
+    fn should_keep_readonly_persistent_handle_valid_after_unlink() -> FsResult<()> {
+        // Arrange
+        let fs = MockFs::new();
+        let path = FsPath::new("stable.txt");
+        let mut writer = fs.open(
+            &path,
+            OpenOptions {
+                mode: OpenMode::ReadWrite,
+                create: true,
+                create_new: false,
+                truncate: false,
+            },
+        )?;
+        writer.append(Bytes::from_static(b"stable bytes"))?;
+        drop(writer);
+        let reader = fs.open_persistent_handle(
+            &path,
+            OpenOptions {
+                mode: OpenMode::ReadOnly,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        )?;
+        fs.remove_file(&path)?;
+
+        // Act
+        let bytes = reader.read_at(0, 12)?;
+
+        // Assert
+        assert_eq!(bytes.as_ref(), b"stable bytes");
         assert!(!fs.exists(&path)?);
         Ok(())
     }

@@ -1,7 +1,7 @@
 use crate::common::{MidgeError, MidgeResult};
 use std::path::{Path, PathBuf};
 
-pub const CURRENT_FORMAT_VERSION: u32 = 2;
+pub const CURRENT_FORMAT_VERSION: u32 = 3;
 const FORMAT_FILE: &str = "FORMAT";
 const FORMAT_PREFIX: &str = "midge-format-version=";
 

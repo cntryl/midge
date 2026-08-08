@@ -352,8 +352,8 @@ path = "benches/tier4_system_strict_group_commit.rs"
 harness = false
 
 [[bench]]
-name = "tier4_system_adaptive_compression_promotion"
-path = "benches/tier4_system_adaptive_compression_promotion.rs"
+name = "tier4_system_compression_policy"
+path = "benches/tier4_system_compression_policy.rs"
 harness = false
 
 [[bench]]

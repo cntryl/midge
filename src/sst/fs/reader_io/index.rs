@@ -1,17 +1,28 @@
 use super::{BlockHandle, IndexEntries, SstFileIo};
 use crate::common::{MidgeError, MidgeResult};
+use crate::io::File;
 use crate::sst::cache::CacheKey;
 use std::sync::Arc;
 
 impl SstFileIo {
     pub(super) fn parse_index_entries(&self) -> MidgeResult<Vec<(Vec<u8>, BlockHandle)>> {
+        self.parse_index_entries_from(None)
+    }
+
+    pub(super) fn parse_index_entries_from(
+        &self,
+        file: Option<&dyn File>,
+    ) -> MidgeResult<Vec<(Vec<u8>, BlockHandle)>> {
         let footer = self
             .footer
             .as_ref()
             .ok_or_else(|| MidgeError::Corruption("No footer".into()))?;
 
-        let index_data = self.read_block(&footer.index_handle)?;
-        let mut result = Vec::new();
+        let index_data = file.map_or_else(
+            || self.read_block(&footer.index_handle),
+            |file| self.read_block_from(file, &footer.index_handle),
+        )?;
+        let mut result: Vec<(Vec<u8>, BlockHandle)> = Vec::new();
         let mut offset = 0;
 
         while offset < index_data.len() {
@@ -77,18 +88,38 @@ impl SstFileIo {
             ]);
             offset += 8;
 
-            result.push((key, BlockHandle::new(block_offset, block_size)));
+            let handle = BlockHandle::new(block_offset, block_size);
+            Self::validate_block_handle(handle, self.block_region_end, "data")?;
+            if result
+                .last()
+                .is_some_and(|(previous_key, previous_handle)| {
+                    previous_key.as_slice() > key.as_slice()
+                        || previous_handle
+                            .offset
+                            .checked_add(previous_handle.size)
+                            .is_none_or(|end| end > handle.offset)
+                })
+            {
+                return Err(MidgeError::Corruption(
+                    "SST index entries are not key-ordered and non-overlapping".into(),
+                ));
+            }
+            result.push((key, handle));
         }
 
         Ok(result)
     }
 
     pub(super) fn index_entries(&self) -> MidgeResult<IndexEntries> {
+        self.index_entries_from(None)
+    }
+
+    pub(super) fn index_entries_from(&self, file: Option<&dyn File>) -> MidgeResult<IndexEntries> {
         if let Some(cached) = self.index_entries.load_full() {
             return Ok(cached);
         }
 
-        let parsed = Arc::new(self.parse_index_entries()?);
+        let parsed = Arc::new(self.parse_index_entries_from(file)?);
         // Concurrent cold readers may parse the same immutable index more
         // than once. Publishing either equivalent result is safe, and avoids
         // placing a mutex in every subsequent point-read hot path.
@@ -199,6 +230,14 @@ impl SstFileIo {
     }
 
     pub(super) fn read_cached_data_block(&self, handle: &BlockHandle) -> MidgeResult<bytes::Bytes> {
+        self.read_cached_data_block_from(handle, None)
+    }
+
+    pub(super) fn read_cached_data_block_from(
+        &self,
+        handle: &BlockHandle,
+        file: Option<&dyn File>,
+    ) -> MidgeResult<bytes::Bytes> {
         let cache_key = CacheKey::for_data(self.sst_id, handle.offset);
         let read_metrics = self.diagnostics.sst_metrics();
 
@@ -214,13 +253,19 @@ impl SstFileIo {
                 if let Some(telemetry) = crate::telemetry::Telemetry::global() {
                     telemetry.metrics().record_cache_miss();
                 }
-                let bytes = self.read_block(handle)?;
+                let bytes = file.map_or_else(
+                    || self.read_block(handle),
+                    |file| self.read_block_from(file, handle),
+                )?;
                 read_metrics.record_data_block_read();
                 cache.put(cache_key, &bytes);
                 Ok(bytes)
             }
         } else {
-            let bytes = self.read_block(handle)?;
+            let bytes = file.map_or_else(
+                || self.read_block(handle),
+                |file| self.read_block_from(file, handle),
+            )?;
             read_metrics.record_data_block_read();
             Ok(bytes)
         }

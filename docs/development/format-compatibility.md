@@ -12,6 +12,27 @@ The compatibility policy applies to:
 - SST file layout and footer/version identifiers
 - cloud WAL publication catalog and epoch-scoped object-key layout
 
+## Current Local Format
+
+Database `FORMAT` version 3 requires SST V4. This is an intentional pre-1.0
+break: current binaries reject database FORMAT versions 1 and 2, SST versions
+1 through 3, and unknown future versions. There is no legacy decoder or
+best-effort fallback in the V4 reader.
+
+SST V4 has the following integrity and compatibility boundaries:
+
+- an 84-byte fixed footer containing its version, encoded footer length,
+  self-identifying magic, and CRC32C
+- exact, non-overlapping block handles validated against the file length
+- a mandatory five-byte compression trailer (`codec` plus CRC32C) on every
+  persisted block
+- explicit TTL presence, so `None` and `Some(u64::MAX)` remain distinct
+- codec identifiers 0 through 3 only: raw, LZ4, Zstd level 3, and Zstd level 9
+
+Removed codec identifiers and malformed or unknown identifiers fail with
+corruption or compatibility errors. The reader never retries such bytes as an
+uncompressed block.
+
 ## Required Rules For 1.0
 
 - every persistent format must carry an explicit version identifier or versioned decoding path
@@ -64,6 +85,19 @@ Before 1.0, Midge should maintain fixtures for:
 - if rollback is unsupported, docs must say so and provide export/import or backup/restore guidance
 - `midge verify` should be part of the documented pre-upgrade and post-upgrade workflow
 
-## Current Gap
+The FORMAT 3/SST V4 transition has no in-place upgrade and no binary rollback.
+Before installing a FORMAT 3 binary, use the old binary to open the old
+database and export its logical column-family key/value contents through the
+public API. Import that logical export into a newly created FORMAT 3 database.
+Applications that use TTL must also preserve enough application metadata to
+reconstruct each remaining expiration; the public scan result intentionally
+does not expose internal persisted expiration timestamps. Keep the original
+database as the rollback copy. Once a FORMAT 3 binary creates or writes the
+new database, an older binary must not open it.
 
-This policy is the contract target. The full golden-fixture and compatibility CI implementation is still a delivery item, not a completed guarantee.
+## Fixture Coverage
+
+Repository gates verify, open, and scan a checked-in populated FORMAT 3/SST V4
+fixture with a stable logical digest; they also reject a prior FORMAT 2 fixture
+and a synthetic future FORMAT 4 fixture. Format changes must update these
+fixtures and their CI assertions together.

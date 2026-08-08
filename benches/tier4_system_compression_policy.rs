@@ -1,9 +1,9 @@
-//! Tier 4 - Adaptive Compression Promotion Probe
+//! Tier 4 - Engine Compression Policy Comparison
 //!
-//! Fixed-work local Throughput workloads used to compare exhaustive and
-//! selective Adaptive SST compression in isolated worktrees. Each workload
-//! performs four explicit flushes, a completed compaction, and a clean
-//! shutdown. Phase timings and the final SST footprint are recorded separately.
+//! Fixed-work local workloads compare the actual policies derived from
+//! `Goal::{Latency, Throughput, Economy}`. Each workload performs four
+//! explicit flushes, a completed compaction, and a clean shutdown. Phase
+//! timings and the final SST footprint are recorded separately.
 
 use cntryl_midge::{
     Engine, Goal, OpenOptions, RecoveryPolicy, TransactionMode, WorkloadProfile, WriteOptions,
@@ -128,7 +128,7 @@ fn records(shape: RecordShape) -> Vec<(Vec<u8>, Vec<u8>)> {
     (0..FLUSHES * RECORDS_PER_FLUSH)
         .map(|ordinal| {
             (
-                format!("adaptive:{:04}:{ordinal:08}", shape.name()).into_bytes(),
+                format!("policy:{:04}:{ordinal:08}", shape.name()).into_bytes(),
                 record_value(shape, ordinal),
             )
         })
@@ -154,23 +154,31 @@ fn final_sst_bytes(path: &Path) -> u64 {
         .sum()
 }
 
-fn execute_workload(shape: RecordShape) -> WorkloadOutcome {
-    let temp = tempfile::tempdir().expect("create adaptive benchmark database");
+fn goal_name(goal: Goal) -> &'static str {
+    match goal {
+        Goal::Latency => "latency_lz4",
+        Goal::Throughput => "throughput_adaptive",
+        Goal::Economy => "economy_zstd9",
+    }
+}
+
+fn execute_workload(shape: RecordShape, goal: Goal) -> WorkloadOutcome {
+    let temp = tempfile::tempdir().expect("create compression-policy benchmark database");
     let records = records(shape);
     let total_started = Instant::now();
     let mut engine = Engine::open(
         OpenOptions::local(temp.path())
-            .goal(Goal::Throughput)
+            .goal(goal)
             .workload(WorkloadProfile::WriteHeavy)
             .recovery_policy(RecoveryPolicy::Strict)
             .background_compaction(false)
             .build()
-            .expect("build adaptive benchmark options"),
+            .expect("build compression-policy benchmark options"),
     )
-    .expect("open adaptive benchmark database");
+    .expect("open compression-policy benchmark database");
     let column_family = engine
-        .create_column_family("adaptive")
-        .expect("create adaptive benchmark column family");
+        .create_column_family("compression-policy")
+        .expect("create compression-policy benchmark column family");
 
     let mut ingest = Duration::ZERO;
     let mut flush_compaction = Duration::ZERO;
@@ -178,32 +186,32 @@ fn execute_workload(shape: RecordShape) -> WorkloadOutcome {
         let ingest_started = Instant::now();
         let mut transaction = engine
             .begin_tx(column_family.id(), TransactionMode::ReadWrite)
-            .expect("begin adaptive benchmark transaction");
+            .expect("begin compression-policy benchmark transaction");
         for (key, value) in batch {
             transaction
                 .put(key.clone(), value.clone(), None)
-                .expect("write adaptive benchmark record");
+                .expect("write compression-policy benchmark record");
         }
         transaction
             .commit(WriteOptions::buffered())
-            .expect("commit adaptive benchmark records");
+            .expect("commit compression-policy benchmark records");
         ingest += ingest_started.elapsed();
 
         let flush_started = Instant::now();
         engine
             .flush_cf(&column_family)
-            .expect("flush adaptive benchmark batch");
+            .expect("flush compression-policy benchmark batch");
         flush_compaction += flush_started.elapsed();
     }
 
     let compaction_started = Instant::now();
     engine
         .compact_all()
-        .expect("complete adaptive benchmark compaction");
+        .expect("complete compression-policy benchmark compaction");
     flush_compaction += compaction_started.elapsed();
     engine
         .shutdown(Duration::from_secs(30))
-        .expect("cleanly shut down adaptive benchmark database");
+        .expect("cleanly shut down compression-policy benchmark database");
     let total = total_started.elapsed();
 
     WorkloadOutcome {
@@ -214,10 +222,11 @@ fn execute_workload(shape: RecordShape) -> WorkloadOutcome {
     }
 }
 
-fn run_workload(ctx: &mut StressContext, shape: RecordShape) {
-    let outcome = execute_workload(shape);
+fn run_workload(ctx: &mut StressContext, shape: RecordShape, goal: Goal) {
+    let outcome = execute_workload(shape, goal);
     let completed = u64::try_from(LOGICAL_BYTES).expect("logical bytes fit in u64");
     ctx.parameter("record_shape", shape.name());
+    ctx.parameter("engine_goal_policy", goal_name(goal));
     ctx.parameter("record_count", FLUSHES * RECORDS_PER_FLUSH);
     ctx.parameter("record_value_bytes", VALUE_SIZE);
     ctx.parameter("flush_count", FLUSHES);
@@ -229,50 +238,64 @@ fn run_workload(ctx: &mut StressContext, shape: RecordShape) {
     ctx.parameter("flush_compaction_ns", outcome.flush_compaction.as_nanos());
     ctx.parameter("total_ns", outcome.total.as_nanos());
     ctx.parameter("final_sst_bytes", outcome.final_sst_bytes);
-    ctx.metadata("trust_class", "diagnostic");
-    ctx.metadata(
-        "diagnostic_reason",
-        "adaptive_compression_isolated_promotion_probe",
-    );
-
     ctx.record_external(
-        format!("adaptive_complete_ingest_{}", shape.name()),
+        format!("engine_policy_{}_ingest_{}", goal_name(goal), shape.name()),
         outcome.ingest,
         completed,
     );
     ctx.record_external(
-        format!("adaptive_complete_flush_compaction_{}", shape.name()),
+        format!(
+            "engine_policy_{}_flush_compaction_{}",
+            goal_name(goal),
+            shape.name()
+        ),
         outcome.flush_compaction,
         completed,
     );
     ctx.record_external(
-        format!("adaptive_complete_total_{}", shape.name()),
+        format!("engine_policy_{}_total_{}", goal_name(goal), shape.name()),
         outcome.total,
         completed,
     );
 }
 
-macro_rules! adaptive_system_case {
-    ($fn_name:ident, $shape:ident) => {
+macro_rules! engine_policy_case {
+    ($fn_name:ident, $goal:ident, $shape:ident) => {
         #[stress(
             tier = 4,
             metadata(
-                component = "adaptive_compression",
-                scenario = "complete_local_sst",
-                trust_class = "diagnostic",
-                diagnostic_reason = "adaptive_compression_isolated_promotion_probe"
+                component = "engine_compression_policy",
+                scenario = "four_flushes_and_compaction"
             )
         )]
         fn $fn_name(ctx: &mut StressContext) {
-            run_workload(ctx, RecordShape::$shape);
+            run_workload(ctx, RecordShape::$shape, Goal::$goal);
         }
     };
 }
 
-adaptive_system_case!(adaptive_complete_repeated, Repeated);
-adaptive_system_case!(adaptive_complete_structured, Structured);
-adaptive_system_case!(adaptive_complete_mixed, Mixed);
-adaptive_system_case!(adaptive_complete_prefix_random_tail, PrefixRandomTail);
-adaptive_system_case!(adaptive_complete_low_cardinality, LowCardinality);
+engine_policy_case!(latency_policy_repeated, Latency, Repeated);
+engine_policy_case!(latency_policy_structured, Latency, Structured);
+engine_policy_case!(latency_policy_mixed, Latency, Mixed);
+engine_policy_case!(latency_policy_prefix_random_tail, Latency, PrefixRandomTail);
+engine_policy_case!(latency_policy_low_cardinality, Latency, LowCardinality);
+engine_policy_case!(throughput_policy_repeated, Throughput, Repeated);
+engine_policy_case!(throughput_policy_structured, Throughput, Structured);
+engine_policy_case!(throughput_policy_mixed, Throughput, Mixed);
+engine_policy_case!(
+    throughput_policy_prefix_random_tail,
+    Throughput,
+    PrefixRandomTail
+);
+engine_policy_case!(
+    throughput_policy_low_cardinality,
+    Throughput,
+    LowCardinality
+);
+engine_policy_case!(economy_policy_repeated, Economy, Repeated);
+engine_policy_case!(economy_policy_structured, Economy, Structured);
+engine_policy_case!(economy_policy_mixed, Economy, Mixed);
+engine_policy_case!(economy_policy_prefix_random_tail, Economy, PrefixRandomTail);
+engine_policy_case!(economy_policy_low_cardinality, Economy, LowCardinality);
 
 stress_main!();

@@ -170,11 +170,11 @@ pub(crate) struct TransactionInit {
     pub(crate) runtime_transaction_guard: crate::runtime::RuntimeTransactionGuard,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
 enum ScanLifecycle {
     Uninitialized,
     Active,
     Exhausted,
+    Failed(MidgeError),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -220,7 +220,7 @@ impl<'a> TransactionScan<'a> {
     }
 
     fn initialize(&mut self) {
-        if self.lifecycle == ScanLifecycle::Uninitialized {
+        if matches!(self.lifecycle, ScanLifecycle::Uninitialized) {
             self.snapshot_head = self.snapshot.next();
             self.intent_head = self.intents.next();
             self.lifecycle = ScanLifecycle::Active;
@@ -349,8 +349,10 @@ impl std::iter::Iterator for TransactionScan<'_> {
     type Item = MidgeResult<(bytes::Bytes, bytes::Bytes)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.lifecycle == ScanLifecycle::Exhausted {
-            return None;
+        match &self.lifecycle {
+            ScanLifecycle::Failed(error) => return Some(Err(error.replay())),
+            ScanLifecycle::Exhausted => return None,
+            ScanLifecycle::Uninitialized | ScanLifecycle::Active => {}
         }
         match self.next_visible() {
             Ok(Some(row)) => Some(Ok(row)),
@@ -359,8 +361,13 @@ impl std::iter::Iterator for TransactionScan<'_> {
                 None
             }
             Err(error) => {
-                self.lifecycle = ScanLifecycle::Exhausted;
-                Some(Err(error))
+                self.lifecycle = ScanLifecycle::Failed(error);
+                match &self.lifecycle {
+                    ScanLifecycle::Failed(error) => Some(Err(error.replay())),
+                    ScanLifecycle::Uninitialized
+                    | ScanLifecycle::Active
+                    | ScanLifecycle::Exhausted => unreachable!(),
+                }
             }
         }
     }

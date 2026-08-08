@@ -1,6 +1,6 @@
 //! Iterator API - lazy, fallible range scans.
 
-use crate::common::MidgeResult;
+use crate::common::{MidgeError, MidgeResult};
 use bytes::Bytes;
 
 /// Iteration direction.
@@ -12,15 +12,29 @@ pub enum Direction {
     Reverse,
 }
 
+/// Observable terminal state of a lazy range iterator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IteratorState {
+    /// The iterator may still yield rows.
+    Active,
+    /// The iterator reached the end of its range normally.
+    Exhausted,
+    /// A storage or decoding error terminated the scan.
+    Failed,
+}
+
 /// A lazy range iterator over key-value pairs.
 ///
 /// Storage is consulted as the iterator advances. Consequently, an error in a
 /// later SST block is returned from the item that reaches that block instead
-/// of being hidden during iterator construction.
+/// of being hidden during iterator construction. A terminal error is sticky:
+/// callers that advance again receive the same error variant and message, and
+/// must propagate the error or stop iterating.
 pub struct Iterator<'a> {
     inner: Box<dyn std::iter::Iterator<Item = MidgeResult<(Bytes, Bytes)>> + 'a>,
     direction: Direction,
-    exhausted: bool,
+    state: IteratorState,
+    failure: Option<MidgeError>,
 }
 
 impl<'a> Iterator<'a> {
@@ -31,14 +45,27 @@ impl<'a> Iterator<'a> {
         Self {
             inner: Box::new(iterator),
             direction,
-            exhausted: false,
+            state: IteratorState::Active,
+            failure: None,
         }
     }
 
     /// Return whether iteration is complete.
     #[must_use]
     pub fn exhausted(&self) -> bool {
-        self.exhausted
+        self.state == IteratorState::Exhausted
+    }
+
+    /// Return whether iteration terminated because of a read error.
+    #[must_use]
+    pub fn failed(&self) -> bool {
+        self.state == IteratorState::Failed
+    }
+
+    /// Return the explicit scan state.
+    #[must_use]
+    pub fn state(&self) -> IteratorState {
+        self.state
     }
 
     /// Return the iteration direction.
@@ -66,14 +93,24 @@ impl std::iter::Iterator for Iterator<'_> {
     type Item = MidgeResult<(Bytes, Bytes)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.exhausted {
+        if let Some(error) = &self.failure {
+            return Some(Err(error.replay()));
+        }
+        if self.state == IteratorState::Exhausted {
             return None;
         }
-        let next = self.inner.next();
-        if next.is_none() {
-            self.exhausted = true;
+        match self.inner.next() {
+            Some(Ok(row)) => Some(Ok(row)),
+            Some(Err(error)) => {
+                self.state = IteratorState::Failed;
+                self.failure = Some(error);
+                self.failure.as_ref().map(|error| Err(error.replay()))
+            }
+            None => {
+                self.state = IteratorState::Exhausted;
+                None
+            }
         }
-        next
     }
 }
 
@@ -112,6 +149,30 @@ mod tests {
         assert!(first.is_some());
         assert!(end.is_none());
         assert!(iterator.exhausted());
+        assert!(!iterator.failed());
+        assert_eq!(iterator.state(), IteratorState::Exhausted);
         assert_eq!(iterator.direction(), Direction::Reverse);
+    }
+
+    #[test]
+    fn should_replay_terminal_error_without_marking_iterator_exhausted() {
+        // Arrange
+        let rows = vec![Err(MidgeError::Corruption("late block".to_string()))];
+        let mut iterator = Iterator::from_iter(rows.into_iter(), Direction::Forward);
+
+        // Act
+        let first = iterator.next().expect("first error item");
+        let replayed = iterator.next().expect("sticky replayed error item");
+
+        // Assert
+        assert!(
+            matches!(first, Err(MidgeError::Corruption(ref message)) if message == "late block")
+        );
+        assert!(
+            matches!(replayed, Err(MidgeError::Corruption(ref message)) if message == "late block")
+        );
+        assert!(iterator.failed());
+        assert!(!iterator.exhausted());
+        assert_eq!(iterator.state(), IteratorState::Failed);
     }
 }

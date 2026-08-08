@@ -97,9 +97,15 @@ pub(crate) struct SnapshotScan {
     reverse: bool,
     sequence: u64,
     initialized: bool,
-    exhausted: bool,
+    lifecycle: SnapshotScanLifecycle,
     sources: Vec<SnapshotStateSource>,
     range_tombstones: Vec<RangeTombstone>,
+}
+
+enum SnapshotScanLifecycle {
+    Active,
+    Exhausted,
+    Failed(MidgeError),
 }
 
 impl SnapshotScan {
@@ -117,7 +123,7 @@ impl SnapshotScan {
             reverse,
             sequence,
             initialized: false,
-            exhausted: false,
+            lifecycle: SnapshotScanLifecycle::Active,
             sources: Vec::new(),
             range_tombstones: Vec::new(),
         }
@@ -308,18 +314,25 @@ impl std::iter::Iterator for SnapshotScan {
     type Item = MidgeResult<(bytes::Bytes, bytes::Bytes)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.exhausted {
-            return None;
+        match &self.lifecycle {
+            SnapshotScanLifecycle::Failed(error) => return Some(Err(error.replay())),
+            SnapshotScanLifecycle::Exhausted => return None,
+            SnapshotScanLifecycle::Active => {}
         }
         match self.next_visible() {
             Ok(Some(row)) => Some(Ok(row)),
             Ok(None) => {
-                self.exhausted = true;
+                self.lifecycle = SnapshotScanLifecycle::Exhausted;
                 None
             }
             Err(error) => {
-                self.exhausted = true;
-                Some(Err(error))
+                self.lifecycle = SnapshotScanLifecycle::Failed(error);
+                match &self.lifecycle {
+                    SnapshotScanLifecycle::Failed(error) => Some(Err(error.replay())),
+                    SnapshotScanLifecycle::Active | SnapshotScanLifecycle::Exhausted => {
+                        unreachable!()
+                    }
+                }
             }
         }
     }

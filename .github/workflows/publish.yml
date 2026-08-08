@@ -118,7 +118,7 @@ jobs:
         run: cntryl-tools validate-tests
 
       - name: Verify checked-in sample database
-        run: cargo run --bin midge -- verify --json tests/fixtures/compatibility/v2_empty_db
+        run: cargo run --bin midge -- verify --json tests/fixtures/compatibility/v3_populated_v4_sst_db
 
       - name: Stop Sqrzl emulator
         if: always()

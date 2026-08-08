@@ -55,6 +55,16 @@ while let Some((key, value)) = rows.next().transpose()? {
 }
 ```
 
+A scan iterator reports `IteratorState::Active`, `Exhausted`, or `Failed`.
+Normal end-of-stream moves it to `Exhausted`. A storage or decode error moves
+it to `Failed`, and later `next()` calls replay that same terminal error; they
+do not turn corruption into an apparently clean end-of-stream. Propagate the
+error or break the loop after observing it. On filesystems that support stable
+persistent handles, holding a scan also holds the SST handles needed by that
+snapshot, so unlinking or replacing a path after the scan begins cannot switch
+the iterator to different bytes. Backends without that capability retain
+path-based reads and surface a sticky read error if the path disappears.
+
 `delete_range` uses an inclusive start and exclusive end and is only a
 transaction operation. A read-only transaction cannot write. A transaction is
 bound to one column family. `rollback()` explicitly abandons buffered writes;
@@ -78,3 +88,11 @@ available through the methods documented on `Engine`.
 
 For crash boundaries and recovery handling, use the [durability contract](transaction-durability-contract.md)
 and [operator runbook](../operations/operator-runbook.md).
+
+## Persisted compression
+
+Current SST blocks use raw, LZ4, Zstd level 3, or Zstd level 9 encoding. Every
+block has a mandatory checksummed trailer, and unknown or removed codec codes
+are rejected without a raw-byte fallback. Compression is intentionally skipped
+for inputs smaller than 256 bytes because framing and codec overhead dominate
+at that size; this is a size policy, not a heuristic acceptance fast path.

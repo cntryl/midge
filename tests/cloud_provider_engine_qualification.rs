@@ -346,7 +346,7 @@ fn seed_empty_sqrzl_metadata_if_required(
   "operations": []
 }"#;
     for (name, data) in [
-        ("FORMAT", b"midge-format-version=2\n".as_slice()),
+        ("FORMAT", b"midge-format-version=3\n".as_slice()),
         ("manifest.snapshot.json", manifest.as_slice()),
         ("manifest.json", manifest.as_slice()),
         ("manifest.journal", b"".as_slice()),

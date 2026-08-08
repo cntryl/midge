@@ -13,7 +13,7 @@ use std::time::Instant;
 static FAILPOINT_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn write_empty_storage_fixture(db_path: &Path) {
-    std::fs::write(db_path.join("FORMAT"), "midge-format-version=2\n")
+    std::fs::write(db_path.join("FORMAT"), "midge-format-version=3\n")
         .expect("write format marker");
     std::fs::write(
         db_path.join("manifest.json"),

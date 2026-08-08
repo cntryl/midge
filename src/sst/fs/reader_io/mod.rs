@@ -8,13 +8,13 @@ use bytes::Bytes;
 use std::sync::Arc;
 
 use crate::common::{MidgeError, MidgeResult};
-use crate::io::{Fs, FsPath};
+use crate::io::{File, Fs, FsError, FsPath, OpenMode, OpenOptions};
 use crate::sst::bloom::{BlockBloomFilter, BloomMetrics};
 use crate::sst::cache::BlockCache;
 use crate::sst::index::tuner::IndexKind;
 use crate::sst::read_amp_metrics::ReadAmpMetrics;
 use crate::sst::trie::TrieReader;
-use crate::sst::types::{BlockHandle, Footer, KeyState, RangeTombstone, SstEntry, SST_FORMAT_V1};
+use crate::sst::types::{BlockHandle, Footer, KeyState, RangeTombstone, SstEntry, SST_FORMAT_V4};
 
 type IndexEntries = Arc<Vec<(Vec<u8>, BlockHandle)>>;
 
@@ -66,6 +66,7 @@ pub struct SstFileIo {
     index_kind: IndexKind,
     smallest_key: Option<Vec<u8>>,
     largest_key: Option<Vec<u8>>,
+    range_tombstone_handle: Option<BlockHandle>,
     range_tombstones: Vec<RangeTombstone>,
 }
 
@@ -97,13 +98,20 @@ pub(crate) struct SstStateScan {
     snapshot_seq: u64,
     now_millis: u64,
     initialized: bool,
-    exhausted: bool,
+    lifecycle: SstScanLifecycle,
+    file: Option<Box<dyn File>>,
     index: Option<IndexEntries>,
     first_block: usize,
     last_block: usize,
     next_block: usize,
     block_entries: Option<BlockEntryCursor>,
     pending_entry: Option<SstEntry>,
+}
+
+enum SstScanLifecycle {
+    Active,
+    Exhausted,
+    Failed(MidgeError),
 }
 
 impl SstStateScan {
@@ -115,6 +123,19 @@ impl SstStateScan {
         snapshot_seq: u64,
         now_millis: u64,
     ) -> Self {
+        let (file, lifecycle) = match reader.fs.open_persistent_handle(
+            &reader.path,
+            OpenOptions {
+                mode: OpenMode::ReadOnly,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        ) {
+            Ok(file) => (Some(file), SstScanLifecycle::Active),
+            Err(FsError::Unsupported(_)) => (None, SstScanLifecycle::Active),
+            Err(error) => (None, SstScanLifecycle::Failed(error.into())),
+        };
         Self {
             reader,
             start,
@@ -123,7 +144,8 @@ impl SstStateScan {
             snapshot_seq,
             now_millis,
             initialized: false,
-            exhausted: false,
+            lifecycle,
+            file,
             index: None,
             first_block: 0,
             last_block: 0,
@@ -143,13 +165,13 @@ impl SstStateScan {
             .reader
             .range_outside_persisted_bounds(self.start.as_deref(), self.end.as_deref())
         {
-            self.exhausted = true;
+            self.lifecycle = SstScanLifecycle::Exhausted;
             return Ok(());
         }
 
-        let index = self.reader.index_entries()?;
+        let index = self.reader.index_entries_from(self.file.as_deref())?;
         if index.is_empty() {
-            self.exhausted = true;
+            self.lifecycle = SstScanLifecycle::Exhausted;
             return Ok(());
         }
 
@@ -165,7 +187,7 @@ impl SstStateScan {
             .map_or_else(|| index.len().saturating_sub(1), |range| *range.end());
 
         if self.first_block >= index.len() || self.first_block > self.last_block {
-            self.exhausted = true;
+            self.lifecycle = SstScanLifecycle::Exhausted;
             return Ok(());
         }
         self.last_block = self.last_block.min(index.len() - 1);
@@ -180,7 +202,7 @@ impl SstStateScan {
 
     fn load_next_block(&mut self) -> MidgeResult<bool> {
         self.initialize()?;
-        if self.exhausted {
+        if matches!(self.lifecycle, SstScanLifecycle::Exhausted) {
             return Ok(false);
         }
 
@@ -194,12 +216,12 @@ impl SstStateScan {
 
         if self.reverse {
             if block_index == self.first_block {
-                self.exhausted = true;
+                self.lifecycle = SstScanLifecycle::Exhausted;
             } else {
                 self.next_block = block_index - 1;
             }
         } else if block_index == self.last_block {
-            self.exhausted = true;
+            self.lifecycle = SstScanLifecycle::Exhausted;
         } else {
             self.next_block = block_index + 1;
         }
@@ -208,7 +230,9 @@ impl SstStateScan {
             .diagnostics
             .sst_metrics()
             .record_candidate_blocks_checked(1);
-        let block = self.reader.read_cached_data_block(&handle)?;
+        let block = self
+            .reader
+            .read_cached_data_block_from(&handle, self.file.as_deref())?;
         let entries = self.reader.scan_block_entries_from_bytes(&block)?;
         self.block_entries = Some(if self.reverse {
             BlockEntryCursor::Reverse(entries.into_iter().rev())
@@ -288,18 +312,30 @@ impl std::iter::Iterator for SstStateScan {
     type Item = MidgeResult<(Bytes, KeyState)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.exhausted && self.block_entries.is_none() && self.pending_entry.is_none() {
-            return None;
+        match &self.lifecycle {
+            SstScanLifecycle::Failed(error) => return Some(Err(error.replay())),
+            SstScanLifecycle::Exhausted
+                if self.block_entries.is_none() && self.pending_entry.is_none() =>
+            {
+                return None;
+            }
+            SstScanLifecycle::Active | SstScanLifecycle::Exhausted => {}
         }
 
         match self.next_state() {
             Ok(Some(state)) => Some(Ok(state)),
-            Ok(None) => None,
+            Ok(None) => {
+                self.lifecycle = SstScanLifecycle::Exhausted;
+                None
+            }
             Err(error) => {
-                self.exhausted = true;
                 self.block_entries = None;
                 self.pending_entry = None;
-                Some(Err(error))
+                self.lifecycle = SstScanLifecycle::Failed(error);
+                match &self.lifecycle {
+                    SstScanLifecycle::Failed(error) => Some(Err(error.replay())),
+                    SstScanLifecycle::Active | SstScanLifecycle::Exhausted => unreachable!(),
+                }
             }
         }
     }
@@ -329,10 +365,11 @@ impl SstFileIo {
             block_cache: None,
             diagnostics: crate::diagnostics::legacy_runtime_diagnostics(),
             index_entries: ArcSwapOption::empty(),
-            format_version: SST_FORMAT_V1,
+            format_version: SST_FORMAT_V4,
             index_kind: IndexKind::Sparse,
             smallest_key: None,
             largest_key: None,
+            range_tombstone_handle: None,
             range_tombstones: Vec::new(),
         }
     }

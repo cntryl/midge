@@ -77,7 +77,7 @@ pub use types::ColumnFamilyId;
 pub type MidgeEngine = Engine;
 
 // Scan API
-pub use engine::{Direction, Query, ScanIterator};
+pub use engine::{Direction, IteratorState, Query, ScanIterator};
 
 // Observability and diagnostics
 pub use config::{
@@ -192,8 +192,8 @@ pub mod prelude {
     /// Use `use midge::prelude::*;` to import the essential types needed
     /// for the standard transaction-based workflow.
     pub use crate::{
-        ColumnFamilyId, ConflictPolicy, Direction, Engine, Key, MidgeError, MidgeResult,
-        OpenOptions, Query, ScanIterator, Storage, Transaction, TransactionMode, Value,
-        WriteOptions,
+        ColumnFamilyId, ConflictPolicy, Direction, Engine, IteratorState, Key, MidgeError,
+        MidgeResult, OpenOptions, Query, ScanIterator, Storage, Transaction, TransactionMode,
+        Value, WriteOptions,
     };
 }

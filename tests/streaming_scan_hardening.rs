@@ -1,7 +1,10 @@
 //! Hardening contract for lazy, fallible transaction scans.
 
 use bytes::Bytes;
-use cntryl_midge::{Engine, Goal, MidgeResult, OpenOptions, Query, TransactionMode, WriteOptions};
+use cntryl_midge::{
+    Engine, Goal, IteratorState, MidgeError, MidgeResult, OpenOptions, Query, TransactionMode,
+    WriteOptions,
+};
 use std::path::Path;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -199,6 +202,8 @@ fn should_surface_corrupt_later_sst_block_from_iterator_item() -> MidgeResult<()
     let late_error = scan
         .find_map(Result::err)
         .expect("corrupt later block must surface from an iterator item");
+    let replayed_once = scan.next().expect("failed scan must replay its error");
+    let replayed_twice = scan.next().expect("failed scan must remain failed");
 
     // Assert
     assert_eq!(first.0, Bytes::from_static(b"block-000"));
@@ -210,6 +215,11 @@ fn should_surface_corrupt_later_sst_block_from_iterator_item() -> MidgeResult<()
             || late_error.to_string().contains("CRC32C"),
         "expected corruption error, got {late_error}"
     );
+    assert!(matches!(replayed_once, Err(MidgeError::Corruption(_))));
+    assert!(matches!(replayed_twice, Err(MidgeError::Corruption(_))));
+    assert_eq!(scan.state(), IteratorState::Failed);
+    assert!(scan.failed());
+    assert!(!scan.exhausted());
     drop(scan);
     drop(read);
     engine.shutdown(Duration::from_secs(2))?;

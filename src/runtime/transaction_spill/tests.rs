@@ -19,6 +19,43 @@ fn delete_range(start: &[u8], end: &[u8]) -> TransactionOp {
 }
 
 #[test]
+fn should_distinguish_absent_ttl_from_maximum_ttl_when_spilling_transaction_ops() -> MidgeResult<()>
+{
+    // Arrange
+    let temp = tempfile::tempdir()?;
+    let mut ops = vec![
+        OrdinalOp {
+            ordinal: 0,
+            op: put(b"no-ttl", b"value"),
+        },
+        OrdinalOp {
+            ordinal: 1,
+            op: TransactionOp::Put {
+                cf_id: 0,
+                key: Bytes::from_static(b"max-ttl"),
+                value: Bytes::from_static(b"value"),
+                ttl_seconds: Some(u64::MAX),
+                insert_only: false,
+            },
+        },
+    ];
+    let run = write_run(temp.path(), 1, 0, &mut ops)?;
+
+    // Act
+    let mut decoded = Vec::new();
+    for_each_run_ordinal(&run, |ordinal_op| {
+        if let TransactionOp::Put { ttl_seconds, .. } = ordinal_op.op {
+            decoded.push(ttl_seconds);
+        }
+        Ok(())
+    })?;
+
+    // Assert
+    assert_eq!(decoded, vec![None, Some(u64::MAX)]);
+    Ok(())
+}
+
+#[test]
 fn should_reject_corrupt_data_frame_when_reading_spill_run() -> MidgeResult<()> {
     // Arrange
     let temp = tempfile::tempdir()?;
