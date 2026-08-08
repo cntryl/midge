@@ -67,7 +67,8 @@ impl EventLoop {
             return Err(error);
         }
 
-        self.durability.rotate_to(self.state.wal.current_segment_id);
+        self.durability
+            .rotate_from_to(segment_id, self.state.wal.current_segment_id)?;
         self.durability
             .record_cloud_segment_inflight(segment_id, max_sequence);
         self.cloud_wal_upload_backlog

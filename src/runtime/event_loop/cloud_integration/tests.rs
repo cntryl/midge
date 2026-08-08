@@ -125,6 +125,55 @@ fn should_not_add_confirmation_waiter_when_cloud_assertion_only_sequence_has_pen
     Ok(())
 }
 
+#[test]
+fn should_fail_all_generation_waiters_given_terminal_cloud_upload_error(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut event_loop = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let direct_request = 43;
+    let pending_request = 44;
+    let direct_response = event_loop.router.register(direct_request);
+    let pending_response = event_loop.router.register(pending_request);
+    event_loop.durability.queue_waiter_for_key(
+        0,
+        DurabilityWaiter::CloudDurability {
+            request_id: direct_request,
+        },
+    );
+    event_loop
+        .durability
+        .queue_waiter(DurabilityWaiter::CloudDurability {
+            request_id: pending_request,
+        });
+
+    // Act
+    event_loop.handle_storage_event(crate::storage::StorageEvent::CloudFail {
+        segment_id: 0,
+        error: "terminal upload failure".to_string(),
+    });
+
+    // Assert
+    for (request_id, receiver) in [
+        (direct_request, direct_response),
+        (pending_request, pending_response),
+    ] {
+        let response = receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("terminal cloud failure response");
+        assert!(matches!(
+            response,
+            RuntimeResponse::Error {
+                request_id: response_id,
+                error: crate::common::MidgeError::Internal(message),
+            } if response_id == request_id && message.contains("terminal upload failure")
+        ));
+    }
+    assert!(!event_loop.durability.has_pending_waiters());
+    Ok(())
+}
+
 struct FailThirdIntentPutBackend {
     inner: Arc<crate::storage::cloud::MockCloudBackend>,
     intent_puts: AtomicUsize,
@@ -478,13 +527,63 @@ fn seal_segment_without_remote_proof_for_test(
     let seg_id = el.state.wal.current_segment_id;
     let max_sequence = el.wal_actor.flush_for_cloud_upload(&mut el.state)?;
     el.wal_actor.rotate(&mut el.state)?;
-    el.durability.rotate_to(el.state.wal.current_segment_id);
+    el.durability
+        .rotate_from_to(seg_id, el.state.wal.current_segment_id)?;
     copy_local_segment_to_remote_wal_for_test(el, seg_id);
     el.wal_actor.complete_cloud_upload_seal(&mut el.state);
     el.durability
         .record_cloud_segment_inflight(seg_id, max_sequence);
     el.durability.record_cloud_flush();
     Ok((seg_id, max_sequence))
+}
+
+#[test]
+fn should_notify_all_waiters_given_multiple_seal_requests_for_same_cloud_segment(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let sequence = append_cloud_async_put(&mut el)?;
+    let first_id = 18_101;
+    let second_id = 18_102;
+    let first_rx = el.router.register(first_id);
+    let second_rx = el.router.register(second_id);
+    let msg_rx = crossbeam::channel::unbounded::<RuntimeMsg>().1;
+
+    // Act
+    for request_id in [first_id, second_id] {
+        assert_eq!(
+            el.handle_runtime_msg(
+                RuntimeMsg::SealWalForCloud {
+                    request_id,
+                    sequence,
+                    wait_for_ack: true,
+                },
+                &msg_rx,
+            ),
+            super::super::HandleOutcome::Continue
+        );
+    }
+    let segment_id = el
+        .durability
+        .inflight_segment_for_sequence(sequence)
+        .expect("shared inflight segment");
+    copy_local_segment_to_remote_wal_for_test(&el, segment_id);
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id,
+        max_sequence: sequence,
+    });
+
+    // Assert
+    for (request_id, receiver) in [(first_id, first_rx), (second_id, second_rx)] {
+        assert!(matches!(
+            receiver.recv().expect("cloud durability response"),
+            RuntimeResponse::Ok { request_id: actual } if actual == request_id
+        ));
+    }
+    assert_eq!(el.durability.waiters_fanned_out(), 2);
+    Ok(())
 }
 
 fn remote_wal_path_for_test(el: &EventLoop, segment_id: u64) -> PathBuf {
@@ -3395,7 +3494,6 @@ fn should_not_enqueue_cloud_wal_segment_given_lease_unhealthy_when_sealing(
     Ok(())
 }
 
-#[cfg(feature = "failpoints")]
 fn append_cloud_async_put(el: &mut EventLoop) -> crate::common::MidgeResult<u64> {
     let ops = vec![crate::runtime::TransactionOp::Put {
         cf_id: 0,

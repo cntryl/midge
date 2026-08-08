@@ -1,13 +1,13 @@
 mod common;
 
-// Concurrent write test to measure ingest metrics
+// Concurrent public writes exercise runtime-side transaction coalescing.
+use cntryl_midge::Query;
 use common::opts_for_mode;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 
 #[test]
-fn should_measure_concurrent_ingest_coordinator_metrics_when_multiple_threads_write() {
+fn should_preserve_runtime_coalescing_when_threads_write_concurrently() {
     // Arrange
     let mut opts = opts_for_mode("memory");
     opts.memtable_size = 64 * 1024 * 1024;
@@ -15,16 +15,10 @@ fn should_measure_concurrent_ingest_coordinator_metrics_when_multiple_threads_wr
     let cf = engine.create_column_family("test_cf").unwrap();
     let cf_id = cf.id();
 
-    let num_threads = 8;
-    let ops_per_thread = 10000;
-
-    println!("\n=== Running concurrent write test ===");
-    println!("Threads: {num_threads}");
-    println!("Operations per thread: {ops_per_thread}");
+    let num_threads = 8_usize;
+    let ops_per_thread = 500_usize;
 
     // Act
-    let start = std::time::Instant::now();
-
     let mut handles = vec![];
     for thread_id in 0..num_threads {
         let engine_clone = Arc::clone(&engine);
@@ -50,14 +44,21 @@ fn should_measure_concurrent_ingest_coordinator_metrics_when_multiple_threads_wr
         handle.join().expect("thread join");
     }
 
-    // Assert
-    let elapsed = start.elapsed();
-    let total_ops = f64::from(num_threads * ops_per_thread);
-    let throughput = total_ops / elapsed.as_secs_f64();
-
-    println!("\nCompleted in {:.2}s", elapsed.as_secs_f64());
-    println!("Throughput: {throughput:.0} ops/sec");
-
-    // Give ingest threads time to log final stats
-    thread::sleep(Duration::from_millis(100));
+    // Assert: caller submissions stay distinct, while the runtime coalesces
+    // their WAL frames and preserves every logical write.
+    let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+    let read = engine
+        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+        .expect("begin read transaction");
+    let rows = read
+        .scan(&Query::new())
+        .expect("scan writes")
+        .try_collect()
+        .expect("collect writes");
+    let total_ops = u64::try_from(num_threads * ops_per_thread).expect("operation count fits u64");
+    assert_eq!(rows.len() as u64, total_ops);
+    assert!(
+        metrics.wal_append_count < total_ops,
+        "runtime write draining should coalesce logical transactions"
+    );
 }

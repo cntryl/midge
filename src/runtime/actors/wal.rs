@@ -179,6 +179,11 @@ mod spill;
 mod transaction;
 
 impl WalActor {
+    #[cfg(test)]
+    pub(crate) fn replace_writer_for_test(&mut self, writer: Box<dyn WalWriter>) {
+        self.writer = Some(writer);
+    }
+
     fn duration_nanos_u64(duration: Duration) -> u64 {
         u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
     }

@@ -17,6 +17,67 @@ thread_local! {
 }
 
 impl WalActor {
+    pub(super) fn preflight_prepared_transaction_ops(
+        state: &RuntimeState,
+        apply_ops: &[&TransactionApplyOp],
+    ) -> MidgeResult<()> {
+        let mut batch_pairs = HashSet::new();
+        for apply_op in apply_ops {
+            let (cf_id, point) = match apply_op {
+                TransactionApplyOp::Put {
+                    cf_id,
+                    key,
+                    sequence,
+                    ..
+                }
+                | TransactionApplyOp::Delete {
+                    cf_id,
+                    key,
+                    sequence,
+                } => (*cf_id, Some((key.as_ref(), *sequence))),
+                TransactionApplyOp::DeleteRange { cf_id, .. } => (*cf_id, None),
+            };
+            let cf_state = state.column_families.get(&cf_id).ok_or_else(|| {
+                MidgeError::InvalidArgument(format!("column family {cf_id} does not exist"))
+            })?;
+            let Some((key, sequence)) = point else {
+                continue;
+            };
+            if !batch_pairs.insert((cf_id, key.to_vec(), sequence))
+                || cf_state.memtable.contains_key_sequence(key, sequence)
+                || cf_state
+                    .immutable_memtables
+                    .iter()
+                    .any(|memtable| memtable.contains_key_sequence(key, sequence))
+            {
+                return Err(MidgeError::Corruption(format!(
+                    "duplicate memtable key/sequence pair for column family {cf_id} at sequence {sequence}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply an operation set that was completely validated before the WAL
+    /// append. Runtime event-loop ownership prevents another memtable writer
+    /// from invalidating that validation before this phase completes.
+    pub(super) fn apply_prevalidated_transaction_ops(
+        state: &mut RuntimeState,
+        apply_ops: Vec<TransactionApplyOp>,
+        effective_durability: DurabilityPolicy,
+        last_sequence: u64,
+        apply_op_count: usize,
+    ) {
+        Self::apply_transaction_ops(
+            state,
+            apply_ops,
+            effective_durability,
+            last_sequence,
+            apply_op_count,
+        )
+        .expect("prevalidated memtable mutation must remain infallible");
+    }
+
     pub(super) fn apply_transaction_ops(
         state: &mut RuntimeState,
         apply_ops: Vec<TransactionApplyOp>,
@@ -424,25 +485,28 @@ impl WalActor {
         expiration: Option<u64>,
     ) -> MidgeResult<()> {
         let current_segment_id = state.wal.current_segment_id;
-        if let Some(cf_state) = state.column_families.get_mut(&cf_id) {
-            let prev = cf_state.memtable.size_bytes();
-            if let Some(val) = value {
-                cf_state
-                    .memtable
-                    .as_ref()
-                    .put_bytes_with_seq(key, val, sequence, expiration)?;
-            } else {
-                cf_state
-                    .memtable
-                    .as_ref()
-                    .delete_bytes_with_seq(key, sequence)?;
-            }
-            let new = cf_state.memtable.size_bytes();
-            if prev == 0 && new > 0 {
-                cf_state.active_memtable_started_in_segment = current_segment_id;
-            }
-            state.recompute_total_memtable_bytes();
+        let cf_state = state.column_families.get_mut(&cf_id).ok_or_else(|| {
+            MidgeError::Internal(format!(
+                "column family {cf_id} disappeared between validation and memtable apply"
+            ))
+        })?;
+        let prev = cf_state.memtable.size_bytes();
+        if let Some(val) = value {
+            cf_state
+                .memtable
+                .as_ref()
+                .put_bytes_with_seq(key, val, sequence, expiration)?;
+        } else {
+            cf_state
+                .memtable
+                .as_ref()
+                .delete_bytes_with_seq(key, sequence)?;
         }
+        let new = cf_state.memtable.size_bytes();
+        if prev == 0 && new > 0 {
+            cf_state.active_memtable_started_in_segment = current_segment_id;
+        }
+        state.recompute_total_memtable_bytes();
         Ok(())
     }
 
@@ -455,18 +519,21 @@ impl WalActor {
         end_key: &[u8],
     ) -> MidgeResult<()> {
         let current_segment_id = state.wal.current_segment_id;
-        if let Some(cf_state) = state.column_families.get_mut(&cf_id) {
-            let memtable = Arc::clone(&cf_state.memtable);
-            let prev = memtable.size_bytes();
-            memtable
-                .as_ref()
-                .delete_range_with_seq(start_key, end_key, sequence)?;
-            let new = memtable.size_bytes();
-            if prev == 0 && new > 0 {
-                cf_state.active_memtable_started_in_segment = current_segment_id;
-            }
-            state.recompute_total_memtable_bytes();
+        let cf_state = state.column_families.get_mut(&cf_id).ok_or_else(|| {
+            MidgeError::Internal(format!(
+                "column family {cf_id} disappeared between validation and range apply"
+            ))
+        })?;
+        let memtable = Arc::clone(&cf_state.memtable);
+        let prev = memtable.size_bytes();
+        memtable
+            .as_ref()
+            .delete_range_with_seq(start_key, end_key, sequence)?;
+        let new = memtable.size_bytes();
+        if prev == 0 && new > 0 {
+            cf_state.active_memtable_started_in_segment = current_segment_id;
         }
+        state.recompute_total_memtable_bytes();
         state.record_delete_range(cf_id, start_key, end_key, sequence);
         Ok(())
     }

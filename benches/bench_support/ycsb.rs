@@ -855,10 +855,8 @@ where
             // Start all clients together to reduce launch skew.
             barrier.wait();
 
-            // Stagger thread starts to enable write grouping: threads with
-            // overlapping commits will be batched together automatically.
-            // Without this, all threads hit their first commit simultaneously,
-            // preventing the write group coordinator from batching.
+            // Stagger starts so commits overlap the runtime drain window and
+            // can share a physical WAL append.
             if client_id > 0 {
                 std::thread::sleep(Duration::from_micros(usize_to_u64(client_id) * 50));
             }

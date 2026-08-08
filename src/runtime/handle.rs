@@ -524,36 +524,6 @@ impl RuntimeHandle {
             .map_err(|_| MidgeError::Internal("Response channel closed".to_string()))
     }
 
-    pub(crate) fn send_apply_transaction_and_wait_timeout(
-        &self,
-        request_id: u64,
-        submission: TransactionSubmission,
-        timeout: Duration,
-    ) -> MidgeResult<Option<RuntimeResponse>> {
-        let submission_guard = self.lifecycle.begin_submission()?;
-        let (response_tx, response_rx) = channel::bounded(1);
-        self.msg_tx
-            .try_send(RuntimeMsg::ApplyTransaction {
-                request_id,
-                ops: submission.ops,
-                assertions: submission.assertions,
-                durability_policy: submission.durability_policy,
-                start_sequence: submission.start_sequence,
-                conflict_policy: submission.conflict_policy,
-                response_tx: Some(response_tx),
-            })
-            .map_err(Self::map_submission_error)?;
-        drop(submission_guard);
-
-        match response_rx.recv_timeout(timeout) {
-            Ok(response) => Ok(Some(response)),
-            Err(crossbeam::channel::RecvTimeoutError::Timeout) => Ok(None),
-            Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
-                Err(MidgeError::Internal("Response channel closed".to_string()))
-            }
-        }
-    }
-
     pub(crate) fn send_spilled_transaction_and_wait(
         &self,
         request_id: u64,

@@ -6,7 +6,7 @@ use std::thread;
 use std::time::Instant;
 
 #[test]
-fn should_group_concurrent_batch_submissions_when_multiple_threads_submit() {
+fn should_coalesce_wal_appends_when_multiple_threads_submit_transactions() {
     // Arrange
     let opts = opts_for_mode("memory");
     let engine =
@@ -62,7 +62,7 @@ fn should_group_concurrent_batch_submissions_when_multiple_threads_submit() {
     }
 
     println!(
-        "OK: Write grouping: {} ops from {} threads in {:.3}s, {:.0} ops/sec",
+        "OK: Runtime coalescing: {} ops from {} threads in {:.3}s, {:.0} ops/sec",
         total_ops,
         num_threads,
         elapsed.as_secs_f64(),
@@ -71,7 +71,7 @@ fn should_group_concurrent_batch_submissions_when_multiple_threads_submit() {
 }
 
 #[test]
-fn should_handle_concurrent_writes_correctly_with_write_grouping() {
+fn should_handle_concurrent_writes_correctly_with_runtime_coalescing() {
     // Arrange: Create engine
     let opts = opts_for_mode("memory");
     let engine =
@@ -122,12 +122,12 @@ fn should_handle_concurrent_writes_correctly_with_write_grouping() {
         f64::from(u32::try_from(total_ops).expect("test operation count fits in u32"));
     let throughput = total_ops_f64 / elapsed.as_secs_f64();
     println!(
-        "OK: Write grouping with backpressure: {total_ops} ops from {num_threads} threads, {throughput:.0} ops/sec"
+        "OK: Runtime coalescing with backpressure: {total_ops} ops from {num_threads} threads, {throughput:.0} ops/sec"
     );
 }
 
 #[test]
-fn should_maintain_ordering_with_write_grouping() {
+fn should_maintain_ordering_with_runtime_coalescing() {
     // Arrange
     let opts = opts_for_mode("memory");
     let engine = cntryl_midge::Engine::open(opts.to_open_options()).expect("Engine creation");

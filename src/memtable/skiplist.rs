@@ -405,6 +405,29 @@ impl SkipList {
         None
     }
 
+    /// Return whether `key` already has a version with exactly `sequence`.
+    pub fn contains_sequence(&self, key: &[u8], sequence: u64) -> bool {
+        let guard = &epoch::pin();
+        let node_ptr = self.find_node(key, guard);
+        let Some(node) = (unsafe { node_ptr.as_ref() }) else {
+            return false;
+        };
+        if node.key.as_ref() != key {
+            return false;
+        }
+        let mut version = node.versions_head.load(AO::Acquire, guard);
+        while let Some(current) = unsafe { version.as_ref() } {
+            if current.seq == sequence {
+                return true;
+            }
+            if current.seq < sequence {
+                return false;
+            }
+            version = current.next.load(AO::Acquire, guard);
+        }
+        false
+    }
+
     /// Upsert with optional expiration and `OpType` (lock-free, linearizable).
     pub fn upsert_exp(
         &self,
@@ -413,7 +436,7 @@ impl SkipList {
         seq: u64,
         exp: Option<u64>,
         op: OpType,
-    ) {
+    ) -> bool {
         let guard = &epoch::pin();
         self.upsert_exp_internal(
             UpsertVersion {
@@ -424,14 +447,14 @@ impl SkipList {
                 op,
             },
             guard,
-        );
+        )
     }
 
     /// Internal upsert implementation.
     ///
     /// - If the key exists, prepend a new version to the version chain.
     /// - If the key is absent, insert a new node at a random level.
-    fn upsert_exp_internal(&self, version: UpsertVersion, guard: &Guard) {
+    fn upsert_exp_internal(&self, version: UpsertVersion, guard: &Guard) -> bool {
         let UpsertVersion {
             key,
             value,
@@ -448,10 +471,8 @@ impl SkipList {
         // Case 1: Key exists – prepend new version to the version chain.
         // SAFETY: succs[0] was populated by find() under the epoch guard.
         if let Some(curr) = unsafe { succs[0].as_ref() } {
-            if curr.key == key
-                && Self::try_append_version(curr, seq, value.as_ref(), exp, op, guard)
-            {
-                return;
+            if curr.key == key {
+                return Self::try_append_version(curr, seq, value.as_ref(), exp, op, guard);
             }
         }
 
@@ -470,10 +491,8 @@ impl SkipList {
             // If so, append to the existing node's version chain instead of inserting a new node.
             // SAFETY: succs[0] was refreshed by find() under this guard.
             if let Some(curr) = unsafe { succs[0].as_ref() } {
-                if curr.key == key
-                    && Self::try_append_version(curr, seq, value.as_ref(), exp, op, guard)
-                {
-                    return;
+                if curr.key == key {
+                    return Self::try_append_version(curr, seq, value.as_ref(), exp, op, guard);
                 }
             }
 
@@ -540,6 +559,7 @@ impl SkipList {
                 }
             }
         }
+        true
     }
 
     /// Reclaim a node that lost the level-0 splice race and was therefore
@@ -589,7 +609,10 @@ impl SkipList {
             let mut predecessor = None;
             let mut current = node.versions_head.load(AO::Acquire, guard);
             while let Some(current_ref) = unsafe { current.as_ref() } {
-                if current_ref.seq <= seq {
+                if current_ref.seq == seq {
+                    return false;
+                }
+                if current_ref.seq < seq {
                     break;
                 }
                 predecessor = Some(current);
@@ -638,14 +661,14 @@ impl SkipList {
 
     /// Insert or update with sequence number (Put).
     #[inline]
-    pub fn upsert(&self, key: Bytes, value: Option<Bytes>, seq: u64) {
-        self.upsert_exp(key, value, seq, None, OpType::Put);
+    pub fn upsert(&self, key: Bytes, value: Option<Bytes>, seq: u64) -> bool {
+        self.upsert_exp(key, value, seq, None, OpType::Put)
     }
 
     /// Delete a key (insert tombstone).
     #[inline]
-    pub fn delete(&self, key: Bytes, seq: u64) {
-        self.upsert_exp(key, None, seq, None, OpType::Delete);
+    pub fn delete(&self, key: Bytes, seq: u64) -> bool {
+        self.upsert_exp(key, None, seq, None, OpType::Delete)
     }
 
     /// Range scan returning visible entries at `snapshot_seq`.
@@ -1846,7 +1869,7 @@ mod tests {
                 match value {
                     Some(bytes) => sl.upsert(key.clone(), Some(Bytes::from(bytes.clone())), *seq),
                     None => sl.delete(key.clone(), *seq),
-                }
+                };
             }
 
             // Act
@@ -1859,5 +1882,32 @@ mod tests {
             // Assert
             prop_assert_eq!(sl.get(key.as_ref(), snapshot_seq), expected);
         }
+    }
+
+    #[test]
+    fn should_reject_one_writer_given_two_writers_appending_same_key_and_sequence() {
+        // Arrange
+        let list = Arc::new(SkipList::new());
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let mut handles = Vec::new();
+        for value in [Bytes::from_static(b"first"), Bytes::from_static(b"second")] {
+            let list = Arc::clone(&list);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                list.upsert(Bytes::from_static(b"key"), Some(value), 41)
+            }));
+        }
+
+        // Act
+        barrier.wait();
+        let inserted = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("join writer"))
+            .collect::<Vec<_>>();
+
+        // Assert
+        assert_eq!(inserted.iter().filter(|inserted| **inserted).count(), 1);
+        assert!(list.contains_sequence(b"key", 41));
     }
 }

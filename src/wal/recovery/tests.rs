@@ -26,6 +26,27 @@ fn encode_frame(record: &WalRecord) -> Vec<u8> {
     frame
 }
 
+#[test]
+fn should_fail_replay_closed_given_duplicate_key_sequence() {
+    // Arrange
+    let mut memtables = HashMap::new();
+    let first = put_record(b"duplicate", 7, 1);
+    let mut conflicting = put_record(b"duplicate", 7, 1);
+    conflicting.value = Some(Bytes::from_static(b"conflicting"));
+    apply_record(&first, &mut memtables).expect("apply first record");
+
+    // Act
+    let result = apply_record(&conflicting, &mut memtables);
+
+    // Assert: replay returns corruption, so startup never publishes this
+    // temporary recovery-memtable map into RuntimeState.
+    assert!(matches!(result, Err(MidgeError::Corruption(_))));
+    assert_eq!(
+        memtables[&0].get(b"duplicate").expect("read staged value"),
+        Some(b"value".to_vec())
+    );
+}
+
 fn put_record(key: &'static [u8], sequence: u64, writer_epoch: u64) -> WalRecord {
     WalRecord::new(
         WalOpKind::Put,

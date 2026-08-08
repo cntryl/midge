@@ -4,18 +4,20 @@ use std::hash::Hash;
 
 /// A keyed group-commit accumulator.
 ///
-/// This is the same core idea as `Accumulator`, but instead of returning
-/// per-submitter channels, it tracks *waiter payloads* grouped by a key.
+/// Tracks waiter payloads by the durability generation that will complete them.
 ///
 /// Intended use:
 /// - Call `join(waiter)` to register a waiter under the current key.
-/// - When the current key is sealed (e.g. WAL segment rotation), call `rotate_to(new_key)`
+/// - When the current key is sealed (e.g. WAL segment rotation), call `rotate_from_to`
 ///   to move all pending waiters for the sealed key into an inflight bucket.
 /// - When the keyed work completes (e.g. `CloudAck` for that WAL segment), call
 ///   `complete(key)` to drain the waiters and notify them externally.
 pub struct KeyedGroupCommit<K, W> {
     state: Mutex<KeyedState<K, W>>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyTransitionMismatch;
 
 struct KeyedState<K, W> {
     current_key: K,
@@ -49,12 +51,7 @@ where
         state.inflight.entry(key).or_default().push(waiter);
     }
 
-    /// Seal the current key and begin a new one.
-    ///
-    /// Returns the sealed key + number of waiters moved to inflight, if any.
-    pub fn rotate_to(&self, new_key: K) -> Option<(K, usize)> {
-        let mut state = self.state.lock();
-
+    fn rotate_locked(state: &mut KeyedState<K, W>, new_key: K) -> Option<(K, usize)> {
         let old_key = state.current_key.clone();
         state.current_key = new_key;
 
@@ -64,8 +61,26 @@ where
 
         let waiters = std::mem::take(&mut state.pending);
         let moved = waiters.len();
-        state.inflight.insert(old_key.clone(), waiters);
+        state
+            .inflight
+            .entry(old_key.clone())
+            .or_default()
+            .extend(waiters);
         Some((old_key, moved))
+    }
+
+    /// Seal `expected_current` and begin `new_key`, failing without mutation
+    /// when the caller's external generation has drifted from this primitive.
+    pub fn rotate_from_to(
+        &self,
+        expected_current: &K,
+        new_key: K,
+    ) -> Result<Option<(K, usize)>, KeyTransitionMismatch> {
+        let mut state = self.state.lock();
+        if &state.current_key != expected_current {
+            return Err(KeyTransitionMismatch);
+        }
+        Ok(Self::rotate_locked(&mut state, new_key))
     }
 
     /// Drain all waiters for the given key.
@@ -83,6 +98,22 @@ where
         for (_, mut ws) in state.inflight.drain() {
             out.append(&mut ws);
         }
+        out
+    }
+
+    /// Atomically discard every existing generation and install `new_key`.
+    ///
+    /// This is the fail-closed recovery path for an external generation drift:
+    /// callers must terminally fail the returned waiters before accepting work
+    /// under the replacement key.
+    pub fn drain_all_and_reset(&self, new_key: K) -> Vec<W> {
+        let mut state = self.state.lock();
+        let mut out = Vec::new();
+        out.append(&mut state.pending);
+        for (_, mut waiters) in state.inflight.drain() {
+            out.append(&mut waiters);
+        }
+        state.current_key = new_key;
         out
     }
 
@@ -108,7 +139,7 @@ mod tests {
         gc.join(2);
 
         // Act: Seal key=10 and start key=11
-        let sealed = gc.rotate_to(11);
+        let sealed = gc.rotate_from_to(&10, 11).expect("rotate generation");
         assert_eq!(sealed, Some((10, 2)));
 
         // Arrange (join under new key 11)
@@ -123,5 +154,51 @@ mod tests {
         // Assert: Key=11 is still pending (not sealed yet)
         assert_eq!(gc.complete(&11), Vec::<u64>::new());
         assert_eq!(gc.pending_len(), 1);
+    }
+
+    #[test]
+    fn should_preserve_join_for_key_waiters_given_pending_batch_when_rotating_same_key() {
+        // Arrange
+        let gc: KeyedGroupCommit<u64, u64> = KeyedGroupCommit::new(1);
+        gc.join_for_key(1, 100);
+        gc.join(200);
+
+        // Act
+        assert_eq!(gc.rotate_from_to(&1, 2), Ok(Some((1, 1))));
+
+        // Assert
+        assert_eq!(gc.complete(&1), vec![100, 200]);
+    }
+
+    #[test]
+    fn should_reject_transition_without_orphaning_waiters_when_expected_key_drifted() {
+        // Arrange
+        let gc: KeyedGroupCommit<u64, u64> = KeyedGroupCommit::new(7);
+        gc.join(9);
+
+        // Act
+        let result = gc.rotate_from_to(&6, 8);
+
+        // Assert
+        assert_eq!(result, Err(KeyTransitionMismatch));
+        assert_eq!(gc.rotate_from_to(&7, 8), Ok(Some((7, 1))));
+        assert_eq!(gc.complete(&7), vec![9]);
+    }
+
+    #[test]
+    fn should_reset_generation_after_draining_waiters_given_external_drift() {
+        // Arrange
+        let gc: KeyedGroupCommit<u64, u64> = KeyedGroupCommit::new(7);
+        gc.join_for_key(7, 1);
+        gc.join(2);
+
+        // Act
+        let drained = gc.drain_all_and_reset(9);
+        gc.join(3);
+
+        // Assert
+        assert_eq!(drained, vec![2, 1]);
+        assert_eq!(gc.rotate_from_to(&9, 10), Ok(Some((9, 1))));
+        assert_eq!(gc.complete(&9), vec![3]);
     }
 }
