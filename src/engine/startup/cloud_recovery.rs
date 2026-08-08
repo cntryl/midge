@@ -391,12 +391,15 @@ impl CloudStartupRecovery {
     ) -> MidgeResult<()> {
         let headers = match Self::blocking_cloud_head_optional(cloud, key)? {
             Some(metadata) => {
-                let etag = metadata.etag.trim().to_string();
-                if etag.is_empty() {
-                    return Err(MidgeError::Internal(format!(
-                        "cloud metadata '{key}' cannot be conditionally updated without an etag"
-                    )));
-                }
+                let headers = crate::storage::cloud::object_match_precondition_headers(
+                    &metadata.etag,
+                    metadata.generation.as_deref(),
+                )
+                .ok_or_else(|| {
+                    MidgeError::Internal(format!(
+                        "cloud metadata '{key}' cannot be conditionally updated without an identity token"
+                    ))
+                })?;
                 let current = Self::blocking_cloud_get_optional(cloud, key)?.ok_or_else(|| {
                     MidgeError::Internal(format!(
                         "cloud metadata '{key}' disappeared after HEAD precondition"
@@ -414,7 +417,7 @@ impl CloudStartupRecovery {
                 if current == data {
                     return Ok(());
                 }
-                vec![("If-Match".to_string(), etag)]
+                headers
             }
             None => vec![("If-None-Match".to_string(), "*".to_string())],
         };

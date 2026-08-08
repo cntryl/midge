@@ -262,6 +262,21 @@ impl ObjectMetadata {
     }
 }
 
+pub(crate) fn object_match_precondition_headers(
+    etag: &str,
+    generation: Option<&str>,
+) -> Option<Vec<(String, String)>> {
+    if let Some(generation) = generation.filter(|value| !value.trim().is_empty()) {
+        return Some(vec![(
+            "x-goog-if-generation-match".to_string(),
+            generation.trim().to_string(),
+        )]);
+    }
+
+    let etag = etag.trim();
+    (!etag.is_empty()).then(|| vec![("If-Match".to_string(), etag.to_string())])
+}
+
 /// Non-blocking cloud backend interface used by the engine.
 pub trait CloudBackend: Send + Sync + 'static {
     /// Submit a PUT request for `key` with optional HTTP headers. Implementations
@@ -1074,6 +1089,39 @@ mod tests {
         // Assert
         assert_eq!(metadata.etag, "");
         assert_eq!(metadata.size, 100);
+    }
+
+    #[test]
+    fn should_prefer_generation_when_building_object_match_precondition() {
+        // Arrange
+        let quoted_etag = "  \"etag-value\"  ";
+
+        // Act
+        let headers = object_match_precondition_headers(quoted_etag, Some(" 42 "));
+
+        // Assert
+        assert_eq!(
+            headers,
+            Some(vec![(
+                "x-goog-if-generation-match".to_string(),
+                "42".to_string()
+            )])
+        );
+    }
+
+    #[test]
+    fn should_preserve_quoted_etag_when_building_object_match_precondition() {
+        // Arrange
+        let quoted_etag = "  \"etag-value\"  ";
+
+        // Act
+        let headers = object_match_precondition_headers(quoted_etag, None);
+
+        // Assert
+        assert_eq!(
+            headers,
+            Some(vec![("If-Match".to_string(), "\"etag-value\"".to_string())])
+        );
     }
 
     // =========== CloudStorage Routing Tests ===========

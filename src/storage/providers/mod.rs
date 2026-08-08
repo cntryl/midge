@@ -73,6 +73,33 @@ pub(crate) mod test_support {
         handle: JoinHandle<usize>,
     }
 
+    #[derive(Debug)]
+    pub(crate) struct RecordedHttpRequest {
+        pub(crate) method: String,
+        pub(crate) target: String,
+        headers: Vec<(String, String)>,
+    }
+
+    impl RecordedHttpRequest {
+        pub(crate) fn header(&self, name: &str) -> Option<&str> {
+            self.headers
+                .iter()
+                .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str())
+        }
+    }
+
+    pub(crate) struct RecordingHttpServer {
+        pub(crate) endpoint: String,
+        handle: JoinHandle<RecordedHttpRequest>,
+    }
+
+    impl RecordingHttpServer {
+        pub(crate) fn finish(self) -> RecordedHttpRequest {
+            self.handle.join().expect("recording HTTP server panicked")
+        }
+    }
+
     impl ScriptedHttpServer {
         pub(crate) fn finish(self) -> usize {
             self.handle.join().expect("scripted HTTP server panicked")
@@ -125,6 +152,78 @@ pub(crate) mod test_support {
         });
 
         ScriptedHttpServer { endpoint, handle }
+    }
+
+    pub(crate) fn spawn_recording_http_server(
+        response_headers: Vec<(String, String)>,
+        response_body: Vec<u8>,
+    ) -> RecordingHttpServer {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind recording HTTP server");
+        let endpoint = format!("http://{}", listener.local_addr().expect("server address"));
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept recorded HTTP request");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("configure recorded request timeout");
+
+            let mut bytes = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            while !bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).expect("read recorded HTTP request");
+                if read == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&chunk[..read]);
+            }
+
+            let head = String::from_utf8_lossy(&bytes);
+            let mut lines = head.split("\r\n");
+            let request_line = lines.next().expect("recorded HTTP request line");
+            let mut request_parts = request_line.split_whitespace();
+            let method = request_parts
+                .next()
+                .expect("recorded HTTP request method")
+                .to_string();
+            let target = request_parts
+                .next()
+                .expect("recorded HTTP request target")
+                .to_string();
+            let headers = lines
+                .take_while(|line| !line.is_empty())
+                .filter_map(|line| line.split_once(':'))
+                .map(|(name, value)| (name.to_string(), value.trim().to_string()))
+                .collect::<Vec<_>>();
+
+            let mut response = String::from("HTTP/1.1 200 OK\r\n");
+            for (name, value) in &response_headers {
+                use std::fmt::Write as _;
+                write!(&mut response, "{name}: {value}\r\n")
+                    .expect("write recorded response header");
+            }
+            if !response_headers
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+            {
+                use std::fmt::Write as _;
+                write!(&mut response, "Content-Length: {}\r\n", response_body.len())
+                    .expect("write recorded response content length");
+            }
+            response.push_str("Connection: close\r\n\r\n");
+            stream
+                .write_all(response.as_bytes())
+                .expect("write recorded HTTP response headers");
+            stream
+                .write_all(&response_body)
+                .expect("write recorded HTTP response body");
+
+            RecordedHttpRequest {
+                method,
+                target,
+                headers,
+            }
+        });
+
+        RecordingHttpServer { endpoint, handle }
     }
 
     pub(crate) fn receive_list_result(backend: &dyn CloudBackend) -> CloudOutcome<Vec<String>> {

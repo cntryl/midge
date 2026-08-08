@@ -166,13 +166,15 @@ impl HybridStorage {
         data: Vec<u8>,
     ) -> crate::common::MidgeResult<RemoteObjectProof> {
         let headers = if let Some(expected) = expected {
-            let etag = expected.etag.trim();
-            if etag.is_empty() {
-                return Err(crate::common::MidgeError::InvalidArgument(format!(
+            crate::storage::cloud::object_match_precondition_headers(
+                &expected.etag,
+                expected.generation.as_deref(),
+            )
+            .ok_or_else(|| {
+                crate::common::MidgeError::InvalidArgument(format!(
                     "remote CAS for '{key}' requires a non-empty identity token"
-                )));
-            }
-            vec![("If-Match".to_string(), etag.to_string())]
+                ))
+            })?
         } else {
             vec![("If-None-Match".to_string(), "*".to_string())]
         };
@@ -288,13 +290,16 @@ impl HybridStorage {
     ) -> Result<(), String> {
         self.reap_finished_prune_workers();
 
-        let etag = target.metadata.etag.trim().to_string();
-        if etag.is_empty() {
-            return Err(format!(
+        let delete_headers = crate::storage::cloud::object_match_precondition_headers(
+            &target.metadata.etag,
+            target.metadata.generation.as_deref(),
+        )
+        .ok_or_else(|| {
+            format!(
                 "cannot conditionally delete remote object '{}' without an identity token",
                 target.key
-            ));
-        }
+            )
+        })?;
 
         let cloud = Arc::clone(self.cloud_backend_for_key(&target.key));
         let target_guard = self.remote_identity_guard(&target);
@@ -333,11 +338,7 @@ impl HybridStorage {
                     }
 
                     let (tx, rx) = std::sync::mpsc::channel();
-                    cloud.submit_delete_with_headers(
-                        &target_key,
-                        vec![("If-Match".into(), etag)],
-                        tx,
-                    );
+                    cloud.submit_delete_with_headers(&target_key, delete_headers, tx);
                     match rx.recv_timeout(callback_timeout) {
                         Ok(StorageEvent::DeleteComplete { result, .. }) => match result {
                             StorageOutcome::Ok(()) => Ok(()),

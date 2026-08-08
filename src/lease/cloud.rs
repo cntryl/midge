@@ -747,22 +747,10 @@ fn parse_lease_document(content: &str) -> Option<LeaseDocument> {
 }
 
 fn mutation_precondition_headers(metadata: &ObjectMetadata) -> Option<Vec<(String, String)>> {
-    if let Some(generation) = metadata
-        .generation
-        .as_ref()
-        .filter(|value| !value.is_empty())
-    {
-        return Some(vec![(
-            "x-goog-if-generation-match".to_string(),
-            generation.clone(),
-        )]);
-    }
-
-    if !metadata.etag.is_empty() {
-        return Some(vec![("If-Match".to_string(), metadata.etag.clone())]);
-    }
-
-    None
+    crate::storage::cloud::object_match_precondition_headers(
+        &metadata.etag,
+        metadata.generation.as_deref(),
+    )
 }
 
 /// Classify a non-not-found [`CloudError`] from a lease HEAD/GET into the
