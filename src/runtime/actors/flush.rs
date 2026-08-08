@@ -685,12 +685,15 @@ fn conditional_metadata_put(
             if current == data {
                 return Ok(());
             }
-            if metadata.etag.trim().is_empty() {
-                return Err(MidgeError::Internal(format!(
-                    "cloud metadata '{key}' has no conditional etag"
-                )));
-            }
-            vec![("If-Match".to_string(), metadata.etag)]
+            crate::storage::cloud::object_match_precondition_headers(
+                &metadata.etag,
+                metadata.generation.as_deref(),
+            )
+            .ok_or_else(|| {
+                MidgeError::Internal(format!(
+                    "cloud metadata '{key}' has no conditional identity token"
+                ))
+            })?
         }
         None => vec![("If-None-Match".to_string(), "*".to_string())],
     };

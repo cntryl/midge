@@ -697,12 +697,15 @@ impl EventLoop {
             .map_err(crate::common::MidgeError::Internal)?
         {
             Some(metadata) => {
-                let etag = metadata.etag.trim().to_string();
-                if etag.is_empty() {
-                    return Err(crate::common::MidgeError::Internal(format!(
-                        "cloud metadata '{key}' cannot be conditionally updated without an etag"
-                    )));
-                }
+                let headers = crate::storage::cloud::object_match_precondition_headers(
+                    &metadata.etag,
+                    metadata.generation.as_deref(),
+                )
+                .ok_or_else(|| {
+                    crate::common::MidgeError::Internal(format!(
+                        "cloud metadata '{key}' cannot be conditionally updated without an identity token"
+                    ))
+                })?;
                 let current = Self::cloud_metadata_get_optional(cloud, key)
                     .map_err(crate::common::MidgeError::Internal)?
                     .ok_or_else(|| {
@@ -723,7 +726,7 @@ impl EventLoop {
                 if current == data {
                     return Ok(());
                 }
-                vec![("If-Match".to_string(), etag)]
+                headers
             }
             None => vec![("If-None-Match".to_string(), "*".to_string())],
         };

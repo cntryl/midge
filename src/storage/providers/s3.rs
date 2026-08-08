@@ -972,7 +972,7 @@ impl CloudBackend for S3Backend {
                     .headers
                     .iter()
                     .find(|(name, _)| name.eq_ignore_ascii_case("etag"))
-                    .map(|(_, value)| value.trim_matches('"').to_string())
+                    .map(|(_, value)| value.trim().to_string())
                     .unwrap_or_default();
                 let metadata = ObjectMetadata::new(size, etag, 0);
                 CloudEvent::Head {
@@ -1194,12 +1194,113 @@ fn decode_xml_entities(value: &str) -> String {
 mod tests {
     use super::*;
     use crate::storage::providers::test_support::{
-        receive_list_result, spawn_scripted_http_server,
+        receive_list_result, spawn_recording_http_server, spawn_scripted_http_server,
     };
     use reqwest::Method;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::Arc;
+
+    fn recording_backend(endpoint: String) -> S3Backend {
+        let config = S3Config::custom("bucket".into(), "us-east-1".into(), endpoint, true);
+        S3Backend::new(config, CloudExecutor::new(None).expect("cloud executor"))
+    }
+
+    fn receive_put_result(receiver: &std::sync::mpsc::Receiver<CloudEvent>) -> CloudOutcome<()> {
+        match receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("receive S3 PUT result")
+        {
+            CloudEvent::Put { result, .. } => result,
+            event => panic!("expected S3 PUT event, got {event:?}"),
+        }
+    }
+
+    fn receive_delete_result(receiver: &std::sync::mpsc::Receiver<CloudEvent>) -> CloudOutcome<()> {
+        match receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("receive S3 DELETE result")
+        {
+            CloudEvent::Delete { result, .. } => result,
+            event => panic!("expected S3 DELETE event, got {event:?}"),
+        }
+    }
+
+    #[test]
+    fn should_echo_provider_quoted_etag_given_s3_conditional_mutations() {
+        // Arrange
+        let head_server = spawn_recording_http_server(
+            vec![
+                ("Content-Length".into(), "5".into()),
+                ("ETag".into(), "\"s3-etag\"".into()),
+            ],
+            Vec::new(),
+        );
+        let head_backend = recording_backend(head_server.endpoint.clone());
+        let (head_sender, head_receiver) = std::sync::mpsc::channel();
+        head_backend.submit_head("lease/primary", head_sender);
+        let metadata = match head_receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("receive S3 HEAD result")
+        {
+            CloudEvent::Head {
+                result: CloudOutcome::Ok(metadata),
+                ..
+            } => metadata,
+            event => panic!("expected successful S3 HEAD event, got {event:?}"),
+        };
+        let _ = head_server.finish();
+
+        let create_server = spawn_recording_http_server(Vec::new(), Vec::new());
+        let create_backend = recording_backend(create_server.endpoint.clone());
+        let (create_sender, create_receiver) = std::sync::mpsc::channel();
+        let update_server = spawn_recording_http_server(Vec::new(), Vec::new());
+        let update_backend = recording_backend(update_server.endpoint.clone());
+        let (update_sender, update_receiver) = std::sync::mpsc::channel();
+        let delete_server = spawn_recording_http_server(Vec::new(), Vec::new());
+        let delete_backend = recording_backend(delete_server.endpoint.clone());
+        let (delete_sender, delete_receiver) = std::sync::mpsc::channel();
+
+        // Act
+        create_backend.submit_put(
+            "lease/primary",
+            b"lease".to_vec(),
+            vec![("If-None-Match".into(), "*".into())],
+            create_sender,
+        );
+        let create_result = receive_put_result(&create_receiver);
+        update_backend.submit_put(
+            "lease/primary",
+            b"renewed".to_vec(),
+            vec![("If-Match".into(), metadata.etag.clone())],
+            update_sender,
+        );
+        let update_result = receive_put_result(&update_receiver);
+        delete_backend.submit_delete(
+            "lease/primary",
+            vec![("If-Match".into(), metadata.etag.clone())],
+            delete_sender,
+        );
+        let delete_result = receive_delete_result(&delete_receiver);
+        let create_request = create_server.finish();
+        let update_request = update_server.finish();
+        let delete_request = delete_server.finish();
+
+        // Assert
+        assert_eq!(metadata.etag, "\"s3-etag\"");
+        assert!(matches!(create_result, CloudOutcome::Ok(())));
+        assert!(matches!(update_result, CloudOutcome::Ok(())));
+        assert!(matches!(delete_result, CloudOutcome::Ok(())));
+        assert_eq!(create_request.method, "PUT");
+        assert!(
+            create_request.target.ends_with("/bucket/lease/primary"),
+            "unexpected S3 request target: {}",
+            create_request.target
+        );
+        assert_eq!(create_request.header("if-none-match"), Some("*"));
+        assert_eq!(update_request.header("if-match"), Some("\"s3-etag\""));
+        assert_eq!(delete_request.header("if-match"), Some("\"s3-etag\""));
+    }
 
     #[test]
     fn should_send_zero_content_length_when_put_body_is_empty() {

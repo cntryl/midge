@@ -949,16 +949,45 @@ impl CloudBackend for GcsBackend {
             GcsBackendMode::Json => Method::POST,
             GcsBackendMode::Xml => Method::PUT,
         };
-        let url = self.upload_url(&key);
+        let mut url = self.upload_url(&key);
         let content_length = data.len();
-        let mut request = CloudRequest::new(method, url)
+        let mut request = CloudRequest::new(method, String::new())
             .with_body(data)
             .with_header("Content-Type", "application/octet-stream")
             .with_header("Content-Length", content_length.to_string());
-        // Attach any additional headers provided by caller (e.g. conditional headers)
+        // JSON uploads express mutation preconditions as query parameters. The
+        // standard ETag headers are read-only in GCS JSON mode, so never forward
+        // them on a write where they could be ignored.
         for (name, value) in headers {
-            request = request.with_header(name, value);
+            if self.mode == GcsBackendMode::Json
+                && name.eq_ignore_ascii_case("x-goog-if-generation-match")
+            {
+                url = append_query_param(&url, "ifGenerationMatch", &value);
+            } else if self.mode == GcsBackendMode::Json
+                && name.eq_ignore_ascii_case("x-goog-if-generation-not-match")
+            {
+                url = append_query_param(&url, "ifGenerationNotMatch", &value);
+            } else if self.mode == GcsBackendMode::Json
+                && name.eq_ignore_ascii_case("if-none-match")
+                && value.trim() == "*"
+            {
+                url = append_query_param(&url, "ifGenerationMatch", "0");
+            } else if self.mode == GcsBackendMode::Json
+                && (name.eq_ignore_ascii_case("if-match")
+                    || name.eq_ignore_ascii_case("if-none-match"))
+            {
+                let _ = callback.send(CloudEvent::Put {
+                    key,
+                    result: CloudOutcome::Err(CloudError::Protocol(format!(
+                        "GCS JSON PUT cannot enforce {name}; use a generation precondition"
+                    ))),
+                });
+                return;
+            } else {
+                request = request.with_header(name, value);
+            }
         }
+        request.url = url;
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
             Ok(resp) if resp.status < 400 => CloudEvent::Put {
                 key: ctx,
@@ -1041,6 +1070,21 @@ impl CloudBackend for GcsBackend {
                 && name.eq_ignore_ascii_case("x-goog-if-generation-match")
             {
                 url = append_query_param(&url, "ifGenerationMatch", &value);
+            } else if self.mode == GcsBackendMode::Json
+                && name.eq_ignore_ascii_case("x-goog-if-generation-not-match")
+            {
+                url = append_query_param(&url, "ifGenerationNotMatch", &value);
+            } else if self.mode == GcsBackendMode::Json
+                && (name.eq_ignore_ascii_case("if-match")
+                    || name.eq_ignore_ascii_case("if-none-match"))
+            {
+                let _ = callback.send(CloudEvent::Delete {
+                    key,
+                    result: CloudOutcome::Err(CloudError::Protocol(format!(
+                        "GCS JSON DELETE cannot enforce {name}; use a generation precondition"
+                    ))),
+                });
+                return;
             } else {
                 request = request.with_header(name, value);
             }
@@ -1166,7 +1210,7 @@ impl CloudBackend for GcsBackend {
                     .headers
                     .iter()
                     .find(|(name, _)| name.eq_ignore_ascii_case("etag"))
-                    .map(|(_, value)| value.trim_matches('"').to_string())
+                    .map(|(_, value)| value.trim().to_string())
                     .or_else(|| extract_json_string_value(&body, "etag"))
                     .unwrap_or_default();
                 let generation = resp
@@ -1340,19 +1384,32 @@ impl Goog1HmacSigner {
     fn new(access_id: String, secret: String) -> Self {
         Self { access_id, secret }
     }
-}
 
-impl CloudSigner for Goog1HmacSigner {
-    fn sign(&self, request: &mut CloudRequest) -> MidgeResult<()> {
+    fn canonicalized_extension_headers(headers: &[(String, String)]) -> String {
+        let mut canonical = std::collections::BTreeMap::<String, Vec<String>>::new();
+        for (name, value) in headers {
+            let name = name.to_ascii_lowercase();
+            if !name.starts_with("x-goog-") {
+                continue;
+            }
+            let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
+            canonical.entry(name).or_default().push(value);
+        }
+
+        canonical
+            .into_iter()
+            .fold(String::new(), |mut output, (name, values)| {
+                use std::fmt::Write as _;
+                writeln!(&mut output, "{name}:{}", values.join(","))
+                    .expect("write canonical GCS extension header");
+                output
+            })
+    }
+
+    fn string_to_sign(request: &CloudRequest, date: &str) -> MidgeResult<String> {
         let url = url::Url::parse(&request.url).map_err(|err| {
             crate::common::MidgeError::InvalidArgument(format!("url parse: {err}"))
         })?;
-        let date = Utc::now().format("%a, %d %b %Y %H:%M:%S GMT").to_string();
-        request.headers.retain(|(n, _)| {
-            !n.eq_ignore_ascii_case("authorization") && !n.eq_ignore_ascii_case("date")
-        });
-        request.headers.push(("Date".into(), date.clone()));
-
         let content_md5 = request
             .headers
             .iter()
@@ -1368,14 +1425,25 @@ impl CloudSigner for Goog1HmacSigner {
         } else {
             url.path()
         };
-        let string_to_sign = format!(
-            "{}\n{}\n{}\n{}\n{}",
+        let extension_headers = Self::canonicalized_extension_headers(&request.headers);
+        Ok(format!(
+            "{}\n{}\n{}\n{}\n{}{}",
             request.method.as_str(),
             content_md5,
             content_type,
             date,
+            extension_headers,
             resource
-        );
+        ))
+    }
+
+    fn sign_with_date(&self, request: &mut CloudRequest, date: &str) -> MidgeResult<()> {
+        request.headers.retain(|(name, _)| {
+            !name.eq_ignore_ascii_case("authorization") && !name.eq_ignore_ascii_case("date")
+        });
+        request.headers.push(("Date".into(), date.to_string()));
+
+        let string_to_sign = Self::string_to_sign(request, date)?;
         let key = BASE64
             .decode(&self.secret)
             .unwrap_or_else(|_| self.secret.as_bytes().to_vec());
@@ -1385,9 +1453,16 @@ impl CloudSigner for Goog1HmacSigner {
         let signature = BASE64.encode(mac.finalize().into_bytes());
         request.headers.push((
             "Authorization".into(),
-            format!("GOOG1 {}:{}", self.access_id, signature),
+            format!("GOOG1 {}:{signature}", self.access_id),
         ));
         Ok(())
+    }
+}
+
+impl CloudSigner for Goog1HmacSigner {
+    fn sign(&self, request: &mut CloudRequest) -> MidgeResult<()> {
+        let date = Utc::now().format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+        self.sign_with_date(request, &date)
     }
 }
 
@@ -1399,8 +1474,250 @@ impl CloudSigner for Goog1HmacSigner {
 mod tests {
     use super::*;
     use crate::storage::providers::test_support::{
-        receive_list_result, spawn_scripted_http_server,
+        receive_list_result, spawn_recording_http_server, spawn_scripted_http_server,
     };
+
+    const TEST_BEARER_TOKEN: &str = "gcs-json-test-token";
+
+    fn recording_json_backend(endpoint: String) -> Arc<dyn CloudBackend> {
+        GcsProvider::with_bearer_token_endpoint(
+            "bucket".into(),
+            "project".into(),
+            TEST_BEARER_TOKEN.into(),
+            Some(endpoint),
+        )
+        .expect("GCS bearer-token provider")
+        .backend()
+    }
+
+    fn receive_put_result(receiver: &std::sync::mpsc::Receiver<CloudEvent>) -> CloudOutcome<()> {
+        match receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("receive GCS PUT result")
+        {
+            CloudEvent::Put { result, .. } => result,
+            event => panic!("expected GCS PUT event, got {event:?}"),
+        }
+    }
+
+    fn receive_delete_result(receiver: &std::sync::mpsc::Receiver<CloudEvent>) -> CloudOutcome<()> {
+        match receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("receive GCS DELETE result")
+        {
+            CloudEvent::Delete { result, .. } => result,
+            event => panic!("expected GCS DELETE event, got {event:?}"),
+        }
+    }
+
+    fn query_value(target: &str, name: &str) -> Option<String> {
+        url::Url::parse(&format!("http://recorded{target}"))
+            .expect("parse recorded GCS request target")
+            .query_pairs()
+            .find_map(|(candidate, value)| (candidate == name).then(|| value.into_owned()))
+    }
+
+    #[test]
+    fn should_translate_generation_match_to_query_when_gcs_json_puts_object() {
+        // Arrange
+        let server = spawn_recording_http_server(Vec::new(), Vec::new());
+        let backend = recording_json_backend(server.endpoint.clone());
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        // Act
+        backend.submit_put(
+            "lease/primary",
+            b"lease".to_vec(),
+            vec![("x-goog-if-generation-match".into(), "42".into())],
+            sender,
+        );
+        let result = receive_put_result(&receiver);
+        let request = server.finish();
+
+        // Assert
+        assert!(matches!(result, CloudOutcome::Ok(())));
+        assert_eq!(request.method, "POST");
+        assert_eq!(
+            query_value(&request.target, "ifGenerationMatch").as_deref(),
+            Some("42")
+        );
+        assert!(request.header("x-goog-if-generation-match").is_none());
+        assert_eq!(
+            request.header("authorization"),
+            Some("Bearer gcs-json-test-token")
+        );
+    }
+
+    #[test]
+    fn should_translate_if_none_match_to_generation_zero_when_gcs_json_puts_object() {
+        // Arrange
+        let server = spawn_recording_http_server(Vec::new(), Vec::new());
+        let backend = recording_json_backend(server.endpoint.clone());
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        // Act
+        backend.submit_put(
+            "lease/primary",
+            b"lease".to_vec(),
+            vec![("If-None-Match".into(), "*".into())],
+            sender,
+        );
+        let result = receive_put_result(&receiver);
+        let request = server.finish();
+
+        // Assert
+        assert!(matches!(result, CloudOutcome::Ok(())));
+        assert_eq!(
+            query_value(&request.target, "ifGenerationMatch").as_deref(),
+            Some("0")
+        );
+        assert!(request.header("if-none-match").is_none());
+        assert_eq!(
+            request.header("authorization"),
+            Some("Bearer gcs-json-test-token")
+        );
+    }
+
+    #[test]
+    fn should_fail_closed_when_gcs_json_put_has_etag_precondition() {
+        // Arrange
+        let backend = recording_json_backend("http://127.0.0.1:1".into());
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        // Act
+        backend.submit_put(
+            "lease/primary",
+            b"lease".to_vec(),
+            vec![("If-Match".into(), "\"etag\"".into())],
+            sender,
+        );
+        let result = receive_put_result(&receiver);
+
+        // Assert
+        assert!(matches!(
+            result,
+            CloudOutcome::Err(CloudError::Protocol(message))
+                if message.contains("use a generation precondition")
+        ));
+    }
+
+    #[test]
+    fn should_translate_generation_match_to_query_when_gcs_json_deletes_object() {
+        // Arrange
+        let server = spawn_recording_http_server(Vec::new(), Vec::new());
+        let backend = recording_json_backend(server.endpoint.clone());
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        // Act
+        backend.submit_delete(
+            "lease/primary",
+            vec![("x-goog-if-generation-match".into(), "42".into())],
+            sender,
+        );
+        let result = receive_delete_result(&receiver);
+        let request = server.finish();
+
+        // Assert
+        assert!(matches!(result, CloudOutcome::Ok(())));
+        assert_eq!(request.method, "DELETE");
+        assert_eq!(
+            query_value(&request.target, "ifGenerationMatch").as_deref(),
+            Some("42")
+        );
+        assert!(request.header("x-goog-if-generation-match").is_none());
+        assert_eq!(
+            request.header("authorization"),
+            Some("Bearer gcs-json-test-token")
+        );
+    }
+
+    #[test]
+    fn should_translate_generation_not_match_to_query_when_gcs_json_deletes_object() {
+        // Arrange
+        let server = spawn_recording_http_server(Vec::new(), Vec::new());
+        let backend = recording_json_backend(server.endpoint.clone());
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        // Act
+        backend.submit_delete(
+            "lease/primary",
+            vec![("x-goog-if-generation-not-match".into(), "42".into())],
+            sender,
+        );
+        let result = receive_delete_result(&receiver);
+        let request = server.finish();
+
+        // Assert
+        assert!(matches!(result, CloudOutcome::Ok(())));
+        assert_eq!(
+            query_value(&request.target, "ifGenerationNotMatch").as_deref(),
+            Some("42")
+        );
+        assert!(request.header("x-goog-if-generation-not-match").is_none());
+        assert_eq!(
+            request.header("authorization"),
+            Some("Bearer gcs-json-test-token")
+        );
+    }
+
+    #[test]
+    fn should_fail_closed_when_gcs_json_delete_has_etag_precondition() {
+        // Arrange
+        let backend = recording_json_backend("http://127.0.0.1:1".into());
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        // Act
+        backend.submit_delete(
+            "lease/primary",
+            vec![("If-Match".into(), "\"etag\"".into())],
+            sender,
+        );
+        let result = receive_delete_result(&receiver);
+
+        // Assert
+        assert!(matches!(
+            result,
+            CloudOutcome::Err(CloudError::Protocol(message))
+                if message.contains("use a generation precondition")
+        ));
+    }
+
+    #[test]
+    fn should_canonicalize_generation_precondition_when_gcs_xml_signs_request() {
+        // Arrange
+        let signer = Goog1HmacSigner::new("GOOG123".into(), "c2VjcmV0".into());
+        let date = "Sat, 08 Aug 2026 12:00:00 GMT";
+        let mut request = CloudRequest::new(
+            Method::PUT,
+            "https://storage.googleapis.com/bucket/lease/primary".into(),
+        )
+        .with_body(b"lease".to_vec())
+        .with_header("Content-Type", "application/octet-stream")
+        .with_header("X-Goog-Meta-Owner", " first   holder ")
+        .with_header("x-goog-if-generation-match", "42")
+        .with_header("x-goog-meta-owner", "second holder");
+
+        // Act
+        let string_to_sign = Goog1HmacSigner::string_to_sign(&request, date)
+            .expect("build deterministic GOOG1 string-to-sign");
+        signer
+            .sign_with_date(&mut request, date)
+            .expect("sign deterministic GOOG1 request");
+
+        // Assert
+        assert_eq!(
+            string_to_sign,
+            "PUT\n\napplication/octet-stream\nSat, 08 Aug 2026 12:00:00 GMT\nx-goog-if-generation-match:42\nx-goog-meta-owner:first holder,second holder\n/bucket/lease/primary"
+        );
+        assert_eq!(
+            request
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                .map(|(_, value)| value.as_str()),
+            Some("GOOG1 GOOG123:rkS054NuU5pCTrAsV8U7cjpRaOY=")
+        );
+    }
 
     #[test]
     fn should_reject_repeated_gcs_json_list_page_token() {
