@@ -188,20 +188,32 @@ impl Manifest {
 
     // === Column Family Lifecycle ===
 
-    /// Get next available column family ID
-    pub fn next_cf_id(&self) -> u32 {
+    /// Get the next available column family ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::common::MidgeError::ResourceLimit`] after the last
+    /// representable column family ID has been consumed.
+    pub fn next_cf_id(&self) -> crate::common::MidgeResult<u32> {
         self.column_families
             .iter()
             .map(|cf| cf.id)
             .max()
             .unwrap_or(0)
-            + 1
+            .checked_add(1)
+            .ok_or_else(|| {
+                crate::common::MidgeError::ResourceLimit(
+                    "column family id space exhausted".to_string(),
+                )
+            })
     }
 
     /// Create a new column family
     #[cfg(test)]
     pub fn create_column_family(&mut self, name: String) -> u32 {
-        let id = self.next_cf_id();
+        let id = self
+            .next_cf_id()
+            .expect("test manifest column family id space");
         let created_at = millis_since_epoch();
 
         self.column_families.push(ColumnFamilyMeta {
@@ -634,9 +646,9 @@ mod tests {
         let mut manifest = Manifest::default();
 
         // Act
-        let id1 = manifest.next_cf_id();
+        let id1 = manifest.next_cf_id().expect("next column family id");
         manifest.create_column_family("cf1".to_string());
-        let id2 = manifest.next_cf_id();
+        let id2 = manifest.next_cf_id().expect("next column family id");
 
         // Assert
         assert_eq!(id1, 1);
@@ -649,10 +661,37 @@ mod tests {
         let manifest = Manifest::default();
 
         // Act
-        let next_id = manifest.next_cf_id();
+        let next_id = manifest.next_cf_id().expect("next column family id");
 
         // Assert
         assert_eq!(next_id, 1);
+    }
+
+    #[test]
+    fn should_return_resource_limit_when_column_family_id_space_is_exhausted() {
+        // Arrange
+        let manifest = Manifest {
+            column_families: vec![ColumnFamilyMeta {
+                id: u32::MAX,
+                name: "last-column-family".to_string(),
+                created_at: 0,
+                deleted_at: None,
+                drop_sequence: None,
+                dropped_sst_names: Vec::new(),
+                reclaimed: false,
+            }],
+            ..Manifest::default()
+        };
+
+        // Act
+        let result = manifest.next_cf_id();
+
+        // Assert
+        assert!(matches!(
+            result,
+            Err(crate::common::MidgeError::ResourceLimit(message))
+                if message.contains("column family")
+        ));
     }
 
     #[test]

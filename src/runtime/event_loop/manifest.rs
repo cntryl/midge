@@ -61,7 +61,7 @@ impl ManifestCoordinator {
                 request_id,
                 RuntimeResponse::Error {
                     request_id,
-                    error: crate::common::MidgeError::Internal(
+                    error: crate::common::MidgeError::InvalidArgument(
                         "ingest: DDL forbidden during ingest mode".to_string(),
                     ),
                 },
@@ -117,7 +117,7 @@ impl ManifestCoordinator {
                 request_id,
                 RuntimeResponse::Error {
                     request_id,
-                    error: crate::common::MidgeError::Internal(
+                    error: crate::common::MidgeError::InvalidArgument(
                         "ingest: DDL forbidden during ingest mode".to_string(),
                     ),
                 },

@@ -759,7 +759,10 @@ impl Engine {
     ///
     /// # Errors
     ///
-    /// Returns an error when the column family cannot be created or persisted.
+    /// Returns [`MidgeError::InvalidArgument`] when the reserved `default`
+    /// name is requested or DDL is attempted during ingest mode. Returns
+    /// [`MidgeError::ResourceLimit`] when the column-family ID space is
+    /// exhausted. Other errors report persistence or runtime failures.
     pub fn create_column_family(&self, name: &str) -> MidgeResult<ColumnFamilyHandle> {
         let response = self.runtime_handle.send_and_wait_filtered(
             RuntimeMsg::ManifestCreateColumnFamily {
@@ -804,7 +807,9 @@ impl Engine {
     ///
     /// # Errors
     ///
-    /// Returns an error when the column family cannot be dropped or persisted.
+    /// Returns [`MidgeError::InvalidArgument`] for the default, missing, or
+    /// already-dropped column family and when DDL is attempted during ingest
+    /// mode. Other errors report persistence or runtime failures.
     pub fn drop_column_family(&self, cf_id: ColumnFamilyId) -> MidgeResult<()> {
         let response = self.runtime_handle.send_and_wait_filtered(
             RuntimeMsg::ManifestDropColumnFamily {

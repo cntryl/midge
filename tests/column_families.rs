@@ -65,6 +65,27 @@ fn should_reject_duplicate_column_family_name_given_existing_active_column_famil
 }
 
 #[test]
+fn should_reject_default_named_column_family_given_reserved_name_when_creating() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(&opts, mode));
+
+        // Act
+        let result = engine.create_column_family("default");
+
+        // Assert
+        assert!(matches!(
+            result,
+            Err(MidgeError::InvalidArgument(message))
+                if message.contains("default") && message.contains("reserved")
+        ));
+        let column_families = engine.list_column_families().expect("list column families");
+        assert_eq!(column_families.len(), 1);
+        assert_eq!(column_families[0].id(), 0);
+    });
+}
+
+#[test]
 fn should_create_column_family_with_custom_config_given_config_when_creating() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -154,6 +175,48 @@ fn should_fail_drop_default_column_family_given_drop_request_when_default_cf() {
 
         // Assert
         assert!(result.is_err());
+    });
+}
+
+#[test]
+fn should_return_invalid_argument_given_drop_of_nonexistent_column_family() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(&opts, mode));
+
+        // Act
+        let result = engine.drop_column_family(42);
+
+        // Assert
+        assert!(matches!(
+            result,
+            Err(MidgeError::InvalidArgument(message))
+                if message.contains("42") && message.contains("not found")
+        ));
+    });
+}
+
+#[test]
+fn should_return_invalid_argument_given_second_drop_of_same_column_family() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = Arc::new(open_with_mode(&opts, mode));
+        let cf = engine
+            .create_column_family("drop-twice")
+            .expect("create column family");
+        engine
+            .drop_column_family(cf.id())
+            .expect("drop column family once");
+
+        // Act
+        let result = engine.drop_column_family(cf.id());
+
+        // Assert
+        assert!(matches!(
+            result,
+            Err(MidgeError::InvalidArgument(message))
+                if message.contains("not found") || message.contains("already deleted")
+        ));
     });
 }
 

@@ -84,6 +84,72 @@ pub(in crate::runtime::event_loop) fn create_test_local_event_loop(
 }
 
 #[test]
+fn should_return_invalid_argument_given_column_family_create_during_ingest() {
+    // Arrange
+    let mut event_loop = create_test_event_loop().expect("create event loop");
+    event_loop
+        .state
+        .ingest_active
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
+    let request_id = 901;
+    let response_rx = event_loop.router.register(request_id);
+
+    // Act
+    super::manifest::ManifestCoordinator::create_column_family(
+        &mut event_loop,
+        &msg_rx,
+        request_id,
+        "during-ingest",
+    );
+    let response = response_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("receive create response");
+
+    // Assert
+    assert!(matches!(
+        response,
+        RuntimeResponse::Error {
+            error: crate::common::MidgeError::InvalidArgument(message),
+            ..
+        } if message.contains("ingest mode")
+    ));
+}
+
+#[test]
+fn should_return_invalid_argument_given_column_family_drop_during_ingest() {
+    // Arrange
+    let mut event_loop = create_test_event_loop().expect("create event loop");
+    event_loop
+        .state
+        .ingest_active
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
+    let request_id = 902;
+    let response_rx = event_loop.router.register(request_id);
+
+    // Act
+    super::manifest::ManifestCoordinator::drop_column_family(
+        &mut event_loop,
+        &msg_rx,
+        request_id,
+        42,
+    );
+    let response = response_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("receive drop response");
+
+    // Assert
+    assert!(matches!(
+        response,
+        RuntimeResponse::Error {
+            error: crate::common::MidgeError::InvalidArgument(message),
+            ..
+        } if message.contains("ingest mode")
+    ));
+}
+
+#[test]
 fn should_apply_runtime_config_block_cache_policy_to_read_resources_when_initializing_event_loop(
 ) -> crate::common::MidgeResult<()> {
     // Arrange

@@ -42,6 +42,11 @@ pub(crate) struct DdlRegistry {
 }
 
 pub(crate) fn create_edit(state: &RuntimeState, name: &str) -> MidgeResult<ManifestEdit> {
+    if name == "default" {
+        return Err(MidgeError::InvalidArgument(
+            "column family name 'default' is reserved".to_string(),
+        ));
+    }
     if state.manifest.get_column_family_by_name(name).is_some() {
         return Err(MidgeError::InvalidArgument(format!(
             "column family '{name}' already exists"
@@ -54,7 +59,7 @@ pub(crate) fn create_edit(state: &RuntimeState, name: &str) -> MidgeResult<Manif
         .try_into()
         .unwrap_or(u64::MAX);
     Ok(ManifestEdit::CreateColumnFamily {
-        id: state.manifest.next_cf_id(),
+        id: state.manifest.next_cf_id()?,
         name: name.to_string(),
         created_at,
     })
@@ -73,7 +78,7 @@ pub(crate) fn drop_edit(state: &RuntimeState, cf_id: u32) -> MidgeResult<Manifes
         .find(|cf| cf.id == cf_id && cf.deleted_at.is_none())
         .is_none()
     {
-        return Err(MidgeError::Internal(format!(
+        return Err(MidgeError::InvalidArgument(format!(
             "Column family {cf_id} not found or already deleted"
         )));
     }
