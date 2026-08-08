@@ -589,6 +589,47 @@ fn should_not_report_sync_deadline_without_pending_data() -> MidgeResult<()> {
 }
 
 #[test]
+fn should_not_report_local_batch_work_given_pending_cloud_async_wal() -> MidgeResult<()> {
+    // Arrange
+    let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
+    let db_path = temp.path().to_path_buf();
+    let mut state = RuntimeState::new(db_path.clone(), false);
+    let mut wal_actor = WalActor::new(
+        db_path.join("wal"),
+        DurabilityPolicy::CloudAsync,
+        BatchConfig {
+            max_delay_ms: 0,
+            max_bytes: 1,
+        },
+        false,
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    let (_, deferred) = wal_actor.append(
+        &mut state,
+        AppendParams {
+            request_id: 581,
+            cf_id: 0,
+            key: Bytes::from_static(b"cloud-pending"),
+            value: Some(Bytes::from_static(b"value")),
+            insert_only: false,
+            ttl_seconds: None,
+        },
+    )?;
+
+    // Act
+    let should_run_local_batch = wal_actor.should_sync_batch();
+    let local_batch_deadline = wal_actor.sync_deadline_timeout();
+
+    // Assert
+    assert!(deferred);
+    assert!(wal_actor.has_pending_data());
+    assert!(!should_run_local_batch);
+    assert_eq!(local_batch_deadline, None);
+    Ok(())
+}
+
+#[test]
 fn should_only_coalesce_supported_local_transaction_appends() -> MidgeResult<()> {
     // Arrange
     let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;

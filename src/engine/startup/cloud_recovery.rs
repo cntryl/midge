@@ -1,13 +1,15 @@
 use super::{CloudSstRecoveryProof, CloudStartupRecovery, CloudWalRecoveryPlan};
 use crate::common::{MidgeError, MidgeResult};
 use crate::config::RecoveryPolicy;
-use crate::io::Fs as _;
 use crate::runtime::RuntimeState;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-type LocalWalPaths = (std::collections::BTreeMap<u64, PathBuf>, Option<PathBuf>);
+type LocalWalPaths = (
+    std::collections::BTreeMap<u64, Vec<PathBuf>>,
+    Option<PathBuf>,
+);
 
 impl CloudStartupRecovery {
     pub(super) fn ensure_local_sst_cache_from_cloud(
@@ -901,7 +903,7 @@ impl CloudStartupRecovery {
                 )))
             }
         };
-        let mut segment_paths = std::collections::BTreeMap::<u64, PathBuf>::new();
+        let mut segment_paths = std::collections::BTreeMap::<u64, Vec<PathBuf>>::new();
         let mut active_path = None;
         for entry_result in entries {
             let entry = match entry_result {
@@ -952,14 +954,10 @@ impl CloudStartupRecovery {
             let Some(segment_id) = crate::wal::parse_segment_id(source_name) else {
                 continue;
             };
-            let canonical_name = crate::wal::segment_file_name(segment_id);
-            let prefer_candidate = segment_paths.get(&segment_id).is_none_or(|existing| {
-                existing.file_name().and_then(|name| name.to_str()) != Some(&canonical_name)
-                    && source_name == canonical_name
-            });
-            if prefer_candidate {
-                segment_paths.insert(segment_id, source_path);
-            }
+            segment_paths
+                .entry(segment_id)
+                .or_default()
+                .push(source_path);
         }
         Ok(Some((segment_paths, active_path)))
     }
@@ -995,39 +993,73 @@ impl CloudStartupRecovery {
     }
 
     fn merge_local_sealed_wal_segments(
-        segment_paths: std::collections::BTreeMap<u64, PathBuf>,
+        segment_paths: std::collections::BTreeMap<u64, Vec<PathBuf>>,
         local_wal_dir: &Path,
         staging_fs: &Arc<dyn crate::io::traits::Fs>,
         plan: &mut CloudWalRecoveryPlan,
         recovery_policy: RecoveryPolicy,
     ) -> MidgeResult<()> {
-        for (segment_id, mut source_path) in segment_paths {
-            let local_bytes = match std::fs::read(&source_path) {
-                Ok(bytes) => bytes,
-                Err(error) if recovery_policy == RecoveryPolicy::Salvage => {
-                    tracing::warn!(
-                        %error,
-                        path = %source_path.display(),
-                        "skipping unreadable local WAL segment during salvage open"
-                    );
-                    plan.opened_in_salvage_mode = true;
+        for (segment_id, mut source_paths) in segment_paths {
+            let target_name = crate::wal::segment_file_name(segment_id);
+            source_paths.sort_by(|left, right| {
+                let left_name = left
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("");
+                let right_name = right
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("");
+                (left_name != target_name, left_name).cmp(&(right_name != target_name, right_name))
+            });
+            let mut selected: Option<(PathBuf, Vec<u8>, u64)> = None;
+            for source_path in source_paths {
+                let local_bytes = match std::fs::read(&source_path) {
+                    Ok(bytes) => bytes,
+                    Err(error) if recovery_policy == RecoveryPolicy::Salvage => {
+                        tracing::warn!(
+                            %error,
+                            path = %source_path.display(),
+                            "skipping unreadable local WAL segment during salvage open"
+                        );
+                        plan.opened_in_salvage_mode = true;
+                        continue;
+                    }
+                    Err(error) => {
+                        return Err(MidgeError::RecoveryFailed(format!(
+                            "failed to read intact local WAL '{}': {error}",
+                            source_path.display()
+                        )))
+                    }
+                };
+                let key = source_path.to_string_lossy();
+                let Some(max_sequence) = Self::validate_sealed_recovery_wal(
+                    &key,
+                    &local_bytes,
+                    recovery_policy,
+                    &mut plan.opened_in_salvage_mode,
+                )?
+                else {
+                    continue;
+                };
+                if let Some((selected_path, selected_bytes, _)) = &selected {
+                    if selected_bytes != &local_bytes {
+                        let message = format!(
+                            "conflicting duplicate local WAL files for segment {segment_id}: '{}' and '{}'",
+                            selected_path.display(),
+                            source_path.display()
+                        );
+                        if recovery_policy == RecoveryPolicy::Strict {
+                            return Err(MidgeError::RecoveryFailed(message));
+                        }
+                        plan.opened_in_salvage_mode = true;
+                        tracing::warn!(%message, "retaining canonical local WAL alias during salvage open");
+                    }
                     continue;
                 }
-                Err(error) => {
-                    return Err(MidgeError::RecoveryFailed(format!(
-                        "failed to read intact local WAL '{}': {error}",
-                        source_path.display()
-                    )))
-                }
-            };
-            let target_name = crate::wal::segment_file_name(segment_id);
-            let Some(max_sequence) = Self::validate_sealed_recovery_wal(
-                &target_name,
-                &local_bytes,
-                recovery_policy,
-                &mut plan.opened_in_salvage_mode,
-            )?
-            else {
+                selected = Some((source_path, local_bytes, max_sequence));
+            }
+            let Some((source_path, local_bytes, max_sequence)) = selected else {
                 continue;
             };
             let staged_path = plan.replay_dir.join(&target_name);
@@ -1048,21 +1080,17 @@ impl CloudStartupRecovery {
 
             let canonical_path = local_wal_dir.join(&target_name);
             if source_path != canonical_path {
-                std::fs::rename(&source_path, &canonical_path).map_err(|error| {
-                    MidgeError::RecoveryFailed(format!(
-                        "failed to canonicalize recovered local WAL '{}' as '{}': {error}",
-                        source_path.display(),
-                        canonical_path.display()
-                    ))
-                })?;
-                let local_fs = crate::io::RealFs::new(local_wal_dir)?;
-                local_fs
-                    .sync_dir(&crate::io::FsPath::new("."), crate::io::Durability::Durable)
-                    .map_err(MidgeError::from)?;
-                source_path = canonical_path;
+                let local_fs: Arc<dyn crate::io::traits::Fs> =
+                    Arc::new(crate::io::RealFs::new(local_wal_dir)?);
+                crate::io::staging::stage_bytes(
+                    &local_fs,
+                    &crate::io::FsPath::new(format!("{target_name}.recovery.tmp")),
+                    &crate::io::FsPath::new(&target_name),
+                    &local_bytes,
+                    MidgeError::RecoveryFailed,
+                )?;
             }
             Self::stage_recovery_wal_bytes(staging_fs, &target_name, &local_bytes)?;
-            debug_assert_eq!(source_path, local_wal_dir.join(&target_name));
             plan.local_segments.insert(segment_id, max_sequence);
         }
         Ok(())

@@ -894,6 +894,50 @@ fn should_fail_strict_recovery_given_conflicting_duplicate_simulated_cloud_wal_a
 }
 
 #[test]
+fn should_fail_strict_recovery_given_conflicting_duplicate_local_wal_aliases() {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let cloud_wal_dir = temp_dir.path().join("cloud_store").join("wal");
+    let local_wal_dir = temp_dir.path().join("wal");
+    std::fs::create_dir_all(&cloud_wal_dir).expect("create simulated cloud WAL directory");
+    std::fs::create_dir_all(&local_wal_dir).expect("create local WAL directory");
+    let wal_bytes = |key: &'static [u8]| {
+        let record = crate::wal::WalRecord::new(
+            crate::wal::WalOpKind::Put,
+            bytes::Bytes::from_static(key),
+            Some(bytes::Bytes::from_static(b"value")),
+            1,
+            0,
+        );
+        let payload = crate::wal::encoding::encode(&record).expect("encode WAL record");
+        let mut bytes = Vec::new();
+        crate::wal::frame::append_frame(&mut bytes, &payload).expect("frame WAL record");
+        bytes
+    };
+    std::fs::write(local_wal_dir.join("1.wal"), wal_bytes(b"legacy"))
+        .expect("write legacy local WAL alias");
+    std::fs::write(
+        local_wal_dir.join(crate::wal::segment_file_name(1)),
+        wal_bytes(b"canonical"),
+    )
+    .expect("write canonical local WAL file");
+
+    // Act
+    let result = startup::CloudStartupRecovery::materialize_simulated_cloud_wal_recovery_dir(
+        &cloud_wal_dir,
+        temp_dir.path(),
+        RecoveryPolicy::Strict,
+    );
+
+    // Assert
+    assert!(matches!(
+        result,
+        Err(crate::common::MidgeError::RecoveryFailed(message))
+            if message.contains("conflicting duplicate local WAL")
+    ));
+}
+
+#[test]
 fn should_fail_strict_cloud_wal_recovery_given_list_budget_exhaustion() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");

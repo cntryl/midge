@@ -1043,7 +1043,7 @@ impl EventLoop {
             return true;
         }
 
-        if self.wal_actor.should_sync_batch() || self.state.wal.pending_writes > 0 {
+        if self.wal_actor.should_sync_batch() {
             return true;
         }
 

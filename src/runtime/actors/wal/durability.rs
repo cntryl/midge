@@ -220,6 +220,9 @@ impl WalActor {
 
     /// Check if batched sync should trigger
     pub fn should_sync_batch(&self) -> bool {
+        if self.is_cloud_async() {
+            return false;
+        }
         // Time-based check (max_delay_ms) OR byte-count threshold
         let by_bytes = self.bytes_since_sync >= self.batch_config.max_bytes;
         let by_time = self.last_sync_instant.elapsed().as_millis()
@@ -230,7 +233,7 @@ impl WalActor {
     /// Return how long the event loop can sleep before the batched sync deadline.
     #[must_use]
     pub fn sync_deadline_timeout(&self) -> Option<Duration> {
-        if !self.has_pending_data() {
+        if self.is_cloud_async() || !self.has_pending_data() {
             return None;
         }
 
