@@ -361,6 +361,7 @@ impl RuntimeState {
         let (active_memtables, immutable_memtables) = self.memtable_counts();
         let (sst_count, sst_bytes) = self.sst_totals();
         let residue = self.storage_residue_assessment();
+        let read_path = self.diagnostics.snapshot();
         let telemetry = crate::telemetry::Telemetry::global().map(|t| t.metrics().snapshot());
         let flush_queue_depth = self
             .column_families
@@ -444,6 +445,10 @@ impl RuntimeState {
             wal_append_ns_total: telemetry.as_ref().map_or(0, |m| m.wal_append_ns_total),
             wal_fsync_ns_total: telemetry.as_ref().map_or(0, |m| m.wal_fsync_ns_total),
             wal_fsync_ns_max: telemetry.as_ref().map_or(0, |m| m.wal_fsync_ns_max),
+            durability_waiters_fanned_out_total: 0,
+            sst_bloom_rejects_total: read_path.bloom_rejects,
+            sst_bloom_checks_total: read_path.bloom_checks,
+            sst_data_blocks_read_total: read_path.data_blocks_read,
             flush_queue_depth,
             flush_inflight,
             flush_enqueued_total: self.flush_metrics.enqueued_total,

@@ -86,6 +86,48 @@ fn should_report_zero_delta_for_an_idle_engine_window() {
 }
 
 #[test]
+fn should_reject_absent_key_with_bloom_without_reading_data_block() -> MidgeResult<()> {
+    // Arrange
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
+    let cf = engine.create_column_family("bloom-observability")?;
+    let mut write = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
+    for index in (0..400).step_by(2) {
+        write.put(
+            format!("key-{index:04}").into_bytes(),
+            b"present".to_vec(),
+            None,
+        )?;
+    }
+    write.commit(WriteOptions::best_effort())?;
+    engine.flush_cf(&cf)?;
+
+    // Act: find a deterministic in-range miss that the persisted bloom rejects.
+    let mut observed_reject = false;
+    for index in (1..399).step_by(2) {
+        let before = engine.get_runtime_metrics()?;
+        let read = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
+        assert!(read.get(format!("key-{index:04}").as_bytes())?.is_none());
+        let after = engine.get_runtime_metrics()?;
+        if after.sst_bloom_rejects_total > before.sst_bloom_rejects_total {
+            assert!(after.sst_bloom_checks_total > before.sst_bloom_checks_total);
+            assert_eq!(
+                after.sst_data_blocks_read_total, before.sst_data_blocks_read_total,
+                "a definite bloom rejection must avoid data-block I/O"
+            );
+            observed_reject = true;
+            break;
+        }
+    }
+
+    // Assert
+    assert!(
+        observed_reject,
+        "expected at least one persisted-bloom rejection"
+    );
+    Ok(())
+}
+
+#[test]
 fn should_count_flushed_range_scan_work_in_its_own_window() -> MidgeResult<()> {
     // Arrange
     let engine = open_with_mode(&opts_for_mode("local"), "local");

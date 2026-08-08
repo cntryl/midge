@@ -91,8 +91,8 @@ pub use types::{
 
 // Configuration
 pub use engine::{
-    BlockCachePolicy, CloudWritePolicy, Goal, MemoryBudget, OpenOptions, OpenOptionsBuilder,
-    RecoveryPolicy, Storage, WorkloadProfile, WriteOptions,
+    BlockCachePolicy, CloudWritePolicy, DurabilityPolicy, Goal, MemoryBudget, OpenOptions,
+    OpenOptionsBuilder, RecoveryPolicy, Storage, WorkloadProfile, WriteOptions,
 };
 
 // Key/value types

@@ -582,7 +582,20 @@ fn should_notify_all_waiters_given_multiple_seal_requests_for_same_cloud_segment
             RuntimeResponse::Ok { request_id: actual } if actual == request_id
         ));
     }
-    assert_eq!(el.durability.waiters_fanned_out(), 2);
+    let metrics_id = 18_103;
+    let metrics_rx = el.router.register(metrics_id);
+    el.handle_runtime_msg(
+        RuntimeMsg::GetRuntimeMetrics {
+            request_id: metrics_id,
+        },
+        &msg_rx,
+    );
+    let RuntimeResponse::RuntimeMetricsSnapshot { snapshot, .. } =
+        metrics_rx.recv().expect("runtime metrics response")
+    else {
+        panic!("unexpected runtime metrics response");
+    };
+    assert_eq!(snapshot.durability_waiters_fanned_out_total, 2);
     Ok(())
 }
 

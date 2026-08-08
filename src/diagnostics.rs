@@ -29,6 +29,7 @@ pub struct ReadPathDiagnosticsSnapshot {
     pub candidate_sst_files_checked: u64,
     pub candidate_blocks_checked: u64,
     pub data_blocks_read: u64,
+    pub bloom_checks: u64,
     pub bloom_rejects: u64,
     pub range_tombstone_scans: u64,
 }
@@ -68,6 +69,7 @@ impl RuntimeDiagnostics {
             candidate_sst_files_checked: self.sst.candidate_sst_files_checked(),
             candidate_blocks_checked: self.sst.candidate_blocks_checked(),
             data_blocks_read: self.sst.data_blocks_read(),
+            bloom_checks: self.sst.bloom_checks(),
             bloom_rejects: self.sst.bloom_rejects(),
             range_tombstone_scans: self.sst.range_tombstone_scans(),
         }

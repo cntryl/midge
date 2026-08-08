@@ -107,6 +107,11 @@ impl EventLoop {
     pub(super) fn handle_get_runtime_metrics(&self, request_id: u64) {
         crate::failpoints::fail_point!("midge::runtime::before_get_runtime_metrics_response");
         let mut snapshot = self.state.runtime_metrics_snapshot();
+        let read_path = self.state.diagnostics.snapshot();
+        snapshot.durability_waiters_fanned_out_total = self.durability.waiters_fanned_out();
+        snapshot.sst_bloom_rejects_total = read_path.bloom_rejects;
+        snapshot.sst_bloom_checks_total = read_path.bloom_checks;
+        snapshot.sst_data_blocks_read_total = read_path.data_blocks_read;
         if let Some(storage) = &self.hybrid_storage {
             let budget = storage.budget_snapshot();
             snapshot.hybrid_max_local_bytes = budget.max_local_bytes;

@@ -11,6 +11,7 @@ pub(crate) struct SstReadMetrics {
     candidate_sst_files_checked: AtomicU64,
     candidate_blocks_checked: AtomicU64,
     data_blocks_read: AtomicU64,
+    bloom_checks: AtomicU64,
     bloom_rejects: AtomicU64,
     range_tombstone_scans: AtomicU64,
 }
@@ -46,6 +47,10 @@ impl SstReadMetrics {
 
     pub(crate) fn bloom_rejects(&self) -> u64 {
         self.bloom_rejects.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn bloom_checks(&self) -> u64 {
+        self.bloom_checks.load(Ordering::Relaxed)
     }
 
     pub(crate) fn range_tombstone_scans(&self) -> u64 {
@@ -84,6 +89,10 @@ impl SstReadMetrics {
 
     pub(crate) fn record_bloom_reject(&self) {
         self.bloom_rejects.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_bloom_check(&self) {
+        self.bloom_checks.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn record_range_tombstone_scan(&self) {

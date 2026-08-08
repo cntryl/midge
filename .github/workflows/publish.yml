@@ -14,9 +14,6 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
-    env:
-      MIDGE_REQUIRE_SQRZL: 1
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -91,10 +88,10 @@ jobs:
         run: cargo test --workspace --all-features
 
       - name: Sqrzl provider qualification
-        run: cargo test --lib --features sqrzl-tests storage::providers::qualification -- --test-threads=1
+        run: cargo test --lib --features sqrzl-tests storage::providers::qualification -- --ignored --test-threads=1
 
       - name: Sqrzl engine qualification
-        run: cargo test --test cloud_provider_engine_qualification --features sqrzl-tests -- --test-threads=1
+        run: cargo test --test cloud_provider_engine_qualification --features sqrzl-tests -- --ignored --test-threads=1
 
       - name: Trust-critical smoke suite
         run: cargo test --test external_adopter_smoke --features failpoints

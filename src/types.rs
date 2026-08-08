@@ -135,6 +135,14 @@ pub struct RuntimeMetricsSnapshot {
     pub wal_fsync_ns_total: u64,
     /// Maximum latency of one physical WAL fsync.
     pub wal_fsync_ns_max: u64,
+    /// Durability waiters completed through keyed fan-out events.
+    pub durability_waiters_fanned_out_total: u64,
+    /// SST data blocks skipped after a definite bloom-filter rejection.
+    pub sst_bloom_rejects_total: u64,
+    /// Persisted SST block bloom filters consulted by point reads.
+    pub sst_bloom_checks_total: u64,
+    /// Checksummed SST data blocks read through the point/range read path.
+    pub sst_data_blocks_read_total: u64,
     /// Immutable flushes waiting for the single worker. Gauge.
     pub flush_queue_depth: usize,
     /// Flush worker tasks currently executing. Gauge (zero or one).
