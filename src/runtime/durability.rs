@@ -7,7 +7,7 @@ use crate::common::KeyedGroupCommit;
 #[cfg(test)]
 use crate::types::ReadDurability;
 use std::collections::{BTreeMap, HashMap};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Single `CloudAsync` segment being uploaded
 #[derive(Debug, Clone)]
@@ -264,6 +264,23 @@ impl DurabilityCoordinator {
                     >= self.cloud_runtime_policy.wal_seal.max_flush_delay)
     }
 
+    /// Return the remaining time before a non-empty `CloudAsync` WAL must be
+    /// sealed. The event loop uses this deadline while idle so a sub-threshold
+    /// segment neither spins nor waits for unrelated background maintenance.
+    #[must_use]
+    pub fn cloud_seal_deadline_timeout(&self, pending_writes: usize) -> Option<Duration> {
+        if !self.is_cloud_async || pending_writes == 0 {
+            return None;
+        }
+
+        Some(
+            self.cloud_runtime_policy
+                .wal_seal
+                .max_flush_delay
+                .saturating_sub(self.last_cloud_flush.elapsed()),
+        )
+    }
+
     pub fn mark_cloud_seal_retry_needed(&mut self) {
         self.cloud_seal_retry_needed = true;
     }
@@ -280,5 +297,69 @@ impl DurabilityCoordinator {
     /// Update last flush timestamp (call after `CloudAsync` segment is enqueued).
     pub fn record_cloud_flush(&mut self) {
         self.last_cloud_flush = Instant::now();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cloud_coordinator() -> DurabilityCoordinator {
+        DurabilityCoordinator::new(0, true, crate::runtime::CloudRuntimePolicy::default())
+    }
+
+    #[test]
+    fn should_buffer_ack_given_earlier_segment_still_unacked_when_ack_arrives_out_of_order() {
+        // Arrange
+        let mut coordinator = cloud_coordinator();
+        coordinator.record_cloud_segment_inflight(1, 10);
+        coordinator.record_cloud_segment_inflight(2, 20);
+        let mut acknowledgements = BTreeMap::from([(2, 20)]);
+
+        // Act
+        let blocked = coordinator
+            .take_contiguous_acked_cloud_segments(&acknowledgements)
+            .expect("buffer later acknowledgement");
+        acknowledgements.insert(1, 10);
+        let ready = coordinator
+            .take_contiguous_acked_cloud_segments(&acknowledgements)
+            .expect("drain contiguous acknowledgements");
+
+        // Assert
+        assert!(blocked.is_empty());
+        assert_eq!(ready, vec![(1, 10), (2, 20)]);
+    }
+
+    #[test]
+    fn should_reject_ack_given_mismatched_max_sequence_when_segment_is_inflight() {
+        // Arrange
+        let mut coordinator = cloud_coordinator();
+        coordinator.record_cloud_segment_inflight(7, 70);
+        let acknowledgements = BTreeMap::from([(7, 71)]);
+
+        // Act
+        let result = coordinator.take_contiguous_acked_cloud_segments(&acknowledgements);
+
+        // Assert
+        assert!(matches!(result, Err(message) if message.contains("does not match")));
+        assert_eq!(coordinator.cloud_segment_max_sequence(7), Some(70));
+    }
+
+    #[test]
+    fn should_expose_cloud_seal_deadline_only_given_pending_cloud_async_wal() {
+        // Arrange
+        let cloud = cloud_coordinator();
+        let local =
+            DurabilityCoordinator::new(0, false, crate::runtime::CloudRuntimePolicy::default());
+
+        // Act
+        let pending_deadline = cloud.cloud_seal_deadline_timeout(1);
+        let empty_deadline = cloud.cloud_seal_deadline_timeout(0);
+        let local_deadline = local.cloud_seal_deadline_timeout(1);
+
+        // Assert
+        assert!(pending_deadline.is_some());
+        assert_eq!(empty_deadline, None);
+        assert_eq!(local_deadline, None);
     }
 }

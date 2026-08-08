@@ -447,11 +447,8 @@ fn should_tolerate_corrupted_tail_given_recovery_mode_set_when_reopening() {
 // Validates that CloudAsync mode returns WriteStall error when
 // pending cloud write queue reaches capacity (100k entries).
 //
-// NOTE: This functionality is validated via internal unit tests:
-// 1. WalActor unit tests in src/runtime/actors/wal.rs
-// 2. CloudWriteQueue unit tests in src/runtime/actors/cloud_write_queue.rs
-// 3. Internal integration tests with mock cloud backends
-// (CloudAsync durability policy is not exposed in public API)
+// CloudAsync admission is validated against the production HybridStorage
+// upload queue in its backend tests.
 
 // ============================================================================
 // LOCAL TRUST-BOUNDARY TESTS

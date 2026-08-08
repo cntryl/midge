@@ -135,7 +135,7 @@ fn should_prune_remote_wal_segment_after_cloud_sst_covers_it() {
 }
 
 #[test]
-fn should_prune_manifest_covered_remote_wal_after_restart() {
+fn should_ignore_reintroduced_manifest_covered_remote_wal_after_restart() {
     // Arrange
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
     let opts = opts_for_mode("cloud");
@@ -153,7 +153,9 @@ fn should_prune_manifest_covered_remote_wal_after_restart() {
         .map(|path| {
             let bytes = fs::read(&path).expect("read remote WAL before simulated interruption");
             (
-                path.file_name().expect("remote WAL filename").to_owned(),
+                path.strip_prefix(&remote_wal_dir)
+                    .expect("remote WAL path below WAL root")
+                    .to_owned(),
                 bytes,
             )
         })
@@ -166,20 +168,23 @@ fn should_prune_manifest_covered_remote_wal_after_restart() {
         .expect("shutdown before restoring interrupted prune residue");
 
     fs::create_dir_all(&remote_wal_dir).expect("recreate remote WAL directory");
-    for (name, bytes) in retained_segments {
-        fs::write(remote_wal_dir.join(name), bytes).expect("restore covered remote WAL residue");
+    for (relative_path, bytes) in retained_segments {
+        let restored_path = remote_wal_dir.join(relative_path);
+        fs::create_dir_all(restored_path.parent().expect("remote WAL parent"))
+            .expect("restore remote WAL epoch directory");
+        fs::write(restored_path, bytes).expect("restore covered remote WAL residue");
     }
     reset_dir(&db_path.join("wal"));
     reset_dir(&db_path.join("sst"));
 
     // Act
     let reopened = Engine::open(opts.to_open_options()).expect("reopen cloud engine");
-    let remaining = wait_for_remote_wal_count(&remote_wal_dir, 0);
+    let remaining = wait_for_remote_wal_count_at_least(&remote_wal_dir, 1);
 
     // Assert
     assert!(
-        remaining.is_empty(),
-        "startup maintenance should prune recovered WAL already covered by the manifest: {remaining:?}"
+        !remaining.is_empty(),
+        "a WAL object reintroduced after catalog retirement should remain a harmless orphan"
     );
     assert_eq!(
         get_default(&reopened, b"restart-prune-key"),
@@ -438,6 +443,53 @@ fn should_keep_cloud_async_commit_visible_given_cloud_upload_failure_when_commit
 
 #[cfg(feature = "failpoints")]
 #[test]
+fn should_recover_cloud_async_commit_given_intact_local_wal_when_upload_fails() {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let opts = opts_for_mode("cloud");
+    let db_path = cloud_db_path(&opts);
+    let remote_wal_dir = db_path.join("cloud_store").join("wal");
+    let scenario = fail::FailScenario::setup();
+    fail::cfg("midge::cloud::inject_fail_wal_upload", "return")
+        .expect("configure wal upload failure failpoint");
+
+    let mut engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
+    put_default(
+        &engine,
+        b"intact-local-cloud-async",
+        b"survives-same-node-restart",
+        WriteOptions::cloud_async(),
+    );
+    let _metrics = wait_for_cloud_gap(&engine, 1);
+    engine
+        .shutdown(std::time::Duration::from_secs(5))
+        .expect("shutdown before same-node reopen");
+
+    fail::remove("midge::cloud::inject_fail_wal_upload");
+    scenario.teardown();
+
+    // Act
+    let reopened = Engine::open(opts.to_open_options()).expect("reopen cloud engine");
+
+    // Assert
+    assert_eq!(
+        get_default(&reopened, b"intact-local-cloud-async"),
+        Some(Bytes::from_static(b"survives-same-node-restart"))
+    );
+    let durable = wait_for_cloud_catch_up(&reopened, 1);
+    assert!(
+        durable.wal_cloud_durable_seq >= durable.current_sequence,
+        "resumed upload must advance the cloud frontier only after acknowledgment"
+    );
+    assert!(
+        !wait_for_remote_wal_count_at_least(&remote_wal_dir, 1).is_empty(),
+        "same-node recovery must resume publication of the local-only WAL"
+    );
+    shutdown_test_engine(reopened);
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
 fn should_fail_cloud_strict_commit_given_cloud_upload_failure_when_waiting_for_ack() {
     // Arrange
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
@@ -512,6 +564,10 @@ fn should_salvage_valid_prefix_when_remote_wal_segment_is_corrupt() {
         .expect("shutdown before reopen");
 
     let remote_wal_dir = db_path.join("cloud_store").join("wal");
+    let corrupt_remote_wal = list_files_with_extension(&remote_wal_dir, "wal")
+        .into_iter()
+        .max()
+        .expect("remote WAL object to corrupt");
     corrupt_last_file(&remote_wal_dir);
     reset_dir(&db_path.join("wal"));
 
@@ -534,6 +590,10 @@ fn should_salvage_valid_prefix_when_remote_wal_segment_is_corrupt() {
         Some(Bytes::from_static(b"prefix-value"))
     );
     assert_eq!(get_default(&salvaged, b"truncated-key"), None);
+    assert!(
+        corrupt_remote_wal.exists(),
+        "corrupt recovered WAL must be retained when it cannot be proven safe to delete"
+    );
     shutdown_test_engine(salvaged);
 }
 
@@ -710,6 +770,31 @@ fn wait_for_cloud_gap(engine: &Engine, min_sequence: u64) -> cntryl_midge::Runti
     }
 }
 
+#[cfg(feature = "failpoints")]
+fn wait_for_cloud_catch_up(
+    engine: &Engine,
+    min_sequence: u64,
+) -> cntryl_midge::RuntimeMetricsSnapshot {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+        if metrics.current_sequence >= min_sequence
+            && metrics.wal_cloud_durable_seq >= metrics.current_sequence
+        {
+            return metrics;
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for recovered WAL cloud acknowledgment; last metrics: seq={} cloud_seq={} health={:?}",
+            metrics.current_sequence,
+            metrics.wal_cloud_durable_seq,
+            metrics.health
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
 fn corrupt_last_file(dir: &Path) {
     let mut files = list_files_with_extension(dir, "wal");
     files.sort();
@@ -725,10 +810,22 @@ fn list_files_with_extension(dir: &Path, extension: &str) -> Vec<PathBuf> {
 }
 
 fn list_files(dir: &Path) -> Vec<PathBuf> {
-    fs::read_dir(dir)
-        .unwrap_or_else(|error| panic!("read_dir({}): {error}", dir.display()))
-        .map(|entry| entry.expect("dir entry").path())
-        .collect()
+    let mut files = Vec::new();
+    collect_files(dir, &mut files);
+    files
+}
+
+fn collect_files(dir: &Path, files: &mut Vec<PathBuf>) {
+    for entry in
+        fs::read_dir(dir).unwrap_or_else(|error| panic!("read_dir({}): {error}", dir.display()))
+    {
+        let path = entry.expect("dir entry").path();
+        if path.is_dir() {
+            collect_files(&path, files);
+        } else {
+            files.push(path);
+        }
+    }
 }
 
 fn wait_for_remote_wal_count(dir: &Path, expected: usize) -> Vec<PathBuf> {

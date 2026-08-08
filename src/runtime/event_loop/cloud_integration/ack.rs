@@ -63,6 +63,13 @@ impl EventLoop {
     }
 
     fn handle_storage_event_cloud_ack(&mut self, segment_id: u64, max_sequence: u64) {
+        if let Err(error) = self.validate_runtime_writer_lease() {
+            self.handle_cloud_upload_failure(
+                segment_id,
+                &format!("writer was fenced before cloud WAL acknowledgement: {error}"),
+            );
+            return;
+        }
         if let Err(error) = self.verify_remote_wal_segment_before_ack(segment_id, max_sequence) {
             self.handle_cloud_upload_failure(
                 segment_id,
@@ -70,12 +77,17 @@ impl EventLoop {
             );
             return;
         }
+        if let Err(error) = self.validate_runtime_writer_lease() {
+            self.handle_cloud_upload_failure(
+                segment_id,
+                &format!("writer was fenced after cloud WAL publication: {error}"),
+            );
+            return;
+        }
 
-        let resource = crate::wal::cloud_segment_object_key(segment_id);
-        self.state
-            .cloud
-            .pending_uploads
-            .retain(|item| item != &resource);
+        self.state.cloud.pending_uploads.retain(|item| {
+            crate::wal::parse_segment_id(item).is_none_or(|pending| pending != segment_id)
+        });
         self.cloud_acked_wal_segments
             .insert(segment_id, max_sequence);
 
@@ -101,47 +113,32 @@ impl EventLoop {
             return;
         };
 
-        #[cfg(test)]
-        let upload_complete_result = self.wal_actor.handle_cloud_upload_complete(
-            &mut self.state,
-            durable_segment_id,
-            durable_max_sequence,
+        self.state.wal.cloud_durable_seq =
+            self.state.wal.cloud_durable_seq.max(durable_max_sequence);
+        tracing::debug!(
+            segment_id = durable_segment_id,
+            cloud_durable_seq = self.state.wal.cloud_durable_seq,
+            "Cloud upload complete"
         );
-        #[cfg(not(test))]
-        let upload_complete_result: crate::common::MidgeResult<()> = {
-            self.wal_actor.handle_cloud_upload_complete(
-                &mut self.state,
-                durable_segment_id,
-                durable_max_sequence,
-            );
-            Ok(())
-        };
 
-        match upload_complete_result {
-            Ok(()) => {
-                for (ready_segment_id, _) in &ready_segments {
-                    self.remove_cloud_durable_local_wal_segment(*ready_segment_id);
-                }
-
-                for (seg_id, _) in ready_segments {
-                    if let Some(enqueued_at) = self.durability.take_cloud_segment_timing(seg_id) {
-                        if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-                            telemetry.metrics().record_cloud_async_wal_ack_latency_us(
-                                Self::elapsed_micros_to_u64(enqueued_at.elapsed()),
-                            );
-                        }
-                    }
-
-                    let waiters = self.durability.complete_waiters_at(seg_id);
-                    self.complete_durability_waiters(waiters, CompletionSource::CloudAck);
-                }
-                self.prune_cloud_wal_segments_covered_by_manifest();
-                self.drain_auto_flush_memtables();
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "failed to apply cloud ack");
-            }
+        for (ready_segment_id, _) in &ready_segments {
+            self.remove_cloud_durable_local_wal_segment(*ready_segment_id);
         }
+
+        for (seg_id, _) in ready_segments {
+            if let Some(enqueued_at) = self.durability.take_cloud_segment_timing(seg_id) {
+                if let Some(telemetry) = crate::telemetry::Telemetry::global() {
+                    telemetry.metrics().record_cloud_async_wal_ack_latency_us(
+                        Self::elapsed_micros_to_u64(enqueued_at.elapsed()),
+                    );
+                }
+            }
+
+            let waiters = self.durability.complete_waiters_at(seg_id);
+            self.complete_durability_waiters(waiters, CompletionSource::CloudAck);
+        }
+        self.prune_cloud_wal_segments_covered_by_manifest();
+        self.drain_auto_flush_memtables();
     }
 
     fn handle_storage_event_cloud_wal_prune_complete(
@@ -158,24 +155,17 @@ impl EventLoop {
                 tracing::debug!(segment_id, "Pruned cloud-covered remote WAL segment");
             }
             crate::storage::StorageOutcome::Err(error) => {
-                let failures = self
-                    .cloud_wal_prune_retries
-                    .get(&segment_id)
-                    .map_or(1, |(failures, _)| failures.saturating_add(1));
-                let exponent = failures.saturating_sub(1).min(8);
-                let delay_ms = 25_u64.saturating_mul(1_u64 << exponent);
-                let retry_at = std::time::Instant::now()
-                    + std::time::Duration::from_millis(delay_ms.min(5_000));
-                self.cloud_wal_prune_retries
-                    .insert(segment_id, (failures, retry_at));
-                self.next_background_compaction_check =
-                    self.next_background_compaction_check.min(retry_at);
+                // The authoritative catalog entry is retired before physical
+                // deletion is attempted. A failed delete is therefore a safe
+                // storage leak, not a recovery obligation that may be retried
+                // through a now-absent catalog entry.
+                self.cloud_wal_prune_retries.remove(&segment_id);
+                self.cloud_acked_wal_segments.remove(&segment_id);
+                self.state.mark_persistence_anomaly();
                 tracing::warn!(
                     segment_id,
-                    failures,
-                    ?retry_at,
                     error = %error,
-                    "Failed to prune cloud-covered remote WAL segment; retaining it for bounded retry"
+                    "Cloud WAL authority was retired but physical deletion failed; retaining an ignored orphan"
                 );
             }
         }
@@ -189,15 +179,22 @@ impl EventLoop {
         let Some(storage) = self.hybrid_storage.as_ref() else {
             return Err("CloudAck received without HybridStorage".to_string());
         };
-        storage.verify_remote_wal_segment(segment_id, max_sequence)
+        let local_path = self
+            .state
+            .wal_dir
+            .join(crate::wal::segment_file_name(segment_id));
+        storage.publish_remote_wal_segment(
+            segment_id,
+            max_sequence,
+            &local_path,
+            self.state.writer_epoch,
+        )
     }
 
     fn handle_cloud_upload_failure(&mut self, segment_id: u64, error: &str) {
-        let resource = crate::wal::cloud_segment_object_key(segment_id);
-        self.state
-            .cloud
-            .pending_uploads
-            .retain(|item| item != &resource);
+        self.state.cloud.pending_uploads.retain(|item| {
+            crate::wal::parse_segment_id(item).is_none_or(|pending| pending != segment_id)
+        });
         self.state.mark_persistence_anomaly();
         self.cloud_acked_wal_segments.remove(&segment_id);
 
@@ -208,7 +205,7 @@ impl EventLoop {
         let failed_max_seq = self.durability.cloud_segment_max_sequence(segment_id);
 
         // Let WAL actor handle its internal failure handling and drop pending writes.
-        self.wal_actor.handle_cloud_upload_failed(segment_id, error);
+        tracing::error!(segment_id, error, "Cloud upload failed");
 
         // If we know the max_sequence for the failed segment, invalidate idempotency
         // allocations up to that sequence so retries will allocate fresh sequences.

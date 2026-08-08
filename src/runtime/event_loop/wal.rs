@@ -456,6 +456,18 @@ impl WalCoordinator {
         }
 
         if event_loop.wal_actor.is_cloud_async() {
+            if !event_loop.cloud_wal_upload_backlog.is_empty() {
+                event_loop.respond(
+                    request_id,
+                    RuntimeResponse::Error {
+                        request_id,
+                        error: crate::common::MidgeError::WriteStall(
+                            "CloudAsync WAL recovery uploads are still draining".to_string(),
+                        ),
+                    },
+                );
+                return false;
+            }
             if let Some(storage) = &event_loop.hybrid_storage {
                 if let Err(error) = storage.ensure_wal_write_admission() {
                     event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });

@@ -201,6 +201,7 @@ pub enum StorageOutcome<T: Clone> {
 
 impl<T: Clone> StorageOutcome<T> {
     /// Check if this is an Ok outcome
+    #[cfg(test)]
     pub fn is_ok(&self) -> bool {
         matches!(self, StorageOutcome::Ok(_))
     }

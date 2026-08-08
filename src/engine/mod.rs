@@ -384,12 +384,15 @@ impl Engine {
         cloud: &crate::storage::cloud::CloudStorage,
         db_path: &Path,
         recovery_policy: RecoveryPolicy,
+        catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
     ) -> MidgeResult<PathBuf> {
         startup::CloudStartupRecovery::materialize_cloud_wal_recovery_dir(
             cloud,
             db_path,
             recovery_policy,
+            catalog,
         )
+        .map(|plan| plan.replay_dir)
     }
 
     #[cfg(test)]

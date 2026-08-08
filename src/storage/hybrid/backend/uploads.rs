@@ -7,6 +7,18 @@ use super::{
 };
 
 impl HybridStorage {
+    pub(crate) fn queue_cloud_wal_prune_complete(
+        &self,
+        segment_id: u64,
+        result: StorageOutcome<()>,
+    ) {
+        Self::queue_storage_event(
+            &self.event_queue,
+            self.external_event_tx.as_ref(),
+            StorageEvent::CloudWalPruneComplete { segment_id, result },
+        );
+    }
+
     pub fn ensure_wal_upload_capacity(
         &self,
         additional_bytes: u64,
@@ -441,22 +453,29 @@ impl HybridStorage {
         callback_timeout: Duration,
         mut verify_remote: impl FnMut(u64, u64) -> Result<(), String>,
     ) {
-        match rx.recv_timeout(callback_timeout) {
-            Ok(StorageEvent::WriteComplete { key, result }) if result.is_ok() => {
+        let (write_reported_success, write_error) = match rx.recv_timeout(callback_timeout) {
+            Ok(StorageEvent::WriteComplete { key, result }) => {
                 let _ = key;
-                if let Err(error) = verify_remote(upload.segment_id, upload.max_sequence) {
-                    if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-                        telemetry.metrics().record_cloud_async_wal_upload_failed();
-                    }
-                    Self::emit_wal_upload_failure(
-                        upload,
-                        &format!("remote WAL readback validation failed: {error}"),
-                        event_queue,
-                        external_event_tx,
-                    );
-                    return;
+                match result {
+                    StorageOutcome::Ok(()) => (true, None),
+                    StorageOutcome::Err(error) => (false, Some(error)),
                 }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => (
+                false,
+                Some("cloud WAL upload callback timed out".to_string()),
+            ),
+            Err(mpsc::RecvTimeoutError::Disconnected) | Ok(_) => (
+                false,
+                Some(
+                    "cloud WAL upload callback channel closed or returned an unexpected event"
+                        .to_string(),
+                ),
+            ),
+        };
 
+        match verify_remote(upload.segment_id, upload.max_sequence) {
+            Ok(()) => {
                 if let Some(telemetry) = crate::telemetry::Telemetry::global() {
                     telemetry.metrics().record_cloud_async_wal_upload_completed(
                         Self::duration_micros_to_u64(upload_start.elapsed()),
@@ -465,31 +484,20 @@ impl HybridStorage {
                 Self::emit_wal_upload_ack(upload, event_queue, external_event_tx);
                 Self::log_wal_upload_ack(upload);
             }
-            Ok(StorageEvent::WriteComplete { key, result }) => {
-                let _ = key;
+            Err(readback_error) => {
                 if let Some(telemetry) = crate::telemetry::Telemetry::global() {
                     telemetry.metrics().record_cloud_async_wal_upload_failed();
                 }
-                let error = match result {
-                    StorageOutcome::Err(e) => e,
-                    StorageOutcome::Ok(()) => "Unknown error".to_string(),
+                let error = if write_reported_success {
+                    format!("remote WAL readback validation failed: {readback_error}")
+                } else {
+                    format!(
+                        "{}; remote WAL readback did not confirm the write: {readback_error}",
+                        write_error.unwrap_or_else(|| "cloud WAL upload failed".to_string())
+                    )
                 };
                 Self::emit_wal_upload_failure(upload, &error, event_queue, external_event_tx);
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                Self::emit_wal_upload_failure(
-                    upload,
-                    "cloud WAL upload callback timed out",
-                    event_queue,
-                    external_event_tx,
-                );
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) | Ok(_) => Self::emit_wal_upload_failure(
-                upload,
-                "cloud WAL upload callback channel closed or returned an unexpected event",
-                event_queue,
-                external_event_tx,
-            ),
         }
     }
 }

@@ -11,6 +11,8 @@ pub struct CloudObjectLayout;
 impl CloudObjectLayout {
     /// Sealed write-ahead log segments in the data store.
     pub const WAL_PREFIX: &'static str = "wal/";
+    /// Lease-fenced authority document for remotely recoverable WAL segments.
+    pub const WAL_CATALOG_OBJECT_KEY: &'static str = "wal/publication-catalog.v1.json";
     /// Immutable sorted-string tables in the data store.
     pub const SST_PREFIX: &'static str = "sst/";
     /// Mutable recovery metadata in the control store.

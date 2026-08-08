@@ -829,7 +829,7 @@ impl CloudBackend for AzureBackend {
             request = request.with_header(name, value);
         }
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status < 400 => CloudEvent::Delete {
+            Ok(resp) if resp.status < 400 || resp.status == 404 => CloudEvent::Delete {
                 key: ctx,
                 result: CloudOutcome::Ok(()),
             },
@@ -1549,7 +1549,8 @@ impl CloudSigner for ManagedIdentitySigner {
 mod tests {
     use super::*;
     use crate::storage::providers::test_support::{
-        receive_list_result, spawn_recording_http_server, spawn_scripted_http_server,
+        receive_list_result, spawn_recording_http_server, spawn_recording_http_server_with_status,
+        spawn_scripted_http_server,
     };
     use std::sync::{Mutex, OnceLock};
 
@@ -1581,6 +1582,23 @@ mod tests {
             CloudEvent::Delete { result, .. } => result,
             event => panic!("expected Azure DELETE event, got {event:?}"),
         }
+    }
+
+    #[test]
+    fn should_treat_missing_azure_blob_as_success_when_deleting() {
+        // Arrange
+        let server = spawn_recording_http_server_with_status(404, Vec::new(), Vec::new());
+        let backend = recording_backend(server.endpoint.clone());
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        // Act
+        backend.submit_delete("missing/blob", Vec::new(), sender);
+        let result = receive_delete_result(&receiver);
+        let request = server.finish();
+
+        // Assert
+        assert!(matches!(result, CloudOutcome::Ok(())));
+        assert_eq!(request.method, "DELETE");
     }
 
     #[test]

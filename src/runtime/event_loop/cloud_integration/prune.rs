@@ -79,9 +79,12 @@ impl EventLoop {
 
         for (segment_id, max_sequence) in eligible_segments {
             self.cloud_wal_prune_inflight.insert(segment_id);
-            if let Err(error) =
-                storage.prune_cloud_wal_segment(segment_id, max_sequence, prune_guard.clone())
-            {
+            if let Err(error) = storage.prune_cloud_wal_segment(
+                segment_id,
+                max_sequence,
+                prune_guard.clone(),
+                self.state.writer_epoch,
+            ) {
                 self.cloud_wal_prune_inflight.remove(&segment_id);
                 if error.contains("at capacity") {
                     tracing::debug!(
@@ -103,7 +106,10 @@ impl EventLoop {
 }
 
 impl EventLoop {
-    pub(super) fn remove_cloud_durable_local_wal_segment(&mut self, segment_id: u64) {
+    pub(in crate::runtime::event_loop) fn remove_cloud_durable_local_wal_segment(
+        &mut self,
+        segment_id: u64,
+    ) {
         if self.state.is_memory_mode() {
             return;
         }

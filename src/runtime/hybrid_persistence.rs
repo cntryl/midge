@@ -9,6 +9,7 @@ use crate::metadata::{FileMeta, Manifest};
 use crate::storage::cloud::CloudStorage;
 use crate::storage::hybrid::backend::{GuardedObjectProof, HybridStorage, RemoteObjectProof};
 use crate::storage::{StorageBackend, StorageObjectMetadata};
+use crate::wal::cloud_catalog::{PublishedWalSegment, WalPublicationCatalog};
 use crate::wal::cloud_segment::DataCoverageRecord;
 use std::io::Write as _;
 use std::path::Path;
@@ -68,12 +69,23 @@ pub(crate) trait HybridPersistence {
         segment_id: u64,
         local_path: &Path,
         max_sequence: u64,
-    ) -> MidgeResult<()>;
+    ) -> MidgeResult<String>;
 
+    fn fence_cloud_wal_catalog(&self, writer_epoch: u64) -> MidgeResult<WalPublicationCatalog>;
+
+    #[cfg(test)]
     fn verify_remote_wal_segment(
         &self,
         segment_id: u64,
         expected_max_sequence: u64,
+    ) -> Result<(), String>;
+
+    fn publish_remote_wal_segment(
+        &self,
+        segment_id: u64,
+        expected_max_sequence: u64,
+        local_path: &Path,
+        fencing_epoch: u64,
     ) -> Result<(), String>;
 
     fn remote_wal_segment_covered_by_manifest(
@@ -90,6 +102,7 @@ pub(crate) trait HybridPersistence {
         segment_id: u64,
         expected_max_sequence: u64,
         guard: CloudWalPruneGuard,
+        fencing_epoch: u64,
     ) -> Result<(), String>;
 
     fn write_sst_object(&self, sst_name: &str, data: Vec<u8>) -> MidgeResult<()>;
@@ -103,21 +116,113 @@ impl HybridPersistence for HybridStorage {
         segment_id: u64,
         local_path: &Path,
         max_sequence: u64,
-    ) -> MidgeResult<()> {
-        self.enqueue_object_upload(
-            segment_id,
-            crate::wal::cloud_segment::object_key(segment_id),
-            local_path,
+    ) -> MidgeResult<String> {
+        let bytes = std::fs::read(local_path).map_err(MidgeError::Io)?;
+        let readback = crate::wal::cloud_segment::validate_bytes(
+            &local_path.display().to_string(),
+            &bytes,
             max_sequence,
         )
+        .map_err(MidgeError::Corruption)?;
+        let object_key =
+            crate::wal::cloud_segment::object_key(segment_id, readback.validation.writer_epoch);
+        self.enqueue_object_upload(segment_id, object_key.clone(), local_path, max_sequence)?;
+        Ok(object_key)
     }
 
+    fn fence_cloud_wal_catalog(&self, writer_epoch: u64) -> MidgeResult<WalPublicationCatalog> {
+        let existing = self
+            .remote_object_proof_optional(crate::wal::cloud_catalog::OBJECT_KEY)
+            .map_err(MidgeError::Internal)?;
+        let (mut catalog, expected) = match existing.as_ref() {
+            Some(proof) => (
+                WalPublicationCatalog::decode(proof.bytes()).map_err(MidgeError::Corruption)?,
+                Some(proof.metadata()),
+            ),
+            None => (
+                WalPublicationCatalog::empty(writer_epoch).map_err(MidgeError::Internal)?,
+                None,
+            ),
+        };
+
+        let changed = if existing.is_some() {
+            catalog.fence_to(writer_epoch).map_err(MidgeError::Fenced)?
+        } else {
+            true
+        };
+        if changed {
+            let bytes = catalog.encode().map_err(MidgeError::Internal)?;
+            self.compare_exchange_remote_object(
+                crate::wal::cloud_catalog::OBJECT_KEY,
+                expected,
+                bytes,
+            )?;
+        }
+        Ok(catalog)
+    }
+
+    #[cfg(test)]
     fn verify_remote_wal_segment(
         &self,
         segment_id: u64,
         expected_max_sequence: u64,
     ) -> Result<(), String> {
-        validate_remote_wal(self, segment_id, expected_max_sequence).map(|_| ())
+        let (_, entry) = authoritative_wal_entry(self, segment_id)?;
+        if entry.max_sequence != expected_max_sequence {
+            return Err(format!(
+                "cloud WAL catalog segment {segment_id} max sequence {} does not match expected {expected_max_sequence}",
+                entry.max_sequence
+            ));
+        }
+        validate_remote_wal(self, &entry).map(|_| ())
+    }
+
+    fn publish_remote_wal_segment(
+        &self,
+        segment_id: u64,
+        expected_max_sequence: u64,
+        local_path: &Path,
+        fencing_epoch: u64,
+    ) -> Result<(), String> {
+        let local_bytes = std::fs::read(local_path).map_err(|error| {
+            format!(
+                "failed to read local WAL segment '{}' before cloud acknowledgement: {error}",
+                local_path.display()
+            )
+        })?;
+        let local_readback = crate::wal::cloud_segment::validate_bytes(
+            &local_path.display().to_string(),
+            &local_bytes,
+            expected_max_sequence,
+        )?;
+        let entry = PublishedWalSegment::from_validated_bytes(
+            segment_id,
+            expected_max_sequence,
+            local_readback.validation.writer_epoch,
+            &local_bytes,
+        );
+        let remote = validate_remote_wal(self, &entry)?;
+        if remote.proof.bytes() != local_bytes {
+            return Err(format!(
+                "cloud WAL segment {segment_id} does not match the locally sealed bytes for writer epoch {}",
+                local_readback.validation.writer_epoch
+            ));
+        }
+        let catalog_proof = self
+            .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
+            .map_err(|error| format!("cloud WAL publication catalog unavailable: {error}"))?;
+        let mut catalog = WalPublicationCatalog::decode(catalog_proof.bytes())?;
+        if !catalog.publish(fencing_epoch, entry)? {
+            return Ok(());
+        }
+        let catalog_bytes = catalog.encode()?;
+        self.compare_exchange_remote_object(
+            crate::wal::cloud_catalog::OBJECT_KEY,
+            Some(catalog_proof.metadata()),
+            catalog_bytes,
+        )
+        .map(|_| ())
+        .map_err(|error| format!("cloud WAL catalog publication failed: {error}"))
     }
 
     fn remote_wal_segment_covered_by_manifest(
@@ -126,7 +231,14 @@ impl HybridPersistence for HybridStorage {
         expected_max_sequence: u64,
         manifest: &Manifest,
     ) -> Result<bool, String> {
-        let validated = validate_remote_wal(self, segment_id, expected_max_sequence)?;
+        let (_, entry) = authoritative_wal_entry(self, segment_id)?;
+        if entry.max_sequence != expected_max_sequence {
+            return Err(format!(
+                "cloud WAL catalog segment {segment_id} max sequence {} does not match expected {expected_max_sequence}",
+                entry.max_sequence
+            ));
+        }
+        let validated = validate_remote_wal(self, &entry)?;
         Ok(wal_data_records_covered_by_manifest(
             &validated.data_records,
             manifest,
@@ -145,8 +257,16 @@ impl HybridPersistence for HybridStorage {
         segment_id: u64,
         expected_max_sequence: u64,
         guard: CloudWalPruneGuard,
+        fencing_epoch: u64,
     ) -> Result<(), String> {
-        let validated = validate_remote_wal(self, segment_id, expected_max_sequence)?;
+        let (catalog_proof, entry) = authoritative_wal_entry(self, segment_id)?;
+        if entry.max_sequence != expected_max_sequence {
+            return Err(format!(
+                "cloud WAL catalog segment {segment_id} max sequence {} does not match expected {expected_max_sequence}",
+                entry.max_sequence
+            ));
+        }
+        let validated = validate_remote_wal(self, &entry)?;
         if !wal_data_records_covered_by_manifest(&validated.data_records, &guard.manifest) {
             return Err(format!(
                 "cloud WAL segment {segment_id} contains records not covered by the committed manifest"
@@ -169,7 +289,31 @@ impl HybridPersistence for HybridStorage {
             dependencies.extend(metadata.objects);
         }
 
-        self.delete_remote_object_guarded(segment_id, validated.proof, dependencies)
+        // Publication authority is retired before physical deletion. A crash or
+        // delete failure after this point can leak an ignored object but cannot
+        // make recovery depend on a missing object.
+        self.verify_remote_delete_guards(&validated.proof, &dependencies)?;
+        let mut catalog = WalPublicationCatalog::decode(catalog_proof.bytes())?;
+        if catalog.retire(fencing_epoch, &entry)? {
+            self.compare_exchange_remote_object(
+                crate::wal::cloud_catalog::OBJECT_KEY,
+                Some(catalog_proof.metadata()),
+                catalog.encode()?,
+            )
+            .map_err(|error| format!("cloud WAL catalog retirement failed: {error}"))?;
+        }
+
+        if let Err(error) =
+            self.delete_remote_object_guarded(segment_id, validated.proof, dependencies)
+        {
+            tracing::warn!(
+                segment_id,
+                error = %error,
+                "cloud WAL catalog entry retired; retaining orphan after delete admission failure"
+            );
+            self.queue_cloud_wal_prune_complete(segment_id, crate::storage::StorageOutcome::Ok(()));
+        }
+        Ok(())
     }
 
     fn write_sst_object(&self, sst_name: &str, data: Vec<u8>) -> MidgeResult<()> {
@@ -202,15 +346,31 @@ impl HybridPersistence for HybridStorage {
     }
 }
 
-fn validate_remote_wal(
+fn authoritative_wal_entry(
     storage: &HybridStorage,
     segment_id: u64,
-    expected_max_sequence: u64,
+) -> Result<(RemoteObjectProof, PublishedWalSegment), String> {
+    let proof = storage
+        .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
+        .map_err(|error| format!("cloud WAL publication catalog unavailable: {error}"))?;
+    let catalog = WalPublicationCatalog::decode(proof.bytes())?;
+    let entry = catalog.segments.get(&segment_id).cloned().ok_or_else(|| {
+        format!("cloud WAL segment {segment_id} is not authoritative in the publication catalog")
+    })?;
+    Ok((proof, entry))
+}
+
+fn validate_remote_wal(
+    storage: &HybridStorage,
+    entry: &PublishedWalSegment,
 ) -> Result<ValidatedWalObject, String> {
-    let key = crate::wal::cloud_segment::object_key(segment_id);
-    let proof = storage.remote_object_proof(&key)?;
-    let readback =
-        crate::wal::cloud_segment::validate_bytes(&key, proof.bytes(), expected_max_sequence)?;
+    let proof = storage.remote_object_proof(&entry.object_key)?;
+    entry.validate_bytes(proof.bytes())?;
+    let readback = crate::wal::cloud_segment::validate_bytes(
+        &entry.object_key,
+        proof.bytes(),
+        entry.max_sequence,
+    )?;
     Ok(ValidatedWalObject {
         proof,
         data_records: readback.data_records,

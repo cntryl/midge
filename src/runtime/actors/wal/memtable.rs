@@ -17,32 +17,6 @@ thread_local! {
 }
 
 impl WalActor {
-    #[cfg(test)]
-    pub(super) fn apply_transaction_ops(
-        &mut self,
-        state: &mut RuntimeState,
-        apply_ops: Vec<TransactionApplyOp>,
-        effective_durability: DurabilityPolicy,
-        last_sequence: u64,
-        apply_op_count: usize,
-    ) -> MidgeResult<()> {
-        if !matches!(effective_durability, DurabilityPolicy::CloudAsync) {
-            return Self::apply_ops_to_memtables(state, apply_ops);
-        }
-        #[cfg(test)]
-        self.validate_cloud_async_transaction_queue(apply_op_count)?;
-        for apply_op in apply_ops {
-            Self::apply_transaction_op_to_memtable(state, apply_op)?;
-        }
-        tracing::trace!(
-            commit_sequence = last_sequence,
-            apply_op_count,
-            "Applied batch to memtable (CloudAsync)"
-        );
-        Ok(())
-    }
-
-    #[cfg(not(test))]
     pub(super) fn apply_transaction_ops(
         state: &mut RuntimeState,
         apply_ops: Vec<TransactionApplyOp>,
@@ -409,7 +383,11 @@ impl WalActor {
     }
 
     /// Checks current in-memory view (active + immutable memtables) for existence
-    fn key_exists(state: &RuntimeState, cf_id: crate::types::ColumnFamilyId, key: &[u8]) -> bool {
+    pub(super) fn key_exists(
+        state: &RuntimeState,
+        cf_id: crate::types::ColumnFamilyId,
+        key: &[u8],
+    ) -> bool {
         let Some(cf_state) = state.column_families.get(&cf_id) else {
             return false;
         };
@@ -434,30 +412,6 @@ impl WalActor {
             state.is_memory_mode(),
         );
         matches!(snapshot.get(key, u64::MAX), Ok(Some(_)))
-    }
-
-    pub(super) fn key_exists_or_pending(
-        &self,
-        state: &RuntimeState,
-        cf_id: crate::types::ColumnFamilyId,
-        key: &[u8],
-    ) -> bool {
-        if Self::key_exists(state, cf_id, key) {
-            return true;
-        }
-
-        if !self.is_cloud_async() {
-            return false;
-        }
-
-        #[cfg(test)]
-        {
-            self.cloud_write_queue.contains_key(cf_id, key)
-        }
-        #[cfg(not(test))]
-        {
-            false
-        }
     }
 
     /// Apply a write to the memtable

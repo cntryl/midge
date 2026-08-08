@@ -87,7 +87,7 @@ impl CloudActor {
         };
 
         // Create cloud key
-        let cloud_key = crate::wal::cloud_segment_object_key(segment_id);
+        let cloud_key = crate::wal::cloud_segment_object_key(segment_id, state.writer_epoch);
 
         // Track pending upload
         state.cloud.pending_uploads.push(cloud_key.clone());

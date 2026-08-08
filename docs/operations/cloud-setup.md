@@ -13,6 +13,14 @@ feature set. The default feature set currently includes the cloud integrations.
 state, so it is suitable for deterministic tests rather than service
 qualification.
 
+`cloud-oci` enables the generic S3-compatible backend; it is not a native OCI
+Object Storage client and does not add an OCI-specific configuration variant,
+credential resolver, signer, or error taxonomy. Configure OCI through
+`CloudProviderConfig::s3_compatible` and OCI's S3 Compatibility API. The
+isolated `cloud-oci` CI leg is compile-only, so operators must independently
+qualify conditional writes, missing-object responses, credentials, and endpoint
+behavior against the exact OCI tenancy before relying on it.
+
 ## Configuration
 
 Construct `CloudProviderConfig` with the provider-specific public credential
@@ -37,7 +45,7 @@ let options = OpenOptions::cloud("/var/lib/midge-cache", location).build()?;
 ```
 
 The shared location contains `wal/`, `sst/`, `metadata/`,
-`metadata/ddl.registry.json`, and
+`wal/publication-catalog.v1.json`, `metadata/ddl.registry.json`, and
 `midge_primary_lease.json`. Configure the shared location without object
 versioning. Never point a writer at an empty control namespace while another
 writer can still hold a lease for the same database.
@@ -64,6 +72,14 @@ bound cleanup of noncurrent versions:
 | `sst/` | SST | Never age-expire current objects. Give noncurrent versions a bounded recovery window. |
 | `metadata/` | control | Never age-expire current objects. Retain only a small, bounded noncurrent recovery window. |
 | `midge_primary_lease.json` | control | Keep current lease state; use the shortest practical noncurrent-version lifetime. |
+
+The WAL store contains epoch-scoped immutable segment objects and the mutable
+`wal/publication-catalog.v1.json` authority document. Lease acquisition
+conditionally advances the catalog fencing epoch before recovery. Uploads are
+recoverable only after a conditional catalog publication; an unlisted object
+is an orphan and is ignored. WAL pruning removes the catalog entry only after
+manifest/SST coverage has been validated, then best-effort deletes the orphaned
+object. Operators must not edit or reconstruct this catalog.
 
 Do not configure age-based expiration for current WAL, SST, or metadata
 objects. Their safe-deletion decision depends on manifest coverage and is owned

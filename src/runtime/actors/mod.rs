@@ -6,7 +6,7 @@
 //! - `flush`: freeze memtables and stage SST publication
 //! - `compaction`: plan and execute replacement SST sets, then hand publication back to runtime
 //! - `manifest`: publish authoritative file-set changes
-//! - `cloud` and `cloud_write_queue`: cloud durability and upload coordination
+//! - `cloud`: cloud durability and upload coordination
 //! - `gc`: delete obsolete files only after publication makes them safe to remove
 
 #[cfg(test)]

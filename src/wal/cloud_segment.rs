@@ -16,6 +16,7 @@ pub(crate) struct DataCoverageRecord {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SegmentValidation {
     pub(crate) max_sequence: u64,
+    pub(crate) writer_epoch: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,8 +31,8 @@ pub(crate) fn file_name(segment_id: u64) -> String {
 }
 
 #[must_use]
-pub(crate) fn object_key(segment_id: u64) -> String {
-    super::segment_object_key(segment_id)
+pub(crate) fn object_key(segment_id: u64, writer_epoch: u64) -> String {
+    super::segment_object_key(segment_id, writer_epoch)
 }
 
 pub(crate) fn validate_bytes(
@@ -63,6 +64,7 @@ pub(crate) fn inspect_bytes(key: &str, data: &[u8]) -> Result<SegmentReadback, S
     let mut pos = 0usize;
     let mut records = 0usize;
     let mut observed_max_sequence = 0u64;
+    let mut observed_writer_epoch = None;
     let mut data_records = Vec::new();
     while pos < data.len() {
         let header_end = pos
@@ -90,6 +92,16 @@ pub(crate) fn inspect_bytes(key: &str, data: &[u8]) -> Result<SegmentReadback, S
             .map_err(|error| format!("cloud WAL segment '{key}' frame CRC: {error}"))?;
         let record = super::encoding::decode(payload)
             .map_err(|error| format!("cloud WAL segment '{key}' record decode: {error}"))?;
+        if let Some(expected_epoch) = observed_writer_epoch {
+            if record.writer_epoch != expected_epoch {
+                return Err(format!(
+                    "cloud WAL segment '{key}' mixes writer epochs {expected_epoch} and {}",
+                    record.writer_epoch
+                ));
+            }
+        } else {
+            observed_writer_epoch = Some(record.writer_epoch);
+        }
         observed_max_sequence = observed_max_sequence.max(record.seq);
         append_data_coverage_records(key, &record, &mut data_records)?;
         records += 1;
@@ -102,6 +114,7 @@ pub(crate) fn inspect_bytes(key: &str, data: &[u8]) -> Result<SegmentReadback, S
     Ok(SegmentReadback {
         validation: SegmentValidation {
             max_sequence: observed_max_sequence,
+            writer_epoch: observed_writer_epoch.unwrap_or_default(),
         },
         data_records,
     })
@@ -180,4 +193,37 @@ fn push_data_coverage_record(
         WalOpKind::TxnBegin | WalOpKind::TxnCommit | WalOpKind::TxnBatch => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+
+    fn append_record_frame(bytes: &mut Vec<u8>, sequence: u64, writer_epoch: u64) {
+        let record = WalRecord::new(
+            WalOpKind::Put,
+            Bytes::from_static(b"key"),
+            Some(Bytes::from_static(b"value")),
+            sequence,
+            writer_epoch,
+        );
+        let payload = crate::wal::encoding::encode(&record).unwrap();
+        crate::wal::frame::append_frame(bytes, &payload).unwrap();
+    }
+
+    #[test]
+    fn should_reject_segment_given_records_from_multiple_writer_epochs() {
+        // Arrange
+        let mut bytes = Vec::new();
+        append_record_frame(&mut bytes, 1, 41);
+        append_record_frame(&mut bytes, 2, 42);
+
+        // Act
+        let result = inspect_bytes("wal/00000000000000000001.wal", &bytes);
+
+        // Assert
+        let error = result.unwrap_err();
+        assert!(error.contains("mixes writer epochs 41 and 42"), "{error}");
+    }
 }

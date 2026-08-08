@@ -177,6 +177,27 @@ impl HybridStorage {
         Self::with_policy_and_event_sender(local, cloud, policy, None)
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_test_upload_limits(
+        local: Arc<dyn StorageBackend>,
+        cloud: Arc<dyn StorageBackend>,
+        policy: policy::StorageBudgetPolicy,
+        upload_entries: usize,
+        upload_bytes: u64,
+    ) -> Self {
+        Self::with_policy_event_sender_and_limits(
+            local,
+            cloud,
+            policy,
+            None,
+            HybridQueueLimits {
+                upload_entries,
+                upload_bytes,
+                ..HybridQueueLimits::default()
+            },
+        )
+    }
+
     pub fn with_policy_and_event_sender(
         local: Arc<dyn StorageBackend>,
         cloud: Arc<dyn StorageBackend>,

@@ -41,6 +41,7 @@ pub use state::RuntimeState;
 
 pub use config::RuntimeConfig;
 pub(crate) use config::{CloudRuntimePolicy, CloudWalSealPolicy};
+pub(crate) use config::{RecoveredCloudActiveWal, RecoveredCloudWalSegment};
 pub use handle::RuntimeHandle;
 pub(crate) use lifecycle::{RuntimeLifecycle, RuntimeLifecycleState, RuntimeTransactionGuard};
 pub(crate) use protocol::next_request_id;

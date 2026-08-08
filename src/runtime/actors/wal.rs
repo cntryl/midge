@@ -27,8 +27,6 @@
 #[cfg(test)]
 use super::super::state::RuntimeState;
 use super::cloud_write_queue::TransactionApplyOp;
-#[cfg(test)]
-use super::cloud_write_queue::{CloudWriteQueue, CLOUD_UPLOAD_TIMEOUT};
 use crate::common::MidgeResult;
 use crate::io::{Fs, RealFs};
 use crate::wal::policy::BatchConfig;
@@ -143,12 +141,6 @@ pub struct WalActor {
     pending_sync_count: usize,
     /// Durability policy (determines sync behavior)
     durability_policy: DurabilityPolicy,
-    /// Pending writes waiting for cloud durability (`CloudAsync` mode only)
-    /// These writes are in local WAL but NOT in memtable yet
-    #[cfg(test)]
-    cloud_write_queue: CloudWriteQueue,
-    #[cfg(not(test))]
-    cloud_pending_writes: bool,
     /// Bytes written since last sync (for batched mode)
     bytes_since_sync: usize,
     /// Highest sequence actually appended to the current WAL segment.
@@ -253,10 +245,6 @@ impl WalActor {
             wal_fs,
             pending_sync_count: 0,
             durability_policy,
-            #[cfg(test)]
-            cloud_write_queue: CloudWriteQueue::new(),
-            #[cfg(not(test))]
-            cloud_pending_writes: false,
             bytes_since_sync: 0,
             segment_max_sequence: 0,
             flush_generation: 0,
@@ -332,22 +320,6 @@ impl WalActor {
         .then_some(effective_durability)
     }
 
-    pub fn has_pending_cloud_writes(&self) -> bool {
-        #[cfg(test)]
-        {
-            self.cloud_write_queue.has_pending_writes()
-        }
-        #[cfg(not(test))]
-        {
-            self.cloud_pending_writes
-        }
-    }
-
-    #[cfg(test)]
-    pub fn pending_cloud_writes_len(&self) -> usize {
-        self.cloud_write_queue.len()
-    }
-
     pub fn bytes_since_sync(&self) -> usize {
         self.bytes_since_sync
     }
@@ -373,51 +345,6 @@ impl WalActor {
         self.append_calls
     }
 
-    /// Check if cloud write queue has hit backpressure limits
-    /// Returns true if we should reject new writes to prevent memory exhaustion
-    #[cfg(test)]
-    pub fn should_apply_backpressure(&self) -> bool {
-        self.cloud_write_queue.should_apply_backpressure()
-    }
-
-    /// Check for timed-out pending cloud writes
-    /// Returns number of writes that have exceeded `CLOUD_UPLOAD_TIMEOUT`
-    #[cfg(test)]
-    pub fn count_timed_out_writes(&self) -> usize {
-        self.cloud_write_queue.count_timed_out_writes()
-    }
-
-    #[cfg(test)]
-    fn ensure_cloud_async_ready(&self) -> MidgeResult<()> {
-        if self.should_apply_backpressure() {
-            if let Some(t) = crate::telemetry::Telemetry::global() {
-                t.metrics().record_write_stall_cloud();
-            }
-            tracing::warn!(
-                pending_count = self.cloud_write_queue.len(),
-                pending_bytes = self.cloud_write_queue.pending_bytes(),
-                "CloudAsync write stall: pending queue at capacity"
-            );
-            return Err(MidgeError::WriteStall(
-                "CloudAsync pending queue at capacity; cloud upload too slow".to_string(),
-            ));
-        }
-
-        let timed_out = self.count_timed_out_writes();
-        if timed_out > 0 {
-            tracing::error!(
-                timed_out_count = timed_out,
-                timeout_secs = CLOUD_UPLOAD_TIMEOUT.as_secs(),
-                "CloudAsync timeout: pending writes not acknowledged by cloud"
-            );
-            return Err(MidgeError::Internal(format!(
-                "{timed_out} pending writes exceeded cloud upload timeout"
-            )));
-        }
-
-        Ok(())
-    }
-
     #[cfg(test)]
     fn apply_append_policy(
         &mut self,
@@ -440,18 +367,10 @@ impl WalActor {
                     value.cloned(),
                     expiration,
                 )?;
-
-                if matches!(self.durability_policy, DurabilityPolicy::CloudMirrored) {
-                    self.cloud_write_queue.enqueue_write(
-                        cf_id,
-                        key.to_vec(),
-                        value.map(|bytes| bytes.as_ref().to_vec()),
-                        sequence,
-                        expiration,
-                    );
-                }
             }
-            DurabilityPolicy::Batched | DurabilityPolicy::BestEffort => {
+            DurabilityPolicy::Batched
+            | DurabilityPolicy::BestEffort
+            | DurabilityPolicy::CloudAsync => {
                 Self::apply_to_memtable(
                     state,
                     sequence,
@@ -460,24 +379,6 @@ impl WalActor {
                     value.cloned(),
                     expiration,
                 )?;
-            }
-            DurabilityPolicy::CloudAsync => {
-                self.ensure_cloud_async_ready()?;
-                Self::apply_to_memtable(
-                    state,
-                    sequence,
-                    cf_id,
-                    key.clone(),
-                    value.cloned(),
-                    expiration,
-                )?;
-                self.cloud_write_queue.enqueue_write(
-                    cf_id,
-                    key.to_vec(),
-                    value.map(|bytes| bytes.as_ref().to_vec()),
-                    sequence,
-                    expiration,
-                );
             }
         }
 
@@ -500,18 +401,10 @@ impl WalActor {
                 state.wal.local_durable_seq = sequence;
                 Self::apply_delete_range_to_memtable(state, sequence, cf_id, start_key, end_key)?;
             }
-            DurabilityPolicy::Batched | DurabilityPolicy::BestEffort => {
+            DurabilityPolicy::Batched
+            | DurabilityPolicy::BestEffort
+            | DurabilityPolicy::CloudAsync => {
                 Self::apply_delete_range_to_memtable(state, sequence, cf_id, start_key, end_key)?;
-            }
-            DurabilityPolicy::CloudAsync => {
-                self.ensure_cloud_async_ready()?;
-                Self::apply_delete_range_to_memtable(state, sequence, cf_id, start_key, end_key)?;
-                self.cloud_write_queue.enqueue_delete_range(
-                    cf_id,
-                    start_key.to_vec(),
-                    end_key.to_vec(),
-                    sequence,
-                );
             }
         }
 
@@ -545,7 +438,7 @@ impl WalActor {
         } = params;
 
         // Enforce insert-only if requested by checking in-memory state
-        if insert_only && self.key_exists_or_pending(state, cf_id, &key) {
+        if insert_only && Self::key_exists(state, cf_id, &key) {
             return Err(MidgeError::InvalidArgument(
                 "key already exists".to_string(),
             ));
@@ -760,36 +653,6 @@ impl WalActor {
             DurabilityPolicy::Batched | DurabilityPolicy::CloudAsync
         );
         Ok((sequence, deferred))
-    }
-
-    #[cfg(test)]
-    fn validate_cloud_async_transaction_queue(&self, apply_op_count: usize) -> MidgeResult<()> {
-        if self.should_apply_backpressure() {
-            if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-                telemetry.metrics().record_write_stall_cloud();
-            }
-            tracing::warn!(
-                apply_op_count,
-                pending_count = self.cloud_write_queue.len(),
-                pending_bytes = self.cloud_write_queue.pending_bytes(),
-                "CloudAsync batch stall: pending queue at capacity"
-            );
-            return Err(MidgeError::WriteStall(
-                "CloudAsync pending queue at capacity; cloud upload too slow".to_string(),
-            ));
-        }
-        let timed_out = self.count_timed_out_writes();
-        if timed_out > 0 {
-            tracing::error!(
-                timed_out_count = timed_out,
-                timeout_secs = CLOUD_UPLOAD_TIMEOUT.as_secs(),
-                "CloudAsync batch timeout: pending writes not acknowledged by cloud"
-            );
-            return Err(MidgeError::Internal(format!(
-                "{timed_out} pending writes exceeded cloud upload timeout"
-            )));
-        }
-        Ok(())
     }
 
     /// Handle sync completion notification

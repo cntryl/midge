@@ -118,7 +118,7 @@ impl WalActor {
             }
         }
 
-        self.validate_transaction_preconditions(
+        Self::validate_transaction_preconditions(
             state,
             &ops,
             &assertions,
@@ -179,15 +179,6 @@ impl WalActor {
                     sequence_plan.begin_seq,
                 )?;
             }
-            #[cfg(test)]
-            self.apply_transaction_ops(
-                state,
-                apply_ops,
-                effective_durability,
-                last_sequence,
-                apply_op_count,
-            )?;
-            #[cfg(not(test))]
             Self::apply_transaction_ops(
                 state,
                 apply_ops,
@@ -219,7 +210,6 @@ impl WalActor {
     }
 
     fn validate_transaction_preconditions(
-        &self,
         state: &RuntimeState,
         ops: &[crate::runtime::TransactionOp],
         assertions: &[crate::runtime::KeyAssertion],
@@ -268,7 +258,7 @@ impl WalActor {
                         _ => {}
                     }
                 }
-                self.key_exists_or_pending(state, cf_id, key)
+                Self::key_exists(state, cf_id, key)
             };
 
         for op in ops {

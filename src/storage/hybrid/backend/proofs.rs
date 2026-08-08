@@ -279,6 +279,21 @@ impl HybridStorage {
         ))
     }
 
+    /// Revalidate a pending delete target and every semantic dependency before
+    /// the runtime retires an authority reference to that target.
+    pub(crate) fn verify_remote_delete_guards(
+        &self,
+        target: &RemoteObjectProof,
+        dependencies: &[GuardedObjectProof],
+    ) -> Result<(), String> {
+        let target_guard = self.remote_identity_guard(target);
+        Self::verify_guarded_object_proof(&target_guard, self.callback_timeout)?;
+        for dependency in dependencies {
+            Self::verify_guarded_object_proof(dependency, self.callback_timeout)?;
+        }
+        Ok(())
+    }
+
     /// Conditionally delete a remote object after revalidating format-neutral
     /// dependency identities. The runtime must first establish all semantic
     /// coverage relationships and supply the resulting proofs.

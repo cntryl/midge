@@ -299,6 +299,9 @@ pub trait CloudBackend: Send + Sync + 'static {
     }
     #[cfg(test)]
     fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback);
+    /// Submit an idempotent delete. Implementations must report success when
+    /// the target is already absent; conditional-precondition failures remain
+    /// errors.
     fn submit_delete(&self, key: &str, _headers: Vec<(String, String)>, callback: CloudCallback) {
         let _ = callback.send(CloudEvent::Delete {
             key: key.to_string(),

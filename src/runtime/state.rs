@@ -740,6 +740,14 @@ impl RuntimeState {
         }
     }
 
+    /// Reset the cloud durability frontier to bytes proven durable by the
+    /// manifest. Startup separately advances it through the contiguous set of
+    /// validated remote WAL segments; local-only replay must never contribute
+    /// to this frontier until its resumed upload is acknowledged.
+    pub(crate) fn reset_cloud_durable_sequence_for_recovery(&mut self) {
+        self.wal.cloud_durable_seq = Self::manifest_visible_sequence_floor(&self.manifest);
+    }
+
     /// Check if we have cached sequences for this `request_id`.
     /// Returns (`first_sequence`, count) if found and not yet confirmed.
     #[cfg(test)]
