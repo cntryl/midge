@@ -36,6 +36,17 @@ fn put_record(key: &'static [u8], sequence: u64, writer_epoch: u64) -> WalRecord
     )
 }
 
+fn wal_with_corrupted_length_before_valid_suffix() -> Vec<u8> {
+    let prefix = encode_frame(&put_record(b"prefix", 1, 1));
+    let hidden = encode_frame(&put_record(b"hidden", 2, 1));
+    let suffix = encode_frame(&put_record(b"suffix", 3, 1));
+    let hidden_offset = prefix.len();
+    let mut wal_bytes = [prefix, hidden, suffix].concat();
+    let corrupt_len = u32::try_from(wal_bytes.len()).unwrap();
+    wal_bytes[hidden_offset..hidden_offset + 4].copy_from_slice(&corrupt_len.to_le_bytes());
+    wal_bytes
+}
+
 #[test]
 fn should_initialize_stats_with_zeros_when_created() {
     let stats = RecoveryStats::new();
@@ -46,6 +57,24 @@ fn should_initialize_stats_with_zeros_when_created() {
 fn should_initialize_bytes_with_zero_when_created() {
     let stats = RecoveryStats::new();
     assert_eq!(stats.bytes, 0);
+}
+
+#[test]
+fn should_not_tolerate_generic_corruption_based_on_incomplete_tail_error_text() {
+    // Arrange
+    let replay_file = ReplayFile {
+        path: FsPath::new(crate::wal::ACTIVE_FILE_NAME),
+        kind: ReplayFileKind::FinalActive,
+    };
+    let failure = ReplayFailure::Error(MidgeError::Corruption(
+        "Incomplete WAL record text alone is not a typed tail".to_string(),
+    ));
+
+    // Act
+    let action = replay_error_action(&replay_file, ReplayPolicy::Strict, &failure);
+
+    // Assert
+    assert_eq!(action, ReplayErrorAction::Fail);
 }
 
 #[test]
@@ -1270,6 +1299,89 @@ fn should_ignore_only_incomplete_final_active_wal_tail_given_truncated_frame_whe
         Some(b"value".to_vec())
     );
     assert_eq!(memtables[&0].get(b"torn").unwrap(), None);
+}
+
+#[test]
+fn should_fail_strict_recovery_given_corrupted_length_before_valid_active_wal_suffix() {
+    // Arrange
+    let dir = TempDir::new().unwrap();
+    let wal_subdir = dir.path().join("wal");
+    std::fs::create_dir(&wal_subdir).unwrap();
+    let storage = RealFs::new(dir.path()).unwrap();
+    let wal_dir = FsPath::new("wal");
+    let wal_path = wal_subdir.join(crate::wal::ACTIVE_FILE_NAME);
+
+    append_raw_bytes(&wal_path, &wal_with_corrupted_length_before_valid_suffix());
+    let mut memtables = HashMap::new();
+
+    // Act
+    let error = replay_wal_with_policy(&storage, &wal_dir, &mut memtables, ReplayPolicy::Strict)
+        .expect_err("strict recovery must reject a length field that hides a valid WAL suffix");
+
+    // Assert
+    match error {
+        MidgeError::Corruption(message) => {
+            assert!(message.contains("hides a verified later frame"));
+        }
+        other => panic!("expected corruption error, got {other:?}"),
+    }
+}
+
+#[test]
+fn should_mark_corruption_when_salvaging_corrupted_length_before_valid_active_suffix() {
+    // Arrange
+    let dir = TempDir::new().unwrap();
+    let wal_subdir = dir.path().join("wal");
+    std::fs::create_dir(&wal_subdir).unwrap();
+    let storage = RealFs::new(dir.path()).unwrap();
+    let wal_dir = FsPath::new("wal");
+    let wal_path = wal_subdir.join(crate::wal::ACTIVE_FILE_NAME);
+    append_raw_bytes(&wal_path, &wal_with_corrupted_length_before_valid_suffix());
+    let mut memtables = HashMap::new();
+
+    // Act
+    let stats = replay_wal_with_policy(
+        &storage,
+        &wal_dir,
+        &mut memtables,
+        ReplayPolicy::SalvageValidPrefix,
+    )
+    .expect("salvage recovery must preserve only the verified prefix");
+
+    // Assert
+    assert!(stats.had_corruption);
+    assert_eq!(stats.record_count, 1);
+    assert_eq!(
+        memtables[&0].get(b"prefix").unwrap(),
+        Some(b"value".to_vec())
+    );
+    assert_eq!(memtables[&0].get(b"suffix").unwrap(), None);
+}
+
+#[test]
+fn should_tolerate_zero_filled_final_active_wal_tail_given_strict_recovery() {
+    // Arrange
+    let dir = TempDir::new().unwrap();
+    let wal_subdir = dir.path().join("wal");
+    std::fs::create_dir(&wal_subdir).unwrap();
+    let storage = RealFs::new(dir.path()).unwrap();
+    let wal_dir = FsPath::new("wal");
+    let wal_path = wal_subdir.join(crate::wal::ACTIVE_FILE_NAME);
+    append_raw_bytes(&wal_path, &encode_frame(&put_record(b"prefix", 1, 1)));
+    append_raw_bytes(&wal_path, &[0_u8; crate::wal::frame::WAL_FRAME_HEADER_LEN]);
+    let mut memtables = HashMap::new();
+
+    // Act
+    let stats = replay_wal_with_policy(&storage, &wal_dir, &mut memtables, ReplayPolicy::Strict)
+        .expect("strict recovery must accept an unwritten zero-filled active WAL tail");
+
+    // Assert
+    assert!(!stats.had_corruption);
+    assert_eq!(stats.record_count, 1);
+    assert_eq!(
+        memtables[&0].get(b"prefix").unwrap(),
+        Some(b"value".to_vec())
+    );
 }
 
 #[test]

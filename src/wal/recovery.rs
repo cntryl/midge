@@ -72,14 +72,6 @@ pub enum ReplayPolicy {
     SalvageValidPrefix,
 }
 
-fn is_incomplete_eof_frame(error: &MidgeError) -> bool {
-    let MidgeError::Corruption(message) = error else {
-        return false;
-    };
-    let lower = message.to_ascii_lowercase();
-    lower.contains("incomplete wal frame header") || lower.contains("incomplete wal record")
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReplayFileKind {
     Sealed,
@@ -99,15 +91,45 @@ enum ReplayErrorAction {
     Fail,
 }
 
+#[derive(Debug)]
+enum ReplayFailure {
+    IncompleteTail(MidgeError),
+    Error(MidgeError),
+}
+
+impl ReplayFailure {
+    fn error(&self) -> &MidgeError {
+        match self {
+            Self::IncompleteTail(error) | Self::Error(error) => error,
+        }
+    }
+
+    fn into_error(self) -> MidgeError {
+        match self {
+            Self::IncompleteTail(error) | Self::Error(error) => error,
+        }
+    }
+
+    fn is_incomplete_tail(&self) -> bool {
+        matches!(self, Self::IncompleteTail(_))
+    }
+}
+
+impl From<MidgeError> for ReplayFailure {
+    fn from(error: MidgeError) -> Self {
+        Self::Error(error)
+    }
+}
+
 fn replay_error_action(
     replay_file: &ReplayFile,
     replay_policy: ReplayPolicy,
-    error: &MidgeError,
+    failure: &ReplayFailure,
 ) -> ReplayErrorAction {
-    if replay_file.kind == ReplayFileKind::FinalActive && is_incomplete_eof_frame(error) {
+    if replay_file.kind == ReplayFileKind::FinalActive && failure.is_incomplete_tail() {
         ReplayErrorAction::TolerateFinalActiveTail
     } else if replay_policy == ReplayPolicy::SalvageValidPrefix
-        && matches!(error, MidgeError::Corruption(_))
+        && matches!(failure.error(), MidgeError::Corruption(_))
     {
         ReplayErrorAction::SalvageVerifiedPrefix
     } else {
@@ -358,12 +380,12 @@ fn replay_wal_paths<S: BuildHasher>(
     replay_state: &mut WalReplayState<'_, S>,
 ) -> MidgeResult<()> {
     for replay_file in replay_paths {
-        if let Err(error) = replay_wal_file(storage, &replay_file.path, replay_state) {
-            match replay_error_action(replay_file, replay_policy, &error) {
+        if let Err(failure) = replay_wal_file(storage, &replay_file.path, replay_state) {
+            match replay_error_action(replay_file, replay_policy, &failure) {
                 ReplayErrorAction::TolerateFinalActiveTail => {
                     tracing::info!(
                         path = %replay_file.path,
-                        error = %error,
+                        error = %failure.error(),
                         "wal replay dropped an incomplete final active tail"
                     );
                     return Ok(());
@@ -372,12 +394,12 @@ fn replay_wal_paths<S: BuildHasher>(
                     replay_state.stats.mark_corruption();
                     tracing::warn!(
                         path = %replay_file.path,
-                        error = %error,
+                        error = %failure.error(),
                         "wal replay stopped at corrupt verified-prefix boundary"
                     );
                     return Ok(());
                 }
-                ReplayErrorAction::Fail => return Err(error),
+                ReplayErrorAction::Fail => return Err(failure.into_error()),
             }
         }
     }
@@ -460,11 +482,11 @@ fn discover_writer_epoch_frontiers(
                     ordinal = ordinal.saturating_add(1);
                     pos = frame.next_pos;
                 }
-                Err(error) => match replay_error_action(replay_file, replay_policy, &error) {
+                Err(failure) => match replay_error_action(replay_file, replay_policy, &failure) {
                     ReplayErrorAction::TolerateFinalActiveTail => {
                         tracing::info!(
                             path = %replay_file.path,
-                            error = %error,
+                            error = %failure.error(),
                             "writer epoch discovery dropped an incomplete final active tail"
                         );
                         return Ok((frontiers, had_corruption));
@@ -473,12 +495,12 @@ fn discover_writer_epoch_frontiers(
                         had_corruption = true;
                         tracing::warn!(
                             path = %replay_file.path,
-                            error = %error,
+                            error = %failure.error(),
                             "stopped writer epoch discovery at corrupt WAL prefix boundary"
                         );
                         return Ok((frontiers, had_corruption));
                     }
-                    ReplayErrorAction::Fail => return Err(error),
+                    ReplayErrorAction::Fail => return Err(failure.into_error()),
                 },
             }
         }
@@ -491,7 +513,7 @@ fn replay_wal_file<S: BuildHasher>(
     storage: &dyn Fs,
     file_path: &FsPath,
     replay_state: &mut WalReplayState<'_, S>,
-) -> MidgeResult<()> {
+) -> Result<(), ReplayFailure> {
     let mut pos: u64 = 0;
     let mut file_read_ns: u128 = 0;
     let mut file_apply_ns: u128 = 0;
@@ -587,7 +609,7 @@ fn read_next_wal_frame(
     file_path: &FsPath,
     pos: u64,
     file_read_ns: &mut u128,
-) -> MidgeResult<NextWalFrame> {
+) -> Result<NextWalFrame, ReplayFailure> {
     let file_len = file.len().map_err(map_fs_error)?;
     if pos == file_len {
         return Ok(NextWalFrame::Eof);
@@ -595,80 +617,189 @@ fn read_next_wal_frame(
     if pos > file_len {
         return Err(MidgeError::Corruption(format!(
             "WAL replay read past EOF at pos {pos} in {file_path} (file_len={file_len})"
-        )));
+        ))
+        .into());
     }
     if file_len.saturating_sub(pos) < crate::wal::frame::WAL_FRAME_HEADER_LEN as u64 {
-        return Err(MidgeError::Corruption(format!(
-            "Incomplete WAL frame header at pos {} in {} (need {} bytes, have {})",
-            pos,
-            file_path,
-            crate::wal::frame::WAL_FRAME_HEADER_LEN,
-            file_len.saturating_sub(pos)
+        return Err(ReplayFailure::IncompleteTail(MidgeError::Corruption(
+            format!(
+                "Incomplete WAL frame header at pos {} in {} (need {} bytes, have {})",
+                pos,
+                file_path,
+                crate::wal::frame::WAL_FRAME_HEADER_LEN,
+                file_len.saturating_sub(pos)
+            ),
         )));
     }
 
-    let (len, expected_crc) = read_wal_frame_header(file, pos, file_read_ns)?;
-    let payload = read_wal_frame_payload(file, file_path, pos, len, file_len, file_read_ns)?;
+    let header = read_wal_bytes(
+        file,
+        file_path,
+        pos,
+        crate::wal::frame::WAL_FRAME_HEADER_LEN as u64,
+        file_read_ns,
+    )?;
+    let payload_start = pos + crate::wal::frame::WAL_FRAME_HEADER_LEN as u64;
+    if header.iter().all(|byte| *byte == 0)
+        && is_zero_filled_wal_tail(file, file_path, payload_start, file_len, file_read_ns)?
+    {
+        return Err(ReplayFailure::IncompleteTail(MidgeError::Corruption(
+            format!("Zero-filled WAL tail at pos {pos} in {file_path}"),
+        )));
+    }
+
+    let (len, expected_crc) = crate::wal::frame::decode_frame_header(&header)?;
+    let need_end = payload_start
+        .checked_add(u64::try_from(len).unwrap_or(u64::MAX))
+        .ok_or_else(|| {
+            MidgeError::Corruption(format!(
+                "WAL frame length overflow at pos {pos} in {file_path} (len={len})"
+            ))
+        })?;
+    if need_end > file_len {
+        let hides_verified_suffix = truncated_frame_hides_verified_wal_suffix(
+            file,
+            file_path,
+            payload_start,
+            file_len,
+            file_read_ns,
+        )?;
+        let error = MidgeError::Corruption(if hides_verified_suffix {
+            format!(
+                "WAL frame length at pos {pos} in {file_path} overruns EOF and hides a verified later frame (len={len}, file_len={file_len})"
+            )
+        } else {
+            format!(
+                "Incomplete WAL record at pos {pos} in {file_path} (len={len}, file_len={file_len})"
+            )
+        });
+        return Err(if hides_verified_suffix {
+            ReplayFailure::Error(error)
+        } else {
+            ReplayFailure::IncompleteTail(error)
+        });
+    }
+
+    let payload = read_wal_frame_payload(file, file_path, payload_start, len, file_read_ns)?;
 
     crate::wal::frame::verify_frame_crc(&payload[..len], expected_crc)?;
     let record = super::encoding::decode(&payload[..])?;
 
     Ok(NextWalFrame::Frame(ReplayedWalFrame {
         record,
-        next_pos: pos + crate::wal::frame::WAL_FRAME_HEADER_LEN as u64 + len as u64,
+        next_pos: need_end,
     }))
 }
 
-fn read_wal_frame_header(
+fn read_wal_bytes(
     file: &dyn File,
-    pos: u64,
+    file_path: &FsPath,
+    offset: u64,
+    len: u64,
     file_read_ns: &mut u128,
-) -> MidgeResult<(usize, u32)> {
-    let header_read_start = std::time::Instant::now();
-    let header = file
-        .read_at(pos, crate::wal::frame::WAL_FRAME_HEADER_LEN as u64)
-        .map_err(map_fs_error)?;
-    *file_read_ns = file_read_ns.saturating_add(header_read_start.elapsed().as_nanos());
-    crate::wal::frame::decode_frame_header(&header[..])
+) -> MidgeResult<bytes::Bytes> {
+    let read_start = std::time::Instant::now();
+    let bytes = file.read_at(offset, len).map_err(map_fs_error)?;
+    *file_read_ns = file_read_ns.saturating_add(read_start.elapsed().as_nanos());
+    let expected_len = usize::try_from(len).map_err(|_| {
+        MidgeError::Corruption(format!(
+            "WAL read length does not fit memory at offset {offset} in {file_path}: {len}"
+        ))
+    })?;
+    if bytes.len() != expected_len {
+        return Err(MidgeError::Corruption(format!(
+            "Short WAL read at offset {offset} in {file_path} (need={len}, got={})",
+            bytes.len()
+        )));
+    }
+    Ok(bytes)
 }
 
 fn read_wal_frame_payload(
     file: &dyn File,
     file_path: &FsPath,
-    pos: u64,
+    payload_start: u64,
     len: usize,
-    file_len: u64,
     file_read_ns: &mut u128,
 ) -> MidgeResult<bytes::Bytes> {
-    let need_end = pos
-        .saturating_add(crate::wal::frame::WAL_FRAME_HEADER_LEN as u64)
-        .saturating_add(len as u64);
-    if need_end > file_len {
-        return Err(MidgeError::Corruption(format!(
-            "Incomplete WAL record at pos {pos} in {file_path} (len={len}, file_len={file_len})"
-        )));
+    read_wal_bytes(
+        file,
+        file_path,
+        payload_start,
+        u64::try_from(len).unwrap_or(u64::MAX),
+        file_read_ns,
+    )
+}
+
+fn is_zero_filled_wal_tail(
+    file: &dyn File,
+    file_path: &FsPath,
+    mut offset: u64,
+    file_len: u64,
+    file_read_ns: &mut u128,
+) -> MidgeResult<bool> {
+    const SCAN_CHUNK_LEN: u64 = 64 * 1024;
+
+    while offset < file_len {
+        let read_len = file_len.saturating_sub(offset).min(SCAN_CHUNK_LEN);
+        let bytes = read_wal_bytes(file, file_path, offset, read_len, file_read_ns)?;
+        if bytes.iter().any(|byte| *byte != 0) {
+            return Ok(false);
+        }
+        offset = offset.saturating_add(read_len);
+    }
+    Ok(true)
+}
+
+fn truncated_frame_hides_verified_wal_suffix(
+    file: &dyn File,
+    file_path: &FsPath,
+    payload_start: u64,
+    file_len: u64,
+    file_read_ns: &mut u128,
+) -> MidgeResult<bool> {
+    let available = file_len.saturating_sub(payload_start);
+    if available == 0 {
+        return Ok(false);
     }
 
-    let payload_read_start = std::time::Instant::now();
-    let payload = file
-        .read_at(
-            pos + crate::wal::frame::WAL_FRAME_HEADER_LEN as u64,
-            len as u64,
-        )
-        .map_err(map_fs_error)?;
-    *file_read_ns = file_read_ns.saturating_add(payload_read_start.elapsed().as_nanos());
+    // `decode_frame_header` caps the claimed payload at 64 MiB. Reaching this
+    // branch means the bytes actually available are fewer than that bound, so
+    // inspecting the complete ambiguous tail cannot exceed one WAL frame.
+    let tail = read_wal_bytes(file, file_path, payload_start, available, file_read_ns)?;
+    Ok(contains_verified_wal_frame(&tail))
+}
 
-    if payload.len() < len {
-        return Err(MidgeError::Corruption(format!(
-            "Incomplete WAL record at pos {} in {} (len={}, got={})",
-            pos,
-            file_path,
-            len,
-            payload.len()
-        )));
+fn contains_verified_wal_frame(bytes: &[u8]) -> bool {
+    let header_len = crate::wal::frame::WAL_FRAME_HEADER_LEN;
+    if bytes.len() < header_len.saturating_add(3) {
+        return false;
     }
 
-    Ok(payload)
+    for payload_start in header_len..=bytes.len().saturating_sub(3) {
+        if !super::encoding::has_current_record_prefix(&bytes[payload_start..]) {
+            continue;
+        }
+        let header_start = payload_start - header_len;
+        let Ok((payload_len, expected_crc)) =
+            crate::wal::frame::decode_frame_header(&bytes[header_start..payload_start])
+        else {
+            continue;
+        };
+        let Some(payload_end) = payload_start.checked_add(payload_len) else {
+            continue;
+        };
+        if payload_end > bytes.len() {
+            continue;
+        }
+        let payload = &bytes[payload_start..payload_end];
+        if crate::wal::frame::verify_frame_crc(payload, expected_crc).is_ok()
+            && super::encoding::decode_view(payload).is_ok()
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn apply_replayed_wal_record<S: BuildHasher>(

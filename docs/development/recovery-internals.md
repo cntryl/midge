@@ -39,13 +39,21 @@ Midge replays WAL segments in order and then replays the active WAL file.
 
 ### Truncated tail
 
-If the WAL ends with a truncated tail frame beyond byte 0:
+If the active WAL ends with a typed incomplete-tail condition beyond byte 0:
 
 - the valid prefix is kept
 - the truncated tail is discarded
 - recovery continues
 
-This is the expected behavior for a torn final append.
+This includes a partial final header or payload with no verified frame after it,
+and an all-zero final region left by file preallocation. These are the expected
+shapes of a torn or unwritten final append. Recovery does not infer this state
+from error-message text.
+
+If a declared payload length overruns EOF but the bytes it would otherwise hide
+contain a CRC-valid, decodable WAL frame, the length field is corrupt rather
+than a final torn append. Strict recovery fails; salvage recovery retains only
+the verified prefix and reports degraded health.
 
 ### Partial WAL entry
 
