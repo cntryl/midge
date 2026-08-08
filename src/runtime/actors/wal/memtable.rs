@@ -6,8 +6,15 @@ use crate::runtime::state::RuntimeState;
 use crate::sst::Memtable;
 use crate::wal::{DurabilityPolicy, WalOpKind, WalRecord};
 use bytes::Bytes;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+#[cfg(test)]
+thread_local! {
+    static ASSERTION_SNAPSHOT_BUILD_COUNT: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
 
 impl WalActor {
     #[cfg(test)]
@@ -174,6 +181,10 @@ impl WalActor {
         start_sequence: u64,
     ) -> MidgeResult<()> {
         let mut checked_keys: HashSet<(crate::types::ColumnFamilyId, Vec<u8>)> = HashSet::new();
+        let mut snapshots: HashMap<
+            crate::types::ColumnFamilyId,
+            Option<crate::runtime::ReadSnapshot>,
+        > = HashMap::new();
 
         for assertion in assertions {
             let dedupe_key = (assertion.cf_id, assertion.key.to_vec());
@@ -181,15 +192,25 @@ impl WalActor {
                 continue;
             }
 
-            if let Some(latest_seq) =
-                Self::latest_key_sequence(state, assertion.cf_id, &assertion.key)?
-            {
-                if latest_seq > start_sequence {
-                    Self::record_write_conflict_point();
-                    return Err(MidgeError::WriteConflict(format!(
-                        "assertion conflict on cf {} for key {:?}: latest seq {latest_seq} > tx start {start_sequence}",
-                        assertion.cf_id, assertion.key
-                    )));
+            if !state.column_families.contains_key(&assertion.cf_id) {
+                return Err(MidgeError::InvalidArgument(format!(
+                    "column family {} does not exist",
+                    assertion.cf_id
+                )));
+            }
+
+            let snapshot = snapshots
+                .entry(assertion.cf_id)
+                .or_insert_with(|| Self::latest_sequence_snapshot(state, assertion.cf_id));
+            if let Some(snapshot) = snapshot {
+                if let Some(latest_seq) = snapshot.latest_state_sequence(&assertion.key)? {
+                    if latest_seq > start_sequence {
+                        Self::record_write_conflict_point();
+                        return Err(MidgeError::WriteConflict(format!(
+                            "assertion conflict on cf {} for key {:?}: latest seq {latest_seq} > tx start {start_sequence}",
+                            assertion.cf_id, assertion.key
+                        )));
+                    }
                 }
             }
 
@@ -214,9 +235,17 @@ impl WalActor {
         cf_id: crate::types::ColumnFamilyId,
         key: &[u8],
     ) -> MidgeResult<Option<u64>> {
-        let Some(cf_state) = state.column_families.get(&cf_id) else {
+        let Some(snapshot) = Self::latest_sequence_snapshot(state, cf_id) else {
             return Ok(None);
         };
+        snapshot.latest_state_sequence(key)
+    }
+
+    fn latest_sequence_snapshot(
+        state: &RuntimeState,
+        cf_id: crate::types::ColumnFamilyId,
+    ) -> Option<crate::runtime::ReadSnapshot> {
+        let cf_state = state.column_families.get(&cf_id)?;
         let sst_files: Vec<_> = state
             .manifest
             .files
@@ -240,7 +269,19 @@ impl WalActor {
             state.is_memory_mode(),
         );
         snapshot.cf_id = cf_id;
-        snapshot.latest_state_sequence(key)
+        #[cfg(test)]
+        ASSERTION_SNAPSHOT_BUILD_COUNT.with(|count| count.set(count.get().saturating_add(1)));
+        Some(snapshot)
+    }
+
+    #[cfg(test)]
+    pub(super) fn reset_assertion_snapshot_build_count() {
+        ASSERTION_SNAPSHOT_BUILD_COUNT.with(|count| count.set(0));
+    }
+
+    #[cfg(test)]
+    pub(super) fn assertion_snapshot_build_count() -> usize {
+        ASSERTION_SNAPSHOT_BUILD_COUNT.with(std::cell::Cell::get)
     }
 
     pub(super) fn latest_range_sequence(
@@ -249,32 +290,9 @@ impl WalActor {
         start_key: &[u8],
         end_key: &[u8],
     ) -> MidgeResult<Option<u64>> {
-        let Some(cf_state) = state.column_families.get(&cf_id) else {
+        let Some(snapshot) = Self::latest_sequence_snapshot(state, cf_id) else {
             return Ok(None);
         };
-        let sst_files: Vec<_> = state
-            .manifest
-            .files
-            .iter()
-            .filter(|f| f.cf_id == cf_id)
-            .cloned()
-            .collect();
-
-        let sst_path_prefix = state
-            .sst_dir
-            .strip_prefix(&state.db_path)
-            .unwrap_or_else(|_| std::path::Path::new("sst"))
-            .to_path_buf();
-
-        let mut snapshot = crate::runtime::ReadSnapshot::new(
-            cf_state.memtable.clone(),
-            cf_state.immutable_memtables.clone(),
-            sst_files,
-            Arc::clone(&state.fs),
-            sst_path_prefix,
-            state.is_memory_mode(),
-        );
-        snapshot.cf_id = cf_id;
         snapshot.latest_sequence_in_range(start_key, end_key)
     }
 

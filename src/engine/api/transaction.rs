@@ -491,15 +491,27 @@ impl Transaction {
             })
     }
 
-    /// Assert that `key` has the expected value in this transaction snapshot.
-    /// Pass `None` to assert that the key is absent. The assertion is not a
-    /// write and is therefore excluded from the transaction write set.
+    /// Assert that `key` has the expected value in this transaction's frozen
+    /// start snapshot. Pass `None` to assert that the key is absent.
+    ///
+    /// Unlike [`Transaction::get`], this check deliberately does not observe
+    /// pending writes from the same transaction. This permits the common
+    /// compare-then-update pattern: assert the original value, then stage its
+    /// replacement in the same transaction.
+    ///
+    /// The assertion is registered only when this method returns `Ok(())`.
+    /// Ignoring an error leaves no guard for `commit` to enforce. Assertion
+    /// reservations share the engine's transaction memory pool with write-set
+    /// intents, so unrelated transactions can cause `ResourceLimit` under
+    /// joint pressure. The assertion is not itself a write and is excluded
+    /// from the transaction write set.
     ///
     /// # Errors
     ///
     /// Returns `MidgeError::InvalidArgument` when called on a read-only
     /// transaction or `MidgeError::ResourceLimit` when the transaction memory
     /// pool cannot admit the assertion.
+    #[must_use = "the value assertion is registered only when this result is Ok"]
     pub fn assert_value(&mut self, key: Vec<u8>, expected: Option<Vec<u8>>) -> MidgeResult<()> {
         if self.is_read_only() {
             return Err(MidgeError::InvalidArgument(
@@ -565,9 +577,10 @@ impl Transaction {
             return Ok(());
         }
 
+        let had_writes = self.has_writes();
         let key_assertions = self.deduplicated_key_assertions();
 
-        if !self.has_writes() && key_assertions.is_empty() {
+        if !had_writes && key_assertions.is_empty() {
             let durability_started_at = CommitTiming::phase_start(timing.as_ref());
             let sync_result = effective_wal_durability_policy(self.cloud_mode, opts)
                 .and_then(|_| if opts.is_sync() { self.sync() } else { Ok(()) });
@@ -627,7 +640,7 @@ impl Transaction {
             Ok(sequence) => {
                 self.sequence_publisher.store(sequence, Ordering::SeqCst);
                 let durability_started_at = CommitTiming::phase_start(timing.as_ref());
-                let result = self.finalize_write_durability(sequence, opts);
+                let result = self.finalize_write_durability(sequence, opts, had_writes);
                 CommitTiming::record_durability(&mut timing, durability_started_at);
                 result
             }
@@ -714,6 +727,7 @@ impl Transaction {
         &self,
         sequence: u64,
         opts: crate::engine::api::WriteOptions,
+        had_writes: bool,
     ) -> MidgeResult<()> {
         if self.cloud_mode {
             if opts.is_sync() || opts.is_cloud_strict() {
@@ -737,10 +751,14 @@ impl Transaction {
             return Ok(());
         }
 
-        // A non-empty local synchronous commit is already fsynced by the WAL
+        if !had_writes && opts.is_sync() {
+            return self.sync();
+        }
+
+        // A local synchronous commit with writes is already fsynced by the WAL
         // actor before it acknowledges `submit_ops`. Issuing `WalSync` here
-        // would add a second physical durability barrier to every strict
-        // commit. Empty transactions still use `self.sync()` in `commit`.
+        // would add a second physical durability barrier. Assertion-only
+        // commits have no WAL append, so they take the explicit barrier above.
         Ok(())
     }
 

@@ -149,6 +149,32 @@ fn should_reject_write_given_dropped_column_family_when_committing() {
 }
 
 #[test]
+fn should_reject_assertion_only_commit_given_dropped_column_family() {
+    // Arrange
+    let engine = open_with_mode(&opts_for_mode("local"), "local");
+    let cf = engine
+        .create_column_family("stale-assertion")
+        .expect("create cf");
+    let cf_id = cf.id();
+    let mut tx = engine
+        .begin_tx(cf_id, TransactionMode::ReadWrite)
+        .expect("begin transaction");
+    tx.assert_value(b"must-still-exist".to_vec(), None)
+        .expect("register assertion");
+    engine.drop_column_family(cf_id).expect("drop cf");
+
+    // Act
+    let result = tx.commit(WriteOptions::buffered());
+
+    // Assert
+    assert!(matches!(
+        result,
+        Err(MidgeError::InvalidArgument(message))
+            if message.contains("column family") && message.contains("does not exist")
+    ));
+}
+
+#[test]
 fn should_use_transaction_snapshot_time_for_ttl_visibility() {
     // Arrange
     let engine = open_with_mode(&opts_for_mode("local"), "local");

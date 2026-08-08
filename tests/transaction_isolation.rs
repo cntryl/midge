@@ -59,11 +59,10 @@ fn should_not_see_uncommitted_write_given_concurrent_transaction_when_reading() 
         let txn2 = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
-        // txn2 should not see txn1's uncommitted write
-        // let value = txn2.get(cf.id(), b"key").unwrap();
+        let value = txn2.get(b"key").unwrap();
 
         // Assert
-        // assert_eq!(value, None);
+        assert_eq!(value, None);
 
         // Cleanup
         drop(txn1);
@@ -608,7 +607,3 @@ fn should_maintain_consistency_with_mixed_reader_writer_load_when_concurrent() {
         }
     });
 }
-
-// ============================================================================
-// RECOVERY TESTS (FS + CLOUD ONLY)
-// ============================================================================

@@ -1,8 +1,13 @@
 use super::super::tests::{create_test_cloud_event_loop, create_test_event_loop};
+use super::super::wal::{ApplyTransactionRequest, WalCoordinator};
 use super::super::EventLoop;
+use crate::runtime::durability::DurabilityWaiter;
 use crate::runtime::hybrid_persistence::HybridPersistence;
-use crate::runtime::{state::RuntimeState, ResponseRouter, RuntimeMsg, RuntimeResponse};
+use crate::runtime::{
+    state::RuntimeState, ConflictPolicy, KeyAssertion, ResponseRouter, RuntimeMsg, RuntimeResponse,
+};
 use crate::sst::Memtable;
+use crate::wal::DurabilityPolicy;
 use bytes::Bytes;
 use std::path::{Path, PathBuf};
 #[cfg(feature = "failpoints")]
@@ -19,6 +24,105 @@ static FAILPOINT_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 #[cfg(feature = "failpoints")]
 fn failpoint_test_lock() -> &'static Mutex<()> {
     FAILPOINT_TEST_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn assertion_only_cloud_request(request_id: u64, start_sequence: u64) -> ApplyTransactionRequest {
+    ApplyTransactionRequest {
+        request_id,
+        ops: Vec::new(),
+        assertions: vec![KeyAssertion {
+            cf_id: 0,
+            key: Bytes::from_static(b"cloud-assertion-only"),
+        }],
+        durability_policy: Some(DurabilityPolicy::CloudAsync),
+        start_sequence: Some(start_sequence),
+        conflict_policy: ConflictPolicy::LastWriteWins,
+    }
+}
+
+fn apply_assertion_only_cloud_request(
+    event_loop: &mut EventLoop,
+    request_id: u64,
+    start_sequence: u64,
+) -> RuntimeResponse {
+    let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
+    let (response_tx, response_rx) = crossbeam::channel::bounded(1);
+    let outcome = WalCoordinator::apply_transaction(
+        event_loop,
+        &msg_rx,
+        assertion_only_cloud_request(request_id, start_sequence),
+        Some(response_tx),
+    );
+    assert_eq!(outcome, super::super::HandleOutcome::Continue);
+    response_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("assertion-only cloud response")
+}
+
+#[test]
+fn should_not_queue_confirmation_waiter_when_cloud_assertion_only_sequence_is_already_durable(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut event_loop = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    assert_eq!(event_loop.state.sequence, 0);
+    assert_eq!(event_loop.state.wal.cloud_durable_seq, 0);
+
+    // Act
+    let response = apply_assertion_only_cloud_request(&mut event_loop, 41, 0);
+
+    // Assert
+    assert!(matches!(
+        response,
+        RuntimeResponse::TransactionApplied {
+            request_id: 41,
+            last_sequence: 0,
+            op_count: 0,
+            ..
+        }
+    ));
+    assert!(
+        !event_loop.durability.has_pending_waiters(),
+        "an assertion-only request must not leave a waiter without a WAL generation"
+    );
+    Ok(())
+}
+
+#[test]
+fn should_not_add_confirmation_waiter_when_cloud_assertion_only_sequence_has_pending_upload(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: model an earlier write whose generation has not reached the
+    // cloud frontier. The assertion-only commit adds no WAL record of its own.
+    let mut event_loop = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    event_loop.state.sequence = 1;
+    event_loop.state.wal.cloud_durable_seq = 0;
+    event_loop
+        .durability
+        .queue_waiter(DurabilityWaiter::ConfirmWalAppend { request_id: 40 });
+
+    // Act
+    let response = apply_assertion_only_cloud_request(&mut event_loop, 42, 1);
+    let waiters = event_loop.durability.drain_all_waiters();
+
+    // Assert
+    assert!(matches!(
+        response,
+        RuntimeResponse::TransactionApplied {
+            request_id: 42,
+            last_sequence: 1,
+            op_count: 0,
+            ..
+        }
+    ));
+    assert_eq!(waiters.len(), 1, "only the earlier write should remain");
+    assert!(matches!(
+        &waiters[0],
+        DurabilityWaiter::ConfirmWalAppend { request_id: 40 }
+    ));
+    Ok(())
 }
 
 struct FailSecondIntentPutBackend {

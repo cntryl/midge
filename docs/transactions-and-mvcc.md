@@ -70,10 +70,10 @@ All ops in a commit become visible atomically. There is no partial visibility.
 
 | `WriteOptions` | WAL behavior |
 |---|---|
-| `sync()` | Independent `TxnBatch` WAL frame plus a covering local fsync before returning. Concurrent non-overlapping strict commits may share the physical fsync. |
+| `sync()` | A write commit appends an independent `TxnBatch` WAL frame and establishes a covering local fsync before returning. A fully empty or assertion-only commit appends no frame but still establishes an explicit local fsync barrier, which also covers prior buffered commits. Concurrent non-overlapping strict write commits may share the physical fsync. |
 | `buffered()` | WAL write, no fsync. Crash between write and fsync loses data. |
 | `best_effort()` | WAL skipped entirely. Data lives only in the memtable until flush. |
-| `cloud_strict()` | Uses the cloud durability path and waits for the cloud durability frontier before returning. Empty write-set commits validate cloud-mode compatibility but do not seal or wait for a new cloud sequence. |
+| `cloud_strict()` | Uses the cloud durability path and waits for the cloud durability frontier before returning. A fully empty commit with no assertions validates cloud-mode compatibility without sealing. An assertion-only commit performs its server-side validation and requests coverage of the current runtime sequence without allocating a new one. It returns immediately when that sequence is already cloud-durable; otherwise it seals a pending covering WAL segment when needed or joins its in-flight upload and waits. |
 
 ### Rollback behavior
 
@@ -130,14 +130,22 @@ The only exception is `tx.insert()`: at commit time (inside the event loop), the
 
 ### Value assertions (`assert_value`)
 
-`tx.assert_value(key, expected)` registers a precondition: the key must still hold `expected` (or be absent, for `expected = None`) at commit time. This is a two-part check:
+`tx.assert_value(key, expected)` registers a precondition against the transaction's frozen start snapshot: the key must hold `expected` (or be absent, for `expected = None`) in that snapshot, and no subsequently sequenced point mutation or covering range deletion may occur before runtime commit serialization. This is a two-part check:
 
 1. **Client-side, at `commit()`**: the expected value is compared against the transaction's frozen start snapshot. This is a fast local fail and is where value equality is actually checked.
 2. **Server-side, at the runtime's apply path**: only the *key* crosses into the runtime (never the expected value). The runtime checks whether the key received a point mutation or a covering range deletion with a sequence greater than the transaction's `start_sequence` — the same check `AbortOnWriteConflict` uses for write-set keys, applied to asserted keys instead of written ones.
 
 The server-side check runs unconditionally, **regardless of `ConflictPolicy`**: an explicit assertion is a stronger, opt-in guarantee than the ambient conflict policy, so it is enforced even under `LastWriteWins`. It is a sequence comparison, not a value re-read, which makes it ABA-safe — a concurrent writer that changes the value and then restores it still advances the sequence and is still correctly rejected.
 
-A transaction with only assertions and no writes commits without allocating a sequence, appending to the WAL, or touching a memtable — it is a pure validation round-trip to the runtime's serialization point.
+Assertions always compare with the frozen start snapshot, even though `get()`
+provides read-your-own-writes behavior. A pending `put` or `delete` in the same
+transaction therefore does not change what `assert_value` validates. The guard
+is installed only when `assert_value` returns `Ok(())`; callers must not ignore
+its result. Assertion storage and resident write intents share the bounded
+engine-wide transaction memory pool, and either consumer can receive
+`ResourceLimit` when concurrent transactions exhaust that pool.
+
+A transaction with only assertions and no writes commits without allocating a sequence, appending to the WAL, or touching a memtable. It validates at the runtime's serialization point, then applies the selected durability barrier: local `sync()` performs a covering WAL fsync, while `cloud_strict()` requests cloud coverage at the current runtime sequence. An already-covered cloud sequence returns immediately; a pending sequence seals when necessary or joins its covering in-flight upload and waits.
 
 ### Snapshot isolation and isolation levels
 
