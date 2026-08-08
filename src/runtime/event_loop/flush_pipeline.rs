@@ -157,6 +157,7 @@ impl EventLoop {
             sst_seq,
             db_path: self.state.db_path.clone(),
             sst_dir: self.state.sst_dir.clone(),
+            fs: Arc::clone(&self.state.fs),
             recovery_policy: self.state.recovery_policy(),
             hybrid_storage: self.hybrid_storage.clone(),
             cloud_metadata_storage: self.cloud_metadata_storage.clone(),
@@ -483,8 +484,10 @@ impl EventLoop {
             }
         }
 
-        if let Err(error) = std::fs::File::open(&self.state.wal_dir).and_then(|dir| dir.sync_all())
-        {
+        if let Err(error) = self.state.fs.sync_dir(
+            &crate::io::FsPath::new("wal"),
+            crate::io::Durability::Durable,
+        ) {
             self.state.mark_persistence_anomaly();
             tracing::warn!(%error, "failed to sync local WAL directory after pruning");
         }
@@ -709,6 +712,40 @@ fn clone_flush_error(error: &crate::common::MidgeError) -> crate::common::MidgeE
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn should_mark_anomaly_when_local_wal_directory_sync_fails_after_pruning(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let directory = tempfile::tempdir()?;
+        let mut state =
+            crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
+        let sync_fs = Arc::new(crate::io::MockFs::new());
+        sync_fs.set_sync_dir_failure(true);
+        state.fs = sync_fs.clone();
+        let router = Arc::new(crate::runtime::ResponseRouter::new());
+        let mut event_loop = EventLoop::new(
+            state,
+            false,
+            router,
+            crate::runtime::RuntimeConfig::default(),
+            None,
+        )?;
+
+        // Act
+        event_loop.prune_local_wal_segments_covered_by_manifest();
+
+        // Assert
+        assert!(event_loop.state.persistence_anomaly_detected());
+        assert_eq!(
+            sync_fs.sync_dir_calls(),
+            [(
+                crate::io::FsPath::new("wal"),
+                crate::io::Durability::Durable
+            )]
+        );
+        Ok(())
+    }
 
     #[cfg(feature = "failpoints")]
     #[test]
