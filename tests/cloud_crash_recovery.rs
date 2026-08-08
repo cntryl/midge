@@ -191,6 +191,9 @@ fn child_buffered_eventual_flush_after_publish(db_path: &Path) {
         b"cloud-buffered-crash-value",
         WriteOptions::cloud_async(),
     );
+    wait_for_metrics(&engine, Duration::from_secs(10), |metrics| {
+        metrics.current_sequence >= 17 && metrics.wal_cloud_durable_seq >= metrics.current_sequence
+    });
     let tx = engine
         .begin_tx(cf.id(), TransactionMode::ReadOnly)
         .expect("begin read tx");
