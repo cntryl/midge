@@ -250,6 +250,7 @@ impl EventLoop {
         let memory_mode = state.is_memory_mode();
         let initial_segment_id = state.wal.current_segment_id;
         let recovered_cloud_wal = RecoveredCloudWalConfig::from(&config);
+        state.install_ttl_clock(Arc::clone(&config.ttl_clock));
 
         let (sst_factory, read_resources) =
             Self::initialize_sst_resources(&state, &sst_dir, memory_mode, &config)?;
@@ -501,6 +502,7 @@ impl EventLoop {
                         Arc::clone(&self.state.fs),
                         sst_path_prefix,
                         self.state.is_memory_mode(),
+                        self.state.observed_time_millis(),
                         self.read_resources.clone(),
                     )),
                 },

@@ -95,6 +95,7 @@ impl FacadeAssembly {
                     opts.transaction_memory_pool_size(),
                 ),
             ),
+            ttl_clock: opts.ttl_clock(),
         })
     }
 }

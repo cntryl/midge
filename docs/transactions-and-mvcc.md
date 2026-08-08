@@ -196,7 +196,9 @@ The snapshot lifetime threshold is an observability and pressure signal, not an 
 
 ### When old versions are removed
 
-Compaction merges SST files across levels. During a merge, each key's entries are sorted by sequence number. All but the highest-sequence entry for a given key are dropped. Expired entries (TTL) become masking tombstones at compaction time so an older value cannot reappear.
+Compaction merges SST files across levels. During a merge, each key's entries are sorted by sequence number. All but the highest-sequence entry for a given key are dropped. TTL values retain their raw value and absolute expiration through WAL replay and compaction; expiration is interpreted only by a read snapshot, where an expired newest version masks older versions. This deliberately retains expired bytes until a future proof-based reclamation mechanism can remove them safely.
+
+TTL time is absolute Unix wall time. Within one engine process Midge applies a nondecreasing observed-time floor, so a backward clock correction cannot make an already-observed expiration visible again. The floor cannot survive a process restart: after restart, visibility follows the newly observed host clock, but recovery never destructively converts values based on that potentially skewed clock. Operators should still keep host clocks synchronized; a forward-skewed read can temporarily hide a value until restart with a corrected clock.
 
 ### Tombstone handling
 

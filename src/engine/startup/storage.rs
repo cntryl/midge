@@ -250,6 +250,7 @@ impl RuntimeStorageMaterialization {
         }
 
         let runtime_config = crate::runtime::RuntimeConfig {
+            ttl_clock: opts.ttl_clock(),
             wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
             storage_io_timeout: opts.storage_io_timeout(),
             shutdown_cloud_drain_timeout: opts.shutdown_cloud_drain_timeout(),
@@ -363,6 +364,7 @@ impl RuntimeStorageMaterialization {
         }
 
         let runtime_config = crate::runtime::RuntimeConfig {
+            ttl_clock: opts.ttl_clock(),
             wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
             storage_io_timeout: opts.storage_io_timeout(),
             shutdown_cloud_drain_timeout: opts.shutdown_cloud_drain_timeout(),
@@ -404,6 +406,7 @@ impl RuntimeStorageMaterialization {
         let batch_config = opts.wal_batch_config().unwrap_or_default();
 
         let runtime_config = crate::runtime::RuntimeConfig {
+            ttl_clock: opts.ttl_clock(),
             wal_durability_policy: crate::wal::DurabilityPolicy::Batched,
             wal_batch_config: batch_config,
             storage_io_timeout: opts.storage_io_timeout(),

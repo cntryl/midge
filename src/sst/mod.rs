@@ -99,13 +99,6 @@ pub trait Memtable: Send + Sync {
     /// Returns an error when the value cannot be recorded in the underlying memtable.
     fn put(&self, key: Vec<u8>, value: Vec<u8>) -> MidgeResult<()>;
 
-    /// Read the latest visible value for `key`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the underlying memtable cannot service the read.
-    fn get(&self, key: &[u8]) -> MidgeResult<Option<Vec<u8>>>;
-
     /// Record a tombstone for `key`.
     ///
     /// # Errors
@@ -146,10 +139,12 @@ impl SkipListMemtable {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     }
 
+    #[cfg(test)]
     fn is_expired(expiration: Option<u64>) -> bool {
         Self::is_expired_at(expiration, Self::current_time_millis())
     }
 
+    #[cfg(test)]
     fn current_time_millis() -> u64 {
         crate::common::time::unix_time_millis()
     }
@@ -193,6 +188,7 @@ impl SkipListMemtable {
     /// # Errors
     ///
     /// Returns an error when the underlying memtable cannot service the lookup.
+    #[cfg(test)]
     pub fn get_at_seq(&self, key: &[u8], snapshot_seq: u64) -> MidgeResult<Option<Vec<u8>>> {
         let visible = self.skiplist.get_visible_with_exp(key, snapshot_seq);
 
@@ -217,6 +213,7 @@ impl SkipListMemtable {
     /// # Errors
     ///
     /// Returns an error when the underlying memtable cannot service the lookup.
+    #[cfg(test)]
     pub fn get_key_state_at(
         &self,
         key: &[u8],
@@ -263,6 +260,7 @@ impl SkipListMemtable {
     /// # Errors
     ///
     /// Returns an error when the underlying memtable cannot service the lookup.
+    #[cfg(test)]
     pub fn get_bytes(&self, key: &[u8]) -> MidgeResult<Option<Bytes>> {
         let visible = self.skiplist.get_visible_with_exp(key, u64::MAX);
 
@@ -284,6 +282,7 @@ impl SkipListMemtable {
     /// # Errors
     ///
     /// Returns an error when the underlying memtable cannot service the lookup.
+    #[cfg(test)]
     pub fn get_bytes_at_seq(&self, key: &[u8], snapshot_seq: u64) -> MidgeResult<Option<Bytes>> {
         let visible = self.skiplist.get_visible_with_exp(key, snapshot_seq);
 
@@ -308,6 +307,7 @@ impl SkipListMemtable {
     /// # Errors
     ///
     /// Returns an error when the underlying memtable cannot service the scan.
+    #[cfg(test)]
     pub fn range_state_at(
         &self,
         start: Option<&[u8]>,
@@ -527,7 +527,23 @@ impl Memtable for SkipListMemtable {
         self.put_with_exp(key, value, None)
     }
 
-    fn get(&self, key: &[u8]) -> MidgeResult<Option<Vec<u8>>> {
+    fn delete(&self, key: Vec<u8>) -> MidgeResult<()> {
+        let seq = self.next_seq();
+        let size_delta = key.len() + 16;
+        self.skiplist.delete(Bytes::from(key), seq);
+        self.size_bytes
+            .fetch_add(size_delta, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn size_bytes(&self) -> usize {
+        self.size_bytes.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+impl SkipListMemtable {
+    pub fn get(&self, key: &[u8]) -> MidgeResult<Option<Vec<u8>>> {
         let visible = self.skiplist.get_visible_with_exp(key, u64::MAX);
 
         Ok(match visible {
@@ -540,19 +556,6 @@ impl Memtable for SkipListMemtable {
             }
             Some(None) | None => None,
         })
-    }
-
-    fn delete(&self, key: Vec<u8>) -> MidgeResult<()> {
-        let seq = self.next_seq();
-        let size_delta = key.len() + 16;
-        self.skiplist.delete(Bytes::from(key), seq);
-        self.size_bytes
-            .fetch_add(size_delta, std::sync::atomic::Ordering::Relaxed);
-        Ok(())
-    }
-
-    fn size_bytes(&self) -> usize {
-        self.size_bytes.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 

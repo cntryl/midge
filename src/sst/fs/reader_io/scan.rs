@@ -149,6 +149,45 @@ impl SstFileIo {
 }
 
 impl crate::sst::SstStateReader for SstFileIo {
+    fn scan_range_raw_state(
+        &self,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+    ) -> MidgeResult<Vec<(Bytes, crate::sst::types::KeyState)>> {
+        if self.range_outside_persisted_bounds(start, end) {
+            return Ok(Vec::new());
+        }
+        let index = self.index_entries()?;
+        let mut result = Vec::new();
+        let start_block = start
+            .and_then(|key| self.candidate_block_indices(index.as_ref(), key))
+            .map_or(0, |range| *range.start());
+        let end_block = end
+            .and_then(|key| self.candidate_block_indices(index.as_ref(), key))
+            .map_or_else(|| index.len().saturating_sub(1), |range| *range.end());
+        if index.is_empty() || start_block >= index.len() || start_block > end_block {
+            return Ok(result);
+        }
+        for (_first_key, handle) in &index[start_block..=end_block] {
+            let block_data = self.read_cached_data_block(handle)?;
+            for entry in self.scan_block_entries_from_bytes(&block_data)? {
+                if start.is_some_and(|bound| entry.key.as_slice() < bound)
+                    || end.is_some_and(|bound| entry.key.as_slice() >= bound)
+                {
+                    continue;
+                }
+                let key = Bytes::from(entry.key.clone());
+                let state = if entry.is_tombstone() {
+                    KeyState::Tombstone(entry.sequence)
+                } else {
+                    Self::state_from_entry(entry)
+                };
+                result.push((key, state));
+            }
+        }
+        Ok(result)
+    }
+
     fn get_state(&self, key: &[u8]) -> MidgeResult<crate::sst::types::KeyState> {
         if self.key_outside_persisted_range(key) {
             return Ok(crate::sst::types::KeyState::Absent);

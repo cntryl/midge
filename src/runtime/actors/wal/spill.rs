@@ -43,7 +43,7 @@ impl WalActor {
 
         let effective_durability = durability_policy.unwrap_or(self.durability_policy);
         let sequence_plan = Self::allocate_transaction_sequences(state, source.len());
-        let commit_time_millis = crate::common::time::unix_time_millis();
+        let commit_time_millis = state.observed_time_millis();
         let (wal_bytes, wal_records) = self.append_spilled_wal_records(
             request_id,
             source,
@@ -297,9 +297,8 @@ impl WalActor {
                     sequence,
                     writer_epoch,
                 );
-                record.expiration = ttl_seconds
-                    .filter(|ttl| *ttl > 0)
-                    .map(|ttl| commit_time_millis.saturating_add(ttl.saturating_mul(1_000)));
+                record.expiration =
+                    crate::common::time::expiration_from_ttl(ttl_seconds, commit_time_millis);
                 record
             }
             crate::runtime::TransactionOp::Delete { cf_id, key } => {

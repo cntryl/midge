@@ -55,6 +55,7 @@ impl Default for CloudRuntimePolicy {
 /// Runtime configuration for wiring durability/storage behavior.
 #[derive(Clone)]
 pub struct RuntimeConfig {
+    pub(crate) ttl_clock: Arc<crate::common::time::ObservedClock>,
     pub wal_durability_policy: DurabilityPolicy,
     pub wal_batch_config: BatchConfig,
     pub storage_io_timeout: Duration,
@@ -101,6 +102,7 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
+            ttl_clock: Arc::new(crate::common::time::ObservedClock::default()),
             wal_durability_policy: DurabilityPolicy::Batched,
             wal_batch_config: BatchConfig::default(),
             storage_io_timeout: crate::config::DEFAULT_STORAGE_IO_TIMEOUT,

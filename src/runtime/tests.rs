@@ -749,6 +749,7 @@ fn runtime_response_fixtures() -> Vec<RuntimeResponse> {
         Arc::new(crate::io::MockFs::new()),
         std::path::PathBuf::new(),
         true,
+        0,
     ));
     vec![
         RuntimeResponse::Ok { request_id: 1 },

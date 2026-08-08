@@ -10,8 +10,6 @@
 use super::types::{ColumnFamilyId, WalOpKind, WalRecord};
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::{File, Fs, FsError, FsPath, OpenMode, OpenOptions};
-#[cfg(test)]
-use crate::sst::Memtable;
 use crate::sst::SkipListMemtable;
 use std::collections::HashMap;
 use std::hash::BuildHasher;
@@ -1069,27 +1067,15 @@ fn apply_record<S: BuildHasher>(
     record: &WalRecord,
     memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>, S>,
 ) -> MidgeResult<()> {
-    // Invariant: memtable reconstruction must match the durable WAL prefix
-    // exactly. Expired or incomplete state may be dropped, but visible durable
-    // records must be applied in sequence order.
+    // Reconstruct the durable record exactly. Expiration is a read-time
+    // visibility rule, never a destructive recovery decision: restart wall
+    // clocks may be transiently wrong and must not turn values into tombstones.
     let memtable = memtables
         .entry(record.cf_id)
         .or_insert_with(|| Arc::new(SkipListMemtable::new()));
 
     match record.op {
         WalOpKind::Put | WalOpKind::Insert => {
-            // Preserve an expired write as a masking version. Dropping it
-            // would allow an older value to resurrect after restart.
-            if let Some(exp) = record.expiration {
-                if crate::common::time::is_expired_at(
-                    Some(exp),
-                    crate::common::time::unix_time_millis(),
-                ) {
-                    memtable.delete_with_seq(record.key.to_vec(), record.seq)?;
-                    return Ok(());
-                }
-            }
-
             if let Some(value) = &record.value {
                 memtable.put_with_seq(
                     record.key.to_vec(),

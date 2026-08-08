@@ -242,6 +242,8 @@ pub struct RuntimeState {
 
     // Filesystem abstraction for all IO (never call std::fs directly)
     pub fs: std::sync::Arc<dyn Fs>,
+    /// Engine-scoped TTL clock with a process-local nondecreasing floor.
+    pub(crate) ttl_clock: Arc<crate::common::time::ObservedClock>,
 
     // === Subsystem State ===
     pub wal: WalState,
@@ -303,6 +305,16 @@ pub struct RuntimeState {
     /// Pending CompactAll/BeginIngest requests waiting for compactions to finish.
     /// Maps `request_id` -> `completion_condition` (e.g., "`CompactAll`", "`BeginIngest`").
     pub pending_compaction_waits: parking_lot::Mutex<std::collections::HashMap<u64, String>>,
+}
+
+impl RuntimeState {
+    pub(crate) fn observed_time_millis(&self) -> u64 {
+        self.ttl_clock.now_millis()
+    }
+
+    pub(crate) fn install_ttl_clock(&mut self, clock: Arc<crate::common::time::ObservedClock>) {
+        self.ttl_clock = clock;
+    }
 }
 
 impl RuntimeState {

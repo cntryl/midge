@@ -41,6 +41,7 @@ impl EventLoop {
             std::sync::Arc::clone(&self.state.fs),
             sst_path_prefix,
             self.state.is_memory_mode(),
+            self.state.observed_time_millis(),
             self.read_resources.clone(),
         );
         snapshot.cf_id = cf_id;
@@ -261,6 +262,14 @@ mod tests {
             } else {
                 Ok(Vec::new())
             }
+        }
+
+        fn scan_range_raw_state(
+            &self,
+            start: Option<&[u8]>,
+            end: Option<&[u8]>,
+        ) -> crate::common::MidgeResult<Vec<(bytes::Bytes, crate::sst::types::KeyState)>> {
+            self.scan_range_state(start, end)
         }
     }
 

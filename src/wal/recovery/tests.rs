@@ -582,7 +582,7 @@ fn should_return_zero_record_count_when_no_records() {
 // =========== TTL/Expiration Tests ===========
 
 #[test]
-fn should_skip_expired_records_during_recovery() {
+fn should_mask_preserved_expired_record_at_read_time_when_recovering() {
     // Arrange
     let dir = TempDir::new().unwrap();
     let wal_subdir = dir.path().join("wal");
@@ -624,11 +624,21 @@ fn should_skip_expired_records_during_recovery() {
 
     // Assert
     let recovered_memtable = &memtables[&0];
-    // Expired record should not be present
-    assert!(recovered_memtable.get(b"expired_key").unwrap().is_none());
+    assert!(matches!(
+        recovered_memtable
+            .get_key_state_at_with_time(b"expired_key", u64::MAX, 0)
+            .unwrap(),
+        crate::sst::types::KeyState::Value(_, 1, Some(1), _)
+    ));
+    assert_eq!(
+        recovered_memtable
+            .get_key_state_at_with_time(b"expired_key", u64::MAX, 1)
+            .unwrap(),
+        crate::sst::types::KeyState::Tombstone(1)
+    );
     // Future record should be present
     assert!(recovered_memtable.get(b"future_key").unwrap().is_some());
-    // Both records were processed but expired one was skipped during apply
+    // Both raw records were processed.
     assert_eq!(stats.record_count, 2);
 }
 
@@ -1559,4 +1569,38 @@ fn should_skip_lower_epoch_record_when_seen_after_fresh_epoch_with_lower_sequenc
         Some(b"v2".to_vec())
     );
     assert_eq!(memtables[&0].get(b"zombie-low-seq").unwrap(), None);
+}
+
+#[test]
+fn should_preserve_raw_value_given_forward_clock_skew_during_wal_replay_when_recovering() {
+    // Arrange
+    let mut record = WalRecord::new(
+        WalOpKind::Put,
+        Bytes::from_static(b"ttl-key"),
+        Some(Bytes::from_static(b"ttl-value")),
+        7,
+        1,
+    );
+    record.expiration = Some(20_000);
+    let mut memtables = HashMap::new();
+
+    // Act
+    super::apply_record(&record, &mut memtables).expect("apply recovered record");
+    let visible_before_expiration = memtables[&0]
+        .get_key_state_at_with_time(b"ttl-key", u64::MAX, 19_999)
+        .expect("read recovered value");
+    let masked_at_expiration = memtables[&0]
+        .get_key_state_at_with_time(b"ttl-key", u64::MAX, 20_000)
+        .expect("read expired value");
+
+    // Assert
+    assert!(matches!(
+        visible_before_expiration,
+        crate::sst::types::KeyState::Value(value, 7, Some(20_000), _)
+            if value.as_ref() == b"ttl-value"
+    ));
+    assert_eq!(
+        masked_at_expiration,
+        crate::sst::types::KeyState::Tombstone(7)
+    );
 }
