@@ -15,7 +15,10 @@ impl SstFileIo {
         let mut offset = 0;
 
         while offset < index_data.len() {
-            if offset + 20 > index_data.len() {
+            if offset
+                .checked_add(20)
+                .is_none_or(|end| end > index_data.len())
+            {
                 return Err(MidgeError::Corruption(
                     "SST index has a truncated entry header".into(),
                 ));
@@ -29,16 +32,22 @@ impl SstFileIo {
             ]) as usize;
             offset += 4;
 
-            if offset + key_len > index_data.len() {
+            let key_end = offset.checked_add(key_len).ok_or_else(|| {
+                MidgeError::Corruption("SST index key length overflows the block".into())
+            })?;
+            if key_end > index_data.len() {
                 return Err(MidgeError::Corruption(
                     "SST index has a truncated key".into(),
                 ));
             }
 
-            let key = index_data[offset..offset + key_len].to_vec();
-            offset += key_len;
+            let key = index_data[offset..key_end].to_vec();
+            offset = key_end;
 
-            if offset + 16 > index_data.len() {
+            if offset
+                .checked_add(16)
+                .is_none_or(|end| end > index_data.len())
+            {
                 return Err(MidgeError::Corruption(
                     "SST index has a truncated block handle".into(),
                 ));
@@ -127,14 +136,6 @@ impl SstFileIo {
 
         if let Some(bounds) = self.trie_search_bounds(last_index, key) {
             return Some(bounds);
-        }
-
-        if let Some(ref sparse_idx) = self.sparse_index {
-            let block_range = sparse_idx.find_block_range(key);
-            return Some((
-                block_range.start_block.min(last_index),
-                block_range.end_block.min(last_index),
-            ));
         }
 
         Some((0, last_index))

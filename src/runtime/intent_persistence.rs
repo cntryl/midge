@@ -126,6 +126,7 @@ impl IntentPersistence {
         use crate::io::traits::FsPath;
 
         Self::validate_persisted_sst_names(intents)?;
+        crate::failpoints::fail_point!("midge::intent::before_save");
 
         let json = serde_json::to_vec_pretty(intents)
             .map_err(|e| format!("failed to serialize intent log to JSON: {e}"))?;

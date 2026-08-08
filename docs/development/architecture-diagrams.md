@@ -144,7 +144,7 @@ flowchart TB
     Active["Active memtable"]
     Immutable["Immutable memtables"]
     Manifest["Manifest-visible SST metadata"]
-    SSTReaders["SST readers<br/>cache, bloom, sparse index"]
+    SSTReaders["SST readers<br/>cache, block bloom, binary/trie index"]
     Merge["Sequence/tombstone resolution"]
     Result["Visible key/value result"]
 

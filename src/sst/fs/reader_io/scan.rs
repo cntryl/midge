@@ -1,6 +1,5 @@
 use super::{BlockHandle, KeyState, SstEntry, SstFileIo};
 use crate::common::MidgeResult;
-use crate::sst::bloom::writer::{BloomFilterOps, BloomTestResult};
 use bytes::Bytes;
 
 impl crate::sst::SstReader for SstFileIo {
@@ -141,13 +140,6 @@ impl crate::sst::SstStateReader for SstFileIo {
         }
 
         let mut best_state = KeyState::Absent;
-
-        if let Some(ref bloom) = self.bloom_reader {
-            if matches!(bloom.contains(key), BloomTestResult::DefinitelyNotPresent) {
-                self.read_amp_metrics.record_read(1, 0, 0);
-                return Ok(KeyState::Absent);
-            }
-        }
 
         let index = self.index_entries()?;
         let mut blocks_read = 1u64;

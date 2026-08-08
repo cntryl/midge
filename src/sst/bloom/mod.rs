@@ -7,25 +7,17 @@
 //! This implementation uses double hashing to reduce false positives and supports both
 //! serialization for storage in SST footers and in-memory queries.
 //!
-//! ## Two-Tier Bloom Architecture
+//! ## Persisted Block Bloom Architecture
 //!
-//! Midge uses a two-tier bloom filtering strategy:
-//! - **SST-level bloom** (coarse gate): One filter per SST, eliminates entire SSTs
-//! - **Block-level bloom** (fine gate): One filter per data block, eliminates useless block reads
+//! Midge persists one bloom per data block and checks it after candidate-block
+//! selection. Persisted key-range metadata provides the coarse SST-level gate.
 
-pub mod batch;
 pub mod block_bloom;
-pub mod factory;
 pub mod metrics;
-pub mod range_filter;
 pub mod reader;
-pub mod tiered_config;
 pub mod writer;
 
-pub use batch::BatchBloomResults;
 pub use block_bloom::BlockBloomFilter;
 pub use metrics::BloomMetrics;
-pub use range_filter::RangeFilter;
 pub use reader::BloomReader;
-pub use tiered_config::TieredBloomConfig;
 pub use writer::BloomWriter;

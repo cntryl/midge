@@ -720,6 +720,27 @@ fn should_load_intent_log_on_startup() {
 }
 
 #[test]
+fn should_sweep_non_authoritative_flush_staging_during_startup_cleanup() {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create state directory");
+    let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
+    let staging_dir = state.sst_dir.join(".flush-staging");
+    std::fs::create_dir_all(&staging_dir).expect("create flush staging directory");
+    std::fs::write(staging_dir.join("1-1.sst"), b"unpublished")
+        .expect("write abandoned staging file");
+
+    // Act
+    state.cleanup_storage_residue();
+
+    // Assert
+    assert!(
+        !staging_dir.exists(),
+        "startup cleanup must remove the entire non-authoritative staging tree"
+    );
+    assert!(!state.persistence_anomaly_detected());
+}
+
+#[test]
 fn should_not_apply_wal_record_given_unknown_column_family_when_recovering() {
     // Arrange
     let mut column_families = HashMap::new();

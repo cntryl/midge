@@ -100,17 +100,14 @@ impl CachePolicy for TinyLfuPolicy {
     }
 
     fn on_stale(&self, key: CacheKey) {
-        // Decrement frequency for stale keys to prevent policy drift
+        // A stale victim has no corresponding cache entry, so every frequency
+        // sample for it is stale too. Remove the entry outright rather than
+        // leaking a residual count after repeated accesses.
         let mut recent = self.recent.lock();
         let mut frequencies = self.frequencies.lock();
 
         recent.retain(|k| *k != key);
-        if let Some(freq) = frequencies.get_mut(&key) {
-            *freq = freq.saturating_sub(1);
-            if *freq == 0 {
-                frequencies.remove(&key);
-            }
-        }
+        frequencies.remove(&key);
     }
 
     fn clear(&self) {
@@ -159,6 +156,24 @@ mod tests {
 
         // Assert - can pick victim (frequencies tracked internally)
         let _ = policy.pick_victim(&[]);
+    }
+
+    #[test]
+    fn should_remove_all_frequency_state_when_victim_is_stale() {
+        // Arrange
+        let policy = TinyLfuPolicy::new();
+        let key = CacheKey::for_data(1, 0);
+        for _ in 0..8 {
+            policy.on_access(key);
+        }
+        assert_eq!(policy.pick_victim(&[]), Some(key));
+
+        // Act
+        policy.on_stale(key);
+
+        // Assert
+        assert!(!policy.frequencies.lock().contains_key(&key));
+        assert!(!policy.recent.lock().contains(&key));
     }
 
     // ===== New comprehensive tests =====

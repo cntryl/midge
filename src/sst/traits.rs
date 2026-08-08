@@ -373,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn should_seek_to_first_key_at_or_after_bound_given_sparse_index_when_reading() {
+    fn should_seek_to_first_key_at_or_after_bound_when_reading() {
         // Arrange
         let mut reader = MockSstReader::new();
         reader.insert(b"a".to_vec(), b"val_a".to_vec());

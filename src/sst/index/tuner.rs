@@ -1,4 +1,4 @@
-//! Auto-tuning logic for choosing between `SparseIndex` and `TrieIndex`
+//! Auto-tuning logic for choosing between binary block index and `TrieIndex`
 
 use super::profiler::KeyStructureProfile;
 
@@ -6,6 +6,10 @@ use super::profiler::KeyStructureProfile;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum IndexKind {
+    /// Historical discriminant for the full block-first-key binary index.
+    ///
+    /// The name is retained for on-disk and public API compatibility; it does
+    /// not refer to the removed sampled sparse-index accelerator.
     Sparse = 0,
     Trie = 1,
 }
@@ -84,7 +88,7 @@ impl IndexTuner {
             return IndexKind::Trie;
         }
 
-        // Default to sparse index for safety
+        // Default to the full binary block index for safety.
         IndexKind::Sparse
     }
 
@@ -152,7 +156,7 @@ impl IndexTuner {
                     reasons.push("Default choice for safety".to_string());
                 }
 
-                format!("Sparse index selected: {}", reasons.join(", "))
+                format!("Binary block index selected: {}", reasons.join(", "))
             }
         }
     }
@@ -319,7 +323,7 @@ mod tests {
         let explanation = IndexTuner::explain(&profile);
 
         // Assert
-        assert!(explanation.contains("Sparse index selected"));
+        assert!(explanation.contains("Binary block index selected"));
         assert!(explanation.contains("entropy"));
     }
 
@@ -484,7 +488,7 @@ mod tests {
         let explanation = IndexTuner::explain(&profile);
 
         // Assert
-        assert!(explanation.contains("Sparse index selected"));
+        assert!(explanation.contains("Binary block index selected"));
         assert!(explanation.contains("50 keys"));
     }
 
@@ -501,7 +505,7 @@ mod tests {
         let explanation = IndexTuner::explain(&profile);
 
         // Assert
-        assert!(explanation.contains("Sparse index selected"));
+        assert!(explanation.contains("Binary block index selected"));
         assert!(explanation.contains("2000"));
     }
 
@@ -554,7 +558,7 @@ mod tests {
         let explanation = IndexTuner::explain(&profile);
 
         // Assert
-        assert!(explanation.contains("Sparse index selected"));
+        assert!(explanation.contains("Binary block index selected"));
         assert!(explanation.contains("Default choice"));
     }
 
