@@ -51,6 +51,7 @@ static FAILPOINT_GATE: OnceLock<RwLock<()>> = OnceLock::new();
 #[cfg(feature = "failpoints")]
 thread_local! {
     static OWNS_FAILPOINT_GATE: Cell<bool> = const { Cell::new(false) };
+    static FAILPOINT_READ_SCOPE_DEPTH: Cell<u32> = const { Cell::new(0) };
 }
 
 #[cfg(feature = "failpoints")]
@@ -66,7 +67,7 @@ fn gate() -> &'static RwLock<()> {
 /// because it already holds the write side.
 #[cfg(feature = "failpoints")]
 pub(crate) fn read_gate() -> Option<RwLockReadGuard<'static, ()>> {
-    if OWNS_FAILPOINT_GATE.with(Cell::get) {
+    if OWNS_FAILPOINT_GATE.with(Cell::get) || FAILPOINT_READ_SCOPE_DEPTH.with(Cell::get) > 0 {
         None
     } else {
         Some(
@@ -74,6 +75,48 @@ pub(crate) fn read_gate() -> Option<RwLockReadGuard<'static, ()>> {
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         )
+    }
+}
+
+#[cfg(feature = "failpoints")]
+struct FailpointReadScope;
+
+#[cfg(feature = "failpoints")]
+impl FailpointReadScope {
+    fn enter() -> Self {
+        FAILPOINT_READ_SCOPE_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+        Self
+    }
+}
+
+#[cfg(feature = "failpoints")]
+impl Drop for FailpointReadScope {
+    fn drop(&mut self) {
+        FAILPOINT_READ_SCOPE_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+/// Keep a multi-step operation inside one failpoint read-side scope.
+///
+/// This establishes a consistent lock order for operations that also acquire
+/// subsystem mutexes. Individual failpoint evaluations inside the scope reuse
+/// the outer read lock instead of recursively acquiring the global gate.
+pub(crate) fn with_read_gate<T>(operation: impl FnOnce() -> T) -> T {
+    #[cfg(feature = "failpoints")]
+    {
+        if OWNS_FAILPOINT_GATE.with(Cell::get) || FAILPOINT_READ_SCOPE_DEPTH.with(Cell::get) > 0 {
+            return operation();
+        }
+        let _guard = gate()
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _scope = FailpointReadScope::enter();
+        operation()
+    }
+
+    #[cfg(not(feature = "failpoints"))]
+    {
+        operation()
     }
 }
 

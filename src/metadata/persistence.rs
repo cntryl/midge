@@ -88,6 +88,15 @@ impl ManifestPersistence {
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         recovery_policy: crate::config::RecoveryPolicy,
     ) -> Result<Manifest, String> {
+        crate::metadata::journal::with_manifest_writer_lock(fs, || {
+            Self::load_with_fs_and_policy_unlocked(fs, recovery_policy)
+        })
+    }
+
+    fn load_with_fs_and_policy_unlocked(
+        fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+        recovery_policy: crate::config::RecoveryPolicy,
+    ) -> Result<Manifest, String> {
         use crate::io::traits::FsPath;
 
         let snap_path = FsPath::new(Self::MANIFEST_SNAPSHOT);
@@ -121,8 +130,10 @@ impl ManifestPersistence {
         // Replay only edits newer than the snapshot checkpoint. If a crash
         // happened after snapshot rename but before journal truncation, the
         // already-applied prefix is therefore harmless.
-        match crate::metadata::journal::replay_edits_after_with_fs(fs, manifest.edit_checkpoint_id)
-        {
+        match crate::metadata::journal::replay_edits_after_with_fs_unlocked(
+            fs,
+            manifest.edit_checkpoint_id,
+        ) {
             Ok(edits) => {
                 for edit in &edits {
                     manifest.apply_edit(edit);
@@ -153,6 +164,58 @@ impl ManifestPersistence {
             }
         }
         Ok(())
+    }
+
+    fn checkpoint_base_with_fs(
+        fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+        manifest: &Manifest,
+    ) -> Result<Manifest, String> {
+        use crate::io::traits::FsPath;
+
+        let snapshot_path = FsPath::new(Self::MANIFEST_SNAPSHOT);
+        let snapshot_exists = fs.exists(&snapshot_path).map_err(|error| {
+            format!("failed to check for manifest snapshot {snapshot_path:?}: {error:?}")
+        })?;
+        if !snapshot_exists {
+            return Ok(manifest.clone());
+        }
+
+        let mut persisted = Self::load_json_manifest_file(fs, &snapshot_path, "manifest snapshot")?;
+        if persisted.edit_checkpoint_id <= manifest.edit_checkpoint_id {
+            return Ok(manifest.clone());
+        }
+
+        tracing::warn!(
+            caller_checkpoint = manifest.edit_checkpoint_id,
+            durable_checkpoint = persisted.edit_checkpoint_id,
+            "preserving a newer durable manifest checkpoint over a stale caller"
+        );
+
+        // The caller cloned its manifest before a competing checkpoint was
+        // published. The durable snapshot is authoritative for structural
+        // state; only monotonic progress that is not fully represented by
+        // journal edits may safely be carried forward from the caller.
+        persisted.last_persisted_sequence = persisted
+            .last_persisted_sequence
+            .max(manifest.last_persisted_sequence);
+        persisted.next_wal_seq = persisted.next_wal_seq.max(manifest.next_wal_seq);
+        for (&cf_id, &next_seq) in &manifest.next_sst_seqs {
+            persisted
+                .next_sst_seqs
+                .entry(cf_id)
+                .and_modify(|current| *current = (*current).max(next_seq))
+                .or_insert(next_seq);
+        }
+        if let Some(candidate) = &manifest.cloud_checkpoint {
+            let should_advance = persisted
+                .cloud_checkpoint
+                .as_ref()
+                .is_none_or(|current| candidate.checkpoint_sequence > current.checkpoint_sequence);
+            if should_advance {
+                persisted.cloud_checkpoint = Some(candidate.clone());
+            }
+        }
+        Ok(persisted)
     }
 
     /// Save manifest to disk in JSON format
@@ -209,15 +272,32 @@ impl ManifestPersistence {
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         manifest: &Manifest,
     ) -> Result<(), String> {
+        crate::metadata::journal::with_manifest_writer_lock(fs, || {
+            Self::save_snapshot_and_truncate_journal_with_fs_unlocked(fs, manifest)
+        })
+    }
+
+    fn save_snapshot_and_truncate_journal_with_fs_unlocked(
+        fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+        manifest: &Manifest,
+    ) -> Result<(), String> {
         use crate::io::staging;
         use crate::io::traits::FsPath;
 
         let snap_path = FsPath::new(Self::MANIFEST_SNAPSHOT);
         let temp = FsPath::new(Self::MANIFEST_SNAPSHOT_TEMP);
 
-        let mut checkpoint = manifest.clone();
+        let mut checkpoint = Self::checkpoint_base_with_fs(fs, manifest)?;
+        let journal_edits = crate::metadata::journal::replay_edits_after_with_fs_unlocked(
+            fs,
+            checkpoint.edit_checkpoint_id,
+        )
+        .map_err(|error| format!("failed to replay manifest journal: {error}"))?;
+        for edit in &journal_edits {
+            checkpoint.apply_edit(edit);
+        }
         checkpoint.edit_checkpoint_id = checkpoint.edit_checkpoint_id.max(
-            crate::metadata::journal::highest_edit_id_with_fs(fs)
+            crate::metadata::journal::highest_edit_id_with_fs_unlocked(fs)
                 .map_err(|error| format!("failed to inspect manifest journal: {error}"))?,
         );
         Self::validate_persisted_sst_names(&checkpoint)?;
@@ -232,7 +312,7 @@ impl ManifestPersistence {
         );
 
         // truncate journal
-        crate::metadata::journal::truncate_journal_with_fs(fs)
+        crate::metadata::journal::truncate_journal_with_fs_unlocked(fs)
             .map_err(|e| format!("failed to truncate journal: {e:?}"))?;
 
         // Keep the legacy manifest filename as a compatibility mirror. The
@@ -711,6 +791,177 @@ mod tests {
                 .iter()
                 .any(|file| file.name == "manifest-only.sst"),
             "conflicting manifest.json should not leak into recovery when snapshot exists"
+        );
+    }
+
+    #[test]
+    fn should_preserve_concurrent_journal_edit_when_checkpoint_uses_stale_manifest() {
+        // Arrange
+        let test_dir = create_test_dir();
+        let stale_manifest = Manifest::default();
+        let writer_dir = test_dir.clone();
+        let journal_file_name = crate::sst::file_name(0, 0, 1);
+        let writer_file_name = journal_file_name.clone();
+        let writer = std::thread::spawn(move || {
+            crate::metadata::append_edit(
+                &writer_dir,
+                &crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
+                    name: writer_file_name,
+                    level: 0,
+                    size_bytes: 10,
+                    ..Default::default()
+                }),
+            )
+        });
+        writer
+            .join()
+            .expect("join manifest writer")
+            .expect("append concurrent manifest edit");
+
+        // Act
+        ManifestPersistence::save_snapshot_and_truncate_journal(&test_dir, &stale_manifest)
+            .expect("checkpoint stale manifest without losing durable journal edits");
+        let loaded = ManifestPersistence::load(&test_dir).expect("reopen checkpointed manifest");
+
+        // Assert
+        assert!(
+            loaded
+                .files
+                .iter()
+                .any(|file| file.name == journal_file_name),
+            "checkpoint must merge a durable edit that arrived after its manifest clone"
+        );
+        assert_eq!(loaded.edit_checkpoint_id, 1);
+    }
+
+    #[test]
+    fn should_preserve_all_edits_given_competing_stale_manifest_checkpoints() {
+        // Arrange
+        let test_dir = create_test_dir();
+        let first_edit = crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
+            name: crate::sst::file_name(0, 0, 1),
+            level: 0,
+            size_bytes: 10,
+            ..Default::default()
+        });
+        let second_edit = crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
+            name: crate::sst::file_name(0, 0, 2),
+            level: 0,
+            size_bytes: 20,
+            ..Default::default()
+        });
+        let mut first_writer_manifest = Manifest::default();
+        let mut second_writer_manifest = Manifest::default();
+        crate::metadata::append_edit(&test_dir, &first_edit).expect("append first writer edit");
+        first_writer_manifest.apply_edit(&first_edit);
+        crate::metadata::append_edit(&test_dir, &second_edit).expect("append second writer edit");
+        second_writer_manifest.apply_edit(&second_edit);
+
+        // Act
+        ManifestPersistence::save_snapshot_and_truncate_journal(&test_dir, &first_writer_manifest)
+            .expect("publish first stale checkpoint");
+        ManifestPersistence::save_snapshot_and_truncate_journal(&test_dir, &second_writer_manifest)
+            .expect("publish competing stale checkpoint");
+        let loaded = ManifestPersistence::load(&test_dir).expect("reopen competing checkpoints");
+
+        // Assert
+        assert_eq!(loaded.edit_checkpoint_id, 2);
+        assert!(
+            loaded
+                .files
+                .iter()
+                .any(|file| file.name == crate::sst::file_name(0, 0, 1)),
+            "later stale checkpoint must retain the first writer's durable edit"
+        );
+        assert!(
+            loaded
+                .files
+                .iter()
+                .any(|file| file.name == crate::sst::file_name(0, 0, 2)),
+            "later stale checkpoint must retain the second writer's durable edit"
+        );
+    }
+
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn should_replay_only_post_checkpoint_edits_given_crash_after_snapshot_rename() {
+        // Arrange
+        let test_dir = create_test_dir();
+        let pre_checkpoint = crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
+            name: crate::sst::file_name(0, 0, 1),
+            level: 0,
+            size_bytes: 10,
+            ..Default::default()
+        });
+        crate::metadata::append_edit(&test_dir, &pre_checkpoint)
+            .expect("append pre-checkpoint edit");
+        let mut checkpoint_manifest = Manifest::default();
+        checkpoint_manifest.apply_edit(&pre_checkpoint);
+        let _test_guard = crate::failpoints::test_failpoint_guard();
+        let crash = fail::FailGuard::new(
+            "midge::manifest::after_snapshot_rename_before_journal_truncate",
+            "return",
+        )
+        .expect("configure snapshot-rename crash failpoint");
+        let checkpoint_error = ManifestPersistence::save_snapshot_and_truncate_journal(
+            &test_dir,
+            &checkpoint_manifest,
+        )
+        .expect_err("checkpoint must stop after publishing the snapshot");
+        drop(crash);
+        assert!(checkpoint_error.contains("snapshot rename"));
+        assert!(
+            std::fs::metadata(test_dir.join("manifest.journal"))
+                .expect("inspect retained journal")
+                .len()
+                > 0,
+            "crash boundary must leave the pre-checkpoint journal record intact"
+        );
+        let post_checkpoint = crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
+            name: crate::sst::file_name(0, 0, 2),
+            level: 0,
+            size_bytes: 20,
+            ..Default::default()
+        });
+        crate::metadata::append_edit(&test_dir, &post_checkpoint)
+            .expect("append post-checkpoint edit");
+
+        // Act
+        let loaded = ManifestPersistence::load(&test_dir).expect("reopen manifest after crash");
+        let fs: std::sync::Arc<dyn crate::io::traits::Fs> = std::sync::Arc::new(
+            crate::io::real::RealFs::open_existing(&test_dir).expect("open test filesystem"),
+        );
+        let replayed = crate::metadata::journal::replay_edits_after_with_fs_unlocked(
+            &fs,
+            loaded.edit_checkpoint_id,
+        )
+        .expect("replay edits newer than checkpoint");
+
+        // Assert
+        assert_eq!(loaded.edit_checkpoint_id, 1);
+        assert_eq!(replayed.len(), 1);
+        assert!(matches!(
+            &replayed[0],
+            crate::metadata::ManifestEdit::AddSst(file)
+                if file.name == crate::sst::file_name(0, 0, 2)
+        ));
+        assert_eq!(
+            loaded
+                .files
+                .iter()
+                .filter(|file| file.name == crate::sst::file_name(0, 0, 1))
+                .count(),
+            1,
+            "the pre-checkpoint edit must come only from the published snapshot"
+        );
+        assert_eq!(
+            loaded
+                .files
+                .iter()
+                .filter(|file| file.name == crate::sst::file_name(0, 0, 2))
+                .count(),
+            1,
+            "the post-checkpoint edit must replay exactly once"
         );
     }
 

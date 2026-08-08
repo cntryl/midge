@@ -13,6 +13,7 @@ use super::traits::{
     DirEntry, Durability, File, FileCaps, Fs, FsError, FsPath, FsResult, Metadata, OpenOptions,
 };
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io;
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
@@ -154,6 +155,12 @@ impl RealFs {
 }
 
 impl Fs for RealFs {
+    fn coordination_key(&self) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.base_path.hash(&mut hasher);
+        hasher.finish()
+    }
+
     fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
         // Delegate to shared implementation that returns a 'static file handle.
         self.open_inner(path, opts)

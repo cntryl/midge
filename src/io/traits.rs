@@ -292,6 +292,16 @@ pub trait File: Send {
 
 /// Filesystem abstraction - agnostic of domain
 pub trait Fs: Send + Sync + 'static {
+    /// Return a stable key for coordinating multi-call filesystem transactions.
+    ///
+    /// Handles that address the same logical filesystem root should return the
+    /// same key within a process. Collisions are safe and only add contention.
+    /// The conservative default serializes implementations that cannot expose
+    /// a stable root identity.
+    fn coordination_key(&self) -> u64 {
+        0
+    }
+
     // --- Files ---
 
     /// Open a file

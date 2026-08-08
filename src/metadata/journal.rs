@@ -3,6 +3,26 @@ use crate::metadata::manifest::{CloudCheckpoint, FileMeta};
 use crc32fast::Hasher as Crc32;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::LazyLock;
+
+const MANIFEST_WRITER_LOCK_STRIPES: usize = 64;
+static MANIFEST_WRITER_LOCKS: LazyLock<Vec<parking_lot::Mutex<()>>> = LazyLock::new(|| {
+    (0..MANIFEST_WRITER_LOCK_STRIPES)
+        .map(|_| parking_lot::Mutex::new(()))
+        .collect()
+});
+
+pub(crate) fn with_manifest_writer_lock<T>(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+    operation: impl FnOnce() -> T,
+) -> T {
+    crate::failpoints::with_read_gate(|| {
+        let stripe_count = u64::try_from(MANIFEST_WRITER_LOCK_STRIPES).unwrap_or(64);
+        let stripe = usize::try_from(fs.coordination_key() % stripe_count).unwrap_or(0);
+        let _guard = MANIFEST_WRITER_LOCKS[stripe].lock();
+        operation()
+    })
+}
 
 fn journal_serialize<T: ?Sized + serde::Serialize>(value: &T) -> MidgeResult<Vec<u8>> {
     serde_json::to_vec(value).map_err(|e| crate::common::MidgeError::Internal(e.to_string()))
@@ -231,12 +251,18 @@ fn next_edit_id_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>) -> Midge
 pub(crate) fn highest_edit_id_with_fs(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
 ) -> MidgeResult<u64> {
+    with_manifest_writer_lock(fs, || highest_edit_id_with_fs_unlocked(fs))
+}
+
+pub(crate) fn highest_edit_id_with_fs_unlocked(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+) -> MidgeResult<u64> {
     let checkpoint = checkpoint_edit_id_with_fs(fs)?;
     let journal_max = replay_journal_with_state(fs)?.max_edit_id;
     Ok(checkpoint.max(journal_max))
 }
 
-pub(crate) fn replay_edits_after_with_fs(
+pub(crate) fn replay_edits_after_with_fs_unlocked(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     checkpoint: u64,
 ) -> MidgeResult<Vec<ManifestEdit>> {
@@ -253,6 +279,13 @@ pub fn append_edit_with_fs(
     edit: &ManifestEdit,
 ) -> MidgeResult<()> {
     edit.validate_persisted_sst_names()?;
+    with_manifest_writer_lock(fs, || append_validated_edit_with_fs(fs, edit))
+}
+
+fn append_validated_edit_with_fs(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+    edit: &ManifestEdit,
+) -> MidgeResult<()> {
     let edit_id = next_edit_id_with_fs(fs)?;
     let record = encode_journal_record(
         edit.record_type(),
@@ -750,6 +783,13 @@ pub fn append_edit_batch_with_fs(
     for edit in batch {
         edit.validate_persisted_sst_names()?;
     }
+    with_manifest_writer_lock(fs, || append_validated_edit_batch_with_fs(fs, batch))
+}
+
+fn append_validated_edit_batch_with_fs(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+    batch: &[ManifestEdit],
+) -> MidgeResult<()> {
     let edit_id = next_edit_id_with_fs(fs)?;
     let record = encode_journal_record(
         BATCH_RECORD_TYPE,
@@ -800,8 +840,9 @@ pub fn append_edit_batch(db_path: &Path, batch: &[ManifestEdit]) -> MidgeResult<
     append_edit_batch_with_fs(&fs, batch)
 }
 
-/// Truncate or rotate journal after snapshot using provided Fs.
-pub fn truncate_journal_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>) -> MidgeResult<()> {
+pub(crate) fn truncate_journal_with_fs_unlocked(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+) -> MidgeResult<()> {
     use crate::io::traits::{FsPath, OpenMode, OpenOptions};
 
     // Opening with truncate=true will set length to 0
@@ -825,15 +866,104 @@ pub fn truncate_journal_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::io::traits::{
+        DirEntry, Durability, File, Fs, FsPath, FsResult, Metadata, OpenOptions,
+    };
     use crate::metadata::FileMeta;
     use crate::metadata::{Manifest, ManifestPersistence};
     use proptest::prelude::*;
     use std::cell::Cell;
     use std::io::Write;
+    use std::sync::{Arc, Condvar, Mutex};
     use tempfile::tempdir;
 
     thread_local! {
         static OBSERVE_REQUIRED_MANIFEST_SYNC: Cell<bool> = const { Cell::new(false) };
+    }
+
+    #[derive(Default)]
+    struct JournalOpenGate {
+        state: Mutex<(usize, bool)>,
+        changed: Condvar,
+    }
+
+    impl JournalOpenGate {
+        fn wait_in_open(&self) {
+            let mut state = self.state.lock().expect("lock journal-open gate");
+            state.0 += 1;
+            self.changed.notify_all();
+            while !state.1 {
+                state = self
+                    .changed
+                    .wait(state)
+                    .expect("wait for journal-open release");
+            }
+        }
+
+        fn wait_for_arrivals(&self, expected: usize, timeout: std::time::Duration) -> bool {
+            let state = self.state.lock().expect("lock journal-open gate");
+            let (state, _) = self
+                .changed
+                .wait_timeout_while(state, timeout, |state| state.0 < expected)
+                .expect("wait for journal-open arrivals");
+            state.0 >= expected
+        }
+
+        fn release(&self) {
+            let mut state = self.state.lock().expect("lock journal-open gate");
+            state.1 = true;
+            self.changed.notify_all();
+        }
+    }
+
+    struct GatedJournalFs {
+        inner: crate::io::real::RealFs,
+        open_gate: Arc<JournalOpenGate>,
+    }
+
+    impl Fs for GatedJournalFs {
+        fn coordination_key(&self) -> u64 {
+            self.inner.coordination_key()
+        }
+
+        fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
+            if path.0 == JOURNAL_FILE && opts.create && !opts.truncate {
+                self.open_gate.wait_in_open();
+            }
+            self.inner.open(path, opts)
+        }
+
+        fn remove_file(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.remove_file(path)
+        }
+
+        fn exists(&self, path: &FsPath) -> FsResult<bool> {
+            self.inner.exists(path)
+        }
+
+        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+            self.inner.metadata(path)
+        }
+
+        fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.create_dir_all(path)
+        }
+
+        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+            self.inner.list_dir(path)
+        }
+
+        fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.remove_dir_all(path)
+        }
+
+        fn sync_dir(&self, path: &FsPath, durability: Durability) -> FsResult<()> {
+            self.inner.sync_dir(path, durability)
+        }
+
+        fn rename_atomic(&self, from: &FsPath, to: &FsPath) -> FsResult<()> {
+            self.inner.rename_atomic(from, to)
+        }
     }
 
     fn encode_test_record(payload_edit: &ManifestEdit, crc_edit: &ManifestEdit) -> Vec<u8> {
@@ -903,6 +1033,59 @@ mod tests {
             }
             _ => panic!("unexpected edit variant"),
         }
+    }
+
+    #[test]
+    fn should_assign_distinct_edit_ids_given_concurrent_manifest_appends() {
+        // Arrange
+        let td = tempdir().expect("create manifest directory");
+        let open_gate = Arc::new(JournalOpenGate::default());
+        let first_fs: Arc<dyn Fs> = Arc::new(GatedJournalFs {
+            inner: crate::io::real::RealFs::new(td.path()).expect("open first filesystem handle"),
+            open_gate: Arc::clone(&open_gate),
+        });
+        let second_fs: Arc<dyn Fs> = Arc::new(GatedJournalFs {
+            inner: crate::io::real::RealFs::new(td.path()).expect("open second filesystem handle"),
+            open_gate: Arc::clone(&open_gate),
+        });
+        let first = std::thread::spawn(move || {
+            append_edit_with_fs(&first_fs, &ManifestEdit::BumpWalSeq { seq: 1 })
+        });
+        assert!(
+            open_gate.wait_for_arrivals(1, std::time::Duration::from_secs(1)),
+            "first writer must reach the journal open"
+        );
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let second = std::thread::spawn(move || {
+            started_tx.send(()).expect("signal second writer start");
+            append_edit_with_fs(&second_fs, &ManifestEdit::BumpWalSeq { seq: 2 })
+        });
+        started_rx.recv().expect("observe second writer start");
+
+        // Act
+        let concurrent_open = open_gate.wait_for_arrivals(2, std::time::Duration::from_millis(500));
+        open_gate.release();
+        first
+            .join()
+            .expect("join first writer")
+            .expect("append first manifest edit");
+        second
+            .join()
+            .expect("join second writer")
+            .expect("append second manifest edit");
+        let replay_fs: Arc<dyn Fs> = Arc::new(
+            crate::io::real::RealFs::open_existing(td.path()).expect("open replay filesystem"),
+        );
+        let replayed =
+            replay_journal_with_ids_with_fs(&replay_fs).expect("replay concurrent appends");
+        let edit_ids: Vec<_> = replayed.iter().map(|edit| edit.edit_id).collect();
+
+        // Assert
+        assert!(
+            !concurrent_open,
+            "a second manifest writer entered the journal append transaction"
+        );
+        assert_eq!(edit_ids, vec![1, 2]);
     }
 
     #[test]

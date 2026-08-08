@@ -124,6 +124,10 @@ impl ChaosFs {
 }
 
 impl Fs for ChaosFs {
+    fn coordination_key(&self) -> u64 {
+        self.inner.coordination_key()
+    }
+
     fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
         if self.should_fail_open() {
             return Err(FsError::Unavailable("chaos: open failed".into()));
