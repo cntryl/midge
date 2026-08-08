@@ -174,6 +174,32 @@ impl Default for CloudWritePolicy {
     }
 }
 
+impl CloudWritePolicy {
+    fn validate(&self) -> MidgeResult<()> {
+        if self.eventual_flush_segment_gap == 0 {
+            return Err(MidgeError::InvalidArgument(
+                "cloud eventual-flush segment gap must be greater than zero".to_string(),
+            ));
+        }
+        if self.wal_seal_min_segment_bytes == 0 {
+            return Err(MidgeError::InvalidArgument(
+                "cloud WAL seal minimum segment bytes must be greater than zero".to_string(),
+            ));
+        }
+        if self.wal_seal_max_flush_delay.is_zero() {
+            return Err(MidgeError::InvalidArgument(
+                "cloud WAL seal maximum flush delay must be greater than zero".to_string(),
+            ));
+        }
+        if self.wal_seal_max_pending_writes == 0 {
+            return Err(MidgeError::InvalidArgument(
+                "cloud WAL seal maximum pending writes must be greater than zero".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl From<CloudWritePolicy> for crate::runtime::CloudRuntimePolicy {
     fn from(policy: CloudWritePolicy) -> Self {
         Self {
@@ -630,6 +656,7 @@ impl OpenOptionsBuilder {
                 "lease clock-skew tolerance must not exceed the 30-second lease TTL".to_string(),
             ));
         }
+        self.cloud_write_policy.validate()?;
 
         let total_memory = self.resolve_total_memory()?;
         let pools = self.derive_memory_pools(total_memory)?;
@@ -694,9 +721,10 @@ impl OpenOptionsBuilder {
             MemoryBudget::Auto => memory::auto_memory_budget_bytes().unwrap_or(512 * 1024 * 1024),
             MemoryBudget::Bytes(bytes) => bytes,
         };
-        if total_memory < 2 {
+        if total_memory < 3 {
             return Err(MidgeError::ResourceLimit(
-                "memory budget must hold two memtable generations".to_string(),
+                "memory budget must hold two memtable generations and a transaction pool"
+                    .to_string(),
             ));
         }
         Ok(total_memory)
@@ -705,7 +733,12 @@ impl OpenOptionsBuilder {
     fn derive_memory_pools(&self, total_memory: usize) -> MidgeResult<DerivedMemoryPools> {
         let transaction_memory_pool_size = self
             .transaction_memory_pool_size
-            .unwrap_or(total_memory / 10);
+            .unwrap_or_else(|| (total_memory / 10).max(1));
+        if transaction_memory_pool_size == 0 {
+            return Err(MidgeError::InvalidArgument(
+                "transaction memory pool size must be greater than zero".to_string(),
+            ));
+        }
         if transaction_memory_pool_size > total_memory {
             return Err(MidgeError::ResourceLimit(format!(
                 "transaction memory pool ({transaction_memory_pool_size} bytes) exceeds total budget ({total_memory} bytes)"
@@ -721,6 +754,7 @@ impl OpenOptionsBuilder {
 
         let memtable_size_limit = self.derive_memtable_size(total_memory, max_memtable_size)?;
         let memtable_flush_threshold = self.derive_flush_threshold(memtable_size_limit)?;
+        crate::config::validate_memtable_limits(memtable_size_limit, memtable_flush_threshold)?;
         let mut block_cache_size = total_memory
             .saturating_sub(transaction_memory_pool_size)
             .saturating_sub(memtable_size_limit.saturating_mul(2));
@@ -1417,6 +1451,85 @@ mod tests {
 
         // Assert
         assert!(matches!(result, Err(MidgeError::InvalidArgument(_))));
+    }
+
+    #[test]
+    fn should_reject_flush_threshold_exceeding_size_limit_given_both_explicit_overrides_when_building(
+    ) {
+        // Arrange
+
+        // Act
+        let result = OpenOptions::in_memory()
+            .with_memtable_size_limit(1024)
+            .with_memtable_flush_threshold(2048)
+            .build();
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::InvalidArgument(_))));
+    }
+
+    #[test]
+    fn should_reject_memory_budget_given_value_below_minimum_when_building() {
+        // Arrange
+
+        // Act
+        let result = OpenOptions::in_memory()
+            .memory_budget(MemoryBudget::Bytes(2))
+            .build();
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::ResourceLimit(_))));
+    }
+
+    #[test]
+    fn should_reject_zero_transaction_memory_pool_size_when_building() {
+        // Arrange
+
+        // Act
+        let result = OpenOptions::in_memory()
+            .transaction_memory_pool_size(0)
+            .build();
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::InvalidArgument(_))));
+    }
+
+    #[test]
+    fn should_reject_degenerate_cloud_write_policy_given_zero_fields_when_building() {
+        // Arrange
+        let default = CloudWritePolicy::default();
+        let invalid_policies = [
+            CloudWritePolicy {
+                eventual_flush_segment_gap: 0,
+                ..default.clone()
+            },
+            CloudWritePolicy {
+                wal_seal_min_segment_bytes: 0,
+                ..default.clone()
+            },
+            CloudWritePolicy {
+                wal_seal_max_flush_delay: Duration::ZERO,
+                ..default.clone()
+            },
+            CloudWritePolicy {
+                wal_seal_max_pending_writes: 0,
+                ..default
+            },
+        ];
+
+        // Act
+        let results: Vec<_> = invalid_policies
+            .into_iter()
+            .map(|policy| OpenOptions::in_memory().cloud_write_policy(policy).build())
+            .collect();
+
+        // Assert
+        assert!(
+            results
+                .iter()
+                .all(|result| matches!(result, Err(MidgeError::InvalidArgument(_)))),
+            "every zero cloud write-policy field must be rejected"
+        );
     }
 
     // ========== OpenOptions Builder Tests ==========

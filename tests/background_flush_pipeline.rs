@@ -294,7 +294,7 @@ fn should_retain_writer_lease_until_blocked_flush_worker_exits() {
 }
 
 #[test]
-fn should_serialize_column_family_drop_after_complete_flush_lifecycle() {
+fn should_defer_drop_until_flush_pipeline_completes_given_immutable_flush_inflight() {
     // Arrange
     let _guard = failpoint_test_lock()
         .lock()

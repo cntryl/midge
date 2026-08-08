@@ -838,6 +838,71 @@ fn should_apply_l0_compaction_trigger_from_runtime_config() {
 }
 
 #[test]
+fn should_reject_runtime_config_atomically_given_invalid_memtable_candidate() {
+    // Arrange
+    let mut event_loop = create_test_local_event_loop().expect("create local event loop");
+    let request_id = 100;
+    let response_rx = event_loop.router.register(request_id);
+    let (_tx, msg_rx) = crossbeam::channel::unbounded();
+    let original_size = event_loop.state.memtable_size_limit;
+    let original_threshold = event_loop.state.memtable_flush_threshold;
+    let original_compaction = event_loop.state.compaction_enabled();
+    let original_trigger = event_loop.compaction_actor.l0_file_count_threshold();
+    let original_wal_policy = event_loop.wal_actor.durability_policy();
+    let original_batch_config = event_loop.wal_actor.batch_config();
+
+    // Act
+    event_loop.handle_runtime_msg(
+        RuntimeMsg::SetRuntimeConfig {
+            request_id,
+            memtable_size_limit: Some(1024),
+            memtable_flush_threshold: Some(0),
+            enable_compaction: Some(!original_compaction),
+            l0_compaction_trigger: Some(original_trigger.saturating_add(1)),
+            wal_durability_policy: Some(crate::wal::DurabilityPolicy::Strict),
+            wal_batch_config: Some(crate::wal::policy::BatchConfig {
+                max_delay_ms: 1,
+                max_bytes: 1,
+            }),
+        },
+        &msg_rx,
+    );
+
+    // Assert
+    assert!(matches!(
+        response_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("runtime config response"),
+        RuntimeResponse::Error {
+            error: crate::common::MidgeError::InvalidArgument(_),
+            ..
+        }
+    ));
+    assert_eq!(event_loop.state.memtable_size_limit, original_size);
+    assert_eq!(
+        event_loop.state.memtable_flush_threshold,
+        original_threshold
+    );
+    assert_eq!(event_loop.state.compaction_enabled(), original_compaction);
+    assert_eq!(
+        event_loop.compaction_actor.l0_file_count_threshold(),
+        original_trigger
+    );
+    assert_eq!(
+        event_loop.wal_actor.durability_policy(),
+        original_wal_policy
+    );
+    assert_eq!(
+        event_loop.wal_actor.batch_config().max_delay_ms,
+        original_batch_config.max_delay_ms
+    );
+    assert_eq!(
+        event_loop.wal_actor.batch_config().max_bytes,
+        original_batch_config.max_bytes
+    );
+}
+
+#[test]
 fn should_mark_persistence_anomaly_when_compaction_metadata_range_is_missing() {
     // Arrange
     let mut event_loop = create_test_local_event_loop().expect("create local event loop");

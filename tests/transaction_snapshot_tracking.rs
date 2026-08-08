@@ -1,7 +1,9 @@
 mod common;
 
-use cntryl_midge::{MidgeError, MidgeResult, Query, TransactionMode};
+use cntryl_midge::{MidgeError, MidgeResult, Query, TransactionMode, WriteOptions};
 use common::*;
+use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 fn wait_for_active_snapshots(
@@ -26,6 +28,67 @@ fn wait_for_active_snapshots(
 
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn seed_scan_pin_generations(
+    engine: &cntryl_midge::Engine,
+    cf: &cntryl_midge::ColumnFamilyHandle,
+) -> Vec<String> {
+    for generation in 0..4 {
+        let mut write = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin seed generation");
+        if generation == 0 {
+            for index in 0..24 {
+                write
+                    .put(
+                        format!("row-{index:03}").into_bytes(),
+                        b"baseline".to_vec(),
+                        None,
+                    )
+                    .expect("put baseline row");
+            }
+        } else {
+            write
+                .put(
+                    format!("zz-filler-{generation}").into_bytes(),
+                    b"baseline".to_vec(),
+                    None,
+                )
+                .expect("put filler row");
+        }
+        write
+            .commit(WriteOptions::sync())
+            .expect("commit seed generation");
+        engine.flush_cf(cf).expect("flush seed generation");
+    }
+    let layout = engine.get_storage_layout().expect("layout before scan");
+    let input_names: Vec<_> = layout
+        .levels
+        .iter()
+        .flat_map(|level| level.files.iter())
+        .filter(|file| file.cf_id == cf.id())
+        .map(|file| file.name.clone())
+        .collect();
+    assert_eq!(input_names.len(), 4, "fixture must expose four L0 inputs");
+    input_names
+}
+
+fn wait_for_sst_files_removed(db_path: &Path, names: &[String], timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while names
+        .iter()
+        .any(|name| db_path.join("sst").join(name).exists())
+        && Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        names
+            .iter()
+            .all(|name| !db_path.join("sst").join(name).exists()),
+        "retired inputs should become reclaimable after the snapshot closes"
+    );
 }
 
 #[test]
@@ -475,4 +538,270 @@ fn should_keep_snapshot_range_scan_stable_when_compaction_runs_concurrently() {
         wait_for_active_snapshots(&engine, 0, Duration::from_secs(1))
             .expect("wait for no active snapshots");
     });
+}
+
+#[test]
+fn should_preserve_iterator_view_when_flush_and_compaction_run_during_active_scan() {
+    // Arrange
+    let opts = opts_for_mode("local");
+    let db_path = match &opts.storage_mode {
+        StorageMode::LocalDisk { db_path } => db_path.clone(),
+        _ => unreachable!("local options must expose a local path"),
+    };
+    let engine = Arc::new(open_with_mode(&opts, "local"));
+    let cf = engine.create_column_family("scan-pins").expect("create cf");
+    let input_names = seed_scan_pin_generations(&engine, &cf);
+    let read = engine
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+        .expect("begin pinned snapshot");
+    let mut scan = read.scan(&Query::new()).expect("open snapshot scan");
+    let first = scan
+        .next()
+        .transpose()
+        .expect("read first row")
+        .expect("first row");
+    assert_eq!(first.0.as_ref(), b"row-000");
+
+    // Act
+    let writer_engine = Arc::clone(&engine);
+    let writer_cf = cf.clone();
+    let worker = std::thread::spawn(move || {
+        let mut overwrite = writer_engine
+            .begin_tx(writer_cf.id(), TransactionMode::ReadWrite)
+            .expect("begin concurrent overwrite");
+        for index in 0..24 {
+            overwrite
+                .put(
+                    format!("row-{index:03}").into_bytes(),
+                    b"updated".to_vec(),
+                    None,
+                )
+                .expect("overwrite row");
+        }
+        overwrite
+            .commit(WriteOptions::sync())
+            .expect("commit overwrite");
+        writer_engine
+            .flush_cf(&writer_cf)
+            .expect("flush concurrent overwrite");
+        writer_engine
+            .compact_all()
+            .expect("compact while scan is open");
+    });
+    worker.join().expect("join concurrent compaction");
+    let remaining = scan.try_collect().expect("finish pinned scan");
+
+    // Assert
+    assert_eq!(remaining.len(), 26);
+    assert!(
+        remaining
+            .iter()
+            .all(|(_key, value)| value.as_ref() == b"baseline"),
+        "the already-open iterator must retain its frozen values"
+    );
+    let after = engine
+        .get_storage_layout()
+        .expect("layout after compaction");
+    assert!(
+        after
+            .levels
+            .iter()
+            .any(|level| level.level == 1 && level.file_count > 0),
+        "manual compaction must publish a deeper-level output"
+    );
+    let live_names: std::collections::HashSet<_> = after
+        .levels
+        .iter()
+        .flat_map(|level| level.files.iter())
+        .map(|file| file.name.as_str())
+        .collect();
+    let retired_input_names: Vec<_> = input_names
+        .iter()
+        .filter(|name| !live_names.contains(name.as_str()))
+        .cloned()
+        .collect();
+    assert!(
+        !retired_input_names.is_empty(),
+        "real compaction must retire at least one pinned input"
+    );
+    assert!(
+        retired_input_names
+            .iter()
+            .all(|name| db_path.join("sst").join(name.as_str()).exists()),
+        "snapshot-pinned compaction inputs must remain on disk until the scan closes"
+    );
+    drop(read);
+    wait_for_sst_files_removed(&db_path, &retired_input_names, Duration::from_secs(2));
+}
+
+#[test]
+fn should_shadow_neither_write_when_delete_range_tombstone_precedes_newer_put_across_sst_generations(
+) {
+    // Arrange
+    let opts = opts_for_mode("local");
+    let engine = open_with_mode(&opts, "local");
+    let cf = engine
+        .create_column_family("range-generations")
+        .expect("create cf");
+    let mut initial = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .expect("begin initial write");
+    initial
+        .put(b"middle".to_vec(), b"old".to_vec(), None)
+        .expect("put old value");
+    initial
+        .commit(WriteOptions::sync())
+        .expect("commit old value");
+    engine.flush_cf(&cf).expect("flush old value");
+
+    let mut delete = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .expect("begin range delete");
+    delete
+        .delete_range(b"a".to_vec(), b"z".to_vec())
+        .expect("delete range");
+    delete
+        .commit(WriteOptions::sync())
+        .expect("commit range delete");
+    engine.flush_cf(&cf).expect("flush range tombstone");
+
+    let mut newer = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .expect("begin newer write");
+    newer
+        .put(b"middle".to_vec(), b"new".to_vec(), None)
+        .expect("put newer value");
+    newer
+        .commit(WriteOptions::sync())
+        .expect("commit newer value");
+    engine.flush_cf(&cf).expect("flush newer value");
+
+    let mut filler = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .expect("begin filler write");
+    filler
+        .put(b"zz".to_vec(), b"filler".to_vec(), None)
+        .expect("put filler");
+    filler.commit(WriteOptions::sync()).expect("commit filler");
+    engine.flush_cf(&cf).expect("flush filler");
+    let before = engine
+        .get_storage_layout()
+        .expect("layout before generation compaction");
+    assert_eq!(
+        before
+            .levels
+            .iter()
+            .find(|level| level.level == 0)
+            .map_or(0, |level| level.file_count),
+        4,
+        "fixture must publish four L0 generations"
+    );
+
+    // Act
+    engine.compact_all().expect("compact generations");
+    let read = engine
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+        .expect("begin current read");
+    let value = read.get(b"middle").expect("read middle");
+    let rows = read
+        .scan(&Query::new())
+        .expect("scan current view")
+        .try_collect()
+        .expect("collect current view");
+    let reverse_rows = read
+        .scan(&Query::new().reverse())
+        .expect("reverse-scan current view")
+        .try_collect()
+        .expect("collect reverse current view");
+
+    // Assert
+    let after = engine
+        .get_storage_layout()
+        .expect("layout after generation compaction");
+    assert!(
+        after
+            .levels
+            .iter()
+            .any(|level| level.level == 1 && level.file_count > 0),
+        "the range tombstone and newer point must pass through real compaction"
+    );
+    assert_eq!(value.as_deref(), Some(&b"new"[..]));
+    assert!(rows
+        .iter()
+        .any(|(key, value)| { key.as_ref() == b"middle" && value.as_ref() == b"new" }));
+    assert!(reverse_rows
+        .iter()
+        .any(|(key, value)| { key.as_ref() == b"middle" && value.as_ref() == b"new" }));
+}
+
+#[test]
+fn should_return_stable_results_when_scanning_after_column_family_dropped_mid_transaction() {
+    // Arrange
+    let opts = opts_for_mode("local");
+    let engine = Arc::new(open_with_mode(&opts, "local"));
+    let cf = engine.create_column_family("drop-scan").expect("create cf");
+    let mut write = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .expect("begin seed write");
+    for key in [b"a", b"b", b"c"] {
+        write
+            .put(key.to_vec(), b"value".to_vec(), None)
+            .expect("put row");
+    }
+    write.commit(WriteOptions::sync()).expect("commit rows");
+    engine.flush_cf(&cf).expect("flush rows");
+    let read = engine
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+        .expect("begin snapshot before drop");
+    let mut scan = read.scan(&Query::new()).expect("open scan before drop");
+    let first = scan
+        .next()
+        .transpose()
+        .expect("read first row")
+        .expect("first row");
+
+    // Act
+    let drop_engine = Arc::clone(&engine);
+    let cf_id = cf.id();
+    std::thread::spawn(move || drop_engine.drop_column_family(cf_id))
+        .join()
+        .expect("join concurrent drop")
+        .expect("drop column family with pinned snapshot");
+    let remaining = scan.try_collect().expect("finish scan after drop");
+
+    // Assert
+    assert_eq!(first.0.as_ref(), b"a");
+    assert_eq!(remaining.len(), 2);
+    assert_eq!(remaining[0].0.as_ref(), b"b");
+    assert_eq!(remaining[1].0.as_ref(), b"c");
+    assert!(matches!(
+        engine.begin_tx(cf.id(), TransactionMode::ReadOnly),
+        Err(MidgeError::InvalidArgument(_))
+    ));
+    drop(read);
+}
+
+#[test]
+fn should_return_busy_when_scan_iterator_is_still_open_across_shutdown_call() {
+    // Arrange
+    let opts = opts_for_mode("local");
+    let mut engine = open_with_mode(&opts, "local");
+    let cf = engine
+        .create_column_family("shutdown-scan")
+        .expect("create cf");
+    let read = engine
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+        .expect("begin snapshot");
+    let scan = read.scan(&Query::new()).expect("open scan");
+
+    // Act
+    let result = engine.shutdown(Duration::from_millis(100));
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::Busy(_))));
+    drop(scan);
+    drop(read);
+    engine
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown after scan closes");
 }

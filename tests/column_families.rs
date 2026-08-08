@@ -6,7 +6,8 @@ use bytes::Bytes;
 use cntryl_midge::MidgeError;
 mod common;
 use common::*;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, Barrier};
+use std::time::Duration;
 
 // ============================================================================
 // Column Family Creation
@@ -289,6 +290,95 @@ fn should_discard_unflushed_data_given_explicit_destructive_drop() {
             Err(MidgeError::InvalidArgument(_))
         ));
     });
+}
+
+#[test]
+fn should_return_clean_error_given_write_racing_concurrent_drop_when_same_cf() {
+    // Arrange
+    let opts = opts_for_mode("local");
+    let engine = Arc::new(open_with_mode(&opts, "local"));
+    let cf = engine
+        .create_column_family("racing-drop")
+        .expect("create column family");
+    let cf_id = cf.id();
+    let start = Arc::new(Barrier::new(3));
+    let (result_tx, result_rx) = mpsc::sync_channel(2);
+
+    let write_engine = Arc::clone(&engine);
+    let write_start = Arc::clone(&start);
+    let write_results = result_tx.clone();
+    let writer = std::thread::spawn(move || {
+        write_start.wait();
+        let result = (|| -> cntryl_midge::MidgeResult<()> {
+            let mut tx = write_engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)?;
+            tx.put(b"racing-key".to_vec(), b"racing-value".to_vec(), None)?;
+            tx.commit(cntryl_midge::WriteOptions::sync())
+        })();
+        write_results
+            .send(("write", result))
+            .expect("send write result");
+    });
+
+    let drop_engine = Arc::clone(&engine);
+    let drop_start = Arc::clone(&start);
+    let dropper = std::thread::spawn(move || {
+        drop_start.wait();
+        result_tx
+            .send((
+                "drop",
+                drop_engine.drop_column_family_discarding_unflushed(cf_id),
+            ))
+            .expect("send drop result");
+    });
+
+    // Act
+    start.wait();
+    let first = result_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("first racing result");
+    let second = result_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("second racing result");
+    writer.join().expect("join writer");
+    dropper.join().expect("join dropper");
+
+    // Assert
+    let results = [first, second];
+    let drop_result = results
+        .iter()
+        .find(|(operation, _)| *operation == "drop")
+        .expect("drop result");
+    drop_result
+        .1
+        .as_ref()
+        .expect("destructive drop must reach one coherent terminal state");
+    let write_result = results
+        .iter()
+        .find(|(operation, _)| *operation == "write")
+        .expect("write result");
+    assert!(
+        write_result.1.is_ok()
+            || matches!(write_result.1, Err(MidgeError::InvalidArgument(_))),
+        "the concurrent writer must either commit before the drop or receive a clean missing-CF error: {:?}",
+        write_result.1
+    );
+    assert!(engine.get_column_family("racing-drop").is_none());
+    assert!(matches!(
+        engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly),
+        Err(MidgeError::InvalidArgument(_))
+    ));
+
+    let mut engine =
+        Arc::try_unwrap(engine).unwrap_or_else(|_| panic!("all engine clones dropped"));
+    engine
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown after racing drop");
+    let reopened = open_with_mode(&opts, "local");
+    assert!(reopened.get_column_family("racing-drop").is_none());
+    assert!(matches!(
+        reopened.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly),
+        Err(MidgeError::InvalidArgument(_))
+    ));
 }
 
 #[test]

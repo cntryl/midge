@@ -8,7 +8,7 @@ use crate::diagnostics::RuntimeDiagnostics;
 use crate::metadata::Manifest;
 use crate::runtime::snapshot_pins::SnapshotPinRegistry;
 use crate::runtime::{IntentLogEntry, PublicationPhase};
-use crate::sst::{Memtable, ReadAmpMetrics, SkipListMemtable};
+use crate::sst::{Memtable, SkipListMemtable};
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -278,10 +278,6 @@ pub struct RuntimeState {
     pub(crate) next_flush_id: u64,
     pub(crate) writer_epoch: u64,
     pub(crate) flush_metrics: FlushRuntimeMetrics,
-
-    // === Observability ===
-    /// Read amplification metrics across all reads
-    pub read_amp_metrics: ReadAmpMetrics,
 
     // Startup recovery metrics
     pub wal_recovery_records_replayed: u64,

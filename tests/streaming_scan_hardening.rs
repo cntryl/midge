@@ -61,6 +61,32 @@ fn should_intersect_prefix_with_explicit_end_bound() -> MidgeResult<()> {
 }
 
 #[test]
+fn should_return_empty_given_valid_bounds_disjoint_from_prefix() -> MidgeResult<()> {
+    // Arrange
+    let mut engine = open_memory()?;
+    let cf = default_cf(&engine);
+    seed_rows(
+        &engine,
+        cf.id(),
+        &[(b"alpha:1", b"one"), (b"zulu:1", b"two")],
+    )?;
+    let read = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
+    let query = Query::new()
+        .start_key(Bytes::from_static(b"zulu"))
+        .end_key(Bytes::from_static(b"zulu;"))
+        .prefix(Bytes::from_static(b"alpha:"));
+
+    // Act
+    let rows = read.scan(&query)?.try_collect()?;
+
+    // Assert
+    assert!(rows.is_empty());
+    drop(read);
+    engine.shutdown(Duration::from_secs(2))?;
+    Ok(())
+}
+
+#[test]
 fn should_scan_binary_prefix_without_finite_successor() -> MidgeResult<()> {
     // Arrange
     let mut engine = open_memory()?;

@@ -81,8 +81,7 @@ impl BloomMetrics {
             return 0.0;
         }
         let fps = self.false_positives();
-        f64::from(u32::try_from(fps).unwrap_or(u32::MAX))
-            / f64::from(u32::try_from(total).unwrap_or(u32::MAX))
+        u64_to_f64(fps) / u64_to_f64(total)
     }
 
     /// Calculate negative rate (blocks avoided / total checks)
@@ -93,13 +92,42 @@ impl BloomMetrics {
             return 0.0;
         }
         let negs = self.negatives();
-        f64::from(u32::try_from(negs).unwrap_or(u32::MAX))
-            / f64::from(u32::try_from(total).unwrap_or(u32::MAX))
+        u64_to_f64(negs) / u64_to_f64(total)
     }
+}
+
+fn u64_to_f64(value: u64) -> f64 {
+    let upper = u32::try_from(value >> 32).unwrap_or(u32::MAX);
+    let lower = u32::try_from(value & u64::from(u32::MAX)).unwrap_or(u32::MAX);
+    f64::from(upper) * 4_294_967_296.0 + f64::from(lower)
 }
 
 impl Default for BloomMetrics {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_preserve_bloom_rates_when_counters_exceed_u32_max() {
+        // Arrange
+        let metrics = BloomMetrics::new();
+        let numerator = u64::from(u32::MAX) + 1;
+        let checks = numerator * 2;
+        metrics.checks.store(checks, Ordering::Relaxed);
+        metrics.negatives.store(numerator, Ordering::Relaxed);
+        metrics.false_positives.store(numerator, Ordering::Relaxed);
+
+        // Act
+        let negative_rate = metrics.negative_rate();
+        let false_positive_rate = metrics.false_positive_rate();
+
+        // Assert
+        assert!((negative_rate - 0.5).abs() <= f64::EPSILON);
+        assert!((false_positive_rate - 0.5).abs() <= f64::EPSILON);
     }
 }

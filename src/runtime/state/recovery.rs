@@ -2,7 +2,7 @@
 
 use super::{
     Arc, CloudState, ColumnFamilyState, CompactionConfig, CompactionState, Fs, HashMap,
-    IntentLogEntry, Manifest, MidgeError, MidgeResult, PathBuf, PublicationPhase, ReadAmpMetrics,
+    IntentLogEntry, Manifest, MidgeError, MidgeResult, PathBuf, PublicationPhase,
     RecoveryLoadState, RecoveryStatus, RuntimeDiagnostics, RuntimeMode, RuntimeState,
     SkipListMemtable, SnapshotPinRegistry, SnapshotState, WalRecoveryState, WalState,
     WritePressureState,
@@ -124,7 +124,6 @@ impl RuntimeState {
             flush_metrics: super::FlushRuntimeMetrics::default(),
             write_pressure: WritePressureState { stalled: false },
             total_memtable_bytes: 0,
-            read_amp_metrics: ReadAmpMetrics::new(),
             wal_recovery_records_replayed: wal_recovery.records_replayed,
             wal_recovery_bytes_replayed: wal_recovery.bytes_replayed,
             intent_log_replay_runs: 0,

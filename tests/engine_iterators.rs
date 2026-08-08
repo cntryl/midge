@@ -11,7 +11,7 @@
 
 use bytes::Bytes;
 mod common;
-use cntryl_midge::{Query, Transaction};
+use cntryl_midge::{MidgeError, Query, Transaction};
 use common::*;
 
 fn collect_scan(tx: &Transaction, query: &Query) -> Vec<(Vec<u8>, Vec<u8>)> {
@@ -108,6 +108,106 @@ fn should_iterate_in_reverse_given_reverse_query_when_scanning() {
         assert_eq!(results[3].0.as_slice(), b"k01");
         assert_eq!(results[4].0.as_slice(), b"k00");
     });
+}
+
+#[test]
+fn should_return_correct_boundary_rows_when_reverse_scanning_with_explicit_start_and_end() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = open_with_mode(&opts, mode);
+        let cf = engine
+            .create_column_family("reverse-bounds")
+            .expect("create cf");
+        let mut write = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin write");
+        for key in [b"a", b"b", b"c", b"d", b"e"] {
+            write
+                .put(key.to_vec(), key.to_vec(), None)
+                .expect("put boundary row");
+        }
+        write
+            .commit(buffered_write_options(mode))
+            .expect("commit boundary rows");
+        let read = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .expect("begin read");
+        let query = Query::new()
+            .start_key(Bytes::from_static(b"b"))
+            .end_key(Bytes::from_static(b"e"))
+            .reverse();
+
+        // Act
+        let rows = collect_scan(&read, &query);
+
+        // Assert
+        assert_eq!(
+            rows.iter()
+                .map(|(key, _)| key.as_slice())
+                .collect::<Vec<_>>(),
+            vec![&b"d"[..], &b"c"[..], &b"b"[..]],
+            "mode: {mode}"
+        );
+    });
+}
+
+#[test]
+fn should_iterate_in_reverse_order_given_memtable_and_multiple_ssts() {
+    // Arrange
+    let opts = opts_for_mode("local");
+    let engine = open_with_mode(&opts, "local");
+    let cf = engine
+        .create_column_family("reverse-generations")
+        .expect("create cf");
+    for rows in [
+        [(b"a", b"va"), (b"c", b"vc")],
+        [(b"b", b"vb"), (b"d", b"vd")],
+    ] {
+        let mut write = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin flushed generation");
+        for (key, value) in rows {
+            write
+                .put(key.to_vec(), value.to_vec(), None)
+                .expect("put flushed row");
+        }
+        write
+            .commit(cntryl_midge::WriteOptions::sync())
+            .expect("commit flushed generation");
+        engine.flush_cf(&cf).expect("flush generation");
+    }
+    let mut memtable = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin memtable generation");
+    for (key, value) in [(b"e", b"ve"), (b"f", b"vf")] {
+        memtable
+            .put(key.to_vec(), value.to_vec(), None)
+            .expect("put memtable row");
+    }
+    memtable
+        .commit(cntryl_midge::WriteOptions::sync())
+        .expect("commit memtable generation");
+    let read = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .expect("begin read");
+
+    // Act
+    let rows = collect_scan(&read, &Query::new().reverse());
+
+    // Assert
+    assert_eq!(
+        rows.iter()
+            .map(|(key, _)| key.as_slice())
+            .collect::<Vec<_>>(),
+        vec![
+            &b"f"[..],
+            &b"e"[..],
+            &b"d"[..],
+            &b"c"[..],
+            &b"b"[..],
+            &b"a"[..]
+        ]
+    );
 }
 
 #[test]
@@ -219,7 +319,7 @@ fn should_return_empty_given_seek_past_end_when_scanning() {
 }
 
 #[test]
-fn should_return_empty_given_invalid_range_when_start_greater_than_end() {
+fn should_reject_reversed_bounds_consistently_given_scan_and_delete_range() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = open_with_mode(&opts, mode);
@@ -232,13 +332,53 @@ fn should_return_empty_given_invalid_range_when_start_greater_than_end() {
         tx.put(b"k05".to_vec(), b"v05".to_vec(), None).unwrap();
         tx.commit(buffered_write_options(mode)).unwrap();
 
-        // Act: Invalid range (start > end)
-        let tx = engine
+        // Act
+        let read = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
-        let results = scan_between(&tx, b"k99", b"k00");
+        let Err(scan_error) = read.scan(
+            &Query::new()
+                .start_key(Bytes::from_static(b"k99"))
+                .end_key(Bytes::from_static(b"k00")),
+        ) else {
+            panic!("reversed scan bounds must fail");
+        };
+        let mut write = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin delete transaction");
+        let delete_error = write
+            .delete_range(b"k99".to_vec(), b"k00".to_vec())
+            .expect_err("reversed delete bounds must fail");
 
-        // Assert: No results because start >= end
+        // Assert
+        assert!(matches!(scan_error, MidgeError::InvalidArgument(_)));
+        assert!(matches!(delete_error, MidgeError::InvalidArgument(_)));
+    });
+}
+
+#[test]
+fn should_return_empty_given_equal_scan_bounds() {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        // Arrange
+        let engine = open_with_mode(&opts, mode);
+        let cf = engine.create_column_family("test").expect("create cf");
+        let mut write = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin write");
+        write
+            .put(b"k01".to_vec(), b"v01".to_vec(), None)
+            .expect("put row");
+        write
+            .commit(buffered_write_options(mode))
+            .expect("commit row");
+        let read = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .expect("begin read");
+
+        // Act
+        let results = scan_between(&read, b"k01", b"k01");
+
+        // Assert
         assert!(results.is_empty());
     });
 }

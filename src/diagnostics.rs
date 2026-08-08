@@ -46,6 +46,7 @@ pub(crate) struct RuntimeDiagnostics {
     snapshot_register_count: AtomicU64,
     snapshot_unregister_count: AtomicU64,
     sst: crate::sst::read_path_metrics::SstReadMetrics,
+    read_amp: crate::sst::ReadAmpMetrics,
 }
 
 impl RuntimeDiagnostics {
@@ -74,6 +75,10 @@ impl RuntimeDiagnostics {
 
     pub(crate) fn sst_metrics(&self) -> &crate::sst::read_path_metrics::SstReadMetrics {
         &self.sst
+    }
+
+    pub(crate) fn read_amp_metrics(&self) -> &crate::sst::ReadAmpMetrics {
+        &self.read_amp
     }
 
     pub(crate) fn record_read_only_begin_tx(&self) {

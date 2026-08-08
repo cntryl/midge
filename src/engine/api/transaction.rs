@@ -796,8 +796,18 @@ impl Transaction {
     ///
     /// # Errors
     ///
-    /// Returns an error when the transaction snapshot is unavailable.
+    /// Returns [`MidgeError::InvalidArgument`] when both explicit bounds are
+    /// present and `start > end`. Equal bounds and valid bounds whose prefix
+    /// intersection is empty produce an empty iterator. Also returns an error
+    /// when the transaction snapshot is unavailable.
     pub fn scan(&self, query: &super::query::Query) -> MidgeResult<super::iterator::Iterator<'_>> {
+        if let (Some(start), Some(end)) = (query.start.as_deref(), query.end.as_deref()) {
+            if start > end {
+                return Err(MidgeError::InvalidArgument(
+                    "scan requires start_key <= end_key".to_string(),
+                ));
+            }
+        }
         let snapshot = self.read_snapshot.as_ref().ok_or_else(|| {
             MidgeError::Internal("read snapshot not available - this is a bug".to_string())
         })?;
