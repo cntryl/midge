@@ -4,7 +4,7 @@ use super::WalActor;
 use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::state::RuntimeState;
 use crate::sst::Memtable;
-use crate::wal::{DurabilityPolicy, WalOpKind, WalRecord};
+use crate::wal::{DurabilityPolicy, WalOpKind};
 use bytes::Bytes;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -302,6 +302,7 @@ impl WalActor {
             Arc::clone(&state.fs),
             sst_path_prefix,
             state.is_memory_mode(),
+            state.observed_time_millis(),
         );
         snapshot.cf_id = cf_id;
         #[cfg(test)]
@@ -335,7 +336,7 @@ impl WalActor {
         ops: Vec<crate::runtime::TransactionOp>,
         first_op_seq: u64,
         _txn_id: u64,
-        current_epoch: u64,
+        commit_time_millis: u64,
     ) -> Vec<TransactionApplyOp> {
         let mut apply_ops = Vec::with_capacity(ops.len());
 
@@ -355,21 +356,8 @@ impl WalActor {
                         WalOpKind::Put
                     };
 
-                    let expiration = match ttl_seconds {
-                        Some(ttl) if ttl > 0 => {
-                            WalRecord::new_with_ttl(
-                                cf_id,
-                                op_kind,
-                                key.clone(),
-                                Some(value.clone()),
-                                seq,
-                                ttl,
-                                current_epoch,
-                            )
-                            .expiration
-                        }
-                        _ => None,
-                    };
+                    let expiration =
+                        crate::common::time::expiration_from_ttl(ttl_seconds, commit_time_millis);
 
                     apply_ops.push(TransactionApplyOp::Put {
                         op: op_kind,
@@ -471,6 +459,7 @@ impl WalActor {
             Arc::clone(&state.fs),
             sst_path_prefix,
             state.is_memory_mode(),
+            state.observed_time_millis(),
         );
         matches!(snapshot.get(key, u64::MAX), Ok(Some(_)))
     }

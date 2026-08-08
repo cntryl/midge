@@ -4,7 +4,7 @@
 //!   1. Collect one logical-version buffer per input SST.
 //!   2. Merge their heads into a sorted stream (key ascending, seq descending).
 //!   3. Deduplicate one key at a time (newest version first).
-//!   4. Normalize expired values to masking tombstones on-the-fly.
+//!   4. Preserve raw TTL values; read snapshots alone interpret expiration.
 //!   5. Feed the result directly to the `SstFactory` writer.
 //!
 //! This avoids an additional all-input vector, key map, and deduplicated output
@@ -52,18 +52,14 @@ pub struct CompactionVersion {
 pub struct StreamDeduplicate<I: Iterator<Item = CompactionVersion>> {
     inner: I,
     last_key: Option<Vec<u8>>,
-    now_millis: u64,
 }
 
 #[cfg(test)]
 impl<I: Iterator<Item = CompactionVersion>> StreamDeduplicate<I> {
     pub fn new(inner: I) -> Self {
-        let now_millis = crate::common::time::unix_time_millis();
-
         Self {
             inner,
             last_key: None,
-            now_millis,
         }
     }
 }
@@ -75,18 +71,6 @@ impl<I: Iterator<Item = CompactionVersion>> Iterator for StreamDeduplicate<I> {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             let version = self.inner.next()?;
-
-            let version = if is_expired(&version, self.now_millis) && !version.is_tombstone {
-                CompactionVersion {
-                    key: version.key.clone(),
-                    seq: version.seq,
-                    is_tombstone: true,
-                    value: None,
-                    expiration: None,
-                }
-            } else {
-                version
-            };
 
             // Skip duplicate keys (we already emitted the highest-seq version of this key)
             if let Some(ref last_key) = self.last_key {
@@ -100,11 +84,6 @@ impl<I: Iterator<Item = CompactionVersion>> Iterator for StreamDeduplicate<I> {
             return Some(version);
         }
     }
-}
-
-/// Return `true` if this version is expired with respect to `now_millis`.
-fn is_expired(version: &CompactionVersion, now_millis: u64) -> bool {
-    crate::common::time::is_expired_at(version.expiration, now_millis)
 }
 
 fn tombstone_is_obsolete(sequence: u64, snapshot_horizon: Option<u64>) -> bool {
@@ -247,7 +226,7 @@ fn collect_reader_input(
     reader: &dyn crate::sst::traits::SstReaderExt,
 ) -> MidgeResult<SstCompactionInput> {
     let versions = reader
-        .scan_range_state(None, None)?
+        .scan_range_raw_state(None, None)?
         .into_iter()
         .filter_map(|(key, state)| match state {
             KeyState::Absent => None,
@@ -315,10 +294,10 @@ pub(crate) fn collect_compaction_stream_inputs(
     Ok((streams, normalize_range_tombstones(range_tombstones)))
 }
 
-/// Deduplicate versions, keeping only the newest **non-expired** entry per key.
+/// Deduplicate versions, keeping the newest entry per key without interpreting TTL.
 ///
 /// Rules:
-///   - Versions with TTL that has passed at compaction time are discarded.
+///   - TTL expiration is preserved as metadata and is never interpreted here.
 ///   - Among remaining versions, we keep the one with the highest `seq` per key.
 ///   - Output is sorted by key in ascending order.
 ///
@@ -326,23 +305,11 @@ pub(crate) fn collect_compaction_stream_inputs(
 /// any particular SST layout.
 #[cfg(test)]
 pub fn deduplicate_versions(versions: &[CompactionVersion]) -> Vec<CompactionVersion> {
-    let now_millis = crate::common::time::unix_time_millis();
-
     // Map: key -> newest visible version (by sequence).
     let mut newest_by_key: BTreeMap<Vec<u8>, CompactionVersion> = BTreeMap::new();
 
     for version in versions {
-        let normalized = if is_expired(version, now_millis) && !version.is_tombstone {
-            CompactionVersion {
-                key: version.key.clone(),
-                seq: version.seq,
-                is_tombstone: true,
-                value: None,
-                expiration: None,
-            }
-        } else {
-            version.clone()
-        };
+        let normalized = version.clone();
 
         let key = &normalized.key;
 
@@ -406,7 +373,6 @@ pub(crate) fn write_merged_compaction_output_to_sst(
     abort_check: Option<&dyn Fn() -> bool>,
 ) -> MidgeResult<bool> {
     let mut writer = sst_factory.create()?;
-    let now_millis = crate::common::time::unix_time_millis();
     let mut last_key: Option<Vec<u8>> = None;
     let mut written = 0usize;
     let (obsolete_range_tombstones, retained_range_tombstones): (Vec<_>, Vec<_>) =
@@ -417,7 +383,7 @@ pub(crate) fn write_merged_compaction_output_to_sst(
 
     let mut merged = VersionMergeIterator::new(streams).peekable();
     let mut seen = 0usize;
-    while let Some(mut version) = merged.next() {
+    while let Some(version) = merged.next() {
         if seen.is_multiple_of(1024) {
             ensure_compaction_not_aborted(abort_check)?;
         }
@@ -439,12 +405,6 @@ pub(crate) fn write_merged_compaction_output_to_sst(
                     version.seq
                 )));
             }
-        }
-
-        if is_expired(&version, now_millis) && !version.is_tombstone {
-            version.is_tombstone = true;
-            version.value = None;
-            version.expiration = None;
         }
 
         if last_key.as_deref() == Some(version.key.as_slice()) {
@@ -565,19 +525,19 @@ mod tests {
     }
 
     #[test]
-    fn should_skip_expired_entries_when_deduplicating_with_ttl() {
+    fn should_preserve_expired_value_metadata_when_deduplicating_for_compaction() {
         // Arrange
-        let now = crate::common::time::unix_time_millis();
+        let now = 1_000_u64;
 
         let versions = vec![
             mk_version(
                 "key1",
-                1,
+                2,
                 false,
                 Some("expired"),
                 Some(now.saturating_sub(1)), // Expired
             ),
-            mk_version("key1", 2, false, Some("valid"), None),
+            mk_version("key1", 1, false, Some("older"), None),
         ];
 
         // Act
@@ -585,7 +545,8 @@ mod tests {
 
         // Assert
         assert_eq!(deduped.len(), 1);
-        assert_eq!(deduped[0].value.as_deref(), Some(b"valid".as_ref()));
+        assert_eq!(deduped[0].value.as_deref(), Some(b"expired".as_ref()));
+        assert_eq!(deduped[0].expiration, Some(now.saturating_sub(1)));
     }
 
     #[test]
@@ -656,29 +617,6 @@ mod tests {
     }
 
     #[test]
-    fn should_drop_expired_value_given_compaction_time_after_expiration() {
-        let now = 1_000_000u64;
-        let v = mk_version("k", 1, false, Some("v"), Some(now - 1));
-        assert!(is_expired(&v, now));
-    }
-
-    #[test]
-    fn should_not_drop_unexpired_value_given_compaction_time_before_expiration() {
-        // Arrange
-        let now = 1_000_000u64;
-        let v_future = mk_version("k", 1, false, Some("v"), Some(now + 10));
-        let v_none = mk_version("k", 1, false, Some("v"), None);
-
-        // Act
-        let future_expired = is_expired(&v_future, now);
-        let none_expired = is_expired(&v_none, now);
-
-        // Assert
-        assert!(!future_expired);
-        assert!(!none_expired);
-    }
-
-    #[test]
     fn should_preserve_tombstone_visibility_given_overlapping_ssts_when_scanning() {
         use crate::sst::traits::{SstReader, SstStateReader};
 
@@ -716,6 +654,14 @@ mod tests {
                     ),
                     (bytes::Bytes::from_static(b"beta"), KeyState::Tombstone(41)),
                 ])
+            }
+
+            fn scan_range_raw_state(
+                &self,
+                start: Option<&[u8]>,
+                end: Option<&[u8]>,
+            ) -> MidgeResult<Vec<(bytes::Bytes, KeyState)>> {
+                self.scan_range_state(start, end)
             }
 
             fn range_tombstones(&self) -> Vec<RangeTombstone> {

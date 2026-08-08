@@ -123,7 +123,12 @@ fn get_hit(ctx: &mut StressContext) {
             let mut hits = 0usize;
             for i in 0..LOOKUP_HIT_BATCH_SIZE {
                 let hit_key = hit_keys[i % hit_keys.len()];
-                if memtable.get(black_box(hit_key)).unwrap().is_some() {
+                if matches!(
+                    memtable
+                        .get_key_state_at_with_time(black_box(hit_key), u64::MAX, 0)
+                        .unwrap(),
+                    cntryl_midge::sst::types::KeyState::Value(..)
+                ) {
                     hits += 1;
                 }
             }
@@ -153,11 +158,12 @@ fn get_miss(ctx: &mut StressContext) {
             let mut misses = 0usize;
             for i in 0..LOOKUP_MISS_BATCH_SIZE {
                 let miss_key = &miss_keys[i % miss_keys.len()];
-                if memtable
-                    .get(black_box(miss_key.as_slice()))
-                    .unwrap()
-                    .is_none()
-                {
+                if matches!(
+                    memtable
+                        .get_key_state_at_with_time(black_box(miss_key.as_slice()), u64::MAX, 0,)
+                        .unwrap(),
+                    cntryl_midge::sst::types::KeyState::Absent
+                ) {
                     misses += 1;
                 }
             }

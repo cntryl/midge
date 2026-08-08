@@ -1,13 +1,266 @@
 //! Integration tests for TTL (Time-To-Live) support
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use bytes::Bytes;
 mod common;
-use cntryl_midge::TransactionMode;
+use cntryl_midge::common::time::Clock;
+use cntryl_midge::{MemoryBudget, MidgeEngine, OpenOptions, Query, TransactionMode, WriteOptions};
 use common::*;
+
+#[derive(Debug)]
+struct ManualClock(AtomicU64);
+
+impl ManualClock {
+    fn new(now: u64) -> Self {
+        Self(AtomicU64::new(now))
+    }
+
+    fn set(&self, now: u64) {
+        self.0.store(now, Ordering::Release);
+    }
+}
+
+impl Clock for ManualClock {
+    fn now_millis(&self) -> u64 {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+fn open_with_clock(clock: Arc<ManualClock>) -> MidgeEngine {
+    MidgeEngine::open(
+        OpenOptions::in_memory()
+            .ttl_clock(clock)
+            .build()
+            .expect("build options"),
+    )
+    .expect("open engine")
+}
+
+#[test]
+fn should_not_reexpose_expired_key_given_clock_steps_backward_when_reading() {
+    // Arrange
+    let clock = Arc::new(ManualClock::new(10_000));
+    let engine = open_with_clock(Arc::clone(&clock));
+    let mut write = engine
+        .begin_tx(0, TransactionMode::ReadWrite)
+        .expect("begin write");
+    write
+        .put(b"key".to_vec(), b"value".to_vec(), Some(1))
+        .expect("put");
+    write.commit(WriteOptions::buffered()).expect("commit");
+    clock.set(11_000);
+    assert_eq!(
+        engine
+            .begin_tx(0, TransactionMode::ReadOnly)
+            .expect("read expired")
+            .get(b"key")
+            .expect("get"),
+        None
+    );
+
+    // Act
+    clock.set(10_500);
+    let value = engine
+        .begin_tx(0, TransactionMode::ReadOnly)
+        .expect("read after skew")
+        .get(b"key")
+        .expect("get");
+
+    // Assert
+    assert_eq!(value, None);
+}
+
+#[test]
+fn should_use_one_commit_time_given_multiple_ttl_puts_when_committing() {
+    // Arrange
+    let clock = Arc::new(ManualClock::new(20_000));
+    let engine = open_with_clock(Arc::clone(&clock));
+    let mut transaction = engine
+        .begin_tx(0, TransactionMode::ReadWrite)
+        .expect("begin write");
+    transaction
+        .put(b"a".to_vec(), b"a".to_vec(), Some(1))
+        .expect("put a");
+    transaction
+        .put(b"b".to_vec(), b"b".to_vec(), Some(1))
+        .expect("put b");
+
+    // Act
+    transaction
+        .commit(WriteOptions::buffered())
+        .expect("commit");
+    clock.set(21_000);
+    let read = engine
+        .begin_tx(0, TransactionMode::ReadOnly)
+        .expect("begin read");
+
+    // Assert
+    assert_eq!(read.get(b"a").expect("get a"), None);
+    assert_eq!(read.get(b"b").expect("get b"), None);
+}
+
+#[test]
+fn should_keep_pending_ttl_visible_given_read_your_own_write_before_commit() {
+    // Arrange
+    let clock = Arc::new(ManualClock::new(30_000));
+    let engine = open_with_clock(Arc::clone(&clock));
+    let mut transaction = engine
+        .begin_tx(0, TransactionMode::ReadWrite)
+        .expect("begin write");
+    transaction
+        .put(b"key".to_vec(), b"value".to_vec(), Some(1))
+        .expect("put");
+
+    // Act
+    clock.set(40_000);
+    let value = transaction.get(b"key").expect("read own write");
+
+    // Assert
+    assert_eq!(value, Some(Bytes::from_static(b"value")));
+}
+
+#[test]
+fn should_use_fixed_snapshot_time_given_range_scan_crosses_ttl_boundary() {
+    // Arrange
+    let clock = Arc::new(ManualClock::new(50_000));
+    let engine = open_with_clock(Arc::clone(&clock));
+    let mut write = engine
+        .begin_tx(0, TransactionMode::ReadWrite)
+        .expect("begin write");
+    write
+        .put(b"short".to_vec(), b"value".to_vec(), Some(1))
+        .expect("put short");
+    write
+        .put(b"stable".to_vec(), b"value".to_vec(), None)
+        .expect("put stable");
+    write.commit(WriteOptions::buffered()).expect("commit");
+    clock.set(50_999);
+    let read = engine
+        .begin_tx(0, TransactionMode::ReadOnly)
+        .expect("begin snapshot");
+
+    // Act
+    clock.set(51_001);
+    let entries = read
+        .scan(&Query::new())
+        .expect("scan")
+        .try_collect()
+        .expect("collect scan");
+
+    // Assert
+    assert_eq!(entries.len(), 2);
+}
+
+#[test]
+fn should_match_expiration_given_resident_and_spilled_transaction_paths() {
+    // Arrange
+    let clock = Arc::new(ManualClock::new(60_000));
+    let resident = open_with_clock(Arc::clone(&clock));
+    let spill_dir = tempfile::TempDir::new().expect("spill directory");
+    let spilled = MidgeEngine::open(
+        OpenOptions::local(spill_dir.path())
+            .memory_budget(MemoryBudget::Bytes(128 * 1024))
+            .ttl_clock(clock.clone())
+            .build()
+            .expect("build spill options"),
+    )
+    .expect("open spill engine");
+    for (engine, count) in [(&resident, 1), (&spilled, 100)] {
+        let mut transaction = engine
+            .begin_tx(0, TransactionMode::ReadWrite)
+            .expect("begin write");
+        for index in 0..count {
+            transaction
+                .put(
+                    format!("key-{index:03}").into_bytes(),
+                    vec![b'x'; 1024],
+                    Some(1),
+                )
+                .expect("put");
+        }
+        transaction
+            .commit(WriteOptions::buffered())
+            .expect("commit");
+    }
+
+    // Act
+    clock.set(61_000);
+    let resident_value = resident
+        .begin_tx(0, TransactionMode::ReadOnly)
+        .expect("resident read")
+        .get(b"key-000")
+        .expect("resident get");
+    let spilled_value = spilled
+        .begin_tx(0, TransactionMode::ReadOnly)
+        .expect("spilled read")
+        .get(b"key-000")
+        .expect("spilled get");
+
+    // Assert
+    assert_eq!(resident_value, None);
+    assert_eq!(spilled_value, None);
+}
+
+#[test]
+fn should_preserve_raw_ttl_value_given_forward_skew_during_flush_and_compaction() {
+    // Arrange
+    let directory = tempfile::TempDir::new().expect("database directory");
+    let clock = Arc::new(ManualClock::new(1_000));
+    let mut engine = MidgeEngine::open(
+        OpenOptions::local(directory.path())
+            .ttl_clock(clock.clone())
+            .build()
+            .expect("build options"),
+    )
+    .expect("open engine");
+    let cf = engine.create_column_family("ttl").expect("create cf");
+    for index in 0..4 {
+        let mut transaction = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin write");
+        transaction
+            .put(
+                if index == 0 {
+                    b"ttl-key".to_vec()
+                } else {
+                    format!("padding-{index}").into_bytes()
+                },
+                b"value".to_vec(),
+                (index == 0).then_some(100),
+            )
+            .expect("put");
+        transaction
+            .commit(WriteOptions::buffered())
+            .expect("commit");
+        engine.flush_cf(&cf).expect("flush");
+    }
+    clock.set(200_000);
+
+    // Act
+    engine.compact_all().expect("compact");
+    engine.shutdown(Duration::from_secs(5)).expect("shutdown");
+    clock.set(50_000);
+    let reopened = MidgeEngine::open(
+        OpenOptions::local(directory.path())
+            .ttl_clock(clock)
+            .build()
+            .expect("build reopen options"),
+    )
+    .expect("reopen engine");
+    let reopened_cf = reopened.get_column_family("ttl").expect("reopened cf");
+    let value = reopened
+        .begin_tx(reopened_cf.id(), TransactionMode::ReadOnly)
+        .expect("begin read")
+        .get(b"ttl-key")
+        .expect("get");
+
+    // Assert
+    assert_eq!(value, Some(Bytes::from_static(b"value")));
+}
 
 // ============================================================================
 // Basic TTL Behavior

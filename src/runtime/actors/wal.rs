@@ -480,25 +480,16 @@ impl WalActor {
         };
 
         // Create WAL record (with expiration if provided)
-        let record = match ttl_seconds {
-            Some(ttl) if ttl > 0 => WalRecord::new_with_ttl(
-                cf_id,
-                op_kind,
-                key.clone(),
-                value.clone(),
-                sequence,
-                ttl,
-                self.current_epoch,
-            ),
-            _ => WalRecord::new_cf(
-                cf_id,
-                op_kind,
-                key.clone(),
-                value.clone(),
-                sequence,
-                self.current_epoch,
-            ),
-        };
+        let mut record = WalRecord::new_cf(
+            cf_id,
+            op_kind,
+            key.clone(),
+            value.clone(),
+            sequence,
+            self.current_epoch,
+        );
+        record.expiration =
+            crate::common::time::expiration_from_ttl(ttl_seconds, state.observed_time_millis());
 
         // Calculate record size for batching
         let record_size = record.estimated_size();

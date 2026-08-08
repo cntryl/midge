@@ -57,6 +57,14 @@ pub trait SstStateReader: Send + Sync {
         self.scan_range_state(start, end)
     }
 
+    /// Scan persisted state without interpreting TTL expiration. Recovery and
+    /// compaction use this to preserve raw value-plus-expiration metadata.
+    fn scan_range_raw_state(
+        &self,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+    ) -> MidgeResult<Vec<(Bytes, super::types::KeyState)>>;
+
     /// Snapshot-aware point lookup (entries with seq > `snapshot_seq` are ignored)
     ///
     /// # Errors
@@ -263,6 +271,14 @@ mod tests {
                 .into_iter()
                 .map(|(key, value)| (key, crate::sst::types::KeyState::Value(value, 0, None, 0)))
                 .collect())
+        }
+
+        fn scan_range_raw_state(
+            &self,
+            start: Option<&[u8]>,
+            end: Option<&[u8]>,
+        ) -> MidgeResult<Vec<(Bytes, crate::sst::types::KeyState)>> {
+            self.scan_range_state(start, end)
         }
     }
 

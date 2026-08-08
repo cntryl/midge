@@ -119,6 +119,7 @@ pub struct Engine {
     ingest_coordinators: dashmap::DashMap<ColumnFamilyId, Arc<ingest::IngestCoordinator>>,
     /// Shared bounded pool for resident transaction intents.
     transaction_memory_pool: Arc<crate::runtime::transaction_spill::TransactionMemoryPool>,
+    ttl_clock: Arc<crate::common::time::ObservedClock>,
 }
 
 impl Drop for Engine {
@@ -605,7 +606,7 @@ impl Engine {
         let read_snapshot = Arc::new(
             (*read_snapshot)
                 .clone()
-                .with_read_time_millis(crate::runtime::ReadSnapshot::current_time_millis()),
+                .with_read_time_millis(self.ttl_clock.now_millis()),
         );
 
         let pinned_sst_names = read_snapshot

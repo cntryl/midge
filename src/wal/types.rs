@@ -153,7 +153,7 @@ impl WalRecord {
         }
     }
 
-    /// Create a new WAL record with TTL support.
+    #[cfg(test)]
     pub fn new_with_ttl(
         cf_id: ColumnFamilyId,
         op: WalOpKind,
@@ -163,28 +163,15 @@ impl WalRecord {
         ttl_seconds: u64,
         writer_epoch: u64,
     ) -> Self {
-        let expiration = if ttl_seconds > 0 {
-            let now = crate::common::time::unix_time_millis();
-            Some(now.saturating_add(ttl_seconds.saturating_mul(1_000)))
-        } else {
-            None
-        };
-
-        Self {
-            cf_id,
-            op,
-            key,
-            value,
-            seq,
-            expiration,
-            range_end: None,
-            txn_id: None,
-            compression: None,
-            writer_epoch,
-        }
+        let mut record = Self::new_cf(cf_id, op, key, value, seq, writer_epoch);
+        record.expiration = crate::common::time::expiration_from_ttl(
+            Some(ttl_seconds),
+            crate::common::time::unix_time_millis(),
+        );
+        record
     }
 
-    /// Check if this record has expired
+    #[cfg(test)]
     pub fn is_expired(&self) -> bool {
         crate::common::time::is_expired_at(self.expiration, crate::common::time::unix_time_millis())
     }

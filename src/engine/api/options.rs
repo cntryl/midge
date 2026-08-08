@@ -26,6 +26,7 @@
 //! ```
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Clone)]
@@ -250,6 +251,7 @@ pub struct OpenOptions {
     simulated_cloud_local_storage_budget_bytes: Option<u64>,
     lease_loss_hook: Option<LeaseLossHook>,
     lease_clock_skew_tolerance: Duration,
+    ttl_clock: crate::common::time::ClockHandle,
 }
 
 /// Mutable input state for constructing [`OpenOptions`].
@@ -275,6 +277,7 @@ pub struct OpenOptionsBuilder {
     simulated_cloud_local_storage_budget_bytes: Option<u64>,
     lease_loss_hook: Option<LeaseLossHook>,
     lease_clock_skew_tolerance: Duration,
+    ttl_clock: crate::common::time::ClockHandle,
 }
 
 struct DerivedMemoryPools {
@@ -493,6 +496,10 @@ impl OpenOptions {
     pub(crate) fn lease_clock_skew_tolerance(&self) -> Duration {
         self.lease_clock_skew_tolerance
     }
+
+    pub(crate) fn ttl_clock(&self) -> Arc<crate::common::time::ObservedClock> {
+        Arc::clone(&self.ttl_clock.0)
+    }
 }
 
 impl OpenOptionsBuilder {
@@ -517,6 +524,9 @@ impl OpenOptionsBuilder {
             // Half a lease TTL tolerates ordinary NTP/VM clock correction while
             // bounding additional failover latency.
             lease_clock_skew_tolerance: Duration::from_secs(15),
+            ttl_clock: crate::common::time::ClockHandle(Arc::new(
+                crate::common::time::ObservedClock::default(),
+            )),
         }
     }
 
@@ -625,6 +635,16 @@ impl OpenOptionsBuilder {
         self
     }
 
+    /// Override the engine TTL wall clock, primarily for deterministic hosts
+    /// and tests. Midge applies a process-local nondecreasing floor to it.
+    #[must_use]
+    pub fn ttl_clock(mut self, clock: Arc<dyn crate::common::time::Clock>) -> Self {
+        self.ttl_clock = crate::common::time::ClockHandle(Arc::new(
+            crate::common::time::ObservedClock::new(clock),
+        ));
+        self
+    }
+
     /// Override the simulated-cloud local storage budget.
     #[doc(hidden)]
     #[must_use]
@@ -713,6 +733,7 @@ impl OpenOptionsBuilder {
                 .simulated_cloud_local_storage_budget_bytes,
             lease_loss_hook: self.lease_loss_hook,
             lease_clock_skew_tolerance: self.lease_clock_skew_tolerance,
+            ttl_clock: self.ttl_clock,
         })
     }
 

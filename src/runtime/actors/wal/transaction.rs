@@ -128,7 +128,7 @@ impl WalActor {
         let effective_durability = durability_policy.unwrap_or(self.durability_policy);
         let sequence_plan = Self::allocate_transaction_sequences(state, ops.len());
         let (apply_ops, wal_batch) =
-            self.build_transaction_wal_batch(ops, &sequence_plan, effective_durability)?;
+            self.build_transaction_wal_batch(state, ops, &sequence_plan, effective_durability)?;
 
         Ok(PreparedTransactionAppend {
             request_id,
@@ -340,6 +340,7 @@ impl WalActor {
 
     fn build_transaction_wal_batch(
         &mut self,
+        state: &RuntimeState,
         ops: Vec<crate::runtime::TransactionOp>,
         sequence_plan: &TxnSequencePlan,
         effective_durability: DurabilityPolicy,
@@ -350,7 +351,7 @@ impl WalActor {
             ops,
             sequence_plan.first_op_seq,
             sequence_plan.txn_id,
-            self.current_epoch,
+            state.observed_time_millis(),
         );
         let wal_record =
             self.build_transaction_batch_record(sequence_plan, &apply_ops, encode_wal)?;

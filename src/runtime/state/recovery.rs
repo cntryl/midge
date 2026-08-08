@@ -85,6 +85,7 @@ impl RuntimeState {
             column_families: wal_recovery.column_families,
             manifest,
             fs: fs.clone(),
+            ttl_clock: Arc::new(crate::common::time::ObservedClock::default()),
             wal: WalState {
                 current_segment_id: wal_recovery.next_segment_id,
                 local_durable_seq: wal_recovery.recovered_sequence,

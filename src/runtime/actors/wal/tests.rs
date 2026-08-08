@@ -12,6 +12,43 @@ use std::sync::{Mutex, OnceLock};
 #[cfg(feature = "failpoints")]
 static FAILPOINT_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
+#[test]
+fn should_assign_identical_expiration_given_multiple_ttl_puts_in_one_transaction() {
+    // Arrange
+    let ops = vec![
+        crate::runtime::TransactionOp::Put {
+            cf_id: 0,
+            key: Bytes::from_static(b"a"),
+            value: Bytes::from_static(b"a"),
+            ttl_seconds: Some(3),
+            insert_only: false,
+        },
+        crate::runtime::TransactionOp::Put {
+            cf_id: 0,
+            key: Bytes::from_static(b"b"),
+            value: Bytes::from_static(b"b"),
+            ttl_seconds: Some(3),
+            insert_only: false,
+        },
+    ];
+
+    // Act
+    let apply_ops = WalActor::build_apply_ops(ops, 10, 1, 50_000);
+
+    // Assert
+    let expirations = apply_ops
+        .iter()
+        .map(|op| match op {
+            crate::runtime::actors::cloud_write_queue::TransactionApplyOp::Put {
+                expiration,
+                ..
+            } => *expiration,
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(expirations, vec![Some(53_000), Some(53_000)]);
+}
+
 #[cfg(feature = "failpoints")]
 fn failpoint_test_lock() -> &'static Mutex<()> {
     FAILPOINT_TEST_LOCK.get_or_init(|| Mutex::new(()))

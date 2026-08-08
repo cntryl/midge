@@ -326,10 +326,6 @@ impl std::iter::Iterator for SnapshotScan {
 }
 
 impl ReadSnapshot {
-    pub(crate) fn current_time_millis() -> u64 {
-        crate::common::time::unix_time_millis()
-    }
-
     fn state_sequence(state: &KeyState) -> Option<u64> {
         match state {
             KeyState::Absent => None,
@@ -435,6 +431,7 @@ impl ReadSnapshot {
         sst_fs: Arc<dyn Fs>,
         sst_path_prefix: std::path::PathBuf,
         memory_mode: bool,
+        read_time_millis: u64,
     ) -> Self {
         Self::new_with_resources(
             memtable,
@@ -443,10 +440,12 @@ impl ReadSnapshot {
             sst_fs,
             sst_path_prefix,
             memory_mode,
+            read_time_millis,
             None,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_with_resources(
         memtable: Arc<SkipListMemtable>,
         immutable_memtables: Vec<Arc<SkipListMemtable>>,
@@ -454,6 +453,7 @@ impl ReadSnapshot {
         sst_fs: Arc<dyn Fs>,
         sst_path_prefix: std::path::PathBuf,
         memory_mode: bool,
+        read_time_millis: u64,
         read_resources: Option<Arc<ReadResources>>,
     ) -> Self {
         // Extract cf_id from first SST file or default to DEFAULT
@@ -479,7 +479,7 @@ impl ReadSnapshot {
             sst_fs,
             sst_path_prefix,
             memory_mode,
-            read_time_millis: Self::current_time_millis(),
+            read_time_millis,
             read_resources,
             diagnostics,
             sst_readers,
@@ -873,6 +873,7 @@ mod tests {
             Arc::new(crate::io::RealFs::new(temp_dir.path())?),
             std::path::PathBuf::new(),
             false,
+            0,
             Some(Arc::clone(&read_resources)),
         );
         let block_cache = read_resources.block_cache();
@@ -949,6 +950,7 @@ mod tests {
             fs,
             std::path::PathBuf::new(),
             false,
+            0,
         );
 
         // Act
