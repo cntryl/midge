@@ -297,13 +297,17 @@ mod tests {
             self.state
                 .keys
                 .lock()
-                .expect("policy keys lock")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(key);
         }
 
         fn pick_victim(&self, _exclude_types: &[BlockType]) -> Option<CacheKey> {
             self.state.victim_selected.store(true, Ordering::SeqCst);
-            let keys = self.state.keys.lock().expect("policy keys lock");
+            let keys = self
+                .state
+                .keys
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             keys.contains(&self.target)
                 .then_some(self.target)
                 .or_else(|| keys.iter().next().copied())
@@ -313,7 +317,7 @@ mod tests {
             self.state
                 .keys
                 .lock()
-                .expect("policy keys lock")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(&key);
         }
 
@@ -322,7 +326,11 @@ mod tests {
         }
 
         fn clear(&self) {
-            self.state.keys.lock().expect("policy keys lock").clear();
+            self.state
+                .keys
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear();
         }
     }
 
@@ -400,7 +408,7 @@ mod tests {
             !state
                 .keys
                 .lock()
-                .expect("policy keys lock")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .contains(&target),
             "evicted entry must not remain in policy metadata"
         );

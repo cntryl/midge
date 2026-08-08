@@ -38,20 +38,23 @@ impl CloudOpTracker {
     fn record_delete(&self, key: &str) {
         self.operations
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(format!("delete:{key}"));
     }
 
     #[allow(dead_code)]
     fn record_write(&self, key: &str) {
-        self.operations.lock().unwrap().push(format!("write:{key}"));
+        self.operations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(format!("write:{key}"));
     }
 
     #[allow(dead_code)]
     fn has_deleted(&self, key: &str) -> bool {
         self.operations
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .any(|op| op.as_str() == format!("delete:{key}"))
     }
@@ -60,7 +63,7 @@ impl CloudOpTracker {
     fn count_deleted(&self) -> usize {
         self.operations
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .filter(|op| op.starts_with("delete:"))
             .count()
@@ -68,7 +71,10 @@ impl CloudOpTracker {
 
     #[allow(dead_code)]
     fn get_operations(&self) -> Vec<String> {
-        self.operations.lock().unwrap().clone()
+        self.operations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 }
 

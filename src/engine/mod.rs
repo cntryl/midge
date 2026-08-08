@@ -49,9 +49,14 @@ type FencingResources = (
     Option<crate::lease::LeaseGuard>,
 );
 
-struct PendingFencingCleanup {
-    completion: crossbeam::channel::Receiver<()>,
-    terminal_result: MidgeResult<()>,
+enum PendingFencingCleanup {
+    Known {
+        completion: crossbeam::channel::Receiver<()>,
+        terminal_result: MidgeResult<()>,
+    },
+    Runtime {
+        completion: crossbeam::channel::Receiver<MidgeResult<()>>,
+    },
 }
 
 /// Column family handle for API operations
@@ -217,7 +222,7 @@ impl Engine {
         match spawn_result {
             Ok(worker) => {
                 drop(worker);
-                self.pending_fencing_cleanup = Some(PendingFencingCleanup {
+                self.pending_fencing_cleanup = Some(PendingFencingCleanup::Known {
                     completion: completion_rx,
                     terminal_result,
                 });
@@ -261,6 +266,7 @@ impl Engine {
         );
         let retained_cleanup = Arc::new(std::sync::Mutex::new(Some((runtime, resources))));
         let worker_cleanup = Arc::clone(&retained_cleanup);
+        let runtime_handle = self.runtime_handle.clone();
         let (completion_tx, completion_rx) = crossbeam::channel::bounded(1);
         let spawn_result = std::thread::Builder::new()
             .name("midge-runtime-fencing-reaper".to_string())
@@ -272,17 +278,17 @@ impl Engine {
                 let Some((runtime, resources)) = cleanup else {
                     return;
                 };
+                let terminal_result = runtime_handle.shutdown(Duration::MAX);
                 drop(runtime);
                 Self::release_fencing_parts(resources.0, resources.1, resources.2);
-                let _ = completion_tx.send(());
+                let _ = completion_tx.send(terminal_result);
                 tracing::debug!("Engine runtime and fencing reaper cleanup complete");
             });
         match spawn_result {
             Ok(worker) => {
                 drop(worker);
-                self.pending_fencing_cleanup = Some(PendingFencingCleanup {
+                self.pending_fencing_cleanup = Some(PendingFencingCleanup::Runtime {
                     completion: completion_rx,
-                    terminal_result: Ok(()),
                 });
                 Ok(())
             }
@@ -309,26 +315,61 @@ impl Engine {
     }
 
     fn wait_for_fencing_cleanup(&mut self, timeout: Duration) -> MidgeResult<()> {
-        let wait_result = self
+        enum CleanupWait {
+            KnownComplete,
+            RuntimeComplete(MidgeResult<()>),
+            Timeout,
+            Disconnected,
+        }
+
+        let cleanup = self
             .pending_fencing_cleanup
             .as_ref()
-            .ok_or_else(|| MidgeError::Internal("fencing cleanup was not scheduled".to_string()))?
-            .completion
-            .recv_timeout(timeout);
+            .ok_or_else(|| MidgeError::Internal("fencing cleanup was not scheduled".to_string()))?;
+        let wait_result = match cleanup {
+            PendingFencingCleanup::Known { completion, .. } => {
+                match completion.recv_timeout(timeout) {
+                    Ok(()) => CleanupWait::KnownComplete,
+                    Err(crossbeam::channel::RecvTimeoutError::Timeout) => CleanupWait::Timeout,
+                    Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
+                        CleanupWait::Disconnected
+                    }
+                }
+            }
+            PendingFencingCleanup::Runtime { completion } => {
+                match completion.recv_timeout(timeout) {
+                    Ok(result) => CleanupWait::RuntimeComplete(result),
+                    Err(crossbeam::channel::RecvTimeoutError::Timeout) => CleanupWait::Timeout,
+                    Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
+                        CleanupWait::Disconnected
+                    }
+                }
+            }
+        };
 
         match wait_result {
-            Ok(()) => {
-                self.pending_fencing_cleanup
-                    .take()
-                    .ok_or_else(|| {
-                        MidgeError::Internal("fencing cleanup result was lost".to_string())
-                    })?
-                    .terminal_result
+            CleanupWait::KnownComplete => {
+                let cleanup = self.pending_fencing_cleanup.take().ok_or_else(|| {
+                    MidgeError::Internal("fencing cleanup result was lost".to_string())
+                })?;
+                let PendingFencingCleanup::Known {
+                    terminal_result, ..
+                } = cleanup
+                else {
+                    return Err(MidgeError::Internal(
+                        "fencing cleanup result kind changed while waiting".to_string(),
+                    ));
+                };
+                terminal_result
             }
-            Err(crossbeam::channel::RecvTimeoutError::Timeout) => Err(MidgeError::Timeout(
+            CleanupWait::RuntimeComplete(result) => {
+                self.pending_fencing_cleanup.take();
+                result
+            }
+            CleanupWait::Timeout => Err(MidgeError::Timeout(
                 "fencing cleanup did not complete before shutdown deadline".to_string(),
             )),
-            Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
+            CleanupWait::Disconnected => {
                 self.pending_fencing_cleanup.take();
                 Err(MidgeError::Internal(
                     "fencing cleanup reaper terminated without reporting completion".to_string(),
@@ -726,7 +767,9 @@ impl Engine {
 
         let Some(runtime) = self.runtime.as_mut() else {
             if !self.has_fencing_resources() {
-                return Ok(());
+                return self
+                    .runtime_handle
+                    .shutdown(timeout.saturating_sub(started.elapsed()));
             }
             self.schedule_fencing_cleanup(Ok(()))?;
             return self.wait_for_fencing_cleanup(timeout.saturating_sub(started.elapsed()));

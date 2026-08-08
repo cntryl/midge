@@ -416,7 +416,9 @@ fn should_durably_append_strict_transaction_group_once_before_memtable_apply() -
 #[test]
 fn should_apply_no_strict_group_member_when_shared_sync_fails() -> MidgeResult<()> {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let test_guard = crate::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
@@ -472,7 +474,9 @@ fn should_apply_no_strict_group_member_when_shared_sync_fails() -> MidgeResult<(
 #[test]
 fn should_fail_all_prepared_transactions_when_batch_append_hits_no_space() -> MidgeResult<()> {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
     let db_path = temp.path().to_path_buf();
     let wal_dir = db_path.join("wal");

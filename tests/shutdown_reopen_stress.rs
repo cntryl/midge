@@ -1,4 +1,4 @@
-//! Clean Shutdown Reopen Stress Tests
+//! Clean-Shutdown and Reopen Stress Tests
 //!
 //! Tests concurrent writes and storage operations followed by clean shutdown
 //! and reopen in local-disk mode.
@@ -432,8 +432,8 @@ fn should_handle_concurrent_best_effort_writes_under_load_without_invalid_values
 
                     if let Some(mut t) = tx {
                         for i in 0..50 {
-                            let key = format!("chaos_load_t{tid}_b{batch}_k{i:03}");
-                            t.put(key.as_bytes().to_vec(), b"chaos_value".to_vec(), None)
+                            let key = format!("stress_load_t{tid}_b{batch}_k{i:03}");
+                            t.put(key.as_bytes().to_vec(), b"stress_value".to_vec(), None)
                                 .ok();
                         }
                         t.commit(WriteOptions::best_effort()).ok();
@@ -466,9 +466,9 @@ fn should_handle_concurrent_best_effort_writes_under_load_without_invalid_values
         let mut sampled_present = 0;
         for tid in 0..5 {
             for batch in 0..20 {
-                let key = format!("chaos_load_t{tid}_b{batch}_k000");
+                let key = format!("stress_load_t{tid}_b{batch}_k000");
                 if let Some(val) = tx.get(key.as_bytes()).expect("get") {
-                    assert_eq!(val.as_ref(), b"chaos_value", "mode: {mode} key: {key}");
+                    assert_eq!(val.as_ref(), b"stress_value", "mode: {mode} key: {key}");
                     sampled_present += 1;
                 }
             }

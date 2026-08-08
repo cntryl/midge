@@ -335,7 +335,7 @@ mod tests {
         fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
             self.read_lengths
                 .lock()
-                .expect("recording file lock")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(len);
             let start = usize::try_from(offset)
                 .map_err(|_| FsError::Io("test offset overflow".to_string()))?;
@@ -438,7 +438,10 @@ mod tests {
 
         // Assert
         assert_eq!(crc, crc32c::crc32c(&bytes));
-        let read_lengths = file.read_lengths.lock().expect("recording file lock");
+        let read_lengths = file
+            .read_lengths
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(read_lengths.as_slice(), &[1024 * 1024, 1024 * 1024, 123]);
     }
 

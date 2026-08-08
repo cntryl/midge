@@ -186,11 +186,6 @@ impl CompactionCoordinator {
         } = request;
         let mut allow_emergent_followup = false;
 
-        let _prev = event_loop
-            .state
-            .active_compactions
-            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-
         let reservation = event_loop.compaction_actor.handle_complete(
             &mut event_loop.state,
             &input_ssts,

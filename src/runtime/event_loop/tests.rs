@@ -87,6 +87,84 @@ pub(in crate::runtime::event_loop) fn create_test_local_event_loop(
 }
 
 #[test]
+fn should_fail_every_held_request_when_shutdown_drain_restores_deferred_work() {
+    // Arrange: this is the exact state produced when a flush completion pops
+    // one deferred DDL request into `pending_msg` while shutdown is draining.
+    let mut event_loop = create_test_event_loop().expect("create event loop");
+    let request_ids = [8101_u64, 8102, 8103, 8104, 8105, 8106, 8107];
+    let receivers = request_ids
+        .into_iter()
+        .map(|request_id| (request_id, event_loop.router.register(request_id)))
+        .collect::<Vec<_>>();
+    event_loop.pending_msg = Some(RuntimeMsg::ManifestCreateColumnFamily {
+        request_id: 8101,
+        name: "restored-during-drain".to_string(),
+    });
+    event_loop
+        .publication_deferred_messages
+        .push_back(RuntimeMsg::ManifestDropColumnFamily {
+            request_id: 8102,
+            cf_id: 1,
+            discard_unflushed: false,
+        });
+    event_loop
+        .verification_deferred_messages
+        .push_back(RuntimeMsg::ManifestPersist { request_id: 8103 });
+    event_loop.flush_barrier_waiters.insert(
+        0,
+        vec![super::flush::FlushBarrierWaiter {
+            request_id: 8104,
+            frontier: 1,
+        }],
+    );
+    event_loop
+        .state
+        .pending_compaction_waits
+        .lock()
+        .insert(8105, "CompactAll".to_string());
+    event_loop.write_stall_waiters.insert(8106, 0);
+    event_loop
+        .write_stall_waiter_queues
+        .entry(0)
+        .or_default()
+        .push_back(8106);
+    event_loop.durability.queue_waiter(
+        crate::runtime::durability::DurabilityWaiter::CloudDurability { request_id: 8107 },
+    );
+    event_loop.shutting_down = true;
+
+    // Act
+    event_loop.restore_verification_deferred_message();
+    event_loop.restore_publication_deferred_message();
+    event_loop.fail_shutdown_held_work();
+
+    // Assert
+    for (request_id, receiver) in receivers {
+        let response = receiver
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .expect("shutdown rejection response");
+        assert!(
+            matches!(
+                response,
+                RuntimeResponse::Error {
+                    request_id: response_id,
+                    error: crate::common::MidgeError::Busy(_),
+                } if response_id == request_id
+            ),
+            "request {request_id} received the wrong shutdown response"
+        );
+    }
+    assert!(event_loop.pending_msg.is_none());
+    assert!(event_loop.publication_deferred_messages.is_empty());
+    assert!(event_loop.verification_deferred_messages.is_empty());
+    assert!(event_loop.flush_barrier_waiters.is_empty());
+    assert!(event_loop.state.pending_compaction_waits.lock().is_empty());
+    assert!(event_loop.write_stall_waiters.is_empty());
+    assert!(event_loop.write_stall_waiter_queues.is_empty());
+    assert!(!event_loop.durability.has_pending_waiters());
+}
+
+#[test]
 fn should_retain_writer_epochs_in_recovered_cloud_wal_runtime_config() {
     // Arrange
     let config = crate::runtime::RuntimeConfig {
@@ -660,7 +738,7 @@ fn should_skip_post_flush_compaction_check_during_ingest_when_compaction_disable
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
             self.0
                 .lock()
-                .expect("captured logs lock")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .extend_from_slice(buf);
             Ok(buf.len())
         }
@@ -691,8 +769,14 @@ fn should_skip_post_flush_compaction_check_during_ingest_when_compaction_disable
         event_loop.schedule_compaction_after_flush_publication("ingest-disabled-4.sst");
     });
 
-    let logs = String::from_utf8(captured_logs.0.lock().expect("captured logs lock").clone())
-        .expect("captured logs should be utf8");
+    let logs = String::from_utf8(
+        captured_logs
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone(),
+    )
+    .expect("captured logs should be utf8");
     // Act
     // Assert
     assert!(
@@ -1745,14 +1829,9 @@ fn should_defer_column_family_drop_until_compaction_publication_finishes() {
             ..Default::default()
         });
     event_loop
-        .state
-        .active_compactions
-        .store(1, std::sync::atomic::Ordering::SeqCst);
-    event_loop
-        .state
-        .compaction
-        .compacting_ssts
-        .push(input_name.clone());
+        .compaction_actor
+        .prepare_for_completion_test(&mut event_loop.state, std::slice::from_ref(&input_name))
+        .expect("prepare active compaction fixture");
     let request_id = 8_155;
     let response_rx = event_loop.router.register(request_id);
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
@@ -1797,11 +1876,11 @@ fn should_defer_column_family_drop_until_compaction_publication_finishes() {
             largest_seq: Some(2),
             ..Default::default()
         });
-    event_loop
-        .state
-        .active_compactions
-        .store(0, std::sync::atomic::Ordering::SeqCst);
-    event_loop.state.compaction.compacting_ssts.clear();
+    event_loop.compaction_actor.handle_complete(
+        &mut event_loop.state,
+        std::slice::from_ref(&input_name),
+        std::slice::from_ref(&output_name),
+    );
 
     // Act: once publication is complete, process the deferred drop.
     event_loop.restore_publication_deferred_message();
@@ -1873,14 +1952,9 @@ fn should_restore_deferred_column_family_drop_before_emergent_compaction_followu
     )
     .expect("write completed output");
     event_loop
-        .state
-        .active_compactions
-        .store(1, std::sync::atomic::Ordering::SeqCst);
-    event_loop
-        .state
-        .compaction
-        .compacting_ssts
-        .push(current_input.clone());
+        .compaction_actor
+        .prepare_for_completion_test(&mut event_loop.state, std::slice::from_ref(&current_input))
+        .expect("prepare active compaction fixture");
     let drop_request_id = 8_157;
     let drop_response = event_loop.router.register(drop_request_id);
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
@@ -1951,14 +2025,9 @@ fn should_reject_late_compaction_output_after_column_family_is_dropped() {
     std::fs::write(event_loop.state.sst_dir.join(&output_name), output_bytes)
         .expect("write late compaction output");
     event_loop
-        .state
-        .active_compactions
-        .store(1, std::sync::atomic::Ordering::SeqCst);
-    event_loop
-        .state
-        .compaction
-        .compacting_ssts
-        .push(input_name.clone());
+        .compaction_actor
+        .prepare_for_completion_test(&mut event_loop.state, std::slice::from_ref(&input_name))
+        .expect("prepare active compaction fixture");
     let request_id = 8_156;
     let response_rx = event_loop.router.register(request_id);
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();

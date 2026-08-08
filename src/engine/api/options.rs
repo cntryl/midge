@@ -216,6 +216,7 @@ pub struct OpenOptions {
     cloud_write_policy: CloudWritePolicy,
     background_compaction: bool,
     storage_io_timeout: Duration,
+    shutdown_cloud_drain_timeout: Duration,
     wal_buffer_size: usize,
     l0_compaction_trigger: usize,
     compression_policy: CompressionPolicy,
@@ -243,6 +244,7 @@ pub struct OpenOptionsBuilder {
     cloud_write_policy: CloudWritePolicy,
     background_compaction: bool,
     storage_io_timeout: Duration,
+    shutdown_cloud_drain_timeout: Duration,
     wal_batch_config: Option<crate::wal::policy::BatchConfig>,
     simulated_cloud_local_storage_budget_bytes: Option<u64>,
     lease_loss_hook: Option<LeaseLossHook>,
@@ -444,6 +446,10 @@ impl OpenOptions {
         self.background_compaction
     }
 
+    pub(crate) fn shutdown_cloud_drain_timeout(&self) -> Duration {
+        self.shutdown_cloud_drain_timeout
+    }
+
     pub(crate) fn wal_batch_config(&self) -> Option<crate::wal::policy::BatchConfig> {
         self.wal_batch_config
     }
@@ -478,6 +484,7 @@ impl OpenOptionsBuilder {
             cloud_write_policy: CloudWritePolicy::default(),
             background_compaction: true,
             storage_io_timeout: crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+            shutdown_cloud_drain_timeout: Duration::from_secs(30),
             wal_batch_config: None,
             simulated_cloud_local_storage_budget_bytes: None,
             lease_loss_hook: None,
@@ -564,6 +571,16 @@ impl OpenOptionsBuilder {
         self
     }
 
+    /// Override the CloudAsync drain budget used by deterministic shutdown
+    /// fault-injection tests.
+    #[cfg(feature = "failpoints")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn shutdown_cloud_drain_timeout_for_testing(mut self, timeout: Duration) -> Self {
+        self.shutdown_cloud_drain_timeout = timeout;
+        self
+    }
+
     /// Register a process-local notification invoked exactly once when the
     /// primary lease transitions to fenced. The engine remains open for reads
     /// and rejects writes; embedders should begin orderly shutdown from the
@@ -601,6 +618,11 @@ impl OpenOptionsBuilder {
         if self.storage_io_timeout.is_zero() {
             return Err(MidgeError::InvalidArgument(
                 "storage I/O timeout must be greater than zero".to_string(),
+            ));
+        }
+        if self.shutdown_cloud_drain_timeout.is_zero() {
+            return Err(MidgeError::InvalidArgument(
+                "cloud shutdown drain timeout must be greater than zero".to_string(),
             ));
         }
         if self.lease_clock_skew_tolerance > Duration::from_secs(30) {
@@ -655,6 +677,7 @@ impl OpenOptionsBuilder {
             cloud_write_policy: self.cloud_write_policy,
             background_compaction: self.background_compaction,
             storage_io_timeout: self.storage_io_timeout,
+            shutdown_cloud_drain_timeout: self.shutdown_cloud_drain_timeout,
             wal_buffer_size,
             l0_compaction_trigger,
             compression_policy,

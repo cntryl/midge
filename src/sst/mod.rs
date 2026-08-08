@@ -19,7 +19,7 @@
 //!   → `HybridStorage` persists to cloud (via `StorageBackend` callbacks)
 //!
 //! - **Read path**: Queries use `SstFileIo` to read local SSTs
-//!   → Uses `io::Fs` for flexible filesystem backends (Real, Mock, Chaos)
+//!   → Uses `io::Fs` for flexible real and mock filesystem backends
 //!   → Block cache + bloom filters for optimization
 //!   → No cloud access on read (reads hit local cache or cloud-synced local file)
 //!

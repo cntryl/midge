@@ -268,7 +268,7 @@ fn should_prevent_oom_by_rejecting_writes_when_budget_exceeded() {
     // Arrange
     let _guard = backpressure_stress_test_lock()
         .lock()
-        .expect("lock backpressure stress test");
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     // Act
     let results = std::cell::RefCell::new(Vec::<(String, u64, usize, bool)>::new());
@@ -362,7 +362,7 @@ fn should_handle_concurrent_writes_with_consistent_backpressure() {
     // Arrange
     let _guard = backpressure_stress_test_lock()
         .lock()
-        .expect("lock backpressure stress test");
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     // Act
     let results = std::cell::RefCell::new(Vec::<(String, u64)>::new());

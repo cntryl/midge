@@ -9,7 +9,7 @@ fn sync_count_test_guard() -> std::sync::MutexGuard<'static, ()> {
     SYNC_COUNT_TEST_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("lock physical-sync counter tests")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn open_engine() -> (tempfile::TempDir, Engine, cntryl_midge::ColumnFamilyHandle) {

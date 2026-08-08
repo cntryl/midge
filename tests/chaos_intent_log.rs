@@ -12,6 +12,8 @@
 //! **Storage Modes**: Local\
 //! **Pattern**: Parent spawns child crash process, recovers, validates all data intact
 
+mod common;
+
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -20,6 +22,8 @@ use std::process::Command;
 use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
+
+use common::crash;
 
 const CHILD_TEST_NAME: &str = "should_crash_in_child_when_wal_compaction_crash_scenario_requested";
 const ENV_SCENARIO: &str = "MIDGE_WAL_COMPACTION_CHAOS_SCENARIO";
@@ -82,14 +86,11 @@ fn should_recover_all_data_after_wal_compaction_crash() {
 
 /// Child: Write, flush, compact, crash after manifest persist before GC.
 fn child_create_data_flush_compact_and_crash() {
-    let scenario = fail::FailScenario::setup();
-    std::panic::set_hook(Box::new(|_| std::process::abort()));
-
     // Configure failpoint: crash after manifest persist but before GC
-    fail::cfg("slice6::after_manifest_persist_before_sst_gc", "panic")
-        .expect("configure failpoint");
-
-    std::mem::forget(scenario);
+    crash::configure_abort_failpoint(
+        "slice6::after_manifest_persist_before_sst_gc",
+        "wal_compaction_crash",
+    );
 
     let db_path_str = std::env::var("MIDGE_WAL_COMPACTION_CHAOS_DB_PATH")
         .expect("env var MIDGE_WAL_COMPACTION_CHAOS_DB_PATH");
@@ -166,10 +167,11 @@ fn run_child_crash_after_manifest_persist(db_path: &Path) {
         .env(ENV_SCENARIO, "wal_compaction_crash")
         .env(ENV_DB_PATH, db_path);
 
-    let output = command.output().expect("run child test binary");
-    assert!(
-        !output.status.success(),
-        "child should crash at manifest persist failpoint but exited successfully"
+    crash::run_child_expect_abort(
+        &mut command,
+        "wal_compaction_crash",
+        "slice6::after_manifest_persist_before_sst_gc",
+        db_path,
     );
 }
 
@@ -224,6 +226,7 @@ fn expire_crashed_process_lease(db_path: &Path) {
         content.push('\n');
         fs::write(&leader_path, content).expect("rewrite leader record as stale");
     }
+    crash::clear_crashed_process_acquisition_lock(db_path);
 }
 
 fn read_committed_records(db_path: &Path) -> Vec<CommitRecord> {

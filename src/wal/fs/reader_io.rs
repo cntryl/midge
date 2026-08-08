@@ -1,7 +1,7 @@
 //! Filesystem WAL reader using `io::Fs` abstraction
 //!
 //! This reader uses the base `io::Fs` trait instead of storage abstractions directly,
-//! allowing for swappable implementations (Real, Mock, Chaos) for testing.
+//! allowing for swappable real and mock implementations in tests.
 //!
 //! Architectural invariants (Maintainer: DO NOT VIOLATE):
 //! --------------------------------------------------

@@ -20,7 +20,7 @@ use crate::sst::types::{
 };
 
 /// SST factory that uses `io::Fs` abstraction
-/// Allows using different filesystem implementations (Real, Mock, Chaos) for testing
+/// Allows using real and mock filesystem implementations for testing.
 pub struct FsSstFactoryIo {
     fs: Arc<dyn Fs>,
     block_size: usize,

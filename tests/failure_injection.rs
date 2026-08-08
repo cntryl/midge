@@ -12,7 +12,9 @@ static FAILPOINT_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 #[test]
 fn should_leave_column_family_absent_when_create_manifest_append_fails() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
     let engine = open_local_engine(db_path);
@@ -44,7 +46,9 @@ fn should_leave_column_family_absent_when_create_manifest_append_fails() {
 #[test]
 fn should_keep_column_family_usable_when_drop_manifest_append_fails() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
     let engine = open_local_engine(db_path);
@@ -80,7 +84,9 @@ fn should_keep_column_family_usable_when_drop_manifest_append_fails() {
 #[test]
 fn should_reject_column_family_create_when_wal_sync_fails() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
     let engine = open_local_engine(db_path);
@@ -109,7 +115,9 @@ fn should_reject_column_family_create_when_wal_sync_fails() {
 #[test]
 fn should_reject_column_family_drop_when_wal_sync_fails() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
     let engine = open_local_engine(db_path);
@@ -145,7 +153,9 @@ fn should_reject_column_family_drop_when_wal_sync_fails() {
 #[test]
 fn should_return_busy_before_wal_sync_failure_when_safe_drop_has_unflushed_data() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
     let engine = open_local_engine(db_path);
@@ -177,7 +187,9 @@ fn should_return_busy_before_wal_sync_failure_when_safe_drop_has_unflushed_data(
 #[test]
 fn should_report_success_when_drop_metadata_mirror_fails_after_authority_switch() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
     let engine = open_local_engine(db_path);
@@ -223,7 +235,9 @@ fn should_report_success_when_drop_metadata_mirror_fails_after_authority_switch(
 #[test]
 fn should_reject_transaction_when_no_space_hits_before_batch_append_and_remain_usable() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
     let engine = open_local_engine(db_path);
@@ -275,7 +289,9 @@ fn should_reject_transaction_when_no_space_hits_before_batch_append_and_remain_u
 #[test]
 fn should_not_leak_partial_transaction_when_no_space_hits_before_commit_marker_append() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
     let engine = open_local_engine(db_path);
@@ -320,7 +336,9 @@ fn should_not_leak_partial_transaction_when_no_space_hits_before_commit_marker_a
 #[test]
 fn should_preserve_range_tombstone_atomicity_given_crash_between_wal_append_and_memtable_apply() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
     let engine = open_local_engine(db_path);
@@ -367,7 +385,9 @@ fn should_preserve_range_tombstone_atomicity_given_crash_between_wal_append_and_
 #[test]
 fn should_recover_wal_state_when_flush_sst_finalize_hits_no_space() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
     let engine = open_local_engine(db_path);
@@ -411,7 +431,9 @@ fn should_recover_wal_state_when_flush_sst_finalize_hits_no_space() {
 #[test]
 fn should_ignore_orphan_sst_when_flush_intent_log_save_hits_no_space() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
     let engine = open_local_engine(db_path);
@@ -455,7 +477,9 @@ fn should_ignore_orphan_sst_when_flush_intent_log_save_hits_no_space() {
 #[test]
 fn should_not_publish_flush_output_given_sst_write_failure_when_flushing() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
     let engine = open_local_engine(db_path);
@@ -507,7 +531,9 @@ fn should_not_publish_flush_output_given_sst_write_failure_when_flushing() {
 #[test]
 fn should_retry_flush_given_transient_publish_failure_when_reopening() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
     let engine = open_local_engine(db_path);
@@ -584,7 +610,9 @@ fn should_retry_flush_given_transient_publish_failure_when_reopening() {
 #[test]
 fn should_preserve_flush_identity_order_when_oldest_publication_retries() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let engine = open_local_engine(temp_dir.path());
     let cf = default_cf(&engine);
@@ -642,7 +670,9 @@ fn should_preserve_flush_identity_order_when_oldest_publication_retries() {
 #[test]
 fn should_retry_frozen_memtable_when_sst_sequence_journal_recovers() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let engine = open_local_engine(temp_dir.path());
     let cf = default_cf(&engine);
@@ -675,7 +705,9 @@ fn should_retry_frozen_memtable_when_sst_sequence_journal_recovers() {
 #[test]
 fn should_retry_frozen_memtable_when_sst_write_recovers() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let engine = open_local_engine(temp_dir.path());
     let cf = default_cf(&engine);
@@ -707,7 +739,9 @@ fn should_retry_frozen_memtable_when_sst_write_recovers() {
 #[test]
 fn should_retry_frozen_memtable_when_cloud_sst_upload_recovers() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let engine = Engine::open(
         OpenOptions::cloud_simulated(temp_dir.path(), "test-bucket", "retry-prefix")
@@ -768,7 +802,9 @@ fn should_retry_frozen_memtable_when_cloud_sst_upload_recovers() {
 #[test]
 fn should_restore_sequence_floor_from_flushed_ssts_without_wal_recovery() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
     let engine = open_local_engine(db_path);
@@ -816,7 +852,9 @@ fn should_restore_sequence_floor_from_flushed_ssts_without_wal_recovery() {
 #[test]
 fn should_open_in_salvage_mode_when_replay_cannot_clear_intent_log() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
     let engine = open_local_engine(db_path);
@@ -913,7 +951,9 @@ struct TestColumnFamilyMeta {
 #[test]
 fn should_fail_strict_open_when_replay_cannot_clear_intent_log() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
     let engine = open_local_engine(db_path);
@@ -961,7 +1001,9 @@ fn should_fail_strict_open_when_replay_cannot_clear_intent_log() {
 #[test]
 fn should_open_in_salvage_mode_when_replay_cannot_checkpoint_manifest() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
     let engine = open_local_engine(db_path);
@@ -1055,7 +1097,9 @@ fn should_open_in_salvage_mode_when_replay_cannot_checkpoint_manifest() {
 #[test]
 fn should_fail_strict_open_when_replay_cannot_checkpoint_manifest() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
     let engine = open_local_engine(db_path);
@@ -1148,7 +1192,9 @@ fn should_fail_strict_open_when_replay_cannot_checkpoint_manifest() {
 #[test]
 fn should_recover_flushed_best_effort_data_when_manifest_checkpoint_save_hits_no_space() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
     let engine = open_local_engine(db_path);
@@ -1206,7 +1252,9 @@ fn should_recover_flushed_best_effort_data_when_manifest_checkpoint_save_hits_no
 #[test]
 fn should_preserve_compacted_input_state_when_compaction_output_hits_no_space() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
     let engine = open_local_engine(db_path);
@@ -1272,7 +1320,9 @@ fn should_preserve_compacted_input_state_when_compaction_output_hits_no_space() 
 #[test]
 fn should_publish_single_output_when_retrying_compaction_after_failed_manifest_restart() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
     let engine = open_local_engine(db_path);
@@ -1382,7 +1432,9 @@ fn should_publish_single_output_when_retrying_compaction_after_failed_manifest_r
 #[test]
 fn should_delete_untracked_compaction_output_on_reopen_when_intent_save_fails() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
     let engine = open_local_engine(db_path);
@@ -1447,7 +1499,9 @@ fn should_delete_untracked_compaction_output_on_reopen_when_intent_save_fails() 
 #[test]
 fn should_fence_followup_compaction_when_phase_save_fails_after_authority_switch() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
     let engine = open_local_engine(db_path);
@@ -1535,7 +1589,9 @@ fn should_fence_followup_compaction_when_phase_save_fails_after_authority_switch
 #[test]
 fn should_fence_followup_compaction_when_intent_clear_save_fails() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
     let engine = open_local_engine(db_path);
@@ -1587,7 +1643,9 @@ fn should_fence_followup_compaction_when_intent_clear_save_fails() {
 #[test]
 fn should_fence_followup_compaction_when_manifest_sync_result_is_ambiguous() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
     let engine = open_local_engine(db_path);
@@ -1641,7 +1699,9 @@ fn should_fence_followup_compaction_when_manifest_sync_result_is_ambiguous() {
 #[test]
 fn should_remove_remote_compaction_orphan_on_reopen_when_manifest_batch_fails() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
     let open_cloud = || {
@@ -1702,7 +1762,9 @@ fn should_remove_remote_compaction_orphan_on_reopen_when_manifest_batch_fails() 
 #[test]
 fn should_retain_replaced_remote_compaction_orphan_when_cleanup_proof_is_stale() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
     let cloud_options = || {
@@ -1768,7 +1830,9 @@ fn should_retain_replaced_remote_compaction_orphan_when_cleanup_proof_is_stale()
 #[test]
 fn should_remove_remote_compaction_orphan_when_column_family_is_dropped_before_reopen() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
     let open_cloud = || {
@@ -1843,7 +1907,9 @@ fn should_remove_remote_compaction_orphan_when_column_family_is_dropped_before_r
 #[test]
 fn should_not_upload_remote_compaction_output_when_intent_save_fails() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
     let engine = Engine::open(
@@ -1893,7 +1959,9 @@ fn should_not_upload_remote_compaction_output_when_intent_save_fails() {
 #[test]
 fn should_recover_compaction_from_manifest_checkpoint_save_failure_after_batch_journal_success() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
     let engine = open_local_engine(db_path);

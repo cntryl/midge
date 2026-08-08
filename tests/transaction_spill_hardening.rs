@@ -1,5 +1,7 @@
 //! Hardening contract for bounded transaction memory and durable spill runs.
 
+mod common;
+
 use bytes::Bytes;
 use cntryl_midge::wal::{WalOpKind, WalRecord};
 use cntryl_midge::{
@@ -12,6 +14,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 use tempfile::TempDir;
+
+#[cfg(feature = "failpoints")]
+use common::crash;
 
 const SMALL_POOL_BYTES: usize = 24 * 1024;
 const VALUE_BYTES: usize = 12 * 1024;
@@ -34,6 +39,8 @@ const ENV_SCENARIO: &str = "MIDGE_SPILL_CRASH_SCENARIO";
 const ENV_DB_PATH: &str = "MIDGE_SPILL_CRASH_DB_PATH";
 #[cfg(feature = "failpoints")]
 const CHILD_REACHED_SPILL_MARKER: &str = "spill-child-ready";
+#[cfg(feature = "failpoints")]
+const ENV_FAILPOINT_ISOLATION_CHILD: &str = "MIDGE_SPILL_FAILPOINT_ISOLATION_CHILD";
 
 #[test]
 fn should_bound_shared_resident_bytes_when_two_transactions_pressure_one_pool() {
@@ -511,15 +518,115 @@ fn should_abort_in_child_process_when_spilled_transaction_commit_is_interrupted(
     .expect("write child spill marker");
 
     // Act
-    let scenario = fail::FailScenario::setup();
-    std::panic::set_hook(Box::new(|_| std::process::abort()));
-    fail::cfg("midge::wal::txn_after_ops_append_before_commit", "panic")
-        .expect("configure crash failpoint");
-    std::mem::forget(scenario);
+    crash::configure_abort_failpoint(
+        "midge::wal::spilled_txn_after_ops_append_before_commit",
+        "before-commit-marker",
+    );
     let _ = tx.commit(WriteOptions::sync());
 
     // Assert
     panic!("child commit returned without aborting before its commit marker");
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_reach_only_path_specific_boundary_when_spill_and_direct_commit_race() {
+    // Arrange
+    if std::env::var_os(ENV_FAILPOINT_ISOLATION_CHILD).is_some() {
+        assert_path_specific_failpoints_under_concurrent_commits();
+        return;
+    }
+    let current_exe = std::env::current_exe().expect("current test executable");
+    let temp = TempDir::new().expect("temp dir");
+
+    // Act
+    let output = Command::new(current_exe)
+        .arg("--exact")
+        .arg("should_reach_only_path_specific_boundary_when_spill_and_direct_commit_race")
+        .arg("--nocapture")
+        .arg("--test-threads=1")
+        .env(ENV_FAILPOINT_ISOLATION_CHILD, "1")
+        .env(ENV_DB_PATH, temp.path())
+        .output()
+        .expect("run isolated failpoint child");
+
+    // Assert
+    assert!(
+        output.status.success(),
+        "path-specific failpoint child failed; stdout={}; stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(feature = "failpoints")]
+fn assert_path_specific_failpoints_under_concurrent_commits() {
+    let scenario = fail::FailScenario::setup();
+    let direct_hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let spilled_hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let direct_callback_hits = std::sync::Arc::clone(&direct_hits);
+    let spilled_callback_hits = std::sync::Arc::clone(&spilled_hits);
+    fail::cfg_callback(
+        "midge::wal::txn_after_ops_append_before_commit",
+        move || {
+            direct_callback_hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        },
+    )
+    .expect("configure direct transaction boundary");
+    fail::cfg_callback(
+        "midge::wal::spilled_txn_after_ops_append_before_commit",
+        move || {
+            spilled_callback_hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        },
+    )
+    .expect("configure spilled transaction boundary");
+
+    let db_path = PathBuf::from(std::env::var_os(ENV_DB_PATH).expect("db path env"));
+    let engine = std::sync::Arc::new(open_local(&db_path, 8 * 1024));
+    let cf_id = default_cf(&engine).id();
+    let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+    let direct_engine = std::sync::Arc::clone(&engine);
+    let direct_start = std::sync::Arc::clone(&start);
+    let direct = std::thread::spawn(move || {
+        let mut tx = direct_engine
+            .begin_tx(cf_id, TransactionMode::ReadWrite)
+            .expect("begin direct transaction");
+        tx.put(b"direct".to_vec(), b"value".to_vec(), None)
+            .expect("stage direct value");
+        direct_start.wait();
+        tx.commit(WriteOptions::sync())
+    });
+
+    let spilled_engine = std::sync::Arc::clone(&engine);
+    let spilled_start = std::sync::Arc::clone(&start);
+    let spilled = std::thread::spawn(move || {
+        let mut tx = spilled_engine
+            .begin_tx(cf_id, TransactionMode::ReadWrite)
+            .expect("begin spilled transaction");
+        fill_transaction(&mut tx, "isolation", 12, 8 * 1024);
+        spilled_start.wait();
+        tx.commit(WriteOptions::sync())
+    });
+
+    direct
+        .join()
+        .expect("join direct transaction")
+        .expect("commit direct transaction");
+    spilled
+        .join()
+        .expect("join spilled transaction")
+        .expect("commit spilled transaction");
+    let Ok(mut engine) = std::sync::Arc::try_unwrap(engine) else {
+        panic!("transaction threads retained an engine reference");
+    };
+    engine
+        .shutdown(spill_shutdown_timeout())
+        .expect("shutdown isolated engine");
+    scenario.teardown();
+
+    assert_eq!(direct_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(spilled_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
 fn open_local(path: &Path, transaction_pool_bytes: usize) -> Engine {
@@ -603,19 +710,19 @@ fn read_wal_frames(path: &Path) -> Vec<(WalRecord, usize)> {
 
 #[cfg(feature = "failpoints")]
 fn run_spill_child_expect_abort(db_path: &Path) {
-    let output = Command::new(std::env::current_exe().expect("current test executable"))
+    let mut command = Command::new(std::env::current_exe().expect("current test executable"));
+    command
         .arg("--exact")
         .arg(CHILD_TEST_NAME)
         .arg("--nocapture")
         .arg("--test-threads=1")
         .env(ENV_SCENARIO, "before-commit-marker")
-        .env(ENV_DB_PATH, db_path)
-        .output()
-        .expect("run spill crash child");
-    assert!(
-        !output.status.success(),
-        "spill crash child unexpectedly succeeded: {}",
-        String::from_utf8_lossy(&output.stderr)
+        .env(ENV_DB_PATH, db_path);
+    crash::run_child_expect_abort(
+        &mut command,
+        "before-commit-marker",
+        "midge::wal::spilled_txn_after_ops_append_before_commit",
+        db_path,
     );
 }
 
@@ -641,4 +748,5 @@ fn expire_crashed_process_lease(db_path: &Path) {
         content.push('\n');
         fs::write(&leader_path, content).expect("expire crashed process lease");
     }
+    crash::clear_crashed_process_acquisition_lock(db_path);
 }

@@ -190,6 +190,11 @@ name = "background_flush_pipeline"
 path = "tests/background_flush_pipeline.rs"
 required-features = ["failpoints"]
 
+[[test]]
+name = "shutdown_orchestration"
+path = "tests/shutdown_orchestration.rs"
+required-features = ["failpoints"]
+
 
 # =============================================================================
 # Benchmarks — Active Targets

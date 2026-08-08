@@ -900,6 +900,7 @@ mod tests {
     #[test]
     fn should_retain_all_wal_state_when_pre_prune_sync_fails() -> crate::common::MidgeResult<()> {
         // Arrange
+        let _failpoint_guard = crate::failpoints::test_failpoint_guard();
         let directory = tempfile::tempdir()?;
         let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
         let router = Arc::new(crate::runtime::ResponseRouter::new());

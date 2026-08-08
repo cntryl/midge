@@ -889,7 +889,10 @@ mod tests {
 
     impl JournalOpenGate {
         fn wait_in_open(&self) {
-            let mut state = self.state.lock().expect("lock journal-open gate");
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             state.0 += 1;
             self.changed.notify_all();
             while !state.1 {
@@ -901,7 +904,10 @@ mod tests {
         }
 
         fn wait_for_arrivals(&self, expected: usize, timeout: std::time::Duration) -> bool {
-            let state = self.state.lock().expect("lock journal-open gate");
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let (state, _) = self
                 .changed
                 .wait_timeout_while(state, timeout, |state| state.0 < expected)
@@ -910,7 +916,10 @@ mod tests {
         }
 
         fn release(&self) {
-            let mut state = self.state.lock().expect("lock journal-open gate");
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             state.1 = true;
             self.changed.notify_all();
         }

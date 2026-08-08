@@ -98,6 +98,28 @@ This is the minimum “safe enough to try” gate for local-disk evaluation.
 
 Prefer extending an existing file when the guarantee already has a home. Add a new file only when it becomes a clearer public test category.
 
+## Crash-Trigger Evidence
+
+Every subprocess crash test must prove that its intended boundary fired. Use
+`tests/common/crash.rs` to configure the named failpoint (or record a named
+logical boundary), sync the per-scenario trigger sentinel, and validate both
+the OS-level abort and exact sentinel in the parent. A trailing child
+panic is only a failure fallback; it must never satisfy the parent assertion.
+The shared validator includes child stdout and stderr when the child exits at
+the wrong boundary.
+
+Counted or randomized crash points must also print their selected seed or
+offset on every run and accept an environment override so CI failures are
+replayable. Keep each production path's failpoint names unique: direct and
+spilled transaction commit paths, for example, must never consume the same
+global counter.
+
+```rust,ignore
+crash::configure_abort_failpoint("midge::component::boundary", "scenario");
+// Parent:
+crash::run_child_expect_abort(&mut command, "scenario", "midge::component::boundary", db_path);
+```
+
 ## Naming
 
 Use:

@@ -1021,7 +1021,9 @@ fn should_exclude_empty_strict_request_without_draining_following_commit() -> Mi
 #[test]
 fn should_fail_all_event_loop_buffered_transactions_when_append_hits_no_space() -> MidgeResult<()> {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut fixture = EventLoopFixture::batched()?;
     let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
     let first_rx = fixture.register(60);
@@ -1104,7 +1106,9 @@ fn should_fail_all_event_loop_buffered_transactions_when_append_hits_no_space() 
 #[test]
 fn should_fail_all_event_loop_strict_transactions_when_shared_append_fails() -> MidgeResult<()> {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut fixture = EventLoopFixture::with_policy(DurabilityPolicy::Strict)?;
     let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
     let first_rx = fixture.register(63);
@@ -1162,7 +1166,9 @@ fn should_fail_all_event_loop_strict_transactions_when_shared_append_fails() -> 
 #[test]
 fn should_fail_all_event_loop_strict_transactions_when_shared_sync_fails() -> MidgeResult<()> {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let test_guard = crate::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     let mut fixture = EventLoopFixture::with_policy(DurabilityPolicy::Strict)?;
@@ -1218,7 +1224,9 @@ fn should_fail_all_event_loop_strict_transactions_when_shared_sync_fails() -> Mi
 #[test]
 fn should_fail_same_key_fallback_when_coalesced_prefix_append_fails() -> MidgeResult<()> {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut fixture = EventLoopFixture::batched()?;
     let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
     let (first_msg, first_rx) = inline_txn_msg(

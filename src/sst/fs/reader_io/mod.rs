@@ -1,7 +1,7 @@
 //! Filesystem-backed SST reader using `io::Fs` abstraction (new approach)
 //!
 //! This reader uses the base `io::Fs` trait instead of `std::fs` directly,
-//! allowing for swappable implementations (Real, Mock, Chaos) for testing.
+//! allowing for swappable real and mock implementations in tests.
 
 use arc_swap::ArcSwapOption;
 use bytes::Bytes;

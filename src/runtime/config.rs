@@ -58,6 +58,10 @@ pub struct RuntimeConfig {
     pub wal_durability_policy: DurabilityPolicy,
     pub wal_batch_config: BatchConfig,
     pub storage_io_timeout: Duration,
+    /// Maximum time shutdown waits for `CloudAsync` uploads to drain before it
+    /// reports an incomplete durability outcome. Production callers keep the
+    /// default; deterministic shutdown tests inject a shorter budget.
+    pub(crate) shutdown_cloud_drain_timeout: Duration,
     pub cloud_runtime_policy: CloudRuntimePolicy,
     pub hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
     pub hybrid_storage_events: Option<crossbeam::channel::Receiver<crate::storage::StorageEvent>>,
@@ -100,6 +104,7 @@ impl Default for RuntimeConfig {
             wal_durability_policy: DurabilityPolicy::Batched,
             wal_batch_config: BatchConfig::default(),
             storage_io_timeout: crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+            shutdown_cloud_drain_timeout: Duration::from_secs(30),
             cloud_runtime_policy: CloudRuntimePolicy::default(),
             hybrid_storage: None,
             hybrid_storage_events: None,
