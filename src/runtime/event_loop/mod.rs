@@ -163,6 +163,7 @@ pub struct EventLoop {
     flush_barrier_waiters: HashMap<crate::types::ColumnFamilyId, Vec<flush::FlushBarrierWaiter>>,
     inline_flush_worker: bool,
     shutting_down: bool,
+    shutdown_cloud_drain_timeout: Duration,
 
     /// Sender that worker threads can use to post back completion messages
     /// (compaction threads will use this to report completion).
@@ -338,6 +339,7 @@ impl EventLoop {
             flush_barrier_waiters: HashMap::new(),
             inline_flush_worker: cfg!(test) && worker_msg_tx.is_none(),
             shutting_down: false,
+            shutdown_cloud_drain_timeout: config.shutdown_cloud_drain_timeout,
             worker_msg_tx,
 
             write_stall_waiters: HashMap::new(),
@@ -1243,13 +1245,17 @@ impl EventLoop {
     }
 
     fn restore_verification_deferred_message(&mut self) {
-        if self.verification_barrier_token.is_none() && self.pending_msg.is_none() {
+        if !self.shutting_down
+            && self.verification_barrier_token.is_none()
+            && self.pending_msg.is_none()
+        {
             self.pending_msg = self.verification_deferred_messages.pop_front();
         }
     }
 
     pub(super) fn restore_publication_deferred_message(&mut self) {
-        if !self.manifest_publication_active
+        if !self.shutting_down
+            && !self.manifest_publication_active
             && self.verification_barrier_token.is_none()
             && self.pending_msg.is_none()
         {

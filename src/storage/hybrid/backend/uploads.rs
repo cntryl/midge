@@ -328,6 +328,7 @@ impl HybridStorage {
         };
 
         Self::record_wal_bytes(&data);
+        crate::failpoints::fail_point!("midge::cloud::before_wal_upload");
         if crate::failpoints::is_active("midge::cloud::inject_fail_wal_upload") {
             if let Some(telemetry) = crate::telemetry::Telemetry::global() {
                 telemetry.metrics().record_cloud_async_wal_upload_failed();

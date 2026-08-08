@@ -10,7 +10,7 @@
 //! - [`fs::FsWalFactoryIo`] - Factory for creating readers/writers
 //!
 //! The `io::Fs` abstraction enables better testability with swappable implementations
-//! (Real, Mock, Chaos). All production code has been migrated to this interface.
+//! (real and mock). All production code has been migrated to this interface.
 //!
 //! Cloud WAL durability uses epoch-scoped immutable segment objects plus a
 //! lease-fenced publication catalog. Recovery replays only catalog entries, so

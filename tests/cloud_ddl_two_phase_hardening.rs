@@ -33,7 +33,7 @@ fn should_converge_local_remote_ddl_state_given_remote_cas_failure_when_reopenin
     let _guard = DDL_TEST_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("lock");
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::tempdir().expect("temp dir");
     let engine = open_cloud(temp.path());
     let created = engine
@@ -67,7 +67,7 @@ fn should_retry_cloud_column_family_create_after_remote_cas_failure() {
     let _guard = DDL_TEST_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("lock");
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::tempdir().expect("temp dir");
     let engine = open_cloud(temp.path());
     let scenario = fail::FailScenario::setup();
@@ -92,7 +92,7 @@ fn should_reconcile_remote_commit_when_local_commit_fails() {
     let _guard = DDL_TEST_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("lock");
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::tempdir().expect("temp dir");
     let engine = open_cloud(temp.path());
     let scenario = fail::FailScenario::setup();
@@ -137,7 +137,7 @@ fn should_return_usable_column_family_when_create_metadata_mirror_fails_after_co
     let _guard = DDL_TEST_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("lock");
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::tempdir().expect("temp dir");
     let engine = open_cloud(temp.path());
     let scenario = fail::FailScenario::setup();
@@ -221,7 +221,7 @@ fn should_fence_column_family_when_remote_drop_commits_before_local_commit() {
     let _guard = DDL_TEST_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("lock");
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::tempdir().expect("temp dir");
     let engine = open_cloud(temp.path());
     let cf = engine
@@ -267,7 +267,7 @@ fn should_fence_column_family_when_remote_drop_cas_response_is_lost() {
     let _guard = DDL_TEST_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("lock");
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::tempdir().expect("temp dir");
     let engine = open_cloud(temp.path());
     let cf = engine
@@ -316,7 +316,7 @@ fn should_fence_writes_when_remote_drop_authority_cannot_be_resolved() {
     let _guard = DDL_TEST_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("lock");
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::tempdir().expect("temp dir");
     let engine = open_cloud(temp.path());
     let cf = engine
@@ -383,7 +383,7 @@ fn should_abort_torn_ddl_prepare_given_local_prepare_without_remote_commit_when_
     let _guard = DDL_TEST_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("lock");
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::tempdir().expect("temp dir");
     let engine = open_cloud(temp.path());
     let scenario = fail::FailScenario::setup();

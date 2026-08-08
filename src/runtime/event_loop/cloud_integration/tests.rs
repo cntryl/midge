@@ -1329,9 +1329,8 @@ fn should_publish_control_intent_before_remote_compaction_sst() -> crate::common
         metadata_backend,
         "separate-control".to_string(),
     )));
-    el.state
-        .active_compactions
-        .store(1, std::sync::atomic::Ordering::SeqCst);
+    el.compaction_actor
+        .prepare_for_completion_test(&mut el.state, &[input_sst.to_string()])?;
     let request_id = 4141;
     let response_rx = el.router.register(request_id);
     let (_tx, msg_rx) = crossbeam::channel::unbounded();
@@ -1386,9 +1385,8 @@ fn should_mirror_cleared_compaction_intent_after_cloud_sst_publish(
     ));
     el.cloud_metadata_storage = Some(Arc::clone(&metadata_storage));
 
-    el.state
-        .active_compactions
-        .store(1, std::sync::atomic::Ordering::SeqCst);
+    el.compaction_actor
+        .prepare_for_completion_test(&mut el.state, &[input_sst.to_string()])?;
     let request_id = 4242;
     let response_rx = el.router.register(request_id);
     let (_tx, msg_rx) = crossbeam::channel::unbounded();
@@ -1452,9 +1450,8 @@ fn should_unblock_compaction_waiters_when_cleared_compaction_intent_mirror_fails
     ));
     el.cloud_metadata_storage = Some(Arc::clone(&metadata_storage));
 
-    el.state
-        .active_compactions
-        .store(1, std::sync::atomic::Ordering::SeqCst);
+    el.compaction_actor
+        .prepare_for_completion_test(&mut el.state, &[input_sst.to_string()])?;
     let completion_request_id = 4343;
     let completion_rx = el.router.register(completion_request_id);
     let waiter_request_id = 4344;
@@ -1550,9 +1547,8 @@ fn should_delete_obsolete_cloud_sst_objects_after_compaction() -> crate::common:
     let output_bytes = valid_sst_bytes_for_test(b"obsolete", b"new-value", 11);
     write_test_file(el.state.sst_dir.join(output_sst), &output_bytes);
 
-    el.state
-        .active_compactions
-        .store(1, std::sync::atomic::Ordering::SeqCst);
+    el.compaction_actor
+        .prepare_for_completion_test(&mut el.state, &[input_sst.to_string()])?;
     let request_id = 4545;
     let response_rx = el.router.register(request_id);
     let (_tx, msg_rx) = crossbeam::channel::unbounded();
@@ -3088,7 +3084,9 @@ fn should_not_advance_cloud_frontier_across_failed_segment_gap() -> crate::commo
 fn should_retry_background_cloud_seal_after_failpoint_before_rotate(
 ) -> crate::common::MidgeResult<()> {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _test_guard = crate::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     let mut el = create_test_cloud_event_loop(
@@ -3201,7 +3199,9 @@ fn should_retry_background_cloud_seal_after_failpoint_before_rotate(
 fn should_retain_upload_obligation_given_failure_after_cloud_wal_rotation(
 ) -> crate::common::MidgeResult<()> {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _test_guard = crate::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     let mut event_loop = create_test_cloud_event_loop(
@@ -3476,7 +3476,9 @@ fn complete_retry_and_ack(
 fn should_retry_seal_wal_for_cloud_after_failpoint_before_rotate() -> crate::common::MidgeResult<()>
 {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _test_guard = crate::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     let mut el = create_test_cloud_event_loop(

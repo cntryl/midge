@@ -5,6 +5,9 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+#[cfg(feature = "failpoints")]
+const RUNTIME_PANIC_CHILD: &str = "MIDGE_RUNTIME_PANIC_CHILD";
+
 #[test]
 fn should_reject_new_transactions_given_runtime_is_closing_when_beginning() {
     // Arrange
@@ -38,18 +41,391 @@ fn should_allow_shutdown_retry_when_initial_wait_times_out() {
     assert!(matches!(first, Err(MidgeError::Timeout(_))));
     assert_eq!(handle.lifecycle.state(), RuntimeLifecycleState::Closing);
     assert!(
-        handle
-            .lifecycle
-            .shutdown_response
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_some(),
+        handle.lifecycle.shutdown_response_is_available(),
         "timed-out shutdown must retain its response receiver for retry"
     );
 
     handle.lifecycle.mark_closed();
     assert!(handle.shutdown(Duration::from_millis(5)).is_ok());
     drop(runtime);
+}
+
+#[test]
+fn should_return_timeout_error_but_leave_lease_held_given_second_concurrent_shutdown_caller_when_first_still_waiting(
+) {
+    // Arrange: keep the synthetic runtime marked as running without starting an
+    // event loop, so the first caller owns the shutdown response wait until its
+    // deadline. A running lifecycle represents the runtime whose Engine-level
+    // fencing resources must remain held.
+    let (runtime, handle) = Runtime::new();
+    handle.lifecycle.mark_running();
+    let first_handle = handle.clone();
+    let first = thread::spawn(move || first_handle.shutdown(Duration::from_millis(300)));
+    let pending_deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while handle.router.pending_len() == 0 {
+        assert!(
+            std::time::Instant::now() < pending_deadline,
+            "first shutdown caller did not register its response"
+        );
+        thread::yield_now();
+    }
+
+    // Act: this caller has its own much shorter deadline. It must not inherit
+    // the first caller's blocking response-receiver mutex hold.
+    let second_started = std::time::Instant::now();
+    let second = handle.shutdown(Duration::from_millis(20));
+    let second_elapsed = second_started.elapsed();
+
+    // Assert
+    assert!(matches!(second, Err(MidgeError::Timeout(_))));
+    assert!(
+        second_elapsed < Duration::from_millis(150),
+        "second shutdown caller exceeded its own deadline: {second_elapsed:?}"
+    );
+    assert!(handle
+        .lifecycle
+        .running
+        .load(std::sync::atomic::Ordering::Acquire));
+    assert!(matches!(
+        first.join().expect("join first shutdown caller"),
+        Err(MidgeError::Timeout(_))
+    ));
+
+    handle.lifecycle.mark_closed();
+    drop(runtime);
+}
+
+#[test]
+fn should_replay_identical_terminal_error_to_every_shutdown_caller() {
+    // Arrange
+    let (runtime, handle) = Runtime::new();
+    handle.lifecycle.mark_running();
+    let first_handle = handle.clone();
+    let first = thread::spawn(move || first_handle.shutdown(Duration::from_secs(1)));
+    let pending_deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while handle.router.pending_len() == 0 {
+        assert!(
+            std::time::Instant::now() < pending_deadline,
+            "shutdown caller did not register its response"
+        );
+        thread::yield_now();
+    }
+
+    // Act: model the event loop's terminal durability failure, then ask a later
+    // caller to observe the already-completed shutdown result.
+    handle
+        .router
+        .fail_all("synthetic terminal shutdown failure");
+    let first_result = first.join().expect("join first shutdown caller");
+    let replayed_result = handle.shutdown(Duration::from_millis(20));
+
+    // Assert
+    for result in [first_result, replayed_result] {
+        assert!(matches!(
+            result,
+            Err(MidgeError::Internal(message))
+                if message == "synthetic terminal shutdown failure"
+        ));
+    }
+
+    handle.lifecycle.mark_closed();
+    drop(runtime);
+}
+
+#[test]
+fn should_transfer_shutdown_response_receiver_after_owner_times_out() {
+    // Arrange
+    let (runtime, handle) = Runtime::new();
+    handle.lifecycle.mark_running();
+    let first_handle = handle.clone();
+    let first = thread::spawn(move || first_handle.shutdown(Duration::from_millis(20)));
+    let state_deadline = std::time::Instant::now() + Duration::from_secs(1);
+    let request_id = loop {
+        let shutdown = handle
+            .lifecycle
+            .shutdown
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let super::lifecycle::ShutdownState::Receiving { request_id } = &*shutdown {
+            break *request_id;
+        }
+        drop(shutdown);
+        assert!(
+            std::time::Instant::now() < state_deadline,
+            "first shutdown caller did not begin receiving"
+        );
+        thread::yield_now();
+    };
+    let second_handle = handle.clone();
+    let second = thread::spawn(move || second_handle.shutdown(Duration::from_secs(1)));
+
+    // Act: after the owner returns its receiver to the coordinator, complete
+    // the original request for the still-waiting caller that takes ownership.
+    let first_result = first.join().expect("join first shutdown caller");
+    handle.router.complete(RuntimeResponse::Ok { request_id });
+    let second_result = second.join().expect("join second shutdown caller");
+    let replayed_result = handle.shutdown(Duration::ZERO);
+
+    // Assert
+    assert!(matches!(first_result, Err(MidgeError::Timeout(_))));
+    assert!(second_result.is_ok());
+    assert!(replayed_result.is_ok());
+
+    handle.lifecycle.mark_closed();
+    drop(runtime);
+}
+
+fn create_column_family_during_write_flood(
+    handle: &RuntimeHandle,
+    timeout: Duration,
+) -> RuntimeResponse {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "control request could not enter the runtime during write flood"
+        );
+        match handle.send_and_wait_timeout(
+            RuntimeMsg::ManifestCreateColumnFamily {
+                request_id: next_request_id().expect("allocate DDL request id"),
+                name: "flood-control".to_string(),
+            },
+            remaining,
+        ) {
+            Ok(Some(response)) => return response,
+            Ok(None) => panic!("admitted control request starved behind write flood"),
+            Err(MidgeError::WriteStall(_)) => thread::yield_now(),
+            Err(error) => panic!("unexpected control request error: {error}"),
+        }
+    }
+}
+
+#[test]
+fn should_process_shutdown_promptly_given_continuous_write_flood_when_shutdown_requested() {
+    // Arrange
+    let temp_dir = tempfile::TempDir::new().expect("create runtime directory");
+    let (runtime, _) = Runtime::new();
+    let state = RuntimeState::new(temp_dir.path().to_path_buf(), true);
+    let (mut runtime, handle) = runtime
+        .start_with_config(state, RuntimeConfig::default())
+        .expect("start runtime");
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut writers = Vec::new();
+    for writer_id in 0..2_u64 {
+        let writer_handle = handle.clone();
+        let writer_stop = Arc::clone(&stop);
+        let writer_accepted = Arc::clone(&accepted);
+        writers.push(thread::spawn(move || {
+            let mut ordinal = 0_u64;
+            while !writer_stop.load(std::sync::atomic::Ordering::Acquire) {
+                let request_id = next_request_id().expect("allocate write request id");
+                let result = writer_handle.send(RuntimeMsg::ApplyTransaction {
+                    request_id,
+                    ops: vec![TransactionOp::Put {
+                        cf_id: 0,
+                        key: bytes::Bytes::from(format!("flood-{writer_id}-{ordinal}")),
+                        value: bytes::Bytes::from_static(b"v"),
+                        ttl_seconds: None,
+                        insert_only: false,
+                    }],
+                    assertions: Vec::new(),
+                    durability_policy: Some(DurabilityPolicy::BestEffort),
+                    start_sequence: None,
+                    conflict_policy: ConflictPolicy::LastWriteWins,
+                    response_tx: None,
+                });
+                match result {
+                    Ok(()) => {
+                        writer_accepted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        ordinal = ordinal.saturating_add(1);
+                    }
+                    Err(MidgeError::WriteStall(_)) => thread::yield_now(),
+                    Err(MidgeError::Busy(_)) => break,
+                    Err(error) => panic!("unexpected write flood error: {error}"),
+                }
+            }
+        }));
+    }
+    let flood_deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while accepted.load(std::sync::atomic::Ordering::Acquire) < 100 {
+        assert!(
+            std::time::Instant::now() < flood_deadline,
+            "write flood did not reach the runtime"
+        );
+        thread::yield_now();
+    }
+
+    // Act: a control request queued amid the flood must make progress, and the
+    // terminal shutdown marker must close admission within its own budget.
+    let control_started = std::time::Instant::now();
+    let control = create_column_family_during_write_flood(&handle, Duration::from_secs(1));
+    let control_elapsed = control_started.elapsed();
+    let shutdown_started = std::time::Instant::now();
+    let shutdown = handle.shutdown(Duration::from_secs(2));
+    let shutdown_elapsed = shutdown_started.elapsed();
+    stop.store(true, std::sync::atomic::Ordering::Release);
+    for writer in writers {
+        writer.join().expect("join write flood worker");
+    }
+
+    // Assert
+    assert!(matches!(
+        control,
+        RuntimeResponse::ColumnFamilyCreated { .. }
+    ));
+    assert!(
+        control_elapsed < Duration::from_secs(1),
+        "control request starved behind write flood for {control_elapsed:?}"
+    );
+    assert!(
+        shutdown.is_ok(),
+        "shutdown failed under write flood: {shutdown:?}"
+    );
+    assert!(
+        shutdown_elapsed < Duration::from_secs(1),
+        "shutdown marker starved behind write flood for {shutdown_elapsed:?}"
+    );
+    assert!(matches!(
+        handle.send(RuntimeMsg::RetryGc),
+        Err(MidgeError::Busy(_))
+    ));
+    assert!(runtime.wait_for_exit(Duration::from_secs(1)));
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_answer_pending_router_request_given_event_loop_panic_when_awaiting_response() {
+    if std::env::var(RUNTIME_PANIC_CHILD).as_deref() != Ok("router") {
+        run_runtime_panic_child(
+            "router",
+            "runtime::tests::should_answer_pending_router_request_given_event_loop_panic_when_awaiting_response",
+        );
+        return;
+    }
+
+    // Arrange
+    let scenario = fail::FailScenario::setup();
+    let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let callback_fired = Arc::clone(&fired);
+    fail::cfg_callback(
+        "midge::runtime::before_get_runtime_metrics_response",
+        move || {
+            callback_fired.store(true, std::sync::atomic::Ordering::SeqCst);
+            panic!("deterministic router-response panic");
+        },
+    )
+    .expect("configure router-response panic");
+    let temp_dir = tempfile::TempDir::new().expect("create runtime directory");
+    let (runtime, _) = Runtime::new();
+    let state = RuntimeState::new(temp_dir.path().to_path_buf(), true);
+    let (mut runtime, handle) = runtime
+        .start_with_config(state, RuntimeConfig::default())
+        .expect("start runtime");
+
+    // Act
+    let response = handle
+        .send_and_wait(RuntimeMsg::GetRuntimeMetrics {
+            request_id: next_request_id().expect("allocate metrics request id"),
+        })
+        .expect("panic recovery should answer routed request");
+
+    // Assert
+    assert!(fired.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(matches!(
+        response,
+        RuntimeResponse::Error {
+            error: MidgeError::Internal(message),
+            ..
+        } if message == "runtime event loop panicked before responding"
+    ));
+    assert!(runtime.wait_for_exit(Duration::from_secs(1)));
+    fail::remove("midge::runtime::before_get_runtime_metrics_response");
+    scenario.teardown();
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_answer_pending_apply_transaction_request_given_event_loop_panic_when_awaiting_response() {
+    if std::env::var(RUNTIME_PANIC_CHILD).as_deref() != Ok("apply") {
+        run_runtime_panic_child(
+            "apply",
+            "runtime::tests::should_answer_pending_apply_transaction_request_given_event_loop_panic_when_awaiting_response",
+        );
+        return;
+    }
+
+    // Arrange
+    let scenario = fail::FailScenario::setup();
+    let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let callback_fired = Arc::clone(&fired);
+    fail::cfg_callback("midge::runtime::strict_group_before_collect", move || {
+        callback_fired.store(true, std::sync::atomic::Ordering::SeqCst);
+        panic!("deterministic inline-response panic");
+    })
+    .expect("configure apply-transaction panic");
+    let temp_dir = tempfile::TempDir::new().expect("create runtime directory");
+    let (runtime, _) = Runtime::new();
+    let state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
+    let config = RuntimeConfig {
+        wal_durability_policy: DurabilityPolicy::Strict,
+        ..RuntimeConfig::default()
+    };
+    let (mut runtime, handle) = runtime
+        .start_with_config(state, config)
+        .expect("start runtime");
+    let submission = TransactionSubmission {
+        ops: vec![TransactionOp::Put {
+            cf_id: 0,
+            key: bytes::Bytes::from_static(b"panic-key"),
+            value: bytes::Bytes::from_static(b"panic-value"),
+            ttl_seconds: None,
+            insert_only: false,
+        }],
+        assertions: Vec::new(),
+        durability_policy: Some(DurabilityPolicy::Strict),
+        start_sequence: None,
+        conflict_policy: ConflictPolicy::LastWriteWins,
+    };
+
+    // Act
+    let response = handle.send_apply_transaction_and_wait(
+        next_request_id().expect("allocate transaction request id"),
+        submission,
+    );
+
+    // Assert: ApplyTransaction uses its own inline response channel. Dropping
+    // the panicked EventLoop must still close that channel and unblock caller.
+    assert!(fired.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(matches!(
+        response,
+        Err(MidgeError::Internal(message)) if message == "Response channel closed"
+    ));
+    assert!(runtime.wait_for_exit(Duration::from_secs(1)));
+    fail::remove("midge::runtime::strict_group_before_collect");
+    scenario.teardown();
+}
+
+#[cfg(feature = "failpoints")]
+fn run_runtime_panic_child(scenario: &str, test_name: &str) {
+    let output = std::process::Command::new(
+        std::env::current_exe().expect("locate runtime unit-test executable"),
+    )
+    .arg("--exact")
+    .arg(test_name)
+    .arg("--nocapture")
+    .arg("--test-threads=1")
+    .env(RUNTIME_PANIC_CHILD, scenario)
+    .output()
+    .expect("run isolated runtime panic child");
+    assert!(
+        output.status.success(),
+        "runtime panic child '{scenario}' failed; stdout={}; stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

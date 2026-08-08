@@ -30,10 +30,12 @@ pub struct CompactionActor {
     /// serializes compactions, but the token still prevents a delayed terminal
     /// message from settling a later operation.
     storage_reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
+    /// Exact manifest inputs owned by the active operation.
+    active_input_ssts: Vec<String>,
     /// Cooperative cancellation flag for the active background worker.
     worker_cancel: Arc<AtomicBool>,
     /// Active background worker, joined before runtime shutdown completes.
-    worker_handle: Option<JoinHandle<()>>,
+    worker_handle: Option<JoinHandle<Vec<String>>>,
 }
 
 impl CompactionActor {
@@ -52,6 +54,7 @@ impl CompactionActor {
             compactor: Compactor::with_config(config),
             last_scheduled_cf: None,
             storage_reservation: None,
+            active_input_ssts: Vec::new(),
             worker_cancel: Arc::new(AtomicBool::new(false)),
             worker_handle: None,
         }
@@ -176,14 +179,7 @@ impl CompactionActor {
         plan: &crate::compaction::CompactionPlan,
         sba: Option<&std::sync::Arc<crate::storage::HybridStorage>>,
     ) {
-        state
-            .compaction
-            .compacting_ssts
-            .retain(|name| !plan.input_files.contains(name));
-        state
-            .active_compactions
-            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-        self.compaction_running = false;
+        self.finish_active_bookkeeping(state, &plan.input_files);
         if let (Some(hybrid), Some(token)) = (sba, self.storage_reservation.take()) {
             hybrid.compaction_aborted_with_token(token);
         }
@@ -199,14 +195,8 @@ impl CompactionActor {
         // Invariant: completion only clears in-memory "running" state. The
         // actual authority switch happens when manifest publication removes the
         // old SSTs and adds the replacement set.
-        // Remove input files from compacting set
-        state
-            .compaction
-            .compacting_ssts
-            .retain(|s| !input_ssts.contains(s));
-
-        self.compaction_running = false;
-        self.join_worker();
+        self.finish_active_bookkeeping(state, input_ssts);
+        let _ = self.join_worker();
 
         tracing::info!(
             input_count = input_ssts.len(),
@@ -221,22 +211,78 @@ impl CompactionActor {
     /// storage lease. The worker checks this flag before and after output
     /// finalization, so it cannot publish or leave a staged replacement after
     /// shutdown has begun.
-    pub fn cancel_and_join_worker(&mut self) {
+    pub fn cancel_and_join_worker(
+        &mut self,
+        state: &mut RuntimeState,
+        sba: Option<&std::sync::Arc<crate::storage::HybridStorage>>,
+    ) {
         self.worker_cancel.store(true, Ordering::Release);
-        self.join_worker();
-        self.compaction_running = false;
+        let staged_outputs = self.join_worker();
+        if !self.compaction_running {
+            return;
+        }
+
+        for output in staged_outputs {
+            let path = state.sst_dir.join(&output);
+            match std::fs::remove_file(&path) {
+                Ok(()) => {
+                    tracing::debug!(file = %path.display(), "removed canceled compaction output");
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    state.mark_persistence_anomaly();
+                    tracing::warn!(file = %path.display(), %error, "retaining canceled compaction output after cleanup failure");
+                }
+            }
+        }
+
+        let active_inputs = self.active_input_ssts.clone();
+        self.finish_active_bookkeeping(state, &active_inputs);
+        if let (Some(hybrid), Some(token)) = (sba, self.storage_reservation.take()) {
+            hybrid.compaction_aborted_with_token(token);
+        }
     }
 
-    fn join_worker(&mut self) {
+    fn join_worker(&mut self) -> Vec<String> {
         let Some(handle) = self.worker_handle.take() else {
-            return;
+            return Vec::new();
         };
 
-        if let Ok(()) = handle.join() {
+        if let Ok(outputs) = handle.join() {
             tracing::debug!("compaction worker joined");
+            outputs
         } else {
             tracing::warn!("compaction worker panicked during join");
+            Vec::new()
         }
+    }
+
+    fn finish_active_bookkeeping(&mut self, state: &mut RuntimeState, fallback_inputs: &[String]) {
+        if !self.compaction_running {
+            return;
+        }
+        let inputs = if self.active_input_ssts.is_empty() {
+            fallback_inputs
+        } else {
+            &self.active_input_ssts
+        };
+        state
+            .compaction
+            .compacting_ssts
+            .retain(|name| !inputs.contains(name));
+        if state
+            .active_compactions
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |active| active.checked_sub(1),
+            )
+            .is_err()
+        {
+            tracing::warn!("active compaction accounting was already settled");
+        }
+        self.active_input_ssts.clear();
+        self.compaction_running = false;
     }
 
     fn prepare_compaction(
@@ -252,6 +298,7 @@ impl CompactionActor {
         }
 
         self.compaction_running = true;
+        self.active_input_ssts.clone_from(&plan.input_files);
 
         state
             .compaction
@@ -282,6 +329,17 @@ impl CompactionActor {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prepare_for_completion_test(
+        &mut self,
+        state: &mut RuntimeState,
+        input_ssts: &[String],
+    ) -> MidgeResult<()> {
+        let mut plan = crate::compaction::CompactionPlan::new(0, 0, 1);
+        plan.input_files = input_ssts.to_vec();
+        self.prepare_compaction(state, &plan, None)
     }
 
     fn run_sync_compaction(
@@ -388,13 +446,13 @@ impl CompactionActor {
                     job_id,
                     "compaction worker could not allocate completion request ID"
                 );
-                return;
+                return output_ssts;
             };
             if tx
                 .send(RuntimeMsg::CompactionComplete {
                     request_id,
                     input_ssts: input_files,
-                    output_ssts,
+                    output_ssts: output_ssts.clone(),
                     cf_id: plan_clone.cf_id,
                     target_level: plan_clone.target_level,
                     succeeded,
@@ -407,6 +465,7 @@ impl CompactionActor {
                     "compaction completion receiver closed"
                 );
             }
+            output_ssts
         })
             .map_err(|error| MidgeError::Internal(format!("spawn compaction worker: {error}")))?;
         self.worker_handle = Some(worker);
@@ -423,6 +482,7 @@ impl Clone for CompactionActor {
             compactor: Compactor::with_config(self.compactor.config.clone()),
             last_scheduled_cf: self.last_scheduled_cf,
             storage_reservation: self.storage_reservation,
+            active_input_ssts: self.active_input_ssts.clone(),
             worker_cancel: Arc::clone(&self.worker_cancel),
             worker_handle: None,
         }
@@ -431,13 +491,97 @@ impl Clone for CompactionActor {
 
 impl Drop for CompactionActor {
     fn drop(&mut self) {
-        self.cancel_and_join_worker();
+        self.worker_cancel.store(true, Ordering::Release);
+        let _ = self.join_worker();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct BlockingFinalizeFactory {
+        delegate: Arc<dyn crate::sst::SstFactory>,
+        reached_finalize: std::sync::mpsc::SyncSender<()>,
+        cancel_probe: Arc<std::sync::Mutex<Option<Arc<AtomicBool>>>>,
+    }
+
+    impl crate::sst::SstFactory for BlockingFinalizeFactory {
+        fn create(&self) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
+            Ok(Box::new(BlockingFinalizeWriter {
+                inner: self.delegate.create()?,
+                reached_finalize: self.reached_finalize.clone(),
+                cancel_probe: Arc::clone(&self.cancel_probe),
+            }))
+        }
+
+        fn open(
+            &self,
+            path: &std::path::Path,
+        ) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+            self.delegate.open(path)
+        }
+    }
+
+    struct BlockingFinalizeWriter {
+        inner: Box<dyn crate::sst::traits::DynSstWriter>,
+        reached_finalize: std::sync::mpsc::SyncSender<()>,
+        cancel_probe: Arc<std::sync::Mutex<Option<Arc<AtomicBool>>>>,
+    }
+
+    impl crate::sst::traits::DynSstWriter for BlockingFinalizeWriter {
+        fn add(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()> {
+            self.inner.add(key, value)
+        }
+
+        fn add_with_meta(
+            &mut self,
+            key: &[u8],
+            value: Option<&[u8]>,
+            seq: u64,
+            op_type: u8,
+            expiration: Option<u64>,
+        ) -> MidgeResult<()> {
+            self.inner
+                .add_with_meta(key, value, seq, op_type, expiration)
+        }
+
+        fn add_sorted_with_meta(
+            &mut self,
+            key: &[u8],
+            value: Option<&[u8]>,
+            seq: u64,
+            op_type: u8,
+            expiration: Option<u64>,
+        ) -> MidgeResult<()> {
+            self.inner
+                .add_sorted_with_meta(key, value, seq, op_type, expiration)
+        }
+
+        fn add_range_tombstone(&mut self, start: &[u8], end: &[u8], seq: u64) -> MidgeResult<()> {
+            self.inner.add_range_tombstone(start, end, seq)
+        }
+
+        fn finish_bytes(self: Box<Self>) -> MidgeResult<Vec<u8>> {
+            let Self {
+                inner,
+                reached_finalize,
+                cancel_probe,
+            } = *self;
+            let bytes = inner.finish_bytes()?;
+            let _ = reached_finalize.try_send(());
+            let cancel = cancel_probe
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .cloned()
+                .expect("install worker cancellation probe before compaction");
+            while !cancel.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            Ok(bytes)
+        }
+    }
 
     fn make_l0_file(
         name: &str,
@@ -681,5 +825,101 @@ mod tests {
         assert_eq!(first_plan.cf_id, first_cf);
         assert_eq!(second_plan.cf_id, second_cf);
         assert_eq!(wrapped_plan.cf_id, first_cf);
+    }
+
+    #[test]
+    fn should_reconcile_compaction_state_given_shutdown_mid_async_compaction() {
+        // Arrange
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
+        std::fs::create_dir_all(&state.sst_dir).expect("create SST dir");
+        let input_name = "000000_00_00000000000000000001.sst".to_string();
+        let output_name = "000000_01_00000000000000000002.sst".to_string();
+        let input_path = state.sst_dir.join(&input_name);
+        let output_path = state.sst_dir.join(&output_name);
+        let real_fs = Arc::new(crate::io::RealFs::new(&state.sst_dir).expect("create real SST fs"));
+        let delegate: Arc<dyn crate::sst::SstFactory> =
+            Arc::new(crate::sst::FsSstFactoryIo::new(real_fs, 4096));
+        let mut input_writer = delegate.create().expect("create input SST writer");
+        input_writer
+            .add_with_meta(b"key", Some(b"authoritative value"), 1, 0, None)
+            .expect("write input value");
+        crate::sst::fs::finish_writer_to_path(input_writer, &input_path)
+            .expect("finalize input SST");
+        let input_bytes = std::fs::read(&input_path).expect("read input fixture");
+        state.manifest.files.push(crate::metadata::FileMeta {
+            name: input_name.clone(),
+            level: 0,
+            size_bytes: u64::try_from(input_bytes.len()).expect("input size fits u64"),
+            cf_id: 0,
+            smallest_key: Some(b"key".to_vec()),
+            largest_key: Some(b"key".to_vec()),
+            ..Default::default()
+        });
+
+        let local = Arc::new(
+            crate::storage::filesystem::FileSystem::new(temp.path().join("hybrid-local"))
+                .expect("create local storage"),
+        );
+        let cloud = Arc::new(
+            crate::storage::filesystem::FileSystem::new(temp.path().join("hybrid-cloud"))
+                .expect("create cloud storage"),
+        );
+        let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
+            local,
+            cloud,
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        ));
+        let (reached_tx, reached_rx) = std::sync::mpsc::sync_channel(1);
+        let cancel_probe = Arc::new(std::sync::Mutex::new(None));
+        let factory = Arc::new(BlockingFinalizeFactory {
+            delegate,
+            reached_finalize: reached_tx,
+            cancel_probe: Arc::clone(&cancel_probe),
+        });
+        let mut actor = CompactionActor::new(factory);
+        *cancel_probe
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(Arc::clone(&actor.worker_cancel));
+        let mut plan = crate::compaction::CompactionPlan::new(0, 0, 1).with_output_seq(2);
+        plan.input_files.push(input_name.clone());
+        let (completion_tx, completion_rx) = crossbeam::channel::unbounded();
+        actor
+            .run_compaction(&mut state, &plan, Some(&hybrid), Some(completion_tx))
+            .expect("launch actual async compaction");
+        assert_eq!(state.active_compactions.load(Ordering::SeqCst), 1);
+        assert!(hybrid.budget_snapshot().total_committed_bytes > 0);
+        reached_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("real compaction worker must reach output finalization");
+
+        // Act
+        actor.cancel_and_join_worker(&mut state, Some(&hybrid));
+        actor.cancel_and_join_worker(&mut state, Some(&hybrid));
+
+        // Assert
+        assert!(matches!(
+            completion_rx.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(RuntimeMsg::CompactionComplete {
+                succeeded: false,
+                output_ssts,
+                ..
+            }) if output_ssts.is_empty()
+        ));
+        assert!(
+            actor.worker_handle.is_none(),
+            "shutdown must join the worker"
+        );
+        assert_eq!(state.active_compactions.load(Ordering::SeqCst), 0);
+        assert!(state.compaction.compacting_ssts.is_empty());
+        assert_eq!(
+            std::fs::read(&input_path).expect("read retained input"),
+            input_bytes,
+            "shutdown must retain authoritative inputs byte-for-byte"
+        );
+        assert!(!output_path.exists(), "shutdown must remove staged output");
+        assert_eq!(hybrid.budget_snapshot().total_committed_bytes, 0);
+        assert!(actor.storage_reservation.is_none());
     }
 }

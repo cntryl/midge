@@ -9,6 +9,48 @@ use std::sync::{
 };
 use std::time::Duration;
 
+pub(crate) enum ShutdownTerminal {
+    Success,
+    Error(MidgeError),
+}
+
+impl ShutdownTerminal {
+    pub(crate) fn replay(&self) -> MidgeResult<()> {
+        match self {
+            Self::Success => Ok(()),
+            Self::Error(error) => Err(clone_shutdown_error(error)),
+        }
+    }
+}
+
+pub(crate) enum ShutdownState {
+    Idle,
+    Sending,
+    Ready {
+        request_id: u64,
+        response_rx: Receiver<RuntimeResponse>,
+    },
+    Receiving {
+        request_id: u64,
+    },
+    ResponseDisconnected,
+    Terminal(ShutdownTerminal),
+}
+
+pub(crate) struct ShutdownCoordinator {
+    pub(crate) state: std::sync::Mutex<ShutdownState>,
+    pub(crate) changed: std::sync::Condvar,
+}
+
+impl ShutdownCoordinator {
+    fn new() -> Self {
+        Self {
+            state: std::sync::Mutex::new(ShutdownState::Idle),
+            changed: std::sync::Condvar::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum RuntimeLifecycleState {
@@ -34,8 +76,7 @@ pub(crate) struct RuntimeLifecycle {
     pub(crate) submission_gate: std::sync::RwLock<()>,
     pub(crate) wait_lock: std::sync::Mutex<()>,
     pub(crate) wait_cv: std::sync::Condvar,
-    pub(crate) shutdown_response: std::sync::Mutex<Option<Receiver<RuntimeResponse>>>,
-    pub(crate) shutdown_acknowledged: std::sync::atomic::AtomicBool,
+    pub(crate) shutdown: ShutdownCoordinator,
 }
 
 impl RuntimeLifecycle {
@@ -47,8 +88,7 @@ impl RuntimeLifecycle {
             submission_gate: std::sync::RwLock::new(()),
             wait_lock: std::sync::Mutex::new(()),
             wait_cv: std::sync::Condvar::new(),
-            shutdown_response: std::sync::Mutex::new(None),
-            shutdown_acknowledged: std::sync::atomic::AtomicBool::new(false),
+            shutdown: ShutdownCoordinator::new(),
         }
     }
 
@@ -176,6 +216,50 @@ impl RuntimeLifecycle {
                 return false;
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shutdown_response_is_available(&self) -> bool {
+        matches!(
+            *self
+                .shutdown
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ShutdownState::Ready { .. }
+        )
+    }
+}
+
+fn clone_shutdown_error(error: &MidgeError) -> MidgeError {
+    match error {
+        MidgeError::Io(error) => MidgeError::Io(error.raw_os_error().map_or_else(
+            || std::io::Error::new(error.kind(), error.to_string()),
+            std::io::Error::from_raw_os_error,
+        )),
+        MidgeError::NotFound => MidgeError::NotFound,
+        MidgeError::InvalidArgument(message) => MidgeError::InvalidArgument(message.clone()),
+        MidgeError::Corruption(message) => MidgeError::Corruption(message.clone()),
+        MidgeError::NotSupported(message) => MidgeError::NotSupported(message.clone()),
+        MidgeError::Internal(message) => MidgeError::Internal(message.clone()),
+        MidgeError::InvalidPath => MidgeError::InvalidPath,
+        MidgeError::NoSpace(message) => MidgeError::NoSpace(message.clone()),
+        MidgeError::RecoveryFailed(message) => MidgeError::RecoveryFailed(message.clone()),
+        MidgeError::CompatibilityError(message) => MidgeError::CompatibilityError(message.clone()),
+        MidgeError::WriteStall(message) => MidgeError::WriteStall(message.clone()),
+        MidgeError::MemoryModeViolation(message) => {
+            MidgeError::MemoryModeViolation(message.clone())
+        }
+        MidgeError::Fenced(message) => MidgeError::Fenced(message.clone()),
+        MidgeError::LeaseHeld(message) => MidgeError::LeaseHeld(message.clone()),
+        MidgeError::LeaseUnavailable(message) => MidgeError::LeaseUnavailable(message.clone()),
+        MidgeError::LeaseIndeterminate(message) => MidgeError::LeaseIndeterminate(message.clone()),
+        MidgeError::LeaseEpochExhausted => MidgeError::LeaseEpochExhausted,
+        MidgeError::WriteConflict(message) => MidgeError::WriteConflict(message.clone()),
+        MidgeError::Aborted(message) => MidgeError::Aborted(message.clone()),
+        MidgeError::Busy(message) => MidgeError::Busy(message.clone()),
+        MidgeError::Timeout(message) => MidgeError::Timeout(message.clone()),
+        MidgeError::ResourceLimit(message) => MidgeError::ResourceLimit(message.clone()),
     }
 }
 

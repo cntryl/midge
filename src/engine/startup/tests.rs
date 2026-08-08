@@ -94,7 +94,7 @@ impl std::io::Write for CapturedLogWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         self.0
             .lock()
-            .expect("captured startup logs lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .extend_from_slice(bytes);
         Ok(bytes.len())
     }
@@ -162,7 +162,7 @@ fn should_not_log_cloud_credentials_when_tracing_engine_startup() {
         captured
             .0
             .lock()
-            .expect("captured startup logs lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone(),
     )
     .expect("startup tracing should be UTF-8");

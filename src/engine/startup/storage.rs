@@ -252,6 +252,7 @@ impl RuntimeStorageMaterialization {
         let runtime_config = crate::runtime::RuntimeConfig {
             wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
             storage_io_timeout: opts.storage_io_timeout(),
+            shutdown_cloud_drain_timeout: opts.shutdown_cloud_drain_timeout(),
             cloud_runtime_policy,
             hybrid_storage: Some(cloud.hybrid_storage),
             hybrid_storage_events: Some(cloud.events),
@@ -364,6 +365,7 @@ impl RuntimeStorageMaterialization {
         let runtime_config = crate::runtime::RuntimeConfig {
             wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
             storage_io_timeout: opts.storage_io_timeout(),
+            shutdown_cloud_drain_timeout: opts.shutdown_cloud_drain_timeout(),
             cloud_runtime_policy,
             hybrid_storage: Some(hybrid_storage),
             hybrid_storage_events: Some(rx),
@@ -405,6 +407,7 @@ impl RuntimeStorageMaterialization {
             wal_durability_policy: crate::wal::DurabilityPolicy::Batched,
             wal_batch_config: batch_config,
             storage_io_timeout: opts.storage_io_timeout(),
+            shutdown_cloud_drain_timeout: opts.shutdown_cloud_drain_timeout(),
             cloud_runtime_policy,
             compression_policy: opts.compression_policy().clone(),
             block_cache_size: opts.block_cache_size(),

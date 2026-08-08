@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+pub mod crash;
+
 use cntryl_midge::{
     CloudWritePolicy, ColumnFamilyHandle, Engine, Goal, MemoryBudget, MidgeEngine, MidgeResult,
     OpenOptions, Storage, WorkloadProfile, WriteOptions,

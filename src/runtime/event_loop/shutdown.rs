@@ -1,5 +1,6 @@
 use super::{EventLoop, HandleOutcome};
 use crate::common::MidgeError;
+use crate::runtime::durability::DurabilityWaiter;
 use crate::runtime::{RuntimeMsg, RuntimeResponse};
 
 impl EventLoop {
@@ -18,6 +19,12 @@ impl EventLoop {
         tracing::info!("Runtime shutting down");
         let mut shutdown_error = None;
         self.shutting_down = true;
+
+        // Caller-bearing work held outside the runtime queue cannot make
+        // progress once terminal shutdown owns the event loop. Reject it
+        // before joining potentially stalled storage workers so those callers
+        // observe shutdown promptly instead of inheriting the worker budget.
+        self.fail_shutdown_held_work();
 
         // Drain the currently owned flush pipeline before releasing the writer
         // epoch. No new immutable is scheduled once shutdown admission closes.
@@ -40,7 +47,8 @@ impl EventLoop {
         // Stop compaction before the runtime drains cloud work. Its worker
         // owns staged SST output and must finish while this lease epoch is
         // still valid.
-        self.compaction_actor.cancel_and_join_worker();
+        self.compaction_actor
+            .cancel_and_join_worker(&mut self.state, self.hybrid_storage.as_ref());
 
         if self.wal_actor.is_cloud_async() && self.state.wal.pending_writes > 0 {
             match self.seal_current_cloud_segment() {
@@ -62,7 +70,7 @@ impl EventLoop {
             if let Some(storage) = &self.hybrid_storage {
                 let storage = storage.clone();
                 let shutdown_start = std::time::Instant::now();
-                let shutdown_timeout = std::time::Duration::from_secs(30);
+                let shutdown_timeout = self.shutdown_cloud_drain_timeout;
                 let mut last_pending = usize::MAX;
                 let mut stagnant_rounds = 0usize;
 
@@ -116,6 +124,13 @@ impl EventLoop {
             storage.shutdown_background_workers();
         }
 
+        // Flush completion and other worker progress can restore a deferred
+        // caller into `pending_msg` while shutdown drains. The run loop exits
+        // immediately after this method, so explicitly reject every held
+        // caller before acknowledging shutdown rather than silently dropping
+        // its response channel.
+        self.fail_shutdown_held_work();
+
         if let Some(request_id) = request_id {
             let response = match shutdown_error {
                 Some(error) => RuntimeResponse::Error { request_id, error },
@@ -126,4 +141,86 @@ impl EventLoop {
 
         HandleOutcome::Break
     }
+
+    pub(super) fn fail_shutdown_held_work(&mut self) {
+        let mut messages = Vec::new();
+        if let Some(message) = self.pending_msg.take() {
+            messages.push(message);
+        }
+        messages.extend(self.verification_deferred_messages.drain(..));
+        messages.extend(self.publication_deferred_messages.drain(..));
+        for message in messages {
+            self.fail_shutdown_message(message);
+        }
+
+        let mut routed_request_ids = std::collections::BTreeSet::new();
+        routed_request_ids.extend(
+            self.flush_barrier_waiters
+                .drain()
+                .flat_map(|(_, waiters)| waiters)
+                .map(|waiter| waiter.request_id),
+        );
+        {
+            let mut pending = self.state.pending_compaction_waits.lock();
+            routed_request_ids.extend(pending.keys().copied());
+            pending.clear();
+        }
+        routed_request_ids.extend(self.write_stall_waiters.keys().copied());
+        self.write_stall_waiters.clear();
+        self.write_stall_waiter_queues.clear();
+        let durability_waiters = self.durability.drain_all_waiters();
+        routed_request_ids.extend(
+            durability_waiters
+                .iter()
+                .filter_map(shutdown_waiter_request_id),
+        );
+        routed_request_ids.extend(self.inline_responses.borrow().keys().copied());
+
+        for request_id in routed_request_ids {
+            self.respond(
+                request_id,
+                RuntimeResponse::Error {
+                    request_id,
+                    error: shutdown_error(),
+                },
+            );
+        }
+    }
+
+    fn fail_shutdown_message(&self, message: RuntimeMsg) {
+        let Some(request_id) = message.request_id() else {
+            return;
+        };
+        let inline_response = match message {
+            RuntimeMsg::ApplyTransaction { response_tx, .. }
+            | RuntimeMsg::ApplySpilledTransaction { response_tx, .. } => response_tx,
+            _ => None,
+        };
+        let response = RuntimeResponse::Error {
+            request_id,
+            error: shutdown_error(),
+        };
+        if let Some(response_tx) = inline_response {
+            let _ = response_tx.send(response);
+        } else {
+            self.respond(request_id, response);
+        }
+    }
+}
+
+fn shutdown_waiter_request_id(waiter: &DurabilityWaiter) -> Option<u64> {
+    match waiter {
+        DurabilityWaiter::TransactionApply { request_id, .. }
+        | DurabilityWaiter::CloudDurability { request_id } => Some(*request_id),
+        DurabilityWaiter::ConfirmWalAppend { .. }
+        | DurabilityWaiter::ConfirmTransactionApply { .. } => None,
+        #[cfg(test)]
+        DurabilityWaiter::WalAppend { request_id, .. }
+        | DurabilityWaiter::Read { request_id, .. }
+        | DurabilityWaiter::RangeScan { request_id, .. } => Some(*request_id),
+    }
+}
+
+fn shutdown_error() -> MidgeError {
+    MidgeError::Busy("runtime is shutting down".to_string())
 }

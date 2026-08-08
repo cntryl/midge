@@ -1,9 +1,10 @@
+mod common;
+
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 
@@ -13,10 +14,13 @@ use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 
+use common::crash;
+
 const CHILD_TEST_NAME: &str = "should_abort_in_child_process_when_chaos_scenario_requested";
 const ENV_SCENARIO: &str = "MIDGE_CHAOS_REAL_SCENARIO";
 const ENV_DB_PATH: &str = "MIDGE_CHAOS_REAL_DB_PATH";
 const ENV_TRIGGER_CF: &str = "MIDGE_CHAOS_REAL_TRIGGER_CF";
+const ENV_WAL_APPEND_CRASH_TARGET: &str = "MIDGE_WAL_APPEND_CRASH_TARGET";
 
 /*
 SCENARIO: commit returned Ok, process crashes after WAL append but before fsync, strict durability mode.
@@ -297,6 +301,26 @@ fn should_recover_only_committed_or_single_inflight_write_when_random_wal_append
 }
 
 #[test]
+fn should_fail_deterministically_given_fixed_offset_when_replaying_concurrent_wal_append_crash() {
+    // Arrange
+    let first = TempDir::new().expect("first temp dir");
+    let second = TempDir::new().expect("second temp dir");
+    let target = 17;
+
+    // Act
+    let first_committed = act_concurrent_wal_append_crash_at(first.path(), target);
+    let second_committed = act_concurrent_wal_append_crash_at(second.path(), target);
+    let first_visible = count_visible_concurrent_keys(first.path());
+    let second_visible = count_visible_concurrent_keys(second.path());
+
+    // Assert
+    assert_eq!(first_committed.len(), target - 1);
+    assert_eq!(second_committed.len(), target - 1);
+    assert_eq!(first_visible, second_visible);
+    assert!((target - 1..=target).contains(&first_visible));
+}
+
+#[test]
 fn should_preserve_recovered_data_when_two_crash_recovery_cycles_reuse_same_directory() {
     // WHAT THIS TEST DOES:
     // Runs one crashing child that writes sync commits and aborts in manifest persistence,
@@ -387,9 +411,40 @@ fn act_manifest_crash_with_zeroed_manifest(db_path: &Path) -> Vec<CommitRecord> 
 }
 
 fn act_concurrent_random_wal_append_crash(db_path: &Path) -> HashMap<Vec<u8>, Vec<u8>> {
-    run_child_expect_abort("concurrent_random_wal_append", db_path, &[]);
+    let target = selected_wal_append_crash_target();
+    act_concurrent_wal_append_crash_at(db_path, target)
+}
+
+fn act_concurrent_wal_append_crash_at(db_path: &Path, target: usize) -> HashMap<Vec<u8>, Vec<u8>> {
+    assert!((2..=400).contains(&target));
+    let target_text = target.to_string();
+    eprintln!("[midge-test] {ENV_WAL_APPEND_CRASH_TARGET}={target}; replay with the same value");
+    run_child_expect_abort(
+        "concurrent_random_wal_append",
+        db_path,
+        &[(ENV_WAL_APPEND_CRASH_TARGET, target_text.as_str())],
+    );
     expire_crashed_process_lease(db_path);
     committed_map_by_key(&read_committed_records(db_path))
+}
+
+fn count_visible_concurrent_keys(db_path: &Path) -> usize {
+    let mut engine = open_local_engine(db_path);
+    let default_cf = default_cf(&engine);
+    let mut visible = 0;
+    for thread_id in 0..4 {
+        for index in 0..100 {
+            let key = concurrent_key(thread_id, index);
+            let tx = engine
+                .begin_tx(default_cf.id(), TransactionMode::ReadOnly)
+                .expect("begin replay verification transaction");
+            visible += usize::from(tx.get(key.as_bytes()).expect("read replay key").is_some());
+        }
+    }
+    engine
+        .shutdown(std::time::Duration::from_secs(5))
+        .expect("shutdown replay verification engine");
+    visible
 }
 
 fn act_two_manifest_crash_cycles(db_path: &Path) -> Vec<CommitRecord> {
@@ -418,7 +473,10 @@ fn act_two_manifest_crash_cycles(db_path: &Path) -> Vec<CommitRecord> {
 }
 
 fn child_flush_after_sst_write(db_path: &Path) {
-    configure_abort_failpoint("midge::flush::after_sst_write_before_publish");
+    crash::configure_abort_failpoint(
+        "midge::flush::after_sst_write_before_publish",
+        "flush_after_sst_write",
+    );
 
     let engine = open_local_engine(db_path);
     let default_cf = default_cf(&engine);
@@ -443,7 +501,10 @@ fn child_flush_after_sst_write(db_path: &Path) {
 }
 
 fn child_flush_after_sst_write_best_effort(db_path: &Path) {
-    configure_abort_failpoint("midge::flush::after_sst_write_before_publish");
+    crash::configure_abort_failpoint(
+        "midge::flush::after_sst_write_before_publish",
+        "flush_after_sst_write_best_effort",
+    );
 
     let engine = open_local_engine(db_path);
     let default_cf = default_cf(&engine);
@@ -491,7 +552,10 @@ fn child_manifest_crash_after_sync(db_path: &Path) {
         );
     }
 
-    configure_abort_failpoint("midge::manifest::after_temp_sync_before_rename");
+    crash::configure_abort_failpoint(
+        "midge::manifest::after_temp_sync_before_rename",
+        "manifest_crash_after_sync",
+    );
 
     let trigger_cf = std::env::var(ENV_TRIGGER_CF).expect("trigger cf env");
     assert!(
@@ -504,8 +568,20 @@ fn child_manifest_crash_after_sync(db_path: &Path) {
 }
 
 fn child_concurrent_random_wal_append(db_path: &Path) {
-    let target = (usize::from(rand::random::<u16>()) % 399) + 2;
-    configure_nth_abort_failpoint("midge::wal::after_append_batch_before_sync", target);
+    let target = std::env::var(ENV_WAL_APPEND_CRASH_TARGET)
+        .expect("WAL append crash target env")
+        .parse::<usize>()
+        .expect("WAL append crash target must be an integer");
+    assert!(
+        (2..=400).contains(&target),
+        "WAL append crash target must be in 2..=400"
+    );
+    eprintln!("[midge-test-child] WAL append crash target={target}");
+    crash::configure_nth_abort_failpoint(
+        "midge::wal::after_append_batch_before_sync",
+        "concurrent_random_wal_append",
+        target,
+    );
 
     let engine = Arc::new(open_local_engine(db_path));
     let default_cf = default_cf(&engine);
@@ -524,7 +600,9 @@ fn child_concurrent_random_wal_append(db_path: &Path) {
             for index in 0..100 {
                 let key = concurrent_key(thread_id, index);
                 let value = concurrent_value(thread_id, index);
-                let _guard = commit_gate.lock().expect("lock commit gate");
+                let _guard = commit_gate
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 put_and_track_commit(
                     &engine,
                     &default_cf,
@@ -658,34 +736,34 @@ fn run_child_expect_abort(scenario: &str, db_path: &Path, extra_envs: &[(&str, &
         command.env(name, value);
     }
 
-    let output = command.output().expect("run child test binary");
-    assert!(
-        !output.status.success(),
-        "child scenario {scenario} unexpectedly exited successfully"
+    crash::run_child_expect_abort(&mut command, scenario, crash_trigger(scenario), db_path);
+}
+
+fn crash_trigger(scenario: &str) -> &'static str {
+    match scenario {
+        "flush_after_sst_write" | "flush_after_sst_write_best_effort" => {
+            "midge::flush::after_sst_write_before_publish"
+        }
+        "manifest_crash_after_sync" => "midge::manifest::after_temp_sync_before_rename",
+        "concurrent_random_wal_append" => "midge::wal::after_append_batch_before_sync",
+        other => panic!("unknown crash trigger for scenario {other}"),
+    }
+}
+
+fn selected_wal_append_crash_target() -> usize {
+    let target = std::env::var(ENV_WAL_APPEND_CRASH_TARGET).map_or_else(
+        |_| (usize::from(rand::random::<u16>()) % 399) + 2,
+        |value| {
+            value
+                .parse::<usize>()
+                .unwrap_or_else(|error| panic!("invalid {ENV_WAL_APPEND_CRASH_TARGET}: {error}"))
+        },
     );
-}
-
-fn configure_abort_failpoint(name: &str) {
-    let scenario = fail::FailScenario::setup();
-    std::panic::set_hook(Box::new(|_| std::process::abort()));
-    fail::cfg(name, "panic").expect("configure abort failpoint");
-    std::mem::forget(scenario);
-}
-
-fn configure_nth_abort_failpoint(name: &str, target: usize) {
-    let scenario = fail::FailScenario::setup();
-    std::panic::set_hook(Box::new(|_| std::process::abort()));
-
-    let hits = Arc::new(AtomicUsize::new(0));
-    let hits_for_callback = Arc::clone(&hits);
-    fail::cfg_callback(name, move || {
-        assert!(
-            hits_for_callback.fetch_add(1, Ordering::SeqCst) + 1 != target,
-            "abort on wal append hit {target}"
-        );
-    })
-    .expect("configure nth abort failpoint");
-    std::mem::forget(scenario);
+    assert!(
+        (2..=400).contains(&target),
+        "{ENV_WAL_APPEND_CRASH_TARGET} must be in 2..=400, got {target}"
+    );
+    target
 }
 
 fn append_complete_wal_record(wal_path: &Path, key: &[u8], value: &[u8]) {
@@ -765,6 +843,7 @@ fn expire_crashed_process_lease(db_path: &Path) {
         content.push('\n');
         fs::write(&leader_path, content).expect("rewrite leader record as stale");
     }
+    crash::clear_crashed_process_acquisition_lock(db_path);
 }
 
 fn concurrent_key(thread_id: usize, index: usize) -> String {

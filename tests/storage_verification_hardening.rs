@@ -157,7 +157,7 @@ fn should_verify_online_layout_within_caller_timeout() {
     let _guard = FAILPOINT_TEST_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("lock failpoint test");
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = tempfile::tempdir().expect("create temp directory");
     let mut engine = Engine::open(
         OpenOptions::local(temp_dir.path())
@@ -185,7 +185,7 @@ fn should_retain_verification_barrier_when_online_verification_times_out() {
     let _guard = FAILPOINT_TEST_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("lock failpoint test");
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let scenario = fail::FailScenario::setup();
     fail::cfg(
         "midge::verification::after_barrier_acquired",
@@ -255,7 +255,7 @@ fn should_release_verification_barrier_when_acquire_response_is_lost() {
     let _guard = FAILPOINT_TEST_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("lock failpoint test");
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let scenario = fail::FailScenario::setup();
     fail::cfg(
         "midge::verification::before_barrier_response",
@@ -301,7 +301,7 @@ fn should_retain_primary_lease_when_shutdown_overlaps_timed_out_verification() {
     let _guard = FAILPOINT_TEST_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("lock failpoint test");
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let scenario = fail::FailScenario::setup();
     fail::cfg(
         "midge::verification::after_barrier_acquired",

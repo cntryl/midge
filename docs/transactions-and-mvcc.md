@@ -276,7 +276,9 @@ Recovery (`src/wal/recovery.rs`) reconstructs state as follows:
 A transaction is either fully committed (the `TxnBatch` frame and nested payload are intact) or fully absent (a truncated or malformed transaction frame is discarded). There is no state in which a subset of a transaction's ops are visible after recovery.
 
 The WAL actor includes fail-point annotations at:
-- `midge::wal::txn_after_ops_append_before_commit` — crash here before the transaction frame append → transaction absent on replay.
+- `midge::wal::txn_after_ops_append_before_commit` — normal in-memory commit path after operation frames but before the commit marker; replay omits the transaction.
+- `midge::wal::spilled_txn_after_ops_append_before_commit` — streamed spilled commit path at the equivalent boundary; it is intentionally distinct so concurrent paths cannot consume each other's global trigger.
+- `midge::wal::after_append_batch_before_sync` and `midge::wal::spilled_after_append_batch_before_sync` — path-specific boundaries after the commit marker append but before the required sync.
 - `midge::wal::txn_after_commit_append_before_sync` — crash here after the `TxnBatch` frame append but before sync → strict durability depends on whether the frame reached stable storage.
 
 ### Atomicity preservation

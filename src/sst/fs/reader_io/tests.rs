@@ -19,11 +19,17 @@ impl CountingFs {
     }
 
     fn clear_reads(&self) {
-        self.reads.lock().expect("read log lock").clear();
+        self.reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
     }
 
     fn reads(&self) -> Vec<(u64, u64)> {
-        self.reads.lock().expect("read log lock").clone()
+        self.reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 }
 
@@ -36,7 +42,7 @@ impl File for CountingFile<'_> {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
         self.reads
             .lock()
-            .expect("read log lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push((offset, len));
         if len > 1024 * 1024 {
             return Err(crate::io::FsError::Corruption(

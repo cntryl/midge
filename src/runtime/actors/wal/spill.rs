@@ -232,7 +232,7 @@ impl WalActor {
             self.append_spilled_record(&record)
         })?;
 
-        crate::failpoints::fail_point!("midge::wal::txn_after_ops_append_before_commit");
+        crate::failpoints::fail_point!("midge::wal::spilled_txn_after_ops_append_before_commit");
         crate::failpoints::fail_point!(
             "midge::wal::inject_no_space_on_txn_commit_append",
             |_| Err(MidgeError::NoSpace(
@@ -252,7 +252,7 @@ impl WalActor {
         self.append_spilled_record(&commit)?;
         self.finish_append_instrumentation(total_bytes as u64, append_started_at.elapsed());
         self.record_segment_sequence(sequence_plan.commit_seq);
-        crate::failpoints::fail_point!("midge::wal::after_append_batch_before_sync");
+        crate::failpoints::fail_point!("midge::wal::spilled_after_append_batch_before_sync");
         tracing::trace!(request_id, "appended split transaction WAL frames");
         Ok((total_bytes, source.len().saturating_add(2)))
     }

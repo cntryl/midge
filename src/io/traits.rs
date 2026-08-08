@@ -8,7 +8,7 @@
 //! - Vectorized operations (`readv_at`, `writev_at`, `appendv`) for bulk efficiency
 //! - Platform-specific optimizations (preadv/pwritev, direct I/O, etc.)
 //! - Explicit durability control (fsync vs unsafe)
-//! - Multiple swappable implementations (Real, Mock, Chaos)
+//! - Swappable real and mock implementations
 
 use bytes::Bytes;
 use std::fmt;

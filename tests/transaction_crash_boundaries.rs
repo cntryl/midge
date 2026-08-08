@@ -1,16 +1,18 @@
+mod common;
+
 use bytes::Bytes;
 use cntryl_midge::{ConflictPolicy, Engine, OpenOptions, TransactionMode, WriteOptions};
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Barrier};
 use tempfile::TempDir;
 
+use common::crash;
+
 const CHILD_TEST_NAME: &str = "should_abort_in_child_process_when_txn_crash_scenario_requested";
 const ENV_SCENARIO: &str = "MIDGE_TXN_CRASH_SCENARIO";
 const ENV_DB_PATH: &str = "MIDGE_TXN_CRASH_DB_PATH";
-const ENV_REACHED_MARKER: &str = "MIDGE_TXN_CRASH_REACHED_MARKER";
 
 #[derive(Clone, Copy)]
 struct ExpectedRecord {
@@ -329,7 +331,7 @@ fn should_recover_concurrent_commit_when_process_aborts_after_assertion_rejectio
 }
 
 fn child_abort_after_ops_before_commit(db_path: &Path) {
-    configure_abort_failpoint(
+    crash::configure_abort_failpoint(
         "midge::wal::txn_after_ops_append_before_commit",
         "after_ops_before_commit",
     );
@@ -339,7 +341,7 @@ fn child_abort_after_ops_before_commit(db_path: &Path) {
 }
 
 fn child_abort_after_sync_before_ack(db_path: &Path) {
-    configure_abort_failpoint(
+    crash::configure_abort_failpoint(
         "midge::wal::txn_after_sync_before_ack",
         "after_sync_before_ack",
     );
@@ -352,8 +354,7 @@ fn child_abort_after_commit_ack(db_path: &Path) {
     let engine = open_local_engine(db_path);
     let default_cf = default_cf(&engine);
     commit_fixed_sync_transaction(&engine, &default_cf, POST_ACK_RECORDS);
-    mark_crash_boundary("after_commit_ack");
-    std::process::abort();
+    crash::abort_at_trigger("after_commit_ack", "manual::after_commit_ack");
 }
 
 fn child_abort_after_assertion_only_sync_ack(db_path: &Path) {
@@ -384,12 +385,14 @@ fn child_abort_after_assertion_only_sync_ack(db_path: &Path) {
     asserting
         .commit(WriteOptions::sync())
         .expect("establish assertion-only sync barrier");
-    mark_crash_boundary("after_assertion_only_sync_ack");
-    std::process::abort();
+    crash::abort_at_trigger(
+        "after_assertion_only_sync_ack",
+        "manual::after_assertion_only_sync_ack",
+    );
 }
 
 fn child_abort_assertion_guarded_after_sync_before_ack(db_path: &Path) {
-    configure_abort_failpoint(
+    crash::configure_abort_failpoint(
         "midge::wal::txn_after_sync_before_ack",
         "assertion_guarded_after_sync_before_ack",
     );
@@ -432,7 +435,7 @@ fn child_abort_assertion_guarded_spilled_after_sync_before_ack(db_path: &Path) {
         transaction_spill_run_count(db_path) > 0,
         "assertion-guarded transaction must spill before commit"
     );
-    configure_abort_failpoint(
+    crash::configure_abort_failpoint(
         "midge::wal::txn_after_sync_before_ack",
         "assertion_guarded_spilled_after_sync_before_ack",
     );
@@ -448,8 +451,7 @@ fn child_abort_group_after_sync_before_ack(db_path: &Path) {
 
 fn child_abort_group_after_commit_ack(db_path: &Path) {
     commit_concurrent_sync_transactions(db_path, GROUP_POST_ACK_RECORDS);
-    mark_crash_boundary("group_after_commit_ack");
-    std::process::abort();
+    crash::abort_at_trigger("group_after_commit_ack", "manual::group_after_commit_ack");
 }
 
 fn commit_concurrent_sync_transactions(db_path: &Path, records: &[ExpectedRecord]) {
@@ -517,8 +519,10 @@ fn child_abort_after_strict_conflict_abort(db_path: &Path) {
     );
 
     // Crash after the conflict outcome has been observed.
-    mark_crash_boundary("after_strict_conflict_abort");
-    std::process::abort();
+    crash::abort_at_trigger(
+        "after_strict_conflict_abort",
+        "manual::after_strict_conflict_abort",
+    );
 }
 
 fn child_abort_after_assertion_conflict_abort(db_path: &Path) {
@@ -553,8 +557,10 @@ fn child_abort_after_assertion_conflict_abort(db_path: &Path) {
         conflict,
         Err(cntryl_midge::MidgeError::WriteConflict(_))
     ));
-    mark_crash_boundary("after_assertion_conflict_abort");
-    std::process::abort();
+    crash::abort_at_trigger(
+        "after_assertion_conflict_abort",
+        "manual::after_assertion_conflict_abort",
+    );
 }
 
 fn commit_fixed_sync_transaction(
@@ -655,69 +661,39 @@ fn transaction_spill_run_count(db_path: &Path) -> usize {
 
 fn run_child_expect_abort(scenario: &str, db_path: &Path) {
     let current_exe = std::env::current_exe().expect("current exe");
-    let reached_marker = db_path.join(format!(".{scenario}.reached"));
-    if reached_marker.exists() {
-        fs::remove_file(&reached_marker).expect("remove stale crash-boundary marker");
-    }
-    let output = Command::new(current_exe)
+    let mut command = Command::new(current_exe);
+    command
         .arg("--exact")
         .arg(CHILD_TEST_NAME)
         .arg("--nocapture")
         .arg("--test-threads=1")
         .env(ENV_SCENARIO, scenario)
-        .env(ENV_DB_PATH, db_path)
-        .env(ENV_REACHED_MARKER, &reached_marker)
-        .output()
-        .expect("run child test binary");
-
-    assert!(
-        !output.status.success(),
-        "child scenario {scenario} unexpectedly exited successfully"
-    );
-    let reached = fs::read_to_string(&reached_marker).unwrap_or_else(|error| {
-        panic!(
-            "child must mark the intended crash boundary: {error}; stdout: {}; stderr: {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        )
-    });
-    assert_eq!(
-        reached, scenario,
-        "child must reach the requested crash boundary before terminating"
-    );
-}
-
-fn mark_crash_boundary(scenario: &str) {
-    let marker_path = PathBuf::from(
-        std::env::var_os(ENV_REACHED_MARKER).expect("crash-boundary marker path env"),
-    );
-    let mut marker = fs::File::create(marker_path).expect("create crash-boundary marker");
-    marker
-        .write_all(scenario.as_bytes())
-        .expect("write crash-boundary marker");
-    marker.sync_all().expect("sync crash-boundary marker");
-}
-
-fn configure_abort_failpoint(name: &str, scenario_name: &'static str) {
-    let scenario = fail::FailScenario::setup();
-    fail::cfg_callback(name, move || {
-        mark_crash_boundary(scenario_name);
-        std::process::abort();
-    })
-    .expect("configure abort failpoint");
-    std::mem::forget(scenario);
+        .env(ENV_DB_PATH, db_path);
+    crash::run_child_expect_abort(&mut command, scenario, crash_trigger(scenario), db_path);
 }
 
 fn configure_group_abort_failpoint(scenario_name: &'static str) {
-    let scenario = fail::FailScenario::setup();
+    crash::configure_abort_failpoint("midge::wal::txn_after_sync_before_ack", scenario_name);
     fail::cfg("midge::runtime::strict_group_before_collect", "1*sleep(50)")
         .expect("configure strict group collection failpoint");
-    fail::cfg_callback("midge::wal::txn_after_sync_before_ack", move || {
-        mark_crash_boundary(scenario_name);
-        std::process::abort();
-    })
-    .expect("configure shared sync crash failpoint");
-    std::mem::forget(scenario);
+}
+
+fn crash_trigger(scenario: &str) -> &'static str {
+    match scenario {
+        "after_ops_before_commit" => "midge::wal::txn_after_ops_append_before_commit",
+        "after_sync_before_ack"
+        | "group_after_sync_before_ack"
+        | "assertion_guarded_after_sync_before_ack"
+        | "assertion_guarded_spilled_after_sync_before_ack" => {
+            "midge::wal::txn_after_sync_before_ack"
+        }
+        "after_commit_ack" => "manual::after_commit_ack",
+        "group_after_commit_ack" => "manual::group_after_commit_ack",
+        "after_strict_conflict_abort" => "manual::after_strict_conflict_abort",
+        "after_assertion_only_sync_ack" => "manual::after_assertion_only_sync_ack",
+        "after_assertion_conflict_abort" => "manual::after_assertion_conflict_abort",
+        other => panic!("unknown transaction crash trigger for scenario {other}"),
+    }
 }
 
 fn expire_crashed_process_lease(db_path: &Path) {
@@ -741,23 +717,5 @@ fn expire_crashed_process_lease(db_path: &Path) {
         }
     }
 
-    let lock_path = db_path.join(".midge_leader.lock");
-    if lock_path.exists() {
-        let mut content = fs::read_to_string(&lock_path).expect("read leader lock");
-        if content.contains("created_at=") {
-            content = content
-                .lines()
-                .map(|line| {
-                    if line.starts_with("created_at=") {
-                        "created_at=1970-01-01T00:00:00Z".to_string()
-                    } else {
-                        line.to_string()
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            content.push('\n');
-            fs::write(&lock_path, content).expect("rewrite leader lock as stale");
-        }
-    }
+    crash::clear_crashed_process_acquisition_lock(db_path);
 }

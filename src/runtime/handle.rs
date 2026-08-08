@@ -1,5 +1,6 @@
 //! Runtime request handle and synchronous request APIs.
 
+use super::lifecycle::{ShutdownState, ShutdownTerminal};
 use super::{
     next_request_id, snapshot_cache, snapshot_pins, ResponseRouter, RuntimeLifecycle,
     RuntimeLifecycleState, RuntimeMsg, RuntimeResponse, RuntimeTransactionGuard,
@@ -11,6 +12,24 @@ use std::sync::{atomic::Ordering, Arc};
 use std::time::Duration;
 
 const WRITE_STALL_STATUS_TIMEOUT: Duration = Duration::from_millis(250);
+
+struct ShutdownDeadline {
+    expires_at: Option<std::time::Instant>,
+}
+
+impl ShutdownDeadline {
+    fn new(timeout: Duration) -> Self {
+        Self {
+            expires_at: std::time::Instant::now().checked_add(timeout),
+        }
+    }
+
+    fn remaining(&self) -> Duration {
+        self.expires_at.map_or(Duration::MAX, |expires_at| {
+            expires_at.saturating_duration_since(std::time::Instant::now())
+        })
+    }
+}
 
 /// Handle for submitting work to the runtime.
 ///
@@ -257,7 +276,20 @@ impl RuntimeHandle {
     /// Request runtime shutdown and wait no longer than `timeout` for the
     /// final durability result.
     pub fn shutdown(&self, timeout: Duration) -> MidgeResult<()> {
-        let started = std::time::Instant::now();
+        let deadline = ShutdownDeadline::new(timeout);
+
+        {
+            let shutdown = self
+                .lifecycle
+                .shutdown
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let ShutdownState::Terminal(terminal) = &*shutdown {
+                return terminal.replay();
+            }
+        }
+
         self.lifecycle.begin_shutdown();
         let active_transactions = self.lifecycle.active_transaction_count();
         if active_transactions != 0 {
@@ -266,95 +298,204 @@ impl RuntimeHandle {
             )));
         }
 
-        if self.lifecycle.state() == RuntimeLifecycleState::Closed
-            || !self.lifecycle.running.load(Ordering::Acquire)
-        {
-            self.lifecycle.mark_closed();
-            return Ok(());
-        }
-
-        if self.lifecycle.shutdown_acknowledged.load(Ordering::Acquire) {
-            let remaining = timeout.saturating_sub(started.elapsed());
-            return if self.lifecycle.wait_until_stopped(remaining) {
-                Ok(())
-            } else {
-                Err(MidgeError::Timeout(
-                    "runtime worker did not terminate before shutdown deadline".to_string(),
-                ))
-            };
-        }
-
-        let mut shutdown_response = self
-            .lifecycle
-            .shutdown_response
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if shutdown_response.is_none() {
-            let request_id = next_request_id()?;
-            let response_rx = self.router.register(request_id);
-            let remaining = timeout.saturating_sub(started.elapsed());
-            match self
-                .msg_tx
-                .send_timeout(RuntimeMsg::ShutdownWithResponse { request_id }, remaining)
-            {
-                Ok(()) => {}
-                Err(crossbeam::channel::SendTimeoutError::Timeout(_)) => {
-                    self.router.unregister(request_id);
-                    return Err(MidgeError::Timeout(
-                        "runtime shutdown request queue remained full until deadline".to_string(),
-                    ));
-                }
-                Err(crossbeam::channel::SendTimeoutError::Disconnected(_)) => {
-                    self.router.unregister(request_id);
-                    if self
-                        .lifecycle
-                        .wait_until_stopped(timeout.saturating_sub(started.elapsed()))
+        loop {
+            let mut shutdown = self
+                .lifecycle
+                .shutdown
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match &*shutdown {
+                ShutdownState::Terminal(terminal) => return terminal.replay(),
+                ShutdownState::Idle => {
+                    if self.lifecycle.state() == RuntimeLifecycleState::Closed
+                        || !self.lifecycle.running.load(Ordering::Acquire)
                     {
+                        *shutdown = ShutdownState::Terminal(ShutdownTerminal::Success);
+                        self.lifecycle.shutdown.changed.notify_all();
+                        self.lifecycle.mark_closed();
                         return Ok(());
                     }
-                    return Err(MidgeError::Timeout(
-                        "runtime shutdown channel closed before worker termination".to_string(),
-                    ));
+                    *shutdown = ShutdownState::Sending;
+                    drop(shutdown);
+                    return self.send_shutdown_request(&deadline);
+                }
+                ShutdownState::Ready { .. } => {
+                    let previous = std::mem::replace(&mut *shutdown, ShutdownState::Idle);
+                    let ShutdownState::Ready {
+                        request_id,
+                        response_rx,
+                    } = previous
+                    else {
+                        unreachable!("matched an available shutdown response receiver")
+                    };
+                    *shutdown = ShutdownState::Receiving { request_id };
+                    drop(shutdown);
+                    return self.receive_shutdown_response(request_id, response_rx, &deadline);
+                }
+                ShutdownState::ResponseDisconnected => {
+                    drop(shutdown);
+                    return self.wait_for_shutdown_stop(&deadline);
+                }
+                ShutdownState::Sending | ShutdownState::Receiving { .. } => {
+                    let remaining = deadline.remaining();
+                    if remaining.is_zero() {
+                        return Err(Self::shutdown_ack_timeout());
+                    }
+                    let (next_shutdown, _) = self
+                        .lifecycle
+                        .shutdown
+                        .changed
+                        .wait_timeout(shutdown, remaining)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    drop(next_shutdown);
                 }
             }
-            *shutdown_response = Some(response_rx);
         }
+    }
 
-        let remaining = timeout.saturating_sub(started.elapsed());
-        let response = shutdown_response
-            .as_ref()
-            .expect("shutdown response receiver must be registered")
-            .recv_timeout(remaining);
-        match response {
-            Ok(response) => {
-                shutdown_response.take();
-                self.lifecycle
-                    .shutdown_acknowledged
-                    .store(true, Ordering::Release);
-                match response {
-                    RuntimeResponse::Ok { .. } => Ok(()),
-                    RuntimeResponse::Error { error, .. } => Err(error),
-                    other => Err(MidgeError::Internal(format!(
-                        "Unexpected response to shutdown: {other:?}"
-                    ))),
-                }
+    fn send_shutdown_request(&self, deadline: &ShutdownDeadline) -> MidgeResult<()> {
+        let request_id = match next_request_id() {
+            Ok(request_id) => request_id,
+            Err(error) => {
+                self.reset_shutdown_sender();
+                return Err(error);
             }
-            Err(crossbeam::channel::RecvTimeoutError::Timeout) => Err(MidgeError::Timeout(
-                "runtime did not acknowledge shutdown before deadline".to_string(),
-            )),
-            Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
-                shutdown_response.take();
-                if self
+        };
+        let response_rx = self.router.register(request_id);
+        match self.msg_tx.send_timeout(
+            RuntimeMsg::ShutdownWithResponse { request_id },
+            deadline.remaining(),
+        ) {
+            Ok(()) => {
+                let mut shutdown = self
                     .lifecycle
-                    .wait_until_stopped(timeout.saturating_sub(started.elapsed()))
-                {
-                    Ok(())
-                } else {
-                    Err(MidgeError::Timeout(
-                        "runtime response channel closed before worker termination".to_string(),
-                    ))
-                }
+                    .shutdown
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *shutdown = ShutdownState::Receiving { request_id };
+                drop(shutdown);
+                self.receive_shutdown_response(request_id, response_rx, deadline)
             }
+            Err(crossbeam::channel::SendTimeoutError::Timeout(_)) => {
+                self.router.unregister(request_id);
+                self.reset_shutdown_sender();
+                Err(MidgeError::Timeout(
+                    "runtime shutdown request queue remained full until deadline".to_string(),
+                ))
+            }
+            Err(crossbeam::channel::SendTimeoutError::Disconnected(_)) => {
+                self.router.unregister(request_id);
+                self.mark_shutdown_response_disconnected();
+                self.wait_for_shutdown_stop(deadline)
+            }
+        }
+    }
+
+    fn receive_shutdown_response(
+        &self,
+        request_id: u64,
+        response_rx: crossbeam::channel::Receiver<RuntimeResponse>,
+        deadline: &ShutdownDeadline,
+    ) -> MidgeResult<()> {
+        match response_rx.recv_timeout(deadline.remaining()) {
+            Ok(response) => self.publish_shutdown_terminal(Self::shutdown_terminal(response)),
+            Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
+                if !self.lifecycle.running.load(Ordering::Acquire) {
+                    if let Ok(response) = response_rx.try_recv() {
+                        return self.publish_shutdown_terminal(Self::shutdown_terminal(response));
+                    }
+                    self.router.unregister(request_id);
+                    return self.publish_shutdown_terminal(ShutdownTerminal::Success);
+                }
+                let mut shutdown = self
+                    .lifecycle
+                    .shutdown
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                debug_assert!(matches!(
+                    &*shutdown,
+                    ShutdownState::Receiving {
+                        request_id: active_request_id
+                    } if *active_request_id == request_id
+                ));
+                *shutdown = ShutdownState::Ready {
+                    request_id,
+                    response_rx,
+                };
+                self.lifecycle.shutdown.changed.notify_all();
+                Err(Self::shutdown_ack_timeout())
+            }
+            Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
+                self.mark_shutdown_response_disconnected();
+                self.wait_for_shutdown_stop(deadline)
+            }
+        }
+    }
+
+    fn wait_for_shutdown_stop(&self, deadline: &ShutdownDeadline) -> MidgeResult<()> {
+        if self.lifecycle.wait_until_stopped(deadline.remaining()) {
+            self.publish_shutdown_terminal(ShutdownTerminal::Success)
+        } else {
+            Err(MidgeError::Timeout(
+                "runtime response channel closed before worker termination".to_string(),
+            ))
+        }
+    }
+
+    fn publish_shutdown_terminal(&self, terminal: ShutdownTerminal) -> MidgeResult<()> {
+        let mut shutdown = self
+            .lifecycle
+            .shutdown
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let ShutdownState::Terminal(existing) = &*shutdown {
+            return existing.replay();
+        }
+        let result = terminal.replay();
+        *shutdown = ShutdownState::Terminal(terminal);
+        self.lifecycle.shutdown.changed.notify_all();
+        result
+    }
+
+    fn reset_shutdown_sender(&self) {
+        let mut shutdown = self
+            .lifecycle
+            .shutdown
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *shutdown = ShutdownState::Idle;
+        self.lifecycle.shutdown.changed.notify_all();
+    }
+
+    fn mark_shutdown_response_disconnected(&self) {
+        let mut shutdown = self
+            .lifecycle
+            .shutdown
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !matches!(*shutdown, ShutdownState::Terminal(_)) {
+            *shutdown = ShutdownState::ResponseDisconnected;
+        }
+        self.lifecycle.shutdown.changed.notify_all();
+    }
+
+    fn shutdown_ack_timeout() -> MidgeError {
+        MidgeError::Timeout("runtime did not acknowledge shutdown before deadline".to_string())
+    }
+
+    fn shutdown_terminal(response: RuntimeResponse) -> ShutdownTerminal {
+        match response {
+            RuntimeResponse::Ok { .. } => ShutdownTerminal::Success,
+            RuntimeResponse::Error { error, .. } => ShutdownTerminal::Error(error),
+            other => ShutdownTerminal::Error(MidgeError::Internal(format!(
+                "Unexpected response to shutdown: {other:?}"
+            ))),
         }
     }
 

@@ -2014,7 +2014,9 @@ mod tests {
     #[test]
     fn should_create_provider_with_managed_identity_system_assigned() {
         // Arrange
-        let _env_guard = azure_client_id_env_lock().lock().unwrap();
+        let _env_guard = azure_client_id_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let account = "myaccount";
         let container = "mycontainer";
 
@@ -2035,7 +2037,9 @@ mod tests {
     #[test]
     fn should_create_provider_with_managed_identity_user_assigned() {
         // Arrange
-        let _env_guard = azure_client_id_env_lock().lock().unwrap();
+        let _env_guard = azure_client_id_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let account = "myaccount";
         let container = "mycontainer";
         let client_id = "00000000-0000-0000-0000-000000000000";
@@ -2061,7 +2065,9 @@ mod tests {
     #[test]
     fn should_use_env_var_for_client_id_when_none_provided() {
         // Arrange
-        let _env_guard = azure_client_id_env_lock().lock().unwrap();
+        let _env_guard = azure_client_id_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         std::env::set_var("AZURE_CLIENT_ID", "env-client-id");
         let account = "myaccount";
         let container = "mycontainer";
@@ -2085,7 +2091,9 @@ mod tests {
     fn should_preserve_explicit_credential_over_environment_credential_given_both_are_set_when_building(
     ) {
         // Arrange
-        let _env_guard = azure_client_id_env_lock().lock().unwrap();
+        let _env_guard = azure_client_id_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         std::env::set_var("AZURE_CLIENT_ID", "env-client-id");
         let account = "myaccount";
         let container = "mycontainer";

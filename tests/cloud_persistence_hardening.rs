@@ -15,7 +15,9 @@ static FAILPOINT_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 #[test]
 fn should_recover_cloud_strict_write_from_authoritative_remote_wal_after_local_cache_loss() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let opts = opts_for_mode("cloud");
     let db_path = cloud_db_path(&opts);
     let mut engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
@@ -45,7 +47,9 @@ fn should_recover_cloud_strict_write_from_authoritative_remote_wal_after_local_c
 #[test]
 fn should_remove_local_wal_segment_after_cloud_durable_upload() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let opts = opts_for_mode("cloud");
     let db_path = cloud_db_path(&opts);
     let mut engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
@@ -90,7 +94,9 @@ fn should_remove_local_wal_segment_after_cloud_durable_upload() {
 #[test]
 fn should_prune_remote_wal_segment_after_cloud_sst_covers_it() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let opts = opts_for_mode("cloud");
     let db_path = cloud_db_path(&opts);
     let remote_wal_dir = db_path.join("cloud_store").join("wal");
@@ -137,7 +143,9 @@ fn should_prune_remote_wal_segment_after_cloud_sst_covers_it() {
 #[test]
 fn should_ignore_reintroduced_manifest_covered_remote_wal_after_restart() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let opts = opts_for_mode("cloud");
     let db_path = cloud_db_path(&opts);
     let remote_wal_dir = db_path.join("cloud_store").join("wal");
@@ -196,7 +204,9 @@ fn should_ignore_reintroduced_manifest_covered_remote_wal_after_restart() {
 #[test]
 fn should_recover_delete_range_given_remote_wal_only_when_local_cache_is_lost() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let opts = opts_for_mode("cloud");
     let db_path = cloud_db_path(&opts);
     let remote_wal_dir = db_path.join("cloud_store").join("wal");
@@ -260,7 +270,9 @@ fn should_recover_delete_range_given_remote_wal_only_when_local_cache_is_lost() 
 #[test]
 fn should_preserve_remote_wal_when_unflushed_column_family_still_depends_on_it_given_partial_gc() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let opts = opts_for_mode("cloud");
     let db_path = cloud_db_path(&opts);
     let remote_wal_dir = db_path.join("cloud_store").join("wal");
@@ -317,7 +329,9 @@ fn should_preserve_remote_wal_when_unflushed_column_family_still_depends_on_it_g
 #[test]
 fn should_not_prune_remote_wal_given_manifest_validation_failure_when_gc_runs() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let opts = opts_for_mode("cloud");
     let db_path = cloud_db_path(&opts);
     let remote_wal_dir = db_path.join("cloud_store").join("wal");
@@ -373,7 +387,9 @@ fn should_not_prune_remote_wal_given_manifest_validation_failure_when_gc_runs() 
 #[test]
 fn should_reject_sync_buffered_options_given_cloud_storage_when_committing() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock cloud tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let opts = opts_for_mode("cloud");
     let engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
 
@@ -399,7 +415,9 @@ fn should_reject_sync_buffered_options_given_cloud_storage_when_committing() {
 #[test]
 fn should_keep_cloud_async_commit_visible_given_cloud_upload_failure_when_committing() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let opts = opts_for_mode("cloud");
     let db_path = cloud_db_path(&opts);
     let scenario = fail::FailScenario::setup();
@@ -445,7 +463,9 @@ fn should_keep_cloud_async_commit_visible_given_cloud_upload_failure_when_commit
 #[test]
 fn should_recover_cloud_async_commit_given_intact_local_wal_when_upload_fails() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let opts = opts_for_mode("cloud");
     let db_path = cloud_db_path(&opts);
     let remote_wal_dir = db_path.join("cloud_store").join("wal");
@@ -492,7 +512,9 @@ fn should_recover_cloud_async_commit_given_intact_local_wal_when_upload_fails() 
 #[test]
 fn should_fail_cloud_strict_commit_given_cloud_upload_failure_when_waiting_for_ack() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let opts = opts_for_mode("cloud");
     let db_path = cloud_db_path(&opts);
     let scenario = fail::FailScenario::setup();
@@ -542,7 +564,9 @@ fn should_fail_cloud_strict_commit_given_cloud_upload_failure_when_waiting_for_a
 #[test]
 fn should_salvage_valid_prefix_when_remote_wal_segment_is_corrupt() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let opts = opts_for_mode("cloud");
     let db_path = cloud_db_path(&opts);
     let mut engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
@@ -600,7 +624,9 @@ fn should_salvage_valid_prefix_when_remote_wal_segment_is_corrupt() {
 #[test]
 fn should_restore_local_cache_given_authoritative_remote_sst_when_reopening_after_cache_loss() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let opts = opts_for_mode("cloud");
     let db_path = cloud_db_path(&opts);
     let mut engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
@@ -637,7 +663,9 @@ fn should_restore_local_cache_given_authoritative_remote_sst_when_reopening_afte
 #[test]
 fn should_fail_strict_recovery_given_authoritative_remote_sst_missing_when_reopening() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let opts = opts_for_mode("cloud");
     let db_path = cloud_db_path(&opts);
     let mut engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");

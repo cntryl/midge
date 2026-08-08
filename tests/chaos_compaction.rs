@@ -14,6 +14,8 @@
 //! Naming convention:
 //!   should_<behavior>_`when_crashing`_<`at_point`>
 
+mod common;
+
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -25,6 +27,8 @@ use bytes::Bytes;
 use cntryl_midge::{Engine, OpenOptions, Query, TransactionMode, WriteOptions};
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
+
+use common::crash;
 
 const CHILD_TEST_NAME: &str = "should_crash_in_child_when_compaction_crash_scenario_requested";
 const ENV_SCENARIO: &str = "MIDGE_COMPACTION_CHAOS_SCENARIO";
@@ -196,17 +200,11 @@ fn should_crash_in_child_when_compaction_crash_scenario_requested() {
 }
 
 fn child_create_data_and_compact_with_crash_before_persist(db_path: &Path) {
-    let scenario = fail::FailScenario::setup();
-    std::panic::set_hook(Box::new(|_| std::process::abort()));
-
     // Configure failpoint to crash after compaction update but before manifest persist
-    fail::cfg(
+    crash::configure_abort_failpoint(
         "slice6::after_compaction_update_before_manifest_persist",
-        "panic",
-    )
-    .expect("configure failpoint");
-
-    std::mem::forget(scenario);
+        "crash_before_manifest_persist",
+    );
 
     // Write data and trigger compaction
     let engine = open_local_engine(db_path);
@@ -248,16 +246,10 @@ fn child_create_data_and_compact_with_crash_before_persist(db_path: &Path) {
 }
 
 fn child_create_data_and_compact_with_crash_before_publish(db_path: &Path) {
-    let scenario = fail::FailScenario::setup();
-    std::panic::set_hook(Box::new(|_| std::process::abort()));
-
-    fail::cfg(
+    crash::configure_abort_failpoint(
         "slice7::after_compaction_output_durable_before_manifest_publish",
-        "panic",
-    )
-    .expect("configure failpoint");
-
-    std::mem::forget(scenario);
+        "crash_before_manifest_publish",
+    );
 
     let engine = open_local_engine(db_path);
     let default_cf = default_cf(&engine);
@@ -294,14 +286,11 @@ fn child_create_data_and_compact_with_crash_before_publish(db_path: &Path) {
 }
 
 fn child_create_data_and_compact_with_crash_before_gc(db_path: &Path) {
-    let scenario = fail::FailScenario::setup();
-    std::panic::set_hook(Box::new(|_| std::process::abort()));
-
     // Configure failpoint to crash after manifest persist but before GC deletion
-    fail::cfg("slice6::after_manifest_persist_before_sst_gc", "panic")
-        .expect("configure failpoint");
-
-    std::mem::forget(scenario);
+    crash::configure_abort_failpoint(
+        "slice6::after_manifest_persist_before_sst_gc",
+        "crash_before_sst_gc",
+    );
 
     // Write data and trigger compaction
     let engine = open_local_engine(db_path);
@@ -375,11 +364,20 @@ fn run_child_expect_abort(scenario: &str, db_path: &Path) {
         .env(ENV_SCENARIO, scenario)
         .env(ENV_DB_PATH, db_path);
 
-    let output = command.output().expect("run child test binary");
-    assert!(
-        !output.status.success(),
-        "child scenario {scenario} unexpectedly exited successfully"
-    );
+    crash::run_child_expect_abort(&mut command, scenario, crash_trigger(scenario), db_path);
+}
+
+fn crash_trigger(scenario: &str) -> &'static str {
+    match scenario {
+        "crash_before_manifest_publish" => {
+            "slice7::after_compaction_output_durable_before_manifest_publish"
+        }
+        "crash_before_manifest_persist" => {
+            "slice6::after_compaction_update_before_manifest_persist"
+        }
+        "crash_before_sst_gc" => "slice6::after_manifest_persist_before_sst_gc",
+        other => panic!("unknown compaction crash trigger for scenario {other}"),
+    }
 }
 
 fn expire_crashed_process_lease(db_path: &Path) {
@@ -405,6 +403,7 @@ fn expire_crashed_process_lease(db_path: &Path) {
         content.push('\n');
         fs::write(&leader_path, content).expect("rewrite leader record as stale");
     }
+    crash::clear_crashed_process_acquisition_lock(db_path);
 }
 
 fn read_committed_records(db_path: &Path) -> Vec<CommitRecord> {

@@ -4,7 +4,7 @@ mod common;
 use cntryl_midge::{
     CloudWritePolicy, Engine, RuntimeMetricsSnapshot, TransactionMode, WriteOptions,
 };
-use common::{MidgeOptions, StorageMode};
+use common::{crash, MidgeOptions, StorageMode};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
@@ -14,7 +14,6 @@ use tempfile::TempDir;
 const CHILD_TEST_NAME: &str = "should_abort_in_child_process_when_cloud_crash_scenario_requested";
 const ENV_SCENARIO: &str = "MIDGE_CLOUD_CRASH_SCENARIO";
 const ENV_DB_PATH: &str = "MIDGE_CLOUD_CRASH_DB_PATH";
-const CRASH_READY_MARKER: &str = ".midge-cloud-crash-ready";
 const LARGE_MEMTABLE_BYTES: usize = 512 * 1024 * 1024;
 const EVENTUAL_FLUSH_GAP: u64 = 4;
 
@@ -295,21 +294,8 @@ fn child_buffered_eventual_flush_after_publish(db_path: &Path) {
     abort_after_marking_ready(db_path, "buffered_eventual_flush_after_publish");
 }
 
-fn abort_after_marking_ready(db_path: &Path, scenario: &str) -> ! {
-    use std::io::Write as _;
-
-    let marker_path = db_path.join(CRASH_READY_MARKER);
-    let mut marker = std::fs::File::create(&marker_path).expect("create crash-ready marker");
-    marker
-        .write_all(scenario.as_bytes())
-        .and_then(|()| marker.sync_all())
-        .expect("persist crash-ready marker");
-    if let Ok(directory) = std::fs::File::open(db_path) {
-        directory
-            .sync_all()
-            .expect("persist crash-ready directory entry");
-    }
-    std::process::abort();
+fn abort_after_marking_ready(_db_path: &Path, scenario: &str) -> ! {
+    crash::abort_at_trigger(scenario, cloud_crash_trigger(scenario));
 }
 
 fn buffered_cloud_policy() -> CloudWritePolicy {
@@ -402,30 +388,30 @@ where
 
 fn run_child_expect_abort(scenario: &str, db_path: &Path) {
     let current_exe = std::env::current_exe().expect("current exe");
-    let output = Command::new(current_exe)
+    let mut command = Command::new(current_exe);
+    command
         .arg("--exact")
         .arg(CHILD_TEST_NAME)
         .arg("--nocapture")
         .arg("--test-threads=1")
         .env(ENV_SCENARIO, scenario)
-        .env(ENV_DB_PATH, db_path)
-        .output()
-        .expect("run child test binary");
-
-    assert!(
-        !output.status.success(),
-        "child scenario {scenario} unexpectedly exited successfully"
+        .env(ENV_DB_PATH, db_path);
+    crash::run_child_expect_abort(
+        &mut command,
+        scenario,
+        cloud_crash_trigger(scenario),
+        db_path,
     );
-    let marker_path = db_path.join(CRASH_READY_MARKER);
-    let marker = std::fs::read_to_string(&marker_path).unwrap_or_else(|error| {
-        panic!(
-            "child scenario {scenario} exited before its intended abort point: {error}; stdout={}; stderr={}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        )
-    });
-    assert_eq!(marker, scenario, "child wrote the wrong crash-ready marker");
-    std::fs::remove_file(marker_path).expect("remove crash-ready marker");
+}
+
+fn cloud_crash_trigger(scenario: &str) -> &'static str {
+    match scenario {
+        "cloud_strict_after_ack" => "manual::cloud_strict_after_ack",
+        "cloud_async_active_after_ack" => "manual::cloud_async_active_after_ack",
+        "cloud_async_local_wal_after_ack" => "manual::cloud_async_local_wal_after_ack",
+        "buffered_eventual_flush_after_publish" => "manual::buffered_eventual_flush_after_publish",
+        other => panic!("unknown cloud crash scenario: {other}"),
+    }
 }
 
 fn expire_crashed_process_lease(db_path: &Path) {
@@ -453,24 +439,7 @@ fn expire_crashed_process_lease(db_path: &Path) {
         std::fs::write(&lease_path, content).expect("rewrite lease record as stale");
     }
 
-    clear_crashed_process_acquisition_lock(db_path);
-}
-
-fn clear_crashed_process_acquisition_lock(db_path: &Path) {
-    let lock_path = db_path.join(".midge_leader.lock");
-    // The end-to-end crash path waits for its isolated child process to exit;
-    // the focused tests above invoke this helper directly to model that state.
-    // Because every call uses a private test directory, its lock is orphaned.
-    // The child can abort between create_new and writing the lock payload, so
-    // the harness cannot rely on its fields here. Removing the lock preserves
-    // production's fail-closed handling while simulating the crash timeout.
-    if let Err(error) = std::fs::remove_file(lock_path) {
-        assert_eq!(
-            error.kind(),
-            std::io::ErrorKind::NotFound,
-            "remove crashed process acquisition lock: {error}"
-        );
-    }
+    crash::clear_crashed_process_acquisition_lock(db_path);
 }
 
 fn reset_dir(dir: &Path) {

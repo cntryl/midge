@@ -284,7 +284,9 @@ fn should_ignore_stale_sst_temp_files_on_reopen() {
 #[test]
 fn should_delete_orphan_sst_residue_during_startup_cleanup() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
 
@@ -331,7 +333,9 @@ fn should_delete_orphan_sst_residue_during_startup_cleanup() {
 #[test]
 fn should_report_degraded_health_when_orphan_sst_cleanup_is_blocked() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
 
@@ -487,7 +491,9 @@ fn should_return_runtime_metrics_within_generous_timeout() {
 #[test]
 fn should_unregister_response_slot_when_runtime_metrics_response_times_out() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let scenario = fail::FailScenario::setup();
     fail::cfg(
         "midge::runtime::before_get_runtime_metrics_response",
@@ -553,7 +559,9 @@ fn should_reject_zero_deadline_for_runtime_metrics_without_sending_a_request() {
 #[test]
 fn should_return_runtime_metrics_when_stall_clears_before_deadline() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let scenario = fail::FailScenario::setup();
     fail::cfg(
         "midge::runtime::before_get_runtime_metrics_response",
@@ -587,7 +595,9 @@ fn should_return_runtime_metrics_when_stall_clears_before_deadline() {
 #[test]
 fn should_not_leak_response_slots_across_repeated_timeouts() {
     // Arrange
-    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let scenario = fail::FailScenario::setup();
     fail::cfg(
         "midge::runtime::before_get_runtime_metrics_response",
