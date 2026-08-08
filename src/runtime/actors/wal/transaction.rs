@@ -34,17 +34,24 @@ impl WalActor {
     pub fn append_transaction(
         &mut self,
         state: &mut RuntimeState,
-        request_id: u64,
-        ops: Vec<crate::runtime::TransactionOp>,
-        durability_policy: Option<DurabilityPolicy>,
-        start_sequence: Option<u64>,
-        conflict_policy: crate::runtime::ConflictPolicy,
+        params: TransactionAppendParams,
     ) -> MidgeResult<(u64, usize, bool)> {
-        if ops.is_empty() {
+        if params.ops.is_empty() {
+            // An assertion-only commit is validated here without ever
+            // reaching sequence allocation, WAL append, or memtable apply —
+            // it has nothing to sequence.
+            if !params.assertions.is_empty() {
+                let start_sequence = params.start_sequence.ok_or_else(|| {
+                    MidgeError::InvalidArgument(
+                        "assert_value requires transaction start_sequence".to_string(),
+                    )
+                })?;
+                Self::ensure_no_assertion_conflicts(state, &params.assertions, start_sequence)?;
+            }
             return Ok((state.sequence, 0, false));
         }
 
-        for op in &ops {
+        for op in &params.ops {
             let cf_id = match op {
                 crate::runtime::TransactionOp::Put { cf_id, .. }
                 | crate::runtime::TransactionOp::Delete { cf_id, .. }
@@ -57,16 +64,7 @@ impl WalActor {
             }
         }
 
-        let prepared = self.prepare_transaction_append(
-            state,
-            TransactionAppendParams {
-                request_id,
-                ops,
-                durability_policy,
-                start_sequence,
-                conflict_policy,
-            },
-        )?;
+        let prepared = self.prepare_transaction_append(state, params)?;
         let last_sequence = prepared.sequence_plan.commit_seq;
         let apply_op_count = prepared.apply_ops.len();
         let txn_id = prepared.sequence_plan.txn_id;
@@ -95,6 +93,7 @@ impl WalActor {
         let TransactionAppendParams {
             request_id,
             ops,
+            assertions,
             durability_policy,
             start_sequence,
             conflict_policy,
@@ -119,7 +118,13 @@ impl WalActor {
             }
         }
 
-        self.validate_transaction_preconditions(state, &ops, start_sequence, conflict_policy)?;
+        self.validate_transaction_preconditions(
+            state,
+            &ops,
+            &assertions,
+            start_sequence,
+            conflict_policy,
+        )?;
         let effective_durability = durability_policy.unwrap_or(self.durability_policy);
         let sequence_plan = Self::allocate_transaction_sequences(state, ops.len());
         let (apply_ops, wal_batch) =
@@ -217,6 +222,7 @@ impl WalActor {
         &self,
         state: &RuntimeState,
         ops: &[crate::runtime::TransactionOp],
+        assertions: &[crate::runtime::KeyAssertion],
         start_sequence: Option<u64>,
         conflict_policy: crate::runtime::ConflictPolicy,
     ) -> MidgeResult<()> {
@@ -230,6 +236,18 @@ impl WalActor {
                 )
             })?;
             Self::ensure_no_write_conflicts(state, ops, start_sequence)?;
+        }
+
+        // Assertions are enforced regardless of ConflictPolicy: an explicit
+        // assertion is a stronger guarantee than the ambient policy, so even
+        // LastWriteWins transactions must not silently pass a stale assert.
+        if !assertions.is_empty() {
+            let start_sequence = start_sequence.ok_or_else(|| {
+                MidgeError::InvalidArgument(
+                    "assert_value requires transaction start_sequence".to_string(),
+                )
+            })?;
+            Self::ensure_no_assertion_conflicts(state, assertions, start_sequence)?;
         }
 
         let mut intents = Vec::with_capacity(ops.len());

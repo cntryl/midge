@@ -463,6 +463,193 @@ fn should_ignore_stale_metadata_temp_files_on_reopen() {
     );
 }
 
+#[test]
+fn should_return_runtime_metrics_within_generous_timeout() {
+    // Arrange
+    let temp_dir = TempDir::new().expect("temp dir");
+    let engine = Engine::open(
+        OpenOptions::local(temp_dir.path())
+            .build()
+            .expect("build options"),
+    )
+    .expect("open engine");
+
+    // Act
+    let metrics = engine
+        .get_runtime_metrics_with_timeout(Duration::from_secs(2))
+        .expect("runtime metrics within timeout");
+
+    // Assert
+    assert_eq!(metrics.health, EngineHealth::Healthy);
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_time_out_and_unregister_response_slot_when_runtime_metrics_response_is_blocked() {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let scenario = fail::FailScenario::setup();
+    fail::cfg(
+        "midge::runtime::before_get_runtime_metrics_response",
+        "pause",
+    )
+    .expect("configure runtime metrics pause");
+    let temp_dir = TempDir::new().expect("temp dir");
+    let engine = Engine::open(
+        OpenOptions::local(temp_dir.path())
+            .build()
+            .expect("build options"),
+    )
+    .expect("open engine");
+
+    // Act
+    let result = engine.get_runtime_metrics_with_timeout(Duration::from_millis(200));
+
+    // Assert
+    assert!(
+        matches!(result, Err(MidgeError::Timeout(_))),
+        "expected a bounded timeout while the response is blocked, got: {result:?}"
+    );
+
+    // The event loop thread is still parked inside the paused handler for the
+    // abandoned request above. Release it and confirm the timed-out response
+    // slot was unregistered rather than left to wedge a later request.
+    fail::remove("midge::runtime::before_get_runtime_metrics_response");
+    scenario.teardown();
+
+    let metrics = engine
+        .get_runtime_metrics_with_timeout(Duration::from_secs(2))
+        .expect("runtime metrics after unblocking");
+    assert_eq!(metrics.health, EngineHealth::Healthy);
+}
+
+#[test]
+fn should_reject_zero_deadline_for_runtime_metrics_without_sending_a_request() {
+    // Arrange
+    let temp_dir = TempDir::new().expect("temp dir");
+    let engine = Engine::open(
+        OpenOptions::local(temp_dir.path())
+            .build()
+            .expect("build options"),
+    )
+    .expect("open engine");
+
+    // Act
+    let result = engine.get_runtime_metrics_with_timeout(Duration::ZERO);
+
+    // Assert
+    assert!(
+        matches!(result, Err(MidgeError::Timeout(_))),
+        "expected an immediate Timeout for a zero deadline, got: {result:?}"
+    );
+
+    // A zero deadline must fail fast without ever registering a response
+    // slot, so the runtime must still answer a normal request afterward.
+    let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+    assert_eq!(metrics.health, EngineHealth::Healthy);
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_return_runtime_metrics_when_stall_clears_before_deadline() {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let scenario = fail::FailScenario::setup();
+    fail::cfg(
+        "midge::runtime::before_get_runtime_metrics_response",
+        "pause",
+    )
+    .expect("configure runtime metrics pause");
+    let temp_dir = TempDir::new().expect("temp dir");
+    let engine = Engine::open(
+        OpenOptions::local(temp_dir.path())
+            .build()
+            .expect("build options"),
+    )
+    .expect("open engine");
+
+    // Act: release the stall well inside the deadline from another thread,
+    // so the request must complete rather than time out.
+    let releaser = std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_millis(100));
+        fail::remove("midge::runtime::before_get_runtime_metrics_response");
+    });
+    let result = engine.get_runtime_metrics_with_timeout(Duration::from_secs(5));
+    releaser.join().expect("join stall releaser");
+    scenario.teardown();
+
+    // Assert
+    let metrics = result.expect("runtime metrics once the stall clears");
+    assert_eq!(metrics.health, EngineHealth::Healthy);
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_not_leak_response_slots_across_repeated_timeouts() {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let scenario = fail::FailScenario::setup();
+    fail::cfg(
+        "midge::runtime::before_get_runtime_metrics_response",
+        "pause",
+    )
+    .expect("configure runtime metrics pause");
+    let temp_dir = TempDir::new().expect("temp dir");
+    let engine = Engine::open(
+        OpenOptions::local(temp_dir.path())
+            .build()
+            .expect("build options"),
+    )
+    .expect("open engine");
+
+    // Act: the very first call blocks the event loop inside the paused
+    // handler. Every call after it queues behind that one blocked request
+    // and times out on the client side without the event loop ever reaching
+    // it, exercising the same abandon-and-unregister path repeatedly.
+    for attempt in 0..5 {
+        let result = engine.get_runtime_metrics_with_timeout(Duration::from_millis(100));
+        assert!(
+            matches!(result, Err(MidgeError::Timeout(_))),
+            "attempt {attempt} expected Timeout, got: {result:?}"
+        );
+    }
+
+    fail::remove("midge::runtime::before_get_runtime_metrics_response");
+    scenario.teardown();
+
+    // Assert: none of the abandoned requests wedged the runtime; it still
+    // answers once the stall clears.
+    let metrics = engine
+        .get_runtime_metrics_with_timeout(Duration::from_secs(2))
+        .expect("runtime metrics after repeated timeouts");
+    assert_eq!(metrics.health, EngineHealth::Healthy);
+}
+
+#[test]
+fn should_reject_runtime_metrics_request_after_engine_shutdown() {
+    // Arrange
+    let temp_dir = TempDir::new().expect("temp dir");
+    let mut engine = Engine::open(
+        OpenOptions::local(temp_dir.path())
+            .build()
+            .expect("build options"),
+    )
+    .expect("open engine");
+    engine
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown engine");
+
+    // Act
+    let result = engine.get_runtime_metrics_with_timeout(Duration::from_secs(2));
+
+    // Assert: a closed engine must reject the request rather than hang until
+    // the deadline.
+    assert!(
+        matches!(result, Err(MidgeError::Busy(_) | MidgeError::Internal(_))),
+        "expected a closed-runtime rejection, got: {result:?}"
+    );
+}
+
 fn failpoint_test_lock() -> &'static Mutex<()> {
     FAILPOINT_TEST_LOCK.get_or_init(|| Mutex::new(()))
 }

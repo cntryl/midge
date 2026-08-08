@@ -212,6 +212,7 @@ impl EventLoop {
             Ok(RuntimeMsg::ApplyTransaction {
                 request_id,
                 ops,
+                assertions,
                 durability_policy,
                 start_sequence,
                 conflict_policy,
@@ -226,6 +227,7 @@ impl EventLoop {
                     ApplyTransactionRequest {
                         request_id,
                         ops,
+                        assertions,
                         durability_policy,
                         start_sequence,
                         conflict_policy,
@@ -377,6 +379,7 @@ impl EventLoop {
             RuntimeMsg::ApplyTransaction {
                 request_id,
                 ops,
+                assertions,
                 durability_policy,
                 start_sequence,
                 conflict_policy,
@@ -389,6 +392,7 @@ impl EventLoop {
                 let request = ApplyTransactionRequest {
                     request_id,
                     ops,
+                    assertions,
                     durability_policy,
                     start_sequence,
                     conflict_policy,
@@ -528,6 +532,7 @@ impl EventLoop {
         if request.ops.is_empty()
             || self.transaction_coalescing_key(&request) != Some(coalescing_key)
             || staged_touches.touches_ops(&request.ops)
+            || staged_touches.touches_assertions(&request.assertions)
         {
             return PrepareOutcome::Fallback(request);
         }
@@ -540,6 +545,7 @@ impl EventLoop {
             crate::runtime::actors::wal::TransactionAppendParams {
                 request_id,
                 ops: request.ops,
+                assertions: request.assertions,
                 durability_policy: request.durability_policy,
                 start_sequence: request.start_sequence,
                 conflict_policy: request.conflict_policy,
@@ -560,6 +566,7 @@ impl EventLoop {
         let ApplyTransactionRequest {
             request_id,
             ops,
+            assertions,
             durability_policy,
             start_sequence,
             conflict_policy,
@@ -569,11 +576,14 @@ impl EventLoop {
             .wal_actor
             .append_transaction(
                 &mut self.state,
-                request_id,
-                ops,
-                durability_policy,
-                start_sequence,
-                conflict_policy,
+                crate::runtime::actors::wal::TransactionAppendParams {
+                    request_id,
+                    ops,
+                    assertions,
+                    durability_policy,
+                    start_sequence,
+                    conflict_policy,
+                },
             )
             .map(
                 |(last_sequence, op_count, deferred)| WriteResult::TransactionApplied {
@@ -781,6 +791,30 @@ impl StagedTransactionTouches {
         })
     }
 
+    /// True when an earlier-staged (but not yet applied) batch member's
+    /// write already touches one of `assertions`' keys.
+    ///
+    /// This is the read-side half of the coalescing hazard: preparation
+    /// (including this assertion check) allocates a transaction's sequence
+    /// immediately, but memtable apply for the whole batch is deferred until
+    /// the batch flushes. Without this check, an assertion prepared after an
+    /// earlier-staged write to the same key would query `latest_key_sequence`
+    /// and see the pre-write state — the write's sequence is already
+    /// allocated, but its mutation is not yet visible — and would wrongly
+    /// pass. Falling back routes the asserting transaction through the
+    /// single-transaction path, which only runs once the batch's own writes
+    /// are irrelevant to it (it is no longer part of that batch).
+    ///
+    /// The reverse order needs no symmetric guard: a write staged *after* an
+    /// already-prepared assertion gets a strictly later sequence, which does
+    /// not retroactively invalidate the assertion's already-serialized
+    /// check.
+    fn touches_assertions(&self, assertions: &[crate::runtime::KeyAssertion]) -> bool {
+        assertions
+            .iter()
+            .any(|assertion| self.touches_point(assertion.cf_id, &assertion.key))
+    }
+
     fn record_ops(&mut self, ops: &[TransactionOp]) {
         for op in ops {
             match op {
@@ -852,6 +886,8 @@ fn duplicate_midge_error(error: &MidgeError) -> MidgeError {
         MidgeError::Fenced(message) => MidgeError::Fenced(message.clone()),
         MidgeError::LeaseHeld(message) => MidgeError::LeaseHeld(message.clone()),
         MidgeError::LeaseUnavailable(message) => MidgeError::LeaseUnavailable(message.clone()),
+        MidgeError::LeaseIndeterminate(message) => MidgeError::LeaseIndeterminate(message.clone()),
+        MidgeError::LeaseEpochExhausted => MidgeError::LeaseEpochExhausted,
         MidgeError::WriteConflict(message) => MidgeError::WriteConflict(message.clone()),
         MidgeError::Aborted(message) => MidgeError::Aborted(message.clone()),
         MidgeError::Busy(message) => MidgeError::Busy(message.clone()),

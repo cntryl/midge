@@ -144,6 +144,537 @@ fn should_bound_assertion_memory_by_transaction_pool() {
 }
 
 // ============================================================================
+// COMMIT-TIME ASSERTION ENFORCEMENT
+//
+// assert_value validates against the transaction's start snapshot client-side
+// (above), but that alone is a TOCTOU gap: a concurrent commit to the
+// asserted key between validation and this transaction's own commit is
+// invisible to a purely client-side check. These tests cover the server-side
+// enforcement that closes it.
+// ============================================================================
+
+fn sequence_metric(engine: &cntryl_midge::Engine) -> u64 {
+    engine
+        .get_runtime_metrics()
+        .expect("runtime metrics")
+        .current_sequence
+}
+
+#[test]
+fn should_reject_assertion_when_concurrent_put_lands_after_start_sequence() {
+    // Arrange
+    let engine = Arc::new(open_with_mode(&MidgeOptions::default(), "memory"));
+    let cf = engine
+        .create_column_family("assert-put")
+        .expect("create cf");
+    let mut seed = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin seed tx");
+    seed.put(b"key".to_vec(), b"v1".to_vec(), None)
+        .expect("seed value");
+    seed.commit(cntryl_midge::WriteOptions::buffered())
+        .expect("seed commit");
+
+    let mut asserting = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin asserting tx");
+    asserting
+        .assert_value(b"key".to_vec(), Some(b"v1".to_vec()))
+        .expect("register assertion");
+    asserting
+        .put(b"other".to_vec(), b"unrelated".to_vec(), None)
+        .expect("unrelated write so this isn't an assert-only commit");
+
+    // Act: a concurrent transaction commits a new value to the asserted key
+    // before the asserting transaction commits.
+    let mut concurrent = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin concurrent tx");
+    concurrent
+        .put(b"key".to_vec(), b"v2".to_vec(), None)
+        .expect("concurrent write");
+    concurrent
+        .commit(cntryl_midge::WriteOptions::buffered())
+        .expect("concurrent commit");
+
+    let sequence_before = sequence_metric(&engine);
+    let result = asserting.commit(cntryl_midge::WriteOptions::buffered());
+
+    // Assert
+    assert!(matches!(
+        result,
+        Err(cntryl_midge::MidgeError::WriteConflict(_))
+    ));
+    assert_eq!(
+        sequence_metric(&engine),
+        sequence_before,
+        "a rejected commit must not advance the sequence"
+    );
+    let read_tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .expect("begin read tx");
+    assert_eq!(
+        read_tx.get(b"other").expect("read unrelated key"),
+        None,
+        "a rejected commit must not apply any of its writes"
+    );
+}
+
+#[test]
+fn should_reject_assertion_when_concurrent_delete_lands_after_start_sequence() {
+    // Arrange
+    let engine = Arc::new(open_with_mode(&MidgeOptions::default(), "memory"));
+    let cf = engine
+        .create_column_family("assert-delete")
+        .expect("create cf");
+    let mut seed = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin seed tx");
+    seed.put(b"key".to_vec(), b"v1".to_vec(), None)
+        .expect("seed value");
+    seed.commit(cntryl_midge::WriteOptions::buffered())
+        .expect("seed commit");
+
+    let mut asserting = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin asserting tx");
+    asserting
+        .assert_value(b"key".to_vec(), Some(b"v1".to_vec()))
+        .expect("register assertion");
+
+    // Act
+    let mut concurrent = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin concurrent tx");
+    concurrent
+        .delete(b"key".to_vec())
+        .expect("concurrent delete");
+    concurrent
+        .commit(cntryl_midge::WriteOptions::buffered())
+        .expect("concurrent commit");
+
+    let result = asserting.commit(cntryl_midge::WriteOptions::buffered());
+
+    // Assert
+    assert!(matches!(
+        result,
+        Err(cntryl_midge::MidgeError::WriteConflict(_))
+    ));
+}
+
+#[test]
+fn should_reject_assertion_when_concurrent_range_delete_covers_the_key() {
+    // Arrange
+    let engine = Arc::new(open_with_mode(&MidgeOptions::default(), "memory"));
+    let cf = engine
+        .create_column_family("assert-range-delete")
+        .expect("create cf");
+    let mut seed = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin seed tx");
+    seed.put(b"key-b".to_vec(), b"v1".to_vec(), None)
+        .expect("seed value");
+    seed.commit(cntryl_midge::WriteOptions::buffered())
+        .expect("seed commit");
+
+    let mut asserting = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin asserting tx");
+    asserting
+        .assert_value(b"key-b".to_vec(), Some(b"v1".to_vec()))
+        .expect("register assertion");
+
+    // Act: the concurrent range delete never touches "key-b" directly, only
+    // covers it — the assertion check must consult covering range deletes,
+    // not just point mutations.
+    let mut concurrent = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin concurrent tx");
+    concurrent
+        .delete_range(b"key-a".to_vec(), b"key-z".to_vec())
+        .expect("concurrent range delete");
+    concurrent
+        .commit(cntryl_midge::WriteOptions::buffered())
+        .expect("concurrent commit");
+
+    let result = asserting.commit(cntryl_midge::WriteOptions::buffered());
+
+    // Assert
+    assert!(matches!(
+        result,
+        Err(cntryl_midge::MidgeError::WriteConflict(_))
+    ));
+}
+
+#[test]
+fn should_reject_absent_assertion_when_key_is_inserted_concurrently() {
+    // Arrange
+    let engine = Arc::new(open_with_mode(&MidgeOptions::default(), "memory"));
+    let cf = engine
+        .create_column_family("assert-absent-insert")
+        .expect("create cf");
+
+    let mut asserting = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin asserting tx");
+    asserting
+        .assert_value(b"key".to_vec(), None)
+        .expect("register absent assertion");
+
+    // Act: the key is still absent as of `asserting`'s frozen start
+    // snapshot, so client-side validation (checked at commit()) would still
+    // pass — only the server-side sequence check catches this.
+    let mut concurrent = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin concurrent tx");
+    concurrent
+        .put(b"key".to_vec(), b"inserted".to_vec(), None)
+        .expect("concurrent insert");
+    concurrent
+        .commit(cntryl_midge::WriteOptions::buffered())
+        .expect("concurrent commit");
+
+    let result = asserting.commit(cntryl_midge::WriteOptions::buffered());
+
+    // Assert
+    assert!(matches!(
+        result,
+        Err(cntryl_midge::MidgeError::WriteConflict(_))
+    ));
+}
+
+#[test]
+fn should_reject_assertion_given_aba_value_restored_after_intervening_write() {
+    // Arrange: value goes v1 -> v2 -> v1. A value re-read at commit time
+    // would see v1 and wrongly pass; the sequence-based check must still
+    // reject because the key's sequence advanced twice after start_sequence.
+    let engine = Arc::new(open_with_mode(&MidgeOptions::default(), "memory"));
+    let cf = engine
+        .create_column_family("assert-aba")
+        .expect("create cf");
+    let mut seed = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin seed tx");
+    seed.put(b"key".to_vec(), b"v1".to_vec(), None)
+        .expect("seed value");
+    seed.commit(cntryl_midge::WriteOptions::buffered())
+        .expect("seed commit");
+
+    let mut asserting = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin asserting tx");
+    asserting
+        .assert_value(b"key".to_vec(), Some(b"v1".to_vec()))
+        .expect("register assertion");
+
+    // Act
+    let mut to_v2 = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin tx to v2");
+    to_v2
+        .put(b"key".to_vec(), b"v2".to_vec(), None)
+        .expect("write v2");
+    to_v2
+        .commit(cntryl_midge::WriteOptions::buffered())
+        .expect("commit v2");
+
+    let mut back_to_v1 = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin tx back to v1");
+    back_to_v1
+        .put(b"key".to_vec(), b"v1".to_vec(), None)
+        .expect("restore v1");
+    back_to_v1
+        .commit(cntryl_midge::WriteOptions::buffered())
+        .expect("commit restored v1");
+
+    let result = asserting.commit(cntryl_midge::WriteOptions::buffered());
+
+    // Assert
+    assert!(
+        matches!(result, Err(cntryl_midge::MidgeError::WriteConflict(_))),
+        "ABA-restoring the value must not defeat the assertion, got: {result:?}"
+    );
+}
+
+#[test]
+fn should_allow_asserting_and_writing_the_same_key_in_one_transaction() {
+    // Arrange
+    let engine = Arc::new(open_with_mode(&MidgeOptions::default(), "memory"));
+    let cf = engine
+        .create_column_family("assert-self")
+        .expect("create cf");
+    let mut seed = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin seed tx");
+    seed.put(b"key".to_vec(), b"v1".to_vec(), None)
+        .expect("seed value");
+    seed.commit(cntryl_midge::WriteOptions::buffered())
+        .expect("seed commit");
+
+    // Act: a compare-and-swap pattern — assert the current value, then
+    // write a new one, all in the same transaction. The transaction's own
+    // pending write must not be mistaken for an external conflict.
+    let mut txn = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin cas tx");
+    txn.assert_value(b"key".to_vec(), Some(b"v1".to_vec()))
+        .expect("register assertion");
+    txn.put(b"key".to_vec(), b"v2".to_vec(), None)
+        .expect("cas write");
+    let result = txn.commit(cntryl_midge::WriteOptions::buffered());
+
+    // Assert
+    assert!(result.is_ok(), "expected CAS commit to succeed: {result:?}");
+    let read_tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .expect("begin read tx");
+    assert_eq!(
+        read_tx.get(b"key").expect("read value"),
+        Some(Bytes::from_static(b"v2"))
+    );
+}
+
+#[test]
+fn should_commit_disjoint_assertion_and_write_together() {
+    // Arrange
+    let engine = Arc::new(open_with_mode(&MidgeOptions::default(), "memory"));
+    let cf = engine
+        .create_column_family("assert-disjoint")
+        .expect("create cf");
+    let mut seed = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin seed tx");
+    seed.put(b"guard".to_vec(), b"unchanged".to_vec(), None)
+        .expect("seed guard value");
+    seed.commit(cntryl_midge::WriteOptions::buffered())
+        .expect("seed commit");
+
+    // Act: assert an unrelated key while writing a different one; neither
+    // should interfere with the other.
+    let mut txn = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin tx");
+    txn.assert_value(b"guard".to_vec(), Some(b"unchanged".to_vec()))
+        .expect("register assertion");
+    txn.put(b"data".to_vec(), b"value".to_vec(), None)
+        .expect("unrelated write");
+    let result = txn.commit(cntryl_midge::WriteOptions::buffered());
+
+    // Assert
+    assert!(result.is_ok());
+    let read_tx = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .expect("begin read tx");
+    assert_eq!(
+        read_tx.get(b"data").expect("read data"),
+        Some(Bytes::from_static(b"value"))
+    );
+}
+
+#[test]
+fn should_enforce_assertion_conflict_even_under_last_write_wins_policy() {
+    // Arrange: LastWriteWins is the default and normally lets a later
+    // committer silently overwrite an earlier reader's view. An explicit
+    // assertion is a stronger, opt-in guarantee and must still be enforced.
+    let engine = Arc::new(open_with_mode(&MidgeOptions::default(), "memory"));
+    let cf = engine
+        .create_column_family("assert-lww")
+        .expect("create cf");
+    let mut seed = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin seed tx");
+    seed.put(b"key".to_vec(), b"v1".to_vec(), None)
+        .expect("seed value");
+    seed.commit(cntryl_midge::WriteOptions::buffered())
+        .expect("seed commit");
+
+    let mut asserting = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin asserting tx");
+    assert_eq!(
+        asserting.conflict_policy(),
+        cntryl_midge::ConflictPolicy::LastWriteWins,
+        "this test exercises the default policy"
+    );
+    asserting
+        .assert_value(b"key".to_vec(), Some(b"v1".to_vec()))
+        .expect("register assertion");
+    asserting
+        .put(b"other".to_vec(), b"value".to_vec(), None)
+        .expect("unrelated write");
+
+    // Act
+    let mut concurrent = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin concurrent tx");
+    concurrent
+        .put(b"key".to_vec(), b"v2".to_vec(), None)
+        .expect("concurrent write");
+    concurrent
+        .commit(cntryl_midge::WriteOptions::buffered())
+        .expect("concurrent commit");
+
+    let result = asserting.commit(cntryl_midge::WriteOptions::buffered());
+
+    // Assert
+    assert!(matches!(
+        result,
+        Err(cntryl_midge::MidgeError::WriteConflict(_))
+    ));
+}
+
+#[test]
+fn should_validate_assertion_only_commit_without_allocating_a_sequence() {
+    // Arrange
+    let engine = Arc::new(open_with_mode(&MidgeOptions::default(), "memory"));
+    let cf = engine
+        .create_column_family("assert-only-commit")
+        .expect("create cf");
+    let mut seed = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin seed tx");
+    seed.put(b"key".to_vec(), b"v1".to_vec(), None)
+        .expect("seed value");
+    seed.commit(cntryl_midge::WriteOptions::buffered())
+        .expect("seed commit");
+
+    // Act: no put/delete/delete_range calls at all — only an assertion.
+    let mut txn = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin assert-only tx");
+    txn.assert_value(b"key".to_vec(), Some(b"v1".to_vec()))
+        .expect("register assertion");
+
+    let sequence_before = sequence_metric(&engine);
+    let result = txn.commit(cntryl_midge::WriteOptions::buffered());
+
+    // Assert
+    assert!(
+        result.is_ok(),
+        "expected assert-only commit to succeed: {result:?}"
+    );
+    assert_eq!(
+        sequence_metric(&engine),
+        sequence_before,
+        "an assert-only commit must not allocate a sequence"
+    );
+}
+
+#[test]
+fn should_reject_assertion_only_commit_when_key_changed_concurrently() {
+    // Arrange
+    let engine = Arc::new(open_with_mode(&MidgeOptions::default(), "memory"));
+    let cf = engine
+        .create_column_family("assert-only-reject")
+        .expect("create cf");
+    let mut seed = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin seed tx");
+    seed.put(b"key".to_vec(), b"v1".to_vec(), None)
+        .expect("seed value");
+    seed.commit(cntryl_midge::WriteOptions::buffered())
+        .expect("seed commit");
+
+    let mut asserting = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin assert-only tx");
+    asserting
+        .assert_value(b"key".to_vec(), Some(b"v1".to_vec()))
+        .expect("register assertion");
+
+    // Act
+    let mut concurrent = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin concurrent tx");
+    concurrent
+        .put(b"key".to_vec(), b"v2".to_vec(), None)
+        .expect("concurrent write");
+    concurrent
+        .commit(cntryl_midge::WriteOptions::buffered())
+        .expect("concurrent commit");
+
+    let sequence_before = sequence_metric(&engine);
+    let result = asserting.commit(cntryl_midge::WriteOptions::buffered());
+
+    // Assert
+    assert!(matches!(
+        result,
+        Err(cntryl_midge::MidgeError::WriteConflict(_))
+    ));
+    assert_eq!(
+        sequence_metric(&engine),
+        sequence_before,
+        "a rejected assert-only commit must not allocate a sequence"
+    );
+}
+
+#[test]
+fn should_reject_assertion_conflict_in_a_spilled_transaction() {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        // Arrange: a small memory budget forces the write set to spill to
+        // disk, exercising validate_spilled_transaction's assertion check
+        // rather than the in-memory path.
+        let mut opts = opts;
+        opts = opts.memory_budget(256 * 1024);
+        let engine = open_with_mode(&opts, mode);
+        let cf = engine
+            .create_column_family("assert-spill")
+            .expect("create cf");
+
+        let mut seed = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin seed tx");
+        seed.put(b"guard".to_vec(), b"v1".to_vec(), None)
+            .expect("seed value");
+        seed.commit(buffered_write_options(mode))
+            .expect("seed commit");
+
+        let mut asserting = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin asserting tx");
+        asserting
+            .assert_value(b"guard".to_vec(), Some(b"v1".to_vec()))
+            .expect("register assertion");
+        for i in 0..200 {
+            let key = format!("spill-key{i:04}");
+            let value = format!("spill-value_{i:04}");
+            asserting
+                .put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
+                .expect("put");
+        }
+
+        // Act
+        let mut concurrent = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin concurrent tx");
+        concurrent
+            .put(b"guard".to_vec(), b"v2".to_vec(), None)
+            .expect("concurrent write");
+        concurrent
+            .commit(buffered_write_options(mode))
+            .expect("concurrent commit");
+
+        let result = asserting.commit(buffered_write_options(mode));
+
+        // Assert
+        assert!(
+            matches!(result, Err(cntryl_midge::MidgeError::WriteConflict(_))),
+            "expected spilled commit to reject the stale assertion in mode {mode}, got: {result:?}"
+        );
+
+        let read_tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .expect("begin read tx");
+        assert_eq!(
+            read_tx.get(b"spill-key0000").expect("read spilled key"),
+            None,
+            "a rejected spilled commit must not apply any of its writes in mode {mode}"
+        );
+    });
+}
+
+// ============================================================================
 // BASIC LWW SEMANTICS TESTS
 // ============================================================================
 

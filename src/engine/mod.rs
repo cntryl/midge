@@ -984,6 +984,45 @@ impl Engine {
         }
     }
 
+    /// Get an operator-facing snapshot of runtime metrics and health, bounded by `timeout`.
+    ///
+    /// Unlike [`Engine::get_runtime_metrics`], this never blocks past `timeout`: if the
+    /// runtime cannot respond in time, the pending response slot is unregistered (so it
+    /// cannot leak) and `MidgeError::Timeout` is returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the runtime cannot provide a metrics snapshot, or
+    /// `MidgeError::Timeout` if `timeout` elapses first.
+    pub fn get_runtime_metrics_with_timeout(
+        &self,
+        timeout: Duration,
+    ) -> MidgeResult<RuntimeMetricsSnapshot> {
+        if timeout.is_zero() {
+            return Err(MidgeError::Timeout(
+                "get_runtime_metrics_with_timeout deadline is zero".to_string(),
+            ));
+        }
+
+        let response = self.runtime_handle.send_and_wait_timeout(
+            RuntimeMsg::GetRuntimeMetrics {
+                request_id: next_request_id()?,
+            },
+            timeout,
+        )?;
+
+        match response {
+            Some(RuntimeResponse::RuntimeMetricsSnapshot { snapshot, .. }) => Ok(*snapshot),
+            Some(RuntimeResponse::Error { error, .. }) => Err(error),
+            Some(other) => Err(MidgeError::Internal(format!(
+                "Unexpected response from GetRuntimeMetrics: {other:?}"
+            ))),
+            None => Err(MidgeError::Timeout(
+                "get_runtime_metrics_with_timeout exceeded the deadline".to_string(),
+            )),
+        }
+    }
+
     /// Get a stable snapshot of the current SST layout and pinned snapshot state.
     ///
     /// # Errors

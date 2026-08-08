@@ -96,6 +96,7 @@ fn txn_request(
     ApplyTransactionRequest {
         request_id,
         ops,
+        assertions: Vec::new(),
         durability_policy,
         start_sequence: None,
         conflict_policy: ConflictPolicy::LastWriteWins,
@@ -112,6 +113,7 @@ fn ordered_txn_request(
     ApplyTransactionRequest {
         request_id,
         ops,
+        assertions: Vec::new(),
         durability_policy: Some(durability_policy),
         start_sequence: Some(start_sequence),
         conflict_policy,
@@ -126,6 +128,7 @@ fn txn_msg(
     RuntimeMsg::ApplyTransaction {
         request_id,
         ops,
+        assertions: Vec::new(),
         durability_policy,
         start_sequence: None,
         conflict_policy: ConflictPolicy::LastWriteWins,
@@ -143,6 +146,7 @@ fn inline_txn_msg(
         RuntimeMsg::ApplyTransaction {
             request_id,
             ops,
+            assertions: Vec::new(),
             durability_policy,
             start_sequence: None,
             conflict_policy: ConflictPolicy::LastWriteWins,
@@ -879,6 +883,66 @@ fn should_order_mixed_policy_transactions_on_fallback() -> MidgeResult<()> {
 }
 
 #[test]
+fn should_reject_assertion_when_earlier_batch_member_writes_the_asserted_key() -> MidgeResult<()> {
+    // Arrange: A (initial, prepared first) writes a key; B (queued, prepared
+    // second) asserts that same key and also carries an unrelated write so
+    // it doesn't already fall back via the empty-ops guard alone.
+    //
+    // Preparation allocates a sequence immediately, but memtable apply for
+    // the whole batch is deferred until it flushes — so without
+    // StagedTransactionTouches::touches_assertions, B's assertion would be
+    // checked against a memtable that does not yet reflect A's write (whose
+    // sequence is nonetheless already allocated) and would wrongly pass.
+    let mut fixture = EventLoopFixture::with_policy(DurabilityPolicy::Strict)?;
+    let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
+    let writer_rx = fixture.register(60);
+    let asserting_rx = fixture.register(61);
+    msg_tx
+        .send(RuntimeMsg::ApplyTransaction {
+            request_id: 61,
+            ops: vec![put_op(0, b"assert-coalesce-unrelated", b"value-b")],
+            assertions: vec![crate::runtime::KeyAssertion {
+                cf_id: 0,
+                key: Bytes::from_static(b"assert-coalesce-key"),
+            }],
+            durability_policy: Some(DurabilityPolicy::Strict),
+            start_sequence: Some(0),
+            conflict_policy: ConflictPolicy::LastWriteWins,
+            response_tx: None,
+        })
+        .expect("queue asserting transaction");
+
+    // Act
+    let handled = fixture.event_loop.apply_transaction_with_coalescing(
+        &msg_rx,
+        ordered_txn_request(
+            60,
+            vec![put_op(0, b"assert-coalesce-key", b"value-a")],
+            DurabilityPolicy::Strict,
+            0,
+            ConflictPolicy::LastWriteWins,
+        ),
+        1024,
+    );
+
+    // Assert
+    assert_eq!(handled, 2);
+    assert_eq!(expect_transaction_applied(&writer_rx, 60), (3, 1));
+    assert!(
+        matches!(
+            recv_response(&asserting_rx),
+            RuntimeResponse::Error {
+                error: MidgeError::WriteConflict(_),
+                ..
+            }
+        ),
+        "expected the coalescing-aware assertion check to reject the stale assertion"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn should_fall_back_when_strict_transactions_have_different_ordering_contracts() -> MidgeResult<()>
 {
     // Arrange
@@ -890,6 +954,7 @@ fn should_fall_back_when_strict_transactions_have_different_ordering_contracts()
         .send(RuntimeMsg::ApplyTransaction {
             request_id: 55,
             ops: vec![put_op(0, b"ordered-b", b"value-b")],
+            assertions: Vec::new(),
             durability_policy: Some(DurabilityPolicy::Strict),
             start_sequence: Some(0),
             conflict_policy: ConflictPolicy::AbortOnWriteConflict,

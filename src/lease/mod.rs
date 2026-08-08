@@ -51,6 +51,10 @@ impl From<LeaseError> for crate::common::MidgeError {
             LeaseError::IoError(message) => Self::LeaseUnavailable(message),
             LeaseError::RenewalFailed(message) => Self::Fenced(message),
             LeaseError::AlreadyReleased => Self::Fenced("lease already released".to_string()),
+            LeaseError::Indeterminate(message) => Self::LeaseIndeterminate(message),
+            LeaseError::EpochExhausted => Self::LeaseEpochExhausted,
+            LeaseError::AlreadyAcquired(message) => Self::Busy(message),
+            LeaseError::Internal(message) => Self::Internal(message),
         }
     }
 }

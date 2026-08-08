@@ -7,8 +7,8 @@
 //! - All operations routed through the same `CloudBackend` trait as S3/Azure
 
 use super::super::cloud::{
-    CloudBackend, CloudCallback, CloudEvent, CloudExecutor, CloudListBudget, CloudOutcome,
-    CloudRequest, CloudResponse, CloudSigner, ObjectMetadata,
+    CloudBackend, CloudCallback, CloudError, CloudEvent, CloudExecutor, CloudListBudget,
+    CloudOutcome, CloudRequest, CloudResponse, CloudSigner, ObjectMetadata,
 };
 use crate::common::{MidgeError, MidgeResult};
 use base64::{
@@ -966,11 +966,11 @@ impl CloudBackend for GcsBackend {
             },
             Ok(resp) => CloudEvent::Put {
                 key: ctx,
-                result: CloudOutcome::Err(format!("GCS PUT status {}", resp.status)),
+                result: CloudOutcome::Err(CloudError::from_http_status(resp.status, "GCS PUT")),
             },
             Err(err) => CloudEvent::Put {
                 key: ctx,
-                result: CloudOutcome::Err(format!("{err:?}")),
+                result: CloudOutcome::Err(CloudError::Transport(format!("{err:?}"))),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -985,17 +985,13 @@ impl CloudBackend for GcsBackend {
                 key: ctx,
                 result: CloudOutcome::Ok(resp.body),
             },
-            Ok(resp) if resp.status == 404 => CloudEvent::Get {
-                key: ctx,
-                result: CloudOutcome::Err("not found".into()),
-            },
             Ok(resp) => CloudEvent::Get {
                 key: ctx,
-                result: CloudOutcome::Err(format!("GCS GET status {}", resp.status)),
+                result: CloudOutcome::Err(CloudError::from_http_status(resp.status, "GCS GET")),
             },
             Err(err) => CloudEvent::Get {
                 key: ctx,
-                result: CloudOutcome::Err(format!("{err:?}")),
+                result: CloudOutcome::Err(CloudError::Transport(format!("{err:?}"))),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -1021,13 +1017,16 @@ impl CloudBackend for GcsBackend {
                 key: ctx,
                 start,
                 end,
-                result: CloudOutcome::Err(format!("GCS GET_RANGE status {}", resp.status)),
+                result: CloudOutcome::Err(CloudError::from_http_status(
+                    resp.status,
+                    "GCS GET_RANGE",
+                )),
             },
             Err(err) => CloudEvent::GetRange {
                 key: ctx,
                 start,
                 end,
-                result: CloudOutcome::Err(format!("{err:?}")),
+                result: CloudOutcome::Err(CloudError::Transport(format!("{err:?}"))),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -1058,11 +1057,11 @@ impl CloudBackend for GcsBackend {
             },
             Ok(resp) => CloudEvent::Delete {
                 key: ctx,
-                result: CloudOutcome::Err(format!("GCS DELETE status {}", resp.status)),
+                result: CloudOutcome::Err(CloudError::from_http_status(resp.status, "GCS DELETE")),
             },
             Err(err) => CloudEvent::Delete {
                 key: ctx,
-                result: CloudOutcome::Err(format!("{err:?}")),
+                result: CloudOutcome::Err(CloudError::Transport(format!("{err:?}"))),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -1136,7 +1135,7 @@ impl CloudBackend for GcsBackend {
                 },
                 Err(err) => CloudEvent::List {
                     prefix: ctx,
-                    result: CloudOutcome::Err(format!("{err:?}")),
+                    result: CloudOutcome::Err(CloudError::Protocol(format!("{err:?}"))),
                 },
             },
         );
@@ -1185,17 +1184,13 @@ impl CloudBackend for GcsBackend {
                     result: CloudOutcome::Ok(metadata),
                 }
             }
-            Ok(resp) if resp.status == 404 => CloudEvent::Head {
-                key: ctx,
-                result: CloudOutcome::Err("not found".into()),
-            },
             Ok(resp) => CloudEvent::Head {
                 key: ctx,
-                result: CloudOutcome::Err(format!("GCS HEAD status {}", resp.status)),
+                result: CloudOutcome::Err(CloudError::from_http_status(resp.status, "GCS HEAD")),
             },
             Err(err) => CloudEvent::Head {
                 key: ctx,
-                result: CloudOutcome::Err(format!("{err:?}")),
+                result: CloudOutcome::Err(CloudError::Transport(format!("{err:?}"))),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -1426,7 +1421,10 @@ mod tests {
         let error = receive_list_result(&backend).expect_err("repeated token should fail LIST");
 
         // Assert
-        assert!(error.contains("repeated continuation token"), "{error}");
+        assert!(
+            error.to_string().contains("repeated continuation token"),
+            "{error}"
+        );
         assert_eq!(server.finish(), 2);
     }
 
@@ -1450,7 +1448,10 @@ mod tests {
         let error = receive_list_result(&backend).expect_err("repeated marker should fail LIST");
 
         // Assert
-        assert!(error.contains("repeated continuation token"), "{error}");
+        assert!(
+            error.to_string().contains("repeated continuation token"),
+            "{error}"
+        );
         assert_eq!(server.finish(), 2);
     }
 

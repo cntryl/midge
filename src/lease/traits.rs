@@ -35,12 +35,12 @@ impl LeaseValidity {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if valid_until <= Instant::now() {
-            return Err(LeaseError::AcquisitionFailed(
+            return Err(LeaseError::Internal(
                 "cloud lease expired before acquisition completed".to_string(),
             ));
         }
         if !matches!(*state, LeaseValidityState::Inactive) {
-            return Err(LeaseError::AcquisitionFailed(
+            return Err(LeaseError::Internal(
                 "cloud lease validity was already active".to_string(),
             ));
         }
@@ -82,7 +82,7 @@ impl LeaseValidity {
             LeaseValidityState::Fenced { .. } => Err(LeaseError::RenewalFailed(
                 "cloud lease acquisition is terminally fenced".to_string(),
             )),
-            LeaseValidityState::Inactive => Err(LeaseError::RenewalFailed(
+            LeaseValidityState::Inactive => Err(LeaseError::Internal(
                 "cloud lease validity is inactive".to_string(),
             )),
         }
@@ -153,14 +153,41 @@ impl LeaseValidity {
 }
 
 /// Error type for lease operations.
+///
+/// This taxonomy exists so `LeaseHeld` means one thing and one thing only:
+/// confirmed, safe-to-retry contention — a live holder genuinely owns the
+/// lease, or a conditional write/delete genuinely lost a race to a
+/// concurrent acquirer. Every other failure mode gets its own variant so a
+/// caller can no longer conflate "someone else holds it" with "we don't
+/// know" (I/O, timeout, auth, transport, non-precondition HTTP failures),
+/// "the persisted state can't be interpreted" (malformed/ambiguous), "the
+/// fencing epoch is exhausted", or "this shouldn't be reachable" (an
+/// internal invariant violation, not an environmental condition).
 #[derive(Debug)]
 pub enum LeaseError {
-    /// Failed to acquire lease (likely held by another instance).
+    /// Confirmed, safe-to-retry contention: another live holder genuinely
+    /// owns the lease, or a conditional write/delete genuinely lost a race
+    /// to a concurrent acquirer.
     AcquisitionFailed(String),
     /// Lease renewal failed (instance should stop accepting writes).
     RenewalFailed(String),
-    /// I/O or backend error.
+    /// I/O, timeout, auth, transport, or non-precondition HTTP failure. The
+    /// outcome is unknown — this is NOT proof another instance holds the
+    /// lease.
     IoError(String),
+    /// Persisted lease state could not be interpreted (malformed or
+    /// ambiguous), so ownership cannot be determined either way.
+    Indeterminate(String),
+    /// The lease's fencing epoch counter cannot advance any further.
+    EpochExhausted,
+    /// This instance already holds (or is already mid-acquiring) the lease.
+    /// Not contention with another instance — the caller should back off,
+    /// not treat this as evidence someone else owns it.
+    AlreadyAcquired(String),
+    /// An internal invariant was violated — a logic bug in this instance's
+    /// own state machine, not an environmental condition another retry
+    /// could resolve.
+    Internal(String),
     /// Lease was already released.
     AlreadyReleased,
 }
@@ -171,6 +198,10 @@ impl fmt::Display for LeaseError {
             Self::AcquisitionFailed(msg) => write!(f, "lease acquisition failed: {msg}"),
             Self::RenewalFailed(msg) => write!(f, "lease renewal failed: {msg}"),
             Self::IoError(msg) => write!(f, "lease I/O error: {msg}"),
+            Self::Indeterminate(msg) => write!(f, "lease state is indeterminate: {msg}"),
+            Self::EpochExhausted => write!(f, "lease fencing epoch is exhausted"),
+            Self::AlreadyAcquired(msg) => write!(f, "lease already acquired: {msg}"),
+            Self::Internal(msg) => write!(f, "lease internal error: {msg}"),
             Self::AlreadyReleased => write!(f, "lease already released"),
         }
     }

@@ -75,9 +75,9 @@ impl LeaderStore for ProviderLeaderStore {
             .as_ref()
             .and_then(|document| document.epoch)
             .unwrap_or(0);
-        let epoch = previous_epoch.checked_add(1).ok_or_else(|| {
-            LeaseError::AcquisitionFailed("cloud lease epoch overflow".to_string())
-        })?;
+        let epoch = previous_epoch
+            .checked_add(1)
+            .ok_or(LeaseError::EpochExhausted)?;
         let monotonic_now = Instant::now();
         let now = chrono::Utc::now();
         let valid_until = monotonic_now + self.ttl;
@@ -92,7 +92,7 @@ impl LeaderStore for ProviderLeaderStore {
         };
         let headers = match existing_head {
             Some(metadata) => mutation_precondition_headers(&metadata).ok_or_else(|| {
-                LeaseError::AcquisitionFailed(
+                LeaseError::IoError(
                     "existing cloud lease has no conditional update token".to_string(),
                 )
             })?,
@@ -287,12 +287,12 @@ impl CloudStorageLease {
             .read_at(0, metadata.len)
             .map_err(|error| LeaseError::IoError(format!("failed to read lease file: {error}")))?;
         let content = String::from_utf8(bytes.to_vec()).map_err(|error| {
-            LeaseError::IoError(format!(
+            LeaseError::Indeterminate(format!(
                 "local lease coordination document is not UTF-8: {error}"
             ))
         })?;
         parse_lease_document(&content).map(Some).ok_or_else(|| {
-            LeaseError::IoError("local lease coordination document is malformed".to_string())
+            LeaseError::Indeterminate("local lease coordination document is malformed".to_string())
         })
     }
 
@@ -532,7 +532,7 @@ impl PrimaryLease for CloudStorageLease {
         let inner: &Self = &self;
 
         if inner.acquired.load(Ordering::Acquire) {
-            return Err(LeaseError::AcquisitionFailed(
+            return Err(LeaseError::AlreadyAcquired(
                 "lease already acquired by this instance".to_string(),
             ));
         }
@@ -688,7 +688,7 @@ impl LeaseDocument {
     /// Check if the lease has expired based on `expires_at`.
     fn is_expired(&self) -> Result<bool, LeaseError> {
         let expires = chrono::DateTime::parse_from_rfc3339(&self.expires_at).map_err(|_| {
-            LeaseError::AcquisitionFailed(format!(
+            LeaseError::Indeterminate(format!(
                 "cloud lease expiry is invalid; ownership is ambiguous (holder: {}, epoch: {:?})",
                 self.holder_id, self.epoch
             ))
@@ -746,15 +746,6 @@ fn parse_lease_document(content: &str) -> Option<LeaseDocument> {
     })
 }
 
-fn is_remote_not_found(error: &str) -> bool {
-    let lowered = error.to_ascii_lowercase();
-    lowered.contains("not found")
-        || lowered.contains("notfound")
-        || lowered.contains("404")
-        || lowered.contains("nosuchkey")
-        || lowered.contains("blobnotfound")
-}
-
 fn mutation_precondition_headers(metadata: &ObjectMetadata) -> Option<Vec<(String, String)>> {
     if let Some(generation) = metadata
         .generation
@@ -774,16 +765,32 @@ fn mutation_precondition_headers(metadata: &ObjectMetadata) -> Option<Vec<(Strin
     None
 }
 
+/// Classify a non-not-found [`CloudError`] from a lease HEAD/GET into the
+/// matching [`LeaseError`]. A malformed/ambiguous response gets its own
+/// bucket distinct from a plain I/O failure, since the former means the
+/// object exists but its state can't be trusted either way.
+fn classify_lease_read_error(
+    operation: &str,
+    error: &crate::storage::cloud::CloudError,
+) -> LeaseError {
+    use crate::storage::cloud::CloudError;
+    match error {
+        CloudError::NotFound(_) => unreachable!("callers must check is_not_found() first"),
+        CloudError::Protocol(msg) => {
+            LeaseError::Indeterminate(format!("cloud lease {operation} response: {msg}"))
+        }
+        other => LeaseError::IoError(format!("cloud lease {operation} failed: {other}")),
+    }
+}
+
 fn provider_head(cloud: &CloudStorage) -> Result<Option<ObjectMetadata>, LeaseError> {
     let (tx, rx) = std::sync::mpsc::channel();
     cloud.submit_head(LEASE_OBJECT_KEY, tx);
     match rx.recv_timeout(Duration::from_secs(30)) {
         Ok(CloudEvent::Head { result, .. }) => match result {
             CloudOutcome::Ok(metadata) => Ok(Some(metadata)),
-            CloudOutcome::Err(error) if is_remote_not_found(&error) => Ok(None),
-            CloudOutcome::Err(error) => Err(LeaseError::IoError(format!(
-                "cloud lease HEAD failed: {error}"
-            ))),
+            CloudOutcome::Err(error) if error.is_not_found() => Ok(None),
+            CloudOutcome::Err(error) => Err(classify_lease_read_error("HEAD", &error)),
         },
         Ok(other) => Err(LeaseError::IoError(format!(
             "unexpected cloud lease HEAD response: {other:?}"
@@ -801,16 +808,14 @@ fn provider_read_doc(cloud: &CloudStorage) -> Result<Option<LeaseDocument>, Leas
         Ok(CloudEvent::Get { result, .. }) => match result {
             CloudOutcome::Ok(bytes) => {
                 let content = String::from_utf8(bytes).map_err(|error| {
-                    LeaseError::IoError(format!("cloud lease document is not UTF-8: {error}"))
+                    LeaseError::Indeterminate(format!("cloud lease document is not UTF-8: {error}"))
                 })?;
                 parse_lease_document(&content).map(Some).ok_or_else(|| {
-                    LeaseError::IoError("cloud lease document is malformed".to_string())
+                    LeaseError::Indeterminate("cloud lease document is malformed".to_string())
                 })
             }
-            CloudOutcome::Err(error) if is_remote_not_found(&error) => Ok(None),
-            CloudOutcome::Err(error) => Err(LeaseError::IoError(format!(
-                "cloud lease GET failed: {error}"
-            ))),
+            CloudOutcome::Err(error) if error.is_not_found() => Ok(None),
+            CloudOutcome::Err(error) => Err(classify_lease_read_error("GET", &error)),
         },
         Ok(other) => Err(LeaseError::IoError(format!(
             "unexpected cloud lease GET response: {other:?}"
@@ -836,7 +841,18 @@ fn provider_write_doc(
     match rx.recv_timeout(Duration::from_secs(30)) {
         Ok(CloudEvent::Put { result, .. }) => match result {
             CloudOutcome::Ok(()) => Ok(()),
-            CloudOutcome::Err(error) => Err(LeaseError::AcquisitionFailed(format!(
+            // Only a genuine conditional-write race — another writer's PUT
+            // already changed the object out from under our If-Match /
+            // If-None-Match precondition — is confirmed contention. Every
+            // other failure (auth, transport, server error, malformed
+            // response) means the outcome is unknown, not that someone else
+            // holds the lease.
+            CloudOutcome::Err(error) if error.is_precondition_failed() => {
+                Err(LeaseError::AcquisitionFailed(format!(
+                    "cloud lease conditional write lost a precondition race: {error}"
+                )))
+            }
+            CloudOutcome::Err(error) => Err(LeaseError::IoError(format!(
                 "cloud lease conditional write failed: {error}"
             ))),
         },
@@ -852,6 +868,7 @@ fn provider_write_doc(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::MidgeError;
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -861,6 +878,179 @@ mod tests {
         CloudLeaseConfig {
             bucket: "test-bucket".to_string(),
             prefix: "test/prefix".to_string(),
+        }
+    }
+
+    /// Test double that intercepts conditional PUTs (the lease acquisition
+    /// path) and returns a scripted [`crate::storage::cloud::CloudError`]
+    /// instead of delegating to the wrapped backend. Everything else
+    /// delegates to an inner `MockCloudBackend`, so HEAD/GET/DELETE/LIST
+    /// still behave normally.
+    struct ScriptedConditionalPutBackend {
+        inner: crate::storage::cloud::MockCloudBackend,
+        scripted_error: crate::storage::cloud::CloudError,
+    }
+
+    impl crate::storage::cloud::CloudBackend for ScriptedConditionalPutBackend {
+        fn submit_put(
+            &self,
+            key: &str,
+            data: Vec<u8>,
+            headers: Vec<(String, String)>,
+            callback: crate::storage::cloud::CloudCallback,
+        ) {
+            let is_conditional = headers.iter().any(|(name, _)| {
+                name.eq_ignore_ascii_case("if-match") || name.eq_ignore_ascii_case("if-none-match")
+            });
+            if is_conditional {
+                let _ = callback.send(crate::storage::cloud::CloudEvent::Put {
+                    key: key.to_string(),
+                    result: Err(self.scripted_error.clone()),
+                });
+                return;
+            }
+            crate::storage::cloud::CloudBackend::submit_put(
+                &self.inner,
+                key,
+                data,
+                headers,
+                callback,
+            );
+        }
+
+        fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+            crate::storage::cloud::CloudBackend::submit_get(&self.inner, key, callback);
+        }
+
+        fn submit_get_range(
+            &self,
+            key: &str,
+            start: u64,
+            end: Option<u64>,
+            callback: crate::storage::cloud::CloudCallback,
+        ) {
+            crate::storage::cloud::CloudBackend::submit_get_range(
+                &self.inner,
+                key,
+                start,
+                end,
+                callback,
+            );
+        }
+
+        fn submit_delete(
+            &self,
+            key: &str,
+            headers: Vec<(String, String)>,
+            callback: crate::storage::cloud::CloudCallback,
+        ) {
+            crate::storage::cloud::CloudBackend::submit_delete(&self.inner, key, headers, callback);
+        }
+
+        fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
+            crate::storage::cloud::CloudBackend::submit_list(&self.inner, prefix, callback);
+        }
+
+        fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+            crate::storage::cloud::CloudBackend::submit_head(&self.inner, key, callback);
+        }
+    }
+
+    fn lease_with_scripted_conditional_put_error(
+        scripted_error: crate::storage::cloud::CloudError,
+    ) -> Arc<CloudStorageLease> {
+        let backend = Arc::new(ScriptedConditionalPutBackend {
+            inner: crate::storage::cloud::MockCloudBackend::new(),
+            scripted_error,
+        });
+        let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
+            backend,
+            "midge".to_string(),
+        ));
+        Arc::new(CloudStorageLease::new_provider_backed(
+            test_config(),
+            temp_cache_path(),
+            cloud,
+        ))
+    }
+
+    /// Test double whose HEAD responses always report no etag and no
+    /// generation, regardless of what the wrapped backend actually stored —
+    /// simulating a provider response that omits the fields a conditional
+    /// write needs.
+    struct NoCasTokenBackend {
+        inner: crate::storage::cloud::MockCloudBackend,
+    }
+
+    impl crate::storage::cloud::CloudBackend for NoCasTokenBackend {
+        fn submit_put(
+            &self,
+            key: &str,
+            data: Vec<u8>,
+            headers: Vec<(String, String)>,
+            callback: crate::storage::cloud::CloudCallback,
+        ) {
+            crate::storage::cloud::CloudBackend::submit_put(
+                &self.inner,
+                key,
+                data,
+                headers,
+                callback,
+            );
+        }
+
+        fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+            crate::storage::cloud::CloudBackend::submit_get(&self.inner, key, callback);
+        }
+
+        fn submit_get_range(
+            &self,
+            key: &str,
+            start: u64,
+            end: Option<u64>,
+            callback: crate::storage::cloud::CloudCallback,
+        ) {
+            crate::storage::cloud::CloudBackend::submit_get_range(
+                &self.inner,
+                key,
+                start,
+                end,
+                callback,
+            );
+        }
+
+        fn submit_delete(
+            &self,
+            key: &str,
+            headers: Vec<(String, String)>,
+            callback: crate::storage::cloud::CloudCallback,
+        ) {
+            crate::storage::cloud::CloudBackend::submit_delete(&self.inner, key, headers, callback);
+        }
+
+        fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
+            crate::storage::cloud::CloudBackend::submit_list(&self.inner, prefix, callback);
+        }
+
+        fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+            let (tx, rx) = std::sync::mpsc::channel();
+            crate::storage::cloud::CloudBackend::submit_head(&self.inner, key, tx);
+            let event = match rx.recv() {
+                Ok(crate::storage::cloud::CloudEvent::Head {
+                    key,
+                    result: Ok(metadata),
+                }) => crate::storage::cloud::CloudEvent::Head {
+                    key,
+                    result: Ok(crate::storage::cloud::ObjectMetadata::new(
+                        metadata.size,
+                        String::new(),
+                        0,
+                    )),
+                },
+                Ok(other) => other,
+                Err(_) => return,
+            };
+            let _ = callback.send(event);
         }
     }
 
@@ -877,6 +1067,167 @@ mod tests {
         ));
         std::fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    // === Provider conditional-write classification: the whole point of
+    // typing CloudError before stringification is that only a genuine
+    // precondition race becomes LeaseHeld. Every other failure mode must
+    // surface as LeaseUnavailable (via LeaseError::IoError), never as
+    // confirmed contention. ===
+
+    #[test]
+    fn should_not_treat_unauthorized_conditional_write_as_confirmed_contention() {
+        // Arrange
+        let lease = lease_with_scripted_conditional_put_error(
+            crate::storage::cloud::CloudError::Unauthorized("403 Forbidden".to_string()),
+        );
+
+        // Act
+        let result = Arc::clone(&lease).try_acquire();
+
+        // Assert
+        let Err(error) = result else {
+            panic!("expected an unauthorized conditional write to fail");
+        };
+        assert!(
+            matches!(error, LeaseError::IoError(_)),
+            "an auth failure is not proof another instance holds the lease, got: {error:?}"
+        );
+        assert!(matches!(
+            MidgeError::from(error),
+            MidgeError::LeaseUnavailable(_)
+        ));
+    }
+
+    #[test]
+    fn should_not_treat_server_error_conditional_write_as_confirmed_contention() {
+        // Arrange
+        let lease = lease_with_scripted_conditional_put_error(
+            crate::storage::cloud::CloudError::ServerError("500 Internal Server Error".to_string()),
+        );
+
+        // Act
+        let result = Arc::clone(&lease).try_acquire();
+
+        // Assert
+        let Err(error) = result else {
+            panic!("expected a server-error conditional write to fail");
+        };
+        assert!(
+            matches!(error, LeaseError::IoError(_)),
+            "a provider outage is not proof another instance holds the lease, got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn should_not_treat_transport_failure_conditional_write_as_confirmed_contention() {
+        // Arrange
+        let lease = lease_with_scripted_conditional_put_error(
+            crate::storage::cloud::CloudError::Transport("connection reset".to_string()),
+        );
+
+        // Act
+        let result = Arc::clone(&lease).try_acquire();
+
+        // Assert
+        let Err(error) = result else {
+            panic!("expected a transport-failure conditional write to fail");
+        };
+        assert!(
+            matches!(error, LeaseError::IoError(_)),
+            "a network failure is not proof another instance holds the lease, got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn should_treat_precondition_failed_conditional_write_as_confirmed_contention() {
+        // Arrange
+        let lease = lease_with_scripted_conditional_put_error(
+            crate::storage::cloud::CloudError::PreconditionFailed("412".to_string()),
+        );
+
+        // Act
+        let result = Arc::clone(&lease).try_acquire();
+
+        // Assert
+        let Err(error) = result else {
+            panic!("expected a lost precondition race to fail acquisition");
+        };
+        assert!(
+            matches!(error, LeaseError::AcquisitionFailed(_)),
+            "a genuine conditional-write race is confirmed contention, got: {error:?}"
+        );
+        assert!(matches!(MidgeError::from(error), MidgeError::LeaseHeld(_)));
+    }
+
+    #[test]
+    fn should_map_lease_unavailable_error_types_distinctly_through_midge_error() {
+        // Arrange
+        let lease = lease_with_scripted_conditional_put_error(
+            crate::storage::cloud::CloudError::ServerError("500".to_string()),
+        );
+
+        // Act
+        let result = Arc::clone(&lease).try_acquire();
+        let Err(error) = result else {
+            panic!("expected a server-error conditional write to fail");
+        };
+        let midge_error = MidgeError::from(error);
+
+        // Assert: exact public variant, not conflated with LeaseHeld.
+        assert!(matches!(midge_error, MidgeError::LeaseUnavailable(_)));
+    }
+
+    #[test]
+    fn should_not_treat_missing_cas_token_as_confirmed_contention() {
+        // Arrange: seed an already-expired lease document so acquisition
+        // proceeds to a takeover attempt instead of short-circuiting on
+        // "another instance holds it".
+        let backend = Arc::new(NoCasTokenBackend {
+            inner: crate::storage::cloud::MockCloudBackend::new(),
+        });
+        let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
+            backend,
+            "midge".to_string(),
+        ));
+        let now = chrono::Utc::now();
+        let expired = LeaseDocument {
+            epoch: Some(1),
+            holder_id: "old-holder@host".to_string(),
+            owner_token: Some("old-token".to_string()),
+            acquired_at: (now - chrono::Duration::seconds(120)).to_rfc3339(),
+            expires_at: (now - chrono::Duration::seconds(60)).to_rfc3339(),
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud.submit_put(
+            LEASE_OBJECT_KEY,
+            format_lease_document(&expired).into_bytes(),
+            vec![],
+            tx,
+        );
+        rx.recv().expect("seed expired lease document");
+
+        let lease = Arc::new(CloudStorageLease::new_provider_backed(
+            test_config(),
+            temp_cache_path(),
+            cloud,
+        ));
+
+        // Act
+        let result = Arc::clone(&lease).try_acquire();
+
+        // Assert
+        let Err(error) = result else {
+            panic!("expected takeover to fail without a conditional-update token");
+        };
+        assert!(
+            matches!(error, LeaseError::IoError(_)),
+            "a missing CAS token is not proof another instance holds the lease, got: {error:?}"
+        );
+        assert!(matches!(
+            MidgeError::from(error),
+            MidgeError::LeaseUnavailable(_)
+        ));
     }
 
     #[test]
@@ -974,7 +1325,7 @@ mod tests {
         let result = Arc::clone(&lease).try_acquire();
 
         // Assert
-        assert!(matches!(result, Err(LeaseError::AcquisitionFailed(_))));
+        assert!(matches!(result, Err(LeaseError::Indeterminate(_))));
         assert_eq!(
             std::fs::read_to_string(cache_path.join(LEASE_OBJECT_KEY)).unwrap(),
             document
@@ -1434,7 +1785,7 @@ mod tests {
         let result = Arc::clone(&lease).try_acquire();
 
         // Assert
-        assert!(matches!(result, Err(LeaseError::AcquisitionFailed(_))));
+        assert!(matches!(result, Err(LeaseError::Indeterminate(_))));
         assert_eq!(read_remote_lease(&cloud), document);
         assert_eq!(lease.epoch(), 0);
     }

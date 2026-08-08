@@ -105,6 +105,7 @@ impl EventLoop {
     }
 
     pub(super) fn handle_get_runtime_metrics(&self, request_id: u64) {
+        crate::failpoints::fail_point!("midge::runtime::before_get_runtime_metrics_response");
         let mut snapshot = self.state.runtime_metrics_snapshot();
         if let Some(storage) = &self.hybrid_storage {
             let budget = storage.budget_snapshot();

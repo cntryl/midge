@@ -47,8 +47,10 @@ pub(crate) use protocol::next_request_id;
 #[cfg(test)]
 pub use protocol::CompactionPlan;
 pub use protocol::{
-    FileMeta, IntentLogEntry, PublicationPhase, RuntimeMsg, RuntimeResponse, TransactionOp,
+    FileMeta, IntentLogEntry, KeyAssertion, PublicationPhase, RuntimeMsg, RuntimeResponse,
+    TransactionOp,
 };
+pub(crate) use protocol::{SpilledTransactionSubmission, TransactionSubmission};
 pub(crate) use router::ResponseRouter;
 pub use runtime_worker::Runtime;
 #[cfg(test)]

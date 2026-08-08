@@ -87,6 +87,53 @@ pub enum TransactionOp {
     },
 }
 
+/// A key whose value the client observed (and validated) at the
+/// transaction's start snapshot, which must not have changed by commit time.
+///
+/// This carries only the key, never the expected value: value equality is
+/// already checked client-side, against the frozen snapshot, before the
+/// transaction is submitted (see `Transaction::validate_assertions`). What
+/// the runtime checks here is narrower and cheaper — and, critically,
+/// ABA-safe — a *sequence* comparison: has any point mutation or covering
+/// range deletion committed a sequence higher than the transaction's
+/// `start_sequence`? A write that restores the original value still bumps
+/// the sequence, so this correctly rejects the ABA case a value re-read
+/// would silently accept.
+///
+/// Assertions ride alongside `ops` through the commit pipeline but are
+/// never written to the WAL or applied to a memtable — they are a read-only
+/// check performed at the same pre-sequence-allocation serialization point
+/// as ordinary write-conflict detection, and enforced unconditionally
+/// (regardless of `ConflictPolicy`): an explicit assertion is a stronger
+/// guarantee than the ambient conflict policy.
+#[derive(Debug, Clone)]
+pub struct KeyAssertion {
+    pub cf_id: crate::types::ColumnFamilyId,
+    pub key: Bytes,
+}
+
+/// Bundled inputs for one in-memory `ApplyTransaction` submission, grouped
+/// so `RuntimeHandle`/`IngestCoordinator` call signatures stay readable now
+/// that assertions ride alongside the write set.
+pub(crate) struct TransactionSubmission {
+    pub ops: Vec<TransactionOp>,
+    pub assertions: Vec<KeyAssertion>,
+    pub durability_policy: Option<DurabilityPolicy>,
+    pub start_sequence: Option<u64>,
+    pub conflict_policy: ConflictPolicy,
+}
+
+/// Bundled inputs for one spilled `ApplySpilledTransaction` submission.
+/// Mirrors `TransactionSubmission` for the streamed-source variant, whose
+/// `start_sequence` is mandatory rather than optional.
+pub(crate) struct SpilledTransactionSubmission {
+    pub source: crate::runtime::transaction_spill::TransactionOpSource,
+    pub assertions: Vec<KeyAssertion>,
+    pub durability_policy: Option<DurabilityPolicy>,
+    pub start_sequence: u64,
+    pub conflict_policy: ConflictPolicy,
+}
+
 /// Intent log entry - records all state transitions for deterministic replay
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum IntentLogEntry {
@@ -203,6 +250,7 @@ pub enum RuntimeMsg {
     ApplyTransaction {
         request_id: u64,
         ops: Vec<TransactionOp>,
+        assertions: Vec<KeyAssertion>,
         durability_policy: Option<DurabilityPolicy>,
         start_sequence: Option<u64>,
         conflict_policy: ConflictPolicy,
@@ -215,6 +263,7 @@ pub enum RuntimeMsg {
     ApplySpilledTransaction {
         request_id: u64,
         source: crate::runtime::transaction_spill::TransactionOpSource,
+        assertions: Vec<KeyAssertion>,
         durability_policy: Option<DurabilityPolicy>,
         start_sequence: u64,
         conflict_policy: ConflictPolicy,

@@ -89,6 +89,12 @@ impl StartupLease {
             crate::lease::LeaseError::AlreadyReleased => {
                 MidgeError::Fenced("lease was released during acquisition".to_string())
             }
+            crate::lease::LeaseError::Indeterminate(message) => {
+                MidgeError::LeaseIndeterminate(message)
+            }
+            crate::lease::LeaseError::EpochExhausted => MidgeError::LeaseEpochExhausted,
+            crate::lease::LeaseError::AlreadyAcquired(message) => MidgeError::Busy(message),
+            crate::lease::LeaseError::Internal(message) => MidgeError::Internal(message),
         })?;
 
         tracing::warn!(

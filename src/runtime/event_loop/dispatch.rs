@@ -475,6 +475,7 @@ impl RuntimeDispatcher {
             RuntimeMsg::ApplyTransaction {
                 request_id,
                 ops,
+                assertions,
                 durability_policy,
                 start_sequence,
                 conflict_policy,
@@ -485,6 +486,7 @@ impl RuntimeDispatcher {
                     request: ApplyTransactionRequest {
                         request_id,
                         ops,
+                        assertions,
                         durability_policy,
                         start_sequence,
                         conflict_policy,
@@ -496,6 +498,7 @@ impl RuntimeDispatcher {
             RuntimeMsg::ApplySpilledTransaction {
                 request_id,
                 source,
+                assertions,
                 durability_policy,
                 start_sequence,
                 conflict_policy,
@@ -506,6 +509,7 @@ impl RuntimeDispatcher {
                     request: SpilledTransactionRequest {
                         request_id,
                         source,
+                        assertions,
                         durability_policy,
                         start_sequence,
                         conflict_policy,

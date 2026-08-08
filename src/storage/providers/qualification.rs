@@ -530,7 +530,7 @@ fn put(
     match rx.recv_timeout(Duration::from_secs(30)) {
         Ok(CloudEvent::Put { result, .. }) => match result {
             CloudOutcome::Ok(()) => Ok(()),
-            CloudOutcome::Err(error) => Err(error),
+            CloudOutcome::Err(error) => Err(error.to_string()),
         },
         other => Err(format!("unexpected PUT event: {other:?}")),
     }
@@ -542,7 +542,7 @@ fn get(backend: &CloudStorage, key: &str) -> Result<Vec<u8>, String> {
     match rx.recv_timeout(Duration::from_secs(30)) {
         Ok(CloudEvent::Get { result, .. }) => match result {
             CloudOutcome::Ok(data) => Ok(data),
-            CloudOutcome::Err(error) => Err(error),
+            CloudOutcome::Err(error) => Err(error.to_string()),
         },
         other => Err(format!("unexpected GET event: {other:?}")),
     }
@@ -559,7 +559,7 @@ fn range(
     match rx.recv_timeout(Duration::from_secs(30)) {
         Ok(CloudEvent::GetRange { result, .. }) => match result {
             CloudOutcome::Ok(data) => Ok(data),
-            CloudOutcome::Err(error) => Err(error),
+            CloudOutcome::Err(error) => Err(error.to_string()),
         },
         other => Err(format!("unexpected range event: {other:?}")),
     }
@@ -571,7 +571,7 @@ fn head(backend: &CloudStorage, key: &str) -> Result<ObjectMetadata, String> {
     match rx.recv_timeout(Duration::from_secs(30)) {
         Ok(CloudEvent::Head { result, .. }) => match result {
             CloudOutcome::Ok(metadata) => Ok(metadata),
-            CloudOutcome::Err(error) => Err(error),
+            CloudOutcome::Err(error) => Err(error.to_string()),
         },
         other => Err(format!("unexpected HEAD event: {other:?}")),
     }
@@ -583,7 +583,7 @@ fn list(backend: &CloudStorage, prefix: &str) -> Result<Vec<String>, String> {
     match rx.recv_timeout(Duration::from_secs(30)) {
         Ok(CloudEvent::List { result, .. }) => match result {
             CloudOutcome::Ok(keys) => Ok(keys),
-            CloudOutcome::Err(error) => Err(error),
+            CloudOutcome::Err(error) => Err(error.to_string()),
         },
         other => Err(format!("unexpected LIST event: {other:?}")),
     }
@@ -595,7 +595,7 @@ fn delete(backend: &CloudStorage, key: &str) -> Result<(), String> {
     match rx.recv_timeout(Duration::from_secs(30)) {
         Ok(CloudEvent::Delete { result, .. }) => match result {
             CloudOutcome::Ok(()) => Ok(()),
-            CloudOutcome::Err(error) => Err(error),
+            CloudOutcome::Err(error) => Err(error.to_string()),
         },
         other => Err(format!("unexpected DELETE event: {other:?}")),
     }

@@ -158,6 +158,57 @@ impl WalActor {
         Ok(())
     }
 
+    /// Reject the commit if any asserted key received a point mutation or a
+    /// covering range deletion after `start_sequence`. Enforced
+    /// unconditionally (independent of `ConflictPolicy`) — an explicit
+    /// assertion is a stronger guarantee than the ambient conflict policy.
+    ///
+    /// This is a pure sequence comparison, deliberately not a value re-read:
+    /// value equality against the transaction's start snapshot is already
+    /// checked client-side before submission. Comparing sequences instead of
+    /// values makes this ABA-safe — a write that restores the original
+    /// value still bumps the sequence and is still correctly rejected.
+    pub(super) fn ensure_no_assertion_conflicts(
+        state: &RuntimeState,
+        assertions: &[crate::runtime::KeyAssertion],
+        start_sequence: u64,
+    ) -> MidgeResult<()> {
+        let mut checked_keys: HashSet<(crate::types::ColumnFamilyId, Vec<u8>)> = HashSet::new();
+
+        for assertion in assertions {
+            let dedupe_key = (assertion.cf_id, assertion.key.to_vec());
+            if !checked_keys.insert(dedupe_key) {
+                continue;
+            }
+
+            if let Some(latest_seq) =
+                Self::latest_key_sequence(state, assertion.cf_id, &assertion.key)?
+            {
+                if latest_seq > start_sequence {
+                    Self::record_write_conflict_point();
+                    return Err(MidgeError::WriteConflict(format!(
+                        "assertion conflict on cf {} for key {:?}: latest seq {latest_seq} > tx start {start_sequence}",
+                        assertion.cf_id, assertion.key
+                    )));
+                }
+            }
+
+            if let Some(range_seq) =
+                state.latest_covering_delete_range_sequence(assertion.cf_id, &assertion.key)
+            {
+                if range_seq > start_sequence {
+                    Self::record_write_conflict_point();
+                    return Err(MidgeError::WriteConflict(format!(
+                        "assertion conflict on cf {} for key {:?}: covered by delete-range seq {range_seq} > tx start {start_sequence}",
+                        assertion.cf_id, assertion.key
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     pub(super) fn latest_key_sequence(
         state: &RuntimeState,
         cf_id: crate::types::ColumnFamilyId,

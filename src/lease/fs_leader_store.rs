@@ -396,7 +396,7 @@ impl FsLeaderStore {
 
         let new_epoch = current_epoch
             .checked_add(1)
-            .ok_or_else(|| LeaseError::AcquisitionFailed("leader epoch exhausted".to_string()))?;
+            .ok_or(LeaseError::EpochExhausted)?;
         let now = chrono::Utc::now().to_rfc3339();
 
         let new_record = LeaderRecord {
@@ -494,6 +494,40 @@ mod tests {
         let rec = current.unwrap();
         assert_eq!(rec.epoch, 1);
         assert_eq!(rec.holder_id, "holder-1");
+    }
+
+    #[test]
+    fn should_report_epoch_exhausted_when_fencing_epoch_cannot_advance() {
+        // Arrange
+        let store = make_store();
+        let maxed_record = LeaderRecord {
+            epoch: u64::MAX,
+            holder_id: "prior-holder".to_string(),
+            acquired_at: chrono::Utc::now().to_rfc3339(),
+        };
+        store
+            .fs
+            .open(
+                &FsPath::new(LEADER_RECORD_FILE),
+                OpenOptions {
+                    mode: OpenMode::ReadWrite,
+                    create: true,
+                    create_new: true,
+                    truncate: false,
+                },
+            )
+            .expect("create leader record")
+            .write_at(0, bytes::Bytes::from(format_leader_record(&maxed_record)))
+            .expect("write maxed leader record");
+
+        // Act
+        let result = store.acquire_leadership("new-holder");
+
+        // Assert
+        assert!(
+            matches!(result, Err(LeaseError::EpochExhausted)),
+            "expected EpochExhausted, got: {result:?}"
+        );
     }
 
     #[test]

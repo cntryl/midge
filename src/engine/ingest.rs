@@ -11,7 +11,9 @@
 //! - Correctness: writes are atomic, ordered per CF, errors propagate to caller
 
 use crate::common::{MidgeError, MidgeResult};
-use crate::runtime::{next_request_id, RuntimeHandle, RuntimeResponse, TransactionOp};
+use crate::runtime::{
+    next_request_id, RuntimeHandle, RuntimeResponse, TransactionOp, TransactionSubmission,
+};
 use crossbeam::channel::{bounded, Receiver, Sender, TryRecvError};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -46,13 +48,6 @@ const WRITE_GROUP_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Interval at which a follower checks whether it must rescue orphaned queued work.
 const WRITE_GROUP_RESCUE_INTERVAL: Duration = Duration::from_micros(50);
-
-#[derive(Clone, Copy)]
-struct ApplyTransactionOptions {
-    start_sequence: Option<u64>,
-    conflict_policy: crate::runtime::ConflictPolicy,
-    collect_submit_timing: bool,
-}
 
 fn submit_timing_phase_start(enabled: bool) -> Option<Instant> {
     enabled.then(Instant::now)
@@ -238,13 +233,10 @@ impl IngestCoordinator {
     pub fn submit_ops(
         &self,
         runtime: &RuntimeHandle,
-        ops: Vec<TransactionOp>,
-        durability_policy: Option<crate::wal::DurabilityPolicy>,
-        start_sequence: Option<u64>,
-        conflict_policy: crate::runtime::ConflictPolicy,
+        submission: TransactionSubmission,
         collect_submit_timing: bool,
     ) -> MidgeResult<u64> {
-        if ops.is_empty() {
+        if submission.ops.is_empty() && submission.assertions.is_empty() {
             return Ok(0);
         }
 
@@ -261,26 +253,39 @@ impl IngestCoordinator {
         // Explicit transaction commits carry a start sequence and must not be
         // merged by caller-side write grouping. The runtime may still coalesce
         // safe WAL appends while preserving each transaction's response.
-        if start_sequence.is_some() {
-            return self.submit_direct(
-                runtime,
-                ops,
-                durability_policy,
-                start_sequence,
-                conflict_policy,
-                collect_submit_timing,
-            );
+        if submission.start_sequence.is_some() {
+            return self.submit_direct(runtime, submission, collect_submit_timing);
         }
 
+        if !submission.assertions.is_empty() {
+            // Only explicit transactions (which always carry a start
+            // sequence) can produce assertions. Caller-side write grouping
+            // merges anonymous bulk puts and has no assertion concept.
+            return Err(MidgeError::InvalidArgument(
+                "assert_value requires transaction start_sequence".to_string(),
+            ));
+        }
+
+        let durability_policy = submission.durability_policy;
         if self.write_group_coord.try_acquire_leader() {
-            self.drain_as_leader(runtime, Some(ops), durability_policy, collect_submit_timing)
-                .unwrap_or_else(|| {
-                    Err(MidgeError::Internal(
-                        "Write group leader completed with no result".to_string(),
-                    ))
-                })
+            self.drain_as_leader(
+                runtime,
+                Some(submission.ops),
+                durability_policy,
+                collect_submit_timing,
+            )
+            .unwrap_or_else(|| {
+                Err(MidgeError::Internal(
+                    "Write group leader completed with no result".to_string(),
+                ))
+            })
         } else {
-            self.submit_as_follower(runtime, ops, durability_policy, collect_submit_timing)
+            self.submit_as_follower(
+                runtime,
+                submission.ops,
+                durability_policy,
+                collect_submit_timing,
+            )
         }
     }
 
@@ -288,13 +293,10 @@ impl IngestCoordinator {
     pub(crate) fn submit_spilled_ops(
         &self,
         runtime: &RuntimeHandle,
-        source: crate::runtime::transaction_spill::TransactionOpSource,
-        durability_policy: Option<crate::wal::DurabilityPolicy>,
-        start_sequence: u64,
-        conflict_policy: crate::runtime::ConflictPolicy,
+        submission: crate::runtime::SpilledTransactionSubmission,
         collect_submit_timing: bool,
     ) -> MidgeResult<u64> {
-        if source.is_empty() {
+        if submission.source.is_empty() && submission.assertions.is_empty() {
             return Ok(0);
         }
         if self.stall_flag.load(Ordering::Acquire) {
@@ -307,16 +309,10 @@ impl IngestCoordinator {
             self.stall_flag.store(false, Ordering::Release);
         }
 
-        let expected_op_count = source.len();
+        let expected_op_count = submission.source.len();
         let request_id = next_request_id()?;
         let runtime_apply_started_at = submit_timing_phase_start(collect_submit_timing);
-        let response = runtime.send_spilled_transaction_and_wait(
-            request_id,
-            source,
-            durability_policy,
-            start_sequence,
-            conflict_policy,
-        );
+        let response = runtime.send_spilled_transaction_and_wait(request_id, submission);
         record_submit_runtime_apply(runtime_apply_started_at);
         Self::decode_apply_transaction_response(
             response?,
@@ -429,13 +425,14 @@ impl IngestCoordinator {
     ) -> MidgeResult<u64> {
         Self::send_apply_transaction(
             runtime,
-            ops,
-            durability_policy,
-            ApplyTransactionOptions {
+            TransactionSubmission {
+                ops,
+                assertions: Vec::new(),
+                durability_policy,
                 start_sequence: None,
                 conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
-                collect_submit_timing,
             },
+            collect_submit_timing,
             &self.stall_flag,
             Some((WRITE_GROUP_APPLY_TIMEOUT, "Write group commit timed out")),
             None,
@@ -495,10 +492,13 @@ impl IngestCoordinator {
             Ok(()) => self.wait_for_grouped_result(runtime, &result_rx, collect_submit_timing),
             Err(crossbeam::channel::TrySendError::Full(pending)) => self.submit_direct(
                 runtime,
-                pending.ops,
-                pending.durability_policy,
-                None,
-                crate::runtime::ConflictPolicy::LastWriteWins,
+                TransactionSubmission {
+                    ops: pending.ops,
+                    assertions: Vec::new(),
+                    durability_policy: pending.durability_policy,
+                    start_sequence: None,
+                    conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+                },
                 collect_submit_timing,
             ),
             Err(crossbeam::channel::TrySendError::Disconnected(_)) => Err(MidgeError::Internal(
@@ -550,21 +550,13 @@ impl IngestCoordinator {
     fn submit_direct(
         &self,
         runtime: &RuntimeHandle,
-        ops: Vec<TransactionOp>,
-        durability_policy: Option<crate::wal::DurabilityPolicy>,
-        start_sequence: Option<u64>,
-        conflict_policy: crate::runtime::ConflictPolicy,
+        submission: TransactionSubmission,
         collect_submit_timing: bool,
     ) -> MidgeResult<u64> {
         Self::send_apply_transaction(
             runtime,
-            ops,
-            durability_policy,
-            ApplyTransactionOptions {
-                start_sequence,
-                conflict_policy,
-                collect_submit_timing,
-            },
+            submission,
+            collect_submit_timing,
             &self.stall_flag,
             None,
             None,
@@ -573,37 +565,23 @@ impl IngestCoordinator {
 
     fn send_apply_transaction(
         runtime: &RuntimeHandle,
-        ops: Vec<TransactionOp>,
-        durability_policy: Option<crate::wal::DurabilityPolicy>,
-        options: ApplyTransactionOptions,
+        submission: TransactionSubmission,
+        collect_submit_timing: bool,
         stall_flag: &AtomicBool,
         timeout: Option<(Duration, &'static str)>,
         expected_op_count: Option<usize>,
     ) -> MidgeResult<u64> {
         let request_id = next_request_id()?;
 
-        let runtime_apply_started_at = submit_timing_phase_start(options.collect_submit_timing);
+        let runtime_apply_started_at = submit_timing_phase_start(collect_submit_timing);
         let response_result = if let Some((timeout, timeout_msg)) = timeout {
             runtime
-                .send_apply_transaction_and_wait_timeout(
-                    request_id,
-                    ops,
-                    durability_policy,
-                    options.start_sequence,
-                    options.conflict_policy,
-                    timeout,
-                )
+                .send_apply_transaction_and_wait_timeout(request_id, submission, timeout)
                 .and_then(|response| {
                     response.ok_or_else(|| MidgeError::Internal(timeout_msg.to_string()))
                 })
         } else {
-            runtime.send_apply_transaction_and_wait(
-                request_id,
-                ops,
-                durability_policy,
-                options.start_sequence,
-                options.conflict_policy,
-            )
+            runtime.send_apply_transaction_and_wait(request_id, submission)
         };
         record_submit_runtime_apply(runtime_apply_started_at);
 

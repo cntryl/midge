@@ -55,6 +55,12 @@ pub enum MidgeError {
     /// The lease backend could not be reached or could not complete acquisition.
     LeaseUnavailable(String),
 
+    /// Persisted lease state could not be interpreted (malformed or ambiguous).
+    LeaseIndeterminate(String),
+
+    /// The lease's fencing epoch counter cannot advance any further.
+    LeaseEpochExhausted,
+
     /// Transaction write conflict detected under strict conflict policy
     WriteConflict(String),
 
@@ -89,6 +95,12 @@ impl fmt::Display for MidgeError {
             MidgeError::Fenced(msg) => write!(f, "Fenced: writer epoch is stale: {msg}"),
             MidgeError::LeaseHeld(msg) => write!(f, "Writer lease held: {msg}"),
             MidgeError::LeaseUnavailable(msg) => write!(f, "Writer lease unavailable: {msg}"),
+            MidgeError::LeaseIndeterminate(msg) => {
+                write!(f, "Writer lease state is indeterminate: {msg}")
+            }
+            MidgeError::LeaseEpochExhausted => {
+                write!(f, "Writer lease fencing epoch is exhausted")
+            }
             MidgeError::WriteConflict(msg) => write!(f, "Write conflict: {msg}"),
             MidgeError::Aborted(msg) => write!(f, "Aborted: {msg}"),
             MidgeError::Busy(msg) => write!(f, "Busy: {msg}"),

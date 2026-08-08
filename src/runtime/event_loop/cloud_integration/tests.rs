@@ -50,7 +50,9 @@ impl crate::storage::cloud::CloudBackend for FailSecondIntentPutBackend {
             let _ = callback.send(crate::storage::cloud::CloudEvent::Put {
                 key,
                 result: crate::storage::cloud::CloudOutcome::Err(
-                    "injected intent metadata put failure".to_string(),
+                    crate::storage::cloud::CloudError::ServerError(
+                        "injected intent metadata put failure".to_string(),
+                    ),
                 ),
             });
             return;
@@ -2755,11 +2757,14 @@ fn should_retry_background_cloud_seal_after_failpoint_before_rotate(
     }];
     let (last_sequence, _op_count, deferred) = el.wal_actor.append_transaction(
         &mut el.state,
-        301,
-        ops,
-        Some(crate::wal::DurabilityPolicy::CloudAsync),
-        None,
-        crate::runtime::ConflictPolicy::LastWriteWins,
+        crate::runtime::actors::wal::TransactionAppendParams {
+            request_id: 301,
+            ops,
+            assertions: Vec::new(),
+            durability_policy: Some(crate::wal::DurabilityPolicy::CloudAsync),
+            start_sequence: None,
+            conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+        },
     )?;
     // Act
     // Assert
@@ -2861,11 +2866,14 @@ fn should_seal_cloud_wal_with_segment_max_sequence_not_global_sequence(
     }];
     let (last_wal_sequence, _op_count, deferred) = el.wal_actor.append_transaction(
         &mut el.state,
-        303,
-        ops,
-        Some(crate::wal::DurabilityPolicy::CloudAsync),
-        None,
-        crate::runtime::ConflictPolicy::LastWriteWins,
+        crate::runtime::actors::wal::TransactionAppendParams {
+            request_id: 303,
+            ops,
+            assertions: Vec::new(),
+            durability_policy: Some(crate::wal::DurabilityPolicy::CloudAsync),
+            start_sequence: None,
+            conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+        },
     )?;
     // Act
     // Assert
@@ -2927,11 +2935,14 @@ fn append_cloud_async_put(el: &mut EventLoop) -> crate::common::MidgeResult<u64>
     }];
     let (last_sequence, _op_count, deferred) = el.wal_actor.append_transaction(
         &mut el.state,
-        302,
-        ops,
-        Some(crate::wal::DurabilityPolicy::CloudAsync),
-        None,
-        crate::runtime::ConflictPolicy::LastWriteWins,
+        crate::runtime::actors::wal::TransactionAppendParams {
+            request_id: 302,
+            ops,
+            assertions: Vec::new(),
+            durability_policy: Some(crate::wal::DurabilityPolicy::CloudAsync),
+            start_sequence: None,
+            conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+        },
     )?;
     assert!(
         deferred,

@@ -735,7 +735,7 @@ fn blocking_get_optional(
         Ok(crate::storage::cloud::CloudEvent::Get {
             result: crate::storage::cloud::CloudOutcome::Err(error),
             ..
-        }) => Err(error),
+        }) => Err(error.to_string()),
         Ok(other) => Err(format!("unexpected cloud get response: {other:?}")),
         Err(error) => Err(format!("cloud get timed out: {error}")),
     }
@@ -759,7 +759,7 @@ fn blocking_head_optional(
         Ok(crate::storage::cloud::CloudEvent::Head {
             result: crate::storage::cloud::CloudOutcome::Err(error),
             ..
-        }) => Err(error),
+        }) => Err(error.to_string()),
         Ok(other) => Err(format!("unexpected cloud head response: {other:?}")),
         Err(error) => Err(format!("cloud head timed out: {error}")),
     }

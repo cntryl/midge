@@ -1,6 +1,6 @@
 use super::super::durability::DurabilityWaiter;
 use super::{EventLoop, HandleOutcome};
-use crate::runtime::{ConflictPolicy, RuntimeMsg, RuntimeResponse, TransactionOp};
+use crate::runtime::{ConflictPolicy, KeyAssertion, RuntimeMsg, RuntimeResponse, TransactionOp};
 use crate::wal::DurabilityPolicy;
 use crossbeam::channel::{Receiver, Sender};
 
@@ -9,6 +9,7 @@ pub(super) struct WalCoordinator;
 pub(super) struct ApplyTransactionRequest {
     pub request_id: u64,
     pub ops: Vec<TransactionOp>,
+    pub assertions: Vec<KeyAssertion>,
     pub durability_policy: Option<DurabilityPolicy>,
     pub start_sequence: Option<u64>,
     pub conflict_policy: ConflictPolicy,
@@ -17,6 +18,7 @@ pub(super) struct ApplyTransactionRequest {
 pub(super) struct SpilledTransactionRequest {
     pub request_id: u64,
     pub source: crate::runtime::transaction_spill::TransactionOpSource,
+    pub assertions: Vec<KeyAssertion>,
     pub durability_policy: Option<DurabilityPolicy>,
     pub start_sequence: u64,
     pub conflict_policy: ConflictPolicy,
@@ -42,6 +44,7 @@ impl WalCoordinator {
         let SpilledTransactionRequest {
             request_id,
             source,
+            assertions,
             durability_policy,
             start_sequence,
             conflict_policy,
@@ -62,11 +65,14 @@ impl WalCoordinator {
         };
         match event_loop.wal_actor.append_spilled_transaction(
             &mut event_loop.state,
-            request_id,
             &source,
-            durability_policy,
-            start_sequence,
-            conflict_policy,
+            crate::runtime::actors::wal::SpilledTransactionAppendParams {
+                request_id,
+                assertions,
+                durability_policy,
+                start_sequence,
+                conflict_policy,
+            },
         ) {
             Ok((last_sequence, op_count, deferred)) => {
                 event_loop.publish_snapshot();
@@ -125,6 +131,7 @@ impl WalCoordinator {
         let ApplyTransactionRequest {
             request_id,
             ops,
+            assertions,
             durability_policy,
             start_sequence,
             conflict_policy,
@@ -148,6 +155,7 @@ impl WalCoordinator {
                 ApplyTransactionRequest {
                     request_id,
                     ops,
+                    assertions,
                     durability_policy,
                     start_sequence,
                     conflict_policy,
@@ -157,11 +165,14 @@ impl WalCoordinator {
         } else {
             match event_loop.wal_actor.append_transaction(
                 &mut event_loop.state,
-                request_id,
-                ops,
-                durability_policy,
-                start_sequence,
-                conflict_policy,
+                crate::runtime::actors::wal::TransactionAppendParams {
+                    request_id,
+                    ops,
+                    assertions,
+                    durability_policy,
+                    start_sequence,
+                    conflict_policy,
+                },
             ) {
                 Ok((last_sequence, op_count, deferred)) => {
                     event_loop.publish_snapshot();

@@ -128,6 +128,17 @@ In strict mode, conflict checks happen in the runtime apply path before WAL appe
 
 The only exception is `tx.insert()`: at commit time (inside the event loop), the engine checks whether the key already exists. If it does, the commit returns an error. This is a server-side existence check, not a conflict check against other in-flight transactions.
 
+### Value assertions (`assert_value`)
+
+`tx.assert_value(key, expected)` registers a precondition: the key must still hold `expected` (or be absent, for `expected = None`) at commit time. This is a two-part check:
+
+1. **Client-side, at `commit()`**: the expected value is compared against the transaction's frozen start snapshot. This is a fast local fail and is where value equality is actually checked.
+2. **Server-side, at the runtime's apply path**: only the *key* crosses into the runtime (never the expected value). The runtime checks whether the key received a point mutation or a covering range deletion with a sequence greater than the transaction's `start_sequence` — the same check `AbortOnWriteConflict` uses for write-set keys, applied to asserted keys instead of written ones.
+
+The server-side check runs unconditionally, **regardless of `ConflictPolicy`**: an explicit assertion is a stronger, opt-in guarantee than the ambient conflict policy, so it is enforced even under `LastWriteWins`. It is a sequence comparison, not a value re-read, which makes it ABA-safe — a concurrent writer that changes the value and then restores it still advances the sequence and is still correctly rejected.
+
+A transaction with only assertions and no writes commits without allocating a sequence, appending to the WAL, or touching a memtable — it is a pure validation round-trip to the runtime's serialization point.
+
 ### Snapshot isolation and isolation levels
 
 | Mode | Isolation characterization |
@@ -229,6 +240,7 @@ Compaction reads `state.oldest_active_snapshot_sequence()` and applies that hori
 - Phantom protection: **not provided.**
 - Write conflicts: **policy-dependent.** Default mode is last-write-wins; strict mode aborts overlapping writes with `WriteConflict`.
 - Lost updates: **allowed in default mode**, prevented for overlapping write-sets in strict conflict-abort mode.
+- Value assertions (`assert_value`): **enforced regardless of `ConflictPolicy`.** An asserted key is checked against the same commit-time serialization point as write-set keys, independent of whether the transaction is in last-write-wins or strict mode.
 
 **Non-guarantees (all modes):**
 

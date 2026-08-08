@@ -16,6 +16,7 @@ impl EventLoop {
                 | RuntimeMsg::ManifestDropColumnFamily { .. }
                 | RuntimeMsg::CompactionComplete { .. }
                 | RuntimeMsg::CompactAll { .. }
+                | RuntimeMsg::RetryGc
         );
         #[cfg(test)]
         let mutating = mutating

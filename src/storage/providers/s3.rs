@@ -11,7 +11,7 @@ use super::super::cloud::{
     CloudBackend, CloudExecutor, CloudListBudget, CloudRequest, CloudResponse, CloudSigner,
     ObjectMetadata,
 };
-use super::super::cloud::{CloudCallback, CloudEvent, CloudOutcome};
+use super::super::cloud::{CloudCallback, CloudError, CloudEvent, CloudOutcome};
 use crate::common::{MidgeError, MidgeResult};
 use chrono::Utc;
 use hex;
@@ -811,11 +811,11 @@ impl CloudBackend for S3Backend {
             },
             Ok(resp) => CloudEvent::Put {
                 key: ctx,
-                result: CloudOutcome::Err(format!("unexpected status {}", resp.status)),
+                result: CloudOutcome::Err(CloudError::from_http_status(resp.status, "S3 PUT")),
             },
             Err(err) => CloudEvent::Put {
                 key: ctx,
-                result: CloudOutcome::Err(format!("{err:?}")),
+                result: CloudOutcome::Err(CloudError::Transport(format!("{err:?}"))),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -830,17 +830,13 @@ impl CloudBackend for S3Backend {
                 key: ctx,
                 result: CloudOutcome::Ok(resp.body),
             },
-            Ok(resp) if resp.status == 404 => CloudEvent::Get {
-                key: ctx,
-                result: CloudOutcome::Err("not found".into()),
-            },
             Ok(resp) => CloudEvent::Get {
                 key: ctx,
-                result: CloudOutcome::Err(format!("status {}", resp.status)),
+                result: CloudOutcome::Err(CloudError::from_http_status(resp.status, "S3 GET")),
             },
             Err(err) => CloudEvent::Get {
                 key: ctx,
-                result: CloudOutcome::Err(format!("{err:?}")),
+                result: CloudOutcome::Err(CloudError::Transport(format!("{err:?}"))),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -867,13 +863,16 @@ impl CloudBackend for S3Backend {
                 key: ctx,
                 start,
                 end,
-                result: CloudOutcome::Err(format!("status {}", resp.status)),
+                result: CloudOutcome::Err(CloudError::from_http_status(
+                    resp.status,
+                    "S3 GET_RANGE",
+                )),
             },
             Err(err) => CloudEvent::GetRange {
                 key: ctx,
                 start,
                 end,
-                result: CloudOutcome::Err(format!("{err:?}")),
+                result: CloudOutcome::Err(CloudError::Transport(format!("{err:?}"))),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -893,11 +892,11 @@ impl CloudBackend for S3Backend {
             },
             Ok(resp) => CloudEvent::Delete {
                 key: ctx,
-                result: CloudOutcome::Err(format!("status {}", resp.status)),
+                result: CloudOutcome::Err(CloudError::from_http_status(resp.status, "S3 DELETE")),
             },
             Err(err) => CloudEvent::Delete {
                 key: ctx,
-                result: CloudOutcome::Err(format!("{err:?}")),
+                result: CloudOutcome::Err(CloudError::Transport(format!("{err:?}"))),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -951,7 +950,7 @@ impl CloudBackend for S3Backend {
                 },
                 Err(err) => CloudEvent::List {
                     prefix: ctx,
-                    result: CloudOutcome::Err(format!("{err:?}")),
+                    result: CloudOutcome::Err(CloudError::Protocol(format!("{err:?}"))),
                 },
             },
         );
@@ -983,11 +982,11 @@ impl CloudBackend for S3Backend {
             }
             Ok(resp) => CloudEvent::Head {
                 key: ctx,
-                result: CloudOutcome::Err(format!("status {}", resp.status)),
+                result: CloudOutcome::Err(CloudError::from_http_status(resp.status, "S3 HEAD")),
             },
             Err(err) => CloudEvent::Head {
                 key: ctx,
-                result: CloudOutcome::Err(format!("{err:?}")),
+                result: CloudOutcome::Err(CloudError::Transport(format!("{err:?}"))),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -1281,7 +1280,10 @@ mod tests {
         let error = receive_list_result(&backend).expect_err("repeated token should fail LIST");
 
         // Assert
-        assert!(error.contains("repeated continuation token"), "{error}");
+        assert!(
+            error.to_string().contains("repeated continuation token"),
+            "{error}"
+        );
         assert_eq!(server.finish(), 2);
     }
 

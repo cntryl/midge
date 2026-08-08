@@ -14,7 +14,7 @@ use crate::runtime::read_snapshot::SnapshotScan;
 use crate::runtime::transaction_spill::{
     IntentKeyScan, IntentLookup, TransactionMemoryPool, TransactionWriteSet,
 };
-use crate::runtime::RuntimeHandle;
+use crate::runtime::{KeyAssertion, RuntimeHandle};
 use crate::types::ConflictPolicy;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -565,7 +565,9 @@ impl Transaction {
             return Ok(());
         }
 
-        if !self.has_writes() {
+        let key_assertions = self.deduplicated_key_assertions();
+
+        if !self.has_writes() && key_assertions.is_empty() {
             let durability_started_at = CommitTiming::phase_start(timing.as_ref());
             let sync_result = effective_wal_durability_policy(self.cloud_mode, opts)
                 .and_then(|_| if opts.is_sync() { self.sync() } else { Ok(()) });
@@ -587,24 +589,35 @@ impl Transaction {
         let durability_policy = Some(effective_wal_durability_policy(self.cloud_mode, opts)?);
         let submit_started_at = CommitTiming::phase_start(timing.as_ref());
         let collect_submit_timing = timing.is_some();
+        // An assertion-only commit (no writes) still carries a non-empty
+        // `key_assertions` here, and is validated server-side — at the same
+        // pre-sequence-allocation serialization point as write-conflict
+        // detection — without ever allocating a sequence, appending to the
+        // WAL, or touching a memtable.
         let commit_result = if self.write_set.has_spills() {
             let source = self.write_set.take_source();
             self.coordinator.submit_spilled_ops(
                 &self.runtime_handle,
-                source,
-                durability_policy,
-                self.start_sequence(),
-                conflict_policy,
+                crate::runtime::SpilledTransactionSubmission {
+                    source,
+                    assertions: key_assertions,
+                    durability_policy,
+                    start_sequence: self.start_sequence(),
+                    conflict_policy,
+                },
                 collect_submit_timing,
             )
         } else {
             let runtime_ops = self.write_set.take_in_memory_ops();
             self.coordinator.submit_ops(
                 &self.runtime_handle,
-                runtime_ops,
-                durability_policy,
-                Some(self.start_sequence()),
-                conflict_policy,
+                crate::runtime::TransactionSubmission {
+                    ops: runtime_ops,
+                    assertions: key_assertions,
+                    durability_policy,
+                    start_sequence: Some(self.start_sequence()),
+                    conflict_policy,
+                },
                 collect_submit_timing,
             )
         };
@@ -641,6 +654,25 @@ impl Transaction {
             }
         }
         Ok(())
+    }
+
+    /// Deduplicated keys for the commit-time precondition check.
+    ///
+    /// Only the key crosses into the runtime — expected values are already
+    /// validated client-side, against the frozen start snapshot, in
+    /// `validate_assertions`. What the runtime checks is narrower: has this
+    /// key's sequence advanced past `start_sequence` since then. See
+    /// `KeyAssertion` for why that's the right (ABA-safe) check.
+    fn deduplicated_key_assertions(&self) -> Vec<KeyAssertion> {
+        let mut seen = std::collections::HashSet::with_capacity(self.assertions.len());
+        self.assertions
+            .iter()
+            .filter(|(key, _)| seen.insert(key.clone()))
+            .map(|(key, _)| KeyAssertion {
+                cf_id: self.cf_id,
+                key: bytes::Bytes::from(key.clone()),
+            })
+            .collect()
     }
 
     /// Roll back this transaction and unregister its snapshot.

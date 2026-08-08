@@ -543,6 +543,24 @@ impl EventLoop {
             }
         }
         self.prune_cloud_wal_segments_covered_by_manifest();
+        self.rearm_wal_prune_retry_deadline();
+    }
+
+    /// Fold any still-pending cloud WAL-prune retry deadline back into the
+    /// background maintenance timer. Without this, resetting the timer above
+    /// to the full 30s interval would silently discard a tighter exponential
+    /// backoff deadline set by a failed prune (see ack.rs), stalling that
+    /// segment's retry on an otherwise-idle system.
+    fn rearm_wal_prune_retry_deadline(&mut self) {
+        if let Some(earliest_retry_at) = self
+            .cloud_wal_prune_retries
+            .values()
+            .map(|(_, retry_at)| *retry_at)
+            .min()
+        {
+            self.next_background_compaction_check =
+                self.next_background_compaction_check.min(earliest_retry_at);
+        }
     }
 
     pub(super) fn schedule_background_compaction_on_startup(&mut self) {

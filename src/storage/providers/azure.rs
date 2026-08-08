@@ -8,8 +8,8 @@
 //! - All operations routed through the same `CloudBackend` trait as S3
 
 use super::super::cloud::{
-    CloudBackend, CloudCallback, CloudEvent, CloudExecutor, CloudListBudget, CloudOutcome,
-    CloudRequest, CloudResponse, CloudSigner, ObjectMetadata,
+    CloudBackend, CloudCallback, CloudError, CloudEvent, CloudExecutor, CloudListBudget,
+    CloudOutcome, CloudRequest, CloudResponse, CloudSigner, ObjectMetadata,
 };
 use crate::common::{MidgeError, MidgeResult};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as Base64Engine};
@@ -755,11 +755,11 @@ impl CloudBackend for AzureBackend {
             },
             Ok(resp) => CloudEvent::Put {
                 key: ctx,
-                result: CloudOutcome::Err(format!("Azure PUT status {}", resp.status)),
+                result: CloudOutcome::Err(CloudError::from_http_status(resp.status, "Azure PUT")),
             },
             Err(err) => CloudEvent::Put {
                 key: ctx,
-                result: CloudOutcome::Err(format!("{err:?}")),
+                result: CloudOutcome::Err(CloudError::Transport(format!("{err:?}"))),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -774,17 +774,13 @@ impl CloudBackend for AzureBackend {
                 key: ctx,
                 result: CloudOutcome::Ok(resp.body),
             },
-            Ok(resp) if resp.status == 404 => CloudEvent::Get {
-                key: ctx,
-                result: CloudOutcome::Err("not found".into()),
-            },
             Ok(resp) => CloudEvent::Get {
                 key: ctx,
-                result: CloudOutcome::Err(format!("Azure GET status {}", resp.status)),
+                result: CloudOutcome::Err(CloudError::from_http_status(resp.status, "Azure GET")),
             },
             Err(err) => CloudEvent::Get {
                 key: ctx,
-                result: CloudOutcome::Err(format!("{err:?}")),
+                result: CloudOutcome::Err(CloudError::Transport(format!("{err:?}"))),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -810,13 +806,16 @@ impl CloudBackend for AzureBackend {
                 key: ctx,
                 start,
                 end,
-                result: CloudOutcome::Err(format!("Azure GET_RANGE status {}", resp.status)),
+                result: CloudOutcome::Err(CloudError::from_http_status(
+                    resp.status,
+                    "Azure GET_RANGE",
+                )),
             },
             Err(err) => CloudEvent::GetRange {
                 key: ctx,
                 start,
                 end,
-                result: CloudOutcome::Err(format!("{err:?}")),
+                result: CloudOutcome::Err(CloudError::Transport(format!("{err:?}"))),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -836,11 +835,14 @@ impl CloudBackend for AzureBackend {
             },
             Ok(resp) => CloudEvent::Delete {
                 key: ctx,
-                result: CloudOutcome::Err(format!("Azure DELETE status {}", resp.status)),
+                result: CloudOutcome::Err(CloudError::from_http_status(
+                    resp.status,
+                    "Azure DELETE",
+                )),
             },
             Err(err) => CloudEvent::Delete {
                 key: ctx,
-                result: CloudOutcome::Err(format!("{err:?}")),
+                result: CloudOutcome::Err(CloudError::Transport(format!("{err:?}"))),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -886,7 +888,7 @@ impl CloudBackend for AzureBackend {
                 },
                 Err(err) => CloudEvent::List {
                     prefix: ctx,
-                    result: CloudOutcome::Err(format!("{err:?}")),
+                    result: CloudOutcome::Err(CloudError::Protocol(format!("{err:?}"))),
                 },
             },
         );
@@ -918,11 +920,11 @@ impl CloudBackend for AzureBackend {
             }
             Ok(resp) => CloudEvent::Head {
                 key: ctx,
-                result: CloudOutcome::Err(format!("Azure HEAD status {}", resp.status)),
+                result: CloudOutcome::Err(CloudError::from_http_status(resp.status, "Azure HEAD")),
             },
             Err(err) => CloudEvent::Head {
                 key: ctx,
-                result: CloudOutcome::Err(format!("{err:?}")),
+                result: CloudOutcome::Err(CloudError::Transport(format!("{err:?}"))),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -1579,7 +1581,10 @@ mod tests {
         let error = receive_list_result(&backend).expect_err("repeated marker should fail LIST");
 
         // Assert
-        assert!(error.contains("repeated continuation token"), "{error}");
+        assert!(
+            error.to_string().contains("repeated continuation token"),
+            "{error}"
+        );
         assert_eq!(server.finish(), 2);
     }
 

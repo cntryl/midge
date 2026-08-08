@@ -2,11 +2,10 @@
 
 use super::{
     next_request_id, snapshot_cache, snapshot_pins, ResponseRouter, RuntimeLifecycle,
-    RuntimeLifecycleState, RuntimeMsg, RuntimeResponse, RuntimeTransactionGuard, TransactionOp,
+    RuntimeLifecycleState, RuntimeMsg, RuntimeResponse, RuntimeTransactionGuard,
+    SpilledTransactionSubmission, TransactionSubmission,
 };
 use crate::common::{MidgeError, MidgeResult};
-use crate::types::ConflictPolicy;
-use crate::wal::DurabilityPolicy;
 use crossbeam::channel::{self, Sender};
 use std::sync::{atomic::Ordering, Arc};
 use std::time::Duration;
@@ -362,20 +361,18 @@ impl RuntimeHandle {
     pub(crate) fn send_apply_transaction_and_wait(
         &self,
         request_id: u64,
-        ops: Vec<TransactionOp>,
-        durability_policy: Option<DurabilityPolicy>,
-        start_sequence: Option<u64>,
-        conflict_policy: ConflictPolicy,
+        submission: TransactionSubmission,
     ) -> MidgeResult<RuntimeResponse> {
         let submission_guard = self.lifecycle.begin_submission()?;
         let (response_tx, response_rx) = channel::bounded(1);
         self.msg_tx
             .try_send(RuntimeMsg::ApplyTransaction {
                 request_id,
-                ops,
-                durability_policy,
-                start_sequence,
-                conflict_policy,
+                ops: submission.ops,
+                assertions: submission.assertions,
+                durability_policy: submission.durability_policy,
+                start_sequence: submission.start_sequence,
+                conflict_policy: submission.conflict_policy,
                 response_tx: Some(response_tx),
             })
             .map_err(Self::map_submission_error)?;
@@ -389,10 +386,7 @@ impl RuntimeHandle {
     pub(crate) fn send_apply_transaction_and_wait_timeout(
         &self,
         request_id: u64,
-        ops: Vec<TransactionOp>,
-        durability_policy: Option<DurabilityPolicy>,
-        start_sequence: Option<u64>,
-        conflict_policy: ConflictPolicy,
+        submission: TransactionSubmission,
         timeout: Duration,
     ) -> MidgeResult<Option<RuntimeResponse>> {
         let submission_guard = self.lifecycle.begin_submission()?;
@@ -400,10 +394,11 @@ impl RuntimeHandle {
         self.msg_tx
             .try_send(RuntimeMsg::ApplyTransaction {
                 request_id,
-                ops,
-                durability_policy,
-                start_sequence,
-                conflict_policy,
+                ops: submission.ops,
+                assertions: submission.assertions,
+                durability_policy: submission.durability_policy,
+                start_sequence: submission.start_sequence,
+                conflict_policy: submission.conflict_policy,
                 response_tx: Some(response_tx),
             })
             .map_err(Self::map_submission_error)?;
@@ -421,20 +416,18 @@ impl RuntimeHandle {
     pub(crate) fn send_spilled_transaction_and_wait(
         &self,
         request_id: u64,
-        source: crate::runtime::transaction_spill::TransactionOpSource,
-        durability_policy: Option<DurabilityPolicy>,
-        start_sequence: u64,
-        conflict_policy: ConflictPolicy,
+        submission: SpilledTransactionSubmission,
     ) -> MidgeResult<RuntimeResponse> {
         let submission_guard = self.lifecycle.begin_submission()?;
         let (response_tx, response_rx) = channel::bounded(1);
         self.msg_tx
             .try_send(RuntimeMsg::ApplySpilledTransaction {
                 request_id,
-                source,
-                durability_policy,
-                start_sequence,
-                conflict_policy,
+                source: submission.source,
+                assertions: submission.assertions,
+                durability_policy: submission.durability_policy,
+                start_sequence: submission.start_sequence,
+                conflict_policy: submission.conflict_policy,
                 response_tx: Some(response_tx),
             })
             .map_err(Self::map_submission_error)?;

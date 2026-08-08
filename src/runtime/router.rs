@@ -66,4 +66,65 @@ impl ResponseRouter {
             }
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_not_leak_pending_entry_when_unregistered_after_timeout() {
+        // Arrange
+        let router = ResponseRouter::new();
+        let request_id = 1;
+
+        // Act: caller registers, then abandons the request the way
+        // `send_and_wait_timeout` does when its `recv_timeout` elapses.
+        let _rx = router.register(request_id);
+        assert_eq!(router.pending_len(), 1);
+        router.unregister(request_id);
+
+        // Assert
+        assert_eq!(router.pending_len(), 0);
+    }
+
+    #[test]
+    fn should_not_leak_pending_entries_across_repeated_timeouts() {
+        // Arrange
+        let router = ResponseRouter::new();
+
+        // Act: simulate several requests that each time out and are abandoned.
+        for request_id in 0..10 {
+            let _rx = router.register(request_id);
+            router.unregister(request_id);
+        }
+
+        // Assert
+        assert_eq!(
+            router.pending_len(),
+            0,
+            "repeated register/unregister cycles must not accumulate entries"
+        );
+    }
+
+    #[test]
+    fn should_ignore_late_response_for_a_request_already_unregistered() {
+        // Arrange
+        let router = ResponseRouter::new();
+        let request_id = 7;
+        let _rx = router.register(request_id);
+        router.unregister(request_id);
+
+        // Act: the event loop finishes the abandoned request after the caller
+        // already gave up (mirrors a worker thread unblocking post-timeout).
+        router.complete(RuntimeResponse::Ok { request_id });
+
+        // Assert: no pending entry is resurrected by the late response.
+        assert_eq!(router.pending_len(), 0);
+    }
 }

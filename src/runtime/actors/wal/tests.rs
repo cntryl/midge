@@ -55,6 +55,7 @@ fn prepare_put_transaction(
         state,
         TransactionAppendParams {
             request_id,
+            assertions: Vec::new(),
             ops: vec![crate::runtime::TransactionOp::Put {
                 cf_id: 0,
                 key: Bytes::from_static(key),
@@ -212,11 +213,14 @@ fn should_not_force_sync_immediately() -> MidgeResult<()> {
 
     let (_last_seq, _count, deferred) = wal_actor.append_transaction(
         &mut state,
-        1,
-        ops,
-        None,
-        None,
-        crate::runtime::ConflictPolicy::LastWriteWins,
+        TransactionAppendParams {
+            request_id: 1,
+            ops,
+            assertions: Vec::new(),
+            durability_policy: None,
+            start_sequence: None,
+            conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+        },
     )?;
     assert!(deferred);
 
@@ -259,6 +263,7 @@ fn should_append_multiple_prepared_transactions_with_one_physical_call() -> Midg
         &mut state,
         TransactionAppendParams {
             request_id: 10,
+            assertions: Vec::new(),
             ops: vec![crate::runtime::TransactionOp::Put {
                 cf_id: 0,
                 key: Bytes::from_static(b"coalesce-a"),
@@ -275,6 +280,7 @@ fn should_append_multiple_prepared_transactions_with_one_physical_call() -> Midg
         &mut state,
         TransactionAppendParams {
             request_id: 11,
+            assertions: Vec::new(),
             ops: vec![crate::runtime::TransactionOp::Put {
                 cf_id: 0,
                 key: Bytes::from_static(b"coalesce-b"),
@@ -430,6 +436,7 @@ fn should_apply_no_strict_group_member_when_shared_sync_fails() -> MidgeResult<(
 
 #[cfg(feature = "failpoints")]
 #[test]
+#[allow(clippy::too_many_lines)]
 fn should_fail_all_prepared_transactions_when_batch_append_hits_no_space() -> MidgeResult<()> {
     // Arrange
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
@@ -450,6 +457,7 @@ fn should_fail_all_prepared_transactions_when_batch_append_hits_no_space() -> Mi
         &mut state,
         TransactionAppendParams {
             request_id: 20,
+            assertions: Vec::new(),
             ops: vec![crate::runtime::TransactionOp::Put {
                 cf_id: 0,
                 key: Bytes::from_static(b"failed-a"),
@@ -466,6 +474,7 @@ fn should_fail_all_prepared_transactions_when_batch_append_hits_no_space() -> Mi
         &mut state,
         TransactionAppendParams {
             request_id: 21,
+            assertions: Vec::new(),
             ops: vec![crate::runtime::TransactionOp::Delete {
                 cf_id: 0,
                 key: Bytes::from_static(b"failed-b"),
@@ -513,6 +522,7 @@ fn should_fail_all_prepared_transactions_when_batch_append_hits_no_space() -> Mi
         &mut state,
         TransactionAppendParams {
             request_id: 22,
+            assertions: Vec::new(),
             ops: vec![crate::runtime::TransactionOp::Put {
                 cf_id: 0,
                 key: Bytes::from_static(b"recovered"),

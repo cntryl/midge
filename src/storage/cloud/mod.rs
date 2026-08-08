@@ -62,12 +62,104 @@ pub use executor::{CloudExecutor, CloudRequest, CloudResponse, CloudSigner};
 ))]
 pub(crate) use list_budget::CloudListBudget;
 
+/// Structured cloud provider failure, classified at the point the HTTP
+/// response (or transport failure) is first observed — inside each provider
+/// implementation (`s3.rs`, `azure.rs`, `gcs.rs`), where the real status code
+/// or connection error is still a typed value.
+///
+/// Downstream consumers (lease acquisition, WAL/SST GC, flush publication)
+/// match on these variants directly instead of re-deriving meaning from a
+/// formatted message string. In particular, [`CloudError::PreconditionFailed`]
+/// is reserved for a genuine conditional-write/delete race lost to another
+/// writer (S3 412/409, Azure 412 `ConditionNotMet`, GCS 412
+/// `conditionNotMet`) — every other failure mode (auth, transport, server
+/// error, malformed protocol response) uses a distinct variant so callers
+/// can no longer conflate "someone else holds it" with "we don't know".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CloudError {
+    /// The object does not exist (404 / `NoSuchKey` / `NotFound` /
+    /// `BlobNotFound`).
+    NotFound(String),
+    /// A conditional request (`If-Match` / `If-None-Match`) lost a genuine
+    /// race with a concurrent writer.
+    PreconditionFailed(String),
+    /// Authentication or authorization failure (401 / 403).
+    Unauthorized(String),
+    /// The provider rejected the request as malformed (4xx other than
+    /// not-found/precondition/auth).
+    InvalidRequest(String),
+    /// The provider reported a server-side failure (5xx).
+    ServerError(String),
+    /// The request could not reach the provider or timed out (network,
+    /// DNS, TLS, connection, or client-side timeout failure).
+    Transport(String),
+    /// The response did not match the expected protocol: malformed body,
+    /// unexpected status, or a required header was missing.
+    Protocol(String),
+}
+
+impl CloudError {
+    /// True when the object is confirmed absent.
+    #[must_use]
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, Self::NotFound(_))
+    }
+
+    /// True when a conditional write/delete genuinely lost a race to a
+    /// concurrent writer, as opposed to failing for an unrelated reason.
+    #[must_use]
+    pub fn is_precondition_failed(&self) -> bool {
+        matches!(self, Self::PreconditionFailed(_))
+    }
+
+    /// Classify a raw HTTP status code from a provider response.
+    ///
+    /// This is the single place that decides which statuses represent a
+    /// genuine conditional-write/delete race (412 Precondition Failed / 409
+    /// Conflict — S3, Azure, and GCS all use 412 for `If-Match`/
+    /// `If-None-Match` mismatches; some S3-compatible services use 409 for
+    /// the same case) versus every other failure mode. Providers call this
+    /// from their response mapper, where `status` is still a real `u16`
+    /// rather than a formatted string — the point this module exists to
+    /// preserve.
+    #[must_use]
+    pub(crate) fn from_http_status(status: u16, detail: impl std::fmt::Display) -> Self {
+        match status {
+            404 => Self::NotFound(format!("status {status}: {detail}")),
+            401 | 403 => Self::Unauthorized(format!("status {status}: {detail}")),
+            409 | 412 => Self::PreconditionFailed(format!("status {status}: {detail}")),
+            400..=499 => Self::InvalidRequest(format!("status {status}: {detail}")),
+            500..=599 => Self::ServerError(format!("status {status}: {detail}")),
+            _ => Self::Protocol(format!("unexpected status {status}: {detail}")),
+        }
+    }
+}
+
+impl std::fmt::Display for CloudError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound(msg) => write!(f, "not found: {msg}"),
+            Self::PreconditionFailed(msg) => write!(f, "precondition failed: {msg}"),
+            Self::Unauthorized(msg) => write!(f, "unauthorized: {msg}"),
+            Self::InvalidRequest(msg) => write!(f, "invalid request: {msg}"),
+            Self::ServerError(msg) => write!(f, "server error: {msg}"),
+            Self::Transport(msg) => write!(f, "transport error: {msg}"),
+            Self::Protocol(msg) => write!(f, "protocol error: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for CloudError {}
+
 /// Cloud operation outcome sent across the callback boundary.
-pub type CloudOutcome<T> = Result<T, String>;
+pub type CloudOutcome<T> = Result<T, CloudError>;
 
 #[cfg(test)]
 fn cloud_outcome_from_result<T>(result: Result<T, MidgeError>) -> CloudOutcome<T> {
-    result.map_err(|error| format!("{error:?}"))
+    result.map_err(|error| match error {
+        MidgeError::NotFound => CloudError::NotFound(format!("{error:?}")),
+        other => CloudError::Protocol(format!("{other:?}")),
+    })
 }
 
 /// Cloud operation completion events sent back via callback.
@@ -168,7 +260,9 @@ pub trait CloudBackend: Send + Sync + 'static {
     fn submit_get(&self, key: &str, callback: CloudCallback) {
         let _ = callback.send(CloudEvent::Get {
             key: key.to_string(),
-            result: Err("cloud backend does not support GET".to_string()),
+            result: Err(CloudError::Protocol(
+                "cloud backend does not support GET".to_string(),
+            )),
         });
     }
     #[cfg(test)]
@@ -176,19 +270,25 @@ pub trait CloudBackend: Send + Sync + 'static {
     fn submit_delete(&self, key: &str, _headers: Vec<(String, String)>, callback: CloudCallback) {
         let _ = callback.send(CloudEvent::Delete {
             key: key.to_string(),
-            result: Err("cloud backend does not support DELETE".to_string()),
+            result: Err(CloudError::Protocol(
+                "cloud backend does not support DELETE".to_string(),
+            )),
         });
     }
     fn submit_list(&self, prefix: &str, callback: CloudCallback) {
         let _ = callback.send(CloudEvent::List {
             prefix: prefix.to_string(),
-            result: Err("cloud backend does not support LIST".to_string()),
+            result: Err(CloudError::Protocol(
+                "cloud backend does not support LIST".to_string(),
+            )),
         });
     }
     fn submit_head(&self, key: &str, callback: CloudCallback) {
         let _ = callback.send(CloudEvent::Head {
             key: key.to_string(),
-            result: Err("cloud backend does not support HEAD".to_string()),
+            result: Err(CloudError::Protocol(
+                "cloud backend does not support HEAD".to_string(),
+            )),
         });
     }
 }
@@ -257,7 +357,9 @@ impl CloudBackend for MockCloudBackend {
             // Simulate conditional failure (precondition failed)
             let event = CloudEvent::Put {
                 key,
-                result: CloudOutcome::Err("precondition failed".to_string()),
+                result: CloudOutcome::Err(CloudError::PreconditionFailed(
+                    "precondition failed".to_string(),
+                )),
             };
             let _ = callback.send(event);
             return;
@@ -273,7 +375,9 @@ impl CloudBackend for MockCloudBackend {
             if !exists {
                 let event = CloudEvent::Put {
                     key,
-                    result: CloudOutcome::Err("precondition failed".to_string()),
+                    result: CloudOutcome::Err(CloudError::PreconditionFailed(
+                        "precondition failed".to_string(),
+                    )),
                 };
                 let _ = callback.send(event);
                 return;
@@ -286,7 +390,9 @@ impl CloudBackend for MockCloudBackend {
             if expected != &current_etag {
                 let event = CloudEvent::Put {
                     key,
-                    result: CloudOutcome::Err("precondition failed".to_string()),
+                    result: CloudOutcome::Err(CloudError::PreconditionFailed(
+                        "precondition failed".to_string(),
+                    )),
                 };
                 let _ = callback.send(event);
                 return;
@@ -359,7 +465,9 @@ impl CloudBackend for MockCloudBackend {
             if !exists {
                 let event = CloudEvent::Delete {
                     key,
-                    result: CloudOutcome::Err("precondition failed".to_string()),
+                    result: CloudOutcome::Err(CloudError::PreconditionFailed(
+                        "precondition failed".to_string(),
+                    )),
                 };
                 let _ = callback.send(event);
                 return;
@@ -370,7 +478,9 @@ impl CloudBackend for MockCloudBackend {
             if expected.trim_matches('"') != current_etag {
                 let event = CloudEvent::Delete {
                     key,
-                    result: CloudOutcome::Err("precondition failed".to_string()),
+                    result: CloudOutcome::Err(CloudError::PreconditionFailed(
+                        "precondition failed".to_string(),
+                    )),
                 };
                 let _ = callback.send(event);
                 return;
@@ -612,7 +722,11 @@ impl CloudStorage {
         self.backend.submit_head(&full_key, callback);
     }
 
-    fn precondition_error(&self, full_key: &str, headers: &[(String, String)]) -> Option<String> {
+    fn precondition_error(
+        &self,
+        full_key: &str,
+        headers: &[(String, String)],
+    ) -> Option<CloudError> {
         let if_none_match = headers
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case("if-none-match"))
@@ -632,43 +746,46 @@ impl CloudStorage {
             Ok(CloudEvent::Head { result, .. }) => match result {
                 CloudOutcome::Ok(metadata) => {
                     if if_none_match.as_deref() == Some("*") {
-                        Some("precondition failed: object already exists".to_string())
+                        Some(CloudError::PreconditionFailed(
+                            "object already exists".to_string(),
+                        ))
                     } else if let Some(expected) = if_match {
                         let current = metadata.etag.trim_matches('"');
                         if current == expected {
                             None
                         } else {
-                            Some("precondition failed: etag mismatch".to_string())
+                            Some(CloudError::PreconditionFailed("etag mismatch".to_string()))
                         }
                     } else {
                         None
                     }
                 }
                 CloudOutcome::Err(error) => {
-                    if is_not_found_error(&error) {
+                    if error.is_not_found() {
                         if if_match.is_some() {
-                            Some("precondition failed: object missing".to_string())
+                            Some(CloudError::PreconditionFailed("object missing".to_string()))
                         } else {
                             None
                         }
                     } else {
-                        Some(format!("precondition check failed: {error}"))
+                        Some(CloudError::Protocol(format!(
+                            "precondition check failed: {error}"
+                        )))
                     }
                 }
             },
-            Ok(other) => Some(format!("unexpected precondition HEAD response: {other:?}")),
-            Err(error) => Some(format!("precondition HEAD timed out: {error}")),
+            Ok(other) => Some(CloudError::Protocol(format!(
+                "unexpected precondition HEAD response: {other:?}"
+            ))),
+            Err(error) => Some(CloudError::Transport(format!(
+                "precondition HEAD timed out: {error}"
+            ))),
         }
     }
 }
 
-pub(crate) fn is_not_found_error(error: &str) -> bool {
-    let lowered = error.to_ascii_lowercase();
-    lowered.contains("not found")
-        || lowered.contains("notfound")
-        || lowered.contains("404")
-        || lowered.contains("nosuchkey")
-        || lowered.contains("blobnotfound")
+pub(crate) fn is_not_found_error(error: &CloudError) -> bool {
+    error.is_not_found()
 }
 
 #[cfg(test)]
@@ -683,7 +800,7 @@ impl StorageBackend for CloudStorage {
         if let Ok(CloudEvent::Get { key, result }) = rx.recv() {
             let outcome = match result {
                 CloudOutcome::Ok(data) => StorageOutcome::Ok(data),
-                CloudOutcome::Err(err) => StorageOutcome::Err(err),
+                CloudOutcome::Err(err) => StorageOutcome::Err(err.to_string()),
             };
             let event = StorageEvent::ReadComplete {
                 key,
@@ -699,7 +816,7 @@ impl StorageBackend for CloudStorage {
         if let Ok(CloudEvent::Put { key, result }) = rx.recv() {
             let outcome = match result {
                 CloudOutcome::Ok(()) => StorageOutcome::Ok(()),
-                CloudOutcome::Err(err) => StorageOutcome::Err(err),
+                CloudOutcome::Err(err) => StorageOutcome::Err(err.to_string()),
             };
             let event = StorageEvent::WriteComplete {
                 key,
@@ -721,7 +838,7 @@ impl StorageBackend for CloudStorage {
         if let Ok(CloudEvent::Put { key, result }) = rx.recv() {
             let outcome = match result {
                 CloudOutcome::Ok(()) => StorageOutcome::Ok(()),
-                CloudOutcome::Err(err) => StorageOutcome::Err(err),
+                CloudOutcome::Err(err) => StorageOutcome::Err(err.to_string()),
             };
             let event = StorageEvent::WriteComplete {
                 key,
@@ -737,7 +854,7 @@ impl StorageBackend for CloudStorage {
         if let Ok(CloudEvent::Delete { key, result }) = rx.recv() {
             let outcome = match result {
                 CloudOutcome::Ok(()) => StorageOutcome::Ok(()),
-                CloudOutcome::Err(err) => StorageOutcome::Err(err),
+                CloudOutcome::Err(err) => StorageOutcome::Err(err.to_string()),
             };
             let event = StorageEvent::DeleteComplete {
                 key,
@@ -758,7 +875,7 @@ impl StorageBackend for CloudStorage {
         if let Ok(CloudEvent::Delete { key, result }) = rx.recv() {
             let outcome = match result {
                 CloudOutcome::Ok(()) => StorageOutcome::Ok(()),
-                CloudOutcome::Err(err) => StorageOutcome::Err(err),
+                CloudOutcome::Err(err) => StorageOutcome::Err(err.to_string()),
             };
             let event = StorageEvent::DeleteComplete {
                 key,
@@ -779,7 +896,7 @@ impl StorageBackend for CloudStorage {
         {
             let outcome = match result {
                 CloudOutcome::Ok(items) => StorageOutcome::Ok(items),
-                CloudOutcome::Err(err) => StorageOutcome::Err(err),
+                CloudOutcome::Err(err) => StorageOutcome::Err(err.to_string()),
             };
             let event = StorageEvent::ListComplete {
                 prefix: key_prefix,
@@ -800,7 +917,7 @@ impl StorageBackend for CloudStorage {
                         etag: metadata.etag,
                         generation: metadata.generation,
                     }),
-                    CloudOutcome::Err(err) => StorageOutcome::Err(err),
+                    CloudOutcome::Err(err) => StorageOutcome::Err(err.to_string()),
                 };
                 StorageEvent::HeadComplete {
                     key,
@@ -831,7 +948,8 @@ mod tests {
     fn should_discriminate_success_from_failure_outcomes() {
         // Arrange
         let ok_outcome: CloudOutcome<String> = CloudOutcome::Ok("success".into());
-        let err_outcome: CloudOutcome<String> = CloudOutcome::Err("failure".into());
+        let err_outcome: CloudOutcome<String> =
+            CloudOutcome::Err(CloudError::Protocol("failure".to_string()));
 
         // Act
         let ok_is_ok = ok_outcome.is_ok();
@@ -850,7 +968,8 @@ mod tests {
     fn should_clone_outcomes_with_different_types() {
         // Arrange
         let int_ok = CloudOutcome::Ok(42);
-        let int_err: CloudOutcome<i32> = CloudOutcome::Err("error".into());
+        let int_err: CloudOutcome<i32> =
+            CloudOutcome::Err(CloudError::Protocol("error".to_string()));
 
         // Act
         let int_ok_cloned = int_ok.clone();

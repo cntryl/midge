@@ -79,64 +79,67 @@ impl FileSystemLease {
 impl PrimaryLease for FileSystemLease {
     fn try_acquire(self: Arc<Self>) -> Result<LeaseGuard, LeaseError> {
         if self.acquired.load(Ordering::Acquire) {
-            return Err(LeaseError::AcquisitionFailed(
+            return Err(LeaseError::AlreadyAcquired(
                 "lease already acquired by this instance".to_string(),
             ));
         }
 
         // Check freshness while holding the acquisition lock so a concurrent
         // winner cannot publish a live record between validation and CAS.
-        let record = self
-            .leader_store
-            .acquire_leadership_after_validation(&self.holder_id, |existing| {
-                let Some(existing) = existing else {
-                    return Ok(());
-                };
-                if existing.holder_id == self.holder_id {
-                    return Ok(());
-                }
+        // The validation closure's own error variant (Indeterminate for an
+        // unparseable/ambiguous record, AcquisitionFailed for confirmed
+        // contention) propagates verbatim — it must not be collapsed into a
+        // single blanket variant here, or every distinction made below would
+        // be silently discarded.
+        let record =
+            self.leader_store
+                .acquire_leadership_after_validation(&self.holder_id, |existing| {
+                    let Some(existing) = existing else {
+                        return Ok(());
+                    };
+                    if existing.holder_id == self.holder_id {
+                        return Ok(());
+                    }
 
-                let acquired_at = chrono::DateTime::parse_from_rfc3339(&existing.acquired_at)
-                    .map_err(|_| {
-                        LeaseError::AcquisitionFailed(format!(
-                            "another Midge instance may still own this storage; leader timestamp \
-                             is invalid (holder: {}, epoch: {})",
+                    let acquired_at = chrono::DateTime::parse_from_rfc3339(&existing.acquired_at)
+                        .map_err(|_| {
+                        LeaseError::Indeterminate(format!(
+                            "leader timestamp is invalid; ownership is ambiguous (holder: {}, \
+                             epoch: {})",
                             existing.holder_id, existing.epoch
                         ))
                     })?;
-                let signed_age = chrono::Utc::now().signed_duration_since(acquired_at);
-                if signed_age < chrono::Duration::zero() {
-                    return Err(LeaseError::AcquisitionFailed(format!(
-                        "another Midge instance may still own this storage; leader timestamp is \
-                         in the future (holder: {}, epoch: {})",
+                    let signed_age = chrono::Utc::now().signed_duration_since(acquired_at);
+                    if signed_age < chrono::Duration::zero() {
+                        return Err(LeaseError::Indeterminate(format!(
+                        "leader timestamp is in the future; ownership is ambiguous (holder: {}, \
+                         epoch: {})",
                         existing.holder_id, existing.epoch
                     )));
-                }
-                let age = signed_age.to_std().map_err(|_| {
-                    LeaseError::AcquisitionFailed(format!(
-                        "another Midge instance may still own this storage; leader age is \
-                         ambiguous (holder: {}, epoch: {})",
-                        existing.holder_id, existing.epoch
-                    ))
-                })?;
-                if age < Duration::from_secs(DEFAULT_TTL_SECS * 2) {
-                    return Err(LeaseError::AcquisitionFailed(format!(
-                        "another Midge instance is already running against this storage \
+                    }
+                    let age = signed_age.to_std().map_err(|_| {
+                        LeaseError::Indeterminate(format!(
+                            "leader age is ambiguous (holder: {}, epoch: {})",
+                            existing.holder_id, existing.epoch
+                        ))
+                    })?;
+                    if age < Duration::from_secs(DEFAULT_TTL_SECS * 2) {
+                        return Err(LeaseError::AcquisitionFailed(format!(
+                            "another Midge instance is already running against this storage \
                          (holder: {}, epoch: {}, acquired {}s ago)",
-                        existing.holder_id,
-                        existing.epoch,
-                        age.as_secs()
-                    )));
-                }
-                tracing::warn!(
-                    old_holder = %existing.holder_id,
-                    old_epoch = existing.epoch,
-                    age_secs = age.as_secs(),
-                    "taking over stale leader record (previous holder likely crashed)"
-                );
-                Ok(())
-            })
-            .map_err(|e| LeaseError::AcquisitionFailed(e.to_string()))?;
+                            existing.holder_id,
+                            existing.epoch,
+                            age.as_secs()
+                        )));
+                    }
+                    tracing::warn!(
+                        old_holder = %existing.holder_id,
+                        old_epoch = existing.epoch,
+                        age_secs = age.as_secs(),
+                        "taking over stale leader record (previous holder likely crashed)"
+                    );
+                    Ok(())
+                })?;
 
         let epoch = record.epoch;
         self.acquired_epoch.store(epoch, Ordering::Release);
@@ -270,7 +273,7 @@ mod tests {
         let result = Arc::clone(&lease).try_acquire();
 
         // Assert
-        assert!(matches!(result, Err(LeaseError::AcquisitionFailed(_))));
+        assert!(matches!(result, Err(LeaseError::AlreadyAcquired(_))));
     }
 
     #[test]
@@ -320,7 +323,7 @@ mod tests {
         let result = Arc::clone(&lease).try_acquire();
 
         // Assert
-        assert!(matches!(result, Err(LeaseError::AcquisitionFailed(_))));
+        assert!(matches!(result, Err(LeaseError::Indeterminate(_))));
         assert_eq!(
             lease
                 .leader_store

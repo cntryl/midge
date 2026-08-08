@@ -66,8 +66,19 @@ struct TxnWalBatch {
 pub(crate) struct TransactionAppendParams {
     pub request_id: u64,
     pub ops: Vec<crate::runtime::TransactionOp>,
+    pub assertions: Vec<crate::runtime::KeyAssertion>,
     pub durability_policy: Option<DurabilityPolicy>,
     pub start_sequence: Option<u64>,
+    pub conflict_policy: crate::runtime::ConflictPolicy,
+}
+
+/// Inputs needed to append one spilled transaction. Mirrors
+/// `TransactionAppendParams` for the streamed-source variant.
+pub(crate) struct SpilledTransactionAppendParams {
+    pub request_id: u64,
+    pub assertions: Vec<crate::runtime::KeyAssertion>,
+    pub durability_policy: Option<DurabilityPolicy>,
+    pub start_sequence: u64,
     pub conflict_policy: crate::runtime::ConflictPolicy,
 }
 
