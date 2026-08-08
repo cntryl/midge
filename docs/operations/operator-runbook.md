@@ -37,6 +37,23 @@ If a database is intentionally disposable, stop all users, preserve a copy if
 needed, and recreate it from the application's source of truth. That is a data
 replacement procedure, not recovery.
 
+## Lease loss and fencing
+
+Midge is fail-closed on lease loss: the engine remains open so reads and
+diagnostics are available, but every new write is rejected with
+`MidgeError::Fenced`. Configure `OpenOptionsBuilder::on_lease_loss` for an
+exact-once process-local notification and begin orderly shutdown from the
+application; the callback must not block the lease thread. Polling
+`Engine::is_primary_lease_healthy` remains useful for health reporting.
+
+The default wall-clock skew allowance is 15 seconds (half the 30-second lease
+TTL). Increasing it delays legitimate takeover by the same amount; values over
+one TTL are rejected. Filesystem mutation locks are intentionally never broken
+automatically because an NFS/SMB rename already in flight cannot be cancelled.
+If a process crashes while holding `.midge_leader.lock`, fence and stop every
+possible writer, preserve the database, and remove the lock only as an explicit
+operator recovery action. Never remove it merely because its timestamp is old.
+
 ## Cloud-specific notes
 
 `cloud_async()` acknowledges local visibility and lets cloud upload proceed in

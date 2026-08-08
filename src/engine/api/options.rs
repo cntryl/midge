@@ -28,6 +28,15 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+#[derive(Clone)]
+pub(crate) struct LeaseLossHook(pub(crate) std::sync::Arc<dyn Fn() + Send + Sync>);
+
+impl std::fmt::Debug for LeaseLossHook {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("LeaseLossHook(..)")
+    }
+}
+
 use crate::common::{MidgeError, MidgeResult};
 #[cfg(test)]
 use crate::config::{
@@ -212,6 +221,8 @@ pub struct OpenOptions {
     compression_policy: CompressionPolicy,
     wal_batch_config: Option<crate::wal::policy::BatchConfig>,
     simulated_cloud_local_storage_budget_bytes: Option<u64>,
+    lease_loss_hook: Option<LeaseLossHook>,
+    lease_clock_skew_tolerance: Duration,
 }
 
 /// Mutable input state for constructing [`OpenOptions`].
@@ -234,6 +245,8 @@ pub struct OpenOptionsBuilder {
     storage_io_timeout: Duration,
     wal_batch_config: Option<crate::wal::policy::BatchConfig>,
     simulated_cloud_local_storage_budget_bytes: Option<u64>,
+    lease_loss_hook: Option<LeaseLossHook>,
+    lease_clock_skew_tolerance: Duration,
 }
 
 struct DerivedMemoryPools {
@@ -438,6 +451,16 @@ impl OpenOptions {
     pub(crate) fn simulated_cloud_local_storage_budget_bytes(&self) -> Option<u64> {
         self.simulated_cloud_local_storage_budget_bytes
     }
+
+    pub(crate) fn lease_loss_hook(&self) -> Option<std::sync::Arc<dyn Fn() + Send + Sync>> {
+        self.lease_loss_hook
+            .as_ref()
+            .map(|hook| std::sync::Arc::clone(&hook.0))
+    }
+
+    pub(crate) fn lease_clock_skew_tolerance(&self) -> Duration {
+        self.lease_clock_skew_tolerance
+    }
 }
 
 impl OpenOptionsBuilder {
@@ -457,6 +480,10 @@ impl OpenOptionsBuilder {
             storage_io_timeout: crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
             wal_batch_config: None,
             simulated_cloud_local_storage_budget_bytes: None,
+            lease_loss_hook: None,
+            // Half a lease TTL tolerates ordinary NTP/VM clock correction while
+            // bounding additional failover latency.
+            lease_clock_skew_tolerance: Duration::from_secs(15),
         }
     }
 
@@ -537,6 +564,24 @@ impl OpenOptionsBuilder {
         self
     }
 
+    /// Register a process-local notification invoked exactly once when the
+    /// primary lease transitions to fenced. The engine remains open for reads
+    /// and rejects writes; embedders should begin orderly shutdown from the
+    /// notification without blocking the callback.
+    #[must_use]
+    pub fn on_lease_loss(mut self, hook: impl Fn() + Send + Sync + 'static) -> Self {
+        self.lease_loss_hook = Some(LeaseLossHook(std::sync::Arc::new(hook)));
+        self
+    }
+
+    /// Set the wall-clock skew allowance used before a persisted lease may be
+    /// taken over. Values are bounded to one 30-second lease TTL.
+    #[must_use]
+    pub fn lease_clock_skew_tolerance(mut self, tolerance: Duration) -> Self {
+        self.lease_clock_skew_tolerance = tolerance;
+        self
+    }
+
     /// Override the simulated-cloud local storage budget.
     #[doc(hidden)]
     #[must_use]
@@ -556,6 +601,11 @@ impl OpenOptionsBuilder {
         if self.storage_io_timeout.is_zero() {
             return Err(MidgeError::InvalidArgument(
                 "storage I/O timeout must be greater than zero".to_string(),
+            ));
+        }
+        if self.lease_clock_skew_tolerance > Duration::from_secs(30) {
+            return Err(MidgeError::InvalidArgument(
+                "lease clock-skew tolerance must not exceed the 30-second lease TTL".to_string(),
             ));
         }
 
@@ -611,6 +661,8 @@ impl OpenOptionsBuilder {
             wal_batch_config: self.wal_batch_config,
             simulated_cloud_local_storage_budget_bytes: self
                 .simulated_cloud_local_storage_budget_bytes,
+            lease_loss_hook: self.lease_loss_hook,
+            lease_clock_skew_tolerance: self.lease_clock_skew_tolerance,
         })
     }
 
@@ -1552,5 +1604,34 @@ mod tests {
 
         // Assert
         assert_eq!(cloned.goal, original.goal);
+    }
+
+    #[test]
+    fn should_use_half_ttl_clock_skew_tolerance_by_default() {
+        // Arrange
+        // (default configuration)
+
+        // Act
+        let options = OpenOptions::in_memory().build().expect("build options");
+
+        // Assert
+        assert_eq!(
+            options.lease_clock_skew_tolerance(),
+            Duration::from_secs(15)
+        );
+    }
+
+    #[test]
+    fn should_reject_clock_skew_tolerance_larger_than_lease_ttl() {
+        // Arrange
+        let tolerance = Duration::from_secs(31);
+
+        // Act
+        let result = OpenOptions::in_memory()
+            .lease_clock_skew_tolerance(tolerance)
+            .build();
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::InvalidArgument(_))));
     }
 }

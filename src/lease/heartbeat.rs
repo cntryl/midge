@@ -21,6 +21,24 @@ pub struct LeaseHeartbeat {
     renewal_handle: Option<JoinHandle<()>>,
     watchdog_handle: Option<JoinHandle<()>>,
     spawn_failed: bool,
+    loss_hook: Option<Arc<dyn Fn() + Send + Sync>>,
+    loss_notified: Arc<AtomicBool>,
+}
+
+fn mark_unhealthy(
+    healthy: &AtomicBool,
+    loss_notified: &AtomicBool,
+    loss_hook: Option<&(dyn Fn() + Send + Sync)>,
+) {
+    healthy.store(false, Ordering::Release);
+    if loss_notified
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        if let Some(hook) = loss_hook {
+            hook();
+        }
+    }
 }
 
 fn run_renewal_worker(
@@ -29,6 +47,8 @@ fn run_renewal_worker(
     running: &AtomicBool,
     healthy: &AtomicBool,
     ttl: Duration,
+    loss_notified: &AtomicBool,
+    loss_hook: Option<&(dyn Fn() + Send + Sync)>,
 ) {
     let renewal_interval = ttl / 3;
     tracing::info!(
@@ -46,7 +66,7 @@ fn run_renewal_worker(
                     continue;
                 }
                 LeaseValidityState::Fenced { .. } => {
-                    healthy.store(false, Ordering::Release);
+                    mark_unhealthy(healthy, loss_notified, loss_hook);
                     break;
                 }
                 LeaseValidityState::Active { valid_until, .. } => {
@@ -73,14 +93,14 @@ fn run_renewal_worker(
                 if validity.is_some_and(|validity| {
                     matches!(validity.snapshot(), LeaseValidityState::Fenced { .. })
                 }) {
-                    healthy.store(false, Ordering::Release);
+                    mark_unhealthy(healthy, loss_notified, loss_hook);
                     break;
                 }
                 tracing::trace!("lease renewed successfully");
             }
             Err(error) => {
                 tracing::error!(%error, "lease renewal failed; marking unhealthy");
-                healthy.store(false, Ordering::Release);
+                mark_unhealthy(healthy, loss_notified, loss_hook);
                 if let Some(validity) = validity {
                     if let LeaseValidityState::Active { epoch, .. } = validity.snapshot() {
                         validity.fence(epoch);
@@ -97,6 +117,8 @@ fn run_watchdog_worker(
     validity: &super::traits::LeaseValidity,
     running: &AtomicBool,
     healthy: &AtomicBool,
+    loss_notified: &AtomicBool,
+    loss_hook: Option<&(dyn Fn() + Send + Sync)>,
 ) {
     while running.load(Ordering::Acquire) {
         let observed = validity.snapshot();
@@ -105,20 +127,20 @@ fn run_watchdog_worker(
                 let _ = validity.wait_for_change(observed, Duration::from_secs(30), running);
             }
             LeaseValidityState::Fenced { .. } => {
-                healthy.store(false, Ordering::Release);
+                mark_unhealthy(healthy, loss_notified, loss_hook);
                 break;
             }
             LeaseValidityState::Active { epoch, valid_until } => {
                 let wait = valid_until.saturating_duration_since(std::time::Instant::now());
                 if wait.is_zero() {
                     validity.fence(epoch);
-                    healthy.store(false, Ordering::Release);
+                    mark_unhealthy(healthy, loss_notified, loss_hook);
                     break;
                 }
                 let current = validity.wait_for_change(observed, wait, running);
                 if current == observed && std::time::Instant::now() >= valid_until {
                     validity.fence(epoch);
-                    healthy.store(false, Ordering::Release);
+                    mark_unhealthy(healthy, loss_notified, loss_hook);
                     break;
                 }
             }
@@ -158,7 +180,13 @@ impl LeaseHeartbeat {
             renewal_handle: None,
             watchdog_handle: None,
             spawn_failed: false,
+            loss_hook: None,
+            loss_notified: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub(crate) fn set_loss_hook(&mut self, hook: Arc<dyn Fn() + Send + Sync>) {
+        self.loss_hook = Some(hook);
     }
 
     /// Return a shared reference to the healthy flag.
@@ -179,10 +207,13 @@ impl LeaseHeartbeat {
 
         running.store(true, Ordering::Release);
         healthy.store(true, Ordering::Release);
+        self.loss_notified.store(false, Ordering::Release);
 
         let ttl = lease.ttl();
 
         let renewal_validity = validity.as_ref().map(Arc::clone);
+        let renewal_loss_notified = Arc::clone(&self.loss_notified);
+        let renewal_loss_hook = self.loss_hook.as_ref().map(Arc::clone);
         let handle = thread::Builder::new()
             .name("midge-lease-renewal".to_string())
             .spawn(move || {
@@ -192,6 +223,8 @@ impl LeaseHeartbeat {
                     &running,
                     &healthy,
                     ttl,
+                    &renewal_loss_notified,
+                    renewal_loss_hook.as_deref(),
                 );
             });
 
@@ -215,10 +248,19 @@ impl LeaseHeartbeat {
         let running = Arc::clone(&self.running);
         let healthy = Arc::clone(&self.healthy);
         let watchdog_validity = Arc::clone(&validity);
+        let watchdog_loss_notified = Arc::clone(&self.loss_notified);
+        let watchdog_loss_hook = self.loss_hook.as_ref().map(Arc::clone);
         match thread::Builder::new()
             .name("midge-lease-watchdog".to_string())
-            .spawn(move || run_watchdog_worker(&watchdog_validity, &running, &healthy))
-        {
+            .spawn(move || {
+                run_watchdog_worker(
+                    &watchdog_validity,
+                    &running,
+                    &healthy,
+                    &watchdog_loss_notified,
+                    watchdog_loss_hook.as_deref(),
+                );
+            }) {
             Ok(handle) => self.watchdog_handle = Some(handle),
             Err(error) => {
                 tracing::error!(%error, "failed to spawn lease expiry watchdog");
@@ -532,6 +574,33 @@ mod tests {
             "expected heartbeat to be unhealthy after renewal failure"
         );
         heartbeat.stop();
+    }
+
+    #[test]
+    fn should_notify_lease_loss_exactly_once_given_repeated_unhealthy_observation() {
+        // Arrange
+        let mock = Arc::new(MockLease::new());
+        mock.set_should_fail(true);
+        let notifications = Arc::new(AtomicUsize::new(0));
+        let hook_notifications = Arc::clone(&notifications);
+        let mut heartbeat = LeaseHeartbeat::new(mock as Arc<dyn PrimaryLease>);
+        heartbeat.set_loss_hook(Arc::new(move || {
+            hook_notifications.fetch_add(1, Ordering::AcqRel);
+        }));
+
+        // Act
+        heartbeat.start();
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while heartbeat.is_healthy() && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        for _ in 0..10 {
+            assert!(!heartbeat.is_healthy());
+        }
+        heartbeat.stop();
+
+        // Assert
+        assert_eq!(notifications.load(Ordering::Acquire), 1);
     }
 
     #[test]

@@ -15,6 +15,7 @@ pub struct CloudRequest {
     pub url: String,
     pub headers: Vec<(String, String)>,
     pub body: Option<Vec<u8>>,
+    pub timeout: Option<Duration>,
 }
 
 impl CloudRequest {
@@ -24,6 +25,7 @@ impl CloudRequest {
             url,
             headers: Vec::new(),
             body: None,
+            timeout: None,
         }
     }
 
@@ -34,6 +36,11 @@ impl CloudRequest {
 
     pub fn with_body(mut self, body: Vec<u8>) -> Self {
         self.body = Some(body);
+        self
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
         self
     }
 
@@ -233,6 +240,9 @@ impl CloudExecutor {
         request: CloudRequest,
     ) -> Result<CloudResponse, RequestError> {
         let mut builder = client.request(request.method.clone(), &request.url);
+        if let Some(timeout) = request.timeout {
+            builder = builder.timeout(timeout);
+        }
         for (k, v) in &request.headers {
             builder = builder.header(k, v);
         }
@@ -422,5 +432,55 @@ mod tests {
             request_count, 1,
             "conditional mutation must not be replayed blindly"
         );
+    }
+
+    #[test]
+    fn should_return_at_provider_deadline_even_when_remote_may_commit_later() {
+        // Arrange
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let endpoint = format!(
+            "http://{}/lease",
+            listener.local_addr().expect("server address")
+        );
+        let (request_seen_tx, request_seen_rx) = std::sync::mpsc::channel();
+        let (inspect_tx, inspect_rx) = std::sync::mpsc::channel();
+        let committed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let server_committed = std::sync::Arc::clone(&committed);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .expect("set server read timeout");
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).expect("read request");
+            request_seen_tx.send(()).expect("signal request receipt");
+            inspect_rx.recv().expect("wait until request deadline");
+
+            // A client-side deadline is not proof that the provider did not
+            // commit. Model that honest worst case: the backing store applies
+            // the mutation after the caller has already received a timeout.
+            server_committed.store(true, std::sync::atomic::Ordering::Release);
+        });
+        let request = CloudRequest::new(Method::PUT, endpoint)
+            .with_header("If-Match", "\"lease-etag\"")
+            .with_header("Connection", "close")
+            .with_body(b"renewed-authority".to_vec())
+            .with_timeout(Duration::from_millis(50));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+
+        // Act
+        let result = runtime.block_on(CloudExecutor::execute_request(Client::new(), request));
+        request_seen_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("server observed request");
+        inspect_tx.send(()).expect("inspect cancelled connection");
+        server.join().expect("join test server");
+
+        // Assert
+        assert!(result.is_err());
+        assert!(committed.load(std::sync::atomic::Ordering::Acquire));
     }
 }
