@@ -136,6 +136,82 @@ fn should_reject_remote_cas_when_identity_is_stale() {
 }
 
 #[test]
+fn should_reject_wal_catalog_publication_from_stale_epoch_after_takeover() {
+    // Arrange
+    let (_mock_cloud, storage) = hybrid_with_mock_cloud();
+    let tmp = tempfile::tempdir().expect("create stale publisher WAL dir");
+    let segment_id = 1;
+    let max_sequence = 11;
+    let bytes = valid_wal_bytes(max_sequence);
+    let local_path = tmp.path().join(crate::wal::segment_file_name(segment_id));
+    std::fs::write(&local_path, &bytes).expect("write stale publisher local WAL");
+    let object_key = crate::wal::cloud_segment_object_key(segment_id, 1);
+    write_cloud_object(&storage, &object_key, bytes);
+    storage
+        .fence_cloud_wal_catalog(3)
+        .expect("new lease fences WAL catalog");
+
+    // Act
+    let result = storage.publish_remote_wal_segment(segment_id, max_sequence, &local_path, 2);
+
+    // Assert
+    let error = result.expect_err("stale lease epoch must not publish WAL authority");
+    assert!(error.contains("requires fencing epoch 3"), "{error}");
+    let catalog_proof = storage
+        .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
+        .expect("read winning WAL catalog");
+    let catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(catalog_proof.bytes())
+        .expect("decode winning WAL catalog");
+    assert!(!catalog.segments.contains_key(&segment_id));
+    assert_cloud_object_exists(&storage, &object_key);
+}
+
+#[test]
+fn should_reject_stale_catalog_compare_exchange_after_takeover() {
+    // Arrange
+    let (_mock_cloud, storage) = hybrid_with_mock_cloud();
+    let stale_proof = storage
+        .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
+        .expect("read pre-takeover WAL catalog");
+    let mut takeover_catalog =
+        crate::wal::cloud_catalog::WalPublicationCatalog::decode(stale_proof.bytes())
+            .expect("decode pre-takeover WAL catalog");
+    takeover_catalog
+        .fence_to(3)
+        .expect("advance winning takeover epoch");
+    storage
+        .compare_exchange_remote_object(
+            crate::wal::cloud_catalog::OBJECT_KEY,
+            Some(stale_proof.metadata()),
+            takeover_catalog.encode().expect("encode winning catalog"),
+        )
+        .expect("publish winning takeover catalog");
+    let mut losing_catalog =
+        crate::wal::cloud_catalog::WalPublicationCatalog::decode(stale_proof.bytes())
+            .expect("decode stale WAL catalog");
+    losing_catalog
+        .fence_to(4)
+        .expect("prepare losing catalog mutation");
+
+    // Act
+    let result = storage.compare_exchange_remote_object(
+        crate::wal::cloud_catalog::OBJECT_KEY,
+        Some(stale_proof.metadata()),
+        losing_catalog.encode().expect("encode losing catalog"),
+    );
+
+    // Assert
+    assert!(matches!(result, Err(crate::common::MidgeError::Busy(_))));
+    let winning_proof = storage
+        .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
+        .expect("read winning WAL catalog");
+    let winning_catalog =
+        crate::wal::cloud_catalog::WalPublicationCatalog::decode(winning_proof.bytes())
+            .expect("decode winning WAL catalog");
+    assert_eq!(winning_catalog.fencing_epoch, 3);
+}
+
+#[test]
 fn should_reject_guarded_delete_when_worker_capacity_is_exhausted() {
     // Arrange
     let tmp = tempfile::tempdir().expect("create guarded-delete test dir");
@@ -197,6 +273,9 @@ fn hybrid_with_mock_cloud() -> (Arc<MockCloudBackend>, HybridStorage) {
         cloud,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     );
+    storage
+        .fence_cloud_wal_catalog(2)
+        .expect("initialize test WAL publication catalog");
     (mock_cloud, storage)
 }
 
@@ -253,7 +332,7 @@ fn should_route_each_object_class_to_its_separate_cloud_store() {
         .len();
     assert_eq!(
         wal_mock.get_uploads(),
-        vec![(crate::wal::cloud_segment::object_key(17), wal_size)]
+        vec![(crate::wal::cloud_segment::object_key(17, 1), wal_size)]
     );
     assert_eq!(
         sst_mock
@@ -293,6 +372,38 @@ fn valid_wal_bytes(seq: u64) -> Vec<u8> {
     let mut bytes = Vec::new();
     crate::wal::frame::append_frame(&mut bytes, &payload).expect("append WAL frame");
     bytes
+}
+
+fn write_authoritative_cloud_wal(
+    storage: &HybridStorage,
+    segment_id: u64,
+    catalog_max_sequence: u64,
+    bytes: Vec<u8>,
+) -> String {
+    let publication = crate::wal::cloud_catalog::PublishedWalSegment::from_validated_bytes(
+        segment_id,
+        catalog_max_sequence,
+        1,
+        &bytes,
+    );
+    write_cloud_object(storage, &publication.object_key, bytes);
+    let catalog_proof = storage
+        .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
+        .expect("read test WAL catalog");
+    let mut catalog =
+        crate::wal::cloud_catalog::WalPublicationCatalog::decode(catalog_proof.bytes())
+            .expect("decode test WAL catalog");
+    catalog
+        .publish(2, publication.clone())
+        .expect("publish test WAL authority");
+    storage
+        .compare_exchange_remote_object(
+            crate::wal::cloud_catalog::OBJECT_KEY,
+            Some(catalog_proof.metadata()),
+            catalog.encode().expect("encode test WAL catalog"),
+        )
+        .expect("update test WAL catalog");
+    publication.object_key
 }
 
 struct AlwaysFailingWriteBackend {
@@ -1007,9 +1118,10 @@ fn should_not_prune_remote_wal_given_manifest_validation_failure_when_gc_runs() 
     let (mock_cloud, storage) = hybrid_with_mock_cloud();
     let segment_id = 7;
     let max_sequence = 11;
-    write_cloud_object(
+    let _key = write_authoritative_cloud_wal(
         &storage,
-        &crate::wal::cloud_segment::object_key(segment_id),
+        segment_id,
+        max_sequence,
         valid_wal_bytes(max_sequence),
     );
 
@@ -1023,7 +1135,7 @@ fn should_not_prune_remote_wal_given_manifest_validation_failure_when_gc_runs() 
     assert!(
         first_downloads
             .iter()
-            .any(|key| key.ends_with("wal/00000000000000000007.wal")),
+            .any(|key| key.ends_with("wal/epochs/00000000000000000001/00000000000000000007.wal")),
         "first validation should read the cloud WAL, got {first_downloads:?}"
     );
 
@@ -1034,7 +1146,7 @@ fn should_not_prune_remote_wal_given_manifest_validation_failure_when_gc_runs() 
     assert_eq!(
         downloads
             .iter()
-            .filter(|key| key.ends_with("wal/00000000000000000007.wal"))
+            .filter(|key| key.ends_with("wal/epochs/00000000000000000001/00000000000000000007.wal"))
             .count(),
         2,
         "authoritative WAL validation must reread the segment: {downloads:?}"
@@ -1047,8 +1159,12 @@ fn should_reject_cached_remote_wal_proof_when_cloud_object_is_deleted() {
     let (_mock_cloud, storage) = hybrid_with_mock_cloud();
     let segment_id = 8;
     let max_sequence = 12;
-    let key = crate::wal::cloud_segment::object_key(segment_id);
-    write_cloud_object(&storage, &key, valid_wal_bytes(max_sequence));
+    let key = write_authoritative_cloud_wal(
+        &storage,
+        segment_id,
+        max_sequence,
+        valid_wal_bytes(max_sequence),
+    );
 
     storage
         .verify_remote_wal_segment(segment_id, max_sequence)
@@ -1072,7 +1188,7 @@ fn should_not_prune_remote_wal_given_remote_sst_identity_change_when_gc_runs() {
     let (_mock_cloud, storage) = hybrid_with_mock_cloud();
     let segment_id = 11;
     let max_sequence = 21;
-    let key = crate::wal::cloud_segment::object_key(segment_id);
+    let key = crate::wal::cloud_segment::object_key(segment_id, 1);
     write_cloud_object(&storage, &key, valid_wal_bytes(max_sequence));
     let stale_proof = storage
         .remote_object_proof(&key)
@@ -1102,7 +1218,7 @@ fn should_reject_reader_proof_when_guarded_prune_deletes_wal_during_download() {
             .expect("create local backend"),
     );
     let segment_id = 12;
-    let key = crate::wal::cloud_segment::object_key(segment_id);
+    let key = crate::wal::cloud_segment::object_key(segment_id, 1);
     let bytes = valid_wal_bytes(22);
     let backend = Arc::new(RacingReadDeleteBackend::new(bytes.clone()));
     let cloud: Arc<dyn StorageBackend> = backend.clone();
@@ -1148,13 +1264,17 @@ fn should_not_prune_remote_wal_when_manifest_sst_disappears_after_initial_valida
     let (_mock_cloud, storage) = hybrid_with_mock_cloud();
     let segment_id = 13;
     let max_sequence = 23;
-    let wal_key = crate::wal::cloud_segment::object_key(segment_id);
+    let wal_key = write_authoritative_cloud_wal(
+        &storage,
+        segment_id,
+        max_sequence,
+        valid_wal_bytes(max_sequence),
+    );
     let sst_name = "missing-after-validation.sst";
     let sst_key = crate::sst::object_key(sst_name);
     let sst_bytes = valid_sst_bytes(b"k", b"v1", max_sequence);
     let manifest = manifest_covering_wal(sst_name, &sst_bytes, max_sequence, None);
 
-    write_cloud_object(&storage, &wal_key, valid_wal_bytes(max_sequence));
     write_cloud_object(&storage, &sst_key, sst_bytes);
     storage
         .verify_remote_wal_segment(segment_id, max_sequence)
@@ -1169,6 +1289,7 @@ fn should_not_prune_remote_wal_when_manifest_sst_disappears_after_initial_valida
             segment_id,
             max_sequence,
             CloudWalPruneGuard::new(manifest.clone(), None),
+            2,
         )
         .expect_err("missing manifest SST must reject prune");
 
@@ -1187,14 +1308,18 @@ fn should_not_prune_remote_wal_when_manifest_sst_content_crc_differs() {
     let (_mock_cloud, storage) = hybrid_with_mock_cloud();
     let segment_id = 16;
     let max_sequence = 26;
-    let wal_key = crate::wal::cloud_segment::object_key(segment_id);
+    let wal_key = write_authoritative_cloud_wal(
+        &storage,
+        segment_id,
+        max_sequence,
+        valid_wal_bytes(max_sequence),
+    );
     let sst_name = "wrong-crc-prune-guard.sst";
     let sst_key = crate::sst::object_key(sst_name);
     let sst_bytes = valid_sst_bytes(b"k", b"v1", max_sequence);
     let wrong_crc = crc32c::crc32c(&sst_bytes) ^ 0xffff_ffff;
     let manifest = manifest_covering_wal(sst_name, &sst_bytes, max_sequence, Some(wrong_crc));
 
-    write_cloud_object(&storage, &wal_key, valid_wal_bytes(max_sequence));
     write_cloud_object(&storage, &sst_key, sst_bytes);
     storage
         .verify_remote_wal_segment(segment_id, max_sequence)
@@ -1204,6 +1329,7 @@ fn should_not_prune_remote_wal_when_manifest_sst_content_crc_differs() {
             segment_id,
             max_sequence,
             CloudWalPruneGuard::new(manifest, None),
+            2,
         )
         .expect_err("incorrect manifest CRC must reject prune");
 
@@ -1222,7 +1348,12 @@ fn should_not_prune_remote_wal_when_cloud_metadata_changes_after_initial_validat
     let (_mock_cloud, storage) = hybrid_with_mock_cloud();
     let segment_id = 14;
     let max_sequence = 24;
-    let wal_key = crate::wal::cloud_segment::object_key(segment_id);
+    let wal_key = write_authoritative_cloud_wal(
+        &storage,
+        segment_id,
+        max_sequence,
+        valid_wal_bytes(max_sequence),
+    );
     let sst_name = "metadata-guard.sst";
     let sst_key = crate::sst::object_key(sst_name);
     let sst_bytes = valid_sst_bytes(b"k", b"v1", max_sequence);
@@ -1240,7 +1371,6 @@ fn should_not_prune_remote_wal_when_cloud_metadata_changes_after_initial_validat
     let metadata_key = crate::storage::cloud::cloud_metadata_key("manifest.json");
     let metadata_bytes = br#"{"last_persisted_sequence":24}"#.to_vec();
 
-    write_cloud_object(&storage, &wal_key, valid_wal_bytes(max_sequence));
     write_cloud_object(&storage, &sst_key, sst_bytes);
     storage
         .verify_remote_wal_segment(segment_id, max_sequence)
@@ -1256,20 +1386,30 @@ fn should_not_prune_remote_wal_when_cloud_metadata_changes_after_initial_validat
     );
 
     write_cloud_metadata_object(&metadata_cloud, &metadata_key, b"changed".to_vec());
-    storage
+    let error = storage
         .prune_cloud_wal_segment(
             segment_id,
             max_sequence,
             CloudWalPruneGuard::new(manifest, Some(metadata_guard)),
+            2,
         )
-        .expect("schedule prune");
+        .expect_err("changed metadata proof must reject authority retirement");
 
-    let result = wait_for_wal_prune_result(&storage, segment_id);
+    let catalog_proof = storage
+        .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
+        .expect("read catalog after prune scheduling");
+    let catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(catalog_proof.bytes())
+        .expect("decode catalog after prune scheduling");
+    assert!(
+        catalog.segments.contains_key(&segment_id),
+        "catalog authority must remain when a coverage dependency changed"
+    );
     // Act
     // Assert
     assert!(
-        result.is_err(),
-        "worker-side metadata revalidation must fail conservatively"
+        error.contains("changed before conditional delete")
+            || error.contains("identity changed before conditional delete"),
+        "unexpected changed metadata proof error: {error}"
     );
     assert_cloud_object_exists(&storage, &wal_key);
 }
@@ -1280,7 +1420,12 @@ fn should_prune_remote_wal_when_worker_side_guard_remains_valid() {
     let (_mock_cloud, storage) = hybrid_with_mock_cloud();
     let segment_id = 15;
     let max_sequence = 25;
-    let wal_key = crate::wal::cloud_segment::object_key(segment_id);
+    let wal_key = write_authoritative_cloud_wal(
+        &storage,
+        segment_id,
+        max_sequence,
+        valid_wal_bytes(max_sequence),
+    );
     let sst_name = "guard-valid.sst";
     let sst_key = crate::sst::object_key(sst_name);
     let sst_bytes = valid_sst_bytes(b"k", b"v1", max_sequence);
@@ -1307,7 +1452,6 @@ fn should_prune_remote_wal_when_worker_side_guard_remains_valid() {
     let metadata_key = crate::storage::cloud::cloud_metadata_key("manifest.json");
     let metadata_bytes = br#"{"last_persisted_sequence":25}"#.to_vec();
 
-    write_cloud_object(&storage, &wal_key, valid_wal_bytes(max_sequence));
     write_cloud_object(&storage, &sst_key, sst_bytes.clone());
     storage
         .verify_remote_wal_segment(segment_id, max_sequence)
@@ -1330,8 +1474,19 @@ fn should_prune_remote_wal_when_worker_side_guard_remains_valid() {
             segment_id,
             max_sequence,
             CloudWalPruneGuard::new(manifest, Some(metadata_guard)),
+            2,
         )
         .expect("schedule prune");
+
+    let catalog_proof = storage
+        .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
+        .expect("read catalog after prune scheduling");
+    let catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(catalog_proof.bytes())
+        .expect("decode catalog after prune scheduling");
+    assert!(
+        !catalog.segments.contains_key(&segment_id),
+        "catalog authority must retire before physical delete completion"
+    );
 
     let result = wait_for_wal_prune_result(&storage, segment_id);
     // Act
@@ -1349,9 +1504,10 @@ fn should_reject_remote_wal_segment_with_sequence_beyond_expected_max() {
     let (_mock_cloud, storage) = hybrid_with_mock_cloud();
     let segment_id = 10;
     let expected_max_sequence = 20;
-    write_cloud_object(
+    write_authoritative_cloud_wal(
         &storage,
-        &crate::wal::cloud_segment::object_key(segment_id),
+        segment_id,
+        expected_max_sequence,
         valid_wal_bytes(expected_max_sequence + 1),
     );
 
@@ -1373,7 +1529,7 @@ fn should_not_overwrite_existing_remote_wal_during_upload() {
     let tmp = tempfile::tempdir().expect("create WAL dir");
     let segment_id = 12;
     let upload_max_sequence = 22;
-    let key = crate::wal::cloud_segment::object_key(segment_id);
+    let key = crate::wal::cloud_segment::object_key(segment_id, 1);
     let existing_bytes = valid_wal_bytes(upload_max_sequence + 100);
     write_cloud_object(&storage, &key, existing_bytes.clone());
 
@@ -1466,7 +1622,7 @@ fn should_readback_remote_wal_before_upload_worker_emits_ack() {
         mock_cloud
             .get_downloads()
             .iter()
-            .any(|key| key.ends_with("wal/00000000000000000009.wal")),
+            .any(|key| key.ends_with("wal/epochs/00000000000000000001/00000000000000000009.wal")),
         "upload worker must read back the remote WAL before ack"
     );
 }

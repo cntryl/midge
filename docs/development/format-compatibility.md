@@ -10,6 +10,7 @@ The compatibility policy applies to:
 - manifest files and manifest journal
 - intent-log persistence format
 - SST file layout and footer/version identifiers
+- cloud WAL publication catalog and epoch-scoped object-key layout
 
 ## Required Rules For 1.0
 
@@ -27,6 +28,19 @@ The compatibility policy applies to:
 
 - no blanket on-disk compatibility promise
 - any format movement must be called out in the changelog and migration guide
+
+The current cloud WAL layout is publication catalog format v1. Mere object
+presence is not authority: recovery reads only entries in
+`wal/publication-catalog.v1.json`. The pre-v1 segment-only cloud layout is not
+auto-migrated because it cannot prove whether a late stale-writer upload was
+accepted before fencing.
+
+The v1 JSON document contains `format_version`, the current `fencing_epoch`,
+and a segment-id map. Each segment entry records its writer epoch, maximum
+sequence, exact byte length, CRC32C, and canonical epoch-scoped object key.
+Unknown versions, malformed entries, a future writer epoch, or WAL objects
+without the required catalog fail startup explicitly; salvage mode does not
+invent publication authority.
 
 ### At 1.0 and Within 1.x
 

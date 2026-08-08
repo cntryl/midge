@@ -9,7 +9,19 @@ The provider-backed cloud configuration API intentionally changed before
 1.0. Replace `CloudStorageBuckets` with one `CloudStorageLocation` passed to
 `OpenOptions::cloud`. If separate locations remain necessary, construct a
 `CloudStorageTopology`, apply the per-class overrides, and pass it to
-`OpenOptions::cloud_multi`. Persisted object keys and formats are unchanged.
+`OpenOptions::cloud_multi`.
+
+Cloud WAL publication catalog format v1 is a breaking persisted-layout
+change. Sealed objects now use
+`wal/epochs/<writer-epoch>/<segment-id>.wal`, and
+`wal/publication-catalog.v1.json` is the sole authority for remote WAL
+recovery. A database prefix that contains the older segment-only
+`wal/<segment-id>.wal` layout without a v1 catalog is rejected explicitly;
+Midge does not guess whether those objects were published before or after a
+lease takeover. Epoch-scoped WAL objects without the catalog are also rejected
+as ambiguous instead of being silently ignored during catalog initialization.
+Preserve the old database, open/export it with a compatible release, then
+import into a new prefix. Do not synthesize a catalog by hand.
 
 1. Stop writers and complete `engine.shutdown(timeout)`.
 2. Preserve the database directory and WAL as a recoverable copy.

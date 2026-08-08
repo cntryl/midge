@@ -6,6 +6,7 @@ use super::{
 };
 use crate::common::{MidgeError, MidgeResult};
 use crate::config::{RecoveryPolicy, Storage};
+use crate::runtime::hybrid_persistence::HybridPersistence;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -210,11 +211,19 @@ impl RuntimeStorageMaterialization {
             &storage_path.db_path,
             opts.simulated_cloud_local_storage_budget_bytes(),
         )?;
+        CloudStartupRecovery::reject_simulated_cloud_wal_without_catalog(
+            &cloud.recovery_cloud_wal_dir,
+        )?;
+        let wal_catalog = cloud
+            .hybrid_storage
+            .fence_cloud_wal_catalog(startup_lease.writer_epoch)?;
+        startup_lease.ensure_healthy("after cloud WAL catalog fencing")?;
 
         let recovery_plan = CloudStartupRecovery::materialize_simulated_cloud_wal_recovery_dir(
             &cloud.recovery_cloud_wal_dir,
             &storage_path.db_path,
             opts.recovery_policy(),
+            &wal_catalog,
         )?;
 
         let mut state = RuntimeState::try_new_with_recovery_dir(
@@ -288,26 +297,12 @@ impl RuntimeStorageMaterialization {
                 topology.control().prefix(),
             )?
         };
-        CloudStartupRecovery::hydrate_cloud_metadata(
-            &metadata_storage,
-            &storage_path.db_path,
-            opts.recovery_policy(),
-        )?;
-        let mut recovery_plan = CloudStartupRecovery::materialize_cloud_wal_recovery_dir(
-            &wal_storage,
-            &storage_path.db_path,
-            opts.recovery_policy(),
-        )?;
-        CloudStartupRecovery::merge_local_wal_into_recovery_dir(
-            &storage_path.db_path,
-            &mut recovery_plan,
-            opts.recovery_policy(),
-        )?;
 
+        CloudStartupRecovery::reject_cloud_wal_without_catalog(&wal_storage)?;
         let local_backend = Arc::new(crate::storage::filesystem::FileSystem::new(
             storage_path.db_path.join("hybrid_local"),
         )?);
-        let wal_backend: Arc<dyn crate::storage::StorageBackend> = wal_storage;
+        let wal_backend: Arc<dyn crate::storage::StorageBackend> = wal_storage.clone();
         let sst_backend: Arc<dyn crate::storage::StorageBackend> = sst_storage.clone();
         let control_backend: Arc<dyn crate::storage::StorageBackend> = metadata_storage.clone();
 
@@ -323,6 +318,25 @@ impl RuntimeStorageMaterialization {
                 tx,
             ),
         );
+        let wal_catalog = hybrid_storage.fence_cloud_wal_catalog(startup_lease.writer_epoch)?;
+        startup_lease.ensure_healthy("after cloud WAL catalog fencing")?;
+
+        CloudStartupRecovery::hydrate_cloud_metadata(
+            &metadata_storage,
+            &storage_path.db_path,
+            opts.recovery_policy(),
+        )?;
+        let mut recovery_plan = CloudStartupRecovery::materialize_cloud_wal_recovery_dir(
+            &wal_storage,
+            &storage_path.db_path,
+            opts.recovery_policy(),
+            &wal_catalog,
+        )?;
+        CloudStartupRecovery::merge_local_wal_into_recovery_dir(
+            &storage_path.db_path,
+            &mut recovery_plan,
+            opts.recovery_policy(),
+        )?;
 
         let mut state = RuntimeState::try_new_with_recovery_dir(
             storage_path.db_path.clone(),

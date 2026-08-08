@@ -388,9 +388,10 @@ impl crate::storage::StorageBackend for FailOnceDeleteStorageBackend {
 fn seal_segment_for_test(el: &mut EventLoop) -> crate::common::MidgeResult<(u64, u64)> {
     let (seg_id, max_sequence) = seal_segment_without_remote_proof_for_test(el)?;
     if let Some(storage) = el.hybrid_storage.as_ref() {
+        let local_path = el.state.wal_dir.join(crate::wal::segment_file_name(seg_id));
         storage
-            .verify_remote_wal_segment(seg_id, max_sequence)
-            .expect("verify remote WAL for test CloudAck");
+            .publish_remote_wal_segment(seg_id, max_sequence, &local_path, el.state.writer_epoch)
+            .expect("publish remote WAL for test CloudAck");
     }
     Ok((seg_id, max_sequence))
 }
@@ -414,8 +415,10 @@ fn remote_wal_path_for_test(el: &EventLoop, segment_id: u64) -> PathBuf {
     el.state
         .db_path
         .join("cloud_store")
-        .join("wal")
-        .join(crate::wal::cloud_segment_file_name(segment_id))
+        .join(crate::wal::cloud_segment_object_key(
+            segment_id,
+            el.state.writer_epoch,
+        ))
 }
 
 fn remote_sst_path_for_test(el: &EventLoop, sst_name: &str) -> PathBuf {
@@ -451,6 +454,30 @@ fn copy_local_segment_to_remote_wal_for_test(el: &EventLoop, segment_id: u64) {
     });
 }
 
+fn publish_remote_wal_bytes_for_test(
+    el: &EventLoop,
+    segment_id: u64,
+    max_sequence: u64,
+    bytes: &[u8],
+) {
+    let local_path = el
+        .state
+        .wal_dir
+        .join(crate::wal::segment_file_name(segment_id));
+    write_test_file(local_path.clone(), bytes);
+    write_test_file(remote_wal_path_for_test(el, segment_id), bytes);
+    if let Some(storage) = el.hybrid_storage.as_ref() {
+        storage
+            .publish_remote_wal_segment(
+                segment_id,
+                max_sequence,
+                &local_path,
+                el.state.writer_epoch,
+            )
+            .expect("publish authoritative remote WAL for test");
+    }
+}
+
 fn seed_cloud_prune_candidate(el: &mut EventLoop, segment_id: u64, max_sequence: u64) {
     el.state.wal.current_segment_id = segment_id + 1;
     el.state.manifest.last_persisted_sequence = max_sequence;
@@ -460,17 +487,12 @@ fn seed_cloud_prune_candidate(el: &mut EventLoop, segment_id: u64, max_sequence:
         Bytes::from_static(b"prune-candidate"),
         Some(Bytes::from_static(b"value")),
         max_sequence,
-        0,
+        el.state.writer_epoch,
     );
     let payload = crate::wal::encoding::encode(&record).expect("encode test WAL record");
     let mut bytes = Vec::new();
     crate::wal::frame::append_frame(&mut bytes, &payload).expect("append test WAL frame");
-    write_test_file(remote_wal_path_for_test(el, segment_id), &bytes);
-    if let Some(storage) = el.hybrid_storage.as_ref() {
-        storage
-            .verify_remote_wal_segment(segment_id, max_sequence)
-            .expect("verify remote WAL prune candidate");
-    }
+    publish_remote_wal_bytes_for_test(el, segment_id, max_sequence, &bytes);
 }
 
 fn seed_cloud_prune_candidate_with_records(
@@ -484,16 +506,12 @@ fn seed_cloud_prune_candidate_with_records(
     el.cloud_acked_wal_segments.insert(segment_id, max_sequence);
 
     let mut bytes = Vec::new();
-    for record in records {
+    for mut record in records {
+        record.writer_epoch = el.state.writer_epoch;
         let payload = crate::wal::encoding::encode(&record).expect("encode test WAL record");
         crate::wal::frame::append_frame(&mut bytes, &payload).expect("append test WAL frame");
     }
-    write_test_file(remote_wal_path_for_test(el, segment_id), &bytes);
-    if let Some(storage) = el.hybrid_storage.as_ref() {
-        storage
-            .verify_remote_wal_segment(segment_id, max_sequence)
-            .expect("verify remote WAL prune candidate");
-    }
+    publish_remote_wal_bytes_for_test(el, segment_id, max_sequence, &bytes);
 }
 
 fn add_manifest_sst_for_test(el: &mut EventLoop, sst_name: &str, max_sequence: u64) {
@@ -2500,8 +2518,8 @@ fn should_keep_local_wal_when_cached_remote_wal_proof_becomes_stale_before_cloud
     el.hybrid_storage
         .as_ref()
         .expect("hybrid storage")
-        .verify_remote_wal_segment(segment_id, max_sequence)
-        .expect("establish remote WAL proof");
+        .publish_remote_wal_segment(segment_id, max_sequence, &local_wal, el.state.writer_epoch)
+        .expect("establish authoritative remote WAL publication");
     std::fs::remove_file(remote_wal_path_for_test(&el, segment_id))
         .expect("delete remote WAL after proof");
 
@@ -3172,6 +3190,16 @@ fn should_seal_cloud_wal_with_segment_max_sequence_not_global_sequence(
     }
 
     storage
+        .publish_remote_wal_segment(
+            segment_id,
+            last_wal_sequence,
+            &el.state
+                .wal_dir
+                .join(crate::wal::segment_file_name(segment_id)),
+            el.state.writer_epoch,
+        )
+        .expect("publish the actual segment frontier");
+    storage
         .verify_remote_wal_segment(segment_id, last_wal_sequence)
         .expect("remote WAL readback should prove the actual segment max sequence");
     let overproof = storage
@@ -3289,8 +3317,13 @@ fn complete_retry_and_ack(
     el.hybrid_storage
         .as_ref()
         .expect("hybrid storage")
-        .verify_remote_wal_segment(seg_id, last_sequence)
-        .expect("verify retry remote WAL for test CloudAck");
+        .publish_remote_wal_segment(
+            seg_id,
+            last_sequence,
+            &el.state.wal_dir.join(crate::wal::segment_file_name(seg_id)),
+            el.state.writer_epoch,
+        )
+        .expect("publish retry remote WAL for test CloudAck");
     el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
         segment_id: seg_id,
         max_sequence: last_sequence,

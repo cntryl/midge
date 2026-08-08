@@ -31,8 +31,8 @@ pub(crate) fn file_name(segment_id: u64) -> String {
 }
 
 #[must_use]
-pub(crate) fn object_key(segment_id: u64) -> String {
-    super::segment_object_key(segment_id)
+pub(crate) fn object_key(segment_id: u64, writer_epoch: u64) -> String {
+    super::segment_object_key(segment_id, writer_epoch)
 }
 
 pub(crate) fn validate_bytes(

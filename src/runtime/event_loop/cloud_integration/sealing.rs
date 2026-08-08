@@ -117,13 +117,13 @@ impl EventLoop {
                 .state
                 .wal_dir
                 .join(crate::wal::segment_file_name(segment_id));
-            match storage.enqueue_wal_segment(segment_id, &local_path, max_sequence) {
-                Ok(()) => {}
+            let resource = match storage.enqueue_wal_segment(segment_id, &local_path, max_sequence)
+            {
+                Ok(resource) => resource,
                 Err(crate::common::MidgeError::WriteStall(_)) => return Ok(()),
                 Err(error) => return Err(error),
-            }
+            };
             self.cloud_wal_upload_backlog.remove(&segment_id);
-            let resource = crate::wal::cloud_segment_object_key(segment_id);
             if !self.state.cloud.pending_uploads.contains(&resource) {
                 self.state.cloud.pending_uploads.push(resource);
             }

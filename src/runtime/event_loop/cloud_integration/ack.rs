@@ -77,12 +77,17 @@ impl EventLoop {
             );
             return;
         }
+        if let Err(error) = self.validate_runtime_writer_lease() {
+            self.handle_cloud_upload_failure(
+                segment_id,
+                &format!("writer was fenced after cloud WAL publication: {error}"),
+            );
+            return;
+        }
 
-        let resource = crate::wal::cloud_segment_object_key(segment_id);
-        self.state
-            .cloud
-            .pending_uploads
-            .retain(|item| item != &resource);
+        self.state.cloud.pending_uploads.retain(|item| {
+            crate::wal::parse_segment_id(item).is_none_or(|pending| pending != segment_id)
+        });
         self.cloud_acked_wal_segments
             .insert(segment_id, max_sequence);
 
@@ -150,24 +155,17 @@ impl EventLoop {
                 tracing::debug!(segment_id, "Pruned cloud-covered remote WAL segment");
             }
             crate::storage::StorageOutcome::Err(error) => {
-                let failures = self
-                    .cloud_wal_prune_retries
-                    .get(&segment_id)
-                    .map_or(1, |(failures, _)| failures.saturating_add(1));
-                let exponent = failures.saturating_sub(1).min(8);
-                let delay_ms = 25_u64.saturating_mul(1_u64 << exponent);
-                let retry_at = std::time::Instant::now()
-                    + std::time::Duration::from_millis(delay_ms.min(5_000));
-                self.cloud_wal_prune_retries
-                    .insert(segment_id, (failures, retry_at));
-                self.next_background_compaction_check =
-                    self.next_background_compaction_check.min(retry_at);
+                // The authoritative catalog entry is retired before physical
+                // deletion is attempted. A failed delete is therefore a safe
+                // storage leak, not a recovery obligation that may be retried
+                // through a now-absent catalog entry.
+                self.cloud_wal_prune_retries.remove(&segment_id);
+                self.cloud_acked_wal_segments.remove(&segment_id);
+                self.state.mark_persistence_anomaly();
                 tracing::warn!(
                     segment_id,
-                    failures,
-                    ?retry_at,
                     error = %error,
-                    "Failed to prune cloud-covered remote WAL segment; retaining it for bounded retry"
+                    "Cloud WAL authority was retired but physical deletion failed; retaining an ignored orphan"
                 );
             }
         }
@@ -185,15 +183,18 @@ impl EventLoop {
             .state
             .wal_dir
             .join(crate::wal::segment_file_name(segment_id));
-        storage.verify_remote_wal_segment_matches_local(segment_id, max_sequence, &local_path)
+        storage.publish_remote_wal_segment(
+            segment_id,
+            max_sequence,
+            &local_path,
+            self.state.writer_epoch,
+        )
     }
 
     fn handle_cloud_upload_failure(&mut self, segment_id: u64, error: &str) {
-        let resource = crate::wal::cloud_segment_object_key(segment_id);
-        self.state
-            .cloud
-            .pending_uploads
-            .retain(|item| item != &resource);
+        self.state.cloud.pending_uploads.retain(|item| {
+            crate::wal::parse_segment_id(item).is_none_or(|pending| pending != segment_id)
+        });
         self.state.mark_persistence_anomaly();
         self.cloud_acked_wal_segments.remove(&segment_id);
 

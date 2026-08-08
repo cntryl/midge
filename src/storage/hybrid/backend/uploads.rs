@@ -7,6 +7,18 @@ use super::{
 };
 
 impl HybridStorage {
+    pub(crate) fn queue_cloud_wal_prune_complete(
+        &self,
+        segment_id: u64,
+        result: StorageOutcome<()>,
+    ) {
+        Self::queue_storage_event(
+            &self.event_queue,
+            self.external_event_tx.as_ref(),
+            StorageEvent::CloudWalPruneComplete { segment_id, result },
+        );
+    }
+
     pub fn ensure_wal_upload_capacity(
         &self,
         additional_bytes: u64,

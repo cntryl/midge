@@ -281,7 +281,9 @@ stateDiagram-v2
     Visible --> Sealed: rotate WAL segment
     Sealed --> PendingUpload: enqueue_wal_segment
     PendingUpload --> InProgress: process_uploads
-    InProgress --> CloudDurable: upload success
+    InProgress --> UploadedOrphan: immutable upload success
+    UploadedOrphan --> CatalogPublished: lease-fenced catalog CAS
+    CatalogPublished --> CloudDurable: exact readback and lease recheck
     InProgress --> Retry: upload failure below retry budget
     Retry --> InProgress
     InProgress --> Failed: retry budget exhausted

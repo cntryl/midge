@@ -1,4 +1,5 @@
 use super::*;
+use crate::runtime::hybrid_persistence::HybridPersistence;
 use crate::runtime::{state::RuntimeState, ResponseRouter};
 use crate::sst::Memtable;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -59,9 +60,11 @@ pub(in crate::runtime::event_loop) fn create_test_cloud_event_loop(
         cloud,
         storage_policy,
     ));
+    hybrid_storage.fence_cloud_wal_catalog(1)?;
     let config = crate::runtime::RuntimeConfig {
         wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
         hybrid_storage: Some(Arc::clone(&hybrid_storage)),
+        writer_epoch: 1,
         ..crate::runtime::RuntimeConfig::default()
     };
     EventLoop::new(state, false, router, config, None)
@@ -219,11 +222,13 @@ fn should_hold_cloud_frontier_at_local_recovery_gap_until_resumed_upload_is_ackn
         cloud,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
+    hybrid_storage.fence_cloud_wal_catalog(1)?;
     let config = crate::runtime::RuntimeConfig {
         wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
         hybrid_storage: Some(Arc::clone(&hybrid_storage)),
         recovered_cloud_wal_segments: [(1, 1), (3, 3)].into_iter().collect(),
         recovered_local_wal_segments: [(2, 2)].into_iter().collect(),
+        writer_epoch: 1,
         ..crate::runtime::RuntimeConfig::default()
     };
     let router = Arc::new(ResponseRouter::new());
@@ -243,8 +248,7 @@ fn should_hold_cloud_frontier_at_local_recovery_gap_until_resumed_upload_is_ackn
 
     let remote_segment = db_path
         .join("cloud_store")
-        .join("wal")
-        .join(crate::wal::segment_file_name(2));
+        .join(crate::wal::cloud_segment_object_key(2, 0));
     std::fs::create_dir_all(remote_segment.parent().expect("remote WAL parent"))
         .expect("create remote WAL directory");
     std::fs::write(remote_segment, segment_bytes).expect("publish resumed WAL segment");
@@ -1469,6 +1473,7 @@ fn should_incrementally_drain_recovered_wal_given_bounded_upload_queue_at_open(
         1,
         max_segment_bytes,
     ));
+    storage.fence_cloud_wal_catalog(1)?;
     let config = crate::runtime::RuntimeConfig {
         wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
         hybrid_storage: Some(Arc::clone(&storage)),
@@ -1479,6 +1484,7 @@ fn should_incrementally_drain_recovered_wal_given_bounded_upload_queue_at_open(
             record_count: 1,
             valid_bytes: active_bytes.len(),
         }),
+        writer_epoch: 1,
         ..crate::runtime::RuntimeConfig::default()
     };
 

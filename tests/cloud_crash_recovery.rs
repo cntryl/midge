@@ -136,10 +136,7 @@ fn should_resume_cloud_upload_from_recovered_active_wal_after_child_abort() {
     assert!(metrics.wal_cloud_durable_seq >= metrics.current_sequence);
     let remote_wal_dir = db_path.join("cloud_store").join("wal");
     assert!(
-        std::fs::read_dir(&remote_wal_dir)
-            .expect("list resumed remote WAL")
-            .flatten()
-            .any(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("wal")),
+        contains_file_with_extension(&remote_wal_dir, "wal"),
         "recovered active WAL must be sealed and uploaded"
     );
 }
@@ -479,4 +476,18 @@ fn clear_crashed_process_acquisition_lock(db_path: &Path) {
 fn reset_dir(dir: &Path) {
     let _ = std::fs::remove_dir_all(dir);
     std::fs::create_dir_all(dir).expect("recreate directory");
+}
+
+fn contains_file_with_extension(dir: &Path, extension: &str) -> bool {
+    std::fs::read_dir(dir)
+        .unwrap_or_else(|error| panic!("list {}: {error}", dir.display()))
+        .flatten()
+        .any(|entry| {
+            let path = entry.path();
+            if path.is_dir() {
+                contains_file_with_extension(&path, extension)
+            } else {
+                path.extension().and_then(|value| value.to_str()) == Some(extension)
+            }
+        })
 }
