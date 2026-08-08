@@ -35,6 +35,13 @@ pub(crate) struct SstVerificationStats {
     pub data_blocks: u64,
 }
 
+/// Physical work performed by one point lookup against one SST.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SstPointReadStats {
+    pub sst_touched: bool,
+    pub blocks_read: u64,
+}
+
 /// SST file reader using `io::Fs` abstraction
 /// Identical to `SstFile` but accepts `Arc<dyn Fs>` for the filesystem backend
 pub struct SstFileIo {

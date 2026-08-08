@@ -132,6 +132,21 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    #[test]
+    fn should_reject_frame_header_given_declared_length_one_byte_over_wal_max_record_len() {
+        // Arrange
+        let declared_len = u32::try_from(WAL_MAX_RECORD_LEN + 1)
+            .expect("WAL maximum plus one fits the encoded length field");
+        let mut header = [0_u8; WAL_FRAME_HEADER_LEN];
+        header[..4].copy_from_slice(&declared_len.to_le_bytes());
+
+        // Act
+        let result = decode_frame_header(&header);
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::Corruption(_))));
+    }
+
     proptest! {
         #[test]
         fn should_roundtrip_arbitrary_payloads(payload in proptest::collection::vec(any::<u8>(), 0..8192)) {

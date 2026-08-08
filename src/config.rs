@@ -9,6 +9,28 @@ use std::time::Duration;
 
 pub(crate) const DEFAULT_STORAGE_IO_TIMEOUT: Duration = Duration::from_secs(30);
 
+pub(crate) fn validate_memtable_limits(
+    memtable_size_limit: usize,
+    memtable_flush_threshold: usize,
+) -> crate::common::MidgeResult<()> {
+    if memtable_size_limit == 0 {
+        return Err(crate::common::MidgeError::InvalidArgument(
+            "memtable size limit must be greater than zero".to_string(),
+        ));
+    }
+    if memtable_flush_threshold == 0 {
+        return Err(crate::common::MidgeError::InvalidArgument(
+            "memtable flush threshold must be greater than zero".to_string(),
+        ));
+    }
+    if memtable_flush_threshold > memtable_size_limit {
+        return Err(crate::common::MidgeError::InvalidArgument(format!(
+            "memtable flush threshold ({memtable_flush_threshold} bytes) exceeds size limit ({memtable_size_limit} bytes)"
+        )));
+    }
+    Ok(())
+}
+
 mod provider;
 
 pub use provider::{

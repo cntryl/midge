@@ -35,12 +35,16 @@ pub fn ensure_or_create_format_marker(db_path: &Path) -> MidgeResult<u32> {
 pub fn validate_format_marker(db_path: &Path) -> MidgeResult<u32> {
     let marker_path = format_marker_path(db_path);
     let contents = std::fs::read_to_string(&marker_path).map_err(|error| {
-        MidgeError::CompatibilityError(format!(
-            "failed to read {} marker at '{}': {}",
-            FORMAT_FILE,
-            marker_path.display(),
-            error
-        ))
+        if error.kind() == std::io::ErrorKind::NotFound {
+            MidgeError::CompatibilityError(format!(
+                "failed to read {} marker at '{}': {}",
+                FORMAT_FILE,
+                marker_path.display(),
+                error
+            ))
+        } else {
+            MidgeError::Io(error)
+        }
     })?;
 
     let version = contents
@@ -201,5 +205,31 @@ mod tests {
 
         // Assert
         assert!(matches!(error, MidgeError::CompatibilityError(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn should_report_io_error_given_inaccessible_format_marker_when_validating() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Arrange
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        ensure_or_create_format_marker(temp_dir.path()).expect("create marker");
+        let marker_path = format_marker_path(temp_dir.path());
+        let original_permissions = std::fs::metadata(&marker_path)
+            .expect("FORMAT metadata")
+            .permissions();
+        let mut unreadable_permissions = original_permissions.clone();
+        unreadable_permissions.set_mode(0o000);
+        std::fs::set_permissions(&marker_path, unreadable_permissions)
+            .expect("make FORMAT unreadable");
+
+        // Act
+        let error = validate_format_marker(temp_dir.path()).expect_err("inaccessible marker");
+        std::fs::set_permissions(&marker_path, original_permissions)
+            .expect("restore FORMAT access");
+
+        // Assert
+        assert!(matches!(error, MidgeError::Io(_)));
     }
 }

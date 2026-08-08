@@ -72,7 +72,7 @@ impl EventLoop {
     }
 
     pub(super) fn handle_get_read_amp_metrics(&self, request_id: u64) {
-        let metrics = &self.state.read_amp_metrics;
+        let metrics = self.state.diagnostics.read_amp_metrics();
         self.respond(
             request_id,
             RuntimeResponse::ReadAmpMetricsSnapshot {
@@ -138,6 +138,26 @@ impl EventLoop {
         &mut self,
         update: &RuntimeConfigUpdate,
     ) -> HandleOutcome {
+        let candidate_memtable_size_limit = update
+            .memtable_size_limit
+            .unwrap_or(self.state.memtable_size_limit);
+        let candidate_memtable_flush_threshold = update
+            .memtable_flush_threshold
+            .unwrap_or(self.state.memtable_flush_threshold);
+        if let Err(error) = crate::config::validate_memtable_limits(
+            candidate_memtable_size_limit,
+            candidate_memtable_flush_threshold,
+        ) {
+            self.respond(
+                update.request_id,
+                RuntimeResponse::Error {
+                    request_id: update.request_id,
+                    error,
+                },
+            );
+            return HandleOutcome::Continue;
+        }
+
         if let Some(ms) = update.memtable_size_limit {
             self.state.memtable_size_limit = ms;
         }

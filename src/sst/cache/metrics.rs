@@ -95,15 +95,20 @@ impl CacheMetrics {
     #[must_use]
     pub fn hit_rate(&self) -> f64 {
         let hits = self.hit_count();
-        let total = hits + self.miss_count();
-        if total == 0 {
+        let misses = self.miss_count();
+        if hits == 0 && misses == 0 {
             0.0
         } else {
-            let hits = f64::from(u32::try_from(hits).unwrap_or(u32::MAX));
-            let total = f64::from(u32::try_from(total).unwrap_or(u32::MAX));
-            (hits / total) * 100.0
+            let total = u64_to_f64(hits) + u64_to_f64(misses);
+            (u64_to_f64(hits) / total) * 100.0
         }
     }
+}
+
+fn u64_to_f64(value: u64) -> f64 {
+    let upper = u32::try_from(value >> 32).unwrap_or(u32::MAX);
+    let lower = u32::try_from(value & u64::from(u32::MAX)).unwrap_or(u32::MAX);
+    f64::from(upper) * 4_294_967_296.0 + f64::from(lower)
 }
 
 impl Default for CacheMetrics {
@@ -144,6 +149,21 @@ mod tests {
         // Assert
         let expected = (2.0 / 3.0) * 100.0;
         assert!((metrics.hit_rate() - expected).abs() < 0.01);
+    }
+
+    #[test]
+    fn should_preserve_hit_rate_when_counters_exceed_u32_max() {
+        // Arrange
+        let metrics = CacheMetrics::new();
+        let count = u64::from(u32::MAX) + 1;
+        metrics.hits.store(count, Ordering::Relaxed);
+        metrics.misses.store(count, Ordering::Relaxed);
+
+        // Act
+        let hit_rate = metrics.hit_rate();
+
+        // Assert
+        assert!((hit_rate - 50.0).abs() <= f64::EPSILON);
     }
 
     #[test]

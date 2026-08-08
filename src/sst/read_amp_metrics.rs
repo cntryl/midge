@@ -4,6 +4,9 @@
 //! - How many SSTs are touched per read
 //! - L0 overlap patterns
 //! - Read budget violations
+//!
+//! Runtime samples are recorded after a point read completes successfully;
+//! failed reads are excluded because their physical-work sample may be partial.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -16,7 +19,7 @@ pub const MAX_BLOCKS_PER_READ: u64 = 20;
 /// Tracks read amplification patterns across SST reads
 #[derive(Debug)]
 pub struct ReadAmpMetrics {
-    /// Total number of read operations
+    /// Total number of successfully completed read operations
     reads_total: AtomicU64,
 
     /// Total SSTs touched across all reads

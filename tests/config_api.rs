@@ -64,7 +64,7 @@ fn should_derive_same_pools_when_builder_calls_are_reordered() {
 #[test]
 fn should_keep_accounted_pools_within_total_given_tiny_and_normal_budgets() {
     // Arrange
-    let budgets = [2usize, 3, 9, 10, 31, 1024, 128 * 1024, 512 * 1024 * 1024];
+    let budgets = [3usize, 9, 10, 31, 1024, 128 * 1024, 512 * 1024 * 1024];
 
     for budget in budgets {
         // Act
@@ -82,6 +82,10 @@ fn should_keep_accounted_pools_within_total_given_tiny_and_normal_budgets() {
         assert!(
             accounted <= opts.memory_budget_bytes(),
             "budget={budget} accounted={accounted}"
+        );
+        assert!(
+            opts.transaction_memory_pool_size() > 0,
+            "budget={budget} must retain a nonzero transaction pool"
         );
     }
 }

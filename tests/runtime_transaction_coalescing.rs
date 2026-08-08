@@ -1,72 +1,64 @@
 mod common;
 
+use cntryl_midge::Query;
 use common::opts_for_mode;
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
 #[test]
-fn should_coalesce_wal_appends_when_multiple_threads_submit_transactions() {
+fn should_preserve_runtime_coalescing_when_threads_write_concurrently() {
     // Arrange
-    let opts = opts_for_mode("memory");
-    let engine =
-        Arc::new(cntryl_midge::Engine::open(opts.to_open_options()).expect("Engine creation"));
-    let cf = engine.create_column_family("test_cf").expect("create CF");
+    let mut opts = opts_for_mode("memory");
+    opts.memtable_size = 64 * 1024 * 1024;
+    let engine = Arc::new(cntryl_midge::Engine::open(opts.to_open_options()).unwrap());
+    let cf = engine.create_column_family("test_cf").unwrap();
     let cf_id = cf.id();
 
-    let num_threads = 8_u64;
-    let batches_per_thread = 100_u64;
+    let num_threads = 8_usize;
+    let ops_per_thread = 500_usize;
 
     // Act
-    let start = Instant::now();
-    let handles: Vec<_> = (0..num_threads)
-        .map(|thread_id| {
-            let engine_clone = Arc::clone(&engine);
-            thread::spawn(move || {
-                for batch_num in 0..batches_per_thread {
-                    let key = format!("key_{thread_id}_{batch_num}");
-                    let value = format!("value_{thread_id}");
-
-                    // Each thread submits a small batch
-                    let mut tx = engine_clone
-                        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
-                        .expect("begin_tx");
-                    tx.put(key.into_bytes(), value.into_bytes(), None)
-                        .expect("put");
-                    let result = tx.commit(cntryl_midge::WriteOptions::buffered());
-                    assert!(result.is_ok(), "commit should succeed");
-                }
-            })
-        })
-        .collect();
-
-    // Wait for all threads to complete
-    for handle in handles {
-        handle.join().expect("Thread should complete");
-    }
-
-    let elapsed = start.elapsed();
-    let total_ops = batches_per_thread * num_threads;
-    let total_ops_f64 =
-        f64::from(u32::try_from(total_ops).expect("test operation count fits in u32"));
-    let throughput = total_ops_f64 / elapsed.as_secs_f64();
-
-    // Assert: Verify that operations completed successfully and measure throughput
+    let mut handles = vec![];
     for thread_id in 0..num_threads {
-        let key = format!("key_{}_{}", thread_id, batches_per_thread - 1);
-        let read_tx = engine
-            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
-            .expect("begin_tx for read");
-        let result = read_tx.get(key.as_bytes());
-        assert!(result.is_ok(), "Should be able to read back written value");
+        let engine_clone = Arc::clone(&engine);
+        let handle = thread::spawn(move || {
+            for op_id in 0..ops_per_thread {
+                let key = format!("key-t{thread_id:02}-o{op_id:06}");
+                let value = format!("val-{op_id}");
+
+                let mut tx = engine_clone
+                    .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                    .expect("begin");
+                tx.put(key.into_bytes(), value.into_bytes(), None)
+                    .expect("put");
+                tx.commit(cntryl_midge::WriteOptions::buffered())
+                    .expect("commit");
+            }
+        });
+        handles.push(handle);
     }
 
-    println!(
-        "OK: Runtime coalescing: {} ops from {} threads in {:.3}s, {:.0} ops/sec",
-        total_ops,
-        num_threads,
-        elapsed.as_secs_f64(),
-        throughput
+    for handle in handles {
+        handle.join().expect("thread join");
+    }
+
+    // Assert: caller submissions stay distinct, while the runtime coalesces
+    // their WAL frames and preserves every logical write.
+    let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+    let read = engine
+        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+        .expect("begin read transaction");
+    let rows = read
+        .scan(&Query::new())
+        .expect("scan writes")
+        .try_collect()
+        .expect("collect writes");
+    let total_ops = u64::try_from(num_threads * ops_per_thread).expect("operation count fits u64");
+    assert_eq!(rows.len() as u64, total_ops);
+    assert!(
+        metrics.wal_append_count < total_ops,
+        "runtime write draining should coalesce logical transactions"
     );
 }
 

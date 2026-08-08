@@ -50,19 +50,22 @@ pub enum ReadDurability {
 /// - Budget violation rates
 #[derive(Debug, Clone)]
 pub struct ReadAmpMetricsSnapshot {
-    /// Total read operations performed.
+    /// Total point-read operations that completed without an error.
+    ///
+    /// Failed reads are excluded because their physical-work sample may be
+    /// incomplete at the failure boundary.
     pub reads_total: u64,
-    /// Total SSTs touched across all reads.
+    /// Total SSTs touched across successfully completed reads.
     pub ssts_touched_total: u64,
-    /// Total L0 SSTs touched.
+    /// Total L0 SSTs touched across successfully completed reads.
     pub l0_ssts_touched_total: u64,
-    /// Total blocks read across all operations.
+    /// Total blocks read across successfully completed reads.
     pub blocks_read_total: u64,
-    /// Average SSTs touched per read.
+    /// Average SSTs touched per successfully completed read.
     pub avg_ssts_per_read: f64,
-    /// Average L0 SSTs touched per read.
+    /// Average L0 SSTs touched per successfully completed read.
     pub avg_l0_ssts_per_read: f64,
-    /// Average blocks read per operation.
+    /// Average blocks read per successfully completed read.
     pub avg_blocks_per_read: f64,
     /// L0 overlap rate.
     pub l0_overlap_rate: f64,

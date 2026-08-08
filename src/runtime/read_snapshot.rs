@@ -523,6 +523,9 @@ impl ReadSnapshot {
     pub fn get_bytes(&self, key: &[u8], seq: u64) -> MidgeResult<Option<bytes::Bytes>> {
         let mut best_state = None;
         let mut range_tombstones = Vec::new();
+        let mut ssts_touched = 0u64;
+        let mut l0_ssts_touched = 0u64;
+        let mut blocks_read = 0u64;
 
         let state = self
             .memtable
@@ -556,7 +559,15 @@ impl ReadSnapshot {
                     .sst_metrics()
                     .record_candidate_sst_file_checked();
                 let reader = self.sst_reader(file_meta)?;
-                let state = reader.get_state_at_with_time(key, seq, self.read_time_millis)?;
+                let (state, read_stats) =
+                    reader.get_state_at_with_time_and_stats(key, seq, self.read_time_millis)?;
+                if read_stats.sst_touched {
+                    ssts_touched = ssts_touched.saturating_add(1);
+                    if file_meta.level == 0 {
+                        l0_ssts_touched = l0_ssts_touched.saturating_add(1);
+                    }
+                }
+                blocks_read = blocks_read.saturating_add(read_stats.blocks_read);
                 Self::merge_best_state(&mut best_state, state, self.read_time_millis);
 
                 self.diagnostics.sst_metrics().record_range_tombstone_scan();
@@ -565,6 +576,10 @@ impl ReadSnapshot {
                 ));
             }
         }
+
+        self.diagnostics
+            .read_amp_metrics()
+            .record_read(ssts_touched, l0_ssts_touched, blocks_read);
 
         let Some(state) = best_state else {
             return Ok(None);

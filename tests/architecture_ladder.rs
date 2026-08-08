@@ -2,6 +2,9 @@ use std::path::{Path, PathBuf};
 
 fn rust_sources_under(relative: &str) -> Vec<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+    if root.is_file() {
+        return vec![root];
+    }
     let mut pending = vec![root];
     let mut sources = Vec::new();
     while let Some(path) = pending.pop() {
@@ -180,5 +183,34 @@ fn should_keep_persistence_formats_below_storage_orchestration() {
     assert!(
         violations.is_empty(),
         "WAL and metadata formats must not depend on storage or runtime orchestration: {violations:#?}"
+    );
+}
+
+#[test]
+fn should_enforce_declared_architecture_boundaries_given_diagnostics_and_cli() {
+    // Arrange
+    let diagnostics_forbidden = [
+        "crate::engine",
+        "crate::metadata",
+        "crate::runtime",
+        "crate::storage",
+        "crate::wal",
+    ];
+    let cli_forbidden = [
+        "cntryl_midge::engine",
+        "cntryl_midge::metadata",
+        "cntryl_midge::runtime",
+        "cntryl_midge::storage",
+        "cntryl_midge::wal",
+    ];
+
+    // Act
+    let mut violations = prohibited_edges_under("src/diagnostics.rs", &diagnostics_forbidden);
+    violations.extend(prohibited_edges_under("src/bin/midge.rs", &cli_forbidden));
+
+    // Assert
+    assert!(
+        violations.is_empty(),
+        "diagnostics and the verify CLI must stay on their declared dependency boundaries: {violations:#?}"
     );
 }

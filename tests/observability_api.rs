@@ -242,6 +242,200 @@ fn should_report_degraded_health_given_obsolete_sst_files_and_json_verification(
 }
 
 #[test]
+fn should_exit_zero_given_healthy_database_when_midge_verify_runs() {
+    // Arrange
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
+    let mut engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+        .expect("open engine");
+    engine
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown healthy engine");
+
+    // Act
+    let output = Command::new(env!("CARGO_BIN_EXE_midge"))
+        .arg("verify")
+        .arg("--json")
+        .arg(db_path)
+        .output()
+        .expect("run midge verify");
+
+    // Assert
+    assert_eq!(output.status.code(), Some(0));
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("parse healthy report");
+    assert_eq!(report["health"], "Healthy");
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn should_emit_json_error_object_given_verify_failure_when_json_flag_requested() {
+    // Arrange
+    let temp_dir = TempDir::new().expect("temp dir");
+    let missing_path = temp_dir.path().join("missing-db");
+
+    // Act
+    let output = Command::new(env!("CARGO_BIN_EXE_midge"))
+        .arg("verify")
+        .arg("--json")
+        .arg(&missing_path)
+        .output()
+        .expect("run midge verify");
+
+    // Assert
+    assert_eq!(output.status.code(), Some(3));
+    let error: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("parse structured error");
+    assert_eq!(error["status"], "error");
+    assert_eq!(error["error_kind"], "storage");
+    assert!(
+        error["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("does not exist")),
+        "unexpected structured error: {error}"
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn should_exit_three_given_inaccessible_storage_when_midge_verify_runs() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Arrange
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
+    let mut engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+        .expect("open engine");
+    engine
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown healthy engine");
+    let marker_path = db_path.join("FORMAT");
+    let original_permissions = std::fs::metadata(&marker_path)
+        .expect("FORMAT metadata")
+        .permissions();
+    let mut unreadable_permissions = original_permissions.clone();
+    unreadable_permissions.set_mode(0o000);
+    std::fs::set_permissions(&marker_path, unreadable_permissions).expect("make FORMAT unreadable");
+
+    // Act
+    let output = Command::new(env!("CARGO_BIN_EXE_midge"))
+        .arg("verify")
+        .arg("--json")
+        .arg(db_path)
+        .output()
+        .expect("run midge verify");
+    std::fs::set_permissions(&marker_path, original_permissions).expect("restore FORMAT access");
+
+    // Assert
+    assert_eq!(output.status.code(), Some(3));
+    let error: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("parse inaccessible-storage error");
+    assert_eq!(error["status"], "error");
+    assert_eq!(error["error_kind"], "storage");
+    assert!(
+        error["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("inaccessible")),
+        "unexpected inaccessible-storage error: {error}"
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn should_report_usage_error_given_missing_db_path_when_verify_invoked() {
+    // Arrange
+
+    // Act
+    let output = Command::new(env!("CARGO_BIN_EXE_midge"))
+        .arg("verify")
+        .arg("--json")
+        .output()
+        .expect("run midge verify without path");
+
+    // Assert
+    assert_eq!(output.status.code(), Some(2));
+    let error: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("parse structured usage error");
+    assert_eq!(error["status"], "error");
+    assert_eq!(error["error_kind"], "usage");
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn should_treat_unrecognized_flag_as_path_given_typoed_json_flag_when_verify_invoked() {
+    // Arrange
+
+    // Act
+    let output = Command::new(env!("CARGO_BIN_EXE_midge"))
+        .arg("verify")
+        .arg("--Json")
+        .output()
+        .expect("run midge verify with unknown flag");
+
+    // Assert
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
+    assert!(
+        stderr.contains("unknown flag '--Json'"),
+        "unexpected usage error: {stderr}"
+    );
+    assert!(
+        !stderr.contains("FORMAT"),
+        "unknown flags must not be treated as storage paths: {stderr}"
+    );
+}
+
+#[test]
+fn should_exit_four_given_corrupt_database_when_midge_verify_runs() {
+    // Arrange
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
+    let mut engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+        .expect("open engine");
+    let default_cf = engine
+        .get_column_family("default")
+        .expect("default column family");
+    let mut tx = engine
+        .begin_tx(default_cf.id(), TransactionMode::ReadWrite)
+        .expect("begin write");
+    tx.put(b"corrupt-me".to_vec(), b"value".to_vec(), None)
+        .expect("put value");
+    tx.commit(WriteOptions::sync()).expect("commit value");
+    engine.flush_cf(&default_cf).expect("flush value");
+    engine
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown before corruption");
+    let sst_path = std::fs::read_dir(db_path.join("sst"))
+        .expect("list SST directory")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|extension| extension == "sst"))
+        .expect("flushed SST");
+    let mut bytes = std::fs::read(&sst_path).expect("read SST");
+    let last = bytes.last_mut().expect("non-empty SST");
+    *last ^= 0x01;
+    std::fs::write(&sst_path, bytes).expect("write corrupt SST");
+
+    // Act
+    let output = Command::new(env!("CARGO_BIN_EXE_midge"))
+        .arg("verify")
+        .arg("--json")
+        .arg(db_path)
+        .output()
+        .expect("run midge verify");
+
+    // Assert
+    assert_eq!(output.status.code(), Some(4));
+    let error: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("parse corruption error");
+    assert_eq!(error["status"], "error");
+    assert_eq!(error["error_kind"], "corruption");
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
 fn should_ignore_stale_sst_temp_files_on_reopen() {
     // Arrange
     let temp_dir = TempDir::new().expect("temp dir");

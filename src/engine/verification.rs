@@ -83,15 +83,25 @@ fn verify_manifest_sst(
     Ok((stats.size_bytes, stats.data_blocks))
 }
 
+fn verification_stage_error(context: &str, error: MidgeError) -> MidgeError {
+    match error {
+        error @ (MidgeError::Io(_)
+        | MidgeError::NotFound
+        | MidgeError::InvalidPath
+        | MidgeError::Corruption(_)
+        | MidgeError::CompatibilityError(_)) => error,
+        other => MidgeError::RecoveryFailed(format!("{context}: {other}")),
+    }
+}
+
 pub(super) fn verify_storage_path(
     db_path: &Path,
     runtime_health: Option<EngineHealth>,
 ) -> MidgeResult<StorageVerificationReport> {
     crate::metadata::validate_format_marker(db_path)?;
 
-    let fs: Arc<dyn Fs> = Arc::new(crate::io::RealFs::open_existing(db_path).map_err(|error| {
-        MidgeError::RecoveryFailed(format!("failed to open storage read-only: {error}"))
-    })?);
+    let fs: Arc<dyn Fs> =
+        Arc::new(crate::io::RealFs::open_existing(db_path).map_err(MidgeError::from)?);
     let manifest =
         crate::metadata::ManifestPersistence::load_with_fs_and_policy(&fs, RecoveryPolicy::Strict)
             .map_err(MidgeError::RecoveryFailed)?;
@@ -113,9 +123,9 @@ pub(super) fn verify_storage_path(
         &mut std::collections::HashMap::new(),
         crate::wal::recovery::ReplayPolicy::Strict,
     )
-    .map_err(|error| MidgeError::RecoveryFailed(format!("WAL verification failed: {error}")))?;
+    .map_err(|error| verification_stage_error("WAL verification failed", error))?;
     let manifest_epoch = crate::metadata::journal::highest_edit_id_with_fs(&fs)
-        .map_err(|error| MidgeError::RecoveryFailed(format!("manifest epoch failed: {error}")))?
+        .map_err(|error| verification_stage_error("manifest epoch failed", error))?
         .max(manifest.edit_checkpoint_id);
 
     let residue =
