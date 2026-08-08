@@ -1700,6 +1700,72 @@ fn should_remove_remote_compaction_orphan_on_reopen_when_manifest_batch_fails() 
 }
 
 #[test]
+fn should_retain_replaced_remote_compaction_orphan_when_cleanup_proof_is_stale() {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
+    let cloud_options = || {
+        OpenOptions::cloud_simulated(db_path, "test-bucket", "guarded-compaction-cleanup")
+            .background_compaction(false)
+            .build()
+            .expect("build simulated cloud options")
+    };
+    let engine = Engine::open(cloud_options()).expect("open simulated cloud engine");
+    let cf = default_cf(&engine);
+    for batch in 0..4 {
+        let key = format!("guarded-remote-orphan-{batch}");
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin compaction seed");
+        tx.put(key.into_bytes(), b"value".to_vec(), None)
+            .expect("put compaction seed");
+        tx.commit(WriteOptions::cloud_async())
+            .expect("commit compaction seed");
+        engine.flush_cf(&cf).expect("flush compaction seed");
+    }
+    let cloud_root = db_path.join("cloud_store");
+    let initial_remote_files = sst_file_names(&cloud_root);
+    let scenario = fail::FailScenario::setup();
+    fail::cfg(
+        "midge::manifest::inject_no_space_on_compaction_batch_edit",
+        "return",
+    )
+    .expect("configure manifest batch append failure");
+    engine
+        .compact_all()
+        .expect("compact_all returns after manifest batch failure");
+    fail::remove("midge::manifest::inject_no_space_on_compaction_batch_edit");
+    let orphan_names = sst_file_names(&cloud_root)
+        .difference(&initial_remote_files)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(orphan_names.len(), 1);
+    shutdown_engine(engine);
+    let orphan_path = cloud_root.join("sst").join(&orphan_names[0]);
+    let replacement = b"replacement must survive stale cleanup proof".to_vec();
+    let replacement_path = orphan_path.clone();
+    let replacement_for_callback = replacement.clone();
+    fail::cfg_callback("midge::cloud::before_compaction_orphan_delete", move || {
+        std::fs::write(&replacement_path, &replacement_for_callback)
+            .expect("replace remote orphan after proof");
+    })
+    .expect("configure remote replacement race");
+
+    // Act
+    let reopen_result = Engine::open(cloud_options());
+    fail::remove("midge::cloud::before_compaction_orphan_delete");
+    scenario.teardown();
+
+    // Assert
+    assert!(matches!(reopen_result, Err(MidgeError::RecoveryFailed(_))));
+    assert_eq!(
+        std::fs::read(&orphan_path).expect("replacement must remain remote"),
+        replacement
+    );
+}
+
+#[test]
 fn should_remove_remote_compaction_orphan_when_column_family_is_dropped_before_reopen() {
     // Arrange
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");

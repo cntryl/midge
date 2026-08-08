@@ -383,6 +383,47 @@ impl HybridStorage {
         Ok(())
     }
 
+    /// Conditionally delete exactly the remote object represented by a stable
+    /// proof. Startup recovery uses this blocking form before the runtime
+    /// event loop exists; a provider precondition failure is returned so the
+    /// caller can retain the replacement object and fail closed.
+    pub(crate) fn delete_remote_object_guarded_blocking(
+        &self,
+        target: RemoteObjectProof,
+    ) -> Result<(), String> {
+        let delete_headers = crate::storage::cloud::object_match_precondition_headers(
+            &target.metadata.etag,
+            target.metadata.generation.as_deref(),
+        )
+        .ok_or_else(|| {
+            format!(
+                "cannot conditionally delete remote object '{}' without an identity token",
+                target.key
+            )
+        })?;
+        let cloud = Arc::clone(self.cloud_backend_for_key(&target.key));
+        let target_key = target.key;
+
+        // This deterministic boundary proves the provider condition, rather
+        // than a preceding HEAD, closes the proof/delete race.
+        crate::failpoints::fail_point!("midge::cloud::before_compaction_orphan_delete");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud.submit_delete_with_headers(&target_key, delete_headers, tx);
+        match rx.recv_timeout(self.callback_timeout) {
+            Ok(StorageEvent::DeleteComplete { result, .. }) => match result {
+                StorageOutcome::Ok(()) => Ok(()),
+                StorageOutcome::Err(error) => Err(error),
+            },
+            Ok(other) => Err(format!(
+                "unexpected guarded delete response for '{target_key}': {other:?}"
+            )),
+            Err(error) => Err(format!(
+                "guarded delete timed out for '{target_key}': {error}"
+            )),
+        }
+    }
+
     /// Stop admitting cloud prune work and join every outstanding worker.
     ///
     /// Each worker may issue a conditional remote delete, so shutdown must
