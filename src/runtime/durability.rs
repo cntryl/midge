@@ -7,7 +7,7 @@ use crate::common::KeyedGroupCommit;
 #[cfg(test)]
 use crate::types::ReadDurability;
 use std::collections::{BTreeMap, HashMap};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Single `CloudAsync` segment being uploaded
 #[derive(Debug, Clone)]
@@ -264,6 +264,23 @@ impl DurabilityCoordinator {
                     >= self.cloud_runtime_policy.wal_seal.max_flush_delay)
     }
 
+    /// Return the remaining time before a non-empty `CloudAsync` WAL must be
+    /// sealed. The event loop uses this deadline while idle so a sub-threshold
+    /// segment neither spins nor waits for unrelated background maintenance.
+    #[must_use]
+    pub fn cloud_seal_deadline_timeout(&self, pending_writes: usize) -> Option<Duration> {
+        if !self.is_cloud_async || pending_writes == 0 {
+            return None;
+        }
+
+        Some(
+            self.cloud_runtime_policy
+                .wal_seal
+                .max_flush_delay
+                .saturating_sub(self.last_cloud_flush.elapsed()),
+        )
+    }
+
     pub fn mark_cloud_seal_retry_needed(&mut self) {
         self.cloud_seal_retry_needed = true;
     }
@@ -326,5 +343,23 @@ mod tests {
         // Assert
         assert!(matches!(result, Err(message) if message.contains("does not match")));
         assert_eq!(coordinator.cloud_segment_max_sequence(7), Some(70));
+    }
+
+    #[test]
+    fn should_expose_cloud_seal_deadline_only_given_pending_cloud_async_wal() {
+        // Arrange
+        let cloud = cloud_coordinator();
+        let local =
+            DurabilityCoordinator::new(0, false, crate::runtime::CloudRuntimePolicy::default());
+
+        // Act
+        let pending_deadline = cloud.cloud_seal_deadline_timeout(1);
+        let empty_deadline = cloud.cloud_seal_deadline_timeout(0);
+        let local_deadline = local.cloud_seal_deadline_timeout(1);
+
+        // Assert
+        assert!(pending_deadline.is_some());
+        assert_eq!(empty_deadline, None);
+        assert_eq!(local_deadline, None);
     }
 }

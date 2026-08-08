@@ -3001,6 +3001,74 @@ fn should_retry_background_cloud_seal_after_failpoint_before_rotate(
     Ok(())
 }
 
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_retain_upload_obligation_given_failure_after_cloud_wal_rotation(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
+    let _test_guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    let mut event_loop = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let (sequence, deferred) = event_loop.wal_actor.append(
+        &mut event_loop.state,
+        crate::runtime::actors::wal::AppendParams {
+            request_id: 302,
+            cf_id: 0,
+            key: Bytes::from_static(b"post-rotate-failure"),
+            value: Some(Bytes::from_static(b"value")),
+            insert_only: false,
+            ttl_seconds: None,
+        },
+    )?;
+    let segment_id = event_loop.state.wal.current_segment_id;
+    fail::cfg(
+        "midge::cloud::inject_fail_after_wal_rotate_before_enqueue",
+        "return",
+    )
+    .expect("configure post-rotate failpoint");
+
+    // Act
+    let error = event_loop
+        .seal_current_cloud_segment()
+        .expect_err("post-rotate failpoint should interrupt enqueue");
+
+    // Assert
+    assert!(deferred);
+    assert!(matches!(
+        error,
+        crate::common::MidgeError::Internal(message)
+            if message.contains("after WAL rotate before enqueue")
+    ));
+    assert_eq!(
+        event_loop.cloud_wal_upload_backlog.get(&segment_id),
+        Some(&sequence)
+    );
+    assert_eq!(
+        event_loop.durability.cloud_segment_max_sequence(segment_id),
+        Some(sequence),
+        "the rotated segment must occupy the frontier gap before enqueue"
+    );
+    assert_eq!(event_loop.state.wal.pending_writes, 0);
+
+    fail::remove("midge::cloud::inject_fail_after_wal_rotate_before_enqueue");
+    event_loop.drain_cloud_wal_upload_backlog();
+    assert!(!event_loop
+        .cloud_wal_upload_backlog
+        .contains_key(&segment_id));
+    assert_eq!(
+        event_loop
+            .hybrid_storage
+            .as_ref()
+            .map_or(0, |storage| storage.pending_upload_count()),
+        1
+    );
+    drop(scenario);
+    Ok(())
+}
+
 #[test]
 fn should_seal_cloud_wal_with_segment_max_sequence_not_global_sequence(
 ) -> crate::common::MidgeResult<()> {

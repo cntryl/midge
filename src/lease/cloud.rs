@@ -675,7 +675,7 @@ unsafe impl Send for CloudStorageLease {}
 unsafe impl Sync for CloudStorageLease {}
 
 /// Parsed lease document.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct LeaseDocument {
     epoch: Option<u64>,
     holder_id: String,
@@ -836,20 +836,51 @@ fn provider_write_doc(
             // other failure (auth, transport, server error, malformed
             // response) means the outcome is unknown, not that someone else
             // holds the lease.
-            CloudOutcome::Err(error) if error.is_precondition_failed() => {
-                Err(LeaseError::AcquisitionFailed(format!(
-                    "cloud lease conditional write lost a precondition race: {error}"
-                )))
-            }
-            CloudOutcome::Err(error) => Err(LeaseError::IoError(format!(
-                "cloud lease conditional write failed: {error}"
-            ))),
+            CloudOutcome::Err(error) => reconcile_ambiguous_lease_write(
+                cloud,
+                document,
+                error.is_precondition_failed(),
+                format!("cloud lease conditional write failed: {error}"),
+            ),
         },
-        Ok(other) => Err(LeaseError::IoError(format!(
-            "unexpected cloud lease PUT response: {other:?}"
-        ))),
-        Err(error) => Err(LeaseError::IoError(format!(
-            "cloud lease PUT timed out: {error}"
+        Ok(other) => reconcile_ambiguous_lease_write(
+            cloud,
+            document,
+            false,
+            format!("unexpected cloud lease PUT response: {other:?}"),
+        ),
+        Err(error) => reconcile_ambiguous_lease_write(
+            cloud,
+            document,
+            false,
+            format!("cloud lease PUT timed out: {error}"),
+        ),
+    }
+}
+
+fn reconcile_ambiguous_lease_write(
+    cloud: &CloudStorage,
+    expected: &LeaseDocument,
+    response_was_precondition_failure: bool,
+    original_error: String,
+) -> Result<(), LeaseError> {
+    match provider_read_doc(cloud) {
+        Ok(Some(actual)) if actual == *expected => {
+            tracing::info!(
+                holder_id = %expected.holder_id,
+                epoch = ?expected.epoch,
+                "confirmed ambiguous cloud lease write by readback"
+            );
+            Ok(())
+        }
+        Ok(_) if response_was_precondition_failure => {
+            Err(LeaseError::AcquisitionFailed(format!(
+                "cloud lease conditional write lost a precondition race: {original_error}"
+            )))
+        }
+        Ok(_) => Err(LeaseError::IoError(original_error)),
+        Err(read_error) => Err(LeaseError::Indeterminate(format!(
+            "{original_error}; cloud lease readback could not determine whether the write landed: {read_error}"
         ))),
     }
 }
@@ -878,6 +909,7 @@ mod tests {
     struct ScriptedConditionalPutBackend {
         inner: crate::storage::cloud::MockCloudBackend,
         scripted_error: crate::storage::cloud::CloudError,
+        apply_before_error: bool,
     }
 
     impl crate::storage::cloud::CloudBackend for ScriptedConditionalPutBackend {
@@ -892,6 +924,29 @@ mod tests {
                 name.eq_ignore_ascii_case("if-match") || name.eq_ignore_ascii_case("if-none-match")
             });
             if is_conditional {
+                if self.apply_before_error {
+                    let (inner_callback, inner_result) = std::sync::mpsc::channel();
+                    crate::storage::cloud::CloudBackend::submit_put(
+                        &self.inner,
+                        key,
+                        data,
+                        headers,
+                        inner_callback,
+                    );
+                    let applied = inner_result
+                        .recv_timeout(Duration::from_secs(1))
+                        .expect("scripted lease write should complete");
+                    assert!(
+                        matches!(
+                            applied,
+                            crate::storage::cloud::CloudEvent::Put {
+                                result: crate::storage::cloud::CloudOutcome::Ok(()),
+                                ..
+                            }
+                        ),
+                        "scripted backend must apply the conditional write before losing its response"
+                    );
+                }
                 let _ = callback.send(crate::storage::cloud::CloudEvent::Put {
                     key: key.to_string(),
                     result: Err(self.scripted_error.clone()),
@@ -951,6 +1006,26 @@ mod tests {
         let backend = Arc::new(ScriptedConditionalPutBackend {
             inner: crate::storage::cloud::MockCloudBackend::new(),
             scripted_error,
+            apply_before_error: false,
+        });
+        let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
+            backend,
+            "midge".to_string(),
+        ));
+        Arc::new(CloudStorageLease::new_provider_backed(
+            test_config(),
+            temp_cache_path(),
+            cloud,
+        ))
+    }
+
+    fn lease_with_applied_conditional_put_error(
+        scripted_error: crate::storage::cloud::CloudError,
+    ) -> Arc<CloudStorageLease> {
+        let backend = Arc::new(ScriptedConditionalPutBackend {
+            inner: crate::storage::cloud::MockCloudBackend::new(),
+            scripted_error,
+            apply_before_error: true,
         });
         let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
             backend,
@@ -1147,6 +1222,25 @@ mod tests {
             "a genuine conditional-write race is confirmed contention, got: {error:?}"
         );
         assert!(matches!(MidgeError::from(error), MidgeError::LeaseHeld(_)));
+    }
+
+    #[test]
+    fn should_confirm_own_lease_write_by_readback_given_success_response_is_lost() {
+        // Arrange
+        let lease = lease_with_applied_conditional_put_error(
+            crate::storage::cloud::CloudError::ServerError(
+                "503 response lost after apply".to_string(),
+            ),
+        );
+
+        // Act
+        let _guard = Arc::clone(&lease)
+            .try_acquire()
+            .expect("readback should confirm the caller's applied lease document");
+
+        // Assert
+        assert!(lease.epoch() > 0);
+        assert!(lease.acquired.load(Ordering::Acquire));
     }
 
     #[test]

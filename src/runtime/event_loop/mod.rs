@@ -107,6 +107,10 @@ pub struct EventLoop {
     pub(super) loop_debug_wakes: u64,
     pub(super) loop_debug_batch_total: u64,
     pub(super) cloud_acked_wal_segments: BTreeMap<u64, u64>,
+    /// Locally sealed WAL segments that must be admitted to the bounded
+    /// uploader in segment order. Keeping this outside the upload queue lets
+    /// startup recover more obligations than fit in one queue window.
+    pub(super) cloud_wal_upload_backlog: BTreeMap<u64, u64>,
     pub(super) cloud_wal_prune_inflight: HashSet<u64>,
     cloud_wal_prune_retries: HashMap<u64, (u32, Instant)>,
     pub(super) cloud_metadata_cleanup_proofs: HashMap<String, MetadataCleanupProof>,
@@ -284,6 +288,7 @@ impl EventLoop {
             loop_debug_wakes: 0,
             loop_debug_batch_total: 0,
             cloud_acked_wal_segments: config.recovered_cloud_wal_segments.clone(),
+            cloud_wal_upload_backlog: BTreeMap::new(),
             cloud_wal_prune_inflight: HashSet::new(),
             cloud_wal_prune_retries: HashMap::new(),
             cloud_metadata_cleanup_proofs: HashMap::new(),
@@ -338,7 +343,7 @@ impl EventLoop {
                 "cloud WAL recovery obligations installed outside CloudAsync mode".to_string(),
             ));
         }
-        let storage = self.hybrid_storage.clone().ok_or_else(|| {
+        self.hybrid_storage.as_ref().ok_or_else(|| {
             crate::common::MidgeError::RecoveryFailed(
                 "cloud WAL recovery requires hybrid storage".to_string(),
             )
@@ -364,23 +369,19 @@ impl EventLoop {
         if let Some((_, max_sequence)) = initially_durable.last() {
             self.state.wal.cloud_durable_seq = self.state.wal.cloud_durable_seq.max(*max_sequence);
         }
+        for (segment_id, _) in initially_durable {
+            self.remove_cloud_durable_local_wal_segment(segment_id);
+        }
 
         for (&segment_id, &max_sequence) in local_segments {
-            let local_path = self
-                .state
-                .wal_dir
-                .join(crate::wal::segment_file_name(segment_id));
-            storage.enqueue_wal_segment(segment_id, &local_path, max_sequence)?;
-            let resource = crate::wal::cloud_segment_object_key(segment_id);
-            if !self.state.cloud.pending_uploads.contains(&resource) {
-                self.state.cloud.pending_uploads.push(resource);
-            }
+            self.cloud_wal_upload_backlog
+                .insert(segment_id, max_sequence);
         }
 
         if let Some(active_wal) = active_wal {
             self.wal_actor
                 .restore_recovered_cloud_active_wal(&mut self.state, active_wal)?;
-            if self.seal_current_cloud_segment()?.is_none() {
+            if self.seal_recovered_cloud_active_segment()?.is_none() {
                 return Err(crate::common::MidgeError::RecoveryFailed(
                     "recovered active cloud WAL was not sealed for resumed upload".to_string(),
                 ));
@@ -1051,6 +1052,10 @@ impl EventLoop {
             return true;
         }
 
+        if !self.cloud_wal_upload_backlog.is_empty() {
+            return true;
+        }
+
         if self.state.compaction.pending_tasks > 0 {
             return true;
         }
@@ -1081,6 +1086,8 @@ impl EventLoop {
     fn idle_progress_timeout(&self) -> Option<Duration> {
         [
             self.wal_actor.sync_deadline_timeout(),
+            self.durability
+                .cloud_seal_deadline_timeout(self.state.wal.pending_writes),
             self.gc_actor.retry_deadline_timeout(),
             self.state.flush_retry_deadline_timeout(),
             self.flush_actor
@@ -1100,8 +1107,10 @@ impl EventLoop {
         self.drain_flush_worker_results();
         self.sync_batched_wal_if_needed(msg_rx);
         self.maybe_flush_cloud_async_wal();
+        self.drain_cloud_wal_upload_backlog();
         self.tick_hybrid_storage();
         self.drain_hybrid_storage_events();
+        self.drain_cloud_wal_upload_backlog();
         let hybrid_storage = self.hybrid_storage.clone();
         self.gc_actor
             .retry_failed_cloud_deletes_if_due(&mut self.state, hybrid_storage);

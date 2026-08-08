@@ -103,7 +103,10 @@ impl EventLoop {
 }
 
 impl EventLoop {
-    pub(super) fn remove_cloud_durable_local_wal_segment(&mut self, segment_id: u64) {
+    pub(in crate::runtime::event_loop) fn remove_cloud_durable_local_wal_segment(
+        &mut self,
+        segment_id: u64,
+    ) {
         if self.state.is_memory_mode() {
             return;
         }

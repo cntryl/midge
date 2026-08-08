@@ -938,6 +938,54 @@ fn should_fail_strict_recovery_given_conflicting_duplicate_local_wal_aliases() {
 }
 
 #[test]
+fn should_canonicalize_and_remove_matching_legacy_local_wal_alias() {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let cloud_wal_dir = temp_dir.path().join("cloud_store").join("wal");
+    let local_wal_dir = temp_dir.path().join("wal");
+    std::fs::create_dir_all(&cloud_wal_dir).expect("create simulated cloud WAL directory");
+    std::fs::create_dir_all(&local_wal_dir).expect("create local WAL directory");
+    let record = crate::wal::WalRecord::new(
+        crate::wal::WalOpKind::Put,
+        bytes::Bytes::from_static(b"legacy-local"),
+        Some(bytes::Bytes::from_static(b"value")),
+        1,
+        0,
+    );
+    let payload = crate::wal::encoding::encode(&record).expect("encode WAL record");
+    let mut wal_bytes = Vec::new();
+    crate::wal::frame::append_frame(&mut wal_bytes, &payload).expect("frame WAL record");
+    let legacy_path = local_wal_dir.join("1.wal");
+    let canonical_path = local_wal_dir.join(crate::wal::segment_file_name(1));
+    std::fs::write(&legacy_path, &wal_bytes).expect("write legacy local WAL alias");
+    std::fs::write(
+        cloud_wal_dir.join(crate::wal::cloud_segment_file_name(1)),
+        &wal_bytes,
+    )
+    .expect("write matching remote WAL");
+
+    // Act
+    let plan = startup::CloudStartupRecovery::materialize_simulated_cloud_wal_recovery_dir(
+        &cloud_wal_dir,
+        temp_dir.path(),
+        RecoveryPolicy::Strict,
+    )
+    .expect("materialize matching local and remote WAL");
+
+    // Assert
+    assert!(
+        !legacy_path.exists(),
+        "legacy alias must not survive recovery"
+    );
+    assert_eq!(
+        std::fs::read(&canonical_path).expect("read canonical local WAL"),
+        wal_bytes
+    );
+    assert_eq!(plan.remote_segments.get(&1), Some(&1));
+    assert!(plan.local_segments.is_empty());
+}
+
+#[test]
 fn should_fail_strict_cloud_wal_recovery_given_list_budget_exhaustion() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");

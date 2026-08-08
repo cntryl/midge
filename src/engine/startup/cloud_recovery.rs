@@ -1,6 +1,7 @@
 use super::{CloudSstRecoveryProof, CloudStartupRecovery, CloudWalRecoveryPlan};
 use crate::common::{MidgeError, MidgeResult};
 use crate::config::RecoveryPolicy;
+use crate::io::Fs as _;
 use crate::runtime::RuntimeState;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1013,6 +1014,7 @@ impl CloudStartupRecovery {
                 (left_name != target_name, left_name).cmp(&(right_name != target_name, right_name))
             });
             let mut selected: Option<(PathBuf, Vec<u8>, u64)> = None;
+            let mut other_aliases = Vec::new();
             for source_path in source_paths {
                 let local_bytes = match std::fs::read(&source_path) {
                     Ok(bytes) => bytes,
@@ -1023,6 +1025,7 @@ impl CloudStartupRecovery {
                             "skipping unreadable local WAL segment during salvage open"
                         );
                         plan.opened_in_salvage_mode = true;
+                        other_aliases.push(source_path);
                         continue;
                     }
                     Err(error) => {
@@ -1040,6 +1043,7 @@ impl CloudStartupRecovery {
                     &mut plan.opened_in_salvage_mode,
                 )?
                 else {
+                    other_aliases.push(source_path);
                     continue;
                 };
                 if let Some((selected_path, selected_bytes, _)) = &selected {
@@ -1055,6 +1059,7 @@ impl CloudStartupRecovery {
                         plan.opened_in_salvage_mode = true;
                         tracing::warn!(%message, "retaining canonical local WAL alias during salvage open");
                     }
+                    other_aliases.push(source_path);
                     continue;
                 }
                 selected = Some((source_path, local_bytes, max_sequence));
@@ -1062,6 +1067,14 @@ impl CloudStartupRecovery {
             let Some((source_path, local_bytes, max_sequence)) = selected else {
                 continue;
             };
+            let canonical_path = local_wal_dir.join(&target_name);
+            Self::canonicalize_local_wal_aliases(
+                local_wal_dir,
+                &canonical_path,
+                &source_path,
+                &local_bytes,
+                &other_aliases,
+            )?;
             let staged_path = plan.replay_dir.join(&target_name);
             if staged_path.exists() {
                 let cloud_bytes = std::fs::read(&staged_path).map_err(|error| {
@@ -1078,22 +1091,107 @@ impl CloudStartupRecovery {
                 )));
             }
 
-            let canonical_path = local_wal_dir.join(&target_name);
-            if source_path != canonical_path {
-                let local_fs: Arc<dyn crate::io::traits::Fs> =
-                    Arc::new(crate::io::RealFs::new(local_wal_dir)?);
-                crate::io::staging::stage_bytes(
-                    &local_fs,
-                    &crate::io::FsPath::new(format!("{target_name}.recovery.tmp")),
-                    &crate::io::FsPath::new(&target_name),
-                    &local_bytes,
-                    MidgeError::RecoveryFailed,
-                )?;
-            }
             Self::stage_recovery_wal_bytes(staging_fs, &target_name, &local_bytes)?;
             plan.local_segments.insert(segment_id, max_sequence);
         }
         Ok(())
+    }
+
+    fn canonicalize_local_wal_aliases(
+        local_wal_dir: &Path,
+        canonical_path: &Path,
+        selected_path: &Path,
+        selected_bytes: &[u8],
+        other_aliases: &[PathBuf],
+    ) -> MidgeResult<()> {
+        let target_name = canonical_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                MidgeError::RecoveryFailed("canonical WAL path has no UTF-8 filename".to_string())
+            })?;
+        let mut directory_changed = false;
+
+        if selected_path != canonical_path {
+            if canonical_path.exists() {
+                Self::quarantine_local_wal_alias(canonical_path)?;
+            }
+            let local_fs: Arc<dyn crate::io::traits::Fs> =
+                Arc::new(crate::io::RealFs::new(local_wal_dir)?);
+            crate::io::staging::stage_bytes(
+                &local_fs,
+                &crate::io::FsPath::new(format!("{target_name}.recovery.tmp")),
+                &crate::io::FsPath::new(target_name),
+                selected_bytes,
+                MidgeError::RecoveryFailed,
+            )?;
+            directory_changed = true;
+        }
+
+        let mut aliases = other_aliases.to_vec();
+        if selected_path != canonical_path {
+            aliases.push(selected_path.to_path_buf());
+        }
+        for alias in aliases {
+            if alias == canonical_path || !alias.exists() {
+                continue;
+            }
+            let matches_selected =
+                std::fs::read(&alias).is_ok_and(|alias_bytes| alias_bytes == selected_bytes);
+            if matches_selected {
+                std::fs::remove_file(&alias).map_err(|error| {
+                    MidgeError::RecoveryFailed(format!(
+                        "failed to remove redundant local WAL alias '{}': {error}",
+                        alias.display()
+                    ))
+                })?;
+            } else {
+                Self::quarantine_local_wal_alias(&alias)?;
+            }
+            directory_changed = true;
+        }
+
+        if directory_changed {
+            let local_fs = crate::io::RealFs::new(local_wal_dir)?;
+            local_fs
+                .sync_dir(&crate::io::FsPath::new("."), crate::io::Durability::Durable)
+                .map_err(MidgeError::from)?;
+        }
+        Ok(())
+    }
+
+    fn quarantine_local_wal_alias(path: &Path) -> MidgeResult<()> {
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                MidgeError::RecoveryFailed(format!(
+                    "local WAL alias '{}' has no UTF-8 filename",
+                    path.display()
+                ))
+            })?;
+        for suffix in 0_u32..=u32::MAX {
+            let retained_name = if suffix == 0 {
+                format!("{file_name}.salvage-retained")
+            } else {
+                format!("{file_name}.salvage-retained.{suffix}")
+            };
+            let retained_path = path.with_file_name(retained_name);
+            if retained_path.exists() {
+                continue;
+            }
+            return std::fs::rename(path, &retained_path).map_err(|error| {
+                MidgeError::RecoveryFailed(format!(
+                    "failed to quarantine local WAL alias '{}' as '{}': {error}",
+                    path.display(),
+                    retained_path.display()
+                ))
+            });
+        }
+        Err(MidgeError::RecoveryFailed(format!(
+            "could not allocate quarantine name for local WAL alias '{}'",
+            path.display()
+        )))
     }
 
     fn validate_sealed_recovery_wal(
