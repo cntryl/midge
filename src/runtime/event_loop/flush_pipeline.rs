@@ -789,6 +789,55 @@ mod tests {
     }
 
     #[test]
+    fn should_separate_writes_at_freeze_linearization_boundary() -> crate::common::MidgeResult<()> {
+        // Arrange
+        let directory = tempfile::tempdir()?;
+        let (mut event_loop, _hybrid) = event_loop_with_hybrid_storage(&directory)?;
+        event_loop
+            .state
+            .get_cf(0)
+            .expect("default column family")
+            .memtable
+            .put_bytes_with_seq(
+                bytes::Bytes::from_static(b"before"),
+                bytes::Bytes::from_static(b"old"),
+                1,
+                None,
+            )?;
+
+        // Act
+        event_loop
+            .freeze_active_memtable(0)?
+            .expect("freeze non-empty memtable");
+        event_loop
+            .state
+            .get_cf(0)
+            .expect("default column family")
+            .memtable
+            .put_bytes_with_seq(
+                bytes::Bytes::from_static(b"after"),
+                bytes::Bytes::from_static(b"new"),
+                2,
+                None,
+            )?;
+
+        // Assert
+        let cf = event_loop.state.get_cf(0).expect("default column family");
+        let frozen = cf.immutable_memtables.last().expect("frozen memtable");
+        assert_eq!(
+            frozen.get_bytes(b"before")?,
+            Some(bytes::Bytes::from_static(b"old"))
+        );
+        assert_eq!(frozen.get_bytes(b"after")?, None);
+        assert_eq!(cf.memtable.get_bytes(b"before")?, None);
+        assert_eq!(
+            cf.memtable.get_bytes(b"after")?,
+            Some(bytes::Bytes::from_static(b"new"))
+        );
+        Ok(())
+    }
+
+    #[test]
     fn should_release_storage_reservation_when_orphan_build_completion_is_discarded(
     ) -> crate::common::MidgeResult<()> {
         // Arrange

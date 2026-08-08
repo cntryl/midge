@@ -7,6 +7,7 @@ use crate::common::KeyedGroupCommit;
 #[cfg(test)]
 use crate::types::ReadDurability;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Single `CloudAsync` segment being uploaded
@@ -85,6 +86,7 @@ pub struct DurabilityCoordinator {
     is_cloud_async: bool,
 
     cloud_runtime_policy: crate::runtime::CloudRuntimePolicy,
+    waiters_fanned_out: AtomicU64,
 }
 
 impl DurabilityCoordinator {
@@ -101,6 +103,7 @@ impl DurabilityCoordinator {
             cloud_seal_retry_needed: false,
             is_cloud_async,
             cloud_runtime_policy,
+            waiters_fanned_out: AtomicU64::new(0),
         }
     }
 
@@ -141,10 +144,22 @@ impl DurabilityCoordinator {
 
     /// Get all waiters ready for completion at the given key.
     pub fn complete_waiters_at(&self, key: u64) -> Vec<DurabilityWaiter> {
-        self.waiters
+        let completed = self
+            .waiters
             .as_ref()
             .map(|w| w.complete(&key))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        self.waiters_fanned_out.fetch_add(
+            u64::try_from(completed.len()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        completed
+    }
+
+    #[must_use]
+    #[cfg(test)]
+    pub fn waiters_fanned_out(&self) -> u64 {
+        self.waiters_fanned_out.load(Ordering::Relaxed)
     }
 
     /// Drain all pending waiters (used on shutdown or error).
@@ -155,16 +170,36 @@ impl DurabilityCoordinator {
             .unwrap_or_default()
     }
 
+    /// Drain every waiter and realign the coordinator after an external WAL
+    /// generation advanced without the paired checked transition.
+    pub fn drain_all_waiters_and_reset(&self, new_key: u64) -> Vec<DurabilityWaiter> {
+        self.waiters
+            .as_ref()
+            .map(|waiters| waiters.drain_all_and_reset(new_key))
+            .unwrap_or_default()
+    }
+
     /// Check if there are pending waiters.
     pub fn has_pending_waiters(&self) -> bool {
         self.waiters.as_ref().is_some_and(|w| w.pending_len() > 0)
     }
 
     /// Rotate group commit to new key (advance generation/segment).
-    pub fn rotate_to(&self, new_key: u64) {
+    pub fn rotate_from_to(
+        &self,
+        expected_current: u64,
+        new_key: u64,
+    ) -> crate::common::MidgeResult<()> {
         if let Some(waiters) = &self.waiters {
-            let _ = waiters.rotate_to(new_key);
+            waiters
+                .rotate_from_to(&expected_current, new_key)
+                .map_err(|_| {
+                    crate::common::MidgeError::Internal(format!(
+                        "durability generation drift: expected current key {expected_current}"
+                    ))
+                })?;
         }
+        Ok(())
     }
 
     /// Record a `CloudAsync` segment enqueued for upload.
@@ -361,5 +396,44 @@ mod tests {
         assert!(pending_deadline.is_some());
         assert_eq!(empty_deadline, None);
         assert_eq!(local_deadline, None);
+    }
+
+    #[test]
+    fn should_retain_waiter_when_completing_different_generation() {
+        // Arrange
+        let coordinator = cloud_coordinator();
+        coordinator.queue_waiter(DurabilityWaiter::CloudDurability { request_id: 1 });
+        coordinator.rotate_from_to(0, 1).expect("rotate generation");
+
+        // Act
+        let wrong = coordinator.complete_waiters_at(1);
+        let correct = coordinator.complete_waiters_at(0);
+
+        // Assert
+        assert!(wrong.is_empty());
+        assert!(matches!(
+            correct.as_slice(),
+            [DurabilityWaiter::CloudDurability { request_id: 1 }]
+        ));
+        assert_eq!(coordinator.waiters_fanned_out(), 1);
+    }
+
+    #[test]
+    fn should_complete_all_waiters_once_when_generation_seals() {
+        // Arrange
+        let coordinator = cloud_coordinator();
+        coordinator.queue_waiter_for_key(0, DurabilityWaiter::CloudDurability { request_id: 10 });
+        coordinator.queue_waiter(DurabilityWaiter::CloudDurability { request_id: 11 });
+        assert_eq!(coordinator.complete_waiters_at(0).len(), 1);
+        coordinator.queue_waiter_for_key(0, DurabilityWaiter::CloudDurability { request_id: 10 });
+
+        // Act
+        coordinator.rotate_from_to(0, 1).expect("seal generation");
+        let completed = coordinator.complete_waiters_at(0);
+
+        // Assert
+        assert_eq!(completed.len(), 2);
+        assert!(coordinator.complete_waiters_at(0).is_empty());
+        assert_eq!(coordinator.waiters_fanned_out(), 3);
     }
 }

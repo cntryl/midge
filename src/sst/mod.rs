@@ -31,7 +31,7 @@
 //! - **traits**: Reader/Writer/Factory contracts for SST implementations
 //! - **fs**: Filesystem-backed SST implementation (uses `io::Fs` abstraction)
 
-use crate::common::MidgeResult;
+use crate::common::{MidgeError, MidgeResult};
 use crate::memtable::skiplist::{OpType, SkipList};
 use bytes::Bytes;
 use parking_lot::RwLock;
@@ -134,6 +134,11 @@ impl SkipListMemtable {
             range_tombstone_count: std::sync::atomic::AtomicUsize::new(0),
             range_tombstones: RwLock::new(Vec::new()),
         }
+    }
+
+    #[must_use]
+    pub(crate) fn contains_key_sequence(&self, key: &[u8], sequence: u64) -> bool {
+        self.skiplist.contains_sequence(key, sequence)
     }
 
     fn next_seq(&self) -> u64 {
@@ -384,10 +389,18 @@ impl SkipListMemtable {
         expiration: Option<u64>,
     ) -> MidgeResult<()> {
         let size_delta = key.len() + value.len() + 16;
-        self.skiplist
-            .upsert_exp(key, Some(value), seq, expiration, OpType::Put);
         self.size_bytes
-            .fetch_add(size_delta, std::sync::atomic::Ordering::Relaxed);
+            .fetch_add(size_delta, std::sync::atomic::Ordering::Release);
+        if !self
+            .skiplist
+            .upsert_exp(key, Some(value), seq, expiration, OpType::Put)
+        {
+            self.size_bytes
+                .fetch_sub(size_delta, std::sync::atomic::Ordering::Release);
+            return Err(MidgeError::Corruption(format!(
+                "duplicate memtable key/sequence pair at sequence {seq}"
+            )));
+        }
         Ok(())
     }
 
@@ -425,9 +438,15 @@ impl SkipListMemtable {
     /// Returns an error when the underlying memtable cannot record the tombstone.
     pub fn delete_bytes_with_seq(&self, key: Bytes, seq: u64) -> MidgeResult<()> {
         let size_delta = key.len() + 16;
-        self.skiplist.delete(key, seq);
         self.size_bytes
-            .fetch_add(size_delta, std::sync::atomic::Ordering::Relaxed);
+            .fetch_add(size_delta, std::sync::atomic::Ordering::Release);
+        if !self.skiplist.delete(key, seq) {
+            self.size_bytes
+                .fetch_sub(size_delta, std::sync::atomic::Ordering::Release);
+            return Err(MidgeError::Corruption(format!(
+                "duplicate memtable key/sequence pair at sequence {seq}"
+            )));
+        }
         Ok(())
     }
 
@@ -447,6 +466,9 @@ impl SkipListMemtable {
             return Ok(());
         }
 
+        let size_delta = start_key.len() + end_key.len() + 24;
+        self.size_bytes
+            .fetch_add(size_delta, std::sync::atomic::Ordering::Release);
         let mut range_tombstones = self.range_tombstones.write();
         range_tombstones.push(crate::sst::types::RangeTombstone::new(
             start_key.to_vec(),
@@ -459,9 +481,6 @@ impl SkipListMemtable {
         // Keep the estimate bounded by the tombstone itself. The range marker,
         // rather than one point tombstone per currently resident key, is the
         // durable representation.
-        let size_delta = start_key.len() + end_key.len() + 24;
-        self.size_bytes
-            .fetch_add(size_delta, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
@@ -539,9 +558,11 @@ impl Memtable for SkipListMemtable {
 
 #[cfg(test)]
 mod tests {
-    use super::SkipListMemtable;
+    use super::{Memtable, SkipListMemtable};
     use crate::sst::types::KeyState;
+    use crate::MidgeError;
     use bytes::Bytes;
+    use std::sync::Arc;
 
     #[test]
     fn should_format_sst_names_in_lexicographic_sequence_order() {
@@ -630,5 +651,102 @@ mod tests {
             KeyState::Value(value, 10, None, 0) if value == Bytes::from_static(b"value")
         ));
         assert!(matches!(after_delete, KeyState::Tombstone(20)));
+    }
+
+    #[test]
+    fn should_preserve_exact_size_when_duplicate_sequence_rejected() {
+        // Arrange
+        let memtable = SkipListMemtable::new();
+
+        // Act
+        memtable
+            .put_bytes_with_seq(
+                Bytes::from_static(b"key"),
+                Bytes::from_static(b"value"),
+                1,
+                None,
+            )
+            .expect("first put");
+        let after_put = memtable.size_bytes();
+        let duplicate = memtable.put_bytes_with_seq(
+            Bytes::from_static(b"key"),
+            Bytes::from_static(b"other"),
+            1,
+            None,
+        );
+        memtable
+            .delete_bytes_with_seq(Bytes::from_static(b"dead"), 2)
+            .expect("delete");
+        memtable
+            .delete_range_with_seq(b"a", b"z", 3)
+            .expect("range delete");
+
+        // Assert
+        assert_eq!(after_put, 3 + 5 + 16);
+        assert!(matches!(duplicate, Err(MidgeError::Corruption(_))));
+        assert_eq!(
+            memtable.size_bytes(),
+            (3 + 5 + 16) + (4 + 16) + (1 + 1 + 24)
+        );
+    }
+
+    #[test]
+    fn should_grow_accounted_bytes_given_repeated_versions_of_same_key() {
+        // Arrange
+        let memtable = SkipListMemtable::new();
+        let delta = 3 + 1 + 16;
+
+        // Act
+        for sequence in 1..=3 {
+            memtable
+                .put_bytes_with_seq(
+                    Bytes::from_static(b"key"),
+                    Bytes::from_static(b"v"),
+                    sequence,
+                    None,
+                )
+                .expect("version put");
+            assert_eq!(
+                memtable.size_bytes(),
+                delta * usize::try_from(sequence).expect("test sequence fits usize")
+            );
+        }
+
+        // Assert
+        assert_eq!(memtable.size_bytes(), delta * 3);
+    }
+
+    #[test]
+    fn should_never_expose_write_before_its_size_reservation() {
+        // Arrange
+        let memtable = Arc::new(SkipListMemtable::new());
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let writer_memtable = Arc::clone(&memtable);
+        let writer_barrier = Arc::clone(&barrier);
+        let writer = std::thread::spawn(move || {
+            writer_barrier.wait();
+            writer_memtable
+                .put_bytes_with_seq(
+                    Bytes::from_static(b"visible-key"),
+                    Bytes::from_static(b"visible-value"),
+                    1,
+                    None,
+                )
+                .expect("put visible value");
+        });
+
+        // Act
+        barrier.wait();
+        while memtable
+            .get_bytes_at_seq(b"visible-key", u64::MAX)
+            .expect("read memtable")
+            .is_none()
+        {
+            std::hint::spin_loop();
+        }
+
+        // Assert
+        assert!(memtable.size_bytes() >= b"visible-key".len() + b"visible-value".len() + 16);
+        writer.join().expect("join writer");
     }
 }

@@ -28,7 +28,6 @@ const LATENCY_SAMPLE_REPEATS: usize = 16;
 const READ_ONLY_BEGIN_TX_SAMPLE_REPEATS: usize = 64;
 const READ_ONLY_BEGIN_TX_SAMPLE_COUNT: usize = 12;
 const READ_ONLY_BEGIN_TX_WARMUP_SAMPLES: usize = 8;
-const MAX_DIRECT_SUBMIT_FOLLOWER_WAIT_US: f64 = 1.0;
 const MIN_AVG_TXN_RECORDS_PER_APPEND: f64 = 7.0;
 
 type LatencyClientWorkload = Vec<(Vec<u8>, Vec<u8>)>;
@@ -123,9 +122,7 @@ struct CommitTimingTotals {
     succeeded: u64,
     commit_total_ns: u64,
     submit_apply_transaction_ns: u64,
-    write_group_leader_collect_ns: u64,
-    write_group_runtime_apply_ns: u64,
-    write_group_follower_wait_ns: u64,
+    runtime_apply_ns: u64,
     durability_finalize_ns: u64,
     unregister_snapshot_ns: u64,
     commit_latency_us: CommitLatencyDistribution,
@@ -146,15 +143,9 @@ impl CommitTimingTotals {
             totals.submit_apply_transaction_ns = totals
                 .submit_apply_transaction_ns
                 .saturating_add(sample.submit_apply_transaction_ns);
-            totals.write_group_leader_collect_ns = totals
-                .write_group_leader_collect_ns
-                .saturating_add(sample.write_group_leader_collect_ns);
-            totals.write_group_runtime_apply_ns = totals
-                .write_group_runtime_apply_ns
-                .saturating_add(sample.write_group_runtime_apply_ns);
-            totals.write_group_follower_wait_ns = totals
-                .write_group_follower_wait_ns
-                .saturating_add(sample.write_group_follower_wait_ns);
+            totals.runtime_apply_ns = totals
+                .runtime_apply_ns
+                .saturating_add(sample.runtime_apply_ns);
             totals.durability_finalize_ns = totals
                 .durability_finalize_ns
                 .saturating_add(sample.durability_finalize_ns);
@@ -186,9 +177,7 @@ struct TransactionLatencyBreakdown {
     commit_p99_us: u64,
     commit_max_us: u64,
     submit_apply_transaction_us: f64,
-    write_group_leader_collect_us: f64,
-    write_group_runtime_apply_us: f64,
-    write_group_follower_wait_us: f64,
+    runtime_apply_us: f64,
     submit_apply_other_us: f64,
     durability_finalize_us: f64,
     unregister_snapshot_us: f64,
@@ -203,18 +192,7 @@ impl TransactionLatencyBreakdown {
         let mut dominant = ("begin_tx", self.begin_tx_us);
         for candidate in [
             ("put", self.put_us),
-            (
-                "write_group_leader_collect",
-                self.write_group_leader_collect_us,
-            ),
-            (
-                "write_group_runtime_apply",
-                self.write_group_runtime_apply_us,
-            ),
-            (
-                "write_group_follower_wait",
-                self.write_group_follower_wait_us,
-            ),
+            ("runtime_apply", self.runtime_apply_us),
             ("submit_apply_other", self.submit_apply_other_us),
             ("durability_finalize", self.durability_finalize_us),
             ("unregister_snapshot", self.unregister_snapshot_us),
@@ -306,7 +284,7 @@ fn run_transaction_coalescing_signal(
         .expect("get starting runtime metrics");
     // The signal measures WAL submission coalescing, not snapshot-acquisition
     // scheduling. Coordinate clients immediately before commit so every
-    // transaction is already prepared when the write-group collector runs.
+    // transaction is already prepared when the runtime drain window opens.
     let commit_barrier = Arc::new(Barrier::new(COALESCING_CLIENTS));
     let mut handles = Vec::with_capacity(COALESCING_CLIENTS);
 
@@ -470,23 +448,8 @@ fn latency_breakdown_from_totals(
         commit_totals.submit_apply_transaction_ns,
         commit_totals.samples,
     );
-    let write_group_leader_collect_us = ns_to_avg_us(
-        commit_totals.write_group_leader_collect_ns,
-        commit_totals.samples,
-    );
-    let write_group_runtime_apply_us = ns_to_avg_us(
-        commit_totals.write_group_runtime_apply_ns,
-        commit_totals.samples,
-    );
-    let write_group_follower_wait_us = ns_to_avg_us(
-        commit_totals.write_group_follower_wait_ns,
-        commit_totals.samples,
-    );
-    let submit_apply_other_us = (submit_apply_transaction_us
-        - write_group_leader_collect_us
-        - write_group_runtime_apply_us
-        - write_group_follower_wait_us)
-        .max(0.0);
+    let runtime_apply_us = ns_to_avg_us(commit_totals.runtime_apply_ns, commit_totals.samples);
+    let submit_apply_other_us = (submit_apply_transaction_us - runtime_apply_us).max(0.0);
     let avg_wal_append_us = ns_to_avg_us(wal_append_ns_total, physical_wal_appends);
 
     TransactionLatencyBreakdown {
@@ -503,9 +466,7 @@ fn latency_breakdown_from_totals(
         commit_p99_us: commit_totals.commit_latency_us.p99_us,
         commit_max_us: commit_totals.commit_latency_us.max_us,
         submit_apply_transaction_us,
-        write_group_leader_collect_us,
-        write_group_runtime_apply_us,
-        write_group_follower_wait_us,
+        runtime_apply_us,
         submit_apply_other_us,
         durability_finalize_us: ns_to_avg_us(
             commit_totals.durability_finalize_ns,
@@ -534,13 +495,8 @@ fn validate_transaction_latency_invariants(breakdown: TransactionLatencyBreakdow
     }
 }
 
-fn transaction_latency_guardrail_violations(breakdown: TransactionLatencyBreakdown) -> u64 {
-    u64::from(
-        matches!(
-            breakdown.kind,
-            LatencyWorkloadKind::SequentialBufferedSingleOp
-        ) && breakdown.write_group_follower_wait_us > MAX_DIRECT_SUBMIT_FOLLOWER_WAIT_US,
-    )
+fn transaction_latency_guardrail_violations(_breakdown: TransactionLatencyBreakdown) -> u64 {
+    0
 }
 
 fn validate_transaction_coalescing_invariants(signal: TransactionCoalescingSignal) {
@@ -583,16 +539,8 @@ fn tag_transaction_latency_breakdown(
         format!("{:.2}", breakdown.submit_apply_transaction_us),
     );
     ctx.parameter(
-        "write_group_leader_collect_us",
-        format!("{:.2}", breakdown.write_group_leader_collect_us),
-    );
-    ctx.parameter(
-        "write_group_runtime_apply_us",
-        format!("{:.2}", breakdown.write_group_runtime_apply_us),
-    );
-    ctx.parameter(
-        "write_group_follower_wait_us",
-        format!("{:.2}", breakdown.write_group_follower_wait_us),
+        "runtime_apply_us",
+        format!("{:.2}", breakdown.runtime_apply_us),
     );
     ctx.parameter(
         "submit_apply_other_us",
@@ -767,9 +715,7 @@ fn read_only_begin_tx(ctx: &mut StressContext) {
         commit_p99_us: 0,
         commit_max_us: 0,
         submit_apply_transaction_us: 0.0,
-        write_group_leader_collect_us: 0.0,
-        write_group_runtime_apply_us: 0.0,
-        write_group_follower_wait_us: 0.0,
+        runtime_apply_us: 0.0,
         submit_apply_other_us: 0.0,
         durability_finalize_us: 0.0,
         unregister_snapshot_us: 0.0,

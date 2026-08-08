@@ -91,7 +91,7 @@ fn should_fail_every_held_request_when_shutdown_drain_restores_deferred_work() {
     // Arrange: this is the exact state produced when a flush completion pops
     // one deferred DDL request into `pending_msg` while shutdown is draining.
     let mut event_loop = create_test_event_loop().expect("create event loop");
-    let request_ids = [8101_u64, 8102, 8103, 8104, 8105, 8106, 8107];
+    let request_ids = [8101_u64, 8102, 8103, 8104, 8105, 8106, 8107, 8108];
     let receivers = request_ids
         .into_iter()
         .map(|request_id| (request_id, event_loop.router.register(request_id)))
@@ -128,8 +128,12 @@ fn should_fail_every_held_request_when_shutdown_drain_restores_deferred_work() {
         .entry(0)
         .or_default()
         .push_back(8106);
-    event_loop.durability.queue_waiter(
+    event_loop.durability.queue_waiter_for_key(
+        0,
         crate::runtime::durability::DurabilityWaiter::CloudDurability { request_id: 8107 },
+    );
+    event_loop.durability.queue_waiter(
+        crate::runtime::durability::DurabilityWaiter::CloudDurability { request_id: 8108 },
     );
     event_loop.shutting_down = true;
 

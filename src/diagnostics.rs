@@ -126,9 +126,7 @@ pub fn read_path_diagnostics_snapshot_for_benchmarks() -> ReadPathDiagnosticsSna
 pub struct TransactionCommitTimingSample {
     pub commit_total_ns: u64,
     pub submit_apply_transaction_ns: u64,
-    pub write_group_leader_collect_ns: u64,
-    pub write_group_runtime_apply_ns: u64,
-    pub write_group_follower_wait_ns: u64,
+    pub runtime_apply_ns: u64,
     pub durability_finalize_ns: u64,
     pub unregister_snapshot_ns: u64,
     pub succeeded: bool,
@@ -137,17 +135,11 @@ pub struct TransactionCommitTimingSample {
 /// Internal per-thread submit timing accumulated while one transaction commits.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct TransactionSubmitTimingSample {
-    pub(crate) leader_collect: u64,
     pub(crate) runtime_apply: u64,
-    pub(crate) follower_wait: u64,
 }
 
 impl TransactionSubmitTimingSample {
-    const ZERO: Self = Self {
-        leader_collect: 0,
-        runtime_apply: 0,
-        follower_wait: 0,
-    };
+    const ZERO: Self = Self { runtime_apply: 0 };
 }
 
 thread_local! {
@@ -214,26 +206,10 @@ pub(crate) fn take_current_transaction_submit_timing() -> TransactionSubmitTimin
     })
 }
 
-pub(crate) fn record_transaction_submit_leader_collect(duration: Duration) {
-    record_current_transaction_submit_timing(|sample| {
-        sample.leader_collect = sample
-            .leader_collect
-            .saturating_add(duration_as_nanos(duration));
-    });
-}
-
 pub(crate) fn record_transaction_submit_runtime_apply(duration: Duration) {
     record_current_transaction_submit_timing(|sample| {
         sample.runtime_apply = sample
             .runtime_apply
-            .saturating_add(duration_as_nanos(duration));
-    });
-}
-
-pub(crate) fn record_transaction_submit_follower_wait(duration: Duration) {
-    record_current_transaction_submit_timing(|sample| {
-        sample.follower_wait = sample
-            .follower_wait
             .saturating_add(duration_as_nanos(duration));
     });
 }

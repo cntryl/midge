@@ -48,8 +48,6 @@ frontier lag, write stalls, and bounded backlog.
 
 Transaction latency and coalescing:
 
-- The buffered direct-submit path should keep
-  `write_group_follower_wait_us <= 1.0` on average.
 - The concurrent coalescing signal should keep
   `avg_txn_records_per_append >= 7.0`.
 - Every measured commit sample must be accounted for exactly once.

@@ -412,6 +412,114 @@ fn should_durably_append_strict_transaction_group_once_before_memtable_apply() -
     Ok(())
 }
 
+#[test]
+fn should_reject_whole_group_before_wal_append_given_duplicate_key_sequence() -> MidgeResult<()> {
+    // Arrange
+    let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
+    let db_path = temp.path().to_path_buf();
+    let mut state = RuntimeState::new(db_path.clone(), false);
+    let mut wal_actor = WalActor::new(
+        db_path.join("wal"),
+        DurabilityPolicy::Batched,
+        BatchConfig::default(),
+        false,
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    let first = prepare_put_transaction(
+        &mut wal_actor,
+        &mut state,
+        120,
+        b"same-key",
+        b"first",
+        DurabilityPolicy::Batched,
+    )?;
+    let mut second = prepare_put_transaction(
+        &mut wal_actor,
+        &mut state,
+        121,
+        b"same-key",
+        b"second",
+        DurabilityPolicy::Batched,
+    )?;
+    let duplicate_sequence = match &first.apply_ops[0] {
+        TransactionApplyOp::Put { sequence, .. } => *sequence,
+        _ => unreachable!("prepared put"),
+    };
+    match &mut second.apply_ops[0] {
+        TransactionApplyOp::Put { sequence, .. } => *sequence = duplicate_sequence,
+        _ => unreachable!("prepared put"),
+    }
+
+    // Act
+    let result = wal_actor.append_prepared_transactions(&mut state, vec![first, second]);
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::Corruption(_))));
+    assert_eq!(wal_actor.append_calls(), 0);
+    assert!(state
+        .get_cf(0)
+        .expect("default column family")
+        .memtable
+        .iter_all(u64::MAX)
+        .is_empty());
+    Ok(())
+}
+
+#[test]
+fn should_reject_whole_group_before_wal_append_given_cf_missing_after_prepare() -> MidgeResult<()> {
+    // Arrange
+    let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
+    let db_path = temp.path().to_path_buf();
+    let mut state = RuntimeState::new(db_path.clone(), false);
+    let mut wal_actor = WalActor::new(
+        db_path.join("wal"),
+        DurabilityPolicy::Batched,
+        BatchConfig::default(),
+        false,
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    let prepared = prepare_put_transaction(
+        &mut wal_actor,
+        &mut state,
+        122,
+        b"must-not-apply",
+        b"value",
+        DurabilityPolicy::Batched,
+    )?;
+    state.column_families.remove(&0);
+
+    // Act
+    let result = wal_actor.append_prepared_transactions(&mut state, vec![prepared]);
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::InvalidArgument(_))));
+    assert_eq!(wal_actor.append_calls(), 0);
+    Ok(())
+}
+
+#[test]
+fn should_fail_loudly_given_column_family_missing_at_direct_memtable_apply() {
+    // Arrange
+    let mut state = RuntimeState::new(PathBuf::from("/tmp/missing-cf-apply"), true);
+
+    // Act
+    let point = WalActor::apply_to_memtable(
+        &mut state,
+        1,
+        99,
+        Bytes::from_static(b"key"),
+        Some(Bytes::from_static(b"value")),
+        None,
+    );
+    let range = WalActor::apply_delete_range_to_memtable(&mut state, 2, 99, b"a", b"z");
+
+    // Assert
+    assert!(matches!(point, Err(MidgeError::Internal(_))));
+    assert!(matches!(range, Err(MidgeError::Internal(_))));
+}
+
 #[cfg(feature = "failpoints")]
 #[test]
 fn should_apply_no_strict_group_member_when_shared_sync_fails() -> MidgeResult<()> {

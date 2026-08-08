@@ -125,9 +125,7 @@ impl CommitTiming {
         if let (Some(timing), Some(started_at)) = (timing.as_mut(), started_at) {
             let submit_timing = crate::diagnostics::take_current_transaction_submit_timing();
             timing.sample.submit_apply_transaction_ns = duration_as_nanos(started_at.elapsed());
-            timing.sample.write_group_leader_collect_ns = submit_timing.leader_collect;
-            timing.sample.write_group_runtime_apply_ns = submit_timing.runtime_apply;
-            timing.sample.write_group_follower_wait_ns = submit_timing.follower_wait;
+            timing.sample.runtime_apply_ns = submit_timing.runtime_apply;
         }
     }
 

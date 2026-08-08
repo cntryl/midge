@@ -148,6 +148,12 @@ impl WalActor {
             return Ok(Vec::new());
         }
 
+        let apply_ops = prepared_transactions
+            .iter()
+            .flat_map(|prepared| prepared.apply_ops.iter())
+            .collect::<Vec<_>>();
+        Self::preflight_prepared_transaction_ops(state, &apply_ops)?;
+
         self.append_prepared_transaction_batches(state, &prepared_transactions)?;
         let strict_group = prepared_transactions
             .iter()
@@ -179,13 +185,13 @@ impl WalActor {
                     sequence_plan.begin_seq,
                 )?;
             }
-            Self::apply_transaction_ops(
+            Self::apply_prevalidated_transaction_ops(
                 state,
                 apply_ops,
                 effective_durability,
                 last_sequence,
                 apply_op_count,
-            )?;
+            );
 
             tracing::trace!(
                 txn_id = sequence_plan.txn_id,
