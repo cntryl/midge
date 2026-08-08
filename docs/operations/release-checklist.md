@@ -23,9 +23,9 @@ Use this checklist before publishing a release candidate or stable release.
 - [ ] `cargo test --test compatibility_fixtures`
 - [ ] `cntryl-tools validate-tests`
 - [ ] default `cargo tree --edges normal` and `cargo check --release` exclude `fail`
-- [ ] `MIDGE_REQUIRE_SQRZL=1`
 - [ ] Sqrzl `/healthz` responds successfully
-- [ ] Sqrzl provider and provider-engine qualification suites pass
+- [ ] Sqrzl provider and provider-engine qualification suites are explicitly
+      selected with `--ignored` and pass (an unreachable emulator fails hard)
 - [ ] every registered fuzz target completed a bounded smoke run
 - [ ] current contract docs present:
       `docs/user-guides/transaction-durability-contract.md`,

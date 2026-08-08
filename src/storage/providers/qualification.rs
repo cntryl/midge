@@ -3,7 +3,7 @@
 //! These tests intentionally assume Sqrzl is already running. Start it with:
 //! `docker compose up -d sqrzl`
 //! then run with the feature enabled, for example:
-//! `cargo test --lib --features sqrzl-tests storage::providers::qualification -- --test-threads=1`
+//! `cargo test --lib --features sqrzl-tests storage::providers::qualification -- --ignored --test-threads=1`
 
 use super::build_cloud_storage;
 use super::CloudProviderConfig;
@@ -16,7 +16,6 @@ const SQRZL_ENDPOINT: &str = "http://127.0.0.1:9000";
 const SQRZL_SOCKET: &str = "127.0.0.1:9000";
 const SQRZL_ACCESS_KEY: &str = "admin";
 const SQRZL_SECRET_KEY: &str = "easy-peasy";
-const REQUIRE_SQRZL_ENV: &str = "MIDGE_REQUIRE_SQRZL";
 const REAL_S3_BUCKET_ENV: &str = "MIDGE_REAL_S3_BUCKET";
 const REAL_S3_ENDPOINT_ENV: &str = "MIDGE_REAL_S3_ENDPOINT";
 const REAL_S3_REGION_ENV: &str = "MIDGE_REAL_S3_REGION";
@@ -25,18 +24,21 @@ const REAL_S3_SECRET_KEY_ENV: &str = "MIDGE_REAL_S3_SECRET_KEY";
 const REAL_S3_PATH_STYLE_ENV: &str = "MIDGE_REAL_S3_PATH_STYLE";
 
 #[test]
+#[ignore = "requires Sqrzl; run the scheduled/manual Cloud Qualification workflow"]
 fn should_run_s3_compatible_contract_against_sqrzl() {
     let provider = CloudProviderConfig::sqrzl_s3("midge-sqrzl-s3");
     run_provider_contract("s3", &provider);
 }
 
 #[test]
+#[ignore = "requires Sqrzl; run the scheduled/manual Cloud Qualification workflow"]
 fn should_run_azure_blob_contract_against_sqrzl() {
     let provider = CloudProviderConfig::sqrzl_azure("midge-sqrzl-azure");
     run_provider_contract("azure", &provider);
 }
 
 #[test]
+#[ignore = "requires Sqrzl; run the scheduled/manual Cloud Qualification workflow"]
 fn should_run_gcs_xml_contract_against_sqrzl() {
     let provider = CloudProviderConfig::sqrzl_gcs("midge-sqrzl-gcs");
     run_provider_contract("gcs", &provider);
@@ -55,9 +57,7 @@ fn should_run_s3_compatible_contract_against_real_provider_if_configured() {
 }
 
 fn run_provider_contract(label: &str, provider: &CloudProviderConfig) {
-    if !sqrzl_available_or_skip(label) {
-        return;
-    }
+    require_sqrzl(label);
 
     ensure_sqrzl_namespace(provider).unwrap_or_else(|error| {
         panic!("{label}: failed to prepare Sqrzl namespace: {error}");
@@ -162,18 +162,11 @@ fn configured_real_s3_provider() -> Option<CloudProviderConfig> {
     )
 }
 
-fn sqrzl_available_or_skip(label: &str) -> bool {
-    if sqrzl_is_available() {
-        return true;
-    }
-
+fn require_sqrzl(label: &str) {
     assert!(
-        !sqrzl_required(),
-        "{label}: Sqrzl is required by {REQUIRE_SQRZL_ENV}, but {SQRZL_ENDPOINT} is unreachable"
+        sqrzl_is_available(),
+        "{label}: Sqrzl qualification was explicitly selected but {SQRZL_ENDPOINT} is unreachable"
     );
-
-    eprintln!("{label}: skipping Sqrzl qualification test because {SQRZL_ENDPOINT} is unreachable");
-    false
 }
 
 fn sqrzl_is_available() -> bool {
@@ -181,19 +174,6 @@ fn sqrzl_is_available() -> bool {
         return false;
     };
     TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
-}
-
-fn sqrzl_required() -> bool {
-    sqrzl_required_from_value(std::env::var(REQUIRE_SQRZL_ENV).ok().as_deref())
-}
-
-fn sqrzl_required_from_value(value: Option<&str>) -> bool {
-    value.is_some_and(|value| {
-        matches!(
-            value.to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
 }
 
 fn ensure_sqrzl_namespace(provider: &CloudProviderConfig) -> Result<(), String> {
@@ -598,32 +578,5 @@ fn delete(backend: &CloudStorage, key: &str) -> Result<(), String> {
             CloudOutcome::Err(error) => Err(error.to_string()),
         },
         other => Err(format!("unexpected DELETE event: {other:?}")),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::sqrzl_required_from_value;
-
-    #[test]
-    fn should_not_require_sqrzl_when_env_is_unset_or_false() {
-        // Arrange
-        // Act
-        // Assert
-        assert!(!sqrzl_required_from_value(None));
-        assert!(!sqrzl_required_from_value(Some("0")));
-        assert!(!sqrzl_required_from_value(Some("false")));
-        assert!(!sqrzl_required_from_value(Some("off")));
-    }
-
-    #[test]
-    fn should_require_sqrzl_for_truthy_env_values() {
-        // Arrange
-        // Act
-        // Assert
-        assert!(sqrzl_required_from_value(Some("1")));
-        assert!(sqrzl_required_from_value(Some("true")));
-        assert!(sqrzl_required_from_value(Some("YES")));
-        assert!(sqrzl_required_from_value(Some("on")));
     }
 }

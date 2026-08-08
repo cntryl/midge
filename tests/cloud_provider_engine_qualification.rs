@@ -13,7 +13,6 @@ const SQRZL_ENDPOINT: &str = "http://127.0.0.1:9000";
 const SQRZL_SOCKET: &str = "127.0.0.1:9000";
 const SQRZL_ACCESS_KEY: &str = "admin";
 const SQRZL_SECRET_KEY: &str = "easy-peasy";
-const REQUIRE_SQRZL_ENV: &str = "MIDGE_REQUIRE_SQRZL";
 const REAL_S3_BUCKET_ENV: &str = "MIDGE_REAL_S3_BUCKET";
 const REAL_S3_ENDPOINT_ENV: &str = "MIDGE_REAL_S3_ENDPOINT";
 const REAL_S3_REGION_ENV: &str = "MIDGE_REAL_S3_REGION";
@@ -22,6 +21,7 @@ const REAL_S3_SECRET_KEY_ENV: &str = "MIDGE_REAL_S3_SECRET_KEY";
 const REAL_S3_PATH_STYLE_ENV: &str = "MIDGE_REAL_S3_PATH_STYLE";
 
 #[test]
+#[ignore = "requires Sqrzl; run the scheduled/manual Cloud Qualification workflow"]
 fn should_recover_engine_from_sqrzl_s3_after_local_cache_loss() {
     // Arrange
     let provider = CloudProviderConfig::sqrzl_s3("midge-sqrzl-engine-s3");
@@ -34,6 +34,7 @@ fn should_recover_engine_from_sqrzl_s3_after_local_cache_loss() {
 }
 
 #[test]
+#[ignore = "requires Sqrzl; run the scheduled/manual Cloud Qualification workflow"]
 fn should_complete_seeded_sqrzl_azure_lease_lifecycle_through_engine() {
     // Arrange
     let provider = CloudProviderConfig::sqrzl_azure("midge-sqrzl-engine-azure");
@@ -54,6 +55,7 @@ fn should_complete_seeded_sqrzl_azure_lease_lifecycle_through_engine() {
 }
 
 #[test]
+#[ignore = "requires Sqrzl; run the scheduled/manual Cloud Qualification workflow"]
 fn should_complete_seeded_sqrzl_gcs_xml_lease_lifecycle_through_engine() {
     // Arrange
     let provider = CloudProviderConfig::sqrzl_gcs("midge-sqrzl-engine-gcs");
@@ -70,11 +72,10 @@ fn should_complete_seeded_sqrzl_gcs_xml_lease_lifecycle_through_engine() {
 }
 
 #[test]
+#[ignore = "requires Sqrzl; run the scheduled/manual Cloud Qualification workflow"]
 fn should_route_two_location_topology_through_sqrzl() {
     // Arrange
-    if !sqrzl_available_or_skip("sqrzl-two-location") {
-        return;
-    }
+    require_sqrzl("sqrzl-two-location");
     let shared = CloudProviderConfig::sqrzl_s3("midge-sqrzl-engine-two-data");
     let control = CloudProviderConfig::sqrzl_s3("midge-sqrzl-engine-two-control");
     let prefix = format!("engine/two/{}/", uuid::Uuid::new_v4());
@@ -93,11 +94,10 @@ fn should_route_two_location_topology_through_sqrzl() {
 }
 
 #[test]
+#[ignore = "requires Sqrzl; run the scheduled/manual Cloud Qualification workflow"]
 fn should_route_three_location_topology_through_sqrzl() {
     // Arrange
-    if !sqrzl_available_or_skip("sqrzl-three-location") {
-        return;
-    }
+    require_sqrzl("sqrzl-three-location");
     let wal = CloudProviderConfig::sqrzl_s3("midge-sqrzl-engine-three-wal");
     let sst = CloudProviderConfig::sqrzl_s3("midge-sqrzl-engine-three-sst");
     let control = CloudProviderConfig::sqrzl_s3("midge-sqrzl-engine-three-control");
@@ -151,8 +151,8 @@ fn engine_recovers_from_provider_after_local_cache_loss(
     prepare_namespace: bool,
     exercise_cloud_data: bool,
 ) {
-    if prepare_namespace && !sqrzl_available_or_skip(label) {
-        return;
+    if prepare_namespace {
+        require_sqrzl(label);
     }
 
     if prepare_namespace {
@@ -398,18 +398,11 @@ fn configured_real_s3_provider() -> Option<CloudProviderConfig> {
     )
 }
 
-fn sqrzl_available_or_skip(label: &str) -> bool {
-    if sqrzl_is_available() {
-        return true;
-    }
-
+fn require_sqrzl(label: &str) {
     assert!(
-        !sqrzl_required(),
-        "{label}: Sqrzl is required by {REQUIRE_SQRZL_ENV}, but {SQRZL_ENDPOINT} is unreachable"
+        sqrzl_is_available(),
+        "{label}: Sqrzl qualification was explicitly selected but {SQRZL_ENDPOINT} is unreachable"
     );
-
-    eprintln!("{label}: skipping Sqrzl qualification test because {SQRZL_ENDPOINT} is unreachable");
-    false
 }
 
 fn sqrzl_is_available() -> bool {
@@ -418,19 +411,6 @@ fn sqrzl_is_available() -> bool {
     };
     TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
 }
-
-fn sqrzl_required() -> bool {
-    std::env::var(REQUIRE_SQRZL_ENV)
-        .ok()
-        .as_deref()
-        .is_some_and(|value| {
-            matches!(
-                value.to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-}
-
 fn ensure_sqrzl_s3_bucket(bucket: &str) -> Result<(), String> {
     signed_s3_request("PUT", &format!("/{bucket}"), b"").map(|_| ())
 }

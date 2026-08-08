@@ -157,8 +157,7 @@ impl DurabilityCoordinator {
     }
 
     #[must_use]
-    #[cfg(test)]
-    pub fn waiters_fanned_out(&self) -> u64 {
+    pub(crate) fn waiters_fanned_out(&self) -> u64 {
         self.waiters_fanned_out.load(Ordering::Relaxed)
     }
 

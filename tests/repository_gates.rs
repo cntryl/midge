@@ -144,7 +144,7 @@ fn should_route_extended_gates_through_triggered_workflows() {
     let docker = read_workflow(".github/workflows/docker.yml");
 
     // Act
-    let follow_up_workflows = [&cloud, &compatibility, &platform];
+    let follow_up_workflows = [&compatibility, &platform];
 
     // Assert
     for workflow in follow_up_workflows {
@@ -153,6 +153,9 @@ fn should_route_extended_gates_through_triggered_workflows() {
         assert!(workflow.contains("workflow_dispatch:"));
         assert!(workflow.contains("schedule:"));
     }
+    assert!(cloud.contains("workflow_dispatch:"));
+    assert!(cloud.contains("schedule:"));
+    assert!(!cloud.contains("workflow_run:"));
     assert!(qualification.contains("pull_request:"));
     assert!(docker.contains("pull_request:"));
 }
@@ -218,10 +221,10 @@ fn should_use_sqrzl_emulator_for_cloud_gates() {
     assert!(compose.contains("  sqrzl:"));
     assert!(cloud.contains("docker compose up -d sqrzl"));
     assert!(cloud.contains("--features sqrzl-tests"));
-    assert!(cloud.contains("MIDGE_REQUIRE_SQRZL: 1"));
+    assert_eq!(cloud.matches("-- --ignored --test-threads=1").count(), 2);
     assert!(cloud.contains("http://127.0.0.1:9001/healthz"));
     assert!(publish.contains("docker compose up -d sqrzl"));
-    assert!(publish.contains("MIDGE_REQUIRE_SQRZL: 1"));
+    assert_eq!(publish.matches("-- --ignored --test-threads=1").count(), 2);
     assert!(manifest.contains("sqrzl-tests = []"));
 }
 

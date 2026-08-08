@@ -24,4 +24,4 @@ pub use options::{
 pub use query::Query;
 pub(crate) use transaction::TransactionInit;
 pub use transaction::{Transaction, TransactionMode};
-pub use write_options::WriteOptions;
+pub use write_options::{DurabilityPolicy, WriteOptions};
