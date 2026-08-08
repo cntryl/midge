@@ -425,10 +425,26 @@ impl RuntimeRecoveryMaterialization {
         db_path: &Path,
         recovery_policy: RecoveryPolicy,
     ) -> MidgeResult<Self> {
+        let remote_cleanup_candidates = materialized
+            .state
+            .non_authoritative_compaction_outputs_for_remote_cleanup()?;
+        let remote_cleanup_names =
+            if let Some(storage) = materialized.runtime_config.hybrid_storage.as_deref() {
+                CloudStartupRecovery::cleanup_non_authoritative_compaction_outputs(
+                    &mut materialized.state,
+                    storage,
+                    &remote_cleanup_candidates,
+                )?
+            } else {
+                std::collections::BTreeSet::new()
+            };
+
         if let Some(cloud_storage) = materialized.cloud_storage_for_restore.as_deref() {
             let sst_proofs = CloudStartupRecovery::cloud_recovery_sst_proofs_for_intent_replay(
                 &materialized.state,
-            );
+            )
+            .into_iter()
+            .filter(|proof| !remote_cleanup_names.contains(&proof.name));
             CloudStartupRecovery::ensure_named_sst_cache_from_cloud_storage(
                 &mut materialized.state,
                 cloud_storage,

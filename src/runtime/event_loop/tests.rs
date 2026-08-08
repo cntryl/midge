@@ -168,6 +168,7 @@ fn should_return_invalid_argument_given_column_family_drop_during_ingest() {
         &msg_rx,
         request_id,
         42,
+        false,
     );
     let response = response_rx
         .recv_timeout(std::time::Duration::from_secs(1))
@@ -258,6 +259,134 @@ fn should_hold_cloud_frontier_at_local_recovery_gap_until_resumed_upload_is_ackn
     });
     assert_eq!(event_loop.state.wal.cloud_durable_seq, 3);
     Ok(())
+}
+
+#[test]
+fn should_leave_later_write_queued_when_destructively_dropping_column_family() {
+    // Arrange
+    let mut event_loop = create_test_local_event_loop().expect("create event loop");
+    let cf_id = event_loop
+        .manifest_actor
+        .create_column_family(&mut event_loop.state, "ordered-drop")
+        .expect("create column family");
+    let drop_request_id = 903;
+    let write_request_id = 904;
+    let drop_response = event_loop.router.register(drop_request_id);
+    let write_response = event_loop.router.register(write_request_id);
+    let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
+    msg_tx
+        .send(RuntimeMsg::ApplyTransaction {
+            request_id: write_request_id,
+            ops: vec![crate::runtime::TransactionOp::Put {
+                cf_id,
+                key: bytes::Bytes::from_static(b"later-key"),
+                value: bytes::Bytes::from_static(b"later-value"),
+                ttl_seconds: None,
+                insert_only: false,
+            }],
+            assertions: Vec::new(),
+            durability_policy: Some(crate::wal::DurabilityPolicy::Batched),
+            start_sequence: None,
+            conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+            response_tx: None,
+        })
+        .expect("queue later write");
+
+    // Act: the DDL WAL barrier must cover only already-processed writes. It
+    // must not pull a message ordered after the destructive drop across that
+    // boundary and then discard it.
+    super::manifest::ManifestCoordinator::drop_column_family(
+        &mut event_loop,
+        &msg_rx,
+        drop_request_id,
+        cf_id,
+        true,
+    );
+
+    // Assert
+    assert!(matches!(
+        drop_response
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("drop response"),
+        RuntimeResponse::Ok { .. }
+    ));
+    assert!(write_response.try_recv().is_err());
+    let later_write = msg_rx.try_recv().expect("later write must remain queued");
+    event_loop.handle_runtime_msg(later_write, &msg_rx);
+    assert!(matches!(
+        write_response
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("later write response"),
+        RuntimeResponse::Error {
+            error: crate::common::MidgeError::InvalidArgument(message),
+            ..
+        } if message.contains("does not exist")
+    ));
+}
+
+#[test]
+fn should_cancel_column_family_waiters_after_drop_commits() {
+    // Arrange
+    let mut event_loop = create_test_local_event_loop().expect("create event loop");
+    let cf_id = event_loop
+        .manifest_actor
+        .create_column_family(&mut event_loop.state, "drop-waiters")
+        .expect("create column family");
+    let flush_request_id = 905;
+    let stall_request_id = 906;
+    let drop_request_id = 907;
+    let flush_response = event_loop.router.register(flush_request_id);
+    let stall_response = event_loop.router.register(stall_request_id);
+    let drop_response = event_loop.router.register(drop_request_id);
+    event_loop.flush_barrier_waiters.insert(
+        cf_id,
+        vec![super::flush::FlushBarrierWaiter {
+            request_id: flush_request_id,
+            frontier: 1,
+        }],
+    );
+    event_loop
+        .write_stall_waiters
+        .insert(stall_request_id, cf_id);
+    event_loop
+        .write_stall_waiter_queues
+        .entry(cf_id)
+        .or_default()
+        .push_back(stall_request_id);
+    let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
+
+    // Act
+    super::manifest::ManifestCoordinator::drop_column_family(
+        &mut event_loop,
+        &msg_rx,
+        drop_request_id,
+        cf_id,
+        false,
+    );
+
+    // Assert
+    assert!(matches!(
+        drop_response
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("drop response"),
+        RuntimeResponse::Ok { .. }
+    ));
+    for response in [flush_response, stall_response] {
+        assert!(matches!(
+            response
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("canceled waiter response"),
+            RuntimeResponse::Error {
+                error: crate::common::MidgeError::InvalidArgument(message),
+                ..
+            } if message.contains("was dropped")
+        ));
+    }
+    assert!(!event_loop.flush_barrier_waiters.contains_key(&cf_id));
+    assert!(!event_loop
+        .write_stall_waiters
+        .contains_key(&stall_request_id));
+    assert!(!event_loop.write_stall_waiter_queues.contains_key(&cf_id));
 }
 
 #[test]
@@ -618,6 +747,34 @@ fn should_apply_l0_compaction_trigger_from_runtime_config() {
         2,
         "runtime config should update the compaction actor L0 file-count trigger"
     );
+}
+
+#[test]
+fn should_mark_persistence_anomaly_when_compaction_metadata_range_is_missing() {
+    // Arrange
+    let mut event_loop = create_test_local_event_loop().expect("create local event loop");
+    event_loop.state.set_compaction_enabled(true);
+    event_loop
+        .state
+        .manifest
+        .files
+        .push(crate::metadata::FileMeta {
+            name: crate::sst::file_name(0, 0, 1),
+            level: 0,
+            cf_id: 0,
+            smallest_key: None,
+            largest_key: None,
+            ..Default::default()
+        });
+
+    // Act
+    let error = event_loop
+        .schedule_one_background_compaction_if_needed("metadata regression")
+        .expect_err("unknown overlap range must stop compaction planning");
+
+    // Assert
+    assert!(matches!(error, crate::common::MidgeError::Corruption(_)));
+    assert!(event_loop.state.persistence_anomaly_detected());
 }
 
 #[test]
@@ -1555,4 +1712,282 @@ fn should_remove_validated_local_copy_when_remote_recovery_segment_is_initially_
     assert!(!local_path.exists());
     assert_eq!(event_loop.state.wal.cloud_durable_seq, 1);
     Ok(())
+}
+
+#[test]
+fn should_defer_column_family_drop_until_compaction_publication_finishes() {
+    // Arrange
+    let mut event_loop = create_test_local_event_loop().expect("create local event loop");
+    let cf_id = event_loop
+        .manifest_actor
+        .create_column_family(&mut event_loop.state, "compacting")
+        .expect("create compacting column family");
+    let input_name = crate::sst::file_name(cf_id, 0, 1);
+    let output_name = crate::sst::file_name(cf_id, 1, 2);
+    let input_bytes = valid_sst_bytes_for_event_loop_test(b"key", b"old", 1);
+    let output_bytes = valid_sst_bytes_for_event_loop_test(b"key", b"new", 2);
+    std::fs::write(event_loop.state.sst_dir.join(&input_name), &input_bytes)
+        .expect("write compaction input");
+    event_loop
+        .state
+        .manifest
+        .files
+        .push(crate::metadata::FileMeta {
+            name: input_name.clone(),
+            level: 0,
+            size_bytes: u64::try_from(input_bytes.len()).expect("input length"),
+            content_crc32c: Some(crc32c::crc32c(&input_bytes)),
+            cf_id,
+            smallest_key: Some(b"key".to_vec()),
+            largest_key: Some(b"key".to_vec()),
+            smallest_seq: Some(1),
+            largest_seq: Some(1),
+            ..Default::default()
+        });
+    event_loop
+        .state
+        .active_compactions
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    event_loop
+        .state
+        .compaction
+        .compacting_ssts
+        .push(input_name.clone());
+    let request_id = 8_155;
+    let response_rx = event_loop.router.register(request_id);
+    let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
+
+    // Act: the DDL arrives while the worker still owns its input set.
+    let outcome = event_loop.handle_runtime_msg(
+        RuntimeMsg::ManifestDropColumnFamily {
+            request_id,
+            cf_id,
+            discard_unflushed: true,
+        },
+        &msg_rx,
+    );
+
+    // Assert: publication must win the authority race before drop snapshots files.
+    assert_eq!(outcome, HandleOutcome::Continue);
+    assert!(response_rx.try_recv().is_err());
+    assert_eq!(event_loop.publication_deferred_messages.len(), 1);
+    assert!(event_loop.state.get_cf(cf_id).is_some());
+
+    // Arrange: simulate the serialized compaction authority switch.
+    std::fs::write(event_loop.state.sst_dir.join(&output_name), &output_bytes)
+        .expect("write compaction output");
+    event_loop
+        .state
+        .manifest
+        .files
+        .retain(|file| file.name != input_name);
+    event_loop
+        .state
+        .manifest
+        .files
+        .push(crate::metadata::FileMeta {
+            name: output_name.clone(),
+            level: 1,
+            size_bytes: u64::try_from(output_bytes.len()).expect("output length"),
+            content_crc32c: Some(crc32c::crc32c(&output_bytes)),
+            cf_id,
+            smallest_key: Some(b"key".to_vec()),
+            largest_key: Some(b"key".to_vec()),
+            smallest_seq: Some(2),
+            largest_seq: Some(2),
+            ..Default::default()
+        });
+    event_loop
+        .state
+        .active_compactions
+        .store(0, std::sync::atomic::Ordering::SeqCst);
+    event_loop.state.compaction.compacting_ssts.clear();
+
+    // Act: once publication is complete, process the deferred drop.
+    event_loop.restore_publication_deferred_message();
+    let deferred = event_loop
+        .pending_msg
+        .take()
+        .expect("restored deferred drop");
+    event_loop.handle_runtime_msg(deferred, &msg_rx);
+
+    // Assert
+    assert!(matches!(
+        response_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("drop response"),
+        RuntimeResponse::Ok { request_id: 8_155 }
+    ));
+    assert!(event_loop.state.get_cf(cf_id).is_none());
+    assert!(event_loop
+        .state
+        .manifest
+        .files
+        .iter()
+        .all(|file| file.cf_id != cf_id));
+    assert!(!event_loop.state.sst_dir.join(output_name).exists());
+}
+
+#[test]
+fn should_restore_deferred_column_family_drop_before_emergent_compaction_followup() {
+    // Arrange
+    let mut event_loop = create_test_local_event_loop().expect("create local event loop");
+    let cf_id = event_loop
+        .manifest_actor
+        .create_column_family(&mut event_loop.state, "drop-before-followup")
+        .expect("create column family");
+    let current_input = crate::sst::file_name(cf_id, 0, 1);
+    let current_output = crate::sst::file_name(cf_id, 1, 10);
+    for (name, key, sequence) in
+        std::iter::once((current_input.clone(), b'a', 1_u64)).chain((2_u8..=5).map(|index| {
+            (
+                crate::sst::file_name(cf_id, 0, u64::from(index)),
+                b'a'.saturating_add(index),
+                u64::from(index),
+            )
+        }))
+    {
+        let bytes = valid_sst_bytes_for_event_loop_test(&[key], b"input", sequence);
+        std::fs::write(event_loop.state.sst_dir.join(&name), &bytes).expect("write input SST");
+        event_loop
+            .state
+            .manifest
+            .files
+            .push(crate::metadata::FileMeta {
+                name,
+                level: 0,
+                size_bytes: u64::try_from(bytes.len()).expect("input length"),
+                content_crc32c: Some(crc32c::crc32c(&bytes)),
+                cf_id,
+                smallest_key: Some(vec![key]),
+                largest_key: Some(vec![key]),
+                smallest_seq: Some(sequence),
+                largest_seq: Some(sequence),
+                ..Default::default()
+            });
+    }
+    let output_bytes = valid_sst_bytes_for_event_loop_test(b"a", b"output", 10);
+    std::fs::write(
+        event_loop.state.sst_dir.join(&current_output),
+        &output_bytes,
+    )
+    .expect("write completed output");
+    event_loop
+        .state
+        .active_compactions
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    event_loop
+        .state
+        .compaction
+        .compacting_ssts
+        .push(current_input.clone());
+    let drop_request_id = 8_157;
+    let drop_response = event_loop.router.register(drop_request_id);
+    let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
+    event_loop.handle_runtime_msg(
+        RuntimeMsg::ManifestDropColumnFamily {
+            request_id: drop_request_id,
+            cf_id,
+            discard_unflushed: false,
+        },
+        &msg_rx,
+    );
+    assert_eq!(event_loop.publication_deferred_messages.len(), 1);
+
+    // Act
+    event_loop.handle_runtime_msg(
+        RuntimeMsg::CompactionComplete {
+            request_id: 8_158,
+            input_ssts: vec![current_input],
+            output_ssts: vec![current_output],
+            cf_id,
+            target_level: 1,
+            succeeded: true,
+        },
+        &msg_rx,
+    );
+
+    // Assert: four L0 files still qualify, but the waiting drop owns the next
+    // serialized publication turn instead of another compaction worker.
+    assert_eq!(
+        event_loop
+            .state
+            .active_compactions
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert_eq!(event_loop.publication_deferred_messages.len(), 1);
+    event_loop.restore_publication_deferred_message();
+    let deferred = event_loop
+        .pending_msg
+        .take()
+        .expect("drop should be restored before compaction followup");
+    event_loop.handle_runtime_msg(deferred, &msg_rx);
+    assert!(matches!(
+        drop_response
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("drop response"),
+        RuntimeResponse::Ok { .. }
+    ));
+    assert!(event_loop.state.get_cf(cf_id).is_none());
+}
+
+#[test]
+fn should_reject_late_compaction_output_after_column_family_is_dropped() {
+    // Arrange
+    let mut event_loop = create_test_local_event_loop().expect("create local event loop");
+    let cf_id = event_loop
+        .manifest_actor
+        .create_column_family(&mut event_loop.state, "already-dropped")
+        .expect("create column family");
+    event_loop
+        .manifest_actor
+        .drop_column_family(&mut event_loop.state, cf_id)
+        .expect("drop column family");
+
+    let input_name = crate::sst::file_name(cf_id, 0, 1);
+    let output_name = crate::sst::file_name(cf_id, 1, 2);
+    let output_bytes = valid_sst_bytes_for_event_loop_test(b"key", b"value", 2);
+    std::fs::write(event_loop.state.sst_dir.join(&output_name), output_bytes)
+        .expect("write late compaction output");
+    event_loop
+        .state
+        .active_compactions
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    event_loop
+        .state
+        .compaction
+        .compacting_ssts
+        .push(input_name.clone());
+    let request_id = 8_156;
+    let response_rx = event_loop.router.register(request_id);
+    let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
+
+    // Act
+    event_loop.handle_runtime_msg(
+        RuntimeMsg::CompactionComplete {
+            request_id,
+            input_ssts: vec![input_name],
+            output_ssts: vec![output_name.clone()],
+            cf_id,
+            target_level: 1,
+            succeeded: true,
+        },
+        &msg_rx,
+    );
+
+    // Assert
+    assert!(matches!(
+        response_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("late completion response"),
+        RuntimeResponse::Error { .. }
+    ));
+    assert!(!event_loop.state.sst_dir.join(&output_name).exists());
+    assert!(event_loop
+        .state
+        .manifest
+        .files
+        .iter()
+        .all(|file| file.name != output_name));
 }

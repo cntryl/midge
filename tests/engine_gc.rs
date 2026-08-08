@@ -24,14 +24,26 @@ use std::time::Duration;
 // HELPER: Extract filesystem path from local storage mode
 // ============================================================================
 
-#[allow(dead_code)]
-fn get_storage_path_if_local(_opts: &MidgeOptions) -> Option<PathBuf> {
-    // For local storage, we need access to the temp directory
-    // This is typically stored in opts during test setup
-    // Since MidgeOptions doesn't expose storage directly, we create a marker file
-    // to track paths. For now, we'll use the opts.data_dir() method if available.
-    // As a fallback for tests, we can check the filesystem during test runs.
-    None
+fn get_storage_path_if_local(opts: &MidgeOptions) -> Option<PathBuf> {
+    match &opts.storage_mode {
+        StorageMode::LocalDisk { db_path } => Some(db_path.clone()),
+        StorageMode::Memory | StorageMode::CloudBacked { .. } => None,
+    }
+}
+
+fn local_sst_names(db_path: &std::path::Path) -> Vec<String> {
+    let mut names = std::fs::read_dir(db_path.join("sst"))
+        .expect("read local SST directory")
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| {
+            std::path::Path::new(name)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("sst"))
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names
 }
 
 // ============================================================================
@@ -40,54 +52,54 @@ fn get_storage_path_if_local(_opts: &MidgeOptions) -> Option<PathBuf> {
 
 #[test]
 fn should_collect_orphaned_sst_files_after_compaction() {
-    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        eprintln!("\n=== GC: Collect Orphaned SST Files (mode: {mode}) ===");
-
+    for_each_storage_mode(&["local"], |mode, opts| {
         // Arrange
         let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
-
-        // Insert 100 keys and flush to create initial SST
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .expect("begin_tx");
-        for i in 0..100 {
-            let key = format!("key_{i:04}");
-            tx.put(key.as_bytes().to_vec(), b"v1".to_vec(), None).ok();
+        for batch in 0..4 {
+            let mut tx = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .expect("begin_tx");
+            for index in 0..25 {
+                let key = format!("key_{batch}_{index:04}");
+                tx.put(key.into_bytes(), b"v1".to_vec(), None)
+                    .expect("put compaction seed");
+            }
+            tx.commit(buffered_write_options(mode)).expect("commit");
+            engine.flush_cf(&cf).expect("flush L0 generation");
         }
-        tx.commit(buffered_write_options(mode)).expect("commit");
-        engine.flush_cf(&cf).expect("flush initial");
-
-        // Insert more keys and flush again to create second L0 SST
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .expect("begin_tx");
-        for i in 100..150 {
-            let key = format!("key_{i:04}");
-            tx.put(key.as_bytes().to_vec(), b"v1".to_vec(), None).ok();
-        }
-        tx.commit(buffered_write_options(mode)).expect("commit");
-        engine.flush_cf(&cf).expect("flush second");
-
-        // Act: Trigger compaction (merge L0 SSTs)
-        engine.compact_all().ok();
+        let db_path = get_storage_path_if_local(&opts).expect("local storage path");
+        let input_names = local_sst_names(&db_path);
+        assert_eq!(input_names.len(), 4);
+        // Act
+        engine.compact_all().expect("compact L0 generations");
 
         // Assert
+        let remaining_names = local_sst_names(&db_path);
+        assert!(!remaining_names.is_empty());
+        let retained_input_count = input_names
+            .iter()
+            .filter(|input_name| db_path.join("sst").join(input_name).exists())
+            .count();
+        assert_eq!(
+            retained_input_count, 1,
+            "the configured three-file batch must reclaim exactly three physical inputs"
+        );
+        assert!(
+            input_names
+                .iter()
+                .any(|input_name| !db_path.join("sst").join(input_name).exists()),
+            "at least one obsolete compaction input must be absent on disk"
+        );
         let tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadOnly)
             .expect("begin_tx");
-        // Verify all keys still readable after compaction
-        for i in 0..150 {
-            let key = format!("key_{i:04}");
-            let val = tx.get(key.as_bytes()).expect("get during compaction");
-            assert!(val.is_some(), "key lost during compaction in mode: {mode}");
-        }
-
-        // For local/cloud modes, verify orphaned SST files are cleaned
-        if mode != "memory" {
-            // In local mode, compaction should mark old SSTs for deletion
-            // Subsequent flush or background GC should remove them
-            eprintln!("âœ“ Compaction completed; orphan SSTs should be deleted");
+        for batch in 0..4 {
+            for index in 0..25 {
+                let key = format!("key_{batch}_{index:04}");
+                let val = tx.get(key.as_bytes()).expect("get during compaction");
+                assert!(val.is_some(), "key lost during compaction in mode: {mode}");
+            }
         }
     });
 }

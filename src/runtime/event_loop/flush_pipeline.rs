@@ -16,6 +16,23 @@ impl EventLoop {
             .is_some_and(|cf| !cf.immutable_flushes.is_empty())
     }
 
+    pub(super) fn column_family_publication_pipeline_active(&self, cf_id: u32) -> bool {
+        if self.column_family_flush_pipeline_active(cf_id) {
+            return true;
+        }
+
+        // Compactions use one global worker slot. Until its completion message
+        // has performed the manifest authority switch, a CF drop cannot know
+        // whether the worker's replacement belongs in its reclamation set.
+        // Deferring all drops during that bounded window is conservative and
+        // avoids relying on mutable input metadata for CF attribution.
+        self.state
+            .active_compactions
+            .load(std::sync::atomic::Ordering::Acquire)
+            > 0
+            || !self.state.compaction.compacting_ssts.is_empty()
+    }
+
     pub(super) fn freeze_active_memtable(
         &mut self,
         cf_id: crate::types::ColumnFamilyId,
@@ -573,6 +590,7 @@ impl EventLoop {
                 crate::runtime::RuntimeMsg::ManifestDropColumnFamily {
                     request_id,
                     cf_id: deferred_cf,
+                    ..
                 } if deferred_cf == cf_id => self.respond(
                     request_id,
                     RuntimeResponse::Error {

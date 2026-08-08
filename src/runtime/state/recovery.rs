@@ -8,6 +8,13 @@ use super::{
     WritePressureState,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompactionManifestState {
+    Prepublication,
+    Published,
+    Partial,
+}
+
 impl RuntimeState {
     pub(super) fn manifest_visible_sequence_floor(manifest: &Manifest) -> u64 {
         let file_max_sequence = manifest
@@ -464,11 +471,39 @@ impl RuntimeState {
         Ok(false)
     }
 
-    fn validate_recovered_sst(&mut self, sst_name: &str) -> MidgeResult<bool> {
+    fn validate_recovered_sst(
+        &mut self,
+        file_meta: &crate::runtime::FileMeta,
+    ) -> MidgeResult<bool> {
+        let sst_name = &file_meta.name;
         let path = self.sst_dir.join(sst_name);
         if !path.exists() {
             return self.handle_recovery_issue(format!(
                 "recovery intent references missing SST '{sst_name}'"
+            ));
+        }
+
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return self.handle_recovery_issue(format!(
+                    "recovery intent could not read SST '{sst_name}': {error}"
+                ));
+            }
+        };
+        if file_meta.size_bytes != 0
+            && u64::try_from(bytes.len()).unwrap_or(u64::MAX) != file_meta.size_bytes
+        {
+            return self.handle_recovery_issue(format!(
+                "recovery intent SST '{sst_name}' size does not match its publication proof"
+            ));
+        }
+        if file_meta
+            .content_crc32c
+            .is_some_and(|expected| crc32c::crc32c(&bytes) != expected)
+        {
+            return self.handle_recovery_issue(format!(
+                "recovery intent SST '{sst_name}' checksum does not match its publication proof"
             ));
         }
 
@@ -518,7 +553,7 @@ impl RuntimeState {
             PublicationPhase::OutputDurable => {
                 let path = self.sst_dir.join(&file_meta.name);
                 if path.exists() {
-                    if !self.validate_recovered_sst(&file_meta.name)? {
+                    if !self.validate_recovered_sst(file_meta)? {
                         return Ok(false);
                     }
                     self.delete_sst_if_exists(&file_meta.name)?;
@@ -535,7 +570,7 @@ impl RuntimeState {
                 Ok(false)
             }
             PublicationPhase::ManifestPublished => {
-                if !self.validate_recovered_sst(&file_meta.name)? {
+                if !self.validate_recovered_sst(file_meta)? {
                     return Ok(false);
                 }
 
@@ -556,32 +591,297 @@ impl RuntimeState {
         removed: &[String],
         added: &[crate::runtime::FileMeta],
     ) -> MidgeResult<bool> {
+        if removed.is_empty() {
+            return self
+                .handle_recovery_issue("compaction publication intent has no inputs".to_string());
+        }
+
+        let manifest_state = self.compaction_manifest_state(removed, added);
+        match (phase, manifest_state) {
+            (PublicationPhase::OutputDurable, CompactionManifestState::Prepublication) => {
+                for file_meta in added {
+                    let path = self.sst_dir.join(&file_meta.name);
+                    if !path.exists() {
+                        continue;
+                    }
+                    if !self.validate_recovered_sst(file_meta)? {
+                        return Ok(false);
+                    }
+                    self.delete_sst_if_exists(&file_meta.name)?;
+                }
+                tracing::info!(
+                    removed_count = removed.len(),
+                    added_count = added.len(),
+                    "rolled back output-durable compaction before manifest publication"
+                );
+                Ok(false)
+            }
+            (
+                PublicationPhase::OutputDurable | PublicationPhase::ManifestPublished,
+                CompactionManifestState::Published,
+            ) => {
+                for file_meta in added {
+                    if !self.validate_recovered_sst(file_meta)? {
+                        return Ok(false);
+                    }
+                }
+                for sst_name in removed {
+                    self.delete_sst_if_exists(sst_name)?;
+                }
+                Ok(false)
+            }
+            (PublicationPhase::ManifestPublished, CompactionManifestState::Prepublication) => {
+                for file_meta in added {
+                    if !self.validate_recovered_sst(file_meta)? {
+                        return Ok(false);
+                    }
+                }
+                self.append_manifest_compaction_batch(removed, added)?;
+                let manifest_changed = self.apply_compaction_to_manifest(removed, added);
+                for sst_name in removed {
+                    self.delete_sst_if_exists(sst_name)?;
+                }
+                tracing::info!(
+                    removed_count = removed.len(),
+                    added_count = added.len(),
+                    "replayed manifest-published compaction into manifest"
+                );
+                Ok(manifest_changed)
+            }
+            (_, CompactionManifestState::Partial) => self.handle_recovery_issue(format!(
+                "compaction publication intent has partial manifest visibility (phase={phase:?}, removed={removed:?})"
+            )),
+        }
+    }
+
+    fn compaction_output_is_superseded_by_published_retry(
+        &self,
+        current_index: usize,
+        cf_id: crate::types::ColumnFamilyId,
+        removed: &[String],
+        added: &[crate::runtime::FileMeta],
+        intents: &[crate::runtime::IntentLogEntry],
+    ) -> bool {
+        intents.iter().enumerate().any(|(index, intent)| {
+            if index == current_index {
+                return false;
+            }
+            let crate::runtime::IntentLogEntry::CompactionPublish {
+                phase: retry_phase,
+                cf_id: retry_cf_id,
+                removed: retry_removed,
+                added: retry_added,
+            } = intent
+            else {
+                return false;
+            };
+
+            *retry_cf_id == cf_id
+                && Self::same_file_name_set(
+                    retry_removed.iter().map(String::as_str),
+                    removed.iter().map(String::as_str),
+                )
+                && !Self::same_file_name_set(
+                    retry_added.iter().map(|meta| meta.name.as_str()),
+                    added.iter().map(|meta| meta.name.as_str()),
+                )
+                && (*retry_phase == PublicationPhase::ManifestPublished
+                    || self.compaction_manifest_state(retry_removed, retry_added)
+                        == CompactionManifestState::Published)
+        })
+    }
+
+    fn compaction_retry_groups_are_unambiguous(
+        &mut self,
+        intents: &[crate::runtime::IntentLogEntry],
+    ) -> MidgeResult<bool> {
+        for (left_index, left) in intents.iter().enumerate() {
+            let crate::runtime::IntentLogEntry::CompactionPublish {
+                phase: left_phase,
+                cf_id: left_cf_id,
+                removed: left_removed,
+                added: left_added,
+            } = left
+            else {
+                continue;
+            };
+            for right in intents.iter().skip(left_index + 1) {
+                let crate::runtime::IntentLogEntry::CompactionPublish {
+                    phase: right_phase,
+                    cf_id: right_cf_id,
+                    removed: right_removed,
+                    added: right_added,
+                } = right
+                else {
+                    continue;
+                };
+                let same_inputs = left_cf_id == right_cf_id
+                    && Self::same_file_name_set(
+                        left_removed.iter().map(String::as_str),
+                        right_removed.iter().map(String::as_str),
+                    );
+                let different_outputs = !Self::same_file_name_set(
+                    left_added.iter().map(|meta| meta.name.as_str()),
+                    right_added.iter().map(|meta| meta.name.as_str()),
+                );
+                if !same_inputs || !different_outputs {
+                    continue;
+                }
+
+                let both_declared_published = *left_phase == PublicationPhase::ManifestPublished
+                    && *right_phase == PublicationPhase::ManifestPublished;
+                let both_manifest_visible = self
+                    .compaction_manifest_state(left_removed, left_added)
+                    == CompactionManifestState::Published
+                    && self.compaction_manifest_state(right_removed, right_added)
+                        == CompactionManifestState::Published;
+                if both_declared_published || both_manifest_visible {
+                    return self.handle_recovery_issue(format!(
+                        "multiple compaction retries claim publication authority for column family {left_cf_id} and inputs {left_removed:?}"
+                    ));
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    fn roll_back_superseded_compaction_output(
+        &mut self,
+        added: &[crate::runtime::FileMeta],
+    ) -> MidgeResult<()> {
         for file_meta in added {
-            if !self.validate_recovered_sst(&file_meta.name)? {
-                return Ok(false);
+            if self.manifest_has_file(&file_meta.name)
+                || !self.sst_dir.join(&file_meta.name).exists()
+            {
+                continue;
+            }
+            if !self.validate_recovered_sst(file_meta)? {
+                return Ok(());
+            }
+            self.delete_sst_if_exists(&file_meta.name)?;
+        }
+        tracing::info!(
+            added_count = added.len(),
+            "rolled back superseded output-durable compaction retry"
+        );
+        Ok(())
+    }
+
+    fn reject_compaction_for_inactive_column_family(
+        &mut self,
+        cf_id: crate::types::ColumnFamilyId,
+        added: &[crate::runtime::FileMeta],
+    ) -> MidgeResult<()> {
+        for file_meta in added {
+            if self.manifest_has_file(&file_meta.name)
+                || !self.sst_dir.join(&file_meta.name).exists()
+            {
+                continue;
+            }
+            if !self.validate_recovered_sst(file_meta)? {
+                return Ok(());
+            }
+            self.delete_sst_if_exists(&file_meta.name)?;
+        }
+        self.mark_persistence_anomaly();
+        tracing::warn!(
+            cf_id,
+            added_count = added.len(),
+            "rejected compaction publication intent for inactive column family"
+        );
+        Ok(())
+    }
+
+    fn compaction_manifest_state(
+        &self,
+        removed: &[String],
+        added: &[crate::runtime::FileMeta],
+    ) -> CompactionManifestState {
+        let all_inputs_present = removed.iter().all(|name| self.manifest_has_file(name));
+        let all_inputs_absent = removed.iter().all(|name| !self.manifest_has_file(name));
+        let all_outputs_present = added
+            .iter()
+            .all(|file_meta| self.manifest_has_file(&file_meta.name));
+        let all_outputs_absent = added
+            .iter()
+            .all(|file_meta| !self.manifest_has_file(&file_meta.name));
+
+        if all_inputs_present && all_outputs_absent {
+            CompactionManifestState::Prepublication
+        } else if all_inputs_absent && all_outputs_present {
+            CompactionManifestState::Published
+        } else {
+            CompactionManifestState::Partial
+        }
+    }
+
+    /// Return durable, non-authoritative compaction outputs that may have
+    /// reached remote storage and must be removed before replay clears their
+    /// intent. The caller validates object identity before deletion.
+    pub(crate) fn non_authoritative_compaction_outputs_for_remote_cleanup(
+        &self,
+    ) -> MidgeResult<Vec<crate::runtime::FileMeta>> {
+        let intents = &self.intent_log;
+        let mut candidates = std::collections::BTreeMap::<String, crate::runtime::FileMeta>::new();
+
+        for (intent_index, intent) in intents.iter().enumerate() {
+            let crate::runtime::IntentLogEntry::CompactionPublish {
+                phase,
+                cf_id,
+                removed,
+                added,
+            } = intent
+            else {
+                continue;
+            };
+            if *phase != PublicationPhase::OutputDurable {
+                continue;
+            }
+            // A committed CF drop removes the compaction inputs from the
+            // manifest before startup can classify this OutputDurable intent.
+            // In that state the usual input-present prepublication proof is
+            // unavailable, but an output absent from the manifest cannot be
+            // authoritative for an inactive, monotonically identified CF.
+            // Keep the object-identity validation at the deletion boundary.
+            let inactive_output_set = self.get_cf(*cf_id).is_none()
+                && added
+                    .iter()
+                    .all(|file_meta| !self.manifest_has_file(&file_meta.name));
+            let non_authoritative = self.compaction_manifest_state(removed, added)
+                == CompactionManifestState::Prepublication
+                || self.compaction_output_is_superseded_by_published_retry(
+                    intent_index,
+                    *cf_id,
+                    removed,
+                    added,
+                    intents,
+                )
+                || inactive_output_set;
+            if !non_authoritative {
+                continue;
+            }
+
+            for file_meta in added {
+                if self.manifest_has_file(&file_meta.name) {
+                    continue;
+                }
+                if let Some(existing) = candidates.get(&file_meta.name) {
+                    if existing.size_bytes != file_meta.size_bytes
+                        || existing.content_crc32c != file_meta.content_crc32c
+                        || existing.cf_id != file_meta.cf_id
+                    {
+                        return Err(MidgeError::Corruption(format!(
+                            "conflicting remote cleanup proofs for compaction output '{}'",
+                            file_meta.name
+                        )));
+                    }
+                } else {
+                    candidates.insert(file_meta.name.clone(), file_meta.clone());
+                }
             }
         }
 
-        let mut manifest_changed = false;
-        if !self.manifest_reflects_compaction(removed, added) {
-            self.append_manifest_compaction_batch(removed, added)?;
-            manifest_changed |= self.apply_compaction_to_manifest(removed, added);
-            tracing::info!(
-                removed_count = removed.len(),
-                added_count = added.len(),
-                "replayed compaction publication into manifest"
-            );
-        }
-
-        if phase == PublicationPhase::ManifestPublished
-            || self.manifest_reflects_compaction(removed, added)
-        {
-            for sst_name in removed {
-                self.delete_sst_if_exists(sst_name)?;
-            }
-        }
-
-        Ok(manifest_changed)
+        Ok(candidates.into_values().collect())
     }
 
     /// Replay intent log to recover incomplete mutations
@@ -607,9 +907,10 @@ impl RuntimeState {
         );
 
         let intents = self.intent_log.clone();
+        let compaction_replay_safe = self.compaction_retry_groups_are_unambiguous(&intents)?;
         let mut manifest_changed = false;
 
-        for intent in &intents {
+        for (intent_index, intent) in intents.iter().enumerate() {
             match intent {
                 crate::runtime::IntentLogEntry::FlushPublish {
                     phase, file_meta, ..
@@ -618,10 +919,35 @@ impl RuntimeState {
                 }
                 crate::runtime::IntentLogEntry::CompactionPublish {
                     phase,
+                    cf_id,
                     removed,
                     added,
-                    ..
                 } => {
+                    if !compaction_replay_safe {
+                        continue;
+                    }
+                    if added.iter().any(|file_meta| file_meta.cf_id != *cf_id) {
+                        let _ = self.handle_recovery_issue(format!(
+                            "compaction publication intent for column family {cf_id} contains output metadata for another family"
+                        ))?;
+                        continue;
+                    }
+                    if self.get_cf(*cf_id).is_none() {
+                        self.reject_compaction_for_inactive_column_family(*cf_id, added)?;
+                        continue;
+                    }
+                    if *phase == PublicationPhase::OutputDurable
+                        && self.compaction_output_is_superseded_by_published_retry(
+                            intent_index,
+                            *cf_id,
+                            removed,
+                            added,
+                            &intents,
+                        )
+                    {
+                        self.roll_back_superseded_compaction_output(added)?;
+                        continue;
+                    }
                     manifest_changed |=
                         self.replay_compaction_publish_intent(*phase, removed, added)?;
                 }

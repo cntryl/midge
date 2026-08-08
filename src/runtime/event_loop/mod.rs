@@ -180,6 +180,15 @@ pub struct EventLoop {
     /// Shared flag from the lease heartbeat. When `false`, the event loop
     /// rejects new write operations with `MidgeError::Fenced`.
     lease_healthy: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// A remote DDL CAS may have committed even when its response and the
+    /// authority re-read both fail. Fence writes/publication until the durable
+    /// prepare can be reconciled instead of accepting work into a stale CF.
+    ddl_authority_ambiguous: bool,
+    /// A compaction manifest authority switch completed, but its publication
+    /// intent could not be advanced or settled. Further compaction could
+    /// consume that output and make restart recovery ambiguous, so compaction
+    /// remains fenced until reopen replays the durable intent.
+    compaction_publication_degraded: bool,
     writer_epoch: u64,
     leader_store: Option<Arc<dyn crate::lease::LeaderStore>>,
 }
@@ -336,6 +345,8 @@ impl EventLoop {
             snapshot_cache: None,
             read_resources,
             lease_healthy: config.lease_healthy.clone(),
+            ddl_authority_ambiguous: false,
+            compaction_publication_degraded: false,
             writer_epoch: config.writer_epoch,
             leader_store: config.leader_store.clone(),
         };
@@ -419,6 +430,12 @@ impl EventLoop {
 
     /// Returns an error if the lease has been lost (heartbeat detected failure).
     fn check_lease_health(&self) -> crate::common::MidgeResult<()> {
+        if self.ddl_authority_ambiguous {
+            return Err(crate::common::MidgeError::Fenced(
+                "DDL authority is ambiguous; refusing writes until prepared DDL is reconciled"
+                    .into(),
+            ));
+        }
         if let Some(healthy) = &self.lease_healthy {
             if !healthy.load(std::sync::atomic::Ordering::Acquire) {
                 return Err(crate::common::MidgeError::Fenced(
@@ -557,6 +574,12 @@ impl EventLoop {
         &mut self,
         plan: crate::compaction::CompactionPlan,
     ) -> crate::common::MidgeResult<()> {
+        if self.compaction_publication_degraded {
+            return Err(crate::common::MidgeError::Fenced(
+                "compaction publication is unsettled; refusing another compaction until recovery"
+                    .into(),
+            ));
+        }
         let plan = self.prepare_compaction_plan_for_launch(plan)?;
 
         self.compaction_actor
@@ -574,6 +597,11 @@ impl EventLoop {
         &mut self,
         operation: &str,
     ) -> crate::common::MidgeResult<bool> {
+        if self.ddl_authority_ambiguous {
+            return Err(crate::common::MidgeError::Fenced(
+                "DDL authority is ambiguous; refusing compaction until reconciliation".into(),
+            ));
+        }
         let timed_out = self.state.warn_timed_out_snapshots();
         if timed_out > 0 {
             tracing::warn!(
@@ -607,7 +635,8 @@ impl EventLoop {
             ));
         }
 
-        let Some(plan) = self.compaction_actor.check_compaction(&self.state) else {
+        let planned = self.compaction_actor.check_compaction(&self.state);
+        let Some(plan) = planned.inspect_err(|_| self.state.mark_persistence_anomaly())? else {
             return Ok(false);
         };
 
@@ -1229,7 +1258,7 @@ impl EventLoop {
                 .front()
                 .is_some_and(|message| match message {
                     RuntimeMsg::ManifestDropColumnFamily { cf_id, .. } => {
-                        !self.column_family_flush_pipeline_active(*cf_id)
+                        !self.column_family_publication_pipeline_active(*cf_id)
                     }
                     _ => true,
                 });

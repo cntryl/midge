@@ -123,8 +123,9 @@ fn should_replay_wal_until_manifest_sequence_given_manifest_fsynced_when_recover
                 let tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadOnly)
                     .expect("begin_tx");
-                assert!(
-                    tx.get(key.as_bytes()).expect("get").is_some(),
+                assert_eq!(
+                    tx.get(key.as_bytes()).expect("get"),
+                    Some(bytes::Bytes::from_static(b"value")),
                     "mode: {mode}"
                 );
             }

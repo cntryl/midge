@@ -330,6 +330,10 @@ pub enum RuntimeMsg {
     ManifestDropColumnFamily {
         request_id: u64,
         cf_id: crate::types::ColumnFamilyId,
+        /// Explicitly allow committed data still resident in the active
+        /// memtable to be discarded. Publication workers are still quiesced
+        /// before either safe or destructive drop executes.
+        discard_unflushed: bool,
     },
 
     /// Begin an ingest barrier: prevent new compactions, bump ingest epoch,

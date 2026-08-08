@@ -1,6 +1,6 @@
-#[cfg(feature = "failpoints")]
-use cntryl_midge::MidgeError;
 use cntryl_midge::{Engine, OpenOptions};
+#[cfg(feature = "failpoints")]
+use cntryl_midge::{EngineHealth, MidgeError, TransactionMode, WriteOptions};
 use std::fs;
 use std::path::Path;
 #[cfg(feature = "failpoints")]
@@ -103,12 +103,193 @@ fn should_reconcile_remote_commit_when_local_commit_fails() {
     let first = engine.create_column_family("local-retry");
     fail::remove("midge::ddl::before_local_commit");
     scenario.teardown();
-    let second = engine.create_column_family("local-retry");
+
+    // Assert: remote CAS already committed, so the live runtime adopts that
+    // authority and fences the stale local view until restart reconciliation.
+    assert_eq!(
+        first.expect("remote-authoritative create").name(),
+        "local-retry"
+    );
+    assert_eq!(
+        engine
+            .get_runtime_metrics()
+            .expect("degraded runtime metrics")
+            .health,
+        EngineHealth::Degraded
+    );
+    shutdown(engine);
+    let reopened = open_cloud(temp.path());
+    assert!(reopened.get_column_family("local-retry").is_some());
+    assert_eq!(
+        reopened
+            .get_runtime_metrics()
+            .expect("reconciled runtime metrics")
+            .health,
+        EngineHealth::Healthy
+    );
+    shutdown(reopened);
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_fence_column_family_when_remote_drop_commits_before_local_commit() {
+    // Arrange
+    let _guard = DDL_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("lock");
+    let temp = tempfile::tempdir().expect("temp dir");
+    let engine = open_cloud(temp.path());
+    let cf = engine
+        .create_column_family("remote-drop")
+        .expect("create column family");
+    let scenario = fail::FailScenario::setup();
+    fail::cfg("midge::ddl::before_local_commit", "return")
+        .expect("configure local drop commit failpoint");
+
+    // Act
+    let drop_result = engine.drop_column_family(cf.id());
+    fail::remove("midge::ddl::before_local_commit");
+    scenario.teardown();
 
     // Assert
-    assert!(matches!(first, Err(MidgeError::Internal(_))));
-    assert_eq!(second.expect("reconciled create").name(), "local-retry");
+    assert!(drop_result.is_ok(), "remote authority committed the drop");
+    assert!(engine.get_column_family("remote-drop").is_none());
+    assert_eq!(
+        engine
+            .get_runtime_metrics()
+            .expect("degraded runtime metrics")
+            .health,
+        EngineHealth::Degraded
+    );
     shutdown(engine);
+
+    let reopened = open_cloud(temp.path());
+    assert!(reopened.get_column_family("remote-drop").is_none());
+    assert_eq!(
+        reopened
+            .get_runtime_metrics()
+            .expect("reconciled runtime metrics")
+            .health,
+        EngineHealth::Healthy
+    );
+    shutdown(reopened);
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_fence_column_family_when_remote_drop_cas_response_is_lost() {
+    // Arrange
+    let _guard = DDL_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("lock");
+    let temp = tempfile::tempdir().expect("temp dir");
+    let engine = open_cloud(temp.path());
+    let cf = engine
+        .create_column_family("lost-drop-response")
+        .expect("create column family");
+    let scenario = fail::FailScenario::setup();
+    fail::cfg("midge::ddl::after_remote_cas", "return")
+        .expect("configure lost remote CAS response");
+
+    // Act
+    let drop_result = engine.drop_column_family(cf.id());
+    fail::remove("midge::ddl::after_remote_cas");
+    scenario.teardown();
+
+    // Assert
+    assert!(
+        drop_result.is_ok(),
+        "operation id proves the remote drop committed"
+    );
+    assert!(engine.get_column_family("lost-drop-response").is_none());
+    assert_eq!(
+        engine
+            .get_runtime_metrics()
+            .expect("degraded runtime metrics")
+            .health,
+        EngineHealth::Degraded
+    );
+    shutdown(engine);
+
+    let reopened = open_cloud(temp.path());
+    assert!(reopened.get_column_family("lost-drop-response").is_none());
+    assert_eq!(
+        reopened
+            .get_runtime_metrics()
+            .expect("reconciled runtime metrics")
+            .health,
+        EngineHealth::Healthy
+    );
+    shutdown(reopened);
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_fence_writes_when_remote_drop_authority_cannot_be_resolved() {
+    // Arrange
+    let _guard = DDL_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("lock");
+    let temp = tempfile::tempdir().expect("temp dir");
+    let engine = open_cloud(temp.path());
+    let cf = engine
+        .create_column_family("ambiguous-drop")
+        .expect("create column family");
+    let mut seed = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .expect("begin unflushed seed transaction");
+    seed.put(b"discarded".to_vec(), b"value".to_vec(), None)
+        .expect("buffer unflushed seed");
+    seed.commit(WriteOptions::cloud_async())
+        .expect("commit unflushed seed");
+    let scenario = fail::FailScenario::setup();
+    fail::cfg("midge::ddl::after_remote_cas", "return")
+        .expect("configure lost remote CAS response");
+    fail::cfg(
+        "midge::ddl::before_ambiguous_cas_authority_reread",
+        "return",
+    )
+    .expect("configure authority re-read failure");
+
+    // Act
+    let drop_result = engine.drop_column_family_discarding_unflushed(cf.id());
+    fail::remove("midge::ddl::after_remote_cas");
+    fail::remove("midge::ddl::before_ambiguous_cas_authority_reread");
+    scenario.teardown();
+
+    // Assert: until the durable prepare can be reconciled, the runtime must
+    // not accept a write that a remotely committed drop would erase.
+    assert!(matches!(drop_result, Err(MidgeError::Fenced(_))));
+    assert!(engine.get_column_family("ambiguous-drop").is_some());
+    let mut tx = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .expect("begin transaction against locally visible CF");
+    tx.put(b"must-not-commit".to_vec(), b"value".to_vec(), None)
+        .expect("buffer fenced write");
+    assert!(matches!(
+        tx.commit(WriteOptions::cloud_async()),
+        Err(MidgeError::Fenced(_))
+    ));
+    assert_eq!(
+        engine
+            .get_runtime_metrics()
+            .expect("degraded runtime metrics")
+            .health,
+        EngineHealth::Degraded
+    );
+
+    engine
+        .drop_column_family(cf.id())
+        .expect("safe retry resolves already-committed prepared remote drop");
+    assert!(engine.get_column_family("ambiguous-drop").is_none());
+    shutdown(engine);
+
+    let reopened = open_cloud(temp.path());
+    assert!(reopened.get_column_family("ambiguous-drop").is_none());
+    shutdown(reopened);
 }
 
 #[cfg(feature = "failpoints")]

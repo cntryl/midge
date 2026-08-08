@@ -175,6 +175,7 @@ enum ManifestRoute {
     DropColumnFamily {
         request_id: u64,
         cf_id: crate::types::ColumnFamilyId,
+        discard_unflushed: bool,
     },
 }
 
@@ -688,7 +689,7 @@ impl RuntimeDispatcher {
         msg_rx: &Receiver<RuntimeMsg>,
     ) -> HandleOutcome {
         if let RuntimeMsg::ManifestDropColumnFamily { cf_id, .. } = &msg {
-            if event_loop.column_family_flush_pipeline_active(*cf_id) {
+            if event_loop.column_family_publication_pipeline_active(*cf_id) {
                 event_loop.publication_deferred_messages.push_back(msg);
                 return HandleOutcome::Continue;
             }
@@ -699,10 +700,18 @@ impl RuntimeDispatcher {
                 msg_rx,
                 ManifestRoute::CreateColumnFamily { request_id, name },
             ),
-            RuntimeMsg::ManifestDropColumnFamily { request_id, cf_id } => Self::dispatch_manifest(
+            RuntimeMsg::ManifestDropColumnFamily {
+                request_id,
+                cf_id,
+                discard_unflushed,
+            } => Self::dispatch_manifest(
                 event_loop,
                 msg_rx,
-                ManifestRoute::DropColumnFamily { request_id, cf_id },
+                ManifestRoute::DropColumnFamily {
+                    request_id,
+                    cf_id,
+                    discard_unflushed,
+                },
             ),
             #[cfg(test)]
             RuntimeMsg::ManifestAddSst {
@@ -978,9 +987,17 @@ impl RuntimeDispatcher {
             ManifestRoute::CreateColumnFamily { request_id, name } => {
                 ManifestCoordinator::create_column_family(event_loop, msg_rx, request_id, &name)
             }
-            ManifestRoute::DropColumnFamily { request_id, cf_id } => {
-                ManifestCoordinator::drop_column_family(event_loop, msg_rx, request_id, cf_id)
-            }
+            ManifestRoute::DropColumnFamily {
+                request_id,
+                cf_id,
+                discard_unflushed,
+            } => ManifestCoordinator::drop_column_family(
+                event_loop,
+                msg_rx,
+                request_id,
+                cf_id,
+                discard_unflushed,
+            ),
         }
     }
 

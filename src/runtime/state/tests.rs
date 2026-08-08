@@ -5,6 +5,52 @@ fn isolated_test_db_path() -> PathBuf {
     tempfile::tempdir().expect("temp dir").keep()
 }
 
+fn write_valid_sst_for_recovery_test(
+    state: &RuntimeState,
+    name: &str,
+    level: u32,
+    key: &[u8],
+    sequence: u64,
+) -> crate::runtime::FileMeta {
+    use crate::sst::SstFactory;
+
+    let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
+    let mut writer = factory.create().expect("create recovery test SST");
+    writer
+        .add_with_meta(key, Some(b"value"), sequence, 0, None)
+        .expect("write recovery test entry");
+    let bytes = writer.finish_bytes().expect("finish recovery test SST");
+    std::fs::create_dir_all(&state.sst_dir).expect("create recovery test SST directory");
+    std::fs::write(state.sst_dir.join(name), &bytes).expect("persist recovery test SST");
+
+    crate::runtime::FileMeta {
+        name: name.to_string(),
+        level,
+        size_bytes: u64::try_from(bytes.len()).expect("SST length fits u64"),
+        content_crc32c: Some(crc32c::crc32c(&bytes)),
+        cf_id: 0,
+        smallest_key: Some(key.to_vec()),
+        largest_key: Some(key.to_vec()),
+        smallest_seq: Some(sequence),
+        largest_seq: Some(sequence),
+    }
+}
+
+fn manifest_meta_for_recovery_test(file: &crate::runtime::FileMeta) -> crate::metadata::FileMeta {
+    crate::metadata::FileMeta {
+        name: file.name.clone(),
+        level: file.level,
+        size_bytes: file.size_bytes,
+        content_crc32c: file.content_crc32c,
+        cf_id: file.cf_id,
+        smallest_key: file.smallest_key.clone(),
+        largest_key: file.largest_key.clone(),
+        smallest_seq: file.smallest_seq,
+        largest_seq: file.largest_seq,
+        ..Default::default()
+    }
+}
+
 fn grow_active_memtable(
     state: &mut RuntimeState,
     cf_id: crate::types::ColumnFamilyId,
@@ -782,6 +828,430 @@ fn should_not_mutate_compaction_intent_when_persistence_rejects_output() {
         state.intent_log.is_empty(),
         "failed intent persistence must not mutate in-memory state"
     );
+}
+
+#[test]
+fn should_roll_back_output_durable_compaction_when_manifest_is_still_prepublication() {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create recovery directory");
+    let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
+    let input_name = crate::sst::file_name(0, 0, 1);
+    let output_name = crate::sst::file_name(0, 1, 2);
+    let input = write_valid_sst_for_recovery_test(&state, &input_name, 0, b"input", 1);
+    let output = write_valid_sst_for_recovery_test(&state, &output_name, 1, b"input", 2);
+    state
+        .manifest
+        .files
+        .push(manifest_meta_for_recovery_test(&input));
+    state
+        .append_intent(crate::runtime::IntentLogEntry::CompactionPublish {
+            phase: PublicationPhase::OutputDurable,
+            cf_id: 0,
+            removed: vec![input_name.clone()],
+            added: vec![output],
+        })
+        .expect("persist output-durable intent");
+
+    // Act
+    state.replay_intent_log().expect("replay intent");
+
+    // Assert
+    assert!(state.manifest_has_file(&input_name));
+    assert!(!state.manifest_has_file(&output_name));
+    assert!(state.sst_dir.join(&input_name).exists());
+    assert!(!state.sst_dir.join(&output_name).exists());
+}
+
+#[test]
+fn should_retain_inputs_for_output_durable_remove_only_compaction_after_crash() {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create recovery directory");
+    let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
+    let input_name = crate::sst::file_name(0, 0, 1);
+    let input = write_valid_sst_for_recovery_test(&state, &input_name, 0, b"deleted", 1);
+    state
+        .manifest
+        .files
+        .push(manifest_meta_for_recovery_test(&input));
+    crate::metadata::ManifestPersistence::save(temp_dir.path(), &state.manifest)
+        .expect("persist prepublication manifest");
+    state
+        .append_intent(crate::runtime::IntentLogEntry::CompactionPublish {
+            phase: PublicationPhase::OutputDurable,
+            cf_id: 0,
+            removed: vec![input_name.clone()],
+            added: Vec::new(),
+        })
+        .expect("persist remove-only output intent");
+    drop(state);
+
+    // Act
+    let mut reopened = RuntimeState::try_new(
+        temp_dir.path().to_path_buf(),
+        false,
+        crate::config::RecoveryPolicy::Strict,
+    )
+    .expect("reopen state");
+    reopened.replay_intent_log().expect("replay intent");
+
+    // Assert
+    assert!(reopened.manifest_has_file(&input_name));
+    assert!(reopened.sst_dir.join(input_name).exists());
+}
+
+#[test]
+fn should_publish_remove_only_compaction_after_manifest_phase_crash() {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create recovery directory");
+    let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
+    let input_name = crate::sst::file_name(0, 0, 1);
+    let input = write_valid_sst_for_recovery_test(&state, &input_name, 0, b"deleted", 1);
+    state
+        .manifest
+        .files
+        .push(manifest_meta_for_recovery_test(&input));
+    crate::metadata::ManifestPersistence::save(temp_dir.path(), &state.manifest)
+        .expect("persist prepublication manifest");
+    state
+        .append_intent(crate::runtime::IntentLogEntry::CompactionPublish {
+            phase: PublicationPhase::ManifestPublished,
+            cf_id: 0,
+            removed: vec![input_name.clone()],
+            added: Vec::new(),
+        })
+        .expect("persist remove-only publication intent");
+    drop(state);
+
+    // Act
+    let mut reopened = RuntimeState::try_new(
+        temp_dir.path().to_path_buf(),
+        false,
+        crate::config::RecoveryPolicy::Strict,
+    )
+    .expect("reopen state");
+    reopened.replay_intent_log().expect("replay intent");
+
+    // Assert
+    assert!(!reopened.manifest_has_file(&input_name));
+    assert!(!reopened.sst_dir.join(input_name).exists());
+}
+
+#[test]
+fn should_supersede_stale_output_durable_intent_when_retrying_same_compaction_inputs() {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create recovery directory");
+    let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
+    let input_name = crate::sst::file_name(0, 0, 1);
+    let first_output = crate::runtime::FileMeta {
+        name: crate::sst::file_name(0, 1, 2),
+        level: 1,
+        size_bytes: 1,
+        content_crc32c: None,
+        cf_id: 0,
+        smallest_key: Some(b"a".to_vec()),
+        largest_key: Some(b"a".to_vec()),
+        smallest_seq: Some(2),
+        largest_seq: Some(2),
+    };
+    let retry_output = crate::runtime::FileMeta {
+        name: crate::sst::file_name(0, 1, 3),
+        level: 1,
+        size_bytes: 1,
+        content_crc32c: None,
+        cf_id: 0,
+        smallest_key: Some(b"a".to_vec()),
+        largest_key: Some(b"a".to_vec()),
+        smallest_seq: Some(3),
+        largest_seq: Some(3),
+    };
+    state
+        .record_compaction_publication_intent(0, vec![input_name.clone()], vec![first_output])
+        .expect("persist first compaction intent");
+
+    // Act
+    state
+        .record_compaction_publication_intent(0, vec![input_name], vec![retry_output.clone()])
+        .expect("persist retry compaction intent");
+
+    // Assert
+    let compaction_intents: Vec<_> = state
+        .intent_log
+        .iter()
+        .filter_map(|entry| match entry {
+            crate::runtime::IntentLogEntry::CompactionPublish { added, .. } => Some(added),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(compaction_intents.len(), 1);
+    assert_eq!(compaction_intents[0][0].name, retry_output.name);
+}
+
+#[test]
+fn should_keep_distinct_remove_only_compaction_intents_for_distinct_inputs() {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create intent directory");
+    let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
+    let first_input = crate::sst::file_name(0, 6, 1);
+    let second_input = crate::sst::file_name(0, 6, 2);
+    state
+        .record_compaction_publication_intent(0, vec![first_input.clone()], Vec::new())
+        .expect("persist first remove-only intent");
+
+    // Act
+    state
+        .record_compaction_publication_intent(0, vec![second_input.clone()], Vec::new())
+        .expect("persist independent remove-only intent");
+
+    // Assert
+    let removed_sets: Vec<_> = state
+        .intent_log
+        .iter()
+        .filter_map(|entry| match entry {
+            crate::runtime::IntentLogEntry::CompactionPublish { removed, .. } => {
+                Some(removed.as_slice())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(removed_sets.len(), 2);
+    assert!(removed_sets.contains(&[first_input].as_slice()));
+    assert!(removed_sets.contains(&[second_input].as_slice()));
+}
+
+#[test]
+fn should_recover_published_retry_when_legacy_stale_intent_precedes_it() {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create recovery directory");
+    let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
+    let input_name = crate::sst::file_name(0, 0, 1);
+    let stale_output_name = crate::sst::file_name(0, 1, 2);
+    let retry_output_name = crate::sst::file_name(0, 1, 3);
+    let stale_output = write_valid_sst_for_recovery_test(&state, &stale_output_name, 1, b"key", 2);
+    let retry_output = write_valid_sst_for_recovery_test(&state, &retry_output_name, 1, b"key", 3);
+    state
+        .manifest
+        .files
+        .push(manifest_meta_for_recovery_test(&retry_output));
+    state
+        .append_intent(crate::runtime::IntentLogEntry::CompactionPublish {
+            phase: PublicationPhase::OutputDurable,
+            cf_id: 0,
+            removed: vec![input_name.clone()],
+            added: vec![stale_output],
+        })
+        .expect("persist stale intent");
+    state
+        .append_intent(crate::runtime::IntentLogEntry::CompactionPublish {
+            phase: PublicationPhase::OutputDurable,
+            cf_id: 0,
+            removed: vec![input_name],
+            added: vec![retry_output],
+        })
+        .expect("persist published retry intent");
+
+    // Act
+    state
+        .replay_intent_log()
+        .expect("published retry should disambiguate stale output");
+
+    // Assert
+    assert!(!state.sst_dir.join(stale_output_name).exists());
+    assert!(state.sst_dir.join(retry_output_name).exists());
+    assert!(state.intent_log.is_empty());
+}
+
+#[test]
+fn should_recover_manifest_published_retry_when_it_precedes_stale_output_intent() {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create recovery directory");
+    let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
+    let input_name = crate::sst::file_name(0, 0, 1);
+    let stale_output_name = crate::sst::file_name(0, 1, 2);
+    let retry_output_name = crate::sst::file_name(0, 1, 3);
+    let input = write_valid_sst_for_recovery_test(&state, &input_name, 0, b"key", 1);
+    let stale_output = write_valid_sst_for_recovery_test(&state, &stale_output_name, 1, b"key", 2);
+    let retry_output = write_valid_sst_for_recovery_test(&state, &retry_output_name, 1, b"key", 3);
+    state
+        .manifest
+        .files
+        .push(manifest_meta_for_recovery_test(&input));
+    state
+        .append_intent(crate::runtime::IntentLogEntry::CompactionPublish {
+            phase: PublicationPhase::ManifestPublished,
+            cf_id: 0,
+            removed: vec![input_name.clone()],
+            added: vec![retry_output],
+        })
+        .expect("persist published retry intent");
+    state
+        .append_intent(crate::runtime::IntentLogEntry::CompactionPublish {
+            phase: PublicationPhase::OutputDurable,
+            cf_id: 0,
+            removed: vec![input_name.clone()],
+            added: vec![stale_output],
+        })
+        .expect("persist stale intent after retry");
+
+    // Act
+    state.replay_intent_log().expect("replay canonical retry");
+
+    // Assert
+    assert!(!state.manifest_has_file(&input_name));
+    assert!(state.manifest_has_file(&retry_output_name));
+    assert!(!state.manifest_has_file(&stale_output_name));
+    assert!(!state.sst_dir.join(input_name).exists());
+    assert!(state.sst_dir.join(retry_output_name).exists());
+    assert!(!state.sst_dir.join(stale_output_name).exists());
+}
+
+#[test]
+fn should_fail_closed_when_multiple_retry_outputs_are_manifest_visible() {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create recovery directory");
+    let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
+    let input_name = crate::sst::file_name(0, 0, 1);
+    let first_output_name = crate::sst::file_name(0, 1, 2);
+    let second_output_name = crate::sst::file_name(0, 1, 3);
+    let first_output = write_valid_sst_for_recovery_test(&state, &first_output_name, 1, b"key", 2);
+    let second_output =
+        write_valid_sst_for_recovery_test(&state, &second_output_name, 1, b"key", 3);
+    state
+        .manifest
+        .files
+        .extend([&first_output, &second_output].map(manifest_meta_for_recovery_test));
+    for output in [first_output, second_output] {
+        state
+            .append_intent(crate::runtime::IntentLogEntry::CompactionPublish {
+                phase: PublicationPhase::OutputDurable,
+                cf_id: 0,
+                removed: vec![input_name.clone()],
+                added: vec![output],
+            })
+            .expect("persist legacy retry intent");
+    }
+
+    // Act
+    let error = state
+        .replay_intent_log()
+        .expect_err("two published retry outputs are ambiguous");
+
+    // Assert
+    assert!(matches!(
+        error,
+        crate::common::MidgeError::RecoveryFailed(_)
+    ));
+    assert!(state.manifest_has_file(&first_output_name));
+    assert!(state.manifest_has_file(&second_output_name));
+    assert!(state.sst_dir.join(first_output_name).exists());
+    assert!(state.sst_dir.join(second_output_name).exists());
+    assert_eq!(state.intent_log.len(), 2);
+}
+
+#[test]
+fn should_reject_compaction_intent_for_dropped_column_family_after_crash() {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create recovery directory");
+    let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
+    let cf_id = state.manifest.create_column_family("dropped".to_string());
+    state
+        .column_families
+        .insert(cf_id, ColumnFamilyState::new(cf_id, "dropped".to_string()));
+    let input_name = crate::sst::file_name(cf_id, 0, 1);
+    let output_name = crate::sst::file_name(cf_id, 1, 2);
+    let mut input = write_valid_sst_for_recovery_test(&state, &input_name, 0, b"key", 1);
+    input.cf_id = cf_id;
+    let mut output = write_valid_sst_for_recovery_test(&state, &output_name, 1, b"key", 2);
+    output.cf_id = cf_id;
+    state
+        .manifest
+        .files
+        .push(manifest_meta_for_recovery_test(&input));
+    state
+        .append_intent(crate::runtime::IntentLogEntry::CompactionPublish {
+            phase: PublicationPhase::ManifestPublished,
+            cf_id,
+            removed: vec![input_name.clone()],
+            added: vec![output],
+        })
+        .expect("persist late compaction intent");
+    assert!(state.manifest.delete_column_family_with_reclamation(
+        cf_id,
+        2,
+        vec![input_name.clone()]
+    ));
+    crate::metadata::ManifestPersistence::save(temp_dir.path(), &state.manifest)
+        .expect("persist dropped column family");
+    drop(state);
+
+    // Act
+    let mut reopened = RuntimeState::try_new(
+        temp_dir.path().to_path_buf(),
+        false,
+        crate::config::RecoveryPolicy::Strict,
+    )
+    .expect("reopen state");
+    reopened.replay_intent_log().expect("reject late intent");
+
+    // Assert
+    assert!(reopened.manifest_has_file(&input_name));
+    assert!(!reopened.manifest_has_file(&output_name));
+    assert!(reopened.sst_dir.join(input_name).exists());
+    assert!(!reopened.sst_dir.join(output_name).exists());
+    assert!(reopened.persistence_anomaly_detected());
+}
+
+#[test]
+fn should_fail_closed_when_output_durable_compaction_manifest_is_partial() {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create recovery directory");
+    let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
+    let first_input_name = crate::sst::file_name(0, 0, 1);
+    let missing_input_name = crate::sst::file_name(0, 0, 2);
+    let output_name = crate::sst::file_name(0, 1, 3);
+    let first_input = write_valid_sst_for_recovery_test(&state, &first_input_name, 0, b"a", 1);
+    let output = write_valid_sst_for_recovery_test(&state, &output_name, 1, b"a", 3);
+    state
+        .manifest
+        .files
+        .push(manifest_meta_for_recovery_test(&first_input));
+    state
+        .append_intent(crate::runtime::IntentLogEntry::CompactionPublish {
+            phase: PublicationPhase::OutputDurable,
+            cf_id: 0,
+            removed: vec![first_input_name.clone(), missing_input_name],
+            added: vec![output],
+        })
+        .expect("persist output-durable intent");
+
+    // Act
+    let error = state
+        .replay_intent_log()
+        .expect_err("partial compaction authority must fail strict recovery");
+
+    // Assert
+    assert!(matches!(
+        error,
+        crate::common::MidgeError::RecoveryFailed(_)
+    ));
+    assert!(state.manifest_has_file(&first_input_name));
+    assert!(state.sst_dir.join(&first_input_name).exists());
+    assert!(state.sst_dir.join(&output_name).exists());
+}
+
+#[test]
+fn should_delete_untracked_compaction_output_during_startup_residue_cleanup() {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create residue directory");
+    let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
+    let orphan_name = crate::sst::file_name(0, 1, 9);
+    let _orphan = write_valid_sst_for_recovery_test(&state, &orphan_name, 1, b"orphan", 9);
+    assert!(state.sst_dir.join(&orphan_name).exists());
+
+    // Act
+    state.cleanup_storage_residue();
+
+    // Assert
+    assert!(!state.sst_dir.join(orphan_name).exists());
 }
 
 #[test]

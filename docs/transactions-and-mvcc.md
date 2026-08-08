@@ -196,22 +196,22 @@ The snapshot lifetime threshold is an observability and pressure signal, not an 
 
 ### When old versions are removed
 
-Compaction merges SST files across levels. During a merge, each key's entries are sorted by sequence number. All but the highest-sequence entry for a given key are dropped. Tombstones are also dropped (see below). Expired entries (TTL) are dropped based on wall-clock time at compaction time.
+Compaction merges SST files across levels. During a merge, each key's entries are sorted by sequence number. All but the highest-sequence entry for a given key are dropped. Expired entries (TTL) become masking tombstones at compaction time so an older value cannot reappear.
 
 ### Tombstone handling
 
-The compaction executor calls `filter_tombstones_with_horizon(versions, snapshot_horizon)`:
+The planner enables point-tombstone GC when the selected key range is bottommost in the current manifest: no unselected overlapping file at any configured level can contain an older point value. This lets small databases reclaim deletes during an ordinary L0-to-L1 compaction without waiting for data to reach a mostly empty final configured level. The executor then applies the snapshot horizon:
 
 ```rust
 match snapshot_horizon {
     Some(h) => retain tombstones with seq > h,   // keep tombstones newer than active readers
-    None    => drop all point-key tombstones,     // current behavior
+    None    => tombstones are old enough to drop,
 }
 ```
 
-Because active snapshots are registered, `oldest_active_snapshot_sequence()` reflects the oldest live reader. Point-key tombstones older than that horizon can be dropped; newer tombstones are retained.
+Because active snapshots are registered, `oldest_active_snapshot_sequence()` reflects the oldest live reader. Point-key tombstones older than that horizon are dropped only with the bottommost overlap proof; newer or unproven tombstones are retained.
 
-Range tombstones are handled separately and are written into the output SST. They are not subject to this filter.
+Range tombstones use the same horizon but need a stronger proof. Legacy manifest bounds may omit range-tombstone endpoints, so a range marker is removed only when the plan contains every SST in the column family. Covered older point values are removed in the same merge before the marker is discarded.
 
 ### How Midge prevents removing versions still needed by readers
 

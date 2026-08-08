@@ -125,12 +125,12 @@ fn should_not_add_confirmation_waiter_when_cloud_assertion_only_sequence_has_pen
     Ok(())
 }
 
-struct FailSecondIntentPutBackend {
+struct FailThirdIntentPutBackend {
     inner: Arc<crate::storage::cloud::MockCloudBackend>,
     intent_puts: AtomicUsize,
 }
 
-impl FailSecondIntentPutBackend {
+impl FailThirdIntentPutBackend {
     fn new(inner: Arc<crate::storage::cloud::MockCloudBackend>) -> Self {
         Self {
             inner,
@@ -139,7 +139,7 @@ impl FailSecondIntentPutBackend {
     }
 }
 
-impl crate::storage::cloud::CloudBackend for FailSecondIntentPutBackend {
+impl crate::storage::cloud::CloudBackend for FailThirdIntentPutBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -148,7 +148,7 @@ impl crate::storage::cloud::CloudBackend for FailSecondIntentPutBackend {
         callback: crate::storage::cloud::CloudCallback,
     ) {
         if key.ends_with("metadata/intent_log.json")
-            && self.intent_puts.fetch_add(1, Ordering::SeqCst) >= 1
+            && self.intent_puts.fetch_add(1, Ordering::SeqCst) >= 2
         {
             let key = key.to_string();
             let _ = callback.send(crate::storage::cloud::CloudEvent::Put {
@@ -162,6 +162,82 @@ impl crate::storage::cloud::CloudBackend for FailSecondIntentPutBackend {
             return;
         }
 
+        crate::storage::cloud::CloudBackend::submit_put(
+            self.inner.as_ref(),
+            key,
+            data,
+            headers,
+            callback,
+        );
+    }
+
+    fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        crate::storage::cloud::CloudBackend::submit_get(self.inner.as_ref(), key, callback);
+    }
+
+    fn submit_get_range(
+        &self,
+        key: &str,
+        start: u64,
+        end: Option<u64>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        crate::storage::cloud::CloudBackend::submit_get_range(
+            self.inner.as_ref(),
+            key,
+            start,
+            end,
+            callback,
+        );
+    }
+
+    fn submit_delete(
+        &self,
+        key: &str,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        crate::storage::cloud::CloudBackend::submit_delete(
+            self.inner.as_ref(),
+            key,
+            headers,
+            callback,
+        );
+    }
+
+    fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
+        crate::storage::cloud::CloudBackend::submit_list(self.inner.as_ref(), prefix, callback);
+    }
+
+    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        crate::storage::cloud::CloudBackend::submit_head(self.inner.as_ref(), key, callback);
+    }
+}
+
+struct ObserveIntentBeforeRemoteSstBackend {
+    inner: Arc<crate::storage::cloud::MockCloudBackend>,
+    remote_sst_path: PathBuf,
+    saw_compaction_intent: Arc<AtomicBool>,
+    remote_existed_at_intent_publish: Arc<AtomicBool>,
+}
+
+impl crate::storage::cloud::CloudBackend for ObserveIntentBeforeRemoteSstBackend {
+    fn submit_put(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        if key.ends_with("metadata/intent_log.json")
+            && data
+                .windows(b"CompactionPublish".len())
+                .any(|window| window == b"CompactionPublish")
+            && !self.saw_compaction_intent.swap(true, Ordering::SeqCst)
+        {
+            self.remote_existed_at_intent_publish
+                .store(self.remote_sst_path.exists(), Ordering::SeqCst);
+        }
         crate::storage::cloud::CloudBackend::submit_put(
             self.inner.as_ref(),
             key,
@@ -1229,6 +1305,66 @@ fn should_prune_remote_wal_when_flush_intent_clear_is_mirrored() -> crate::commo
 }
 
 #[test]
+fn should_publish_control_intent_before_remote_compaction_sst() -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    el.state.set_compaction_enabled(false);
+    let input_sst = "ordered-control-input.sst";
+    add_valid_manifest_sst_for_test(&mut el, input_sst, 10);
+    let output_sst = "ordered-control-output.sst";
+    let output_bytes = valid_sst_bytes_for_test(b"ordered", b"value", 11);
+    write_test_file(el.state.sst_dir.join(output_sst), &output_bytes);
+
+    let saw_compaction_intent = Arc::new(AtomicBool::new(false));
+    let remote_existed_at_intent_publish = Arc::new(AtomicBool::new(false));
+    let metadata_backend = Arc::new(ObserveIntentBeforeRemoteSstBackend {
+        inner: Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+        remote_sst_path: remote_sst_path_for_test(&el, output_sst),
+        saw_compaction_intent: Arc::clone(&saw_compaction_intent),
+        remote_existed_at_intent_publish: Arc::clone(&remote_existed_at_intent_publish),
+    });
+    el.cloud_metadata_storage = Some(Arc::new(crate::storage::cloud::CloudStorage::new(
+        metadata_backend,
+        "separate-control".to_string(),
+    )));
+    el.state
+        .active_compactions
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    let request_id = 4141;
+    let response_rx = el.router.register(request_id);
+    let (_tx, msg_rx) = crossbeam::channel::unbounded();
+
+    // Act
+    el.handle_runtime_msg(
+        RuntimeMsg::CompactionComplete {
+            request_id,
+            input_ssts: vec![input_sst.to_string()],
+            output_ssts: vec![output_sst.to_string()],
+            cf_id: 0,
+            target_level: 1,
+            succeeded: true,
+        },
+        &msg_rx,
+    );
+
+    // Assert
+    assert!(matches!(
+        response_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("compaction completion response"),
+        RuntimeResponse::Ok { .. }
+    ));
+    assert!(saw_compaction_intent.load(Ordering::SeqCst));
+    assert!(
+        !remote_existed_at_intent_publish.load(Ordering::SeqCst),
+        "control-cloud cleanup intent must be authoritative before SST upload"
+    );
+    Ok(())
+}
+
+#[test]
 fn should_mirror_cleared_compaction_intent_after_cloud_sst_publish(
 ) -> crate::common::MidgeResult<()> {
     // Arrange
@@ -1309,7 +1445,7 @@ fn should_unblock_compaction_waiters_when_cleared_compaction_intent_mirror_fails
     write_test_file(el.state.sst_dir.join(output_sst), &output_bytes);
 
     let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
-    let failing_backend = Arc::new(FailSecondIntentPutBackend::new(metadata_backend));
+    let failing_backend = Arc::new(FailThirdIntentPutBackend::new(metadata_backend));
     let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
         failing_backend,
         "metadata-test".to_string(),

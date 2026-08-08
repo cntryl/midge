@@ -228,7 +228,7 @@ fn should_unregister_snapshot_when_drop_ends_transaction() {
 
 #[test]
 fn should_preserve_snapshot_value_when_delete_is_compacted_with_snapshot_active() {
-    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
         let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
@@ -256,11 +256,57 @@ fn should_preserve_snapshot_value_when_delete_is_compacted_with_snapshot_active(
             .commit(buffered_write_options(mode))
             .expect("delete commit");
         engine.flush_cf(&cf).expect("delete flush");
+        for index in 0..2 {
+            let mut filler = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .expect("begin filler tx");
+            filler
+                .put(
+                    format!("filler-{index}").into_bytes(),
+                    b"value".to_vec(),
+                    None,
+                )
+                .expect("put filler");
+            filler
+                .commit(buffered_write_options(mode))
+                .expect("commit filler");
+            engine.flush_cf(&cf).expect("flush filler");
+        }
+        let layout_before = engine
+            .get_storage_layout()
+            .expect("layout before compaction");
+        let l0_before = layout_before
+            .levels
+            .iter()
+            .find(|level| level.level == 0)
+            .map_or(0, |level| level.file_count);
+        assert_eq!(l0_before, 4, "fixture must create four L0 files");
 
         // Act
         engine.compact_all().expect("compact all");
 
         // Assert
+        let layout_after = engine
+            .get_storage_layout()
+            .expect("layout after compaction");
+        let l0_after = layout_after
+            .levels
+            .iter()
+            .find(|level| level.level == 0)
+            .map_or(0, |level| level.file_count);
+        let l1_after = layout_after
+            .levels
+            .iter()
+            .find(|level| level.level == 1)
+            .map_or(0, |level| level.file_count);
+        assert!(
+            l0_after < l0_before,
+            "fixture must compact L0 in mode {mode}"
+        );
+        assert!(
+            l1_after > 0,
+            "fixture must publish L1 output in mode {mode}"
+        );
         let snapshot_value = snapshot.get(b"k").expect("snapshot get after compaction");
         assert_eq!(
             snapshot_value,

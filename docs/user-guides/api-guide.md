@@ -21,6 +21,21 @@ options before opening. Public builder controls include `goal`,
 `block_cache_policy`, `cloud_write_policy`, `background_compaction`,
 `recovery_policy`, and `storage_io_timeout`.
 
+## Column-family lifecycle
+
+`create_column_family` accepts non-empty UTF-8 names up to 255 bytes. Names
+containing NUL and the reserved name `default` are rejected.
+
+`drop_column_family` is the safe default: it waits for in-flight flush and
+compaction publication, but returns `MidgeError::Busy` while committed data
+remains in the active memtable. Flush that column family and retry to avoid an
+implicit active-memtable discard; the drop still makes all data in the column
+family inaccessible and eligible for reclamation. If discarding committed,
+unflushed writes is deliberate, call the explicitly destructive
+`drop_column_family_discarding_unflushed` method. Writes ordered after either
+drop request are not pulled across its WAL barrier and fail against the
+dropped column family.
+
 ## Transactions
 
 ```rust
