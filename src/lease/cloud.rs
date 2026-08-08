@@ -775,6 +775,7 @@ fn classify_lease_read_error(
 ) -> LeaseError {
     use crate::storage::cloud::CloudError;
     match error {
+        #[cfg(any(test, feature = "cloud-common"))]
         CloudError::NotFound(_) => unreachable!("callers must check is_not_found() first"),
         CloudError::Protocol(msg) => {
             LeaseError::Indeterminate(format!("cloud lease {operation} response: {msg}"))

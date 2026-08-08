@@ -21,32 +21,30 @@ provider's documented default chain over putting secrets in source. Midge does
 not manage secret rotation, a secret store, IAM policy, or network access.
 Never commit credentials or place them in a checked-in example.
 
-Provider-backed cloud mode requires three distinct buckets/containers. This is
-a hard configuration boundary: WAL, SST, and mutable control objects cannot be
-co-located, even under different prefixes. Object versioning is bucket-wide on
-providers such as S3, so a prefix-only split cannot provide independent
-versioning policy.
+The recommended deployment uses one unversioned bucket/container and one
+database prefix. Midge keeps WAL, SST, metadata, and lease keys in disjoint
+namespaces beneath that prefix. Use a multi-location topology only when
+separate IAM, ownership, or lifecycle boundaries are operationally valuable.
 
 ```rust,no_run
-# use cntryl_midge::{CloudProviderConfig, CloudStorageBuckets, CloudStorageLocation, OpenOptions};
-let location = |bucket| CloudStorageLocation::new(
-    CloudProviderConfig::aws_s3(bucket, "us-east-1"),
+# use cntryl_midge::{CloudProviderConfig, CloudStorageLocation, OpenOptions};
+let location = CloudStorageLocation::new(
+    CloudProviderConfig::aws_s3("midge-data", "us-east-1"),
     "database-a",
 );
-let buckets = CloudStorageBuckets::new(
-    location("midge-wal"),
-    location("midge-sst"),
-    location("midge-control"),
-);
-let options = OpenOptions::cloud("/var/lib/midge-cache", buckets).build()?;
+let options = OpenOptions::cloud("/var/lib/midge-cache", location).build()?;
 # Ok::<(), cntryl_midge::MidgeError>(())
 ```
 
-The WAL bucket contains `wal/`, the SST bucket contains `sst/`, and the control
-bucket contains `metadata/`, `metadata/ddl.registry.json`, and
-`midge_primary_lease.json`. Configure the control bucket without object
+The shared location contains `wal/`, `sst/`, `metadata/`,
+`metadata/ddl.registry.json`, and
+`midge_primary_lease.json`. Configure the shared location without object
 versioning. Never point a writer at an empty control namespace while another
 writer can still hold a lease for the same database.
+
+For advanced routing, start with `CloudStorageTopology::new(shared)`, override
+individual locations with `with_wal`, `with_sst`, or `with_control`, and pass
+the result to `OpenOptions::cloud_multi`.
 
 Use `WriteOptions::cloud_async()` when local acknowledgement may precede remote
 upload, or `WriteOptions::cloud_strict()` when the commit must wait for the
@@ -55,15 +53,17 @@ cloud upload. These choices are meaningful only with cloud-backed storage.
 ## Object versioning and lifecycle rules
 
 Provider lifecycle policy is bucket/container provisioning, not a Midge data
-plane operation. Midge exposes the stable suffixes through `CloudObjectLayout`
-so provisioning can give each class a separate rule:
+plane operation. Midge does not query, warn about, or reject provider
+versioning state. Prefer versioning disabled. If operators enable versioning,
+Midge exposes stable suffixes through `CloudObjectLayout` so provisioning can
+bound cleanup of noncurrent versions:
 
 | Object class | Store | Lifecycle requirement |
 | --- | --- | --- |
-| `wal/` | WAL | Never age-expire current objects. Expire noncurrent versions shortly after Midge's guarded prune. |
-| `sst/` | SST | Never age-expire current objects. Give noncurrent versions a separately bounded recovery window. |
-| `metadata/` | control | Prefer versioning disabled. Otherwise retain only a small, bounded noncurrent recovery window. |
-| `midge_primary_lease.json` | control | Prefer versioning disabled. Otherwise use the shortest noncurrent-version lifetime supported. |
+| `wal/` | WAL | Never age-expire current objects. Bound cleanup of noncurrent versions after Midge's guarded prune. |
+| `sst/` | SST | Never age-expire current objects. Give noncurrent versions a bounded recovery window. |
+| `metadata/` | control | Never age-expire current objects. Retain only a small, bounded noncurrent recovery window. |
+| `midge_primary_lease.json` | control | Keep current lease state; use the shortest practical noncurrent-version lifetime. |
 
 Do not configure age-based expiration for current WAL, SST, or metadata
 objects. Their safe-deletion decision depends on manifest coverage and is owned

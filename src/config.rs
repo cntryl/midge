@@ -45,32 +45,48 @@ impl CloudStorageLocation {
     }
 }
 
-/// Independently managed cloud storage classes.
+/// Resolved cloud storage locations for each object class.
 ///
-/// WAL, SST, and mutable control objects use separate provider locations so
-/// each class can have an independent versioning and lifecycle policy. The
-/// control location contains the primary lease, recovery metadata, and DDL
-/// registry. Configure it without object versioning whenever possible.
-///
-/// Midge never age-expires current WAL, SST, or metadata objects. Provider
-/// lifecycle rules must only bound noncurrent versions, delete markers, and
-/// incomplete multipart uploads.
+/// By default WAL, SST, and mutable control objects share one provider
+/// location. Individual classes can be overridden when separate IAM,
+/// ownership, or lifecycle boundaries are operationally useful.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CloudStorageBuckets {
+pub struct CloudStorageTopology {
     wal: CloudStorageLocation,
     sst: CloudStorageLocation,
     control: CloudStorageLocation,
 }
 
-impl CloudStorageBuckets {
-    /// Define independent WAL, SST, and control storage locations.
+impl CloudStorageTopology {
+    /// Route WAL, SST, and control objects through one shared location.
     #[must_use]
-    pub fn new(
-        wal: CloudStorageLocation,
-        sst: CloudStorageLocation,
-        control: CloudStorageLocation,
-    ) -> Self {
-        Self { wal, sst, control }
+    pub fn new(shared: CloudStorageLocation) -> Self {
+        Self {
+            wal: shared.clone(),
+            sst: shared.clone(),
+            control: shared,
+        }
+    }
+
+    /// Override the sealed-WAL storage location.
+    #[must_use]
+    pub fn with_wal(mut self, location: CloudStorageLocation) -> Self {
+        self.wal = location;
+        self
+    }
+
+    /// Override the immutable-SST storage location.
+    #[must_use]
+    pub fn with_sst(mut self, location: CloudStorageLocation) -> Self {
+        self.sst = location;
+        self
+    }
+
+    /// Override the lease and metadata storage location.
+    #[must_use]
+    pub fn with_control(mut self, location: CloudStorageLocation) -> Self {
+        self.control = location;
+        self
     }
 
     /// Return the sealed-WAL storage location.
@@ -122,8 +138,8 @@ pub enum Storage {
     Cloud {
         /// Local cache/staging path for performance
         local_cache_path: PathBuf,
-        /// Required, independently managed WAL, SST, and control locations.
-        buckets: Box<CloudStorageBuckets>,
+        /// Resolved WAL, SST, and control locations.
+        topology: Box<CloudStorageTopology>,
     },
 
     /// Filesystem-backed cloud simulation.

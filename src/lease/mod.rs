@@ -98,10 +98,10 @@ pub(crate) fn create_lease_with_validity(storage: &Storage) -> Result<CreatedLea
         }
         Storage::Cloud {
             local_cache_path,
-            buckets,
+            topology,
         } => {
             // Cloud storage: use cloud lease with TTL-based coordination
-            let control = buckets.control();
+            let control = topology.control();
             let lease_provider = control.provider();
             let lease_prefix = control.prefix();
             let config = CloudLeaseConfig {

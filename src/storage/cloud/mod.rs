@@ -79,16 +79,20 @@ pub(crate) use list_budget::CloudListBudget;
 pub enum CloudError {
     /// The object does not exist (404 / `NoSuchKey` / `NotFound` /
     /// `BlobNotFound`).
+    #[cfg(any(test, feature = "cloud-common"))]
     NotFound(String),
     /// A conditional request (`If-Match` / `If-None-Match`) lost a genuine
     /// race with a concurrent writer.
     PreconditionFailed(String),
     /// Authentication or authorization failure (401 / 403).
+    #[cfg(any(test, feature = "cloud-common"))]
     Unauthorized(String),
     /// The provider rejected the request as malformed (4xx other than
     /// not-found/precondition/auth).
+    #[cfg(any(test, feature = "cloud-common"))]
     InvalidRequest(String),
     /// The provider reported a server-side failure (5xx).
+    #[cfg(any(test, feature = "cloud-common"))]
     ServerError(String),
     /// The request could not reach the provider or timed out (network,
     /// DNS, TLS, connection, or client-side timeout failure).
@@ -102,7 +106,15 @@ impl CloudError {
     /// True when the object is confirmed absent.
     #[must_use]
     pub fn is_not_found(&self) -> bool {
-        matches!(self, Self::NotFound(_))
+        #[cfg(any(test, feature = "cloud-common"))]
+        {
+            matches!(self, Self::NotFound(_))
+        }
+        #[cfg(not(any(test, feature = "cloud-common")))]
+        {
+            let _ = std::mem::discriminant(self);
+            false
+        }
     }
 
     /// True when a conditional write/delete genuinely lost a race to a
@@ -122,6 +134,7 @@ impl CloudError {
     /// from their response mapper, where `status` is still a real `u16`
     /// rather than a formatted string — the point this module exists to
     /// preserve.
+    #[cfg(any(test, feature = "cloud-common"))]
     #[must_use]
     pub(crate) fn from_http_status(status: u16, detail: impl std::fmt::Display) -> Self {
         match status {
@@ -138,10 +151,14 @@ impl CloudError {
 impl std::fmt::Display for CloudError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            #[cfg(any(test, feature = "cloud-common"))]
             Self::NotFound(msg) => write!(f, "not found: {msg}"),
             Self::PreconditionFailed(msg) => write!(f, "precondition failed: {msg}"),
+            #[cfg(any(test, feature = "cloud-common"))]
             Self::Unauthorized(msg) => write!(f, "unauthorized: {msg}"),
+            #[cfg(any(test, feature = "cloud-common"))]
             Self::InvalidRequest(msg) => write!(f, "invalid request: {msg}"),
+            #[cfg(any(test, feature = "cloud-common"))]
             Self::ServerError(msg) => write!(f, "server error: {msg}"),
             Self::Transport(msg) => write!(f, "transport error: {msg}"),
             Self::Protocol(msg) => write!(f, "protocol error: {msg}"),
@@ -943,6 +960,26 @@ mod tests {
     use std::sync::mpsc;
 
     // =========== CloudOutcome Tests ===========
+
+    #[test]
+    fn should_classify_provider_http_statuses() {
+        // Arrange
+        let statuses = [404, 401, 400, 503];
+
+        // Act
+        let errors = [
+            CloudError::from_http_status(statuses[0], "missing"),
+            CloudError::from_http_status(statuses[1], "credentials"),
+            CloudError::from_http_status(statuses[2], "request"),
+            CloudError::from_http_status(statuses[3], "unavailable"),
+        ];
+
+        // Assert
+        assert!(matches!(errors[0], CloudError::NotFound(_)));
+        assert!(matches!(errors[1], CloudError::Unauthorized(_)));
+        assert!(matches!(errors[2], CloudError::InvalidRequest(_)));
+        assert!(matches!(errors[3], CloudError::ServerError(_)));
+    }
 
     #[test]
     fn should_discriminate_success_from_failure_outcomes() {

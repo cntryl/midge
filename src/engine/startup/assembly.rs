@@ -129,26 +129,40 @@ impl EngineStartup {
     }
 
     pub(super) fn trace_open(opts: &OpenOptions) {
-        if let Storage::Cloud { buckets, .. } = opts.storage() {
-            let wal_endpoint = provider_endpoint(buckets.wal().provider()).map_or_else(
+        if let Storage::Cloud { topology, .. } = opts.storage() {
+            if topology.wal() == topology.sst() && topology.wal() == topology.control() {
+                let endpoint = provider_endpoint(topology.wal().provider()).map_or_else(
+                    || "<provider-default>".to_string(),
+                    redact_endpoint_metadata,
+                );
+                tracing::debug!(
+                    storage = "cloud",
+                    provider = provider_kind(topology.wal().provider()),
+                    endpoint = %endpoint,
+                    credentials = "[REDACTED]",
+                    "opening midge engine"
+                );
+                return;
+            }
+            let wal_endpoint = provider_endpoint(topology.wal().provider()).map_or_else(
                 || "<provider-default>".to_string(),
                 redact_endpoint_metadata,
             );
-            let sst_endpoint = provider_endpoint(buckets.sst().provider()).map_or_else(
+            let sst_endpoint = provider_endpoint(topology.sst().provider()).map_or_else(
                 || "<provider-default>".to_string(),
                 redact_endpoint_metadata,
             );
-            let control_endpoint = provider_endpoint(buckets.control().provider()).map_or_else(
+            let control_endpoint = provider_endpoint(topology.control().provider()).map_or_else(
                 || "<provider-default>".to_string(),
                 redact_endpoint_metadata,
             );
             tracing::debug!(
                 storage = "cloud",
-                wal_provider = provider_kind(buckets.wal().provider()),
+                wal_provider = provider_kind(topology.wal().provider()),
                 wal_endpoint = %wal_endpoint,
-                sst_provider = provider_kind(buckets.sst().provider()),
+                sst_provider = provider_kind(topology.sst().provider()),
                 sst_endpoint = %sst_endpoint,
-                control_provider = provider_kind(buckets.control().provider()),
+                control_provider = provider_kind(topology.control().provider()),
                 control_endpoint = %control_endpoint,
                 credentials = "[REDACTED]",
                 "opening midge engine"

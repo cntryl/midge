@@ -30,11 +30,12 @@ engine.shutdown(Duration::from_secs(5))?;
 Use `OpenOptions::local(path)` for restart-persistent local files,
 `OpenOptions::in_memory()` for tests that do not need persistence, and
 `OpenOptions::cloud_simulated(cache, bucket, prefix)` for a local simulation of
-cloud lifecycle behavior. `OpenOptions::cloud(cache, buckets)` is
+cloud lifecycle behavior. `OpenOptions::cloud(cache, location)` is
 feature-gated provider-backed storage and remains pre-1.0. Provider-backed
-cloud mode requires `CloudStorageBuckets` with distinct WAL, SST, and control
-buckets/containers. Keep the control bucket non-versioned so lease heartbeats
-and metadata replacement do not create an unbounded version stream; see the
+cloud mode normally uses one unversioned bucket/container and one database
+prefix. Do not age-expire current objects. If versioning is enabled, bound
+cleanup of noncurrent versions. Use `OpenOptions::cloud_multi` only when
+separate IAM, ownership, or lifecycle boundaries are valuable; see the
 [cloud setup guide](../operations/cloud-setup.md).
 
 ## Choose commit durability

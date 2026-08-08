@@ -141,21 +141,18 @@ fn should_not_log_cloud_credentials_when_tracing_engine_startup() {
     // Act
     tracing::subscriber::with_default(subscriber, || {
         for provider in providers {
-            let buckets = crate::config::CloudStorageBuckets::new(
+            let topology = crate::config::CloudStorageTopology::new(
                 crate::config::CloudStorageLocation::new(provider, "prefix"),
-                crate::config::CloudStorageLocation::new(
-                    crate::config::CloudProviderConfig::aws_s3("redaction-sst-bucket", "us-east-1"),
-                    "prefix",
-                ),
-                crate::config::CloudStorageLocation::new(
-                    crate::config::CloudProviderConfig::aws_s3(
-                        "redaction-control-bucket",
-                        "us-east-1",
-                    ),
-                    "prefix",
-                ),
-            );
-            let opts = OpenOptions::cloud("/tmp/midge-redaction", buckets)
+            )
+            .with_sst(crate::config::CloudStorageLocation::new(
+                crate::config::CloudProviderConfig::aws_s3("redaction-sst-bucket", "us-east-1"),
+                "prefix",
+            ))
+            .with_control(crate::config::CloudStorageLocation::new(
+                crate::config::CloudProviderConfig::aws_s3("redaction-control-bucket", "us-east-1"),
+                "prefix",
+            ));
+            let opts = OpenOptions::cloud_multi("/tmp/midge-redaction", topology)
                 .build()
                 .expect("build redaction options");
             EngineStartup::trace_open(&opts);

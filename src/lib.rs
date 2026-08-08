@@ -81,8 +81,8 @@ pub use engine::{Direction, Query, ScanIterator};
 
 // Observability and diagnostics
 pub use config::{
-    AzureCredentialSource, CloudCredentialSource, CloudProviderConfig, CloudStorageBuckets,
-    CloudStorageLocation, EngineHealth, GcsApiStyle, GcsCredentialSource, S3CredentialSource,
+    AzureCredentialSource, CloudCredentialSource, CloudProviderConfig, CloudStorageLocation,
+    CloudStorageTopology, EngineHealth, GcsApiStyle, GcsCredentialSource, S3CredentialSource,
 };
 pub use types::{
     ReadAmpMetricsSnapshot, RecoveryMetricsSnapshot, RuntimeMetricsSnapshot, SnapshotPinSnapshot,

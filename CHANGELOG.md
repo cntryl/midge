@@ -9,6 +9,11 @@ Midge is currently in the 0.1 release line. Compatibility expectations for pre-1
 
 ## [Unreleased]
 
+### Changed
+- Provider-backed cloud storage now defaults to one bucket/container and one
+  database prefix. Advanced deployments can route WAL, SST, and control
+  objects separately with `CloudStorageTopology` and `OpenOptions::cloud_multi`.
+
 ### Added
 - Initial release of Midge embedded LSM database
 - Actor-based concurrency model for deterministic execution
@@ -46,6 +51,7 @@ Midge is currently in the 0.1 release line. Compatibility expectations for pre-1
 - Trimmed duplicated positioning/readiness documentation and refreshed storage-mode overview language
 
 ### Removed
+- The mandatory three-location `CloudStorageBuckets` API.
 - Orphaned internal `SeqnoAllocActor` source file that was not compiled into the runtime actor module
 - Empty/redundant integration test files and duplicate engine initialization coverage
 

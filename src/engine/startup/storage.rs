@@ -189,12 +189,12 @@ impl RuntimeStorageMaterialization {
                 startup_lease,
                 cloud_runtime_policy,
             ),
-            Storage::Cloud { buckets, .. } => Self::materialize_cloud(
+            Storage::Cloud { topology, .. } => Self::materialize_cloud(
                 opts,
                 storage_path,
                 startup_lease,
                 cloud_runtime_policy,
-                buckets,
+                topology,
             ),
             _ => Self::materialize_local(opts, storage_path, startup_lease, cloud_runtime_policy),
         }
@@ -254,20 +254,30 @@ impl RuntimeStorageMaterialization {
         storage_path: &StartupStoragePath,
         startup_lease: &StartupLease,
         cloud_runtime_policy: crate::runtime::CloudRuntimePolicy,
-        buckets: &crate::config::CloudStorageBuckets,
+        topology: &crate::config::CloudStorageTopology,
     ) -> MidgeResult<Self> {
         let wal_storage = crate::storage::providers::build_cloud_storage(
-            buckets.wal().provider(),
-            buckets.wal().prefix(),
+            topology.wal().provider(),
+            topology.wal().prefix(),
         )?;
-        let sst_storage = crate::storage::providers::build_cloud_storage(
-            buckets.sst().provider(),
-            buckets.sst().prefix(),
-        )?;
-        let metadata_storage = crate::storage::providers::build_cloud_storage(
-            buckets.control().provider(),
-            buckets.control().prefix(),
-        )?;
+        let sst_storage = if topology.sst() == topology.wal() {
+            wal_storage.clone()
+        } else {
+            crate::storage::providers::build_cloud_storage(
+                topology.sst().provider(),
+                topology.sst().prefix(),
+            )?
+        };
+        let metadata_storage = if topology.control() == topology.wal() {
+            wal_storage.clone()
+        } else if topology.control() == topology.sst() {
+            sst_storage.clone()
+        } else {
+            crate::storage::providers::build_cloud_storage(
+                topology.control().provider(),
+                topology.control().prefix(),
+            )?
+        };
         CloudStartupRecovery::hydrate_cloud_metadata(
             &metadata_storage,
             &storage_path.db_path,

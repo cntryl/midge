@@ -656,13 +656,11 @@ fn should_select_same_storage_modes_from_open_options_constructors() {
     let local = OpenOptions::local("/tmp/midge-solid-local")
         .build()
         .expect("build options");
-    let cloud = OpenOptions::cloud(
+    let cloud = OpenOptions::cloud_multi(
         "/tmp/midge-solid-cloud",
-        cntryl_midge::CloudStorageBuckets::new(
-            location("wal-bucket"),
-            location("sst-bucket"),
-            location("control-bucket"),
-        ),
+        cntryl_midge::CloudStorageTopology::new(location("wal-bucket"))
+            .with_sst(location("sst-bucket"))
+            .with_control(location("control-bucket")),
     )
     .build()
     .expect("build options");
