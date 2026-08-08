@@ -220,7 +220,7 @@ impl ManifestActor {
             .unwrap_or(u64::MAX);
 
         let mut candidate_manifest = state.manifest.clone();
-        let cf_id = candidate_manifest.next_cf_id();
+        let cf_id = candidate_manifest.next_cf_id()?;
         let edit = crate::metadata::ManifestEdit::CreateColumnFamily {
             id: cf_id,
             name: name.clone(),
