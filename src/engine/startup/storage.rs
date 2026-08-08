@@ -55,17 +55,22 @@ impl StartupStoragePath {
 impl StartupLease {
     pub(super) fn acquire(opts: &OpenOptions) -> MidgeResult<Self> {
         let storage = opts.storage();
-        let created = crate::lease::create_lease_with_validity(storage).map_err(|error| {
-            match MidgeError::from(error) {
-                MidgeError::LeaseHeld(message) => MidgeError::LeaseHeld(message),
-                MidgeError::LeaseUnavailable(message) => MidgeError::LeaseUnavailable(format!(
-                    "failed to create lease for storage backend: {message}"
-                )),
-                other => other,
-            }
-        })?;
+        let created =
+            crate::lease::create_lease_with_validity(storage, opts.lease_clock_skew_tolerance())
+                .map_err(|error| match MidgeError::from(error) {
+                    MidgeError::LeaseHeld(message) => MidgeError::LeaseHeld(message),
+                    MidgeError::LeaseUnavailable(message) => MidgeError::LeaseUnavailable(format!(
+                        "failed to create lease for storage backend: {message}"
+                    )),
+                    other => other,
+                })?;
 
-        Self::acquire_created(created.lease, created.validity, Some(storage))
+        Self::acquire_created(
+            created.lease,
+            created.validity,
+            Some(storage),
+            opts.lease_loss_hook(),
+        )
     }
 
     #[cfg(test)]
@@ -73,13 +78,14 @@ impl StartupLease {
         lease: Arc<dyn crate::lease::PrimaryLease>,
         validity: Option<Arc<crate::lease::LeaseValidity>>,
     ) -> MidgeResult<Self> {
-        Self::acquire_created(lease, validity, None)
+        Self::acquire_created(lease, validity, None, None)
     }
 
     fn acquire_created(
         lease: Arc<dyn crate::lease::PrimaryLease>,
         lease_validity: Option<Arc<crate::lease::LeaseValidity>>,
         storage: Option<&Storage>,
+        lease_loss_hook: Option<Arc<dyn Fn() + Send + Sync>>,
     ) -> MidgeResult<Self> {
         let lease_guard = lease.clone().try_acquire().map_err(|error| match error {
             crate::lease::LeaseError::AcquisitionFailed(message) => MidgeError::LeaseHeld(format!(
@@ -118,7 +124,7 @@ impl StartupLease {
             lease_validity,
             lease_heartbeat: None,
         };
-        startup_lease.start_heartbeat()?;
+        startup_lease.start_heartbeat(lease_loss_hook)?;
         startup_lease.ensure_healthy("immediately after lease acquisition")?;
         Ok(startup_lease)
     }
@@ -127,12 +133,18 @@ impl StartupLease {
         Arc::clone(&self.lease_healthy)
     }
 
-    fn start_heartbeat(&mut self) -> MidgeResult<()> {
+    fn start_heartbeat(
+        &mut self,
+        lease_loss_hook: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) -> MidgeResult<()> {
         let mut lease_heartbeat = crate::lease::LeaseHeartbeat::new_with_healthy_and_validity(
             Arc::clone(&self.lease),
             Arc::clone(&self.lease_healthy),
             self.lease_validity.as_ref().map(Arc::clone),
         );
+        if let Some(hook) = lease_loss_hook {
+            lease_heartbeat.set_loss_hook(hook);
+        }
         lease_heartbeat.start();
         if !lease_heartbeat.is_healthy() {
             return Err(MidgeError::Fenced(

@@ -11,7 +11,9 @@
 //! - **Fencing lease**: Not advisory—enforced by the storage backend
 //! - **TTL-based**: Lease expires if not renewed (handles crashes gracefully)
 //! - **Heartbeat loop**: Continuous renewal during normal operation
-//! - **Fail-stop semantics**: Loss of lease immediately stops accepting writes
+//! - **Fail-closed semantics**: Loss of lease immediately stops accepting
+//!   writes. The engine stays open for reads/diagnostics and can notify the
+//!   embedder exactly once through `OpenOptionsBuilder::on_lease_loss`.
 //!
 //! ## Backends
 //!
@@ -64,7 +66,10 @@ pub(crate) struct CreatedLease {
     pub(crate) validity: Option<Arc<LeaseValidity>>,
 }
 
-pub(crate) fn create_lease_with_validity(storage: &Storage) -> Result<CreatedLease, LeaseError> {
+pub(crate) fn create_lease_with_validity(
+    storage: &Storage,
+    clock_skew_tolerance: std::time::Duration,
+) -> Result<CreatedLease, LeaseError> {
     match storage {
         Storage::InMemory => {
             // In-memory mode: use filesystem lease on temp directory (no disk I/O)
@@ -91,9 +96,14 @@ pub(crate) fn create_lease_with_validity(storage: &Storage) -> Result<CreatedLea
         }
         Storage::Local { path } => {
             // Local storage: use filesystem lease with RealFs
+            let lease = Arc::new(FileSystemLease::new_with_clock_skew_tolerance(
+                path.as_path(),
+                false,
+                clock_skew_tolerance,
+            )?);
             Ok(CreatedLease {
-                lease: Arc::new(FileSystemLease::new(path.as_path(), false)?),
-                validity: None,
+                validity: Some(lease.lease_validity()),
+                lease,
             })
         }
         Storage::Cloud {
@@ -113,11 +123,14 @@ pub(crate) fn create_lease_with_validity(storage: &Storage) -> Result<CreatedLea
                     .map_err(|error| {
                         LeaseError::IoError(format!("cloud lease backend: {error}"))
                     })?;
-            let lease = Arc::new(CloudStorageLease::new_provider_backed(
-                config,
-                local_cache_path.clone(),
-                cloud,
-            ));
+            let lease = Arc::new(
+                CloudStorageLease::new_provider_backed_with_clock_skew_tolerance(
+                    config,
+                    local_cache_path.clone(),
+                    cloud,
+                    clock_skew_tolerance,
+                ),
+            );
             Ok(CreatedLease {
                 validity: Some(lease.lease_validity()),
                 lease,
@@ -132,11 +145,36 @@ pub(crate) fn create_lease_with_validity(storage: &Storage) -> Result<CreatedLea
                 bucket: bucket.clone(),
                 prefix: prefix.clone(),
             };
-            let lease = Arc::new(CloudStorageLease::new(config, local_cache_path.clone()));
+            let lease = Arc::new(CloudStorageLease::new_with_clock_skew_tolerance(
+                config,
+                local_cache_path.clone(),
+                clock_skew_tolerance,
+            ));
             Ok(CreatedLease {
                 validity: Some(lease.lease_validity()),
                 lease,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_attach_monotonic_watchdog_validity_to_local_filesystem_lease() {
+        // Arrange
+        let directory = tempfile::tempdir().expect("create local lease directory");
+        let storage = Storage::Local {
+            path: directory.path().to_path_buf(),
+        };
+
+        // Act
+        let created = create_lease_with_validity(&storage, std::time::Duration::from_secs(15))
+            .expect("create local lease");
+
+        // Assert
+        assert!(created.validity.is_some());
     }
 }

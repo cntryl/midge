@@ -128,6 +128,28 @@ impl LeaseValidity {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    pub(crate) fn remaining(&self, epoch: u64) -> Result<Duration, LeaseError> {
+        match self.snapshot() {
+            LeaseValidityState::Active {
+                epoch: active_epoch,
+                valid_until,
+            } if active_epoch == epoch => {
+                let remaining = valid_until.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    self.fence(epoch);
+                    Err(LeaseError::RenewalFailed(
+                        "lease renewal crossed monotonic expiry".to_string(),
+                    ))
+                } else {
+                    Ok(remaining)
+                }
+            }
+            _ => Err(LeaseError::RenewalFailed(
+                "lease is no longer valid for renewal".to_string(),
+            )),
+        }
+    }
+
     pub(crate) fn wait_for_change(
         &self,
         observed: LeaseValidityState,

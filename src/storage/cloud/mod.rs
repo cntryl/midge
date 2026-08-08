@@ -47,6 +47,8 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+pub(crate) const REQUEST_TIMEOUT_HEADER: &str = "x-midge-internal-request-timeout-ms";
+
 #[cfg(any(
     feature = "cloud-aws",
     feature = "cloud-azure",
@@ -190,6 +192,10 @@ pub enum CloudEvent {
         key: String,
         result: CloudOutcome<Vec<u8>>,
     },
+    GetWithMetadata {
+        key: String,
+        result: CloudOutcome<(Vec<u8>, ObjectMetadata)>,
+    },
     #[cfg(test)]
     GetRange {
         key: String,
@@ -294,6 +300,14 @@ pub trait CloudBackend: Send + Sync + 'static {
             key: key.to_string(),
             result: Err(CloudError::Protocol(
                 "cloud backend does not support GET".to_string(),
+            )),
+        });
+    }
+    fn submit_get_with_metadata(&self, key: &str, callback: CloudCallback) {
+        let _ = callback.send(CloudEvent::GetWithMetadata {
+            key: key.to_string(),
+            result: Err(CloudError::Protocol(
+                "cloud backend does not support metadata-bearing GET".to_string(),
             )),
         });
     }
@@ -465,6 +479,23 @@ impl CloudBackend for MockCloudBackend {
             result: cloud_outcome_from_result(result),
         };
         let _ = callback.send(event);
+    }
+
+    fn submit_get_with_metadata(&self, key: &str, callback: CloudCallback) {
+        let _guard = self.mutation_lock.lock();
+        let data = self.storage.lock().get(key).cloned();
+        let generation = self.gens.lock().get(key).copied();
+        let result = match (data, generation) {
+            (Some(data), Some(generation)) => CloudOutcome::Ok((
+                data.clone(),
+                ObjectMetadata::new(data.len() as u64, format!("mock-gen-{generation}"), 0),
+            )),
+            _ => CloudOutcome::Err(CloudError::NotFound(key.to_string())),
+        };
+        let _ = callback.send(CloudEvent::GetWithMetadata {
+            key: key.to_string(),
+            result,
+        });
     }
 
     fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
@@ -718,6 +749,11 @@ impl CloudStorage {
     pub fn submit_get(&self, key: &str, callback: CloudCallback) {
         let full_key = self.full_path(key);
         self.backend.submit_get(&full_key, callback);
+    }
+
+    pub fn submit_get_with_metadata(&self, key: &str, callback: CloudCallback) {
+        let full_key = self.full_path(key);
+        self.backend.submit_get_with_metadata(&full_key, callback);
     }
 
     #[cfg(test)]

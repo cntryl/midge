@@ -19,7 +19,7 @@
 //! - Leader record is a small file; no built-in expiry without heartbeat
 
 use super::fs_leader_store::FsLeaderStore;
-use super::traits::{LeaderStore, LeaseError, LeaseGuard, PrimaryLease};
+use super::traits::{LeaderStore, LeaseError, LeaseGuard, LeaseValidity, PrimaryLease};
 use crate::io::{Fs, MockFs, RealFs};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -39,6 +39,8 @@ pub struct FileSystemLease {
     acquired: AtomicBool,
     /// Epoch obtained during the most recent successful acquisition.
     acquired_epoch: AtomicU64,
+    validity: Arc<LeaseValidity>,
+    clock_skew_tolerance: Duration,
 }
 
 impl FileSystemLease {
@@ -48,6 +50,18 @@ impl FileSystemLease {
     /// * `db_path` - Path to the database directory
     /// * `use_mock_fs` - If true, uses `MockFs` (for in-memory mode); otherwise uses `RealFs`
     pub fn new(db_path: &Path, use_mock_fs: bool) -> Result<Self, LeaseError> {
+        Self::new_with_clock_skew_tolerance(
+            db_path,
+            use_mock_fs,
+            Duration::from_secs(DEFAULT_TTL_SECS / 2),
+        )
+    }
+
+    pub(crate) fn new_with_clock_skew_tolerance(
+        db_path: &Path,
+        use_mock_fs: bool,
+        clock_skew_tolerance: Duration,
+    ) -> Result<Self, LeaseError> {
         let fs: Arc<dyn Fs> = if use_mock_fs {
             Arc::new(MockFs::new())
         } else {
@@ -72,7 +86,13 @@ impl FileSystemLease {
             holder_id,
             acquired: AtomicBool::new(false),
             acquired_epoch: AtomicU64::new(0),
+            validity: Arc::new(LeaseValidity::new()),
+            clock_skew_tolerance,
         })
+    }
+
+    pub(crate) fn lease_validity(&self) -> Arc<LeaseValidity> {
+        Arc::clone(&self.validity)
     }
 }
 
@@ -123,7 +143,13 @@ impl PrimaryLease for FileSystemLease {
                             existing.holder_id, existing.epoch
                         ))
                     })?;
-                    if age < Duration::from_secs(DEFAULT_TTL_SECS * 2) {
+                    // A takeover is delayed by a bounded skew allowance. This
+                    // trades failover latency for protection against a holder
+                    // whose wall clock stepped backwards while its monotonic
+                    // watchdog still considers the lease live.
+                    let stale_after = Duration::from_secs(DEFAULT_TTL_SECS * 2)
+                        .saturating_add(self.clock_skew_tolerance);
+                    if age < stale_after {
                         return Err(LeaseError::AcquisitionFailed(format!(
                             "another Midge instance is already running against this storage \
                          (holder: {}, epoch: {}, acquired {}s ago)",
@@ -142,6 +168,8 @@ impl PrimaryLease for FileSystemLease {
                 })?;
 
         let epoch = record.epoch;
+        self.validity
+            .activate(epoch, std::time::Instant::now() + self.ttl())?;
         self.acquired_epoch.store(epoch, Ordering::Release);
         self.acquired.store(true, Ordering::Release);
 
@@ -155,16 +183,28 @@ impl PrimaryLease for FileSystemLease {
     }
 
     fn renew(&self) -> Result<(), LeaseError> {
-        if !self.acquired.load(Ordering::Acquire) {
-            return Err(LeaseError::RenewalFailed("lease not acquired".to_string()));
-        }
-
-        // Validate that our epoch is still current AND refresh the timestamp
-        // so other processes can see we're still alive.
         let our_epoch = self.acquired_epoch.load(Ordering::Acquire);
-        self.leader_store
-            .refresh_timestamp(&self.holder_id, our_epoch)
-            .map_err(|e| LeaseError::RenewalFailed(e.to_string()))
+        let result = (|| {
+            if !self.acquired.load(Ordering::Acquire) {
+                return Err(LeaseError::RenewalFailed("lease not acquired".to_string()));
+            }
+            self.validity.remaining(our_epoch)?;
+            self.leader_store
+                .refresh_timestamp(&self.holder_id, our_epoch)
+                .map_err(|error| LeaseError::RenewalFailed(error.to_string()))?;
+            self.validity
+                .advance(our_epoch, std::time::Instant::now() + self.ttl())
+        })();
+        if let Err(error) = result {
+            self.validity.fence(our_epoch);
+            self.acquired.store(false, Ordering::Release);
+            self.acquired_epoch.store(0, Ordering::Release);
+            let _ = self
+                .leader_store
+                .release_if_owner(&self.holder_id, our_epoch);
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn release(&self) -> Result<(), LeaseError> {
@@ -182,6 +222,7 @@ impl PrimaryLease for FileSystemLease {
 
         self.acquired.store(false, Ordering::Release);
         self.acquired_epoch.store(0, Ordering::Release);
+        self.validity.deactivate(our_epoch);
 
         tracing::info!(
             holder_id = %self.holder_id,

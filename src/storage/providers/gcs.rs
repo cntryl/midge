@@ -959,7 +959,23 @@ impl CloudBackend for GcsBackend {
         // standard ETag headers are read-only in GCS JSON mode, so never forward
         // them on a write where they could be ignored.
         for (name, value) in headers {
-            if self.mode == GcsBackendMode::Json
+            if name.eq_ignore_ascii_case(crate::storage::cloud::REQUEST_TIMEOUT_HEADER) {
+                match value.parse::<u64>() {
+                    Ok(milliseconds) => {
+                        request =
+                            request.with_timeout(std::time::Duration::from_millis(milliseconds));
+                    }
+                    Err(error) => {
+                        let _ = callback.send(CloudEvent::Put {
+                            key,
+                            result: CloudOutcome::Err(CloudError::Protocol(format!(
+                                "invalid internal request timeout: {error}"
+                            ))),
+                        });
+                        return;
+                    }
+                }
+            } else if self.mode == GcsBackendMode::Json
                 && name.eq_ignore_ascii_case("x-goog-if-generation-match")
             {
                 url = append_query_param(&url, "ifGenerationMatch", &value);
@@ -1019,6 +1035,45 @@ impl CloudBackend for GcsBackend {
                 result: CloudOutcome::Err(CloudError::from_http_status(resp.status, "GCS GET")),
             },
             Err(err) => CloudEvent::Get {
+                key: ctx,
+                result: CloudOutcome::Err(CloudError::Transport(format!("{err:?}"))),
+            },
+        };
+        self.executor.spawn_request(request, key, callback, mapper);
+    }
+
+    fn submit_get_with_metadata(&self, key: &str, callback: CloudCallback) {
+        let key = key.to_string();
+        let request = CloudRequest::new(Method::GET, self.download_url(&key));
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
+            Ok(resp) if resp.status == 200 => {
+                let etag = resp
+                    .headers
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case("etag"))
+                    .map(|(_, value)| value.trim().to_string())
+                    .unwrap_or_default();
+                let generation = resp
+                    .headers
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case("x-goog-generation"))
+                    .map(|(_, value)| value.trim().to_string());
+                let metadata = match generation {
+                    Some(generation) => {
+                        ObjectMetadata::with_generation(resp.body.len() as u64, etag, 0, generation)
+                    }
+                    None => ObjectMetadata::new(resp.body.len() as u64, etag, 0),
+                };
+                CloudEvent::GetWithMetadata {
+                    key: ctx,
+                    result: CloudOutcome::Ok((resp.body, metadata)),
+                }
+            }
+            Ok(resp) => CloudEvent::GetWithMetadata {
+                key: ctx,
+                result: CloudOutcome::Err(CloudError::from_http_status(resp.status, "GCS GET")),
+            },
+            Err(err) => CloudEvent::GetWithMetadata {
                 key: ctx,
                 result: CloudOutcome::Err(CloudError::Transport(format!("{err:?}"))),
             },

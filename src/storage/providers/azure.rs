@@ -746,7 +746,25 @@ impl CloudBackend for AzureBackend {
             .with_header("Content-Length", len.to_string());
         // Merge provided headers into the request (caller-controlled; e.g. If-None-Match)
         for (name, value) in headers {
-            request = request.with_header(name, value);
+            if name.eq_ignore_ascii_case(crate::storage::cloud::REQUEST_TIMEOUT_HEADER) {
+                match value.parse::<u64>() {
+                    Ok(milliseconds) => {
+                        request =
+                            request.with_timeout(std::time::Duration::from_millis(milliseconds));
+                    }
+                    Err(error) => {
+                        let _ = callback.send(CloudEvent::Put {
+                            key,
+                            result: CloudOutcome::Err(CloudError::Protocol(format!(
+                                "invalid internal request timeout: {error}"
+                            ))),
+                        });
+                        return;
+                    }
+                }
+            } else {
+                request = request.with_header(name, value);
+            }
         }
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
             Ok(resp) if resp.status < 400 => CloudEvent::Put {
@@ -779,6 +797,35 @@ impl CloudBackend for AzureBackend {
                 result: CloudOutcome::Err(CloudError::from_http_status(resp.status, "Azure GET")),
             },
             Err(err) => CloudEvent::Get {
+                key: ctx,
+                result: CloudOutcome::Err(CloudError::Transport(format!("{err:?}"))),
+            },
+        };
+        self.executor.spawn_request(request, key, callback, mapper);
+    }
+
+    fn submit_get_with_metadata(&self, key: &str, callback: CloudCallback) {
+        let key = key.to_string();
+        let request = CloudRequest::new(Method::GET, self.object_url(&key));
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
+            Ok(resp) if resp.status == 200 => {
+                let etag = resp
+                    .headers
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case("etag"))
+                    .map(|(_, value)| value.trim().to_string())
+                    .unwrap_or_default();
+                let metadata = ObjectMetadata::new(resp.body.len() as u64, etag, 0);
+                CloudEvent::GetWithMetadata {
+                    key: ctx,
+                    result: CloudOutcome::Ok((resp.body, metadata)),
+                }
+            }
+            Ok(resp) => CloudEvent::GetWithMetadata {
+                key: ctx,
+                result: CloudOutcome::Err(CloudError::from_http_status(resp.status, "Azure GET")),
+            },
+            Err(err) => CloudEvent::GetWithMetadata {
                 key: ctx,
                 result: CloudOutcome::Err(CloudError::Transport(format!("{err:?}"))),
             },

@@ -20,6 +20,10 @@ use std::time::{Duration, Instant};
 
 /// Default TTL for cloud leases (30 seconds).
 const DEFAULT_CLOUD_LEASE_TTL_SECS: u64 = 30;
+// Provider HTTP clients use a 10-second request timeout. Renewal admission
+// retains one extra second so a timed-out request cannot still land after the
+// holder's monotonic expiry.
+const RENEWAL_WRITE_DEADLINE_MARGIN: Duration = Duration::from_secs(11);
 
 /// Key used for the lease object in cloud storage.
 const LEASE_OBJECT_KEY: &str = crate::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY;
@@ -39,6 +43,7 @@ struct ProviderLeaderStore {
     ttl: Duration,
     owner_token: String,
     validity: Arc<LeaseValidity>,
+    clock_skew_tolerance: Duration,
 }
 
 impl ProviderLeaderStore {
@@ -47,23 +52,28 @@ impl ProviderLeaderStore {
         ttl: Duration,
         owner_token: String,
         validity: Arc<LeaseValidity>,
+        clock_skew_tolerance: Duration,
     ) -> Self {
         Self {
             cloud,
             ttl,
             owner_token,
             validity,
+            clock_skew_tolerance,
         }
     }
 }
 
 impl LeaderStore for ProviderLeaderStore {
     fn acquire_leadership(&self, holder_id: &str) -> Result<LeaderRecord, LeaseError> {
-        let existing_head = provider_head(&self.cloud)?;
-        let existing = provider_read_doc(&self.cloud)?;
+        let current = provider_read_doc_with_metadata(&self.cloud, Duration::from_secs(30))?;
+        let (existing, metadata) = match current {
+            Some((document, metadata)) => (Some(document), Some(metadata)),
+            None => (None, None),
+        };
 
         if let Some(existing) = existing.as_ref() {
-            if !existing.is_expired()? {
+            if !existing.is_expired_with_tolerance(self.clock_skew_tolerance)? {
                 return Err(LeaseError::AcquisitionFailed(format!(
                     "another instance holds the lease (holder: {}, expires: {})",
                     existing.holder_id, existing.expires_at
@@ -90,7 +100,7 @@ impl LeaderStore for ProviderLeaderStore {
                 + chrono::Duration::seconds(CloudStorageLease::lease_ttl_seconds_i64(self.ttl)))
             .to_rfc3339(),
         };
-        let headers = match existing_head {
+        let headers = match metadata {
             Some(metadata) => mutation_precondition_headers(&metadata).ok_or_else(|| {
                 LeaseError::IoError(
                     "existing cloud lease has no conditional update token".to_string(),
@@ -157,6 +167,7 @@ pub struct CloudStorageLease {
     local_fs: Option<Arc<dyn Fs>>,
     /// Real cloud object backend for distributed lease coordination.
     cloud: Option<Arc<CloudStorage>>,
+    clock_skew_tolerance: Duration,
 }
 
 impl CloudStorageLease {
@@ -211,7 +222,40 @@ impl CloudStorageLease {
             local_leader_store,
             local_fs,
             cloud: None,
+            clock_skew_tolerance: Duration::from_secs(DEFAULT_CLOUD_LEASE_TTL_SECS / 2),
         }
+    }
+
+    /// Override the bounded wall-clock skew allowance used for takeover.
+    pub fn with_clock_skew_tolerance(mut self, tolerance: Duration) -> Result<Self, LeaseError> {
+        if tolerance > self.ttl {
+            return Err(LeaseError::Internal(format!(
+                "lease clock-skew tolerance {tolerance:?} exceeds TTL {:?}",
+                self.ttl
+            )));
+        }
+        self.clock_skew_tolerance = tolerance;
+        if let Some(cloud) = self.cloud.as_ref() {
+            self.leader_store = Some(Arc::new(ProviderLeaderStore::new(
+                Arc::clone(cloud),
+                self.ttl,
+                self.owner_token.clone(),
+                Arc::clone(&self.validity),
+                tolerance,
+            )));
+        }
+        Ok(self)
+    }
+
+    pub(crate) fn new_with_clock_skew_tolerance(
+        config: CloudLeaseConfig,
+        local_cache_path: impl AsRef<std::path::Path>,
+        clock_skew_tolerance: Duration,
+    ) -> Self {
+        let lease = Self::new(config, local_cache_path);
+        lease
+            .with_clock_skew_tolerance(clock_skew_tolerance)
+            .expect("engine validates lease clock-skew tolerance")
     }
 
     pub fn new_provider_backed(
@@ -225,9 +269,22 @@ impl CloudStorageLease {
             lease.ttl,
             lease.owner_token.clone(),
             Arc::clone(&lease.validity),
+            Duration::from_secs(DEFAULT_CLOUD_LEASE_TTL_SECS / 2),
         )));
         lease.cloud = Some(cloud);
         lease
+    }
+
+    pub(crate) fn new_provider_backed_with_clock_skew_tolerance(
+        config: CloudLeaseConfig,
+        local_cache_path: std::path::PathBuf,
+        cloud: Arc<CloudStorage>,
+        clock_skew_tolerance: Duration,
+    ) -> Self {
+        let lease = Self::new_provider_backed(config, local_cache_path, cloud);
+        lease
+            .with_clock_skew_tolerance(clock_skew_tolerance)
+            .expect("engine validates lease clock-skew tolerance")
     }
 
     /// Full object key for the lease file.
@@ -321,34 +378,12 @@ impl CloudStorageLease {
         }
     }
 
-    fn remote_head(&self) -> Result<Option<ObjectMetadata>, LeaseError> {
-        let Some(cloud) = self.cloud.as_ref() else {
-            return Ok(None);
-        };
-        provider_head(cloud)
-    }
-
-    fn remote_read_doc(&self) -> Result<Option<LeaseDocument>, LeaseError> {
-        let Some(cloud) = self.cloud.as_ref() else {
-            return Ok(None);
-        };
-        provider_read_doc(cloud)
-    }
-
-    fn remote_write_doc(
-        &self,
-        doc: &LeaseDocument,
-        headers: Vec<(String, String)>,
-    ) -> Result<(), LeaseError> {
-        let Some(cloud) = self.cloud.as_ref() else {
-            return self.write_lease_file(doc);
-        };
-        provider_write_doc(cloud, doc, headers)
-    }
-
     fn remote_release_if_still_holder(&self) -> Result<(), LeaseError> {
-        let metadata = self.remote_head()?;
-        let Some(metadata) = metadata else {
+        let Some(cloud) = self.cloud.as_ref() else {
+            return Ok(());
+        };
+        let current = provider_read_doc_with_metadata(cloud, Duration::from_secs(30))?;
+        let Some((current, metadata)) = current else {
             tracing::warn!(
                 holder_id = %self.holder_id,
                 "skipping cloud lease release because the lease has no HEAD metadata"
@@ -360,11 +395,6 @@ impl CloudStorageLease {
                 holder_id = %self.holder_id,
                 "skipping cloud lease release because no conditional update token is available"
             );
-            return Ok(());
-        };
-
-        let current = self.remote_read_doc()?;
-        let Some(current) = current else {
             return Ok(());
         };
 
@@ -380,11 +410,20 @@ impl CloudStorageLease {
             return Ok(());
         }
 
+        // Preserve the fencing epoch so the next holder must advance it.  The
+        // released timestamp is placed beyond the configured skew window;
+        // merely writing `now - 1ms` would keep the record live for callers
+        // using the safe default tolerance.
+        let release_offset = chrono::Duration::from_std(
+            self.clock_skew_tolerance
+                .saturating_add(Duration::from_millis(1)),
+        )
+        .unwrap_or(chrono::Duration::MAX);
         let released = LeaseDocument {
-            expires_at: (chrono::Utc::now() - chrono::Duration::milliseconds(1)).to_rfc3339(),
+            expires_at: (chrono::Utc::now() - release_offset).to_rfc3339(),
             ..current
         };
-        self.remote_write_doc(&released, headers)
+        provider_write_doc(cloud, &released, headers)
     }
 
     fn local_store(&self) -> Result<&Arc<FsLeaderStore>, LeaseError> {
@@ -414,7 +453,7 @@ impl CloudStorageLease {
             &self.holder_id,
             |_| {
                 if let Some(existing) = self.read_lease_file()? {
-                    if !existing.is_expired()? {
+                    if !existing.is_expired_with_tolerance(self.clock_skew_tolerance)? {
                         return Err(LeaseError::AcquisitionFailed(format!(
                             "another instance holds the lease (holder: {}, expires: {})",
                             existing.holder_id, existing.expires_at
@@ -486,6 +525,7 @@ impl CloudStorageLease {
                     + chrono::Duration::seconds(Self::lease_ttl_seconds_i64(self.ttl)))
                 .to_rfc3339(),
             };
+            self.validity.remaining(expected_epoch)?;
             self.write_lease_file(&renewed)?;
             Ok(valid_until)
         })?;
@@ -494,7 +534,11 @@ impl CloudStorageLease {
             self.acquired.store(false, Ordering::Release);
             return Err(LeaseError::RenewalFailed(error.to_string()));
         }
-        self.validity.advance(expected_epoch, valid_until)?;
+        if let Err(error) = self.validity.advance(expected_epoch, valid_until) {
+            let _ = self.release_local_if_still_holder();
+            self.acquired.store(false, Ordering::Release);
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -562,67 +606,114 @@ impl PrimaryLease for CloudStorageLease {
     }
 
     fn renew(&self) -> Result<(), LeaseError> {
-        if !self.acquired.load(Ordering::Acquire) {
-            return Err(LeaseError::RenewalFailed("lease not acquired".to_string()));
-        }
-        if self.cloud.is_none() {
-            self.renew_local()?;
-            tracing::trace!("simulated-cloud storage lease renewed");
-            return Ok(());
-        }
-
-        let metadata = self.remote_head()?.ok_or_else(|| {
-            self.acquired.store(false, Ordering::Release);
-            LeaseError::RenewalFailed("cloud lease HEAD disappeared".to_string())
-        })?;
-        let headers = mutation_precondition_headers(&metadata).ok_or_else(|| {
-            LeaseError::RenewalFailed(
-                "cloud lease has no token for conditional renewal".to_string(),
-            )
-        })?;
-        // Verify ownership after capturing the mutation precondition. If the
-        // object changes after HEAD, the conditional write fails rather than
-        // applying this stale document to the newer version.
-        let existing = self.remote_read_doc()?.ok_or_else(|| {
-            self.acquired.store(false, Ordering::Release);
-            LeaseError::RenewalFailed("cloud lease document disappeared".to_string())
-        })?;
         let expected_epoch = self.acquired_epoch.load(Ordering::Acquire);
-        if !self.owns_document(&existing, expected_epoch) {
-            self.acquired.store(false, Ordering::Release);
-            return Err(LeaseError::RenewalFailed(format!(
-                "cloud lease ownership changed (holder: {}, epoch: {:?})",
-                existing.holder_id, existing.epoch
-            )));
-        }
-
-        // Write renewed lease
-        let monotonic_now = Instant::now();
-        let now = chrono::Utc::now();
-        let valid_until = monotonic_now + self.ttl;
-        let doc = LeaseDocument {
-            epoch: Some(expected_epoch),
-            holder_id: self.holder_id.clone(),
-            owner_token: Some(self.owner_token.clone()),
-            acquired_at: existing.acquired_at,
-            expires_at: (now + chrono::Duration::seconds(Self::lease_ttl_seconds_i64(self.ttl)))
-                .to_rfc3339(),
-        };
-        self.remote_write_doc(&doc, headers)?;
-        self.validity.advance(expected_epoch, valid_until)?;
-
-        tracing::trace!("cloud storage lease renewed");
-
-        // Also validate epoch is still current with leader store.
-        if let Some(ref store) = self.leader_store {
-            let expected = self
-                .acquired_epoch
-                .load(std::sync::atomic::Ordering::Acquire);
-            if expected > 0 {
-                store.validate_epoch(expected)?;
+        let result = (|| {
+            if !self.acquired.load(Ordering::Acquire) {
+                return Err(LeaseError::RenewalFailed("lease not acquired".to_string()));
             }
-        }
+            self.validity.remaining(expected_epoch)?;
+            if self.cloud.is_none() {
+                self.renew_local()?;
+                tracing::trace!("simulated-cloud storage lease renewed");
+                return Ok(());
+            }
 
+            let (existing, metadata) = provider_read_doc_with_metadata(
+                self.cloud
+                    .as_ref()
+                    .expect("provider lease has cloud backend"),
+                self.validity.remaining(expected_epoch)?,
+            )?
+            .ok_or_else(|| {
+                LeaseError::RenewalFailed("cloud lease document disappeared".to_string())
+            })?;
+            let headers = mutation_precondition_headers(&metadata).ok_or_else(|| {
+                LeaseError::RenewalFailed(
+                    "cloud lease has no token for conditional renewal".to_string(),
+                )
+            })?;
+            // The document and mutation token came from the same provider GET. If
+            // it changes afterward, the conditional write fails closed.
+            if !self.owns_document(&existing, expected_epoch) {
+                return Err(LeaseError::RenewalFailed(format!(
+                    "cloud lease ownership changed (holder: {}, epoch: {:?})",
+                    existing.holder_id, existing.epoch
+                )));
+            }
+
+            // Write renewed lease
+            let monotonic_now = Instant::now();
+            let now = chrono::Utc::now();
+            let valid_until = monotonic_now + self.ttl;
+            let doc = LeaseDocument {
+                epoch: Some(expected_epoch),
+                holder_id: self.holder_id.clone(),
+                owner_token: Some(self.owner_token.clone()),
+                acquired_at: existing.acquired_at,
+                expires_at: (now
+                    + chrono::Duration::seconds(Self::lease_ttl_seconds_i64(self.ttl)))
+                .to_rfc3339(),
+            };
+            let remaining = self.validity.remaining(expected_epoch)?;
+            let write_timeout = remaining
+                .checked_sub(RENEWAL_WRITE_DEADLINE_MARGIN)
+                .filter(|timeout| !timeout.is_zero())
+                .ok_or_else(|| {
+                    LeaseError::RenewalFailed(
+                        "insufficient monotonic validity remains for bounded provider renewal"
+                            .to_string(),
+                    )
+                })?;
+            if let Err(error) = provider_write_doc_with_timeout(
+                self.cloud
+                    .as_ref()
+                    .expect("provider lease has cloud backend"),
+                &doc,
+                headers,
+                write_timeout,
+            ) {
+                if matches!(error, LeaseError::IoError(_) | LeaseError::Indeterminate(_)) {
+                    spawn_ambiguous_renewal_reconciler(
+                        Arc::clone(
+                            self.cloud
+                                .as_ref()
+                                .expect("provider lease has cloud backend"),
+                        ),
+                        doc,
+                        self.clock_skew_tolerance,
+                    );
+                }
+                return Err(error);
+            }
+            if let Err(error) = self.validity.advance(expected_epoch, valid_until) {
+                // The conditional write may have landed as the monotonic deadline
+                // expired. Best-effort CAS expiry prevents a fenced process from
+                // extending takeover latency; failure remains fail-closed.
+                let _ = self.remote_release_if_still_holder();
+                return Err(error);
+            }
+
+            tracing::trace!("cloud storage lease renewed");
+
+            // Also validate epoch is still current with leader store.
+            if let Some(ref store) = self.leader_store {
+                let expected = self
+                    .acquired_epoch
+                    .load(std::sync::atomic::Ordering::Acquire);
+                if expected > 0 {
+                    store.validate_epoch(expected)?;
+                }
+            }
+
+            Ok(())
+        })();
+
+        if let Err(error) = result {
+            self.validity.fence(expected_epoch);
+            self.acquired.store(false, Ordering::Release);
+            self.acquired_epoch.store(0, Ordering::Release);
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -686,14 +777,22 @@ struct LeaseDocument {
 
 impl LeaseDocument {
     /// Check if the lease has expired based on `expires_at`.
+    #[cfg(test)]
     fn is_expired(&self) -> Result<bool, LeaseError> {
+        self.is_expired_with_tolerance(Duration::ZERO)
+    }
+
+    fn is_expired_with_tolerance(&self, tolerance: Duration) -> Result<bool, LeaseError> {
         let expires = chrono::DateTime::parse_from_rfc3339(&self.expires_at).map_err(|_| {
             LeaseError::Indeterminate(format!(
                 "cloud lease expiry is invalid; ownership is ambiguous (holder: {}, epoch: {:?})",
                 self.holder_id, self.epoch
             ))
         })?;
-        Ok(chrono::Utc::now() > expires)
+        let tolerance = chrono::Duration::from_std(tolerance).map_err(|_| {
+            LeaseError::Internal("lease clock-skew tolerance is out of range".to_string())
+        })?;
+        Ok(chrono::Utc::now() > expires + tolerance)
     }
 }
 
@@ -772,28 +871,59 @@ fn classify_lease_read_error(
     }
 }
 
-fn provider_head(cloud: &CloudStorage) -> Result<Option<ObjectMetadata>, LeaseError> {
+fn provider_read_doc(cloud: &CloudStorage) -> Result<Option<LeaseDocument>, LeaseError> {
+    provider_read_doc_with_timeout(cloud, Duration::from_secs(30))
+}
+
+fn provider_read_doc_with_metadata(
+    cloud: &CloudStorage,
+    timeout: Duration,
+) -> Result<Option<(LeaseDocument, ObjectMetadata)>, LeaseError> {
     let (tx, rx) = std::sync::mpsc::channel();
-    cloud.submit_head(LEASE_OBJECT_KEY, tx);
-    match rx.recv_timeout(Duration::from_secs(30)) {
-        Ok(CloudEvent::Head { result, .. }) => match result {
-            CloudOutcome::Ok(metadata) => Ok(Some(metadata)),
-            CloudOutcome::Err(error) if error.is_not_found() => Ok(None),
-            CloudOutcome::Err(error) => Err(classify_lease_read_error("HEAD", &error)),
-        },
+    cloud.submit_get_with_metadata(LEASE_OBJECT_KEY, tx);
+    match rx.recv_timeout(timeout) {
+        Ok(CloudEvent::GetWithMetadata {
+            key: returned_key,
+            result,
+        }) => {
+            drop(returned_key);
+            match result {
+                CloudOutcome::Ok((bytes, metadata)) => {
+                    let content = String::from_utf8(bytes).map_err(|error| {
+                        LeaseError::Indeterminate(format!(
+                            "cloud lease document is not UTF-8: {error}"
+                        ))
+                    })?;
+                    let document = parse_lease_document(&content).ok_or_else(|| {
+                        LeaseError::Indeterminate("cloud lease document is malformed".to_string())
+                    })?;
+                    if mutation_precondition_headers(&metadata).is_none() {
+                        return Err(LeaseError::IoError(
+                            "existing cloud lease has no conditional update token".to_string(),
+                        ));
+                    }
+                    Ok(Some((document, metadata)))
+                }
+                CloudOutcome::Err(error) if error.is_not_found() => Ok(None),
+                CloudOutcome::Err(error) => Err(classify_lease_read_error("GET", &error)),
+            }
+        }
         Ok(other) => Err(LeaseError::IoError(format!(
-            "unexpected cloud lease HEAD response: {other:?}"
+            "unexpected metadata-bearing cloud lease GET response: {other:?}"
         ))),
         Err(error) => Err(LeaseError::IoError(format!(
-            "cloud lease HEAD timed out: {error}"
+            "cloud lease GET timed out: {error}"
         ))),
     }
 }
 
-fn provider_read_doc(cloud: &CloudStorage) -> Result<Option<LeaseDocument>, LeaseError> {
+fn provider_read_doc_with_timeout(
+    cloud: &CloudStorage,
+    timeout: Duration,
+) -> Result<Option<LeaseDocument>, LeaseError> {
     let (tx, rx) = std::sync::mpsc::channel();
     cloud.submit_get(LEASE_OBJECT_KEY, tx);
-    match rx.recv_timeout(Duration::from_secs(30)) {
+    match rx.recv_timeout(timeout) {
         Ok(CloudEvent::Get { result, .. }) => match result {
             CloudOutcome::Ok(bytes) => {
                 let content = String::from_utf8(bytes).map_err(|error| {
@@ -820,6 +950,22 @@ fn provider_write_doc(
     document: &LeaseDocument,
     headers: Vec<(String, String)>,
 ) -> Result<(), LeaseError> {
+    provider_write_doc_with_timeout(cloud, document, headers, Duration::from_secs(30))
+}
+
+fn provider_write_doc_with_timeout(
+    cloud: &CloudStorage,
+    document: &LeaseDocument,
+    mut headers: Vec<(String, String)>,
+    timeout: Duration,
+) -> Result<(), LeaseError> {
+    let timeout_ms = u64::try_from(timeout.as_millis())
+        .unwrap_or(u64::MAX)
+        .max(1);
+    headers.push((
+        crate::storage::cloud::REQUEST_TIMEOUT_HEADER.to_string(),
+        timeout_ms.to_string(),
+    ));
     let (tx, rx) = std::sync::mpsc::channel();
     cloud.submit_put(
         LEASE_OBJECT_KEY,
@@ -827,7 +973,7 @@ fn provider_write_doc(
         headers,
         tx,
     );
-    match rx.recv_timeout(Duration::from_secs(30)) {
+    match rx.recv_timeout(timeout) {
         Ok(CloudEvent::Put { result, .. }) => match result {
             CloudOutcome::Ok(()) => Ok(()),
             // Only a genuine conditional-write race — another writer's PUT
@@ -882,6 +1028,75 @@ fn reconcile_ambiguous_lease_write(
         Err(read_error) => Err(LeaseError::Indeterminate(format!(
             "{original_error}; cloud lease readback could not determine whether the write landed: {read_error}"
         ))),
+    }
+}
+
+fn spawn_ambiguous_renewal_reconciler(
+    cloud: Arc<CloudStorage>,
+    expected: LeaseDocument,
+    clock_skew_tolerance: Duration,
+) {
+    let expected_expiry = chrono::DateTime::parse_from_rfc3339(&expected.expires_at).map_or_else(
+        |_| chrono::Utc::now(),
+        |value| value.with_timezone(&chrono::Utc),
+    );
+    let tolerance =
+        chrono::Duration::from_std(clock_skew_tolerance).unwrap_or(chrono::Duration::MAX);
+    let reconcile_until = expected_expiry
+        .checked_add_signed(tolerance)
+        .and_then(|value| value.checked_add_signed(chrono::Duration::seconds(1)))
+        .unwrap_or(expected_expiry);
+
+    let spawn = std::thread::Builder::new()
+        .name("midge-lease-renew-reconciler".to_string())
+        .spawn(move || {
+            let poll_interval = if cfg!(test) {
+                Duration::from_millis(10)
+            } else {
+                Duration::from_millis(100)
+            };
+            while chrono::Utc::now() <= reconcile_until {
+                if let Ok(Some((current, metadata))) =
+                    provider_read_doc_with_metadata(&cloud, Duration::from_millis(500))
+                {
+                    let same_authority = current.epoch == expected.epoch
+                        && current.holder_id == expected.holder_id
+                        && current.owner_token == expected.owner_token;
+                    if !same_authority {
+                        // A different authority won. Its provider identity
+                        // is never used by this cleanup obligation.
+                        return;
+                    }
+                    if !current
+                        .is_expired_with_tolerance(clock_skew_tolerance)
+                        .unwrap_or(false)
+                    {
+                        if let Some(headers) = mutation_precondition_headers(&metadata) {
+                            let release_offset =
+                                clock_skew_tolerance.saturating_add(Duration::from_millis(1));
+                            let chrono_offset = chrono::Duration::from_std(release_offset)
+                                .unwrap_or(chrono::Duration::MAX);
+                            let expired = LeaseDocument {
+                                expires_at: (chrono::Utc::now() - chrono_offset).to_rfc3339(),
+                                ..current
+                            };
+                            let _ = provider_write_doc_with_timeout(
+                                &cloud,
+                                &expired,
+                                headers,
+                                Duration::from_millis(500),
+                            );
+                        }
+                    }
+                }
+                // Absence and transient read failure are not completion proof:
+                // an already-accepted PUT may still become visible, so retain
+                // the obligation through the bound.
+                std::thread::sleep(poll_interval);
+            }
+        });
+    if let Err(error) = spawn {
+        tracing::error!(%error, "failed to start ambiguous lease-renewal reconciler");
     }
 }
 
@@ -966,6 +1181,18 @@ mod tests {
             crate::storage::cloud::CloudBackend::submit_get(&self.inner, key, callback);
         }
 
+        fn submit_get_with_metadata(
+            &self,
+            key: &str,
+            callback: crate::storage::cloud::CloudCallback,
+        ) {
+            crate::storage::cloud::CloudBackend::submit_get_with_metadata(
+                &self.inner,
+                key,
+                callback,
+            );
+        }
+
         fn submit_get_range(
             &self,
             key: &str,
@@ -1046,6 +1273,262 @@ mod tests {
         inner: crate::storage::cloud::MockCloudBackend,
     }
 
+    struct ValidateFailureLeaderStore {
+        inner: Arc<dyn LeaderStore>,
+    }
+
+    struct BlockingRenewalBackend {
+        inner: crate::storage::cloud::MockCloudBackend,
+        conditional_puts: std::sync::atomic::AtomicUsize,
+        renewal_seen: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
+        allow_renewal: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    type PendingPut = (String, Vec<u8>, Vec<(String, String)>);
+
+    struct LateCommitRenewalBackend {
+        inner: crate::storage::cloud::MockCloudBackend,
+        conditional_puts: std::sync::atomic::AtomicUsize,
+        pending: std::sync::Mutex<Option<PendingPut>>,
+        old_read_seen: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    }
+
+    impl LateCommitRenewalBackend {
+        fn commit_pending(&self) {
+            let (key, data, headers) = self
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+                .expect("late renewal PUT is pending");
+            let (callback, result) = std::sync::mpsc::channel();
+            crate::storage::cloud::CloudBackend::submit_put(
+                &self.inner,
+                &key,
+                data,
+                headers,
+                callback,
+            );
+            assert!(matches!(
+                result.recv_timeout(Duration::from_secs(1)),
+                Ok(crate::storage::cloud::CloudEvent::Put {
+                    result: crate::storage::cloud::CloudOutcome::Ok(()),
+                    ..
+                })
+            ));
+        }
+    }
+
+    impl crate::storage::cloud::CloudBackend for LateCommitRenewalBackend {
+        fn submit_put(
+            &self,
+            key: &str,
+            data: Vec<u8>,
+            headers: Vec<(String, String)>,
+            callback: crate::storage::cloud::CloudCallback,
+        ) {
+            let conditional = headers.iter().any(|(name, _)| {
+                name.eq_ignore_ascii_case("if-match") || name.eq_ignore_ascii_case("if-none-match")
+            });
+            if conditional
+                && self
+                    .conditional_puts
+                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+                    == 1
+            {
+                *self
+                    .pending
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some((key.to_string(), data, headers));
+                let _ = callback.send(crate::storage::cloud::CloudEvent::Put {
+                    key: key.to_string(),
+                    result: Err(crate::storage::cloud::CloudError::Transport(
+                        "scripted renewal timeout before late commit".to_string(),
+                    )),
+                });
+                return;
+            }
+            crate::storage::cloud::CloudBackend::submit_put(
+                &self.inner,
+                key,
+                data,
+                headers,
+                callback,
+            );
+        }
+
+        fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+            if self
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some()
+            {
+                if let Some(signal) = self
+                    .old_read_seen
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                {
+                    signal.send(()).expect("signal old reconciliation read");
+                }
+            }
+            crate::storage::cloud::CloudBackend::submit_get(&self.inner, key, callback);
+        }
+
+        fn submit_get_with_metadata(
+            &self,
+            key: &str,
+            callback: crate::storage::cloud::CloudCallback,
+        ) {
+            crate::storage::cloud::CloudBackend::submit_get_with_metadata(
+                &self.inner,
+                key,
+                callback,
+            );
+        }
+
+        fn submit_get_range(
+            &self,
+            key: &str,
+            start: u64,
+            end: Option<u64>,
+            callback: crate::storage::cloud::CloudCallback,
+        ) {
+            crate::storage::cloud::CloudBackend::submit_get_range(
+                &self.inner,
+                key,
+                start,
+                end,
+                callback,
+            );
+        }
+
+        fn submit_delete(
+            &self,
+            key: &str,
+            headers: Vec<(String, String)>,
+            callback: crate::storage::cloud::CloudCallback,
+        ) {
+            crate::storage::cloud::CloudBackend::submit_delete(&self.inner, key, headers, callback);
+        }
+
+        fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
+            crate::storage::cloud::CloudBackend::submit_list(&self.inner, prefix, callback);
+        }
+
+        fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+            crate::storage::cloud::CloudBackend::submit_head(&self.inner, key, callback);
+        }
+    }
+
+    impl crate::storage::cloud::CloudBackend for BlockingRenewalBackend {
+        fn submit_put(
+            &self,
+            key: &str,
+            data: Vec<u8>,
+            headers: Vec<(String, String)>,
+            callback: crate::storage::cloud::CloudCallback,
+        ) {
+            let conditional = headers.iter().any(|(name, _)| {
+                name.eq_ignore_ascii_case("if-match") || name.eq_ignore_ascii_case("if-none-match")
+            });
+            if conditional
+                && self
+                    .conditional_puts
+                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+                    == 1
+            {
+                if let Some(signal) = self
+                    .renewal_seen
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                {
+                    signal.send(()).expect("signal blocked renewal");
+                }
+                self.allow_renewal
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .recv()
+                    .expect("release blocked renewal");
+            }
+            crate::storage::cloud::CloudBackend::submit_put(
+                &self.inner,
+                key,
+                data,
+                headers,
+                callback,
+            );
+        }
+
+        fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+            crate::storage::cloud::CloudBackend::submit_get(&self.inner, key, callback);
+        }
+
+        fn submit_get_with_metadata(
+            &self,
+            key: &str,
+            callback: crate::storage::cloud::CloudCallback,
+        ) {
+            crate::storage::cloud::CloudBackend::submit_get_with_metadata(
+                &self.inner,
+                key,
+                callback,
+            );
+        }
+
+        fn submit_get_range(
+            &self,
+            key: &str,
+            start: u64,
+            end: Option<u64>,
+            callback: crate::storage::cloud::CloudCallback,
+        ) {
+            crate::storage::cloud::CloudBackend::submit_get_range(
+                &self.inner,
+                key,
+                start,
+                end,
+                callback,
+            );
+        }
+
+        fn submit_delete(
+            &self,
+            key: &str,
+            headers: Vec<(String, String)>,
+            callback: crate::storage::cloud::CloudCallback,
+        ) {
+            crate::storage::cloud::CloudBackend::submit_delete(&self.inner, key, headers, callback);
+        }
+
+        fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
+            crate::storage::cloud::CloudBackend::submit_list(&self.inner, prefix, callback);
+        }
+
+        fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+            crate::storage::cloud::CloudBackend::submit_head(&self.inner, key, callback);
+        }
+    }
+
+    impl LeaderStore for ValidateFailureLeaderStore {
+        fn acquire_leadership(&self, holder_id: &str) -> Result<LeaderRecord, LeaseError> {
+            self.inner.acquire_leadership(holder_id)
+        }
+
+        fn read_current(&self) -> Result<Option<LeaderRecord>, LeaseError> {
+            self.inner.read_current()
+        }
+
+        fn validate_epoch(&self, _expected_epoch: u64) -> Result<(), LeaseError> {
+            Err(LeaseError::RenewalFailed(
+                "scripted post-renew validation failure".to_string(),
+            ))
+        }
+    }
+
     impl crate::storage::cloud::CloudBackend for NoCasTokenBackend {
         fn submit_put(
             &self,
@@ -1065,6 +1548,35 @@ mod tests {
 
         fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
             crate::storage::cloud::CloudBackend::submit_get(&self.inner, key, callback);
+        }
+
+        fn submit_get_with_metadata(
+            &self,
+            key: &str,
+            callback: crate::storage::cloud::CloudCallback,
+        ) {
+            let (tx, rx) = std::sync::mpsc::channel();
+            crate::storage::cloud::CloudBackend::submit_get_with_metadata(&self.inner, key, tx);
+            let event = match rx.recv() {
+                Ok(crate::storage::cloud::CloudEvent::GetWithMetadata {
+                    key,
+                    result: Ok((bytes, metadata)),
+                }) => crate::storage::cloud::CloudEvent::GetWithMetadata {
+                    key,
+                    result: Ok((
+                        bytes,
+                        crate::storage::cloud::ObjectMetadata::new(metadata.size, String::new(), 0),
+                    )),
+                },
+                Ok(other) => other,
+                Err(error) => crate::storage::cloud::CloudEvent::GetWithMetadata {
+                    key: key.to_string(),
+                    result: Err(crate::storage::cloud::CloudError::Transport(
+                        error.to_string(),
+                    )),
+                },
+            };
+            let _ = callback.send(event);
         }
 
         fn submit_get_range(
@@ -1471,6 +1983,206 @@ mod tests {
     }
 
     #[test]
+    fn should_not_extend_persisted_lease_given_watchdog_fenced_before_renewal() {
+        // Arrange
+        let lease = Arc::new(CloudStorageLease::new(test_config(), temp_cache_path()));
+        let _guard = Arc::clone(&lease).try_acquire().expect("acquire lease");
+        let epoch = lease.epoch();
+        let before = lease
+            .read_lease_file()
+            .expect("read lease document")
+            .expect("lease document exists");
+        lease.validity.fence(epoch);
+
+        // Act
+        let result = lease.renew();
+        let after = lease
+            .read_lease_file()
+            .expect("read lease document")
+            .expect("lease document remains");
+
+        // Assert
+        assert!(matches!(result, Err(LeaseError::RenewalFailed(_))));
+        assert_eq!(after, before);
+        assert!(!lease.acquired.load(Ordering::Acquire));
+        assert_eq!(lease.acquired_epoch.load(Ordering::Acquire), 0);
+        assert!(lease.validity.remaining(epoch).is_err());
+    }
+
+    #[test]
+    fn should_clear_direct_lease_state_when_post_renew_validation_fails() {
+        // Arrange
+        let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());
+        let mut lease =
+            CloudStorageLease::new_provider_backed(test_config(), temp_cache_path(), cloud);
+        let inner = lease
+            .leader_store
+            .take()
+            .expect("provider leader store installed");
+        lease.leader_store = Some(Arc::new(ValidateFailureLeaderStore { inner }));
+        let lease = Arc::new(lease);
+        let _guard = Arc::clone(&lease).try_acquire().expect("acquire lease");
+        let epoch = lease.epoch();
+
+        // Act
+        let result = lease.renew();
+
+        // Assert
+        assert!(matches!(result, Err(LeaseError::RenewalFailed(_))));
+        assert!(!lease.acquired.load(Ordering::Acquire));
+        assert_eq!(lease.acquired_epoch.load(Ordering::Acquire), 0);
+        assert!(lease.validity.remaining(epoch).is_err());
+    }
+
+    #[test]
+    fn should_not_resurrect_authority_when_provider_put_lands_after_watchdog_fence() {
+        // Arrange
+        let (renewal_seen_tx, renewal_seen_rx) = std::sync::mpsc::channel();
+        let (allow_renewal_tx, allow_renewal_rx) = std::sync::mpsc::channel();
+        let backend = Arc::new(BlockingRenewalBackend {
+            inner: crate::storage::cloud::MockCloudBackend::new(),
+            conditional_puts: std::sync::atomic::AtomicUsize::new(0),
+            renewal_seen: std::sync::Mutex::new(Some(renewal_seen_tx)),
+            allow_renewal: std::sync::Mutex::new(allow_renewal_rx),
+        });
+        let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
+            backend,
+            "midge".to_string(),
+        ));
+        let lease = Arc::new(CloudStorageLease::new_provider_backed(
+            test_config(),
+            temp_cache_path(),
+            Arc::clone(&cloud),
+        ));
+        let _guard = Arc::clone(&lease).try_acquire().expect("acquire lease");
+        let epoch = lease.epoch();
+        let renewing = {
+            let lease = Arc::clone(&lease);
+            std::thread::spawn(move || lease.renew())
+        };
+        renewal_seen_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("renewal reached backing store");
+
+        // Act: deterministically model monotonic expiry while the provider
+        // request is live, then let that stale PUT land.
+        lease.validity.fence(epoch);
+        allow_renewal_tx.send(()).expect("release renewal PUT");
+        let result = renewing.join().expect("renewal thread");
+
+        // Assert
+        assert!(matches!(result, Err(LeaseError::RenewalFailed(_))));
+        assert!(!lease.acquired.load(Ordering::Acquire));
+        assert_eq!(lease.acquired_epoch.load(Ordering::Acquire), 0);
+        assert!(lease.validity.remaining(epoch).is_err());
+        let persisted = provider_read_doc(&cloud)
+            .expect("read reconciled lease")
+            .expect("lease record retained for epoch history");
+        assert!(
+            persisted
+                .is_expired_with_tolerance(lease.clock_skew_tolerance)
+                .expect("parse reconciled expiry"),
+            "late provider side effect must be conditionally expired"
+        );
+    }
+
+    #[test]
+    fn should_eventually_expire_late_renewal_after_timeout_readback_saw_old_object() {
+        // Arrange
+        let (old_read_tx, old_read_rx) = std::sync::mpsc::channel();
+        let backend = Arc::new(LateCommitRenewalBackend {
+            inner: crate::storage::cloud::MockCloudBackend::new(),
+            conditional_puts: std::sync::atomic::AtomicUsize::new(0),
+            pending: std::sync::Mutex::new(None),
+            old_read_seen: std::sync::Mutex::new(Some(old_read_tx)),
+        });
+        let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
+            Arc::clone(&backend) as Arc<dyn crate::storage::cloud::CloudBackend>,
+            "midge".to_string(),
+        ));
+        let stale = Arc::new(CloudStorageLease::new_provider_backed(
+            test_config(),
+            temp_cache_path(),
+            Arc::clone(&cloud),
+        ));
+        let _guard = Arc::clone(&stale)
+            .try_acquire()
+            .expect("acquire stale lease");
+
+        // Act: renewal reports timeout, its immediate ambiguity read observes
+        // the old record, and only then does the accepted PUT become visible.
+        let renew_result = stale.renew();
+        old_read_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("immediate reconciliation read old object");
+        backend.commit_pending();
+
+        let cleanup_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let current = provider_read_doc(&cloud)
+                .expect("read eventual cleanup state")
+                .expect("lease record retained");
+            if current
+                .is_expired_with_tolerance(stale.clock_skew_tolerance)
+                .expect("parse cleanup expiry")
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < cleanup_deadline,
+                "late committed renewal was not eventually expired"
+            );
+            std::thread::yield_now();
+        }
+
+        let takeover = Arc::new(CloudStorageLease::new_provider_backed(
+            test_config(),
+            temp_cache_path(),
+            Arc::clone(&cloud),
+        ));
+        let _takeover_guard = Arc::clone(&takeover)
+            .try_acquire()
+            .expect("acquire after reconciled renewal");
+        let takeover_epoch = takeover.epoch();
+        let takeover_owner = takeover.owner_token.clone();
+        std::thread::sleep(Duration::from_millis(30));
+        let after_takeover = provider_read_doc(&cloud)
+            .expect("read takeover lease")
+            .expect("takeover lease remains");
+
+        // Assert
+        assert!(matches!(renew_result, Err(LeaseError::IoError(_))));
+        assert!(!stale.acquired.load(Ordering::Acquire));
+        assert_eq!(stale.acquired_epoch.load(Ordering::Acquire), 0);
+        assert_eq!(after_takeover.epoch, Some(takeover_epoch));
+        assert_eq!(
+            after_takeover.owner_token.as_deref(),
+            Some(takeover_owner.as_str())
+        );
+        assert!(!after_takeover
+            .is_expired_with_tolerance(takeover.clock_skew_tolerance)
+            .expect("parse takeover expiry"));
+    }
+
+    #[test]
+    fn should_reject_excessive_public_clock_skew_override_given_safe_default() {
+        // Arrange
+        let default_lease = CloudStorageLease::new(test_config(), temp_cache_path());
+        let excessive = Duration::from_secs(DEFAULT_CLOUD_LEASE_TTL_SECS + 1);
+
+        // Act
+        let override_result = CloudStorageLease::new(test_config(), temp_cache_path())
+            .with_clock_skew_tolerance(excessive);
+
+        // Assert
+        assert_eq!(
+            default_lease.clock_skew_tolerance,
+            Duration::from_secs(DEFAULT_CLOUD_LEASE_TTL_SECS / 2)
+        );
+        assert!(matches!(override_result, Err(LeaseError::Internal(_))));
+    }
+
+    #[test]
     fn should_release_lease_when_held() {
         // Arrange
         let cache_path = temp_cache_path();
@@ -1550,7 +2262,11 @@ mod tests {
     fn should_preserve_newer_owner_given_stale_guard_drop_when_releasing() {
         // Arrange
         let cache_path = temp_cache_path();
-        let stale = Arc::new(CloudStorageLease::new(test_config(), cache_path.clone()));
+        let stale = Arc::new(
+            CloudStorageLease::new(test_config(), cache_path.clone())
+                .with_clock_skew_tolerance(Duration::ZERO)
+                .expect("zero skew tolerance"),
+        );
         let _stale_guard = Arc::clone(&stale).try_acquire().unwrap();
         let mut expired = stale
             .read_lease_file()
@@ -1559,7 +2275,11 @@ mod tests {
         expired.expires_at = (chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
         stale.write_lease_file(&expired).unwrap();
 
-        let current = Arc::new(CloudStorageLease::new(test_config(), cache_path.clone()));
+        let current = Arc::new(
+            CloudStorageLease::new(test_config(), cache_path.clone())
+                .with_clock_skew_tolerance(Duration::ZERO)
+                .expect("zero skew tolerance"),
+        );
         assert_eq!(stale.holder_id(), current.holder_id());
         let _current_guard = Arc::clone(&current).try_acquire().unwrap();
 
@@ -1574,7 +2294,11 @@ mod tests {
     fn should_not_renew_newer_simulated_lease_from_stale_same_process_holder() {
         // Arrange
         let cache_path = temp_cache_path();
-        let stale = Arc::new(CloudStorageLease::new(test_config(), cache_path.clone()));
+        let stale = Arc::new(
+            CloudStorageLease::new(test_config(), cache_path.clone())
+                .with_clock_skew_tolerance(Duration::ZERO)
+                .expect("zero skew tolerance"),
+        );
         let _stale_guard = Arc::clone(&stale).try_acquire().unwrap();
         let mut expired = stale
             .read_lease_file()
@@ -1583,7 +2307,11 @@ mod tests {
         expired.expires_at = (chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
         stale.write_lease_file(&expired).unwrap();
 
-        let current = Arc::new(CloudStorageLease::new(test_config(), cache_path));
+        let current = Arc::new(
+            CloudStorageLease::new(test_config(), cache_path)
+                .with_clock_skew_tolerance(Duration::ZERO)
+                .expect("zero skew tolerance"),
+        );
         let _current_guard = Arc::clone(&current).try_acquire().unwrap();
         let before = current
             .read_lease_file()
@@ -1756,6 +2484,39 @@ mod tests {
         // Assert
         assert_eq!(first_epoch, 1);
         assert_eq!(second.epoch(), 2);
+    }
+
+    #[test]
+    fn should_grant_exactly_one_acquisition_given_concurrent_provider_racers_when_racing() {
+        // Arrange
+        let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());
+        let first = Arc::new(CloudStorageLease::new_provider_backed(
+            test_config(),
+            temp_cache_path(),
+            Arc::clone(&cloud),
+        ));
+        let second = Arc::new(CloudStorageLease::new_provider_backed(
+            test_config(),
+            temp_cache_path(),
+            cloud,
+        ));
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let spawn = |lease: Arc<CloudStorageLease>| {
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                lease.try_acquire()
+            })
+        };
+        let first_thread = spawn(first);
+        let second_thread = spawn(second);
+
+        // Act
+        barrier.wait();
+        let results = [first_thread.join().unwrap(), second_thread.join().unwrap()];
+
+        // Assert
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
     }
 
     #[test]
@@ -2104,6 +2865,29 @@ mod tests {
 
         // Assert
         assert!(expired);
+    }
+
+    #[test]
+    fn should_delay_takeover_until_clock_skew_tolerance_elapses() {
+        // Arrange
+        let now = chrono::Utc::now();
+        let document = LeaseDocument {
+            epoch: Some(7),
+            holder_id: "skewed-holder".to_string(),
+            owner_token: Some("token".to_string()),
+            acquired_at: (now - chrono::Duration::seconds(30)).to_rfc3339(),
+            expires_at: (now - chrono::Duration::seconds(5)).to_rfc3339(),
+        };
+
+        // Act
+        let without_tolerance = document.is_expired_with_tolerance(Duration::ZERO).unwrap();
+        let with_tolerance = document
+            .is_expired_with_tolerance(Duration::from_secs(15))
+            .unwrap();
+
+        // Assert
+        assert!(without_tolerance);
+        assert!(!with_tolerance);
     }
 
     #[test]
