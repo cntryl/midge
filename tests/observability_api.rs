@@ -485,7 +485,7 @@ fn should_return_runtime_metrics_within_generous_timeout() {
 
 #[cfg(feature = "failpoints")]
 #[test]
-fn should_time_out_and_unregister_response_slot_when_runtime_metrics_response_is_blocked() {
+fn should_unregister_response_slot_when_runtime_metrics_response_times_out() {
     // Arrange
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
     let scenario = fail::FailScenario::setup();

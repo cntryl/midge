@@ -436,7 +436,6 @@ fn should_apply_no_strict_group_member_when_shared_sync_fails() -> MidgeResult<(
 
 #[cfg(feature = "failpoints")]
 #[test]
-#[allow(clippy::too_many_lines)]
 fn should_fail_all_prepared_transactions_when_batch_append_hits_no_space() -> MidgeResult<()> {
     // Arrange
     let _guard = failpoint_test_lock().lock().expect("lock failpoint tests");
@@ -453,22 +452,13 @@ fn should_fail_all_prepared_transactions_when_batch_append_hits_no_space() -> Mi
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
 
-    let first = wal_actor.prepare_transaction_append(
+    let first = prepare_put_transaction(
+        &mut wal_actor,
         &mut state,
-        TransactionAppendParams {
-            request_id: 20,
-            assertions: Vec::new(),
-            ops: vec![crate::runtime::TransactionOp::Put {
-                cf_id: 0,
-                key: Bytes::from_static(b"failed-a"),
-                value: Bytes::from_static(b"value-a"),
-                ttl_seconds: None,
-                insert_only: false,
-            }],
-            durability_policy: Some(DurabilityPolicy::Batched),
-            start_sequence: None,
-            conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
-        },
+        20,
+        b"failed-a",
+        b"value-a",
+        DurabilityPolicy::Batched,
     )?;
     let second = wal_actor.prepare_transaction_append(
         &mut state,
@@ -518,22 +508,13 @@ fn should_fail_all_prepared_transactions_when_batch_append_hits_no_space() -> Mi
         drop(failpoint_guard);
         scenario.teardown();
     }
-    let recovery = wal_actor.prepare_transaction_append(
+    let recovery = prepare_put_transaction(
+        &mut wal_actor,
         &mut state,
-        TransactionAppendParams {
-            request_id: 22,
-            assertions: Vec::new(),
-            ops: vec![crate::runtime::TransactionOp::Put {
-                cf_id: 0,
-                key: Bytes::from_static(b"recovered"),
-                value: Bytes::from_static(b"value"),
-                ttl_seconds: None,
-                insert_only: false,
-            }],
-            durability_policy: Some(DurabilityPolicy::Batched),
-            start_sequence: None,
-            conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
-        },
+        22,
+        b"recovered",
+        b"value",
+        DurabilityPolicy::Batched,
     )?;
     wal_actor.append_prepared_transactions(&mut state, vec![recovery])?;
     assert!(state

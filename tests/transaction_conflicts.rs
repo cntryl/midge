@@ -398,7 +398,7 @@ fn should_reject_assertion_given_aba_value_restored_after_intervening_write() {
 }
 
 #[test]
-fn should_allow_asserting_and_writing_the_same_key_in_one_transaction() {
+fn should_allow_writing_asserted_key_in_same_transaction() {
     // Arrange
     let engine = Arc::new(open_with_mode(&MidgeOptions::default(), "memory"));
     let cf = engine
@@ -436,7 +436,7 @@ fn should_allow_asserting_and_writing_the_same_key_in_one_transaction() {
 }
 
 #[test]
-fn should_commit_disjoint_assertion_and_write_together() {
+fn should_commit_disjoint_assertion_with_write() {
     // Arrange
     let engine = Arc::new(open_with_mode(&MidgeOptions::default(), "memory"));
     let cf = engine
