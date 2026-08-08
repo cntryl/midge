@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+use std::{fs, path::Path};
 
 use bytes::Bytes;
 mod common;
@@ -203,6 +204,170 @@ fn should_match_expiration_given_resident_and_spilled_transaction_paths() {
     // Assert
     assert_eq!(resident_value, None);
     assert_eq!(spilled_value, None);
+}
+
+#[test]
+fn should_preserve_maximum_expiration_given_resident_spilled_transactions() {
+    // Arrange
+    let clock = Arc::new(ManualClock::new(u64::MAX - 500));
+    let resident = open_with_clock(Arc::clone(&clock));
+    let spill_dir = tempfile::TempDir::new().expect("spill directory");
+    let spilled = MidgeEngine::open(
+        OpenOptions::local(spill_dir.path())
+            .memory_budget(MemoryBudget::Bytes(64 * 1024 * 1024))
+            .transaction_memory_pool_size(32 * 1024)
+            .ttl_clock(clock.clone())
+            .build()
+            .expect("build spill options"),
+    )
+    .expect("open spill engine");
+    let mut resident_write = resident
+        .begin_tx(0, TransactionMode::ReadWrite)
+        .expect("begin resident write");
+    resident_write
+        .put(b"max-ttl".to_vec(), b"resident".to_vec(), Some(1))
+        .expect("put resident TTL");
+    resident_write
+        .put(b"no-ttl".to_vec(), b"resident-stable".to_vec(), None)
+        .expect("put resident control");
+    resident_write
+        .commit(WriteOptions::sync())
+        .expect("commit resident write");
+
+    let mut spilled_write = spilled
+        .begin_tx(0, TransactionMode::ReadWrite)
+        .expect("begin spilled write");
+    spilled_write
+        .put(b"max-ttl".to_vec(), vec![b't'; 4096], Some(1))
+        .expect("put spilled TTL");
+    spilled_write
+        .put(b"no-ttl".to_vec(), b"spilled-stable".to_vec(), None)
+        .expect("put spilled control");
+    for index in 0..64 {
+        spilled_write
+            .put(
+                format!("padding-{index:03}").into_bytes(),
+                vec![b'p'; 4096],
+                None,
+            )
+            .expect("put spill pressure");
+    }
+    assert!(contains_spill_run(spill_dir.path()));
+    spilled_write
+        .commit(WriteOptions::sync())
+        .expect("commit spilled write");
+
+    // Act
+    clock.set(u64::MAX);
+    let resident_read = resident
+        .begin_tx(0, TransactionMode::ReadOnly)
+        .expect("begin resident read");
+    let spilled_read = spilled
+        .begin_tx(0, TransactionMode::ReadOnly)
+        .expect("begin spilled read");
+
+    // Assert
+    assert_eq!(
+        resident_read.get(b"max-ttl").expect("resident TTL read"),
+        None
+    );
+    assert_eq!(
+        spilled_read.get(b"max-ttl").expect("spilled TTL read"),
+        None
+    );
+    assert_eq!(
+        resident_read.get(b"no-ttl").expect("resident control read"),
+        Some(Bytes::from_static(b"resident-stable"))
+    );
+    assert_eq!(
+        spilled_read.get(b"no-ttl").expect("spilled control read"),
+        Some(Bytes::from_static(b"spilled-stable"))
+    );
+}
+
+fn contains_spill_run(path: &Path) -> bool {
+    fs::read_dir(path).is_ok_and(|entries| {
+        entries.filter_map(Result::ok).any(|entry| {
+            let path = entry.path();
+            if path.is_dir() {
+                contains_spill_run(&path)
+            } else {
+                path.extension().is_some_and(|extension| extension == "run")
+            }
+        })
+    })
+}
+
+#[test]
+fn should_round_trip_maximum_expiration_value_given_sst_flush_when_ttl_saturates_to_u64_max() {
+    // Arrange
+    let directory = tempfile::TempDir::new().expect("database directory");
+    let clock = Arc::new(ManualClock::new(u64::MAX - 500));
+    let mut engine = MidgeEngine::open(
+        OpenOptions::local(directory.path())
+            .ttl_clock(clock.clone())
+            .background_compaction(false)
+            .build()
+            .expect("build options"),
+    )
+    .expect("open engine");
+    let cf = engine.create_column_family("max-ttl").expect("create CF");
+    for index in 0..4 {
+        let mut write = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin write");
+        write
+            .put(
+                if index == 0 {
+                    b"max-ttl".to_vec()
+                } else {
+                    format!("padding-{index}").into_bytes()
+                },
+                b"value".to_vec(),
+                (index == 0).then_some(1),
+            )
+            .expect("put TTL generation");
+        if index == 0 {
+            write
+                .put(b"no-ttl".to_vec(), b"stable".to_vec(), None)
+                .expect("put control");
+        }
+        write.commit(WriteOptions::sync()).expect("commit");
+        engine.flush_cf(&cf).expect("flush V4 SST");
+    }
+    engine.compact_all().expect("compact V4 SSTs");
+    clock.set(u64::MAX);
+    let before_restart = engine
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+        .expect("begin pre-restart read");
+    assert_eq!(before_restart.get(b"max-ttl").expect("read TTL"), None);
+    assert_eq!(
+        before_restart.get(b"no-ttl").expect("read control"),
+        Some(Bytes::from_static(b"stable"))
+    );
+    drop(before_restart);
+    engine.shutdown(Duration::from_secs(5)).expect("shutdown");
+
+    // Act
+    let reopened = MidgeEngine::open(
+        OpenOptions::local(directory.path())
+            .ttl_clock(clock)
+            .background_compaction(false)
+            .build()
+            .expect("build reopen options"),
+    )
+    .expect("reopen engine");
+    let reopened_cf = reopened.get_column_family("max-ttl").expect("reopen CF");
+    let after_restart = reopened
+        .begin_tx(reopened_cf.id(), TransactionMode::ReadOnly)
+        .expect("begin reopened read");
+
+    // Assert
+    assert_eq!(after_restart.get(b"max-ttl").expect("reopened TTL"), None);
+    assert_eq!(
+        after_restart.get(b"no-ttl").expect("reopened control"),
+        Some(Bytes::from_static(b"stable"))
+    );
 }
 
 #[test]

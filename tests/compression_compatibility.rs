@@ -11,62 +11,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use xxhash_rust::xxh3::xxh3_64;
 
-const BASELINE_FIXTURE_DATA_DIGEST: u64 = 0x0009_2c66_9deb_80b7;
-
 fn structured_block(size: usize) -> Vec<u8> {
     let pattern = b"account=0042|region=east|status=active|segment=business|";
     pattern.iter().copied().cycle().take(size).collect()
-}
-
-fn fixtures_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/compatibility")
-}
-
-fn copy_dir_recursive(source: &Path, destination: &Path) -> std::io::Result<()> {
-    fs::create_dir_all(destination)?;
-    for entry in fs::read_dir(source)? {
-        let entry = entry?;
-        let destination = destination.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_dir_recursive(&entry.path(), &destination)?;
-        } else {
-            fs::copy(entry.path(), destination)?;
-        }
-    }
-    Ok(())
-}
-
-fn copy_compressed_fixture() -> tempfile::TempDir {
-    let source = fixtures_root().join("v2_compressed_sst_db");
-    let destination = tempfile::tempdir().expect("create fixture copy");
-    copy_dir_recursive(&source, destination.path()).expect("copy compressed fixture");
-    destination
-}
-
-fn baseline_fixture_value(index: usize) -> Vec<u8> {
-    let record = format!(
-        "customer={index:04}|region={}|status=active|segment={}|",
-        ["east", "west", "north", "south"][index % 4],
-        ["consumer", "business", "public"][index % 3],
-    );
-    record
-        .as_bytes()
-        .iter()
-        .copied()
-        .cycle()
-        .take(8 * 1024)
-        .collect()
-}
-
-fn baseline_fixture_records() -> Vec<(Vec<u8>, Vec<u8>)> {
-    (0..512)
-        .map(|index| {
-            (
-                format!("fixture:key:{index:04}").into_bytes(),
-                baseline_fixture_value(index),
-            )
-        })
-        .collect()
 }
 
 fn adaptive_records(prefix: &str, count: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
@@ -108,9 +55,9 @@ fn canonical_data_digest<'a>(rows: impl IntoIterator<Item = (&'a [u8], &'a [u8])
     xxh3_64(&canonical)
 }
 
-fn local_throughput_options(path: &Path) -> cntryl_midge::OpenOptions {
+fn local_options(path: &Path, goal: Goal) -> cntryl_midge::OpenOptions {
     OpenOptions::local(path)
-        .goal(Goal::Throughput)
+        .goal(goal)
         .workload(WorkloadProfile::WriteHeavy)
         .recovery_policy(RecoveryPolicy::Strict)
         .background_compaction(false)
@@ -141,7 +88,7 @@ fn write_records_and_flush(
 
 fn write_fresh_adaptive_database(path: &Path, records: &[(Vec<u8>, Vec<u8>)]) {
     let mut engine =
-        Engine::open(local_throughput_options(path)).expect("open adaptive test database");
+        Engine::open(local_options(path, Goal::Throughput)).expect("open adaptive test database");
     let column_family = engine
         .create_column_family("adaptive")
         .expect("create adaptive column family");
@@ -171,6 +118,32 @@ fn sorted_sst_files(path: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     files
 }
 
+fn sst_block_algorithms(bytes: &[u8]) -> Vec<u8> {
+    let footer_start = bytes
+        .len()
+        .checked_sub(84)
+        .expect("V4 SST has fixed footer");
+    let mut cursor = 0usize;
+    let mut algorithms = Vec::new();
+    while cursor < footer_start {
+        let length_end = cursor.checked_add(4).expect("block prefix end");
+        let payload_len = usize::try_from(u32::from_le_bytes(
+            bytes[cursor..length_end]
+                .try_into()
+                .expect("four-byte block prefix"),
+        ))
+        .expect("block payload length fits usize");
+        let block_end = length_end
+            .checked_add(payload_len)
+            .expect("block extent fits usize");
+        assert!(block_end <= footer_start, "block extends into V4 footer");
+        algorithms.push(bytes[block_end - BLOCK_TRAILER_SIZE]);
+        cursor = block_end;
+    }
+    assert_eq!(cursor, footer_start, "blocks exactly precede V4 footer");
+    algorithms
+}
+
 #[test]
 fn should_preserve_exact_sst_codec_codes() {
     // Arrange
@@ -179,8 +152,6 @@ fn should_preserve_exact_sst_codec_codes() {
         (CompressionAlgo::Lz4, 1),
         (CompressionAlgo::Zstd3, 2),
         (CompressionAlgo::Zstd9, 3),
-        (CompressionAlgo::Zlib, 4),
-        (CompressionAlgo::Snappy, 5),
     ];
 
     // Act
@@ -189,7 +160,7 @@ fn should_preserve_exact_sst_codec_codes() {
         assert_eq!(algorithm.to_u8(), code);
         assert_eq!(CompressionAlgo::from_u8(code), Some(algorithm));
     }
-    assert_eq!(CompressionAlgo::from_u8(6), None);
+    assert_eq!(CompressionAlgo::from_u8(4), None);
     assert_eq!(CompressionAlgo::from_u8(u8::MAX), None);
 }
 
@@ -321,6 +292,267 @@ fn should_reject_invalid_sst_block_trailers() {
 }
 
 #[test]
+fn should_reject_nonshipping_codec_codes_without_fallback() {
+    // Arrange
+    let encoded = [4_u8, 5, u8::MAX].map(|code| {
+        let mut block = b"payload".to_vec();
+        block.push(code);
+        block.extend_from_slice(&crc32c::crc32c(&block).to_le_bytes());
+        block
+    });
+
+    // Act
+    let errors = encoded.map(|block| {
+        decompress_block_with_trailer(&block).expect_err("unknown codec must fail closed")
+    });
+
+    // Assert
+    for error in errors {
+        assert!(matches!(error, cntryl_midge::MidgeError::Corruption(_)));
+        assert!(error
+            .to_string()
+            .contains("unknown compression algorithm code"));
+    }
+}
+
+#[test]
+fn should_reject_corrupt_compressed_payload_for_every_shipping_codec() {
+    // Arrange
+    let data = structured_block(16 * 1024);
+    let cases = [
+        CompressionAlgo::Lz4,
+        CompressionAlgo::Zstd3,
+        CompressionAlgo::Zstd9,
+    ];
+
+    // Act
+    for algorithm in cases {
+        let mut block = compress_block_with_trailer(&data, &CompressionPolicy::Fixed(algorithm))
+            .expect("compress shipping codec")
+            .to_vec();
+        match algorithm {
+            CompressionAlgo::Lz4 => {
+                block[..4].copy_from_slice(&(64 * 1024 * 1024_u32 + 1).to_le_bytes());
+            }
+            CompressionAlgo::Zstd3 | CompressionAlgo::Zstd9 => block[0] ^= 0xff,
+            CompressionAlgo::None => unreachable!(),
+        }
+        let crc_offset = block.len() - size_of::<u32>();
+        let crc = crc32c::crc32c(&block[..crc_offset]);
+        block[crc_offset..].copy_from_slice(&crc.to_le_bytes());
+        let error = decompress_block_with_trailer(&block)
+            .expect_err("codec payload corruption must not fall back to raw bytes");
+
+        // Assert
+        assert!(
+            matches!(error, cntryl_midge::MidgeError::Corruption(_)),
+            "{algorithm:?} returned {error}"
+        );
+    }
+}
+
+#[test]
+fn should_roundtrip_edge_case_values_when_written_through_full_sst_pipeline() {
+    // Arrange
+    let temp = tempfile::tempdir().expect("create database");
+    let mut engine = Engine::open(local_options(temp.path(), Goal::Latency)).expect("open engine");
+    let cf = engine
+        .create_column_family("payloads")
+        .expect("create column family");
+    let incompressible = seeded_bytes(16 * 1024, 0x8f21_49da);
+    let mut write = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .expect("begin write");
+    write
+        .put(b"empty".to_vec(), Vec::new(), None)
+        .expect("put empty value");
+    write
+        .put(b"random".to_vec(), incompressible.clone(), None)
+        .expect("put incompressible value");
+    write.commit(WriteOptions::sync()).expect("commit values");
+    engine.flush_cf(&cf).expect("flush values");
+    engine
+        .shutdown(Duration::from_secs(10))
+        .expect("shutdown engine");
+
+    // Act
+    let reopened = Engine::open(local_options(temp.path(), Goal::Latency)).expect("reopen engine");
+    let cf = reopened
+        .get_column_family("payloads")
+        .expect("reopen column family");
+    let read = reopened
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+        .expect("begin read");
+
+    // Assert
+    assert_eq!(
+        read.get(b"empty").expect("read empty"),
+        Some(Vec::new().into())
+    );
+    assert_eq!(
+        read.get(b"random").expect("read incompressible").as_deref(),
+        Some(incompressible.as_slice())
+    );
+}
+
+fn seeded_bytes(size: usize, seed: u32) -> Vec<u8> {
+    let mut state = seed;
+    (0..size)
+        .map(|_| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            u8::try_from(state >> 24).expect("shifted state fits u8")
+        })
+        .collect()
+}
+
+#[test]
+fn should_preserve_data_given_deliberate_compression_policy_change_when_reopening_populated_database(
+) {
+    // Arrange
+    let temp = tempfile::tempdir().expect("create policy-change database");
+    let latency_records = adaptive_records("latency", 48);
+    let economy_records = adaptive_records("economy", 48);
+    let mut latency =
+        Engine::open(local_options(temp.path(), Goal::Latency)).expect("open latency engine");
+    let cf = latency
+        .create_column_family("policies")
+        .expect("create column family");
+    write_records_and_flush(&latency, &cf, &latency_records);
+    latency
+        .shutdown(Duration::from_secs(10))
+        .expect("shutdown latency engine");
+
+    // Act
+    let mut economy =
+        Engine::open(local_options(temp.path(), Goal::Economy)).expect("open economy engine");
+    let cf = economy
+        .get_column_family("policies")
+        .expect("reopen column family");
+    write_records_and_flush(&economy, &cf, &economy_records);
+    let read = economy
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+        .expect("begin cross-policy read");
+    let rows = read
+        .scan(&Query::new())
+        .expect("scan cross-policy rows")
+        .try_collect()
+        .expect("collect cross-policy rows");
+
+    // Assert
+    assert_eq!(rows.len(), latency_records.len() + economy_records.len());
+    for (key, value) in latency_records.iter().chain(&economy_records) {
+        assert_eq!(
+            read.get(key).expect("read cross-policy value").as_deref(),
+            Some(value.as_slice())
+        );
+    }
+    drop(read);
+    economy
+        .shutdown(Duration::from_secs(10))
+        .expect("shutdown economy engine");
+}
+
+#[test]
+fn should_select_current_policy_for_new_blocks_while_preserving_prior_algorithm_when_compacting_after_goal_change(
+) {
+    // Arrange
+    let temp = tempfile::tempdir().expect("create policy-change database");
+    let batches = (0..4)
+        .map(|batch| adaptive_records(&format!("policy-{batch}"), 48))
+        .collect::<Vec<_>>();
+    let mut latency =
+        Engine::open(local_options(temp.path(), Goal::Latency)).expect("open latency engine");
+    let cf = latency
+        .create_column_family("policies")
+        .expect("create column family");
+    for batch in &batches[..3] {
+        write_records_and_flush(&latency, &cf, batch);
+    }
+    latency
+        .shutdown(Duration::from_secs(10))
+        .expect("shutdown latency engine");
+    let latency_ssts = sorted_sst_files(temp.path());
+    assert!(latency_ssts
+        .iter()
+        .any(|(_, bytes)| { sst_block_algorithms(bytes).contains(&CompressionAlgo::Lz4.to_u8()) }));
+
+    let mut economy =
+        Engine::open(local_options(temp.path(), Goal::Economy)).expect("open economy engine");
+    let cf = economy
+        .get_column_family("policies")
+        .expect("reopen column family");
+    write_records_and_flush(&economy, &cf, &batches[3]);
+    assert!(sorted_sst_files(temp.path()).iter().any(|(_, bytes)| {
+        sst_block_algorithms(bytes).contains(&CompressionAlgo::Zstd9.to_u8())
+    }));
+
+    // Act
+    economy.compact_all().expect("compact mixed-policy SSTs");
+    economy
+        .shutdown(Duration::from_secs(10))
+        .expect("shutdown economy engine");
+    let report = Engine::verify_path(temp.path()).expect("verify compacted database");
+    let compacted_ssts = sorted_sst_files(temp.path());
+    let reopened = Engine::open(local_options(temp.path(), Goal::Throughput))
+        .expect("reopen compacted engine");
+    let cf = reopened
+        .get_column_family("policies")
+        .expect("reopen compacted column family");
+    let read = reopened
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+        .expect("begin compacted read");
+    let rows = read
+        .scan(&Query::new())
+        .expect("scan compacted rows")
+        .try_collect()
+        .expect("collect compacted rows");
+
+    // Assert
+    assert!(report.authoritative);
+    assert!(compacted_ssts.iter().any(|(_, bytes)| {
+        sst_block_algorithms(bytes).contains(&CompressionAlgo::Zstd9.to_u8())
+    }));
+    assert_eq!(rows.len(), batches.iter().map(Vec::len).sum::<usize>());
+    for batch in &batches {
+        for (key, value) in batch {
+            assert_eq!(
+                read.get(key).expect("read policy-change key").as_deref(),
+                Some(value.as_slice())
+            );
+        }
+    }
+}
+
+#[test]
+fn should_report_meaningful_error_given_footer_corruption_when_running_explicit_verification() {
+    // Arrange
+    let temp = tempfile::tempdir().expect("create footer database");
+    let records = adaptive_records("footer", 32);
+    write_fresh_adaptive_database(temp.path(), &records);
+    let sst_path = fs::read_dir(temp.path().join("sst"))
+        .expect("read SST directory")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|extension| extension == "sst"))
+        .expect("SST path");
+    let mut bytes = fs::read(&sst_path).expect("read SST");
+    let footer_handle_byte = bytes.len() - 84 + 8;
+    bytes[footer_handle_byte] ^= 0x01;
+    fs::write(&sst_path, bytes).expect("corrupt footer");
+
+    // Act
+    let error = Engine::verify_path(temp.path()).expect_err("footer corruption must fail verify");
+
+    // Assert
+    assert!(matches!(error, cntryl_midge::MidgeError::Corruption(_)));
+    assert!(
+        error.to_string().contains("CRC mismatch")
+            || error.to_string().contains("footer CRC32C mismatch"),
+        "expected checksummed verification failure, got {error}"
+    );
+}
+
+#[test]
 fn should_preserve_candidate_adaptive_sst_across_strict_reopen() {
     // Arrange
     let temp = tempfile::tempdir().expect("create candidate database");
@@ -334,8 +566,8 @@ fn should_preserve_candidate_adaptive_sst_across_strict_reopen() {
 
     // Act
     let report = Engine::verify_path(temp.path()).expect("verify candidate adaptive database");
-    let mut reopened =
-        Engine::open(local_throughput_options(temp.path())).expect("strictly reopen candidate");
+    let mut reopened = Engine::open(local_options(temp.path(), Goal::Throughput))
+        .expect("strictly reopen candidate");
     let column_family = reopened
         .get_column_family("adaptive")
         .expect("reopen adaptive column family");
@@ -373,78 +605,6 @@ fn should_preserve_candidate_adaptive_sst_across_strict_reopen() {
 }
 
 #[test]
-fn should_reopen_mixed_blocks_after_appending_candidate_to_baseline_fixture() {
-    // Arrange
-    let temp = copy_compressed_fixture();
-    let new_records = adaptive_records("fixture:new", 128);
-    let mut engine =
-        Engine::open(local_throughput_options(temp.path())).expect("open baseline fixture copy");
-    let column_family = engine
-        .get_column_family("fixture")
-        .expect("baseline fixture column family");
-    write_records_and_flush(&engine, &column_family, &new_records);
-    engine
-        .shutdown(Duration::from_secs(10))
-        .expect("shutdown mixed fixture");
-
-    let mut expected_records = baseline_fixture_records();
-    expected_records.extend(new_records.clone());
-    expected_records.sort_by(|left, right| left.0.cmp(&right.0));
-    let expected_digest = canonical_data_digest(
-        expected_records
-            .iter()
-            .map(|(key, value)| (key.as_slice(), value.as_slice())),
-    );
-
-    // Act
-    let report = Engine::verify_path(temp.path()).expect("verify mixed fixture database");
-    let mut reopened =
-        Engine::open(local_throughput_options(temp.path())).expect("strictly reopen mixed fixture");
-    let column_family = reopened
-        .get_column_family("fixture")
-        .expect("reopen fixture column family");
-    let read = reopened
-        .begin_tx(column_family.id(), TransactionMode::ReadOnly)
-        .expect("begin mixed read");
-    let legacy = read.get(b"fixture:key:0256").expect("read legacy key");
-    let candidate = read.get(b"fixture:new:0064").expect("read candidate key");
-    let rows = read
-        .scan(&Query::new())
-        .expect("scan mixed SSTs")
-        .try_collect()
-        .expect("collect mixed scan");
-    drop(read);
-
-    // Assert
-    assert_eq!(report.health, EngineHealth::Healthy);
-    assert!(report.sst_files_verified >= 2);
-    assert_eq!(
-        legacy.as_deref(),
-        Some(baseline_fixture_value(256).as_slice())
-    );
-    assert_eq!(candidate.as_deref(), Some(new_records[64].1.as_slice()));
-    assert_eq!(rows.len(), 640);
-    assert_eq!(
-        canonical_data_digest(
-            rows.iter()
-                .map(|(key, value)| (key.as_ref(), value.as_ref()))
-        ),
-        expected_digest
-    );
-    assert_eq!(
-        canonical_data_digest(
-            baseline_fixture_records()
-                .iter()
-                .map(|(key, value)| (key.as_slice(), value.as_slice()))
-        ),
-        BASELINE_FIXTURE_DATA_DIGEST
-    );
-    reopened
-        .shutdown(Duration::from_secs(10))
-        .expect("shutdown reopened mixed fixture");
-}
-
-#[test]
 fn should_strictly_reopen_completed_adaptive_compaction() {
     // Arrange
     let temp = tempfile::tempdir().expect("create compacted database");
@@ -459,8 +619,8 @@ fn should_strictly_reopen_completed_adaptive_compaction() {
             .map(|(key, value)| (key.as_slice(), value.as_slice())),
     );
 
-    let mut engine =
-        Engine::open(local_throughput_options(temp.path())).expect("open compacted database");
+    let mut engine = Engine::open(local_options(temp.path(), Goal::Throughput))
+        .expect("open compacted database");
     let column_family = engine
         .create_column_family("adaptive")
         .expect("create compacted column family");
@@ -475,8 +635,8 @@ fn should_strictly_reopen_completed_adaptive_compaction() {
         .shutdown(Duration::from_secs(10))
         .expect("cleanly shut down compacted database");
     let report = Engine::verify_path(temp.path()).expect("verify compacted database");
-    let mut reopened =
-        Engine::open(local_throughput_options(temp.path())).expect("strictly reopen compaction");
+    let mut reopened = Engine::open(local_options(temp.path(), Goal::Throughput))
+        .expect("strictly reopen compaction");
     let column_family = reopened
         .get_column_family("adaptive")
         .expect("reopen compacted column family");

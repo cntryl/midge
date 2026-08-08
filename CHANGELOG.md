@@ -10,6 +10,15 @@ Midge is currently in the 0.1 release line. Compatibility expectations for pre-1
 ## [Unreleased]
 
 ### Changed
+- **Breaking:** database FORMAT 3 now requires SST V4. V4 uses a fixed,
+  self-identifying checksummed footer, mandatory checksummed block trailers,
+  exact block-handle validation, and explicit TTL presence. FORMAT 1/2 and SST
+  V1-V3 require logical export with the old binary and import into a new
+  database; there is no in-place migration or legacy fallback.
+- Scan iterators retain stable SST handles for the scan lifetime on supporting
+  filesystem backends and expose explicit active, exhausted, and failed
+  states. Terminal read errors remain sticky instead of becoming clean
+  exhaustion; path-only backends fail visibly if the backing path disappears.
 - Provider-backed cloud storage now defaults to one bucket/container and one
   database prefix. Advanced deployments can route WAL, SST, and control
   objects separately with `CloudStorageTopology` and `OpenOptions::cloud_multi`.
@@ -51,6 +60,8 @@ Midge is currently in the 0.1 release line. Compatibility expectations for pre-1
 - Trimmed duplicated positioning/readiness documentation and refreshed storage-mode overview language
 
 ### Removed
+- Unsupported legacy SST codec identifiers and the nonshipping compression
+  fast-accept heuristic. Unknown or removed codec identifiers now fail closed.
 - The mandatory three-location `CloudStorageBuckets` API.
 - Orphaned internal `SeqnoAllocActor` source file that was not compiled into the runtime actor module
 - Empty/redundant integration test files and duplicate engine initialization coverage

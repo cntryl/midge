@@ -44,14 +44,13 @@ impl Block {
 /// RocksDB-compatible magic number for SST footer validation
 pub const SST_FOOTER_MAGIC: u64 = 0xdb47_7524_8b80_fb57;
 
-/// Legacy SST entry format without persisted expiration metadata.
-pub const SST_FORMAT_V1: u32 = 1;
+/// Current, checksummed SST format with explicit TTL-presence encoding.
+pub const SST_FORMAT_V4: u32 = 4;
 
-/// Stateful SST entry format with persisted expiration and metadata blocks.
-pub const SST_FORMAT_V2: u32 = 2;
-
-/// Final pre-1.0 SST format with persisted accelerator metadata.
-pub const SST_FORMAT_V3: u32 = 3;
+/// Exact encoded size of the self-identifying V4 footer.
+pub const SST_FOOTER_SIZE: usize = 84;
+const SST_FOOTER_CHECKSUM_OFFSET: usize = 80;
+const SST_FOOTER_MAGIC_OFFSET: usize = 72;
 
 /// Footer stored at end of SST file
 #[derive(Debug, Clone)]
@@ -85,17 +84,20 @@ impl Footer {
         self
     }
 
-    /// Encode footer to exactly 72 bytes
+    /// Encode the self-identifying V4 footer to exactly 84 bytes.
     /// Layout:
     ///   [`meta_index_handle`: 16 bytes]
     ///   [`index_handle`: 16 bytes]
     ///   [`trie_handle`: 16 bytes (optional, 0 if None)]
     ///   [`block_bloom_handle`: 16 bytes (optional, 0 if None)]
+    ///   [`format_version`: 4 bytes]
+    ///   [`footer_size`: 4 bytes]
     ///   [magic: 8 bytes]
-    /// Total: 72 bytes (extended from 56 for block bloom support)
+    ///   [crc32c: 4 bytes, covering every preceding footer byte]
+    /// Total: 84 bytes.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        let mut buf = vec![0u8; 72];
+        let mut buf = vec![0u8; SST_FOOTER_SIZE];
         // Store handles as fixed 16 bytes each
         // meta_index: offset (8) + size (8)
         buf[0..8].copy_from_slice(&self.meta_index_handle.offset.to_le_bytes());
@@ -113,48 +115,62 @@ impl Footer {
             buf[48..56].copy_from_slice(&block_bloom.offset.to_le_bytes());
             buf[56..64].copy_from_slice(&block_bloom.size.to_le_bytes());
         }
-        // Magic number at end [64..72]
-        buf[64..72].copy_from_slice(&SST_FOOTER_MAGIC.to_le_bytes());
+        buf[64..68].copy_from_slice(&SST_FORMAT_V4.to_le_bytes());
+        buf[68..72].copy_from_slice(
+            &u32::try_from(SST_FOOTER_SIZE)
+                .expect("V4 footer size fits in u32")
+                .to_le_bytes(),
+        );
+        buf[SST_FOOTER_MAGIC_OFFSET..SST_FOOTER_CHECKSUM_OFFSET]
+            .copy_from_slice(&SST_FOOTER_MAGIC.to_le_bytes());
+        let checksum = crc32c::crc32c(&buf[..SST_FOOTER_CHECKSUM_OFFSET]);
+        buf[SST_FOOTER_CHECKSUM_OFFSET..SST_FOOTER_SIZE].copy_from_slice(&checksum.to_le_bytes());
         buf
     }
 
-    /// Decode footer from 48, 56, or 72 bytes (backward compatible)
+    /// Decode one exact V4 footer.
     ///
     /// # Errors
     ///
-    /// Returns `MidgeError::Corruption` when the footer is truncated or has an invalid magic value.
+    /// Returns `MidgeError::Corruption` when the footer is malformed or its
+    /// checksum is invalid, and `MidgeError::CompatibilityError` for a
+    /// well-formed unsupported version. V1-V3 footers are intentionally not
+    /// decoded by this build.
     pub fn decode(data: &[u8]) -> crate::common::MidgeResult<Self> {
-        if data.len() < 48 {
-            return Err(crate::common::MidgeError::Corruption(
-                "Footer too short".into(),
-            ));
+        if data.len() != SST_FOOTER_SIZE {
+            return Err(crate::common::MidgeError::Corruption(format!(
+                "SST V4 footer must be exactly {SST_FOOTER_SIZE} bytes, got {}",
+                data.len()
+            )));
         }
 
-        // Determine format: 48 (original), 56 (with trie), or 72 (with block bloom)
-        let has_trie = data.len() >= 56;
-        let has_block_bloom = data.len() >= 72;
-
-        // Validate magic number
-        let magic_offset = if has_block_bloom {
-            64
-        } else if has_trie {
-            48
-        } else {
-            40
-        };
         let magic = u64::from_le_bytes([
-            data[magic_offset],
-            data[magic_offset + 1],
-            data[magic_offset + 2],
-            data[magic_offset + 3],
-            data[magic_offset + 4],
-            data[magic_offset + 5],
-            data[magic_offset + 6],
-            data[magic_offset + 7],
+            data[72], data[73], data[74], data[75], data[76], data[77], data[78], data[79],
         ]);
         if magic != SST_FOOTER_MAGIC {
             return Err(crate::common::MidgeError::Corruption(format!(
                 "Invalid footer magic: expected 0x{SST_FOOTER_MAGIC:016x}, got 0x{magic:016x}"
+            )));
+        }
+
+        let stored_checksum = u32::from_le_bytes([data[80], data[81], data[82], data[83]]);
+        let actual_checksum = crc32c::crc32c(&data[..SST_FOOTER_CHECKSUM_OFFSET]);
+        if stored_checksum != actual_checksum {
+            return Err(crate::common::MidgeError::Corruption(format!(
+                "SST footer CRC32C mismatch: expected {stored_checksum:#010x}, computed {actual_checksum:#010x}"
+            )));
+        }
+
+        let format_version = u32::from_le_bytes([data[64], data[65], data[66], data[67]]);
+        if format_version != SST_FORMAT_V4 {
+            return Err(crate::common::MidgeError::CompatibilityError(format!(
+                "unsupported SST format version {format_version}; this build requires V{SST_FORMAT_V4}"
+            )));
+        }
+        let encoded_size = u32::from_le_bytes([data[68], data[69], data[70], data[71]]);
+        if usize::try_from(encoded_size).ok() != Some(SST_FOOTER_SIZE) {
+            return Err(crate::common::MidgeError::Corruption(format!(
+                "SST footer declares size {encoded_size}, expected {SST_FOOTER_SIZE}"
             )));
         }
 
@@ -171,39 +187,22 @@ impl Footer {
             data[24], data[25], data[26], data[27], data[28], data[29], data[30], data[31],
         ]);
 
-        // Read trie handle if format supports it
-        let trie_handle = if has_trie {
-            let trie_offset = u64::from_le_bytes([
-                data[32], data[33], data[34], data[35], data[36], data[37], data[38], data[39],
-            ]);
-            let trie_size = u64::from_le_bytes([
-                data[40], data[41], data[42], data[43], data[44], data[45], data[46], data[47],
-            ]);
-            if trie_offset == 0 && trie_size == 0 {
-                None
-            } else {
-                Some(BlockHandle::new(trie_offset, trie_size))
-            }
-        } else {
-            None
-        };
+        let trie_offset = u64::from_le_bytes([
+            data[32], data[33], data[34], data[35], data[36], data[37], data[38], data[39],
+        ]);
+        let trie_size = u64::from_le_bytes([
+            data[40], data[41], data[42], data[43], data[44], data[45], data[46], data[47],
+        ]);
+        let trie_handle = decode_optional_footer_handle(trie_offset, trie_size, "trie")?;
 
-        // Read block bloom handle if format supports it
-        let block_bloom_handle = if has_block_bloom {
-            let bloom_offset = u64::from_le_bytes([
-                data[48], data[49], data[50], data[51], data[52], data[53], data[54], data[55],
-            ]);
-            let bloom_size = u64::from_le_bytes([
-                data[56], data[57], data[58], data[59], data[60], data[61], data[62], data[63],
-            ]);
-            if bloom_offset == 0 && bloom_size == 0 {
-                None
-            } else {
-                Some(BlockHandle::new(bloom_offset, bloom_size))
-            }
-        } else {
-            None
-        };
+        let bloom_offset = u64::from_le_bytes([
+            data[48], data[49], data[50], data[51], data[52], data[53], data[54], data[55],
+        ]);
+        let bloom_size = u64::from_le_bytes([
+            data[56], data[57], data[58], data[59], data[60], data[61], data[62], data[63],
+        ]);
+        let block_bloom_handle =
+            decode_optional_footer_handle(bloom_offset, bloom_size, "block bloom")?;
 
         Ok(Footer {
             meta_index_handle: BlockHandle::new(meta_offset, meta_size),
@@ -212,6 +211,22 @@ impl Footer {
             block_bloom_handle,
         })
     }
+}
+
+fn decode_optional_footer_handle(
+    offset: u64,
+    size: u64,
+    kind: &str,
+) -> crate::common::MidgeResult<Option<BlockHandle>> {
+    if offset == 0 && size == 0 {
+        return Ok(None);
+    }
+    if size == 0 {
+        return Err(crate::common::MidgeError::Corruption(format!(
+            "SST footer {kind} handle must be fully absent or fully present"
+        )));
+    }
+    Ok(Some(BlockHandle::new(offset, size)))
 }
 
 /// SST-level metadata persisted in the meta block.
@@ -233,7 +248,7 @@ pub struct KeyRangeMetadata {
 impl Default for SstMetadata {
     fn default() -> Self {
         Self {
-            format_version: SST_FORMAT_V1,
+            format_version: SST_FORMAT_V4,
             index_kind: IndexKind::Sparse,
             range_tombstone_handle: None,
             key_range: None,
@@ -289,24 +304,15 @@ impl SstMetadata {
         }
 
         let format_version = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        if format_version != SST_FORMAT_V4 {
+            return Err(crate::common::MidgeError::CompatibilityError(format!(
+                "unsupported SST metadata format version {format_version}; this build requires V{SST_FORMAT_V4}"
+            )));
+        }
         if data.len() == 20 {
-            let offset = u64::from_le_bytes([
-                data[4], data[5], data[6], data[7], data[8], data[9], data[10], data[11],
-            ]);
-            let size = u64::from_le_bytes([
-                data[12], data[13], data[14], data[15], data[16], data[17], data[18], data[19],
-            ]);
-
-            return Ok(Self {
-                format_version,
-                index_kind: IndexKind::Sparse,
-                range_tombstone_handle: if offset == 0 && size == 0 {
-                    None
-                } else {
-                    Some(BlockHandle::new(offset, size))
-                },
-                key_range: None,
-            });
+            return Err(crate::common::MidgeError::CompatibilityError(
+                "legacy SST metadata layout is unsupported; V4 metadata is required".into(),
+            ));
         }
 
         if data.len() < 24 {
@@ -319,6 +325,11 @@ impl SstMetadata {
             crate::common::MidgeError::Corruption("Unknown SST index kind".into())
         })?;
         let flags = data[5];
+        if flags & !0x01 != 0 || data[6] != 0 || data[7] != 0 {
+            return Err(crate::common::MidgeError::Corruption(
+                "SST metadata contains unknown flags or nonzero reserved bytes".into(),
+            ));
+        }
         let offset = u64::from_le_bytes([
             data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
         ]);
@@ -326,20 +337,41 @@ impl SstMetadata {
             data[16], data[17], data[18], data[19], data[20], data[21], data[22], data[23],
         ]);
 
+        let mut cursor = 24usize;
         let key_range = if flags & 0x01 == 0 {
+            if data.len() != cursor {
+                return Err(crate::common::MidgeError::Corruption(
+                    "SST metadata has trailing bytes without key-range flag".into(),
+                ));
+            }
             None
         } else {
-            let mut cursor = 24usize;
             let smallest_len = decode_metadata_u32(data, &mut cursor, "smallest key length")?;
             let smallest_key =
                 decode_metadata_bytes(data, &mut cursor, smallest_len, "smallest key")?;
             let largest_len = decode_metadata_u32(data, &mut cursor, "largest key length")?;
             let largest_key = decode_metadata_bytes(data, &mut cursor, largest_len, "largest key")?;
+            if cursor != data.len() {
+                return Err(crate::common::MidgeError::Corruption(
+                    "SST metadata key range has trailing bytes".into(),
+                ));
+            }
+            if smallest_key > largest_key {
+                return Err(crate::common::MidgeError::Corruption(
+                    "SST metadata key range is inverted".into(),
+                ));
+            }
             Some(KeyRangeMetadata {
                 smallest_key,
                 largest_key,
             })
         };
+
+        if size == 0 && offset != 0 {
+            return Err(crate::common::MidgeError::Corruption(
+                "SST range-tombstone handle must be fully absent or fully present".into(),
+            ));
+        }
 
         Ok(Self {
             format_version,
@@ -757,7 +789,7 @@ mod tests {
     // =========== Footer Encoding/Decoding Tests ===========
 
     #[test]
-    fn should_encode_footer_to_72_bytes() {
+    fn should_encode_footer_to_exact_v4_size() {
         // Arrange
         let footer = Footer::new(BlockHandle::new(0, 100), BlockHandle::new(100, 200));
 
@@ -765,7 +797,7 @@ mod tests {
         let encoded = footer.encode();
 
         // Assert
-        assert_eq!(encoded.len(), 72);
+        assert_eq!(encoded.len(), SST_FOOTER_SIZE);
     }
 
     #[test]
@@ -777,7 +809,7 @@ mod tests {
         let encoded = footer.encode();
 
         // Assert
-        assert_eq!(encoded.len(), 72);
+        assert_eq!(encoded.len(), SST_FOOTER_SIZE);
         let decoded = Footer::decode(&encoded).unwrap();
         assert_eq!(decoded.meta_index_handle.offset, 0);
         assert_eq!(decoded.index_handle.offset, 0);
@@ -795,7 +827,7 @@ mod tests {
         let encoded = footer.encode();
 
         // Assert
-        assert_eq!(encoded.len(), 72);
+        assert_eq!(encoded.len(), SST_FOOTER_SIZE);
         let decoded = Footer::decode(&encoded).unwrap();
         assert_eq!(decoded.meta_index_handle.offset, u64::MAX - 1000);
         assert_eq!(decoded.index_handle.offset, u64::MAX - 500);
@@ -870,6 +902,63 @@ mod tests {
         assert_eq!(decoded.meta_index_handle, original.meta_index_handle);
         assert_eq!(decoded.index_handle, original.index_handle);
         assert_eq!(decoded.trie_handle, original.trie_handle);
+    }
+
+    #[test]
+    fn should_detect_corruption_given_footer_meta_index_size_zeroed_when_data_blocks_are_modern() {
+        // Arrange
+        let footer = Footer::new(BlockHandle::new(11, 101), BlockHandle::new(112, 202))
+            .with_trie(BlockHandle::new(314, 303))
+            .with_block_bloom(BlockHandle::new(617, 404));
+        let mut encoded = footer.encode();
+        encoded[8..16].fill(0);
+
+        // Act
+        let result = Footer::decode(&encoded);
+
+        // Assert
+        assert!(matches!(
+            result,
+            Err(crate::common::MidgeError::Corruption(_))
+        ));
+    }
+
+    #[test]
+    fn should_reject_well_formed_unknown_footer_version() {
+        // Arrange
+        let mut encoded =
+            Footer::new(BlockHandle::new(11, 101), BlockHandle::new(112, 202)).encode();
+        encoded[64..68].copy_from_slice(&5_u32.to_le_bytes());
+        let checksum = crc32c::crc32c(&encoded[..SST_FOOTER_CHECKSUM_OFFSET]);
+        encoded[SST_FOOTER_CHECKSUM_OFFSET..].copy_from_slice(&checksum.to_le_bytes());
+
+        // Act
+        let result = Footer::decode(&encoded);
+
+        // Assert
+        assert!(matches!(
+            result,
+            Err(crate::common::MidgeError::CompatibilityError(_))
+        ));
+    }
+
+    #[test]
+    fn should_reject_half_present_optional_footer_handle() {
+        // Arrange
+        let mut encoded =
+            Footer::new(BlockHandle::new(11, 101), BlockHandle::new(112, 202)).encode();
+        encoded[32..40].copy_from_slice(&1_u64.to_le_bytes());
+        let checksum = crc32c::crc32c(&encoded[..SST_FOOTER_CHECKSUM_OFFSET]);
+        encoded[SST_FOOTER_CHECKSUM_OFFSET..].copy_from_slice(&checksum.to_le_bytes());
+
+        // Act
+        let result = Footer::decode(&encoded);
+
+        // Assert
+        assert!(matches!(
+            result,
+            Err(crate::common::MidgeError::Corruption(_))
+        ));
     }
 
     #[test]

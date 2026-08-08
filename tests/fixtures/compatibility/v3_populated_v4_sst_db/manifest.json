@@ -1,0 +1,57 @@
+{
+  "last_persisted_sequence": 5,
+  "files": [
+    {
+      "name": "000000_00_00000000000000000001.sst",
+      "level": 0,
+      "size_bytes": 437,
+      "content_crc32c": 1313763752,
+      "cf_id": 0,
+      "sst_seq": 0,
+      "smallest_key": [
+        102,
+        105,
+        120,
+        116,
+        117,
+        114,
+        101,
+        47,
+        97,
+        108,
+        112,
+        104,
+        97
+      ],
+      "largest_key": [
+        102,
+        105,
+        120,
+        116,
+        117,
+        114,
+        101,
+        47,
+        115,
+        116,
+        114,
+        117,
+        99,
+        116,
+        117,
+        114,
+        101,
+        100
+      ],
+      "smallest_seq": 2,
+      "largest_seq": 4,
+      "sublevel": 0
+    }
+  ],
+  "column_families": [],
+  "next_wal_seq": 1,
+  "next_sst_seqs": {
+    "0": 2
+  },
+  "edit_checkpoint_id": 1
+}

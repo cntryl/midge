@@ -238,8 +238,7 @@ impl Default for ManifestActor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sst::types::SST_FOOTER_MAGIC;
-    use std::io::Write;
+    use crate::sst::traits::SstFactory;
 
     #[test]
     fn should_initialize_manifest_actor_with_zero_pending_edits() {
@@ -391,12 +390,11 @@ mod tests {
         assert!(state.sst_dir.exists(), "sst dir must exist");
         let sst_path = state.sst_dir.join(&sst_name);
 
-        // Write a minimal valid SST footer so the reader's validation accepts it
-        let mut f = std::fs::File::create(&sst_path)?;
-        let mut buf = vec![0u8; 48];
-        buf[40..48].copy_from_slice(&SST_FOOTER_MAGIC.to_le_bytes());
-        f.write_all(&buf)?;
-        f.sync_all()?;
+        let factory =
+            crate::sst::FsSstFactoryIo::new(std::sync::Arc::new(crate::io::MockFs::new()), 4096);
+        let mut writer = factory.create()?;
+        writer.add_with_meta(b"a", Some(b"value"), 10, 0, None)?;
+        crate::sst::fs::finish_writer_to_path(writer, &sst_path)?;
         assert!(
             sst_path.exists(),
             "sst path must exist after creating footer"

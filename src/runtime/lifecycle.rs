@@ -232,35 +232,7 @@ impl RuntimeLifecycle {
 }
 
 fn clone_shutdown_error(error: &MidgeError) -> MidgeError {
-    match error {
-        MidgeError::Io(error) => MidgeError::Io(error.raw_os_error().map_or_else(
-            || std::io::Error::new(error.kind(), error.to_string()),
-            std::io::Error::from_raw_os_error,
-        )),
-        MidgeError::NotFound => MidgeError::NotFound,
-        MidgeError::InvalidArgument(message) => MidgeError::InvalidArgument(message.clone()),
-        MidgeError::Corruption(message) => MidgeError::Corruption(message.clone()),
-        MidgeError::NotSupported(message) => MidgeError::NotSupported(message.clone()),
-        MidgeError::Internal(message) => MidgeError::Internal(message.clone()),
-        MidgeError::InvalidPath => MidgeError::InvalidPath,
-        MidgeError::NoSpace(message) => MidgeError::NoSpace(message.clone()),
-        MidgeError::RecoveryFailed(message) => MidgeError::RecoveryFailed(message.clone()),
-        MidgeError::CompatibilityError(message) => MidgeError::CompatibilityError(message.clone()),
-        MidgeError::WriteStall(message) => MidgeError::WriteStall(message.clone()),
-        MidgeError::MemoryModeViolation(message) => {
-            MidgeError::MemoryModeViolation(message.clone())
-        }
-        MidgeError::Fenced(message) => MidgeError::Fenced(message.clone()),
-        MidgeError::LeaseHeld(message) => MidgeError::LeaseHeld(message.clone()),
-        MidgeError::LeaseUnavailable(message) => MidgeError::LeaseUnavailable(message.clone()),
-        MidgeError::LeaseIndeterminate(message) => MidgeError::LeaseIndeterminate(message.clone()),
-        MidgeError::LeaseEpochExhausted => MidgeError::LeaseEpochExhausted,
-        MidgeError::WriteConflict(message) => MidgeError::WriteConflict(message.clone()),
-        MidgeError::Aborted(message) => MidgeError::Aborted(message.clone()),
-        MidgeError::Busy(message) => MidgeError::Busy(message.clone()),
-        MidgeError::Timeout(message) => MidgeError::Timeout(message.clone()),
-        MidgeError::ResourceLimit(message) => MidgeError::ResourceLimit(message.clone()),
-    }
+    error.replay()
 }
 
 pub(crate) struct RuntimeTransactionGuard {

@@ -11,8 +11,6 @@ pub enum CompressionAlgo {
     Lz4 = 1,
     Zstd3 = 2, // Zstd level 3
     Zstd9 = 3, // Zstd level 9+
-    Zlib = 4,
-    Snappy = 5,
 }
 
 impl CompressionAlgo {
@@ -24,8 +22,6 @@ impl CompressionAlgo {
             1 => Some(Self::Lz4),
             2 => Some(Self::Zstd3),
             3 => Some(Self::Zstd9),
-            4 => Some(Self::Zlib),
-            5 => Some(Self::Snappy),
             _ => None,
         }
     }
@@ -43,7 +39,9 @@ pub enum CompressionPolicy {
     /// Never compress
     None,
 
-    /// Always use specified algorithm
+    /// Use the specified algorithm for inputs at or above
+    /// [`MIN_COMPRESSION_INPUT_BYTES`]. Smaller inputs remain raw because the
+    /// framing and codec overhead dominates at that size.
     Fixed(CompressionAlgo),
 
     /// Auto-select best algorithm per block
@@ -73,8 +71,8 @@ impl Default for CompressionPolicy {
     }
 }
 
-/// Minimum block size to attempt compression
-pub const MIN_COMPRESS_SIZE: usize = 256;
+/// Minimum SST block or WAL value size at which compression is attempted.
+pub const MIN_COMPRESSION_INPUT_BYTES: usize = 256;
 
 /// Maximum block size after compression
 pub const MAX_BLOCK_SIZE: usize = 64 * 1024;
@@ -94,8 +92,7 @@ pub fn compress_block(
     data: &[u8],
     policy: &CompressionPolicy,
 ) -> MidgeResult<(Bytes, CompressionAlgo)> {
-    // Never compress tiny blocks
-    if data.len() < MIN_COMPRESS_SIZE {
+    if data.len() < MIN_COMPRESSION_INPUT_BYTES {
         return Ok((Bytes::copy_from_slice(data), CompressionAlgo::None));
     }
 
@@ -139,12 +136,6 @@ fn compress_with_algo(data: &[u8], algo: CompressionAlgo) -> MidgeResult<(Bytes,
                 crate::common::MidgeError::Internal(format!("zstd(9) compress failed: {e}"))
             })?;
             Ok((Bytes::from(compressed), CompressionAlgo::Zstd9))
-        }
-
-        CompressionAlgo::Zlib | CompressionAlgo::Snappy => {
-            Err(crate::common::MidgeError::NotSupported(format!(
-                "compression algorithm {algo:?} not available (missing dependency)"
-            )))
         }
     }
 }
@@ -209,57 +200,6 @@ fn ratio_at_or_below_f32_threshold(
     compressed_size / original_size <= threshold
 }
 
-#[cfg(test)]
-fn meets_fast_accept(
-    original_size: usize,
-    compressed_size: usize,
-    min_ratio: f32,
-    fast_accept_ratio: f32,
-) -> bool {
-    ratio_at_or_below_f32_threshold(
-        original_size,
-        compressed_size,
-        min_ratio.min(fast_accept_ratio),
-    )
-}
-
-#[cfg(test)]
-fn compress_adaptive_with_fast_accept(
-    data: &[u8],
-    min_savings: usize,
-    min_ratio: f32,
-    algos: &[CompressionAlgo],
-    fast_accept_ratio: f32,
-) -> (Bytes, CompressionAlgo) {
-    let mut best: Option<(Bytes, CompressionAlgo)> = None;
-
-    for &algo in algos {
-        if algo == CompressionAlgo::None {
-            continue;
-        }
-
-        // Try compression
-        if let Ok((compressed, _)) = compress_with_algo(data, algo) {
-            let compressed_size = compressed.len();
-
-            if compression_qualifies(data.len(), compressed_size, min_savings, min_ratio) {
-                if meets_fast_accept(data.len(), compressed_size, min_ratio, fast_accept_ratio) {
-                    return (compressed, algo);
-                }
-
-                if best
-                    .as_ref()
-                    .is_none_or(|(current, _)| compressed_size < current.len())
-                {
-                    best = Some((compressed, algo));
-                }
-            }
-        }
-    }
-
-    best.unwrap_or_else(|| (Bytes::copy_from_slice(data), CompressionAlgo::None))
-}
-
 /// Decompress block data based on compression type.
 ///
 /// # Errors
@@ -314,12 +254,6 @@ pub fn decompress_block(compressed: &[u8], algo: CompressionAlgo) -> MidgeResult
                     crate::common::MidgeError::Corruption(format!("Zstd decompression failed: {e}"))
                 })?;
             Ok(Bytes::from(decompressed))
-        }
-
-        CompressionAlgo::Zlib | CompressionAlgo::Snappy => {
-            Err(crate::common::MidgeError::NotSupported(format!(
-                "decompression algorithm {algo:?} not available (missing dependency)"
-            )))
         }
     }
 }
@@ -440,7 +374,7 @@ fn is_likely_compressible(value: &[u8]) -> bool {
 /// CPU waste on random/encrypted data in constrained environments.
 #[must_use]
 pub fn compress_wal_value(value: &[u8]) -> (Bytes, Option<u8>) {
-    if value.len() < MIN_COMPRESS_SIZE {
+    if value.len() < MIN_COMPRESSION_INPUT_BYTES {
         return (Bytes::copy_from_slice(value), None);
     }
 
@@ -483,11 +417,6 @@ pub fn decompress_wal_value(value: &[u8], compression: Option<u8>) -> MidgeResul
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn structured_test_block(size: usize) -> Vec<u8> {
-        let pattern = b"account=0042|region=east|status=active|segment=business|";
-        pattern.iter().copied().cycle().take(size).collect()
-    }
 
     // ====================== CompressionAlgo Tests ======================
 
@@ -540,33 +469,9 @@ mod tests {
     }
 
     #[test]
-    fn should_roundtrip_zlib_code() {
-        // Arrange
-        let algo = CompressionAlgo::from_u8(4).unwrap();
-
-        // Act
-
-        // Assert
-        assert_eq!(algo, CompressionAlgo::Zlib);
-        assert_eq!(algo.to_u8(), 4);
-    }
-
-    #[test]
-    fn should_roundtrip_snappy_code() {
-        // Arrange
-        let algo = CompressionAlgo::from_u8(5).unwrap();
-
-        // Act
-
-        // Assert
-        assert_eq!(algo, CompressionAlgo::Snappy);
-        assert_eq!(algo.to_u8(), 5);
-    }
-
-    #[test]
     fn should_roundtrip_all_valid_codes() {
         // Arrange
-        let valid_codes = (0..=5).collect::<Vec<_>>();
+        let valid_codes = (0..=3).collect::<Vec<_>>();
 
         // Act
         for code in valid_codes {
@@ -578,9 +483,9 @@ mod tests {
     }
 
     #[test]
-    fn should_reject_invalid_compression_code_6() {
+    fn should_reject_removed_compression_code_4() {
         // Arrange
-        let result = CompressionAlgo::from_u8(6);
+        let result = CompressionAlgo::from_u8(4);
 
         // Act
 
@@ -602,7 +507,7 @@ mod tests {
     #[test]
     fn should_reject_all_invalid_codes() {
         // Arrange
-        for code in 6..=255 {
+        for code in 4..=255 {
             // Act
             let result = CompressionAlgo::from_u8(code);
 
@@ -645,8 +550,6 @@ mod tests {
         assert_eq!(CompressionAlgo::Lz4.to_u8(), 1);
         assert_eq!(CompressionAlgo::Zstd3.to_u8(), 2);
         assert_eq!(CompressionAlgo::Zstd9.to_u8(), 3);
-        assert_eq!(CompressionAlgo::Zlib.to_u8(), 4);
-        assert_eq!(CompressionAlgo::Snappy.to_u8(), 5);
     }
 
     // ====================== CompressionPolicy Tests ======================
@@ -747,10 +650,10 @@ mod tests {
     // ====================== compress_block Tests ======================
 
     #[test]
-    fn should_skip_compression_for_tiny_blocks() {
+    fn should_store_tiny_block_uncompressed_when_fixed_policy_requests_compression() {
         // Arrange
-        let policy = CompressionPolicy::default();
-        let tiny_data = vec![0u8; 100]; // < MIN_COMPRESS_SIZE (256)
+        let policy = CompressionPolicy::Fixed(CompressionAlgo::Zstd9);
+        let tiny_data = vec![0u8; MIN_COMPRESSION_INPUT_BYTES - 1];
 
         // Act
         let (compressed, algo) = compress_block(&tiny_data, &policy).unwrap();
@@ -765,7 +668,7 @@ mod tests {
     fn should_skip_compression_at_min_compress_size_boundary() {
         // Arrange
         let policy = CompressionPolicy::default();
-        let boundary_data = vec![0u8; MIN_COMPRESS_SIZE - 1];
+        let boundary_data = vec![0u8; MIN_COMPRESSION_INPUT_BYTES - 1];
 
         // Act
         let (compressed, algo) = compress_block(&boundary_data, &policy).unwrap();
@@ -779,7 +682,7 @@ mod tests {
     fn should_compress_at_min_compress_size() {
         // Arrange
         let policy = CompressionPolicy::default();
-        let boundary_data = vec![0u8; MIN_COMPRESS_SIZE];
+        let boundary_data = vec![0u8; MIN_COMPRESSION_INPUT_BYTES];
 
         // Act
         let (compressed, algo) = compress_block(&boundary_data, &policy).unwrap();
@@ -869,19 +772,6 @@ mod tests {
     }
 
     #[test]
-    fn should_use_fixed_zlib_policy() {
-        // Arrange
-        let policy = CompressionPolicy::Fixed(CompressionAlgo::Zlib);
-        let data = vec![6u8; 1024];
-
-        // Act
-        let result = compress_block(&data, &policy);
-
-        // Assert
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn should_handle_adaptive_policy() {
         // Arrange
         let policy = CompressionPolicy::Adaptive {
@@ -921,69 +811,6 @@ mod tests {
     }
 
     #[test]
-    fn should_apply_inclusive_fast_accept_with_custom_ratio_cap() {
-        // Arrange
-        let original_size = 1_000;
-
-        // Act
-        let exact_fast = meets_fast_accept(original_size, 300, 0.95, 0.30);
-        let above_fast = meets_fast_accept(original_size, 301, 0.95, 0.30);
-        let exact_custom = meets_fast_accept(original_size, 200, 0.20, 0.30);
-        let above_custom = meets_fast_accept(original_size, 201, 0.20, 0.30);
-
-        // Assert
-        assert!(exact_fast);
-        assert!(!above_fast);
-        assert!(exact_custom);
-        assert!(!above_custom);
-    }
-
-    #[test]
-    fn should_return_strong_lz4_without_trying_for_smaller_output() {
-        // Arrange
-        let data = vec![b'A'; 16 * 1024];
-        let algorithms = [CompressionAlgo::Lz4, CompressionAlgo::Zstd3];
-
-        // Act
-        let (_, algorithm) =
-            compress_adaptive_with_fast_accept(&data, 256, 0.95, &algorithms, 0.30);
-
-        // Assert
-        assert_eq!(algorithm, CompressionAlgo::Lz4);
-    }
-
-    #[test]
-    fn should_continue_from_weak_lz4_to_strong_zstd3() {
-        // Arrange
-        let data = structured_test_block(16 * 1024);
-        let algorithms = [CompressionAlgo::Lz4, CompressionAlgo::Zstd3];
-
-        // Act
-        let (_, algorithm) =
-            compress_adaptive_with_fast_accept(&data, 256, 0.95, &algorithms, 0.005);
-
-        // Assert
-        assert_eq!(algorithm, CompressionAlgo::Zstd3);
-    }
-
-    #[test]
-    fn should_emit_smallest_qualifying_result_when_no_result_is_strong() {
-        // Arrange
-        let data = structured_test_block(16 * 1024);
-        let algorithms = [CompressionAlgo::Lz4, CompressionAlgo::Zstd3];
-
-        // Act
-        let (compressed, algorithm) =
-            compress_adaptive_with_fast_accept(&data, 256, 0.95, &algorithms, 0.0);
-        let (lz4, _) = compress_with_algo(&data, CompressionAlgo::Lz4).expect("compress LZ4");
-        let (zstd3, _) = compress_with_algo(&data, CompressionAlgo::Zstd3).expect("compress Zstd3");
-
-        // Assert
-        assert_eq!(algorithm, CompressionAlgo::Zstd3);
-        assert_eq!(compressed.len(), lz4.len().min(zstd3.len()));
-    }
-
-    #[test]
     fn should_keep_production_adaptive_selection_exhaustive_after_rejected_candidate() {
         // Arrange
         let data = vec![b'A'; 16 * 1024];
@@ -1001,54 +828,6 @@ mod tests {
         // Assert
         assert_eq!(algorithm, CompressionAlgo::Zstd3);
         assert_eq!(compressed.len(), lz4.len().min(zstd3.len()));
-    }
-
-    #[test]
-    fn should_continue_past_non_operational_codecs_in_declared_order() {
-        // Arrange
-        let data = vec![b'A'; 16 * 1024];
-        let algorithms = [
-            CompressionAlgo::None,
-            CompressionAlgo::Zlib,
-            CompressionAlgo::Snappy,
-            CompressionAlgo::Lz4,
-        ];
-
-        // Act
-        let (_, algorithm) =
-            compress_adaptive_with_fast_accept(&data, 256, 0.95, &algorithms, 0.30);
-
-        // Assert
-        assert_eq!(algorithm, CompressionAlgo::Lz4);
-    }
-
-    #[test]
-    fn should_emit_raw_fallback_for_empty_or_ineligible_adaptive_lists() {
-        // Arrange
-        let data = vec![b'A'; 16 * 1024];
-
-        // Act
-        let empty = compress_adaptive_with_fast_accept(&data, 256, 0.95, &[], 0.30);
-        let ineligible = compress_adaptive_with_fast_accept(
-            &data,
-            data.len(),
-            0.95,
-            &[CompressionAlgo::Lz4, CompressionAlgo::Zstd3],
-            0.30,
-        );
-        let unsupported = compress_adaptive_with_fast_accept(
-            &data,
-            256,
-            0.95,
-            &[CompressionAlgo::Zlib, CompressionAlgo::Snappy],
-            0.30,
-        );
-
-        // Assert
-        for (raw, algorithm) in [empty, ineligible, unsupported] {
-            assert_eq!(algorithm, CompressionAlgo::None);
-            assert_eq!(raw.as_ref(), data.as_slice());
-        }
     }
 
     #[test]
@@ -1212,30 +991,6 @@ mod tests {
     }
 
     #[test]
-    fn should_reject_decompress_zlib() {
-        // Arrange
-        let data = b"some data";
-
-        // Act
-        let result = decompress_block(data, CompressionAlgo::Zlib);
-
-        // Assert
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn should_reject_decompress_snappy() {
-        // Arrange
-        let data = b"some data";
-
-        // Act
-        let result = decompress_block(data, CompressionAlgo::Snappy);
-
-        // Assert
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn should_decompress_large_data_with_none() {
         // Arrange
         let data = vec![11u8; 16 * 1024]; // 16KB
@@ -1292,7 +1047,7 @@ mod tests {
         // Arrange
         // Act
         // Assert
-        assert_eq!(MIN_COMPRESS_SIZE, 256);
+        assert_eq!(MIN_COMPRESSION_INPUT_BYTES, 256);
     }
 
     #[test]

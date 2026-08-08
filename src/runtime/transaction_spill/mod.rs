@@ -30,7 +30,7 @@ use std::fs::File;
 #[cfg(test)]
 use std::io::{Seek, SeekFrom};
 const RUN_MAGIC: &[u8; 8] = b"MDGTXN01";
-const RUN_VERSION: u32 = 1;
+const RUN_VERSION: u32 = 2;
 const RUN_HEADER_LEN: usize = 48;
 const SPARSE_INDEX_STRIDE: usize = 16;
 const MAX_FRAME_BYTES: usize = crate::wal::frame::WAL_MAX_RECORD_LEN;

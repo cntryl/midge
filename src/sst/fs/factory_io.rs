@@ -16,7 +16,7 @@ use crate::sst::index::tuner::{IndexKind, IndexTuner};
 use crate::sst::trie::writer::TrieWriter;
 use crate::sst::types::{
     encode_range_tombstones, BlockHandle, Footer, KeyRangeMetadata, RangeTombstone, SstMetadata,
-    SST_FORMAT_V3,
+    SST_FORMAT_V4,
 };
 
 /// SST factory that uses `io::Fs` abstraction
@@ -242,7 +242,7 @@ impl InMemorySstWriter {
     fn encode_pending_entry(previous_key: &[u8], entry: &PendingEntry) -> MidgeResult<Vec<u8>> {
         let shared_len = Self::shared_prefix_len(previous_key, &entry.key);
         let key_delta = &entry.key[shared_len as usize..];
-        crate::sst::encoding::encode_v2(
+        crate::sst::encoding::encode_v4(
             key_delta,
             shared_len,
             entry.value.as_deref(),
@@ -621,7 +621,7 @@ impl InMemorySstWriter {
         let trie_handle =
             Self::append_trie_block_to_stream(&mut state, compression_policy, index_kind)?;
         let metadata = SstMetadata {
-            format_version: SST_FORMAT_V3,
+            format_version: SST_FORMAT_V4,
             index_kind,
             range_tombstone_handle,
             key_range: state
@@ -761,7 +761,7 @@ impl DynSstWriter for InMemorySstWriter {
             &finalized.block_index_entries,
         )?;
         let metadata = SstMetadata {
-            format_version: SST_FORMAT_V3,
+            format_version: SST_FORMAT_V4,
             index_kind,
             range_tombstone_handle,
             key_range: finalized.smallest_key.zip(finalized.largest_key).map(

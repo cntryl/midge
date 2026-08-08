@@ -1598,11 +1598,11 @@ fn test_sst_bytes() -> Vec<u8> {
 }
 
 fn same_size_sst_with_different_crc(bytes: &[u8]) -> Vec<u8> {
-    assert!(bytes.len() > 32, "test SST must include an extended footer");
+    assert!(bytes.len() > 4, "test SST must contain a data block");
     let mut changed = bytes.to_vec();
-    let footer_block_bloom_byte = changed.len() - 16;
-    changed[footer_block_bloom_byte] ^= 0x01;
+    changed[4] ^= 0x01;
     assert_eq!(changed.len(), bytes.len());
+    assert_ne!(changed, bytes);
     assert_ne!(crc32c::crc32c(&changed), crc32c::crc32c(bytes));
 
     let temp_dir = tempfile::tempdir().expect("create temp dir");

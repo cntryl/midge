@@ -348,21 +348,22 @@ fn write_op_frame(file: &mut File, ordinal_op: &OrdinalOp) -> MidgeResult<()> {
         } => (
             u8::from(*insert_only),
             *cf_id,
-            ttl_seconds.unwrap_or(u64::MAX),
+            *ttl_seconds,
             key.as_ref(),
             value.as_ref(),
         ),
-        TransactionOp::Delete { cf_id, key } => (2, *cf_id, u64::MAX, key.as_ref(), &[][..]),
+        TransactionOp::Delete { cf_id, key } => (2, *cf_id, None, key.as_ref(), &[][..]),
         TransactionOp::DeleteRange {
             cf_id,
             start_key,
             end_key,
-        } => (3, *cf_id, u64::MAX, start_key.as_ref(), end_key.as_ref()),
+        } => (3, *cf_id, None, start_key.as_ref(), end_key.as_ref()),
     };
     let ordinal = ordinal_op.ordinal.to_le_bytes();
     let tag = [tag];
     let cf_id = cf_id.to_le_bytes();
-    let ttl = ttl.to_le_bytes();
+    let ttl_present = [u8::from(ttl.is_some())];
+    let ttl = ttl.unwrap_or(0).to_le_bytes();
     let key_len = field_len_bytes(key.len())?;
     let second_len = field_len_bytes(second.len())?;
     write_frame_parts(
@@ -371,6 +372,7 @@ fn write_op_frame(file: &mut File, ordinal_op: &OrdinalOp) -> MidgeResult<()> {
             &ordinal,
             &tag,
             &cf_id,
+            &ttl_present,
             &ttl,
             &key_len,
             key,
@@ -382,23 +384,34 @@ fn write_op_frame(file: &mut File, ordinal_op: &OrdinalOp) -> MidgeResult<()> {
 
 pub(super) fn read_op_frame(file: &mut File) -> MidgeResult<(OrdinalOp, u64)> {
     let (payload_len, expected_crc) = read_frame_header(file)?;
-    if payload_len < 29 {
+    if payload_len < 30 {
         return Err(MidgeError::Corruption(
             "transaction spill operation is truncated".to_string(),
         ));
     }
     let mut crc = 0_u32;
-    let mut fixed = [0_u8; 21];
+    let mut fixed = [0_u8; 22];
     read_crc_exact(file, &mut fixed, &mut crc)?;
     let ordinal = read_u64_at(&fixed, 0)?;
     let tag = fixed[8];
     let cf_id = read_u32_at(&fixed, 9)?;
-    let ttl = read_u64_at(&fixed, 13)?;
+    let ttl_present = fixed[13];
+    if ttl_present > 1 {
+        return Err(MidgeError::Corruption(format!(
+            "transaction spill operation has invalid TTL-presence byte {ttl_present}"
+        )));
+    }
+    let ttl = read_u64_at(&fixed, 14)?;
+    if ttl_present == 0 && ttl != 0 {
+        return Err(MidgeError::Corruption(
+            "transaction spill operation without TTL has nonzero TTL bytes".to_string(),
+        ));
+    }
 
     let mut key_len_bytes = [0_u8; 4];
     read_crc_exact(file, &mut key_len_bytes, &mut crc)?;
     let key_len = read_u32_at(&key_len_bytes, 0)? as usize;
-    let mut consumed = 25_usize;
+    let mut consumed = 26_usize;
     if consumed.saturating_add(key_len).saturating_add(4) > payload_len {
         return Err(MidgeError::Corruption(
             "transaction spill key length exceeds its frame".to_string(),
@@ -427,7 +440,7 @@ pub(super) fn read_op_frame(file: &mut File) -> MidgeResult<(OrdinalOp, u64)> {
             cf_id,
             key: Bytes::from(key),
             value: Bytes::from(second),
-            ttl_seconds: (ttl != u64::MAX).then_some(ttl),
+            ttl_seconds: (ttl_present == 1).then_some(ttl),
             insert_only: tag == 1,
         },
         2 if second.is_empty() => TransactionOp::Delete {
@@ -445,6 +458,11 @@ pub(super) fn read_op_frame(file: &mut File) -> MidgeResult<(OrdinalOp, u64)> {
             )))
         }
     };
+    if tag >= 2 && ttl_present != 0 {
+        return Err(MidgeError::Corruption(
+            "transaction spill delete operation carries a TTL".to_string(),
+        ));
+    }
     Ok((OrdinalOp { ordinal, op }, file.stream_position()?))
 }
 
@@ -455,14 +473,14 @@ pub(super) fn read_op_frame(file: &mut File) -> MidgeResult<(OrdinalOp, u64)> {
 /// checksummed through a fixed scratch buffer and discarded.
 pub(super) fn read_op_primary_key_frame(file: &mut File) -> MidgeResult<(Bytes, u64)> {
     let (payload_len, expected_crc) = read_frame_header(file)?;
-    if payload_len < 29 {
+    if payload_len < 30 {
         return Err(MidgeError::Corruption(
             "transaction spill operation is truncated".to_string(),
         ));
     }
 
     let mut crc = 0_u32;
-    let mut fixed = [0_u8; 21];
+    let mut fixed = [0_u8; 22];
     read_crc_exact(file, &mut fixed, &mut crc)?;
     let tag = fixed[8];
     if tag > 3 {
@@ -470,11 +488,18 @@ pub(super) fn read_op_primary_key_frame(file: &mut File) -> MidgeResult<(Bytes, 
             "transaction spill operation has invalid tag {tag}"
         )));
     }
+    let ttl_present = fixed[13];
+    let ttl = read_u64_at(&fixed, 14)?;
+    if ttl_present > 1 || (ttl_present == 0 && ttl != 0) || (tag >= 2 && ttl_present != 0) {
+        return Err(MidgeError::Corruption(
+            "transaction spill operation has invalid TTL encoding".to_string(),
+        ));
+    }
 
     let mut key_len_bytes = [0_u8; 4];
     read_crc_exact(file, &mut key_len_bytes, &mut crc)?;
     let key_len = read_u32_at(&key_len_bytes, 0)? as usize;
-    let mut consumed = 25_usize;
+    let mut consumed = 26_usize;
     if consumed.saturating_add(key_len).saturating_add(4) > payload_len {
         return Err(MidgeError::Corruption(
             "transaction spill key length exceeds its frame".to_string(),

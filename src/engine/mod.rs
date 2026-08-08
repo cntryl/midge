@@ -36,9 +36,9 @@ pub use crate::types::{
     StorageLayoutSnapshot, StorageVerificationReport,
 };
 pub use api::{
-    BlockCachePolicy, CloudWritePolicy, ConflictPolicy, Direction, Goal, Key, MemoryBudget,
-    OpenOptions, OpenOptionsBuilder, Query, RecoveryPolicy, ScanIterator, Storage, Transaction,
-    TransactionMode, Value, WorkloadProfile, WriteOptions,
+    BlockCachePolicy, CloudWritePolicy, ConflictPolicy, Direction, Goal, IteratorState, Key,
+    MemoryBudget, OpenOptions, OpenOptionsBuilder, Query, RecoveryPolicy, ScanIterator, Storage,
+    Transaction, TransactionMode, Value, WorkloadProfile, WriteOptions,
 };
 /// Registry of column families, keyed by column family ID
 type ColumnFamilyRegistry = dashmap::DashMap<ColumnFamilyId, ColumnFamilyHandle>;

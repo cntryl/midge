@@ -290,12 +290,13 @@ fn encode_into_inner(record: &WalRecord, buf: &mut Vec<u8>) -> MidgeResult<()> {
 
     if let Some(v) = &record.value {
         // Preserve Some(empty) distinctly from None by always emitting VALUE when present.
-        let (write_val, comp_byte) = if v.len() < crate::sst::compression::MIN_COMPRESS_SIZE {
-            (EncodedValue::Borrowed(v.as_ref()), None)
-        } else {
-            let (value, comp_byte) = crate::sst::compression::compress_wal_value(v);
-            (EncodedValue::Owned(value), comp_byte)
-        };
+        let (write_val, comp_byte) =
+            if v.len() < crate::sst::compression::MIN_COMPRESSION_INPUT_BYTES {
+                (EncodedValue::Borrowed(v.as_ref()), None)
+            } else {
+                let (value, comp_byte) = crate::sst::compression::compress_wal_value(v);
+                (EncodedValue::Owned(value), comp_byte)
+            };
         put_tlv(buf, tags::VALUE, write_val.as_slice())?;
         if let Some(cb) = comp_byte {
             put_u8(buf, tags::COMPRESSION, cb)?;

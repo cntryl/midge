@@ -1,9 +1,12 @@
 use super::{BlockHandle, SstFileIo, SstVerificationStats};
 use crate::common::{MidgeError, MidgeResult};
+use crate::io::File;
 use crate::sst::bloom::BlockBloomFilter;
 use crate::sst::index::tuner::IndexKind;
 use crate::sst::trie::TrieReader;
-use crate::sst::types::{decode_range_tombstones, Footer, SstMetadata, SST_FORMAT_V1};
+use crate::sst::types::{
+    decode_range_tombstones, Footer, SstMetadata, SST_FOOTER_MAGIC, SST_FOOTER_SIZE,
+};
 use std::convert::TryFrom;
 use std::sync::Arc;
 
@@ -15,13 +18,6 @@ impl SstFileIo {
     /// every data block so late corruption cannot hide behind intact metadata.
     pub(crate) fn verify_all_blocks(&self) -> MidgeResult<SstVerificationStats> {
         let file_size = self.fs.metadata(&self.path)?.len;
-        if !self.uses_block_trailers() {
-            return Err(MidgeError::Corruption(format!(
-                "SST '{}' does not use checksummed block trailers",
-                self.path.0.as_str()
-            )));
-        }
-
         let footer = self
             .footer
             .as_ref()
@@ -56,7 +52,7 @@ impl SstFileIo {
         })
     }
 
-    fn validate_block_handle(
+    pub(super) fn validate_block_handle(
         handle: BlockHandle,
         block_region_end: u64,
         kind: &str,
@@ -64,7 +60,10 @@ impl SstFileIo {
         let end = handle.offset.checked_add(handle.size).ok_or_else(|| {
             MidgeError::Corruption(format!("SST {kind} block handle overflows file offsets"))
         })?;
-        if handle.size < 4 || end > block_region_end {
+        let minimum_size = 4_u64.saturating_add(
+            u64::try_from(crate::sst::compression::BLOCK_TRAILER_SIZE).unwrap_or(u64::MAX),
+        );
+        if handle.size < minimum_size || end > block_region_end {
             return Err(MidgeError::Corruption(format!(
                 "SST {kind} block [{}, {}) exceeds block region ending at {block_region_end}",
                 handle.offset, end
@@ -79,38 +78,61 @@ impl SstFileIo {
         let metadata = self.fs.metadata(&self.path)?;
         let file_size = metadata.len;
 
-        if file_size < 48 {
-            return Err(MidgeError::Corruption("SST file too small".into()));
+        let footer_size = u64::try_from(SST_FOOTER_SIZE).expect("V4 footer size fits u64");
+        let file = self.fs.open(
+            &self.path,
+            crate::io::OpenOptions {
+                mode: crate::io::OpenMode::ReadOnly,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        )?;
+        if file_size < footer_size {
+            if file_size >= 8
+                && file
+                    .read_at(file_size - 8, 8)?
+                    .as_ref()
+                    .eq(&SST_FOOTER_MAGIC.to_le_bytes())
+            {
+                return Err(MidgeError::CompatibilityError(
+                    "legacy SST V1-V3 is unsupported; this build requires V4".into(),
+                ));
+            }
+            return Err(MidgeError::Corruption(format!(
+                "SST is too short for the {SST_FOOTER_SIZE}-byte V4 footer"
+            )));
         }
-
-        // Determine footer size (72 bytes new, fall back to 56 or 48)
-        let footer_size = if file_size >= 72 {
-            72u64
-        } else if file_size >= 56 {
-            56u64
-        } else {
-            48u64
-        };
-
-        // Read footer from end of file
         let footer_offset = file_size - footer_size;
-        self.block_region_end = footer_offset;
-        let footer_data = {
-            let file = self.fs.open(
-                &self.path,
-                crate::io::OpenOptions {
-                    mode: crate::io::OpenMode::ReadOnly,
-                    create: false,
-                    create_new: false,
-                    truncate: false,
-                },
-            )?;
-            file.read_at(footer_offset, footer_size)?
+        let footer_data = file.read_at(footer_offset, footer_size)?;
+        let footer = match Footer::decode(&footer_data) {
+            Ok(footer) => footer,
+            Err(error) => {
+                let trailing_magic = file.read_at(file_size.saturating_sub(8), 8)?;
+                if trailing_magic.as_ref() == SST_FOOTER_MAGIC.to_le_bytes() {
+                    return Err(MidgeError::CompatibilityError(
+                        "legacy SST V1-V3 is unsupported; this build requires V4".into(),
+                    ));
+                }
+                return Err(error);
+            }
         };
-
-        self.footer = Some(Footer::decode(&footer_data)?);
+        self.block_region_end = footer_offset;
+        Self::validate_block_handle(footer.meta_index_handle, footer_offset, "metadata")?;
+        Self::validate_block_handle(footer.index_handle, footer_offset, "index")?;
+        if let Some(handle) = footer.trie_handle {
+            Self::validate_block_handle(handle, footer_offset, "trie")?;
+        }
+        if let Some(handle) = footer.block_bloom_handle {
+            Self::validate_block_handle(handle, footer_offset, "block bloom")?;
+        }
+        drop(file);
+        self.footer = Some(footer);
         self.load_sst_metadata()?;
         self.load_block_bloom()?;
+        let index = self.parse_index_entries()?;
+        self.validate_nonoverlapping_references(&index)?;
+        self.index_entries.store(Some(Arc::new(index)));
 
         Ok(())
     }
@@ -120,25 +142,11 @@ impl SstFileIo {
             return Ok(());
         };
 
-        if footer.meta_index_handle.size == 0 {
-            self.format_version = SST_FORMAT_V1;
-            self.index_kind = IndexKind::Sparse;
-            self.smallest_key = None;
-            self.largest_key = None;
-            self.trie_reader = None;
-            self.range_tombstones.clear();
-            return Ok(());
-        }
-
         let metadata_bytes = self.read_block(&footer.meta_index_handle)?;
         if metadata_bytes.is_empty() {
-            self.format_version = SST_FORMAT_V1;
-            self.index_kind = IndexKind::Sparse;
-            self.smallest_key = None;
-            self.largest_key = None;
-            self.trie_reader = None;
-            self.range_tombstones.clear();
-            return Ok(());
+            return Err(MidgeError::Corruption(
+                "SST V4 metadata block is empty".into(),
+            ));
         }
 
         let metadata = SstMetadata::decode(&metadata_bytes)?;
@@ -152,8 +160,10 @@ impl SstFileIo {
             .key_range
             .as_ref()
             .map(|range| range.largest_key.clone());
+        self.range_tombstone_handle = metadata.range_tombstone_handle;
         self.range_tombstones = match metadata.range_tombstone_handle {
-            Some(handle) if handle.size > 0 => {
+            Some(handle) => {
+                Self::validate_block_handle(handle, self.block_region_end, "range tombstone")?;
                 let tombstone_bytes = self.read_block(&handle)?;
                 decode_range_tombstones(&tombstone_bytes)?
             }
@@ -180,6 +190,68 @@ impl SstFileIo {
         Ok(())
     }
 
+    pub(super) fn validate_nonoverlapping_references(
+        &self,
+        index: &[(Vec<u8>, BlockHandle)],
+    ) -> MidgeResult<()> {
+        let footer = self
+            .footer
+            .as_ref()
+            .ok_or_else(|| MidgeError::Corruption("SST footer is missing".into()))?;
+        let mut handles = vec![
+            ("metadata", footer.meta_index_handle),
+            ("index", footer.index_handle),
+        ];
+        if let Some(handle) = footer.trie_handle {
+            handles.push(("trie", handle));
+        }
+        if let Some(handle) = footer.block_bloom_handle {
+            handles.push(("block bloom", handle));
+        }
+        if let Some(handle) = self.range_tombstone_handle {
+            handles.push(("range tombstone", handle));
+        }
+        handles.extend(index.iter().map(|(_, handle)| ("data", *handle)));
+        handles.sort_unstable_by_key(|(_, handle)| handle.offset);
+
+        if handles
+            .first()
+            .is_some_and(|(_, handle)| handle.offset != 0)
+        {
+            return Err(MidgeError::Corruption(
+                "SST block references leave unreferenced bytes at the start of the file".into(),
+            ));
+        }
+
+        for pair in handles.windows(2) {
+            let (left_kind, left) = pair[0];
+            let (right_kind, right) = pair[1];
+            let left_end = left.offset.checked_add(left.size).ok_or_else(|| {
+                MidgeError::Corruption(format!(
+                    "SST {left_kind} block handle overflows file offsets"
+                ))
+            })?;
+            if left_end > right.offset {
+                return Err(MidgeError::Corruption(format!(
+                    "SST {left_kind} block overlaps {right_kind} block"
+                )));
+            }
+            if left_end < right.offset {
+                return Err(MidgeError::Corruption(format!(
+                    "SST {left_kind} and {right_kind} blocks leave unreferenced bytes"
+                )));
+            }
+        }
+        if handles.last().is_some_and(|(_, handle)| {
+            handle.offset.checked_add(handle.size) != Some(self.block_region_end)
+        }) {
+            return Err(MidgeError::Corruption(
+                "SST block references do not exactly reach the V4 footer".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn read_block(&self, handle: &BlockHandle) -> MidgeResult<bytes::Bytes> {
         Self::validate_block_handle(*handle, self.block_region_end, "referenced")?;
         let file = self.fs.open(
@@ -192,7 +264,15 @@ impl SstFileIo {
             },
         )?;
 
-        // Read block with size prefix
+        self.read_block_from(file.as_ref(), handle)
+    }
+
+    pub(super) fn read_block_from(
+        &self,
+        file: &dyn File,
+        handle: &BlockHandle,
+    ) -> MidgeResult<bytes::Bytes> {
+        Self::validate_block_handle(*handle, self.block_region_end, "referenced")?;
         let buffer = file.read_at(handle.offset, handle.size)?;
 
         // First 4 bytes are length prefix
@@ -201,47 +281,29 @@ impl SstFileIo {
         }
 
         let len = u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
-        if len
-            .checked_add(4)
-            .is_none_or(|encoded_len| encoded_len > buffer.len())
-        {
-            return Err(MidgeError::Corruption("Block data truncated".into()));
+        if len.checked_add(4) != Some(buffer.len()) {
+            return Err(MidgeError::Corruption(
+                "SST block length prefix does not exactly match its handle".into(),
+            ));
         }
 
         let raw = &buffer[4..4 + len];
-        Self::decompress_raw_block(raw, self.uses_block_trailers())
+        Self::decompress_raw_block(raw)
     }
 
     /// Decompress a raw block payload, stripping the block trailer if present.
     ///
-    /// Blocks with a valid trailer (`[data][algo:u8][crc32c:u32]`) are verified
-    /// and decompressed.  Legacy blocks without a trailer (pre-v1.0.0) are
-    /// returned as-is for backward compatibility.
-    fn uses_block_trailers(&self) -> bool {
-        self.footer
-            .as_ref()
-            .is_some_and(|footer| footer.meta_index_handle.size > 0)
-    }
-
-    fn decompress_raw_block(raw: &[u8], strict_trailer: bool) -> MidgeResult<bytes::Bytes> {
+    /// Every V4 block carries `[payload][algo:u8][crc32c:u32]` and is rejected
+    /// if that trailer cannot be verified and decoded.
+    fn decompress_raw_block(raw: &[u8]) -> MidgeResult<bytes::Bytes> {
         use crate::sst::compression;
 
-        // A block must be at least BLOCK_TRAILER_SIZE bytes to contain a
-        // trailer.  Shorter payloads are legacy / uncompressed.
         if raw.len() < compression::BLOCK_TRAILER_SIZE {
-            if strict_trailer {
-                return Err(MidgeError::Corruption(
-                    "current-format SST block too short for trailer".into(),
-                ));
-            }
-            return Ok(bytes::Bytes::copy_from_slice(raw));
+            return Err(MidgeError::Corruption(
+                "SST V4 block is too short for its mandatory trailer".into(),
+            ));
         }
-
-        match compression::decompress_block_with_trailer(raw) {
-            Ok(decompressed) => Ok(decompressed),
-            Err(error) if strict_trailer => Err(error),
-            Err(_) => Ok(bytes::Bytes::copy_from_slice(raw)),
-        }
+        compression::decompress_block_with_trailer(raw)
     }
 
     /// Read multiple contiguous blocks in a single IO operation for cold-cache scans.
@@ -312,7 +374,6 @@ impl SstFileIo {
 
         // Extract individual blocks from the buffer
         let mut result = Vec::with_capacity(handles.len());
-        let strict_trailer = self.uses_block_trailers();
         for handle in handles {
             // Compute offset within the buffer
             let relative_offset = handle.offset.checked_sub(read_start).ok_or_else(|| {
@@ -348,15 +409,14 @@ impl SstFileIo {
                 block_slice[3],
             ]) as usize;
 
-            if len
-                .checked_add(4)
-                .is_none_or(|encoded_len| encoded_len > block_slice.len())
-            {
-                return Err(MidgeError::Corruption("Block data truncated".into()));
+            if len.checked_add(4) != Some(block_slice.len()) {
+                return Err(MidgeError::Corruption(
+                    "SST block length prefix does not exactly match its handle".into(),
+                ));
             }
 
             let raw = &block_slice[4..4 + len];
-            result.push(Self::decompress_raw_block(raw, strict_trailer)?);
+            result.push(Self::decompress_raw_block(raw)?);
         }
 
         Ok(result)

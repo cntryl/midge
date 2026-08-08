@@ -112,6 +112,40 @@ impl fmt::Display for MidgeError {
 
 impl std::error::Error for MidgeError {}
 
+impl MidgeError {
+    /// Reconstruct this error for terminal-state replay without erasing its
+    /// public variant or message.
+    pub(crate) fn replay(&self) -> Self {
+        match self {
+            Self::Io(error) => Self::Io(error.raw_os_error().map_or_else(
+                || io::Error::new(error.kind(), error.to_string()),
+                io::Error::from_raw_os_error,
+            )),
+            Self::NotFound => Self::NotFound,
+            Self::InvalidArgument(message) => Self::InvalidArgument(message.clone()),
+            Self::Corruption(message) => Self::Corruption(message.clone()),
+            Self::NotSupported(message) => Self::NotSupported(message.clone()),
+            Self::Internal(message) => Self::Internal(message.clone()),
+            Self::InvalidPath => Self::InvalidPath,
+            Self::NoSpace(message) => Self::NoSpace(message.clone()),
+            Self::RecoveryFailed(message) => Self::RecoveryFailed(message.clone()),
+            Self::CompatibilityError(message) => Self::CompatibilityError(message.clone()),
+            Self::WriteStall(message) => Self::WriteStall(message.clone()),
+            Self::MemoryModeViolation(message) => Self::MemoryModeViolation(message.clone()),
+            Self::Fenced(message) => Self::Fenced(message.clone()),
+            Self::LeaseHeld(message) => Self::LeaseHeld(message.clone()),
+            Self::LeaseUnavailable(message) => Self::LeaseUnavailable(message.clone()),
+            Self::LeaseIndeterminate(message) => Self::LeaseIndeterminate(message.clone()),
+            Self::LeaseEpochExhausted => Self::LeaseEpochExhausted,
+            Self::WriteConflict(message) => Self::WriteConflict(message.clone()),
+            Self::Aborted(message) => Self::Aborted(message.clone()),
+            Self::Busy(message) => Self::Busy(message.clone()),
+            Self::Timeout(message) => Self::Timeout(message.clone()),
+            Self::ResourceLimit(message) => Self::ResourceLimit(message.clone()),
+        }
+    }
+}
+
 impl From<io::Error> for MidgeError {
     fn from(err: io::Error) -> Self {
         let raw_code = err.raw_os_error();

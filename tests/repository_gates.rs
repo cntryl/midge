@@ -226,19 +226,20 @@ fn should_use_sqrzl_emulator_for_cloud_gates() {
 }
 
 #[test]
-fn should_verify_checked_in_v2_fixture_in_publish_workflow() {
+fn should_verify_checked_in_current_fixture_in_publish_workflow() {
     // Arrange
     let publish = read_workflow(".github/workflows/publish.yml");
-    let fixture = repository_root().join("tests/fixtures/compatibility/v2_empty_db");
+    let fixture = repository_root().join("tests/fixtures/compatibility/v3_populated_v4_sst_db");
 
     // Act
-    let uses_v2_fixture = publish.contains("tests/fixtures/compatibility/v2_empty_db");
+    let uses_current_fixture =
+        publish.contains("tests/fixtures/compatibility/v3_populated_v4_sst_db");
 
     // Assert
     assert!(fixture.is_dir(), "release compatibility fixture must exist");
     assert!(
-        uses_v2_fixture,
-        "publish must verify the checked-in v2 fixture"
+        uses_current_fixture,
+        "publish must verify the checked-in current-format fixture"
     );
     assert!(!publish.contains("tests/fixtures/compatibility/v1_empty_db"));
 }
