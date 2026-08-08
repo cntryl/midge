@@ -147,6 +147,41 @@ fn should_issue_one_physical_wal_sync_when_empty_sync_transaction_commits() {
 }
 
 #[test]
+fn should_issue_one_physical_wal_sync_when_assertion_only_sync_transaction_commits() {
+    // Arrange
+    let _guard = sync_count_test_guard();
+    let (_temp_dir, mut engine, cf) = open_engine();
+    let mut seed = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .expect("begin seed transaction");
+    seed.put(b"guard".to_vec(), b"value".to_vec(), None)
+        .expect("stage guard value");
+    seed.commit(WriteOptions::buffered())
+        .expect("commit guard value to the WAL buffer");
+    let before = wal_fsync_count(&engine);
+    let mut tx = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .expect("begin assertion-only transaction");
+    tx.assert_value(b"guard".to_vec(), Some(b"value".to_vec()))
+        .expect("register guard assertion");
+
+    // Act
+    tx.commit(WriteOptions::sync())
+        .expect("commit assertion-only transaction synchronously");
+    let after = wal_fsync_count(&engine);
+
+    // Assert
+    assert_eq!(
+        after.saturating_sub(before),
+        1,
+        "an assertion-only synchronous commit must establish one physical WAL barrier"
+    );
+    engine
+        .shutdown(Duration::from_secs(2))
+        .expect("shutdown assertion-only sync engine");
+}
+
+#[test]
 fn should_not_issue_physical_wal_sync_before_buffered_commit_returns() {
     // Arrange
     let _guard = sync_count_test_guard();

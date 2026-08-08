@@ -323,6 +323,40 @@ fn should_append_multiple_prepared_transactions_with_one_physical_call() -> Midg
 }
 
 #[test]
+fn should_build_one_read_snapshot_when_checking_multiple_assertions_in_one_column_family(
+) -> MidgeResult<()> {
+    // Arrange
+    let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
+    let state = RuntimeState::new(temp.path().to_path_buf(), false);
+    let assertions = vec![
+        crate::runtime::KeyAssertion {
+            cf_id: 0,
+            key: Bytes::from_static(b"first"),
+        },
+        crate::runtime::KeyAssertion {
+            cf_id: 0,
+            key: Bytes::from_static(b"second"),
+        },
+        crate::runtime::KeyAssertion {
+            cf_id: 0,
+            key: Bytes::from_static(b"third"),
+        },
+    ];
+    WalActor::reset_assertion_snapshot_build_count();
+
+    // Act
+    WalActor::ensure_no_assertion_conflicts(&state, &assertions, 0)?;
+
+    // Assert
+    assert_eq!(
+        WalActor::assertion_snapshot_build_count(),
+        1,
+        "assertion conflict checks must reuse one read snapshot per column family"
+    );
+    Ok(())
+}
+
+#[test]
 fn should_durably_append_strict_transaction_group_once_before_memtable_apply() -> MidgeResult<()> {
     // Arrange
     let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;

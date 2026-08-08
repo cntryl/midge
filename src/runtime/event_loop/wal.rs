@@ -77,11 +77,7 @@ impl WalCoordinator {
             Ok((last_sequence, op_count, deferred)) => {
                 event_loop.publish_snapshot();
                 if event_loop.should_ack_immediately(deferred) {
-                    if event_loop.wal_actor.is_cloud_async() {
-                        event_loop
-                            .durability
-                            .queue_waiter(DurabilityWaiter::ConfirmTransactionApply { request_id });
-                    } else if deferred {
+                    if deferred {
                         event_loop.maybe_queue_confirm_only_waiter(deferred, request_id, true);
                     } else {
                         event_loop.state.clear_pending_transaction_barrier();
@@ -178,11 +174,7 @@ impl WalCoordinator {
                     event_loop.publish_snapshot();
 
                     if event_loop.should_ack_immediately(deferred) {
-                        if event_loop.wal_actor.is_cloud_async() {
-                            event_loop.durability.queue_waiter(
-                                DurabilityWaiter::ConfirmTransactionApply { request_id },
-                            );
-                        } else if deferred {
+                        if deferred {
                             event_loop.maybe_queue_confirm_only_waiter(deferred, request_id, true);
                         } else {
                             event_loop.state.clear_pending_transaction_barrier();

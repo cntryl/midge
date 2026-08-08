@@ -143,6 +143,256 @@ fn should_bound_assertion_memory_by_transaction_pool() {
     ));
 }
 
+#[test]
+fn should_reject_assertion_when_write_intent_consumes_shared_transaction_pool() {
+    // Arrange
+    let opts = cntryl_midge::OpenOptions::in_memory()
+        .transaction_memory_pool_size(1_024)
+        .build()
+        .expect("build options");
+    let engine = cntryl_midge::Engine::open(opts).expect("open engine");
+    let cf = engine
+        .create_column_family("write-pressure")
+        .expect("create cf");
+    let mut writer = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin writer");
+    writer
+        .put(b"held".to_vec(), b"value".to_vec(), None)
+        .expect("reserve write intent memory");
+    let mut asserting = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin asserting transaction");
+
+    // Act
+    let pressured = asserting.assert_value(vec![b'a'; 512], None);
+    drop(writer);
+    let admitted_after_release = asserting.assert_value(vec![b'b'; 512], None);
+
+    // Assert
+    assert!(matches!(
+        pressured,
+        Err(cntryl_midge::MidgeError::ResourceLimit(_))
+    ));
+    assert!(
+        admitted_after_release.is_ok(),
+        "dropping the writer must release its shared pool reservation"
+    );
+}
+
+#[test]
+fn should_reject_write_intent_when_assertion_consumes_shared_transaction_pool() {
+    // Arrange
+    let opts = cntryl_midge::OpenOptions::in_memory()
+        .transaction_memory_pool_size(1_024)
+        .build()
+        .expect("build options");
+    let engine = cntryl_midge::Engine::open(opts).expect("open engine");
+    let cf = engine
+        .create_column_family("assertion-pressure")
+        .expect("create cf");
+    let mut asserting = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin asserting transaction");
+    asserting
+        .assert_value(vec![b'a'; 512], None)
+        .expect("reserve assertion memory");
+    let mut writer = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin writer");
+
+    // Act
+    let pressured = writer.put(b"held".to_vec(), b"value".to_vec(), None);
+    drop(asserting);
+    let admitted_after_release = writer.put(b"released".to_vec(), b"value".to_vec(), None);
+
+    // Assert
+    assert!(matches!(
+        pressured,
+        Err(cntryl_midge::MidgeError::ResourceLimit(_))
+    ));
+    assert!(
+        admitted_after_release.is_ok(),
+        "dropping the assertion owner must release its shared pool reservation"
+    );
+}
+
+#[test]
+fn should_spill_write_intent_when_assertion_consumes_shared_pool_in_local_mode() {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create database directory");
+    let opts = cntryl_midge::OpenOptions::local(temp_dir.path())
+        .transaction_memory_pool_size(1_024)
+        .build()
+        .expect("build options");
+    let engine = cntryl_midge::Engine::open(opts).expect("open engine");
+    let cf = engine
+        .create_column_family("assertion-spill-pressure")
+        .expect("create cf");
+    let mut asserting = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin asserting transaction");
+    asserting
+        .assert_value(vec![b'a'; 512], None)
+        .expect("reserve assertion memory");
+    let mut writer = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin writer");
+
+    // Act
+    let admitted = writer.put(b"spilled".to_vec(), b"value".to_vec(), None);
+    let spill_runs = std::fs::read_dir(temp_dir.path().join("txn"))
+        .expect("open transaction spill directory")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "run"))
+        .count();
+    let committed = writer.commit(cntryl_midge::WriteOptions::buffered());
+
+    // Assert
+    assert!(
+        admitted.is_ok(),
+        "local transactions must spill when assertion pressure prevents resident admission"
+    );
+    assert!(
+        spill_runs > 0,
+        "assertion pressure must create a transaction spill run before commit"
+    );
+    assert!(
+        committed.is_ok(),
+        "the directly spilled write must remain committable: {committed:?}"
+    );
+    let current = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .expect("begin verification transaction");
+    assert_eq!(
+        current.get(b"spilled").expect("read spilled value"),
+        Some(Bytes::from_static(b"value"))
+    );
+    drop(asserting);
+}
+
+#[test]
+fn should_use_transaction_snapshot_time_when_asserted_value_expires_before_commit() {
+    // Arrange
+    let engine = Arc::new(open_with_mode(&MidgeOptions::default(), "memory"));
+    let cf = engine
+        .create_column_family("assertion-ttl")
+        .expect("create cf");
+    let mut seed = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin seed tx");
+    seed.put(b"ttl-key".to_vec(), b"value".to_vec(), Some(1))
+        .expect("seed expiring value");
+    seed.commit(cntryl_midge::WriteOptions::buffered())
+        .expect("commit expiring value");
+    let mut asserting = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin assertion snapshot");
+    asserting
+        .assert_value(b"ttl-key".to_vec(), Some(b"value".to_vec()))
+        .expect("register ttl assertion");
+
+    // Act
+    std::thread::sleep(Duration::from_millis(1_100));
+    let result = asserting.commit(cntryl_midge::WriteOptions::buffered());
+
+    // Assert
+    assert!(
+        result.is_ok(),
+        "assertion must use the TTL clock frozen with its transaction snapshot: {result:?}"
+    );
+    let current = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .expect("begin current snapshot");
+    assert_eq!(
+        current.get(b"ttl-key").expect("read current value"),
+        None,
+        "a new snapshot must observe the value as expired"
+    );
+}
+
+#[test]
+fn should_isolate_assertion_conflicts_between_column_families() {
+    // Arrange
+    let engine = Arc::new(open_with_mode(&MidgeOptions::default(), "memory"));
+    let first_cf = engine
+        .create_column_family("assertion-cf-first")
+        .expect("create first cf");
+    let second_cf = engine
+        .create_column_family("assertion-cf-second")
+        .expect("create second cf");
+    for (cf_id, value) in [
+        (first_cf.id(), b"first".as_slice()),
+        (second_cf.id(), b"second".as_slice()),
+    ] {
+        let mut seed = engine
+            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin seed transaction");
+        seed.put(b"shared-key".to_vec(), value.to_vec(), None)
+            .expect("seed shared key");
+        seed.commit(cntryl_midge::WriteOptions::buffered())
+            .expect("commit shared key");
+    }
+    let mut asserting = engine
+        .begin_tx(first_cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin first-cf assertion");
+    asserting
+        .assert_value(b"shared-key".to_vec(), Some(b"first".to_vec()))
+        .expect("register first-cf assertion");
+    let mut concurrent = engine
+        .begin_tx(second_cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin second-cf writer");
+    concurrent
+        .put(b"shared-key".to_vec(), b"updated".to_vec(), None)
+        .expect("update second-cf key");
+    concurrent
+        .commit(cntryl_midge::WriteOptions::buffered())
+        .expect("commit second-cf update");
+
+    // Act
+    let result = asserting.commit(cntryl_midge::WriteOptions::buffered());
+
+    // Assert
+    assert!(
+        result.is_ok(),
+        "a same-named key in another column family must not conflict: {result:?}"
+    );
+}
+
+#[test]
+fn should_reject_conflicting_duplicate_assertions_for_one_key() {
+    // Arrange
+    let engine = Arc::new(open_with_mode(&MidgeOptions::default(), "memory"));
+    let cf = engine
+        .create_column_family("duplicate-assertion")
+        .expect("create cf");
+    let mut seed = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin seed transaction");
+    seed.put(b"key".to_vec(), b"value".to_vec(), None)
+        .expect("seed value");
+    seed.commit(cntryl_midge::WriteOptions::buffered())
+        .expect("commit seed value");
+    let mut asserting = engine
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin asserting transaction");
+    asserting
+        .assert_value(b"key".to_vec(), Some(b"value".to_vec()))
+        .expect("register matching assertion");
+    asserting
+        .assert_value(b"key".to_vec(), Some(b"different".to_vec()))
+        .expect("register conflicting assertion");
+
+    // Act
+    let result = asserting.commit(cntryl_midge::WriteOptions::buffered());
+
+    // Assert
+    assert!(matches!(
+        result,
+        Err(cntryl_midge::MidgeError::WriteConflict(_))
+    ));
+}
+
 // ============================================================================
 // COMMIT-TIME ASSERTION ENFORCEMENT
 //
