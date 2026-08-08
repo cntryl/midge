@@ -46,6 +46,7 @@ pub(crate) struct FlushPublishTask {
     pub sst_seq: u64,
     pub db_path: PathBuf,
     pub sst_dir: PathBuf,
+    pub fs: Arc<dyn crate::io::Fs>,
     pub recovery_policy: crate::config::RecoveryPolicy,
     pub hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
     pub cloud_metadata_storage: Option<Arc<crate::storage::cloud::CloudStorage>>,
@@ -502,18 +503,16 @@ fn validate_task_lease(task: &FlushPublishTask) -> MidgeResult<()> {
 }
 
 fn finalize_staged_sst(task: &FlushPublishTask, final_path: &Path) -> MidgeResult<()> {
-    if final_path.exists() {
-        validate_final_sst(final_path, &task.build.file_meta)?;
-        cleanup_non_authoritative_staging(task);
-        return Ok(());
+    if !final_path.exists() {
+        let parent = final_path.parent().ok_or(MidgeError::InvalidPath)?;
+        std::fs::create_dir_all(parent)?;
+        std::fs::rename(&task.build.staging_path, final_path)?;
     }
-    let parent = final_path.parent().ok_or(MidgeError::InvalidPath)?;
-    std::fs::create_dir_all(parent)?;
-    std::fs::rename(&task.build.staging_path, final_path)?;
     validate_final_sst(final_path, &task.build.file_meta)?;
-    if let Ok(directory) = std::fs::File::open(parent) {
-        directory.sync_all()?;
-    }
+    task.fs.sync_dir(
+        &crate::io::FsPath::new("sst"),
+        crate::io::Durability::Durable,
+    )?;
     cleanup_non_authoritative_staging(task);
     Ok(())
 }
@@ -880,6 +879,7 @@ mod tests {
             sst_seq: 1,
             db_path,
             sst_dir,
+            fs: Arc::new(crate::io::MockFs::new()),
             recovery_policy: crate::config::RecoveryPolicy::Strict,
             hybrid_storage: Some(hybrid),
             cloud_metadata_storage: Some(control_cloud),
@@ -892,6 +892,44 @@ mod tests {
             sst_backend,
             control_backend,
         })
+    }
+
+    #[test]
+    fn should_retry_sst_directory_sync_when_prior_finalize_barrier_failed() -> MidgeResult<()> {
+        // Arrange
+        let mut fixture = publication_fixture(usize::MAX)?;
+        let sync_fs = Arc::new(crate::io::MockFs::new());
+        sync_fs.set_sync_dir_failure(true);
+        fixture.task.fs = sync_fs.clone();
+        let final_path = fixture.task.sst_dir.join(&fixture.task.sst_name);
+
+        // Act
+        let error = finalize_staged_sst(&fixture.task, &final_path)
+            .expect_err("directory durability failure must fail SST finalization");
+        sync_fs.set_sync_dir_failure(false);
+        finalize_staged_sst(&fixture.task, &final_path)?;
+
+        // Assert
+        assert!(matches!(error, MidgeError::Internal(_)));
+        assert!(
+            final_path.exists(),
+            "renamed SST must be retained for retry"
+        );
+        assert_eq!(
+            sync_fs.sync_dir_calls(),
+            [
+                (
+                    crate::io::FsPath::new("sst"),
+                    crate::io::Durability::Durable
+                ),
+                (
+                    crate::io::FsPath::new("sst"),
+                    crate::io::Durability::Durable
+                ),
+            ],
+            "retry must re-establish the directory durability barrier"
+        );
+        Ok(())
     }
 
     #[test]

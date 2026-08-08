@@ -8,6 +8,8 @@ use super::traits::{
 use bytes::Bytes;
 use parking_lot::Mutex;
 use std::collections::HashMap;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -19,6 +21,10 @@ struct MockFileData {
 #[derive(Debug, Clone, Default)]
 pub struct MockFs {
     files: Arc<Mutex<HashMap<String, MockFileData>>>,
+    #[cfg(test)]
+    sync_dir_calls: Arc<Mutex<Vec<(FsPath, Durability)>>>,
+    #[cfg(test)]
+    fail_sync_dir: Arc<AtomicBool>,
 }
 
 impl MockFs {
@@ -39,6 +45,16 @@ impl MockFs {
     #[cfg(test)]
     pub fn clear(&self) {
         self.files.lock().clear();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_sync_dir_failure(&self, fail: bool) {
+        self.fail_sync_dir.store(fail, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sync_dir_calls(&self) -> Vec<(FsPath, Durability)> {
+        self.sync_dir_calls.lock().clone()
     }
 }
 
@@ -164,7 +180,18 @@ impl Fs for MockFs {
         Ok(())
     }
 
-    fn sync_dir(&self, _path: &FsPath, _dur: Durability) -> FsResult<()> {
+    fn sync_dir(&self, path: &FsPath, dur: Durability) -> FsResult<()> {
+        #[cfg(test)]
+        {
+            self.sync_dir_calls.lock().push((path.clone(), dur));
+            if self.fail_sync_dir.load(Ordering::Relaxed) {
+                return Err(FsError::Unavailable(
+                    "injected directory sync failure".to_string(),
+                ));
+            }
+        }
+        #[cfg(not(test))]
+        let _ = (path, dur);
         Ok(())
     }
 
