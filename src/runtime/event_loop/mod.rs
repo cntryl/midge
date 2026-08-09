@@ -24,6 +24,7 @@ mod cloud;
 mod cloud_integration;
 mod compaction;
 mod control;
+mod coordination;
 mod dispatch;
 mod durability_sync;
 mod flush;
@@ -40,7 +41,7 @@ mod write_batch;
 
 use crossbeam::channel::{Receiver, Sender, TryRecvError};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -96,12 +97,8 @@ impl From<&super::RuntimeConfig> for RecoveredCloudWalConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct MetadataCleanupProof {
-    len: u64,
-    crc32c: u32,
-    remote: crate::storage::StorageObjectMetadata,
-}
+pub(super) use coordination::MetadataCleanupProof;
+use coordination::{CloudWalUploadTracker, ManifestPublicationGate, VerificationBarrier};
 
 /// Main synchronous event loop for the runtime.
 ///
@@ -126,14 +123,7 @@ pub struct EventLoop {
     pub(super) loop_debug: bool,
     pub(super) loop_debug_wakes: u64,
     pub(super) loop_debug_batch_total: u64,
-    pub(super) cloud_acked_wal_segments: BTreeMap<u64, u64>,
-    /// Locally sealed WAL segments that must be admitted to the bounded
-    /// uploader in segment order. Keeping this outside the upload queue lets
-    /// startup recover more obligations than fit in one queue window.
-    pub(super) cloud_wal_upload_backlog: BTreeMap<u64, u64>,
-    pub(super) cloud_wal_prune_inflight: HashSet<u64>,
-    cloud_wal_prune_retries: HashMap<u64, (u32, Instant)>,
-    pub(super) cloud_metadata_cleanup_proofs: HashMap<String, MetadataCleanupProof>,
+    pub(super) cloud_wal: CloudWalUploadTracker,
     next_background_compaction_check: Instant,
 
     // Durability coordination (extracted to reduce EventLoop cognitive load)
@@ -150,14 +140,8 @@ pub struct EventLoop {
     /// if we encounter a non-write message, we stash it here and handle it next.
     pub(super) pending_msg: Option<RuntimeMsg>,
 
-    /// Active runtime-wide barrier token held by online storage verification.
-    verification_barrier_token: Option<u64>,
-    /// Internal completion messages held until the verification barrier releases.
-    verification_deferred_messages: VecDeque<RuntimeMsg>,
-    /// Manifest-mutating messages held while a flush publication owns the
-    /// single authority-changing I/O slot.
-    publication_deferred_messages: VecDeque<RuntimeMsg>,
-    manifest_publication_active: bool,
+    verification_barrier: VerificationBarrier,
+    publication_gate: ManifestPublicationGate,
 
     pub(super) flush_worker_result_rx: crossbeam::channel::Receiver<FlushWorkerResult>,
     flush_barrier_waiters: HashMap<crate::types::ColumnFamilyId, Vec<flush::FlushBarrierWaiter>>,
@@ -318,11 +302,7 @@ impl EventLoop {
             loop_debug: std::env::var_os("MIDGE_LOOP_DEBUG").is_some(),
             loop_debug_wakes: 0,
             loop_debug_batch_total: 0,
-            cloud_acked_wal_segments: config.recovered_cloud_wal_segments.clone(),
-            cloud_wal_upload_backlog: BTreeMap::new(),
-            cloud_wal_prune_inflight: HashSet::new(),
-            cloud_wal_prune_retries: HashMap::new(),
-            cloud_metadata_cleanup_proofs: HashMap::new(),
+            cloud_wal: CloudWalUploadTracker::new(config.recovered_cloud_wal_segments.clone()),
             next_background_compaction_check: Instant::now() + BACKGROUND_COMPACTION_CHECK_INTERVAL,
             durability: DurabilityCoordinator::new(
                 initial_durability_key,
@@ -332,10 +312,8 @@ impl EventLoop {
             router,
             inline_responses: RefCell::new(HashMap::new()),
             pending_msg: None,
-            verification_barrier_token: None,
-            verification_deferred_messages: VecDeque::new(),
-            publication_deferred_messages: VecDeque::new(),
-            manifest_publication_active: false,
+            verification_barrier: VerificationBarrier::default(),
+            publication_gate: ManifestPublicationGate::default(),
             flush_worker_result_rx,
             flush_barrier_waiters: HashMap::new(),
             inline_flush_worker: cfg!(test) && worker_msg_tx.is_none(),
@@ -400,7 +378,7 @@ impl EventLoop {
 
         let initially_durable = self
             .durability
-            .take_contiguous_acked_cloud_segments(&self.cloud_acked_wal_segments)
+            .take_contiguous_acked_cloud_segments(&self.cloud_wal.acked_segments)
             .map_err(crate::common::MidgeError::RecoveryFailed)?;
         if let Some((_, max_sequence)) = initially_durable.last() {
             self.state.wal.cloud_durable_seq = self.state.wal.cloud_durable_seq.max(*max_sequence);
@@ -410,7 +388,8 @@ impl EventLoop {
         }
 
         for (&segment_id, segment) in local_segments {
-            self.cloud_wal_upload_backlog
+            self.cloud_wal
+                .upload_backlog
                 .insert(segment_id, segment.max_sequence);
         }
 
@@ -704,7 +683,8 @@ impl EventLoop {
     /// segment's retry on an otherwise-idle system.
     fn rearm_wal_prune_retry_deadline(&mut self) {
         if let Some(earliest_retry_at) = self
-            .cloud_wal_prune_retries
+            .cloud_wal
+            .prune_retries
             .values()
             .map(|(_, retry_at)| *retry_at)
             .min()
@@ -1012,16 +992,20 @@ impl EventLoop {
     pub(super) fn defer_verification_message(&mut self, message: RuntimeMsg) {
         let is_duplicate_maintenance = matches!(message, RuntimeMsg::RetryGc)
             && self
-                .verification_deferred_messages
+                .verification_barrier
+                .deferred_messages
                 .iter()
                 .any(|pending| matches!(pending, RuntimeMsg::RetryGc));
         let is_duplicate_drop_shutdown = matches!(message, RuntimeMsg::Shutdown)
             && self
-                .verification_deferred_messages
+                .verification_barrier
+                .deferred_messages
                 .iter()
                 .any(|pending| matches!(pending, RuntimeMsg::Shutdown));
         if !is_duplicate_maintenance && !is_duplicate_drop_shutdown {
-            self.verification_deferred_messages.push_back(message);
+            self.verification_barrier
+                .deferred_messages
+                .push_back(message);
         }
     }
 
@@ -1034,8 +1018,8 @@ impl EventLoop {
             || self.state.compaction.pending_tasks > 0
             || !self.state.compaction.compacting_ssts.is_empty()
             || self.flush_actor.is_inflight()
-            || self.manifest_publication_active;
-        if self.verification_barrier_token.is_some() || layout_is_changing {
+            || self.publication_gate.active;
+        if self.verification_barrier.token.is_some() || layout_is_changing {
             self.respond(
                 request_id,
                 RuntimeResponse::Error {
@@ -1048,7 +1032,8 @@ impl EventLoop {
             return HandleOutcome::Continue;
         }
 
-        self.verification_barrier_token = Some(request_id);
+        let activated = self.verification_barrier.activate(request_id);
+        debug_assert!(activated);
         crate::failpoints::fail_point!("midge::verification::before_barrier_response");
         self.respond(
             request_id,
@@ -1065,7 +1050,7 @@ impl EventLoop {
         request_id: u64,
         token: u64,
     ) -> HandleOutcome {
-        if self.verification_barrier_token != Some(token) {
+        if self.verification_barrier.token != Some(token) {
             self.respond(
                 request_id,
                 RuntimeResponse::Error {
@@ -1078,9 +1063,9 @@ impl EventLoop {
             return HandleOutcome::Continue;
         }
 
-        self.verification_barrier_token = None;
+        let deferred = self.verification_barrier.release(token);
         if self.pending_msg.is_none() {
-            self.pending_msg = self.verification_deferred_messages.pop_front();
+            self.pending_msg = deferred;
         }
         self.respond(request_id, RuntimeResponse::Ok { request_id });
         HandleOutcome::Continue
@@ -1091,7 +1076,7 @@ impl EventLoop {
             return true;
         }
 
-        if self.verification_barrier_token.is_some() {
+        if self.verification_barrier.token.is_some() {
             return false;
         }
 
@@ -1107,7 +1092,7 @@ impl EventLoop {
             return true;
         }
 
-        if !self.cloud_wal_upload_backlog.is_empty() {
+        if !self.cloud_wal.upload_backlog.is_empty() {
             return true;
         }
 
@@ -1156,7 +1141,7 @@ impl EventLoop {
     }
 
     fn progress_pass(&mut self, msg_rx: &Receiver<RuntimeMsg>) {
-        if self.verification_barrier_token.is_some() {
+        if self.verification_barrier.token.is_some() {
             return;
         }
         self.drain_flush_worker_results();
@@ -1204,7 +1189,7 @@ impl EventLoop {
     }
 
     fn process_one(&mut self, msg: RuntimeMsg, msg_rx: &Receiver<RuntimeMsg>) -> HandleOutcome {
-        if self.verification_barrier_token.is_none() {
+        if self.verification_barrier.token.is_none() {
             self.drain_flush_worker_results();
             self.maybe_flush_cloud_async_wal();
             self.tick_hybrid_storage();
@@ -1236,7 +1221,7 @@ impl EventLoop {
             return outcome;
         }
 
-        let drained = if self.verification_barrier_token.is_some() || self.pending_msg.is_some() {
+        let drained = if self.verification_barrier.token.is_some() || self.pending_msg.is_some() {
             0
         } else {
             self.drain_pending_writes(msg_rx, max_drain)
@@ -1248,30 +1233,30 @@ impl EventLoop {
 
     fn restore_verification_deferred_message(&mut self) {
         if !self.shutting_down
-            && self.verification_barrier_token.is_none()
+            && self.verification_barrier.token.is_none()
             && self.pending_msg.is_none()
         {
-            self.pending_msg = self.verification_deferred_messages.pop_front();
+            self.pending_msg = self.verification_barrier.deferred_messages.pop_front();
         }
     }
 
     pub(super) fn restore_publication_deferred_message(&mut self) {
         if !self.shutting_down
-            && !self.manifest_publication_active
-            && self.verification_barrier_token.is_none()
+            && !self.publication_gate.active
+            && self.verification_barrier.token.is_none()
             && self.pending_msg.is_none()
         {
-            let eligible = self
-                .publication_deferred_messages
-                .front()
-                .is_some_and(|message| match message {
-                    RuntimeMsg::ManifestDropColumnFamily { cf_id, .. } => {
-                        !self.column_family_publication_pipeline_active(*cf_id)
-                    }
-                    _ => true,
-                });
+            let eligible =
+                self.publication_gate.deferred_messages.front().is_some_and(
+                    |message| match message {
+                        RuntimeMsg::ManifestDropColumnFamily { cf_id, .. } => {
+                            !self.column_family_publication_pipeline_active(*cf_id)
+                        }
+                        _ => true,
+                    },
+                );
             if eligible {
-                self.pending_msg = self.publication_deferred_messages.pop_front();
+                self.pending_msg = self.publication_gate.finish();
             }
         }
     }
@@ -1321,9 +1306,7 @@ impl EventLoop {
             }
 
             let idle_timeout = self.idle_progress_timeout();
-            let selectable_storage_rx = self
-                .verification_barrier_token
-                .is_none()
+            let selectable_storage_rx = (!self.verification_barrier.is_active())
                 .then(|| self.hybrid_storage_events.clone())
                 .flatten();
             let msg = if let Some(storage_rx) = selectable_storage_rx {

@@ -456,7 +456,7 @@ impl WalCoordinator {
         }
 
         if event_loop.wal_actor.is_cloud_async() {
-            if !event_loop.cloud_wal_upload_backlog.is_empty() {
+            if !event_loop.cloud_wal.upload_backlog.is_empty() {
                 event_loop.respond(
                     request_id,
                     RuntimeResponse::Error {

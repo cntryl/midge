@@ -690,7 +690,7 @@ impl RuntimeDispatcher {
     ) -> HandleOutcome {
         if let RuntimeMsg::ManifestDropColumnFamily { cf_id, .. } = &msg {
             if event_loop.column_family_publication_pipeline_active(*cf_id) {
-                event_loop.publication_deferred_messages.push_back(msg);
+                event_loop.publication_gate.defer(msg);
                 return HandleOutcome::Continue;
             }
         }

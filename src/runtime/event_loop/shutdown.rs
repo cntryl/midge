@@ -5,7 +5,7 @@ use crate::runtime::{RuntimeMsg, RuntimeResponse};
 
 impl EventLoop {
     pub(super) fn handle_shutdown_request(&mut self, request_id: Option<u64>) -> HandleOutcome {
-        if self.verification_barrier_token.is_some() {
+        if self.verification_barrier.token.is_some() {
             let message = request_id.map_or(RuntimeMsg::Shutdown, |request_id| {
                 RuntimeMsg::ShutdownWithResponse { request_id }
             });
@@ -147,8 +147,8 @@ impl EventLoop {
         if let Some(message) = self.pending_msg.take() {
             messages.push(message);
         }
-        messages.extend(self.verification_deferred_messages.drain(..));
-        messages.extend(self.publication_deferred_messages.drain(..));
+        messages.extend(self.verification_barrier.deferred_messages.drain(..));
+        messages.extend(self.publication_gate.deferred_messages.drain(..));
         for message in messages {
             self.fail_shutdown_message(message);
         }

@@ -70,7 +70,7 @@ impl EventLoop {
 
     pub(super) fn should_stall_writes(&self, cf_id: crate::types::ColumnFamilyId) -> bool {
         self.state.should_stall_writes(cf_id)
-            || !self.cloud_wal_upload_backlog.is_empty()
+            || self.cloud_wal.has_pending_uploads()
             || self
                 .hybrid_storage
                 .as_ref()

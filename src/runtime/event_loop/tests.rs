@@ -101,14 +101,16 @@ fn should_fail_every_held_request_when_shutdown_drain_restores_deferred_work() {
         name: "restored-during-drain".to_string(),
     });
     event_loop
-        .publication_deferred_messages
+        .publication_gate
+        .deferred_messages
         .push_back(RuntimeMsg::ManifestDropColumnFamily {
             request_id: 8102,
             cf_id: 1,
             discard_unflushed: false,
         });
     event_loop
-        .verification_deferred_messages
+        .verification_barrier
+        .deferred_messages
         .push_back(RuntimeMsg::ManifestPersist { request_id: 8103 });
     event_loop.flush_barrier_waiters.insert(
         0,
@@ -159,8 +161,8 @@ fn should_fail_every_held_request_when_shutdown_drain_restores_deferred_work() {
         );
     }
     assert!(event_loop.pending_msg.is_none());
-    assert!(event_loop.publication_deferred_messages.is_empty());
-    assert!(event_loop.verification_deferred_messages.is_empty());
+    assert!(event_loop.publication_gate.deferred_messages.is_empty());
+    assert!(event_loop.verification_barrier.deferred_messages.is_empty());
     assert!(event_loop.flush_barrier_waiters.is_empty());
     assert!(event_loop.state.pending_compaction_waits.lock().is_empty());
     assert!(event_loop.write_stall_waiters.is_empty());
@@ -321,7 +323,7 @@ fn should_hold_cloud_frontier_at_local_recovery_gap_until_resumed_upload_is_ackn
 
     // Assert
     assert_eq!(event_loop.state.wal.cloud_durable_seq, 1);
-    assert_eq!(event_loop.cloud_wal_upload_backlog.get(&2), Some(&2));
+    assert_eq!(event_loop.cloud_wal.upload_backlog.get(&2), Some(&2));
     event_loop.drain_cloud_wal_upload_backlog();
     assert_eq!(hybrid_storage.pending_upload_count(), 1);
     assert_eq!(
@@ -996,11 +998,11 @@ fn should_defer_layout_completion_until_verification_barrier_releases() {
         })
     ));
     assert!(matches!(
-        event_loop.verification_deferred_messages.front(),
+        event_loop.verification_barrier.deferred_messages.front(),
         Some(RuntimeMsg::RetryGc)
     ));
     assert_eq!(
-        event_loop.verification_deferred_messages.len(),
+        event_loop.verification_barrier.deferred_messages.len(),
         1,
         "duplicate maintenance retries must be coalesced while verification is active"
     );
@@ -1010,7 +1012,7 @@ fn should_defer_layout_completion_until_verification_barrier_releases() {
 fn should_reject_storage_verification_while_flush_publication_is_active() {
     // Arrange
     let mut event_loop = create_test_local_event_loop().expect("create local event loop");
-    event_loop.manifest_publication_active = true;
+    event_loop.publication_gate.active = true;
     let request_id = 104;
     let response_rx = event_loop.router.register(request_id);
 
@@ -1027,7 +1029,7 @@ fn should_reject_storage_verification_while_flush_publication_is_active() {
             ..
         }
     ));
-    assert!(event_loop.verification_barrier_token.is_none());
+    assert!(event_loop.verification_barrier.token.is_none());
 }
 
 #[test]
@@ -1801,11 +1803,11 @@ fn should_incrementally_drain_recovered_wal_given_bounded_upload_queue_at_open(
     // Act
     let router = Arc::new(ResponseRouter::new());
     let mut event_loop = EventLoop::new(state, false, router, config, None)?;
-    let backlog_after_open = event_loop.cloud_wal_upload_backlog.len();
+    let backlog_after_open = event_loop.cloud_wal.upload_backlog.len();
     let queued_after_open = storage.pending_upload_count();
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline
-        && (!event_loop.cloud_wal_upload_backlog.is_empty() || storage.pending_upload_count() > 0)
+        && (!event_loop.cloud_wal.upload_backlog.is_empty() || storage.pending_upload_count() > 0)
     {
         event_loop.tick_hybrid_storage();
         event_loop.drain_cloud_wal_upload_backlog();
@@ -1821,7 +1823,7 @@ fn should_incrementally_drain_recovered_wal_given_bounded_upload_queue_at_open(
         backlog_after_open, 2,
         "remaining sealed and active WAL obligations must stay recoverable"
     );
-    assert!(event_loop.cloud_wal_upload_backlog.is_empty());
+    assert!(event_loop.cloud_wal.upload_backlog.is_empty());
     assert_eq!(storage.pending_upload_count(), 0);
     assert_eq!(event_loop.state.wal.cloud_durable_seq, 3);
     Ok(())
@@ -1918,7 +1920,7 @@ fn should_defer_column_family_drop_until_compaction_publication_finishes() {
     // Assert: publication must win the authority race before drop snapshots files.
     assert_eq!(outcome, HandleOutcome::Continue);
     assert!(response_rx.try_recv().is_err());
-    assert_eq!(event_loop.publication_deferred_messages.len(), 1);
+    assert_eq!(event_loop.publication_gate.deferred_messages.len(), 1);
     assert!(event_loop.state.get_cf(cf_id).is_some());
 
     // Arrange: simulate the serialized compaction authority switch.
@@ -2035,7 +2037,7 @@ fn should_restore_deferred_column_family_drop_before_emergent_compaction_followu
         },
         &msg_rx,
     );
-    assert_eq!(event_loop.publication_deferred_messages.len(), 1);
+    assert_eq!(event_loop.publication_gate.deferred_messages.len(), 1);
 
     // Act
     event_loop.handle_runtime_msg(
@@ -2059,7 +2061,7 @@ fn should_restore_deferred_column_family_drop_before_emergent_compaction_followu
             .load(std::sync::atomic::Ordering::SeqCst),
         0
     );
-    assert_eq!(event_loop.publication_deferred_messages.len(), 1);
+    assert_eq!(event_loop.publication_gate.deferred_messages.len(), 1);
     event_loop.restore_publication_deferred_message();
     let deferred = event_loop
         .pending_msg
