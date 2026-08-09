@@ -51,6 +51,39 @@ fn manifest_meta_for_recovery_test(file: &crate::runtime::FileMeta) -> crate::me
     }
 }
 
+#[test]
+fn should_preserve_column_family_identity_given_sst_add_is_appended_to_manifest() {
+    // Arrange
+    let state = RuntimeState::new(isolated_test_db_path(), false);
+    let file = crate::runtime::FileMeta {
+        name: "000042_00_00000000000000000001.sst".to_string(),
+        level: 0,
+        size_bytes: 437,
+        content_crc32c: Some(0xA5A5_A5A5),
+        cf_id: 42,
+        smallest_key: Some(b"alpha".to_vec()),
+        largest_key: Some(b"omega".to_vec()),
+        smallest_seq: Some(7),
+        largest_seq: Some(9),
+    };
+
+    // Act
+    state
+        .append_manifest_add_sst(&file)
+        .expect("append SST manifest edit");
+    let edits =
+        crate::metadata::journal::replay_journal(&state.db_path).expect("replay SST manifest edit");
+
+    // Assert
+    let [crate::metadata::ManifestEdit::AddSst(persisted)] = edits.as_slice() else {
+        panic!("expected one persisted SST add edit: {edits:?}");
+    };
+    assert_eq!(persisted.cf_id, 42);
+    assert_eq!(persisted.name, file.name);
+    assert_eq!(persisted.smallest_key.as_deref(), Some(b"alpha".as_slice()));
+    assert_eq!(persisted.largest_key.as_deref(), Some(b"omega".as_slice()));
+}
+
 fn grow_active_memtable(
     state: &mut RuntimeState,
     cf_id: crate::types::ColumnFamilyId,
