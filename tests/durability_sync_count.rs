@@ -1,3 +1,9 @@
+//! Public durability-boundary and physical fsync-count coverage.
+//!
+//! These tests do not directly establish `KeyedGroupCommit` waiter merge/fanout behavior. That
+//! primitive has dedicated unit coverage, while its real cloud fanout path is exercised by the
+//! runtime `CloudAck` tests.
+
 use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
 use std::sync::{Arc, Barrier, Mutex, OnceLock};
 use std::time::Duration;

@@ -169,6 +169,9 @@ where
         })?;
         drop(file);
 
+        crate::failpoints::fail_point!("midge::io::staging::before_rename", |_| Err(map_error(
+            "failpoint: staging publication failed before rename".to_string()
+        )));
         before_rename()?;
 
         fs.rename_atomic(temp_path, target_path).map_err(|error| {
@@ -379,6 +382,47 @@ mod tests {
         assert!(result
             .expect_err("directory sync failure must be returned")
             .contains("injected directory sync failure"));
+    }
+
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn should_clean_temporary_file_given_staging_failpoint_before_rename_when_publishing() {
+        // Arrange
+        let _guard = crate::failpoints::test_failpoint_guard();
+        let scenario = fail::FailScenario::setup();
+        fail::cfg("midge::io::staging::before_rename", "return")
+            .expect("configure staging failpoint");
+        let fs: Arc<dyn Fs> = Arc::new(crate::io::MockFs::new());
+        let temporary = FsPath::new("manifest.json.tmp");
+        let target = FsPath::new("manifest.json");
+
+        // Act
+        let failure = stage_bytes(&fs, &temporary, &target, b"manifest", |message| message);
+        fail::remove("midge::io::staging::before_rename");
+        let retry = stage_bytes(&fs, &temporary, &target, b"manifest", |message| message);
+
+        // Assert
+        assert!(failure
+            .expect_err("configured staging failpoint must fail")
+            .contains("before rename"));
+        assert!(matches!(fs.metadata(&temporary), Err(FsError::NotFound(_))));
+        retry.expect("staging retry must succeed");
+        let target_file = fs
+            .open(
+                &target,
+                OpenOptions {
+                    mode: OpenMode::ReadOnly,
+                    create: false,
+                    create_new: false,
+                    truncate: false,
+                },
+            )
+            .expect("open published target");
+        assert_eq!(
+            target_file.read_at(0, 8).expect("read target"),
+            b"manifest"[..]
+        );
+        scenario.teardown();
     }
 
     #[test]
