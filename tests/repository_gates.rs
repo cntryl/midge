@@ -483,7 +483,7 @@ fn should_cover_registered_benchmarks_when_benchmark_workflow_runs() {
 }
 
 #[test]
-fn should_describe_manual_trigger_when_benchmark_automation_documented() {
+fn should_describe_bounded_pr_guard_when_benchmark_automation_documented() {
     // Arrange
     let document = read_workflow("docs/development/benchmarks.md");
     let workflow = read_workflow(".github/workflows/bench.yml");
@@ -493,9 +493,27 @@ fn should_describe_manual_trigger_when_benchmark_automation_documented() {
 
     // Assert
     assert!(workflow.contains("workflow_dispatch:"));
-    assert!(!workflow.contains("pull_request:"));
-    assert!(document.contains("manually with `workflow_dispatch`"));
-    assert!(normalized_document.contains("not a pull-request performance gate"));
+    assert!(workflow.contains("pull_request:"));
+    assert!(workflow.contains("schedule:"));
+    assert!(workflow.contains("Performance regression guard"));
+    assert!(document.contains("bounded Ubuntu A/B guard"));
+    assert!(normalized_document.contains("regression greater than 15%"));
+}
+
+#[test]
+fn should_require_acceptance_evidence_when_pull_request_changes() {
+    // Arrange
+    let workflow = read_workflow(".github/workflows/pr-acceptance.yml");
+    let template = read_workflow(".github/pull_request_template.md");
+
+    // Act
+    // Assert
+    assert!(workflow.contains("pull_request:"));
+    assert!(workflow.contains("scripts/validate_pr_acceptance.py"));
+    assert!(template.contains("## Linked issues"));
+    assert!(template.contains("## Acceptance audit"));
+    assert!(template.contains("Production entry point:"));
+    assert!(template.contains("Resolution:"));
 }
 
 #[test]
@@ -538,14 +556,12 @@ fn should_cover_every_fuzz_target_when_scheduled_smokes_run() {
 }
 
 #[test]
-fn should_validate_benchmark_contract_when_ci_runs() {
+fn should_validate_benchmark_contract_when_repository_qualifies() {
     // Arrange
     let qualification = read_workflow(".github/workflows/qualification.yml");
     // Act
     // Assert
-    assert!(
-        qualification.contains("cntryl-tools validate-benchmarks --config .cntryl/repository.toml")
-    );
+    assert!(qualification.contains("cargo test --test repository_gates"));
 }
 
 #[test]
@@ -572,7 +588,7 @@ fn should_run_repository_qualification_when_ci_runs() {
         "cargo install cargo-machete --version 0.9.2 --locked",
         "cntryl-tools validate-tests",
         "cntryl-tools validate-docs --config .cntryl/repository.toml",
-        "cntryl-tools validate-benchmarks --config .cntryl/repository.toml",
+        "cargo test --test repository_gates",
         "cntryl-tools check-module-sizes --config .cntryl/repository.toml",
         "cargo machete",
         "cargo test --workspace --all-features --doc",

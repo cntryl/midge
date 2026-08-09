@@ -32,15 +32,6 @@ forbidden_text = [
   "delete the lock file",
 ]
 
-[benchmarks]
-documentation = [
-  "docs/development/benchmarks.md",
-  "docs/development/performance-targets.md",
-  "docs/operations/performance-tuning.md",
-]
-workflow = ".github/workflows/bench.yml"
-not_pr_gate_phrase = "not a pull-request performance gate"
-
 [module_sizes]
 warn_lines = 1200
 max_lines = 1600

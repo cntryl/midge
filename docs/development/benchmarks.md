@@ -47,15 +47,25 @@ Stress artifacts are written under `target/stress/{suite}/` as `latest.json`,
 
 ## Automation Contract
 
-The `Bench` GitHub Actions workflow runs every benchmark target registered in
-`Cargo.toml`. It is started manually with `workflow_dispatch`. It is not a pull-request performance gate. Normal CI compiles benchmark targets through its
-`--all-targets` checks, but does not execute timed benchmark rows.
+The `Bench` GitHub Actions workflow runs the complete registered benchmark
+inventory weekly and on manual dispatch. Pull requests that change production
+or benchmark code run a bounded Ubuntu A/B guard instead: the exact base and
+candidate revisions each run the memory-mode Tier 4 workload three times on
+the same runner, and the median-of-medians comparison rejects a throughput
+regression greater than 15%. Reports are retained as workflow artifacts. The
+required check exits quickly without timed execution for documentation-only
+and other performance-neutral changes.
+
+The A/B design deliberately avoids a fixed operations-per-second threshold,
+which would encode one machine's performance and be unreliable on hosted
+runners. The complete matrix remains informational because its duration and
+cross-platform variance are unsuitable for every pull request.
 
 Benchmark commands in this document and the performance-target document are
-validated against Cargo metadata by `cntryl-tools validate-benchmarks` using
-`.cntryl/repository.toml`.
-The same validator checks that the workflow's tier patterns cover every
-registered benchmark. Add a target to `Cargo.toml` before advertising it here.
+validated against Cargo metadata by `tests/repository_gates.rs`. The same
+required repository check verifies that the workflow's tier patterns cover
+every registered benchmark and that the bounded PR guard remains wired. Add a
+target to `Cargo.toml` before advertising it here.
 
 ## Tier Model
 

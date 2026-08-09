@@ -77,8 +77,8 @@ jobs:
           test -f docs/operations/migration-guide.md
           test -f CHANGELOG.md
 
-      - name: Validate benchmark contract
-        run: cntryl-tools validate-benchmarks --config .cntryl/repository.toml
+      - name: Validate repository and benchmark contracts
+        run: cargo test --test repository_gates
 
       - name: Check production module sizes
         run: cntryl-tools check-module-sizes --config .cntryl/repository.toml
