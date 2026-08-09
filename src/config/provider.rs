@@ -670,6 +670,13 @@ impl CloudProviderConfig {
         }
     }
 
+    /// Create a GCS JSON configuration for the local Sqrzl emulator.
+    pub fn sqrzl_gcs_json(bucket: impl Into<String>) -> Self {
+        Self::gcs_bearer_token(bucket, "admin")
+            .with_endpoint("http://127.0.0.1:9000")
+            .expect("GCS supports endpoint overrides")
+    }
+
     /// Override a provider endpoint when that provider supports endpoint overrides.
     ///
     /// # Errors

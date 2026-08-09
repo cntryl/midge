@@ -3,14 +3,14 @@ services:
   sqrzl:
     container_name: sqrzl
     hostname: sqrzl
-    image: ghcr.io/sqrzl/sqrzl-emulator@sha256:2da2a96e2d737457e1814989de6a780edd84c7e394dce2f47e4da684b975b2e4
+    image: ghcr.io/sqrzl/sqrzl-emulator@sha256:23a040a5b44c14e2319acf5215552a0eeed9c48004d9c1187297a5d683886392
     ports:
       - "9000:9000"
       - "9001:9001"
     environment:
-      BLOBS_PATH: /app/blobs
-      ACCESS_KEY_ID: admin
-      SECRET_ACCESS_KEY: easy-peasy
+      SQRZL_BLOBS_PATH: /app/blobs
+      SQRZL_ACCESS_KEY_ID: admin
+      SQRZL_SECRET_ACCESS_KEY: easy-peasy
     volumes:
       - sqrzl-blobs:/app/blobs
 
