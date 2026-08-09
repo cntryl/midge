@@ -260,24 +260,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn should_report_io_error_given_inaccessible_format_marker_when_validating() {
-        use std::os::unix::fs::PermissionsExt;
-
         // Arrange
         let temp_dir = tempfile::tempdir().expect("temp dir");
         ensure_or_create_format_marker(temp_dir.path()).expect("create marker");
         let marker_path = format_marker_path(temp_dir.path());
-        let original_permissions = std::fs::metadata(&marker_path)
-            .expect("FORMAT metadata")
-            .permissions();
-        let mut unreadable_permissions = original_permissions.clone();
-        unreadable_permissions.set_mode(0o000);
-        std::fs::set_permissions(&marker_path, unreadable_permissions)
-            .expect("make FORMAT unreadable");
+        std::fs::remove_file(&marker_path).expect("remove FORMAT file");
+        std::fs::create_dir(&marker_path).expect("replace FORMAT with directory");
 
         // Act
         let error = validate_format_marker(temp_dir.path()).expect_err("inaccessible marker");
-        std::fs::set_permissions(&marker_path, original_permissions)
-            .expect("restore FORMAT access");
 
         // Assert
         assert!(matches!(error, MidgeError::Io(_)));
