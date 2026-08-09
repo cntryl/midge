@@ -6,6 +6,102 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// Storage-integrity façade for online and offline verification.
+pub struct StorageVerifier {
+    runtime_handle: crate::runtime::RuntimeHandle,
+    db_path: std::path::PathBuf,
+    memory_mode: bool,
+    cloud_mode: bool,
+}
+
+impl StorageVerifier {
+    pub(super) fn new(
+        runtime_handle: crate::runtime::RuntimeHandle,
+        db_path: std::path::PathBuf,
+        memory_mode: bool,
+        cloud_mode: bool,
+    ) -> Self {
+        Self {
+            runtime_handle,
+            db_path,
+            memory_mode,
+            cloud_mode,
+        }
+    }
+
+    /// Run a non-mutating online integrity pass.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when verification is unsupported, fails, or exceeds the deadline.
+    pub fn verify_storage(&self, timeout: Duration) -> MidgeResult<StorageVerificationReport> {
+        self.runtime_handle.ensure_open()?;
+        Self::validate_online_request(self.memory_mode, timeout)?;
+
+        let started = Instant::now();
+        let health_request_id = crate::runtime::next_request_id()?;
+        let runtime_health = match self.runtime_handle.send_and_wait_timeout(
+            crate::runtime::RuntimeMsg::GetRuntimeMetrics {
+                request_id: health_request_id,
+            },
+            timeout,
+        )? {
+            Some(crate::runtime::RuntimeResponse::RuntimeMetricsSnapshot { snapshot, .. }) => {
+                snapshot.health
+            }
+            Some(crate::runtime::RuntimeResponse::Error { error, .. }) => return Err(error),
+            Some(other) => {
+                return Err(MidgeError::Internal(format!(
+                    "unexpected runtime-health response before verification: {other:?}"
+                )))
+            }
+            None => {
+                return Err(MidgeError::Timeout(
+                    "runtime health capture exceeded the verification deadline".to_string(),
+                ))
+            }
+        };
+        let remaining = timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Err(MidgeError::Timeout(
+                "online storage verification deadline elapsed during health capture".to_string(),
+            ));
+        }
+        verify_storage_online(
+            &self.runtime_handle,
+            self.db_path.clone(),
+            runtime_health,
+            self.cloud_mode,
+            remaining,
+        )
+    }
+
+    /// Verify a storage directory without opening an engine runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the storage contents fail strict verification.
+    pub fn verify_path(
+        path: impl Into<std::path::PathBuf>,
+    ) -> MidgeResult<StorageVerificationReport> {
+        verify_storage_path(&path.into(), None)
+    }
+
+    fn validate_online_request(memory_mode: bool, timeout: Duration) -> MidgeResult<()> {
+        if memory_mode {
+            return Err(MidgeError::NotSupported(
+                "storage verification is not supported in memory mode".to_string(),
+            ));
+        }
+        if timeout.is_zero() {
+            return Err(MidgeError::Timeout(
+                "online storage verification deadline is zero".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 fn checksummed_file_crc(file: &dyn crate::io::File, file_len: u64) -> MidgeResult<u32> {
     const VERIFY_CHUNK_BYTES: u64 = 1024 * 1024;
 
@@ -320,12 +416,27 @@ pub(super) fn verify_storage_online(
 
 #[cfg(test)]
 mod tests {
-    use crate::engine::Engine;
+    use super::StorageVerifier;
     use crate::io::{Durability, File, FsError, FsResult};
     use crate::metadata::{FileMeta, Manifest, ManifestPersistence};
     use crate::sst::{FsSstFactoryIo, SstFactory};
     use bytes::Bytes;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn should_reject_memory_mode_without_constructing_engine() {
+        // Arrange
+        let timeout = std::time::Duration::from_secs(1);
+
+        // Act
+        let result = StorageVerifier::validate_online_request(true, timeout);
+
+        // Assert
+        assert!(matches!(
+            result,
+            Err(crate::common::MidgeError::NotSupported(_))
+        ));
+    }
 
     struct RecordingFile {
         bytes: Vec<u8>,
@@ -461,7 +572,8 @@ mod tests {
         let fixture = create_verification_fixture();
 
         // Act
-        let report = Engine::verify_path(&fixture.db_path).expect("verify complete fixture");
+        let report =
+            StorageVerifier::verify_path(&fixture.db_path).expect("verify complete fixture");
 
         // Assert
         assert_eq!(report.manifest_epoch, 7);
@@ -483,7 +595,7 @@ mod tests {
         rewrite_manifest_crc(&fixture.db_path, crc32c::crc32c(&bytes));
 
         // Act
-        let error = Engine::verify_path(&fixture.db_path)
+        let error = StorageVerifier::verify_path(&fixture.db_path)
             .expect_err("block checksum corruption must fail verification");
 
         // Assert
@@ -503,7 +615,7 @@ mod tests {
         ManifestPersistence::save(&fixture.db_path, &manifest).expect("save wrong size");
 
         // Act
-        let error = Engine::verify_path(&fixture.db_path)
+        let error = StorageVerifier::verify_path(&fixture.db_path)
             .expect_err("manifest size mismatch must fail verification");
 
         // Assert
@@ -522,7 +634,7 @@ mod tests {
         rewrite_manifest_crc(&fixture.db_path, wrong_crc);
 
         // Act
-        let error = Engine::verify_path(&fixture.db_path)
+        let error = StorageVerifier::verify_path(&fixture.db_path)
             .expect_err("manifest CRC mismatch must fail verification");
 
         // Assert

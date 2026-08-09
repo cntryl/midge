@@ -1,6 +1,8 @@
+mod config;
 pub mod executor;
 pub mod strategy;
 
+pub(crate) use config::OpenCompactionConfig;
 pub use strategy::{CompactionPlan, Compactor, LeveledCompactionConfig};
 
 use crate::common::{MidgeError, MidgeResult};
