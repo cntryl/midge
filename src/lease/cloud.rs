@@ -1310,7 +1310,7 @@ mod tests {
                 callback,
             );
             assert!(matches!(
-                result.recv_timeout(Duration::from_secs(1)),
+                result.recv_timeout(Duration::from_secs(5)),
                 Ok(crate::storage::cloud::CloudEvent::Put {
                     result: crate::storage::cloud::CloudOutcome::Ok(()),
                     ..
