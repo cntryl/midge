@@ -1402,7 +1402,7 @@ mod tests {
     }
 
     #[test]
-    fn should_enforce_conditional_create_update_given_concurrent_remote_writers_when_publishing() {
+    fn should_enforce_if_match_if_none_match_given_concurrent_remote_writers_when_publishing() {
         fn concurrent_puts(
             storage: &Arc<CloudStorage>,
             values: [Vec<u8>; 2],
