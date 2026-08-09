@@ -230,7 +230,8 @@ fn install_blocking_renewal_lease(
     lease: &Arc<BlockingRenewalLease>,
 ) -> MidgeResult<()> {
     let heartbeat_mutex = engine
-        .lease_heartbeat
+        .lease_state
+        .heartbeat
         .take()
         .ok_or_else(|| MidgeError::Internal("engine heartbeat missing".to_string()))?;
     let mut heartbeat = heartbeat_mutex
@@ -238,10 +239,10 @@ fn install_blocking_renewal_lease(
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let healthy = heartbeat.healthy_flag();
     heartbeat.stop();
-    if let Some(original_lease) = engine.lease.take() {
+    if let Some(original_lease) = engine.lease_state.lease.take() {
         original_lease.release()?;
     }
-    engine.lease_guard.take();
+    engine.lease_state.guard.take();
 
     let lease_guard = Arc::clone(lease).try_acquire()?;
     let engine_lease: Arc<dyn crate::lease::PrimaryLease> = lease.clone();
@@ -251,9 +252,9 @@ fn install_blocking_renewal_lease(
         Some(Arc::clone(&lease.validity)),
     );
     heartbeat.start();
-    engine.lease = Some(engine_lease);
-    engine.lease_guard = Some(lease_guard);
-    engine.lease_heartbeat = Some(std::sync::Mutex::new(heartbeat));
+    engine.lease_state.lease = Some(engine_lease);
+    engine.lease_state.guard = Some(lease_guard);
+    engine.lease_state.heartbeat = Some(std::sync::Mutex::new(heartbeat));
     Ok(())
 }
 
@@ -261,16 +262,16 @@ fn install_blocking_renewal_lease(
 fn should_bound_shutdown_when_primary_lease_release_blocks() -> MidgeResult<()> {
     // Arrange
     let mut engine = Engine::open(OpenOptions::in_memory().build()?)?;
-    let lease_heartbeat = engine.lease_heartbeat.take();
-    let lease = engine.lease.take();
-    let lease_guard = engine.lease_guard.take();
+    let lease_heartbeat = engine.lease_state.heartbeat.take();
+    let lease = engine.lease_state.lease.take();
+    let lease_guard = engine.lease_state.guard.take();
     Engine::release_fencing_parts(lease_heartbeat, lease, lease_guard);
 
     let blocking_lease = Arc::new(BlockingReleaseLease::default());
     let lease_guard = Arc::clone(&blocking_lease).try_acquire()?;
     let engine_lease: Arc<dyn crate::lease::PrimaryLease> = blocking_lease.clone();
-    engine.lease = Some(engine_lease);
-    engine.lease_guard = Some(lease_guard);
+    engine.lease_state.lease = Some(engine_lease);
+    engine.lease_state.guard = Some(lease_guard);
     let (shutdown_tx, shutdown_rx) = std::sync::mpsc::sync_channel(1);
 
     // Act

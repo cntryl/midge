@@ -1,4 +1,4 @@
-use super::super::{ColumnFamilyHandle, Engine, OpenOptions};
+use super::super::{lease_state::LeaseState, ColumnFamilyHandle, Engine, OpenOptions};
 use super::{
     provider_endpoint, provider_kind, redact_endpoint_metadata, EngineStartup, FacadeAssembly,
     RuntimeRecoveryMaterialization, RuntimeStorageMaterialization, StartedRuntime, StartupLease,
@@ -85,10 +85,7 @@ impl FacadeAssembly {
             )),
             next_snapshot_id: std::sync::atomic::AtomicU64::new(1),
             column_families,
-            lease: Some(lease),
-            lease_guard: Some(lease_guard),
-            lease_heartbeat: Some(std::sync::Mutex::new(lease_heartbeat)),
-            pending_fencing_cleanup: None,
+            lease_state: LeaseState::new(lease, lease_guard, lease_heartbeat),
             ingest_coordinators,
             transaction_memory_pool: Arc::new(
                 crate::runtime::transaction_spill::TransactionMemoryPool::new(

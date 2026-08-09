@@ -12,12 +12,15 @@
 //! cache insertion entirely.
 
 pub mod admission;
+mod config;
 pub mod key;
 pub mod metrics;
 pub mod policy;
 pub mod shard;
 pub mod value;
 
+pub use config::BlockCachePolicy;
+pub(crate) use config::CachePolicyConfig;
 pub use key::{CacheBlockKind, CacheKey};
 pub use metrics::CacheMetrics;
 pub use policy::{CachePolicy, CachePolicyType};

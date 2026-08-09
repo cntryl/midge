@@ -70,7 +70,10 @@ pub use cloud_layout::CloudObjectLayout;
 pub use common::{MidgeError, MidgeResult};
 
 // Engine / Transactions
-pub use engine::{ColumnFamilyHandle, ConflictPolicy, Engine, Transaction, TransactionMode};
+pub use engine::{
+    ColumnFamilyHandle, ConflictPolicy, Engine, EngineMetrics, StorageVerifier, Transaction,
+    TransactionMode,
+};
 pub use types::ColumnFamilyId;
 
 // Backward-compatible alias
