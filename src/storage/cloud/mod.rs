@@ -23,6 +23,7 @@
 //! - Events are received asynchronously but callback processing is synchronous
 //! - No futures in the engine: all async work happens in `CloudExecutor` embedded tokio runtime
 
+mod config;
 #[cfg(any(
     feature = "cloud-aws",
     feature = "cloud-azure",
@@ -37,6 +38,9 @@ pub mod executor;
     feature = "cloud-oci"
 ))]
 mod list_budget;
+
+pub use config::CloudWritePolicy;
+pub(crate) use config::CloudWritePolicyConfig;
 
 use super::{StorageBackend, StorageCallback, StorageEvent, StorageObjectMetadata, StorageOutcome};
 #[cfg(test)]

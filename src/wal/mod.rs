@@ -21,6 +21,7 @@
 
 pub(crate) mod cloud_catalog;
 pub(crate) mod cloud_segment;
+mod config;
 pub mod encoding;
 pub mod frame;
 pub mod fs;
@@ -91,6 +92,7 @@ pub fn parse_segment_id(name: &str) -> Option<u64> {
 }
 
 // Re-export main WAL types
+pub(crate) use config::WalBatchingConfig;
 pub use types::{WalOpKind, WalRecord};
 
 // Re-export traits
