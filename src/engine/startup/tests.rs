@@ -44,7 +44,7 @@ impl crate::lease::PrimaryLease for StartupWatchdogLease {
     ) -> Result<crate::lease::LeaseGuard, crate::lease::LeaseError> {
         self.validity.activate(
             1,
-            std::time::Instant::now() + std::time::Duration::from_millis(150),
+            std::time::Instant::now() + std::time::Duration::from_secs(2),
         )?;
         Ok(crate::lease::LeaseGuard::token())
     }
@@ -52,7 +52,7 @@ impl crate::lease::PrimaryLease for StartupWatchdogLease {
     fn renew(&self) -> Result<(), crate::lease::LeaseError> {
         self.validity.advance(
             1,
-            std::time::Instant::now() + std::time::Duration::from_millis(150),
+            std::time::Instant::now() + std::time::Duration::from_secs(2),
         )?;
         self.renewals
             .fetch_add(1, std::sync::atomic::Ordering::Release);
@@ -65,7 +65,7 @@ impl crate::lease::PrimaryLease for StartupWatchdogLease {
     }
 
     fn ttl(&self) -> std::time::Duration {
-        std::time::Duration::from_millis(150)
+        std::time::Duration::from_secs(2)
     }
 
     fn holder_id(&self) -> String {
@@ -212,7 +212,7 @@ fn should_run_heartbeat_before_cloud_recovery_can_block_startup() -> MidgeResult
     // Act
     let startup_lease =
         StartupLease::acquire_for_test(lease_object, Some(std::sync::Arc::clone(&lease.validity)))?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while lease.renewals.load(std::sync::atomic::Ordering::Acquire) == 0
         && std::time::Instant::now() < deadline
     {

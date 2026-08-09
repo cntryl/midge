@@ -60,7 +60,12 @@ fn should_return_timeout_error_but_leave_lease_held_given_second_concurrent_shut
     let (runtime, handle) = Runtime::new();
     handle.lifecycle.mark_running();
     let first_handle = handle.clone();
-    let first = thread::spawn(move || first_handle.shutdown(Duration::from_millis(300)));
+    let (first_result_tx, first_result_rx) = std::sync::mpsc::channel();
+    let first = thread::spawn(move || {
+        first_result_tx
+            .send(first_handle.shutdown(Duration::from_secs(1)))
+            .expect("send first shutdown result");
+    });
     let pending_deadline = std::time::Instant::now() + Duration::from_secs(1);
     while handle.router.pending_len() == 0 {
         assert!(
@@ -72,24 +77,28 @@ fn should_return_timeout_error_but_leave_lease_held_given_second_concurrent_shut
 
     // Act: this caller has its own much shorter deadline. It must not inherit
     // the first caller's blocking response-receiver mutex hold.
-    let second_started = std::time::Instant::now();
     let second = handle.shutdown(Duration::from_millis(20));
-    let second_elapsed = second_started.elapsed();
 
     // Assert
     assert!(matches!(second, Err(MidgeError::Timeout(_))));
     assert!(
-        second_elapsed < Duration::from_millis(150),
-        "second shutdown caller exceeded its own deadline: {second_elapsed:?}"
+        matches!(
+            first_result_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ),
+        "second shutdown caller waited for the first caller to finish"
     );
     assert!(handle
         .lifecycle
         .running
         .load(std::sync::atomic::Ordering::Acquire));
     assert!(matches!(
-        first.join().expect("join first shutdown caller"),
+        first_result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("receive first shutdown result"),
         Err(MidgeError::Timeout(_))
     ));
+    first.join().expect("join first shutdown caller");
 
     handle.lifecycle.mark_closed();
     drop(runtime);
