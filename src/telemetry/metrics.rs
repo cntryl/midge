@@ -5,6 +5,18 @@ use std::sync::Arc;
 
 use crate::telemetry::config::TelemetryConfig;
 
+trait AtomicU64SaturatingAdd {
+    fn saturating_add(&self, value: u64, ordering: Ordering);
+}
+
+impl AtomicU64SaturatingAdd for AtomicU64 {
+    fn saturating_add(&self, value: u64, ordering: Ordering) {
+        let _ = self.fetch_update(ordering, ordering, |current| {
+            Some(current.saturating_add(value))
+        });
+    }
+}
+
 /// Metric counters (atomic, zero-copy)
 #[derive(Debug)]
 pub struct Metrics {
@@ -236,7 +248,7 @@ impl Metrics {
     #[inline]
     pub fn record_event_loop_wake(&self) {
         if self.enabled {
-            self.event_loop_wakes.fetch_add(1, Ordering::Relaxed);
+            self.event_loop_wakes.saturating_add(1, Ordering::Relaxed);
         }
     }
 
@@ -244,7 +256,7 @@ impl Metrics {
     pub fn record_event_loop_batch(&self, batch: u64) {
         if self.enabled {
             self.event_loop_batch_total
-                .fetch_add(batch, Ordering::Relaxed);
+                .saturating_add(batch, Ordering::Relaxed);
         }
     }
 
@@ -252,11 +264,11 @@ impl Metrics {
     pub fn record_cloud_async_wal_segment_sealed(&self, bytes: u64, seal_latency_us: u64) {
         if self.enabled {
             self.cloud_async_wal_segments_sealed
-                .fetch_add(1, Ordering::Relaxed);
+                .saturating_add(1, Ordering::Relaxed);
             self.cloud_async_wal_bytes_sealed
-                .fetch_add(bytes, Ordering::Relaxed);
+                .saturating_add(bytes, Ordering::Relaxed);
             self.cloud_async_wal_seal_latency_us
-                .fetch_add(seal_latency_us, Ordering::Relaxed);
+                .saturating_add(seal_latency_us, Ordering::Relaxed);
         }
     }
 
@@ -264,7 +276,7 @@ impl Metrics {
     pub fn record_cloud_async_wal_upload_started(&self) {
         if self.enabled {
             self.cloud_async_wal_uploads_started
-                .fetch_add(1, Ordering::Relaxed);
+                .saturating_add(1, Ordering::Relaxed);
         }
     }
 
@@ -272,9 +284,9 @@ impl Metrics {
     pub fn record_cloud_async_wal_upload_completed(&self, upload_latency_us: u64) {
         if self.enabled {
             self.cloud_async_wal_uploads_completed
-                .fetch_add(1, Ordering::Relaxed);
+                .saturating_add(1, Ordering::Relaxed);
             self.cloud_async_wal_upload_latency_us
-                .fetch_add(upload_latency_us, Ordering::Relaxed);
+                .saturating_add(upload_latency_us, Ordering::Relaxed);
         }
     }
 
@@ -282,7 +294,7 @@ impl Metrics {
     pub fn record_cloud_async_wal_upload_failed(&self) {
         if self.enabled {
             self.cloud_async_wal_uploads_failed
-                .fetch_add(1, Ordering::Relaxed);
+                .saturating_add(1, Ordering::Relaxed);
         }
     }
 
@@ -290,7 +302,7 @@ impl Metrics {
     pub fn record_cloud_async_wal_ack_latency_us(&self, ack_latency_us: u64) {
         if self.enabled {
             self.cloud_async_wal_ack_latency_us
-                .fetch_add(ack_latency_us, Ordering::Relaxed);
+                .saturating_add(ack_latency_us, Ordering::Relaxed);
         }
     }
 
@@ -299,7 +311,7 @@ impl Metrics {
     #[cfg(test)]
     pub fn record_put(&self) {
         if self.enabled {
-            self.puts.fetch_add(1, Ordering::Relaxed);
+            self.puts.saturating_add(1, Ordering::Relaxed);
         }
     }
 
@@ -308,7 +320,7 @@ impl Metrics {
     #[cfg(test)]
     pub fn record_delete(&self) {
         if self.enabled {
-            self.deletes.fetch_add(1, Ordering::Relaxed);
+            self.deletes.saturating_add(1, Ordering::Relaxed);
         }
     }
 
@@ -317,7 +329,7 @@ impl Metrics {
     #[cfg(test)]
     pub fn record_get(&self) {
         if self.enabled {
-            self.gets.fetch_add(1, Ordering::Relaxed);
+            self.gets.saturating_add(1, Ordering::Relaxed);
         }
     }
 
@@ -326,7 +338,7 @@ impl Metrics {
     #[cfg(test)]
     pub fn record_range_scan(&self) {
         if self.enabled {
-            self.range_scans.fetch_add(1, Ordering::Relaxed);
+            self.range_scans.saturating_add(1, Ordering::Relaxed);
         }
     }
 
@@ -336,7 +348,7 @@ impl Metrics {
     pub fn record_write_latency_us(&self, latency_us: u64) {
         if self.enabled {
             self.write_latency_us
-                .fetch_add(latency_us, Ordering::Relaxed);
+                .saturating_add(latency_us, Ordering::Relaxed);
         }
     }
 
@@ -346,7 +358,7 @@ impl Metrics {
     pub fn record_read_latency_us(&self, latency_us: u64) {
         if self.enabled {
             self.read_latency_us
-                .fetch_add(latency_us, Ordering::Relaxed);
+                .saturating_add(latency_us, Ordering::Relaxed);
         }
     }
 
@@ -354,8 +366,9 @@ impl Metrics {
     #[inline]
     pub fn record_wal_append(&self, bytes: u64) {
         if self.enabled {
-            self.wal_appends.fetch_add(1, Ordering::Relaxed);
-            self.wal_bytes_written.fetch_add(bytes, Ordering::Relaxed);
+            self.wal_appends.saturating_add(1, Ordering::Relaxed);
+            self.wal_bytes_written
+                .saturating_add(bytes, Ordering::Relaxed);
         }
     }
 
@@ -363,7 +376,7 @@ impl Metrics {
     #[inline]
     pub fn record_wal_append_count(&self) {
         if self.enabled {
-            self.wal_append_count.fetch_add(1, Ordering::Relaxed);
+            self.wal_append_count.saturating_add(1, Ordering::Relaxed);
         }
     }
 
@@ -371,7 +384,8 @@ impl Metrics {
     #[inline]
     pub fn record_wal_append_ns(&self, ns: u64) {
         if self.enabled {
-            self.wal_append_ns_total.fetch_add(ns, Ordering::Relaxed);
+            self.wal_append_ns_total
+                .saturating_add(ns, Ordering::Relaxed);
         }
     }
 
@@ -379,8 +393,9 @@ impl Metrics {
     #[inline]
     pub fn record_wal_encode(&self, ns: u64) {
         if self.enabled {
-            self.wal_encode_count.fetch_add(1, Ordering::Relaxed);
-            self.wal_encode_ns_total.fetch_add(ns, Ordering::Relaxed);
+            self.wal_encode_count.saturating_add(1, Ordering::Relaxed);
+            self.wal_encode_ns_total
+                .saturating_add(ns, Ordering::Relaxed);
         }
     }
 
@@ -389,8 +404,10 @@ impl Metrics {
     #[cfg(test)]
     pub fn record_wal_lock_wait(&self, ns: u64) {
         if self.enabled {
-            self.wal_lock_wait_count.fetch_add(1, Ordering::Relaxed);
-            self.wal_lock_wait_ns_total.fetch_add(ns, Ordering::Relaxed);
+            self.wal_lock_wait_count
+                .saturating_add(1, Ordering::Relaxed);
+            self.wal_lock_wait_ns_total
+                .saturating_add(ns, Ordering::Relaxed);
         }
     }
 
@@ -398,9 +415,10 @@ impl Metrics {
     #[inline]
     pub fn record_wal_write_syscall(&self, ns: u64) {
         if self.enabled {
-            self.wal_write_syscall_count.fetch_add(1, Ordering::Relaxed);
+            self.wal_write_syscall_count
+                .saturating_add(1, Ordering::Relaxed);
             self.wal_write_syscall_ns_total
-                .fetch_add(ns, Ordering::Relaxed);
+                .saturating_add(ns, Ordering::Relaxed);
         }
     }
 
@@ -408,7 +426,7 @@ impl Metrics {
     #[inline]
     pub fn record_wal_flush(&self) {
         if self.enabled {
-            self.wal_flush_count.fetch_add(1, Ordering::Relaxed);
+            self.wal_flush_count.saturating_add(1, Ordering::Relaxed);
         }
     }
 
@@ -416,9 +434,9 @@ impl Metrics {
     #[inline]
     pub fn record_wal_fsync_count(&self) {
         if self.enabled {
-            self.wal_fsync_count.fetch_add(1, Ordering::Relaxed);
+            self.wal_fsync_count.saturating_add(1, Ordering::Relaxed);
             #[cfg(test)]
-            self.wal_syncs.fetch_add(1, Ordering::Relaxed);
+            self.wal_syncs.saturating_add(1, Ordering::Relaxed);
         }
     }
 
@@ -426,7 +444,8 @@ impl Metrics {
     #[inline]
     pub fn record_wal_fsync_ns(&self, ns: u64) {
         if self.enabled {
-            self.wal_fsync_ns_total.fetch_add(ns, Ordering::Relaxed);
+            self.wal_fsync_ns_total
+                .saturating_add(ns, Ordering::Relaxed);
             self.wal_fsync_ns_max.fetch_max(ns, Ordering::Relaxed);
         }
     }
@@ -436,9 +455,9 @@ impl Metrics {
     pub fn record_wal_recovery(&self, records: u64, bytes: u64) {
         if self.enabled {
             self.wal_recovery_records_replayed
-                .fetch_add(records, Ordering::Relaxed);
+                .saturating_add(records, Ordering::Relaxed);
             self.wal_recovery_bytes_replayed
-                .fetch_add(bytes, Ordering::Relaxed);
+                .saturating_add(bytes, Ordering::Relaxed);
         }
     }
 
@@ -446,9 +465,10 @@ impl Metrics {
     #[inline]
     pub fn record_intent_log_replay(&self, entries: u64) {
         if self.enabled {
-            self.intent_log_replay_runs.fetch_add(1, Ordering::Relaxed);
+            self.intent_log_replay_runs
+                .saturating_add(1, Ordering::Relaxed);
             self.intent_log_entries_replayed
-                .fetch_add(entries, Ordering::Relaxed);
+                .saturating_add(entries, Ordering::Relaxed);
         }
     }
 
@@ -457,9 +477,9 @@ impl Metrics {
     pub fn record_wal_backpressure_wait(&self, wait_attempts: u64) {
         if self.enabled {
             self.wal_backpressure_wait_count
-                .fetch_add(1, Ordering::Relaxed);
+                .saturating_add(1, Ordering::Relaxed);
             self.wal_backpressure_wait_attempts_total
-                .fetch_add(wait_attempts, Ordering::Relaxed);
+                .saturating_add(wait_attempts, Ordering::Relaxed);
         }
     }
 
@@ -468,7 +488,7 @@ impl Metrics {
     pub fn record_wal_buffer_pool_overflow(&self, dropped_buffers: u64) {
         if self.enabled {
             self.wal_buffer_pool_overflow_count
-                .fetch_add(dropped_buffers, Ordering::Relaxed);
+                .saturating_add(dropped_buffers, Ordering::Relaxed);
         }
     }
 
@@ -476,7 +496,8 @@ impl Metrics {
     #[inline]
     pub fn record_thread_spawn_failure(&self) {
         if self.enabled {
-            self.thread_spawn_failures.fetch_add(1, Ordering::Relaxed);
+            self.thread_spawn_failures
+                .saturating_add(1, Ordering::Relaxed);
         }
     }
 
@@ -484,7 +505,7 @@ impl Metrics {
     #[inline]
     pub fn record_wal_sync(&self) {
         if self.enabled {
-            self.wal_syncs.fetch_add(1, Ordering::Relaxed);
+            self.wal_syncs.saturating_add(1, Ordering::Relaxed);
         }
     }
 
@@ -493,7 +514,7 @@ impl Metrics {
     #[cfg(test)]
     pub fn record_sst_created(&self) {
         if self.enabled {
-            self.sst_created.fetch_add(1, Ordering::Relaxed);
+            self.sst_created.saturating_add(1, Ordering::Relaxed);
         }
     }
 
@@ -502,7 +523,7 @@ impl Metrics {
     #[cfg(test)]
     pub fn record_sst_loaded(&self) {
         if self.enabled {
-            self.sst_loaded.fetch_add(1, Ordering::Relaxed);
+            self.sst_loaded.saturating_add(1, Ordering::Relaxed);
         }
     }
 
@@ -510,16 +531,17 @@ impl Metrics {
     #[inline]
     pub fn record_compaction(&self, bytes_rewritten: u64) {
         if self.enabled {
-            self.compactions_run.fetch_add(1, Ordering::Relaxed);
+            self.compactions_run.saturating_add(1, Ordering::Relaxed);
             self.compaction_bytes_rewritten
-                .fetch_add(bytes_rewritten, Ordering::Relaxed);
+                .saturating_add(bytes_rewritten, Ordering::Relaxed);
         }
     }
 
     #[inline]
     pub fn record_compaction_failure(&self) {
         if self.enabled {
-            self.compaction_failures.fetch_add(1, Ordering::Relaxed);
+            self.compaction_failures
+                .saturating_add(1, Ordering::Relaxed);
         }
     }
 
@@ -527,9 +549,9 @@ impl Metrics {
     #[inline]
     pub fn record_cloud_upload(&self, bytes: u64) {
         if self.enabled {
-            self.cloud_uploads.fetch_add(1, Ordering::Relaxed);
+            self.cloud_uploads.saturating_add(1, Ordering::Relaxed);
             self.cloud_bytes_uploaded
-                .fetch_add(bytes, Ordering::Relaxed);
+                .saturating_add(bytes, Ordering::Relaxed);
         }
     }
 
@@ -538,9 +560,9 @@ impl Metrics {
     #[cfg(test)]
     pub fn record_cloud_download(&self, bytes: u64) {
         if self.enabled {
-            self.cloud_downloads.fetch_add(1, Ordering::Relaxed);
+            self.cloud_downloads.saturating_add(1, Ordering::Relaxed);
             self.cloud_bytes_downloaded
-                .fetch_add(bytes, Ordering::Relaxed);
+                .saturating_add(bytes, Ordering::Relaxed);
         }
     }
 
@@ -548,7 +570,7 @@ impl Metrics {
     #[inline]
     pub fn record_cache_hit(&self) {
         if self.enabled {
-            self.cache_hits.fetch_add(1, Ordering::Relaxed);
+            self.cache_hits.saturating_add(1, Ordering::Relaxed);
         }
     }
 
@@ -556,7 +578,7 @@ impl Metrics {
     #[inline]
     pub fn record_cache_miss(&self) {
         if self.enabled {
-            self.cache_misses.fetch_add(1, Ordering::Relaxed);
+            self.cache_misses.saturating_add(1, Ordering::Relaxed);
         }
     }
 
@@ -565,62 +587,67 @@ impl Metrics {
     #[cfg(test)]
     pub fn record_write_stall(&self) {
         if self.enabled {
-            self.write_stalls.fetch_add(1, Ordering::Relaxed);
+            self.write_stalls.saturating_add(1, Ordering::Relaxed);
         }
     }
 
     #[inline]
     pub fn record_write_stall_memory(&self) {
         if self.enabled {
-            self.write_stalls.fetch_add(1, Ordering::Relaxed);
-            self.write_stalls_memory.fetch_add(1, Ordering::Relaxed);
+            self.write_stalls.saturating_add(1, Ordering::Relaxed);
+            self.write_stalls_memory
+                .saturating_add(1, Ordering::Relaxed);
         }
     }
 
     #[inline]
     pub fn record_write_stall_compaction(&self) {
         if self.enabled {
-            self.write_stalls.fetch_add(1, Ordering::Relaxed);
-            self.write_stalls_compaction.fetch_add(1, Ordering::Relaxed);
+            self.write_stalls.saturating_add(1, Ordering::Relaxed);
+            self.write_stalls_compaction
+                .saturating_add(1, Ordering::Relaxed);
         }
     }
 
     #[inline]
     pub fn record_write_stall_cloud(&self) {
         if self.enabled {
-            self.write_stalls.fetch_add(1, Ordering::Relaxed);
-            self.write_stalls_cloud.fetch_add(1, Ordering::Relaxed);
+            self.write_stalls.saturating_add(1, Ordering::Relaxed);
+            self.write_stalls_cloud.saturating_add(1, Ordering::Relaxed);
         }
     }
 
     #[inline]
     pub fn record_write_stall_no_space(&self) {
         if self.enabled {
-            self.write_stalls.fetch_add(1, Ordering::Relaxed);
-            self.write_stalls_no_space.fetch_add(1, Ordering::Relaxed);
+            self.write_stalls.saturating_add(1, Ordering::Relaxed);
+            self.write_stalls_no_space
+                .saturating_add(1, Ordering::Relaxed);
         }
     }
 
     #[inline]
     pub fn record_no_space_event(&self) {
         if self.enabled {
-            self.no_space_events.fetch_add(1, Ordering::Relaxed);
+            self.no_space_events.saturating_add(1, Ordering::Relaxed);
         }
     }
 
     #[inline]
     pub fn record_write_conflict_point(&self) {
         if self.enabled {
-            self.write_conflicts.fetch_add(1, Ordering::Relaxed);
-            self.write_conflicts_point.fetch_add(1, Ordering::Relaxed);
+            self.write_conflicts.saturating_add(1, Ordering::Relaxed);
+            self.write_conflicts_point
+                .saturating_add(1, Ordering::Relaxed);
         }
     }
 
     #[inline]
     pub fn record_write_conflict_range(&self) {
         if self.enabled {
-            self.write_conflicts.fetch_add(1, Ordering::Relaxed);
-            self.write_conflicts_range.fetch_add(1, Ordering::Relaxed);
+            self.write_conflicts.saturating_add(1, Ordering::Relaxed);
+            self.write_conflicts_range
+                .saturating_add(1, Ordering::Relaxed);
         }
     }
 
@@ -630,7 +657,7 @@ impl Metrics {
     pub fn record_idempotency_cache_evictions(&self, count: u64) {
         if self.enabled {
             self.idempotency_cache_evictions
-                .fetch_add(count, Ordering::Relaxed);
+                .saturating_add(count, Ordering::Relaxed);
         }
     }
 
@@ -640,7 +667,8 @@ impl Metrics {
     #[inline]
     pub fn record_pending_txn_started(&self) {
         if self.enabled {
-            self.pending_txn_started.fetch_add(1, Ordering::Relaxed);
+            self.pending_txn_started
+                .saturating_add(1, Ordering::Relaxed);
         }
     }
 
@@ -649,7 +677,7 @@ impl Metrics {
     pub fn record_pending_txn_duration_ms(&self, duration_ms: u64) {
         if self.enabled {
             self.pending_txn_duration_ms_total
-                .fetch_add(duration_ms, Ordering::Relaxed);
+                .saturating_add(duration_ms, Ordering::Relaxed);
 
             // Update max duration (best-effort, may race but that's acceptable for observability)
             let current_max = self.pending_txn_duration_ms_max.load(Ordering::Relaxed);
@@ -665,7 +693,8 @@ impl Metrics {
     #[cfg(test)]
     pub fn record_idempotency_alloc(&self) {
         if self.enabled {
-            self.idempotency_alloc_total.fetch_add(1, Ordering::Relaxed);
+            self.idempotency_alloc_total
+                .saturating_add(1, Ordering::Relaxed);
         }
     }
 
@@ -674,7 +703,8 @@ impl Metrics {
     #[cfg(test)]
     pub fn record_idempotency_cache_hit(&self) {
         if self.enabled {
-            self.idempotency_cache_hits.fetch_add(1, Ordering::Relaxed);
+            self.idempotency_cache_hits
+                .saturating_add(1, Ordering::Relaxed);
         }
     }
 
@@ -950,6 +980,21 @@ mod tests {
 
         // Assert
         assert!(snapshot.cache_hit_ratio().abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn should_preserve_metric_saturation_given_counter_overflow_when_recording() {
+        // Arrange
+        let metrics = Metrics::new(&TelemetryConfig::default().with_enabled(true));
+        metrics.cache_hits.store(u64::MAX - 1, Ordering::Relaxed);
+
+        // Act
+        metrics.record_cache_hit();
+        metrics.record_cache_hit();
+        let snapshot = metrics.snapshot();
+
+        // Assert
+        assert_eq!(snapshot.cache_hits, u64::MAX);
     }
 
     #[test]

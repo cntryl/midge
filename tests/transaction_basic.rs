@@ -8,6 +8,22 @@ use cntryl_midge::{MidgeError, Query, WriteOptions};
 use common::*;
 use std::sync::Arc;
 
+fn collect_scan_and_assert_exhausted(
+    mut scan: cntryl_midge::ScanIterator<'_>,
+) -> Vec<(Bytes, Bytes)> {
+    let mut rows = Vec::new();
+    for row in scan.by_ref() {
+        rows.push(row.expect("scan row"));
+    }
+    assert!(scan.exhausted());
+    assert!(!scan.failed());
+    assert!(
+        scan.next().is_none(),
+        "exhausted iterator must stay exhausted"
+    );
+    rows
+}
+
 // ============================================================================
 // Commit Tests
 // ============================================================================
@@ -193,11 +209,26 @@ fn should_unregister_snapshot_given_commit_of_read_only_transaction_when_committ
         let txn = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
+        assert_eq!(
+            engine
+                .get_runtime_metrics()
+                .expect("metrics before read-only commit")
+                .active_snapshots,
+            1
+        );
         let _value = txn.get(b"key1").unwrap();
         let result = txn.commit(buffered_write_options(mode));
 
         // Assert
         assert!(result.is_ok());
+        assert_eq!(
+            engine
+                .get_runtime_metrics()
+                .expect("metrics after read-only commit")
+                .active_snapshots,
+            0,
+            "mode: {mode}; committing must unregister the read-only snapshot"
+        );
     });
 }
 
@@ -600,18 +631,20 @@ fn should_hide_deleted_key_given_delete_range_and_point_put_when_scanning() {
         let txn = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
-        let results = txn
-            .scan(
+        let results = collect_scan_and_assert_exhausted(
+            txn.scan(
                 &Query::new()
                     .start_key(Bytes::from(&b"key0"[..]))
                     .end_key(Bytes::from(&b"key9"[..])),
             )
-            .unwrap()
-            .try_collect()
-            .expect("collect post-delete range scan");
+            .unwrap(),
+        );
 
         // Assert - Should only see key3
-        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results,
+            vec![(Bytes::from_static(b"key3"), Bytes::from_static(b"v3"))]
+        );
     });
 }
 
@@ -685,18 +718,23 @@ fn should_see_uncommitted_writes_given_transaction_scan_when_scanning() {
         txn.put(b"key2".to_vec(), b"value2".to_vec(), None).unwrap();
 
         // Scan within transaction
-        let results = txn
-            .scan(
+        let results = collect_scan_and_assert_exhausted(
+            txn.scan(
                 &Query::new()
                     .start_key(Bytes::from(&b"key0"[..]))
                     .end_key(Bytes::from(&b"key9"[..])),
             )
-            .unwrap()
-            .try_collect()
-            .expect("collect transaction intent scan");
+            .unwrap(),
+        );
 
         // Assert - should see uncommitted writes
-        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results,
+            vec![
+                (Bytes::from_static(b"key1"), Bytes::from_static(b"value1")),
+                (Bytes::from_static(b"key2"), Bytes::from_static(b"value2")),
+            ]
+        );
     });
 }
 
@@ -713,11 +751,10 @@ fn should_return_no_rows_given_zero_limit_when_scanning() {
             .expect("stage value");
 
         // Act
-        let rows = txn
-            .scan(&Query::new().limit(0))
-            .expect("zero-limit scan should initialize")
-            .try_collect()
-            .expect("zero-limit scan should complete");
+        let rows = collect_scan_and_assert_exhausted(
+            txn.scan(&Query::new().limit(0))
+                .expect("zero-limit scan should initialize"),
+        );
 
         // Assert
         assert!(rows.is_empty());
@@ -735,17 +772,39 @@ fn should_unregister_snapshot_given_commit_failure_when_commit_returns_error() {
         let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
-        // Act - first transaction fails (simulated disk full)
-        {
-            let mut txn1 = engine
-                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-                .unwrap();
-            txn1.put(b"key1".to_vec(), b"value1".to_vec(), None)
-                .unwrap();
-            // Simulate commit failure by dropping
-        }
+        let mut txn1 = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        txn1.put(b"key1".to_vec(), b"value1".to_vec(), None)
+            .unwrap();
+        assert_eq!(
+            engine
+                .get_runtime_metrics()
+                .expect("metrics before failed commit")
+                .active_snapshots,
+            1
+        );
 
-        // Second transaction should work
+        // Act
+        let incompatible_options = if mode == "cloud" {
+            WriteOptions::sync()
+        } else {
+            WriteOptions::cloud_strict()
+        };
+        let failed_commit = txn1.commit(incompatible_options);
+
+        // Assert
+        assert!(matches!(failed_commit, Err(MidgeError::InvalidArgument(_))));
+        assert_eq!(
+            engine
+                .get_runtime_metrics()
+                .expect("metrics after failed commit")
+                .active_snapshots,
+            0,
+            "mode: {mode}; failed commit must unregister its snapshot"
+        );
+
+        // A later transaction proves failure cleanup did not poison admission.
         let mut txn2 = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
@@ -753,7 +812,6 @@ fn should_unregister_snapshot_given_commit_failure_when_commit_returns_error() {
             .unwrap();
         txn2.commit(buffered_write_options(mode)).unwrap();
 
-        // Assert
         let read_tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();

@@ -1402,6 +1402,81 @@ mod tests {
     }
 
     #[test]
+    fn should_enforce_conditional_create_update_given_concurrent_remote_writers_when_publishing() {
+        fn concurrent_puts(
+            storage: &Arc<CloudStorage>,
+            values: [Vec<u8>; 2],
+            headers: [Vec<(String, String)>; 2],
+        ) -> Vec<CloudOutcome<()>> {
+            let barrier = Arc::new(std::sync::Barrier::new(3));
+            let mut handles = Vec::new();
+            for (value, headers) in values.into_iter().zip(headers) {
+                let storage = Arc::clone(storage);
+                let barrier = Arc::clone(&barrier);
+                handles.push(std::thread::spawn(move || {
+                    let (sender, receiver) = mpsc::channel();
+                    barrier.wait();
+                    storage.submit_put("concurrent", value, headers, sender);
+                    match receiver.recv().expect("receive concurrent PUT result") {
+                        CloudEvent::Put { result, .. } => result,
+                        event => panic!("expected PUT event, got {event:?}"),
+                    }
+                }));
+            }
+            barrier.wait();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("concurrent writer panicked"))
+                .collect()
+        }
+
+        // Arrange
+        let storage = Arc::new(CloudStorage::with_mock());
+
+        // Act
+        let creates = concurrent_puts(
+            &storage,
+            [b"create-a".to_vec(), b"create-b".to_vec()],
+            [
+                vec![("If-None-Match".to_string(), "*".to_string())],
+                vec![("If-None-Match".to_string(), "*".to_string())],
+            ],
+        );
+        let (head_sender, head_receiver) = mpsc::channel();
+        storage.submit_head("concurrent", head_sender);
+        let etag = match head_receiver
+            .recv()
+            .expect("receive HEAD after create race")
+        {
+            CloudEvent::Head {
+                result: CloudOutcome::Ok(metadata),
+                ..
+            } => metadata.etag,
+            event => panic!("expected successful HEAD event, got {event:?}"),
+        };
+        let updates = concurrent_puts(
+            &storage,
+            [b"update-a".to_vec(), b"update-b".to_vec()],
+            [
+                vec![("If-Match".to_string(), etag.clone())],
+                vec![("If-Match".to_string(), etag)],
+            ],
+        );
+
+        // Assert
+        for outcomes in [&creates, &updates] {
+            assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+            assert_eq!(
+                outcomes
+                    .iter()
+                    .filter(|result| matches!(result, Err(CloudError::PreconditionFailed(_))))
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
     fn should_honor_if_match_header_on_delete() {
         // Arrange
         let storage = CloudStorage::with_mock();

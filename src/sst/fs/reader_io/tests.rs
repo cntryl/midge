@@ -540,6 +540,181 @@ fn should_keep_binary_index_metadata_for_small_ssts() -> MidgeResult<()> {
 }
 
 #[test]
+fn should_seek_to_first_key_at_or_after_bound_given_sparse_index_when_reading() -> MidgeResult<()> {
+    // Arrange
+    let temp_dir = tempfile::tempdir()?;
+    let keys = (0..96)
+        .map(|index| format!("random-key-{index:04}").into_bytes())
+        .collect::<Vec<_>>();
+    write_keyed_sst(&temp_dir, "forward-seek.sst", 4096, &keys)?;
+    let reader = Arc::new(SstFileIo::open(
+        "forward-seek.sst",
+        Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+    )?);
+    assert_eq!(reader.index_kind, IndexKind::Sparse);
+    assert!(
+        reader.index_entries()?.len() >= 3,
+        "forward seek must cross a real sparse-index boundary"
+    );
+    let between_keys = b"random-key-0031\0".to_vec();
+
+    // Act
+    let first = reader
+        .state_scan(Some(between_keys), None, false, u64::MAX, 0)
+        .next()
+        .expect("bounded forward scan has a row")?;
+
+    // Assert
+    assert_eq!(first.0.as_ref(), b"random-key-0032");
+    Ok(())
+}
+
+#[test]
+fn should_return_empty_scan_given_start_bound_after_all_keys_when_reading() -> MidgeResult<()> {
+    // Arrange
+    let temp_dir = tempfile::tempdir()?;
+    let keys = (0..96)
+        .map(|index| format!("random-key-{index:04}").into_bytes())
+        .collect::<Vec<_>>();
+    write_keyed_sst(&temp_dir, "start-after-all.sst", 4096, &keys)?;
+    let reader = Arc::new(SstFileIo::open(
+        "start-after-all.sst",
+        Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+    )?);
+
+    // Act
+    let rows = reader
+        .state_scan(Some(b"zzzz".to_vec()), None, false, u64::MAX, 0)
+        .collect::<MidgeResult<Vec<_>>>()?;
+
+    // Assert
+    assert!(rows.is_empty());
+    Ok(())
+}
+
+#[test]
+fn should_return_empty_scan_given_end_bound_before_all_keys_when_reading() -> MidgeResult<()> {
+    // Arrange
+    let temp_dir = tempfile::tempdir()?;
+    let keys = (0..96)
+        .map(|index| format!("random-key-{index:04}").into_bytes())
+        .collect::<Vec<_>>();
+    write_keyed_sst(&temp_dir, "end-before-all.sst", 4096, &keys)?;
+    let reader = Arc::new(SstFileIo::open(
+        "end-before-all.sst",
+        Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+    )?);
+
+    // Act
+    let rows = reader
+        .state_scan(None, Some(b"a".to_vec()), false, u64::MAX, 0)
+        .collect::<MidgeResult<Vec<_>>>()?;
+
+    // Assert
+    assert!(rows.is_empty());
+    Ok(())
+}
+
+#[test]
+fn should_seek_to_last_key_at_or_before_bound_given_reverse_scan_when_reading() -> MidgeResult<()> {
+    // Arrange
+    let temp_dir = tempfile::tempdir()?;
+    let keys = (0..96)
+        .map(|index| format!("random-key-{index:04}").into_bytes())
+        .collect::<Vec<_>>();
+    write_keyed_sst(&temp_dir, "reverse-seek.sst", 4096, &keys)?;
+    let reader = Arc::new(SstFileIo::open(
+        "reverse-seek.sst",
+        Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+    )?);
+    assert_eq!(reader.index_kind, IndexKind::Sparse);
+    assert!(
+        reader.index_entries()?.len() >= 3,
+        "reverse seek must cross a real sparse-index boundary"
+    );
+    let inclusive_end = b"random-key-0031\0".to_vec();
+
+    // Act
+    let mut scan = reader.state_scan(None, Some(inclusive_end), true, u64::MAX, 0);
+    let first = scan.next().expect("bounded reverse scan has a row")?;
+    let second = scan.next().expect("bounded reverse scan has another row")?;
+
+    // Assert
+    assert_eq!(first.0.as_ref(), b"random-key-0031");
+    assert_eq!(second.0.as_ref(), b"random-key-0030");
+    Ok(())
+}
+
+#[test]
+fn should_reject_corrupt_sparse_index_given_nonmonotonic_offsets_when_opening() -> MidgeResult<()> {
+    // Arrange: fixed no-compression keeps the index payload byte-addressable.
+    let temp_dir = tempfile::tempdir()?;
+    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+    let factory = crate::sst::FsSstFactoryIo::new(fs, 4096)
+        .with_compression_policy(CompressionPolicy::Fixed(CompressionAlgo::None));
+    let mut writer = factory.create()?;
+    let value = vec![b'v'; 256];
+    for index in 0..96u64 {
+        let key = format!("random-key-{index:04}");
+        writer.add_with_meta(key.as_bytes(), Some(&value), index + 1, 0, None)?;
+    }
+    let path = temp_dir.path().join("nonmonotonic-index.sst");
+    crate::sst::fs::finish_writer_to_path(writer, &path)?;
+    let reader = SstFileIo::open(
+        "nonmonotonic-index.sst",
+        Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+    )?;
+    assert_eq!(reader.index_kind, IndexKind::Sparse);
+    let index = reader.index_entries()?;
+    assert!(index.len() >= 2, "test SST must contain multiple blocks");
+    let index_handle = reader.footer.as_ref().expect("V4 footer").index_handle;
+    let first_data_offset = index[0].1.offset;
+
+    let mut bytes = std::fs::read(&path)?;
+    let block_start = usize::try_from(index_handle.offset).expect("index offset fits usize");
+    let block_end = block_start
+        .checked_add(usize::try_from(index_handle.size).expect("index size fits usize"))
+        .expect("index end fits usize");
+    let payload_start = block_start + size_of::<u32>();
+    let first_key_len = u32::from_le_bytes(
+        bytes[payload_start..payload_start + size_of::<u32>()]
+            .try_into()
+            .expect("first key length"),
+    ) as usize;
+    let second_entry = payload_start + size_of::<u32>() + first_key_len + 2 * size_of::<u64>();
+    let second_key_len = u32::from_le_bytes(
+        bytes[second_entry..second_entry + size_of::<u32>()]
+            .try_into()
+            .expect("second key length"),
+    ) as usize;
+    let second_offset = second_entry + size_of::<u32>() + second_key_len;
+    bytes[second_offset..second_offset + size_of::<u64>()]
+        .copy_from_slice(&first_data_offset.to_le_bytes());
+    let crc_offset = block_end - size_of::<u32>();
+    assert_eq!(
+        bytes[crc_offset - 1],
+        CompressionAlgo::None.to_u8(),
+        "test index must remain uncompressed"
+    );
+    let crc = crc32c::crc32c(&bytes[payload_start..crc_offset]);
+    bytes[crc_offset..block_end].copy_from_slice(&crc.to_le_bytes());
+    std::fs::write(&path, bytes)?;
+
+    // Act
+    let Err(error) = SstFileIo::open(
+        "nonmonotonic-index.sst",
+        Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+    ) else {
+        panic!("nonmonotonic data-block offsets must fail SST open");
+    };
+
+    // Assert
+    assert!(matches!(error, MidgeError::Corruption(_)));
+    assert!(error.to_string().contains("non-overlapping"));
+    Ok(())
+}
+
+#[test]
 fn should_use_trie_accelerator_when_structured_key_is_present() -> MidgeResult<()> {
     // Arrange
     let temp_dir = tempfile::tempdir()?;

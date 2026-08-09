@@ -766,6 +766,57 @@ fn should_load_intent_log_on_startup() {
 }
 
 #[test]
+fn should_replay_intent_log_idempotently_given_duplicate_publish_intents_when_reopening() {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create duplicate-intent directory");
+    let state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
+    let sst_name = crate::sst::file_name(0, 0, 17);
+    let file_meta = write_valid_sst_for_recovery_test(&state, &sst_name, 0, b"value", 17);
+    let duplicate = crate::runtime::IntentLogEntry::SstAdded {
+        file_meta: file_meta.clone(),
+    };
+    crate::runtime::IntentPersistence::save(temp_dir.path(), &[duplicate.clone(), duplicate])
+        .expect("persist duplicate publication intents");
+    drop(state);
+
+    // Act
+    let mut reopened = RuntimeState::try_new(
+        temp_dir.path().to_path_buf(),
+        false,
+        crate::config::RecoveryPolicy::Strict,
+    )
+    .expect("reopen duplicate intent log");
+    assert_eq!(reopened.intent_log.len(), 2);
+    reopened
+        .replay_intent_log()
+        .expect("replay duplicate intents");
+    drop(reopened);
+    let mut second_reopen = RuntimeState::try_new(
+        temp_dir.path().to_path_buf(),
+        false,
+        crate::config::RecoveryPolicy::Strict,
+    )
+    .expect("reopen after idempotent replay");
+    second_reopen
+        .replay_intent_log()
+        .expect("empty replay remains idempotent");
+
+    // Assert
+    assert_eq!(
+        second_reopen
+            .manifest
+            .files
+            .iter()
+            .filter(|file| file.name == sst_name)
+            .count(),
+        1,
+        "duplicate publication intents must produce one manifest owner"
+    );
+    assert!(second_reopen.intent_log.is_empty());
+    assert!(second_reopen.sst_dir.join(sst_name).exists());
+}
+
+#[test]
 fn should_sweep_non_authoritative_flush_staging_during_startup_cleanup() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create state directory");

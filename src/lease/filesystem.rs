@@ -336,12 +336,41 @@ mod tests {
         // Arrange
         let temp_dir = tempfile::tempdir().unwrap();
         let lease = Arc::new(FileSystemLease::new(temp_dir.path(), false).unwrap());
+        let _guard = Arc::clone(&lease)
+            .try_acquire()
+            .expect("acquire original lease");
+        let original_epoch = lease.epoch();
+        let newer_record = LeaderRecord {
+            epoch: original_epoch + 1,
+            holder_id: "newer-holder".to_string(),
+            acquired_at: chrono::Utc::now().to_rfc3339(),
+        };
+        std::fs::write(
+            temp_dir.path().join(".midge_leader"),
+            format_leader_record(&newer_record),
+        )
+        .expect("replace record with newer owner");
 
         // Act
         let result = lease.renew();
 
         // Assert
-        assert!(matches!(result, Err(LeaseError::RenewalFailed(_))));
+        assert!(matches!(
+            result,
+            Err(LeaseError::RenewalFailed(message))
+                if message.contains("leader record changed")
+                    && message.contains("newer-holder")
+        ));
+        assert_eq!(
+            lease
+                .leader_store
+                .read_current()
+                .expect("read newer leader record"),
+            Some(newer_record),
+            "stale renewal cleanup must retain the newer owner"
+        );
+        assert_eq!(lease.epoch(), 0);
+        assert!(!lease.acquired.load(Ordering::Acquire));
     }
 
     #[test]

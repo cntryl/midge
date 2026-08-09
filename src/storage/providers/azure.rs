@@ -918,6 +918,7 @@ impl CloudBackend for AzureBackend {
                     )));
                 }
                 let body = String::from_utf8_lossy(&resp.body);
+                super::validate_list_xml(&body, "EnumerationResults")?;
                 let page_items = extract_xml_tag_values(&body, "Name");
                 let marker = extract_xml_tag_values(&body, "NextMarker")
                     .into_iter()
@@ -1963,21 +1964,6 @@ mod tests {
         // Assert
         assert_eq!(provider.account_name(), "");
         assert_eq!(provider.container(), "container");
-    }
-
-    #[test]
-    fn should_reject_empty_container_given_cloud_provider_config_when_building() {
-        // Arrange
-        let account = "account";
-        let container = "";
-
-        // Act
-        let provider = AzureProvider::new(account.into(), container.into());
-        let provider = provider.expect("should create provider with empty container");
-
-        // Assert
-        assert_eq!(provider.account_name(), "account");
-        assert_eq!(provider.container(), "");
     }
 
     #[test]

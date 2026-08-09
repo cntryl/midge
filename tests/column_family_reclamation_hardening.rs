@@ -127,6 +127,41 @@ fn should_reclaim_column_family_files_given_no_snapshot_pin_when_gc_runs() {
 }
 
 #[test]
+fn should_preserve_snapshot_visibility_given_column_family_drop_when_old_snapshot_is_active() {
+    for storage in [TestStorage::Local, TestStorage::SimulatedCloud] {
+        // Arrange
+        let temp = tempfile::tempdir().expect("temp dir");
+        let engine = open_engine(temp.path(), storage);
+        let cf = engine
+            .create_column_family("snapshot-drop")
+            .expect("create column family");
+        let files = write_and_flush(&engine, &cf, storage);
+        let snapshot = engine
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("begin pre-drop snapshot");
+
+        // Act
+        engine
+            .drop_column_family(cf.id())
+            .expect("drop column family");
+        let pre_drop_value = snapshot
+            .get(b"retained-key")
+            .expect("read through pre-drop snapshot");
+        let new_transaction = engine.begin_tx(cf.id(), TransactionMode::ReadOnly);
+
+        // Assert
+        assert_eq!(pre_drop_value, Some(Bytes::from(vec![b'x'; 32 * 1024])));
+        assert!(matches!(
+            new_transaction,
+            Err(cntryl_midge::MidgeError::InvalidArgument(message))
+                if message == format!("column family {} does not exist", cf.id())
+        ));
+        drop(snapshot);
+        wait_until_reclaimed(&engine, temp.path(), storage, cf.id(), &files);
+    }
+}
+
+#[test]
 fn should_defer_column_family_file_reclamation_given_old_snapshot_pin_when_gc_runs() {
     for storage in [TestStorage::Local, TestStorage::SimulatedCloud] {
         // Arrange

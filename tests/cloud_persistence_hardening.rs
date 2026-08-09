@@ -327,7 +327,7 @@ fn should_preserve_remote_wal_when_unflushed_column_family_still_depends_on_it_g
 }
 
 #[test]
-fn should_not_prune_remote_wal_given_manifest_validation_failure_when_gc_runs() {
+fn should_recover_partial_remote_wal_cleanup_given_mixed_flush_state_when_reopening() {
     // Arrange
     let _guard = failpoint_test_lock()
         .lock()
@@ -593,6 +593,8 @@ fn should_salvage_valid_prefix_when_remote_wal_segment_is_corrupt() {
         .max()
         .expect("remote WAL object to corrupt");
     corrupt_last_file(&remote_wal_dir);
+    let corrupt_authoritative_bytes =
+        fs::read(&corrupt_remote_wal).expect("read corrupt authoritative WAL bytes");
     reset_dir(&db_path.join("wal"));
 
     // Act
@@ -617,6 +619,11 @@ fn should_salvage_valid_prefix_when_remote_wal_segment_is_corrupt() {
     assert!(
         corrupt_remote_wal.exists(),
         "corrupt recovered WAL must be retained when it cannot be proven safe to delete"
+    );
+    assert_eq!(
+        fs::read(&corrupt_remote_wal).expect("read retained corrupt authoritative WAL"),
+        corrupt_authoritative_bytes,
+        "salvage recovery must retain corrupt authoritative WAL byte-for-byte"
     );
     shutdown_test_engine(salvaged);
 }

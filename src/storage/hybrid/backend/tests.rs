@@ -3,6 +3,8 @@ use crate::runtime::hybrid_persistence::{
     CloudMetadataPruneGuard, CloudMetadataPruneProof, CloudWalPruneGuard, HybridPersistence,
 };
 use crate::sst::SstFactory;
+#[cfg(feature = "failpoints")]
+use crate::storage::cloud::CloudBackend;
 use crate::storage::cloud::{CloudStorage, MockCloudBackend};
 use bytes::Bytes;
 use std::sync::{
@@ -10,6 +12,162 @@ use std::sync::{
     Arc, Barrier,
 };
 use std::time::{Duration, Instant};
+
+#[cfg(feature = "cloud-all")]
+#[derive(Clone, Copy)]
+enum ProviderErrorShape {
+    S3,
+    Azure,
+    Gcs,
+}
+
+#[cfg(feature = "cloud-all")]
+fn provider_config_for_error_shape(
+    shape: ProviderErrorShape,
+    endpoint: String,
+) -> crate::config::CloudProviderConfig {
+    match shape {
+        ProviderErrorShape::S3 => crate::config::CloudProviderConfig::s3_compatible_static(
+            "bucket", endpoint, "access", "secret",
+        ),
+        ProviderErrorShape::Azure => crate::config::CloudProviderConfig::azure_blob_shared_key(
+            "account",
+            "container",
+            "YQ==",
+        )
+        .with_endpoint(endpoint)
+        .expect("Azure supports endpoint overrides"),
+        ProviderErrorShape::Gcs => {
+            crate::config::CloudProviderConfig::gcs_bearer_token("bucket", "token")
+                .with_endpoint(endpoint)
+                .expect("GCS supports endpoint overrides")
+        }
+    }
+}
+
+#[cfg(feature = "cloud-all")]
+fn provider_error_response(shape: ProviderErrorShape, status: u16) -> (u16, String, String) {
+    match (shape, status) {
+        (ProviderErrorShape::S3, 404) => (
+            404,
+            "application/xml".to_string(),
+            "<Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message></Error>"
+                .to_string(),
+        ),
+        (ProviderErrorShape::S3, 412) => (
+            412,
+            "application/xml".to_string(),
+            "<Error><Code>PreconditionFailed</Code><Message>At least one condition failed.</Message></Error>"
+                .to_string(),
+        ),
+        (ProviderErrorShape::Azure, 404) => (
+            404,
+            "application/xml".to_string(),
+            "<Error><Code>BlobNotFound</Code><Message>The specified blob does not exist.</Message></Error>"
+                .to_string(),
+        ),
+        (ProviderErrorShape::Azure, 412) => (
+            412,
+            "application/xml".to_string(),
+            "<Error><Code>ConditionNotMet</Code><Message>The condition specified was not met.</Message></Error>"
+                .to_string(),
+        ),
+        (ProviderErrorShape::Gcs, 404) => (
+            404,
+            "application/json".to_string(),
+            r#"{"error":{"code":404,"message":"No such object","errors":[{"reason":"notFound"}]}}"#
+                .to_string(),
+        ),
+        (ProviderErrorShape::Gcs, 412) => (
+            412,
+            "application/json".to_string(),
+            r#"{"error":{"code":412,"message":"At least one precondition failed","errors":[{"reason":"conditionNotMet"}]}}"#
+                .to_string(),
+        ),
+        _ => unreachable!("provider error fixture supports only 404 and 412"),
+    }
+}
+
+#[cfg(feature = "cloud-all")]
+fn assert_real_provider_missing_and_cas_errors(shape: ProviderErrorShape) {
+    use crate::storage::providers::test_support::spawn_scripted_http_response_server;
+
+    let missing_server =
+        spawn_scripted_http_response_server(vec![provider_error_response(shape, 404)]);
+    let missing_backend = crate::storage::providers::build_cloud_backend(
+        &provider_config_for_error_shape(shape, missing_server.endpoint.clone()),
+    )
+    .expect("build credential-free provider against local response fixture");
+    let missing_cloud = Arc::new(CloudStorage::new(missing_backend, String::new()));
+    let missing_dir = tempfile::tempdir().expect("create missing-response local directory");
+    let missing_local = Arc::new(
+        crate::storage::filesystem::FileSystem::new(missing_dir.path().join("local"))
+            .expect("create missing-response local backend"),
+    );
+    let missing_storage = HybridStorage::with_policy(
+        missing_local,
+        missing_cloud,
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    );
+
+    let missing = missing_storage
+        .remote_object_proof_optional(crate::wal::cloud_catalog::OBJECT_KEY)
+        .expect("provider-shaped 404 must classify as confirmed missing");
+    assert!(missing.is_none());
+    assert_eq!(missing_server.finish(), 1);
+
+    let cas_server = spawn_scripted_http_response_server(vec![
+        provider_error_response(shape, 404),
+        provider_error_response(shape, 412),
+    ]);
+    let cas_backend = crate::storage::providers::build_cloud_backend(
+        &provider_config_for_error_shape(shape, cas_server.endpoint.clone()),
+    )
+    .expect("build credential-free provider against local CAS fixture");
+    let cas_cloud = Arc::new(CloudStorage::new(cas_backend, String::new()));
+    let cas_dir = tempfile::tempdir().expect("create CAS-response local directory");
+    let cas_local = Arc::new(
+        crate::storage::filesystem::FileSystem::new(cas_dir.path().join("local"))
+            .expect("create CAS-response local backend"),
+    );
+    let cas_storage = HybridStorage::with_policy(
+        cas_local,
+        cas_cloud,
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    );
+
+    let cas_error = cas_storage
+        .compare_exchange_remote_object(
+            crate::wal::cloud_catalog::OBJECT_KEY,
+            None,
+            b"catalog".to_vec(),
+        )
+        .expect_err("provider-shaped 412 must classify as a CAS conflict");
+    assert!(matches!(
+        cas_error,
+        crate::common::MidgeError::Busy(message)
+            if message.contains("status 412") && message.contains("precondition")
+    ));
+    assert_eq!(cas_server.finish(), 2);
+}
+
+#[cfg(feature = "cloud-all")]
+#[test]
+fn should_classify_real_s3_error_shapes_given_wal_catalog_operations() {
+    assert_real_provider_missing_and_cas_errors(ProviderErrorShape::S3);
+}
+
+#[cfg(feature = "cloud-all")]
+#[test]
+fn should_classify_real_azure_error_shapes_given_wal_catalog_operations() {
+    assert_real_provider_missing_and_cas_errors(ProviderErrorShape::Azure);
+}
+
+#[cfg(feature = "cloud-all")]
+#[test]
+fn should_classify_real_gcs_error_shapes_given_wal_catalog_operations() {
+    assert_real_provider_missing_and_cas_errors(ProviderErrorShape::Gcs);
+}
 
 #[test]
 fn should_classify_windows_missing_paths_as_absent() {
@@ -1113,7 +1271,7 @@ fn should_retry_same_content_upload_idempotently_given_remote_object_already_exi
 }
 
 #[test]
-fn should_not_prune_remote_wal_given_manifest_validation_failure_when_gc_runs() {
+fn should_reread_remote_wal_given_repeated_authoritative_validation() {
     // Arrange
     let (mock_cloud, storage) = hybrid_with_mock_cloud();
     let segment_id = 7;
@@ -1183,7 +1341,7 @@ fn should_reject_cached_remote_wal_proof_when_cloud_object_is_deleted() {
 }
 
 #[test]
-fn should_not_prune_remote_wal_given_remote_sst_identity_change_when_gc_runs() {
+fn should_reject_stale_remote_wal_target_identity_when_guarded_delete_runs() {
     // Arrange
     let (_mock_cloud, storage) = hybrid_with_mock_cloud();
     let segment_id = 11;
@@ -1303,7 +1461,7 @@ fn should_not_prune_remote_wal_when_manifest_sst_disappears_after_initial_valida
 }
 
 #[test]
-fn should_not_prune_remote_wal_when_manifest_sst_content_crc_differs() {
+fn should_not_prune_remote_wal_given_manifest_validation_failure_when_gc_runs() {
     // Arrange
     let (_mock_cloud, storage) = hybrid_with_mock_cloud();
     let segment_id = 16;
@@ -1340,6 +1498,87 @@ fn should_not_prune_remote_wal_when_manifest_sst_content_crc_differs() {
         "unexpected manifest CRC error: {error}"
     );
     assert_cloud_object_exists(&storage, &wal_key);
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_not_prune_remote_wal_given_remote_sst_identity_change_when_gc_runs() {
+    // Arrange
+    let _test_guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    let (mock_cloud, storage) = hybrid_with_mock_cloud();
+    let segment_id = 17;
+    let max_sequence = 27;
+    let wal_key = write_authoritative_cloud_wal(
+        &storage,
+        segment_id,
+        max_sequence,
+        valid_wal_bytes(max_sequence),
+    );
+    let sst_name = "changed-after-validation.sst";
+    let sst_key = crate::sst::object_key(sst_name);
+    let original = valid_sst_bytes(b"k", b"v1", max_sequence);
+    let replacement = valid_sst_bytes(b"k", b"v2", max_sequence);
+    let manifest = manifest_covering_wal(
+        sst_name,
+        &original,
+        max_sequence,
+        Some(crc32c::crc32c(&original)),
+    );
+    write_cloud_object(&storage, &sst_key, original);
+    storage
+        .verify_remote_wal_segment(segment_id, max_sequence)
+        .expect("initial remote WAL validation");
+    let callback_backend = Arc::clone(&mock_cloud);
+    let callback_key = format!("hybrid-test/{sst_key}");
+    let callback_replacement = replacement.clone();
+    fail::cfg_callback(
+        "midge::cloud::after_wal_prune_dependency_validation",
+        move || {
+            let (tx, rx) = std::sync::mpsc::channel();
+            CloudBackend::submit_put(
+                callback_backend.as_ref(),
+                &callback_key,
+                callback_replacement.clone(),
+                Vec::new(),
+                tx,
+            );
+            assert!(matches!(
+                rx.recv_timeout(Duration::from_secs(1)),
+                Ok(crate::storage::cloud::CloudEvent::Put {
+                    result: crate::storage::cloud::CloudOutcome::Ok(()),
+                    ..
+                })
+            ));
+        },
+    )
+    .expect("configure SST identity replacement boundary");
+
+    // Act
+    let error = storage
+        .prune_cloud_wal_segment(
+            segment_id,
+            max_sequence,
+            CloudWalPruneGuard::new(manifest, None),
+            2,
+        )
+        .expect_err("changed SST identity must reject WAL authority retirement");
+    fail::remove("midge::cloud::after_wal_prune_dependency_validation");
+    scenario.teardown();
+
+    // Assert
+    assert!(
+        error.contains("identity changed before conditional delete"),
+        "unexpected changed SST proof error: {error}"
+    );
+    let catalog_proof = storage
+        .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
+        .expect("read retained WAL catalog");
+    let catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(catalog_proof.bytes())
+        .expect("decode retained WAL catalog");
+    assert!(catalog.segments.contains_key(&segment_id));
+    assert_cloud_object_exists(&storage, &wal_key);
+    assert_eq!(read_cloud_object(&storage, &sst_key), replacement);
 }
 
 #[test]
@@ -1795,6 +2034,7 @@ fn should_release_storage_reservation_given_upload_callback_is_lost_when_worker_
     let cloud = Arc::new(NeverCompletesBackend::default());
     let limits = HybridQueueLimits {
         callback_timeout: Duration::from_millis(20),
+        upload_entries: 1,
         ..HybridQueueLimits::default()
     };
     let storage = HybridStorage::with_policy_event_sender_and_limits(
@@ -1809,30 +2049,38 @@ fn should_release_storage_reservation_given_upload_callback_is_lost_when_worker_
     storage
         .enqueue_wal_segment(3, &wal_path, 3)
         .expect("enqueue WAL upload");
+    assert!(
+        storage.ensure_wal_write_admission().is_err(),
+        "the only queue reservation must close write admission while upload is stuck"
+    );
     storage.process_uploads();
 
     // Act
     let deadline = Instant::now() + Duration::from_secs(1);
-    let mut failure = None;
-    while Instant::now() < deadline {
-        failure = storage.process_uploads().into_iter().find_map(|event| {
-            if let StorageEvent::CloudFail { error, .. } = event {
-                Some(error)
-            } else {
-                None
-            }
-        });
-        if failure.is_some() {
+    let mut timeout_failures = 0;
+    while Instant::now() < deadline && storage.pending_upload_count() != 0 {
+        timeout_failures += storage
+            .process_uploads()
+            .into_iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    StorageEvent::CloudFail { error, .. } if error.contains("timed out")
+                )
+            })
+            .count();
+        if storage.pending_upload_count() == 0 {
             break;
         }
         std::thread::sleep(Duration::from_millis(5));
     }
 
     // Assert
-    assert!(
-        failure.is_some_and(|error| error.contains("timed out")),
-        "missing callback must produce a bounded CloudFail"
-    );
+    assert_eq!(timeout_failures, 3, "every bounded retry must time out");
+    assert_eq!(storage.pending_upload_count(), 0);
+    storage
+        .ensure_wal_write_admission()
+        .expect("terminal callback timeouts must release the queue reservation");
 }
 
 #[test]

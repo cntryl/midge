@@ -304,6 +304,10 @@ impl ManifestPersistence {
         let json = serde_json::to_vec_pretty(&checkpoint)
             .map_err(|e| format!("failed to serialize manifest to JSON: {e}"))?;
 
+        crate::failpoints::fail_point!("midge::manifest::inject_snapshot_write_failure", |_| Err(
+            "failpoint: manifest snapshot write failed".to_string()
+        ));
+
         staging::stage_bytes(fs, &temp, &snap_path, &json, |msg| msg)?;
 
         crate::failpoints::fail_point!(
@@ -965,16 +969,57 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "failpoints")]
     #[test]
     fn should_recover_manifest_from_journal_given_snapshot_write_failure_when_reopening() {
         // Arrange
-        // The journal-on-snapshot recovery path is the durable fallback when a
-        // snapshot publication cannot complete.
+        let test_dir = create_test_dir();
+        let edit = crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
+            name: crate::sst::file_name(0, 0, 7),
+            level: 0,
+            size_bytes: 700,
+            ..Default::default()
+        });
+        crate::metadata::append_edit(&test_dir, &edit).expect("append authoritative edit");
+        let mut manifest = Manifest::default();
+        manifest.apply_edit(&edit);
+        let _test_guard = crate::failpoints::test_failpoint_guard();
+        let failure =
+            fail::FailGuard::new("midge::manifest::inject_snapshot_write_failure", "return")
+                .expect("configure snapshot-write failpoint");
+
         // Act
-        should_recover_manifest_journal_consistently_given_snapshot_save_crash_before_journal_truncation();
+        let error = ManifestPersistence::save_snapshot_and_truncate_journal(&test_dir, &manifest)
+            .expect_err("snapshot write must fail before publication");
+        drop(failure);
+        let reopened = ManifestPersistence::load(&test_dir)
+            .expect("journal must recover after failed snapshot write");
+
         // Assert
-        // The delegated regression asserts both the snapshot base and journal
-        // edit are visible after reopening.
+        assert!(
+            error.contains("snapshot write failed"),
+            "unexpected error: {error}"
+        );
+        assert!(!ManifestPersistence::manifest_snapshot_path(&test_dir).exists());
+        assert!(!test_dir
+            .join(ManifestPersistence::MANIFEST_SNAPSHOT_TEMP)
+            .exists());
+        assert!(
+            std::fs::metadata(test_dir.join("manifest.journal"))
+                .expect("inspect retained journal")
+                .len()
+                > 0,
+            "failed snapshot publication must retain the authoritative journal"
+        );
+        assert_eq!(
+            reopened
+                .files
+                .iter()
+                .filter(|file| file.name == crate::sst::file_name(0, 0, 7))
+                .count(),
+            1,
+            "journal recovery must restore the edit exactly once"
+        );
     }
 
     #[test]

@@ -12,6 +12,35 @@ use std::thread;
 use std::time::Duration;
 
 #[test]
+fn should_initialize_global_telemetry_once_given_repeated_init_calls_when_starting() {
+    // Arrange
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let callers = (0..2)
+        .map(|_| {
+            let barrier = std::sync::Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                cntryl_midge::init_benchmark_telemetry()
+            })
+        })
+        .collect::<Vec<_>>();
+
+    // Act
+    barrier.wait();
+    let concurrent_results = callers
+        .into_iter()
+        .map(|caller| caller.join().expect("telemetry caller must not panic"))
+        .collect::<Vec<_>>();
+    let later = cntryl_midge::init_benchmark_telemetry();
+
+    // Assert
+    for result in concurrent_results {
+        result.expect("concurrent public telemetry initialization should be idempotent");
+    }
+    later.expect("later public telemetry initialization should replay success");
+}
+
+#[test]
 fn should_preserve_all_values_given_repeated_reads_when_values_accessed_repeatedly() {
     for_each_storage_mode(&["local", "cloud"], |mode, opts| {
         // Arrange

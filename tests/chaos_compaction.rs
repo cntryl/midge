@@ -16,6 +16,7 @@
 
 mod common;
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -33,6 +34,7 @@ use common::crash;
 const CHILD_TEST_NAME: &str = "should_crash_in_child_when_compaction_crash_scenario_requested";
 const ENV_SCENARIO: &str = "MIDGE_COMPACTION_CHAOS_SCENARIO";
 const ENV_DB_PATH: &str = "MIDGE_COMPACTION_CHAOS_DB_PATH";
+const COMPACTION_INPUTS_FILE: &str = "compaction-inputs.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CommitRecord {
@@ -54,15 +56,34 @@ fn should_retain_input_ssts_given_compaction_failure_before_manifest_publish() {
 
     // Act: crash after outputs are durable and intented, but before manifest publish.
     let committed = run_child_crash_at_output_durable_before_publish(db_path);
+    let input_names = read_compaction_input_names(db_path);
+    let disk_before_reopen = sst_names_on_disk(db_path);
 
     // Assert
     assert!(
         !committed.is_empty(),
         "expected child to commit data before crash"
     );
+    assert!(
+        input_names.is_subset(&disk_before_reopen),
+        "every authoritative input must survive the pre-publication crash: inputs={input_names:?}, disk={disk_before_reopen:?}"
+    );
 
     let engine = open_local_engine(db_path);
     let default_cf = default_cf(&engine);
+    let recovered_layout = engine
+        .get_storage_layout()
+        .expect("storage layout after pre-publication recovery");
+    let manifest_names = manifest_sst_names(&recovered_layout);
+    assert_eq!(
+        manifest_names, input_names,
+        "rollback must leave the original inputs as the complete manifest authority"
+    );
+    assert_eq!(
+        sst_names_on_disk(db_path),
+        manifest_names,
+        "startup must remove the unowned compaction output without deleting inputs"
+    );
 
     for record in &committed {
         let tx = engine
@@ -122,15 +143,48 @@ fn should_not_delete_input_ssts_given_compaction_gc_failure_after_manifest_publi
 
     // Act: Write data, trigger compaction, crash after manifest persist but before GC
     let committed = run_child_crash_at_manifest_persist_before_gc(db_path);
+    let input_names = read_compaction_input_names(db_path);
+    let disk_before_reopen = sst_names_on_disk(db_path);
 
     // Assert: Manifest is durable, data accessible from new SSTs
     assert!(
         !committed.is_empty(),
         "expected child to commit data before crash"
     );
+    assert!(
+        input_names.is_subset(&disk_before_reopen),
+        "GC failure must retain every obsolete input at the crash boundary: inputs={input_names:?}, disk={disk_before_reopen:?}"
+    );
 
     let engine = open_local_engine(db_path);
     let default_cf = default_cf(&engine);
+    let recovered_layout = engine
+        .get_storage_layout()
+        .expect("storage layout after post-publication recovery");
+    let manifest_names = manifest_sst_names(&recovered_layout);
+    let disk_after_reopen = sst_names_on_disk(db_path);
+    let compacted_inputs = input_names
+        .difference(&manifest_names)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let replacement_names = manifest_names
+        .difference(&input_names)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert!(
+        !compacted_inputs.is_empty() && !replacement_names.is_empty(),
+        "the durable manifest must replace selected inputs with a new output: manifest={manifest_names:?}, inputs={input_names:?}"
+    );
+    assert!(
+        !manifest_names.is_empty() && manifest_names.is_subset(&disk_after_reopen),
+        "every manifest-owned replacement must exist on disk: manifest={manifest_names:?}, disk={disk_after_reopen:?}"
+    );
+    for retained_input in compacted_inputs.intersection(&disk_after_reopen) {
+        assert!(
+            recovered_layout.obsolete_files.contains(retained_input),
+            "a retained obsolete input must be reported outside manifest ownership: {retained_input}"
+        );
+    }
 
     // All data must be recoverable (from manifest-referenced SSTs, not WAL replay)
     for record in &committed {
@@ -254,7 +308,7 @@ fn child_create_data_and_compact_with_crash_before_publish(db_path: &Path) {
     let engine = open_local_engine(db_path);
     let default_cf = default_cf(&engine);
 
-    for batch in 0..5 {
+    for batch in 0..4 {
         let mut tx = engine
             .begin_tx(default_cf.id(), TransactionMode::ReadWrite)
             .expect("begin batch tx");
@@ -280,6 +334,8 @@ fn child_create_data_and_compact_with_crash_before_publish(db_path: &Path) {
         engine.flush_cf(&default_cf).expect("flush batch");
     }
 
+    write_compaction_input_names(&engine, db_path);
+
     engine.compact_all().expect("compact_all");
 
     panic!("expected crash at manifest publish failpoint");
@@ -297,7 +353,7 @@ fn child_create_data_and_compact_with_crash_before_gc(db_path: &Path) {
     let default_cf = default_cf(&engine);
 
     // Write multiple batches to create L0 files
-    for batch in 0..5 {
+    for batch in 0..4 {
         let mut tx = engine
             .begin_tx(default_cf.id(), TransactionMode::ReadWrite)
             .expect("begin batch tx");
@@ -323,6 +379,8 @@ fn child_create_data_and_compact_with_crash_before_gc(db_path: &Path) {
         tx.commit(WriteOptions::buffered()).expect("commit batch");
         engine.flush_cf(&default_cf).expect("flush batch");
     }
+
+    write_compaction_input_names(&engine, db_path);
 
     // Trigger compaction - will crash at slice6::after_manifest_persist_before_sst_gc
     engine.compact_all().expect("compact_all");
@@ -417,6 +475,65 @@ fn read_committed_records(db_path: &Path) -> Vec<CommitRecord> {
         .lines()
         .filter(|line| !line.is_empty())
         .map(|line| serde_json::from_str(line).expect("parse commit record"))
+        .collect()
+}
+
+fn write_compaction_input_names(engine: &Engine, db_path: &Path) {
+    let layout = engine
+        .get_storage_layout()
+        .expect("storage layout before compaction");
+    let names = manifest_sst_names(&layout);
+    assert_eq!(
+        names.len(),
+        4,
+        "fixture must expose exactly the four L0 files selected by compaction"
+    );
+    assert!(
+        layout
+            .levels
+            .iter()
+            .all(|level| level.level == 0 || level.files.is_empty()),
+        "fixture inputs must all be manifest-owned L0 files"
+    );
+    let encoded = serde_json::to_vec(&names).expect("serialize compaction input names");
+    let mut file = fs::File::create(db_path.join(COMPACTION_INPUTS_FILE))
+        .expect("create compaction input evidence");
+    file.write_all(&encoded)
+        .expect("write compaction input evidence");
+    file.sync_all().expect("sync compaction input evidence");
+}
+
+fn read_compaction_input_names(db_path: &Path) -> BTreeSet<String> {
+    let bytes = fs::read(db_path.join(COMPACTION_INPUTS_FILE))
+        .expect("read child compaction input evidence");
+    serde_json::from_slice(&bytes).expect("parse child compaction input evidence")
+}
+
+fn manifest_sst_names(layout: &cntryl_midge::StorageLayoutSnapshot) -> BTreeSet<String> {
+    layout
+        .levels
+        .iter()
+        .flat_map(|level| &level.files)
+        .map(|file| file.name.clone())
+        .collect()
+}
+
+fn sst_names_on_disk(db_path: &Path) -> BTreeSet<String> {
+    fs::read_dir(db_path.join("sst"))
+        .expect("read SST directory")
+        .map(|entry| entry.expect("read SST directory entry"))
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "sst")
+        })
+        .map(|entry| {
+            entry
+                .file_name()
+                .into_string()
+                .expect("SST file name is UTF-8")
+        })
         .collect()
 }
 

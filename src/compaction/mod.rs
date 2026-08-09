@@ -25,6 +25,14 @@ pub fn execute_compaction(
     output_dir: &Path,
     abort_check: Option<&dyn Fn() -> bool>,
 ) -> MidgeResult<Vec<String>> {
+    // An empty plan is a planner no-op and must not create an unreferenced
+    // output. Keep the later no-output error for non-empty plans: silently
+    // replacing actual inputs with nothing would be unsafe without a proven
+    // tombstone-only removal policy.
+    if plan.input_files.is_empty() {
+        return Ok(Vec::new());
+    }
+
     // --- 1. Materialize reader-provided per-SST streams ---------------------
     //
     // The reader contract currently returns one vector per SST. Keep those
@@ -371,6 +379,146 @@ mod tests {
 
         // Assert
         assert_eq!(plan.output_seq, u64::MAX);
+    }
+
+    #[test]
+    fn should_produce_no_output_given_empty_compaction_input() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let plan = CompactionPlan::new(0, 0, 1).with_output_seq(40);
+        let output_path = temp_dir.path().join(crate::sst::file_name(0, 1, 40));
+
+        // Act
+        let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
+
+        // Assert
+        assert!(output_names.is_empty());
+        assert!(!output_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_drop_unexpired_value_given_compaction_time_before_expiration() -> MidgeResult<()>
+    {
+        // Arrange
+        let temp_dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let expiration = u64::MAX - 1;
+        let mut input_writer = factory.create()?;
+        input_writer.add_with_meta(b"live", Some(b"value"), 7, 0, Some(expiration))?;
+        crate::sst::fs::finish_writer_to_path(input_writer, &temp_dir.path().join("input.sst"))?;
+        let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(41);
+        plan.input_files.push("input.sst".to_string());
+
+        // Act
+        let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
+        let reader = factory.open(std::path::Path::new(&output_names[0]))?;
+        let state = reader.get_state_at_with_time(b"live", u64::MAX, expiration - 1)?;
+
+        // Assert
+        assert!(matches!(
+            state,
+            crate::sst::types::KeyState::Value(ref value, 7, Some(actual), _)
+                if value.as_ref() == b"value" && actual == expiration
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn should_preserve_expired_ttl_metadata_given_compaction_then_mask_at_read_time(
+    ) -> MidgeResult<()> {
+        // Arrange: compaction is deliberately time-independent. It preserves
+        // raw TTL metadata so a snapshot can apply its own read timestamp.
+        let temp_dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let expiration = 100;
+        let mut writer = factory.create()?;
+        writer.add_with_meta(b"expired", Some(b"value"), 9, 0, Some(expiration))?;
+        crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join("expired.sst"))?;
+        let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(49);
+        plan.input_files.push("expired.sst".to_string());
+
+        // Act
+        let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
+        let reader = factory.open(std::path::Path::new(&output_names[0]))?;
+        let raw = reader.scan_range_raw_state(None, None)?;
+        let visible = reader.get_state_at_with_time(b"expired", u64::MAX, expiration + 1)?;
+
+        // Assert
+        assert!(matches!(
+            raw.as_slice(),
+            [(key, crate::sst::types::KeyState::Value(value, 9, Some(actual), _))]
+                if key.as_ref() == b"expired"
+                    && value.as_ref() == b"value"
+                    && *actual == expiration
+        ));
+        assert!(matches!(visible, crate::sst::types::KeyState::Tombstone(9)));
+        Ok(())
+    }
+
+    #[test]
+    fn should_preserve_tombstone_visibility_given_overlapping_ssts_when_compacting(
+    ) -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let mut older = factory.create()?;
+        older.add_with_meta(b"same", Some(b"old"), 3, 0, None)?;
+        crate::sst::fs::finish_writer_to_path(older, &temp_dir.path().join("older.sst"))?;
+        let mut newer = factory.create()?;
+        newer.add_with_meta(b"same", None, 4, 2, None)?;
+        crate::sst::fs::finish_writer_to_path(newer, &temp_dir.path().join("newer.sst"))?;
+        let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(50);
+        plan.input_files
+            .extend(["older.sst".to_string(), "newer.sst".to_string()]);
+
+        // Act
+        let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
+        let reader = factory.open(std::path::Path::new(&output_names[0]))?;
+
+        // Assert
+        assert!(matches!(
+            reader.get_state(b"same")?,
+            crate::sst::types::KeyState::Tombstone(4)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn should_preserve_latest_version_given_equal_sequence_versions_when_compacting(
+    ) -> MidgeResult<()> {
+        // Arrange: equal-sequence entries are safe only when their complete
+        // logical payload is identical. Conflicting payloads are rejected by
+        // the adjacent fail-closed corruption regression.
+        let temp_dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        for name in ["first.sst", "second.sst"] {
+            let mut writer = factory.create()?;
+            writer.add_with_meta(b"same", Some(b"value"), 7, 0, Some(900))?;
+            crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join(name))?;
+        }
+        let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(51);
+        plan.input_files
+            .extend(["first.sst".to_string(), "second.sst".to_string()]);
+
+        // Act
+        let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
+        let reader = factory.open(std::path::Path::new(&output_names[0]))?;
+        let versions = reader.scan_range_raw_state(None, None)?;
+
+        // Assert
+        assert!(matches!(
+            versions.as_slice(),
+            [(key, crate::sst::types::KeyState::Value(value, 7, Some(900), _))]
+                if key.as_ref() == b"same" && value.as_ref() == b"value"
+        ));
+        Ok(())
     }
 
     #[test]

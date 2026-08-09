@@ -152,7 +152,7 @@ mod tests {
     }
 
     #[test]
-    fn should_activate_adapter_when_failpoints_feature_is_enabled() {
+    fn should_activate_adapter_paths_given_configured_failpoints() {
         // Arrange
         let _test_guard = super::test_failpoint_guard();
         let scenario = fail::FailScenario::setup();
