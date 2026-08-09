@@ -258,9 +258,8 @@ mod tests {
         // Act
         let size = record.estimated_size();
 
-        // Assert - should include all fields
-        // 4 (cf_id) + 1 (op) + 8 (seq) + 4 (key len) + 5 (key) + 4 (value len) + 7 (value) + 20 (overhead) = 53
-        assert!(size >= 53);
+        // Assert
+        assert_eq!(size, 61);
     }
 
     #[test]
@@ -271,8 +270,8 @@ mod tests {
         // Act
         let size = record.estimated_size();
 
-        // Assert - should not include value length
-        assert!(size >= 4 + 1 + 8 + 4 + 3 + 4 + 20);
+        // Assert
+        assert_eq!(size, 52);
     }
 
     #[test]
