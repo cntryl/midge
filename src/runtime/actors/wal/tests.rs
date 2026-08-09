@@ -537,6 +537,67 @@ fn should_reject_whole_group_before_wal_append_given_cf_missing_after_prepare() 
 }
 
 #[test]
+fn should_leave_no_partial_writes_given_later_memtable_preflight_failure() -> MidgeResult<()> {
+    // Arrange
+    let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
+    let db_path = temp.path().to_path_buf();
+    let mut state = RuntimeState::new(db_path.clone(), false);
+    state.column_families.insert(
+        1,
+        crate::runtime::state::ColumnFamilyState::new(1, "second".to_string()),
+    );
+    let mut wal_actor = WalActor::new(
+        db_path.join("wal"),
+        DurabilityPolicy::Batched,
+        BatchConfig::default(),
+        false,
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    let prepared = wal_actor.prepare_transaction_append(
+        &mut state,
+        TransactionAppendParams {
+            request_id: 123,
+            assertions: Vec::new(),
+            ops: vec![
+                crate::runtime::TransactionOp::Put {
+                    cf_id: 0,
+                    key: Bytes::from_static(b"first-valid"),
+                    value: Bytes::from_static(b"value"),
+                    ttl_seconds: None,
+                    insert_only: false,
+                },
+                crate::runtime::TransactionOp::Put {
+                    cf_id: 1,
+                    key: Bytes::from_static(b"later-invalid"),
+                    value: Bytes::from_static(b"value"),
+                    ttl_seconds: None,
+                    insert_only: false,
+                },
+            ],
+            durability_policy: Some(DurabilityPolicy::Batched),
+            start_sequence: None,
+            conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+        },
+    )?;
+    state.column_families.remove(&1);
+
+    // Act
+    let result = wal_actor.append_prepared_transactions(&mut state, vec![prepared]);
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::InvalidArgument(_))));
+    assert_eq!(wal_actor.append_calls(), 0);
+    assert!(state
+        .get_cf(0)
+        .expect("first column family remains")
+        .memtable
+        .iter_all(u64::MAX)
+        .is_empty());
+    Ok(())
+}
+
+#[test]
 fn should_fail_loudly_given_column_family_missing_at_direct_memtable_apply() {
     // Arrange
     let mut state = RuntimeState::new(PathBuf::from("/tmp/missing-cf-apply"), true);

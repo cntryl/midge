@@ -11,6 +11,10 @@
 //!
 //! Naming convention:
 //!   should_<behavior>_given_<context>_when_<condition>
+//!
+//! This suite covers public WAL durability/recovery behavior, not the internal
+//! `KeyedGroupCommit` waiter primitive. Dedicated primitive tests and the real
+//! runtime `CloudAck` fanout test establish join/rotate/complete semantics.
 
 use bytes::Bytes;
 mod common;

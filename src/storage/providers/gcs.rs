@@ -1549,7 +1549,8 @@ impl CloudSigner for Goog1HmacSigner {
 mod tests {
     use super::*;
     use crate::storage::providers::test_support::{
-        receive_list_result, spawn_recording_http_server, spawn_scripted_http_server,
+        receive_list_result, spawn_recording_http_server, spawn_recording_http_server_with_status,
+        spawn_scripted_http_server,
     };
 
     const TEST_BEARER_TOKEN: &str = "gcs-json-test-token";
@@ -1583,6 +1584,23 @@ mod tests {
             CloudEvent::Delete { result, .. } => result,
             event => panic!("expected GCS DELETE event, got {event:?}"),
         }
+    }
+
+    #[test]
+    fn should_treat_missing_gcs_object_as_success_when_deleting() {
+        // Arrange
+        let server = spawn_recording_http_server_with_status(404, Vec::new(), Vec::new());
+        let backend = recording_json_backend(server.endpoint.clone());
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        // Act
+        backend.submit_delete("missing/object", Vec::new(), sender);
+        let result = receive_delete_result(&receiver);
+        let request = server.finish();
+
+        // Assert
+        assert!(matches!(result, CloudOutcome::Ok(())));
+        assert_eq!(request.method, "DELETE");
     }
 
     fn query_value(target: &str, name: &str) -> Option<String> {
