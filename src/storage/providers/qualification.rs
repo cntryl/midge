@@ -45,6 +45,13 @@ fn should_run_gcs_xml_contract_against_sqrzl() {
 }
 
 #[test]
+#[ignore = "requires Sqrzl; run the scheduled/manual Cloud Qualification workflow"]
+fn should_run_gcs_json_contract_against_sqrzl() {
+    let provider = CloudProviderConfig::sqrzl_gcs_json("midge-sqrzl-gcs-json");
+    run_provider_contract("gcs-json", &provider);
+}
+
+#[test]
 fn should_run_s3_compatible_contract_against_real_provider_if_configured() {
     // Arrange
     let Some(provider) = configured_real_s3_provider() else {
@@ -119,11 +126,20 @@ fn run_provider_contract_body(label: &str, provider: &CloudProviderConfig) {
         !conditional_head.etag.is_empty(),
         "HEAD should return an ETag for conditional update"
     );
+    let conditional_headers = if label == "gcs-json" {
+        crate::storage::cloud::object_match_precondition_headers(
+            &conditional_head.etag,
+            conditional_head.generation.as_deref(),
+        )
+        .expect("GCS JSON HEAD should provide a generation token")
+    } else {
+        vec![("If-Match".to_string(), conditional_head.etag)]
+    };
     put(
         &backend,
         &conditional_key,
         b"updated".to_vec(),
-        vec![("If-Match".to_string(), conditional_head.etag)],
+        conditional_headers,
     )
     .expect("conditional update with matching ETag");
     assert_eq!(

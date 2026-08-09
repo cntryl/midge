@@ -1249,19 +1249,25 @@ impl CloudBackend for GcsBackend {
             GcsBackendMode::Json => Method::GET,
             GcsBackendMode::Xml => Method::HEAD,
         };
+        let mode = self.mode;
         let request = CloudRequest::new(method, url);
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
             Ok(resp) if resp.status == 200 => {
                 let body = String::from_utf8_lossy(&resp.body);
-                let size = resp
+                let header_size = resp
                     .headers
                     .iter()
                     .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-                    .and_then(|(_, value)| value.parse::<u64>().ok())
-                    .or_else(|| {
-                        extract_json_string_value(&body, "size").and_then(|s| s.parse().ok())
-                    })
-                    .unwrap_or(0);
+                    .and_then(|(_, value)| value.parse::<u64>().ok());
+                let json_size = extract_json_string_value(&body, "size")
+                    .and_then(|value| value.parse::<u64>().ok());
+                let size = match mode {
+                    // A JSON metadata GET's Content-Length describes the metadata document,
+                    // not the stored object. Prefer the provider's object-size field.
+                    GcsBackendMode::Json => json_size.or(header_size),
+                    GcsBackendMode::Xml => header_size,
+                }
+                .unwrap_or(0);
                 let etag = resp
                     .headers
                     .iter()
@@ -1584,6 +1590,42 @@ mod tests {
             CloudEvent::Delete { result, .. } => result,
             event => panic!("expected GCS DELETE event, got {event:?}"),
         }
+    }
+
+    fn receive_head_result(
+        receiver: &std::sync::mpsc::Receiver<CloudEvent>,
+    ) -> CloudOutcome<ObjectMetadata> {
+        match receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("receive GCS HEAD result")
+        {
+            CloudEvent::Head { result, .. } => result,
+            event => panic!("expected GCS HEAD event, got {event:?}"),
+        }
+    }
+
+    #[test]
+    fn should_use_object_size_given_gcs_json_metadata_response() {
+        // Arrange
+        let response = r#"{"size":"11","etag":"opaque-etag","generation":"42"}"#;
+        assert_ne!(response.len(), 11, "fixture must distinguish response size");
+        let server = spawn_scripted_http_server(vec![response.to_string()]);
+        let backend = GcsBackend::json(
+            "bucket".into(),
+            Some(server.endpoint.clone()),
+            CloudExecutor::new(None).expect("create cloud executor"),
+        );
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        // Act
+        backend.submit_head("object", sender);
+        let metadata = receive_head_result(&receiver).expect("GCS JSON HEAD should succeed");
+
+        // Assert
+        assert_eq!(metadata.size, 11);
+        assert_eq!(metadata.etag, "opaque-etag");
+        assert_eq!(metadata.generation.as_deref(), Some("42"));
+        assert_eq!(server.finish(), 1);
     }
 
     #[test]

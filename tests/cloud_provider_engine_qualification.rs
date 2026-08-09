@@ -1,8 +1,8 @@
 #![cfg(all(feature = "cloud-all", feature = "sqrzl-tests"))]
 
 use cntryl_midge::{
-    Bytes, CloudObjectLayout, CloudProviderConfig, CloudStorageLocation, CloudStorageTopology,
-    ColumnFamilyHandle, Engine, MemoryBudget, OpenOptions, TransactionMode, WriteOptions,
+    Bytes, CloudProviderConfig, CloudStorageLocation, CloudStorageTopology, ColumnFamilyHandle,
+    Engine, MemoryBudget, OpenOptions, TransactionMode, WriteOptions,
 };
 use std::fmt::Write as _;
 use std::net::{SocketAddr, TcpStream};
@@ -35,40 +35,38 @@ fn should_recover_engine_from_sqrzl_s3_after_local_cache_loss() {
 
 #[test]
 #[ignore = "requires Sqrzl; run the scheduled/manual Cloud Qualification workflow"]
-fn should_complete_seeded_sqrzl_azure_lease_lifecycle_through_engine() {
+fn should_recover_engine_from_sqrzl_azure_after_local_cache_loss() {
     // Arrange
     let provider = CloudProviderConfig::sqrzl_azure("midge-sqrzl-engine-azure");
 
     // Act
-    // Sqrzl reports missing Azure objects as 500, so this path seeds an
-    // expired lease and exercises takeover, release, and reacquisition through
-    // the engine. Wire-level tests separately prove conditional header handling.
     engine_recovers_from_provider_after_local_cache_loss(
         "sqrzl-engine-azure",
         provider,
         true,
-        false,
+        true,
     );
 
     // Assert
-    // The helper performs the seeded provider-backed lease lifecycle.
+    // The helper performs first acquisition and cache-loss recovery assertions.
 }
 
 #[test]
 #[ignore = "requires Sqrzl; run the scheduled/manual Cloud Qualification workflow"]
-fn should_complete_seeded_sqrzl_gcs_xml_lease_lifecycle_through_engine() {
+fn should_recover_engine_from_sqrzl_gcs_json_after_local_cache_loss() {
     // Arrange
-    let provider = CloudProviderConfig::sqrzl_gcs("midge-sqrzl-engine-gcs");
+    let provider = CloudProviderConfig::sqrzl_gcs_json("midge-sqrzl-engine-gcs-json");
 
     // Act
-    // Sqrzl exposes only GCS XML/HMAC and reports missing objects as 500, so
-    // this path seeds an expired lease and exercises takeover, release, and
-    // reacquisition through the engine. Authenticated JSON mutation translation
-    // is covered by the scripted provider-wire tests.
-    engine_recovers_from_provider_after_local_cache_loss("sqrzl-engine-gcs", provider, true, false);
+    engine_recovers_from_provider_after_local_cache_loss(
+        "sqrzl-engine-gcs-json",
+        provider,
+        true,
+        true,
+    );
 
     // Assert
-    // The helper performs the seeded provider-backed lease lifecycle.
+    // The helper performs first acquisition and cache-loss recovery assertions.
 }
 
 #[test]
@@ -163,14 +161,9 @@ fn engine_recovers_from_provider_after_local_cache_loss(
 
     let database_prefix = format!("engine/{label}/{}/", uuid::Uuid::new_v4());
     if prepare_namespace {
-        seed_expired_sqrzl_lease_if_required(&provider, &database_prefix).unwrap_or_else(|error| {
-            panic!("{label}: failed to seed expired provider lease: {error}");
-        });
-        seed_empty_sqrzl_metadata_if_required(&provider, &database_prefix).unwrap_or_else(
-            |error| {
-                panic!("{label}: failed to seed provider metadata: {error}");
-            },
-        );
+        // Namespace creation is administrative setup; lease and database
+        // objects must start absent so the engine exercises provider-shaped
+        // first-create semantics itself.
     }
     let cache_path =
         std::env::temp_dir().join(format!("midge-provider-engine-{}", uuid::Uuid::new_v4()));
@@ -290,94 +283,6 @@ fn ensure_sqrzl_namespace(provider: &CloudProviderConfig) -> Result<(), String> 
         CloudProviderConfig::S3Compatible { bucket, .. } => ensure_sqrzl_s3_bucket(bucket),
         CloudProviderConfig::Gcs { bucket, .. } => ensure_sqrzl_gcs_bucket(bucket),
         CloudProviderConfig::AzureBlob { container, .. } => ensure_sqrzl_azure_container(container),
-    }
-}
-
-fn seed_expired_sqrzl_lease_if_required(
-    provider: &CloudProviderConfig,
-    database_prefix: &str,
-) -> Result<(), String> {
-    let key = format!("{database_prefix}{}", CloudObjectLayout::LEASE_OBJECT_KEY);
-    let body = b"epoch: 1\nholder_id: expired-qualification-holder\nowner_token: expired-qualification-owner\nacquired_at: 2000-01-01T00:00:00Z\nexpires_at: 2000-01-01T00:00:01Z\n";
-    match provider {
-        CloudProviderConfig::Gcs { bucket, .. } => signed_gcs_request(
-            "PUT",
-            &format!("/{bucket}/{key}"),
-            "application/octet-stream",
-            body,
-        )
-        .map(|_| ()),
-        CloudProviderConfig::AzureBlob {
-            account, container, ..
-        } => signed_azure_request(
-            "PUT",
-            &format!("/{account}/{container}/{key}"),
-            "",
-            body,
-            vec![("x-ms-blob-type", "BlockBlob")],
-        )
-        .map(|_| ()),
-        CloudProviderConfig::AwsS3 { .. } | CloudProviderConfig::S3Compatible { .. } => Ok(()),
-    }
-}
-
-fn seed_empty_sqrzl_metadata_if_required(
-    provider: &CloudProviderConfig,
-    database_prefix: &str,
-) -> Result<(), String> {
-    if matches!(
-        provider,
-        CloudProviderConfig::AwsS3 { .. } | CloudProviderConfig::S3Compatible { .. }
-    ) {
-        return Ok(());
-    }
-
-    let manifest = br#"{
-  "last_persisted_sequence": 0,
-  "files": [],
-  "column_families": [],
-  "next_wal_seq": 1,
-  "next_sst_seqs": {},
-  "edit_checkpoint_id": 0
-}"#;
-    let ddl_registry = br#"{
-  "epoch": 0,
-  "column_families": [],
-  "operations": []
-}"#;
-    for (name, data) in [
-        ("FORMAT", b"midge-format-version=3\n".as_slice()),
-        ("manifest.snapshot.json", manifest.as_slice()),
-        ("manifest.json", manifest.as_slice()),
-        ("manifest.journal", b"".as_slice()),
-        ("intent_log.json", b"[]\n".as_slice()),
-        ("ddl.registry.json", ddl_registry.as_slice()),
-    ] {
-        put_sqrzl_object(provider, &format!("{database_prefix}metadata/{name}"), data)?;
-    }
-    Ok(())
-}
-
-fn put_sqrzl_object(provider: &CloudProviderConfig, key: &str, data: &[u8]) -> Result<(), String> {
-    match provider {
-        CloudProviderConfig::Gcs { bucket, .. } => signed_gcs_request(
-            "PUT",
-            &format!("/{bucket}/{key}"),
-            "application/octet-stream",
-            data,
-        )
-        .map(|_| ()),
-        CloudProviderConfig::AzureBlob {
-            account, container, ..
-        } => signed_azure_request(
-            "PUT",
-            &format!("/{account}/{container}/{key}"),
-            "",
-            data,
-            vec![("x-ms-blob-type", "BlockBlob")],
-        )
-        .map(|_| ()),
-        CloudProviderConfig::AwsS3 { .. } | CloudProviderConfig::S3Compatible { .. } => Ok(()),
     }
 }
 
