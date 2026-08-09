@@ -12,7 +12,7 @@ Use this checklist before publishing a release candidate or stable release.
 - [ ] `cargo test --workspace --all-features --doc`
 - [ ] `cargo check --example documented_quick_start --all-features`
 - [ ] `cargo machete`
-- [ ] `cntryl-tools validate-benchmarks --config .cntryl/repository.toml`
+- [ ] `cargo test --test repository_gates`
 - [ ] `cargo package --locked`
 - [ ] `docker build --file Dockerfile.tests --tag midge-tests:release .`
 - [ ] `cargo test --test external_adopter_smoke --features failpoints`

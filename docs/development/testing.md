@@ -32,7 +32,7 @@ Run the repository and packaging qualification gates:
 cargo test --workspace --all-features --doc
 cargo check --example documented_quick_start --all-features
 cargo machete
-cntryl-tools validate-benchmarks --config .cntryl/repository.toml
+cargo test --test repository_gates
 cargo package --locked
 docker build --file Dockerfile.tests --tag midge-tests:local .
 ```
@@ -134,6 +134,22 @@ invariant rather than mechanism-reachability evidence.
 drives concurrent commits through the engine and compares logical operations
 with physical WAL appends. The deleted caller-side leader/follower grouping is
 not assigned counters because it is no longer a production mechanism.
+
+## Acceptance Evidence Before Merge
+
+Every pull request must translate each linked issue criterion into a checked
+acceptance-audit entry. Each entry names the exact evidence, identifies the
+production entry point (or honestly labels a local invariant), and records
+whether the implementation follows the requested approach or intentionally
+uses a different resolution. A renamed pre-existing test is not new evidence,
+and a partial assertion must not be presented as satisfying a stronger value,
+failure, recovery, or performance contract.
+
+The `PR Acceptance / Acceptance evidence` check validates this structure and
+rejects unchecked criteria. It cannot decide whether engineering evidence is
+correct; that remains an adversarial reviewer responsibility. Its purpose is
+to make omissions and changed interpretations visible before merge rather than
+discovering them in a later issue sweep.
 
 ## Mechanism Observability
 

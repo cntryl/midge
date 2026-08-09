@@ -28,6 +28,9 @@ Tier 3 and Tier 4 stress benchmarks:
 - Investigate p99 latency growth greater than 20% across repeated runs.
 - Prefer at least 3 runs for normal stress checks and 5 runs when deciding
   whether to accept a meaningful change in Tier 4 results.
+- Pull requests automatically enforce the 15% throughput budget for the
+  memory-mode batched-write regression row by comparing three base and three
+  candidate reports on the same runner.
 
 ## External LSM Comparisons
 
@@ -56,6 +59,12 @@ Local throughput:
 
 - Investigate when batched local buffered throughput falls below 50% of the
   memory-mode baseline for the same workload.
+- PR #205 intentionally removed the memory-only caller grouping path to keep
+  one transaction submission contract across storage modes. The resulting
+  roughly 20% memory-mode reduction is the accepted comparison baseline, not
+  an unreported production durability regression. Future changes are compared
+  against their immediate base revision and must remain within the Tier 4 15%
+  budget unless the PR explicitly revises this policy with evidence.
 
 Cloud buffered async:
 

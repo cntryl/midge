@@ -1,6 +1,117 @@
 use std::fs;
 use std::process::Command;
 
+fn benchmark_guardrail_args(kind: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    for index in 1..=3 {
+        args.push("--base".to_owned());
+        args.push(format!(
+            "tests/fixtures/benchmark_guardrail/base-{index}.json"
+        ));
+    }
+    for index in 1..=3 {
+        args.push("--candidate".to_owned());
+        args.push(format!(
+            "tests/fixtures/benchmark_guardrail/{kind}-{index}.json"
+        ));
+    }
+    args.extend([
+        "--benchmark".to_owned(),
+        "memory_batched_write_throughput".to_owned(),
+        "--max-regression".to_owned(),
+        "0.15".to_owned(),
+    ]);
+    args
+}
+
+#[test]
+fn should_accept_benchmark_candidate_at_regression_budget() {
+    // Arrange
+    let args = benchmark_guardrail_args("good");
+
+    // Act
+    let output = Command::new("python3")
+        .arg("scripts/compare_benchmark_guardrail.py")
+        .args(args)
+        .output()
+        .expect("run benchmark guardrail");
+
+    // Assert
+    assert!(
+        output.status.success(),
+        "guardrail failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn should_reject_benchmark_candidate_beyond_regression_budget() {
+    // Arrange
+    let args = benchmark_guardrail_args("bad");
+
+    // Act
+    let output = Command::new("python3")
+        .arg("scripts/compare_benchmark_guardrail.py")
+        .args(args)
+        .output()
+        .expect("run benchmark guardrail");
+
+    // Assert
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("exceeds allowed 15%"));
+}
+
+#[test]
+fn should_require_complete_acceptance_audit_given_pull_request_body() {
+    // Arrange
+    let temp = tempfile::tempdir().expect("create PR body fixture directory");
+    let body = temp.path().join("body.md");
+    fs::write(
+        &body,
+        "## Linked issues\nCloses #214\n\n## Acceptance audit\n- [x] Criterion: Enforce the Tier 4 budget.\n  Evidence: A/B fixture rejects a 22% regression.\n  Production entry point: Bench workflow executes the registered target.\n  Resolution: Matches the requested guardrail.\n\n## Verification\nFocused contracts passed.\n",
+    )
+    .expect("write PR body fixture");
+
+    // Act
+    let output = Command::new("python3")
+        .arg("scripts/validate_pr_acceptance.py")
+        .arg(&body)
+        .output()
+        .expect("validate PR acceptance body");
+
+    // Assert
+    assert!(
+        output.status.success(),
+        "acceptance validation failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn should_reject_incomplete_acceptance_audit_given_renamed_test_claim() {
+    // Arrange
+    let temp = tempfile::tempdir().expect("create PR body fixture directory");
+    let body = temp.path().join("body.md");
+    fs::write(
+        &body,
+        "## Linked issues\nCloses #214\n\n## Acceptance audit\n- [ ] Criterion: Covered by a renamed old test.\n\n## Verification\nNone.\n",
+    )
+    .expect("write incomplete PR body fixture");
+
+    // Act
+    let output = Command::new("python3")
+        .arg("scripts/validate_pr_acceptance.py")
+        .arg(&body)
+        .output()
+        .expect("validate incomplete PR acceptance body");
+
+    // Assert
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("unchecked acceptance"));
+    assert!(error.contains("Production entry point"));
+}
+
 #[test]
 fn should_keep_expensive_testing_governance_scheduled_or_manual() {
     // Arrange
