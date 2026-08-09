@@ -27,7 +27,7 @@ fn shutdown(mut engine: Engine) {
 }
 
 #[test]
-fn should_converge_local_remote_ddl_state_given_remote_cas_failure_when_reopening() {
+fn should_converge_local_remote_ddl_state_given_normal_create_drop_when_reopening() {
     // Arrange
     #[cfg(feature = "failpoints")]
     let _guard = DDL_TEST_LOCK
@@ -58,6 +58,47 @@ fn should_converge_local_remote_ddl_state_given_remote_cas_failure_when_reopenin
     assert_eq!(registry["epoch"], 2);
     assert_eq!(registry["operations"].as_array().map(Vec::len), Some(2));
     shutdown(final_open);
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_converge_local_remote_ddl_state_given_remote_cas_failure_when_reopening() {
+    // Arrange
+    let _guard = DDL_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::tempdir().expect("temp dir");
+    let engine = open_cloud(temp.path());
+    let scenario = fail::FailScenario::setup();
+    fail::cfg("midge::ddl::before_remote_cas", "return").expect("configure remote CAS failure");
+
+    // Act
+    let failed_create = engine.create_column_family("cas-reopen");
+    fail::remove("midge::ddl::before_remote_cas");
+    scenario.teardown();
+    assert!(matches!(failed_create, Err(MidgeError::Internal(_))));
+    assert!(engine.get_column_family("cas-reopen").is_none());
+    shutdown(engine);
+    let reopened = open_cloud(temp.path());
+    assert!(
+        !temp.path().join("ddl.prepare.json").exists(),
+        "reopen itself must clear the failed pre-authority prepare before any retry"
+    );
+    let before_retry = reopened.get_column_family("cas-reopen");
+    let created = reopened
+        .create_column_family("cas-reopen")
+        .expect("retry create after reopen");
+
+    // Assert
+    assert!(before_retry.is_none());
+    assert_eq!(created.name(), "cas-reopen");
+    let registry = fs::read(temp.path().join("cloud_store/metadata/ddl.registry.json"))
+        .expect("read authoritative DDL registry");
+    let registry: serde_json::Value = serde_json::from_slice(&registry).expect("decode registry");
+    assert_eq!(registry["epoch"], 1);
+    assert_eq!(registry["operations"].as_array().map(Vec::len), Some(1));
+    shutdown(reopened);
 }
 
 #[cfg(feature = "failpoints")]

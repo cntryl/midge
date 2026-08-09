@@ -532,14 +532,16 @@ mod tests {
         // Arrange
         let mut parent = TrieNode::new(0, b"parent".to_vec(), None);
         parent.add_child(TrieEdge::new(b'a', 999)); // Index way out of bounds
+        let encoded = encode_trie(&[parent]);
 
         // Act
-        let encoded = encode_trie(&[parent]);
-        let decoded = decode_trie(&encoded).unwrap();
-        let child_index = decoded[0].children[0].child_index;
+        let error = crate::sst::trie::TrieReader::new(&encoded)
+            .err()
+            .expect("invalid child offset must fail trie open");
 
         // Assert
-        assert_eq!(child_index, 999);
+        assert!(matches!(error, MidgeError::Corruption(_)));
+        assert!(error.to_string().contains("missing child 999"));
     }
 
     #[test]

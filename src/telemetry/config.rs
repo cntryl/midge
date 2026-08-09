@@ -31,7 +31,7 @@ pub struct TelemetryConfig {
     #[serde(flatten)]
     pub features: TelemetryFeatures,
 
-    /// Sampling rate for traces (0.0..=1.0)
+    /// Sampling rate for traces; must be finite and in `(0.0, 1.0]`.
     pub trace_sample_rate: f64,
 
     /// Service name for traces
@@ -78,11 +78,28 @@ impl TelemetryConfig {
         self
     }
 
-    /// Set trace sampling rate (0.0 = none, 1.0 = all)
+    /// Set trace sampling rate for tests.
+    ///
+    /// Validation deliberately happens at telemetry initialization so that
+    /// deserialized and directly-constructed configurations follow the same
+    /// fail-closed path as builder-created configurations.
     #[cfg(test)]
     pub fn with_sample_rate(mut self, rate: f64) -> Self {
-        self.trace_sample_rate = rate.clamp(0.0, 1.0);
+        self.trace_sample_rate = rate;
         self
+    }
+
+    pub(crate) fn validate(&self) -> crate::common::MidgeResult<()> {
+        if !self.trace_sample_rate.is_finite()
+            || self.trace_sample_rate <= 0.0
+            || self.trace_sample_rate > 1.0
+        {
+            return Err(crate::common::MidgeError::InvalidArgument(
+                "telemetry trace sample rate must be finite and in (0.0, 1.0]".to_string(),
+            ));
+        }
+
+        Ok(())
     }
 
     /// Set OTLP exporter configuration
@@ -126,16 +143,23 @@ mod tests {
     }
 
     #[test]
-    fn should_clamp_sample_rate() {
+    fn should_reject_zero_or_nonfinite_sample_rate_given_telemetry_config_when_initializing() {
         // Arrange
+        let invalid_rates = [0.0, -0.5, 1.5, f64::NAN, f64::INFINITY];
 
         // Act
-        let high = TelemetryConfig::new().with_sample_rate(1.5);
-        let low = TelemetryConfig::new().with_sample_rate(-0.5);
+        let errors = invalid_rates.map(|rate| {
+            super::super::Telemetry::init(&TelemetryConfig::new().with_sample_rate(rate))
+                .expect_err("invalid sample rate must fail before global initialization")
+        });
 
         // Assert
-        assert!((high.trace_sample_rate - 1.0).abs() <= f64::EPSILON);
-        assert!(low.trace_sample_rate.abs() <= f64::EPSILON);
+        for error in errors {
+            assert!(matches!(
+                error,
+                crate::common::MidgeError::InvalidArgument(_)
+            ));
+        }
     }
 
     #[test]

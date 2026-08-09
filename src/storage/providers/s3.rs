@@ -969,6 +969,7 @@ impl CloudBackend for S3Backend {
                     return Err(MidgeError::Internal(format!("status {}", resp.status)));
                 }
                 let body = String::from_utf8_lossy(&resp.body);
+                super::validate_list_xml(&body, "ListBucketResult")?;
                 let page_items = extract_xml_tag_values(&body, "Key");
                 let truncated = extract_xml_tag_values(&body, "IsTruncated")
                     .first()

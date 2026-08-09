@@ -9,11 +9,11 @@ pub mod metrics;
 pub use config::TelemetryConfig;
 pub use metrics::Metrics;
 
-use std::sync::Arc;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Global telemetry instance
 static TELEMETRY: OnceLock<Option<Arc<Telemetry>>> = OnceLock::new();
+static TELEMETRY_INIT: Mutex<()> = Mutex::new(());
 
 /// Central telemetry coordinator
 pub struct Telemetry {
@@ -23,6 +23,21 @@ pub struct Telemetry {
 impl Telemetry {
     /// Initialize global telemetry
     pub fn init(config: &TelemetryConfig) -> crate::common::MidgeResult<()> {
+        config.validate()?;
+
+        // Subscriber installation and publication of the telemetry singleton
+        // are one initialization transaction. Without this gate, a repeated
+        // or concurrent enabled call can try to install the process-global
+        // tracing subscriber before observing that telemetry already exists.
+        let _init_guard = TELEMETRY_INIT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if TELEMETRY.get().is_some() {
+            return Err(crate::common::MidgeError::Internal(
+                "Telemetry already initialized".to_string(),
+            ));
+        }
+
         let enabled = config.enabled;
         let metrics = Metrics::new(config);
 
@@ -44,7 +59,7 @@ impl Telemetry {
 
     /// Get global telemetry instance (if enabled)
     pub fn global() -> Option<Arc<Telemetry>> {
-        TELEMETRY.get_or_init(|| None).clone()
+        TELEMETRY.get().and_then(Clone::clone)
     }
 
     /// Get metrics collector
@@ -87,15 +102,23 @@ impl Telemetry {
                 .with_batch_exporter(exporter)
                 .build();
             let tracer = tracer_provider.tracer("midge");
-            global::set_tracer_provider(tracer_provider);
-
             registry
                 .with(tracing_opentelemetry::layer().with_tracer(tracer))
-                .init();
+                .try_init()
+                .map_err(|error| {
+                    crate::common::MidgeError::Internal(format!(
+                        "Failed to install telemetry subscriber: {error}"
+                    ))
+                })?;
+            global::set_tracer_provider(tracer_provider);
             return Ok(());
         }
 
-        registry.init();
+        registry.try_init().map_err(|error| {
+            crate::common::MidgeError::Internal(format!(
+                "Failed to install telemetry subscriber: {error}"
+            ))
+        })?;
         Ok(())
     }
 }

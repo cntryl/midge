@@ -22,8 +22,8 @@ Be respectful, constructive, and professional. We're here to build reliable infr
 ### Prerequisites
 
 - Rust 1.70+ (latest stable recommended)
+- Python 3 (used by coverage-tier governance checks)
 - cntryl-tools (install with `cargo install --git https://github.com/cntryl/tools --locked`)
-- Python 3.8+ (only for `scripts/test_watchdog.py`)
 - Git
 
 ### Fork and Clone
@@ -52,6 +52,10 @@ cntryl-tools validate-tests
 # Run benchmarks
 cargo bench
 ```
+
+The former repository-local Python per-test watchdog was intentionally retired
+with the other local validation scripts. Use focused `cargo test --test ...`
+commands during development and the CI job timeouts for bounded qualification.
 
 ### Explore the Codebase
 

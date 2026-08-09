@@ -30,7 +30,7 @@ impl Drop for UploadRelease {
 }
 
 #[test]
-fn should_preserve_shutdown_durability_result_given_stalled_cloud_upload_when_caller_times_out() {
+fn should_release_primary_lease_given_shutdown_timeout_when_shutdown_completes() {
     // Arrange
     let scenario = fail::FailScenario::setup();
     let temp_dir = tempfile::TempDir::new().expect("create cloud shutdown directory");
@@ -122,6 +122,10 @@ fn should_preserve_shutdown_durability_result_given_stalled_cloud_upload_when_ca
         replayed_shutdown,
         Err(MidgeError::Internal(message)) if message == terminal_message
     ));
+    assert!(
+        !db_path.join(".midge_leader.lock").exists(),
+        "completed shutdown cleanup must remove the acquisition lock"
+    );
     fail::remove(BLOCKED_UPLOAD_FAILPOINT);
     scenario.teardown();
     let mut reopened = Engine::open(cloud_options(&db_path, Arc::clone(&lease_loss_calls)))

@@ -289,6 +289,12 @@ impl HybridPersistence for HybridStorage {
             dependencies.extend(metadata.objects);
         }
 
+        // Deterministic proof/publication boundary used to verify that an SST
+        // identity change after semantic validation cannot retire WAL
+        // authority. The worker still revalidates every dependency and the
+        // target immediately before its conditional delete.
+        crate::failpoints::fail_point!("midge::cloud::after_wal_prune_dependency_validation");
+
         // Publication authority is retired before physical deletion. A crash or
         // delete failure after this point can leak an ignored object but cannot
         // make recovery depend on a missing object.

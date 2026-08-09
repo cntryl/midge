@@ -613,6 +613,22 @@ fn should_run_repository_qualification_before_publish() {
 }
 
 #[test]
+fn should_not_reference_retired_python_watchdog_when_documenting_repository_checks() {
+    // Arrange
+    let agent_guidance = read_workflow("AGENTS.md");
+    let contributor_guidance = read_workflow("CONTRIBUTING.md");
+
+    // Act
+    let documented_guidance = format!("{agent_guidance}\n{contributor_guidance}");
+
+    // Assert
+    assert!(!documented_guidance.contains("scripts/test_watchdog.py"));
+    assert!(documented_guidance.contains("Python 3"));
+    assert!(documented_guidance.contains("coverage-tier governance"));
+    assert!(documented_guidance.contains("cntryl-tools validate-tests"));
+}
+
+#[test]
 fn should_build_test_image_when_ci_runs() {
     // Arrange
     let docker = read_workflow(".github/workflows/docker.yml");

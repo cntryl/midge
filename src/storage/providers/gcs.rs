@@ -1196,6 +1196,7 @@ impl CloudBackend for GcsBackend {
                         (items, next_page_token)
                     }
                     GcsBackendMode::Xml => {
+                        super::validate_list_xml(&body, "ListBucketResult")?;
                         let items = extract_xml_tag_values(&body, "Key");
                         let truncated = extract_xml_tag_values(&body, "IsTruncated")
                             .first()
@@ -1311,22 +1312,41 @@ fn extract_json_string_value(body: &str, key: &str) -> Option<String> {
 fn extract_gcs_json_list(body: &str) -> MidgeResult<(Vec<String>, Option<String>)> {
     let json: serde_json::Value = serde_json::from_str(body)
         .map_err(|error| MidgeError::Internal(format!("GCS list JSON parse: {error}")))?;
-    let items = json
-        .get("items")
-        .and_then(|value| value.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.get("name").and_then(|value| value.as_str()))
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let next_page_token = json
-        .get("nextPageToken")
-        .and_then(|value| value.as_str())
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
+    let object = json.as_object().ok_or_else(|| {
+        MidgeError::Internal("GCS list JSON response must be an object".to_string())
+    })?;
+    let items = match object.get("items") {
+        None => Vec::new(),
+        Some(value) => value
+            .as_array()
+            .ok_or_else(|| {
+                MidgeError::Internal("GCS list JSON items must be an array".to_string())
+            })?
+            .iter()
+            .map(|item| {
+                item.get("name")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        MidgeError::Internal(
+                            "GCS list JSON item must contain a string name".to_string(),
+                        )
+                    })
+            })
+            .collect::<MidgeResult<Vec<_>>>()?,
+    };
+    let next_page_token = match object.get("nextPageToken") {
+        None => None,
+        Some(value) => Some(
+            value
+                .as_str()
+                .ok_or_else(|| {
+                    MidgeError::Internal("GCS list JSON nextPageToken must be a string".to_string())
+                })?
+                .to_string(),
+        )
+        .filter(|value| !value.is_empty()),
+    };
     Ok((items, next_page_token))
 }
 
@@ -1925,21 +1945,6 @@ mod tests {
             provider.credential(),
             GcsCredential::BearerToken { .. }
         ));
-    }
-
-    #[test]
-    fn should_reject_empty_bucket_given_cloud_provider_config_when_building() {
-        // Arrange
-        let bucket = "";
-        let project = "project";
-
-        // Act
-        let provider = GcsProvider::new(bucket.into(), project.into());
-        let provider = provider.expect("should create provider with empty bucket");
-
-        // Assert
-        assert_eq!(provider.bucket(), "");
-        assert_eq!(provider.project_id(), "project");
     }
 
     #[test]

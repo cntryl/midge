@@ -1104,7 +1104,7 @@ fn should_skip_later_local_wal_from_lower_writer_epoch_during_salvage() {
 }
 
 #[test]
-fn should_not_list_cloud_wal_objects_when_catalog_is_authoritative() {
+fn should_recover_from_authoritative_catalog_without_listing_cloud_wal_objects() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
     let inner = Arc::new(crate::storage::cloud::MockCloudBackend::new());
@@ -1112,7 +1112,8 @@ fn should_not_list_cloud_wal_objects_when_catalog_is_authoritative() {
         Arc::new(ListOmittingCloudBackend::failing(inner, "wal/"));
     let cloud = crate::storage::cloud::CloudStorage::new(backend, "midge".to_string());
 
-    // Act
+    // Act. Catalog format v1 replaced the old budgeted LIST-based recovery
+    // path; recovery must consume only catalog publications.
     let catalog = cloud_wal_test_catalog(1, &[]);
     let result = Engine::materialize_cloud_wal_recovery_dir(
         &cloud,
@@ -1126,7 +1127,7 @@ fn should_not_list_cloud_wal_objects_when_catalog_is_authoritative() {
 }
 
 #[test]
-fn should_not_mark_salvage_degraded_when_irrelevant_wal_list_fails() {
+fn should_keep_salvage_healthy_given_catalog_recovery_when_irrelevant_list_fails() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
     let inner = Arc::new(crate::storage::cloud::MockCloudBackend::new());
@@ -1134,7 +1135,8 @@ fn should_not_mark_salvage_degraded_when_irrelevant_wal_list_fails() {
         Arc::new(ListOmittingCloudBackend::failing(inner, "wal/"));
     let cloud = crate::storage::cloud::CloudStorage::new(backend, "midge".to_string());
 
-    // Act
+    // Act. A LIST failure cannot exhaust or degrade catalog-driven recovery
+    // because LIST is no longer part of the authoritative WAL scan.
     let catalog = cloud_wal_test_catalog(1, &[]);
     let plan = startup::CloudStartupRecovery::materialize_cloud_wal_recovery_dir(
         &cloud,

@@ -107,6 +107,17 @@ pub(crate) mod test_support {
     }
 
     pub(crate) fn spawn_scripted_http_server(bodies: Vec<String>) -> ScriptedHttpServer {
+        spawn_scripted_http_response_server(
+            bodies
+                .into_iter()
+                .map(|body| (200, "application/octet-stream".to_string(), body))
+                .collect(),
+        )
+    }
+
+    pub(crate) fn spawn_scripted_http_response_server(
+        responses: Vec<(u16, String, String)>,
+    ) -> ScriptedHttpServer {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind scripted HTTP server");
         listener
             .set_nonblocking(true)
@@ -117,7 +128,7 @@ pub(crate) mod test_support {
             let mut idle_deadline = None;
             let mut served = 0;
 
-            while served < bodies.len() && Instant::now() < overall_deadline {
+            while served < responses.len() && Instant::now() < overall_deadline {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         stream
@@ -126,9 +137,9 @@ pub(crate) mod test_support {
                         let mut request = [0_u8; 4096];
                         let _ = stream.read(&mut request);
 
-                        let body = &bodies[served];
+                        let (status, content_type, body) = &responses[served];
                         let response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            "HTTP/1.1 {status} Test\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                             body.len(),
                             body
                         );
@@ -283,7 +294,143 @@ pub(super) fn is_azure_blob(provider: &CloudProviderConfig) -> bool {
 pub(crate) fn build_cloud_backend(
     provider: &CloudProviderConfig,
 ) -> MidgeResult<Arc<dyn CloudBackend>> {
+    #[cfg(any(
+        feature = "cloud-aws",
+        feature = "cloud-azure",
+        feature = "cloud-gcp",
+        feature = "cloud-oci"
+    ))]
+    validate_cloud_provider_config(provider)?;
+
     factory::CloudProviderFactory::build_backend(provider)
+}
+
+#[cfg(any(
+    feature = "cloud-aws",
+    feature = "cloud-azure",
+    feature = "cloud-gcp",
+    feature = "cloud-oci"
+))]
+fn validate_cloud_provider_config(provider: &CloudProviderConfig) -> MidgeResult<()> {
+    let target = provider.bucket_or_container();
+    if target.trim().is_empty() {
+        return Err(crate::common::MidgeError::InvalidArgument(
+            "cloud bucket or container must not be empty".to_string(),
+        ));
+    }
+
+    let endpoint = match provider {
+        CloudProviderConfig::S3Compatible { endpoint, .. } => Some(endpoint.as_str()),
+        CloudProviderConfig::AzureBlob { endpoint, .. }
+        | CloudProviderConfig::Gcs { endpoint, .. } => endpoint.as_deref(),
+        CloudProviderConfig::AwsS3 { .. } => None,
+    };
+
+    if let Some(endpoint) = endpoint {
+        let parsed = url::Url::parse(endpoint).map_err(|error| {
+            crate::common::MidgeError::InvalidArgument(format!(
+                "cloud endpoint must be an absolute HTTP(S) URL: {error}"
+            ))
+        })?;
+        if !matches!(parsed.scheme(), "http" | "https")
+            || parsed.host_str().is_none()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(crate::common::MidgeError::InvalidArgument(
+                "cloud endpoint must be an absolute HTTP(S) origin without credentials, query, or fragment"
+                    .to_string(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(any(
+    feature = "cloud-aws",
+    feature = "cloud-azure",
+    feature = "cloud-gcp",
+    feature = "cloud-oci"
+))]
+fn validate_list_xml(body: &str, expected_root: &str) -> MidgeResult<()> {
+    let mut remaining = body.trim();
+    let mut stack = Vec::new();
+    let mut saw_root = false;
+
+    while !remaining.is_empty() {
+        let Some(open) = remaining.find('<') else {
+            if remaining.trim().is_empty() {
+                break;
+            }
+            return Err(crate::common::MidgeError::Internal(
+                "provider LIST XML contains text outside its root element".to_string(),
+            ));
+        };
+        if !remaining[..open].trim().is_empty() && stack.is_empty() {
+            return Err(crate::common::MidgeError::Internal(
+                "provider LIST XML contains text outside its root element".to_string(),
+            ));
+        }
+        let after_open = &remaining[open + 1..];
+        let Some(close) = after_open.find('>') else {
+            return Err(crate::common::MidgeError::Internal(
+                "provider LIST XML contains an unterminated tag".to_string(),
+            ));
+        };
+        let tag = after_open[..close].trim();
+        remaining = &after_open[close + 1..];
+
+        if tag.starts_with('?') || tag.starts_with('!') {
+            continue;
+        }
+        if let Some(closing_name) = tag.strip_prefix('/') {
+            let closing_name = closing_name.trim();
+            let Some(opening_name) = stack.pop() else {
+                return Err(crate::common::MidgeError::Internal(
+                    "provider LIST XML has an unmatched closing tag".to_string(),
+                ));
+            };
+            if opening_name != closing_name {
+                return Err(crate::common::MidgeError::Internal(format!(
+                    "provider LIST XML closes {closing_name} while {opening_name} is open"
+                )));
+            }
+            continue;
+        }
+
+        let self_closing = tag.ends_with('/');
+        let name = tag
+            .trim_end_matches('/')
+            .split_whitespace()
+            .next()
+            .unwrap_or_default();
+        if name.is_empty() {
+            return Err(crate::common::MidgeError::Internal(
+                "provider LIST XML contains an empty tag".to_string(),
+            ));
+        }
+        if stack.is_empty() {
+            if saw_root || name != expected_root {
+                return Err(crate::common::MidgeError::Internal(format!(
+                    "provider LIST XML expected root {expected_root}, found {name}"
+                )));
+            }
+            saw_root = true;
+        }
+        if !self_closing {
+            stack.push(name.to_string());
+        }
+    }
+
+    if !saw_root || !stack.is_empty() {
+        return Err(crate::common::MidgeError::Internal(format!(
+            "provider LIST XML is empty or incomplete for root {expected_root}"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(feature = "cloud-common")]
@@ -296,6 +443,147 @@ pub(crate) fn build_cloud_storage(
         backend,
         prefix.trim_matches('/').to_string(),
     )))
+}
+
+#[cfg(all(test, feature = "cloud-all"))]
+mod validation_tests {
+    use super::*;
+    use crate::config::{AzureCredentialSource, GcsCredentialSource};
+    use crate::storage::cloud::{CloudError, CloudOutcome};
+    use crate::storage::providers::test_support::{
+        receive_list_result, spawn_scripted_http_server,
+    };
+
+    #[test]
+    fn should_reject_empty_bucket_or_container_given_cloud_provider_config_when_building() {
+        // Arrange
+        let providers = [
+            CloudProviderConfig::aws_s3_static("", "us-east-1", "access", "secret"),
+            CloudProviderConfig::s3_compatible_static(
+                " ",
+                "http://127.0.0.1:9000",
+                "access",
+                "secret",
+            ),
+            CloudProviderConfig::azure_blob_shared_key("account", "", "YQ=="),
+            CloudProviderConfig::gcs_bearer_token("", "token"),
+        ];
+
+        // Act
+        let errors = providers.map(|provider| {
+            build_cloud_backend(&provider)
+                .err()
+                .expect("empty cloud target must fail before provider construction")
+        });
+
+        // Assert
+        for error in errors {
+            assert!(matches!(
+                error,
+                crate::common::MidgeError::InvalidArgument(message)
+                    if message.contains("bucket or container")
+            ));
+        }
+    }
+
+    #[test]
+    fn should_reject_malformed_endpoint_given_cloud_provider_config_when_building() {
+        // Arrange
+        let providers = [
+            CloudProviderConfig::s3_compatible_static("bucket", "not a URL", "access", "secret"),
+            CloudProviderConfig::azure_blob("account", "container")
+                .with_azure_credentials(AzureCredentialSource::shared_key("YQ=="))
+                .expect("Azure credential override should match")
+                .with_endpoint("ftp://example.test")
+                .expect("Azure supports endpoint overrides"),
+            CloudProviderConfig::gcs("bucket")
+                .with_gcs_credentials(GcsCredentialSource::bearer_token("token"))
+                .expect("GCS credential override should match")
+                .with_endpoint("http://user:secret@example.test?query=1")
+                .expect("GCS supports endpoint overrides"),
+        ];
+
+        // Act
+        let errors = providers.map(|provider| {
+            build_cloud_backend(&provider)
+                .err()
+                .expect("malformed endpoint must fail before provider construction")
+        });
+
+        // Assert
+        for error in errors {
+            assert!(matches!(
+                error,
+                crate::common::MidgeError::InvalidArgument(message)
+                    if message.contains("endpoint")
+            ));
+        }
+    }
+
+    #[test]
+    fn should_parse_empty_provider_response_as_error_given_malformed_http_body_when_listing() {
+        // Arrange
+        let server = spawn_scripted_http_server(vec![String::new()]);
+        let provider = CloudProviderConfig::s3_compatible_static(
+            "bucket",
+            server.endpoint.clone(),
+            "access",
+            "secret",
+        );
+        let backend = build_cloud_backend(&provider).expect("build local S3 provider");
+
+        // Act
+        let result = receive_list_result(backend.as_ref());
+        let requests = server.finish();
+
+        // Assert
+        assert_eq!(requests, 1);
+        assert!(matches!(
+            result,
+            CloudOutcome::Err(CloudError::Protocol(message))
+                if message.contains("empty or incomplete")
+        ));
+    }
+
+    #[test]
+    fn should_reject_invalid_xml_or_json_given_malformed_provider_response_when_parsing() {
+        // Arrange
+        let xml_server = spawn_scripted_http_server(vec![
+            "<ListBucketResult><Contents><Key>sst/a.sst</Contents></ListBucketResult>".to_string(),
+        ]);
+        let xml_provider = CloudProviderConfig::s3_compatible_static(
+            "bucket",
+            xml_server.endpoint.clone(),
+            "access",
+            "secret",
+        );
+        let xml_backend = build_cloud_backend(&xml_provider).expect("build local S3 provider");
+
+        let json_server = spawn_scripted_http_server(vec!["{\"items\":[}".to_string()]);
+        let json_provider = CloudProviderConfig::gcs_bearer_token("bucket", "token")
+            .with_endpoint(json_server.endpoint.clone())
+            .expect("GCS supports endpoint overrides");
+        let json_backend = build_cloud_backend(&json_provider).expect("build local GCS provider");
+
+        // Act
+        let xml_result = receive_list_result(xml_backend.as_ref());
+        let json_result = receive_list_result(json_backend.as_ref());
+        let xml_requests = xml_server.finish();
+        let json_requests = json_server.finish();
+
+        // Assert
+        assert_eq!((xml_requests, json_requests), (1, 1));
+        assert!(matches!(
+            xml_result,
+            CloudOutcome::Err(CloudError::Protocol(message))
+                if message.contains("closes Contents while Key is open")
+        ));
+        assert!(matches!(
+            json_result,
+            CloudOutcome::Err(CloudError::Protocol(message))
+                if message.contains("GCS list JSON parse")
+        ));
+    }
 }
 
 #[cfg(not(feature = "cloud-common"))]

@@ -56,6 +56,10 @@ cargo check --workspace --all-targets --no-default-features --features cloud-gcp
 cargo check --workspace --all-targets --no-default-features --features cloud-oci
 ```
 
+The `cloud-oci` command is compile-only verification of the generic
+S3-compatible alias. It does not qualify OCI wire behavior, conditional writes,
+or provider error responses; see `docs/operations/cloud-setup.md`.
+
 The scheduled fuzz workflow builds every registered target and runs bounded
 smokes. Local smoke commands should use the same time and per-input bounds.
 

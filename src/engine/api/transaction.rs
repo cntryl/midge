@@ -185,6 +185,24 @@ enum SourceAdvance {
     Both,
 }
 
+impl SourceAdvance {
+    const fn include_snapshot(self) -> Self {
+        match self {
+            Self::None => Self::Snapshot,
+            Self::Intent => Self::Both,
+            Self::Snapshot | Self::Both => self,
+        }
+    }
+
+    const fn include_intent(self) -> Self {
+        match self {
+            Self::None => Self::Intent,
+            Self::Snapshot => Self::Both,
+            Self::Intent | Self::Both => self,
+        }
+    }
+}
+
 struct TransactionScan<'a> {
     snapshot: SnapshotScan,
     intents: IntentKeyScan,
@@ -303,10 +321,7 @@ impl<'a> TransactionScan<'a> {
                     .take()
                     .and_then(Result::ok)
                     .map(|(_, value)| value);
-                self.pending_advance = match self.pending_advance {
-                    SourceAdvance::None | SourceAdvance::Intent => SourceAdvance::Snapshot,
-                    SourceAdvance::Snapshot | SourceAdvance::Both => SourceAdvance::Both,
-                };
+                self.pending_advance = self.pending_advance.include_snapshot();
             }
             if self
                 .intent_head
@@ -315,10 +330,7 @@ impl<'a> TransactionScan<'a> {
                 .is_some_and(|candidate| candidate == &key)
             {
                 self.intent_head = None;
-                self.pending_advance = match self.pending_advance {
-                    SourceAdvance::None | SourceAdvance::Snapshot => SourceAdvance::Intent,
-                    SourceAdvance::Intent | SourceAdvance::Both => SourceAdvance::Both,
-                };
+                self.pending_advance = self.pending_advance.include_intent();
             }
 
             let value = match self.write_set.latest_for_key(&key)? {

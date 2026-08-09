@@ -434,4 +434,38 @@ mod tests {
             .expect_err("directory sync failure must be returned")
             .contains("injected directory sync failure"));
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn should_reject_rename_through_symlinked_parent_given_staging_filesystem_when_renaming() {
+        // Arrange
+        let root = tempfile::tempdir().expect("create rooted filesystem directory");
+        let outside = tempfile::tempdir().expect("create outside directory");
+        std::fs::write(outside.path().join("manifest.json"), b"outside-original")
+            .expect("seed outside target");
+        std::os::unix::fs::symlink(outside.path(), root.path().join("linked"))
+            .expect("create symlinked target parent");
+        let fs: Arc<dyn Fs> =
+            Arc::new(crate::io::RealFs::new(root.path()).expect("create rooted real filesystem"));
+
+        // Act
+        let result = stage_bytes(
+            &fs,
+            &FsPath::new("manifest.json.tmp"),
+            &FsPath::new("linked/manifest.json"),
+            b"replacement",
+            |message| message,
+        );
+
+        // Assert
+        assert!(result
+            .expect_err("symlinked rename parent must be rejected")
+            .contains("symlink"));
+        assert_eq!(
+            std::fs::read(outside.path().join("manifest.json"))
+                .expect("read retained outside target"),
+            b"outside-original"
+        );
+        assert!(!root.path().join("manifest.json.tmp").exists());
+    }
 }

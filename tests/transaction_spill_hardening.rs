@@ -192,6 +192,100 @@ fn should_merge_transaction_intents_when_scanning_after_spill() {
 }
 
 #[test]
+fn should_return_reverse_rows_in_descending_order_given_prefix_and_limit_when_scanning() {
+    // Arrange
+    let temp = TempDir::new().expect("temp dir");
+    let mut engine = open_local(temp.path(), 8 * 1024);
+    let cf = default_cf(&engine);
+    let mut tx = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .expect("begin scanning transaction");
+    tx.put(b"scan:a".to_vec(), b"a".to_vec(), None)
+        .expect("put scan a");
+    tx.put(b"scan:b".to_vec(), b"b".to_vec(), None)
+        .expect("put scan b");
+    fill_transaction(&mut tx, "outside-prefix", 4, 8 * 1024);
+    tx.put(b"scan:c".to_vec(), b"c".to_vec(), None)
+        .expect("put scan c");
+    tx.put(b"scan:d".to_vec(), b"d".to_vec(), None)
+        .expect("put scan d");
+    let had_spills = !spill_files(temp.path()).is_empty();
+
+    // Act
+    let mut scan = tx
+        .scan(
+            &Query::new()
+                .prefix(Bytes::from_static(b"scan:"))
+                .reverse()
+                .limit(3),
+        )
+        .expect("reverse prefix scan");
+    let mut rows = Vec::new();
+    for row in scan.by_ref() {
+        rows.push(row.expect("reverse scan row"));
+    }
+
+    // Assert
+    assert!(had_spills, "reverse scan must merge a physical spill run");
+    assert!(scan.exhausted());
+    assert!(scan.next().is_none());
+    assert_eq!(
+        rows,
+        vec![
+            (Bytes::from_static(b"scan:d"), Bytes::from_static(b"d")),
+            (Bytes::from_static(b"scan:c"), Bytes::from_static(b"c")),
+            (Bytes::from_static(b"scan:b"), Bytes::from_static(b"b")),
+        ]
+    );
+    drop(scan);
+    tx.rollback().expect("rollback scanning transaction");
+    engine
+        .shutdown(spill_shutdown_timeout())
+        .expect("shutdown engine");
+}
+
+#[test]
+fn should_preserve_transaction_atomicity_given_spill_run_read_failure_when_committing() {
+    // Arrange
+    let temp = TempDir::new().expect("temp dir");
+    let mut engine = open_local(temp.path(), 8 * 1024);
+    let cf = default_cf(&engine);
+    let mut tx = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .expect("begin spilled transaction");
+    fill_transaction(&mut tx, "atomic", 6, 8 * 1024);
+    let data_run = spill_files(temp.path())
+        .into_iter()
+        .find(|path| path.extension().is_some_and(|extension| extension == "run"))
+        .expect("transaction must create a data run");
+    fs::remove_file(&data_run).expect("remove spill data run");
+
+    // Act
+    let result = tx.commit(WriteOptions::sync());
+    let read = engine
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+        .expect("begin read after failed commit");
+
+    // Assert
+    assert!(matches!(
+        result,
+        Err(MidgeError::Io(_) | MidgeError::Corruption(_))
+    ));
+    for index in 0..6 {
+        assert_eq!(
+            read.get(format!("atomic-{index:03}").as_bytes())
+                .expect("read key after failed commit"),
+            None,
+            "spill read failure must not partially publish transaction key {index}"
+        );
+    }
+    drop(read);
+    engine
+        .shutdown(spill_shutdown_timeout())
+        .expect("shutdown engine");
+}
+
+#[test]
 fn should_preserve_put_delete_insert_ordinals_across_spill_runs() {
     // Arrange
     let temp = TempDir::new().expect("temp dir");

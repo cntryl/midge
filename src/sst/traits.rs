@@ -389,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn should_seek_to_first_key_at_or_after_bound_when_reading() {
+    fn should_apply_bounded_range_given_mock_reader() {
         // Arrange
         let mut reader = MockSstReader::new();
         reader.insert(b"a".to_vec(), b"val_a".to_vec());
@@ -409,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn should_return_empty_scan_given_start_bound_after_all_keys_when_reading() {
+    fn should_return_suffix_given_inclusive_start_bound_when_using_mock_reader() {
         // Arrange
         let mut reader = MockSstReader::new();
         reader.insert(b"apple".to_vec(), b"v1".to_vec());
@@ -427,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn should_return_empty_scan_given_end_bound_before_all_keys_when_reading() {
+    fn should_return_prefix_given_exclusive_end_bound_when_using_mock_reader() {
         // Arrange
         let mut reader = MockSstReader::new();
         reader.insert(b"apple".to_vec(), b"v1".to_vec());

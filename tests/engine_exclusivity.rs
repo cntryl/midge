@@ -257,7 +257,7 @@ fn should_work_with_in_memory_storage_when_unique_paths() {
 }
 
 #[test]
-fn should_release_primary_lease_given_shutdown_timeout_when_shutdown_completes() {
+fn should_release_primary_lease_given_clean_shutdown_when_shutdown_completes() {
     // Arrange
     let db_path = temp_db_path();
 

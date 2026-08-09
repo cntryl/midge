@@ -1,8 +1,11 @@
 use crate::common::{MidgeError, MidgeResult};
+use crate::io::{staging, Fs, FsError, FsPath, RealFs};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub const CURRENT_FORMAT_VERSION: u32 = 3;
 const FORMAT_FILE: &str = "FORMAT";
+const FORMAT_FILE_TEMP: &str = "FORMAT.tmp";
 const FORMAT_PREFIX: &str = "midge-format-version=";
 
 pub fn format_marker_path(db_path: &Path) -> PathBuf {
@@ -25,9 +28,19 @@ pub fn ensure_or_create_format_marker(db_path: &Path) -> MidgeResult<u32> {
         )));
     }
 
-    std::fs::write(
-        &marker_path,
-        format!("{FORMAT_PREFIX}{CURRENT_FORMAT_VERSION}\n"),
+    let fs: Arc<dyn Fs> = Arc::new(RealFs::new(db_path)?);
+    staging::stage_bytes_with_hook(
+        &fs,
+        &FsPath::new(FORMAT_FILE_TEMP),
+        &FsPath::new(FORMAT_FILE),
+        format!("{FORMAT_PREFIX}{CURRENT_FORMAT_VERSION}\n").as_bytes(),
+        || {
+            crate::failpoints::fail_point!("midge::format::before_publish", |_| Err(FsError::Io(
+                "failpoint: FORMAT publication failed".to_string()
+            )));
+            Ok(())
+        },
+        FsError::Io,
     )?;
     Ok(CURRENT_FORMAT_VERSION)
 }
@@ -126,7 +139,42 @@ mod tests {
 
         // Assert
         assert_eq!(version, CURRENT_FORMAT_VERSION);
-        assert!(format_marker_path(temp_dir.path()).exists());
+        assert_eq!(
+            std::fs::read_to_string(format_marker_path(temp_dir.path()))
+                .expect("read published format marker"),
+            format!("{FORMAT_PREFIX}{CURRENT_FORMAT_VERSION}\n")
+        );
+        assert!(!temp_dir.path().join(FORMAT_FILE_TEMP).exists());
+    }
+
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn should_clean_failed_format_publication_given_configured_failpoint_when_opening() {
+        // Arrange
+        let _test_guard = crate::failpoints::test_failpoint_guard();
+        let scenario = fail::FailScenario::setup();
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        fail::cfg("midge::format::before_publish", "return")
+            .expect("configure FORMAT publication failure");
+
+        // Act
+        let error = ensure_or_create_format_marker(temp_dir.path())
+            .expect_err("injected publication failure must be visible");
+        let marker_existed_after_failure = format_marker_path(temp_dir.path()).exists();
+        let temp_existed_after_failure = temp_dir.path().join(FORMAT_FILE_TEMP).exists();
+        fail::remove("midge::format::before_publish");
+        let retry = ensure_or_create_format_marker(temp_dir.path());
+        scenario.teardown();
+
+        // Assert
+        assert!(matches!(error, MidgeError::Io(_)));
+        assert!(!marker_existed_after_failure);
+        assert!(!temp_existed_after_failure);
+        retry.expect("retry after pre-publish failure should create FORMAT");
+        assert_eq!(
+            validate_format_marker(temp_dir.path()).expect("validate retried FORMAT"),
+            CURRENT_FORMAT_VERSION
+        );
     }
 
     #[test]
@@ -194,17 +242,19 @@ mod tests {
     fn should_reject_open_given_invalid_format_marker_when_starting() {
         // Arrange
         let temp_dir = tempfile::tempdir().expect("temp dir");
-        std::fs::write(
-            format_marker_path(temp_dir.path()),
-            format!("{}{}\n", FORMAT_PREFIX, CURRENT_FORMAT_VERSION - 1),
-        )
-        .expect("write previous format marker");
+        std::fs::write(format_marker_path(temp_dir.path()), "not-a-format-marker\n")
+            .expect("write malformed format marker");
 
         // Act
-        let error = validate_format_marker(temp_dir.path()).expect_err("previous version");
+        let error = validate_format_marker(temp_dir.path()).expect_err("malformed marker");
 
         // Assert
-        assert!(matches!(error, MidgeError::CompatibilityError(_)));
+        assert!(matches!(
+            error,
+            MidgeError::CompatibilityError(message)
+                if message.contains("invalid FORMAT marker")
+                    && message.contains("expected 'midge-format-version=<version>'")
+        ));
     }
 
     #[cfg(unix)]

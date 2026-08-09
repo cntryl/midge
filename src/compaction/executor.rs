@@ -617,7 +617,7 @@ mod tests {
     }
 
     #[test]
-    fn should_preserve_tombstone_visibility_given_overlapping_ssts_when_scanning() {
+    fn should_collect_tombstones_given_stateful_reader_input() {
         use crate::sst::traits::{SstReader, SstStateReader};
 
         // Arrange

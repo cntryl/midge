@@ -274,18 +274,6 @@ mod tests {
     }
 
     #[test]
-    fn should_replay_intent_log_idempotently_given_duplicate_publish_intents_when_reopening() {
-        // Arrange
-        // Intent persistence is staged atomically, so reopening the same
-        // durable log must produce the same recovery input on every replay.
-        // Act
-        should_roundtrip_intent_log();
-        // Assert
-        // The delegated regression checks the durable file, staging cleanup,
-        // and exact recovered entry.
-    }
-
-    #[test]
     fn should_reject_unsafe_sst_name_before_intent_log_is_persisted() {
         // Arrange
         let test_dir = create_test_dir();

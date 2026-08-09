@@ -134,9 +134,10 @@ fn should_replay_wal_until_manifest_sequence_given_manifest_fsynced_when_recover
                 let tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadOnly)
                     .expect("begin_tx");
-                assert!(
-                    tx.get(key.as_bytes()).expect("get").is_some(),
-                    "mode: {mode}"
+                assert_eq!(
+                    tx.get(key.as_bytes()).expect("get").as_deref(),
+                    Some(b"value".as_slice()),
+                    "mode: {mode}; reopened WAL value must match the committed write"
                 );
             }
         }
@@ -273,9 +274,10 @@ fn should_preserve_data_visibility_when_reopening_after_successful_flush_and_cle
                 let tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadOnly)
                     .expect("begin_tx");
-                assert!(
-                    tx.get(key.as_bytes()).expect("get").is_some(),
-                    "mode: {mode}"
+                assert_eq!(
+                    tx.get(key.as_bytes()).expect("get").as_deref(),
+                    Some(b"value".as_slice()),
+                    "mode: {mode}; reopened value must match the flushed write"
                 );
             }
         }
@@ -536,9 +538,10 @@ fn should_preserve_updated_values_when_reopening_after_multiple_flushes() {
                 let tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadOnly)
                     .expect("begin_tx");
-                assert!(
-                    tx.get(key.as_bytes()).expect("get").is_some(),
-                    "mode: {mode}"
+                assert_eq!(
+                    tx.get(key.as_bytes()).expect("get").as_deref(),
+                    Some(b"new_value".as_slice()),
+                    "mode: {mode}; reopened value must be the latest flushed update"
                 );
             }
         }

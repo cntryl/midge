@@ -214,19 +214,26 @@ impl LeaseHeartbeat {
         let renewal_validity = validity.as_ref().map(Arc::clone);
         let renewal_loss_notified = Arc::clone(&self.loss_notified);
         let renewal_loss_hook = self.loss_hook.as_ref().map(Arc::clone);
-        let handle = thread::Builder::new()
-            .name("midge-lease-renewal".to_string())
-            .spawn(move || {
-                run_renewal_worker(
-                    lease.as_ref(),
-                    renewal_validity.as_deref(),
-                    &running,
-                    &healthy,
-                    ttl,
-                    &renewal_loss_notified,
-                    renewal_loss_hook.as_deref(),
-                );
-            });
+        let handle =
+            if crate::failpoints::is_active("midge::lease::inject_renewal_thread_spawn_failure") {
+                Err(std::io::Error::other(
+                    "failpoint: lease renewal thread spawn failed",
+                ))
+            } else {
+                thread::Builder::new()
+                    .name("midge-lease-renewal".to_string())
+                    .spawn(move || {
+                        run_renewal_worker(
+                            lease.as_ref(),
+                            renewal_validity.as_deref(),
+                            &running,
+                            &healthy,
+                            ttl,
+                            &renewal_loss_notified,
+                            renewal_loss_hook.as_deref(),
+                        );
+                    })
+            };
 
         match handle {
             Ok(h) => {
@@ -627,12 +634,56 @@ mod tests {
 
         // Act
         heartbeat.start();
+        let first_thread = heartbeat
+            .renewal_handle
+            .as_ref()
+            .expect("first start must retain renewal thread")
+            .thread()
+            .id();
         heartbeat.start();
+        let second_thread = heartbeat
+            .renewal_handle
+            .as_ref()
+            .expect("second start must retain renewal thread")
+            .thread()
+            .id();
         heartbeat.stop();
 
         // Assert
+        assert_eq!(
+            second_thread, first_thread,
+            "second start must not replace the live worker"
+        );
         assert!(heartbeat.renewal_handle.is_none());
         assert!(heartbeat.watchdog_handle.is_none());
+    }
+
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn should_report_unhealthy_given_heartbeat_thread_spawn_failure_when_starting() {
+        // Arrange
+        let _test_guard = crate::failpoints::test_failpoint_guard();
+        let scenario = fail::FailScenario::setup();
+        fail::cfg(
+            "midge::lease::inject_renewal_thread_spawn_failure",
+            "return",
+        )
+        .expect("configure renewal spawn failure");
+        let mock = Arc::new(MockLease::new());
+        let mut heartbeat = LeaseHeartbeat::new(mock.clone() as Arc<dyn PrimaryLease>);
+
+        // Act
+        heartbeat.start();
+
+        // Assert
+        assert!(!heartbeat.is_healthy());
+        assert!(heartbeat.spawn_failed);
+        assert!(!heartbeat.running.load(Ordering::Acquire));
+        assert!(heartbeat.renewal_handle.is_none());
+        assert!(heartbeat.watchdog_handle.is_none());
+        assert_eq!(mock.get_renewal_count(), 0);
+        fail::remove("midge::lease::inject_renewal_thread_spawn_failure");
+        scenario.teardown();
     }
 
     #[test]
