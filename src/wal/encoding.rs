@@ -626,10 +626,7 @@ pub fn encode_txn_batch_payload_records(
     );
 
     for (index, record) in records.iter().enumerate() {
-        if matches!(
-            record.op,
-            WalOpKind::TxnBegin | WalOpKind::TxnCommit | WalOpKind::TxnBatch
-        ) {
+        if record.op.is_transaction_marker() {
             return Err(MidgeError::InvalidArgument(
                 "transaction batch cannot contain nested transaction markers".into(),
             ));
@@ -795,10 +792,7 @@ fn decode_txn_batch_record(
     index: usize,
 ) -> MidgeResult<TxnBatchRecord> {
     let op = WalOpKind::from_wire_format(read_u8(input, "op")?)?;
-    if matches!(
-        op,
-        WalOpKind::TxnBegin | WalOpKind::TxnCommit | WalOpKind::TxnBatch
-    ) {
+    if op.is_transaction_marker() {
         return Err(corruption(
             "transaction batch payload cannot contain nested transaction markers",
         ));

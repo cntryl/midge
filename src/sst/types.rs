@@ -19,10 +19,14 @@ impl BlockHandle {
     }
 }
 
-/// Block types in SST file
+/// On-disk block tags encoded in an SST file.
+///
+/// This is intentionally distinct from
+/// [`crate::sst::cache::CacheBlockKind`], which categorizes cache admission
+/// and includes auxiliary filter objects that are not encoded with this tag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub enum BlockType {
+pub enum SstBlockType {
     Data = 0,
     Index = 1,
     MetaIndex = 2,
@@ -32,11 +36,11 @@ pub enum BlockType {
 #[derive(Debug, Clone)]
 pub struct Block {
     pub data: Bytes,
-    pub block_type: BlockType,
+    pub block_type: SstBlockType,
 }
 
 impl Block {
-    pub fn new(data: Bytes, block_type: BlockType) -> Self {
+    pub fn new(data: Bytes, block_type: SstBlockType) -> Self {
         Self { data, block_type }
     }
 }
@@ -726,37 +730,37 @@ mod tests {
         assert_eq!(h1, h2);
     }
 
-    // =========== BlockType Tests ===========
+    // =========== SstBlockType Tests ===========
 
     #[test]
     fn should_block_type_data_has_correct_value() {
         // Assert
-        assert_eq!(BlockType::Data as u8, 0);
+        assert_eq!(SstBlockType::Data as u8, 0);
     }
 
     #[test]
     fn should_block_type_index_has_correct_value() {
         // Assert
-        assert_eq!(BlockType::Index as u8, 1);
+        assert_eq!(SstBlockType::Index as u8, 1);
     }
 
     #[test]
     fn should_block_type_meta_index_has_correct_value() {
         // Assert
-        assert_eq!(BlockType::MetaIndex as u8, 2);
+        assert_eq!(SstBlockType::MetaIndex as u8, 2);
     }
 
     #[test]
     fn should_block_type_equality() {
         // Assert
-        assert_eq!(BlockType::Data, BlockType::Data);
-        assert_eq!(BlockType::Index, BlockType::Index);
+        assert_eq!(SstBlockType::Data, SstBlockType::Data);
+        assert_eq!(SstBlockType::Index, SstBlockType::Index);
     }
 
     #[test]
     fn should_block_type_inequality() {
         // Assert
-        assert_ne!(BlockType::Data, BlockType::Index);
+        assert_ne!(SstBlockType::Data, SstBlockType::Index);
     }
 
     // =========== Block Tests ===========
@@ -767,11 +771,11 @@ mod tests {
         let data = Bytes::from("test_data");
 
         // Act
-        let block = Block::new(data.clone(), BlockType::Data);
+        let block = Block::new(data.clone(), SstBlockType::Data);
 
         // Assert
         assert_eq!(block.data, data);
-        assert_eq!(block.block_type, BlockType::Data);
+        assert_eq!(block.block_type, SstBlockType::Data);
     }
 
     #[test]
@@ -780,7 +784,7 @@ mod tests {
         // (no setup)
 
         // Act
-        let block = Block::new(Bytes::new(), BlockType::Index);
+        let block = Block::new(Bytes::new(), SstBlockType::Index);
 
         // Assert
         assert!(block.data.is_empty());

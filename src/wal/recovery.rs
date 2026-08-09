@@ -7,7 +7,7 @@
 //! 1) Rotated segment files: `{segment_id}.wal` in ascending `segment_id` order
 //! 2) Active file: `wal.log` (if present)
 
-use super::types::{ColumnFamilyId, WalOpKind, WalRecord};
+use super::types::{ColumnFamilyId, WalOpRole, WalRecord};
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::{File, Fs, FsError, FsPath, OpenMode, OpenOptions};
 use crate::sst::SkipListMemtable;
@@ -966,8 +966,8 @@ fn apply_replayed_wal_record<S: BuildHasher>(
 
     ctx.stats.record(record);
 
-    match record.op {
-        WalOpKind::TxnBatch => {
+    match record.op.role() {
+        WalOpRole::TransactionBatch => {
             let payload = record.value.as_ref().ok_or_else(|| {
                 MidgeError::Corruption("transaction batch record missing payload".into())
             })?;
@@ -988,7 +988,7 @@ fn apply_replayed_wal_record<S: BuildHasher>(
                 apply_wal_record_to_memtables(&replay_record, ctx.memtables, ctx.file_apply_ns)?;
             }
         }
-        WalOpKind::TxnBegin => {
+        WalOpRole::TransactionBegin => {
             if let Some(txn_id) = record.txn_id {
                 let key = (record.writer_epoch, txn_id);
                 match ctx.open_txns.entry(key) {
@@ -1004,7 +1004,7 @@ fn apply_replayed_wal_record<S: BuildHasher>(
                 }
             }
         }
-        WalOpKind::TxnCommit => {
+        WalOpRole::TransactionCommit => {
             if let Some(txn_id) = record.txn_id {
                 if let Some(spool) = ctx.open_txns.remove(&(record.writer_epoch, txn_id)) {
                     spool.replay(|buffered| {
@@ -1013,7 +1013,7 @@ fn apply_replayed_wal_record<S: BuildHasher>(
                 }
             }
         }
-        _ => {
+        WalOpRole::ValueWrite | WalOpRole::PointDelete | WalOpRole::RangeDelete => {
             if let Some(txn_id) = record.txn_id {
                 if let Some(spool) = ctx.open_txns.get_mut(&(record.writer_epoch, txn_id)) {
                     spool.append(record)?;
@@ -1074,8 +1074,8 @@ fn apply_record<S: BuildHasher>(
         .entry(record.cf_id)
         .or_insert_with(|| Arc::new(SkipListMemtable::new()));
 
-    match record.op {
-        WalOpKind::Put | WalOpKind::Insert => {
+    match record.op.role() {
+        WalOpRole::ValueWrite => {
             if let Some(value) = &record.value {
                 memtable.put_with_seq(
                     record.key.to_vec(),
@@ -1085,10 +1085,10 @@ fn apply_record<S: BuildHasher>(
                 )?;
             }
         }
-        WalOpKind::Delete => {
+        WalOpRole::PointDelete => {
             memtable.delete_with_seq(record.key.to_vec(), record.seq)?;
         }
-        WalOpKind::DeleteRange => {
+        WalOpRole::RangeDelete => {
             // Apply delete_range to memtable during recovery
             if let Some(end_key) = &record.range_end {
                 memtable.delete_range_with_seq(
@@ -1098,7 +1098,9 @@ fn apply_record<S: BuildHasher>(
                 )?;
             }
         }
-        WalOpKind::TxnBegin | WalOpKind::TxnCommit | WalOpKind::TxnBatch => {
+        WalOpRole::TransactionBegin
+        | WalOpRole::TransactionCommit
+        | WalOpRole::TransactionBatch => {
             // Transaction markers carry no direct memtable mutation.
         }
     }

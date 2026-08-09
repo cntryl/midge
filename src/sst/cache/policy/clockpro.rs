@@ -146,7 +146,7 @@ impl CachePolicy for ClockProPolicy {
         }
     }
 
-    fn pick_victim(&self, exclude_types: &[crate::sst::cache::BlockType]) -> Option<CacheKey> {
+    fn pick_victim(&self, exclude_types: &[crate::sst::cache::CacheBlockKind]) -> Option<CacheKey> {
         // Lock order: slots, key_to_slot, hand, resident_count, hot_count, hot_target
         // This order must be consistent across all methods to prevent deadlocks
         let mut slots = self.slots.lock();

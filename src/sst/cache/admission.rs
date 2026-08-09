@@ -10,7 +10,7 @@ use std::convert::TryFrom;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::sst::cache::{BlockType, CacheKey};
+use crate::sst::cache::{CacheBlockKind, CacheKey};
 
 /// Probabilistic frequency counter for admission control
 ///
@@ -54,9 +54,9 @@ impl AdmissionCounter {
         identity[..8].copy_from_slice(&key.sst_id.to_le_bytes());
         identity[8..16].copy_from_slice(&key.block_offset.to_le_bytes());
         identity[16] = match key.block_type {
-            BlockType::Index => 0,
-            BlockType::Data => 1,
-            BlockType::Filter => 2,
+            CacheBlockKind::Index => 0,
+            CacheBlockKind::Data => 1,
+            CacheBlockKind::Filter => 2,
         };
         identity
     }
@@ -79,11 +79,11 @@ impl AdmissionCounter {
     /// Data blocks are checked by full cache key identity.
     pub fn should_admit(&self, key: &crate::sst::cache::CacheKey) -> bool {
         match key.block_type {
-            BlockType::Index | BlockType::Filter => {
+            CacheBlockKind::Index | CacheBlockKind::Filter => {
                 // Always admit index and filter blocks
                 true
             }
-            BlockType::Data => {
+            CacheBlockKind::Data => {
                 // Data blocks: use the complete block identity so one hot block
                 // does not admit every other block from the same SST.
                 self.estimate(&Self::cache_key_identity(key))

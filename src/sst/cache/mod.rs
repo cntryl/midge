@@ -18,7 +18,7 @@ pub mod policy;
 pub mod shard;
 pub mod value;
 
-pub use key::{BlockType, CacheKey};
+pub use key::{CacheBlockKind, CacheKey};
 pub use metrics::CacheMetrics;
 pub use policy::{CachePolicy, CachePolicyType};
 pub use shard::CacheShard;

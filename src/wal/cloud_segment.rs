@@ -3,7 +3,7 @@
 //! Hybrid storage owns cloud orchestration and deletion policy, but WAL owns
 //! the segment key format and byte-level interpretation of WAL frames.
 
-use super::types::{WalOpKind, WalRecord};
+use super::types::{WalOpKind, WalOpRole, WalRecord};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DataCoverageRecord {
@@ -125,7 +125,7 @@ fn append_data_coverage_records(
     record: &WalRecord,
     data_records: &mut Vec<DataCoverageRecord>,
 ) -> Result<(), String> {
-    if matches!(record.op, WalOpKind::TxnBatch) {
+    if record.op.is_transaction_batch() {
         let payload = record
             .value
             .as_ref()
@@ -170,8 +170,8 @@ fn push_data_coverage_record(
     seq: u64,
     data_records: &mut Vec<DataCoverageRecord>,
 ) -> Result<(), String> {
-    match op {
-        WalOpKind::Put | WalOpKind::Insert | WalOpKind::Delete => {
+    match op.role() {
+        WalOpRole::ValueWrite | WalOpRole::PointDelete => {
             data_records.push(DataCoverageRecord {
                 cf_id,
                 key: key.to_vec(),
@@ -179,7 +179,7 @@ fn push_data_coverage_record(
                 seq,
             });
         }
-        WalOpKind::DeleteRange => {
+        WalOpRole::RangeDelete => {
             let range_end = range_end.ok_or_else(|| {
                 format!("cloud WAL segment '{segment_key}' delete range missing range_end")
             })?;
@@ -190,7 +190,9 @@ fn push_data_coverage_record(
                 seq,
             });
         }
-        WalOpKind::TxnBegin | WalOpKind::TxnCommit | WalOpKind::TxnBatch => {}
+        WalOpRole::TransactionBegin
+        | WalOpRole::TransactionCommit
+        | WalOpRole::TransactionBatch => {}
     }
     Ok(())
 }
