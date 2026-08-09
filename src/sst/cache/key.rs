@@ -13,15 +13,32 @@
 use std::convert::TryFrom;
 use std::hash::{Hash, Hasher};
 
-/// Type of cached block
+/// Cache-policy category for an SST-related object.
+///
+/// This is intentionally distinct from
+/// [`crate::sst::types::SstBlockType`], which describes the on-disk block
+/// tag. A filter is a cacheable auxiliary object, while a meta-index block is
+/// not admitted through this cache-key surface.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub enum BlockType {
+pub enum CacheBlockKind {
     /// Index block (block-first-key index or accelerator)
     Index,
     /// Data block (KV pairs)
     Data,
     /// Filter block (bloom filter)
     Filter,
+}
+
+impl TryFrom<crate::sst::types::SstBlockType> for CacheBlockKind {
+    type Error = crate::sst::types::SstBlockType;
+
+    fn try_from(block_type: crate::sst::types::SstBlockType) -> Result<Self, Self::Error> {
+        match block_type {
+            crate::sst::types::SstBlockType::Data => Ok(Self::Data),
+            crate::sst::types::SstBlockType::Index => Ok(Self::Index),
+            crate::sst::types::SstBlockType::MetaIndex => Err(block_type),
+        }
+    }
 }
 
 /// Unique identifier for a cached block
@@ -35,13 +52,13 @@ pub struct CacheKey {
     /// Block offset in bytes within the SST file
     pub block_offset: u64,
     /// Type of block (determines caching policy)
-    pub block_type: BlockType,
+    pub block_type: CacheBlockKind,
 }
 
 impl CacheKey {
     /// Create a new cache key for a block
     #[must_use]
-    pub fn new(sst_id: u64, block_offset: u64, block_type: BlockType) -> Self {
+    pub fn new(sst_id: u64, block_offset: u64, block_type: CacheBlockKind) -> Self {
         Self {
             sst_id,
             block_offset,
@@ -52,19 +69,19 @@ impl CacheKey {
     /// Create a cache key for a data block
     #[must_use]
     pub fn for_data(sst_id: u64, block_offset: u64) -> Self {
-        Self::new(sst_id, block_offset, BlockType::Data)
+        Self::new(sst_id, block_offset, CacheBlockKind::Data)
     }
 
     /// Create a cache key for an index block
     #[must_use]
     pub fn for_index(sst_id: u64, block_offset: u64) -> Self {
-        Self::new(sst_id, block_offset, BlockType::Index)
+        Self::new(sst_id, block_offset, CacheBlockKind::Index)
     }
 
     /// Create a cache key for a filter block
     #[must_use]
     pub fn for_filter(sst_id: u64, block_offset: u64) -> Self {
-        Self::new(sst_id, block_offset, BlockType::Filter)
+        Self::new(sst_id, block_offset, CacheBlockKind::Filter)
     }
 
     /// Get the shard index for this key (`0..num_shards`)
@@ -91,7 +108,7 @@ mod tests {
         // Assert
         assert_eq!(key.sst_id, 42);
         assert_eq!(key.block_offset, 1024);
-        assert_eq!(key.block_type, BlockType::Data);
+        assert_eq!(key.block_type, CacheBlockKind::Data);
     }
 
     #[test]
@@ -102,7 +119,7 @@ mod tests {
         let key = CacheKey::for_data(1, 100);
 
         // Assert
-        assert_eq!(key.block_type, BlockType::Data);
+        assert_eq!(key.block_type, CacheBlockKind::Data);
     }
 
     #[test]
@@ -113,7 +130,7 @@ mod tests {
         let key = CacheKey::for_index(1, 100);
 
         // Assert
-        assert_eq!(key.block_type, BlockType::Index);
+        assert_eq!(key.block_type, CacheBlockKind::Index);
     }
 
     #[test]
@@ -124,7 +141,25 @@ mod tests {
         let key = CacheKey::for_filter(1, 100);
 
         // Assert
-        assert_eq!(key.block_type, BlockType::Filter);
+        assert_eq!(key.block_type, CacheBlockKind::Filter);
+    }
+
+    #[test]
+    fn should_map_on_disk_block_kinds_when_cache_category_exists() {
+        // Arrange
+        let data = crate::sst::types::SstBlockType::Data;
+        let index = crate::sst::types::SstBlockType::Index;
+        let meta_index = crate::sst::types::SstBlockType::MetaIndex;
+
+        // Act
+        let data_kind = CacheBlockKind::try_from(data);
+        let index_kind = CacheBlockKind::try_from(index);
+        let meta_index_kind = CacheBlockKind::try_from(meta_index);
+
+        // Assert
+        assert_eq!(data_kind, Ok(CacheBlockKind::Data));
+        assert_eq!(index_kind, Ok(CacheBlockKind::Index));
+        assert_eq!(meta_index_kind, Err(meta_index));
     }
 
     #[test]

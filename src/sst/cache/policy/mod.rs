@@ -13,7 +13,7 @@ pub use clockpro::ClockProPolicy;
 pub use lru::LruPolicy;
 pub use tinylfu::TinyLfuPolicy;
 
-use crate::sst::cache::key::{BlockType, CacheKey};
+use crate::sst::cache::key::{CacheBlockKind, CacheKey};
 
 /// Eviction policy trait
 ///
@@ -29,7 +29,7 @@ pub trait CachePolicy: Send + Sync {
     /// Returns None if no suitable victim is found
     ///
     /// **May return stale keys** - caller must validate with cache before evicting
-    fn pick_victim(&self, exclude_types: &[BlockType]) -> Option<CacheKey>;
+    fn pick_victim(&self, exclude_types: &[CacheBlockKind]) -> Option<CacheKey>;
 
     /// Notify policy that a key was successfully evicted
     fn on_remove(&self, key: CacheKey);

@@ -62,7 +62,7 @@ impl CachePolicy for TinyLfuPolicy {
         *frequency = frequency.saturating_add(1);
     }
 
-    fn pick_victim(&self, exclude_types: &[crate::sst::cache::BlockType]) -> Option<CacheKey> {
+    fn pick_victim(&self, exclude_types: &[crate::sst::cache::CacheBlockKind]) -> Option<CacheKey> {
         let mut recent = self.recent.lock();
         let frequencies = self.frequencies.lock();
 

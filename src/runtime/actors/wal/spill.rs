@@ -4,7 +4,7 @@ use super::{TxnSequencePlan, WalActor};
 use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::state::RuntimeState;
 use crate::wal::DurabilityPolicy;
-use crate::wal::{WalOpKind, WalRecord};
+use crate::wal::{types::WalOpRole, WalOpKind, WalRecord};
 use bytes::Bytes;
 use std::time::Instant;
 
@@ -343,8 +343,8 @@ impl WalActor {
                 epoch,
                 commit_time_millis,
             );
-            let apply_op = match record.op {
-                WalOpKind::Put | WalOpKind::Insert => TransactionApplyOp::Put {
+            let apply_op = match record.op.role() {
+                WalOpRole::ValueWrite => TransactionApplyOp::Put {
                     op: record.op,
                     cf_id: record.cf_id,
                     key: record.key,
@@ -354,12 +354,12 @@ impl WalActor {
                     expiration: record.expiration,
                     sequence,
                 },
-                WalOpKind::Delete => TransactionApplyOp::Delete {
+                WalOpRole::PointDelete => TransactionApplyOp::Delete {
                     cf_id: record.cf_id,
                     key: record.key,
                     sequence,
                 },
-                WalOpKind::DeleteRange => TransactionApplyOp::DeleteRange {
+                WalOpRole::RangeDelete => TransactionApplyOp::DeleteRange {
                     cf_id: record.cf_id,
                     start_key: record.key,
                     end_key: record.range_end.ok_or_else(|| {
@@ -369,7 +369,9 @@ impl WalActor {
                     })?,
                     sequence,
                 },
-                WalOpKind::TxnBegin | WalOpKind::TxnCommit | WalOpKind::TxnBatch => {
+                WalOpRole::TransactionBegin
+                | WalOpRole::TransactionCommit
+                | WalOpRole::TransactionBatch => {
                     return Err(MidgeError::Internal(
                         "transaction source produced a marker operation".to_string(),
                     ));

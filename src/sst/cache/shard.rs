@@ -116,12 +116,14 @@ impl CacheShard {
     /// Strategy: Protect index/filter blocks by evicting data blocks first.
     /// Only evict index/filter blocks under severe memory pressure (>2x capacity).
     fn evict_if_needed(&self) {
-        use crate::sst::cache::BlockType;
+        use crate::sst::cache::CacheBlockKind;
 
         let mut made_progress = false;
         while self.is_over_capacity() {
             // Try to evict data blocks first (protect index/filter blocks).
-            if let Some(evicted) = self.try_evict_victim(&[BlockType::Index, BlockType::Filter]) {
+            if let Some(evicted) =
+                self.try_evict_victim(&[CacheBlockKind::Index, CacheBlockKind::Filter])
+            {
                 self.update_metrics_after_eviction(&evicted);
                 made_progress = true;
                 continue;
@@ -163,7 +165,7 @@ impl CacheShard {
     /// Uses retry loop to handle stale keys from concurrent access
     fn try_evict_victim(
         &self,
-        exclude_types: &[crate::sst::cache::BlockType],
+        exclude_types: &[crate::sst::cache::CacheBlockKind],
     ) -> Option<CacheValue> {
         const MAX_RETRIES: usize = 10;
 
@@ -266,7 +268,7 @@ impl CacheShard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sst::cache::key::BlockType;
+    use crate::sst::cache::key::CacheBlockKind;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
@@ -301,7 +303,7 @@ mod tests {
                 .insert(key);
         }
 
-        fn pick_victim(&self, _exclude_types: &[BlockType]) -> Option<CacheKey> {
+        fn pick_victim(&self, _exclude_types: &[CacheBlockKind]) -> Option<CacheKey> {
             self.state.victim_selected.store(true, Ordering::SeqCst);
             let keys = self
                 .state

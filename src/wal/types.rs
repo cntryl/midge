@@ -12,36 +12,77 @@ pub type WalPos = u64;
 /// Column family ID type
 pub type ColumnFamilyId = u32;
 
-/// WAL operation kinds
+/// WAL operation kinds.
+///
+/// Extension rule: add the stable wire discriminant and semantic role here.
+/// Encoding, recovery, cloud coverage, and transaction application consume
+/// [`WalOpRole`] rather than maintaining their own exhaustive operation-kind
+/// matches. This file is the canonical compile-time audit point for new WAL
+/// operations.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[repr(u8)]
 pub enum WalOpKind {
-    Put,
-    Insert,
-    Delete,
+    Put = 0,
+    Insert = 1,
+    Delete = 2,
     /// Delete all keys in range [key, `range_end`)
-    DeleteRange,
+    DeleteRange = 3,
     /// Begin a transaction
-    TxnBegin,
+    TxnBegin = 4,
     /// Commit a transaction
-    TxnCommit,
+    TxnCommit = 5,
     /// Atomic transaction batch encoded in a single physical WAL frame.
-    TxnBatch,
+    TxnBatch = 6,
+}
+
+/// Canonical behavior class used by WAL consumers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WalOpRole {
+    ValueWrite,
+    PointDelete,
+    RangeDelete,
+    TransactionBegin,
+    TransactionCommit,
+    TransactionBatch,
 }
 
 impl WalOpKind {
+    /// Return the canonical behavior class for this operation.
+    #[must_use]
+    pub(crate) const fn role(self) -> WalOpRole {
+        match self {
+            Self::Put | Self::Insert => WalOpRole::ValueWrite,
+            Self::Delete => WalOpRole::PointDelete,
+            Self::DeleteRange => WalOpRole::RangeDelete,
+            Self::TxnBegin => WalOpRole::TransactionBegin,
+            Self::TxnCommit => WalOpRole::TransactionCommit,
+            Self::TxnBatch => WalOpRole::TransactionBatch,
+        }
+    }
+
+    /// Whether the operation controls transaction framing rather than
+    /// directly mutating a column family.
+    #[must_use]
+    pub(crate) const fn is_transaction_marker(self) -> bool {
+        matches!(
+            self.role(),
+            WalOpRole::TransactionBegin
+                | WalOpRole::TransactionCommit
+                | WalOpRole::TransactionBatch
+        )
+    }
+
+    /// Whether the operation contains an encoded transaction batch.
+    #[must_use]
+    pub(crate) const fn is_transaction_batch(self) -> bool {
+        matches!(self.role(), WalOpRole::TransactionBatch)
+    }
+
     /// Convert operation to wire format (TLV encoding).
     #[inline]
     #[must_use]
     pub fn to_wire_format(self) -> u8 {
-        match self {
-            WalOpKind::Put => 0,
-            WalOpKind::Insert => 1,
-            WalOpKind::Delete => 2,
-            WalOpKind::DeleteRange => 3,
-            WalOpKind::TxnBegin => 4,
-            WalOpKind::TxnCommit => 5,
-            WalOpKind::TxnBatch => 6,
-        }
+        self as u8
     }
 
     /// Parse operation from wire format (TLV encoding).
@@ -339,6 +380,28 @@ mod tests {
         assert_eq!(txn_begin, WalOpKind::TxnBegin);
         assert_eq!(txn_commit, WalOpKind::TxnCommit);
         assert_eq!(txn_batch, WalOpKind::TxnBatch);
+    }
+
+    #[test]
+    fn should_classify_every_wal_operation_at_canonical_dispatch_boundary() {
+        // Arrange
+        let operations = [
+            (WalOpKind::Put, WalOpRole::ValueWrite),
+            (WalOpKind::Insert, WalOpRole::ValueWrite),
+            (WalOpKind::Delete, WalOpRole::PointDelete),
+            (WalOpKind::DeleteRange, WalOpRole::RangeDelete),
+            (WalOpKind::TxnBegin, WalOpRole::TransactionBegin),
+            (WalOpKind::TxnCommit, WalOpRole::TransactionCommit),
+            (WalOpKind::TxnBatch, WalOpRole::TransactionBatch),
+        ];
+
+        // Act
+        let classifications = operations.map(|(operation, expected)| (operation.role(), expected));
+
+        // Assert
+        assert!(classifications
+            .into_iter()
+            .all(|(actual, expected)| actual == expected));
     }
 
     #[test]

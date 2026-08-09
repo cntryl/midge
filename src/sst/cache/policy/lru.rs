@@ -79,7 +79,7 @@ impl CachePolicy for LruPolicy {
     ///
     /// Finds the key with the smallest generation (least recently used)
     /// among non-excluded types.
-    fn pick_victim(&self, exclude_types: &[crate::sst::cache::BlockType]) -> Option<CacheKey> {
+    fn pick_victim(&self, exclude_types: &[crate::sst::cache::CacheBlockKind]) -> Option<CacheKey> {
         loop {
             let candidate = self
                 .generations
