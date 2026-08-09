@@ -22,15 +22,17 @@ impl EventLoop {
         let now = std::time::Instant::now();
 
         let eligible_segments: Vec<(u64, u64)> = self
-            .cloud_acked_wal_segments
+            .cloud_wal
+            .acked_segments
             .iter()
             .filter(|(segment_id, max_sequence)| {
                 **segment_id < recovery_floor_segment
                     && **max_sequence <= self.state.wal.cloud_durable_seq
                     && **max_sequence <= persisted_sequence
-                    && !self.cloud_wal_prune_inflight.contains(segment_id)
+                    && !self.cloud_wal.prune_inflight.contains(segment_id)
                     && self
-                        .cloud_wal_prune_retries
+                        .cloud_wal
+                        .prune_retries
                         .get(segment_id)
                         .is_none_or(|(_, retry_at)| *retry_at <= now)
             })
@@ -78,14 +80,14 @@ impl EventLoop {
         let prune_guard = CloudWalPruneGuard::new(self.state.manifest.clone(), metadata_guard);
 
         for (segment_id, max_sequence) in eligible_segments {
-            self.cloud_wal_prune_inflight.insert(segment_id);
+            self.cloud_wal.prune_inflight.insert(segment_id);
             if let Err(error) = storage.prune_cloud_wal_segment(
                 segment_id,
                 max_sequence,
                 prune_guard.clone(),
                 self.state.writer_epoch,
             ) {
-                self.cloud_wal_prune_inflight.remove(&segment_id);
+                self.cloud_wal.prune_inflight.remove(&segment_id);
                 if error.contains("at capacity") {
                     tracing::debug!(
                         segment_id,

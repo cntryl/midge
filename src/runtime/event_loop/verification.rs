@@ -6,7 +6,7 @@ impl EventLoop {
         &mut self,
         msg: RuntimeMsg,
     ) -> Option<RuntimeMsg> {
-        if !self.manifest_publication_active {
+        if !self.publication_gate.active {
             return Some(msg);
         }
         let mutating = matches!(
@@ -27,7 +27,7 @@ impl EventLoop {
                     | RuntimeMsg::RunCompaction { .. }
             );
         if mutating {
-            self.publication_deferred_messages.push_back(msg);
+            self.publication_gate.defer(msg);
             None
         } else {
             Some(msg)
@@ -38,7 +38,7 @@ impl EventLoop {
         &mut self,
         msg: RuntimeMsg,
     ) -> Option<RuntimeMsg> {
-        if self.verification_barrier_token.is_none() {
+        if self.verification_barrier.token.is_none() {
             return Some(msg);
         }
 

@@ -433,6 +433,51 @@ pub trait LeaderStore: Send + Sync {
     /// Read the current leader record from storage (non-locking).
     fn read_current(&self) -> Result<Option<LeaderRecord>, LeaseError>;
 
+    /// Renew backend-specific leadership validity for the current holder.
+    ///
+    /// Stores that do not manage renewable leases retain the default
+    /// fail-closed implementation.
+    fn renew_leadership(&self, _holder_id: &str, _expected_epoch: u64) -> Result<(), LeaseError> {
+        Err(LeaseError::RenewalFailed(
+            "leader store does not support lease renewal".to_string(),
+        ))
+    }
+
+    /// Release leadership only if the supplied holder and epoch still own it.
+    fn release_leadership(&self, _holder_id: &str, _expected_epoch: u64) -> Result<(), LeaseError> {
+        Err(LeaseError::Internal(
+            "leader store does not support lease release".to_string(),
+        ))
+    }
+
+    /// Apply the lease takeover clock-skew allowance used by this store.
+    fn set_clock_skew_tolerance(&self, _tolerance: Duration) -> Result<(), LeaseError> {
+        Err(LeaseError::Internal(
+            "leader store does not support clock-skew configuration".to_string(),
+        ))
+    }
+
+    #[cfg(test)]
+    fn read_test_coordination_document(&self) -> Result<Option<String>, LeaseError> {
+        Err(LeaseError::Internal(
+            "leader store has no test coordination document".to_string(),
+        ))
+    }
+
+    #[cfg(test)]
+    fn write_test_coordination_document(&self, _content: &str) -> Result<(), LeaseError> {
+        Err(LeaseError::Internal(
+            "leader store has no test coordination document".to_string(),
+        ))
+    }
+
+    #[cfg(test)]
+    fn remove_test_coordination_document(&self) -> Result<(), LeaseError> {
+        Err(LeaseError::Internal(
+            "leader store has no test coordination document".to_string(),
+        ))
+    }
+
     /// Convenience: read current record and verify the epoch matches.
     fn validate_epoch(&self, expected_epoch: u64) -> Result<(), LeaseError> {
         match self.read_current()? {

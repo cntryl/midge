@@ -167,7 +167,7 @@ impl EventLoop {
             );
             return;
         };
-        self.manifest_publication_active = true;
+        self.publication_gate.active = true;
         let task = FlushPublishTask {
             build,
             sst_name,
@@ -182,7 +182,7 @@ impl EventLoop {
             leader_store: self.leader_store.clone(),
         };
         if let Err(error) = self.flush_actor.submit_publish(task) {
-            self.manifest_publication_active = false;
+            self.publication_gate.active = false;
             self.fail_flush_pipeline(flush.flush_id, None, &error, true);
         }
     }
@@ -320,7 +320,7 @@ impl EventLoop {
             .flush_metrics
             .publish_ns_max
             .max(completion.publish_ns);
-        self.manifest_publication_active = false;
+        self.publication_gate.active = false;
 
         if let Err(error) = self.validate_flush_completion(completion.identity) {
             self.settle_stale_publish_reservation(&completion);
@@ -572,7 +572,7 @@ impl EventLoop {
         }
         self.flush_actor.finish_pipeline();
         if publication_phase {
-            self.manifest_publication_active = false;
+            self.publication_gate.active = false;
         }
         let retry_after = self.state.mark_immutable_flush_failed(flush_id);
         tracing::warn!(flush_id, ?retry_after, %error, "flush pipeline failed; immutable retained");
@@ -585,7 +585,7 @@ impl EventLoop {
 
     fn fail_deferred_column_family_drops(&mut self, cf_id: u32, error: &crate::common::MidgeError) {
         let mut retained = std::collections::VecDeque::new();
-        while let Some(message) = self.publication_deferred_messages.pop_front() {
+        while let Some(message) = self.publication_gate.deferred_messages.pop_front() {
             match message {
                 crate::runtime::RuntimeMsg::ManifestDropColumnFamily {
                     request_id,
@@ -601,7 +601,7 @@ impl EventLoop {
                 other => retained.push_back(other),
             }
         }
-        self.publication_deferred_messages = retained;
+        self.publication_gate.deferred_messages = retained;
     }
 
     pub(super) fn flush_frontier_satisfied(&self, cf_id: u32, frontier: u64) -> bool {

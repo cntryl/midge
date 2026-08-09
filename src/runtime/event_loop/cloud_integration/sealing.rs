@@ -32,7 +32,7 @@ impl EventLoop {
         if self.state.is_memory_mode() || self.state.wal.pending_writes == 0 {
             return Ok(None);
         }
-        if !recovered_active && !self.cloud_wal_upload_backlog.is_empty() {
+        if !recovered_active && !self.cloud_wal.upload_backlog.is_empty() {
             return Err(crate::common::MidgeError::WriteStall(
                 "older CloudAsync WAL segments are still awaiting upload admission".to_string(),
             ));
@@ -71,7 +71,8 @@ impl EventLoop {
             .rotate_from_to(segment_id, self.state.wal.current_segment_id)?;
         self.durability
             .record_cloud_segment_inflight(segment_id, max_sequence);
-        self.cloud_wal_upload_backlog
+        self.cloud_wal
+            .upload_backlog
             .insert(segment_id, max_sequence);
         self.wal_actor.complete_cloud_upload_seal(&mut self.state);
         self.durability.record_cloud_flush();
@@ -99,7 +100,7 @@ impl EventLoop {
 
     fn try_drain_cloud_wal_upload_backlog(&mut self) -> crate::common::MidgeResult<()> {
         let Some(storage) = self.hybrid_storage.clone() else {
-            if self.cloud_wal_upload_backlog.is_empty() {
+            if self.cloud_wal.upload_backlog.is_empty() {
                 return Ok(());
             }
             return Err(crate::common::MidgeError::Internal(
@@ -109,7 +110,7 @@ impl EventLoop {
 
         loop {
             let Some((&segment_id, &max_sequence)) =
-                self.cloud_wal_upload_backlog.first_key_value()
+                self.cloud_wal.upload_backlog.first_key_value()
             else {
                 return Ok(());
             };
@@ -124,7 +125,7 @@ impl EventLoop {
                 Err(crate::common::MidgeError::WriteStall(_)) => return Ok(()),
                 Err(error) => return Err(error),
             };
-            self.cloud_wal_upload_backlog.remove(&segment_id);
+            self.cloud_wal.upload_backlog.remove(&segment_id);
             if !self.state.cloud.pending_uploads.contains(&resource) {
                 self.state.cloud.pending_uploads.push(resource);
             }

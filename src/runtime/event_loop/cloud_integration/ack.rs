@@ -88,16 +88,17 @@ impl EventLoop {
         self.state.cloud.pending_uploads.retain(|item| {
             crate::wal::parse_segment_id(item).is_none_or(|pending| pending != segment_id)
         });
-        self.cloud_acked_wal_segments
+        self.cloud_wal
+            .acked_segments
             .insert(segment_id, max_sequence);
 
         let ready_segments = match self
             .durability
-            .take_contiguous_acked_cloud_segments(&self.cloud_acked_wal_segments)
+            .take_contiguous_acked_cloud_segments(&self.cloud_wal.acked_segments)
         {
             Ok(ready_segments) => ready_segments,
             Err(error) => {
-                self.cloud_acked_wal_segments.remove(&segment_id);
+                self.cloud_wal.acked_segments.remove(&segment_id);
                 self.handle_cloud_upload_failure(segment_id, &error);
                 return;
             }
@@ -146,11 +147,11 @@ impl EventLoop {
         segment_id: u64,
         result: crate::storage::StorageOutcome<()>,
     ) {
-        self.cloud_wal_prune_inflight.remove(&segment_id);
+        self.cloud_wal.prune_inflight.remove(&segment_id);
         match result {
             crate::storage::StorageOutcome::Ok(()) => {
-                self.cloud_wal_prune_retries.remove(&segment_id);
-                self.cloud_acked_wal_segments.remove(&segment_id);
+                self.cloud_wal.prune_retries.remove(&segment_id);
+                self.cloud_wal.acked_segments.remove(&segment_id);
                 self.next_background_compaction_check = std::time::Instant::now();
                 tracing::debug!(segment_id, "Pruned cloud-covered remote WAL segment");
             }
@@ -159,8 +160,8 @@ impl EventLoop {
                 // deletion is attempted. A failed delete is therefore a safe
                 // storage leak, not a recovery obligation that may be retried
                 // through a now-absent catalog entry.
-                self.cloud_wal_prune_retries.remove(&segment_id);
-                self.cloud_acked_wal_segments.remove(&segment_id);
+                self.cloud_wal.prune_retries.remove(&segment_id);
+                self.cloud_wal.acked_segments.remove(&segment_id);
                 self.state.mark_persistence_anomaly();
                 tracing::warn!(
                     segment_id,
@@ -196,7 +197,7 @@ impl EventLoop {
             crate::wal::parse_segment_id(item).is_none_or(|pending| pending != segment_id)
         });
         self.state.mark_persistence_anomaly();
-        self.cloud_acked_wal_segments.remove(&segment_id);
+        self.cloud_wal.acked_segments.remove(&segment_id);
 
         // Attempt to recover the failed segment's max_sequence so we can
         // invalidate idempotency allocations that were part of it. Keep the

@@ -14,12 +14,12 @@ impl EventLoop {
                     error = %error,
                     "Cloud metadata mismatch blocked WAL prune; attempting metadata mirror before retry"
                 );
-                self.cloud_metadata_cleanup_proofs.clear();
+                self.cloud_wal.metadata_cleanup_proofs.clear();
                 self.mirror_metadata_after_local_commit("cloud WAL prune metadata convergence")
                     .map_err(|mirror_error| {
                         format!("{error}; metadata mirror before WAL prune failed: {mirror_error}")
                     })?;
-                self.cloud_metadata_cleanup_proofs.clear();
+                self.cloud_wal.metadata_cleanup_proofs.clear();
                 self.cloud_metadata_prune_guard_for_wal_cleanup()
                     .map_err(|retry_error| {
                         format!(
@@ -65,7 +65,7 @@ impl EventLoop {
             let key = crate::storage::cloud::cloud_metadata_key(file_name);
             let local_len = local_data.len() as u64;
             let local_crc32c = crc32c::crc32c(&local_data);
-            if let Some(proof) = self.cloud_metadata_cleanup_proofs.get(file_name) {
+            if let Some(proof) = self.cloud_wal.metadata_cleanup_proofs.get(file_name) {
                 if proof.len == local_len && proof.crc32c == local_crc32c {
                     let actual = crate::storage::cloud::blocking_cloud_object_proof(cloud, &key)?
                         .ok_or_else(|| {
@@ -92,7 +92,7 @@ impl EventLoop {
                     ));
                 }
             }
-            self.cloud_metadata_cleanup_proofs.remove(file_name);
+            self.cloud_wal.metadata_cleanup_proofs.remove(file_name);
 
             let cloud_proof = crate::storage::cloud::blocking_cloud_object_proof(cloud, &key)?
                 .ok_or_else(|| format!("cloud metadata '{key}' is missing"))?;
@@ -101,7 +101,7 @@ impl EventLoop {
                     "cloud metadata '{key}' does not match committed local metadata"
                 ));
             }
-            self.cloud_metadata_cleanup_proofs.insert(
+            self.cloud_wal.metadata_cleanup_proofs.insert(
                 file_name.to_string(),
                 super::super::MetadataCleanupProof {
                     len: local_len,

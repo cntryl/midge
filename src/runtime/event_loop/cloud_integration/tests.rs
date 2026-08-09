@@ -669,7 +669,7 @@ fn publish_remote_wal_bytes_for_test(
 fn seed_cloud_prune_candidate(el: &mut EventLoop, segment_id: u64, max_sequence: u64) {
     el.state.wal.current_segment_id = segment_id + 1;
     el.state.manifest.last_persisted_sequence = max_sequence;
-    el.cloud_acked_wal_segments.insert(segment_id, max_sequence);
+    el.cloud_wal.acked_segments.insert(segment_id, max_sequence);
     let record = crate::wal::WalRecord::new(
         crate::wal::WalOpKind::Put,
         Bytes::from_static(b"prune-candidate"),
@@ -691,7 +691,7 @@ fn seed_cloud_prune_candidate_with_records(
 ) {
     el.state.wal.current_segment_id = segment_id + 1;
     el.state.manifest.last_persisted_sequence = max_sequence;
-    el.cloud_acked_wal_segments.insert(segment_id, max_sequence);
+    el.cloud_wal.acked_segments.insert(segment_id, max_sequence);
 
     let mut bytes = Vec::new();
     for mut record in records {
@@ -814,7 +814,7 @@ fn drain_prune_completion_for_test(el: &mut EventLoop) {
     let deadline = Instant::now() + Duration::from_secs(1);
     while Instant::now() < deadline {
         el.tick_hybrid_storage();
-        if el.cloud_wal_prune_inflight.is_empty() {
+        if el.cloud_wal.prune_inflight.is_empty() {
             return;
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -1144,7 +1144,7 @@ fn should_not_prune_remote_wal_when_manifest_sst_is_missing_from_cloud(
         "remote WAL must be retained when a manifest-referenced cloud SST is missing"
     );
     assert!(
-        el.cloud_acked_wal_segments.contains_key(&segment_id),
+        el.cloud_wal.acked_segments.contains_key(&segment_id),
         "retained WAL should remain eligible for a future conservative retry"
     );
 
@@ -1175,7 +1175,7 @@ fn should_not_prune_remote_wal_when_manifest_sst_is_corrupt_in_cloud(
         "remote WAL must be retained when a manifest-referenced cloud SST is unreadable"
     );
     assert!(
-        el.cloud_acked_wal_segments.contains_key(&segment_id),
+        el.cloud_wal.acked_segments.contains_key(&segment_id),
         "retained WAL should remain eligible for a future conservative retry"
     );
 
@@ -1209,7 +1209,7 @@ fn should_not_prune_remote_wal_when_cloud_metadata_is_missing() -> crate::common
         "remote WAL must be retained when committed cloud metadata is missing"
     );
     assert!(
-        el.cloud_acked_wal_segments.contains_key(&segment_id),
+        el.cloud_wal.acked_segments.contains_key(&segment_id),
         "retained WAL should remain eligible for a future conservative retry"
     );
 
@@ -1271,7 +1271,8 @@ fn should_converge_stale_intent_metadata_before_remote_wal_prune() -> crate::com
         "cloud intent metadata should converge to committed local metadata before WAL prune"
     );
     let proof = el
-        .cloud_metadata_cleanup_proofs
+        .cloud_wal
+        .metadata_cleanup_proofs
         .get("intent_log.json")
         .expect("retry validation should refresh the intent metadata proof");
     assert_eq!(proof.len, local_intent.len() as u64);
@@ -1329,7 +1330,7 @@ fn should_not_prune_remote_wal_when_cloud_manifest_metadata_is_ahead(
         "remote WAL must be retained when cloud manifest metadata is ahead of local state"
     );
     assert!(
-        el.cloud_acked_wal_segments.contains_key(&segment_id),
+        el.cloud_wal.acked_segments.contains_key(&segment_id),
         "retained WAL should remain eligible for a future conservative retry"
     );
 
@@ -1975,7 +1976,7 @@ fn should_not_prune_remote_wal_when_segment_is_not_cloud_durable() -> crate::com
         "remote WAL must be retained until the cloud durable frontier covers its max sequence"
     );
     assert!(
-        el.cloud_acked_wal_segments.contains_key(&segment_id),
+        el.cloud_wal.acked_segments.contains_key(&segment_id),
         "retained WAL should remain eligible for a future conservative retry"
     );
 
@@ -2008,7 +2009,7 @@ fn should_not_prune_remote_wal_when_manifest_sequence_advances_without_sst_cover
         "remote WAL must be retained when manifest sequence is advanced but no SST covers it"
     );
     assert!(
-        el.cloud_acked_wal_segments.contains_key(&segment_id),
+        el.cloud_wal.acked_segments.contains_key(&segment_id),
         "retained WAL should remain eligible for a future conservative retry"
     );
 
@@ -2067,7 +2068,7 @@ fn should_not_prune_remote_wal_when_high_sequence_sst_does_not_cover_wal_record_
         "remote WAL must be retained when manifest SST coverage is only for a different CF"
     );
     assert!(
-        el.cloud_acked_wal_segments.contains_key(&segment_id),
+        el.cloud_wal.acked_segments.contains_key(&segment_id),
         "retained WAL should remain eligible for a future conservative retry"
     );
 
@@ -2112,7 +2113,7 @@ fn should_not_prune_remote_wal_when_manifest_sst_metadata_does_not_match_actual_
         "remote WAL must be retained when manifest SST metadata does not match actual SST contents"
     );
     assert!(
-        el.cloud_acked_wal_segments.contains_key(&segment_id),
+        el.cloud_wal.acked_segments.contains_key(&segment_id),
         "retained WAL should remain eligible for a future conservative retry"
     );
 
@@ -2328,11 +2329,11 @@ fn should_retry_prune_after_preflight_failure_clears_inflight() -> crate::common
     // Act
     // Assert
     assert!(
-        el.cloud_wal_prune_inflight.is_empty(),
+        el.cloud_wal.prune_inflight.is_empty(),
         "preflight failure must not leave prune inflight state"
     );
     assert!(
-        el.cloud_acked_wal_segments.contains_key(&segment_id),
+        el.cloud_wal.acked_segments.contains_key(&segment_id),
         "failed guarded prune must keep the WAL eligible for retry"
     );
     assert!(
@@ -2619,7 +2620,7 @@ fn should_not_advance_cloud_durability_across_unacked_segment_gap() -> crate::co
         "cloud durable frontier must not jump across an unacked segment"
     );
     assert!(
-        el.cloud_acked_wal_segments.contains_key(&second_segment),
+        el.cloud_wal.acked_segments.contains_key(&second_segment),
         "later acknowledgement must remain buffered until the earlier gap closes"
     );
     assert!(
@@ -2704,7 +2705,7 @@ fn should_drop_buffered_cloud_acks_when_earlier_segment_fails() -> crate::common
         max_sequence: second_max_sequence,
     });
     assert!(
-        el.cloud_acked_wal_segments.contains_key(&second_segment),
+        el.cloud_wal.acked_segments.contains_key(&second_segment),
         "later ack should be buffered while an earlier segment is unacked"
     );
 
@@ -2718,7 +2719,7 @@ fn should_drop_buffered_cloud_acks_when_earlier_segment_fails() -> crate::common
         "failure of the earlier segment must not let a buffered later ack advance durability"
     );
     assert!(
-        el.cloud_acked_wal_segments.contains_key(&second_segment),
+        el.cloud_wal.acked_segments.contains_key(&second_segment),
         "later verified ACK bookkeeping must remain buffered behind an earlier gap"
     );
     assert!(el.state.persistence_anomaly_detected());
@@ -3350,7 +3351,7 @@ fn should_retain_upload_obligation_given_failure_after_cloud_wal_rotation(
             if message.contains("after WAL rotate before enqueue")
     ));
     assert_eq!(
-        event_loop.cloud_wal_upload_backlog.get(&segment_id),
+        event_loop.cloud_wal.upload_backlog.get(&segment_id),
         Some(&sequence)
     );
     assert_eq!(
@@ -3363,7 +3364,8 @@ fn should_retain_upload_obligation_given_failure_after_cloud_wal_rotation(
     fail::remove("midge::cloud::inject_fail_after_wal_rotate_before_enqueue");
     event_loop.drain_cloud_wal_upload_backlog();
     assert!(!event_loop
-        .cloud_wal_upload_backlog
+        .cloud_wal
+        .upload_backlog
         .contains_key(&segment_id));
     assert_eq!(
         event_loop

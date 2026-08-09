@@ -542,7 +542,7 @@ impl CompactionCoordinator {
         // this authority switch. Let the run loop restore it before taking the
         // global compaction slot again, otherwise steady compaction debt can
         // starve destructive DDL indefinitely.
-        if allow_emergent_followup && event_loop.publication_deferred_messages.is_empty() {
+        if allow_emergent_followup && event_loop.publication_gate.deferred_messages.is_empty() {
             loop {
                 let plan = match event_loop
                     .compaction_actor
