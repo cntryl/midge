@@ -45,22 +45,31 @@ jobs:
     name: Mutation pilot (informational)
     runs-on: ubuntu-latest
     timeout-minutes: 120
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
       - run: rustup update stable
       - run: cargo install cargo-mutants --version 27.1.0 --locked
       - name: Run storage-critical mutation pilot
+        id: mutants
         run: |
-          set -o pipefail
+          set +e
           cargo mutants --no-shuffle \
+            --shard 1/512 --sharding round-robin --jobs 2 \
             --file 'src/compaction/**' --file 'src/lease/**' \
             --file 'src/wal/**' --file 'src/metadata/**' --file 'src/runtime/**' \
             2>&1 | tee mutation-pilot.log
+          status=${PIPESTATUS[0]}
+          echo "exit_code=${status}" >> "$GITHUB_OUTPUT"
+          case "$status" in
+            0|2|3) ;;
+            *) exit "$status" ;;
+          esac
+      - name: Validate mutation report
+        run: python3 scripts/mutation_report.py mutants.out/outcomes.json | tee mutation-pilot.md
       - name: Publish summary
-        if: always()
         run: |
-          echo '## Mutation pilot' >> "$GITHUB_STEP_SUMMARY"
+          cat mutation-pilot.md >> "$GITHUB_STEP_SUMMARY"
+          echo '' >> "$GITHUB_STEP_SUMMARY"
           echo 'Informational scheduled run; surviving mutants require triage, not a PR failure.' >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v6
         if: always()
@@ -68,4 +77,5 @@ jobs:
           name: mutation-pilot
           path: |
             mutation-pilot.log
+            mutation-pilot.md
             mutants.out

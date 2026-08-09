@@ -20,7 +20,59 @@ fn should_keep_expensive_testing_governance_scheduled_or_manual() {
     assert!(!workflow.contains("workflow_run:"));
     assert!(workflow.contains("find tests -maxdepth 1"));
     assert!(!workflow.contains("cargo llvm-cov --tests"));
+    assert!(workflow.contains("--shard 1/512 --sharding round-robin --jobs 2"));
+    assert!(!workflow.contains("continue-on-error: true"));
+    assert!(workflow.contains("scripts/mutation_report.py"));
     assert!(has_expensive_jobs);
+}
+
+#[test]
+fn should_reject_empty_mutation_pilot_given_no_viable_outcome() {
+    // Arrange
+    let temp = tempfile::tempdir().expect("create mutation fixture directory");
+    let invalid = temp.path().join("invalid.json");
+    fs::write(
+        &invalid,
+        r#"{"outcomes":[{"scenario":"Baseline","summary":"Success"}],"total_mutants":0,"caught":0,"missed":0,"timeout":0,"unviable":0}"#,
+    )
+    .expect("write invalid mutation report");
+
+    // Act
+    let output = Command::new("python3")
+        .arg("scripts/mutation_report.py")
+        .arg(&invalid)
+        .output()
+        .expect("validate mutation report");
+
+    // Assert
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("produced no mutants"));
+}
+
+#[test]
+fn should_summarize_mutation_pilot_given_caught_and_surviving_mutants() {
+    // Arrange
+    let temp = tempfile::tempdir().expect("create mutation fixture directory");
+    let valid = temp.path().join("valid.json");
+    fs::write(
+        &valid,
+        r#"{"outcomes":[{"scenario":"Baseline","summary":"Success"},{"scenario":{"Mutant":{"name":"replace + with *"}},"summary":"CaughtMutant"},{"scenario":{"Mutant":{"name":"delete durability guard"}},"summary":"MissedMutant"}],"total_mutants":2,"caught":1,"missed":1,"timeout":0,"unviable":0}"#,
+    )
+    .expect("write valid mutation report");
+
+    // Act
+    let output = Command::new("python3")
+        .arg("scripts/mutation_report.py")
+        .arg(&valid)
+        .output()
+        .expect("validate mutation report");
+    let summary = String::from_utf8(output.stdout).expect("mutation summary is UTF-8");
+
+    // Assert
+    assert!(output.status.success());
+    assert!(summary.contains("Caught: 1"));
+    assert!(summary.contains("Survived: 1"));
+    assert!(summary.contains("delete durability guard"));
 }
 
 #[test]
