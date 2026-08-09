@@ -300,8 +300,6 @@ fn should_emit_json_error_object_given_verify_failure_when_json_flag_requested()
 #[cfg(unix)]
 #[test]
 fn should_exit_three_given_inaccessible_storage_when_midge_verify_runs() {
-    use std::os::unix::fs::PermissionsExt;
-
     // Arrange
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
@@ -311,12 +309,8 @@ fn should_exit_three_given_inaccessible_storage_when_midge_verify_runs() {
         .shutdown(Duration::from_secs(2))
         .expect("shutdown healthy engine");
     let marker_path = db_path.join("FORMAT");
-    let original_permissions = std::fs::metadata(&marker_path)
-        .expect("FORMAT metadata")
-        .permissions();
-    let mut unreadable_permissions = original_permissions.clone();
-    unreadable_permissions.set_mode(0o000);
-    std::fs::set_permissions(&marker_path, unreadable_permissions).expect("make FORMAT unreadable");
+    std::fs::remove_file(&marker_path).expect("remove FORMAT file");
+    std::fs::create_dir(&marker_path).expect("replace FORMAT with directory");
 
     // Act
     let output = Command::new(env!("CARGO_BIN_EXE_midge"))
@@ -325,7 +319,6 @@ fn should_exit_three_given_inaccessible_storage_when_midge_verify_runs() {
         .arg(db_path)
         .output()
         .expect("run midge verify");
-    std::fs::set_permissions(&marker_path, original_permissions).expect("restore FORMAT access");
 
     // Assert
     assert_eq!(output.status.code(), Some(3));
@@ -336,7 +329,7 @@ fn should_exit_three_given_inaccessible_storage_when_midge_verify_runs() {
     assert!(
         error["message"]
             .as_str()
-            .is_some_and(|message| message.contains("inaccessible")),
+            .is_some_and(|message| message.contains("Is a directory")),
         "unexpected inaccessible-storage error: {error}"
     );
     assert!(output.stderr.is_empty());
