@@ -191,11 +191,7 @@ impl HybridStorage {
                 result: StorageOutcome::Err(error),
                 ..
             }) => {
-                let lower = error.to_ascii_lowercase();
-                if lower.contains("precondition")
-                    || lower.contains("if-match")
-                    || lower.contains("already exists")
-                {
+                if Self::storage_error_indicates_precondition_failure(&error) {
                     return Err(crate::common::MidgeError::Busy(format!(
                         "remote CAS conflict for '{key}': {error}"
                     )));

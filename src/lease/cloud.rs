@@ -66,7 +66,7 @@ impl ProviderLeaderStore {
 
 impl LeaderStore for ProviderLeaderStore {
     fn acquire_leadership(&self, holder_id: &str) -> Result<LeaderRecord, LeaseError> {
-        let current = provider_read_doc_with_metadata(&self.cloud, Duration::from_secs(30))?;
+        let current = provider_read_doc_with_metadata(&self.cloud, self.cloud.callback_timeout())?;
         let (existing, metadata) = match current {
             Some((document, metadata)) => (Some(document), Some(metadata)),
             None => (None, None),
@@ -189,7 +189,7 @@ impl LeaderStore for ProviderLeaderStore {
 
     fn release_leadership(&self, holder_id: &str, expected_epoch: u64) -> Result<(), LeaseError> {
         let Some((current, metadata)) =
-            provider_read_doc_with_metadata(&self.cloud, Duration::from_secs(30))?
+            provider_read_doc_with_metadata(&self.cloud, self.cloud.callback_timeout())?
         else {
             return Ok(());
         };
@@ -924,7 +924,7 @@ fn classify_lease_read_error(
 }
 
 fn provider_read_doc(cloud: &CloudStorage) -> Result<Option<LeaseDocument>, LeaseError> {
-    provider_read_doc_with_timeout(cloud, Duration::from_secs(30))
+    provider_read_doc_with_timeout(cloud, cloud.callback_timeout())
 }
 
 fn provider_read_doc_with_metadata(
@@ -1002,7 +1002,7 @@ fn provider_write_doc(
     document: &LeaseDocument,
     headers: Vec<(String, String)>,
 ) -> Result<(), LeaseError> {
-    provider_write_doc_with_timeout(cloud, document, headers, Duration::from_secs(30))
+    provider_write_doc_with_timeout(cloud, document, headers, cloud.callback_timeout())
 }
 
 fn provider_write_doc_with_timeout(

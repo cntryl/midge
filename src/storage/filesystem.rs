@@ -213,6 +213,9 @@ impl StorageBackend for FileSystem {
 
         let outcome = match fs::read(&full_path) {
             Ok(bytes) => StorageOutcome::Ok(bytes),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                StorageOutcome::Err(format!("not found: read {}: {e}", full_path.display()))
+            }
             Err(e) => StorageOutcome::Err(format!("read {}: {e}", full_path.display())),
         };
 
@@ -363,6 +366,9 @@ impl StorageBackend for FileSystem {
 
         let outcome = match fs::remove_file(&full_path) {
             Ok(()) => StorageOutcome::Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                StorageOutcome::Err(format!("not found: delete {}: {e}", full_path.display()))
+            }
             Err(e) => StorageOutcome::Err(format!("delete {}: {e}", full_path.display())),
         };
 

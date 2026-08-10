@@ -21,6 +21,25 @@ const REAL_S3_SECRET_KEY_ENV: &str = "MIDGE_REAL_S3_SECRET_KEY";
 const REAL_S3_PATH_STYLE_ENV: &str = "MIDGE_REAL_S3_PATH_STYLE";
 
 #[test]
+fn should_join_azure_canonical_headers_directly_to_resource() {
+    // Arrange
+    let headers = vec![
+        (
+            "x-ms-date".to_string(),
+            "Sun, 10 Aug 2026 12:00:00 GMT".to_string(),
+        ),
+        ("x-ms-version".to_string(), "2024-11-04".to_string()),
+    ];
+
+    // Act
+    let string_to_sign = azure_string_to_sign("GET", &headers, "/admin/container/blob", "", b"");
+
+    // Assert
+    assert!(string_to_sign.contains("x-ms-version:2024-11-04\n/admin/admin/container/blob"));
+    assert!(!string_to_sign.contains("x-ms-version:2024-11-04\n\n/"));
+}
+
+#[test]
 #[ignore = "requires Sqrzl; run the scheduled/manual Cloud Qualification workflow"]
 fn should_recover_engine_from_sqrzl_s3_after_local_cache_loss() {
     // Arrange
@@ -551,8 +570,9 @@ fn azure_string_to_sign(
     } else {
         body.len().to_string()
     };
-    [
-        method.to_string(),
+    format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}{}",
+        method,
         azure_header_value(headers, "Content-Encoding"),
         azure_header_value(headers, "Content-Language"),
         content_length,
@@ -566,8 +586,7 @@ fn azure_string_to_sign(
         azure_header_value(headers, "Range"),
         azure_canonical_headers(headers),
         azure_canonical_resource(path, query),
-    ]
-    .join("\n")
+    )
 }
 
 fn azure_shared_key_signature(string_to_sign: &str) -> Result<String, String> {

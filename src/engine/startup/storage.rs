@@ -11,6 +11,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+struct CloudClassStores {
+    wal: Arc<crate::storage::cloud::CloudStorage>,
+    sst: Arc<crate::storage::cloud::CloudStorage>,
+    metadata: Arc<crate::storage::cloud::CloudStorage>,
+}
+
 impl StartupStoragePath {
     pub(super) fn resolve(storage: &Storage) -> Self {
         match storage {
@@ -55,15 +61,18 @@ impl StartupStoragePath {
 impl StartupLease {
     pub(super) fn acquire(opts: &OpenOptions) -> MidgeResult<Self> {
         let storage = opts.storage();
-        let created =
-            crate::lease::create_lease_with_validity(storage, opts.lease_clock_skew_tolerance())
-                .map_err(|error| match MidgeError::from(error) {
-                    MidgeError::LeaseHeld(message) => MidgeError::LeaseHeld(message),
-                    MidgeError::LeaseUnavailable(message) => MidgeError::LeaseUnavailable(format!(
-                        "failed to create lease for storage backend: {message}"
-                    )),
-                    other => other,
-                })?;
+        let created = crate::lease::create_lease_with_validity_and_timeout(
+            storage,
+            opts.lease_clock_skew_tolerance(),
+            opts.storage_io_timeout(),
+        )
+        .map_err(|error| match MidgeError::from(error) {
+            MidgeError::LeaseHeld(message) => MidgeError::LeaseHeld(message),
+            MidgeError::LeaseUnavailable(message) => MidgeError::LeaseUnavailable(format!(
+                "failed to create lease for storage backend: {message}"
+            )),
+            other => other,
+        })?;
 
         Self::acquire_created(
             created.lease,
@@ -188,6 +197,38 @@ impl Drop for StartupLease {
 }
 
 impl RuntimeStorageMaterialization {
+    fn build_cloud_class_stores(
+        opts: &OpenOptions,
+        topology: &crate::config::CloudStorageTopology,
+    ) -> MidgeResult<CloudClassStores> {
+        let wal = crate::storage::providers::build_cloud_storage_with_timeout(
+            topology.wal().provider(),
+            topology.wal().prefix(),
+            opts.storage_io_timeout(),
+        )?;
+        let sst = if topology.sst() == topology.wal() {
+            wal.clone()
+        } else {
+            crate::storage::providers::build_cloud_storage_with_timeout(
+                topology.sst().provider(),
+                topology.sst().prefix(),
+                opts.storage_io_timeout(),
+            )?
+        };
+        let metadata = if topology.control() == topology.wal() {
+            wal.clone()
+        } else if topology.control() == topology.sst() {
+            sst.clone()
+        } else {
+            crate::storage::providers::build_cloud_storage_with_timeout(
+                topology.control().provider(),
+                topology.control().prefix(),
+                opts.storage_io_timeout(),
+            )?
+        };
+        Ok(CloudClassStores { wal, sst, metadata })
+    }
+
     pub(super) fn materialize(
         opts: &OpenOptions,
         storage_path: &StartupStoragePath,
@@ -289,28 +330,10 @@ impl RuntimeStorageMaterialization {
         cloud_runtime_policy: crate::runtime::CloudRuntimePolicy,
         topology: &crate::config::CloudStorageTopology,
     ) -> MidgeResult<Self> {
-        let wal_storage = crate::storage::providers::build_cloud_storage(
-            topology.wal().provider(),
-            topology.wal().prefix(),
-        )?;
-        let sst_storage = if topology.sst() == topology.wal() {
-            wal_storage.clone()
-        } else {
-            crate::storage::providers::build_cloud_storage(
-                topology.sst().provider(),
-                topology.sst().prefix(),
-            )?
-        };
-        let metadata_storage = if topology.control() == topology.wal() {
-            wal_storage.clone()
-        } else if topology.control() == topology.sst() {
-            sst_storage.clone()
-        } else {
-            crate::storage::providers::build_cloud_storage(
-                topology.control().provider(),
-                topology.control().prefix(),
-            )?
-        };
+        let stores = Self::build_cloud_class_stores(opts, topology)?;
+        let wal_storage = stores.wal;
+        let sst_storage = stores.sst;
+        let metadata_storage = stores.metadata;
 
         CloudStartupRecovery::reject_cloud_wal_without_catalog(&wal_storage)?;
         let local_backend = Arc::new(crate::storage::filesystem::FileSystem::new(
@@ -330,6 +353,7 @@ impl RuntimeStorageMaterialization {
                 sst_backend,
                 control_backend,
                 tx,
+                opts.storage_io_timeout(),
             ),
         );
         let wal_catalog = hybrid_storage.fence_cloud_wal_catalog(startup_lease.writer_epoch)?;

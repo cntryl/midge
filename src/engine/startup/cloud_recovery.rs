@@ -5,7 +5,6 @@ use crate::io::Fs as _;
 use crate::runtime::RuntimeState;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 type LocalWalPaths = (
     std::collections::BTreeMap<u64, Vec<PathBuf>>,
@@ -251,7 +250,7 @@ impl CloudStartupRecovery {
     ) -> MidgeResult<Vec<String>> {
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_list(prefix, tx);
-        match rx.recv_timeout(Duration::from_secs(30)) {
+        match rx.recv_timeout(cloud.callback_timeout()) {
             Ok(crate::storage::cloud::CloudEvent::List {
                 prefix: returned_prefix,
                 result,
@@ -279,7 +278,7 @@ impl CloudStartupRecovery {
     ) -> MidgeResult<Vec<u8>> {
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_get(key, tx);
-        match rx.recv_timeout(Duration::from_secs(30)) {
+        match rx.recv_timeout(cloud.callback_timeout()) {
             Ok(crate::storage::cloud::CloudEvent::Get { result, .. }) => match result {
                 crate::storage::cloud::CloudOutcome::Ok(data) => Ok(data),
                 crate::storage::cloud::CloudOutcome::Err(error) => {
@@ -301,7 +300,7 @@ impl CloudStartupRecovery {
     ) -> MidgeResult<Option<Vec<u8>>> {
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_get(key, tx);
-        match rx.recv_timeout(Duration::from_secs(30)) {
+        match rx.recv_timeout(cloud.callback_timeout()) {
             Ok(crate::storage::cloud::CloudEvent::Get { result, .. }) => match result {
                 crate::storage::cloud::CloudOutcome::Ok(data) => Ok(Some(data)),
                 crate::storage::cloud::CloudOutcome::Err(error)
@@ -328,7 +327,7 @@ impl CloudStartupRecovery {
     ) -> MidgeResult<Option<crate::storage::cloud::ObjectMetadata>> {
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_head(key, tx);
-        match rx.recv_timeout(Duration::from_secs(30)) {
+        match rx.recv_timeout(cloud.callback_timeout()) {
             Ok(crate::storage::cloud::CloudEvent::Head { result, .. }) => match result {
                 crate::storage::cloud::CloudOutcome::Ok(metadata) => Ok(Some(metadata)),
                 crate::storage::cloud::CloudOutcome::Err(error)
@@ -373,7 +372,7 @@ impl CloudStartupRecovery {
     ) -> MidgeResult<()> {
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_put(key, data, headers, tx);
-        match rx.recv_timeout(Duration::from_secs(30)) {
+        match rx.recv_timeout(cloud.callback_timeout()) {
             Ok(crate::storage::cloud::CloudEvent::Put { result, .. }) => match result {
                 crate::storage::cloud::CloudOutcome::Ok(()) => Ok(()),
                 crate::storage::cloud::CloudOutcome::Err(error) => {

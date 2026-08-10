@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 const FLUSH_WORKER_CHANNEL_CAPACITY: usize = 1;
 
@@ -687,7 +687,7 @@ fn conditional_metadata_put(
     };
     let (tx, rx) = std::sync::mpsc::channel();
     cloud.submit_put(key, data, headers, tx);
-    match rx.recv_timeout(Duration::from_secs(30)) {
+    match rx.recv_timeout(cloud.callback_timeout()) {
         Ok(crate::storage::cloud::CloudEvent::Put {
             result: crate::storage::cloud::CloudOutcome::Ok(()),
             ..
@@ -713,7 +713,7 @@ fn blocking_get_optional(
 ) -> Result<Option<Vec<u8>>, String> {
     let (tx, rx) = std::sync::mpsc::channel();
     cloud.submit_get(key, tx);
-    match rx.recv_timeout(Duration::from_secs(30)) {
+    match rx.recv_timeout(cloud.callback_timeout()) {
         Ok(crate::storage::cloud::CloudEvent::Get {
             result: crate::storage::cloud::CloudOutcome::Ok(data),
             ..
@@ -737,7 +737,7 @@ fn blocking_head_optional(
 ) -> Result<Option<crate::storage::cloud::ObjectMetadata>, String> {
     let (tx, rx) = std::sync::mpsc::channel();
     cloud.submit_head(key, tx);
-    match rx.recv_timeout(Duration::from_secs(30)) {
+    match rx.recv_timeout(cloud.callback_timeout()) {
         Ok(crate::storage::cloud::CloudEvent::Head {
             result: crate::storage::cloud::CloudOutcome::Ok(metadata),
             ..

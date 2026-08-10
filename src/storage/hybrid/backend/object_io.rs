@@ -2,7 +2,7 @@
 
 use super::{
     Arc, Duration, HybridStorage, StorageBackend, StorageCallback, StorageEvent,
-    StorageObjectMetadata, StorageOutcome, STORAGE_CALLBACK_TIMEOUT,
+    StorageObjectMetadata, StorageOutcome,
 };
 
 impl HybridStorage {
@@ -19,8 +19,9 @@ impl HybridStorage {
     pub(super) fn read_cloud_object_from_backend_blocking(
         cloud: &Arc<dyn StorageBackend>,
         key: &str,
+        callback_timeout: Duration,
     ) -> Result<Vec<u8>, String> {
-        Self::read_object_from_backend_blocking(cloud, key, STORAGE_CALLBACK_TIMEOUT)
+        Self::read_object_from_backend_blocking(cloud, key, callback_timeout)
     }
 
     pub(super) fn read_object_from_backend_blocking(
@@ -78,23 +79,23 @@ impl HybridStorage {
     }
 
     pub(super) fn storage_error_indicates_missing(error: &str) -> bool {
-        let error = error.to_ascii_lowercase();
-        error.contains("not found")
-            || error.contains("notfound")
-            || error.contains("no such file")
-            || error.contains("does not exist")
-            || error.contains("cannot find the file")
-            || error.contains("cannot find the path")
-            || error.contains("404")
+        let error = error.trim().to_ascii_lowercase();
+        error.starts_with("not found:")
+    }
+
+    pub(super) fn storage_error_indicates_precondition_failure(error: &str) -> bool {
+        let error = error.trim().to_ascii_lowercase();
+        error == "precondition failed" || error.starts_with("precondition failed:")
     }
 
     pub(super) fn object_exists_in_backend_blocking(
         backend: &Arc<dyn StorageBackend>,
         key: &str,
+        callback_timeout: Duration,
     ) -> Result<bool, String> {
         let (tx, rx) = std::sync::mpsc::channel();
         backend.submit_head(key, tx);
-        match rx.recv_timeout(Duration::from_secs(30)) {
+        match rx.recv_timeout(callback_timeout) {
             Ok(StorageEvent::HeadComplete {
                 key: returned_key,
                 result: StorageOutcome::Ok(_),
@@ -126,10 +127,11 @@ impl HybridStorage {
     pub(super) fn delete_object_from_backend_blocking(
         backend: &Arc<dyn StorageBackend>,
         key: &str,
+        callback_timeout: Duration,
     ) -> Result<bool, String> {
         let (tx, rx) = std::sync::mpsc::channel();
         backend.submit_delete(key, tx);
-        match rx.recv_timeout(Duration::from_secs(30)) {
+        match rx.recv_timeout(callback_timeout) {
             Ok(StorageEvent::DeleteComplete {
                 key: returned_key,
                 result: StorageOutcome::Ok(()),

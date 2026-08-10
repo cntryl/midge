@@ -24,17 +24,19 @@ impl HybridStorage {
         data: &[u8],
     ) -> crate::common::MidgeResult<bool> {
         let exists =
-            Self::object_exists_in_backend_blocking(&self.local, key).map_err(|error| {
-                crate::common::MidgeError::Internal(format!(
-                    "local immutable cache preflight failed: {error}"
-                ))
-            })?;
+            Self::object_exists_in_backend_blocking(&self.local, key, self.callback_timeout)
+                .map_err(|error| {
+                    crate::common::MidgeError::Internal(format!(
+                        "local immutable cache preflight failed: {error}"
+                    ))
+                })?;
         if !exists {
             return Ok(false);
         }
 
-        let existing = Self::read_cloud_object_from_backend_blocking(&self.local, key)
-            .map_err(crate::common::MidgeError::Internal)?;
+        let existing =
+            Self::read_cloud_object_from_backend_blocking(&self.local, key, self.callback_timeout)
+                .map_err(crate::common::MidgeError::Internal)?;
         if existing != data {
             return Err(crate::common::MidgeError::Internal(format!(
                 "local cache already exists with different bytes for immutable object '{key}'"
@@ -48,10 +50,17 @@ impl HybridStorage {
         key: &str,
         data: &[u8],
     ) -> crate::common::MidgeResult<()> {
-        let exists = Self::object_exists_in_backend_blocking(&self.cloud, key)
-            .map_err(crate::common::MidgeError::Internal)?;
+        let exists =
+            Self::object_exists_in_backend_blocking(&self.cloud, key, self.callback_timeout)
+                .map_err(crate::common::MidgeError::Internal)?;
         if exists {
-            return Self::ensure_backend_object_matches(&self.cloud, key, data, None);
+            return Self::ensure_backend_object_matches(
+                &self.cloud,
+                key,
+                data,
+                None,
+                self.callback_timeout,
+            );
         }
 
         let (tx, rx) = std::sync::mpsc::channel();
@@ -80,7 +89,13 @@ impl HybridStorage {
             StorageEvent::WriteComplete {
                 result: StorageOutcome::Err(error),
                 ..
-            } => Self::ensure_backend_object_matches(&self.cloud, key, data, Some(&error)),
+            } => Self::ensure_backend_object_matches(
+                &self.cloud,
+                key,
+                data,
+                Some(&error),
+                self.callback_timeout,
+            ),
             other => Err(crate::common::MidgeError::Internal(format!(
                 "unexpected cloud immutable upload response: {other:?}"
             ))),
@@ -92,14 +107,17 @@ impl HybridStorage {
         key: &str,
         expected: &[u8],
         upload_error: Option<&str>,
+        callback_timeout: std::time::Duration,
     ) -> crate::common::MidgeResult<()> {
         let existing =
-            Self::read_cloud_object_from_backend_blocking(backend, key).map_err(|read_error| {
-                crate::common::MidgeError::Internal(format!(
-                    "cloud immutable upload failed{}; readback failed: {read_error}",
-                    upload_error.map_or_else(String::new, |error| format!(": {error}"))
-                ))
-            })?;
+            Self::read_cloud_object_from_backend_blocking(backend, key, callback_timeout).map_err(
+                |read_error| {
+                    crate::common::MidgeError::Internal(format!(
+                        "cloud immutable upload failed{}; readback failed: {read_error}",
+                        upload_error.map_or_else(String::new, |error| format!(": {error}"))
+                    ))
+                },
+            )?;
         if existing == expected {
             return Ok(());
         }
@@ -154,7 +172,7 @@ impl HybridStorage {
         &self,
         key: &str,
     ) -> crate::common::MidgeResult<()> {
-        match Self::delete_object_from_backend_blocking(&self.cloud, key) {
+        match Self::delete_object_from_backend_blocking(&self.cloud, key, self.callback_timeout) {
             Ok(true) => {
                 tracing::info!(key, "deleted obsolete remote immutable object");
             }
@@ -170,7 +188,7 @@ impl HybridStorage {
 
         // This runs inside the tracked GC worker that owns this deletion.
         // Avoid a detached local-cache delete that could outlive the lease.
-        match Self::delete_object_from_backend_blocking(&self.local, key) {
+        match Self::delete_object_from_backend_blocking(&self.local, key, self.callback_timeout) {
             Ok(true) => {
                 tracing::debug!(key, "deleted obsolete local immutable cache object");
             }

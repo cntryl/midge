@@ -116,10 +116,7 @@ fn assert_real_provider_missing_and_cas_errors(shape: ProviderErrorShape) {
     assert!(missing.is_none());
     assert_eq!(missing_server.finish(), 1);
 
-    let cas_server = spawn_scripted_http_response_server(vec![
-        provider_error_response(shape, 404),
-        provider_error_response(shape, 412),
-    ]);
+    let cas_server = spawn_scripted_http_response_server(vec![provider_error_response(shape, 412)]);
     let cas_backend = crate::storage::providers::build_cloud_backend(
         &provider_config_for_error_shape(shape, cas_server.endpoint.clone()),
     )
@@ -150,7 +147,7 @@ fn assert_real_provider_missing_and_cas_errors(shape: ProviderErrorShape) {
             message.contains("status 412") && message.contains("precondition")
         }
     ));
-    assert_eq!(cas_server.finish(), 2);
+    assert_eq!(cas_server.finish(), 1);
 }
 
 #[cfg(feature = "cloud-all")]
@@ -172,11 +169,12 @@ fn should_classify_real_gcs_error_shapes_given_wal_catalog_operations() {
 }
 
 #[test]
-fn should_classify_windows_missing_paths_as_absent() {
+fn should_classify_only_normalized_missing_object_errors_as_absent() {
     // Arrange
     let errors = [
-        "read C:\\data\\missing.sst: The system cannot find the file specified. (os error 2)",
-        "read C:\\data\\sst: The system cannot find the path specified. (os error 3)",
+        "not found: S3 GET failed: HTTP 404 NoSuchKey",
+        "not found: Azure Blob request failed: 404 BlobNotFound",
+        "not found: read C:\\data\\missing.sst: os error 2",
     ];
 
     // Act
@@ -189,21 +187,59 @@ fn should_classify_windows_missing_paths_as_absent() {
 }
 
 #[test]
-fn should_classify_provider_missing_object_errors_as_absent() {
+fn should_not_classify_credential_file_failure_as_missing_object() {
+    // Arrange
+    let error =
+        "transport error: Internal(\"failed to read workload token: No such file or directory\")";
+
+    // Act
+    let missing = HybridStorage::storage_error_indicates_missing(error);
+
+    // Assert
+    assert!(!missing);
+}
+
+#[test]
+fn should_not_classify_unrelated_numeric_diagnostics_as_absent() {
     // Arrange
     let errors = [
-        "S3 GET failed: HTTP 404 NoSuchKey",
-        "Azure Blob request failed: 404 BlobNotFound",
-        "GCS object lookup returned NotFound: No such object",
+        "protocol error: expected metadata length 404, got 17",
+        "server error: status 503: upstream request id 404",
     ];
 
     // Act
-    let all_missing = errors
+    let any_missing = errors
         .iter()
-        .all(|error| HybridStorage::storage_error_indicates_missing(error));
+        .any(|error| HybridStorage::storage_error_indicates_missing(error));
 
     // Assert
-    assert!(all_missing);
+    assert!(!any_missing);
+}
+
+#[test]
+fn should_only_classify_structured_precondition_failure_as_cas_conflict() {
+    // Arrange
+    let conflicts = [
+        "precondition failed: status 412: S3 PUT",
+        "precondition failed",
+    ];
+    let unrelated = [
+        "protocol error: GCS JSON PUT cannot enforce If-Match; use a generation precondition",
+        "protocol error: precondition check failed: unauthorized",
+        "invalid request: object already exists in a retained snapshot",
+    ];
+
+    // Act
+    let all_conflicts = conflicts
+        .iter()
+        .all(|error| HybridStorage::storage_error_indicates_precondition_failure(error));
+    let any_unrelated = unrelated
+        .iter()
+        .any(|error| HybridStorage::storage_error_indicates_precondition_failure(error));
+
+    // Assert
+    assert!(all_conflicts);
+    assert!(!any_unrelated);
 }
 
 #[test]

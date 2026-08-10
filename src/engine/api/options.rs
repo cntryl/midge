@@ -572,13 +572,14 @@ impl OpenOptionsBuilder {
     ///
     /// # Errors
     ///
-    /// Returns [`MidgeError::InvalidArgument`] for zero-valued required limits
-    /// and [`MidgeError::ResourceLimit`] when an override cannot fit inside the
-    /// total memory budget.
+    /// Returns [`MidgeError::InvalidArgument`] for invalid required limits and
+    /// [`MidgeError::ResourceLimit`] when an override cannot fit inside the
+    /// total memory budget. Storage I/O timeouts must be representable by the
+    /// providers' millisecond-granularity deadlines.
     pub fn build(self) -> MidgeResult<OpenOptions> {
-        if self.cloud.storage_io_timeout.is_zero() {
+        if self.cloud.storage_io_timeout < Duration::from_millis(1) {
             return Err(MidgeError::InvalidArgument(
-                "storage I/O timeout must be greater than zero".to_string(),
+                "storage I/O timeout must be at least 1 millisecond".to_string(),
             ));
         }
         if self.cloud.shutdown_drain_timeout.is_zero() {

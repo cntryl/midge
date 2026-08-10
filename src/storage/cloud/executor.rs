@@ -1,7 +1,10 @@
 use crate::common::{MidgeError, MidgeResult};
 use crate::storage::cloud::{CloudCallback, CloudEvent};
 use reqwest::{Client, Method};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use std::time::Duration;
 
 const MAX_TRANSIENT_RETRIES: u32 = 3;
@@ -16,6 +19,7 @@ pub struct CloudRequest {
     pub headers: Vec<(String, String)>,
     pub body: Option<Vec<u8>>,
     pub timeout: Option<Duration>,
+    retry_conditional_conflicts: bool,
 }
 
 impl CloudRequest {
@@ -26,6 +30,7 @@ impl CloudRequest {
             headers: Vec::new(),
             body: None,
             timeout: None,
+            retry_conditional_conflicts: false,
         }
     }
 
@@ -44,17 +49,39 @@ impl CloudRequest {
         self
     }
 
-    fn is_conditional_mutation(&self) -> bool {
-        if !matches!(self.method, Method::PUT | Method::POST | Method::DELETE) {
+    /// Permit bounded retries for provider-specific conditional-conflict
+    /// responses. AWS S3 uses 409 `ConditionalRequestConflict` for a retryable
+    /// conditional PUT race; other providers do not share that contract.
+    pub fn with_conditional_conflict_retries(mut self) -> Self {
+        self.retry_conditional_conflicts = true;
+        self
+    }
+
+    fn is_mutation(&self) -> bool {
+        matches!(self.method, Method::PUT | Method::POST | Method::DELETE)
+    }
+
+    fn is_conditionally_idempotent_mutation(&self) -> bool {
+        if !self.is_mutation() {
             return false;
         }
+
+        // Generation-not-match does not fence the identity being mutated and
+        // therefore cannot make an ambiguous replay safe.
+        if self
+            .headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("x-goog-if-generation-not-match"))
+            || self.url.contains("ifGenerationNotMatch=")
+        {
+            return false;
+        }
+
         self.headers.iter().any(|(name, _)| {
             name.eq_ignore_ascii_case("if-match")
                 || name.eq_ignore_ascii_case("if-none-match")
                 || name.eq_ignore_ascii_case("x-goog-if-generation-match")
-                || name.eq_ignore_ascii_case("x-goog-if-generation-not-match")
         }) || self.url.contains("ifGenerationMatch=")
-            || self.url.contains("ifGenerationNotMatch=")
     }
 }
 
@@ -79,6 +106,7 @@ pub struct CloudExecutor {
     client: Client,
     signer: Option<Arc<dyn CloudSigner>>,
     rt: Option<Arc<tokio::runtime::Runtime>>,
+    default_timeout_ms: AtomicU64,
 }
 
 impl CloudExecutor {
@@ -102,33 +130,53 @@ impl CloudExecutor {
             client,
             signer,
             rt: Some(Arc::new(rt)),
+            default_timeout_ms: AtomicU64::new(Self::duration_millis(
+                crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+            )),
         })
     }
 
-    fn sign_request(&self, request: &mut CloudRequest) -> MidgeResult<()> {
-        if let Some(signer) = &self.signer {
-            signer.sign(request)
+    pub(crate) fn set_default_timeout(&self, timeout: Duration) {
+        self.default_timeout_ms
+            .store(Self::duration_millis(timeout), Ordering::Release);
+    }
+
+    fn duration_millis(timeout: Duration) -> u64 {
+        let milliseconds = timeout.as_millis();
+        let rounded_milliseconds = if timeout.subsec_nanos().is_multiple_of(1_000_000) {
+            milliseconds
         } else {
-            Ok(())
+            milliseconds.saturating_add(1)
+        };
+        u64::try_from(rounded_milliseconds)
+            .unwrap_or(u64::MAX)
+            .max(1)
+    }
+
+    fn default_timeout(&self) -> Duration {
+        Duration::from_millis(self.default_timeout_ms.load(Ordering::Acquire))
+    }
+
+    fn apply_default_timeout(mut request: CloudRequest, default_timeout: Duration) -> CloudRequest {
+        if request.timeout.is_none() {
+            request.timeout = Some(default_timeout);
         }
+        request
     }
 
     pub fn spawn_request<F>(
         &self,
-        mut request: CloudRequest,
+        request: CloudRequest,
         context: String,
         callback: CloudCallback,
         mapper: F,
     ) where
         F: FnOnce(String, MidgeResult<CloudResponse>) -> CloudEvent + Send + 'static,
     {
-        if let Err(err) = self.sign_request(&mut request) {
-            let event = mapper(context, Err(err));
-            let _ = callback.send(event);
-            return;
-        }
-
         let client = self.client.clone();
+        let signer = self.signer.clone();
+        let request = Self::apply_default_timeout(request, self.default_timeout());
+        let deadline = Self::deadline_from_timeout(request.timeout);
 
         let Some(rt) = self.rt.as_ref() else {
             let event = mapper(
@@ -142,7 +190,8 @@ impl CloudExecutor {
         };
 
         rt.spawn(async move {
-            let result = Self::execute_request(client, request).await;
+            let result =
+                Self::execute_request_with_signer_at(client, signer, request, deadline).await;
 
             let event = mapper(context, result);
             let _ = callback.send(event);
@@ -165,6 +214,8 @@ impl CloudExecutor {
     {
         let client = self.client.clone();
         let signer = self.signer.clone();
+        let default_timeout = self.default_timeout();
+        let operation_deadline = Self::deadline_from_timeout(Some(default_timeout));
 
         let Some(rt) = self.rt.as_ref() else {
             let event = finish(
@@ -178,29 +229,50 @@ impl CloudExecutor {
         };
 
         rt.spawn(async move {
-            let mut state = initial_state;
-            let result = loop {
-                let mut request = match make_request(&state) {
-                    Ok(request) => request,
-                    Err(error) => break Err(error),
-                };
+            let operation = async move {
+                let mut state = initial_state;
+                loop {
+                    Self::ensure_deadline_active(Some(default_timeout), operation_deadline)?;
+                    let request = match make_request(&state) {
+                        Ok(request) => Self::apply_default_timeout(request, default_timeout),
+                        Err(error) => break Err(error),
+                    };
+                    let request_deadline = Self::earliest_deadline(
+                        operation_deadline,
+                        Self::deadline_from_timeout(request.timeout),
+                    );
 
-                if let Some(signer) = &signer {
-                    if let Err(error) = signer.sign(&mut request) {
-                        break Err(error);
+                    let response = match Self::execute_request_with_signer_at(
+                        client.clone(),
+                        signer.clone(),
+                        request,
+                        request_deadline,
+                    )
+                    .await
+                    {
+                        Ok(response) => response,
+                        Err(error) => break Err(error),
+                    };
+
+                    match step(&mut state, response) {
+                        Ok(true) => {}
+                        Ok(false) => break Ok(state),
+                        Err(error) => break Err(error),
                     }
                 }
-
-                let response = match Self::execute_request(client.clone(), request).await {
-                    Ok(response) => response,
-                    Err(error) => break Err(error),
-                };
-
-                match step(&mut state, response) {
-                    Ok(true) => {}
-                    Ok(false) => break Ok(state),
-                    Err(error) => break Err(error),
-                }
+            };
+            let result = if operation_deadline
+                .is_some_and(|deadline| deadline <= tokio::time::Instant::now())
+            {
+                Err(Self::timeout_error(default_timeout))
+            } else if let Some(deadline) = operation_deadline {
+                tokio::time::timeout_at(deadline, operation)
+                    .await
+                    .unwrap_or_else(|_| Err(Self::timeout_error(default_timeout)))
+            } else {
+                tokio::time::timeout(default_timeout, operation)
+                    .await
+                    .unwrap_or_else(|_| Err(Self::timeout_error(default_timeout)))
             };
 
             let event = finish(context, result);
@@ -208,13 +280,120 @@ impl CloudExecutor {
         });
     }
 
+    async fn sign_request_async(
+        signer: Option<Arc<dyn CloudSigner>>,
+        mut request: CloudRequest,
+    ) -> MidgeResult<CloudRequest> {
+        let Some(signer) = signer else {
+            return Ok(request);
+        };
+        tokio::task::spawn_blocking(move || {
+            signer.sign(&mut request)?;
+            Ok(request)
+        })
+        .await
+        .map_err(|error| MidgeError::Internal(format!("cloud signer task failed: {error}")))?
+    }
+
+    #[cfg(test)]
     async fn execute_request(client: Client, request: CloudRequest) -> MidgeResult<CloudResponse> {
+        Self::execute_request_with_signer(client, None, request).await
+    }
+
+    #[cfg(test)]
+    async fn execute_request_with_signer(
+        client: Client,
+        signer: Option<Arc<dyn CloudSigner>>,
+        request: CloudRequest,
+    ) -> MidgeResult<CloudResponse> {
+        let deadline = Self::deadline_from_timeout(request.timeout);
+        Self::execute_request_with_signer_at(client, signer, request, deadline).await
+    }
+
+    async fn execute_request_with_signer_at(
+        client: Client,
+        signer: Option<Arc<dyn CloudSigner>>,
+        request: CloudRequest,
+        deadline: Option<tokio::time::Instant>,
+    ) -> MidgeResult<CloudResponse> {
+        let timeout = request.timeout;
+        Self::ensure_deadline_active(timeout, deadline)?;
+        let operation = async move {
+            let request = Self::sign_request_async(signer, request).await?;
+            Self::ensure_deadline_active(timeout, deadline)?;
+            Self::execute_request_with_retries(client, request, deadline).await
+        };
+
+        match (timeout, deadline) {
+            (Some(timeout), Some(deadline)) => tokio::time::timeout_at(deadline, operation)
+                .await
+                .map_err(|_| Self::timeout_error(timeout))?,
+            (Some(timeout), None) => tokio::time::timeout(timeout, operation)
+                .await
+                .map_err(|_| Self::timeout_error(timeout))?,
+            (None, _) => operation.await,
+        }
+    }
+
+    fn deadline_from_timeout(timeout: Option<Duration>) -> Option<tokio::time::Instant> {
+        timeout.and_then(|timeout| tokio::time::Instant::now().checked_add(timeout))
+    }
+
+    fn earliest_deadline(
+        first: Option<tokio::time::Instant>,
+        second: Option<tokio::time::Instant>,
+    ) -> Option<tokio::time::Instant> {
+        match (first, second) {
+            (Some(first), Some(second)) => Some(first.min(second)),
+            (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
+            (None, None) => None,
+        }
+    }
+
+    fn ensure_deadline_active(
+        timeout: Option<Duration>,
+        deadline: Option<tokio::time::Instant>,
+    ) -> MidgeResult<()> {
+        match (timeout, deadline) {
+            (Some(timeout), Some(deadline)) if deadline <= tokio::time::Instant::now() => {
+                Err(Self::timeout_error(timeout))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn timeout_error(timeout: Duration) -> MidgeError {
+        MidgeError::Internal(format!(
+            "cloud request timed out after {} ms",
+            timeout.as_millis()
+        ))
+    }
+
+    async fn execute_request_with_retries(
+        client: Client,
+        request: CloudRequest,
+        deadline: Option<tokio::time::Instant>,
+    ) -> MidgeResult<CloudResponse> {
         let mut attempt = 0u32;
-        let conditional_mutation = request.is_conditional_mutation();
         loop {
-            match Self::execute_request_once(client.clone(), request.clone()).await {
+            Self::ensure_deadline_active(request.timeout, deadline)?;
+            let attempt_request = Self::constrain_request_to_deadline(request.clone(), deadline);
+            match Self::execute_request_once(client.clone(), attempt_request).await {
+                Ok(response) if Self::is_retryable_conditional_conflict(&request, &response) => {
+                    if attempt >= MAX_TRANSIENT_RETRIES {
+                        return Ok(response);
+                    }
+                    tokio::time::sleep(Self::retry_delay(attempt)).await;
+                    attempt += 1;
+                }
                 Ok(response) if Self::is_transient_status(response.status) => {
-                    if conditional_mutation || attempt >= MAX_TRANSIENT_RETRIES {
+                    // A mutation may have committed before its transient response
+                    // was observed. Replaying it can turn that successful commit
+                    // into a false precondition failure, so only reads receive
+                    // generic transient retries. Provider-specific conflict
+                    // responses are handled above when their contract explicitly
+                    // guarantees that replay is safe.
+                    if request.is_mutation() || attempt >= MAX_TRANSIENT_RETRIES {
                         return Ok(response);
                     }
                     tokio::time::sleep(Self::retry_delay(attempt)).await;
@@ -223,7 +402,7 @@ impl CloudExecutor {
                 Ok(response) => return Ok(response),
                 Err(error)
                     if error.transient
-                        && !conditional_mutation
+                        && !request.is_mutation()
                         && attempt < MAX_TRANSIENT_RETRIES =>
                 {
                     tokio::time::sleep(Self::retry_delay(attempt)).await;
@@ -234,12 +413,39 @@ impl CloudExecutor {
         }
     }
 
+    fn constrain_request_to_deadline(
+        mut request: CloudRequest,
+        deadline: Option<tokio::time::Instant>,
+    ) -> CloudRequest {
+        if let Some(deadline) = deadline {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            request.timeout = Some(
+                request
+                    .timeout
+                    .map_or(remaining, |timeout| timeout.min(remaining)),
+            );
+        }
+        request
+    }
+
     fn retry_delay(attempt: u32) -> Duration {
         Duration::from_millis(TRANSIENT_BACKOFF_BASE_MS.saturating_mul(1u64 << attempt.min(4)))
     }
 
     fn is_transient_status(status: u16) -> bool {
         matches!(status, 408 | 425 | 429 | 500 | 502 | 503 | 504)
+    }
+
+    fn is_retryable_conditional_conflict(request: &CloudRequest, response: &CloudResponse) -> bool {
+        if response.status != 409
+            || !request.retry_conditional_conflicts
+            || !request.is_conditionally_idempotent_mutation()
+        {
+            return false;
+        }
+        let body = String::from_utf8_lossy(&response.body);
+        body.contains("<Code>ConditionalRequestConflict</Code>")
+            || body.contains("<Code>OperationAborted</Code>")
     }
 
     async fn execute_request_once(
@@ -278,7 +484,7 @@ impl CloudExecutor {
                 while let Some(chunk) = resp
                     .chunk()
                     .await
-                    .map_err(|err| RequestError::permanent(format!("cloud body error: {err}")))?
+                    .map_err(|err| RequestError::from_reqwest(&err))?
                 {
                     append_bounded_response_chunk(&mut body, &chunk, MAX_CLOUD_RESPONSE_BYTES)
                         .map_err(RequestError::permanent)?;
@@ -325,8 +531,11 @@ impl RequestError {
     }
 
     fn from_reqwest(error: &reqwest::Error) -> Self {
-        let transient =
-            error.is_timeout() || error.is_connect() || error.is_request() || error.is_body();
+        let transient = error.is_timeout()
+            || error.is_connect()
+            || error.is_request()
+            || error.is_body()
+            || error.is_decode();
         Self {
             transient,
             message: format!("cloud request failed: {error}"),
@@ -357,11 +566,271 @@ impl Drop for CloudExecutor {
 
 #[cfg(test)]
 mod tests {
-    use super::{append_bounded_response_chunk, CloudExecutor, CloudRequest};
+    use super::{append_bounded_response_chunk, CloudExecutor, CloudRequest, CloudSigner};
+    use crate::common::{MidgeError, MidgeResult};
+    use crate::storage::cloud::{CloudError, CloudEvent, CloudOutcome};
     use reqwest::{Client, Method};
     use std::io::{ErrorKind, Read, Write};
     use std::net::TcpListener;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Barrier,
+    };
     use std::time::{Duration, Instant};
+
+    struct SlowFailingSigner;
+    struct SlowSuccessfulSigner;
+    struct CountingSlowSuccessfulSigner {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl CloudSigner for SlowFailingSigner {
+        fn sign(&self, _request: &mut CloudRequest) -> MidgeResult<()> {
+            std::thread::sleep(Duration::from_millis(150));
+            Err(MidgeError::Internal("injected signer failure".to_string()))
+        }
+    }
+
+    impl CloudSigner for SlowSuccessfulSigner {
+        fn sign(&self, _request: &mut CloudRequest) -> MidgeResult<()> {
+            std::thread::sleep(Duration::from_millis(150));
+            Ok(())
+        }
+    }
+
+    impl CloudSigner for CountingSlowSuccessfulSigner {
+        fn sign(&self, _request: &mut CloudRequest) -> MidgeResult<()> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            std::thread::sleep(Duration::from_millis(150));
+            Ok(())
+        }
+    }
+
+    fn block_executor_runtime(executor: &CloudExecutor) -> Arc<Barrier> {
+        let ready = Arc::new(Barrier::new(5));
+        let release = Arc::new(Barrier::new(5));
+        for _ in 0..4 {
+            let task_ready = Arc::clone(&ready);
+            let task_release = Arc::clone(&release);
+            executor
+                .rt
+                .as_ref()
+                .expect("cloud runtime")
+                .spawn(async move {
+                    task_ready.wait();
+                    task_release.wait();
+                });
+        }
+        ready.wait();
+        release
+    }
+
+    #[test]
+    fn should_apply_configured_default_timeout_without_overriding_request_deadline() {
+        // Arrange
+        let executor = CloudExecutor::new(None).expect("create cloud executor");
+        executor.set_default_timeout(Duration::from_millis(123));
+        let defaulted = CloudRequest::new(Method::GET, "http://example.invalid".to_string());
+        let explicit = CloudRequest::new(Method::GET, "http://example.invalid".to_string())
+            .with_timeout(Duration::from_millis(456));
+
+        // Act
+        let defaulted = CloudExecutor::apply_default_timeout(defaulted, executor.default_timeout());
+        let explicit = CloudExecutor::apply_default_timeout(explicit, executor.default_timeout());
+
+        // Assert
+        assert_eq!(defaulted.timeout, Some(Duration::from_millis(123)));
+        assert_eq!(explicit.timeout, Some(Duration::from_millis(456)));
+    }
+
+    #[test]
+    fn should_round_fractional_default_timeout_up_to_next_millisecond() {
+        // Arrange
+        let timeout = Duration::from_micros(1_999);
+
+        // Act
+        let timeout_millis = CloudExecutor::duration_millis(timeout);
+
+        // Assert
+        assert_eq!(timeout_millis, 2);
+    }
+
+    #[test]
+    fn should_preserve_exact_default_timeout_boundary() {
+        // Arrange
+        let exact_millisecond = Duration::from_millis(1);
+
+        // Act
+        let exact_millis = CloudExecutor::duration_millis(exact_millisecond);
+
+        // Assert
+        assert_eq!(exact_millis, 1);
+    }
+
+    #[test]
+    fn should_saturate_default_timeout_at_u64_max() {
+        // Arrange
+        let timeout = Duration::MAX;
+
+        // Act
+        let saturated_millis = CloudExecutor::duration_millis(timeout);
+
+        // Assert
+        assert_eq!(saturated_millis, u64::MAX);
+    }
+
+    #[test]
+    fn should_return_immediately_when_cloud_signer_refresh_is_slow() {
+        // Arrange
+        let executor =
+            CloudExecutor::new(Some(Arc::new(SlowFailingSigner))).expect("create cloud executor");
+        let request = CloudRequest::new(Method::GET, "http://127.0.0.1:9/object".to_string());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let started = Instant::now();
+
+        // Act
+        executor.spawn_request(request, "object".to_string(), sender, |key, result| {
+            CloudEvent::Get {
+                key,
+                result: match result {
+                    Ok(response) => CloudOutcome::Ok(response.body),
+                    Err(error) => CloudOutcome::Err(CloudError::Transport(error.to_string())),
+                },
+            }
+        });
+        let returned_after = started.elapsed();
+        let event = receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("receive signer failure");
+
+        // Assert
+        assert!(returned_after < Duration::from_millis(50));
+        assert!(matches!(
+            event,
+            CloudEvent::Get {
+                result: CloudOutcome::Err(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn should_charge_slow_signer_refresh_to_request_deadline() {
+        // Arrange
+        let executor = CloudExecutor::new(Some(Arc::new(SlowSuccessfulSigner)))
+            .expect("create cloud executor");
+        let request = CloudRequest::new(Method::PUT, "http://127.0.0.1:9/object".to_string())
+            .with_timeout(Duration::from_millis(30));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let started = Instant::now();
+
+        // Act
+        executor.spawn_request(request, "object".to_string(), sender, |key, result| {
+            CloudEvent::Put {
+                key,
+                result: result
+                    .map(|_| ())
+                    .map_err(|error| CloudError::Transport(error.to_string())),
+            }
+        });
+        let event = receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("receive signer timeout");
+
+        // Assert
+        assert!(started.elapsed() < Duration::from_millis(120));
+        assert!(matches!(
+            event,
+            CloudEvent::Put {
+                result: CloudOutcome::Err(CloudError::Transport(message)),
+                ..
+            } if message.contains("timed out after 30 ms")
+        ));
+    }
+
+    #[test]
+    fn should_not_authorize_spawned_request_after_submission_deadline() {
+        // Arrange
+        let signer_calls = Arc::new(AtomicUsize::new(0));
+        let executor = CloudExecutor::new(Some(Arc::new(CountingSlowSuccessfulSigner {
+            calls: Arc::clone(&signer_calls),
+        })))
+        .expect("create cloud executor");
+        let release = block_executor_runtime(&executor);
+        let request = CloudRequest::new(Method::PUT, "http://127.0.0.1:9/object".to_string())
+            .with_timeout(Duration::from_millis(30));
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        // Act
+        executor.spawn_request(request, "object".to_string(), sender, |key, result| {
+            CloudEvent::Put {
+                key,
+                result: result
+                    .map(|_| ())
+                    .map_err(|error| CloudError::Transport(error.to_string())),
+            }
+        });
+        std::thread::sleep(Duration::from_millis(60));
+        release.wait();
+        let event = receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("receive expired request result");
+
+        // Assert
+        assert_eq!(signer_calls.load(Ordering::Acquire), 0);
+        assert!(matches!(
+            event,
+            CloudEvent::Put {
+                result: CloudOutcome::Err(CloudError::Transport(message)),
+                ..
+            } if message.contains("timed out after 30 ms")
+        ));
+    }
+
+    #[test]
+    fn should_not_begin_spawned_request_loop_after_submission_deadline() {
+        // Arrange
+        let make_calls = Arc::new(AtomicUsize::new(0));
+        let executor = CloudExecutor::new(None).expect("create cloud executor");
+        executor.set_default_timeout(Duration::from_millis(30));
+        let release = block_executor_runtime(&executor);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let counted_make_calls = Arc::clone(&make_calls);
+
+        // Act
+        executor.spawn_request_loop(
+            Vec::<String>::new(),
+            "objects/".to_string(),
+            sender,
+            move |_| {
+                counted_make_calls.fetch_add(1, Ordering::AcqRel);
+                Ok(CloudRequest::new(
+                    Method::GET,
+                    "http://127.0.0.1:9/objects".to_string(),
+                ))
+            },
+            |_, _| Ok(false),
+            |prefix, result| CloudEvent::List {
+                prefix,
+                result: result.map_err(|error| CloudError::Transport(error.to_string())),
+            },
+        );
+        std::thread::sleep(Duration::from_millis(60));
+        release.wait();
+        let event = receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("receive expired list result");
+
+        // Assert
+        assert_eq!(make_calls.load(Ordering::Acquire), 0);
+        assert!(matches!(
+            event,
+            CloudEvent::List {
+                result: CloudOutcome::Err(CloudError::Transport(message)),
+                ..
+            } if message.contains("timed out after 30 ms")
+        ));
+    }
 
     #[test]
     fn should_stop_at_redirect_when_cloud_request_is_mutating() {
@@ -462,14 +931,9 @@ mod tests {
                     Ok((mut stream, _)) => {
                         let mut request = [0_u8; 2048];
                         let _ = stream.read(&mut request);
-                        let status = if served == 0 {
-                            "503 Service Unavailable"
-                        } else {
-                            "412 Precondition Failed"
-                        };
                         write!(
                             stream,
-                            "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                         )
                         .expect("write test response");
                         served += 1;
@@ -501,8 +965,182 @@ mod tests {
         assert_eq!(response.status, 503);
         assert_eq!(
             request_count, 1,
-            "conditional mutation must not be replayed blindly"
+            "an ambiguous conditional mutation requires caller reconciliation before replay"
         );
+    }
+
+    #[test]
+    fn should_retry_read_given_partial_response_body_disconnect() {
+        // Arrange
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        listener
+            .set_nonblocking(true)
+            .expect("configure nonblocking test server");
+        let endpoint = format!(
+            "http://{}/object",
+            listener.local_addr().expect("server address")
+        );
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut served = 0;
+            while served < 2 && Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut request = [0_u8; 2048];
+                        let _ = stream.read(&mut request);
+                        if served == 0 {
+                            stream
+                                .write_all(
+                                    b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\npart",
+                                )
+                                .expect("write partial response");
+                        } else {
+                            stream
+                                .write_all(
+                                    b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\ncomplete",
+                                )
+                                .expect("write complete response");
+                        }
+                        served += 1;
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept test request: {error}"),
+                }
+            }
+            served
+        });
+        let request = CloudRequest::new(Method::GET, endpoint);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+
+        // Act
+        let response = runtime
+            .block_on(CloudExecutor::execute_request(Client::new(), request))
+            .expect("read should recover from partial body disconnect");
+        let request_count = server.join().expect("join test server");
+
+        // Assert
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"complete");
+        assert_eq!(request_count, 2);
+    }
+
+    #[test]
+    fn should_not_retry_unconditional_mutation_given_ambiguous_transient_response() {
+        // Arrange
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        listener
+            .set_nonblocking(true)
+            .expect("configure nonblocking test server");
+        let endpoint = format!(
+            "http://{}/object",
+            listener.local_addr().expect("server address")
+        );
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut served = 0;
+            let mut last_request: Option<Instant> = None;
+            while Instant::now() < deadline
+                && last_request.is_none_or(|last| last.elapsed() < Duration::from_millis(250))
+            {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut request = [0_u8; 2048];
+                        let _ = stream.read(&mut request);
+                        write!(
+                            stream,
+                            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        )
+                        .expect("write test response");
+                        served += 1;
+                        last_request = Some(Instant::now());
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept test request: {error}"),
+                }
+            }
+            served
+        });
+        let request = CloudRequest::new(Method::POST, endpoint).with_body(b"new-value".to_vec());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+
+        // Act
+        let response = runtime
+            .block_on(CloudExecutor::execute_request(Client::new(), request))
+            .expect("transient HTTP response");
+        let request_count = server.join().expect("join test server");
+
+        // Assert
+        assert_eq!(response.status, 503);
+        assert_eq!(
+            request_count, 1,
+            "an unconditional object mutation must not overwrite a concurrent replacement on retry"
+        );
+    }
+
+    #[test]
+    fn should_not_retry_generation_not_match_mutation_given_transient_response() {
+        // Arrange
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        listener
+            .set_nonblocking(true)
+            .expect("configure nonblocking test server");
+        let endpoint = format!(
+            "http://{}/object",
+            listener.local_addr().expect("server address")
+        );
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut served = 0;
+            let mut last_request: Option<Instant> = None;
+            while Instant::now() < deadline
+                && last_request.is_none_or(|last| last.elapsed() < Duration::from_millis(250))
+            {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut request = [0_u8; 2048];
+                        let _ = stream.read(&mut request);
+                        write!(
+                            stream,
+                            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        )
+                        .expect("write test response");
+                        served += 1;
+                        last_request = Some(Instant::now());
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept test request: {error}"),
+                }
+            }
+            served
+        });
+        let request = CloudRequest::new(Method::DELETE, endpoint)
+            .with_header("x-goog-if-generation-not-match", "7");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+
+        // Act
+        let response = runtime
+            .block_on(CloudExecutor::execute_request(Client::new(), request))
+            .expect("transient HTTP response");
+        let request_count = server.join().expect("join test server");
+
+        // Assert
+        assert_eq!(response.status, 503);
+        assert_eq!(request_count, 1);
     }
 
     #[test]

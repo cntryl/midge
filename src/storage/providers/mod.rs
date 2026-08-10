@@ -260,7 +260,6 @@ pub(crate) mod test_support {
 
 use std::sync::Arc;
 
-#[cfg(not(feature = "cloud-common"))]
 use crate::common::MidgeError;
 use crate::common::MidgeResult;
 #[cfg(feature = "cloud-common")]
@@ -433,16 +432,39 @@ fn validate_list_xml(body: &str, expected_root: &str) -> MidgeResult<()> {
     Ok(())
 }
 
-#[cfg(feature = "cloud-common")]
+#[cfg(all(test, feature = "cloud-all"))]
 pub(crate) fn build_cloud_storage(
     provider: &CloudProviderConfig,
     prefix: &str,
 ) -> MidgeResult<Arc<CloudStorage>> {
+    build_cloud_storage_with_timeout(provider, prefix, crate::config::DEFAULT_STORAGE_IO_TIMEOUT)
+}
+
+#[cfg(feature = "cloud-common")]
+pub(crate) fn build_cloud_storage_with_timeout(
+    provider: &CloudProviderConfig,
+    prefix: &str,
+    timeout: std::time::Duration,
+) -> MidgeResult<Arc<CloudStorage>> {
+    let namespace = validated_cloud_prefix(prefix)?;
     let backend = build_cloud_backend(provider)?;
-    Ok(Arc::new(CloudStorage::new(
-        backend,
-        prefix.trim_matches('/').to_string(),
+    backend.set_request_timeout(timeout);
+    Ok(Arc::new(CloudStorage::new_with_timeout(
+        backend, namespace, timeout,
     )))
+}
+
+#[cfg(feature = "cloud-common")]
+fn validated_cloud_prefix(prefix: &str) -> MidgeResult<String> {
+    let prefix = prefix.trim_matches('/');
+    for segment in prefix.split('/') {
+        if matches!(segment, "." | "..") {
+            return Err(MidgeError::InvalidArgument(
+                "cloud storage prefix must not contain a dot segment".to_string(),
+            ));
+        }
+    }
+    Ok(prefix.to_string())
 }
 
 #[cfg(all(test, feature = "cloud-all"))]
@@ -521,6 +543,46 @@ mod validation_tests {
     }
 
     #[test]
+    fn should_reject_dot_segments_given_cloud_storage_prefix() {
+        // Arrange
+        let provider = CloudProviderConfig::s3_compatible_static(
+            "bucket",
+            "http://127.0.0.1:9000",
+            "access",
+            "secret",
+        );
+        let prefixes = ["tenant/../shared", "tenant/./shared"];
+
+        // Act
+        let errors = prefixes.map(|prefix| {
+            build_cloud_storage(&provider, prefix)
+                .err()
+                .expect("dot segments must fail before any cloud request")
+        });
+
+        // Assert
+        for error in errors {
+            assert!(matches!(
+                error,
+                crate::common::MidgeError::InvalidArgument(message)
+                    if message.contains("dot segment")
+            ));
+        }
+    }
+
+    #[test]
+    fn should_preserve_literal_percent_sequences_given_cloud_storage_prefix() {
+        // Arrange
+        let prefix = "tenant/%2e%2e/%/shared";
+
+        // Act
+        let validated = validated_cloud_prefix(prefix).expect("literal percent prefix");
+
+        // Assert
+        assert_eq!(validated, prefix);
+    }
+
+    #[test]
     fn should_parse_empty_provider_response_as_error_given_malformed_http_body_when_listing() {
         // Arrange
         let server = spawn_scripted_http_server(vec![String::new()]);
@@ -587,9 +649,10 @@ mod validation_tests {
 }
 
 #[cfg(not(feature = "cloud-common"))]
-pub(crate) fn build_cloud_storage(
+pub(crate) fn build_cloud_storage_with_timeout(
     _provider: &CloudProviderConfig,
     _prefix: &str,
+    _timeout: std::time::Duration,
 ) -> MidgeResult<Arc<CloudStorage>> {
     Err(MidgeError::InvalidArgument(
         "real cloud storage requires an enabled cloud provider feature".to_string(),

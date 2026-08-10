@@ -139,15 +139,11 @@ fn run_provider_contract_body(label: &str, provider: &CloudProviderConfig) {
         !conditional_head.etag.is_empty(),
         "HEAD should return an ETag for conditional update"
     );
-    let conditional_headers = if label == "gcs-json" {
-        crate::storage::cloud::object_match_precondition_headers(
-            &conditional_head.etag,
-            conditional_head.generation.as_deref(),
-        )
-        .expect("GCS JSON HEAD should provide a generation token")
-    } else {
-        vec![("If-Match".to_string(), conditional_head.etag)]
-    };
+    let conditional_headers = crate::storage::cloud::object_match_precondition_headers(
+        &conditional_head.etag,
+        conditional_head.generation.as_deref(),
+    )
+    .expect("provider HEAD should provide a conditional identity token");
     put(
         &backend,
         &conditional_key,
