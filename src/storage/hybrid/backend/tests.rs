@@ -145,8 +145,10 @@ fn assert_real_provider_missing_and_cas_errors(shape: ProviderErrorShape) {
         .expect_err("provider-shaped 412 must classify as a CAS conflict");
     assert!(matches!(
         cas_error,
-        crate::common::MidgeError::Busy(message)
-            if message.contains("status 412") && message.contains("precondition")
+        crate::common::MidgeError::Busy(message) if {
+            let message = message.to_ascii_lowercase();
+            message.contains("status 412") && message.contains("precondition")
+        }
     ));
     assert_eq!(cas_server.finish(), 2);
 }
