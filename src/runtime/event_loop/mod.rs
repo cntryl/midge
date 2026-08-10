@@ -730,7 +730,7 @@ impl EventLoop {
     ) -> Result<Option<Vec<u8>>, String> {
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_get(key, tx);
-        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+        match rx.recv_timeout(cloud.callback_timeout()) {
             Ok(crate::storage::cloud::CloudEvent::Get {
                 result: crate::storage::cloud::CloudOutcome::Ok(data),
                 ..
@@ -756,7 +756,7 @@ impl EventLoop {
     ) -> Result<Option<crate::storage::cloud::ObjectMetadata>, String> {
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_head(key, tx);
-        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+        match rx.recv_timeout(cloud.callback_timeout()) {
             Ok(crate::storage::cloud::CloudEvent::Head {
                 result: crate::storage::cloud::CloudOutcome::Ok(metadata),
                 ..
@@ -865,7 +865,7 @@ impl EventLoop {
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_put(key, data, headers, tx);
 
-        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+        match rx.recv_timeout(cloud.callback_timeout()) {
             Ok(crate::storage::cloud::CloudEvent::Put { result, .. }) => match result {
                 crate::storage::cloud::CloudOutcome::Ok(()) => Ok(()),
                 crate::storage::cloud::CloudOutcome::Err(error) => {

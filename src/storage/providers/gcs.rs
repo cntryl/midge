@@ -17,7 +17,6 @@ use base64::{
 };
 use chrono::Utc;
 use hmac::{Hmac, KeyInit, Mac};
-use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use reqwest::Method;
 use ring::{
     rand,
@@ -29,17 +28,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
-
-const ENCODE_SET: &AsciiSet = &CONTROLS
-    .add(b' ')
-    .add(b'"')
-    .add(b'<')
-    .add(b'>')
-    .add(b'`')
-    .add(b'#')
-    .add(b'?')
-    .add(b'{')
-    .add(b'}');
 
 // ---------------------------------------------------------------------------
 // Credentials
@@ -231,13 +219,21 @@ impl Drop for GcsProvider {
     }
 }
 
+#[cfg(not(windows))]
 fn default_gcloud_adc_file() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
         .map(|home| home.join(".config/gcloud/application_default_credentials.json"))
 }
 
-#[derive(Clone)]
+#[cfg(windows)]
+fn default_gcloud_adc_file() -> Option<std::path::PathBuf> {
+    std::env::var_os("APPDATA")
+        .map(std::path::PathBuf::from)
+        .map(|app_data| app_data.join("gcloud/application_default_credentials.json"))
+}
+
+#[derive(Clone, Debug)]
 struct CachedGcsToken {
     access_token: String,
     expires_at: Option<u64>,
@@ -343,38 +339,75 @@ fn token_from_adc_file(path: &std::path::Path) -> MidgeResult<CachedGcsToken> {
 }
 
 fn fetch_external_account_token(json: &serde_json::Value) -> MidgeResult<CachedGcsToken> {
+    if json.get("client_id").is_some() || json.get("client_secret").is_some() {
+        return Err(MidgeError::InvalidArgument(
+            "GCS external_account client authentication is not supported".to_string(),
+        ));
+    }
     let audience = required_json_str(json, "audience")?;
     let subject_token_type = required_json_str(json, "subject_token_type")?;
     let token_url = required_json_str(json, "token_url")?;
     let subject_token = external_account_subject_token(json)?;
-    let token = post_form_for_access_token(
-        token_url,
-        &[
-            (
-                "grant_type",
-                "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
-            ),
-            ("audience", audience.to_string()),
-            (
-                "scope",
-                "https://www.googleapis.com/auth/devstorage.full_control".to_string(),
-            ),
-            (
-                "requested_token_type",
-                "urn:ietf:params:oauth:token-type:access_token".to_string(),
-            ),
-            ("subject_token_type", subject_token_type.to_string()),
-            ("subject_token", subject_token),
-        ],
-    )?;
-
-    if let Some(url) = json
+    let impersonation_url = json
         .get("service_account_impersonation_url")
+        .and_then(|value| value.as_str());
+    let scope = if impersonation_url.is_some() {
+        // IAM Credentials requires the underlying federated token to carry
+        // either the IAM or cloud-platform scope before it can mint the final
+        // service-account token.
+        "https://www.googleapis.com/auth/cloud-platform"
+    } else {
+        "https://www.googleapis.com/auth/devstorage.full_control"
+    };
+    let mut fields = vec![
+        (
+            "grant_type",
+            "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
+        ),
+        ("audience", audience.to_string()),
+        ("scope", scope.to_string()),
+        (
+            "requested_token_type",
+            "urn:ietf:params:oauth:token-type:access_token".to_string(),
+        ),
+        ("subject_token_type", subject_token_type.to_string()),
+        ("subject_token", subject_token),
+    ];
+    if let Some(user_project) = json
+        .get("workforce_pool_user_project")
         .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
     {
-        impersonate_gcs_service_account(url, &token.access_token)
+        fields.push((
+            "options",
+            json!({ "userProject": user_project }).to_string(),
+        ));
+    }
+    let token = post_form_for_access_token(token_url, &fields)?;
+
+    if let Some(url) = impersonation_url {
+        let lifetime_seconds = external_account_impersonation_lifetime(json)?;
+        impersonate_gcs_service_account(url, &token.access_token, lifetime_seconds)
     } else {
         Ok(token)
+    }
+}
+
+fn external_account_impersonation_lifetime(json: &serde_json::Value) -> MidgeResult<u64> {
+    let configured = json
+        .get("service_account_impersonation")
+        .and_then(|value| value.get("token_lifetime_seconds"));
+    match configured {
+        None => Ok(3600),
+        Some(value) => value
+            .as_u64()
+            .filter(|seconds| (600..=43_200).contains(seconds))
+            .ok_or_else(|| {
+            MidgeError::InvalidArgument(
+                "GCS external_account service_account_impersonation.token_lifetime_seconds must be an integer from 600 through 43200"
+                    .to_string(),
+            )
+        }),
     }
 }
 
@@ -392,21 +425,88 @@ fn external_account_subject_token(json: &serde_json::Value) -> MidgeResult<Strin
         ));
     }
 
-    let file = source
-        .get("file")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| {
-            MidgeError::InvalidArgument(
-                "GCS external_account ADC currently supports file credential_source only"
+    if source.get("environment_id").is_some() {
+        return Err(MidgeError::InvalidArgument(
+            "GCS AWS external_account credential_source is not yet supported; use a file- or URL-sourced workload identity credential"
+                .to_string(),
+        ));
+    }
+
+    let (content, source_description) =
+        if let Some(file) = source.get("file").and_then(|value| value.as_str()) {
+            let content = std::fs::read_to_string(file).map_err(|error| {
+                MidgeError::Internal(format!(
+                    "failed to read GCS external_account subject token file '{file}': {error}"
+                ))
+            })?;
+            (content, format!("file '{file}'"))
+        } else if let Some(url) = source.get("url").and_then(|value| value.as_str()) {
+            (
+                fetch_external_account_subject_token_url(source, url)?,
+                format!("URL '{url}'"),
+            )
+        } else {
+            return Err(MidgeError::InvalidArgument(
+                "GCS external_account ADC requires a supported file or URL credential_source"
                     .to_string(),
+            ));
+        };
+
+    parse_external_account_subject_token(source, &content, &source_description)
+}
+
+fn fetch_external_account_subject_token_url(
+    source: &serde_json::Value,
+    url: &str,
+) -> MidgeResult<String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|error| {
+            MidgeError::Internal(format!(
+                "GCS external_account subject token client init: {error}"
+            ))
+        })?;
+    let mut request = client.get(url);
+    if let Some(headers) = source.get("headers") {
+        let headers = headers.as_object().ok_or_else(|| {
+            MidgeError::InvalidArgument(
+                "GCS external_account credential_source.headers must be an object".to_string(),
             )
         })?;
-    let content = std::fs::read_to_string(file).map_err(|error| {
+        for (name, value) in headers {
+            let value = value.as_str().ok_or_else(|| {
+                MidgeError::InvalidArgument(format!(
+                    "GCS external_account credential_source header '{name}' must be a string"
+                ))
+            })?;
+            request = request.header(name.as_str(), value);
+        }
+    }
+    let response = request.send().map_err(|error| {
         MidgeError::Internal(format!(
-            "failed to read GCS external_account subject token file '{file}': {error}"
+            "GCS external_account subject token URL request failed: {error}"
         ))
     })?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().unwrap_or_default();
+        return Err(MidgeError::Internal(format!(
+            "GCS external_account subject token URL failed with status {status}: {body}"
+        )));
+    }
+    response.text().map_err(|error| {
+        MidgeError::Internal(format!(
+            "GCS external_account subject token URL response body: {error}"
+        ))
+    })
+}
 
+fn parse_external_account_subject_token(
+    source: &serde_json::Value,
+    content: &str,
+    source_description: &str,
+) -> MidgeResult<String> {
     match source
         .get("format")
         .and_then(|format| format.get("type"))
@@ -424,27 +524,33 @@ fn external_account_subject_token(json: &serde_json::Value) -> MidgeResult<Strin
                     )
                 })?;
             let token_json: serde_json::Value =
-                serde_json::from_str(&content).map_err(|error| {
+                serde_json::from_str(content).map_err(|error| {
                     MidgeError::InvalidArgument(format!(
-                        "failed to parse GCS external_account subject token JSON '{file}': {error}"
+                        "failed to parse GCS external_account subject token JSON from {source_description}: {error}"
                     ))
                 })?;
-            token_json
+            let token = token_json
                 .get(field)
                 .and_then(|value| value.as_str())
-                .map(str::to_string)
                 .ok_or_else(|| {
                     MidgeError::InvalidArgument(format!(
                         "GCS external_account subject token JSON missing string field {field}"
                     ))
-                })
+                })?
+                .trim();
+            if token.is_empty() {
+                return Err(MidgeError::InvalidArgument(format!(
+                    "GCS external_account subject token JSON field {field} from {source_description} is empty"
+                )));
+            }
+            Ok(token.to_string())
         }
         Some("text") | None => {
             let token = content.trim();
             if token.is_empty() {
-                Err(MidgeError::InvalidArgument(
-                    "GCS external_account subject token file is empty".to_string(),
-                ))
+                Err(MidgeError::InvalidArgument(format!(
+                    "GCS external_account subject token from {source_description} is empty"
+                )))
             } else {
                 Ok(token.to_string())
             }
@@ -458,6 +564,7 @@ fn external_account_subject_token(json: &serde_json::Value) -> MidgeResult<Strin
 fn impersonate_gcs_service_account(
     url: &str,
     source_access_token: &str,
+    lifetime_seconds: u64,
 ) -> MidgeResult<CachedGcsToken> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
@@ -472,7 +579,7 @@ fn impersonate_gcs_service_account(
         .bearer_auth(source_access_token)
         .json(&json!({
             "scope": ["https://www.googleapis.com/auth/devstorage.full_control"],
-            "lifetime": "3600s",
+            "lifetime": format!("{lifetime_seconds}s"),
         }))
         .send()
         .map_err(|error| {
@@ -716,16 +823,32 @@ fn parse_access_token_json(body: &str) -> MidgeResult<CachedGcsToken> {
     let access_token = json
         .get("access_token")
         .and_then(|value| value.as_str())
-        .map(str::to_string)
         .ok_or_else(|| MidgeError::Internal("GCS token response missing access_token".into()))?;
-    let expires_at = json
+    if access_token.trim().is_empty() {
+        return Err(MidgeError::Internal(
+            "GCS token response contains empty access_token".into(),
+        ));
+    }
+    let ttl = json
         .get("expires_in")
         .and_then(serde_json::Value::as_u64)
-        .map_or_else(
-            || current_unix_secs().saturating_add(3600),
-            |ttl| current_unix_secs().saturating_add(ttl),
-        );
-    Ok(CachedGcsToken::expiring(access_token, expires_at))
+        .filter(|ttl| *ttl > 0)
+        .ok_or_else(|| {
+            MidgeError::Internal("GCS token response must include a positive expires_in".into())
+        })?;
+    let now = current_unix_secs();
+    let expires_at = now
+        .checked_add(ttl)
+        .filter(|expires_at| *expires_at > now)
+        .ok_or_else(|| {
+            MidgeError::Internal(
+                "GCS token response expires_in does not yield a future expiry".into(),
+            )
+        })?;
+    Ok(CachedGcsToken::expiring(
+        access_token.to_string(),
+        expires_at,
+    ))
 }
 
 fn parse_impersonated_access_token_json(body: &str) -> MidgeResult<CachedGcsToken> {
@@ -737,21 +860,39 @@ fn parse_impersonated_access_token_json(body: &str) -> MidgeResult<CachedGcsToke
     let access_token = json
         .get("accessToken")
         .and_then(|value| value.as_str())
-        .map(str::to_string)
         .ok_or_else(|| {
             MidgeError::Internal(
                 "GCS service account impersonation response missing accessToken".into(),
             )
         })?;
-    let expires_at = json
+    if access_token.trim().is_empty() {
+        return Err(MidgeError::Internal(
+            "GCS service account impersonation response contains empty accessToken".into(),
+        ));
+    }
+    let expire_time = json
         .get("expireTime")
         .and_then(|value| value.as_str())
-        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-        .map_or_else(
-            || current_unix_secs().saturating_add(3600),
-            |datetime| u64::try_from(datetime.timestamp().max(0)).unwrap_or(0),
-        );
-    Ok(CachedGcsToken::expiring(access_token, expires_at))
+        .ok_or_else(|| {
+            MidgeError::Internal(
+                "GCS service account impersonation response must include a future RFC3339 expireTime"
+                    .into(),
+            )
+        })?;
+    let expires_at = chrono::DateTime::parse_from_rfc3339(expire_time)
+        .ok()
+        .and_then(|datetime| u64::try_from(datetime.timestamp()).ok())
+        .filter(|expires_at| *expires_at > current_unix_secs())
+        .ok_or_else(|| {
+            MidgeError::Internal(
+                "GCS service account impersonation response must include a future RFC3339 expireTime"
+                    .into(),
+            )
+        })?;
+    Ok(CachedGcsToken::expiring(
+        access_token.to_string(),
+        expires_at,
+    ))
 }
 
 fn current_unix_secs() -> u64 {
@@ -764,6 +905,7 @@ fn current_unix_secs() -> u64 {
 fn required_json_str<'a>(json: &'a serde_json::Value, field: &str) -> MidgeResult<&'a str> {
     json.get(field)
         .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| MidgeError::InvalidArgument(format!("GCS credential JSON missing {field}")))
 }
 
@@ -810,9 +952,16 @@ impl GcsBackend {
 
     fn canonical_key(key: &str) -> String {
         key.split('/')
-            .map(|seg| utf8_percent_encode(seg, ENCODE_SET).to_string())
+            .map(|segment| urlencoding::encode(segment).into_owned())
             .collect::<Vec<_>>()
             .join("/")
+    }
+
+    fn json_object_path(key: &str) -> String {
+        // The JSON API models the complete object name as one path parameter.
+        // Encoding the complete key prevents slashes and percent escapes from
+        // being interpreted as path structure or as a different object name.
+        urlencoding::encode(key).into_owned()
     }
 
     /// Upload URL: `https://storage.googleapis.com/upload/storage/v1/b/{bucket}/o?uploadType=media&name={key}`
@@ -833,14 +982,14 @@ impl GcsBackend {
         }
     }
 
-    /// Download URL (media): `https://storage.googleapis.com/storage/v1/b/{bucket}/o/{key}?alt=media`
+    /// Download URL (media): `https://storage.googleapis.com/download/storage/v1/b/{bucket}/o/{key}?alt=media`
     fn download_url(&self, key: &str) -> String {
         match self.mode {
             GcsBackendMode::Json => format!(
-                "{}/storage/v1/b/{}/o/{}?alt=media",
+                "{}/download/storage/v1/b/{}/o/{}?alt=media",
                 self.endpoint.trim_end_matches('/'),
                 self.bucket,
-                Self::canonical_key(key)
+                Self::json_object_path(key)
             ),
             GcsBackendMode::Xml => self.upload_url(key),
         }
@@ -853,7 +1002,7 @@ impl GcsBackend {
                 "{}/storage/v1/b/{}/o/{}",
                 self.endpoint.trim_end_matches('/'),
                 self.bucket,
-                Self::canonical_key(key)
+                Self::json_object_path(key)
             ),
             GcsBackendMode::Xml => self.upload_url(key),
         }
@@ -901,6 +1050,7 @@ struct GcsListState {
     page_token: Option<String>,
     items: Vec<String>,
     budget: CloudListBudget,
+    error: Option<CloudError>,
 }
 
 impl GcsListState {
@@ -937,6 +1087,10 @@ impl GcsListState {
 }
 
 impl CloudBackend for GcsBackend {
+    fn set_request_timeout(&self, timeout: std::time::Duration) {
+        self.executor.set_default_timeout(timeout);
+    }
+
     fn submit_put(
         &self,
         key: &str,
@@ -949,6 +1103,12 @@ impl CloudBackend for GcsBackend {
             GcsBackendMode::Json => Method::POST,
             GcsBackendMode::Xml => Method::PUT,
         };
+        let mode = self.mode;
+        let conditional_mutation = headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("x-goog-if-generation-match")
+                || name.eq_ignore_ascii_case("if-match")
+                || (name.eq_ignore_ascii_case("if-none-match") && value.trim() == "*")
+        });
         let mut url = self.upload_url(&key);
         let content_length = data.len();
         let mut request = CloudRequest::new(method, String::new())
@@ -975,27 +1135,31 @@ impl CloudBackend for GcsBackend {
                         return;
                     }
                 }
-            } else if self.mode == GcsBackendMode::Json
-                && name.eq_ignore_ascii_case("x-goog-if-generation-match")
-            {
-                url = append_query_param(&url, "ifGenerationMatch", &value);
-            } else if self.mode == GcsBackendMode::Json
-                && name.eq_ignore_ascii_case("x-goog-if-generation-not-match")
-            {
-                url = append_query_param(&url, "ifGenerationNotMatch", &value);
-            } else if self.mode == GcsBackendMode::Json
-                && name.eq_ignore_ascii_case("if-none-match")
-                && value.trim() == "*"
-            {
-                url = append_query_param(&url, "ifGenerationMatch", "0");
-            } else if self.mode == GcsBackendMode::Json
-                && (name.eq_ignore_ascii_case("if-match")
-                    || name.eq_ignore_ascii_case("if-none-match"))
+            } else if name.eq_ignore_ascii_case("x-goog-if-generation-match") {
+                if self.mode == GcsBackendMode::Json {
+                    url = append_query_param(&url, "ifGenerationMatch", &value);
+                } else {
+                    request = request.with_header(name, value);
+                }
+            } else if name.eq_ignore_ascii_case("x-goog-if-generation-not-match") {
+                if self.mode == GcsBackendMode::Json {
+                    url = append_query_param(&url, "ifGenerationNotMatch", &value);
+                } else {
+                    request = request.with_header(name, value);
+                }
+            } else if name.eq_ignore_ascii_case("if-none-match") && value.trim() == "*" {
+                if self.mode == GcsBackendMode::Json {
+                    url = append_query_param(&url, "ifGenerationMatch", "0");
+                } else {
+                    request = request.with_header("x-goog-if-generation-match", "0".to_string());
+                }
+            } else if name.eq_ignore_ascii_case("if-match")
+                || name.eq_ignore_ascii_case("if-none-match")
             {
                 let _ = callback.send(CloudEvent::Put {
                     key,
                     result: CloudOutcome::Err(CloudError::Protocol(format!(
-                        "GCS JSON PUT cannot enforce {name}; use a generation precondition"
+                        "GCS PUT cannot enforce {name}; use a generation precondition"
                     ))),
                 });
                 return;
@@ -1011,7 +1175,12 @@ impl CloudBackend for GcsBackend {
             },
             Ok(resp) => CloudEvent::Put {
                 key: ctx,
-                result: CloudOutcome::Err(CloudError::from_http_status(resp.status, "GCS PUT")),
+                result: CloudOutcome::Err(gcs_response_error(
+                    &resp,
+                    "GCS PUT",
+                    mode,
+                    conditional_mutation,
+                )),
             },
             Err(err) => CloudEvent::Put {
                 key: ctx,
@@ -1023,6 +1192,7 @@ impl CloudBackend for GcsBackend {
 
     fn submit_get(&self, key: &str, callback: CloudCallback) {
         let key = key.to_string();
+        let mode = self.mode;
         let url = self.download_url(&key);
         let request = CloudRequest::new(Method::GET, url);
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
@@ -1032,7 +1202,7 @@ impl CloudBackend for GcsBackend {
             },
             Ok(resp) => CloudEvent::Get {
                 key: ctx,
-                result: CloudOutcome::Err(CloudError::from_http_status(resp.status, "GCS GET")),
+                result: CloudOutcome::Err(gcs_response_error(&resp, "GCS GET", mode, false)),
             },
             Err(err) => CloudEvent::Get {
                 key: ctx,
@@ -1044,34 +1214,19 @@ impl CloudBackend for GcsBackend {
 
     fn submit_get_with_metadata(&self, key: &str, callback: CloudCallback) {
         let key = key.to_string();
+        let mode = self.mode;
         let request = CloudRequest::new(Method::GET, self.download_url(&key));
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
             Ok(resp) if resp.status == 200 => {
-                let etag = resp
-                    .headers
-                    .iter()
-                    .find(|(name, _)| name.eq_ignore_ascii_case("etag"))
-                    .map(|(_, value)| value.trim().to_string())
-                    .unwrap_or_default();
-                let generation = resp
-                    .headers
-                    .iter()
-                    .find(|(name, _)| name.eq_ignore_ascii_case("x-goog-generation"))
-                    .map(|(_, value)| value.trim().to_string());
-                let metadata = match generation {
-                    Some(generation) => {
-                        ObjectMetadata::with_generation(resp.body.len() as u64, etag, 0, generation)
-                    }
-                    None => ObjectMetadata::new(resp.body.len() as u64, etag, 0),
-                };
+                let metadata = parse_gcs_media_object_metadata(&resp, mode);
                 CloudEvent::GetWithMetadata {
                     key: ctx,
-                    result: CloudOutcome::Ok((resp.body, metadata)),
+                    result: metadata.map(|metadata| (resp.body, metadata)),
                 }
             }
             Ok(resp) => CloudEvent::GetWithMetadata {
                 key: ctx,
-                result: CloudOutcome::Err(CloudError::from_http_status(resp.status, "GCS GET")),
+                result: CloudOutcome::Err(gcs_response_error(&resp, "GCS GET", mode, false)),
             },
             Err(err) => CloudEvent::GetWithMetadata {
                 key: ctx,
@@ -1084,6 +1239,7 @@ impl CloudBackend for GcsBackend {
     #[cfg(test)]
     fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
         let key = key.to_string();
+        let mode = self.mode;
         let url = self.download_url(&key);
         let range = match end {
             Some(e) => format!("bytes={}-{}", start, e.saturating_sub(1)),
@@ -1101,10 +1257,7 @@ impl CloudBackend for GcsBackend {
                 key: ctx,
                 start,
                 end,
-                result: CloudOutcome::Err(CloudError::from_http_status(
-                    resp.status,
-                    "GCS GET_RANGE",
-                )),
+                result: CloudOutcome::Err(gcs_response_error(&resp, "GCS GET_RANGE", mode, false)),
             },
             Err(err) => CloudEvent::GetRange {
                 key: ctx,
@@ -1118,6 +1271,11 @@ impl CloudBackend for GcsBackend {
 
     fn submit_delete(&self, key: &str, headers: Vec<(String, String)>, callback: CloudCallback) {
         let key = key.to_string();
+        let mode = self.mode;
+        let conditional_mutation = headers.iter().any(|(name, _)| {
+            name.eq_ignore_ascii_case("x-goog-if-generation-match")
+                || name.eq_ignore_ascii_case("if-match")
+        });
         let mut url = self.metadata_url(&key);
         let mut request = CloudRequest::new(Method::DELETE, String::new());
         for (name, value) in headers {
@@ -1129,14 +1287,13 @@ impl CloudBackend for GcsBackend {
                 && name.eq_ignore_ascii_case("x-goog-if-generation-not-match")
             {
                 url = append_query_param(&url, "ifGenerationNotMatch", &value);
-            } else if self.mode == GcsBackendMode::Json
-                && (name.eq_ignore_ascii_case("if-match")
-                    || name.eq_ignore_ascii_case("if-none-match"))
+            } else if name.eq_ignore_ascii_case("if-match")
+                || name.eq_ignore_ascii_case("if-none-match")
             {
                 let _ = callback.send(CloudEvent::Delete {
                     key,
                     result: CloudOutcome::Err(CloudError::Protocol(format!(
-                        "GCS JSON DELETE cannot enforce {name}; use a generation precondition"
+                        "GCS DELETE cannot enforce {name}; use a generation precondition"
                     ))),
                 });
                 return;
@@ -1156,7 +1313,12 @@ impl CloudBackend for GcsBackend {
             },
             Ok(resp) => CloudEvent::Delete {
                 key: ctx,
-                result: CloudOutcome::Err(CloudError::from_http_status(resp.status, "GCS DELETE")),
+                result: CloudOutcome::Err(gcs_response_error(
+                    &resp,
+                    "GCS DELETE",
+                    mode,
+                    conditional_mutation,
+                )),
             },
             Err(err) => CloudEvent::Delete {
                 key: ctx,
@@ -1176,6 +1338,7 @@ impl CloudBackend for GcsBackend {
             page_token: None,
             items: Vec::new(),
             budget: CloudListBudget::default(),
+            error: None,
         };
         self.executor.spawn_request_loop(
             state,
@@ -1184,10 +1347,8 @@ impl CloudBackend for GcsBackend {
             |state| Ok(CloudRequest::new(Method::GET, state.url())),
             |state, resp| {
                 if resp.status != 200 {
-                    return Err(MidgeError::Internal(format!(
-                        "GCS LIST status {}",
-                        resp.status
-                    )));
+                    state.error = Some(gcs_response_error(&resp, "GCS LIST", state.mode, false));
+                    return Ok(false);
                 }
                 let body = String::from_utf8_lossy(&resp.body);
                 let (page_items, page_token) = match state.mode {
@@ -1229,9 +1390,13 @@ impl CloudBackend for GcsBackend {
                 Ok(state.page_token.is_some())
             },
             |ctx, result| match result {
-                Ok(state) => CloudEvent::List {
+                Ok(state) if state.error.is_none() => CloudEvent::List {
                     prefix: ctx,
                     result: CloudOutcome::Ok(state.items),
+                },
+                Ok(mut state) => CloudEvent::List {
+                    prefix: ctx,
+                    result: CloudOutcome::Err(state.error.take().expect("checked list error")),
                 },
                 Err(err) => CloudEvent::List {
                     prefix: ctx,
@@ -1253,46 +1418,18 @@ impl CloudBackend for GcsBackend {
         let request = CloudRequest::new(method, url);
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
             Ok(resp) if resp.status == 200 => {
-                let body = String::from_utf8_lossy(&resp.body);
-                let header_size = resp
-                    .headers
-                    .iter()
-                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-                    .and_then(|(_, value)| value.parse::<u64>().ok());
-                let json_size = extract_json_string_value(&body, "size")
-                    .and_then(|value| value.parse::<u64>().ok());
-                let size = match mode {
-                    // A JSON metadata GET's Content-Length describes the metadata document,
-                    // not the stored object. Prefer the provider's object-size field.
-                    GcsBackendMode::Json => json_size.or(header_size),
-                    GcsBackendMode::Xml => header_size,
-                }
-                .unwrap_or(0);
-                let etag = resp
-                    .headers
-                    .iter()
-                    .find(|(name, _)| name.eq_ignore_ascii_case("etag"))
-                    .map(|(_, value)| value.trim().to_string())
-                    .or_else(|| extract_json_string_value(&body, "etag"))
-                    .unwrap_or_default();
-                let generation = resp
-                    .headers
-                    .iter()
-                    .find(|(name, _)| name.eq_ignore_ascii_case("x-goog-generation"))
-                    .map(|(_, value)| value.clone())
-                    .or_else(|| extract_json_string_value(&body, "generation"));
-                let metadata = match generation {
-                    Some(generation) => ObjectMetadata::with_generation(size, etag, 0, generation),
-                    None => ObjectMetadata::new(size, etag, 0),
+                let metadata = match mode {
+                    GcsBackendMode::Json => parse_gcs_json_object_metadata(&resp.body),
+                    GcsBackendMode::Xml => parse_gcs_xml_object_metadata(&resp),
                 };
                 CloudEvent::Head {
                     key: ctx,
-                    result: CloudOutcome::Ok(metadata),
+                    result: metadata,
                 }
             }
             Ok(resp) => CloudEvent::Head {
                 key: ctx,
-                result: CloudOutcome::Err(CloudError::from_http_status(resp.status, "GCS HEAD")),
+                result: CloudOutcome::Err(gcs_response_error(&resp, "GCS HEAD", mode, false)),
             },
             Err(err) => CloudEvent::Head {
                 key: ctx,
@@ -1303,16 +1440,180 @@ impl CloudBackend for GcsBackend {
     }
 }
 
-/// Extract a string value from a JSON body by key name.
-/// Simple parser — avoids adding a JSON dependency for lightweight metadata extraction.
-fn extract_json_string_value(body: &str, key: &str) -> Option<String> {
-    let pattern = format!("\"{key}\"");
-    let start = body.find(&pattern)?;
-    let after_key = &body[start + pattern.len()..];
-    let after_colon = after_key.trim_start().strip_prefix(':')?;
-    let trimmed = after_colon.trim_start().trim_start_matches('"');
-    let end = trimmed.find('"')?;
-    Some(trimmed[..end].to_string())
+fn gcs_response_error(
+    response: &CloudResponse,
+    operation: &str,
+    mode: GcsBackendMode,
+    conditional_mutation: bool,
+) -> CloudError {
+    let body = String::from_utf8_lossy(&response.body);
+    let (reason, message) = match mode {
+        GcsBackendMode::Json => serde_json::from_slice::<serde_json::Value>(&response.body)
+            .ok()
+            .map_or((None, None), |json| {
+                let reason = json
+                    .pointer("/error/errors/0/reason")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string);
+                let message = json
+                    .pointer("/error/message")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string);
+                (reason, message)
+            }),
+        GcsBackendMode::Xml => (
+            extract_xml_tag_values(&body, "Code").into_iter().next(),
+            extract_xml_tag_values(&body, "Message").into_iter().next(),
+        ),
+    };
+    let detail = match (reason.as_deref(), message.as_deref()) {
+        (Some(reason), Some(message)) => format!("{operation}: {reason}: {message}"),
+        (Some(reason), None) => format!("{operation}: {reason}"),
+        (None, Some(message)) => format!("{operation}: {message}"),
+        (None, None) => operation.to_string(),
+    };
+    let predicate_failed = reason.as_deref().is_some_and(|reason| {
+        reason.eq_ignore_ascii_case("conditionNotMet")
+            || reason.eq_ignore_ascii_case("PreconditionFailed")
+    });
+    if conditional_mutation && response.status == 412 && predicate_failed {
+        return CloudError::PreconditionFailed(format!("status {}: {detail}", response.status));
+    }
+
+    let policy_failure = reason.as_deref().is_some_and(|reason| {
+        [
+            "retentionPolicyNotMet",
+            "orgPolicyConstraintFailed",
+            "objectUnderActiveHold",
+            "userProjectMissing",
+            "billingNotEnabled",
+        ]
+        .iter()
+        .any(|candidate| reason.eq_ignore_ascii_case(candidate))
+    });
+    if policy_failure && matches!(response.status, 403 | 409 | 412) {
+        CloudError::InvalidRequest(format!("status {}: {detail}", response.status))
+    } else {
+        CloudError::from_http_status(response.status, detail)
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct GcsJsonObjectMetadata {
+    size: String,
+    etag: String,
+    generation: String,
+}
+
+fn parse_gcs_json_object_metadata(body: &[u8]) -> CloudOutcome<ObjectMetadata> {
+    let metadata: GcsJsonObjectMetadata = serde_json::from_slice(body).map_err(|error| {
+        CloudError::Protocol(format!("GCS JSON metadata response is invalid: {error}"))
+    })?;
+    let size = metadata.size.parse::<u64>().map_err(|error| {
+        CloudError::Protocol(format!(
+            "GCS JSON metadata response has invalid size '{}': {error}",
+            metadata.size
+        ))
+    })?;
+    let etag = metadata.etag.trim();
+    if etag.is_empty() {
+        return Err(CloudError::Protocol(
+            "GCS JSON metadata response has an empty etag".to_string(),
+        ));
+    }
+    let generation = metadata.generation.trim();
+    if generation.is_empty() {
+        return Err(CloudError::Protocol(
+            "GCS JSON metadata response has an empty generation".to_string(),
+        ));
+    }
+    generation.parse::<u64>().map_err(|error| {
+        CloudError::Protocol(format!(
+            "GCS JSON metadata response has invalid generation '{generation}': {error}"
+        ))
+    })?;
+
+    Ok(ObjectMetadata::with_generation(
+        size,
+        etag.to_string(),
+        0,
+        generation,
+    ))
+}
+
+fn parse_gcs_media_object_metadata(
+    response: &CloudResponse,
+    mode: GcsBackendMode,
+) -> CloudOutcome<ObjectMetadata> {
+    let size = u64::try_from(response.body.len()).unwrap_or(u64::MAX);
+    let etag = required_gcs_metadata_header(response, "etag", "ETag")?;
+    let generation = required_gcs_generation(response, mode)?;
+    Ok(ObjectMetadata::with_generation(size, etag, 0, generation))
+}
+
+fn parse_gcs_xml_object_metadata(response: &CloudResponse) -> CloudOutcome<ObjectMetadata> {
+    let size = response
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .ok_or_else(|| {
+            CloudError::Protocol("GCS XML metadata response is missing Content-Length".to_string())
+        })?
+        .1
+        .parse::<u64>()
+        .map_err(|error| {
+            CloudError::Protocol(format!(
+                "GCS XML metadata response has invalid Content-Length: {error}"
+            ))
+        })?;
+    let etag = required_gcs_metadata_header(response, "etag", "ETag")?;
+    let generation = required_gcs_generation(response, GcsBackendMode::Xml)?;
+    Ok(ObjectMetadata::with_generation(size, etag, 0, generation))
+}
+
+fn required_gcs_metadata_header(
+    response: &CloudResponse,
+    header_name: &str,
+    display_name: &str,
+) -> CloudOutcome<String> {
+    response
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(header_name))
+        .map(|(_, value)| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            CloudError::Protocol(format!("GCS metadata response is missing {display_name}"))
+        })
+}
+
+fn required_gcs_generation(response: &CloudResponse, mode: GcsBackendMode) -> CloudOutcome<String> {
+    let generation = response
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("x-goog-generation"))
+        .map(|(_, value)| value.trim())
+        .ok_or_else(|| {
+            CloudError::Protocol(format!(
+                "GCS {} metadata response is missing x-goog-generation",
+                match mode {
+                    GcsBackendMode::Json => "JSON",
+                    GcsBackendMode::Xml => "XML",
+                }
+            ))
+        })?;
+    if generation.is_empty() {
+        return Err(CloudError::Protocol(
+            "GCS metadata response has an empty x-goog-generation".to_string(),
+        ));
+    }
+    generation.parse::<u64>().map_err(|error| {
+        CloudError::Protocol(format!(
+            "GCS metadata response has invalid x-goog-generation '{generation}': {error}"
+        ))
+    })?;
+    Ok(generation.to_string())
 }
 
 fn extract_gcs_json_list(body: &str) -> MidgeResult<(Vec<String>, Option<String>)> {
@@ -1556,7 +1857,7 @@ mod tests {
     use super::*;
     use crate::storage::providers::test_support::{
         receive_list_result, spawn_recording_http_server, spawn_recording_http_server_with_status,
-        spawn_scripted_http_server,
+        spawn_scripted_http_response_server, spawn_scripted_http_server,
     };
 
     const TEST_BEARER_TOKEN: &str = "gcs-json-test-token";
@@ -1605,6 +1906,59 @@ mod tests {
     }
 
     #[test]
+    fn should_only_classify_gcs_condition_reason_as_precondition_conflict() {
+        // Arrange
+        let response = |status, reason: &str| {
+            CloudResponse {
+            status,
+            headers: Vec::new(),
+            body: format!(
+                r#"{{"error":{{"code":{status},"message":"failure","errors":[{{"reason":"{reason}"}}]}}}}"#
+            )
+            .into_bytes(),
+        }
+        };
+        let predicate = response(412, "conditionNotMet");
+        let policy = response(412, "orgPolicyConstraintFailed");
+        let retention = response(403, "retentionPolicyNotMet");
+
+        // Act
+        let predicate_error = gcs_response_error(&predicate, "GCS PUT", GcsBackendMode::Json, true);
+        let policy_error = gcs_response_error(&policy, "GCS PUT", GcsBackendMode::Json, true);
+        let retention_error =
+            gcs_response_error(&retention, "GCS DELETE", GcsBackendMode::Json, true);
+
+        // Assert
+        assert!(matches!(predicate_error, CloudError::PreconditionFailed(_)));
+        assert!(matches!(policy_error, CloudError::InvalidRequest(_)));
+        assert!(matches!(retention_error, CloudError::InvalidRequest(_)));
+    }
+
+    #[test]
+    fn should_preserve_gcs_authorization_error_when_listing() {
+        // Arrange
+        let server = spawn_scripted_http_response_server(vec![(
+            403,
+            "application/json".to_string(),
+            r#"{"error":{"code":403,"message":"denied","errors":[{"reason":"forbidden"}]}}"#
+                .to_string(),
+        )]);
+        let backend = recording_json_backend(server.endpoint.clone());
+
+        // Act
+        let result = receive_list_result(backend.as_ref());
+        let requests = server.finish();
+
+        // Assert
+        assert!(matches!(
+            result,
+            CloudOutcome::Err(CloudError::Unauthorized(message))
+                if message.contains("forbidden")
+        ));
+        assert_eq!(requests, 1);
+    }
+
+    #[test]
     fn should_reject_redirect_status_when_putting_gcs_object() {
         // Arrange
         let server = spawn_recording_http_server_with_status(302, Vec::new(), Vec::new());
@@ -1642,6 +1996,181 @@ mod tests {
         assert_eq!(metadata.etag, "opaque-etag");
         assert_eq!(metadata.generation.as_deref(), Some("42"));
         assert_eq!(server.finish(), 1);
+    }
+
+    #[test]
+    fn should_use_top_level_fields_when_gcs_json_metadata_contains_shadowing_metadata() {
+        // Arrange
+        let response = r#"{
+            "metadata":{"size":"999","etag":"shadow-etag","generation":"999"},
+            "size":"11",
+            "etag":"object-etag",
+            "generation":"42"
+        }"#;
+        let server = spawn_scripted_http_server(vec![response.to_string()]);
+        let backend = GcsBackend::json(
+            "bucket".into(),
+            Some(server.endpoint.clone()),
+            CloudExecutor::new(None).expect("create cloud executor"),
+        );
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        // Act
+        backend.submit_head("object", sender);
+        let metadata = receive_head_result(&receiver).expect("GCS JSON HEAD should succeed");
+
+        // Assert
+        assert_eq!(metadata.size, 11);
+        assert_eq!(metadata.etag, "object-etag");
+        assert_eq!(metadata.generation.as_deref(), Some("42"));
+        assert_eq!(server.finish(), 1);
+    }
+
+    #[test]
+    fn should_fail_closed_when_gcs_json_metadata_omits_generation() {
+        // Arrange
+        let response = r#"{"size":"11","etag":"opaque-etag"}"#;
+        let server = spawn_scripted_http_server(vec![response.to_string()]);
+        let backend = GcsBackend::json(
+            "bucket".into(),
+            Some(server.endpoint.clone()),
+            CloudExecutor::new(None).expect("create cloud executor"),
+        );
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        // Act
+        backend.submit_head("object", sender);
+        let result = receive_head_result(&receiver);
+
+        // Assert
+        assert!(matches!(
+            result,
+            CloudOutcome::Err(CloudError::Protocol(message))
+                if message.contains("generation")
+        ));
+        assert_eq!(server.finish(), 1);
+    }
+
+    #[test]
+    fn should_fail_closed_when_gcs_json_metadata_has_invalid_size() {
+        // Arrange
+        let response = r#"{"size":"eleven","etag":"opaque-etag","generation":"42"}"#;
+        let server = spawn_scripted_http_server(vec![response.to_string()]);
+        let backend = GcsBackend::json(
+            "bucket".into(),
+            Some(server.endpoint.clone()),
+            CloudExecutor::new(None).expect("create cloud executor"),
+        );
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        // Act
+        backend.submit_head("object", sender);
+        let result = receive_head_result(&receiver);
+
+        // Assert
+        assert!(matches!(
+            result,
+            CloudOutcome::Err(CloudError::Protocol(message)) if message.contains("size")
+        ));
+        assert_eq!(server.finish(), 1);
+    }
+
+    #[test]
+    fn should_fail_closed_when_gcs_json_media_response_omits_generation() {
+        // Arrange
+        let server = spawn_recording_http_server(
+            vec![("ETag".to_string(), "object-etag".to_string())],
+            b"lease".to_vec(),
+        );
+        let backend = recording_json_backend(server.endpoint.clone());
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        // Act
+        backend.submit_get_with_metadata("lease/primary", sender);
+        let result = match receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("receive GCS metadata-bearing GET result")
+        {
+            CloudEvent::GetWithMetadata { result, .. } => result,
+            event => panic!("expected GCS metadata-bearing GET event, got {event:?}"),
+        };
+        let _ = server.finish();
+
+        // Assert
+        assert!(matches!(
+            result,
+            CloudOutcome::Err(CloudError::Protocol(message))
+                if message.contains("x-goog-generation")
+        ));
+    }
+
+    #[test]
+    fn should_fail_closed_when_gcs_xml_head_omits_identity_metadata() {
+        // Arrange
+        let response = CloudResponse {
+            status: 200,
+            headers: vec![("Content-Length".to_string(), "5".to_string())],
+            body: Vec::new(),
+        };
+
+        // Act
+        let result = parse_gcs_xml_object_metadata(&response);
+
+        // Assert
+        assert!(matches!(
+            result,
+            CloudOutcome::Err(CloudError::Protocol(message)) if message.contains("ETag")
+        ));
+    }
+
+    #[test]
+    fn should_require_generation_for_gcs_xml_mutation_proofs() {
+        // Arrange
+        let response = CloudResponse {
+            status: 200,
+            headers: vec![
+                ("Content-Length".to_string(), "5".to_string()),
+                ("ETag".to_string(), "object-etag".to_string()),
+            ],
+            body: Vec::new(),
+        };
+
+        // Act
+        let result = parse_gcs_xml_object_metadata(&response);
+
+        // Assert
+        assert!(matches!(
+            result,
+            CloudOutcome::Err(CloudError::Protocol(message))
+                if message.contains("x-goog-generation")
+        ));
+    }
+
+    #[test]
+    fn should_translate_gcs_xml_conditional_create_to_generation_zero() {
+        // Arrange
+        let server = spawn_recording_http_server(Vec::new(), Vec::new());
+        let backend = GcsBackend::xml(
+            "bucket".to_string(),
+            Some(server.endpoint.clone()),
+            CloudExecutor::new(None).expect("create cloud executor"),
+        );
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        // Act
+        backend.submit_put(
+            "wal/segment",
+            b"value".to_vec(),
+            vec![("If-None-Match".to_string(), "*".to_string())],
+            sender,
+        );
+        let result = receive_put_result(&receiver);
+        let request = server.finish();
+
+        // Assert
+        assert!(matches!(result, CloudOutcome::Ok(())));
+        assert_eq!(request.header("x-goog-if-generation-match"), Some("0"));
+        assert_eq!(request.header("if-none-match"), None);
     }
 
     #[test]
@@ -2078,8 +2607,10 @@ mod tests {
         let url = backend.download_url("path/to/object");
 
         // Assert
-        assert!(url.starts_with("https://storage.googleapis.com/storage/v1/b/my-bucket/o/"));
-        assert!(url.contains("alt=media"));
+        assert_eq!(
+            url,
+            "https://storage.googleapis.com/download/storage/v1/b/my-bucket/o/path%2Fto%2Fobject?alt=media"
+        );
     }
 
     #[test]
@@ -2094,6 +2625,21 @@ mod tests {
         assert_eq!(
             url,
             "https://storage.googleapis.com/storage/v1/b/my-bucket/o/myobject"
+        );
+    }
+
+    #[test]
+    fn should_fully_encode_reserved_gcs_json_object_path() {
+        // Arrange
+        let backend = GcsBackend::new("my-bucket".into(), make_noop_executor());
+
+        // Act
+        let url = backend.metadata_url("wal/a%2Fb +?");
+
+        // Assert
+        assert_eq!(
+            url,
+            "https://storage.googleapis.com/storage/v1/b/my-bucket/o/wal%2Fa%252Fb%20%2B%3F"
         );
     }
 
@@ -2316,6 +2862,162 @@ mod tests {
     }
 
     #[test]
+    fn should_send_workforce_user_project_in_sts_options() {
+        // Arrange
+        let token_path = std::env::temp_dir().join(format!(
+            "midge_gcs_workforce_subject_token_{}_{}.txt",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&token_path, "subject-token").expect("write workforce token");
+        let (token_url, server) = spawn_recording_json_response_server(
+            r#"{"access_token":"sts-access-token","expires_in":3600}"#,
+        );
+        let credentials = json!({
+            "type": "external_account",
+            "audience": "//iam.googleapis.com/locations/global/workforcePools/pool/providers/provider",
+            "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+            "token_url": token_url,
+            "workforce_pool_user_project": "123456789",
+            "credential_source": {
+                "file": token_path,
+                "format": {"type": "text"}
+            }
+        });
+
+        // Act
+        let token = fetch_external_account_token(&credentials).expect("workforce token exchange");
+        let request = server.join().expect("STS server");
+        let _ = std::fs::remove_file(
+            credentials
+                .pointer("/credential_source/file")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default(),
+        );
+
+        // Assert
+        assert_eq!(token.access_token, "sts-access-token");
+        assert!(request.contains("options=%7B%22userProject%22%3A%22123456789%22%7D"));
+    }
+
+    #[test]
+    fn should_follow_external_account_impersonation_contract() {
+        // Arrange
+        let token_path = std::env::temp_dir().join(format!(
+            "midge_gcs_impersonation_subject_token_{}_{}.txt",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&token_path, "subject-token").unwrap();
+        let (token_url, token_server) = spawn_recording_json_response_server(
+            r#"{"access_token":"sts-access-token","expires_in":60}"#,
+        );
+        let (impersonation_url, impersonation_server) = spawn_recording_json_response_server(
+            r#"{"accessToken":"impersonated","expireTime":"2099-01-01T00:00:00Z"}"#,
+        );
+        let json = json!({
+            "type": "external_account",
+            "audience": "//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/pool/providers/provider",
+            "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+            "token_url": token_url,
+            "service_account_impersonation_url": impersonation_url,
+            "service_account_impersonation": {"token_lifetime_seconds": 900},
+            "credential_source": {
+                "file": token_path,
+                "format": {"type": "text"}
+            }
+        });
+
+        // Act
+        let token = fetch_external_account_token(&json).expect("impersonated token exchange");
+        let sts_request = token_server.join().expect("STS server");
+        let impersonation_request = impersonation_server.join().expect("impersonation server");
+
+        // Assert
+        assert_eq!(token.access_token, "impersonated");
+        assert!(
+            sts_request.contains("scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcloud-platform")
+        );
+        assert!(impersonation_request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer sts-access-token"));
+        assert!(impersonation_request.contains(r#""lifetime":"900s""#));
+        assert!(impersonation_request
+            .contains(r#""scope":["https://www.googleapis.com/auth/devstorage.full_control"]"#));
+        let file = json
+            .get("credential_source")
+            .and_then(|source| source.get("file"))
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        let _ = std::fs::remove_file(file);
+    }
+
+    #[test]
+    fn should_read_url_sourced_external_account_subject_token_with_headers() {
+        // Arrange
+        let (url, server) =
+            spawn_recording_json_response_server(r#"{"access_token":"azure-subject-token"}"#);
+        let json = json!({
+            "credential_source": {
+                "url": url,
+                "headers": {"Metadata": "True"},
+                "format": {
+                    "type": "json",
+                    "subject_token_field_name": "access_token"
+                }
+            }
+        });
+
+        // Act
+        let token = external_account_subject_token(&json).expect("URL subject token");
+        let request = server.join().expect("URL credential server");
+
+        // Assert
+        assert_eq!(token, "azure-subject-token");
+        assert!(request.to_ascii_lowercase().contains("metadata: true"));
+    }
+
+    #[test]
+    fn should_reject_empty_json_external_account_subject_token() {
+        // Arrange
+        let source = json!({
+            "format": {
+                "type": "json",
+                "subject_token_field_name": "access_token"
+            }
+        });
+
+        // Act
+        let error = parse_external_account_subject_token(
+            &source,
+            r#"{"access_token":"   "}"#,
+            "test credential source",
+        )
+        .expect_err("empty JSON subject token must fail closed");
+
+        // Assert
+        assert!(error.to_string().contains("is empty"));
+    }
+
+    #[test]
+    fn should_reject_aws_external_account_before_treating_metadata_url_as_subject_token() {
+        // Arrange
+        let json = json!({
+            "credential_source": {
+                "environment_id": "aws1",
+                "url": "http://127.0.0.1:1/latest/meta-data/iam/security-credentials",
+                "regional_cred_verification_url": "https://sts.{region}.amazonaws.com?Action=GetCallerIdentity&Version=2011-06-15"
+            }
+        });
+
+        // Act
+        let error = external_account_subject_token(&json).expect_err("AWS source is unsupported");
+
+        // Assert
+        assert!(error.to_string().contains("AWS external_account"));
+    }
+
+    #[test]
     fn should_reject_executable_external_account_credentials() {
         // Arrange
         let json = json!({
@@ -2336,6 +3038,79 @@ mod tests {
     }
 
     #[test]
+    fn should_reject_empty_access_token_in_token_response() {
+        // Arrange
+        let body = r#"{"access_token":"   ","expires_in":3600}"#;
+
+        // Act
+        let error = parse_access_token_json(body).expect_err("empty token must fail closed");
+
+        // Assert
+        assert!(error.to_string().contains("empty access_token"));
+    }
+
+    #[test]
+    fn should_reject_missing_or_invalid_expiry_in_token_response() {
+        // Arrange
+        let bodies = [
+            r#"{"access_token":"token"}"#,
+            r#"{"access_token":"token","expires_in":0}"#,
+            r#"{"access_token":"token","expires_in":-1}"#,
+            r#"{"access_token":"token","expires_in":"3600"}"#,
+        ];
+
+        // Act
+        let errors = bodies
+            .into_iter()
+            .map(|body| parse_access_token_json(body).expect_err("invalid expiry must fail closed"))
+            .collect::<Vec<_>>();
+
+        // Assert
+        assert!(errors
+            .iter()
+            .all(|error| error.to_string().contains("positive expires_in")));
+    }
+
+    #[test]
+    fn should_parse_access_token_with_future_expiry() {
+        // Arrange
+        let before = current_unix_secs();
+        let body = r#"{"access_token":"token","expires_in":3600}"#;
+
+        // Act
+        let token = parse_access_token_json(body).expect("valid token response");
+
+        // Assert
+        assert_eq!(token.access_token, "token");
+        assert!(token.expires_at.unwrap_or_default() > before);
+    }
+
+    #[test]
+    fn should_reject_expiry_that_cannot_yield_future_token_expiration() {
+        // Arrange
+        let body = r#"{"access_token":"token","expires_in":18446744073709551615}"#;
+
+        // Act
+        let error = parse_access_token_json(body).expect_err("overflowing expiry must fail closed");
+
+        // Assert
+        assert!(error.to_string().contains("does not yield a future expiry"));
+    }
+
+    #[test]
+    fn should_preserve_non_expiring_static_bearer_token() {
+        // Arrange
+        let provider = GcsTokenProvider::StaticBearer("emulator-token".into());
+
+        // Act
+        let token = provider.fetch_token().expect("static bearer token");
+
+        // Assert
+        assert_eq!(token.access_token, "emulator-token");
+        assert_eq!(token.expires_at, None);
+    }
+
+    #[test]
     fn should_parse_impersonated_access_token() {
         // Arrange
         let token = parse_impersonated_access_token_json(
@@ -2349,42 +3124,41 @@ mod tests {
         assert!(token.expires_at.unwrap_or_default() > current_unix_secs());
     }
 
-    // =========== JSON Value Extraction Tests ===========
-
     #[test]
-    fn should_extract_size_from_json_metadata() {
+    fn should_reject_empty_access_token_in_impersonation_response() {
         // Arrange
-        let json = r#"{"kind":"storage#object","name":"test","size":"12345","etag":"abc"}"#;
+        let body = r#"{"accessToken":"   ","expireTime":"2099-01-01T00:00:00Z"}"#;
 
         // Act
-        let size = extract_json_string_value(json, "size");
+        let error = parse_impersonated_access_token_json(body)
+            .expect_err("empty impersonated token must fail closed");
 
         // Assert
-        assert_eq!(size, Some("12345".to_string()));
+        assert!(error.to_string().contains("empty accessToken"));
     }
 
     #[test]
-    fn should_extract_etag_from_json_metadata() {
+    fn should_reject_missing_malformed_or_expired_impersonation_expiry() {
         // Arrange
-        let json = r#"{"kind":"storage#object","name":"test","size":"100","etag":"CLT3abc="}"#;
+        let bodies = [
+            r#"{"accessToken":"token"}"#,
+            r#"{"accessToken":"token","expireTime":"not-a-timestamp"}"#,
+            r#"{"accessToken":"token","expireTime":"2000-01-01T00:00:00Z"}"#,
+        ];
 
         // Act
-        let etag = extract_json_string_value(json, "etag");
+        let errors = bodies
+            .into_iter()
+            .map(|body| {
+                parse_impersonated_access_token_json(body)
+                    .expect_err("invalid impersonation expiry must fail closed")
+            })
+            .collect::<Vec<_>>();
 
         // Assert
-        assert_eq!(etag, Some("CLT3abc=".to_string()));
-    }
-
-    #[test]
-    fn should_return_none_when_key_missing_from_json() {
-        // Arrange
-        let json = r#"{"kind":"storage#object","name":"test"}"#;
-
-        // Act
-        let result = extract_json_string_value(json, "size");
-
-        // Assert
-        assert!(result.is_none());
+        assert!(errors
+            .iter()
+            .all(|error| error.to_string().contains("future RFC3339 expireTime")));
     }
 
     #[test]
@@ -2426,5 +3200,60 @@ mod tests {
 
     fn make_noop_executor() -> CloudExecutor {
         CloudExecutor::new(None).expect("Failed to create noop executor in test")
+    }
+
+    fn spawn_recording_json_response_server(
+        response_body: &'static str,
+    ) -> (String, std::thread::JoinHandle<String>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind token server");
+        let endpoint = format!(
+            "http://{}",
+            listener.local_addr().expect("token server address")
+        );
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept token request");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .expect("configure token request timeout");
+
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            let mut expected_length = None;
+            loop {
+                let read =
+                    std::io::Read::read(&mut stream, &mut chunk).expect("read token request");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                if expected_length.is_none() {
+                    if let Some(header_end) =
+                        request.windows(4).position(|window| window == b"\r\n\r\n")
+                    {
+                        let headers = String::from_utf8_lossy(&request[..header_end]);
+                        let content_length = headers.lines().find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        });
+                        expected_length = Some(header_end + 4 + content_length.unwrap_or(0));
+                    }
+                }
+                if expected_length.is_some_and(|length| request.len() >= length) {
+                    break;
+                }
+            }
+
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            std::io::Write::write_all(&mut stream, response.as_bytes())
+                .expect("write token response");
+            String::from_utf8(request).expect("token request must be UTF-8")
+        });
+        (endpoint, handle)
     }
 }

@@ -25,13 +25,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b' ')
     .add(b'"')
+    .add(b'%')
     .add(b'<')
     .add(b'>')
+    .add(b'\\')
     .add(b'`')
     .add(b'#')
     .add(b'?')
     .add(b'{')
     .add(b'}');
+
+const AZURE_PUBLIC_AUTHORITY: &str = "https://login.microsoftonline.com";
+const AZURE_GOVERNMENT_AUTHORITY: &str = "https://login.microsoftonline.us";
+const AZURE_CHINA_AUTHORITY: &str = "https://login.chinacloudapi.cn";
 
 // ---------------------------------------------------------------------------
 // Credentials
@@ -68,6 +74,8 @@ pub struct AzureProvider {
     container: String,
     #[cfg(test)]
     credential: AzureCredential,
+    #[cfg(test)]
+    oauth_authority: Option<&'static str>,
 }
 
 #[derive(Debug, Clone)]
@@ -75,10 +83,7 @@ enum AzureEndpoint {
     /// Path-style emulator front door: `{endpoint}/{account}/{container}/{blob}`.
     PathStyleBase(String),
     /// Account-scoped Blob endpoint: `{endpoint}/{container}/{blob}`.
-    AccountBase {
-        endpoint: String,
-        emulator_compat: bool,
-    },
+    AccountBase(String),
 }
 
 impl AzureEndpoint {
@@ -86,22 +91,65 @@ impl AzureEndpoint {
         Self::PathStyleBase(endpoint)
     }
 
-    fn account_base(endpoint: String, account_name: &str) -> Self {
-        let emulator_compat = account_endpoint_looks_emulated(&endpoint, account_name);
-        Self::AccountBase {
-            endpoint,
-            emulator_compat,
-        }
+    fn account_base(endpoint: String) -> Self {
+        Self::AccountBase(endpoint)
     }
+}
 
-    fn emulator_compat(&self) -> bool {
-        match self {
-            Self::PathStyleBase(_) => true,
-            Self::AccountBase {
-                emulator_compat, ..
-            } => *emulator_compat,
-        }
+fn identity_blob_endpoint(endpoint: Option<String>) -> MidgeResult<Option<AzureEndpoint>> {
+    endpoint
+        .map(|endpoint| {
+            validated_https_origin(&endpoint, "Azure identity credential Blob endpoint")
+                .map(AzureEndpoint::account_base)
+        })
+        .transpose()
+}
+
+fn azure_oauth_authority_for_blob_endpoint(endpoint: Option<&AzureEndpoint>) -> &'static str {
+    // Azure Storage's generic OAuth audience is shared by every Azure cloud,
+    // but client-secret and workload-identity tokens must be issued by the
+    // Entra authority that owns the configured account endpoint.
+    let Some(AzureEndpoint::AccountBase(endpoint)) = endpoint else {
+        return AZURE_PUBLIC_AUTHORITY;
+    };
+    let Ok(parsed) = url::Url::parse(endpoint) else {
+        return AZURE_PUBLIC_AUTHORITY;
+    };
+    let Some(host) = parsed.host_str() else {
+        return AZURE_PUBLIC_AUTHORITY;
+    };
+
+    if host.ends_with(".blob.core.usgovcloudapi.net") {
+        AZURE_GOVERNMENT_AUTHORITY
+    } else if host.ends_with(".blob.core.chinacloudapi.cn") {
+        AZURE_CHINA_AUTHORITY
+    } else {
+        AZURE_PUBLIC_AUTHORITY
     }
+}
+
+fn validated_https_origin(value: &str, label: &str) -> MidgeResult<String> {
+    if value.is_empty() || value != value.trim() {
+        return Err(MidgeError::InvalidArgument(format!(
+            "{label} must be an absolute HTTPS origin"
+        )));
+    }
+    let parsed = url::Url::parse(value).map_err(|error| {
+        MidgeError::InvalidArgument(format!("{label} must be an absolute HTTPS origin: {error}"))
+    })?;
+    if parsed.scheme() != "https"
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || parsed.path() != "/"
+    {
+        return Err(MidgeError::InvalidArgument(format!(
+            "{label} must be an absolute HTTPS origin without credentials, path, query, or fragment"
+        )));
+    }
+    Ok(parsed.as_str().trim_end_matches('/').to_string())
 }
 
 impl AzureProvider {
@@ -151,13 +199,7 @@ impl AzureProvider {
         let backend_container = container.clone();
         #[cfg(not(test))]
         let backend_container = container;
-        let signer = SharedKeySigner::new_with_emulator_compat(
-            backend_account_name.clone(),
-            account_key,
-            endpoint
-                .as_ref()
-                .is_some_and(AzureEndpoint::emulator_compat),
-        );
+        let signer = SharedKeySigner::new(backend_account_name.clone(), account_key);
         let executor = CloudExecutor::new(Some(Arc::new(signer)))?;
         let backend = Arc::new(AzureBackend::new(
             backend_account_name,
@@ -174,6 +216,8 @@ impl AzureProvider {
             container,
             #[cfg(test)]
             credential,
+            #[cfg(test)]
+            oauth_authority: None,
         })
     }
 
@@ -238,6 +282,8 @@ impl AzureProvider {
             container,
             #[cfg(test)]
             credential,
+            #[cfg(test)]
+            oauth_authority: None,
         })
     }
 
@@ -256,15 +302,35 @@ impl AzureProvider {
     /// - `AZURE_CLIENT_ID`: User-assigned managed identity client ID
     /// - `MSI_ENDPOINT`: Custom IMDS endpoint (for testing)
     /// - `IDENTITY_ENDPOINT`: Alternative endpoint (App Service/Container Apps)
+    #[cfg(test)]
     pub fn with_managed_identity(
         account_name: String,
         container: String,
         client_id: Option<String>,
     ) -> MidgeResult<Self> {
+        Self::with_managed_identity_and_endpoint(account_name, container, client_id, None)
+    }
+
+    pub(super) fn with_managed_identity_and_endpoint(
+        account_name: String,
+        container: String,
+        client_id: Option<String>,
+        endpoint: Option<String>,
+    ) -> MidgeResult<Self> {
+        let endpoint = identity_blob_endpoint(endpoint)?;
+        Self::with_managed_identity_and_azure_endpoint(account_name, container, client_id, endpoint)
+    }
+
+    fn with_managed_identity_and_azure_endpoint(
+        account_name: String,
+        container: String,
+        client_id: Option<String>,
+        endpoint: Option<AzureEndpoint>,
+    ) -> MidgeResult<Self> {
         // Determine client_id: explicit arg > env var > None (system-assigned)
         let effective_client_id = client_id
             .or_else(|| std::env::var("AZURE_CLIENT_ID").ok())
-            .filter(|id| !id.is_empty());
+            .filter(|id| !id.trim().is_empty());
 
         #[cfg(test)]
         let credential = AzureCredential::ManagedIdentity {
@@ -286,7 +352,7 @@ impl AzureProvider {
         let backend = Arc::new(AzureBackend::new(
             backend_account_name,
             backend_container,
-            None,
+            endpoint,
             None, // No SAS token for managed identity
             executor,
         ));
@@ -299,6 +365,8 @@ impl AzureProvider {
             container,
             #[cfg(test)]
             credential,
+            #[cfg(test)]
+            oauth_authority: None,
         })
     }
 
@@ -337,6 +405,20 @@ impl AzureProvider {
             return Self::from_connection_string_and_endpoint(&conn_str, container, endpoint);
         }
 
+        let account_name = if account_name.trim().is_empty() {
+            std::env::var("AZURE_STORAGE_ACCOUNT")
+                .ok()
+                .filter(|account| !account.trim().is_empty())
+                .ok_or_else(|| {
+                    MidgeError::InvalidArgument(
+                        "missing Azure storage account name; pass it explicitly or set AZURE_STORAGE_ACCOUNT"
+                            .to_string(),
+                    )
+                })?
+        } else {
+            account_name
+        };
+
         // Try explicit storage key
         if let Ok(key) = std::env::var("AZURE_STORAGE_KEY") {
             return Self::with_shared_key_and_endpoint(account_name, container, &key, endpoint);
@@ -347,15 +429,8 @@ impl AzureProvider {
             return Self::with_sas_token_and_endpoint(account_name, container, &sas, endpoint);
         }
 
-        if endpoint.is_some() {
-            return Err(MidgeError::InvalidArgument(
-                "Azure storage environment credentials for emulator endpoints require connection string, key, or SAS token"
-                    .to_string(),
-            ));
-        }
-
         // Default to managed identity (checks AZURE_CLIENT_ID internally)
-        Self::with_managed_identity(account_name, container, None)
+        Self::with_managed_identity_and_endpoint(account_name, container, None, endpoint)
     }
 
     /// Create provider from Azure Storage connection string.
@@ -369,31 +444,36 @@ impl AzureProvider {
     ) -> MidgeResult<Self> {
         let parts = AzureConnectionString::parse(conn_str);
 
-        let account = parts
-            .account_name
-            .as_deref()
-            .ok_or_else(|| {
+        if let Some(key) = parts.account_key.as_deref() {
+            let account = parts.account_name.as_deref().ok_or_else(|| {
                 MidgeError::InvalidArgument("Missing AccountName in connection string".into())
-            })?
-            .to_string();
-        let resolved_endpoint = endpoint
-            .map(AzureEndpoint::path_style)
-            .or_else(|| parts.blob_endpoint(account.as_str()));
-
-        if let Some(key) = parts.account_key {
+            })?;
+            let resolved_endpoint = endpoint
+                .map(AzureEndpoint::path_style)
+                .or_else(|| parts.blob_endpoint(account));
             return Self::with_shared_key_and_azure_endpoint(
-                account,
+                account.to_string(),
                 container,
-                &key,
+                key,
                 resolved_endpoint,
             );
         }
 
-        if let Some(sas) = parts.sas_token {
+        if let Some(sas) = parts.sas_token.as_deref() {
+            let account = parts.account_name.clone().unwrap_or_default();
+            let has_account_scoped_endpoint = endpoint.is_none() && parts.blob_endpoint.is_some();
+            if account.is_empty() && !has_account_scoped_endpoint {
+                return Err(MidgeError::InvalidArgument(
+                    "Azure SAS connection string must include AccountName or BlobEndpoint".into(),
+                ));
+            }
+            let resolved_endpoint = endpoint
+                .map(AzureEndpoint::path_style)
+                .or_else(|| parts.blob_endpoint(&account));
             return Self::with_sas_token_and_azure_endpoint(
                 account,
                 container,
-                &sas,
+                sas,
                 resolved_endpoint,
             );
         }
@@ -406,12 +486,15 @@ impl AzureProvider {
     pub fn from_lightweight_credential_source(
         account_name: String,
         container: String,
+        endpoint: Option<String>,
         source: super::AzureCredentialSource,
     ) -> MidgeResult<Self> {
+        let endpoint = identity_blob_endpoint(endpoint)?;
         match source {
             super::AzureCredentialSource::EnvironmentClientSecret => Self::with_oauth_provider(
                 account_name,
                 container,
+                endpoint,
                 AzureOAuthProvider::from_environment_client_secret()?,
                 "environment-client-secret",
             ),
@@ -422,6 +505,7 @@ impl AzureProvider {
             } => Self::with_oauth_provider(
                 account_name,
                 container,
+                endpoint,
                 AzureOAuthProvider::from_workload_identity(tenant_id, client_id, token_file)?,
                 "workload-identity",
             ),
@@ -430,6 +514,7 @@ impl AzureProvider {
                     return Self::with_oauth_provider(
                         account_name,
                         container,
+                        endpoint,
                         AzureOAuthProvider::from_environment_client_secret()?,
                         "environment-client-secret",
                     );
@@ -438,14 +523,25 @@ impl AzureProvider {
                     return Self::with_oauth_provider(
                         account_name,
                         container,
+                        endpoint,
                         AzureOAuthProvider::from_workload_identity(None, None, None)?,
                         "workload-identity",
                     );
                 }
-                Self::with_managed_identity(account_name, container, None)
+                Self::with_managed_identity_and_azure_endpoint(
+                    account_name,
+                    container,
+                    None,
+                    endpoint,
+                )
             }
             super::AzureCredentialSource::ManagedIdentity { client_id } => {
-                Self::with_managed_identity(account_name, container, client_id)
+                Self::with_managed_identity_and_azure_endpoint(
+                    account_name,
+                    container,
+                    client_id,
+                    endpoint,
+                )
             }
             other => Err(MidgeError::InvalidArgument(format!(
                 "unsupported Azure OAuth credential source in this path: {other:?}"
@@ -456,12 +552,15 @@ impl AzureProvider {
     fn with_oauth_provider(
         account_name: String,
         container: String,
+        endpoint: Option<AzureEndpoint>,
         provider: AzureOAuthProvider,
         source_name: &str,
     ) -> MidgeResult<Self> {
         #[cfg(not(test))]
         tracing::trace!(source = source_name, "Azure OAuth provider configured");
-        let signer: Arc<dyn CloudSigner> = Arc::new(OAuthTokenSigner::new(provider));
+        let oauth_authority = azure_oauth_authority_for_blob_endpoint(endpoint.as_ref());
+        let signer: Arc<dyn CloudSigner> =
+            Arc::new(OAuthTokenSigner::new(provider, oauth_authority));
         #[cfg(test)]
         let backend_account_name = account_name.clone();
         #[cfg(not(test))]
@@ -474,7 +573,7 @@ impl AzureProvider {
         let backend = Arc::new(AzureBackend::new(
             backend_account_name,
             backend_container,
-            None,
+            endpoint,
             None,
             executor,
         ));
@@ -488,6 +587,8 @@ impl AzureProvider {
             credential: AzureCredential::OAuth {
                 source: source_name.to_string(),
             },
+            #[cfg(test)]
+            oauth_authority: Some(oauth_authority),
         })
     }
 
@@ -512,6 +613,11 @@ impl AzureProvider {
     #[cfg(test)]
     pub(crate) fn credential(&self) -> &AzureCredential {
         &self.credential
+    }
+
+    #[cfg(test)]
+    fn oauth_authority(&self) -> Option<&'static str> {
+        self.oauth_authority
     }
 }
 
@@ -573,7 +679,6 @@ impl AzureConnectionString {
         if let Some(endpoint) = self.blob_endpoint.as_deref() {
             return Some(AzureEndpoint::account_base(
                 endpoint.trim_end_matches('/').to_string(),
-                account_name,
             ));
         }
 
@@ -582,33 +687,18 @@ impl AzureConnectionString {
             .default_endpoints_protocol
             .as_deref()
             .unwrap_or("https");
-        Some(AzureEndpoint::account_base(
-            format!(
-                "{}://{}.blob.{}",
-                protocol,
-                account_name,
-                suffix.trim_start_matches('.')
-            ),
+        Some(AzureEndpoint::account_base(format!(
+            "{}://{}.blob.{}",
+            protocol,
             account_name,
-        ))
+            suffix.trim_start_matches('.')
+        )))
     }
 }
 
 fn default_azurite_account_key() -> String {
     "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
         .to_string()
-}
-
-fn account_endpoint_looks_emulated(endpoint: &str, account_name: &str) -> bool {
-    let Ok(url) = url::Url::parse(endpoint) else {
-        return false;
-    };
-    let host_is_local = matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "::1"));
-    let first_path_segment = url
-        .path_segments()
-        .and_then(|mut segments| segments.next())
-        .unwrap_or_default();
-    host_is_local || first_path_segment.eq_ignore_ascii_case(account_name)
 }
 
 impl Drop for AzureProvider {
@@ -656,7 +746,7 @@ impl AzureBackend {
                 self.account_name,
                 self.container
             ),
-            Some(AzureEndpoint::AccountBase { endpoint, .. }) => {
+            Some(AzureEndpoint::AccountBase(endpoint)) => {
                 format!("{}/{}", endpoint.trim_end_matches('/'), self.container)
             }
             None => format!(
@@ -708,6 +798,7 @@ struct AzureListState {
     marker: Option<String>,
     items: Vec<String>,
     budget: CloudListBudget,
+    error: Option<CloudError>,
 }
 
 impl AzureListState {
@@ -730,6 +821,10 @@ impl AzureListState {
 }
 
 impl CloudBackend for AzureBackend {
+    fn set_request_timeout(&self, timeout: std::time::Duration) {
+        self.executor.set_default_timeout(timeout);
+    }
+
     fn submit_put(
         &self,
         key: &str,
@@ -740,6 +835,9 @@ impl CloudBackend for AzureBackend {
         let key = key.to_string();
         let url = self.object_url(&key);
         let len = data.len();
+        let conditional_mutation = headers.iter().any(|(name, _)| {
+            name.eq_ignore_ascii_case("if-match") || name.eq_ignore_ascii_case("if-none-match")
+        });
         let mut request = CloudRequest::new(Method::PUT, url)
             .with_body(data)
             .with_header("x-ms-blob-type", "BlockBlob")
@@ -773,7 +871,11 @@ impl CloudBackend for AzureBackend {
             },
             Ok(resp) => CloudEvent::Put {
                 key: ctx,
-                result: CloudOutcome::Err(CloudError::from_http_status(resp.status, "Azure PUT")),
+                result: CloudOutcome::Err(azure_response_error(
+                    &resp,
+                    "Azure PUT",
+                    conditional_mutation,
+                )),
             },
             Err(err) => CloudEvent::Put {
                 key: ctx,
@@ -794,7 +896,7 @@ impl CloudBackend for AzureBackend {
             },
             Ok(resp) => CloudEvent::Get {
                 key: ctx,
-                result: CloudOutcome::Err(CloudError::from_http_status(resp.status, "Azure GET")),
+                result: CloudOutcome::Err(azure_response_error(&resp, "Azure GET", false)),
             },
             Err(err) => CloudEvent::Get {
                 key: ctx,
@@ -809,21 +911,18 @@ impl CloudBackend for AzureBackend {
         let request = CloudRequest::new(Method::GET, self.object_url(&key));
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
             Ok(resp) if resp.status == 200 => {
-                let etag = resp
-                    .headers
-                    .iter()
-                    .find(|(name, _)| name.eq_ignore_ascii_case("etag"))
-                    .map(|(_, value)| value.trim().to_string())
-                    .unwrap_or_default();
-                let metadata = ObjectMetadata::new(resp.body.len() as u64, etag, 0);
+                let metadata = object_metadata_from_azure_response(
+                    &resp,
+                    Some(u64::try_from(resp.body.len()).unwrap_or(u64::MAX)),
+                );
                 CloudEvent::GetWithMetadata {
                     key: ctx,
-                    result: CloudOutcome::Ok((resp.body, metadata)),
+                    result: metadata.map(|metadata| (resp.body, metadata)),
                 }
             }
             Ok(resp) => CloudEvent::GetWithMetadata {
                 key: ctx,
-                result: CloudOutcome::Err(CloudError::from_http_status(resp.status, "Azure GET")),
+                result: CloudOutcome::Err(azure_response_error(&resp, "Azure GET", false)),
             },
             Err(err) => CloudEvent::GetWithMetadata {
                 key: ctx,
@@ -853,10 +952,7 @@ impl CloudBackend for AzureBackend {
                 key: ctx,
                 start,
                 end,
-                result: CloudOutcome::Err(CloudError::from_http_status(
-                    resp.status,
-                    "Azure GET_RANGE",
-                )),
+                result: CloudOutcome::Err(azure_response_error(&resp, "Azure GET_RANGE", false)),
             },
             Err(err) => CloudEvent::GetRange {
                 key: ctx,
@@ -871,6 +967,9 @@ impl CloudBackend for AzureBackend {
     fn submit_delete(&self, key: &str, headers: Vec<(String, String)>, callback: CloudCallback) {
         let key = key.to_string();
         let url = self.object_url(&key);
+        let conditional_mutation = headers.iter().any(|(name, _)| {
+            name.eq_ignore_ascii_case("if-match") || name.eq_ignore_ascii_case("if-none-match")
+        });
         let mut request = CloudRequest::new(Method::DELETE, url);
         for (name, value) in headers {
             request = request.with_header(name, value);
@@ -882,9 +981,10 @@ impl CloudBackend for AzureBackend {
             },
             Ok(resp) => CloudEvent::Delete {
                 key: ctx,
-                result: CloudOutcome::Err(CloudError::from_http_status(
-                    resp.status,
+                result: CloudOutcome::Err(azure_response_error(
+                    &resp,
                     "Azure DELETE",
+                    conditional_mutation,
                 )),
             },
             Err(err) => CloudEvent::Delete {
@@ -904,6 +1004,7 @@ impl CloudBackend for AzureBackend {
             marker: None,
             items: Vec::new(),
             budget: CloudListBudget::default(),
+            error: None,
         };
         self.executor.spawn_request_loop(
             state,
@@ -912,10 +1013,8 @@ impl CloudBackend for AzureBackend {
             |state| Ok(CloudRequest::new(Method::GET, state.url())),
             |state, resp| {
                 if resp.status != 200 {
-                    return Err(MidgeError::Internal(format!(
-                        "Azure LIST status {}",
-                        resp.status
-                    )));
+                    state.error = Some(azure_response_error(&resp, "Azure LIST", false));
+                    return Ok(false);
                 }
                 let body = String::from_utf8_lossy(&resp.body);
                 super::validate_list_xml(&body, "EnumerationResults")?;
@@ -930,9 +1029,13 @@ impl CloudBackend for AzureBackend {
                 Ok(state.marker.is_some())
             },
             |ctx, result| match result {
-                Ok(state) => CloudEvent::List {
+                Ok(state) if state.error.is_none() => CloudEvent::List {
                     prefix: ctx,
                     result: CloudOutcome::Ok(state.items),
+                },
+                Ok(mut state) => CloudEvent::List {
+                    prefix: ctx,
+                    result: CloudOutcome::Err(state.error.take().expect("checked list error")),
                 },
                 Err(err) => CloudEvent::List {
                     prefix: ctx,
@@ -947,28 +1050,13 @@ impl CloudBackend for AzureBackend {
         let url = self.object_url(&key);
         let request = CloudRequest::new(Method::HEAD, url);
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status == 200 => {
-                let size = resp
-                    .headers
-                    .iter()
-                    .find(|(n, _)| n.eq_ignore_ascii_case("content-length"))
-                    .and_then(|(_, v)| v.parse().ok())
-                    .unwrap_or(0);
-                let etag = resp
-                    .headers
-                    .iter()
-                    .find(|(n, _)| n.eq_ignore_ascii_case("etag"))
-                    .map(|(_, v)| v.trim().to_string())
-                    .unwrap_or_default();
-                let metadata = ObjectMetadata::new(size, etag, 0);
-                CloudEvent::Head {
-                    key: ctx,
-                    result: CloudOutcome::Ok(metadata),
-                }
-            }
+            Ok(resp) if resp.status == 200 => CloudEvent::Head {
+                key: ctx,
+                result: object_metadata_from_azure_response(&resp, None),
+            },
             Ok(resp) => CloudEvent::Head {
                 key: ctx,
-                result: CloudOutcome::Err(CloudError::from_http_status(resp.status, "Azure HEAD")),
+                result: CloudOutcome::Err(azure_response_error(&resp, "Azure HEAD", false)),
             },
             Err(err) => CloudEvent::Head {
                 key: ctx,
@@ -976,6 +1064,72 @@ impl CloudBackend for AzureBackend {
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
+    }
+}
+
+fn object_metadata_from_azure_response(
+    response: &CloudResponse,
+    known_size: Option<u64>,
+) -> CloudOutcome<ObjectMetadata> {
+    let size = match known_size {
+        Some(size) => size,
+        None => response
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+            .ok_or_else(|| {
+                CloudError::Protocol(
+                    "Azure metadata response is missing Content-Length".to_string(),
+                )
+            })?
+            .1
+            .parse::<u64>()
+            .map_err(|error| {
+                CloudError::Protocol(format!(
+                    "Azure metadata response has invalid Content-Length: {error}"
+                ))
+            })?,
+    };
+    let etag = response
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("etag"))
+        .map(|(_, value)| value.trim())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            CloudError::Protocol("Azure metadata response is missing ETag".to_string())
+        })?;
+    Ok(ObjectMetadata::new(size, etag.to_string(), 0))
+}
+
+fn azure_response_error(
+    response: &CloudResponse,
+    operation: &str,
+    conditional_mutation: bool,
+) -> CloudError {
+    let body = String::from_utf8_lossy(&response.body);
+    let code = response
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("x-ms-error-code"))
+        .map(|(_, value)| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| extract_xml_tag_values(&body, "Code").into_iter().next());
+    let message = extract_xml_tag_values(&body, "Message").into_iter().next();
+    let detail = match (code.as_deref(), message.as_deref()) {
+        (Some(code), Some(message)) => format!("{operation}: {code}: {message}"),
+        (Some(code), None) => format!("{operation}: {code}"),
+        (None, _) => operation.to_string(),
+    };
+    let predicate_failed = code.as_deref().is_some_and(|code| {
+        code.eq_ignore_ascii_case("ConditionNotMet")
+            || code.eq_ignore_ascii_case("TargetConditionNotMet")
+    });
+
+    if conditional_mutation && response.status == 412 && predicate_failed {
+        CloudError::PreconditionFailed(format!("status {}: {detail}", response.status))
+    } else {
+        CloudError::from_http_status(response.status, detail)
     }
 }
 
@@ -990,27 +1144,16 @@ struct SharedKeySigner {
     account_name: String,
     /// Base64-decoded account key (raw bytes for HMAC-SHA256).
     decoded_key: Vec<u8>,
-    emulator_compat: bool,
 }
 
 impl SharedKeySigner {
-    #[cfg(test)]
     fn new(account_name: String, account_key_base64: &str) -> Self {
-        Self::new_with_emulator_compat(account_name, account_key_base64, false)
-    }
-
-    fn new_with_emulator_compat(
-        account_name: String,
-        account_key_base64: &str,
-        emulator_compat: bool,
-    ) -> Self {
         let decoded_key = BASE64
             .decode(account_key_base64)
             .unwrap_or_else(|_| account_key_base64.as_bytes().to_vec());
         Self {
             account_name,
             decoded_key,
-            emulator_compat,
         }
     }
 
@@ -1079,43 +1222,23 @@ impl SharedKeySigner {
             let _ = write!(canonical_resource, "\n{k}:{v}");
         }
 
-        if self.emulator_compat {
-            [
-                method.to_string(),
-                hdr("Content-Encoding"),
-                hdr("Content-Language"),
-                content_len_str,
-                hdr("Content-MD5"),
-                hdr("Content-Type"),
-                hdr("Date"),
-                hdr("If-Modified-Since"),
-                hdr("If-Match"),
-                hdr("If-None-Match"),
-                hdr("If-Unmodified-Since"),
-                hdr("Range"),
-                canonical_headers,
-                canonical_resource,
-            ]
-            .join("\n")
-        } else {
-            format!(
-                "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}{}",
-                method,
-                hdr("Content-Encoding"),
-                hdr("Content-Language"),
-                content_len_str,
-                hdr("Content-MD5"),
-                hdr("Content-Type"),
-                hdr("Date"),
-                hdr("If-Modified-Since"),
-                hdr("If-Match"),
-                hdr("If-None-Match"),
-                hdr("If-Unmodified-Since"),
-                hdr("Range"),
-                canonical_headers,
-                canonical_resource,
-            )
-        }
+        format!(
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}{}",
+            method,
+            hdr("Content-Encoding"),
+            hdr("Content-Language"),
+            content_len_str,
+            hdr("Content-MD5"),
+            hdr("Content-Type"),
+            hdr("Date"),
+            hdr("If-Modified-Since"),
+            hdr("If-Match"),
+            hdr("If-None-Match"),
+            hdr("If-Unmodified-Since"),
+            hdr("Range"),
+            canonical_headers,
+            canonical_resource,
+        )
     }
 }
 
@@ -1196,15 +1319,19 @@ enum AzureOAuthProvider {
 
 impl AzureOAuthProvider {
     fn has_environment_client_secret() -> bool {
-        std::env::var_os("AZURE_TENANT_ID").is_some()
-            && std::env::var_os("AZURE_CLIENT_ID").is_some()
-            && std::env::var_os("AZURE_CLIENT_SECRET").is_some()
+        ["AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET"]
+            .into_iter()
+            .all(environment_value_is_nonempty)
     }
 
     fn has_workload_identity() -> bool {
-        std::env::var_os("AZURE_TENANT_ID").is_some()
-            && std::env::var_os("AZURE_CLIENT_ID").is_some()
-            && std::env::var_os("AZURE_FEDERATED_TOKEN_FILE").is_some()
+        [
+            "AZURE_TENANT_ID",
+            "AZURE_CLIENT_ID",
+            "AZURE_FEDERATED_TOKEN_FILE",
+        ]
+        .into_iter()
+        .all(environment_value_is_nonempty)
     }
 
     fn from_environment_client_secret() -> MidgeResult<Self> {
@@ -1222,15 +1349,21 @@ impl AzureOAuthProvider {
     ) -> MidgeResult<Self> {
         Ok(Self::WorkloadIdentity {
             tenant_id: tenant_id
+                .filter(|value| !value.trim().is_empty())
                 .or_else(|| std::env::var("AZURE_TENANT_ID").ok())
+                .filter(|value| !value.trim().is_empty())
                 .ok_or_else(|| MidgeError::InvalidArgument("missing AZURE_TENANT_ID".into()))?,
             client_id: client_id
+                .filter(|value| !value.trim().is_empty())
                 .or_else(|| std::env::var("AZURE_CLIENT_ID").ok())
+                .filter(|value| !value.trim().is_empty())
                 .ok_or_else(|| MidgeError::InvalidArgument("missing AZURE_CLIENT_ID".into()))?,
             token_file: token_file
+                .filter(|path| !path.as_os_str().is_empty())
                 .or_else(|| {
                     std::env::var("AZURE_FEDERATED_TOKEN_FILE")
                         .ok()
+                        .filter(|value| !value.trim().is_empty())
                         .map(std::path::PathBuf::from)
                 })
                 .ok_or_else(|| {
@@ -1239,7 +1372,7 @@ impl AzureOAuthProvider {
         })
     }
 
-    fn fetch_token(&self) -> MidgeResult<CachedToken> {
+    fn fetch_token(&self, default_authority: &str) -> MidgeResult<CachedToken> {
         match self {
             Self::ClientSecret {
                 tenant_id,
@@ -1247,6 +1380,7 @@ impl AzureOAuthProvider {
                 client_secret,
             } => post_azure_token_form(
                 tenant_id,
+                default_authority,
                 &[
                     ("grant_type", "client_credentials".to_string()),
                     ("client_id", client_id.clone()),
@@ -1266,8 +1400,16 @@ impl AzureOAuthProvider {
                         error
                     ))
                 })?;
+                let assertion = assertion.trim();
+                if assertion.is_empty() {
+                    return Err(MidgeError::InvalidArgument(format!(
+                        "Azure federated token file '{}' is empty",
+                        token_file.display()
+                    )));
+                }
                 post_azure_token_form(
                     tenant_id,
+                    default_authority,
                     &[
                         ("grant_type", "client_credentials".to_string()),
                         ("client_id", client_id.clone()),
@@ -1275,7 +1417,7 @@ impl AzureOAuthProvider {
                             "client_assertion_type",
                             "urn:ietf:params:oauth:client-assertion-type:jwt-bearer".to_string(),
                         ),
-                        ("client_assertion", assertion.trim().to_string()),
+                        ("client_assertion", assertion.to_string()),
                         ("scope", "https://storage.azure.com/.default".to_string()),
                     ],
                 )
@@ -1286,13 +1428,15 @@ impl AzureOAuthProvider {
 
 struct OAuthTokenSigner {
     provider: AzureOAuthProvider,
+    default_authority: &'static str,
     token_cache: Arc<Mutex<Option<CachedToken>>>,
 }
 
 impl OAuthTokenSigner {
-    fn new(provider: AzureOAuthProvider) -> Self {
+    fn new(provider: AzureOAuthProvider, default_authority: &'static str) -> Self {
         Self {
             provider,
+            default_authority,
             token_cache: Arc::new(Mutex::new(None)),
         }
     }
@@ -1310,7 +1454,7 @@ impl OAuthTokenSigner {
             }
         }
 
-        let fresh = self.provider.fetch_token()?;
+        let fresh = self.provider.fetch_token(self.default_authority)?;
         let token = fresh.access_token.clone();
         let mut cache = self
             .token_cache
@@ -1337,19 +1481,47 @@ impl CloudSigner for OAuthTokenSigner {
 }
 
 fn required_env(name: &str) -> MidgeResult<String> {
-    std::env::var(name).map_err(|_| MidgeError::InvalidArgument(format!("missing {name}")))
+    let value =
+        std::env::var(name).map_err(|_| MidgeError::InvalidArgument(format!("missing {name}")))?;
+    if value.trim().is_empty() {
+        return Err(MidgeError::InvalidArgument(format!(
+            "missing or empty {name}"
+        )));
+    }
+    Ok(value)
 }
 
-fn post_azure_token_form(tenant_id: &str, values: &[(&str, String)]) -> MidgeResult<CachedToken> {
+fn environment_value_is_nonempty(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| !value.trim().is_empty())
+}
+
+fn azure_oauth_token_url(tenant_id: &str, default_authority: &str) -> MidgeResult<String> {
+    let authority = match std::env::var("AZURE_AUTHORITY_HOST") {
+        Ok(authority) => validated_https_origin(&authority, "AZURE_AUTHORITY_HOST")?,
+        Err(std::env::VarError::NotPresent) => default_authority.to_string(),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(MidgeError::InvalidArgument(
+                "AZURE_AUTHORITY_HOST must contain valid Unicode".to_string(),
+            ));
+        }
+    };
+    Ok(format!(
+        "{authority}/{}/oauth2/v2.0/token",
+        urlencoding::encode(tenant_id)
+    ))
+}
+
+fn post_azure_token_form(
+    tenant_id: &str,
+    default_authority: &str,
+    values: &[(&str, String)],
+) -> MidgeResult<CachedToken> {
     let body = values
         .iter()
         .map(|(key, value)| format!("{}={}", key, urlencoding::encode(value)))
         .collect::<Vec<_>>()
         .join("&");
-    let url = format!(
-        "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
-        urlencoding::encode(tenant_id)
-    );
+    let url = azure_oauth_token_url(tenant_id, default_authority)?;
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
@@ -1370,31 +1542,53 @@ fn post_azure_token_form(tenant_id: &str, values: &[(&str, String)]) -> MidgeRes
     let body = response
         .text()
         .map_err(|error| MidgeError::Internal(format!("Azure OAuth token body: {error}")))?;
-    let json: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|error| MidgeError::Internal(format!("Azure OAuth token JSON: {error}")))?;
-    let access_token = json
-        .get("access_token")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| MidgeError::Internal("Azure OAuth response missing access_token".into()))?
-        .to_string();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let expires_at = json
-        .get("expires_on")
+    parse_azure_oauth_token_response(&body, now)
+}
+
+fn parse_azure_oauth_token_response(body: &str, now: u64) -> MidgeResult<CachedToken> {
+    let json: serde_json::Value = serde_json::from_str(body)
+        .map_err(|error| MidgeError::Internal(format!("Azure OAuth token JSON: {error}")))?;
+    let access_token = json
+        .get("access_token")
         .and_then(|value| value.as_str())
-        .and_then(|value| value.parse::<u64>().ok())
-        .or_else(|| {
-            json.get("expires_in")
-                .and_then(serde_json::Value::as_u64)
-                .map(|ttl| now.saturating_add(ttl))
-        })
-        .unwrap_or_else(|| now.saturating_add(3600));
+        .filter(|token| !token.trim().is_empty())
+        .ok_or_else(|| {
+            MidgeError::Internal("Azure OAuth response missing or empty access_token".into())
+        })?
+        .to_string();
+    let expires_at = if let Some(expires_on) = json.get("expires_on") {
+        json_u64(expires_on).ok_or_else(|| {
+            MidgeError::Internal("Azure OAuth response has invalid expires_on".into())
+        })?
+    } else {
+        let expires_in = json.get("expires_in").and_then(json_u64).ok_or_else(|| {
+            MidgeError::Internal(
+                "Azure OAuth response is missing a valid expires_on or expires_in".into(),
+            )
+        })?;
+        now.checked_add(expires_in).ok_or_else(|| {
+            MidgeError::Internal("Azure OAuth response expires_in overflows timestamp".into())
+        })?
+    };
+    if expires_at <= now {
+        return Err(MidgeError::Internal(
+            "Azure OAuth response expiry is not in the future".into(),
+        ));
+    }
     Ok(CachedToken {
         access_token,
         expires_at,
     })
+}
+
+fn json_u64(value: &serde_json::Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|text| text.parse::<u64>().ok()))
 }
 
 fn extract_xml_tag_values(body: &str, tag: &str) -> Vec<String> {
@@ -1435,27 +1629,68 @@ struct ManagedIdentitySigner {
     token_cache: Arc<Mutex<Option<CachedToken>>>,
     /// IMDS endpoint (defaults to standard Azure IMDS)
     imds_endpoint: String,
+    /// Authentication contract used by the selected managed identity endpoint.
+    endpoint_kind: ManagedIdentityEndpointKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManagedIdentityEndpointKind {
+    /// App Service/Container Apps `IDENTITY_ENDPOINT` contract.
+    Identity,
+    /// Legacy App Service `MSI_ENDPOINT` contract.
+    LegacyMsi,
+    /// Azure VM Instance Metadata Service contract.
+    VmImds,
 }
 
 impl ManagedIdentitySigner {
     fn new(client_id: Option<String>) -> Self {
-        // Determine IMDS endpoint from environment
-        let imds_endpoint = std::env::var("IDENTITY_ENDPOINT")
-            .or_else(|_| std::env::var("MSI_ENDPOINT"))
-            .unwrap_or_else(|_| "http://169.254.169.254/metadata/identity/oauth2/token".into());
+        // IDENTITY_ENDPOINT uses the App Service/Container Apps contract, which
+        // authenticates callers with the rotating IDENTITY_HEADER value. Legacy
+        // App Service uses MSI_ENDPOINT with MSI_SECRET, while VM IMDS uses the
+        // Metadata header.
+        let (imds_endpoint, endpoint_kind) = match std::env::var("IDENTITY_ENDPOINT") {
+            Ok(endpoint) if !endpoint.trim().is_empty() => {
+                (endpoint, ManagedIdentityEndpointKind::Identity)
+            }
+            _ => match std::env::var("MSI_ENDPOINT") {
+                Ok(endpoint) if !endpoint.trim().is_empty() => {
+                    (endpoint, ManagedIdentityEndpointKind::LegacyMsi)
+                }
+                _ => (
+                    "http://169.254.169.254/metadata/identity/oauth2/token".into(),
+                    ManagedIdentityEndpointKind::VmImds,
+                ),
+            },
+        };
 
+        Self::with_endpoint(client_id, imds_endpoint, endpoint_kind)
+    }
+
+    fn with_endpoint(
+        client_id: Option<String>,
+        imds_endpoint: String,
+        endpoint_kind: ManagedIdentityEndpointKind,
+    ) -> Self {
         Self {
             client_id,
             token_cache: Arc::new(Mutex::new(None)),
             imds_endpoint,
+            endpoint_kind,
         }
     }
 
     /// Fetch a fresh OAuth token from Azure IMDS.
     fn fetch_token(&self) -> MidgeResult<CachedToken> {
         // Build IMDS request URL
+        let api_version = match self.endpoint_kind {
+            ManagedIdentityEndpointKind::LegacyMsi => "2017-09-01",
+            ManagedIdentityEndpointKind::Identity | ManagedIdentityEndpointKind::VmImds => {
+                "2019-08-01"
+            }
+        };
         let mut url = format!(
-            "{}?api-version=2019-08-01&resource=https://storage.azure.com/",
+            "{}?api-version={api_version}&resource=https://storage.azure.com/",
             self.imds_endpoint
         );
 
@@ -1470,16 +1705,21 @@ impl ManagedIdentitySigner {
             .build()
             .map_err(|e| MidgeError::Internal(format!("IMDS client init: {e}")))?;
 
-        let response = client
-            .get(&url)
-            .header("Metadata", "true")
-            .send()
-            .map_err(|e| {
-                MidgeError::Internal(format!(
-                    "Failed to fetch managed identity token from IMDS: {e}. \
+        let request = match self.endpoint_kind {
+            ManagedIdentityEndpointKind::Identity => client
+                .get(&url)
+                .header("X-IDENTITY-HEADER", required_env("IDENTITY_HEADER")?),
+            ManagedIdentityEndpointKind::LegacyMsi => client
+                .get(&url)
+                .header("Secret", required_env("MSI_SECRET")?),
+            ManagedIdentityEndpointKind::VmImds => client.get(&url).header("Metadata", "true"),
+        };
+        let response = request.send().map_err(|e| {
+            MidgeError::Internal(format!(
+                "Failed to fetch managed identity token from IMDS: {e}. \
                      Ensure managed identity is enabled on this Azure resource."
-                ))
-            })?;
+            ))
+        })?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -1500,16 +1740,29 @@ impl ManagedIdentitySigner {
 
         let access_token = json["access_token"]
             .as_str()
-            .ok_or_else(|| MidgeError::Internal("Missing access_token in IMDS response".into()))?
+            .filter(|token| !token.trim().is_empty())
+            .ok_or_else(|| {
+                MidgeError::Internal(
+                    "Missing or empty access_token in managed identity response".into(),
+                )
+            })?
             .to_string();
 
         // Parse expires_on (Unix timestamp string)
-        let expires_on = json["expires_on"]
-            .as_str()
-            .and_then(|s| s.parse::<u64>().ok())
-            .ok_or_else(|| {
-                MidgeError::Internal("Missing or invalid expires_on in IMDS response".into())
-            })?;
+        let expires_on = json.get("expires_on").and_then(json_u64).ok_or_else(|| {
+            MidgeError::Internal(
+                "Missing or invalid expires_on in managed identity response".into(),
+            )
+        })?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if expires_on <= now {
+            return Err(MidgeError::Internal(
+                "Managed identity response expires_on is not in the future".into(),
+            ));
+        }
 
         Ok(CachedToken {
             access_token,
@@ -1598,9 +1851,39 @@ mod tests {
     use super::*;
     use crate::storage::providers::test_support::{
         receive_list_result, spawn_recording_http_server, spawn_recording_http_server_with_status,
-        spawn_scripted_http_server,
+        spawn_scripted_http_response_server, spawn_scripted_http_server,
     };
+    use std::ffi::OsString;
     use std::sync::{Mutex, OnceLock};
+
+    struct TestEnvVar {
+        name: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl TestEnvVar {
+        fn set(name: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self { name, previous }
+        }
+
+        fn remove(name: &'static str) -> Self {
+            let previous = std::env::var_os(name);
+            std::env::remove_var(name);
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for TestEnvVar {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.as_ref() {
+                std::env::set_var(self.name, previous);
+            } else {
+                std::env::remove_var(self.name);
+            }
+        }
+    }
 
     fn recording_backend(endpoint: String) -> AzureBackend {
         AzureBackend::new(
@@ -1663,6 +1946,80 @@ mod tests {
         // Assert
         assert!(matches!(result, CloudOutcome::Ok(())));
         assert_eq!(request.method, "DELETE");
+    }
+
+    #[test]
+    fn should_only_classify_azure_target_condition_as_precondition_conflict() {
+        // Arrange
+        let response = |status, code: &str| CloudResponse {
+            status,
+            headers: vec![("x-ms-error-code".to_string(), code.to_string())],
+            body: Vec::new(),
+        };
+        let predicate = response(412, "TargetConditionNotMet");
+        let missing_lease = response(412, "LeaseIdMissing");
+        let retained_snapshot = response(409, "SnapshotsPresent");
+
+        // Act
+        let predicate_error = azure_response_error(&predicate, "Azure PUT", true);
+        let lease_error = azure_response_error(&missing_lease, "Azure PUT", true);
+        let snapshot_error = azure_response_error(&retained_snapshot, "Azure DELETE", true);
+
+        // Assert
+        assert!(matches!(predicate_error, CloudError::PreconditionFailed(_)));
+        assert!(matches!(lease_error, CloudError::InvalidRequest(_)));
+        assert!(matches!(snapshot_error, CloudError::InvalidRequest(_)));
+    }
+
+    #[test]
+    fn should_preserve_azure_authorization_error_when_listing() {
+        // Arrange
+        let server = spawn_scripted_http_response_server(vec![(
+            403,
+            "application/xml".to_string(),
+            "<Error><Code>AuthorizationFailure</Code><Message>denied</Message></Error>".to_string(),
+        )]);
+        let backend = recording_backend(server.endpoint.clone());
+
+        // Act
+        let result = receive_list_result(&backend);
+        let requests = server.finish();
+
+        // Assert
+        assert!(matches!(
+            result,
+            CloudOutcome::Err(CloudError::Unauthorized(message))
+                if message.contains("AuthorizationFailure")
+        ));
+        assert_eq!(requests, 1);
+    }
+
+    #[test]
+    fn should_fail_closed_when_azure_head_omits_identity_metadata() {
+        // Arrange
+        let server = spawn_recording_http_server(
+            vec![("Content-Length".to_string(), "7".to_string())],
+            Vec::new(),
+        );
+        let backend = recording_backend(server.endpoint.clone());
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        // Act
+        backend.submit_head("lease/primary", sender);
+        let result = match receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("receive Azure HEAD result")
+        {
+            CloudEvent::Head { result, .. } => result,
+            event => panic!("expected Azure HEAD event, got {event:?}"),
+        };
+        let _ = server.finish();
+
+        // Assert
+        assert!(matches!(
+            result,
+            CloudOutcome::Err(CloudError::Protocol(message)) if message.contains("ETag")
+        ));
     }
 
     #[test]
@@ -2148,7 +2505,6 @@ mod tests {
             "mycontainer".into(),
             Some(AzureEndpoint::account_base(
                 "https://myaccount.blob.core.usgovcloudapi.net".to_string(),
-                "myaccount",
             )),
             None,
             make_noop_executor(),
@@ -2160,6 +2516,48 @@ mod tests {
             backend.base_url(),
             "https://myaccount.blob.core.usgovcloudapi.net/mycontainer"
         );
+    }
+
+    #[test]
+    fn should_treat_identity_endpoint_as_account_scoped_blob_origin() {
+        // Arrange
+        let endpoint = "https://myaccount.blob.core.usgovcloudapi.net/";
+
+        // Act
+        let endpoint = identity_blob_endpoint(Some(endpoint.to_string()))
+            .expect("valid sovereign Blob endpoint")
+            .expect("configured endpoint");
+
+        // Assert
+        assert!(matches!(
+            endpoint,
+            AzureEndpoint::AccountBase(value)
+                if value == "https://myaccount.blob.core.usgovcloudapi.net"
+        ));
+    }
+
+    #[test]
+    fn should_reject_insecure_or_non_origin_identity_blob_endpoint() {
+        // Arrange
+        let endpoints = [
+            "not a URL",
+            "http://myaccount.blob.core.windows.net",
+            "https://user:secret@myaccount.blob.core.windows.net",
+            "https://myaccount.blob.core.windows.net/base",
+            "https://myaccount.blob.core.windows.net?sig=secret",
+            "https://myaccount.blob.core.windows.net#fragment",
+        ];
+
+        // Act
+        let results = endpoints.map(|endpoint| identity_blob_endpoint(Some(endpoint.to_string())));
+
+        // Assert
+        for result in results {
+            assert!(
+                matches!(result, Err(MidgeError::InvalidArgument(ref message)) if message.contains("identity")),
+                "identity Blob endpoints must be secure account-scoped origins: {result:?}"
+            );
+        }
     }
 
     #[test]
@@ -2209,7 +2607,7 @@ mod tests {
             .expect("endpoint suffix should produce endpoint");
 
         match endpoint {
-            AzureEndpoint::AccountBase { endpoint, .. } => {
+            AzureEndpoint::AccountBase(endpoint) => {
                 // Act
                 // Assert
                 assert_eq!(endpoint, "https://myaccount.blob.core.usgovcloudapi.net");
@@ -2229,11 +2627,42 @@ mod tests {
         assert!(parts.account_key.is_some());
         assert!(matches!(
             parts.blob_endpoint("devstoreaccount1"),
-            Some(AzureEndpoint::AccountBase {
-                emulator_compat: true,
-                ..
-            })
+            Some(AzureEndpoint::AccountBase(_))
         ));
+    }
+
+    #[test]
+    fn should_accept_accountless_sas_connection_string_when_blob_endpoint_is_explicit() {
+        // Arrange
+        let server = spawn_recording_http_server(Vec::new(), Vec::new());
+        let connection_string = format!(
+            "BlobEndpoint={};SharedAccessSignature=sv=2024-11-04&sig=test",
+            server.endpoint
+        );
+
+        // Act
+        let provider = AzureProvider::from_connection_string_and_endpoint(
+            &connection_string,
+            "container".to_string(),
+            None,
+        )
+        .expect("accountless SAS connection string");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        provider.backend().submit_get("blob", sender);
+        let event = receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("receive Azure GET result");
+        let request = server.finish();
+
+        // Assert
+        assert!(matches!(
+            event,
+            CloudEvent::Get {
+                result: CloudOutcome::Ok(_),
+                ..
+            }
+        ));
+        assert_eq!(request.target, "/container/blob?sv=2024-11-04&sig=test");
     }
 
     #[test]
@@ -2252,6 +2681,52 @@ mod tests {
 
         // Assert
         assert_eq!(url, "https://acct.blob.core.windows.net/ctr/path/to/blob");
+    }
+
+    #[test]
+    fn should_escape_literal_percent_when_building_object_url() {
+        // Arrange
+        let backend = AzureBackend::new(
+            "acct".into(),
+            "ctr".into(),
+            None,
+            None,
+            make_noop_executor(),
+        );
+
+        // Act
+        let object_url = backend.object_url("tenant%2Fblue/wal/segment");
+        let list_url = backend.list_url("tenant%2Fblue/wal/", None);
+
+        // Assert
+        assert_eq!(
+            object_url,
+            "https://acct.blob.core.windows.net/ctr/tenant%252Fblue/wal/segment"
+        );
+        assert!(list_url.contains("prefix=tenant%252Fblue%2Fwal%2F"));
+    }
+
+    #[test]
+    fn should_escape_backslashes_before_parsing_azure_object_url() {
+        // Arrange
+        let backend = AzureBackend::new(
+            "acct".into(),
+            "ctr".into(),
+            None,
+            None,
+            make_noop_executor(),
+        );
+
+        // Act
+        let object_url = backend.object_url("tenant\\..\\shared/wal/segment");
+        let parsed = url::Url::parse(&object_url).expect("Azure object URL");
+
+        // Assert
+        assert_eq!(
+            parsed.path(),
+            "/ctr/tenant%5C..%5Cshared/wal/segment",
+            "backslashes must remain object-name bytes rather than path separators"
+        );
     }
 
     #[test]
@@ -2349,6 +2824,456 @@ mod tests {
             .iter()
             .any(|(n, _)| n.eq_ignore_ascii_case("Authorization"));
         assert!(has_auth, "should have Authorization header");
+    }
+
+    #[test]
+    fn should_join_emulator_canonical_headers_directly_to_resource() {
+        // Arrange
+        let signer = SharedKeySigner::new(
+            "devstoreaccount1".into(),
+            "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==",
+        );
+        let headers = vec![
+            (
+                "x-ms-date".to_string(),
+                "Sun, 10 Aug 2026 12:00:00 GMT".to_string(),
+            ),
+            ("x-ms-version".to_string(), "2024-11-04".to_string()),
+        ];
+        let url = url::Url::parse("http://127.0.0.1:10000/devstoreaccount1/container/blob")
+            .expect("emulator URL");
+
+        // Act
+        let string_to_sign = signer.string_to_sign("GET", &headers, &url, None);
+
+        // Assert
+        assert!(string_to_sign.contains(
+            "x-ms-version:2024-11-04\n/devstoreaccount1/devstoreaccount1/container/blob"
+        ));
+        assert!(!string_to_sign.contains("x-ms-version:2024-11-04\n\n/"));
+    }
+
+    #[test]
+    fn should_send_rotating_identity_header_when_using_identity_endpoint() {
+        // Arrange
+        let _env_guard = azure_client_id_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let server = spawn_recording_http_server(
+            Vec::new(),
+            br#"{"access_token":"token","expires_on":"4102444800"}"#.to_vec(),
+        );
+        let _endpoint = TestEnvVar::set("IDENTITY_ENDPOINT", &server.endpoint);
+        let _identity_header = TestEnvVar::set("IDENTITY_HEADER", "rotating-secret");
+        let signer = ManagedIdentitySigner::new(None);
+
+        // Act
+        let token = signer.fetch_token().expect("managed identity token");
+        let request = server.finish();
+
+        // Assert
+        assert_eq!(token.access_token, "token");
+        assert_eq!(request.header("x-identity-header"), Some("rotating-secret"));
+        assert_eq!(request.header("secret"), None);
+        assert_eq!(request.header("metadata"), None);
+    }
+
+    #[test]
+    fn should_send_legacy_secret_header_when_using_msi_endpoint() {
+        // Arrange
+        let _env_guard = azure_client_id_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let server = spawn_recording_http_server(
+            Vec::new(),
+            br#"{"access_token":"token","expires_on":"4102444800"}"#.to_vec(),
+        );
+        let _identity_endpoint = TestEnvVar::remove("IDENTITY_ENDPOINT");
+        let _msi_endpoint = TestEnvVar::set("MSI_ENDPOINT", &server.endpoint);
+        let _msi_secret = TestEnvVar::set("MSI_SECRET", "legacy-secret");
+        let signer = ManagedIdentitySigner::new(None);
+
+        // Act
+        let token = signer.fetch_token().expect("managed identity token");
+        let request = server.finish();
+
+        // Assert
+        assert_eq!(token.access_token, "token");
+        assert_eq!(request.header("secret"), Some("legacy-secret"));
+        assert_eq!(request.header("metadata"), None);
+        assert_eq!(request.header("x-identity-header"), None);
+        assert!(request.target.contains("api-version=2017-09-01"));
+    }
+
+    #[test]
+    fn should_send_metadata_header_when_using_vm_imds_endpoint() {
+        // Arrange
+        let server = spawn_recording_http_server(
+            Vec::new(),
+            br#"{"access_token":"token","expires_on":"4102444800"}"#.to_vec(),
+        );
+        let signer = ManagedIdentitySigner::with_endpoint(
+            None,
+            server.endpoint.clone(),
+            ManagedIdentityEndpointKind::VmImds,
+        );
+
+        // Act
+        let token = signer.fetch_token().expect("managed identity token");
+        let request = server.finish();
+
+        // Assert
+        assert_eq!(token.access_token, "token");
+        assert_eq!(request.header("metadata"), Some("true"));
+        assert_eq!(request.header("secret"), None);
+        assert_eq!(request.header("x-identity-header"), None);
+        assert!(request.target.contains("api-version=2019-08-01"));
+    }
+
+    #[test]
+    fn should_honor_azure_authority_host_when_building_oauth_token_url() {
+        // Arrange
+        let _env_guard = azure_client_id_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _authority =
+            TestEnvVar::set("AZURE_AUTHORITY_HOST", "https://login.microsoftonline.us/");
+
+        // Act
+        let url = azure_oauth_token_url("tenant id", AZURE_PUBLIC_AUTHORITY)
+            .expect("sovereign OAuth token URL");
+
+        // Assert
+        assert_eq!(
+            url,
+            "https://login.microsoftonline.us/tenant%20id/oauth2/v2.0/token"
+        );
+    }
+
+    #[test]
+    fn should_default_to_public_azure_authority_when_override_is_absent() {
+        // Arrange
+        let _env_guard = azure_client_id_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _authority = TestEnvVar::remove("AZURE_AUTHORITY_HOST");
+
+        // Act
+        let url = azure_oauth_token_url("tenant", AZURE_PUBLIC_AUTHORITY)
+            .expect("default OAuth token URL");
+
+        // Assert
+        assert_eq!(
+            url,
+            "https://login.microsoftonline.com/tenant/oauth2/v2.0/token"
+        );
+    }
+
+    #[test]
+    fn should_derive_sovereign_authority_when_blob_endpoint_identifies_cloud() {
+        // Arrange
+        let _env_guard = azure_client_id_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _authority = TestEnvVar::remove("AZURE_AUTHORITY_HOST");
+        let government =
+            AzureEndpoint::account_base("https://account.blob.core.usgovcloudapi.net".to_string());
+        let china =
+            AzureEndpoint::account_base("https://account.blob.core.chinacloudapi.cn".to_string());
+
+        // Act
+        let government_url = azure_oauth_token_url(
+            "government-tenant",
+            azure_oauth_authority_for_blob_endpoint(Some(&government)),
+        )
+        .expect("government OAuth token URL");
+        let china_url = azure_oauth_token_url(
+            "china-tenant",
+            azure_oauth_authority_for_blob_endpoint(Some(&china)),
+        )
+        .expect("China OAuth token URL");
+
+        // Assert
+        assert_eq!(
+            government_url,
+            "https://login.microsoftonline.us/government-tenant/oauth2/v2.0/token"
+        );
+        assert_eq!(
+            china_url,
+            "https://login.chinacloudapi.cn/china-tenant/oauth2/v2.0/token"
+        );
+    }
+
+    #[test]
+    fn should_wire_sovereign_authority_through_oauth_provider_construction() {
+        // Arrange
+        let _env_guard = azure_client_id_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _authority = TestEnvVar::remove("AZURE_AUTHORITY_HOST");
+        let _tenant = TestEnvVar::set("AZURE_TENANT_ID", "tenant");
+        let _client = TestEnvVar::set("AZURE_CLIENT_ID", "client");
+        let _secret = TestEnvVar::set("AZURE_CLIENT_SECRET", "secret");
+
+        // Act
+        let government = AzureProvider::from_lightweight_credential_source(
+            "account".to_string(),
+            "container".to_string(),
+            Some("https://account.blob.core.usgovcloudapi.net".to_string()),
+            super::super::AzureCredentialSource::EnvironmentClientSecret,
+        )
+        .expect("government OAuth provider");
+        let china = AzureProvider::from_lightweight_credential_source(
+            "account".to_string(),
+            "container".to_string(),
+            Some("https://account.blob.core.chinacloudapi.cn".to_string()),
+            super::super::AzureCredentialSource::EnvironmentClientSecret,
+        )
+        .expect("China OAuth provider");
+
+        // Assert
+        assert_eq!(
+            government.oauth_authority(),
+            Some(AZURE_GOVERNMENT_AUTHORITY)
+        );
+        assert_eq!(china.oauth_authority(), Some(AZURE_CHINA_AUTHORITY));
+    }
+
+    #[test]
+    fn should_preserve_explicit_authority_override_given_sovereign_blob_endpoint() {
+        // Arrange
+        let _env_guard = azure_client_id_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _authority = TestEnvVar::set("AZURE_AUTHORITY_HOST", "https://login.example.invalid");
+        let government =
+            AzureEndpoint::account_base("https://account.blob.core.usgovcloudapi.net".to_string());
+
+        // Act
+        let url = azure_oauth_token_url(
+            "tenant",
+            azure_oauth_authority_for_blob_endpoint(Some(&government)),
+        )
+        .expect("explicit OAuth token URL");
+
+        // Assert
+        assert_eq!(
+            url,
+            "https://login.example.invalid/tenant/oauth2/v2.0/token"
+        );
+    }
+
+    #[test]
+    fn should_ignore_blank_azure_environment_credentials_when_selecting_default_chain() {
+        // Arrange
+        let _env_guard = azure_client_id_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _tenant = TestEnvVar::set("AZURE_TENANT_ID", "   ");
+        let _client = TestEnvVar::set("AZURE_CLIENT_ID", "");
+        let _secret = TestEnvVar::set("AZURE_CLIENT_SECRET", "\t");
+        let _token_file = TestEnvVar::set("AZURE_FEDERATED_TOKEN_FILE", "  ");
+
+        // Act
+        let has_client_secret = AzureOAuthProvider::has_environment_client_secret();
+        let has_workload_identity = AzureOAuthProvider::has_workload_identity();
+
+        // Assert
+        assert!(!has_client_secret);
+        assert!(!has_workload_identity);
+    }
+
+    #[test]
+    fn should_reject_empty_azure_workload_identity_assertion() {
+        // Arrange
+        let token_path = std::env::temp_dir().join(format!(
+            "midge-empty-azure-federated-token-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&token_path, "  \n").expect("write empty federated token fixture");
+        let provider = AzureOAuthProvider::from_workload_identity(
+            Some("tenant".to_string()),
+            Some("client".to_string()),
+            Some(token_path.clone()),
+        )
+        .expect("construct workload identity provider");
+
+        // Act
+        let error = provider
+            .fetch_token(AZURE_PUBLIC_AUTHORITY)
+            .expect_err("empty workload identity assertion must fail closed");
+        let _ = std::fs::remove_file(token_path);
+
+        // Assert
+        assert!(matches!(
+            error,
+            MidgeError::InvalidArgument(message) if message.contains("is empty")
+        ));
+    }
+
+    #[test]
+    fn should_reject_insecure_or_malformed_azure_authority_host() {
+        // Arrange
+        let _env_guard = azure_client_id_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let authorities = [
+            "not a URL",
+            "http://login.microsoftonline.us",
+            "https://user:secret@login.microsoftonline.us",
+            "https://login.microsoftonline.us/base",
+            "https://login.microsoftonline.us?query=1",
+            "https://login.microsoftonline.us#fragment",
+        ];
+
+        // Act
+        for authority in authorities {
+            let _authority = TestEnvVar::set("AZURE_AUTHORITY_HOST", authority);
+            let result = azure_oauth_token_url("tenant", AZURE_PUBLIC_AUTHORITY);
+
+            // Assert
+            assert!(
+                matches!(result, Err(MidgeError::InvalidArgument(ref message)) if message.contains("AZURE_AUTHORITY_HOST")),
+                "invalid authority host must fail closed: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_reject_empty_azure_oauth_access_token() {
+        // Arrange
+        let response = r#"{"access_token":"   ","expires_in":3600}"#;
+
+        // Act
+        let result = parse_azure_oauth_token_response(response, 1_000);
+
+        // Assert
+        assert!(
+            matches!(result, Err(MidgeError::Internal(ref message)) if message.contains("access_token")),
+            "empty access tokens must fail closed: {result:?}"
+        );
+    }
+
+    #[test]
+    fn should_reject_missing_invalid_or_non_future_azure_oauth_expiry() {
+        // Arrange
+        let responses = [
+            r#"{"access_token":"token"}"#,
+            r#"{"access_token":"token","expires_on":"not-a-timestamp"}"#,
+            r#"{"access_token":"token","expires_on":"1000"}"#,
+            r#"{"access_token":"token","expires_in":0}"#,
+        ];
+
+        // Act
+        let results = responses.map(|response| parse_azure_oauth_token_response(response, 1_000));
+
+        // Assert
+        for result in results {
+            assert!(
+                matches!(result, Err(MidgeError::Internal(ref message)) if message.contains("expir")),
+                "unusable OAuth expiry must fail closed: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_reject_missing_or_invalid_managed_identity_expiry() {
+        // Arrange
+        let responses = [
+            br#"{"access_token":"token"}"#.to_vec(),
+            br#"{"access_token":"token","expires_on":"not-a-timestamp"}"#.to_vec(),
+        ];
+
+        // Act
+        let results = responses.map(|body| {
+            let server = spawn_recording_http_server(Vec::new(), body);
+            let signer = ManagedIdentitySigner::with_endpoint(
+                None,
+                server.endpoint.clone(),
+                ManagedIdentityEndpointKind::VmImds,
+            );
+            let result = signer.fetch_token();
+            let _ = server.finish();
+            result
+        });
+
+        // Assert
+        for result in results {
+            assert!(
+                matches!(result, Err(MidgeError::Internal(ref message)) if message.contains("expires_on")),
+                "unusable managed identity expiry must fail closed: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_reject_empty_managed_identity_access_token() {
+        // Arrange
+        let _env_guard = azure_client_id_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let server = spawn_recording_http_server(
+            Vec::new(),
+            br#"{"access_token":"   ","expires_on":"4102444800"}"#.to_vec(),
+        );
+        let _identity_endpoint = TestEnvVar::set("IDENTITY_ENDPOINT", &server.endpoint);
+        let _identity_header = TestEnvVar::set("IDENTITY_HEADER", "rotating-secret");
+        let signer = ManagedIdentitySigner::new(None);
+
+        // Act
+        let result = signer.fetch_token();
+        let _ = server.finish();
+
+        // Assert
+        assert!(
+            matches!(result, Err(MidgeError::Internal(ref message)) if message.contains("access_token")),
+            "empty access tokens must fail closed: {result:?}"
+        );
+    }
+
+    #[test]
+    fn should_reject_non_future_managed_identity_expiry() {
+        // Arrange
+        let _env_guard = azure_client_id_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let server = spawn_recording_http_server(
+            Vec::new(),
+            br#"{"access_token":"token","expires_on":"1"}"#.to_vec(),
+        );
+        let _identity_endpoint = TestEnvVar::set("IDENTITY_ENDPOINT", &server.endpoint);
+        let _identity_header = TestEnvVar::set("IDENTITY_HEADER", "rotating-secret");
+        let signer = ManagedIdentitySigner::new(None);
+
+        // Act
+        let result = signer.fetch_token();
+        let _ = server.finish();
+
+        // Assert
+        assert!(
+            matches!(result, Err(MidgeError::Internal(ref message)) if message.contains("expires_on")),
+            "expired tokens must fail closed: {result:?}"
+        );
+    }
+
+    #[test]
+    fn should_resolve_storage_account_from_environment_when_argument_is_empty() {
+        // Arrange
+        let _env_guard = azure_client_id_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _connection_string = TestEnvVar::remove("AZURE_STORAGE_CONNECTION_STRING");
+        let _account = TestEnvVar::set("AZURE_STORAGE_ACCOUNT", "environment-account");
+        let _key = TestEnvVar::set("AZURE_STORAGE_KEY", "dGVzdA==");
+        let _sas = TestEnvVar::remove("AZURE_STORAGE_SAS_TOKEN");
+
+        // Act
+        let provider =
+            AzureProvider::from_env_and_endpoint(String::new(), "container".to_string(), None)
+                .expect("environment-backed Azure provider");
+
+        // Assert
+        assert_eq!(provider.account_name(), "environment-account");
     }
 
     #[test]

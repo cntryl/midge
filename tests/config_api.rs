@@ -150,6 +150,24 @@ fn should_reject_zero_storage_io_timeout_when_building() {
 }
 
 #[test]
+fn should_reject_sub_millisecond_storage_io_timeout_when_building() {
+    // Arrange
+    let timeout = Duration::from_micros(999);
+
+    // Act
+    let error = OpenOptions::in_memory()
+        .storage_io_timeout(timeout)
+        .build()
+        .expect_err("sub-millisecond timeout cannot be represented by cloud providers");
+
+    // Assert
+    assert!(matches!(
+        error,
+        MidgeError::InvalidArgument(message) if message.contains("at least 1 millisecond")
+    ));
+}
+
+#[test]
 fn should_build_config_given_minimal_defaults_when_only_path_provided() {
     // Arrange
 

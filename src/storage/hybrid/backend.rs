@@ -155,6 +155,7 @@ impl HybridStorage {
         sst_cloud: Arc<dyn StorageBackend>,
         control_cloud: Arc<dyn StorageBackend>,
         external_event_tx: cb::Sender<StorageEvent>,
+        callback_timeout: Duration,
     ) -> Self {
         Self::with_class_stores_policy_event_sender_and_limits(
             local,
@@ -163,7 +164,10 @@ impl HybridStorage {
             control_cloud,
             policy::StorageBudgetPolicy::default(),
             Some(external_event_tx),
-            HybridQueueLimits::default(),
+            HybridQueueLimits {
+                callback_timeout,
+                ..HybridQueueLimits::default()
+            },
         )
     }
 

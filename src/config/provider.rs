@@ -679,6 +679,10 @@ impl CloudProviderConfig {
 
     /// Override a provider endpoint when that provider supports endpoint overrides.
     ///
+    /// Azure Shared Key and SAS credentials retain path-style emulator addressing.
+    /// Azure identity credentials treat this as an HTTPS account-scoped Blob
+    /// service origin, for example a sovereign-cloud storage endpoint.
+    ///
     /// # Errors
     ///
     /// Returns `MidgeError::InvalidArgument` when the selected provider does not
@@ -926,7 +930,9 @@ fn azure_connection_string_account(connection_string: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CloudProviderConfig, GcsCredentialSource, S3CredentialSource};
+    use super::{
+        AzureCredentialSource, CloudProviderConfig, GcsCredentialSource, S3CredentialSource,
+    };
 
     #[test]
     fn should_redact_nested_credentials_given_provider_debug_format_when_formatting() {
@@ -991,5 +997,28 @@ mod tests {
         // Assert
         assert!(!output.contains("gcs-token-do-not-log"));
         assert!(output.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn should_preserve_explicit_blob_endpoint_given_azure_identity_credentials() {
+        // Arrange
+        let endpoint = "https://account.blob.core.usgovcloudapi.net";
+
+        // Act
+        let provider = CloudProviderConfig::azure_blob("account", "container")
+            .with_azure_credentials(AzureCredentialSource::managed_identity())
+            .expect("Azure credential override")
+            .with_endpoint(endpoint)
+            .expect("Azure endpoint override");
+
+        // Assert
+        assert!(matches!(
+            provider,
+            CloudProviderConfig::AzureBlob {
+                endpoint: Some(configured),
+                credential: AzureCredentialSource::ManagedIdentity { .. },
+                ..
+            } if configured == endpoint
+        ));
     }
 }

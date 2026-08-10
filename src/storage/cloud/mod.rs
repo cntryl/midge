@@ -77,8 +77,8 @@ pub(crate) use list_budget::CloudListBudget;
 /// match on these variants directly instead of re-deriving meaning from a
 /// formatted message string. In particular, [`CloudError::PreconditionFailed`]
 /// is reserved for a genuine conditional-write/delete race lost to another
-/// writer (S3 412/409, Azure 412 `ConditionNotMet`, GCS 412
-/// `conditionNotMet`) — every other failure mode (auth, transport, server
+/// writer after the provider-specific error code has been checked — every
+/// other failure mode (auth, transport, server
 /// error, malformed protocol response) uses a distinct variant so callers
 /// can no longer conflate "someone else holds it" with "we don't know".
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,19 +89,22 @@ pub enum CloudError {
     NotFound(String),
     /// A conditional request (`If-Match` / `If-None-Match`) lost a genuine
     /// race with a concurrent writer.
+    #[cfg_attr(not(any(test, feature = "cloud-common")), allow(dead_code))]
     PreconditionFailed(String),
     /// Authentication or authorization failure (401 / 403).
     #[cfg(any(test, feature = "cloud-common"))]
     Unauthorized(String),
-    /// The provider rejected the request as malformed (4xx other than
-    /// not-found/precondition/auth).
+    /// The provider rejected the request as malformed (non-retryable 4xx other
+    /// than not-found/precondition/auth).
     #[cfg(any(test, feature = "cloud-common"))]
     InvalidRequest(String),
-    /// The provider reported a server-side failure (5xx).
+    /// The provider reported a retryable or server-side failure
+    /// (408 / 425 / 429 / 5xx).
     #[cfg(any(test, feature = "cloud-common"))]
     ServerError(String),
     /// The request could not reach the provider or timed out (network,
     /// DNS, TLS, connection, or client-side timeout failure).
+    #[cfg_attr(not(any(test, feature = "cloud-common")), allow(dead_code))]
     Transport(String),
     /// The response did not match the expected protocol: malformed body,
     /// unexpected status, or a required header was missing.
@@ -132,23 +135,18 @@ impl CloudError {
 
     /// Classify a raw HTTP status code from a provider response.
     ///
-    /// This is the single place that decides which statuses represent a
-    /// genuine conditional-write/delete race (412 Precondition Failed / 409
-    /// Conflict — S3, Azure, and GCS all use 412 for `If-Match`/
-    /// `If-None-Match` mismatches; some S3-compatible services use 409 for
-    /// the same case) versus every other failure mode. Providers call this
-    /// from their response mapper, where `status` is still a real `u16`
-    /// rather than a formatted string — the point this module exists to
-    /// preserve.
+    /// Status alone is intentionally insufficient to classify a lost
+    /// precondition: providers also use 409/412 for leases, retention policy,
+    /// snapshots, and other failures. Provider adapters must inspect their
+    /// structured error code before constructing [`Self::PreconditionFailed`].
     #[cfg(any(test, feature = "cloud-common"))]
     #[must_use]
     pub(crate) fn from_http_status(status: u16, detail: impl std::fmt::Display) -> Self {
         match status {
             404 => Self::NotFound(format!("status {status}: {detail}")),
             401 | 403 => Self::Unauthorized(format!("status {status}: {detail}")),
-            409 | 412 => Self::PreconditionFailed(format!("status {status}: {detail}")),
+            408 | 425 | 429 | 500..=599 => Self::ServerError(format!("status {status}: {detail}")),
             400..=499 => Self::InvalidRequest(format!("status {status}: {detail}")),
-            500..=599 => Self::ServerError(format!("status {status}: {detail}")),
             _ => Self::Protocol(format!("unexpected status {status}: {detail}")),
         }
     }
@@ -188,6 +186,7 @@ fn cloud_outcome_from_result<T>(result: Result<T, MidgeError>) -> CloudOutcome<T
 /// Cloud operation completion events sent back via callback.
 #[derive(Clone, Debug)]
 pub enum CloudEvent {
+    #[cfg_attr(not(any(test, feature = "cloud-common")), allow(dead_code))]
     Put {
         key: String,
         result: CloudOutcome<()>,
@@ -289,6 +288,10 @@ pub(crate) fn object_match_precondition_headers(
 
 /// Non-blocking cloud backend interface used by the engine.
 pub trait CloudBackend: Send + Sync + 'static {
+    /// Override the default deadline applied to provider HTTP requests.
+    #[cfg(feature = "cloud-common")]
+    fn set_request_timeout(&self, _timeout: std::time::Duration) {}
+
     /// Submit a PUT request for `key` with optional HTTP headers. Implementations
     /// MUST honor headers (e.g. `If-None-Match`, `If-Match`) when supported by the
     /// provider to allow conditional writes.
@@ -606,6 +609,7 @@ impl CloudBackend for MockCloudBackend {
 pub struct CloudStorage {
     backend: Arc<dyn CloudBackend>,
     namespace: String,
+    callback_timeout: std::time::Duration,
 }
 
 pub(crate) const CLOUD_METADATA_FILES: &[&str] = &[
@@ -643,7 +647,7 @@ pub(crate) fn blocking_cloud_object_proof(
 ) -> Result<Option<CloudObjectProof>, String> {
     let (get_tx, get_rx) = std::sync::mpsc::channel();
     cloud.submit_get(key, get_tx);
-    let bytes = match get_rx.recv_timeout(std::time::Duration::from_secs(30)) {
+    let bytes = match get_rx.recv_timeout(cloud.callback_timeout()) {
         Ok(CloudEvent::Get {
             result: CloudOutcome::Ok(bytes),
             ..
@@ -666,7 +670,7 @@ pub(crate) fn blocking_cloud_object_proof(
 
     let (head_tx, head_rx) = std::sync::mpsc::channel();
     cloud.submit_head(key, head_tx);
-    let metadata = match head_rx.recv_timeout(std::time::Duration::from_secs(30)) {
+    let metadata = match head_rx.recv_timeout(cloud.callback_timeout()) {
         Ok(CloudEvent::Head {
             result: CloudOutcome::Ok(metadata),
             ..
@@ -699,15 +703,36 @@ pub(crate) fn blocking_cloud_object_proof(
 }
 
 impl CloudStorage {
-    #[cfg(any(test, feature = "cloud-common"))]
+    #[cfg(test)]
     pub fn new(backend: Arc<dyn CloudBackend>, namespace: String) -> Self {
-        Self { backend, namespace }
+        Self::new_with_timeout(
+            backend,
+            namespace,
+            crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        )
+    }
+
+    #[cfg(any(test, feature = "cloud-common"))]
+    pub(crate) fn new_with_timeout(
+        backend: Arc<dyn CloudBackend>,
+        namespace: String,
+        callback_timeout: std::time::Duration,
+    ) -> Self {
+        Self {
+            backend,
+            namespace,
+            callback_timeout,
+        }
     }
 
     #[cfg(test)]
     pub fn with_mock() -> Self {
         let backend = Arc::new(MockCloudBackend::new());
         Self::new(backend, "midge".to_string())
+    }
+
+    pub(crate) fn callback_timeout(&self) -> std::time::Duration {
+        self.callback_timeout
     }
 
     fn full_path(&self, suffix: &str) -> String {
@@ -740,13 +765,6 @@ impl CloudStorage {
         callback: CloudCallback,
     ) {
         let full_key = self.full_path(key);
-        if let Some(error) = self.precondition_error(&full_key, &headers) {
-            let _ = callback.send(CloudEvent::Put {
-                key: full_key,
-                result: CloudOutcome::Err(error),
-            });
-            return;
-        }
         self.backend.submit_put(&full_key, data, headers, callback);
     }
 
@@ -796,71 +814,17 @@ impl CloudStorage {
         let full_key = self.full_path(key);
         self.backend.submit_head(&full_key, callback);
     }
-
-    fn precondition_error(
-        &self,
-        full_key: &str,
-        headers: &[(String, String)],
-    ) -> Option<CloudError> {
-        let if_none_match = headers
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case("if-none-match"))
-            .map(|(_, value)| value.trim().to_string());
-        let if_match = headers
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case("if-match"))
-            .map(|(_, value)| value.trim().trim_matches('"').to_string());
-
-        if if_none_match.as_deref() != Some("*") && if_match.is_none() {
-            return None;
-        }
-
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.backend.submit_head(full_key, tx);
-        match rx.recv_timeout(std::time::Duration::from_secs(30)) {
-            Ok(CloudEvent::Head { result, .. }) => match result {
-                CloudOutcome::Ok(metadata) => {
-                    if if_none_match.as_deref() == Some("*") {
-                        Some(CloudError::PreconditionFailed(
-                            "object already exists".to_string(),
-                        ))
-                    } else if let Some(expected) = if_match {
-                        let current = metadata.etag.trim_matches('"');
-                        if current == expected {
-                            None
-                        } else {
-                            Some(CloudError::PreconditionFailed("etag mismatch".to_string()))
-                        }
-                    } else {
-                        None
-                    }
-                }
-                CloudOutcome::Err(error) => {
-                    if error.is_not_found() {
-                        if if_match.is_some() {
-                            Some(CloudError::PreconditionFailed("object missing".to_string()))
-                        } else {
-                            None
-                        }
-                    } else {
-                        Some(CloudError::Protocol(format!(
-                            "precondition check failed: {error}"
-                        )))
-                    }
-                }
-            },
-            Ok(other) => Some(CloudError::Protocol(format!(
-                "unexpected precondition HEAD response: {other:?}"
-            ))),
-            Err(error) => Some(CloudError::Transport(format!(
-                "precondition HEAD timed out: {error}"
-            ))),
-        }
-    }
 }
 
 pub(crate) fn is_not_found_error(error: &CloudError) -> bool {
     error.is_not_found()
+}
+
+fn cloud_to_storage_outcome<T: Clone>(result: CloudOutcome<T>) -> StorageOutcome<T> {
+    match result {
+        CloudOutcome::Ok(value) => StorageOutcome::Ok(value),
+        CloudOutcome::Err(error) => StorageOutcome::Err(error.to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -872,33 +836,45 @@ impl StorageBackend for CloudStorage {
     fn submit_read(&self, key: &str, callback: StorageCallback) {
         let (tx, rx) = std::sync::mpsc::channel();
         self.submit_get(key, tx);
-        if let Ok(CloudEvent::Get { key, result }) = rx.recv() {
-            let outcome = match result {
-                CloudOutcome::Ok(data) => StorageOutcome::Ok(data),
-                CloudOutcome::Err(err) => StorageOutcome::Err(err.to_string()),
-            };
-            let event = StorageEvent::ReadComplete {
+        let event = match rx.recv_timeout(self.callback_timeout) {
+            Ok(CloudEvent::Get { key, result }) => StorageEvent::ReadComplete {
                 key,
-                result: outcome,
-            };
-            let _ = callback.send(event);
-        }
+                result: cloud_to_storage_outcome(result),
+            },
+            Ok(other) => StorageEvent::ReadComplete {
+                key: key.to_string(),
+                result: StorageOutcome::Err(format!("unexpected cloud GET response: {other:?}")),
+            },
+            Err(error) => StorageEvent::ReadComplete {
+                key: key.to_string(),
+                result: StorageOutcome::Err(format!(
+                    "cloud GET callback timed out or closed: {error}"
+                )),
+            },
+        };
+        let _ = callback.send(event);
     }
 
     fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback) {
         let (tx, rx) = std::sync::mpsc::channel();
         self.submit_put(key, data, vec![], tx);
-        if let Ok(CloudEvent::Put { key, result }) = rx.recv() {
-            let outcome = match result {
-                CloudOutcome::Ok(()) => StorageOutcome::Ok(()),
-                CloudOutcome::Err(err) => StorageOutcome::Err(err.to_string()),
-            };
-            let event = StorageEvent::WriteComplete {
+        let event = match rx.recv_timeout(self.callback_timeout) {
+            Ok(CloudEvent::Put { key, result }) => StorageEvent::WriteComplete {
                 key,
-                result: outcome,
-            };
-            let _ = callback.send(event);
-        }
+                result: cloud_to_storage_outcome(result),
+            },
+            Ok(other) => StorageEvent::WriteComplete {
+                key: key.to_string(),
+                result: StorageOutcome::Err(format!("unexpected cloud PUT response: {other:?}")),
+            },
+            Err(error) => StorageEvent::WriteComplete {
+                key: key.to_string(),
+                result: StorageOutcome::Err(format!(
+                    "cloud PUT callback timed out or closed: {error}"
+                )),
+            },
+        };
+        let _ = callback.send(event);
     }
 
     fn submit_write_with_headers(
@@ -910,33 +886,45 @@ impl StorageBackend for CloudStorage {
     ) {
         let (tx, rx) = std::sync::mpsc::channel();
         self.submit_put(key, data, headers, tx);
-        if let Ok(CloudEvent::Put { key, result }) = rx.recv() {
-            let outcome = match result {
-                CloudOutcome::Ok(()) => StorageOutcome::Ok(()),
-                CloudOutcome::Err(err) => StorageOutcome::Err(err.to_string()),
-            };
-            let event = StorageEvent::WriteComplete {
+        let event = match rx.recv_timeout(self.callback_timeout) {
+            Ok(CloudEvent::Put { key, result }) => StorageEvent::WriteComplete {
                 key,
-                result: outcome,
-            };
-            let _ = callback.send(event);
-        }
+                result: cloud_to_storage_outcome(result),
+            },
+            Ok(other) => StorageEvent::WriteComplete {
+                key: key.to_string(),
+                result: StorageOutcome::Err(format!("unexpected cloud PUT response: {other:?}")),
+            },
+            Err(error) => StorageEvent::WriteComplete {
+                key: key.to_string(),
+                result: StorageOutcome::Err(format!(
+                    "cloud PUT callback timed out or closed: {error}"
+                )),
+            },
+        };
+        let _ = callback.send(event);
     }
 
     fn submit_delete(&self, key: &str, callback: StorageCallback) {
         let (tx, rx) = std::sync::mpsc::channel();
         CloudStorage::submit_delete(self, key, tx);
-        if let Ok(CloudEvent::Delete { key, result }) = rx.recv() {
-            let outcome = match result {
-                CloudOutcome::Ok(()) => StorageOutcome::Ok(()),
-                CloudOutcome::Err(err) => StorageOutcome::Err(err.to_string()),
-            };
-            let event = StorageEvent::DeleteComplete {
+        let event = match rx.recv_timeout(self.callback_timeout) {
+            Ok(CloudEvent::Delete { key, result }) => StorageEvent::DeleteComplete {
                 key,
-                result: outcome,
-            };
-            let _ = callback.send(event);
-        }
+                result: cloud_to_storage_outcome(result),
+            },
+            Ok(other) => StorageEvent::DeleteComplete {
+                key: key.to_string(),
+                result: StorageOutcome::Err(format!("unexpected cloud DELETE response: {other:?}")),
+            },
+            Err(error) => StorageEvent::DeleteComplete {
+                key: key.to_string(),
+                result: StorageOutcome::Err(format!(
+                    "cloud DELETE callback timed out or closed: {error}"
+                )),
+            },
+        };
+        let _ = callback.send(event);
     }
 
     fn submit_delete_with_headers(
@@ -947,44 +935,55 @@ impl StorageBackend for CloudStorage {
     ) {
         let (tx, rx) = std::sync::mpsc::channel();
         CloudStorage::submit_delete_with_headers(self, key, headers, tx);
-        if let Ok(CloudEvent::Delete { key, result }) = rx.recv() {
-            let outcome = match result {
-                CloudOutcome::Ok(()) => StorageOutcome::Ok(()),
-                CloudOutcome::Err(err) => StorageOutcome::Err(err.to_string()),
-            };
-            let event = StorageEvent::DeleteComplete {
+        let event = match rx.recv_timeout(self.callback_timeout) {
+            Ok(CloudEvent::Delete { key, result }) => StorageEvent::DeleteComplete {
                 key,
-                result: outcome,
-            };
-            let _ = callback.send(event);
-        }
+                result: cloud_to_storage_outcome(result),
+            },
+            Ok(other) => StorageEvent::DeleteComplete {
+                key: key.to_string(),
+                result: StorageOutcome::Err(format!("unexpected cloud DELETE response: {other:?}")),
+            },
+            Err(error) => StorageEvent::DeleteComplete {
+                key: key.to_string(),
+                result: StorageOutcome::Err(format!(
+                    "cloud DELETE callback timed out or closed: {error}"
+                )),
+            },
+        };
+        let _ = callback.send(event);
     }
 
     #[cfg(test)]
     fn submit_list(&self, prefix: &str, callback: StorageCallback) {
         let (tx, rx) = std::sync::mpsc::channel();
         CloudStorage::submit_list(self, prefix, tx);
-        if let Ok(CloudEvent::List {
-            prefix: key_prefix,
-            result,
-        }) = rx.recv()
-        {
-            let outcome = match result {
-                CloudOutcome::Ok(items) => StorageOutcome::Ok(items),
-                CloudOutcome::Err(err) => StorageOutcome::Err(err.to_string()),
-            };
-            let event = StorageEvent::ListComplete {
+        let event = match rx.recv_timeout(self.callback_timeout) {
+            Ok(CloudEvent::List {
                 prefix: key_prefix,
-                result: outcome,
-            };
-            let _ = callback.send(event);
-        }
+                result,
+            }) => StorageEvent::ListComplete {
+                prefix: key_prefix,
+                result: cloud_to_storage_outcome(result),
+            },
+            Ok(other) => StorageEvent::ListComplete {
+                prefix: prefix.to_string(),
+                result: StorageOutcome::Err(format!("unexpected cloud LIST response: {other:?}")),
+            },
+            Err(error) => StorageEvent::ListComplete {
+                prefix: prefix.to_string(),
+                result: StorageOutcome::Err(format!(
+                    "cloud LIST callback timed out or closed: {error}"
+                )),
+            },
+        };
+        let _ = callback.send(event);
     }
 
     fn submit_head(&self, key: &str, callback: StorageCallback) {
         let (tx, rx) = std::sync::mpsc::channel();
         CloudStorage::submit_head(self, key, tx);
-        let event = match rx.recv() {
+        let event = match rx.recv_timeout(self.callback_timeout) {
             Ok(CloudEvent::Head { key, result }) => {
                 let outcome = match result {
                     CloudOutcome::Ok(metadata) => StorageOutcome::Ok(StorageObjectMetadata {
@@ -1005,7 +1004,9 @@ impl StorageBackend for CloudStorage {
             },
             Err(error) => StorageEvent::HeadComplete {
                 key: key.to_string(),
-                result: StorageOutcome::Err(format!("cloud HEAD channel closed: {error}")),
+                result: StorageOutcome::Err(format!(
+                    "cloud HEAD callback timed out or closed: {error}"
+                )),
             },
         };
         let _ = callback.send(event);
@@ -1015,7 +1016,108 @@ impl StorageBackend for CloudStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    };
+
+    #[derive(Default)]
+    struct ConditionalPutOnlyBackend {
+        head_calls: AtomicUsize,
+    }
+
+    struct DelayedMissingGetBackend;
+
+    impl CloudBackend for ConditionalPutOnlyBackend {
+        fn submit_put(
+            &self,
+            key: &str,
+            _data: Vec<u8>,
+            headers: Vec<(String, String)>,
+            callback: CloudCallback,
+        ) {
+            let has_condition = headers
+                .iter()
+                .any(|(name, value)| name.eq_ignore_ascii_case("if-none-match") && value == "*");
+            let result = if has_condition {
+                CloudOutcome::Ok(())
+            } else {
+                CloudOutcome::Err(CloudError::Protocol(
+                    "conditional header was not delegated".to_string(),
+                ))
+            };
+            let _ = callback.send(CloudEvent::Put {
+                key: key.to_string(),
+                result,
+            });
+        }
+
+        fn submit_get_range(
+            &self,
+            key: &str,
+            start: u64,
+            end: Option<u64>,
+            callback: CloudCallback,
+        ) {
+            let _ = callback.send(CloudEvent::GetRange {
+                key: key.to_string(),
+                start,
+                end,
+                result: CloudOutcome::Err(CloudError::Protocol("unsupported".to_string())),
+            });
+        }
+
+        fn submit_head(&self, key: &str, callback: CloudCallback) {
+            self.head_calls.fetch_add(1, Ordering::SeqCst);
+            let _ = callback.send(CloudEvent::Head {
+                key: key.to_string(),
+                result: CloudOutcome::Err(CloudError::Unauthorized(
+                    "HEAD permission intentionally absent".to_string(),
+                )),
+            });
+        }
+    }
+
+    impl CloudBackend for DelayedMissingGetBackend {
+        fn submit_put(
+            &self,
+            key: &str,
+            _data: Vec<u8>,
+            _headers: Vec<(String, String)>,
+            callback: CloudCallback,
+        ) {
+            let _ = callback.send(CloudEvent::Put {
+                key: key.to_string(),
+                result: CloudOutcome::Err(CloudError::Protocol("unsupported".to_string())),
+            });
+        }
+
+        fn submit_get(&self, key: &str, callback: CloudCallback) {
+            let key = key.to_string();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                let _ = callback.send(CloudEvent::Get {
+                    key,
+                    result: CloudOutcome::Err(CloudError::NotFound("delayed miss".to_string())),
+                });
+            });
+        }
+
+        fn submit_get_range(
+            &self,
+            key: &str,
+            start: u64,
+            end: Option<u64>,
+            callback: CloudCallback,
+        ) {
+            let _ = callback.send(CloudEvent::GetRange {
+                key: key.to_string(),
+                start,
+                end,
+                result: CloudOutcome::Err(CloudError::Protocol("unsupported".to_string())),
+            });
+        }
+    }
 
     // =========== CloudOutcome Tests ===========
 
@@ -1037,6 +1139,20 @@ mod tests {
         assert!(matches!(errors[1], CloudError::Unauthorized(_)));
         assert!(matches!(errors[2], CloudError::InvalidRequest(_)));
         assert!(matches!(errors[3], CloudError::ServerError(_)));
+    }
+
+    #[test]
+    fn should_classify_exhausted_retryable_http_statuses_as_server_errors() {
+        // Arrange
+        let statuses = [408, 425, 429];
+
+        // Act
+        let errors = statuses.map(|status| CloudError::from_http_status(status, "retry exhausted"));
+
+        // Assert
+        assert!(errors
+            .iter()
+            .all(|error| matches!(error, CloudError::ServerError(_))));
     }
 
     #[test]
@@ -1170,6 +1286,60 @@ mod tests {
     // =========== CloudStorage Routing Tests ===========
 
     #[test]
+    fn should_preserve_configured_callback_timeout_for_blocking_cloud_operations() {
+        // Arrange
+        let backend = Arc::new(MockCloudBackend::new());
+        let timeout = std::time::Duration::from_millis(123);
+
+        // Act
+        let storage = CloudStorage::new_with_timeout(backend, "tenant".to_string(), timeout);
+
+        // Assert
+        assert_eq!(storage.callback_timeout(), timeout);
+    }
+
+    #[test]
+    fn should_apply_configured_callback_timeout_to_blocking_cloud_proof() {
+        // Arrange
+        let storage = CloudStorage::new_with_timeout(
+            Arc::new(DelayedMissingGetBackend),
+            "tenant".to_string(),
+            std::time::Duration::from_millis(5),
+        );
+
+        // Act
+        let error = blocking_cloud_object_proof(&storage, "metadata/manifest.json")
+            .expect_err("configured callback timeout must bound proof reads");
+
+        // Assert
+        assert!(error.contains("timed out"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn should_report_storage_callback_timeout_when_cloud_backend_is_slow() {
+        // Arrange
+        let storage = CloudStorage::new_with_timeout(
+            Arc::new(DelayedMissingGetBackend),
+            "tenant".to_string(),
+            std::time::Duration::from_millis(5),
+        );
+        let (sender, receiver) = mpsc::channel();
+
+        // Act
+        StorageBackend::submit_read(&storage, "metadata/manifest.json", sender);
+        let event = receiver.recv().expect("receive bounded adapter result");
+
+        // Assert
+        assert!(matches!(
+            event,
+            StorageEvent::ReadComplete {
+                result: StorageOutcome::Err(message),
+                ..
+            } if message.contains("timed out")
+        ));
+    }
+
+    #[test]
     fn should_route_namespace_put_operation() {
         // Arrange
         let storage = CloudStorage::with_mock();
@@ -1188,6 +1358,33 @@ mod tests {
             }
             _ => panic!("Expected PutComplete"),
         }
+    }
+
+    #[test]
+    fn should_delegate_conditional_put_without_head_preflight() {
+        // Arrange
+        let backend = Arc::new(ConditionalPutOnlyBackend::default());
+        let storage = CloudStorage::new(backend.clone(), "tenant".to_string());
+        let (sender, receiver) = mpsc::channel();
+
+        // Act
+        storage.submit_put(
+            "lease/primary",
+            b"holder".to_vec(),
+            vec![("If-None-Match".to_string(), "*".to_string())],
+            sender,
+        );
+        let event = receiver.recv().expect("receive conditional PUT result");
+
+        // Assert
+        assert!(matches!(
+            event,
+            CloudEvent::Put {
+                result: CloudOutcome::Ok(()),
+                ..
+            }
+        ));
+        assert_eq!(backend.head_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]

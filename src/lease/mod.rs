@@ -66,9 +66,22 @@ pub(crate) struct CreatedLease {
     pub(crate) validity: Option<Arc<LeaseValidity>>,
 }
 
+#[cfg(test)]
 pub(crate) fn create_lease_with_validity(
     storage: &Storage,
     clock_skew_tolerance: std::time::Duration,
+) -> Result<CreatedLease, LeaseError> {
+    create_lease_with_validity_and_timeout(
+        storage,
+        clock_skew_tolerance,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )
+}
+
+pub(crate) fn create_lease_with_validity_and_timeout(
+    storage: &Storage,
+    clock_skew_tolerance: std::time::Duration,
+    storage_io_timeout: std::time::Duration,
 ) -> Result<CreatedLease, LeaseError> {
     match storage {
         Storage::InMemory => {
@@ -118,11 +131,12 @@ pub(crate) fn create_lease_with_validity(
                 bucket: lease_provider.bucket_or_container().to_string(),
                 prefix: lease_prefix.to_string(),
             };
-            let cloud =
-                crate::storage::providers::build_cloud_storage(lease_provider, lease_prefix)
-                    .map_err(|error| {
-                        LeaseError::IoError(format!("cloud lease backend: {error}"))
-                    })?;
+            let cloud = crate::storage::providers::build_cloud_storage_with_timeout(
+                lease_provider,
+                lease_prefix,
+                storage_io_timeout,
+            )
+            .map_err(|error| LeaseError::IoError(format!("cloud lease backend: {error}")))?;
             let lease = Arc::new(
                 CloudStorageLease::new_provider_backed_with_clock_skew_tolerance(
                     config,

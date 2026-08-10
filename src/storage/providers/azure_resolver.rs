@@ -59,33 +59,96 @@ fn resolve_azure(provider: &CloudProviderConfig) -> MidgeResult<Arc<dyn CloudBac
             )?
         }
         AzureCredentialSource::ManagedIdentity { client_id } => {
-            if endpoint.is_some() {
-                return Err(MidgeError::InvalidArgument(
-                    "managed identity cannot be used with an emulator endpoint".to_string(),
-                ));
-            }
-            super::azure::AzureProvider::with_managed_identity(
+            super::azure::AzureProvider::with_managed_identity_and_endpoint(
                 account.clone(),
                 container.clone(),
                 client_id.clone(),
+                endpoint.clone(),
             )?
         }
         AzureCredentialSource::EnvironmentClientSecret
         | AzureCredentialSource::WorkloadIdentity { .. }
         | AzureCredentialSource::LightweightDefaultChain => {
-            if endpoint.is_some() {
-                return Err(MidgeError::InvalidArgument(
-                    "Azure OAuth credential sources cannot be used with an emulator endpoint"
-                        .to_string(),
-                ));
-            }
             super::azure::AzureProvider::from_lightweight_credential_source(
                 account.clone(),
                 container.clone(),
+                endpoint.clone(),
                 credential.clone(),
             )?
         }
     };
 
     Ok(provider.backend())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_accept_account_scoped_https_endpoint_given_managed_identity() {
+        // Arrange
+        let provider = CloudProviderConfig::azure_blob("account", "container")
+            .with_azure_credentials(AzureCredentialSource::managed_identity())
+            .expect("Azure credential override")
+            .with_endpoint("https://account.blob.core.usgovcloudapi.net")
+            .expect("Azure endpoint override");
+
+        // Act
+        let result = resolve_azure(&provider);
+
+        // Assert
+        assert!(result.is_ok(), "sovereign identity endpoint must resolve");
+    }
+
+    #[test]
+    fn should_accept_account_scoped_https_endpoint_given_workload_identity() {
+        // Arrange
+        let provider = CloudProviderConfig::azure_blob("account", "container")
+            .with_azure_credentials(AzureCredentialSource::workload_identity_with(
+                Some("tenant".to_string()),
+                Some("client".to_string()),
+                Some(std::path::PathBuf::from("unused-federated-token")),
+            ))
+            .expect("Azure credential override")
+            .with_endpoint("https://account.blob.core.chinacloudapi.cn")
+            .expect("Azure endpoint override");
+
+        // Act
+        let result = resolve_azure(&provider);
+
+        // Assert
+        assert!(result.is_ok(), "sovereign OAuth endpoint must resolve");
+    }
+
+    #[test]
+    fn should_reject_insecure_endpoint_given_managed_identity() {
+        // Arrange
+        let provider = CloudProviderConfig::azure_blob("account", "container")
+            .with_azure_credentials(AzureCredentialSource::managed_identity())
+            .expect("Azure credential override")
+            .with_endpoint("http://account.blob.core.windows.net")
+            .expect("Azure endpoint override");
+
+        // Act
+        let result = resolve_azure(&provider);
+
+        // Assert
+        assert!(matches!(
+            result,
+            Err(MidgeError::InvalidArgument(message)) if message.contains("identity")
+        ));
+    }
+
+    #[test]
+    fn should_preserve_path_style_http_endpoint_given_shared_key() {
+        // Arrange
+        let provider = CloudProviderConfig::sqrzl_azure("container");
+
+        // Act
+        let result = resolve_azure(&provider);
+
+        // Assert
+        assert!(result.is_ok(), "Sqrzl Azure endpoint must resolve");
+    }
 }
