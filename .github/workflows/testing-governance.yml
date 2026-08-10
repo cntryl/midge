@@ -33,7 +33,7 @@ jobs:
         run: python3 scripts/coverage_tier_diff.py unit-coverage.json integration-coverage.json | tee coverage-tier-diff.md
       - name: Publish summary
         run: cat coverage-tier-diff.md >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: coverage-tier-diff
           path: |
@@ -71,7 +71,7 @@ jobs:
           cat mutation-pilot.md >> "$GITHUB_STEP_SUMMARY"
           echo '' >> "$GITHUB_STEP_SUMMARY"
           echo 'Informational scheduled run; surviving mutants require triage, not a PR failure.' >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: mutation-pilot
