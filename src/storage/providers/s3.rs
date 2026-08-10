@@ -680,6 +680,12 @@ impl S3Provider {
     }
 
     fn with_signer(config: S3Config, signer: Option<Arc<dyn CloudSigner>>) -> MidgeResult<Self> {
+        if config.endpoint.is_none() && config.bucket.contains('.') {
+            return Err(MidgeError::InvalidArgument(format!(
+                "native AWS S3 bucket '{}' must not contain dots because the virtual-hosted HTTPS certificate does not match dotted bucket names",
+                config.bucket
+            )));
+        }
         let executor = CloudExecutor::new(signer)?;
         let backend = Arc::new(S3Backend::new(config, executor));
         Ok(Self { backend })
@@ -823,7 +829,7 @@ impl CloudBackend for S3Backend {
             }
         }
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status < 400 => CloudEvent::Put {
+            Ok(resp) if resp.status == 200 => CloudEvent::Put {
                 key: ctx,
                 result: CloudOutcome::Ok(()),
             },
@@ -933,7 +939,7 @@ impl CloudBackend for S3Backend {
             request = request.with_header(name, value);
         }
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status < 400 || resp.status == 404 => CloudEvent::Delete {
+            Ok(resp) if matches!(resp.status, 200 | 204 | 404) => CloudEvent::Delete {
                 key: ctx,
                 result: CloudOutcome::Ok(()),
             },
@@ -1253,6 +1259,37 @@ mod tests {
     fn recording_backend(endpoint: String) -> S3Backend {
         let config = S3Config::custom("bucket".into(), "us-east-1".into(), endpoint, true);
         S3Backend::new(config, CloudExecutor::new(None).expect("cloud executor"))
+    }
+
+    #[test]
+    fn should_reject_redirect_status_when_putting_s3_object() {
+        // Arrange
+        let server = spawn_recording_http_server_with_status(302, Vec::new(), Vec::new());
+        let backend = recording_backend(server.endpoint.clone());
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        // Act
+        backend.submit_put("object", b"value".to_vec(), Vec::new(), sender);
+        let result = receive_put_result(&receiver);
+        let _ = server.finish();
+
+        // Assert
+        assert!(matches!(result, CloudOutcome::Err(CloudError::Protocol(_))));
+    }
+
+    #[test]
+    fn should_reject_dotted_bucket_when_using_native_aws_endpoint() {
+        // Arrange
+        let credentials = AwsCredentials::new("access".into(), "secret".into(), "us-east-1".into());
+
+        // Act
+        let result = S3Provider::aws("database.example".into(), "us-east-1".into(), credentials);
+
+        // Assert
+        assert!(matches!(
+            result,
+            Err(MidgeError::InvalidArgument(message)) if message.contains("must not contain dots")
+        ));
     }
 
     fn receive_put_result(receiver: &std::sync::mpsc::Receiver<CloudEvent>) -> CloudOutcome<()> {

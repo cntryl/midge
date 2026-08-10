@@ -75,6 +75,10 @@ Sqrzl provider-engine tests are explicitly ignored in ordinary test runs. The
 scheduled/manual `Cloud Qualification` workflow starts Sqrzl and selects those
 ignored tests. Once selected, an unreachable emulator is a hard failure; there
 is no runtime skip that can be confused with a passing qualification.
+The provider contract includes a zero-byte object PUT/HEAD/GET/DELETE lifecycle
+because empty authority documents occur in the WAL and metadata paths and some
+real providers require an explicit `Content-Length: 0`. Provider unit tests also
+reject redirects and undocumented mutation success statuses.
 
 ## Trust Matrix
 
