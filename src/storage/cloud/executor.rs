@@ -91,8 +91,15 @@ impl CloudExecutor {
                 MidgeError::Internal(format!("Failed to build cloud tokio runtime: {e}"))
             })?;
 
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|error| {
+                MidgeError::Internal(format!("Failed to build cloud HTTP client: {error}"))
+            })?;
+
         Ok(Self {
-            client: Client::new(),
+            client,
             signer,
             rt: Some(Arc::new(rt)),
         })
@@ -355,6 +362,70 @@ mod tests {
     use std::io::{ErrorKind, Read, Write};
     use std::net::TcpListener;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn should_stop_at_redirect_when_cloud_request_is_mutating() {
+        // Arrange
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind redirect server");
+        listener
+            .set_nonblocking(true)
+            .expect("configure nonblocking redirect server");
+        let address = listener.local_addr().expect("redirect server address");
+        let endpoint = format!("http://{address}/object");
+        let redirected = format!("http://{address}/redirected");
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut served = 0;
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut request = [0_u8; 2048];
+                        let _ = stream.read(&mut request);
+                        let (status, location) = if served == 0 {
+                            ("303 See Other", format!("Location: {redirected}\r\n"))
+                        } else {
+                            ("200 OK", String::new())
+                        };
+                        write!(
+                            stream,
+                            "HTTP/1.1 {status}\r\n{location}Content-Length: 0\r\nConnection: close\r\n\r\n"
+                        )
+                        .expect("write redirect response");
+                        served += 1;
+                        if served > 1 {
+                            break;
+                        }
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept redirect request: {error}"),
+                }
+            }
+            served
+        });
+        let request = CloudRequest::new(Method::PUT, endpoint).with_body(b"value".to_vec());
+        let executor = CloudExecutor::new(None).expect("cloud executor");
+
+        // Act
+        let response = executor
+            .rt
+            .as_ref()
+            .expect("cloud runtime")
+            .block_on(CloudExecutor::execute_request(
+                executor.client.clone(),
+                request,
+            ))
+            .expect("redirect response");
+        let request_count = server.join().expect("join redirect server");
+
+        // Assert
+        assert_eq!(response.status, 303);
+        assert_eq!(
+            request_count, 1,
+            "cloud mutations must not follow redirects"
+        );
+    }
 
     #[test]
     fn should_reject_cloud_response_chunk_past_limit() {

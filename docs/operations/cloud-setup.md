@@ -29,10 +29,11 @@ provider's documented default chain over putting secrets in source. Midge does
 not manage secret rotation, a secret store, IAM policy, or network access.
 Never commit credentials or place them in a checked-in example.
 
-The recommended deployment uses one unversioned bucket/container and one
-database prefix. Midge keeps WAL, SST, metadata, and lease keys in disjoint
-namespaces beneath that prefix. Use a multi-location topology only when
-separate IAM, ownership, or lifecycle boundaries are operationally valuable.
+The recommended deployment uses one unversioned bucket/container, with provider
+soft-delete retention disabled, and one database prefix. Midge keeps WAL, SST,
+metadata, and lease keys in disjoint namespaces beneath that prefix. Use a
+multi-location topology only when separate IAM, ownership, or lifecycle
+boundaries are operationally valuable.
 
 ```rust,no_run
 # use cntryl_midge::{CloudProviderConfig, CloudStorageLocation, OpenOptions};
@@ -64,7 +65,19 @@ Provider lifecycle policy is bucket/container provisioning, not a Midge data
 plane operation. Midge does not query, warn about, or reject provider
 versioning state. Prefer versioning disabled. If operators enable versioning,
 Midge exposes stable suffixes through `CloudObjectLayout` so provisioning can
-bound cleanup of noncurrent versions:
+bound cleanup of noncurrent versions. Also disable GCS soft delete and Azure
+Blob soft delete for the Midge location; otherwise deleted objects continue to
+consume storage until the provider retention period expires. GCS enables soft
+delete with a seven-day retention period on new buckets by default, unless an
+organization policy or explicit bucket setting changes it.
+
+Native AWS configuration uses virtual-hosted HTTPS endpoints. AWS bucket names
+containing dots are rejected because the standard wildcard certificate does
+not match them. Use a DNS-compatible bucket name without dots. S3 Express
+directory buckets, access-point ARNs, and their specialized endpoints are not
+supported by `CloudProviderConfig::aws_s3`.
+
+Provision lifecycle behavior by object class:
 
 | Object class | Store | Lifecycle requirement |
 | --- | --- | --- |

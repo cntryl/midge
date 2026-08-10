@@ -85,6 +85,7 @@ fn run_provider_contract_body(label: &str, provider: &CloudProviderConfig) {
     let overwrite_key = format!("{prefix}overwrite.bin");
     let conditional_key = format!("{prefix}conditional.bin");
     let missing_key = format!("{prefix}missing.bin");
+    let empty_key = format!("{prefix}empty.bin");
 
     put(&backend, &key, b"hello-sqrzl".to_vec(), vec![]).expect("PUT");
     assert_eq!(get(&backend, &key).expect("GET"), b"hello-sqrzl");
@@ -101,6 +102,18 @@ fn run_provider_contract_body(label: &str, provider: &CloudProviderConfig) {
     assert_eq!(
         range(&backend, &key, 0, Some(5)).expect("range read"),
         b"hello"
+    );
+
+    put(&backend, &empty_key, Vec::new(), vec![]).expect("empty PUT");
+    assert_eq!(
+        get(&backend, &empty_key).expect("empty GET"),
+        Vec::<u8>::new()
+    );
+    assert_eq!(head(&backend, &empty_key).expect("empty HEAD").size, 0);
+    delete(&backend, &empty_key).expect("empty DELETE");
+    assert!(
+        get(&backend, &empty_key).is_err(),
+        "deleted empty object should be missing"
     );
 
     put(&backend, &overwrite_key, b"first".to_vec(), vec![]).expect("initial overwrite PUT");

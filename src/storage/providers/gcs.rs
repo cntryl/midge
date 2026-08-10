@@ -1005,7 +1005,7 @@ impl CloudBackend for GcsBackend {
         }
         request.url = url;
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status < 400 => CloudEvent::Put {
+            Ok(resp) if resp.status == 200 => CloudEvent::Put {
                 key: ctx,
                 result: CloudOutcome::Ok(()),
             },
@@ -1602,6 +1602,22 @@ mod tests {
             CloudEvent::Head { result, .. } => result,
             event => panic!("expected GCS HEAD event, got {event:?}"),
         }
+    }
+
+    #[test]
+    fn should_reject_redirect_status_when_putting_gcs_object() {
+        // Arrange
+        let server = spawn_recording_http_server_with_status(302, Vec::new(), Vec::new());
+        let backend = recording_json_backend(server.endpoint.clone());
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        // Act
+        backend.submit_put("object", b"value".to_vec(), Vec::new(), sender);
+        let result = receive_put_result(&receiver);
+        let _ = server.finish();
+
+        // Assert
+        assert!(matches!(result, CloudOutcome::Err(CloudError::Protocol(_))));
     }
 
     #[test]

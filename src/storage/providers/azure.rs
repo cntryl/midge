@@ -767,7 +767,7 @@ impl CloudBackend for AzureBackend {
             }
         }
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status < 400 => CloudEvent::Put {
+            Ok(resp) if resp.status == 201 => CloudEvent::Put {
                 key: ctx,
                 result: CloudOutcome::Ok(()),
             },
@@ -876,7 +876,7 @@ impl CloudBackend for AzureBackend {
             request = request.with_header(name, value);
         }
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status < 400 || resp.status == 404 => CloudEvent::Delete {
+            Ok(resp) if matches!(resp.status, 202 | 404) => CloudEvent::Delete {
                 key: ctx,
                 result: CloudOutcome::Ok(()),
             },
@@ -1612,6 +1612,22 @@ mod tests {
         )
     }
 
+    #[test]
+    fn should_reject_redirect_status_when_putting_azure_blob() {
+        // Arrange
+        let server = spawn_recording_http_server_with_status(302, Vec::new(), Vec::new());
+        let backend = recording_backend(server.endpoint.clone());
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        // Act
+        backend.submit_put("blob", b"value".to_vec(), Vec::new(), sender);
+        let result = receive_put_result(&receiver);
+        let _ = server.finish();
+
+        // Assert
+        assert!(matches!(result, CloudOutcome::Err(CloudError::Protocol(_))));
+    }
+
     fn receive_put_result(receiver: &std::sync::mpsc::Receiver<CloudEvent>) -> CloudOutcome<()> {
         match receiver
             .recv_timeout(std::time::Duration::from_secs(5))
@@ -1674,13 +1690,13 @@ mod tests {
         };
         let _ = head_server.finish();
 
-        let create_server = spawn_recording_http_server(Vec::new(), Vec::new());
+        let create_server = spawn_recording_http_server_with_status(201, Vec::new(), Vec::new());
         let create_backend = recording_backend(create_server.endpoint.clone());
         let (create_sender, create_receiver) = std::sync::mpsc::channel();
-        let update_server = spawn_recording_http_server(Vec::new(), Vec::new());
+        let update_server = spawn_recording_http_server_with_status(201, Vec::new(), Vec::new());
         let update_backend = recording_backend(update_server.endpoint.clone());
         let (update_sender, update_receiver) = std::sync::mpsc::channel();
-        let delete_server = spawn_recording_http_server(Vec::new(), Vec::new());
+        let delete_server = spawn_recording_http_server_with_status(202, Vec::new(), Vec::new());
         let delete_backend = recording_backend(delete_server.endpoint.clone());
         let (delete_sender, delete_receiver) = std::sync::mpsc::channel();
 
