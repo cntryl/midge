@@ -950,6 +950,15 @@ impl GcsBackend {
         }
     }
 
+    fn bodyless_request(mode: GcsBackendMode, method: Method, url: String) -> CloudRequest {
+        let request = CloudRequest::new(method, url);
+        if mode == GcsBackendMode::Xml {
+            request.with_header("Content-Length", "0")
+        } else {
+            request
+        }
+    }
+
     fn canonical_key(key: &str) -> String {
         key.split('/')
             .map(|segment| urlencoding::encode(segment).into_owned())
@@ -1194,7 +1203,7 @@ impl CloudBackend for GcsBackend {
         let key = key.to_string();
         let mode = self.mode;
         let url = self.download_url(&key);
-        let request = CloudRequest::new(Method::GET, url);
+        let request = Self::bodyless_request(mode, Method::GET, url);
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
             Ok(resp) if resp.status == 200 => CloudEvent::Get {
                 key: ctx,
@@ -1215,7 +1224,7 @@ impl CloudBackend for GcsBackend {
     fn submit_get_with_metadata(&self, key: &str, callback: CloudCallback) {
         let key = key.to_string();
         let mode = self.mode;
-        let request = CloudRequest::new(Method::GET, self.download_url(&key));
+        let request = Self::bodyless_request(mode, Method::GET, self.download_url(&key));
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
             Ok(resp) if resp.status == 200 => {
                 let metadata = parse_gcs_media_object_metadata(&resp, mode);
@@ -1245,7 +1254,7 @@ impl CloudBackend for GcsBackend {
             Some(e) => format!("bytes={}-{}", start, e.saturating_sub(1)),
             None => format!("bytes={start}-"),
         };
-        let request = CloudRequest::new(Method::GET, url).with_header("Range", range);
+        let request = Self::bodyless_request(mode, Method::GET, url).with_header("Range", range);
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
             Ok(resp) if resp.status == 206 || resp.status == 200 => CloudEvent::GetRange {
                 key: ctx,
@@ -1277,7 +1286,7 @@ impl CloudBackend for GcsBackend {
                 || name.eq_ignore_ascii_case("if-match")
         });
         let mut url = self.metadata_url(&key);
-        let mut request = CloudRequest::new(Method::DELETE, String::new());
+        let mut request = Self::bodyless_request(mode, Method::DELETE, String::new());
         for (name, value) in headers {
             if self.mode == GcsBackendMode::Json
                 && name.eq_ignore_ascii_case("x-goog-if-generation-match")
@@ -1344,7 +1353,7 @@ impl CloudBackend for GcsBackend {
             state,
             prefix,
             callback,
-            |state| Ok(CloudRequest::new(Method::GET, state.url())),
+            |state| Ok(Self::bodyless_request(state.mode, Method::GET, state.url())),
             |state, resp| {
                 if resp.status != 200 {
                     state.error = Some(gcs_response_error(&resp, "GCS LIST", state.mode, false));
@@ -1415,7 +1424,7 @@ impl CloudBackend for GcsBackend {
             GcsBackendMode::Xml => Method::HEAD,
         };
         let mode = self.mode;
-        let request = CloudRequest::new(method, url);
+        let request = Self::bodyless_request(mode, method, url);
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
             Ok(resp) if resp.status == 200 => {
                 let metadata = match mode {
@@ -2102,6 +2111,132 @@ mod tests {
             CloudOutcome::Err(CloudError::Protocol(message))
                 if message.contains("x-goog-generation")
         ));
+    }
+
+    #[test]
+    fn should_send_zero_content_length_when_gcs_xml_gets_object() {
+        // Arrange
+        let server = spawn_recording_http_server(Vec::new(), b"value".to_vec());
+        let backend = GcsBackend::xml(
+            "bucket".into(),
+            Some(server.endpoint.clone()),
+            CloudExecutor::new(None).expect("create cloud executor"),
+        );
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        // Act
+        backend.submit_get("object", sender);
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("receive GCS XML GET result");
+        let request = server.finish();
+
+        // Assert
+        assert_eq!(request.header("content-length"), Some("0"));
+    }
+
+    #[test]
+    fn should_send_zero_content_length_when_gcs_xml_gets_object_metadata() {
+        // Arrange
+        let server = spawn_recording_http_server(Vec::new(), b"value".to_vec());
+        let backend = GcsBackend::xml(
+            "bucket".into(),
+            Some(server.endpoint.clone()),
+            CloudExecutor::new(None).expect("create cloud executor"),
+        );
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        // Act
+        backend.submit_get_with_metadata("object", sender);
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("receive GCS XML metadata GET result");
+        let request = server.finish();
+
+        // Assert
+        assert_eq!(request.header("content-length"), Some("0"));
+    }
+
+    #[test]
+    fn should_send_zero_content_length_when_gcs_xml_reads_object_range() {
+        // Arrange
+        let server = spawn_recording_http_server(Vec::new(), b"value".to_vec());
+        let backend = GcsBackend::xml(
+            "bucket".into(),
+            Some(server.endpoint.clone()),
+            CloudExecutor::new(None).expect("create cloud executor"),
+        );
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        // Act
+        backend.submit_get_range("object", 0, Some(2), sender);
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("receive GCS XML range GET result");
+        let request = server.finish();
+
+        // Assert
+        assert_eq!(request.header("content-length"), Some("0"));
+    }
+
+    #[test]
+    fn should_send_zero_content_length_when_gcs_xml_deletes_object() {
+        // Arrange
+        let server = spawn_recording_http_server(Vec::new(), Vec::new());
+        let backend = GcsBackend::xml(
+            "bucket".into(),
+            Some(server.endpoint.clone()),
+            CloudExecutor::new(None).expect("create cloud executor"),
+        );
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        // Act
+        backend.submit_delete("object", Vec::new(), sender);
+        let _ = receive_delete_result(&receiver);
+        let request = server.finish();
+
+        // Assert
+        assert_eq!(request.header("content-length"), Some("0"));
+    }
+
+    #[test]
+    fn should_send_zero_content_length_when_gcs_xml_lists_objects() {
+        // Arrange
+        let response =
+            b"<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>".to_vec();
+        let server = spawn_recording_http_server(Vec::new(), response);
+        let backend = GcsBackend::xml(
+            "bucket".into(),
+            Some(server.endpoint.clone()),
+            CloudExecutor::new(None).expect("create cloud executor"),
+        );
+
+        // Act
+        let _ = receive_list_result(&backend);
+        let request = server.finish();
+
+        // Assert
+        assert_eq!(request.header("content-length"), Some("0"));
+    }
+
+    #[test]
+    fn should_send_zero_content_length_when_gcs_xml_heads_object() {
+        // Arrange
+        let server = spawn_recording_http_server(Vec::new(), Vec::new());
+        let backend = GcsBackend::xml(
+            "bucket".into(),
+            Some(server.endpoint.clone()),
+            CloudExecutor::new(None).expect("create cloud executor"),
+        );
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        // Act
+        backend.submit_head("object", sender);
+        let _ = receive_head_result(&receiver);
+        let request = server.finish();
+
+        // Assert
+        assert_eq!(request.header("content-length"), Some("0"));
     }
 
     #[test]

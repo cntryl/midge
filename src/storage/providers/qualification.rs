@@ -429,8 +429,9 @@ fn azure_string_to_sign(
     } else {
         body.len().to_string()
     };
-    [
-        method.to_string(),
+    format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}{}",
+        method,
         azure_header_value(headers, "Content-Encoding"),
         azure_header_value(headers, "Content-Language"),
         content_length,
@@ -444,8 +445,26 @@ fn azure_string_to_sign(
         azure_header_value(headers, "Range"),
         azure_canonical_headers(headers),
         azure_canonical_resource(path, query),
-    ]
-    .join("\n")
+    )
+}
+
+#[test]
+fn should_join_azure_canonical_headers_directly_to_resource() {
+    // Arrange
+    let headers = vec![
+        (
+            "x-ms-date".to_string(),
+            "Tue, 11 Aug 2026 12:00:00 GMT".to_string(),
+        ),
+        ("x-ms-version".to_string(), "2024-11-04".to_string()),
+    ];
+
+    // Act
+    let string_to_sign = azure_string_to_sign("GET", &headers, "/admin/container/blob", "", b"");
+
+    // Assert
+    assert!(string_to_sign.contains("x-ms-version:2024-11-04\n/admin/admin/container/blob"));
+    assert!(!string_to_sign.contains("x-ms-version:2024-11-04\n\n/"));
 }
 
 fn azure_shared_key_signature(string_to_sign: &str) -> Result<String, String> {
