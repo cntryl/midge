@@ -15,7 +15,8 @@ use stress_config::MidgeOptions;
 
 const DEFAULT_INITIAL_KEYS: usize = 50_000; // Overridable for larger-than-RAM nightly runs
 const WARMUP: Duration = Duration::from_secs(1);
-const MEASURED: Duration = Duration::from_secs(5);
+const MEASURED_DEFAULT: Duration = Duration::from_secs(5);
+const MEASURED_CLOUD_16: Duration = Duration::from_secs(15);
 
 const CLIENTS_1: usize = 1;
 const CLIENTS_16: usize = 16;
@@ -75,7 +76,12 @@ fn run_workload_d_warmup(
 }
 
 fn run_workload_d(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, clients: usize) {
-    ycsb::configure_workload_parameters(ctx, profile, clients, MEASURED);
+    let measured_duration = if profile == "cloud" && clients == CLIENTS_16 {
+        MEASURED_CLOUD_16
+    } else {
+        MEASURED_DEFAULT
+    };
+    ycsb::configure_workload_parameters(ctx, profile, clients, measured_duration);
     ctx.parameter(
         "logical_bytes_per_operation",
         ycsb::logical_entry_size_bytes(),
@@ -120,7 +126,7 @@ fn run_workload_d(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
             ycsb::run_multi_client_for_duration_with_stats(
                 &engine,
                 clients,
-                MEASURED,
+                measured_duration,
                 |client_id, stop| {
                     let mut inserts_so_far: u64 = 0;
                     move |e, cf, op_index| {

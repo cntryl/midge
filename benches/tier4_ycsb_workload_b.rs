@@ -18,6 +18,7 @@ const DEFAULT_INITIAL_KEYS: usize = 50_000; // Overridable for larger-than-RAM n
 const WARMUP: Duration = Duration::from_secs(1);
 const MEASURED: Duration = Duration::from_secs(5);
 const LOCAL_16_MEASURED: Duration = Duration::from_secs(12);
+const CLOUD_16_MEASURED: Duration = Duration::from_secs(15);
 
 const ZIPFIAN_THETA: f64 = 0.99;
 
@@ -28,10 +29,10 @@ const CLIENTS_64: usize = 64;
 const WORKLOAD_SEED: u64 = 0xB0B0_EA5E_5678_9ABC;
 
 fn measured_duration(profile: &str, clients: usize) -> Duration {
-    if profile == "local" && clients == CLIENTS_16 {
-        LOCAL_16_MEASURED
-    } else {
-        MEASURED
+    match (profile, clients) {
+        ("local", CLIENTS_16) => LOCAL_16_MEASURED,
+        ("cloud", CLIENTS_16) => CLOUD_16_MEASURED,
+        _ => MEASURED,
     }
 }
 

@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 const WRITERS: usize = 16;
 const FLUSH_WAVES: usize = 8;
-const TRANSACTIONS_PER_WRITER_PER_WAVE: usize = 128;
+const TRANSACTIONS_PER_WRITER_PER_WAVE: usize = 256;
 const VALUE_SIZE: usize = 256;
 const MEMTABLE_SIZE: usize = 128 * 1024;
 const TOTAL_TRANSACTIONS: usize = WRITERS * FLUSH_WAVES * TRANSACTIONS_PER_WRITER_PER_WAVE;

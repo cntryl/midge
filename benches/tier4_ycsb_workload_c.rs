@@ -17,7 +17,8 @@ use stress_config::MidgeOptions;
 
 const DEFAULT_INITIAL_KEYS: usize = 50_000; // Overridable for larger-than-RAM nightly runs
 const WARMUP: Duration = Duration::from_secs(1);
-const MEASURED: Duration = Duration::from_secs(5);
+const MEASURED_DEFAULT: Duration = Duration::from_secs(5);
+const MEASURED_CLOUD_16: Duration = Duration::from_secs(15);
 
 const ZIPFIAN_THETA: f64 = 0.99;
 
@@ -49,6 +50,7 @@ fn measure_duration(
     initial_keys: usize,
     clients: usize,
     measurement_name: String,
+    measured_duration: Duration,
 ) -> ycsb::MultiClientRunStats {
     stress_config::measure_counted(ctx, measurement_name, "ycsb_operation", || {
         let measured = {
@@ -56,7 +58,7 @@ fn measure_duration(
             ycsb::run_multi_client_for_duration_with_stats(
                 engine,
                 clients,
-                MEASURED,
+                measured_duration,
                 |client_id, _stop| {
                     let zipf = Arc::clone(&zipf);
                     move |e, _cf, op_index| {
@@ -76,7 +78,12 @@ fn measure_duration(
 
 fn run_workload_c(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, clients: usize) {
     let initial_keys = ycsb::configured_initial_keys(DEFAULT_INITIAL_KEYS);
-    ycsb::configure_workload_parameters(ctx, profile, clients, MEASURED);
+    let measured_duration = if profile == "cloud" && clients == CLIENTS_16 {
+        MEASURED_CLOUD_16
+    } else {
+        MEASURED_DEFAULT
+    };
+    ycsb::configure_workload_parameters(ctx, profile, clients, measured_duration);
     ctx.parameter(
         "logical_bytes_per_operation",
         ycsb::logical_entry_size_bytes(),
@@ -126,7 +133,15 @@ fn run_workload_c(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
     let cf_id = cf.id();
     let client_suffix = if clients == 1 { "client" } else { "clients" };
     let measurement_name = format!("tier4_ycsb_c_{profile}_{clients}_{client_suffix}");
-    let measured = measure_duration(ctx, &engine, cf_id, initial_keys, clients, measurement_name);
+    let measured = measure_duration(
+        ctx,
+        &engine,
+        cf_id,
+        initial_keys,
+        clients,
+        measurement_name,
+        measured_duration,
+    );
 
     measured.record_latencies(ctx);
     let perf = ycsb::runtime_perf_report(engine.as_ref(), perf_start);

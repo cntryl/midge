@@ -146,6 +146,10 @@ fn should_enforce_focused_benchmark_observation_contract() {
         .expect("read compression benchmark");
     let strict = fs::read_to_string("benches/tier4_system_strict_group_commit.rs")
         .expect("read strict system benchmark");
+    let singleflight = fs::read_to_string("benches/tier1_hotpath_singleflight.rs")
+        .expect("read singleflight benchmark");
+    let range_cache = fs::read_to_string("benches/tier2_subsystem_range_scan_cache.rs")
+        .expect("read range-cache benchmark");
 
     // Act
     let compression_case_count = compression.matches("engine_policy_case!(").count();
@@ -158,8 +162,10 @@ fn should_enforce_focused_benchmark_observation_contract() {
     assert!(durability.contains("commits_per_fsync"));
     assert_eq!(compression_case_count, 6);
     assert!(!compression.contains("PrefixRandomTail"));
-    assert!(strict.contains("TRANSACTIONS_PER_WRITER_PER_WAVE: usize = 128"));
+    assert!(strict.contains("TRANSACTIONS_PER_WRITER_PER_WAVE: usize = 256"));
     assert!(strict.contains("final_sst_bytes"));
+    assert!(singleflight.contains("SUBMIT_AND_WAIT_BATCH_ROUNDS: usize = 32_768"));
+    assert!(range_cache.contains("COLD_SCAN_REPEATS: usize = 128"));
 }
 
 #[test]

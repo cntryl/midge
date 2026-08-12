@@ -10,8 +10,10 @@ const BLOCK_SIZE: usize = 4096;
 const SST_ID: u64 = 1;
 const WARM_SCAN_REPEATS: usize = 512;
 const WARM_SCAN_REPEAT_OPS: u64 = 512;
-const COLD_SCAN_REPEATS: usize = 32;
-const COLD_SCAN_REPEAT_OPS: u64 = 32;
+// Cache construction is intentionally part of the cold-scan question. Use enough
+// independent caches per sample that allocator and scheduler jitter average out.
+const COLD_SCAN_REPEATS: usize = 128;
+const COLD_SCAN_REPEAT_OPS: u64 = 128;
 
 struct RangeScan {
     start_block: usize,

@@ -10,7 +10,7 @@ use cntryl_midge::Bytes;
 use cntryl_stress::{black_box, stress, stress_main, StressContext};
 
 const ITER_SINGLE_STEP_BATCH_SIZE: usize = 1_048_576;
-const RANGE_SCAN_BATCH_SIZE: usize = 512;
+const RANGE_SCAN_BATCH_SIZE: usize = 2_048;
 const SEEK_WINDOW_COUNT: usize = 64;
 
 #[inline]

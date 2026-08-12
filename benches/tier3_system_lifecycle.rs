@@ -11,7 +11,7 @@ use cntryl_stress::{stress, stress_main, StressContext};
 use std::time::Duration;
 
 const FLUSH_BATCH_SIZE: usize = 32;
-const FLUSH_CYCLES_PER_SAMPLE: u64 = 3;
+const FLUSH_CYCLES_PER_SAMPLE: u64 = 8;
 
 fn row_metadata(
     ctx: &mut StressContext,

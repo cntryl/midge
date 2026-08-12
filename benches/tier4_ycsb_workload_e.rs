@@ -29,6 +29,7 @@ const WARMUP: Duration = Duration::from_secs(1);
 const MEASURED_DURATION_DEFAULT: Duration = Duration::from_secs(5);
 const MEASURED_DURATION_PLATEAU_BASE: Duration = Duration::from_secs(12);
 const MEASURED_DURATION_PLATEAU_LONG: Duration = Duration::from_secs(16);
+const MEASURED_DURATION_CLOUD_16: Duration = Duration::from_secs(20);
 
 const SCAN_LEN: u64 = 64;
 
@@ -155,12 +156,11 @@ fn run_workload_e_measured(
 }
 
 fn measured_duration(profile: &str, clients: usize) -> Duration {
-    if matches!((profile, clients), ("cloud", CLIENTS_1)) {
-        MEASURED_DURATION_PLATEAU_BASE
-    } else if matches!((profile, clients), ("local", CLIENTS_16 | CLIENTS_64)) {
-        MEASURED_DURATION_PLATEAU_LONG
-    } else {
-        MEASURED_DURATION_DEFAULT
+    match (profile, clients) {
+        ("cloud", CLIENTS_1) => MEASURED_DURATION_PLATEAU_BASE,
+        ("cloud", CLIENTS_16) => MEASURED_DURATION_CLOUD_16,
+        ("local", CLIENTS_16 | CLIENTS_64) => MEASURED_DURATION_PLATEAU_LONG,
+        _ => MEASURED_DURATION_DEFAULT,
     }
 }
 
