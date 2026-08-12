@@ -146,19 +146,23 @@ fn should_enforce_focused_benchmark_observation_contract() {
         .expect("read compression benchmark");
     let strict = fs::read_to_string("benches/tier4_system_strict_group_commit.rs")
         .expect("read strict system benchmark");
+
+    // Act
+    let required_compression_shapes = [
+        "Repeated",
+        "Structured",
+        "Mixed",
+        "PrefixRandomTail",
+        "LowCardinality",
+    ];
+
     // Assert
     assert!(transaction.contains("avg_txn_records_per_append"));
     assert!(transaction.contains("validation_errors"));
     assert!(!transaction.contains("format!(\"{scenario}_{phase}\")"));
     assert!(!durability.contains("record_commit_percentiles"));
     assert!(durability.contains("commits_per_fsync"));
-    for shape in [
-        "Repeated",
-        "Structured",
-        "Mixed",
-        "PrefixRandomTail",
-        "LowCardinality",
-    ] {
+    for shape in required_compression_shapes {
         assert!(
             compression.contains(shape),
             "missing compression shape {shape}"
