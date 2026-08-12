@@ -23,15 +23,21 @@ const LOGICAL_BYTES: usize = FLUSHES * RECORDS_PER_FLUSH * VALUE_SIZE;
 
 #[derive(Clone, Copy)]
 enum RecordShape {
+    Repeated,
     Structured,
     Mixed,
+    PrefixRandomTail,
+    LowCardinality,
 }
 
 impl RecordShape {
     const fn name(self) -> &'static str {
         match self {
+            Self::Repeated => "repeated",
             Self::Structured => "structured",
             Self::Mixed => "mixed",
+            Self::PrefixRandomTail => "prefix_random_tail",
+            Self::LowCardinality => "low_cardinality",
         }
     }
 }
@@ -70,6 +76,10 @@ fn structured_value(size: usize, ordinal: usize) -> Vec<u8> {
 
 fn record_value(shape: RecordShape, ordinal: usize) -> Vec<u8> {
     match shape {
+        RecordShape::Repeated => {
+            let byte = b'A' + u8::try_from(ordinal % 23).expect("ordinal fits in u8");
+            vec![byte; VALUE_SIZE]
+        }
         RecordShape::Structured => structured_value(VALUE_SIZE, ordinal),
         RecordShape::Mixed => {
             let structured = structured_value(VALUE_SIZE, ordinal);
@@ -89,6 +99,30 @@ fn record_value(shape: RecordShape, ordinal: usize) -> Vec<u8> {
                     }
                 })
                 .collect()
+        }
+        RecordShape::PrefixRandomTail => {
+            let prefix_len = VALUE_SIZE * 3 / 4;
+            let mut value = structured_value(prefix_len, ordinal);
+            value.extend(lcg_bytes(
+                VALUE_SIZE - prefix_len,
+                0x51a7_1e5d ^ u32::try_from(ordinal).expect("ordinal fits in u32"),
+            ));
+            value
+        }
+        RecordShape::LowCardinality => {
+            let symbols = [
+                b'A' + u8::try_from(ordinal % 13).expect("ordinal fits in u8"),
+                b'a' + u8::try_from(ordinal % 17).expect("ordinal fits in u8"),
+                b'0' + u8::try_from(ordinal % 10).expect("ordinal fits in u8"),
+                b'|',
+            ];
+            lcg_bytes(
+                VALUE_SIZE,
+                0xa11c_e5ed ^ u32::try_from(ordinal).expect("ordinal fits in u32"),
+            )
+            .into_iter()
+            .map(|byte| symbols[usize::from(byte) % symbols.len()])
+            .collect()
         }
     }
 }
@@ -253,11 +287,28 @@ macro_rules! engine_policy_case {
     };
 }
 
+engine_policy_case!(latency_policy_repeated, Latency, Repeated);
 engine_policy_case!(latency_policy_structured, Latency, Structured);
 engine_policy_case!(latency_policy_mixed, Latency, Mixed);
+engine_policy_case!(latency_policy_prefix_random_tail, Latency, PrefixRandomTail);
+engine_policy_case!(latency_policy_low_cardinality, Latency, LowCardinality);
+engine_policy_case!(throughput_policy_repeated, Throughput, Repeated);
 engine_policy_case!(throughput_policy_structured, Throughput, Structured);
 engine_policy_case!(throughput_policy_mixed, Throughput, Mixed);
+engine_policy_case!(
+    throughput_policy_prefix_random_tail,
+    Throughput,
+    PrefixRandomTail
+);
+engine_policy_case!(
+    throughput_policy_low_cardinality,
+    Throughput,
+    LowCardinality
+);
+engine_policy_case!(economy_policy_repeated, Economy, Repeated);
 engine_policy_case!(economy_policy_structured, Economy, Structured);
 engine_policy_case!(economy_policy_mixed, Economy, Mixed);
+engine_policy_case!(economy_policy_prefix_random_tail, Economy, PrefixRandomTail);
+engine_policy_case!(economy_policy_low_cardinality, Economy, LowCardinality);
 
 stress_main!();

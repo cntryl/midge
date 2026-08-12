@@ -19,6 +19,7 @@ const FLUSH_WAVES: usize = 8;
 const TRANSACTIONS_PER_WRITER_PER_WAVE: usize = 256;
 const VALUE_SIZE: usize = 256;
 const MEMTABLE_SIZE: usize = 128 * 1024;
+const MAX_WRITE_STALL_RECOVERIES_PER_COMMIT: u64 = 1;
 const TOTAL_TRANSACTIONS: usize = WRITERS * FLUSH_WAVES * TRANSACTIONS_PER_WRITER_PER_WAVE;
 
 struct SystemOutcome {
@@ -27,6 +28,8 @@ struct SystemOutcome {
     completed: u64,
     wal_appends: u64,
     physical_fsyncs: u64,
+    write_stall_recoveries: u64,
+    write_stall_wait_ns: u64,
     final_sst_count: usize,
     final_sst_bytes: u64,
 }
@@ -66,19 +69,22 @@ fn expected_digest() -> u32 {
     digest.finalize()
 }
 
-fn run_wave(engine: &Arc<Engine>, cf_id: cntryl_midge::ColumnFamilyId, wave: usize) {
+fn run_wave(engine: &Arc<Engine>, cf_id: cntryl_midge::ColumnFamilyId, wave: usize) -> (u64, u64) {
     let barrier = Arc::new(Barrier::new(WRITERS + 1));
     let mut handles = Vec::with_capacity(WRITERS);
     for writer in 0..WRITERS {
         let engine = Arc::clone(engine);
         let barrier = Arc::clone(&barrier);
         handles.push(std::thread::spawn(move || {
+            let mut write_stall_recoveries = 0_u64;
+            let mut write_stall_wait_ns = 0_u64;
             barrier.wait();
             for index in 0..TRANSACTIONS_PER_WRITER_PER_WAVE {
                 let ordinal = wave * WRITERS * TRANSACTIONS_PER_WRITER_PER_WAVE
                     + writer * TRANSACTIONS_PER_WRITER_PER_WAVE
                     + index;
                 let (key, value) = record(ordinal);
+                let mut commit_recoveries = 0_u64;
                 loop {
                     let mut transaction = engine
                         .begin_tx(cf_id, TransactionMode::ReadWrite)
@@ -90,22 +96,38 @@ fn run_wave(engine: &Arc<Engine>, cf_id: cntryl_midge::ColumnFamilyId, wave: usi
                         Ok(()) => break,
                         Err(cntryl_midge::MidgeError::WriteStall(_)) => {
                             assert!(
+                                commit_recoveries < MAX_WRITE_STALL_RECOVERIES_PER_COMMIT,
+                                "strict system commit exceeded bounded write-stall recovery"
+                            );
+                            commit_recoveries += 1;
+                            write_stall_recoveries += 1;
+                            let wait_started = Instant::now();
+                            assert!(
                                 engine
                                     .wait_for_write_stall_clear(cf_id, Duration::from_secs(5))
                                     .expect("wait for strict system write stall"),
                                 "strict system write stall did not clear"
+                            );
+                            write_stall_wait_ns = write_stall_wait_ns.saturating_add(
+                                u64::try_from(wait_started.elapsed().as_nanos())
+                                    .unwrap_or(u64::MAX),
                             );
                         }
                         Err(error) => panic!("commit strict system transaction: {error}"),
                     }
                 }
             }
+            (write_stall_recoveries, write_stall_wait_ns)
         }));
     }
     barrier.wait();
-    for handle in handles {
-        handle.join().expect("join strict system writer");
-    }
+    handles.into_iter().fold((0_u64, 0_u64), |totals, handle| {
+        let observed = handle.join().expect("join strict system writer");
+        (
+            totals.0.saturating_add(observed.0),
+            totals.1.saturating_add(observed.1),
+        )
+    })
 }
 
 fn sst_footprint(path: &Path) -> (usize, u64) {
@@ -182,8 +204,12 @@ fn execute_system_workload() -> SystemOutcome {
         .expect("capture starting strict system metrics");
     let total_started_at = Instant::now();
     let ingest_started_at = Instant::now();
+    let mut write_stall_recoveries = 0_u64;
+    let mut write_stall_wait_ns = 0_u64;
     for wave in 0..FLUSH_WAVES {
-        run_wave(&engine, cf.id(), wave);
+        let observed = run_wave(&engine, cf.id(), wave);
+        write_stall_recoveries = write_stall_recoveries.saturating_add(observed.0);
+        write_stall_wait_ns = write_stall_wait_ns.saturating_add(observed.1);
         engine
             .flush_cf(&cf)
             .expect("flush strict system benchmark wave");
@@ -227,6 +253,8 @@ fn execute_system_workload() -> SystemOutcome {
             .expect("strict system transaction count fits in u64"),
         wal_appends,
         physical_fsyncs,
+        write_stall_recoveries,
+        write_stall_wait_ns,
         final_sst_count,
         final_sst_bytes,
     }
@@ -234,10 +262,12 @@ fn execute_system_workload() -> SystemOutcome {
 
 #[stress(
     tier = 4,
+    role = "diagnostic",
     metadata(
         component = "strict_group_commit",
         scenario = "complete_local_system",
-        measurement_shape = "fixed_workload"
+        measurement_shape = "fixed_workload",
+        diagnostic_reason = "strict_group_commit_promotion_probe"
     )
 )]
 #[allow(clippy::cast_precision_loss)]
@@ -283,6 +313,18 @@ fn tier4_complete_local_strict_group_commit(ctx: &mut StressContext) {
         outcome.physical_fsyncs as f64,
         ObservationUnit::Count,
         ObservationDirection::Informational,
+    );
+    ctx.record_observation(
+        "write_stall_recoveries",
+        outcome.write_stall_recoveries as f64,
+        ObservationUnit::Count,
+        ObservationDirection::LowerIsBetter,
+    );
+    ctx.record_observation(
+        "write_stall_wait_ns",
+        outcome.write_stall_wait_ns as f64,
+        ObservationUnit::Nanoseconds,
+        ObservationDirection::LowerIsBetter,
     );
     ctx.record_observation(
         "commits_per_fsync",

@@ -561,6 +561,7 @@ fn sequential_buffered_single_op(ctx: &mut StressContext) {
 
 #[stress(
     tier = 2,
+    role = "diagnostic",
     metadata(
         component = "transaction_latency",
         scenario = "concurrent_buffered_single_op"
@@ -634,6 +635,7 @@ fn read_only_begin_tx(ctx: &mut StressContext) {
 
 #[stress(
     tier = 2,
+    role = "diagnostic",
     metadata(component = "transaction_latency", scenario = "coalescing_signal")
 )]
 fn coalescing_signal(ctx: &mut StressContext) {
