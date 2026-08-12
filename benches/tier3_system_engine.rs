@@ -23,15 +23,22 @@ use stress_config::MidgeOptions;
 const PUT_BATCH_SIZE: usize = 64;
 const GET_BATCH_SIZE: usize = 1;
 const GET_KEY_COUNT: usize = 4096;
+const ENGINE_GET_MEMTABLE_SIZE_BYTES: usize = 2 * 1024 * 1024;
 const ENGINE_GET_SAMPLE_COUNT: usize = 12;
-const ENGINE_GET_WARMUP_SAMPLES: usize = 4;
 
-fn run_single_get_case(ctx: &mut StressContext, scenario: &'static str, opts: MidgeOptions) {
+fn run_single_get_case(ctx: &mut StressContext, scenario: &'static str, mut opts: MidgeOptions) {
+    // Keep the setup batch in one active memtable so the explicit flush below
+    // produces the single-SST read fixture this benchmark intends to measure.
+    // The generic local benchmark profile uses a deliberately tiny memtable,
+    // which can otherwise stall before setup reaches the explicit flush.
+    opts.memtable_size = opts.memtable_size.max(ENGINE_GET_MEMTABLE_SIZE_BYTES);
+
     ctx.parameter("logical_batch_size", GET_BATCH_SIZE);
     ctx.parameter("logical_unit", "engine_point_read");
     ctx.parameter("operation_surface", "engine_get");
     ctx.parameter("begin_tx_included", "true");
     ctx.parameter("rotating_key_count", GET_KEY_COUNT);
+    ctx.parameter("fixture_memtable_size_bytes", opts.memtable_size);
 
     let engine = stress_config::bench_stress::open_engine_no_compaction(opts);
     let cf = engine.create_column_family("cf1").unwrap();
@@ -64,7 +71,6 @@ fn run_single_get_case(ctx: &mut StressContext, scenario: &'static str, opts: Mi
     let _ = ctx
         .benchmark(scenario)
         .samples(ENGINE_GET_SAMPLE_COUNT)
-        .warmup(ENGINE_GET_WARMUP_SAMPLES)
         .measure_batch(GET_BATCH_SIZE as u64, || {
             for _ in 0..GET_BATCH_SIZE {
                 let key = keys[key_index % keys.len()];
@@ -80,24 +86,18 @@ fn run_single_get_case(ctx: &mut StressContext, scenario: &'static str, opts: Mi
         });
 
     let read_path_after = engine.read_path_diagnostics_snapshot_for_benchmarks();
-    ctx.metadata("trust_class", "diagnostic");
     ctx.metadata("diagnostic_reason", "pending_three_clean_baselines");
     ctx.parameter("local_gate_rsd_limit_pct", 5);
-    ctx.parameter(
-        "read_only_begin_tx_delta",
-        read_path_after.read_only_begin_tx_count - read_path_before.read_only_begin_tx_count,
-    );
-    ctx.parameter(
-        "candidate_sst_files_checked_delta",
-        read_path_after.candidate_sst_files_checked - read_path_before.candidate_sst_files_checked,
-    );
-    ctx.parameter(
-        "candidate_blocks_checked_delta",
-        read_path_after.candidate_blocks_checked - read_path_before.candidate_blocks_checked,
-    );
     assert_eq!(
         validation_failures, 0,
         "measured engine reads must validate"
+    );
+    assert!(
+        read_path_after.read_only_begin_tx_count > read_path_before.read_only_begin_tx_count
+            && read_path_after.candidate_sst_files_checked
+                > read_path_before.candidate_sst_files_checked
+            && read_path_after.candidate_blocks_checked > read_path_before.candidate_blocks_checked,
+        "engine point-read row must exercise read-only transactions, candidate SSTs, and blocks"
     );
 
     drop(engine);
@@ -110,13 +110,13 @@ fn run_single_get_case(ctx: &mut StressContext, scenario: &'static str, opts: Mi
 // Stress tests
 // ---------------------------------------------------------------------------
 
-#[stress(tier = 3)]
+#[stress(tier = 3, role = "diagnostic")]
 fn tier3_engine_get_local(ctx: &mut StressContext) {
     let opts = stress_config::opts_for_mode("local");
     run_single_get_case(ctx, "tier3_engine_get_local", opts);
 }
 
-#[stress(tier = 3)]
+#[stress(tier = 3, role = "diagnostic")]
 fn tier3_engine_get_cloud(ctx: &mut StressContext) {
     let opts = stress_config::opts_for_mode("cloud");
     run_single_get_case(ctx, "tier3_engine_get_cloud", opts);

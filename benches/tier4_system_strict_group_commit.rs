@@ -5,7 +5,7 @@
 //! final SST footprint capture.
 
 use cntryl_midge::{Engine, OpenOptions, Query, RecoveryPolicy, TransactionMode, WriteOptions};
-use cntryl_stress::{stress, stress_main, StressContext};
+use cntryl_stress::{stress, stress_main, LogicalUnit, OperationOutcome, StressContext};
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Barrier};
@@ -220,10 +220,10 @@ fn execute_system_workload() -> SystemOutcome {
 
 #[stress(
     tier = 4,
+    role = "diagnostic",
     metadata(
         component = "strict_group_commit",
         scenario = "complete_local_system",
-        trust_class = "diagnostic",
         diagnostic_reason = "strict_group_commit_promotion_probe"
     )
 )]
@@ -234,37 +234,30 @@ fn tier4_complete_local_strict_group_commit(ctx: &mut StressContext) {
     ctx.parameter("transactions", TOTAL_TRANSACTIONS);
     ctx.parameter("value_size_bytes", VALUE_SIZE);
     ctx.parameter("memtable_size_bytes", MEMTABLE_SIZE);
-    ctx.parameter("wal_appends", outcome.wal_appends);
-    ctx.parameter("physical_fsyncs", outcome.physical_fsyncs);
-    ctx.parameter(
-        "commits_per_fsync",
-        format!(
-            "{:.2}",
-            u64_to_f64(outcome.completed) / u64_to_f64(outcome.physical_fsyncs.max(1))
-        ),
+    assert!(
+        outcome.wal_appends > 0,
+        "strict commits must append to the WAL"
     );
-    ctx.parameter("compaction_completed", true);
-    ctx.parameter("clean_shutdown_completed", true);
-    ctx.parameter("reopen_point_digest_verified", true);
-    ctx.parameter("reopen_scan_digest_verified", true);
-    ctx.parameter("final_sst_count", outcome.final_sst_count);
-    ctx.parameter("final_sst_bytes", outcome.final_sst_bytes);
-    ctx.record_external(
+    assert!(
+        outcome.physical_fsyncs > 0,
+        "strict commits must issue physical fsyncs"
+    );
+    assert!(
+        outcome.final_sst_count > 0 && outcome.final_sst_bytes > 0,
+        "compacted strict workload must leave a non-empty SST footprint"
+    );
+    ctx.record_external_outcome(
         "tier4_complete_local_strict_group_commit_ingest",
         outcome.strict_ingest,
-        outcome.completed,
+        LogicalUnit::new("transaction"),
+        OperationOutcome::success(outcome.completed),
     );
-    ctx.record_external(
+    ctx.record_external_outcome(
         "tier4_complete_local_strict_group_commit_total",
         outcome.total,
-        outcome.completed,
+        LogicalUnit::new("transaction"),
+        OperationOutcome::success(outcome.completed),
     );
-}
-
-fn u64_to_f64(value: u64) -> f64 {
-    let upper = u32::try_from(value >> 32).expect("upper half fits in u32");
-    let lower = u32::try_from(value & u64::from(u32::MAX)).expect("lower half fits in u32");
-    f64::from(upper) * 4_294_967_296.0 + f64::from(lower)
 }
 
 #[path = "./stress_config.rs"]

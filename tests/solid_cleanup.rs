@@ -852,6 +852,12 @@ fn should_enforce_tier3_system_benchmark_contract() {
         assert!(row.contains("read_path_diagnostics_snapshot_for_benchmarks"));
         assert!(row.contains("validation_failures"));
     }
+    assert!(engine.contains("ENGINE_GET_MEMTABLE_SIZE_BYTES"));
+    assert!(engine.contains("opts.memtable_size.max"));
+    assert!(engine.contains("fixture_memtable_size_bytes"));
+    assert!(sst.contains("SST_FIXTURE_MEMTABLE_SIZE_BYTES"));
+    assert!(sst.contains("opts.memtable_size.max"));
+    assert!(sst.contains("fixture_memtable_size_bytes"));
     assert!(sst.contains("tier3_sst_range_seek_cloud"));
     assert!(scan.contains("scan_seek_first_row"));
     assert!(scan.contains("candidate_sst_files_checked"));

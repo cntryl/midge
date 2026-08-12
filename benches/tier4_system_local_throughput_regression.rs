@@ -77,7 +77,7 @@ fn run_mode(ctx: &mut StressContext, mode: &'static str) {
     let batches = make_key_value_batches();
 
     let measurement_name = format!("{mode}_batched_write_throughput");
-    stress_config::measure_external_counted(ctx, measurement_name, || {
+    stress_config::measure_counted(ctx, measurement_name, "write", || {
         let completed = run_batched_write_workload(&engine, cf.id(), &batches);
         ((), completed)
     });
@@ -85,6 +85,7 @@ fn run_mode(ctx: &mut StressContext, mode: &'static str) {
 
 #[stress(
     tier = 4,
+    role = "diagnostic",
     metadata(component = "engine_batch_throughput", scenario = "memory")
 )]
 fn memory(ctx: &mut StressContext) {
@@ -93,6 +94,7 @@ fn memory(ctx: &mut StressContext) {
 
 #[stress(
     tier = 4,
+    role = "diagnostic",
     metadata(component = "engine_batch_throughput", scenario = "local")
 )]
 fn local(ctx: &mut StressContext) {

@@ -18,7 +18,6 @@ const TLV_PRIMITIVE_BATCH_SIZE: usize = 1_048_576;
 const TLV_FIELD_DECODE_BATCH_SIZE: usize = 262_144;
 const TLV_PRIMITIVES_PER_LOGICAL_OPERATION: usize = 32;
 const TLV_NOISY_SAMPLE_COUNT: usize = 12;
-const TLV_NOISY_WARMUP_SAMPLES: usize = 8;
 
 fn tlv_logical_operation_count() -> u64 {
     tlv_logical_operation_count_for(TLV_PRIMITIVE_BATCH_SIZE)
@@ -211,7 +210,6 @@ fn run_varint32_decode_stable(ctx: &mut StressContext, name: &'static str, value
     let measurement_name = format!("varint32_decode_{name}");
     ctx.benchmark(measurement_name)
         .samples(TLV_NOISY_SAMPLE_COUNT)
-        .warmup(TLV_NOISY_WARMUP_SAMPLES)
         .measure_batch(tlv_logical_operation_count(), || {
             let mut decoded = 0u32;
             for _ in 0..TLV_PRIMITIVE_BATCH_SIZE {
@@ -493,7 +491,6 @@ fn run_encode_bytes_tag_stable(ctx: &mut StressContext, name: &'static str, data
     let measurement_name = format!("encode_bytes_tag_{name}");
     ctx.benchmark(measurement_name)
         .samples(TLV_NOISY_SAMPLE_COUNT)
-        .warmup(TLV_NOISY_WARMUP_SAMPLES)
         .measure_batch(tlv_logical_operation_count(), || {
             let mut encoded_len = 0usize;
             for _ in 0..TLV_PRIMITIVE_BATCH_SIZE {
@@ -597,7 +594,6 @@ fn run_decode_field_stable(ctx: &mut StressContext, name: &'static str, data: &[
     let measurement_name = format!("decode_field_{name}");
     ctx.benchmark(measurement_name)
         .samples(TLV_NOISY_SAMPLE_COUNT)
-        .warmup(TLV_NOISY_WARMUP_SAMPLES)
         .measure_batch(
             tlv_logical_operation_count_for(TLV_FIELD_DECODE_BATCH_SIZE),
             || {

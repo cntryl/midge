@@ -281,6 +281,7 @@ fn should_use_versioned_external_actions() {
     // Arrange
     let workflows = [
         read_workflow(".github/workflows/bench.yml"),
+        read_workflow(".github/workflows/benchmark-guard.yml"),
         read_workflow(".github/workflows/ci.yml"),
         read_workflow(".github/workflows/cleanup.yml"),
         read_workflow(".github/workflows/cloud.yml"),
@@ -483,19 +484,61 @@ fn should_cover_registered_benchmarks_when_benchmark_workflow_runs() {
 }
 
 #[test]
+fn should_group_benchmark_artifacts_into_one_fresh_summary_run() {
+    // Arrange
+    let workflow = read_workflow(".github/workflows/bench.yml");
+
+    // Act
+    let uses_shared_run_id = workflow.contains(
+        "STRESS_RUN_ID: midge-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}",
+    );
+    let removes_previous_summary =
+        workflow.contains("rm -f target/bench_results.json target/bench_summary.md");
+
+    // Assert
+    assert!(
+        uses_shared_run_id,
+        "all benchmark tiers in one job must publish the same stress run ID"
+    );
+    assert!(
+        removes_previous_summary,
+        "bootstrap validation must not accept a stale summary manifest"
+    );
+    assert!(workflow.contains("if ! cntryl-tools summarize-benchmarks; then"));
+}
+
+#[test]
+fn should_size_recovery_benchmark_memtable_for_explicit_flush_fixture() {
+    // Arrange
+    let benchmark = read_workflow("benches/tier4_system_recovery_throughput.rs");
+
+    // Act
+    // Assert
+    assert!(benchmark.contains("RECOVERY_FIXTURE_MEMTABLE_SIZE_BYTES"));
+    assert!(benchmark.contains(".max(RECOVERY_FIXTURE_MEMTABLE_SIZE_BYTES)"));
+    assert!(benchmark.contains("fixture_memtable_size_bytes"));
+    assert!(benchmark.contains("recovery_opts_for_mode(\"local\")"));
+    assert!(benchmark.contains("recovery_opts_for_mode(\"cloud\")"));
+}
+
+#[test]
 fn should_describe_bounded_pr_guard_when_benchmark_automation_documented() {
     // Arrange
     let document = read_workflow("docs/development/benchmarks.md");
-    let workflow = read_workflow(".github/workflows/bench.yml");
+    let benchmark_workflow = read_workflow(".github/workflows/bench.yml");
+    let guard_workflow = read_workflow(".github/workflows/benchmark-guard.yml");
 
     // Act
     let normalized_document = document.split_whitespace().collect::<Vec<_>>().join(" ");
 
     // Assert
-    assert!(workflow.contains("workflow_dispatch:"));
-    assert!(workflow.contains("pull_request:"));
-    assert!(workflow.contains("schedule:"));
-    assert!(workflow.contains("Performance regression guard"));
+    assert!(benchmark_workflow.contains("workflow_dispatch:"));
+    assert!(benchmark_workflow.contains("schedule:"));
+    assert!(!benchmark_workflow.contains("pull_request:"));
+    assert!(benchmark_workflow.contains("timeout-minutes: 90"));
+    assert!(benchmark_workflow.contains("scripts/validate_benchmark_summary_bootstrap.py"));
+    assert!(guard_workflow.contains("pull_request:"));
+    assert!(guard_workflow.contains("Performance regression guard"));
     assert!(document.contains("bounded Ubuntu A/B guard"));
     assert!(normalized_document.contains("regression greater than 15%"));
 }
@@ -693,11 +736,13 @@ fn should_limit_validation_workflow_permissions_to_read_only() {
     // Arrange
     let ci = read_workflow(".github/workflows/ci.yml");
     let bench = read_workflow(".github/workflows/bench.yml");
+    let benchmark_guard = read_workflow(".github/workflows/benchmark-guard.yml");
 
     // Act
     // Assert
     assert!(ci.contains("permissions:\n  contents: read"));
     assert!(bench.contains("permissions:\n  contents: read"));
+    assert!(benchmark_guard.contains("permissions:\n  contents: read"));
 }
 
 #[test]

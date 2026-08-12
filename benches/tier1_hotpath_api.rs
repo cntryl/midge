@@ -67,7 +67,6 @@ fn run_batch_put(ctx: &mut StressContext, scenario: &'static str, batch_size: us
     ctx.parameter("storage_profile", "memory");
 
     ctx.benchmark(scenario)
-        .warmup(2)
         .measure_batch(usize_to_u64(BATCH_PUT_ROUNDS), || {
             let mut committed_records = 0usize;
             for round in 0..BATCH_PUT_ROUNDS {
@@ -188,7 +187,11 @@ fn single_get_miss(ctx: &mut StressContext) {
     );
 }
 
-#[stress(tier = 1, metadata(component = "api", scenario = "single_put"))]
+#[stress(
+    tier = 1,
+    role = "diagnostic",
+    metadata(component = "api", scenario = "single_put")
+)]
 fn single_put(ctx: &mut StressContext) {
     let engine = setup_db();
     let cf = engine.create_column_family("cf1").unwrap();
@@ -202,7 +205,6 @@ fn single_put(ctx: &mut StressContext) {
     stress_config::mark_local_rsd_diagnostic(ctx);
 
     ctx.benchmark("single_put")
-        .warmup(2)
         .measure_batch(SINGLE_PUT_BATCH_SIZE as u64, || {
             for _ in 0..SINGLE_PUT_BATCH_SIZE {
                 let idx = key_index % num_ops;

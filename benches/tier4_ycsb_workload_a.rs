@@ -6,7 +6,6 @@
 mod stress_config;
 
 use cntryl_stress::{stress, stress_main, StressContext};
-use stress_config::MidgeStressContextExt as _;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -95,7 +94,7 @@ fn run_workload_a_measured(
 ) -> ycsb::MultiClientRunStats {
     let client_suffix = if clients == 1 { "client" } else { "clients" };
     let measurement_name = format!("tier4_ycsb_a_{profile}_{clients}_{client_suffix}");
-    stress_config::measure_external_counted(ctx, measurement_name, || {
+    stress_config::measure_counted(ctx, measurement_name, "ycsb_operation", || {
         let zipf = match distribution {
             KeyDistribution::Zipf { theta } => {
                 Some(Arc::new(ZipfianGenerator::new(initial_keys, theta)))
@@ -159,10 +158,11 @@ fn run_workload_a_with_distribution(
     clients: usize,
     distribution: KeyDistribution,
 ) {
-    ctx.tag("storage_profile", profile);
-    ctx.parameter("clients", clients);
-    ctx.parameter("measured_secs", MEASURED.as_secs());
-    ctx.parameter("logical_unit", "ycsb_operation");
+    ycsb::configure_workload_parameters(ctx, profile, clients, MEASURED);
+    ctx.parameter(
+        "logical_bytes_per_operation",
+        ycsb::logical_entry_size_bytes(),
+    );
     if matches!(
         (profile, clients),
         ("memory", CLIENTS_1 | CLIENTS_16 | CLIENTS_64)
@@ -200,14 +200,9 @@ fn run_workload_a_with_distribution(
         measured_write_opts,
     );
 
-    ctx.set_elements(measured.operations);
-    ctx.set_bytes(measured.operations * ycsb::logical_entry_size_bytes() as u64);
-    for (name, value) in measured.latency_tags() {
-        ctx.tag(name, value.to_string());
-    }
-    for (name, value) in ycsb::runtime_perf_report(engine.as_ref(), perf_start).tags() {
-        ctx.tag(name, value.to_string());
-    }
+    measured.record_latencies(ctx);
+    let perf = ycsb::runtime_perf_report(engine.as_ref(), perf_start);
+    ycsb::record_runtime_correctness(ctx, &perf);
 }
 
 fn run_workload_a(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, clients: usize) {
@@ -222,37 +217,37 @@ fn run_workload_a(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
     );
 }
 
-#[stress(tier = 4)]
+#[stress(tier = 4, role = "diagnostic")]
 fn tier4_ycsb_a_memory_1_client(ctx: &mut StressContext) {
     let opts = stress_config::opts_for_mode("memory");
     run_workload_a(ctx, opts, "memory", CLIENTS_1);
 }
 
-#[stress(tier = 4)]
+#[stress(tier = 4, role = "diagnostic")]
 fn tier4_ycsb_a_memory_16_clients(ctx: &mut StressContext) {
     let opts = stress_config::opts_for_mode("memory");
     run_workload_a(ctx, opts, "memory", CLIENTS_16);
 }
 
-#[stress(tier = 4)]
+#[stress(tier = 4, role = "diagnostic")]
 fn tier4_ycsb_a_memory_64_clients(ctx: &mut StressContext) {
     let opts = stress_config::opts_for_mode("memory");
     run_workload_a(ctx, opts, "memory", CLIENTS_64);
 }
 
-#[stress(tier = 4)]
+#[stress(tier = 4, role = "diagnostic")]
 fn tier4_ycsb_a_local_64_clients(ctx: &mut StressContext) {
     let opts = stress_config::opts_for_mode("local");
     run_workload_a(ctx, opts, "local", CLIENTS_64);
 }
 
-#[stress(tier = 4)]
+#[stress(tier = 4, role = "diagnostic")]
 fn tier4_ycsb_a_cloud_64_clients(ctx: &mut StressContext) {
     let opts = stress_config::opts_for_mode("cloud");
     run_workload_a(ctx, opts, "cloud", CLIENTS_64);
 }
 
-#[stress(tier = 4)]
+#[stress(tier = 4, role = "diagnostic")]
 fn tier4_ycsb_a_hybrid_16_clients(ctx: &mut StressContext) {
     let opts = stress_config::opts_for_mode("hybrid");
     run_workload_a(ctx, opts, "hybrid", CLIENTS_16);

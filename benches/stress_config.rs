@@ -7,7 +7,7 @@
 
 #![allow(dead_code)]
 
-use cntryl_stress::StressContext;
+use cntryl_stress::{LogicalUnit, OperationOutcome, StressContext};
 use std::time::Instant;
 
 #[path = "bench_support/stress.rs"]
@@ -69,24 +69,36 @@ pub fn measure_hot_path_batch(
 pub fn measure_external<R>(
     ctx: &mut StressContext,
     name: impl Into<String>,
+    logical_unit: &'static str,
     completed_operations: u64,
     f: impl FnOnce() -> R,
 ) -> R {
     let started_at = Instant::now();
     let result = f();
-    ctx.record_external(name, started_at.elapsed(), completed_operations);
+    ctx.record_external_outcome(
+        name,
+        started_at.elapsed(),
+        LogicalUnit::new(logical_unit),
+        OperationOutcome::success(completed_operations),
+    );
     result
 }
 
 #[allow(dead_code)]
-pub fn measure_external_counted<R>(
+pub fn measure_counted<R>(
     ctx: &mut StressContext,
     name: impl Into<String>,
+    logical_unit: &'static str,
     f: impl FnOnce() -> (R, u64),
 ) -> R {
     let started_at = Instant::now();
     let (result, completed_operations) = f();
-    ctx.record_external(name, started_at.elapsed(), completed_operations);
+    ctx.record_external_outcome(
+        name,
+        started_at.elapsed(),
+        LogicalUnit::new(logical_unit),
+        OperationOutcome::success(completed_operations),
+    );
     result
 }
 
@@ -103,7 +115,6 @@ pub fn mark_validated_micro(ctx: &mut StressContext, logical_unit: &'static str)
 
 #[allow(dead_code)]
 pub fn mark_diagnostic(ctx: &mut StressContext, reason: &'static str) {
-    ctx.metadata("trust_class", "diagnostic");
     ctx.metadata("diagnostic_reason", reason);
 }
 
@@ -130,25 +141,4 @@ pub fn mark_duration_plateau_probe(ctx: &mut StressContext, cap_source: &'static
 #[allow(dead_code)]
 pub fn logical_bytes(ctx: &mut StressContext, bytes: u64) {
     ctx.parameter("logical_bytes", bytes);
-}
-
-#[allow(dead_code)]
-pub trait MidgeStressContextExt {
-    fn tag(&mut self, key: &'static str, value: impl ToString) -> &mut Self;
-    fn set_elements(&mut self, completed: u64) -> &mut Self;
-    fn set_bytes(&mut self, bytes: u64) -> &mut Self;
-}
-
-impl MidgeStressContextExt for StressContext {
-    fn tag(&mut self, key: &'static str, value: impl ToString) -> &mut Self {
-        self.parameter(key, value)
-    }
-
-    fn set_elements(&mut self, completed: u64) -> &mut Self {
-        self.operations(completed)
-    }
-
-    fn set_bytes(&mut self, bytes: u64) -> &mut Self {
-        self.parameter("logical_bytes", bytes)
-    }
 }

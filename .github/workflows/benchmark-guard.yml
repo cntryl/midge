@@ -1,0 +1,110 @@
+name: Performance Regression Guard
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-guard-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  regression-guard:
+    name: Performance regression guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_INCREMENTAL: 0
+      BENCHMARK: tier4_system_local_throughput_regression
+      WORKLOAD: memory
+
+    steps:
+      - name: Checkout candidate with base history
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Detect performance-relevant changes
+        id: changes
+        shell: bash
+        run: |
+          if git diff --quiet "${{ github.event.pull_request.base.sha }}"...HEAD -- \
+            src benches Cargo.toml Cargo.lock .cargo \
+            scripts/compare_benchmark_guardrail.py \
+            .github/workflows/bench.yml .github/workflows/benchmark-guard.yml; then
+            echo "relevant=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Update Rust toolchain
+        if: steps.changes.outputs.relevant == 'true'
+        run: rustup update stable
+
+      - name: Cache Rust dependencies
+        if: steps.changes.outputs.relevant == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "bench-guard"
+
+      - name: Create isolated base checkout
+        if: steps.changes.outputs.relevant == 'true'
+        shell: bash
+        run: |
+          git worktree add ../midge-bench-base "${{ github.event.pull_request.base.sha }}"
+          cargo generate-lockfile --manifest-path ../midge-bench-base/Cargo.toml
+          cargo generate-lockfile
+
+      - name: Build and measure base benchmark
+        if: steps.changes.outputs.relevant == 'true'
+        shell: bash
+        run: |
+          mkdir -p target/benchmark-guardrail
+          CARGO_TARGET_DIR="$PWD/target/benchmark-guard-build" cargo bench \
+            --locked --manifest-path ../midge-bench-base/Cargo.toml \
+            --bench "$BENCHMARK" --no-run
+          for run in 1 2 3; do
+            CARGO_TARGET_DIR="$PWD/target/benchmark-guard-build" cargo bench \
+              --locked --manifest-path ../midge-bench-base/Cargo.toml \
+              --bench "$BENCHMARK" -- \
+              --profile release --workload "$WORKLOAD" --json \
+              > "target/benchmark-guardrail/base-$run.json"
+          done
+
+      - name: Build and measure candidate benchmark
+        if: steps.changes.outputs.relevant == 'true'
+        shell: bash
+        run: |
+          CARGO_TARGET_DIR="$PWD/target/benchmark-guard-build" cargo bench \
+            --locked --bench "$BENCHMARK" --no-run
+          for run in 1 2 3; do
+            CARGO_TARGET_DIR="$PWD/target/benchmark-guard-build" cargo bench \
+              --locked --bench "$BENCHMARK" -- \
+              --profile release --workload "$WORKLOAD" --json \
+              > "target/benchmark-guardrail/candidate-$run.json"
+          done
+
+      - name: Enforce Tier 4 regression budget
+        if: steps.changes.outputs.relevant == 'true'
+        shell: bash
+        run: |
+          python3 scripts/compare_benchmark_guardrail.py \
+            --base target/benchmark-guardrail/base-1.json \
+            --base target/benchmark-guardrail/base-2.json \
+            --base target/benchmark-guardrail/base-3.json \
+            --candidate target/benchmark-guardrail/candidate-1.json \
+            --candidate target/benchmark-guardrail/candidate-2.json \
+            --candidate target/benchmark-guardrail/candidate-3.json \
+            --benchmark memory_batched_write_throughput \
+            --max-regression 0.15 | tee target/benchmark-guardrail/comparison.txt
+
+      - name: Upload performance evidence
+        if: always() && steps.changes.outputs.relevant == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: performance-regression-guard
+          path: target/benchmark-guardrail
+          retention-days: 30

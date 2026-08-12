@@ -7,8 +7,7 @@
 mod stress_config;
 
 use cntryl_midge::{MidgeEngine, MidgeError, WriteOptions};
-use cntryl_stress::{stress, stress_main, StressContext};
-use stress_config::MidgeStressContextExt as _;
+use cntryl_stress::{stress, stress_main, LogicalUnit, OperationOutcome, StressContext};
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
@@ -125,19 +124,6 @@ fn run_write_phase(
     out
 }
 
-fn average_ns_to_us(total_ns: u64, count: u64) -> String {
-    if count == 0 {
-        return "0.00".to_string();
-    }
-
-    let divisor = u128::from(count) * 10;
-    let rounded_hundredths = (u128::from(total_ns) + (divisor / 2)) / divisor;
-    let whole = rounded_hundredths / 100;
-    let fraction = rounded_hundredths % 100;
-
-    format!("{whole}.{fraction:02}")
-}
-
 fn run_compaction_backpressure_case(
     ctx: &mut StressContext,
     scenario: &'static str,
@@ -175,47 +161,29 @@ fn run_compaction_backpressure_case(
     );
     let perf = ycsb::runtime_perf_report(&engine, start);
 
-    ctx.parameter("logical_unit", "write");
     ctx.parameter("storage_profile", mode);
     ctx.parameter("writers", WRITERS);
     ctx.parameter("write_batch_size", WRITE_BATCH_SIZE);
     ctx.parameter("value_size_bytes", VALUE_SIZE);
     ctx.parameter("memtable_size_bytes", COMPACTION_MEMTABLE_SIZE_BYTES);
-    ctx.parameter("transactions", measured.transactions);
+    ctx.parameter("logical_bytes_per_operation", ycsb::KEY_SIZE + VALUE_SIZE);
     ctx.parameter("warmup_secs", WARMUP.as_secs_f64());
     ctx.parameter("measured_secs", MEASURED.as_secs_f64());
-
-    ctx.record_external(scenario, measured.elapsed, measured.writes);
-    ctx.set_elements(measured.writes);
-    ctx.set_bytes(
+    assert_eq!(
+        measured.writes,
         measured
-            .writes
-            .saturating_mul((ycsb::KEY_SIZE + VALUE_SIZE) as u64),
+            .transactions
+            .saturating_mul(WRITE_BATCH_SIZE as u64),
+        "each completed transaction must account for one full write batch"
     );
 
-    ctx.tag("write_stalls_total", perf.write_stalls_total.to_string());
-    ctx.tag(
-        "write_stalls_compaction_total",
-        perf.write_stalls_compaction_total.to_string(),
+    ctx.record_external_outcome(
+        scenario,
+        measured.elapsed,
+        LogicalUnit::new("write"),
+        OperationOutcome::success(measured.writes),
     );
-    ctx.tag(
-        "write_stalls_cloud_total",
-        perf.write_stalls_cloud_total.to_string(),
-    );
-    ctx.tag("wal_append_count", perf.wal_append_count.to_string());
-    ctx.tag("wal_fsync_count", perf.wal_fsync_count.to_string());
-    ctx.tag(
-        "avg_wal_append_us",
-        average_ns_to_us(perf.wal_append_ns_total, perf.wal_append_count),
-    );
-    ctx.tag(
-        "avg_wal_fsync_us",
-        average_ns_to_us(perf.wal_fsync_ns_total, perf.wal_fsync_count),
-    );
-    ctx.tag(
-        "pending_cloud_uploads_end",
-        perf.end_pending_cloud_uploads.to_string(),
-    );
+    ycsb::record_runtime_correctness(ctx, &perf);
 }
 
 #[stress(tier = 4)]

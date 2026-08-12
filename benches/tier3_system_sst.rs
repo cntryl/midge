@@ -16,8 +16,8 @@ const VALUE_SIZE: usize = 64;
 const TARGET_BATCH: usize = 1_000;
 const SST_POINT_SEEK_BATCH_SIZE: usize = 1;
 const SST_RANGE_SEEK_BATCH_SIZE: usize = 64;
+const SST_FIXTURE_MEMTABLE_SIZE_BYTES: usize = 4 * 1024 * 1024;
 const SST_POINT_SEEK_SAMPLE_COUNT: usize = 12;
-const SST_POINT_SEEK_WARMUP_SAMPLES: usize = 4;
 
 fn setup_engine(opts: MidgeOptions) -> MidgeEngine {
     stress_config::bench_stress::open_engine_no_compaction(opts)
@@ -30,15 +30,20 @@ fn precompute_keys(num: usize) -> Vec<[u8; KEY_SIZE]> {
 fn run_sst_point_seek_case(
     ctx: &mut StressContext,
     scenario: &'static str,
-    opts: MidgeOptions,
+    mut opts: MidgeOptions,
     num_keys: usize,
 ) {
+    // Build one deliberate SST at the explicit flush boundary. The generic
+    // local profile's 64 KiB memtable is smaller than this fixture and can
+    // trigger write stalls or background flushes during setup.
+    opts.memtable_size = opts.memtable_size.max(SST_FIXTURE_MEMTABLE_SIZE_BYTES);
+
     ctx.parameter("logical_batch_size", SST_POINT_SEEK_BATCH_SIZE);
     ctx.parameter("logical_unit", "sst_point_seek");
     ctx.parameter("operation_surface", "sst_point_seek");
     ctx.parameter("begin_tx_included", "false");
     ctx.parameter("rotating_key_count", num_keys);
-    ctx.metadata("trust_class", "diagnostic");
+    ctx.parameter("fixture_memtable_size_bytes", opts.memtable_size);
     ctx.metadata("diagnostic_reason", "pending_three_clean_baselines");
     ctx.parameter("local_gate_rsd_limit_pct", 5);
 
@@ -74,7 +79,6 @@ fn run_sst_point_seek_case(
     let _ = ctx
         .benchmark(scenario)
         .samples(SST_POINT_SEEK_SAMPLE_COUNT)
-        .warmup(SST_POINT_SEEK_WARMUP_SAMPLES)
         .measure_batch(SST_POINT_SEEK_BATCH_SIZE as u64, || {
             for _ in 0..SST_POINT_SEEK_BATCH_SIZE {
                 let key = keys[key_index % keys.len()];
@@ -92,14 +96,6 @@ fn run_sst_point_seek_case(
         });
 
     let read_path_after = engine.read_path_diagnostics_snapshot_for_benchmarks();
-    ctx.parameter(
-        "candidate_sst_files_checked_delta",
-        read_path_after.candidate_sst_files_checked - read_path_before.candidate_sst_files_checked,
-    );
-    ctx.parameter(
-        "candidate_blocks_checked_delta",
-        read_path_after.candidate_blocks_checked - read_path_before.candidate_blocks_checked,
-    );
     assert_eq!(
         validation_failures, 0,
         "measured SST point reads must validate"
@@ -119,15 +115,18 @@ fn run_sst_point_seek_case(
 fn run_sst_range_seek_case(
     ctx: &mut StressContext,
     scenario: &'static str,
-    opts: MidgeOptions,
+    mut opts: MidgeOptions,
     num_keys: usize,
 ) {
+    // Keep setup in one memtable until the explicit fixture flush below.
+    opts.memtable_size = opts.memtable_size.max(SST_FIXTURE_MEMTABLE_SIZE_BYTES);
+
     ctx.parameter("logical_batch_size", SST_RANGE_SEEK_BATCH_SIZE);
     ctx.parameter("logical_unit", "sst_range_seek");
     ctx.parameter("operation_surface", "sst_range_seek_first_row");
     ctx.parameter("begin_tx_included", "false");
     ctx.parameter("rotating_key_count", num_keys);
-    ctx.metadata("trust_class", "diagnostic");
+    ctx.parameter("fixture_memtable_size_bytes", opts.memtable_size);
     ctx.metadata("diagnostic_reason", "pending_three_clean_baselines");
     ctx.parameter("local_gate_rsd_limit_pct", 5);
 
@@ -182,14 +181,6 @@ fn run_sst_range_seek_case(
     });
 
     let read_path_after = engine.read_path_diagnostics_snapshot_for_benchmarks();
-    ctx.parameter(
-        "candidate_sst_files_checked_delta",
-        read_path_after.candidate_sst_files_checked - read_path_before.candidate_sst_files_checked,
-    );
-    ctx.parameter(
-        "candidate_blocks_checked_delta",
-        read_path_after.candidate_blocks_checked - read_path_before.candidate_blocks_checked,
-    );
     assert_eq!(
         validation_failures, 0,
         "measured SST range reads must validate"
@@ -206,25 +197,25 @@ fn run_sst_range_seek_case(
     drop(engine);
 }
 
-#[stress(tier = 3)]
+#[stress(tier = 3, role = "diagnostic")]
 fn tier3_sst_point_seek_local(ctx: &mut StressContext) {
     let opts = stress_config::opts_for_mode("local");
     run_sst_point_seek_case(ctx, "tier3_sst_point_seek_local", opts, 5_000);
 }
 
-#[stress(tier = 3)]
+#[stress(tier = 3, role = "diagnostic")]
 fn tier3_sst_point_seek_cloud(ctx: &mut StressContext) {
     let opts = stress_config::opts_for_mode("cloud");
     run_sst_point_seek_case(ctx, "tier3_sst_point_seek_cloud", opts, 5_000);
 }
 
-#[stress(tier = 3)]
+#[stress(tier = 3, role = "diagnostic")]
 fn tier3_sst_range_seek_local(ctx: &mut StressContext) {
     let opts = stress_config::opts_for_mode("local");
     run_sst_range_seek_case(ctx, "tier3_sst_range_seek_local", opts, 10_000);
 }
 
-#[stress(tier = 3)]
+#[stress(tier = 3, role = "diagnostic")]
 fn tier3_sst_range_seek_cloud(ctx: &mut StressContext) {
     let opts = stress_config::opts_for_mode("cloud");
     run_sst_range_seek_case(ctx, "tier3_sst_range_seek_cloud", opts, 10_000);

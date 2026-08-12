@@ -151,6 +151,7 @@ fn cold_1000_blocks(ctx: &mut StressContext) {
 
 #[stress(
     tier = 2,
+    role = "diagnostic",
     metadata(component = "range_scan_cache", scenario = "strided_warm")
 )]
 fn strided_warm(ctx: &mut StressContext) {
@@ -167,7 +168,6 @@ fn strided_warm(ctx: &mut StressContext) {
     ctx.parameter("num_accesses", num_accesses);
     ctx.parameter("scan_repeats", WARM_SCAN_REPEATS);
     ctx.parameter("logical_unit", "cache_scan_block");
-    ctx.metadata("trust_class", "diagnostic");
     ctx.metadata("diagnostic_reason", "local_rsd_above_5pct");
     ctx.parameter("local_gate_rsd_limit_pct", 5);
 
@@ -192,6 +192,7 @@ fn strided_warm(ctx: &mut StressContext) {
 
 #[stress(
     tier = 2,
+    role = "diagnostic",
     metadata(component = "range_scan_cache", scenario = "strided_cold")
 )]
 fn strided_cold(ctx: &mut StressContext) {
@@ -202,7 +203,6 @@ fn strided_cold(ctx: &mut StressContext) {
     ctx.parameter("num_accesses", num_accesses);
     ctx.parameter("scan_repeats", COLD_SCAN_REPEATS);
     ctx.parameter("logical_unit", "cache_scan_block");
-    ctx.metadata("trust_class", "diagnostic");
     ctx.metadata("diagnostic_reason", "local_rsd_above_5pct");
     ctx.parameter("local_gate_rsd_limit_pct", 5);
 

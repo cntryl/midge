@@ -8,7 +8,7 @@
 use cntryl_midge::{
     Engine, Goal, OpenOptions, RecoveryPolicy, TransactionMode, WorkloadProfile, WriteOptions,
 };
-use cntryl_stress::{stress, stress_main, StressContext};
+use cntryl_stress::{stress, stress_main, LogicalUnit, OperationOutcome, StressContext};
 use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -230,32 +230,32 @@ fn run_workload(ctx: &mut StressContext, shape: RecordShape, goal: Goal) {
     ctx.parameter("record_count", FLUSHES * RECORDS_PER_FLUSH);
     ctx.parameter("record_value_bytes", VALUE_SIZE);
     ctx.parameter("flush_count", FLUSHES);
-    ctx.parameter("compaction_completed", true);
-    ctx.parameter("clean_shutdown_completed", true);
     ctx.parameter("logical_bytes", LOGICAL_BYTES);
-    ctx.parameter("logical_unit", "record_value_byte");
-    ctx.parameter("ingest_ns", outcome.ingest.as_nanos());
-    ctx.parameter("flush_compaction_ns", outcome.flush_compaction.as_nanos());
-    ctx.parameter("total_ns", outcome.total.as_nanos());
-    ctx.parameter("final_sst_bytes", outcome.final_sst_bytes);
-    ctx.record_external(
+    assert!(
+        outcome.final_sst_bytes > 0,
+        "compression workload must leave a non-empty SST footprint"
+    );
+    ctx.record_external_outcome(
         format!("engine_policy_{}_ingest_{}", goal_name(goal), shape.name()),
         outcome.ingest,
-        completed,
+        LogicalUnit::new("record_value_byte"),
+        OperationOutcome::success(completed),
     );
-    ctx.record_external(
+    ctx.record_external_outcome(
         format!(
             "engine_policy_{}_flush_compaction_{}",
             goal_name(goal),
             shape.name()
         ),
         outcome.flush_compaction,
-        completed,
+        LogicalUnit::new("record_value_byte"),
+        OperationOutcome::success(completed),
     );
-    ctx.record_external(
+    ctx.record_external_outcome(
         format!("engine_policy_{}_total_{}", goal_name(goal), shape.name()),
         outcome.total,
-        completed,
+        LogicalUnit::new("record_value_byte"),
+        OperationOutcome::success(completed),
     );
 }
 
