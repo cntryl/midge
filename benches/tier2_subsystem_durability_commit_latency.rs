@@ -8,13 +8,15 @@
 mod stress_config;
 
 use cntryl_midge::{ColumnFamilyId, Engine, RuntimeMetricsSnapshot, TransactionMode, WriteOptions};
-use cntryl_stress::{stress, stress_main, LogicalUnit, OperationOutcome, StressContext};
+use cntryl_stress::{
+    stress, stress_main, LogicalUnit, ObservationDirection, ObservationUnit, OperationOutcome,
+    StressContext,
+};
 use hdrhistogram::Histogram;
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
 const VALUE_SIZE: usize = 128;
-const TRANSACTIONS_PER_SAMPLE: usize = 512;
 const ROTATION_VALUE_SIZE: usize = 4 * 1024;
 const ROTATION_MEMTABLE_BYTES: usize = 128 * 1024;
 const ROTATION_WARMUP_TRANSACTIONS: usize = 64;
@@ -24,11 +26,9 @@ const ROTATION_RUNS: usize = 5;
 struct StrictCommitSample {
     elapsed: Duration,
     completed: u64,
-    commit_p50_us: u64,
-    commit_p95_us: u64,
-    commit_p99_us: u64,
     wal_appends: u64,
     physical_fsyncs: u64,
+    commit_latencies_us: Vec<u64>,
 }
 
 struct RotationRunSample {
@@ -61,6 +61,12 @@ fn median_u64(values: impl IntoIterator<Item = u64>) -> u64 {
     values[values.len() / 2]
 }
 
+fn u64_to_f64(value: u64) -> f64 {
+    let upper = u32::try_from(value >> 32).expect("upper half fits in u32");
+    let lower = u32::try_from(value & u64::from(u32::MAX)).expect("lower half fits in u32");
+    f64::from(upper) * 4_294_967_296.0 + f64::from(lower)
+}
+
 fn record_success(
     ctx: &mut StressContext,
     name: impl Into<String>,
@@ -74,24 +80,6 @@ fn record_success(
         LogicalUnit::new(logical_unit),
         OperationOutcome::success(completed),
     );
-}
-
-fn record_commit_percentiles(
-    ctx: &mut StressContext,
-    scenario: &str,
-    p50_us: u64,
-    p95_us: u64,
-    p99_us: u64,
-) {
-    for (suffix, latency_us) in [("p50", p50_us), ("p95", p95_us), ("p99", p99_us)] {
-        record_success(
-            ctx,
-            format!("{scenario}_commit_{suffix}"),
-            Duration::from_micros(latency_us),
-            "commit",
-            1,
-        );
-    }
 }
 
 fn commit_rotation_value(engine: &Engine, cf_id: ColumnFamilyId, ordinal: usize, key_prefix: &str) {
@@ -233,7 +221,13 @@ fn writer_workload(
 }
 
 fn execute_strict_commit_case(writers: usize) -> StrictCommitSample {
-    assert!(TRANSACTIONS_PER_SAMPLE.is_multiple_of(writers));
+    let transactions_per_sample: usize = match writers {
+        1 => 2_048,
+        16 => 8_192,
+        64 => 32_768,
+        _ => panic!("unsupported strict commit writer count"),
+    };
+    assert!(transactions_per_sample.is_multiple_of(writers));
     let mut opts = stress_config::write_coordination_opts_for_mode("local");
     opts.enable_compaction = false;
     stress_config::init_benchmark_telemetry().expect("initialize benchmark telemetry");
@@ -246,7 +240,7 @@ fn execute_strict_commit_case(writers: usize) -> StrictCommitSample {
     let start_metrics = engine
         .get_runtime_metrics()
         .expect("capture starting durability metrics");
-    let transactions_per_writer = TRANSACTIONS_PER_SAMPLE / writers;
+    let transactions_per_writer = transactions_per_sample / writers;
     let barrier = Arc::new(Barrier::new(writers + 1));
     let mut handles = Vec::with_capacity(writers);
     for writer in 0..writers {
@@ -259,12 +253,10 @@ fn execute_strict_commit_case(writers: usize) -> StrictCommitSample {
 
     let started_at = Instant::now();
     barrier.wait();
-    let mut histogram = Histogram::<u64>::new(3).expect("create strict commit histogram");
+    let mut commit_latencies_us = Vec::with_capacity(transactions_per_sample);
     for handle in handles {
         for latency_us in handle.join().expect("join strict commit writer") {
-            histogram
-                .record(latency_us)
-                .expect("record strict commit latency");
+            commit_latencies_us.push(latency_us);
         }
     }
     let elapsed = started_at.elapsed();
@@ -281,17 +273,21 @@ fn execute_strict_commit_case(writers: usize) -> StrictCommitSample {
 
     StrictCommitSample {
         elapsed,
-        completed: u64::try_from(TRANSACTIONS_PER_SAMPLE).expect("transaction count fits in u64"),
-        commit_p50_us: histogram.value_at_quantile(0.50),
-        commit_p95_us: histogram.value_at_quantile(0.95),
-        commit_p99_us: histogram.value_at_quantile(0.99),
+        completed: u64::try_from(transactions_per_sample).expect("transaction count fits in u64"),
         wal_appends,
         physical_fsyncs,
+        commit_latencies_us,
     }
 }
 
 fn run_strict_commit_case(ctx: &mut StressContext, scenario: &'static str, writers: usize) {
-    ctx.parameter("logical_batch_size", TRANSACTIONS_PER_SAMPLE);
+    let transactions = match writers {
+        1 => 2_048,
+        16 => 8_192,
+        64 => 32_768,
+        _ => panic!("unsupported strict commit writer count"),
+    };
+    ctx.parameter("logical_batch_size", transactions);
     ctx.parameter("logical_unit", "transaction");
     ctx.parameter("storage_profile", "local");
     ctx.parameter("commit_mode", "sync");
@@ -306,26 +302,26 @@ fn run_strict_commit_case(ctx: &mut StressContext, scenario: &'static str, write
         "transaction",
         sample.completed,
     );
-    record_commit_percentiles(
-        ctx,
-        scenario,
-        sample.commit_p50_us,
-        sample.commit_p95_us,
-        sample.commit_p99_us,
+    for latency_us in &sample.commit_latencies_us {
+        ctx.record_latency(Duration::from_micros((*latency_us).max(1)));
+    }
+    ctx.record_observation(
+        "wal_appends",
+        u64_to_f64(sample.wal_appends),
+        ObservationUnit::Count,
+        ObservationDirection::Informational,
     );
-    record_success(
-        ctx,
-        format!("{scenario}_wal_appends"),
-        sample.elapsed,
-        "wal_append",
-        sample.wal_appends,
+    ctx.record_observation(
+        "physical_fsyncs",
+        u64_to_f64(sample.physical_fsyncs),
+        ObservationUnit::Count,
+        ObservationDirection::Informational,
     );
-    record_success(
-        ctx,
-        format!("{scenario}_physical_fsyncs"),
-        sample.elapsed,
-        "physical_fsync",
-        sample.physical_fsyncs,
+    ctx.record_observation(
+        "commits_per_fsync",
+        u64_to_f64(sample.completed) / u64_to_f64(sample.physical_fsyncs.max(1)),
+        ObservationUnit::Ratio,
+        ObservationDirection::HigherIsBetter,
     );
 }
 
@@ -345,43 +341,11 @@ fn set_rotation_parameters(ctx: &mut StressContext) {
     );
 }
 
-fn record_rotation_latencies(ctx: &mut StressContext, samples: &[RotationRunSample]) {
-    const SCENARIO: &str = "tier2_durability_commit_sync_local_4k_rotation";
-    record_commit_percentiles(
-        ctx,
-        SCENARIO,
-        median_u64(samples.iter().map(|sample| sample.commit_p50_us)),
-        median_u64(samples.iter().map(|sample| sample.commit_p95_us)),
-        median_u64(samples.iter().map(|sample| sample.commit_p99_us)),
-    );
-    record_success(
-        ctx,
-        format!("{SCENARIO}_rotation_commit_p95"),
-        Duration::from_micros(median_u64(
-            samples.iter().map(|sample| sample.rotation_commit_p95_us),
-        )),
-        "commit",
-        1,
-    );
-    record_success(
-        ctx,
-        format!("{SCENARIO}_non_rotation_commit_p95"),
-        Duration::from_micros(median_u64(
-            samples
-                .iter()
-                .map(|sample| sample.non_rotation_commit_p95_us),
-        )),
-        "commit",
-        1,
-    );
-}
-
-fn record_rotation_counters(
+fn record_rotation_observations(
     ctx: &mut StressContext,
     samples: &[RotationRunSample],
     elapsed: Duration,
 ) {
-    const SCENARIO: &str = "tier2_durability_commit_sync_local_4k_rotation";
     let wal_fsyncs = samples.iter().map(|sample| sample.wal_fsyncs).sum::<u64>();
     let wal_fsync_ns_total = samples
         .iter()
@@ -413,47 +377,69 @@ fn record_rotation_counters(
         .map(|sample| sample.flush_publish_ns_total)
         .sum::<u64>();
 
-    record_success(
-        ctx,
-        format!("{SCENARIO}_physical_fsyncs"),
-        elapsed,
-        "physical_fsync",
-        wal_fsyncs,
-    );
-    record_success(
-        ctx,
-        format!("{SCENARIO}_physical_fsync_time"),
-        Duration::from_nanos(wal_fsync_ns_total),
-        "physical_fsync",
-        wal_fsyncs,
-    );
-    record_success(
-        ctx,
-        format!("{SCENARIO}_physical_fsync_max"),
-        Duration::from_nanos(wal_fsync_ns_max),
-        "physical_fsync",
-        1,
-    );
-    record_success(
-        ctx,
-        format!("{SCENARIO}_rotation_commits"),
-        elapsed,
-        "rotation_commit",
-        rotation_commits,
-    );
-    record_success(
-        ctx,
-        format!("{SCENARIO}_flush_build"),
-        Duration::from_nanos(flush_build_ns_total),
-        "flush_build",
-        flush_build_count,
-    );
-    record_success(
-        ctx,
-        format!("{SCENARIO}_flush_publish"),
-        Duration::from_nanos(flush_publish_ns_total),
-        "flush_publish",
-        flush_publish_count,
+    for latency_us in [
+        median_u64(samples.iter().map(|sample| sample.commit_p50_us)),
+        median_u64(samples.iter().map(|sample| sample.commit_p95_us)),
+        median_u64(samples.iter().map(|sample| sample.commit_p99_us)),
+    ] {
+        ctx.record_latency(Duration::from_micros(latency_us.max(1)));
+    }
+    for (name, value, unit) in [
+        (
+            "rotation_commit_p95_us",
+            median_u64(samples.iter().map(|s| s.rotation_commit_p95_us)),
+            ObservationUnit::Microseconds,
+        ),
+        (
+            "non_rotation_commit_p95_us",
+            median_u64(samples.iter().map(|s| s.non_rotation_commit_p95_us)),
+            ObservationUnit::Microseconds,
+        ),
+        ("wal_fsyncs", wal_fsyncs, ObservationUnit::Count),
+        (
+            "wal_fsync_ns_total",
+            wal_fsync_ns_total,
+            ObservationUnit::Nanoseconds,
+        ),
+        (
+            "wal_fsync_ns_max",
+            wal_fsync_ns_max,
+            ObservationUnit::Nanoseconds,
+        ),
+        ("rotation_commits", rotation_commits, ObservationUnit::Count),
+        (
+            "flush_build_count",
+            flush_build_count,
+            ObservationUnit::Count,
+        ),
+        (
+            "flush_build_ns_total",
+            flush_build_ns_total,
+            ObservationUnit::Nanoseconds,
+        ),
+        (
+            "flush_publish_count",
+            flush_publish_count,
+            ObservationUnit::Count,
+        ),
+        (
+            "flush_publish_ns_total",
+            flush_publish_ns_total,
+            ObservationUnit::Nanoseconds,
+        ),
+    ] {
+        ctx.record_observation(
+            name,
+            u64_to_f64(value),
+            unit,
+            ObservationDirection::Informational,
+        );
+    }
+    ctx.record_observation(
+        "elapsed_ns",
+        elapsed.as_secs_f64() * 1_000_000_000.0,
+        ObservationUnit::Nanoseconds,
+        ObservationDirection::Informational,
     );
 }
 
@@ -477,8 +463,7 @@ fn tier2_durability_commit_sync_local_4k_rotation(ctx: &mut StressContext) {
         "transaction",
         completed,
     );
-    record_rotation_latencies(ctx, &samples);
-    record_rotation_counters(ctx, &samples, elapsed);
+    record_rotation_observations(ctx, &samples, elapsed);
 }
 
 #[stress(tier = 2)]

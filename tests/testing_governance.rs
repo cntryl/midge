@@ -136,6 +136,33 @@ fn should_use_typed_roles_when_benchmark_is_non_gating() {
 }
 
 #[test]
+fn should_enforce_focused_benchmark_observation_contract() {
+    // Arrange
+    let transaction = fs::read_to_string("benches/tier2_subsystem_transaction_latency.rs")
+        .expect("read transaction benchmark");
+    let durability = fs::read_to_string("benches/tier2_subsystem_durability_commit_latency.rs")
+        .expect("read durability benchmark");
+    let compression = fs::read_to_string("benches/tier4_system_compression_policy.rs")
+        .expect("read compression benchmark");
+    let strict = fs::read_to_string("benches/tier4_system_strict_group_commit.rs")
+        .expect("read strict system benchmark");
+
+    // Act
+    let compression_case_count = compression.matches("engine_policy_case!(").count();
+
+    // Assert
+    assert!(transaction.contains("avg_txn_records_per_append"));
+    assert!(transaction.contains("validation_errors"));
+    assert!(!transaction.contains("format!(\"{scenario}_{phase}\")"));
+    assert!(!durability.contains("record_commit_percentiles"));
+    assert!(durability.contains("commits_per_fsync"));
+    assert_eq!(compression_case_count, 6);
+    assert!(!compression.contains("PrefixRandomTail"));
+    assert!(strict.contains("TRANSACTIONS_PER_WRITER_PER_WAVE: usize = 128"));
+    assert!(strict.contains("final_sst_bytes"));
+}
+
+#[test]
 fn should_require_complete_acceptance_audit_given_pull_request_body() {
     // Arrange
     let temp = tempfile::tempdir().expect("create PR body fixture directory");

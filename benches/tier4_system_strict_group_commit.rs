@@ -5,15 +5,18 @@
 //! final SST footprint capture.
 
 use cntryl_midge::{Engine, OpenOptions, Query, RecoveryPolicy, TransactionMode, WriteOptions};
-use cntryl_stress::{stress, stress_main, LogicalUnit, OperationOutcome, StressContext};
+use cntryl_stress::{
+    stress, stress_main, LogicalUnit, ObservationDirection, ObservationUnit, OperationOutcome,
+    StressContext,
+};
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
 const WRITERS: usize = 16;
-const FLUSH_WAVES: usize = 4;
-const TRANSACTIONS_PER_WRITER_PER_WAVE: usize = 16;
+const FLUSH_WAVES: usize = 8;
+const TRANSACTIONS_PER_WRITER_PER_WAVE: usize = 128;
 const VALUE_SIZE: usize = 256;
 const MEMTABLE_SIZE: usize = 128 * 1024;
 const TOTAL_TRANSACTIONS: usize = WRITERS * FLUSH_WAVES * TRANSACTIONS_PER_WRITER_PER_WAVE;
@@ -76,15 +79,26 @@ fn run_wave(engine: &Arc<Engine>, cf_id: cntryl_midge::ColumnFamilyId, wave: usi
                     + writer * TRANSACTIONS_PER_WRITER_PER_WAVE
                     + index;
                 let (key, value) = record(ordinal);
-                let mut transaction = engine
-                    .begin_tx(cf_id, TransactionMode::ReadWrite)
-                    .expect("begin strict system transaction");
-                transaction
-                    .put(key, value, None)
-                    .expect("stage strict system value");
-                transaction
-                    .commit(WriteOptions::sync())
-                    .expect("commit strict system transaction");
+                loop {
+                    let mut transaction = engine
+                        .begin_tx(cf_id, TransactionMode::ReadWrite)
+                        .expect("begin strict system transaction");
+                    transaction
+                        .put(key.clone(), value.clone(), None)
+                        .expect("stage strict system value");
+                    match transaction.commit(WriteOptions::sync()) {
+                        Ok(()) => break,
+                        Err(cntryl_midge::MidgeError::WriteStall(_)) => {
+                            assert!(
+                                engine
+                                    .wait_for_write_stall_clear(cf_id, Duration::from_secs(5))
+                                    .expect("wait for strict system write stall"),
+                                "strict system write stall did not clear"
+                            );
+                        }
+                        Err(error) => panic!("commit strict system transaction: {error}"),
+                    }
+                }
             }
         }));
     }
@@ -220,13 +234,13 @@ fn execute_system_workload() -> SystemOutcome {
 
 #[stress(
     tier = 4,
-    role = "diagnostic",
     metadata(
         component = "strict_group_commit",
         scenario = "complete_local_system",
-        diagnostic_reason = "strict_group_commit_promotion_probe"
+        measurement_shape = "fixed_workload"
     )
 )]
+#[allow(clippy::cast_precision_loss)]
 fn tier4_complete_local_strict_group_commit(ctx: &mut StressContext) {
     let outcome = execute_system_workload();
     ctx.parameter("writers", WRITERS);
@@ -247,16 +261,46 @@ fn tier4_complete_local_strict_group_commit(ctx: &mut StressContext) {
         "compacted strict workload must leave a non-empty SST footprint"
     );
     ctx.record_external_outcome(
-        "tier4_complete_local_strict_group_commit_ingest",
-        outcome.strict_ingest,
-        LogicalUnit::new("transaction"),
-        OperationOutcome::success(outcome.completed),
-    );
-    ctx.record_external_outcome(
         "tier4_complete_local_strict_group_commit_total",
         outcome.total,
         LogicalUnit::new("transaction"),
         OperationOutcome::success(outcome.completed),
+    );
+    ctx.record_observation(
+        "ingest_ns",
+        outcome.strict_ingest.as_nanos() as f64,
+        ObservationUnit::Nanoseconds,
+        ObservationDirection::Informational,
+    );
+    ctx.record_observation(
+        "wal_appends",
+        outcome.wal_appends as f64,
+        ObservationUnit::Count,
+        ObservationDirection::Informational,
+    );
+    ctx.record_observation(
+        "physical_fsyncs",
+        outcome.physical_fsyncs as f64,
+        ObservationUnit::Count,
+        ObservationDirection::Informational,
+    );
+    ctx.record_observation(
+        "commits_per_fsync",
+        outcome.completed as f64 / outcome.physical_fsyncs as f64,
+        ObservationUnit::Ratio,
+        ObservationDirection::HigherIsBetter,
+    );
+    ctx.record_observation(
+        "final_sst_count",
+        outcome.final_sst_count as f64,
+        ObservationUnit::Count,
+        ObservationDirection::Informational,
+    );
+    ctx.record_observation(
+        "final_sst_bytes",
+        outcome.final_sst_bytes as f64,
+        ObservationUnit::Bytes,
+        ObservationDirection::Informational,
     );
 }
 

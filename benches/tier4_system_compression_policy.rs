@@ -8,33 +8,30 @@
 use cntryl_midge::{
     Engine, Goal, OpenOptions, RecoveryPolicy, TransactionMode, WorkloadProfile, WriteOptions,
 };
-use cntryl_stress::{stress, stress_main, LogicalUnit, OperationOutcome, StressContext};
+use cntryl_stress::{
+    stress, stress_main, LogicalUnit, ObservationDirection, ObservationUnit, OperationOutcome,
+    StressContext,
+};
 use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-const FLUSHES: usize = 4;
-const RECORDS_PER_FLUSH: usize = 128;
+const FLUSHES: usize = 16;
+const RECORDS_PER_FLUSH: usize = 512;
 const VALUE_SIZE: usize = 16 * 1024;
 const LOGICAL_BYTES: usize = FLUSHES * RECORDS_PER_FLUSH * VALUE_SIZE;
 
 #[derive(Clone, Copy)]
 enum RecordShape {
-    Repeated,
     Structured,
     Mixed,
-    PrefixRandomTail,
-    LowCardinality,
 }
 
 impl RecordShape {
     const fn name(self) -> &'static str {
         match self {
-            Self::Repeated => "repeated",
             Self::Structured => "structured",
             Self::Mixed => "mixed",
-            Self::PrefixRandomTail => "prefix_random_tail",
-            Self::LowCardinality => "low_cardinality",
         }
     }
 }
@@ -73,10 +70,6 @@ fn structured_value(size: usize, ordinal: usize) -> Vec<u8> {
 
 fn record_value(shape: RecordShape, ordinal: usize) -> Vec<u8> {
     match shape {
-        RecordShape::Repeated => {
-            let byte = b'A' + u8::try_from(ordinal % 23).expect("ordinal fits in u8");
-            vec![byte; VALUE_SIZE]
-        }
         RecordShape::Structured => structured_value(VALUE_SIZE, ordinal),
         RecordShape::Mixed => {
             let structured = structured_value(VALUE_SIZE, ordinal);
@@ -96,30 +89,6 @@ fn record_value(shape: RecordShape, ordinal: usize) -> Vec<u8> {
                     }
                 })
                 .collect()
-        }
-        RecordShape::PrefixRandomTail => {
-            let prefix_len = VALUE_SIZE * 3 / 4;
-            let mut value = structured_value(prefix_len, ordinal);
-            value.extend(lcg_bytes(
-                VALUE_SIZE - prefix_len,
-                0x51a7_1e5d ^ u32::try_from(ordinal).expect("ordinal fits in u32"),
-            ));
-            value
-        }
-        RecordShape::LowCardinality => {
-            let symbols = [
-                b'A' + u8::try_from(ordinal % 13).expect("ordinal fits in u8"),
-                b'a' + u8::try_from(ordinal % 17).expect("ordinal fits in u8"),
-                b'0' + u8::try_from(ordinal % 10).expect("ordinal fits in u8"),
-                b'|',
-            ];
-            lcg_bytes(
-                VALUE_SIZE,
-                0xa11c_e5ed ^ u32::try_from(ordinal).expect("ordinal fits in u32"),
-            )
-            .into_iter()
-            .map(|byte| symbols[usize::from(byte) % symbols.len()])
-            .collect()
         }
     }
 }
@@ -222,6 +191,7 @@ fn execute_workload(shape: RecordShape, goal: Goal) -> WorkloadOutcome {
     }
 }
 
+#[allow(clippy::cast_precision_loss)]
 fn run_workload(ctx: &mut StressContext, shape: RecordShape, goal: Goal) {
     let outcome = execute_workload(shape, goal);
     let completed = u64::try_from(LOGICAL_BYTES).expect("logical bytes fit in u64");
@@ -236,26 +206,34 @@ fn run_workload(ctx: &mut StressContext, shape: RecordShape, goal: Goal) {
         "compression workload must leave a non-empty SST footprint"
     );
     ctx.record_external_outcome(
-        format!("engine_policy_{}_ingest_{}", goal_name(goal), shape.name()),
-        outcome.ingest,
-        LogicalUnit::new("record_value_byte"),
-        OperationOutcome::success(completed),
-    );
-    ctx.record_external_outcome(
-        format!(
-            "engine_policy_{}_flush_compaction_{}",
-            goal_name(goal),
-            shape.name()
-        ),
-        outcome.flush_compaction,
-        LogicalUnit::new("record_value_byte"),
-        OperationOutcome::success(completed),
-    );
-    ctx.record_external_outcome(
         format!("engine_policy_{}_total_{}", goal_name(goal), shape.name()),
         outcome.total,
         LogicalUnit::new("record_value_byte"),
         OperationOutcome::success(completed),
+    );
+    ctx.record_observation(
+        "ingest_ns",
+        outcome.ingest.as_nanos() as f64,
+        ObservationUnit::Nanoseconds,
+        ObservationDirection::Informational,
+    );
+    ctx.record_observation(
+        "flush_compaction_ns",
+        outcome.flush_compaction.as_nanos() as f64,
+        ObservationUnit::Nanoseconds,
+        ObservationDirection::Informational,
+    );
+    ctx.record_observation(
+        "final_sst_bytes",
+        outcome.final_sst_bytes as f64,
+        ObservationUnit::Bytes,
+        ObservationDirection::Informational,
+    );
+    ctx.record_observation(
+        "compression_ratio",
+        completed as f64 / outcome.final_sst_bytes as f64,
+        ObservationUnit::Ratio,
+        ObservationDirection::HigherIsBetter,
     );
 }
 
@@ -265,7 +243,8 @@ macro_rules! engine_policy_case {
             tier = 4,
             metadata(
                 component = "engine_compression_policy",
-                scenario = "four_flushes_and_compaction"
+                scenario = "flushes_and_compaction",
+                measurement_shape = "fixed_workload"
             )
         )]
         fn $fn_name(ctx: &mut StressContext) {
@@ -274,28 +253,11 @@ macro_rules! engine_policy_case {
     };
 }
 
-engine_policy_case!(latency_policy_repeated, Latency, Repeated);
 engine_policy_case!(latency_policy_structured, Latency, Structured);
 engine_policy_case!(latency_policy_mixed, Latency, Mixed);
-engine_policy_case!(latency_policy_prefix_random_tail, Latency, PrefixRandomTail);
-engine_policy_case!(latency_policy_low_cardinality, Latency, LowCardinality);
-engine_policy_case!(throughput_policy_repeated, Throughput, Repeated);
 engine_policy_case!(throughput_policy_structured, Throughput, Structured);
 engine_policy_case!(throughput_policy_mixed, Throughput, Mixed);
-engine_policy_case!(
-    throughput_policy_prefix_random_tail,
-    Throughput,
-    PrefixRandomTail
-);
-engine_policy_case!(
-    throughput_policy_low_cardinality,
-    Throughput,
-    LowCardinality
-);
-engine_policy_case!(economy_policy_repeated, Economy, Repeated);
 engine_policy_case!(economy_policy_structured, Economy, Structured);
 engine_policy_case!(economy_policy_mixed, Economy, Mixed);
-engine_policy_case!(economy_policy_prefix_random_tail, Economy, PrefixRandomTail);
-engine_policy_case!(economy_policy_low_cardinality, Economy, LowCardinality);
 
 stress_main!();

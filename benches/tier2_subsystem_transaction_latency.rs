@@ -15,8 +15,7 @@ mod stress_config;
 
 use cntryl_midge::diagnostics::TransactionCommitTimingSample;
 use cntryl_midge::{ColumnFamilyId, Engine, RuntimeMetricsSnapshot, TransactionMode, WriteOptions};
-use cntryl_stress::{stress, stress_main, LogicalUnit, OperationOutcome, StressContext};
-use hdrhistogram::Histogram;
+use cntryl_stress::{stress, stress_main, ObservationDirection, ObservationUnit, StressContext};
 use stress_config::init_benchmark_telemetry;
 
 const COALESCING_CLIENTS: usize = 16;
@@ -24,7 +23,7 @@ const COALESCING_TXNS_PER_CLIENT: usize = 128;
 const COALESCING_VALUE_SIZE: usize = 64;
 const LATENCY_SEQUENTIAL_TXNS: usize = 1024;
 const LATENCY_READ_ONLY_TXNS: usize = 4096;
-const LATENCY_SAMPLE_REPEATS: usize = 16;
+const LATENCY_SAMPLE_REPEATS: usize = 32;
 const READ_ONLY_BEGIN_TX_SAMPLE_REPEATS: usize = 64;
 const MIN_AVG_TXN_RECORDS_PER_APPEND: f64 = 7.0;
 
@@ -91,25 +90,12 @@ impl LatencyClientTotals {
 #[derive(Clone, Copy, Debug, Default)]
 struct CommitLatencyDistribution {
     samples: u64,
-    p50_us: u64,
-    p95_us: u64,
-    p99_us: u64,
-    max_us: u64,
 }
 
 impl CommitLatencyDistribution {
-    fn from_histogram(histogram: &Histogram<u64>) -> Self {
-        let samples = histogram.len();
-        if samples == 0 {
-            return Self::default();
-        }
-
+    fn from_sample_count(samples: usize) -> Self {
         Self {
-            samples,
-            p50_us: histogram.value_at_quantile(0.50),
-            p95_us: histogram.value_at_quantile(0.95),
-            p99_us: histogram.value_at_quantile(0.99),
-            max_us: histogram.max(),
+            samples: u64::try_from(samples).expect("commit sample count fits in u64"),
         }
     }
 }
@@ -128,9 +114,6 @@ struct CommitTimingTotals {
 
 impl CommitTimingTotals {
     fn from_samples(samples: &[TransactionCommitTimingSample]) -> Self {
-        let mut commit_latency_us =
-            Histogram::<u64>::new(3).expect("create commit latency histogram");
-
         let mut totals = Self::default();
         for sample in samples {
             totals.samples = totals.samples.saturating_add(1);
@@ -150,12 +133,9 @@ impl CommitTimingTotals {
             totals.unregister_snapshot_ns = totals
                 .unregister_snapshot_ns
                 .saturating_add(sample.unregister_snapshot_ns);
-            commit_latency_us
-                .record(ns_to_us_ceil(sample.commit_total_ns))
-                .expect("record commit latency sample");
         }
 
-        totals.commit_latency_us = CommitLatencyDistribution::from_histogram(&commit_latency_us);
+        totals.commit_latency_us = CommitLatencyDistribution::from_sample_count(samples.len());
         totals
     }
 }
@@ -169,10 +149,6 @@ struct TransactionLatencyBreakdown {
     put_us: f64,
     commit_total_us: f64,
     commit_samples: u64,
-    commit_p50_us: u64,
-    commit_p95_us: u64,
-    commit_p99_us: u64,
-    commit_max_us: u64,
     submit_apply_transaction_us: f64,
     runtime_apply_us: f64,
     submit_apply_other_us: f64,
@@ -222,10 +198,6 @@ fn duration_to_ns(duration: Duration) -> u64 {
 
 fn ns_to_avg_us(total_ns: u64, count: u64) -> f64 {
     average(total_ns, count.saturating_mul(1_000))
-}
-
-fn ns_to_us_ceil(ns: u64) -> u64 {
-    ns.saturating_add(999) / 1_000
 }
 
 fn logical_coalescing_txn_records() -> u64 {
@@ -329,7 +301,7 @@ fn run_buffered_transaction_latency_breakdown(
     cf_id: ColumnFamilyId,
     kind: LatencyWorkloadKind,
     workloads: Vec<LatencyClientWorkload>,
-) -> TransactionLatencyBreakdown {
+) -> (TransactionLatencyBreakdown, Vec<u64>) {
     let clients = workloads.len();
     let logical_txn_records = workloads
         .iter()
@@ -374,6 +346,10 @@ fn run_buffered_transaction_latency_breakdown(
         cntryl_midge::diagnostics::drain_transaction_commit_timings_for_benchmarks();
     cntryl_midge::diagnostics::disable_transaction_commit_timing_for_benchmarks();
     let commit_totals = CommitTimingTotals::from_samples(&timing_samples);
+    let commit_latencies_ns = timing_samples
+        .iter()
+        .map(|sample| sample.commit_total_ns)
+        .collect::<Vec<_>>();
     assert_eq!(commit_totals.samples, logical_txn_records);
     assert_eq!(commit_totals.succeeded, commit_totals.samples);
     assert_eq!(
@@ -381,13 +357,16 @@ fn run_buffered_transaction_latency_breakdown(
         commit_totals.samples
     );
 
-    latency_breakdown_from_totals(
-        kind,
-        logical_txn_records,
-        client_totals,
-        commit_totals,
-        &start,
-        &end,
+    (
+        latency_breakdown_from_totals(
+            kind,
+            logical_txn_records,
+            client_totals,
+            commit_totals,
+            &start,
+            &end,
+        ),
+        commit_latencies_ns,
     )
 }
 
@@ -435,10 +414,6 @@ fn latency_breakdown_from_totals(
         put_us: ns_to_avg_us(client_totals.put_ns, client_totals.transactions),
         commit_total_us: ns_to_avg_us(commit_totals.commit_total_ns, commit_totals.samples),
         commit_samples: commit_totals.samples,
-        commit_p50_us: commit_totals.commit_latency_us.p50_us,
-        commit_p95_us: commit_totals.commit_latency_us.p95_us,
-        commit_p99_us: commit_totals.commit_latency_us.p99_us,
-        commit_max_us: commit_totals.commit_latency_us.max_us,
         submit_apply_transaction_us,
         runtime_apply_us,
         submit_apply_other_us,
@@ -484,21 +459,8 @@ fn open_local_engine_with_cf(cf_name: &str) -> (Arc<Engine>, ColumnFamilyId) {
     (engine, cf.id())
 }
 
-fn record_latency_us(ctx: &mut StressContext, scenario: &str, phase: &str, latency_us: f64) {
-    if latency_us <= 0.0 {
-        return;
-    }
-    ctx.record_external_outcome(
-        format!("{scenario}_{phase}"),
-        Duration::from_secs_f64(latency_us / 1_000_000.0),
-        LogicalUnit::new("transaction"),
-        OperationOutcome::success(1),
-    );
-}
-
 fn record_transaction_latency_breakdown(
     ctx: &mut StressContext,
-    scenario: &str,
     breakdown: TransactionLatencyBreakdown,
 ) {
     for (phase, latency_us) in [
@@ -519,15 +481,12 @@ fn record_transaction_latency_breakdown(
         ),
         ("wal_append", breakdown.avg_wal_append_us),
     ] {
-        record_latency_us(ctx, scenario, phase, latency_us);
-    }
-    for (phase, latency_us) in [
-        ("commit_p50", breakdown.commit_p50_us),
-        ("commit_p95", breakdown.commit_p95_us),
-        ("commit_p99", breakdown.commit_p99_us),
-        ("commit_max", breakdown.commit_max_us),
-    ] {
-        record_latency_us(ctx, scenario, phase, u64_to_f64(latency_us));
+        ctx.record_observation(
+            format!("avg_{phase}_us"),
+            latency_us,
+            ObservationUnit::Microseconds,
+            ObservationDirection::Informational,
+        );
     }
 }
 
@@ -549,6 +508,7 @@ fn run_latency_breakdown_case(
     ctx.parameter("logical_unit", "transaction");
 
     let mut observed = None;
+    let mut commit_latencies_ns = Vec::new();
     let logical_ops = (clients * txns_per_client * LATENCY_SAMPLE_REPEATS) as u64;
     let measurement_name = match kind {
         LatencyWorkloadKind::SequentialBufferedSingleOp => "sequential_buffered_single_op",
@@ -558,9 +518,10 @@ fn run_latency_breakdown_case(
     let _completed = ctx.measure_batch(measurement_name, logical_ops, || {
         let mut completed = 0u64;
         for _ in 0..LATENCY_SAMPLE_REPEATS {
-            let breakdown =
+            let (breakdown, repeat_latencies_ns) =
                 run_buffered_transaction_latency_breakdown(&engine, cf_id, kind, workloads.clone());
             validate_transaction_latency_invariants(breakdown);
+            commit_latencies_ns.extend(repeat_latencies_ns);
             completed = completed.saturating_add(breakdown.transactions);
             observed = Some(breakdown);
         }
@@ -568,11 +529,11 @@ fn run_latency_breakdown_case(
         black_box(completed);
     });
 
-    record_transaction_latency_breakdown(
-        ctx,
-        measurement_name,
-        observed.expect("latency breakdown recorded"),
-    );
+    for latency_ns in commit_latencies_ns {
+        ctx.record_latency(Duration::from_nanos(latency_ns));
+    }
+
+    record_transaction_latency_breakdown(ctx, observed.expect("latency breakdown recorded"));
     ctx.metadata(
         "diagnostic_reason",
         "performance_guardrails_are_observational",
@@ -600,7 +561,6 @@ fn sequential_buffered_single_op(ctx: &mut StressContext) {
 
 #[stress(
     tier = 2,
-    role = "diagnostic",
     metadata(
         component = "transaction_latency",
         scenario = "concurrent_buffered_single_op"
@@ -656,10 +616,6 @@ fn read_only_begin_tx(ctx: &mut StressContext) {
         put_us: 0.0,
         commit_total_us: 0.0,
         commit_samples: 0,
-        commit_p50_us: 0,
-        commit_p95_us: 0,
-        commit_p99_us: 0,
-        commit_max_us: 0,
         submit_apply_transaction_us: 0.0,
         runtime_apply_us: 0.0,
         submit_apply_other_us: 0.0,
@@ -669,7 +625,7 @@ fn read_only_begin_tx(ctx: &mut StressContext) {
         avg_wal_append_us: 0.0,
     };
     validate_transaction_latency_invariants(breakdown);
-    record_transaction_latency_breakdown(ctx, "read_only_begin_tx", breakdown);
+    record_transaction_latency_breakdown(ctx, breakdown);
     ctx.metadata(
         "diagnostic_reason",
         "performance_guardrails_are_observational",
@@ -678,7 +634,6 @@ fn read_only_begin_tx(ctx: &mut StressContext) {
 
 #[stress(
     tier = 2,
-    role = "diagnostic",
     metadata(component = "transaction_latency", scenario = "coalescing_signal")
 )]
 fn coalescing_signal(ctx: &mut StressContext) {
@@ -710,11 +665,28 @@ fn coalescing_signal(ctx: &mut StressContext) {
         black_box(completed);
     });
 
-    black_box(observed.expect("coalescing signal recorded"));
-    ctx.metadata(
-        "diagnostic_reason",
-        "performance_guardrails_are_observational",
+    let observed = observed.expect("coalescing signal recorded");
+    ctx.record_observation(
+        "avg_txn_records_per_append",
+        observed.avg_txn_records_per_append,
+        ObservationUnit::Ratio,
+        ObservationDirection::HigherIsBetter,
     );
+    ctx.record_observation(
+        "physical_wal_appends",
+        u64_to_f64(observed.physical_wal_appends),
+        ObservationUnit::Count,
+        ObservationDirection::Informational,
+    );
+    ctx.record_observation(
+        "avg_wal_append_us",
+        observed.avg_wal_append_us,
+        ObservationUnit::Microseconds,
+        ObservationDirection::Informational,
+    );
+    let _ = ctx
+        .correctness()
+        .validation_errors(transaction_coalescing_guardrail_violations(observed));
 }
 
 stress_main!();

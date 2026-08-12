@@ -116,7 +116,11 @@ fn narrow_20_keys(ctx: &mut StressContext) {
     run_range(ctx, "narrow_20_keys", 40, 60);
 }
 
-#[stress(tier = 1, metadata(component = "iterator", scenario = "wide_80_keys"))]
+#[stress(
+    tier = 1,
+    role = "diagnostic",
+    metadata(component = "iterator", scenario = "wide_80_keys")
+)]
 fn wide_80_keys(ctx: &mut StressContext) {
     run_range(ctx, "wide_80_keys", 10, 90);
 }
