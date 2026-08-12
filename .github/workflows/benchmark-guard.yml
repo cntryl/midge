@@ -55,8 +55,12 @@ jobs:
         shell: bash
         run: |
           git worktree add ../midge-bench-base "${{ github.event.pull_request.base.sha }}"
-          cargo generate-lockfile --manifest-path ../midge-bench-base/Cargo.toml
-          cargo generate-lockfile
+          # Compare code with one dependency resolution. The base predates the
+          # typed benchmark-role API and its legacy metadata key is rejected by
+          # the pinned stress revision before the workload can run.
+          cp Cargo.lock ../midge-bench-base/Cargo.lock
+          sed -i '/ctx\.metadata("trust_class", "diagnostic");/d' \
+            ../midge-bench-base/benches/stress_config.rs
 
       - name: Build and measure base benchmark
         if: steps.changes.outputs.relevant == 'true'
