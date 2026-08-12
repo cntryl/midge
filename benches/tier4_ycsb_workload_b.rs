@@ -6,7 +6,6 @@
 mod stress_config;
 
 use cntryl_stress::{stress, stress_main, StressContext};
-use stress_config::MidgeStressContextExt as _;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,6 +18,7 @@ const DEFAULT_INITIAL_KEYS: usize = 50_000; // Overridable for larger-than-RAM n
 const WARMUP: Duration = Duration::from_secs(1);
 const MEASURED: Duration = Duration::from_secs(5);
 const LOCAL_16_MEASURED: Duration = Duration::from_secs(12);
+const CLOUD_16_MEASURED: Duration = Duration::from_secs(15);
 
 const ZIPFIAN_THETA: f64 = 0.99;
 
@@ -29,19 +29,20 @@ const CLIENTS_64: usize = 64;
 const WORKLOAD_SEED: u64 = 0xB0B0_EA5E_5678_9ABC;
 
 fn measured_duration(profile: &str, clients: usize) -> Duration {
-    if profile == "local" && clients == CLIENTS_16 {
-        LOCAL_16_MEASURED
-    } else {
-        MEASURED
+    match (profile, clients) {
+        ("local", CLIENTS_16) => LOCAL_16_MEASURED,
+        ("cloud", CLIENTS_16) => CLOUD_16_MEASURED,
+        _ => MEASURED,
     }
 }
 
 fn run_workload_b(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, clients: usize) {
     let measured_window = measured_duration(profile, clients);
-    ctx.tag("storage_profile", profile);
-    ctx.parameter("clients", clients);
-    ctx.parameter("measured_secs", measured_window.as_secs());
-    ctx.parameter("logical_unit", "ycsb_operation");
+    ycsb::configure_workload_parameters(ctx, profile, clients, measured_window);
+    ctx.parameter(
+        "logical_bytes_per_operation",
+        ycsb::logical_entry_size_bytes(),
+    );
     if profile == "local" && matches!(clients, CLIENTS_16 | CLIENTS_64) {
         stress_config::mark_local_rsd_diagnostic(ctx);
     }
@@ -101,7 +102,7 @@ fn run_workload_b(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
     // Phase 3: Measured (duration-based; multi-client)
     let client_suffix = if clients == 1 { "client" } else { "clients" };
     let measurement_name = format!("tier4_ycsb_b_{profile}_{clients}_{client_suffix}");
-    let measured = stress_config::measure_external_counted(ctx, measurement_name, || {
+    let measured = stress_config::measure_counted(ctx, measurement_name, "ycsb_operation", || {
         let measured = {
             let zipf = Arc::new(ZipfianGenerator::new(initial_keys, ZIPFIAN_THETA));
             let write_opts = measured_write_opts;
@@ -149,11 +150,7 @@ fn run_workload_b(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
         (measured, operations)
     });
 
-    ctx.set_elements(measured.operations);
-    ctx.set_bytes(measured.operations * ycsb::logical_entry_size_bytes() as u64);
-    for (name, value) in measured.latency_tags() {
-        ctx.tag(name, value.to_string());
-    }
+    measured.record_latencies(ctx);
 }
 
 #[stress(tier = 4)]
@@ -162,13 +159,13 @@ fn tier4_ycsb_b_local_1_client(ctx: &mut StressContext) {
     run_workload_b(ctx, opts, "local", CLIENTS_1);
 }
 
-#[stress(tier = 4)]
+#[stress(tier = 4, role = "diagnostic")]
 fn tier4_ycsb_b_local_16_clients(ctx: &mut StressContext) {
     let opts = stress_config::opts_for_mode("local");
     run_workload_b(ctx, opts, "local", CLIENTS_16);
 }
 
-#[stress(tier = 4)]
+#[stress(tier = 4, role = "diagnostic")]
 fn tier4_ycsb_b_local_64_clients(ctx: &mut StressContext) {
     let opts = stress_config::opts_for_mode("local");
     run_workload_b(ctx, opts, "local", CLIENTS_64);

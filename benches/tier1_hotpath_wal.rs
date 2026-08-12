@@ -129,10 +129,10 @@ fn run_encode_record(ctx: &mut StressContext, scenario: &'static str, record: &W
 
 #[stress(
     tier = 1,
+    role = "diagnostic",
     metadata(
         component = "wal_encoding",
         scenario = "encode_small_put",
-        trust_class = "diagnostic",
         validated_micro = "true"
     )
 )]
@@ -150,10 +150,10 @@ fn encode_medium_put(ctx: &mut StressContext) {
 
 #[stress(
     tier = 1,
+    role = "diagnostic",
     metadata(
         component = "wal_encoding",
         scenario = "encode_delete",
-        trust_class = "diagnostic",
         validated_micro = "true"
     )
 )]

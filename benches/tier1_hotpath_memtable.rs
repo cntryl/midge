@@ -57,7 +57,6 @@ fn run_put_single(ctx: &mut StressContext, scenario: &'static str, value_size: u
     stress_config::mark_validated_micro(ctx, "memtable_put");
 
     ctx.benchmark(scenario)
-        .warmup(2)
         .measure_batch(PUT_SINGLE_BATCH_OPS, || {
             for _ in 0..PUT_SINGLE_BATCH_SIZE {
                 let idx = key_index % keys.len();
@@ -118,7 +117,6 @@ fn get_hit(ctx: &mut StressContext) {
     stress_config::mark_validated_micro(ctx, "memtable_get_hit");
 
     ctx.benchmark("get_hit")
-        .warmup(2)
         .measure_batch(LOOKUP_HIT_BATCH_OPS, || {
             let mut hits = 0usize;
             for i in 0..LOOKUP_HIT_BATCH_SIZE {
@@ -136,7 +134,11 @@ fn get_hit(ctx: &mut StressContext) {
         });
 }
 
-#[stress(tier = 1, metadata(component = "memtable", scenario = "get_miss"))]
+#[stress(
+    tier = 1,
+    role = "diagnostic",
+    metadata(component = "memtable", scenario = "get_miss")
+)]
 fn get_miss(ctx: &mut StressContext) {
     let keys: Vec<Vec<u8>> = (0..1000).map(make_key).collect();
     let values: Vec<Vec<u8>> = (0..1000).map(make_value_indexed).collect();
@@ -153,7 +155,6 @@ fn get_miss(ctx: &mut StressContext) {
     stress_config::mark_local_rsd_diagnostic(ctx);
 
     ctx.benchmark("get_miss")
-        .warmup(2)
         .measure_batch(LOOKUP_MISS_BATCH_OPS, || {
             let mut misses = 0usize;
             for i in 0..LOOKUP_MISS_BATCH_SIZE {

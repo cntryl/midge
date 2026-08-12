@@ -37,6 +37,13 @@ impl QueuedWrite {
 /// - Memory overhead: 5000 × 512B average ≈ 2.5MB (acceptable)
 /// - Reduces frequency of backpressure triggers while providing smooth flow control
 pub(crate) const MAX_QUEUE_DEPTH: usize = 5000;
+/// Safety poll for a writer that missed or received a delayed queue wake-up.
+///
+/// Producers notify the condition variable after every enqueue, so this is not
+/// a batching window. Keep the fallback short: a stale 500 ms poll made an
+/// otherwise millisecond-scale append occasionally inherit half a second of
+/// latency and destabilized engine-level measurements.
+const IDLE_WAKE_FALLBACK: std::time::Duration = std::time::Duration::from_millis(10);
 /// Maximum buffer pool size to prevent unbounded memory growth
 /// When pool reaches this size, excess buffers are dropped instead of pooled
 /// Sized to accommodate sustained high-concurrency writes:
@@ -132,9 +139,7 @@ impl WriterRunner {
                 break;
             }
 
-            self.config
-                .queue_cond
-                .wait_for(&mut q, std::time::Duration::from_millis(500));
+            self.config.queue_cond.wait_for(&mut q, IDLE_WAKE_FALLBACK);
         }
 
         if self.should_exit_on_shutdown(&q) {
@@ -378,6 +383,7 @@ mod tests {
     use crate::io::traits::{DirEntry, FsError, Metadata};
     use crate::io::{Fs, FsPath, FsResult, OpenOptions as FsOpenOptions};
     use std::sync::atomic::{AtomicBool, AtomicU64};
+    use std::time::Duration;
 
     struct FailingOpenFs;
 
@@ -482,5 +488,29 @@ mod tests {
             .last_sync_error
             .as_deref()
             .is_some_and(|error| error.contains("could not reopen file handle")));
+    }
+
+    #[test]
+    fn should_poll_promptly_when_queue_notification_is_missed() {
+        // Arrange
+        let sync_state = Arc::new(Mutex::new(SyncState::default()));
+        let runner = runner_with_sync_state(sync_state);
+        let queue = Arc::clone(&runner.config.queue);
+        let started = Instant::now();
+        let waiter = std::thread::spawn(move || runner.wait_for_batch_or_pending_sync());
+        std::thread::sleep(Duration::from_millis(25));
+        let (ack_tx, _ack_rx) = std::sync::mpsc::sync_channel(1);
+
+        // Act: deliberately enqueue without notifying the condition variable.
+        queue.lock().push(QueuedWrite::new(vec![1], ack_tx));
+        let batch = waiter.join().expect("join WAL writer wait");
+
+        // Assert
+        assert_eq!(batch.expect("writer should observe queued work").len(), 1);
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "missed notification fallback took {:?}",
+            started.elapsed()
+        );
     }
 }

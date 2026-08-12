@@ -96,7 +96,6 @@ fn run_scan_case(
     ctx.parameter("operation_surface", "prefix_scan_first_row");
     ctx.parameter("storage_layout", layout.name());
     ctx.parameter("storage_mode", mode);
-    ctx.metadata("trust_class", "diagnostic");
     ctx.metadata("diagnostic_reason", "pending_three_clean_baselines");
     ctx.parameter("local_gate_rsd_limit_pct", 5);
 
@@ -122,18 +121,6 @@ fn run_scan_case(
     });
 
     let read_path_after = engine.read_path_diagnostics_snapshot_for_benchmarks();
-    ctx.parameter(
-        "candidate_sst_files_checked_delta",
-        read_path_after.candidate_sst_files_checked - read_path_before.candidate_sst_files_checked,
-    );
-    ctx.parameter(
-        "candidate_blocks_checked_delta",
-        read_path_after.candidate_blocks_checked - read_path_before.candidate_blocks_checked,
-    );
-    ctx.parameter(
-        "data_blocks_read_delta",
-        read_path_after.data_blocks_read - read_path_before.data_blocks_read,
-    );
     assert_eq!(
         validation_failures, 0,
         "each measured scan must return its expected first row"
@@ -151,7 +138,7 @@ fn run_scan_case(
 macro_rules! scan_rows {
     ($(($name:ident, $scenario:literal, $mode:literal, $layout:expr)),+ $(,)?) => {
         $(
-            #[stress(tier = 3)]
+            #[stress(tier = 3, role = "diagnostic")]
             fn $name(ctx: &mut StressContext) {
                 run_scan_case(ctx, $scenario, $mode, $layout);
             }

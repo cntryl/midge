@@ -52,9 +52,12 @@ fn rotate_small(ctx: &mut StressContext) {
     run_memtable_rotate(ctx, "rotate_small", 1_000);
 }
 
-#[stress(tier = 2, metadata(component = "memtable", scenario = "rotate_large"))]
+#[stress(
+    tier = 2,
+    role = "diagnostic",
+    metadata(component = "memtable", scenario = "rotate_large")
+)]
 fn rotate_large(ctx: &mut StressContext) {
-    ctx.metadata("trust_class", "diagnostic");
     ctx.metadata("diagnostic_reason", "local_rsd_above_5pct");
     ctx.parameter("local_gate_rsd_limit_pct", 5);
     run_memtable_rotate(ctx, "rotate_large", 10_000);
@@ -98,10 +101,10 @@ fn put_single_1kb(ctx: &mut StressContext) {
 
 #[stress(
     tier = 2,
+    role = "diagnostic",
     metadata(component = "memtable", scenario = "put_single_4kb")
 )]
 fn put_single_4kb(ctx: &mut StressContext) {
-    ctx.metadata("trust_class", "diagnostic");
     ctx.metadata("diagnostic_reason", "local_rsd_above_5pct");
     ctx.parameter("local_gate_rsd_limit_pct", 5);
     run_put_value_size(ctx, "put_single_4kb", 4096);

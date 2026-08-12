@@ -16,8 +16,6 @@ const RAW_COMPRESS_BATCH_SIZE: usize = 32_768;
 const RAW_ZSTD_COMPRESS_WINDOW_BLOCKS: usize = 32;
 const RAW_ZSTD_COMPRESS_WINDOW_REPEATS: usize =
     RAW_COMPRESS_BATCH_SIZE / RAW_ZSTD_COMPRESS_WINDOW_BLOCKS;
-const ZSTD_COMPRESS_WARMUP_SAMPLES: usize = 8;
-const RAW_NONE_WARMUP_SAMPLES: usize = 8;
 const RAW_LZ4_SAMPLE_COUNT: usize = 12;
 const RAW_NONE_SAMPLE_COUNT: usize = 20;
 const RAW_ZSTD_SAMPLE_COUNT: usize = 16;
@@ -60,7 +58,6 @@ fn run_compress_raw(ctx: &mut StressContext, name: &'static str, policy: &Compre
     let measurement_name = format!("compress_raw_{name}");
     ctx.benchmark(measurement_name)
         .samples(RAW_LZ4_SAMPLE_COUNT)
-        .warmup(ZSTD_COMPRESS_WARMUP_SAMPLES)
         .measure_batch(RAW_COMPRESS_BATCH_SIZE as u64, || {
             let mut bytes = 0usize;
             for _ in 0..RAW_COMPRESS_BATCH_SIZE {
@@ -87,7 +84,6 @@ fn run_compress_raw_zstd_window(
     let measurement_name = format!("compress_raw_{name}");
     ctx.benchmark(measurement_name)
         .samples(RAW_ZSTD_SAMPLE_COUNT)
-        .warmup(ZSTD_COMPRESS_WARMUP_SAMPLES)
         .measure_batch(RAW_COMPRESS_BATCH_SIZE as u64, || {
             let mut bytes = 0usize;
             for _ in 0..RAW_ZSTD_COMPRESS_WINDOW_REPEATS {
@@ -154,7 +150,6 @@ fn compress_raw_none(ctx: &mut StressContext) {
 
     ctx.benchmark("compress_raw_none")
         .samples(RAW_NONE_SAMPLE_COUNT)
-        .warmup(RAW_NONE_WARMUP_SAMPLES)
         .measure_batch(RAW_NONE_BATCH_SIZE as u64, || {
             let mut bytes = 0usize;
             for _ in 0..RAW_NONE_BATCH_SIZE {
@@ -251,9 +246,9 @@ fn run_compress_trailer_zstd_window(ctx: &mut StressContext, policy: &Compressio
     ctx.parameter("window_repeats", TRAILER_ZSTD_COMPRESS_WINDOW_REPEATS);
     ctx.parameter("logical_unit", "block_byte");
 
-    ctx.benchmark("compress_trailer_zstd3")
-        .warmup(ZSTD_COMPRESS_WARMUP_SAMPLES)
-        .measure_batch(TRAILER_ZSTD_COMPRESS_BATCH_SIZE as u64, || {
+    ctx.benchmark("compress_trailer_zstd3").measure_batch(
+        TRAILER_ZSTD_COMPRESS_BATCH_SIZE as u64,
+        || {
             let mut bytes = 0usize;
             for _ in 0..TRAILER_ZSTD_COMPRESS_WINDOW_REPEATS {
                 for block in &blocks {
@@ -262,7 +257,8 @@ fn run_compress_trailer_zstd_window(ctx: &mut StressContext, policy: &Compressio
                 }
             }
             black_box(bytes);
-        });
+        },
+    );
 }
 
 #[stress(
@@ -331,10 +327,10 @@ fn decompress_trailer_zstd3(ctx: &mut StressContext) {
 
 #[stress(
     tier = 1,
+    role = "diagnostic",
     metadata(
         component = "compression",
         scenario = "wal_compress_skip_128b",
-        trust_class = "diagnostic",
         validated_micro = "true"
     )
 )]
@@ -386,10 +382,10 @@ fn wal_compress_lz4_1kb(ctx: &mut StressContext) {
 
 #[stress(
     tier = 1,
+    role = "diagnostic",
     metadata(
         component = "compression",
         scenario = "wal_decompress_passthrough_128b",
-        trust_class = "diagnostic",
         validated_micro = "true"
     )
 )]

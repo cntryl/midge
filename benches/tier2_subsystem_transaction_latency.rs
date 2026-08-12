@@ -15,19 +15,16 @@ mod stress_config;
 
 use cntryl_midge::diagnostics::TransactionCommitTimingSample;
 use cntryl_midge::{ColumnFamilyId, Engine, RuntimeMetricsSnapshot, TransactionMode, WriteOptions};
-use cntryl_stress::{stress, stress_main, StressContext};
-use hdrhistogram::Histogram;
+use cntryl_stress::{stress, stress_main, ObservationDirection, ObservationUnit, StressContext};
 use stress_config::init_benchmark_telemetry;
 
 const COALESCING_CLIENTS: usize = 16;
 const COALESCING_TXNS_PER_CLIENT: usize = 128;
 const COALESCING_VALUE_SIZE: usize = 64;
 const LATENCY_SEQUENTIAL_TXNS: usize = 1024;
-const LATENCY_READ_ONLY_TXNS: usize = 4096;
-const LATENCY_SAMPLE_REPEATS: usize = 16;
+const LATENCY_READ_ONLY_TXNS: usize = 16_384;
+const LATENCY_SAMPLE_REPEATS: usize = 64;
 const READ_ONLY_BEGIN_TX_SAMPLE_REPEATS: usize = 64;
-const READ_ONLY_BEGIN_TX_SAMPLE_COUNT: usize = 12;
-const READ_ONLY_BEGIN_TX_WARMUP_SAMPLES: usize = 8;
 const MIN_AVG_TXN_RECORDS_PER_APPEND: f64 = 7.0;
 
 type LatencyClientWorkload = Vec<(Vec<u8>, Vec<u8>)>;
@@ -93,25 +90,12 @@ impl LatencyClientTotals {
 #[derive(Clone, Copy, Debug, Default)]
 struct CommitLatencyDistribution {
     samples: u64,
-    p50_us: u64,
-    p95_us: u64,
-    p99_us: u64,
-    max_us: u64,
 }
 
 impl CommitLatencyDistribution {
-    fn from_histogram(histogram: &Histogram<u64>) -> Self {
-        let samples = histogram.len();
-        if samples == 0 {
-            return Self::default();
-        }
-
+    fn from_sample_count(samples: usize) -> Self {
         Self {
-            samples,
-            p50_us: histogram.value_at_quantile(0.50),
-            p95_us: histogram.value_at_quantile(0.95),
-            p99_us: histogram.value_at_quantile(0.99),
-            max_us: histogram.max(),
+            samples: u64::try_from(samples).expect("commit sample count fits in u64"),
         }
     }
 }
@@ -130,9 +114,6 @@ struct CommitTimingTotals {
 
 impl CommitTimingTotals {
     fn from_samples(samples: &[TransactionCommitTimingSample]) -> Self {
-        let mut commit_latency_us =
-            Histogram::<u64>::new(3).expect("create commit latency histogram");
-
         let mut totals = Self::default();
         for sample in samples {
             totals.samples = totals.samples.saturating_add(1);
@@ -152,12 +133,9 @@ impl CommitTimingTotals {
             totals.unregister_snapshot_ns = totals
                 .unregister_snapshot_ns
                 .saturating_add(sample.unregister_snapshot_ns);
-            commit_latency_us
-                .record(ns_to_us_ceil(sample.commit_total_ns))
-                .expect("record commit latency sample");
         }
 
-        totals.commit_latency_us = CommitLatencyDistribution::from_histogram(&commit_latency_us);
+        totals.commit_latency_us = CommitLatencyDistribution::from_sample_count(samples.len());
         totals
     }
 }
@@ -165,44 +143,19 @@ impl CommitTimingTotals {
 #[derive(Clone, Copy, Debug)]
 struct TransactionLatencyBreakdown {
     kind: LatencyWorkloadKind,
-    clients: usize,
     transactions: u64,
     logical_txn_records: u64,
     begin_tx_us: f64,
     put_us: f64,
     commit_total_us: f64,
     commit_samples: u64,
-    commit_p50_us: u64,
-    commit_p95_us: u64,
-    commit_p99_us: u64,
-    commit_max_us: u64,
     submit_apply_transaction_us: f64,
     runtime_apply_us: f64,
     submit_apply_other_us: f64,
     durability_finalize_us: f64,
     unregister_snapshot_us: f64,
     runtime_submit_ack_non_wal_us: f64,
-    physical_wal_appends: u64,
     avg_wal_append_us: f64,
-    avg_txn_records_per_append: f64,
-}
-
-impl TransactionLatencyBreakdown {
-    fn dominant_phase(self) -> &'static str {
-        let mut dominant = ("begin_tx", self.begin_tx_us);
-        for candidate in [
-            ("put", self.put_us),
-            ("runtime_apply", self.runtime_apply_us),
-            ("submit_apply_other", self.submit_apply_other_us),
-            ("durability_finalize", self.durability_finalize_us),
-            ("unregister_snapshot", self.unregister_snapshot_us),
-        ] {
-            if candidate.1 > dominant.1 {
-                dominant = candidate;
-            }
-        }
-        dominant.0
-    }
 }
 
 impl TransactionCoalescingSignal {
@@ -245,10 +198,6 @@ fn duration_to_ns(duration: Duration) -> u64 {
 
 fn ns_to_avg_us(total_ns: u64, count: u64) -> f64 {
     average(total_ns, count.saturating_mul(1_000))
-}
-
-fn ns_to_us_ceil(ns: u64) -> u64 {
-    ns.saturating_add(999) / 1_000
 }
 
 fn logical_coalescing_txn_records() -> u64 {
@@ -352,7 +301,7 @@ fn run_buffered_transaction_latency_breakdown(
     cf_id: ColumnFamilyId,
     kind: LatencyWorkloadKind,
     workloads: Vec<LatencyClientWorkload>,
-) -> TransactionLatencyBreakdown {
+) -> (TransactionLatencyBreakdown, Vec<u64>) {
     let clients = workloads.len();
     let logical_txn_records = workloads
         .iter()
@@ -397,6 +346,10 @@ fn run_buffered_transaction_latency_breakdown(
         cntryl_midge::diagnostics::drain_transaction_commit_timings_for_benchmarks();
     cntryl_midge::diagnostics::disable_transaction_commit_timing_for_benchmarks();
     let commit_totals = CommitTimingTotals::from_samples(&timing_samples);
+    let commit_latencies_ns = timing_samples
+        .iter()
+        .map(|sample| sample.commit_total_ns)
+        .collect::<Vec<_>>();
     assert_eq!(commit_totals.samples, logical_txn_records);
     assert_eq!(commit_totals.succeeded, commit_totals.samples);
     assert_eq!(
@@ -404,14 +357,16 @@ fn run_buffered_transaction_latency_breakdown(
         commit_totals.samples
     );
 
-    latency_breakdown_from_totals(
-        kind,
-        clients,
-        logical_txn_records,
-        client_totals,
-        commit_totals,
-        &start,
-        &end,
+    (
+        latency_breakdown_from_totals(
+            kind,
+            logical_txn_records,
+            client_totals,
+            commit_totals,
+            &start,
+            &end,
+        ),
+        commit_latencies_ns,
     )
 }
 
@@ -433,7 +388,6 @@ fn run_read_only_begin_tx_sample(engine: &Engine, cf_id: ColumnFamilyId) -> Late
 
 fn latency_breakdown_from_totals(
     kind: LatencyWorkloadKind,
-    clients: usize,
     logical_txn_records: u64,
     client_totals: LatencyClientTotals,
     commit_totals: CommitTimingTotals,
@@ -454,17 +408,12 @@ fn latency_breakdown_from_totals(
 
     TransactionLatencyBreakdown {
         kind,
-        clients,
         transactions: client_totals.transactions,
         logical_txn_records,
         begin_tx_us: ns_to_avg_us(client_totals.begin_tx_ns, client_totals.transactions),
         put_us: ns_to_avg_us(client_totals.put_ns, client_totals.transactions),
         commit_total_us: ns_to_avg_us(commit_totals.commit_total_ns, commit_totals.samples),
         commit_samples: commit_totals.samples,
-        commit_p50_us: commit_totals.commit_latency_us.p50_us,
-        commit_p95_us: commit_totals.commit_latency_us.p95_us,
-        commit_p99_us: commit_totals.commit_latency_us.p99_us,
-        commit_max_us: commit_totals.commit_latency_us.max_us,
         submit_apply_transaction_us,
         runtime_apply_us,
         submit_apply_other_us,
@@ -477,9 +426,7 @@ fn latency_breakdown_from_totals(
             commit_totals.samples,
         ),
         runtime_submit_ack_non_wal_us: (submit_apply_transaction_us - avg_wal_append_us).max(0.0),
-        physical_wal_appends,
         avg_wal_append_us,
-        avg_txn_records_per_append: average(logical_txn_records, physical_wal_appends),
     }
 }
 
@@ -493,10 +440,6 @@ fn validate_transaction_latency_invariants(breakdown: TransactionLatencyBreakdow
             assert_eq!(breakdown.commit_samples, 0);
         }
     }
-}
-
-fn transaction_latency_guardrail_violations(_breakdown: TransactionLatencyBreakdown) -> u64 {
-    0
 }
 
 fn validate_transaction_coalescing_invariants(signal: TransactionCoalescingSignal) {
@@ -516,72 +459,35 @@ fn open_local_engine_with_cf(cf_name: &str) -> (Arc<Engine>, ColumnFamilyId) {
     (engine, cf.id())
 }
 
-fn tag_transaction_latency_breakdown(
+fn record_transaction_latency_breakdown(
     ctx: &mut StressContext,
     breakdown: TransactionLatencyBreakdown,
 ) {
-    ctx.parameter("workload", breakdown.kind.label());
-    ctx.parameter("clients", breakdown.clients);
-    ctx.parameter("transactions", breakdown.transactions);
-    ctx.parameter("begin_tx_us", format!("{:.2}", breakdown.begin_tx_us));
-    ctx.parameter("put_us", format!("{:.2}", breakdown.put_us));
-    ctx.parameter(
-        "commit_total_us",
-        format!("{:.2}", breakdown.commit_total_us),
-    );
-    ctx.parameter("commit_samples", breakdown.commit_samples);
-    ctx.parameter("commit_p50_us", breakdown.commit_p50_us);
-    ctx.parameter("commit_p95_us", breakdown.commit_p95_us);
-    ctx.parameter("commit_p99_us", breakdown.commit_p99_us);
-    ctx.parameter("commit_max_us", breakdown.commit_max_us);
-    ctx.parameter(
-        "submit_apply_transaction_us",
-        format!("{:.2}", breakdown.submit_apply_transaction_us),
-    );
-    ctx.parameter(
-        "runtime_apply_us",
-        format!("{:.2}", breakdown.runtime_apply_us),
-    );
-    ctx.parameter(
-        "submit_apply_other_us",
-        format!("{:.2}", breakdown.submit_apply_other_us),
-    );
-    ctx.parameter(
-        "durability_finalize_us",
-        format!("{:.2}", breakdown.durability_finalize_us),
-    );
-    ctx.parameter(
-        "unregister_snapshot_us",
-        format!("{:.2}", breakdown.unregister_snapshot_us),
-    );
-    ctx.parameter(
-        "runtime_submit_ack_non_wal_us",
-        format!("{:.2}", breakdown.runtime_submit_ack_non_wal_us),
-    );
-    ctx.parameter("logical_txn_records", breakdown.logical_txn_records);
-    ctx.parameter("physical_wal_appends", breakdown.physical_wal_appends);
-    ctx.parameter(
-        "avg_txn_records_per_append",
-        format!("{:.2}", breakdown.avg_txn_records_per_append),
-    );
-    ctx.parameter(
-        "avg_wal_append_us",
-        format!("{:.2}", breakdown.avg_wal_append_us),
-    );
-    ctx.parameter("dominant_phase", breakdown.dominant_phase());
-}
-
-fn tag_transaction_coalescing_signal(ctx: &mut StressContext, signal: TransactionCoalescingSignal) {
-    ctx.parameter("logical_txn_records", signal.logical_txn_records);
-    ctx.parameter("physical_wal_appends", signal.physical_wal_appends);
-    ctx.parameter(
-        "avg_txn_records_per_append",
-        format!("{:.2}", signal.avg_txn_records_per_append),
-    );
-    ctx.parameter(
-        "avg_wal_append_us",
-        format!("{:.2}", signal.avg_wal_append_us),
-    );
+    for (phase, latency_us) in [
+        ("begin_tx", breakdown.begin_tx_us),
+        ("put", breakdown.put_us),
+        ("commit_total", breakdown.commit_total_us),
+        (
+            "submit_apply_transaction",
+            breakdown.submit_apply_transaction_us,
+        ),
+        ("runtime_apply", breakdown.runtime_apply_us),
+        ("submit_apply_other", breakdown.submit_apply_other_us),
+        ("durability_finalize", breakdown.durability_finalize_us),
+        ("unregister_snapshot", breakdown.unregister_snapshot_us),
+        (
+            "runtime_submit_ack_non_wal",
+            breakdown.runtime_submit_ack_non_wal_us,
+        ),
+        ("wal_append", breakdown.avg_wal_append_us),
+    ] {
+        ctx.record_observation(
+            format!("avg_{phase}_us"),
+            latency_us,
+            ObservationUnit::Microseconds,
+            ObservationDirection::Informational,
+        );
+    }
 }
 
 fn run_latency_breakdown_case(
@@ -602,7 +508,7 @@ fn run_latency_breakdown_case(
     ctx.parameter("logical_unit", "transaction");
 
     let mut observed = None;
-    let mut guardrail_violations = 0_u64;
+    let mut commit_latencies_ns = Vec::new();
     let logical_ops = (clients * txns_per_client * LATENCY_SAMPLE_REPEATS) as u64;
     let measurement_name = match kind {
         LatencyWorkloadKind::SequentialBufferedSingleOp => "sequential_buffered_single_op",
@@ -612,11 +518,10 @@ fn run_latency_breakdown_case(
     let _completed = ctx.measure_batch(measurement_name, logical_ops, || {
         let mut completed = 0u64;
         for _ in 0..LATENCY_SAMPLE_REPEATS {
-            let breakdown =
+            let (breakdown, repeat_latencies_ns) =
                 run_buffered_transaction_latency_breakdown(&engine, cf_id, kind, workloads.clone());
             validate_transaction_latency_invariants(breakdown);
-            guardrail_violations = guardrail_violations
-                .saturating_add(transaction_latency_guardrail_violations(breakdown));
+            commit_latencies_ns.extend(repeat_latencies_ns);
             completed = completed.saturating_add(breakdown.transactions);
             observed = Some(breakdown);
         }
@@ -624,17 +529,20 @@ fn run_latency_breakdown_case(
         black_box(completed);
     });
 
-    tag_transaction_latency_breakdown(ctx, observed.expect("latency breakdown recorded"));
-    ctx.metadata("trust_class", "diagnostic");
+    for latency_ns in commit_latencies_ns {
+        ctx.record_latency(Duration::from_nanos(latency_ns));
+    }
+
+    record_transaction_latency_breakdown(ctx, observed.expect("latency breakdown recorded"));
     ctx.metadata(
         "diagnostic_reason",
         "performance_guardrails_are_observational",
     );
-    ctx.parameter("performance_guardrail_violations", guardrail_violations);
 }
 
 #[stress(
     tier = 2,
+    role = "diagnostic",
     metadata(
         component = "transaction_latency",
         scenario = "sequential_buffered_single_op"
@@ -653,6 +561,7 @@ fn sequential_buffered_single_op(ctx: &mut StressContext) {
 
 #[stress(
     tier = 2,
+    role = "diagnostic",
     metadata(
         component = "transaction_latency",
         scenario = "concurrent_buffered_single_op"
@@ -671,6 +580,7 @@ fn concurrent_buffered_single_op(ctx: &mut StressContext) {
 
 #[stress(
     tier = 2,
+    role = "diagnostic",
     metadata(component = "transaction_latency", scenario = "read_only_begin_tx")
 )]
 fn read_only_begin_tx(ctx: &mut StressContext) {
@@ -685,8 +595,6 @@ fn read_only_begin_tx(ctx: &mut StressContext) {
     let logical_ops = (LATENCY_READ_ONLY_TXNS * READ_ONLY_BEGIN_TX_SAMPLE_REPEATS) as u64;
     let _completed = ctx
         .benchmark("read_only_begin_tx")
-        .samples(READ_ONLY_BEGIN_TX_SAMPLE_COUNT)
-        .warmup(READ_ONLY_BEGIN_TX_WARMUP_SAMPLES)
         .measure_batch(logical_ops, || {
             let mut completed = 0u64;
             let mut begin_tx_ns = 0u64;
@@ -703,39 +611,31 @@ fn read_only_begin_tx(ctx: &mut StressContext) {
 
     let breakdown = TransactionLatencyBreakdown {
         kind: LatencyWorkloadKind::ReadOnlyBeginTx,
-        clients: 1,
         transactions: observed.transactions,
         logical_txn_records: 0,
         begin_tx_us: ns_to_avg_us(observed.begin_tx_ns, observed.transactions),
         put_us: 0.0,
         commit_total_us: 0.0,
         commit_samples: 0,
-        commit_p50_us: 0,
-        commit_p95_us: 0,
-        commit_p99_us: 0,
-        commit_max_us: 0,
         submit_apply_transaction_us: 0.0,
         runtime_apply_us: 0.0,
         submit_apply_other_us: 0.0,
         durability_finalize_us: 0.0,
         unregister_snapshot_us: 0.0,
         runtime_submit_ack_non_wal_us: 0.0,
-        physical_wal_appends: 0,
         avg_wal_append_us: 0.0,
-        avg_txn_records_per_append: 0.0,
     };
     validate_transaction_latency_invariants(breakdown);
-    tag_transaction_latency_breakdown(ctx, breakdown);
-    ctx.metadata("trust_class", "diagnostic");
+    record_transaction_latency_breakdown(ctx, breakdown);
     ctx.metadata(
         "diagnostic_reason",
         "performance_guardrails_are_observational",
     );
-    ctx.parameter("performance_guardrail_violations", 0_u64);
 }
 
 #[stress(
     tier = 2,
+    role = "diagnostic",
     metadata(component = "transaction_latency", scenario = "coalescing_signal")
 )]
 fn coalescing_signal(ctx: &mut StressContext) {
@@ -747,7 +647,6 @@ fn coalescing_signal(ctx: &mut StressContext) {
     ctx.parameter("logical_unit", "transaction_record");
 
     let mut observed = None;
-    let mut guardrail_violations = 0_u64;
     let logical_ops =
         logical_coalescing_txn_records().saturating_mul(LATENCY_SAMPLE_REPEATS as u64);
     let _completed = ctx.measure_batch("coalescing_signal", logical_ops, || {
@@ -755,8 +654,7 @@ fn coalescing_signal(ctx: &mut StressContext) {
         for _ in 0..LATENCY_SAMPLE_REPEATS {
             let signal = run_transaction_coalescing_signal(&engine, cf_id);
             validate_transaction_coalescing_invariants(signal);
-            guardrail_violations = guardrail_violations
-                .saturating_add(transaction_coalescing_guardrail_violations(signal));
+            black_box(transaction_coalescing_guardrail_violations(signal));
             black_box((
                 signal.physical_wal_appends,
                 signal.avg_txn_records_per_append,
@@ -769,13 +667,28 @@ fn coalescing_signal(ctx: &mut StressContext) {
         black_box(completed);
     });
 
-    tag_transaction_coalescing_signal(ctx, observed.expect("coalescing signal recorded"));
-    ctx.metadata("trust_class", "diagnostic");
-    ctx.metadata(
-        "diagnostic_reason",
-        "performance_guardrails_are_observational",
+    let observed = observed.expect("coalescing signal recorded");
+    ctx.record_observation(
+        "avg_txn_records_per_append",
+        observed.avg_txn_records_per_append,
+        ObservationUnit::Ratio,
+        ObservationDirection::HigherIsBetter,
     );
-    ctx.parameter("performance_guardrail_violations", guardrail_violations);
+    ctx.record_observation(
+        "physical_wal_appends",
+        u64_to_f64(observed.physical_wal_appends),
+        ObservationUnit::Count,
+        ObservationDirection::Informational,
+    );
+    ctx.record_observation(
+        "avg_wal_append_us",
+        observed.avg_wal_append_us,
+        ObservationUnit::Microseconds,
+        ObservationDirection::Informational,
+    );
+    let _ = ctx
+        .correctness()
+        .validation_errors(transaction_coalescing_guardrail_violations(observed));
 }
 
 stress_main!();

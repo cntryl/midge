@@ -38,10 +38,10 @@ fn build_filter(expected_keys: usize) -> (cntryl_midge::sst::bloom::BloomReader,
 
 #[stress(
     tier = 1,
+    role = "diagnostic",
     metadata(
         component = "bloom",
         scenario = "maybe_contains_hit",
-        trust_class = "diagnostic",
         validated_micro = "true"
     )
 )]
@@ -68,10 +68,10 @@ fn maybe_contains_hit(ctx: &mut StressContext) {
 
 #[stress(
     tier = 1,
+    role = "diagnostic",
     metadata(
         component = "bloom",
         scenario = "maybe_contains_miss",
-        trust_class = "diagnostic",
         validated_micro = "true"
     )
 )]
@@ -138,10 +138,10 @@ fn batch_100_lookups_mixed(ctx: &mut StressContext) {
 
 #[stress(
     tier = 1,
+    role = "diagnostic",
     metadata(
         component = "bloom",
         scenario = "hashes_via_miss",
-        trust_class = "diagnostic",
         validated_micro = "true"
     )
 )]

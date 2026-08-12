@@ -297,6 +297,7 @@ const LOOKUP_VARIANT_SAMPLE_COUNT: usize = 12;
 
 #[stress(
     tier = 2,
+    role = "diagnostic",
     metadata(component = "read_amplification", scenario = "point_lookups_zipfian")
 )]
 fn point_lookups_zipfian(ctx: &mut StressContext) {
@@ -304,7 +305,6 @@ fn point_lookups_zipfian(ctx: &mut StressContext) {
     ctx.parameter("lookup_count", LOOKUPS_PER_SAMPLE_REPEAT);
     ctx.parameter("distribution", "zipfian");
     ctx.parameter("logical_unit", "lsm_key_probe");
-    ctx.metadata("trust_class", "diagnostic");
     ctx.metadata("diagnostic_reason", "local_rsd_above_5pct");
     ctx.parameter("local_gate_rsd_limit_pct", 5);
 
@@ -337,6 +337,7 @@ fn point_lookups_zipfian(ctx: &mut StressContext) {
 
 #[stress(
     tier = 2,
+    role = "diagnostic",
     metadata(component = "read_amplification", scenario = "mixed_get_scan")
 )]
 fn mixed_get_scan(ctx: &mut StressContext) {
@@ -351,7 +352,6 @@ fn mixed_get_scan(ctx: &mut StressContext) {
     ctx.parameter("scans", MIXED_SCANS_PER_SAMPLE_REPEAT);
     ctx.parameter("scan_width", SCAN_WIDTH);
     ctx.parameter("logical_unit", "lsm_key_probe");
-    ctx.metadata("trust_class", "diagnostic");
     ctx.metadata("diagnostic_reason", "local_rsd_above_5pct");
     ctx.parameter("local_gate_rsd_limit_pct", 5);
 
@@ -391,6 +391,7 @@ fn mixed_get_scan(ctx: &mut StressContext) {
 
 #[stress(
     tier = 2,
+    role = "diagnostic",
     metadata(component = "read_amplification", scenario = "uniform_distribution")
 )]
 fn uniform_distribution(ctx: &mut StressContext) {
@@ -398,7 +399,6 @@ fn uniform_distribution(ctx: &mut StressContext) {
     ctx.parameter("lookup_count", LOOKUPS_PER_SAMPLE_REPEAT);
     ctx.parameter("distribution", "uniform");
     ctx.parameter("logical_unit", "lsm_key_probe");
-    ctx.metadata("trust_class", "diagnostic");
     ctx.metadata("diagnostic_reason", "local_rsd_above_5pct");
     ctx.parameter("local_gate_rsd_limit_pct", 5);
 

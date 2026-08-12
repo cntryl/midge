@@ -10,8 +10,10 @@ const BLOCK_SIZE: usize = 4096;
 const SST_ID: u64 = 1;
 const WARM_SCAN_REPEATS: usize = 512;
 const WARM_SCAN_REPEAT_OPS: u64 = 512;
-const COLD_SCAN_REPEATS: usize = 32;
-const COLD_SCAN_REPEAT_OPS: u64 = 32;
+// Cache construction is intentionally part of the cold-scan question. Use enough
+// independent caches per sample that allocator and scheduler jitter average out.
+const COLD_SCAN_REPEATS: usize = 128;
+const COLD_SCAN_REPEAT_OPS: u64 = 128;
 
 struct RangeScan {
     start_block: usize,
@@ -151,6 +153,7 @@ fn cold_1000_blocks(ctx: &mut StressContext) {
 
 #[stress(
     tier = 2,
+    role = "diagnostic",
     metadata(component = "range_scan_cache", scenario = "strided_warm")
 )]
 fn strided_warm(ctx: &mut StressContext) {
@@ -167,7 +170,6 @@ fn strided_warm(ctx: &mut StressContext) {
     ctx.parameter("num_accesses", num_accesses);
     ctx.parameter("scan_repeats", WARM_SCAN_REPEATS);
     ctx.parameter("logical_unit", "cache_scan_block");
-    ctx.metadata("trust_class", "diagnostic");
     ctx.metadata("diagnostic_reason", "local_rsd_above_5pct");
     ctx.parameter("local_gate_rsd_limit_pct", 5);
 
@@ -192,6 +194,7 @@ fn strided_warm(ctx: &mut StressContext) {
 
 #[stress(
     tier = 2,
+    role = "diagnostic",
     metadata(component = "range_scan_cache", scenario = "strided_cold")
 )]
 fn strided_cold(ctx: &mut StressContext) {
@@ -202,7 +205,6 @@ fn strided_cold(ctx: &mut StressContext) {
     ctx.parameter("num_accesses", num_accesses);
     ctx.parameter("scan_repeats", COLD_SCAN_REPEATS);
     ctx.parameter("logical_unit", "cache_scan_block");
-    ctx.metadata("trust_class", "diagnostic");
     ctx.metadata("diagnostic_reason", "local_rsd_above_5pct");
     ctx.parameter("local_gate_rsd_limit_pct", 5);
 

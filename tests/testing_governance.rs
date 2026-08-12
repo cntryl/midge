@@ -62,6 +62,120 @@ fn should_reject_benchmark_candidate_beyond_regression_budget() {
 }
 
 #[test]
+fn should_accept_initial_benchmark_summary_without_baseline() {
+    // Arrange
+    let temp = tempfile::tempdir().expect("create benchmark summary fixture directory");
+    let manifest = temp.path().join("bench_results.json");
+    fs::write(
+        &manifest,
+        r#"{"comparison_summary":{"baseline_available":false,"critical":0,"new":517,"missing":0}}"#,
+    )
+    .expect("write initial benchmark summary fixture");
+
+    // Act
+    let output = Command::new("python3")
+        .arg("scripts/validate_benchmark_summary_bootstrap.py")
+        .arg(&manifest)
+        .output()
+        .expect("validate initial benchmark summary");
+
+    // Assert
+    assert!(
+        output.status.success(),
+        "initial benchmark summary was rejected: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn should_reject_failed_benchmark_summary_when_baseline_exists() {
+    // Arrange
+    let temp = tempfile::tempdir().expect("create benchmark summary fixture directory");
+    let manifest = temp.path().join("bench_results.json");
+    fs::write(
+        &manifest,
+        r#"{"comparison_summary":{"baseline_available":true,"critical":0,"new":1,"missing":0}}"#,
+    )
+    .expect("write baseline benchmark summary fixture");
+
+    // Act
+    let output = Command::new("python3")
+        .arg("scripts/validate_benchmark_summary_bootstrap.py")
+        .arg(&manifest)
+        .output()
+        .expect("validate baseline benchmark summary");
+
+    // Assert
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not an initial no-baseline report"));
+}
+
+#[test]
+fn should_use_typed_roles_when_benchmark_is_non_gating() {
+    // Arrange
+    let bench_paths = fs::read_dir("benches").expect("read benchmark directory");
+    let mut legacy_role_authors = Vec::new();
+
+    // Act
+    for entry in bench_paths {
+        let path = entry.expect("read benchmark entry").path();
+        if path.extension().is_none_or(|extension| extension != "rs") {
+            continue;
+        }
+        let source = fs::read_to_string(&path).expect("read benchmark source");
+        if source.contains("trust_class") {
+            legacy_role_authors.push(path);
+        }
+    }
+
+    // Assert
+    assert!(
+        legacy_role_authors.is_empty(),
+        "benchmark roles must use #[stress(role = ...)] or the typed row builder: {legacy_role_authors:?}"
+    );
+}
+
+#[test]
+fn should_enforce_focused_benchmark_observation_contract() {
+    // Arrange
+    let transaction = fs::read_to_string("benches/tier2_subsystem_transaction_latency.rs")
+        .expect("read transaction benchmark");
+    let durability = fs::read_to_string("benches/tier2_subsystem_durability_commit_latency.rs")
+        .expect("read durability benchmark");
+    let compression = fs::read_to_string("benches/tier4_system_compression_policy.rs")
+        .expect("read compression benchmark");
+    let strict = fs::read_to_string("benches/tier4_system_strict_group_commit.rs")
+        .expect("read strict system benchmark");
+
+    // Act
+    let required_compression_shapes = [
+        "Repeated",
+        "Structured",
+        "Mixed",
+        "PrefixRandomTail",
+        "LowCardinality",
+    ];
+
+    // Assert
+    assert!(transaction.contains("avg_txn_records_per_append"));
+    assert!(transaction.contains("validation_errors"));
+    assert!(!transaction.contains("format!(\"{scenario}_{phase}\")"));
+    assert!(!durability.contains("record_commit_percentiles"));
+    assert!(durability.contains("commits_per_fsync"));
+    for shape in required_compression_shapes {
+        assert!(
+            compression.contains(shape),
+            "missing compression shape {shape}"
+        );
+    }
+    assert!(transaction.contains("role = \"diagnostic\""));
+    assert!(strict.contains("role = \"diagnostic\""));
+    assert!(strict.contains("final_sst_bytes"));
+    assert!(strict.contains("write_stall_recoveries"));
+    assert!(strict.contains("MAX_WRITE_STALL_RECOVERIES_PER_COMMIT"));
+}
+
+#[test]
 fn should_require_complete_acceptance_audit_given_pull_request_body() {
     // Arrange
     let temp = tempfile::tempdir().expect("create PR body fixture directory");

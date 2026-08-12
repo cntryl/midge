@@ -13,7 +13,6 @@ const TRIE_FINDS_PER_LOGICAL_OPERATION: usize = 32;
 const PREFIX_RANGE_BATCH_SIZE: usize = 65_536;
 const TRIE_PREFIX_RANGES_PER_LOGICAL_OPERATION: usize = 32;
 const TRIE_NOISY_SAMPLE_COUNT: usize = 12;
-const TRIE_NOISY_WARMUP_SAMPLES: usize = 8;
 
 type FindCase = (Vec<u8>, Option<u32>);
 
@@ -85,7 +84,6 @@ fn measure_find_block_stable(
 
     ctx.benchmark(scenario)
         .samples(TRIE_NOISY_SAMPLE_COUNT)
-        .warmup(TRIE_NOISY_WARMUP_SAMPLES)
         .measure_batch(find_logical_operation_count(), || {
             let mut found = 0u32;
             for _ in 0..FIND_BLOCK_BATCH_SIZE {

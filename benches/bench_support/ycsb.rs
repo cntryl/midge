@@ -17,6 +17,7 @@ use hdrhistogram::Histogram;
 use cntryl_midge::{
     ColumnFamilyHandle, Engine, MidgeEngine, MidgeError, MidgeResult, TransactionMode, WriteOptions,
 };
+use cntryl_stress::StressContext;
 
 use super::config::{MidgeOptions, StorageMode};
 
@@ -26,13 +27,16 @@ pub const DEFAULT_VALUE_SIZE: usize = 128;
 pub const TIER4_MEMTABLE_SIZE_BYTES: usize = 4 * 1024 * 1024;
 pub const TIER4_MEMORY_MEMTABLE_SIZE_BYTES: usize = 512 * 1024 * 1024;
 
-#[derive(Clone, Copy, Debug, Default)]
+const EXPORTED_LATENCY_QUANTILES: usize = 256;
+
+#[derive(Clone, Debug, Default)]
 pub struct MultiClientRunStats {
     pub operations: u64,
     pub latency_p50_us: u64,
     pub latency_p95_us: u64,
     pub latency_p99_us: u64,
     pub latency_max_us: u64,
+    latency_quantiles_us: Vec<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -289,15 +293,52 @@ impl RuntimePerfReport {
 }
 
 impl MultiClientRunStats {
-    #[must_use]
-    pub fn latency_tags(&self) -> [(&'static str, u64); 4] {
-        [
-            ("latency_p50_us", self.latency_p50_us),
-            ("latency_p95_us", self.latency_p95_us),
-            ("latency_p99_us", self.latency_p99_us),
-            ("latency_max_us", self.latency_max_us),
-        ]
+    /// Attach a bounded, deterministic approximation of the aggregate
+    /// operation-latency distribution to the latest stress measurement.
+    pub fn record_latencies(&self, ctx: &mut StressContext) {
+        for latency_us in &self.latency_quantiles_us {
+            ctx.record_latency(Duration::from_micros(*latency_us));
+        }
     }
+}
+
+fn latency_quantiles_us(histogram: &Histogram<u64>) -> Vec<u64> {
+    if histogram.is_empty() {
+        return Vec::new();
+    }
+
+    (0..EXPORTED_LATENCY_QUANTILES)
+        .map(|index| {
+            let numerator = u32::try_from(index).expect("latency quantile index fits in u32");
+            let denominator = u32::try_from(EXPORTED_LATENCY_QUANTILES - 1)
+                .expect("latency quantile count fits in u32");
+            let quantile = f64::from(numerator) / f64::from(denominator);
+            histogram.value_at_quantile(quantile)
+        })
+        .collect()
+}
+
+pub fn configure_workload_parameters(
+    ctx: &mut StressContext,
+    profile: &str,
+    clients: usize,
+    measured: Duration,
+) {
+    ctx.parameter("storage_profile", profile);
+    ctx.parameter("clients", clients);
+    ctx.parameter("measured_secs", measured.as_secs());
+    ctx.parameter(
+        "latency_observation_source",
+        "aggregate_histogram_256_quantiles",
+    );
+}
+
+/// Add asynchronous cloud-upload failures to the latest measurement's
+/// canonical correctness counters.
+pub fn record_runtime_correctness(ctx: &mut StressContext, report: &RuntimePerfReport) {
+    let _ = ctx
+        .correctness()
+        .failures(report.cloud_async_wal_uploads_failed);
 }
 
 struct ClientRunStats {
@@ -782,6 +823,42 @@ where
     }
 }
 
+/// Retry write stalls and report whether the logical operation completed
+/// before the workload stop signal was observed.
+///
+/// # Errors
+/// Returns any non-`WriteStall` engine error from `op`, or any error returned
+/// while waiting for backpressure to clear.
+pub fn retry_write_stall_observed<F>(
+    engine: &MidgeEngine,
+    cf_id: cntryl_midge::ColumnFamilyId,
+    stop: &AtomicBool,
+    mut op: F,
+) -> MidgeResult<bool>
+where
+    F: FnMut() -> MidgeResult<()>,
+{
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+
+        match op() {
+            Ok(()) => return Ok(true),
+            Err(MidgeError::WriteStall(_)) => {
+                while !stop.load(Ordering::Acquire) {
+                    match engine.wait_for_write_stall_clear(cf_id, Duration::from_millis(50)) {
+                        Ok(true) => break,
+                        Ok(false) | Err(MidgeError::WriteStall(_)) => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 /// Run `clients` independent client loops concurrently for `duration` and return total ops.
 ///
 /// Core contract:
@@ -951,6 +1028,7 @@ where
         latency_p95_us: latency_us.value_at_percentile(95.0),
         latency_p99_us: latency_us.value_at_percentile(99.0),
         latency_max_us: latency_us.max(),
+        latency_quantiles_us: latency_quantiles_us(&latency_us),
     }
 }
 
@@ -1028,6 +1106,7 @@ where
             latency_p95_us: latency_us.value_at_percentile(95.0),
             latency_p99_us: latency_us.value_at_percentile(99.0),
             latency_max_us: latency_us.max(),
+            latency_quantiles_us: latency_quantiles_us(&latency_us),
         },
         elapsed,
     )

@@ -30,7 +30,6 @@ fn run_read_old_version_case(
     ctx.parameter("operation_surface", "mvcc_old_version_read");
     ctx.parameter("begin_tx_included", "false");
     ctx.parameter("rotating_key_count", num_keys);
-    ctx.metadata("trust_class", "diagnostic");
     ctx.metadata("diagnostic_reason", "pending_three_clean_baselines");
     ctx.parameter("local_gate_rsd_limit_pct", 5);
 
@@ -98,19 +97,12 @@ fn run_read_old_version_case(
     });
 
     let read_path_after = engine.read_path_diagnostics_snapshot_for_benchmarks();
-    ctx.parameter(
-        "read_only_begin_tx_delta",
-        read_path_after.read_only_begin_tx_count - read_path_before.read_only_begin_tx_count,
-    );
-    ctx.parameter(
-        "candidate_sst_files_checked_delta",
-        read_path_after.candidate_sst_files_checked - read_path_before.candidate_sst_files_checked,
-    );
-    ctx.parameter(
-        "candidate_blocks_checked_delta",
-        read_path_after.candidate_blocks_checked - read_path_before.candidate_blocks_checked,
-    );
     assert_eq!(validation_failures, 0, "measured MVCC reads must validate");
+    assert!(
+        read_path_after.candidate_sst_files_checked > read_path_before.candidate_sst_files_checked
+            && read_path_after.candidate_blocks_checked > read_path_before.candidate_blocks_checked,
+        "MVCC old-version row must exercise candidate SST and block work"
+    );
 
     // Engine shutdown waits for active transaction guards so it cannot release
     // its lease while a snapshot still references the runtime. End the
@@ -119,13 +111,13 @@ fn run_read_old_version_case(
     drop(engine);
 }
 
-#[stress(tier = 3)]
+#[stress(tier = 3, role = "diagnostic")]
 fn tier3_mvcc_read_old_version_local(ctx: &mut StressContext) {
     let opts = stress_config::opts_for_mode("local");
     run_read_old_version_case(ctx, "tier3_mvcc_read_old_version_local", opts, 1_000);
 }
 
-#[stress(tier = 3)]
+#[stress(tier = 3, role = "diagnostic")]
 fn tier3_mvcc_read_old_version_cloud(ctx: &mut StressContext) {
     let opts = stress_config::opts_for_mode("cloud");
     run_read_old_version_case(ctx, "tier3_mvcc_read_old_version_cloud", opts, 1_000);

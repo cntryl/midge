@@ -145,7 +145,6 @@ fn run_repeated_block_compress(
         ctx.parameter("data_shape", "mixed");
     }
     if policy_name == "zstd9" && size == 16 * 1024 {
-        ctx.metadata("trust_class", "diagnostic");
         ctx.metadata("diagnostic_reason", "local_rsd_above_5pct");
         ctx.parameter("local_gate_rsd_limit_pct", 5);
     }
@@ -193,6 +192,12 @@ fn run_zstd9_64k_windowed_compress(ctx: &mut StressContext, policy: &Compression
 }
 
 macro_rules! block_compress_case {
+    ($fn_name:ident, $size:expr, $policy_name:literal, $policy:expr, diagnostic) => {
+        #[stress(tier = 2, role = "diagnostic", metadata(component = "compression"))]
+        fn $fn_name(ctx: &mut StressContext) {
+            run_block_compress(ctx, $size, $policy_name, &$policy);
+        }
+    };
     ($fn_name:ident, $size:expr, $policy_name:literal, $policy:expr) => {
         #[stress(tier = 2, metadata(component = "compression"))]
         fn $fn_name(ctx: &mut StressContext) {
@@ -217,7 +222,8 @@ block_compress_case!(
     block_compress_zstd9_16k,
     16 * 1024,
     "zstd9",
-    CompressionPolicy::Fixed(CompressionAlgo::Zstd9)
+    CompressionPolicy::Fixed(CompressionAlgo::Zstd9),
+    diagnostic
 );
 block_compress_case!(
     block_compress_adaptive_16k,
@@ -313,7 +319,6 @@ fn run_lz4_64k_windowed_decompress(ctx: &mut StressContext, policy: &Compression
     let _completed = ctx
         .benchmark("block_decompress_lz4_64k")
         .samples(10)
-        .warmup(2)
         .measure_batch(
             (bytes_per_window * LZ4_64K_DECOMPRESS_WINDOW_REPEATS) as u64,
             || {

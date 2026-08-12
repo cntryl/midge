@@ -10,7 +10,7 @@ use cntryl_midge::Bytes;
 use cntryl_stress::{black_box, stress, stress_main, StressContext};
 
 const ITER_SINGLE_STEP_BATCH_SIZE: usize = 1_048_576;
-const RANGE_SCAN_BATCH_SIZE: usize = 512;
+const RANGE_SCAN_BATCH_SIZE: usize = 2_048;
 const SEEK_WINDOW_COUNT: usize = 64;
 
 #[inline]
@@ -116,7 +116,11 @@ fn narrow_20_keys(ctx: &mut StressContext) {
     run_range(ctx, "narrow_20_keys", 40, 60);
 }
 
-#[stress(tier = 1, metadata(component = "iterator", scenario = "wide_80_keys"))]
+#[stress(
+    tier = 1,
+    role = "diagnostic",
+    metadata(component = "iterator", scenario = "wide_80_keys")
+)]
 fn wide_80_keys(ctx: &mut StressContext) {
     run_range(ctx, "wide_80_keys", 10, 90);
 }
@@ -156,6 +160,7 @@ fn next_after_seek(ctx: &mut StressContext) {
 
 #[stress(
     tier = 1,
+    role = "diagnostic",
     metadata(component = "iterator", scenario = "range_beginning")
 )]
 fn range_beginning(ctx: &mut StressContext) {
@@ -163,13 +168,21 @@ fn range_beginning(ctx: &mut StressContext) {
     run_range(ctx, "range_beginning", 0, 10);
 }
 
-#[stress(tier = 1, metadata(component = "iterator", scenario = "range_middle"))]
+#[stress(
+    tier = 1,
+    role = "diagnostic",
+    metadata(component = "iterator", scenario = "range_middle")
+)]
 fn range_middle(ctx: &mut StressContext) {
     stress_config::mark_local_rsd_diagnostic(ctx);
     run_range(ctx, "range_middle", 45, 55);
 }
 
-#[stress(tier = 1, metadata(component = "iterator", scenario = "range_end"))]
+#[stress(
+    tier = 1,
+    role = "diagnostic",
+    metadata(component = "iterator", scenario = "range_end")
+)]
 fn range_end(ctx: &mut StressContext) {
     stress_config::mark_local_rsd_diagnostic(ctx);
     run_range(ctx, "range_end", 90, 100);
@@ -185,6 +198,7 @@ fn unbounded_50_keys(ctx: &mut StressContext) {
 
 #[stress(
     tier = 1,
+    role = "diagnostic",
     metadata(component = "iterator", scenario = "bounded_50_keys")
 )]
 fn bounded_50_keys(ctx: &mut StressContext) {

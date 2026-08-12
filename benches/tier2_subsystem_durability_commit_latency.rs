@@ -8,13 +8,15 @@
 mod stress_config;
 
 use cntryl_midge::{ColumnFamilyId, Engine, RuntimeMetricsSnapshot, TransactionMode, WriteOptions};
-use cntryl_stress::{stress, stress_main, StressContext};
+use cntryl_stress::{
+    stress, stress_main, LogicalUnit, ObservationDirection, ObservationUnit, OperationOutcome,
+    StressContext,
+};
 use hdrhistogram::Histogram;
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
 const VALUE_SIZE: usize = 128;
-const TRANSACTIONS_PER_SAMPLE: usize = 512;
 const ROTATION_VALUE_SIZE: usize = 4 * 1024;
 const ROTATION_MEMTABLE_BYTES: usize = 128 * 1024;
 const ROTATION_WARMUP_TRANSACTIONS: usize = 64;
@@ -24,11 +26,9 @@ const ROTATION_RUNS: usize = 5;
 struct StrictCommitSample {
     elapsed: Duration,
     completed: u64,
-    commit_p50_us: u64,
-    commit_p95_us: u64,
-    commit_p99_us: u64,
     wal_appends: u64,
     physical_fsyncs: u64,
+    commit_latencies_us: Vec<u64>,
 }
 
 struct RotationRunSample {
@@ -39,7 +39,6 @@ struct RotationRunSample {
     rotation_commit_p95_us: u64,
     non_rotation_commit_p95_us: u64,
     rotation_commits: u64,
-    throughput_ops_per_second: f64,
     wal_fsyncs: u64,
     wal_fsync_ns_total: u64,
     wal_fsync_ns_max: u64,
@@ -56,40 +55,31 @@ fn metrics_delta(start: &RuntimeMetricsSnapshot, end: &RuntimeMetricsSnapshot) -
     )
 }
 
-fn u64_to_f64(value: u64) -> f64 {
-    let upper = u32::try_from(value >> 32).expect("upper half fits in u32");
-    let lower = u32::try_from(value & u64::from(u32::MAX)).expect("lower half fits in u32");
-    f64::from(upper) * 4_294_967_296.0 + f64::from(lower)
-}
-
 fn median_u64(values: impl IntoIterator<Item = u64>) -> u64 {
     let mut values = values.into_iter().collect::<Vec<_>>();
     values.sort_unstable();
     values[values.len() / 2]
 }
 
-fn median_f64(values: impl IntoIterator<Item = f64>) -> f64 {
-    let mut values = values.into_iter().collect::<Vec<_>>();
-    values.sort_by(f64::total_cmp);
-    values[values.len() / 2]
+fn u64_to_f64(value: u64) -> f64 {
+    let upper = u32::try_from(value >> 32).expect("upper half fits in u32");
+    let lower = u32::try_from(value & u64::from(u32::MAX)).expect("lower half fits in u32");
+    f64::from(upper) * 4_294_967_296.0 + f64::from(lower)
 }
 
-fn relative_standard_deviation_percent(values: impl IntoIterator<Item = f64>) -> f64 {
-    let values = values.into_iter().collect::<Vec<_>>();
-    let count = u32::try_from(values.len()).expect("sample count fits in u32");
-    let mean = values.iter().sum::<f64>() / f64::from(count);
-    if mean == 0.0 {
-        return 0.0;
-    }
-    let variance = values
-        .iter()
-        .map(|value| {
-            let delta = value - mean;
-            delta * delta
-        })
-        .sum::<f64>()
-        / f64::from(count);
-    variance.sqrt() / mean * 100.0
+fn record_success(
+    ctx: &mut StressContext,
+    name: impl Into<String>,
+    duration: Duration,
+    logical_unit: &'static str,
+    completed: u64,
+) {
+    ctx.record_external_outcome(
+        name,
+        duration,
+        LogicalUnit::new(logical_unit),
+        OperationOutcome::success(completed),
+    );
 }
 
 fn commit_rotation_value(engine: &Engine, cf_id: ColumnFamilyId, ordinal: usize, key_prefix: &str) {
@@ -178,9 +168,6 @@ fn execute_rotation_run() -> RotationRunSample {
         rotation_commit_p95_us: rotation.value_at_quantile(0.95),
         non_rotation_commit_p95_us: non_rotation.value_at_quantile(0.95),
         rotation_commits,
-        throughput_ops_per_second: u64_to_f64(
-            u64::try_from(ROTATION_TRANSACTIONS_PER_RUN).expect("transaction count fits u64"),
-        ) / elapsed.as_secs_f64(),
         wal_fsyncs: end_metrics
             .wal_fsync_count
             .saturating_sub(start_metrics.wal_fsync_count),
@@ -234,7 +221,13 @@ fn writer_workload(
 }
 
 fn execute_strict_commit_case(writers: usize) -> StrictCommitSample {
-    assert!(TRANSACTIONS_PER_SAMPLE.is_multiple_of(writers));
+    let transactions_per_sample: usize = match writers {
+        1 => 2_048,
+        16 => 8_192,
+        64 => 32_768,
+        _ => panic!("unsupported strict commit writer count"),
+    };
+    assert!(transactions_per_sample.is_multiple_of(writers));
     let mut opts = stress_config::write_coordination_opts_for_mode("local");
     opts.enable_compaction = false;
     stress_config::init_benchmark_telemetry().expect("initialize benchmark telemetry");
@@ -247,7 +240,7 @@ fn execute_strict_commit_case(writers: usize) -> StrictCommitSample {
     let start_metrics = engine
         .get_runtime_metrics()
         .expect("capture starting durability metrics");
-    let transactions_per_writer = TRANSACTIONS_PER_SAMPLE / writers;
+    let transactions_per_writer = transactions_per_sample / writers;
     let barrier = Arc::new(Barrier::new(writers + 1));
     let mut handles = Vec::with_capacity(writers);
     for writer in 0..writers {
@@ -260,12 +253,10 @@ fn execute_strict_commit_case(writers: usize) -> StrictCommitSample {
 
     let started_at = Instant::now();
     barrier.wait();
-    let mut histogram = Histogram::<u64>::new(3).expect("create strict commit histogram");
+    let mut commit_latencies_us = Vec::with_capacity(transactions_per_sample);
     for handle in handles {
         for latency_us in handle.join().expect("join strict commit writer") {
-            histogram
-                .record(latency_us)
-                .expect("record strict commit latency");
+            commit_latencies_us.push(latency_us);
         }
     }
     let elapsed = started_at.elapsed();
@@ -282,66 +273,92 @@ fn execute_strict_commit_case(writers: usize) -> StrictCommitSample {
 
     StrictCommitSample {
         elapsed,
-        completed: u64::try_from(TRANSACTIONS_PER_SAMPLE).expect("transaction count fits in u64"),
-        commit_p50_us: histogram.value_at_quantile(0.50),
-        commit_p95_us: histogram.value_at_quantile(0.95),
-        commit_p99_us: histogram.value_at_quantile(0.99),
+        completed: u64::try_from(transactions_per_sample).expect("transaction count fits in u64"),
         wal_appends,
         physical_fsyncs,
+        commit_latencies_us,
     }
 }
 
 fn run_strict_commit_case(ctx: &mut StressContext, scenario: &'static str, writers: usize) {
-    let sample = execute_strict_commit_case(writers);
-    ctx.parameter("logical_batch_size", TRANSACTIONS_PER_SAMPLE);
+    let transactions = match writers {
+        1 => 2_048,
+        16 => 8_192,
+        64 => 32_768,
+        _ => panic!("unsupported strict commit writer count"),
+    };
+    ctx.parameter("logical_batch_size", transactions);
     ctx.parameter("logical_unit", "transaction");
     ctx.parameter("storage_profile", "local");
     ctx.parameter("commit_mode", "sync");
     ctx.parameter("writers", writers);
     ctx.parameter("value_size_bytes", VALUE_SIZE);
     ctx.parameter("operation_surface", "single_put_single_commit");
-    ctx.parameter("commit_p50_us", sample.commit_p50_us);
-    ctx.parameter("commit_p95_us", sample.commit_p95_us);
-    ctx.parameter("commit_p99_us", sample.commit_p99_us);
-    ctx.parameter("wal_appends", sample.wal_appends);
-    ctx.parameter("physical_fsyncs", sample.physical_fsyncs);
-    ctx.parameter(
-        "commits_per_fsync",
-        format!(
-            "{:.2}",
-            u64_to_f64(sample.completed) / u64_to_f64(sample.physical_fsyncs.max(1))
-        ),
+    let sample = execute_strict_commit_case(writers);
+    record_success(
+        ctx,
+        scenario,
+        sample.elapsed,
+        "transaction",
+        sample.completed,
     );
-    ctx.record_external(scenario, sample.elapsed, sample.completed);
+    for latency_us in &sample.commit_latencies_us {
+        ctx.record_latency(Duration::from_micros((*latency_us).max(1)));
+    }
+    ctx.record_observation(
+        "wal_appends",
+        u64_to_f64(sample.wal_appends),
+        ObservationUnit::Count,
+        ObservationDirection::Informational,
+    );
+    ctx.record_observation(
+        "physical_fsyncs",
+        u64_to_f64(sample.physical_fsyncs),
+        ObservationUnit::Count,
+        ObservationDirection::Informational,
+    );
+    ctx.record_observation(
+        "commits_per_fsync",
+        u64_to_f64(sample.completed) / u64_to_f64(sample.physical_fsyncs.max(1)),
+        ObservationUnit::Ratio,
+        ObservationDirection::HigherIsBetter,
+    );
 }
 
-#[stress(tier = 2)]
-#[allow(clippy::too_many_lines)]
-fn tier2_durability_commit_sync_local_4k_rotation(ctx: &mut StressContext) {
-    stress_config::init_benchmark_telemetry().expect("initialize benchmark telemetry");
-    let samples = (0..ROTATION_RUNS)
-        .map(|_| execute_rotation_run())
-        .collect::<Vec<_>>();
-    let elapsed = samples
-        .iter()
-        .map(|sample| sample.elapsed)
-        .sum::<Duration>();
-    let completed = u64::try_from(ROTATION_RUNS * ROTATION_TRANSACTIONS_PER_RUN)
-        .expect("rotation transaction count fits u64");
-    let p95_rsd = relative_standard_deviation_percent(
-        samples
-            .iter()
-            .map(|sample| u64_to_f64(sample.commit_p95_us)),
+fn set_rotation_parameters(ctx: &mut StressContext) {
+    ctx.parameter("independent_runs", ROTATION_RUNS);
+    ctx.parameter("logical_batch_size", ROTATION_TRANSACTIONS_PER_RUN);
+    ctx.parameter("storage_profile", "local_durable");
+    ctx.parameter("commit_mode", "sync");
+    ctx.parameter("writers", 1);
+    ctx.parameter("value_size_bytes", ROTATION_VALUE_SIZE);
+    ctx.parameter("memtable_flush_threshold_bytes", ROTATION_MEMTABLE_BYTES);
+    ctx.parameter("background_compaction", false);
+    ctx.parameter("warmup_transactions_per_run", ROTATION_WARMUP_TRANSACTIONS);
+    ctx.parameter(
+        "measured_transactions_per_run",
+        ROTATION_TRANSACTIONS_PER_RUN,
     );
-    let throughput_rsd = relative_standard_deviation_percent(
-        samples
-            .iter()
-            .map(|sample| sample.throughput_ops_per_second),
-    );
+}
+
+fn record_rotation_observations(
+    ctx: &mut StressContext,
+    samples: &[RotationRunSample],
+    elapsed: Duration,
+) {
     let wal_fsyncs = samples.iter().map(|sample| sample.wal_fsyncs).sum::<u64>();
     let wal_fsync_ns_total = samples
         .iter()
         .map(|sample| sample.wal_fsync_ns_total)
+        .sum::<u64>();
+    let wal_fsync_ns_max = samples
+        .iter()
+        .map(|sample| sample.wal_fsync_ns_max)
+        .max()
+        .unwrap_or(0);
+    let rotation_commits = samples
+        .iter()
+        .map(|sample| sample.rotation_commits)
         .sum::<u64>();
     let flush_build_count = samples
         .iter()
@@ -360,89 +377,93 @@ fn tier2_durability_commit_sync_local_4k_rotation(ctx: &mut StressContext) {
         .map(|sample| sample.flush_publish_ns_total)
         .sum::<u64>();
 
-    ctx.parameter("independent_runs", ROTATION_RUNS);
-    ctx.parameter("logical_unit", "transaction");
-    ctx.parameter("storage_profile", "local_durable");
-    ctx.parameter("commit_mode", "sync");
-    ctx.parameter("writers", 1);
-    ctx.parameter("value_size_bytes", ROTATION_VALUE_SIZE);
-    ctx.parameter("memtable_flush_threshold_bytes", ROTATION_MEMTABLE_BYTES);
-    ctx.parameter("background_compaction", false);
-    ctx.parameter("warmup_transactions_per_run", ROTATION_WARMUP_TRANSACTIONS);
-    ctx.parameter(
-        "measured_transactions_per_run",
-        ROTATION_TRANSACTIONS_PER_RUN,
-    );
-    ctx.parameter(
-        "median_commit_p50_us",
+    for latency_us in [
         median_u64(samples.iter().map(|sample| sample.commit_p50_us)),
-    );
-    ctx.parameter(
-        "median_commit_p95_us",
         median_u64(samples.iter().map(|sample| sample.commit_p95_us)),
-    );
-    ctx.parameter(
-        "median_commit_p99_us",
         median_u64(samples.iter().map(|sample| sample.commit_p99_us)),
-    );
-    ctx.parameter(
-        "median_rotation_commit_p95_us",
-        median_u64(samples.iter().map(|sample| sample.rotation_commit_p95_us)),
-    );
-    ctx.parameter(
-        "median_non_rotation_commit_p95_us",
-        median_u64(
-            samples
-                .iter()
-                .map(|sample| sample.non_rotation_commit_p95_us),
+    ] {
+        ctx.record_latency(Duration::from_micros(latency_us.max(1)));
+    }
+    for (name, value, unit) in [
+        (
+            "rotation_commit_p95_us",
+            median_u64(samples.iter().map(|s| s.rotation_commit_p95_us)),
+            ObservationUnit::Microseconds,
         ),
-    );
-    ctx.parameter(
-        "rotation_commits_observed",
-        samples
-            .iter()
-            .map(|sample| sample.rotation_commits)
-            .sum::<u64>(),
-    );
-    ctx.parameter(
-        "median_throughput_ops_per_second",
-        format!(
-            "{:.2}",
-            median_f64(
-                samples
-                    .iter()
-                    .map(|sample| sample.throughput_ops_per_second)
-            )
+        (
+            "non_rotation_commit_p95_us",
+            median_u64(samples.iter().map(|s| s.non_rotation_commit_p95_us)),
+            ObservationUnit::Microseconds,
         ),
+        ("wal_fsyncs", wal_fsyncs, ObservationUnit::Count),
+        (
+            "wal_fsync_ns_total",
+            wal_fsync_ns_total,
+            ObservationUnit::Nanoseconds,
+        ),
+        (
+            "wal_fsync_ns_max",
+            wal_fsync_ns_max,
+            ObservationUnit::Nanoseconds,
+        ),
+        ("rotation_commits", rotation_commits, ObservationUnit::Count),
+        (
+            "flush_build_count",
+            flush_build_count,
+            ObservationUnit::Count,
+        ),
+        (
+            "flush_build_ns_total",
+            flush_build_ns_total,
+            ObservationUnit::Nanoseconds,
+        ),
+        (
+            "flush_publish_count",
+            flush_publish_count,
+            ObservationUnit::Count,
+        ),
+        (
+            "flush_publish_ns_total",
+            flush_publish_ns_total,
+            ObservationUnit::Nanoseconds,
+        ),
+    ] {
+        ctx.record_observation(
+            name,
+            u64_to_f64(value),
+            unit,
+            ObservationDirection::Informational,
+        );
+    }
+    ctx.record_observation(
+        "elapsed_ns",
+        elapsed.as_secs_f64() * 1_000_000_000.0,
+        ObservationUnit::Nanoseconds,
+        ObservationDirection::Informational,
     );
-    ctx.parameter("commit_p95_rsd_percent", format!("{p95_rsd:.2}"));
-    ctx.parameter("throughput_rsd_percent", format!("{throughput_rsd:.2}"));
-    ctx.parameter("rsd_target_percent", 10);
-    ctx.parameter(
-        "wal_fsync_average_ns",
-        wal_fsync_ns_total / wal_fsyncs.max(1),
-    );
-    ctx.parameter(
-        "wal_fsync_max_ns",
-        samples
-            .iter()
-            .map(|sample| sample.wal_fsync_ns_max)
-            .max()
-            .unwrap_or(0),
-    );
-    ctx.parameter(
-        "flush_build_average_ns",
-        flush_build_ns_total / flush_build_count.max(1),
-    );
-    ctx.parameter(
-        "flush_publish_average_ns",
-        flush_publish_ns_total / flush_publish_count.max(1),
-    );
-    ctx.record_external(
+}
+
+#[stress(tier = 2)]
+fn tier2_durability_commit_sync_local_4k_rotation(ctx: &mut StressContext) {
+    stress_config::init_benchmark_telemetry().expect("initialize benchmark telemetry");
+    set_rotation_parameters(ctx);
+    let samples = (0..ROTATION_RUNS)
+        .map(|_| execute_rotation_run())
+        .collect::<Vec<_>>();
+    let elapsed = samples
+        .iter()
+        .map(|sample| sample.elapsed)
+        .sum::<Duration>();
+    let completed = u64::try_from(ROTATION_RUNS * ROTATION_TRANSACTIONS_PER_RUN)
+        .expect("rotation transaction count fits u64");
+    record_success(
+        ctx,
         "tier2_durability_commit_sync_local_4k_rotation",
         elapsed,
+        "transaction",
         completed,
     );
+    record_rotation_observations(ctx, &samples, elapsed);
 }
 
 #[stress(tier = 2)]

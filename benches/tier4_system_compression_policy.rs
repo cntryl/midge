@@ -8,13 +8,16 @@
 use cntryl_midge::{
     Engine, Goal, OpenOptions, RecoveryPolicy, TransactionMode, WorkloadProfile, WriteOptions,
 };
-use cntryl_stress::{stress, stress_main, StressContext};
+use cntryl_stress::{
+    stress, stress_main, LogicalUnit, ObservationDirection, ObservationUnit, OperationOutcome,
+    StressContext,
+};
 use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-const FLUSHES: usize = 4;
-const RECORDS_PER_FLUSH: usize = 128;
+const FLUSHES: usize = 16;
+const RECORDS_PER_FLUSH: usize = 512;
 const VALUE_SIZE: usize = 16 * 1024;
 const LOGICAL_BYTES: usize = FLUSHES * RECORDS_PER_FLUSH * VALUE_SIZE;
 
@@ -222,6 +225,7 @@ fn execute_workload(shape: RecordShape, goal: Goal) -> WorkloadOutcome {
     }
 }
 
+#[allow(clippy::cast_precision_loss)]
 fn run_workload(ctx: &mut StressContext, shape: RecordShape, goal: Goal) {
     let outcome = execute_workload(shape, goal);
     let completed = u64::try_from(LOGICAL_BYTES).expect("logical bytes fit in u64");
@@ -230,32 +234,40 @@ fn run_workload(ctx: &mut StressContext, shape: RecordShape, goal: Goal) {
     ctx.parameter("record_count", FLUSHES * RECORDS_PER_FLUSH);
     ctx.parameter("record_value_bytes", VALUE_SIZE);
     ctx.parameter("flush_count", FLUSHES);
-    ctx.parameter("compaction_completed", true);
-    ctx.parameter("clean_shutdown_completed", true);
     ctx.parameter("logical_bytes", LOGICAL_BYTES);
-    ctx.parameter("logical_unit", "record_value_byte");
-    ctx.parameter("ingest_ns", outcome.ingest.as_nanos());
-    ctx.parameter("flush_compaction_ns", outcome.flush_compaction.as_nanos());
-    ctx.parameter("total_ns", outcome.total.as_nanos());
-    ctx.parameter("final_sst_bytes", outcome.final_sst_bytes);
-    ctx.record_external(
-        format!("engine_policy_{}_ingest_{}", goal_name(goal), shape.name()),
-        outcome.ingest,
-        completed,
+    assert!(
+        outcome.final_sst_bytes > 0,
+        "compression workload must leave a non-empty SST footprint"
     );
-    ctx.record_external(
-        format!(
-            "engine_policy_{}_flush_compaction_{}",
-            goal_name(goal),
-            shape.name()
-        ),
-        outcome.flush_compaction,
-        completed,
-    );
-    ctx.record_external(
+    ctx.record_external_outcome(
         format!("engine_policy_{}_total_{}", goal_name(goal), shape.name()),
         outcome.total,
-        completed,
+        LogicalUnit::new("record_value_byte"),
+        OperationOutcome::success(completed),
+    );
+    ctx.record_observation(
+        "ingest_ns",
+        outcome.ingest.as_nanos() as f64,
+        ObservationUnit::Nanoseconds,
+        ObservationDirection::Informational,
+    );
+    ctx.record_observation(
+        "flush_compaction_ns",
+        outcome.flush_compaction.as_nanos() as f64,
+        ObservationUnit::Nanoseconds,
+        ObservationDirection::Informational,
+    );
+    ctx.record_observation(
+        "final_sst_bytes",
+        outcome.final_sst_bytes as f64,
+        ObservationUnit::Bytes,
+        ObservationDirection::Informational,
+    );
+    ctx.record_observation(
+        "compression_ratio",
+        completed as f64 / outcome.final_sst_bytes as f64,
+        ObservationUnit::Ratio,
+        ObservationDirection::HigherIsBetter,
     );
 }
 
@@ -265,7 +277,8 @@ macro_rules! engine_policy_case {
             tier = 4,
             metadata(
                 component = "engine_compression_policy",
-                scenario = "four_flushes_and_compaction"
+                scenario = "flushes_and_compaction",
+                measurement_shape = "fixed_workload"
             )
         )]
         fn $fn_name(ctx: &mut StressContext) {

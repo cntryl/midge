@@ -46,11 +46,9 @@ fn rotate_50_entries(ctx: &mut StressContext) {
     ctx.parameter("rounds", HOTSET_ROTATION_ROUNDS);
     ctx.parameter("logical_unit", "cache_block_access");
 
-    let _completed = ctx
-        .benchmark("hotset_rotation")
-        .samples(10)
-        .warmup(3)
-        .measure_batch((HOTSET_ROTATION_ROUNDS * 50) as u64, || {
+    let _completed = ctx.benchmark("hotset_rotation").samples(10).measure_batch(
+        (HOTSET_ROTATION_ROUNDS * 50) as u64,
+        || {
             let cache = create_cache(1024 * 1024);
             for i in 0..50 {
                 cache.put(keys.get_linear(i), &block);
@@ -67,7 +65,8 @@ fn rotate_50_entries(ctx: &mut StressContext) {
                 }
             }
             black_box((&cache, completed));
-        });
+        },
+    );
 }
 
 #[stress(
@@ -82,11 +81,9 @@ fn evict_10k(ctx: &mut StressContext) {
     ctx.parameter("eviction_repeats", EVICTION_REPEATS);
     ctx.parameter("logical_unit", "cache_block_insert");
 
-    let _completed = ctx
-        .benchmark("lru_eviction_10k")
-        .samples(10)
-        .warmup(8)
-        .measure_batch((10_000 * EVICTION_REPEATS) as u64, || {
+    let _completed = ctx.benchmark("lru_eviction_10k").samples(10).measure_batch(
+        (10_000 * EVICTION_REPEATS) as u64,
+        || {
             let cache = create_cache(2 * 1024 * 1024);
             for i in 0..500 {
                 cache.put(keys.get_linear(i), &block);
@@ -98,7 +95,8 @@ fn evict_10k(ctx: &mut StressContext) {
                 }
             }
             black_box(cache);
-        });
+        },
+    );
 }
 
 stress_main!();

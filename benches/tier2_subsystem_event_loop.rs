@@ -10,8 +10,8 @@ use event_loop_support::{handle, MessageKind};
 
 const CHANNEL_CROSS_THREAD_MESSAGES: usize = 4_194_304;
 const CHANNEL_CROSS_THREAD_OPS: u64 = 4_194_304;
-const PARK_WAKE_MESSAGES: usize = 32_768;
-const PARK_WAKE_OPS: u64 = 32_768;
+const PARK_WAKE_MESSAGES: usize = 1_048_576;
+const PARK_WAKE_OPS: u64 = 1_048_576;
 
 #[inline]
 fn dispatch_message(kind: MessageKind, counter: &mut u64) {

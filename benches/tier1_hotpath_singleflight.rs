@@ -8,7 +8,9 @@ mod stress_config;
 use cntryl_midge::common::KeyedGroupCommit;
 use cntryl_stress::{black_box, stress, stress_main, StressContext};
 
-const SUBMIT_AND_WAIT_BATCH_ROUNDS: usize = 8192;
+// Keep each measured sample comfortably above the microbenchmark runtime floor.
+// The 16-waiter row was short enough for scheduler jitter to dominate at 8K rounds.
+const SUBMIT_AND_WAIT_BATCH_ROUNDS: usize = 32_768;
 
 fn run_flush_waiters(ctx: &mut StressContext, scenario: &'static str, waiters: usize) {
     ctx.parameter("waiters", waiters);
