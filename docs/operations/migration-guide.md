@@ -34,6 +34,16 @@ The provider-backed cloud configuration API intentionally changed before
 `CloudStorageTopology`, apply the per-class overrides, and pass it to
 `OpenOptions::cloud_multi`.
 
+Direct field construction and field pattern matching on `CloudProviderConfig`
+is no longer supported. Construct `AwsS3Config`, `AzureBlobConfig`, `GcsConfig`,
+`OciObjectStorageConfig`, or `S3CompatibleConfig`, then pass it directly to
+`CloudStorageLocation::new`; the existing unambiguous
+`CloudProviderConfig::aws_s3`, `azure_blob`, `gcs`, and related helpers remain.
+Credential and endpoint modifiers now live on their provider-specific config,
+which prevents cross-provider credential combinations. `OpenOptions::build`
+performs structural validation only and may therefore reject names or endpoints
+that older releases deferred until startup.
+
 Cloud WAL publication catalog format v1 is a breaking persisted-layout
 change. Sealed objects now use
 `wal/epochs/<writer-epoch>/<segment-id>.wal`, and

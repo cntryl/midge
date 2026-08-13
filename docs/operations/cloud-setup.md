@@ -1,8 +1,14 @@
-# Cloud setup (pre-1.0)
+# Cloud setup
 
-Cloud-backed storage is an optional, pre-1.0 integration. Qualify the exact
-provider, feature set, credentials, network policy, and failure behavior before
-using it. Midge does not endorse a cloud provider for production deployment.
+Cloud-backed storage is a supported pre-1.0 capability. Midge continuously
+qualifies its provider protocol paths and engine recovery behavior through the
+Sqrzl multi-provider emulator. Pre-1.0 means that APIs, persisted formats, and
+operational guidance can still evolve; it does not mean the cloud path is
+experimental.
+
+Operators must validate deployment-specific credentials, IAM, network policy,
+provider configuration, quotas, and workload capacity. See the canonical
+[cloud qualification policy](../development/cloud-qualification-policy.md).
 
 ## Feature selection
 
@@ -13,13 +19,11 @@ feature set. The default feature set currently includes the cloud integrations.
 state, so it is suitable for deterministic tests rather than service
 qualification.
 
-`cloud-oci` enables the generic S3-compatible backend; it is not a native OCI
-Object Storage client and does not add an OCI-specific configuration variant,
-credential resolver, signer, or error taxonomy. Configure OCI through
-`CloudProviderConfig::s3_compatible` and OCI's S3 Compatibility API. The
-isolated `cloud-oci` CI leg is compile-only, so operators must independently
-qualify conditional writes, missing-object responses, credentials, and endpoint
-behavior against the exact OCI tenancy before relying on it.
+`cloud-oci` owns `OciObjectStorageConfig`. Midge derives OCI's commercial-realm
+S3-compatible endpoint from its namespace and region. For government,
+sovereign, or dedicated realms, set the realm-specific S3 Compatibility API
+origin with `OciObjectStorageConfig::with_endpoint`. OCI uses the shared S3
+protocol implementation while retaining OCI-specific validation and diagnostics.
 
 ## Configuration
 
@@ -44,6 +48,20 @@ let location = CloudStorageLocation::new(
 let options = OpenOptions::cloud("/var/lib/midge-cache", location).build()?;
 # Ok::<(), cntryl_midge::MidgeError>(())
 ```
+
+`OpenOptions::build` automatically validates names, endpoints, credential
+pairings, and prefixes without reading environment variables or credential
+files and without making network requests. Before deployment, explicitly call
+`location.preflight(CloudPreflightOptions::default())` (or preflight the full
+topology). Preflight resolves the production backend, lists the namespace, and,
+when an object exists, performs HEAD plus a zero- or one-byte bounded GET. Its
+serializable report is redacted and distinguishes structural validity,
+deployment readiness, and complete read verification. An empty namespace can
+be ready but cannot be fully verified.
+
+Preflight is deliberately read-only. It does not prove PUT, conditional-write,
+fencing, CAS, or DELETE permission or semantics; Sqrzl qualification remains
+authoritative for those behaviors.
 
 The shared location contains `wal/`, `sst/`, `metadata/`,
 `wal/publication-catalog.v1.json`, `metadata/ddl.registry.json`, and
@@ -71,9 +89,9 @@ consume storage until the provider retention period expires. GCS enables soft
 delete with a seven-day retention period on new buckets by default, unless an
 organization policy or explicit bucket setting changes it.
 
-Native AWS configuration uses virtual-hosted HTTPS endpoints. AWS bucket names
-containing dots are rejected because the standard wildcard certificate does
-not match them. Use a DNS-compatible bucket name without dots. S3 Express
+Native AWS configuration uses virtual-hosted HTTPS endpoints for ordinary
+bucket names. Because standard wildcard certificates do not match dotted
+bucket names, Midge automatically uses AWS path-style addressing for them. S3 Express
 directory buckets, access-point ARNs, and their specialized endpoints are not
 supported by `CloudProviderConfig::aws_s3`.
 
@@ -102,11 +120,22 @@ already retained versions immediately.
 
 ## Qualification
 
-The repository uses the Sqrzl emulator for provider-compatible qualification.
-An emulator pass is evidence for the tested protocol path, not evidence for
-provider availability, IAM, quotas, durability policy, or production scale.
-Run the provider qualification and cache-loss/restart tests with the same
-feature flags and configuration intended for deployment.
+The repository uses Sqrzl as the authoritative, self-contained environment for
+continuous provider qualification. Scheduled and release workflows run
+provider operations plus engine cache-loss and restart recovery through its S3,
+Azure, and GCS front doors. Once explicitly selected, an unreachable emulator
+fails qualification rather than silently skipping it.
+
+Manual real-cloud integration testing validates Sqrzl fidelity and
+deployment-specific assumptions. When it exposes a provider difference, that
+behavior should be reproduced in Sqrzl and retained as a Midge regression test.
+Live cloud credentials are deliberately not required for ordinary repository CI.
+
+A Sqrzl pass is evidence for the protocol paths and failure scenarios it models;
+it is not evidence for a deployment's provider availability, IAM, quotas,
+lifecycle configuration, network policy, or production capacity. Validate those
+environmental conditions with the feature flags and configuration intended for
+deployment.
 
 If the local cache is lost, recovery depends on the remote WAL/manifest state
 and the qualified provider path. Preserve remaining evidence and inspect the

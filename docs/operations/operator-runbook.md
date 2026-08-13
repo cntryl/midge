@@ -9,8 +9,9 @@ production endorsement.
 - Use a dedicated database path with stable ownership and enough free space.
 - Choose `OpenOptions::local(path)` for local storage, or
   `OpenOptions::cloud_simulated(cache, bucket, prefix)` for filesystem-backed
-  cloud behavior. Real cloud providers remain pre-1.0 and require the matching
-  feature and provider configuration.
+  cloud behavior. Provider-backed cloud storage is supported pre-1.0,
+  continuously qualified through Sqrzl, and requires the matching feature and
+  deployment-specific provider configuration.
 - Choose a `WriteOptions` policy for every transaction commit. Use `sync()` when
   the commit must survive a local process or machine crash after acknowledgement.
 - Keep the database path private to one active engine writer. Midge is not a

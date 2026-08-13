@@ -7,7 +7,7 @@ use crate::storage::cloud::CloudBackend;
 pub(super) fn try_resolve(
     provider: &CloudProviderConfig,
 ) -> MidgeResult<Option<Arc<dyn CloudBackend>>> {
-    let CloudProviderConfig::AzureBlob { .. } = provider else {
+    let CloudProviderConfig::AzureBlob(_) = provider else {
         return Ok(None);
     };
 
@@ -15,65 +15,59 @@ pub(super) fn try_resolve(
 }
 
 fn resolve_azure(provider: &CloudProviderConfig) -> MidgeResult<Arc<dyn CloudBackend>> {
-    let CloudProviderConfig::AzureBlob {
-        account,
-        container,
-        endpoint,
-        credential,
-    } = provider
-    else {
+    let CloudProviderConfig::AzureBlob(config) = provider else {
         return Err(MidgeError::InvalidArgument(
             "expected an Azure provider".to_string(),
         ));
     };
 
-    let provider = match credential {
+    let provider = match &config.credential {
         AzureCredentialSource::SharedKey { account_key } => {
             super::azure::AzureProvider::with_shared_key_and_endpoint(
-                account.clone(),
-                container.clone(),
+                config.account.clone(),
+                config.container.clone(),
                 account_key,
-                endpoint.clone(),
+                config.endpoint.clone(),
             )?
         }
         AzureCredentialSource::SasToken { token } => {
             super::azure::AzureProvider::with_sas_token_and_endpoint(
-                account.clone(),
-                container.clone(),
+                config.account.clone(),
+                config.container.clone(),
                 token,
-                endpoint.clone(),
+                config.endpoint.clone(),
             )?
         }
         AzureCredentialSource::ConnectionString { connection_string } => {
             super::azure::AzureProvider::from_connection_string_and_endpoint(
                 connection_string,
-                container.clone(),
-                endpoint.clone(),
+                config.container.clone(),
+                config.endpoint.clone(),
             )?
         }
         AzureCredentialSource::StorageEnvironment => {
             super::azure::AzureProvider::from_env_and_endpoint(
-                account.clone(),
-                container.clone(),
-                endpoint.clone(),
+                config.account.clone(),
+                config.container.clone(),
+                config.endpoint.clone(),
             )?
         }
         AzureCredentialSource::ManagedIdentity { client_id } => {
             super::azure::AzureProvider::with_managed_identity_and_endpoint(
-                account.clone(),
-                container.clone(),
+                config.account.clone(),
+                config.container.clone(),
                 client_id.clone(),
-                endpoint.clone(),
+                config.endpoint.clone(),
             )?
         }
         AzureCredentialSource::EnvironmentClientSecret
         | AzureCredentialSource::WorkloadIdentity { .. }
         | AzureCredentialSource::LightweightDefaultChain => {
             super::azure::AzureProvider::from_lightweight_credential_source(
-                account.clone(),
-                container.clone(),
-                endpoint.clone(),
-                credential.clone(),
+                config.account.clone(),
+                config.container.clone(),
+                config.endpoint.clone(),
+                config.credential.clone(),
             )?
         }
     };

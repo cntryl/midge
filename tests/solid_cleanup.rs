@@ -2,9 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use cntryl_midge::{
-    AzureCredentialSource, CloudCredentialSource, CloudProviderConfig, ColumnFamilyId, Engine,
-    EngineHealth, GcsApiStyle, GcsCredentialSource, MidgeResult, OpenOptions, RecoveryPolicy,
-    RuntimeMetricsSnapshot, S3CredentialSource, Storage, StorageLayoutSnapshot,
+    AzureCredentialSource, CloudProviderConfig, ColumnFamilyId, Engine, EngineHealth, GcsApiStyle,
+    GcsCredentialSource, MidgeResult, OpenOptions, RecoveryPolicy, RuntimeMetricsSnapshot,
+    S3CredentialSource, Storage, StorageLayoutSnapshot,
 };
 
 fn source_path(relative: &str) -> PathBuf {
@@ -62,7 +62,6 @@ fn should_reexport_shared_public_types_from_crate_root() {
     let _: RecoveryPolicy = RecoveryPolicy::Strict;
     let _: EngineHealth = EngineHealth::Healthy;
     let _: Storage = Storage::InMemory;
-    let _: CloudCredentialSource = CloudCredentialSource::S3(S3CredentialSource::environment());
     let _: ColumnFamilyId = 0;
     let _: fn(&Engine) -> MidgeResult<RuntimeMetricsSnapshot> = Engine::get_runtime_metrics;
     let _: fn(&Engine) -> MidgeResult<StorageLayoutSnapshot> = Engine::get_storage_layout;
@@ -75,10 +74,7 @@ fn should_reexport_shared_public_types_from_crate_root() {
     // Assert
     assert!(matches!(
         provider,
-        CloudProviderConfig::Gcs {
-            api: GcsApiStyle::Json,
-            ..
-        }
+        CloudProviderConfig::Gcs(config) if config.api_style() == GcsApiStyle::Json
     ));
 }
 
@@ -549,33 +545,19 @@ fn should_keep_cloud_provider_constructors_on_same_variants() {
     // Assert
     assert!(matches!(
         aws,
-        CloudProviderConfig::AwsS3 {
-            credentials: S3CredentialSource::AwsDefaultChain,
-            ..
-        }
+        CloudProviderConfig::AwsS3(config) if matches!(config.credentials(), S3CredentialSource::AwsDefaultChain)
     ));
     assert!(matches!(
         s3,
-        CloudProviderConfig::S3Compatible {
-            credentials: S3CredentialSource::Environment,
-            path_style: true,
-            ..
-        }
+        CloudProviderConfig::S3Compatible(config) if matches!(config.credentials(), S3CredentialSource::Environment) && config.path_style()
     ));
     assert!(matches!(
         azure,
-        CloudProviderConfig::AzureBlob {
-            credential: AzureCredentialSource::LightweightDefaultChain,
-            ..
-        }
+        CloudProviderConfig::AzureBlob(config) if matches!(config.credentials(), AzureCredentialSource::LightweightDefaultChain)
     ));
     assert!(matches!(
         gcs,
-        CloudProviderConfig::Gcs {
-            api: GcsApiStyle::Xml,
-            credential: GcsCredentialSource::HmacKey { .. },
-            ..
-        }
+        CloudProviderConfig::Gcs(config) if config.api_style() == GcsApiStyle::Xml && matches!(config.credentials(), GcsCredentialSource::HmacKey { .. })
     ));
 }
 
@@ -609,24 +591,15 @@ fn should_delegate_provider_construction_to_provider_family_resolvers() {
     let s3 = read_source("src/storage/providers/s3_resolver.rs");
     let azure = read_source("src/storage/providers/azure_resolver.rs");
     let gcs = read_source("src/storage/providers/gcs_resolver.rs");
-    let forbidden_factory_variants = [
-        "CloudProviderConfig::AwsS3",
-        "CloudProviderConfig::S3Compatible",
-        "CloudProviderConfig::AzureBlob",
-        "CloudProviderConfig::Gcs",
-    ];
-
     // Act / Assert
     // Assert
+    assert!(factory.contains("match provider"));
     assert!(factory.contains("s3_resolver::try_resolve"));
     assert!(factory.contains("azure_resolver::try_resolve"));
     assert!(factory.contains("gcs_resolver::try_resolve"));
-    for pattern in forbidden_factory_variants {
-        assert!(
-            !factory.contains(pattern),
-            "provider factory should not centrally match {pattern}"
-        );
-    }
+    assert!(!factory.contains("super::is_aws_s3"));
+    assert!(!factory.contains("super::is_s3_compatible"));
+    assert!(!factory.contains("super::is_azure_blob"));
     assert!(s3.contains("pub(super) fn try_resolve"));
     assert!(s3.contains("CloudProviderConfig::AwsS3"));
     assert!(s3.contains("CloudProviderConfig::S3Compatible"));

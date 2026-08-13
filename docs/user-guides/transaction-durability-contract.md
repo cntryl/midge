@@ -244,7 +244,8 @@ Midge does not currently promise:
 - serializable transaction isolation
 - automatic lost-update rejection for arbitrary read-modify-write races
 - multi-process shared-writer coordination
-- production cloud guarantees beyond what the support matrix promotes explicitly
+- deployment-specific cloud guarantees such as provider availability, IAM,
+  quotas, network policy, lifecycle configuration, or workload capacity
 - salvage-mode workflows as part of the standard production contract
 
 ## Evidence Surface

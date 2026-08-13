@@ -275,21 +275,6 @@ pub(crate) use crate::config::S3CredentialSource;
 pub(crate) use crate::config::{GcsApiStyle, GcsCredentialSource};
 
 #[cfg(feature = "cloud-common")]
-pub(super) fn is_aws_s3(provider: &CloudProviderConfig) -> bool {
-    matches!(provider, CloudProviderConfig::AwsS3 { .. })
-}
-
-#[cfg(feature = "cloud-common")]
-pub(super) fn is_s3_compatible(provider: &CloudProviderConfig) -> bool {
-    matches!(provider, CloudProviderConfig::S3Compatible { .. })
-}
-
-#[cfg(feature = "cloud-common")]
-pub(super) fn is_azure_blob(provider: &CloudProviderConfig) -> bool {
-    matches!(provider, CloudProviderConfig::AzureBlob { .. })
-}
-
-#[cfg(feature = "cloud-common")]
 pub(crate) fn build_cloud_backend(
     provider: &CloudProviderConfig,
 ) -> MidgeResult<Arc<dyn CloudBackend>> {
@@ -319,10 +304,10 @@ fn validate_cloud_provider_config(provider: &CloudProviderConfig) -> MidgeResult
     }
 
     let endpoint = match provider {
-        CloudProviderConfig::S3Compatible { endpoint, .. } => Some(endpoint.as_str()),
-        CloudProviderConfig::AzureBlob { endpoint, .. }
-        | CloudProviderConfig::Gcs { endpoint, .. } => endpoint.as_deref(),
-        CloudProviderConfig::AwsS3 { .. } => None,
+        CloudProviderConfig::S3Compatible(config) => Some(config.endpoint.as_str()),
+        CloudProviderConfig::AzureBlob(config) => config.endpoint.as_deref(),
+        CloudProviderConfig::Gcs(config) => config.endpoint.as_deref(),
+        CloudProviderConfig::AwsS3(_) | CloudProviderConfig::OciObjectStorage(_) => None,
     };
 
     if let Some(endpoint) = endpoint {

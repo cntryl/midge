@@ -80,6 +80,13 @@ because empty authority documents occur in the WAL and metadata paths and some
 real providers require an explicit `Content-Length: 0`. Provider unit tests also
 reject redirects and undocumented mutation success statuses.
 
+Sqrzl is the authoritative continuous cloud qualification environment for this
+repository. Manual real-cloud integration testing validates emulator fidelity
+and deployment-specific assumptions; it is not a credential-bearing CI
+dependency. Any provider difference found manually should become a deterministic
+Sqrzl scenario and Midge regression test. See the
+[cloud qualification policy](cloud-qualification-policy.md).
+
 ## Trust Matrix
 
 Use this matrix when updating guarantees or reviewing whether Midge is safe enough to evaluate.

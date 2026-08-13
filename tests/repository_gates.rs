@@ -229,6 +229,31 @@ fn should_use_sqrzl_emulator_for_cloud_gates() {
 }
 
 #[test]
+fn should_document_sqrzl_as_self_contained_cloud_qualification_authority() {
+    // Arrange
+    let readme = read_workflow("README.md");
+    let policy = read_workflow("docs/development/cloud-qualification-policy.md");
+    let support_matrix = read_workflow("docs/development/support-matrix.md");
+    let cloud_setup = read_workflow("docs/operations/cloud-setup.md");
+
+    // Act
+    let documents = [&support_matrix, &cloud_setup];
+    let normalized_readme = readme.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    // Assert
+    assert!(normalized_readme.contains("supported pre-1.0 capability"));
+    assert!(normalized_readme.contains("Sqrzl multi-provider emulator"));
+    assert!(policy.contains("authoritative continuous qualification environment"));
+    assert!(policy.contains("deterministic, credential-free"));
+    assert!(policy.contains("Manual real-cloud integration testing has a different purpose"));
+    assert!(policy
+        .contains("absence of live-provider credentials in CI is not a cloud-maturity defect"));
+    for document in documents {
+        assert!(document.contains("cloud qualification policy"));
+    }
+}
+
+#[test]
 fn should_verify_checked_in_current_fixture_in_publish_workflow() {
     // Arrange
     let publish = read_workflow(".github/workflows/publish.yml");
@@ -541,6 +566,22 @@ fn should_describe_bounded_pr_guard_when_benchmark_automation_documented() {
     assert!(guard_workflow.contains("Performance regression guard"));
     assert!(document.contains("bounded Ubuntu A/B guard"));
     assert!(normalized_document.contains("regression greater than 15%"));
+}
+
+#[test]
+fn should_run_diagnostic_pr_probe_without_internal_gate_obligation() {
+    // Arrange
+    let guard_workflow = read_workflow(".github/workflows/benchmark-guard.yml");
+
+    // Act
+    let diagnostic_profile_count = guard_workflow
+        .matches("--profile default --samples 10 --warmup-samples 1")
+        .count();
+
+    // Assert
+    assert_eq!(diagnostic_profile_count, 2);
+    assert!(!guard_workflow.contains("--profile release --workload \"$WORKLOAD\""));
+    assert!(guard_workflow.contains("--max-regression 0.15"));
 }
 
 #[test]

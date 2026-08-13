@@ -26,10 +26,13 @@ Use this checklist before publishing a release candidate or stable release.
 - [ ] Sqrzl `/healthz` responds successfully
 - [ ] Sqrzl provider and provider-engine qualification suites are explicitly
       selected with `--ignored` and pass (an unreachable emulator fails hard)
+- [ ] known differences found by manual real-cloud integration testing are
+      recorded, reproduced in Sqrzl where applicable, and covered by Midge tests
 - [ ] every registered fuzz target completed a bounded smoke run
 - [ ] current contract docs present:
       `docs/user-guides/transaction-durability-contract.md`,
       `docs/development/support-matrix.md`,
+      `docs/development/cloud-qualification-policy.md`,
       `docs/development/format-compatibility.md`,
       `docs/development/release-policy.md`,
       `docs/operations/operator-runbook.md`,
@@ -38,7 +41,7 @@ Use this checklist before publishing a release candidate or stable release.
 - [ ] changelog updated
 - [ ] migration guide updated
 - [ ] rollback statement added to release notes
-- [ ] supported/experimental matrix reviewed
+- [ ] supported/stable matrix reviewed
 - [ ] known-risk summary attached
 
 Do not call a release production-ready unless qualification evidence is attached and the support matrix says the targeted topology is in scope.

@@ -8,12 +8,15 @@ transactions and explicit write durability policies. The crate MSRV is Rust
 
 The supported storage constructors are `OpenOptions::in_memory()`,
 `OpenOptions::local(path)`, `OpenOptions::cloud(...)`, and
-`OpenOptions::cloud_simulated(...)`. The real cloud providers are optional,
-pre-1.0 integrations. `CloudSimulated` is a local filesystem simulation for
-cloud lifecycle tests; it is not a cloud service.
+`OpenOptions::cloud_simulated(...)`. Provider-backed cloud storage is a
+supported pre-1.0 capability, continuously qualified against the Sqrzl
+multi-provider emulator. `CloudSimulated` is a local filesystem simulation for
+cloud lifecycle tests; it is not a cloud service or the provider qualification
+environment.
 
 Midge is single-process embedded storage. The 0.x API and operational contract
-may change. Cloud-backed production use is not endorsed by this release line.
+may change. Deployments must qualify their credentials, IAM, network policy,
+provider configuration, quotas, and workload capacity.
 
 ## Quick start
 
@@ -37,6 +40,7 @@ The executable canonical example is [examples/documented_quick_start.rs](example
 - Users: [overview](docs/user-guides/overview.md) → [quick start](docs/user-guides/quick-start.md) → [API guide](docs/user-guides/api-guide.md).
 - Durability: [transaction durability contract](docs/user-guides/transaction-durability-contract.md) → [recovery internals](docs/development/recovery-internals.md).
 - Contributors: [architecture](docs/development/architecture.md) → [invariants](docs/development/storage-invariants.md) → [testing](docs/development/testing.md).
+- Cloud qualification: [policy](docs/development/cloud-qualification-policy.md) → [cloud setup](docs/operations/cloud-setup.md).
 - Operators: [operator runbook](docs/operations/operator-runbook.md) and [cloud setup](docs/operations/cloud-setup.md).
 
 See [docs/README.md](docs/README.md) for the complete current inventory.

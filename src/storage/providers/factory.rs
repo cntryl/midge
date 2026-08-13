@@ -11,14 +11,12 @@ impl CloudProviderFactory {
     pub(crate) fn build_backend(
         provider: &CloudProviderConfig,
     ) -> MidgeResult<Arc<dyn CloudBackend>> {
-        if super::is_aws_s3(provider) {
-            Self::build_aws(provider)
-        } else if super::is_s3_compatible(provider) {
-            Self::build_s3_compatible(provider)
-        } else if super::is_azure_blob(provider) {
-            Self::build_azure(provider)
-        } else {
-            Self::build_gcp(provider)
+        match provider {
+            CloudProviderConfig::AwsS3(_) => Self::build_aws(provider),
+            CloudProviderConfig::S3Compatible(_) => Self::build_s3_compatible(provider),
+            CloudProviderConfig::OciObjectStorage(_) => Self::build_oci(provider),
+            CloudProviderConfig::AzureBlob(_) => Self::build_azure(provider),
+            CloudProviderConfig::Gcs(_) => Self::build_gcp(provider),
         }
     }
 
@@ -43,6 +41,19 @@ impl CloudProviderFactory {
     #[cfg(not(any(feature = "cloud-aws", feature = "cloud-oci")))]
     fn build_s3_compatible(_provider: &CloudProviderConfig) -> MidgeResult<Arc<dyn CloudBackend>> {
         Self::provider_disabled("S3-compatible/OCI", "cloud-aws or cloud-oci")
+    }
+
+    #[cfg(feature = "cloud-oci")]
+    fn build_oci(provider: &CloudProviderConfig) -> MidgeResult<Arc<dyn CloudBackend>> {
+        Self::resolved_backend(
+            super::s3_resolver::try_resolve(provider)?,
+            "OCI Object Storage",
+        )
+    }
+
+    #[cfg(not(feature = "cloud-oci"))]
+    fn build_oci(_provider: &CloudProviderConfig) -> MidgeResult<Arc<dyn CloudBackend>> {
+        Self::provider_disabled("OCI Object Storage", "cloud-oci")
     }
 
     #[cfg(feature = "cloud-azure")]

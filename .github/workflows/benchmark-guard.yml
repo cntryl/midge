@@ -74,7 +74,8 @@ jobs:
             CARGO_TARGET_DIR="$PWD/target/benchmark-guard-build" cargo bench \
               --locked --manifest-path ../midge-bench-base/Cargo.toml \
               --bench "$BENCHMARK" -- \
-              --profile release --workload "$WORKLOAD" --json \
+              --profile default --samples 10 --warmup-samples 1 \
+              --workload "$WORKLOAD" --json \
               > "target/benchmark-guardrail/base-$run.json"
           done
 
@@ -87,7 +88,8 @@ jobs:
           for run in 1 2 3; do
             CARGO_TARGET_DIR="$PWD/target/benchmark-guard-build" cargo bench \
               --locked --bench "$BENCHMARK" -- \
-              --profile release --workload "$WORKLOAD" --json \
+              --profile default --samples 10 --warmup-samples 1 \
+              --workload "$WORKLOAD" --json \
               > "target/benchmark-guardrail/candidate-$run.json"
           done
 

@@ -1,16 +1,16 @@
 # Overview
 
 Midge is an embedded, single-process Rust LSM key-value engine. Version `0.1.0`
-requires Rust `1.97` or newer. It is intended for evaluation and controlled
-local deployments while the 0.x API and cloud operations continue to evolve.
+requires Rust `1.97` or newer. It is a supported pre-1.0 engine whose API,
+persisted formats, and operational contract continue to evolve.
 
 ## Storage modes
 
 - `InMemory`: process-local state with no restart persistence.
 - `Local`: WAL and SST files under the configured local path.
 - `CloudSimulated`: filesystem-backed cloud behavior for deterministic tests.
-- `Cloud`: an optional provider-backed local cache and remote store. Provider
-  support is feature-gated and remains pre-1.0.
+- `Cloud`: a supported, feature-gated provider-backed local cache and remote
+  store, continuously qualified against the Sqrzl multi-provider emulator.
 
 ## Core model
 
@@ -28,9 +28,9 @@ Durability is selected per commit: `sync`, `buffered`, `best_effort`,
 ## Boundaries
 
 Midge does not provide a server protocol, multi-process coordination, or a
-stable 1.0 compatibility promise. Cloud setup, credentials, provider behavior,
-and cache-loss recovery must be qualified with the relevant feature and test
-environment before adoption.
+stable 1.0 compatibility promise. Repository cloud behavior and cache-loss
+recovery are qualified through Sqrzl; deployments must separately validate
+credentials, IAM, network policy, provider configuration, quotas, and capacity.
 
 Continue with the [quick start](quick-start.md), [API guide](api-guide.md), or
 [documentation hub](../README.md).

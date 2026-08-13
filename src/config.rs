@@ -31,11 +31,17 @@ pub(crate) fn validate_memtable_limits(
     Ok(())
 }
 
+pub(crate) mod cloud_validation;
 mod provider;
 
+pub use cloud_validation::{
+    CloudCheckCode, CloudCheckOutcome, CloudPreflightOptions, CloudProviderKind, CloudStorageRole,
+    CloudValidationFinding, CloudValidationMode, CloudValidationReport,
+};
 pub use provider::{
-    AzureCredentialSource, CloudCredentialSource, CloudProviderConfig, GcsApiStyle,
-    GcsCredentialSource, S3CredentialSource,
+    AwsS3Config, AzureBlobConfig, AzureCredentialSource, CloudProviderConfig, GcsApiStyle,
+    GcsConfig, GcsCredentialSource, OciCredentialSource, OciObjectStorageConfig,
+    S3CompatibleConfig, S3CredentialSource,
 };
 
 /// One provider-backed bucket/container and object namespace.
@@ -47,10 +53,10 @@ pub struct CloudStorageLocation {
 
 impl CloudStorageLocation {
     /// Define one cloud storage location.
-    pub fn new(provider: CloudProviderConfig, prefix: impl Into<String>) -> Self {
+    pub fn new(provider: impl Into<CloudProviderConfig>, prefix: impl Into<String>) -> Self {
         Self {
-            provider,
-            prefix: prefix.into(),
+            provider: provider.into(),
+            prefix: prefix.into().trim_matches('/').to_string(),
         }
     }
 
@@ -64,6 +70,18 @@ impl CloudStorageLocation {
     #[must_use]
     pub fn prefix(&self) -> &str {
         &self.prefix
+    }
+
+    /// Validate configuration without resolving credentials or performing I/O.
+    #[must_use]
+    pub fn validate(&self) -> CloudValidationReport {
+        cloud_validation::validate_location(self, &[CloudStorageRole::Standalone])
+    }
+
+    /// Run an explicit, read-only deployment preflight.
+    #[must_use]
+    pub fn preflight(&self, options: CloudPreflightOptions) -> CloudValidationReport {
+        cloud_validation::preflight_location(self, &[CloudStorageRole::Standalone], options)
     }
 }
 
@@ -127,6 +145,18 @@ impl CloudStorageTopology {
     #[must_use]
     pub fn control(&self) -> &CloudStorageLocation {
         &self.control
+    }
+
+    /// Validate all locations and aggregate role-qualified failures.
+    #[must_use]
+    pub fn validate(&self) -> CloudValidationReport {
+        cloud_validation::validate_topology(self)
+    }
+
+    /// Preflight unique locations concurrently under one overall deadline.
+    #[must_use]
+    pub fn preflight(&self, options: CloudPreflightOptions) -> CloudValidationReport {
+        cloud_validation::preflight_topology(self, options)
     }
 }
 

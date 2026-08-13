@@ -199,7 +199,7 @@ pub enum CloudEvent {
         key: String,
         result: CloudOutcome<(Vec<u8>, ObjectMetadata)>,
     },
-    #[cfg(test)]
+    #[cfg(any(test, feature = "cloud-common"))]
     GetRange {
         key: String,
         start: u64,
@@ -318,7 +318,8 @@ pub trait CloudBackend: Send + Sync + 'static {
             )),
         });
     }
-    #[cfg(test)]
+    /// Submit a ranged GET. `end` is an exclusive byte offset.
+    #[cfg(any(test, feature = "cloud-common"))]
     fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback);
     /// Submit an idempotent delete. Implementations must report success when
     /// the target is already absent; conditional-precondition failures remain
@@ -505,6 +506,7 @@ impl CloudBackend for MockCloudBackend {
         });
     }
 
+    #[cfg(any(test, feature = "cloud-common"))]
     fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
         let key = key.to_string();
         let result = self
