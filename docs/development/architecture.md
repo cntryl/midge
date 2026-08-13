@@ -1,6 +1,8 @@
 # Storage Architecture Overview
 
-This document is the storage-engine map for Midge as an experimental crate that is safe enough to evaluate. It focuses on the parts that control durability, crash recovery, and read correctness rather than the full runtime feature set.
+This document is the storage-engine map for Midge as a supported pre-1.0 crate.
+It focuses on the parts that control durability, crash recovery, and read
+correctness rather than the full runtime feature set.
 
 For visual diagrams of the module boundaries and data flows, see [architecture-diagrams.md](architecture-diagrams.md).
 

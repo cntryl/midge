@@ -33,6 +33,9 @@ pub enum S3CredentialSource {
     AwsDefaultChain,
 }
 
+/// OCI's S3 compatibility API uses the same access-key credential shape.
+pub type OciCredentialSource = S3CredentialSource;
+
 impl fmt::Debug for S3CredentialSource {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -352,127 +355,399 @@ pub enum GcsApiStyle {
     Xml,
 }
 
+/// AWS S3 configuration.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AwsS3Config {
+    pub(crate) bucket: String,
+    pub(crate) region: String,
+    pub(crate) credentials: S3CredentialSource,
+}
+
+impl AwsS3Config {
+    pub fn new(bucket: impl Into<String>, region: impl Into<String>) -> Self {
+        Self {
+            bucket: bucket.into(),
+            region: region.into(),
+            credentials: S3CredentialSource::aws_default_chain(),
+        }
+    }
+    #[must_use]
+    pub fn with_credentials(mut self, credentials: S3CredentialSource) -> Self {
+        self.credentials = credentials;
+        self
+    }
+    #[must_use]
+    pub fn with_profile(self, profile: impl Into<String>) -> Self {
+        self.with_credentials(S3CredentialSource::shared_profile(profile))
+    }
+    #[must_use]
+    pub fn bucket(&self) -> &str {
+        &self.bucket
+    }
+    #[must_use]
+    pub fn region(&self) -> &str {
+        &self.region
+    }
+    #[must_use]
+    pub fn credentials(&self) -> &S3CredentialSource {
+        &self.credentials
+    }
+}
+
+/// Generic S3-compatible object-store configuration.
+#[derive(Clone, PartialEq, Eq)]
+pub struct S3CompatibleConfig {
+    pub(crate) bucket: String,
+    pub(crate) region: String,
+    pub(crate) endpoint: String,
+    pub(crate) path_style: bool,
+    pub(crate) credentials: S3CredentialSource,
+}
+
+impl S3CompatibleConfig {
+    pub fn new(
+        bucket: impl Into<String>,
+        region: impl Into<String>,
+        endpoint: impl Into<String>,
+        credentials: S3CredentialSource,
+    ) -> Self {
+        Self {
+            bucket: bucket.into(),
+            region: region.into(),
+            endpoint: endpoint.into(),
+            path_style: true,
+            credentials,
+        }
+    }
+    #[must_use]
+    pub fn with_credentials(mut self, credentials: S3CredentialSource) -> Self {
+        self.credentials = credentials;
+        self
+    }
+    #[must_use]
+    pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.endpoint = endpoint.into();
+        self
+    }
+    #[must_use]
+    pub fn with_region(mut self, region: impl Into<String>) -> Self {
+        self.region = region.into();
+        self
+    }
+    #[must_use]
+    pub fn with_path_style(mut self, path_style: bool) -> Self {
+        self.path_style = path_style;
+        self
+    }
+    #[must_use]
+    pub fn bucket(&self) -> &str {
+        &self.bucket
+    }
+    #[must_use]
+    pub fn region(&self) -> &str {
+        &self.region
+    }
+    #[must_use]
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+    #[must_use]
+    pub fn path_style(&self) -> bool {
+        self.path_style
+    }
+    #[must_use]
+    pub fn credentials(&self) -> &S3CredentialSource {
+        &self.credentials
+    }
+}
+
+/// Oracle Cloud Infrastructure Object Storage configuration.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OciObjectStorageConfig {
+    pub(crate) namespace: String,
+    pub(crate) bucket: String,
+    pub(crate) region: String,
+    pub(crate) endpoint: Option<String>,
+    pub(crate) credentials: S3CredentialSource,
+}
+
+impl OciObjectStorageConfig {
+    pub fn new(
+        namespace: impl Into<String>,
+        bucket: impl Into<String>,
+        region: impl Into<String>,
+        credentials: S3CredentialSource,
+    ) -> Self {
+        Self {
+            namespace: namespace.into(),
+            bucket: bucket.into(),
+            region: region.into(),
+            endpoint: None,
+            credentials,
+        }
+    }
+    #[must_use]
+    pub fn with_credentials(mut self, credentials: S3CredentialSource) -> Self {
+        self.credentials = credentials;
+        self
+    }
+    #[must_use]
+    pub fn with_profile(self, profile: impl Into<String>) -> Self {
+        self.with_credentials(S3CredentialSource::shared_profile(profile))
+    }
+    /// Override the OCI S3 Compatibility API base URL for another realm.
+    #[must_use]
+    pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.endpoint = Some(endpoint.into());
+        self
+    }
+    #[must_use]
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+    #[must_use]
+    pub fn bucket(&self) -> &str {
+        &self.bucket
+    }
+    #[must_use]
+    pub fn region(&self) -> &str {
+        &self.region
+    }
+    #[must_use]
+    pub fn credentials(&self) -> &S3CredentialSource {
+        &self.credentials
+    }
+    /// Return an explicitly configured OCI S3 Compatibility API base URL.
+    #[must_use]
+    pub fn endpoint_override(&self) -> Option<&str> {
+        self.endpoint.as_deref()
+    }
+    #[must_use]
+    pub fn endpoint(&self) -> String {
+        self.endpoint.clone().unwrap_or_else(|| {
+            format!(
+                "https://{}.compat.objectstorage.{}.oraclecloud.com",
+                self.namespace, self.region
+            )
+        })
+    }
+}
+
+/// Azure Blob Storage configuration.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AzureBlobConfig {
+    pub(crate) account: String,
+    pub(crate) container: String,
+    pub(crate) endpoint: Option<String>,
+    pub(crate) credential: AzureCredentialSource,
+}
+
+impl AzureBlobConfig {
+    pub fn new(account: impl Into<String>, container: impl Into<String>) -> Self {
+        Self {
+            account: account.into(),
+            container: container.into(),
+            endpoint: None,
+            credential: AzureCredentialSource::default_chain(),
+        }
+    }
+    #[must_use]
+    pub fn with_credentials(mut self, credential: AzureCredentialSource) -> Self {
+        self.credential = credential;
+        self
+    }
+    #[must_use]
+    pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.endpoint = Some(endpoint.into());
+        self
+    }
+    #[must_use]
+    pub fn account(&self) -> &str {
+        &self.account
+    }
+    #[must_use]
+    pub fn container(&self) -> &str {
+        &self.container
+    }
+    #[must_use]
+    pub fn endpoint(&self) -> Option<&str> {
+        self.endpoint.as_deref()
+    }
+    #[must_use]
+    pub fn credentials(&self) -> &AzureCredentialSource {
+        &self.credential
+    }
+}
+
+/// Google Cloud Storage configuration. The API style is derived from credentials.
+#[derive(Clone, PartialEq, Eq)]
+pub struct GcsConfig {
+    pub(crate) bucket: String,
+    pub(crate) project_id: String,
+    pub(crate) endpoint: Option<String>,
+    pub(crate) credential: GcsCredentialSource,
+}
+
+impl GcsConfig {
+    pub fn new(bucket: impl Into<String>) -> Self {
+        Self {
+            bucket: bucket.into(),
+            project_id: String::new(),
+            endpoint: None,
+            credential: GcsCredentialSource::application_default(),
+        }
+    }
+    #[must_use]
+    pub fn with_credentials(mut self, credential: GcsCredentialSource) -> Self {
+        self.credential = credential;
+        self
+    }
+    #[must_use]
+    pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.endpoint = Some(endpoint.into());
+        self
+    }
+    #[must_use]
+    pub fn with_project_id(mut self, project_id: impl Into<String>) -> Self {
+        self.project_id = project_id.into();
+        self
+    }
+    #[must_use]
+    pub fn bucket(&self) -> &str {
+        &self.bucket
+    }
+    #[must_use]
+    pub fn project_id(&self) -> &str {
+        &self.project_id
+    }
+    #[must_use]
+    pub fn endpoint(&self) -> Option<&str> {
+        self.endpoint.as_deref()
+    }
+    #[must_use]
+    pub fn credentials(&self) -> &GcsCredentialSource {
+        &self.credential
+    }
+    #[must_use]
+    pub fn api_style(&self) -> GcsApiStyle {
+        if matches!(self.credential, GcsCredentialSource::HmacKey { .. }) {
+            GcsApiStyle::Xml
+        } else {
+            GcsApiStyle::Json
+        }
+    }
+}
+
 /// Public cloud provider configuration for real object-store backends.
 #[derive(Clone, PartialEq, Eq)]
 pub enum CloudProviderConfig {
-    AwsS3 {
-        bucket: String,
-        region: String,
-        credentials: S3CredentialSource,
-    },
-    S3Compatible {
-        bucket: String,
-        region: String,
-        endpoint: String,
-        path_style: bool,
-        credentials: S3CredentialSource,
-    },
-    AzureBlob {
-        account: String,
-        container: String,
-        endpoint: Option<String>,
-        credential: AzureCredentialSource,
-    },
-    Gcs {
-        bucket: String,
-        project_id: String,
-        endpoint: Option<String>,
-        api: GcsApiStyle,
-        credential: GcsCredentialSource,
-    },
+    AwsS3(AwsS3Config),
+    S3Compatible(S3CompatibleConfig),
+    AzureBlob(AzureBlobConfig),
+    Gcs(GcsConfig),
+    OciObjectStorage(OciObjectStorageConfig),
+}
+
+impl From<AwsS3Config> for CloudProviderConfig {
+    fn from(value: AwsS3Config) -> Self {
+        Self::AwsS3(value)
+    }
+}
+impl From<S3CompatibleConfig> for CloudProviderConfig {
+    fn from(value: S3CompatibleConfig) -> Self {
+        Self::S3Compatible(value)
+    }
+}
+impl From<AzureBlobConfig> for CloudProviderConfig {
+    fn from(value: AzureBlobConfig) -> Self {
+        Self::AzureBlob(value)
+    }
+}
+impl From<GcsConfig> for CloudProviderConfig {
+    fn from(value: GcsConfig) -> Self {
+        Self::Gcs(value)
+    }
+}
+impl From<OciObjectStorageConfig> for CloudProviderConfig {
+    fn from(value: OciObjectStorageConfig) -> Self {
+        Self::OciObjectStorage(value)
+    }
+}
+
+impl fmt::Debug for AwsS3Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        CloudProviderConfig::AwsS3(self.clone()).fmt(f)
+    }
+}
+impl fmt::Debug for S3CompatibleConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        CloudProviderConfig::S3Compatible(self.clone()).fmt(f)
+    }
+}
+impl fmt::Debug for AzureBlobConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        CloudProviderConfig::AzureBlob(self.clone()).fmt(f)
+    }
+}
+impl fmt::Debug for GcsConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        CloudProviderConfig::Gcs(self.clone()).fmt(f)
+    }
+}
+impl fmt::Debug for OciObjectStorageConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        CloudProviderConfig::OciObjectStorage(self.clone()).fmt(f)
+    }
 }
 
 impl fmt::Debug for CloudProviderConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::AwsS3 {
-                bucket,
-                region,
-                credentials,
-            } => formatter
+            Self::AwsS3(config) => formatter
                 .debug_struct("AwsS3")
-                .field("bucket", bucket)
-                .field("region", region)
-                .field("credentials", credentials)
+                .field("bucket", &config.bucket)
+                .field("region", &config.region)
+                .field("credentials", &config.credentials)
                 .finish(),
-            Self::S3Compatible {
-                bucket,
-                region,
-                endpoint,
-                path_style,
-                credentials,
-            } => formatter
+            Self::S3Compatible(config) => formatter
                 .debug_struct("S3Compatible")
-                .field("bucket", bucket)
-                .field("region", region)
-                .field("endpoint", endpoint)
-                .field("path_style", path_style)
-                .field("credentials", credentials)
+                .field("bucket", &config.bucket)
+                .field("region", &config.region)
+                .field("endpoint", &config.endpoint)
+                .field("path_style", &config.path_style)
+                .field("credentials", &config.credentials)
                 .finish(),
-            Self::AzureBlob {
-                account,
-                container,
-                endpoint,
-                credential,
-            } => formatter
+            Self::AzureBlob(config) => formatter
                 .debug_struct("AzureBlob")
-                .field("account", account)
-                .field("container", container)
-                .field("endpoint", endpoint)
-                .field("credential", credential)
+                .field("account", &config.account)
+                .field("container", &config.container)
+                .field("endpoint", &config.endpoint)
+                .field("credential", &config.credential)
                 .finish(),
-            Self::Gcs {
-                bucket,
-                project_id,
-                endpoint,
-                api,
-                credential,
-            } => formatter
+            Self::Gcs(config) => formatter
                 .debug_struct("Gcs")
-                .field("bucket", bucket)
-                .field("project_id", project_id)
-                .field("endpoint", endpoint)
-                .field("api", api)
-                .field("credential", credential)
+                .field("bucket", &config.bucket)
+                .field("project_id", &config.project_id)
+                .field("endpoint", &config.endpoint)
+                .field("api", &config.api_style())
+                .field("credential", &config.credential)
+                .finish(),
+            Self::OciObjectStorage(config) => formatter
+                .debug_struct("OciObjectStorage")
+                .field("namespace", &config.namespace)
+                .field("bucket", &config.bucket)
+                .field("region", &config.region)
+                .field("endpoint", &config.endpoint)
+                .field("credentials", &config.credentials)
                 .finish(),
         }
-    }
-}
-
-/// Provider-neutral credential wrapper for fluent cloud configuration.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CloudCredentialSource {
-    S3(S3CredentialSource),
-    Azure(AzureCredentialSource),
-    Gcs(GcsCredentialSource),
-}
-
-impl From<S3CredentialSource> for CloudCredentialSource {
-    fn from(source: S3CredentialSource) -> Self {
-        Self::S3(source)
-    }
-}
-
-impl From<AzureCredentialSource> for CloudCredentialSource {
-    fn from(source: AzureCredentialSource) -> Self {
-        Self::Azure(source)
-    }
-}
-
-impl From<GcsCredentialSource> for CloudCredentialSource {
-    fn from(source: GcsCredentialSource) -> Self {
-        Self::Gcs(source)
     }
 }
 
 impl CloudProviderConfig {
     /// Create AWS S3 config using Midge's lean AWS default credential chain.
     pub fn aws_s3(bucket: impl Into<String>, region: impl Into<String>) -> Self {
-        Self::AwsS3 {
-            bucket: bucket.into(),
-            region: region.into(),
-            credentials: S3CredentialSource::aws_default_chain(),
-        }
+        AwsS3Config::new(bucket, region).into()
     }
 
     /// Create AWS S3 config with explicit access keys.
@@ -482,22 +757,20 @@ impl CloudProviderConfig {
         access_key: impl Into<String>,
         secret_key: impl Into<String>,
     ) -> Self {
-        Self::AwsS3 {
-            bucket: bucket.into(),
-            region: region.into(),
-            credentials: S3CredentialSource::access_key(access_key, secret_key),
-        }
+        AwsS3Config::new(bucket, region)
+            .with_credentials(S3CredentialSource::access_key(access_key, secret_key))
+            .into()
     }
 
     /// Create S3-compatible config using AWS-style environment credentials.
     pub fn s3_compatible_env(bucket: impl Into<String>, endpoint: impl Into<String>) -> Self {
-        Self::S3Compatible {
-            bucket: bucket.into(),
-            region: "us-east-1".to_string(),
-            endpoint: endpoint.into(),
-            path_style: true,
-            credentials: S3CredentialSource::environment(),
-        }
+        S3CompatibleConfig::new(
+            bucket,
+            "us-east-1",
+            endpoint,
+            S3CredentialSource::environment(),
+        )
+        .into()
     }
 
     /// Create S3-compatible config with explicit access keys.
@@ -507,13 +780,13 @@ impl CloudProviderConfig {
         access_key: impl Into<String>,
         secret_key: impl Into<String>,
     ) -> Self {
-        Self::S3Compatible {
-            bucket: bucket.into(),
-            region: "us-east-1".to_string(),
-            endpoint: endpoint.into(),
-            path_style: true,
-            credentials: S3CredentialSource::access_key(access_key, secret_key),
-        }
+        S3CompatibleConfig::new(
+            bucket,
+            "us-east-1",
+            endpoint,
+            S3CredentialSource::access_key(access_key, secret_key),
+        )
+        .into()
     }
 
     /// Create S3-compatible config with explicit region and static credentials.
@@ -524,23 +797,28 @@ impl CloudProviderConfig {
         access_key: impl Into<String>,
         secret_key: impl Into<String>,
     ) -> Self {
-        Self::S3Compatible {
-            bucket: bucket.into(),
-            region: region.into(),
-            endpoint: endpoint.into(),
-            path_style: true,
-            credentials: S3CredentialSource::access_key(access_key, secret_key),
-        }
+        S3CompatibleConfig::new(
+            bucket,
+            region,
+            endpoint,
+            S3CredentialSource::access_key(access_key, secret_key),
+        )
+        .into()
+    }
+
+    /// Create OCI Object Storage config through its S3 Compatibility API.
+    pub fn oci_object_storage(
+        namespace: impl Into<String>,
+        bucket: impl Into<String>,
+        region: impl Into<String>,
+        credentials: OciCredentialSource,
+    ) -> Self {
+        OciObjectStorageConfig::new(namespace, bucket, region, credentials).into()
     }
 
     /// Create Azure Blob config using Midge's lean Azure identity chain.
     pub fn azure_blob(account: impl Into<String>, container: impl Into<String>) -> Self {
-        Self::AzureBlob {
-            account: account.into(),
-            container: container.into(),
-            endpoint: None,
-            credential: AzureCredentialSource::default_chain(),
-        }
+        AzureBlobConfig::new(account, container).into()
     }
 
     /// Create Azure Blob config with shared-key authentication.
@@ -549,12 +827,9 @@ impl CloudProviderConfig {
         container: impl Into<String>,
         account_key: impl Into<String>,
     ) -> Self {
-        Self::AzureBlob {
-            account: account.into(),
-            container: container.into(),
-            endpoint: None,
-            credential: AzureCredentialSource::shared_key(account_key),
-        }
+        AzureBlobConfig::new(account, container)
+            .with_credentials(AzureCredentialSource::shared_key(account_key))
+            .into()
     }
 
     /// Create Azure Blob config with SAS-token authentication.
@@ -563,12 +838,9 @@ impl CloudProviderConfig {
         container: impl Into<String>,
         token: impl Into<String>,
     ) -> Self {
-        Self::AzureBlob {
-            account: account.into(),
-            container: container.into(),
-            endpoint: None,
-            credential: AzureCredentialSource::sas_token(token),
-        }
+        AzureBlobConfig::new(account, container)
+            .with_credentials(AzureCredentialSource::sas_token(token))
+            .into()
     }
 
     /// Create Azure Blob config from a connection string.
@@ -577,23 +849,17 @@ impl CloudProviderConfig {
         connection_string: impl Into<String>,
     ) -> Self {
         let connection_string = connection_string.into();
-        Self::AzureBlob {
-            account: azure_connection_string_account(&connection_string).unwrap_or_default(),
-            container: container.into(),
-            endpoint: None,
-            credential: AzureCredentialSource::connection_string(connection_string),
-        }
+        AzureBlobConfig::new(
+            azure_connection_string_account(&connection_string).unwrap_or_default(),
+            container,
+        )
+        .with_credentials(AzureCredentialSource::connection_string(connection_string))
+        .into()
     }
 
     /// Create GCS config using Application Default Credentials and the JSON API.
     pub fn gcs(bucket: impl Into<String>) -> Self {
-        Self::Gcs {
-            bucket: bucket.into(),
-            project_id: String::new(),
-            endpoint: None,
-            api: GcsApiStyle::Json,
-            credential: GcsCredentialSource::application_default(),
-        }
+        GcsConfig::new(bucket).into()
     }
 
     /// Create GCS config using XML API HMAC credentials.
@@ -602,46 +868,30 @@ impl CloudProviderConfig {
         access_id: impl Into<String>,
         secret: impl Into<String>,
     ) -> Self {
-        Self::Gcs {
-            bucket: bucket.into(),
-            project_id: String::new(),
-            endpoint: None,
-            api: GcsApiStyle::Xml,
-            credential: GcsCredentialSource::hmac_key(access_id, secret),
-        }
+        GcsConfig::new(bucket)
+            .with_credentials(GcsCredentialSource::hmac_key(access_id, secret))
+            .into()
     }
 
     /// Create GCS config using a service-account JSON file.
     pub fn gcs_service_account_file(bucket: impl Into<String>, path: impl Into<PathBuf>) -> Self {
-        Self::Gcs {
-            bucket: bucket.into(),
-            project_id: String::new(),
-            endpoint: None,
-            api: GcsApiStyle::Json,
-            credential: GcsCredentialSource::service_account_json_file(path),
-        }
+        GcsConfig::new(bucket)
+            .with_credentials(GcsCredentialSource::service_account_json_file(path))
+            .into()
     }
 
     /// Create GCS config using an authorized-user ADC JSON file.
     pub fn gcs_authorized_user_file(bucket: impl Into<String>, path: impl Into<PathBuf>) -> Self {
-        Self::Gcs {
-            bucket: bucket.into(),
-            project_id: String::new(),
-            endpoint: None,
-            api: GcsApiStyle::Json,
-            credential: GcsCredentialSource::authorized_user_json_file(path),
-        }
+        GcsConfig::new(bucket)
+            .with_credentials(GcsCredentialSource::authorized_user_json_file(path))
+            .into()
     }
 
     /// Create GCS config using a static `OAuth2` bearer token.
     pub fn gcs_bearer_token(bucket: impl Into<String>, token: impl Into<String>) -> Self {
-        Self::Gcs {
-            bucket: bucket.into(),
-            project_id: String::new(),
-            endpoint: None,
-            api: GcsApiStyle::Json,
-            credential: GcsCredentialSource::bearer_token(token),
-        }
+        GcsConfig::new(bucket)
+            .with_credentials(GcsCredentialSource::bearer_token(token))
+            .into()
     }
 
     /// Create an S3-compatible configuration for the local Sqrzl emulator.
@@ -651,23 +901,19 @@ impl CloudProviderConfig {
 
     /// Create an Azure Blob configuration for the local Sqrzl emulator.
     pub fn sqrzl_azure(container: impl Into<String>) -> Self {
-        Self::AzureBlob {
-            account: "admin".to_string(),
-            container: container.into(),
-            endpoint: Some("http://127.0.0.1:9000".to_string()),
-            credential: AzureCredentialSource::shared_key("easy-peasy"),
-        }
+        AzureBlobConfig::new("admin", container)
+            .with_endpoint("http://127.0.0.1:9000")
+            .with_credentials(AzureCredentialSource::shared_key("easy-peasy"))
+            .into()
     }
 
     /// Create a GCS XML configuration for the local Sqrzl emulator.
     pub fn sqrzl_gcs(bucket: impl Into<String>) -> Self {
-        Self::Gcs {
-            bucket: bucket.into(),
-            project_id: "sqrzl".to_string(),
-            endpoint: Some("http://127.0.0.1:9000".to_string()),
-            api: GcsApiStyle::Xml,
-            credential: GcsCredentialSource::hmac_key("admin", "easy-peasy"),
-        }
+        GcsConfig::new(bucket)
+            .with_project_id("sqrzl")
+            .with_endpoint("http://127.0.0.1:9000")
+            .with_credentials(GcsCredentialSource::hmac_key("admin", "easy-peasy"))
+            .into()
     }
 
     /// Create a GCS JSON configuration for the local Sqrzl emulator.
@@ -690,16 +936,11 @@ impl CloudProviderConfig {
     pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> MidgeResult<Self> {
         let endpoint = endpoint.into();
         match &mut self {
-            Self::S3Compatible {
-                endpoint: target, ..
-            } => *target = endpoint,
-            Self::AzureBlob {
-                endpoint: target, ..
-            }
-            | Self::Gcs {
-                endpoint: target, ..
-            } => *target = Some(endpoint),
-            Self::AwsS3 { .. } => {
+            Self::S3Compatible(config) => config.endpoint = endpoint,
+            Self::OciObjectStorage(config) => config.endpoint = Some(endpoint),
+            Self::AzureBlob(config) => config.endpoint = Some(endpoint),
+            Self::Gcs(config) => config.endpoint = Some(endpoint),
+            Self::AwsS3(_) => {
                 return Err(MidgeError::InvalidArgument(
                     "AWS S3 does not support endpoint overrides; use s3_compatible_* for custom endpoints"
                         .to_string(),
@@ -717,10 +958,8 @@ impl CloudProviderConfig {
     /// support path-style overrides.
     pub fn with_path_style(mut self, path_style: bool) -> MidgeResult<Self> {
         match &mut self {
-            Self::S3Compatible {
-                path_style: target, ..
-            } => *target = path_style,
-            Self::AwsS3 { .. } | Self::AzureBlob { .. } | Self::Gcs { .. } => {
+            Self::S3Compatible(config) => config.path_style = path_style,
+            Self::AwsS3(_) | Self::AzureBlob(_) | Self::Gcs(_) | Self::OciObjectStorage(_) => {
                 return Err(MidgeError::InvalidArgument(format!(
                     "{} provider does not support path-style overrides",
                     self.kind()
@@ -739,10 +978,10 @@ impl CloudProviderConfig {
     pub fn with_s3_region(mut self, region: impl Into<String>) -> MidgeResult<Self> {
         let region = region.into();
         match &mut self {
-            Self::AwsS3 { region: target, .. } | Self::S3Compatible { region: target, .. } => {
-                *target = region;
-            }
-            Self::AzureBlob { .. } | Self::Gcs { .. } => {
+            Self::AwsS3(config) => config.region = region,
+            Self::S3Compatible(config) => config.region = region,
+            Self::OciObjectStorage(config) => config.region = region,
+            Self::AzureBlob(_) | Self::Gcs(_) => {
                 return Err(MidgeError::InvalidArgument(format!(
                     "{} provider does not support S3 region overrides",
                     self.kind()
@@ -758,11 +997,8 @@ impl CloudProviderConfig {
     ///
     /// Returns `MidgeError::InvalidArgument` when called for a non-GCS provider.
     pub fn with_gcs_project_id(mut self, project_id: impl Into<String>) -> MidgeResult<Self> {
-        if let Self::Gcs {
-            project_id: target, ..
-        } = &mut self
-        {
-            *target = project_id.into();
+        if let Self::Gcs(config) = &mut self {
+            config.project_id = project_id.into();
             Ok(self)
         } else {
             Err(MidgeError::InvalidArgument(format!(
@@ -772,26 +1008,23 @@ impl CloudProviderConfig {
         }
     }
 
-    /// Override credentials when the credential kind matches the provider.
-    ///
-    /// # Errors
-    ///
-    /// Returns `MidgeError::InvalidArgument` when the credential family does not
-    /// match the provider family.
-    pub fn with_credentials<C: Into<CloudCredentialSource>>(
-        self,
-        credentials: C,
-    ) -> MidgeResult<Self> {
-        self.try_with_credentials(credentials)
-    }
-
     /// Override credentials for an S3-family provider.
     ///
     /// # Errors
     ///
     /// Returns `MidgeError::InvalidArgument` when called for a non-S3-family provider.
-    pub fn with_s3_credentials(self, credentials: S3CredentialSource) -> MidgeResult<Self> {
-        self.try_with_credentials(credentials)
+    pub fn with_s3_credentials(mut self, credentials: S3CredentialSource) -> MidgeResult<Self> {
+        match &mut self {
+            Self::AwsS3(config) => config.credentials = credentials,
+            Self::S3Compatible(config) => config.credentials = credentials,
+            Self::OciObjectStorage(config) => config.credentials = credentials,
+            _ => {
+                return Err(MidgeError::InvalidArgument(
+                    "provider does not accept S3-family credentials".to_string(),
+                ))
+            }
+        }
+        Ok(self)
     }
 
     /// Override credentials for an Azure provider.
@@ -799,8 +1032,22 @@ impl CloudProviderConfig {
     /// # Errors
     ///
     /// Returns `MidgeError::InvalidArgument` when called for a non-Azure provider.
-    pub fn with_azure_credentials(self, credentials: AzureCredentialSource) -> MidgeResult<Self> {
-        self.try_with_credentials(credentials)
+    pub fn with_azure_credentials(
+        mut self,
+        credentials: AzureCredentialSource,
+    ) -> MidgeResult<Self> {
+        let Self::AzureBlob(config) = &mut self else {
+            return Err(MidgeError::InvalidArgument(
+                "provider does not accept Azure credentials".to_string(),
+            ));
+        };
+        if config.account.is_empty()
+            && !matches!(&credentials, AzureCredentialSource::ConnectionString { .. })
+        {
+            return Err(MidgeError::InvalidArgument("cannot replace Azure connection-string credentials without an account name; use azure_blob_* with an explicit account".to_string()));
+        }
+        config.credential = credentials;
+        Ok(self)
     }
 
     /// Override credentials for a GCS provider, updating the API style as needed.
@@ -808,102 +1055,33 @@ impl CloudProviderConfig {
     /// # Errors
     ///
     /// Returns `MidgeError::InvalidArgument` when called for a non-GCS provider.
-    pub fn with_gcs_credentials(self, credentials: GcsCredentialSource) -> MidgeResult<Self> {
-        self.try_with_credentials(credentials)
-    }
-
-    /// Fallible credential override for dynamic provider/credential configuration.
-    ///
-    /// # Errors
-    ///
-    /// Returns `MidgeError::InvalidArgument` when the credential family does not
-    /// match the provider family or when the Azure account requirements are violated.
-    pub fn try_with_credentials<C: Into<CloudCredentialSource>>(
-        mut self,
-        credentials: C,
-    ) -> MidgeResult<Self> {
-        match (&mut self, credentials.into()) {
-            (
-                Self::AwsS3 {
-                    credentials: target,
-                    ..
-                }
-                | Self::S3Compatible {
-                    credentials: target,
-                    ..
-                },
-                CloudCredentialSource::S3(credentials),
-            ) => *target = credentials,
-            (
-                Self::AzureBlob {
-                    account,
-                    credential,
-                    ..
-                },
-                CloudCredentialSource::Azure(credentials),
-            ) => {
-                if account.is_empty()
-                    && !matches!(&credentials, AzureCredentialSource::ConnectionString { .. })
-                {
-                    return Err(MidgeError::InvalidArgument(
-                        "cannot replace Azure connection-string credentials without an account name; use azure_blob_* with an explicit account"
-                            .to_string(),
-                    ));
-                }
-                *credential = credentials;
-            }
-            (
-                Self::Gcs {
-                    api, credential, ..
-                },
-                CloudCredentialSource::Gcs(credentials),
-            ) => {
-                *api = match &credentials {
-                    GcsCredentialSource::HmacKey { .. } => GcsApiStyle::Xml,
-                    GcsCredentialSource::BearerToken { .. }
-                    | GcsCredentialSource::ApplicationDefault
-                    | GcsCredentialSource::ServiceAccountJsonFile { .. }
-                    | GcsCredentialSource::AuthorizedUserJsonFile { .. }
-                    | GcsCredentialSource::MetadataServer => GcsApiStyle::Json,
-                };
-                *credential = credentials;
-            }
-            (provider, credentials) => {
-                return Err(MidgeError::InvalidArgument(format!(
-                    "cannot apply {} credentials to {} provider",
-                    credentials.kind(),
-                    provider.kind()
-                )));
-            }
-        }
+    pub fn with_gcs_credentials(mut self, credentials: GcsCredentialSource) -> MidgeResult<Self> {
+        let Self::Gcs(config) = &mut self else {
+            return Err(MidgeError::InvalidArgument(
+                "provider does not accept GCS credentials".to_string(),
+            ));
+        };
+        config.credential = credentials;
         Ok(self)
     }
 
     #[must_use]
     pub fn bucket_or_container(&self) -> &str {
         match self {
-            Self::AwsS3 { bucket, .. }
-            | Self::S3Compatible { bucket, .. }
-            | Self::Gcs { bucket, .. } => bucket,
-            Self::AzureBlob { container, .. } => container,
+            Self::AwsS3(config) => &config.bucket,
+            Self::S3Compatible(config) => &config.bucket,
+            Self::Gcs(config) => &config.bucket,
+            Self::AzureBlob(config) => &config.container,
+            Self::OciObjectStorage(config) => &config.bucket,
         }
     }
 
     fn kind(&self) -> &'static str {
         match self {
-            Self::AwsS3 { .. } | Self::S3Compatible { .. } => "S3-family",
-            Self::AzureBlob { .. } => "Azure",
-            Self::Gcs { .. } => "GCS",
-        }
-    }
-}
-
-impl CloudCredentialSource {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::S3(_) => "S3-family",
-            Self::Azure(_) => "Azure",
+            Self::AwsS3(_) | Self::S3Compatible(_) => "S3-family",
+            Self::AzureBlob(_) => "Azure",
             Self::Gcs(_) => "GCS",
+            Self::OciObjectStorage(_) => "OCI",
         }
     }
 }
@@ -1014,11 +1192,7 @@ mod tests {
         // Assert
         assert!(matches!(
             provider,
-            CloudProviderConfig::AzureBlob {
-                endpoint: Some(configured),
-                credential: AzureCredentialSource::ManagedIdentity { .. },
-                ..
-            } if configured == endpoint
+            CloudProviderConfig::AzureBlob(config) if config.endpoint() == Some(endpoint) && matches!(config.credentials(), AzureCredentialSource::ManagedIdentity { .. })
         ));
     }
 }

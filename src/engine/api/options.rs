@@ -577,6 +577,21 @@ impl OpenOptionsBuilder {
     /// total memory budget. Storage I/O timeouts must be representable by the
     /// providers' millisecond-granularity deadlines.
     pub fn build(self) -> MidgeResult<OpenOptions> {
+        if let Storage::Cloud { topology, .. } = &self.storage {
+            let report = topology.validate();
+            if !report.is_valid {
+                let summaries = report
+                    .findings
+                    .iter()
+                    .filter(|finding| finding.outcome == crate::config::CloudCheckOutcome::Failed)
+                    .map(|finding| format!("{:?}: {}", finding.roles, finding.message))
+                    .collect::<Vec<_>>();
+                return Err(MidgeError::InvalidArgument(format!(
+                    "invalid cloud storage topology: {}",
+                    summaries.join("; ")
+                )));
+            }
+        }
         if self.cloud.storage_io_timeout < Duration::from_millis(1) {
             return Err(MidgeError::InvalidArgument(
                 "storage I/O timeout must be at least 1 millisecond".to_string(),

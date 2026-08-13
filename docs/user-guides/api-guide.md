@@ -77,6 +77,10 @@ For cloud-backed storage, `cloud_async` returns after the local barrier while
 upload continues, and `cloud_strict` waits for the cloud upload. Cloud provider
 configuration is exposed through `CloudProviderConfig` and feature-specific
 credential source types; see [cloud setup](../operations/cloud-setup.md).
+Provider payloads are private-field typed configurations, so invalid
+cross-provider credential combinations cannot be assembled through the public
+API. `validate()` is side-effect-free; `preflight(CloudPreflightOptions)` is an
+explicit read-only deployment check returning a serializable redacted report.
 
 ## Errors and diagnostics
 

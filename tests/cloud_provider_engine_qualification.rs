@@ -298,10 +298,11 @@ fn default_cf(engine: &Engine) -> ColumnFamilyHandle {
 
 fn ensure_sqrzl_namespace(provider: &CloudProviderConfig) -> Result<(), String> {
     match provider {
-        CloudProviderConfig::AwsS3 { .. } => Ok(()),
-        CloudProviderConfig::S3Compatible { bucket, .. } => ensure_sqrzl_s3_bucket(bucket),
-        CloudProviderConfig::Gcs { bucket, .. } => ensure_sqrzl_gcs_bucket(bucket),
-        CloudProviderConfig::AzureBlob { container, .. } => ensure_sqrzl_azure_container(container),
+        CloudProviderConfig::AwsS3(_) => Ok(()),
+        CloudProviderConfig::S3Compatible(config) => ensure_sqrzl_s3_bucket(config.bucket()),
+        CloudProviderConfig::Gcs(config) => ensure_sqrzl_gcs_bucket(config.bucket()),
+        CloudProviderConfig::AzureBlob(config) => ensure_sqrzl_azure_container(config.container()),
+        CloudProviderConfig::OciObjectStorage(config) => ensure_sqrzl_s3_bucket(config.bucket()),
     }
 }
 

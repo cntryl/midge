@@ -48,5 +48,6 @@ credentials, or confidential information.
 - [ ] Coexisting implementations have a differential test, or the unused variant is removed.
 - [ ] Shared test infrastructure uses poison-tolerant locks and consistent failpoint gates.
 - [ ] Failpoint governance relies on mechanical call-site discovery, not a hardcoded allowlist.
-- [ ] Expensive coverage, mutation, real-provider, and Sqrzl checks remain scheduled/manual unless their CI cost is explicitly approved.
+- [ ] Expensive coverage and mutation checks remain scheduled/manual unless their CI cost is explicitly approved; Sqrzl remains the self-contained cloud qualification authority.
+- [ ] A real-provider behavior difference is reproduced in Sqrzl and retained as a Midge regression test where applicable.
 - [ ] Every linked issue criterion is represented above; pre-existing or renamed coverage is not claimed as new evidence.

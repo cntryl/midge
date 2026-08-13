@@ -81,7 +81,7 @@ sha2 = { version = "0.11", optional = true }
 sha1 = { version = "0.11", optional = true }
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros"], optional = true }
 ring = { version = "0.17", optional = true }
-url = { version = "2.5", optional = true }
+url = "2.5"
 urlencoding = { version = "2.1", optional = true }
 
 # Platform-Specific Dependencies
@@ -121,7 +121,6 @@ cloud-aws = [
     "dep:hmac",
     "dep:sha2",
     "dep:percent-encoding",
-    "dep:url",
     "dep:urlencoding",
 ]
 
@@ -132,7 +131,6 @@ cloud-azure = [
     "dep:hmac",
     "dep:sha2",
     "dep:percent-encoding",
-    "dep:url",
     "dep:urlencoding",
 ]
 cloud-gcp = [
@@ -143,7 +141,6 @@ cloud-gcp = [
     "dep:sha1",
     "dep:sha2",
     "dep:percent-encoding",
-    "dep:url",
     "dep:urlencoding",
 ]
 cloud-oci = [
@@ -151,7 +148,6 @@ cloud-oci = [
     "dep:hmac",
     "dep:sha2",
     "dep:percent-encoding",
-    "dep:url",
     "dep:urlencoding",
 ]
 cloud-all = ["cloud-aws", "cloud-azure", "cloud-gcp", "cloud-oci"]

@@ -229,6 +229,31 @@ fn should_use_sqrzl_emulator_for_cloud_gates() {
 }
 
 #[test]
+fn should_document_sqrzl_as_self_contained_cloud_qualification_authority() {
+    // Arrange
+    let readme = read_workflow("README.md");
+    let policy = read_workflow("docs/development/cloud-qualification-policy.md");
+    let support_matrix = read_workflow("docs/development/support-matrix.md");
+    let cloud_setup = read_workflow("docs/operations/cloud-setup.md");
+
+    // Act
+    let documents = [&support_matrix, &cloud_setup];
+    let normalized_readme = readme.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    // Assert
+    assert!(normalized_readme.contains("supported pre-1.0 capability"));
+    assert!(normalized_readme.contains("Sqrzl multi-provider emulator"));
+    assert!(policy.contains("authoritative continuous qualification environment"));
+    assert!(policy.contains("deterministic, credential-free"));
+    assert!(policy.contains("Manual real-cloud integration testing has a different purpose"));
+    assert!(policy
+        .contains("absence of live-provider credentials in CI is not a cloud-maturity defect"));
+    for document in documents {
+        assert!(document.contains("cloud qualification policy"));
+    }
+}
+
+#[test]
 fn should_verify_checked_in_current_fixture_in_publish_workflow() {
     // Arrange
     let publish = read_workflow(".github/workflows/publish.yml");

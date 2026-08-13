@@ -139,19 +139,21 @@ pub(super) struct EngineStartup;
 
 fn provider_kind(provider: &crate::config::CloudProviderConfig) -> &'static str {
     match provider {
-        crate::config::CloudProviderConfig::AwsS3 { .. } => "aws-s3",
-        crate::config::CloudProviderConfig::S3Compatible { .. } => "s3-compatible",
-        crate::config::CloudProviderConfig::AzureBlob { .. } => "azure-blob",
-        crate::config::CloudProviderConfig::Gcs { .. } => "gcs",
+        crate::config::CloudProviderConfig::AwsS3(_) => "aws-s3",
+        crate::config::CloudProviderConfig::S3Compatible(_) => "s3-compatible",
+        crate::config::CloudProviderConfig::AzureBlob(_) => "azure-blob",
+        crate::config::CloudProviderConfig::Gcs(_) => "gcs",
+        crate::config::CloudProviderConfig::OciObjectStorage(_) => "oci-object-storage",
     }
 }
 
 fn provider_endpoint(provider: &crate::config::CloudProviderConfig) -> Option<&str> {
     match provider {
-        crate::config::CloudProviderConfig::AwsS3 { .. } => None,
-        crate::config::CloudProviderConfig::S3Compatible { endpoint, .. } => Some(endpoint),
-        crate::config::CloudProviderConfig::AzureBlob { endpoint, .. }
-        | crate::config::CloudProviderConfig::Gcs { endpoint, .. } => endpoint.as_deref(),
+        crate::config::CloudProviderConfig::AwsS3(_) => None,
+        crate::config::CloudProviderConfig::OciObjectStorage(config) => config.endpoint_override(),
+        crate::config::CloudProviderConfig::S3Compatible(config) => Some(&config.endpoint),
+        crate::config::CloudProviderConfig::AzureBlob(config) => config.endpoint.as_deref(),
+        crate::config::CloudProviderConfig::Gcs(config) => config.endpoint.as_deref(),
     }
 }
 

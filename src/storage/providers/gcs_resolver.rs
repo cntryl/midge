@@ -7,7 +7,7 @@ use crate::storage::cloud::CloudBackend;
 pub(super) fn try_resolve(
     provider: &CloudProviderConfig,
 ) -> MidgeResult<Option<Arc<dyn CloudBackend>>> {
-    let CloudProviderConfig::Gcs { .. } = provider else {
+    let CloudProviderConfig::Gcs(_) = provider else {
         return Ok(None);
     };
 
@@ -15,35 +15,28 @@ pub(super) fn try_resolve(
 }
 
 fn resolve_gcs(provider: &CloudProviderConfig) -> MidgeResult<Arc<dyn CloudBackend>> {
-    let CloudProviderConfig::Gcs {
-        bucket,
-        project_id,
-        endpoint,
-        api,
-        credential,
-    } = provider
-    else {
+    let CloudProviderConfig::Gcs(config) = provider else {
         return Err(MidgeError::InvalidArgument(
             "expected a GCS provider".to_string(),
         ));
     };
 
-    let provider = match credential {
+    let provider = match &config.credential {
         GcsCredentialSource::BearerToken { token } => {
             super::gcs::GcsProvider::with_bearer_token_endpoint(
-                bucket.clone(),
-                project_id.clone(),
+                config.bucket.clone(),
+                config.project_id.clone(),
                 token.clone(),
-                endpoint.clone(),
+                config.endpoint.clone(),
             )?
         }
-        GcsCredentialSource::HmacKey { access_id, secret } => match api {
+        GcsCredentialSource::HmacKey { access_id, secret } => match config.api_style() {
             GcsApiStyle::Xml => super::gcs::GcsProvider::with_hmac_key_xml_endpoint(
-                bucket.clone(),
-                project_id.clone(),
+                config.bucket.clone(),
+                config.project_id.clone(),
                 access_id.clone(),
                 secret.clone(),
-                endpoint.clone(),
+                config.endpoint.clone(),
             )?,
             GcsApiStyle::Json => {
                 return Err(MidgeError::InvalidArgument(
@@ -55,16 +48,16 @@ fn resolve_gcs(provider: &CloudProviderConfig) -> MidgeResult<Arc<dyn CloudBacke
         | GcsCredentialSource::ServiceAccountJsonFile { .. }
         | GcsCredentialSource::AuthorizedUserJsonFile { .. }
         | GcsCredentialSource::MetadataServer => {
-            if *api == GcsApiStyle::Xml {
+            if config.api_style() == GcsApiStyle::Xml {
                 return Err(MidgeError::InvalidArgument(
                     "GCS ADC/bearer credentials require JSON API mode".to_string(),
                 ));
             }
             super::gcs::GcsProvider::with_bearer_credential_endpoint(
-                bucket.clone(),
-                project_id.clone(),
-                credential,
-                endpoint.clone(),
+                config.bucket.clone(),
+                config.project_id.clone(),
+                &config.credential,
+                config.endpoint.clone(),
             )?
         }
     };

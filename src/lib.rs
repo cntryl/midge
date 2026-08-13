@@ -69,6 +69,19 @@ mod engine;
 pub use cloud_layout::CloudObjectLayout;
 pub use common::{MidgeError, MidgeResult};
 
+#[cfg(feature = "cloud-common")]
+pub(crate) mod cloud_preflight_backend {
+    #[cfg(test)]
+    pub(crate) use crate::storage::cloud::MockCloudBackend;
+    pub(crate) use crate::storage::cloud::{CloudBackend, CloudEvent};
+
+    pub(crate) fn build(
+        provider: &crate::config::CloudProviderConfig,
+    ) -> crate::common::MidgeResult<std::sync::Arc<dyn CloudBackend>> {
+        crate::storage::providers::build_cloud_backend(provider)
+    }
+}
+
 // Engine / Transactions
 pub use engine::{
     ColumnFamilyHandle, ConflictPolicy, Engine, EngineMetrics, StorageVerifier, Transaction,
@@ -84,8 +97,11 @@ pub use engine::{Direction, IteratorState, Query, ScanIterator};
 
 // Observability and diagnostics
 pub use config::{
-    AzureCredentialSource, CloudCredentialSource, CloudProviderConfig, CloudStorageLocation,
-    CloudStorageTopology, EngineHealth, GcsApiStyle, GcsCredentialSource, S3CredentialSource,
+    AwsS3Config, AzureBlobConfig, AzureCredentialSource, CloudCheckCode, CloudCheckOutcome,
+    CloudPreflightOptions, CloudProviderConfig, CloudProviderKind, CloudStorageLocation,
+    CloudStorageRole, CloudStorageTopology, CloudValidationFinding, CloudValidationMode,
+    CloudValidationReport, EngineHealth, GcsApiStyle, GcsConfig, GcsCredentialSource,
+    OciCredentialSource, OciObjectStorageConfig, S3CompatibleConfig, S3CredentialSource,
 };
 pub use types::{
     ReadAmpMetricsSnapshot, RecoveryMetricsSnapshot, RuntimeMetricsSnapshot, SnapshotPinSnapshot,

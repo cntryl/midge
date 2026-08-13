@@ -7,6 +7,7 @@
 
 use super::build_cloud_storage;
 use super::CloudProviderConfig;
+use crate::config::{CloudPreflightOptions, CloudStorageLocation};
 use crate::storage::cloud::{CloudEvent, CloudOutcome, CloudStorage, ObjectMetadata};
 use std::fmt::Write as _;
 use std::net::{SocketAddr, TcpStream};
@@ -77,6 +78,10 @@ fn run_provider_contract_without_namespace_setup(label: &str, provider: &CloudPr
 }
 
 fn run_provider_contract_body(label: &str, provider: &CloudProviderConfig) {
+    assert!(
+        provider.validate().is_valid,
+        "{label}: structural validation"
+    );
     let backend = build_cloud_storage(provider, "").unwrap_or_else(|error| {
         panic!("{label}: failed to build provider backend: {error}");
     });
@@ -89,6 +94,17 @@ fn run_provider_contract_body(label: &str, provider: &CloudProviderConfig) {
 
     put(&backend, &key, b"hello-sqrzl".to_vec(), vec![]).expect("PUT");
     assert_eq!(get(&backend, &key).expect("GET"), b"hello-sqrzl");
+
+    let preflight = CloudStorageLocation::new(provider.clone(), prefix.trim_end_matches('/'))
+        .preflight(CloudPreflightOptions::default());
+    assert!(
+        preflight.is_ready,
+        "{label}: read-only preflight: {preflight:?}"
+    );
+    assert!(
+        preflight.is_fully_verified,
+        "{label}: full read verification"
+    );
 
     let metadata = head(&backend, &key).expect("HEAD");
     assert_eq!(metadata.size, b"hello-sqrzl".len() as u64);
@@ -203,10 +219,11 @@ fn sqrzl_is_available() -> bool {
 
 fn ensure_sqrzl_namespace(provider: &CloudProviderConfig) -> Result<(), String> {
     match provider {
-        CloudProviderConfig::AwsS3 { .. } => Ok(()),
-        CloudProviderConfig::S3Compatible { bucket, .. } => ensure_sqrzl_s3_bucket(bucket),
-        CloudProviderConfig::Gcs { bucket, .. } => ensure_sqrzl_gcs_bucket(bucket),
-        CloudProviderConfig::AzureBlob { container, .. } => ensure_sqrzl_azure_container(container),
+        CloudProviderConfig::AwsS3(_) => Ok(()),
+        CloudProviderConfig::S3Compatible(config) => ensure_sqrzl_s3_bucket(config.bucket()),
+        CloudProviderConfig::Gcs(config) => ensure_sqrzl_gcs_bucket(config.bucket()),
+        CloudProviderConfig::AzureBlob(config) => ensure_sqrzl_azure_container(config.container()),
+        CloudProviderConfig::OciObjectStorage(config) => ensure_sqrzl_s3_bucket(config.bucket()),
     }
 }
 

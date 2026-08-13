@@ -3,14 +3,17 @@
 ## Is Midge production-ready?
 
 Midge `0.1.0` is pre-1.0. The API, operational procedures, and cloud support
-boundaries can change. Evaluate it with the repository's tests and your own
-failure scenarios.
+boundaries can change. Cloud-backed storage is supported and continuously
+qualified through Sqrzl; deployment-specific credentials, IAM, networking,
+provider configuration, quotas, and capacity remain the adopter's responsibility.
 
 ## Which storage mode should I use?
 
 Use `in_memory` for ephemeral tests, `local` for local restart persistence,
-`cloud_simulated` for deterministic cloud lifecycle tests, and `cloud` only
-after qualifying the selected provider and feature set.
+`cloud_simulated` for deterministic filesystem-backed cloud lifecycle tests,
+and `cloud` for provider-backed storage after validating the deployment-specific
+configuration and workload. Midge continuously qualifies its provider protocol
+paths with Sqrzl.
 
 ## What does commit mean?
 

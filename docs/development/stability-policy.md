@@ -16,13 +16,18 @@ Midge is in the 0.1 release line. It is usable for evaluation and targeted deplo
 - The crate remains focused on single-process embedded storage.
 - Durability choices stay explicit through `WriteOptions`; callers must choose the policy they want.
 - Upgrade-impacting changes should be called out in the changelog and migration guide.
-- The supported/experimental production surface should be tracked in [support-matrix.md](support-matrix.md).
+- The supported and stable production surfaces should be tracked in [support-matrix.md](support-matrix.md).
 
 ## What Is Not Frozen Yet
 
 - Pre-1.0 APIs may still be renamed, removed, or tightened.
 - Operational guidance may change as crash safety, compaction, and observability harden.
 - Storage compatibility guarantees may expand over time, but should not be assumed beyond what current docs and tests state.
+
+Provider-backed cloud storage is supported in the 0.x line and qualified through
+Sqrzl. Its pre-1.0 label describes compatibility and operational stability, not
+an experimental implementation status. See the
+[cloud qualification policy](cloud-qualification-policy.md).
 
 ## Upgrade Guidance
 

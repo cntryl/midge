@@ -93,13 +93,8 @@ fn should_create_aws_s3_with_default_chain() {
 
     // Act
     // Assert
-    assert_eq!(
-        provider,
-        CloudProviderConfig::AwsS3 {
-            bucket: "bucket".to_string(),
-            region: "us-east-1".to_string(),
-            credentials: S3CredentialSource::AwsDefaultChain,
-        }
+    assert!(
+        matches!(provider, CloudProviderConfig::AwsS3(config) if config.bucket() == "bucket" && config.region() == "us-east-1" && matches!(config.credentials(), S3CredentialSource::AwsDefaultChain))
     );
 }
 
@@ -110,15 +105,8 @@ fn should_create_s3_compatible_env_with_safe_defaults() {
 
     // Act
     // Assert
-    assert_eq!(
-        provider,
-        CloudProviderConfig::S3Compatible {
-            bucket: "bucket".to_string(),
-            region: "us-east-1".to_string(),
-            endpoint: "http://localhost:9000".to_string(),
-            path_style: true,
-            credentials: S3CredentialSource::Environment,
-        }
+    assert!(
+        matches!(provider, CloudProviderConfig::S3Compatible(config) if config.bucket() == "bucket" && config.region() == "us-east-1" && config.endpoint() == "http://localhost:9000" && config.path_style() && matches!(config.credentials(), S3CredentialSource::Environment))
     );
 }
 
@@ -137,15 +125,8 @@ fn should_create_s3_compatible_config_with_explicit_overrides() {
 
     // Act
     // Assert
-    assert_eq!(
-        provider,
-        CloudProviderConfig::S3Compatible {
-            bucket: "bucket".to_string(),
-            region: "us-phoenix-1".to_string(),
-            endpoint: "https://object.example.com".to_string(),
-            path_style: false,
-            credentials: S3CredentialSource::access_key("key", "secret"),
-        }
+    assert!(
+        matches!(provider, CloudProviderConfig::S3Compatible(config) if config.bucket() == "bucket" && config.region() == "us-phoenix-1" && config.endpoint() == "https://object.example.com" && !config.path_style() && config.credentials() == &S3CredentialSource::access_key("key", "secret"))
     );
 }
 
@@ -165,32 +146,19 @@ fn should_create_azure_configs_for_supported_credentials() {
     // Assert
     assert!(matches!(
         identity,
-        CloudProviderConfig::AzureBlob {
-            credential: AzureCredentialSource::LightweightDefaultChain,
-            ..
-        }
+        CloudProviderConfig::AzureBlob(config) if matches!(config.credentials(), AzureCredentialSource::LightweightDefaultChain)
     ));
     assert!(matches!(
         shared_key,
-        CloudProviderConfig::AzureBlob {
-            credential: AzureCredentialSource::SharedKey { .. },
-            ..
-        }
+        CloudProviderConfig::AzureBlob(config) if matches!(config.credentials(), AzureCredentialSource::SharedKey { .. })
     ));
     assert!(matches!(
         sas,
-        CloudProviderConfig::AzureBlob {
-            credential: AzureCredentialSource::SasToken { .. },
-            ..
-        }
+        CloudProviderConfig::AzureBlob(config) if matches!(config.credentials(), AzureCredentialSource::SasToken { .. })
     ));
     assert!(matches!(
         conn,
-        CloudProviderConfig::AzureBlob {
-            account,
-            credential: AzureCredentialSource::ConnectionString { .. },
-            ..
-        } if account == "account"
+        CloudProviderConfig::AzureBlob(config) if config.account() == "account" && matches!(config.credentials(), AzureCredentialSource::ConnectionString { .. })
     ));
 }
 
@@ -205,27 +173,15 @@ fn should_create_gcs_configs_with_matching_api_styles() {
     // Assert
     assert!(matches!(
         adc,
-        CloudProviderConfig::Gcs {
-            api: GcsApiStyle::Json,
-            credential: GcsCredentialSource::ApplicationDefault,
-            ..
-        }
+        CloudProviderConfig::Gcs(config) if config.api_style() == GcsApiStyle::Json && matches!(config.credentials(), GcsCredentialSource::ApplicationDefault)
     ));
     assert!(matches!(
         hmac,
-        CloudProviderConfig::Gcs {
-            api: GcsApiStyle::Xml,
-            credential: GcsCredentialSource::HmacKey { .. },
-            ..
-        }
+        CloudProviderConfig::Gcs(config) if config.api_style() == GcsApiStyle::Xml && matches!(config.credentials(), GcsCredentialSource::HmacKey { .. })
     ));
     assert!(matches!(
         bearer,
-        CloudProviderConfig::Gcs {
-            api: GcsApiStyle::Json,
-            credential: GcsCredentialSource::BearerToken { .. },
-            ..
-        }
+        CloudProviderConfig::Gcs(config) if config.api_style() == GcsApiStyle::Json && matches!(config.credentials(), GcsCredentialSource::BearerToken { .. })
     ));
 }
 
@@ -331,35 +287,13 @@ fn should_apply_fluent_cloud_modifiers() {
 
     // Act
     // Assert
-    assert_eq!(
-        s3,
-        CloudProviderConfig::S3Compatible {
-            bucket: "bucket".to_string(),
-            region: "eu-west-1".to_string(),
-            endpoint: "http://new".to_string(),
-            path_style: false,
-            credentials: S3CredentialSource::access_key("key", "secret"),
-        }
+    assert!(
+        matches!(s3, CloudProviderConfig::S3Compatible(config) if config.bucket() == "bucket" && config.region() == "eu-west-1" && config.endpoint() == "http://new" && !config.path_style() && config.credentials() == &S3CredentialSource::access_key("key", "secret"))
     );
     assert!(matches!(
         gcs,
-        CloudProviderConfig::Gcs {
-            api: GcsApiStyle::Json,
-            credential: GcsCredentialSource::ApplicationDefault,
-            ..
-        }
+        CloudProviderConfig::Gcs(config) if config.api_style() == GcsApiStyle::Json && matches!(config.credentials(), GcsCredentialSource::ApplicationDefault)
     ));
-}
-
-#[test]
-fn should_reject_credential_provider_mismatch_given_provider_config_when_building() {
-    // Arrange
-    let result = CloudProviderConfig::gcs("bucket")
-        .try_with_credentials(S3CredentialSource::access_key("key", "secret"));
-
-    // Act
-    // Assert
-    assert!(result.is_err());
 }
 
 #[test]
@@ -390,19 +324,16 @@ fn should_parse_azure_account_from_connection_string_config() {
     // Assert
     assert!(matches!(
         provider,
-        CloudProviderConfig::AzureBlob { account, .. } if account == "myaccount"
+        CloudProviderConfig::AzureBlob(config) if config.account() == "myaccount"
     ));
 }
 
 #[test]
 fn should_reject_connection_string_credential_override_without_account() {
     // Arrange
-    let provider = CloudProviderConfig::AzureBlob {
-        account: String::new(),
-        container: "container".to_string(),
-        endpoint: None,
-        credential: AzureCredentialSource::connection_string("AccountKey=key"),
-    };
+    let provider: CloudProviderConfig = crate::config::AzureBlobConfig::new("", "container")
+        .with_credentials(AzureCredentialSource::connection_string("AccountKey=key"))
+        .into();
 
     let result = provider.with_azure_credentials(AzureCredentialSource::shared_key("key"));
 

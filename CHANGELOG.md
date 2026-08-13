@@ -10,6 +10,10 @@ Midge is currently in the 0.1 release line. Compatibility expectations for pre-1
 ## [Unreleased]
 
 ### Changed
+- **Breaking:** cloud provider enum variants now contain private-field typed
+  AWS, Azure, GCS, OCI, and generic S3-compatible configurations. Cloud
+  locations normalize surrounding prefix slashes, and `OpenOptions::build`
+  performs automatic side-effect-free structural validation.
 - **Breaking:** database FORMAT 3 now requires SST V4. V4 uses a fixed,
   self-identifying checksummed footer, mandatory checksummed block trailers,
   exact block-handle validation, and explicit TTL presence. FORMAT 1/2 and SST
@@ -24,6 +28,10 @@ Midge is currently in the 0.1 release line. Compatibility expectations for pre-1
   objects separately with `CloudStorageTopology` and `OpenOptions::cloud_multi`.
 
 ### Added
+- Read-only cloud location/topology preflight with an overall deadline,
+  topology deduplication, bounded range reads, and serializable redacted
+  readiness reports. Preflight does not qualify write, CAS, fencing, or delete
+  permissions; Sqrzl remains authoritative for mutation semantics.
 - Initial release of Midge embedded LSM database
 - Actor-based concurrency model for deterministic execution
 - Cloud-native storage support (S3, Azure Blob, GCS, OCI)
@@ -58,6 +66,9 @@ Midge is currently in the 0.1 release line. Compatibility expectations for pre-1
 - operator runbook and release checklist
 - Consolidated durability documentation around the canonical transaction durability contract
 - Trimmed duplicated positioning/readiness documentation and refreshed storage-mode overview language
+- Defined Sqrzl as the authoritative self-contained cloud qualification
+  environment, with manual real-cloud testing used to validate emulator fidelity
+  and deployment assumptions.
 
 ### Removed
 - Unsupported legacy SST codec identifiers and the nonshipping compression

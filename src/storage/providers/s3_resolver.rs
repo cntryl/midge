@@ -8,50 +8,57 @@ pub(super) fn try_resolve(
     provider: &CloudProviderConfig,
 ) -> MidgeResult<Option<Arc<dyn CloudBackend>>> {
     match provider {
-        CloudProviderConfig::AwsS3 { .. } | CloudProviderConfig::S3Compatible { .. } => {
-            Ok(Some(resolve_s3_family(provider)?))
-        }
-        CloudProviderConfig::AzureBlob { .. } | CloudProviderConfig::Gcs { .. } => Ok(None),
+        CloudProviderConfig::AwsS3(_)
+        | CloudProviderConfig::S3Compatible(_)
+        | CloudProviderConfig::OciObjectStorage(_) => Ok(Some(resolve_s3_family(provider)?)),
+        CloudProviderConfig::AzureBlob(_) | CloudProviderConfig::Gcs(_) => Ok(None),
     }
 }
 
 fn resolve_s3_family(provider: &CloudProviderConfig) -> MidgeResult<Arc<dyn CloudBackend>> {
     match provider {
-        CloudProviderConfig::AwsS3 {
-            bucket,
-            region,
-            credentials,
-        } => match credentials {
+        CloudProviderConfig::AwsS3(config) => match &config.credentials {
             S3CredentialSource::AwsDefaultChain => {
-                let provider = super::s3::S3Provider::aws_default(bucket.clone(), region.clone())?;
+                let provider = super::s3::S3Provider::aws_default(
+                    config.bucket.clone(),
+                    config.region.clone(),
+                )?;
                 Ok(provider.backend())
             }
             S3CredentialSource::Static { .. }
             | S3CredentialSource::Environment
             | S3CredentialSource::SharedProfile { .. } => {
-                let creds = resolve_s3_credentials(credentials, region, true)?;
-                let provider = super::s3::S3Provider::aws(bucket.clone(), region.clone(), creds)?;
+                let creds = resolve_s3_credentials(&config.credentials, &config.region, true)?;
+                let provider = super::s3::S3Provider::aws(
+                    config.bucket.clone(),
+                    config.region.clone(),
+                    creds,
+                )?;
                 Ok(provider.backend())
             }
         },
-        CloudProviderConfig::S3Compatible {
-            bucket,
-            region,
-            endpoint,
-            path_style,
-            credentials,
-        } => {
-            let creds = resolve_s3_credentials(credentials, region, false)?;
+        CloudProviderConfig::S3Compatible(config) => {
+            let creds = resolve_s3_credentials(&config.credentials, &config.region, false)?;
             let config = super::s3::S3Config::custom(
-                bucket.clone(),
-                region.clone(),
-                endpoint.clone(),
-                *path_style,
+                config.bucket.clone(),
+                config.region.clone(),
+                config.endpoint.clone(),
+                config.path_style,
             );
             let provider = super::s3::S3Provider::custom_with_credentials(config, creds)?;
             Ok(provider.backend())
         }
-        CloudProviderConfig::AzureBlob { .. } | CloudProviderConfig::Gcs { .. } => Err(
+        CloudProviderConfig::OciObjectStorage(config) => {
+            let credentials = resolve_s3_credentials(&config.credentials, &config.region, false)?;
+            let s3 = super::s3::S3Config::custom(
+                config.bucket.clone(),
+                config.region.clone(),
+                config.endpoint(),
+                true,
+            );
+            Ok(super::s3::S3Provider::custom_with_credentials(s3, credentials)?.backend())
+        }
+        CloudProviderConfig::AzureBlob(_) | CloudProviderConfig::Gcs(_) => Err(
             MidgeError::InvalidArgument("expected an S3-family provider".to_string()),
         ),
     }
