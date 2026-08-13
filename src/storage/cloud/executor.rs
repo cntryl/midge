@@ -578,6 +578,8 @@ mod tests {
     };
     use std::time::{Duration, Instant};
 
+    const LOOPBACK_SERVER_TIMEOUT: Duration = Duration::from_secs(10);
+
     struct SlowFailingSigner;
     struct SlowSuccessfulSigner;
     struct CountingSlowSuccessfulSigner {
@@ -843,6 +845,9 @@ mod tests {
         let endpoint = format!("http://{address}/object");
         let redirected = format!("http://{address}/redirected");
         let server = std::thread::spawn(move || {
+            // This test deliberately expects only one request, so keep its
+            // observation window short instead of using the load-tolerant
+            // accept timeout needed by request/response tests below.
             let deadline = Instant::now() + Duration::from_secs(2);
             let mut served = 0;
             while Instant::now() < deadline {
@@ -921,7 +926,7 @@ mod tests {
             listener.local_addr().expect("server address")
         );
         let server = std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(2);
+            let deadline = Instant::now() + LOOPBACK_SERVER_TIMEOUT;
             let mut served = 0;
             let mut last_request: Option<Instant> = None;
             while Instant::now() < deadline
@@ -981,7 +986,7 @@ mod tests {
             listener.local_addr().expect("server address")
         );
         let server = std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(2);
+            let deadline = Instant::now() + LOOPBACK_SERVER_TIMEOUT;
             let mut served = 0;
             while served < 2 && Instant::now() < deadline {
                 match listener.accept() {
@@ -1041,7 +1046,7 @@ mod tests {
             listener.local_addr().expect("server address")
         );
         let server = std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(2);
+            let deadline = Instant::now() + LOOPBACK_SERVER_TIMEOUT;
             let mut served = 0;
             let mut last_request: Option<Instant> = None;
             while Instant::now() < deadline
@@ -1099,7 +1104,7 @@ mod tests {
             listener.local_addr().expect("server address")
         );
         let server = std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(2);
+            let deadline = Instant::now() + LOOPBACK_SERVER_TIMEOUT;
             let mut served = 0;
             let mut last_request: Option<Instant> = None;
             while Instant::now() < deadline
