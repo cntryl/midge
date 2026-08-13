@@ -569,6 +569,22 @@ fn should_describe_bounded_pr_guard_when_benchmark_automation_documented() {
 }
 
 #[test]
+fn should_run_diagnostic_pr_probe_without_internal_gate_obligation() {
+    // Arrange
+    let guard_workflow = read_workflow(".github/workflows/benchmark-guard.yml");
+
+    // Act
+    let diagnostic_profile_count = guard_workflow
+        .matches("--profile default --samples 10 --warmup-samples 1")
+        .count();
+
+    // Assert
+    assert_eq!(diagnostic_profile_count, 2);
+    assert!(!guard_workflow.contains("--profile release --workload \"$WORKLOAD\""));
+    assert!(guard_workflow.contains("--max-regression 0.15"));
+}
+
+#[test]
 fn should_require_acceptance_evidence_when_pull_request_changes() {
     // Arrange
     let workflow = read_workflow(".github/workflows/pr-acceptance.yml");
