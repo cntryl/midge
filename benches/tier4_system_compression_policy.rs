@@ -185,7 +185,7 @@ fn execute_workload(shape: RecordShape, goal: Goal) -> WorkloadOutcome {
 
     let mut ingest = Duration::ZERO;
     let mut flush_compaction = Duration::ZERO;
-    for batch in records.chunks_exact(RECORDS_PER_FLUSH) {
+    for batch in records.as_chunks::<RECORDS_PER_FLUSH>().0 {
         let ingest_started = Instant::now();
         let mut transaction = engine
             .begin_tx(column_family.id(), TransactionMode::ReadWrite)
