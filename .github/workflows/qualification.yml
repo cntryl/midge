@@ -19,6 +19,7 @@ on:
       - "src/**"
       - "tests/**"
       - ".github/workflows/qualification.yml"
+      - ".github/workflows/publish.yml"
   pull_request:
     branches: [main]
     paths:
@@ -34,6 +35,7 @@ on:
       - "src/**"
       - "tests/**"
       - ".github/workflows/qualification.yml"
+      - ".github/workflows/publish.yml"
 
 permissions:
   contents: read
