@@ -1,9 +1,7 @@
 name: Publish to crates.io
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -26,6 +24,7 @@ jobs:
       - name: Verify tag matches crate version
         shell: bash
         run: |
+          test "${GITHUB_REF_TYPE}" = "tag"
           crate_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
           test "${GITHUB_REF_NAME}" = "v${crate_version}"
 

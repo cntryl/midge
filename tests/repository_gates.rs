@@ -287,14 +287,14 @@ fn should_run_full_pedantic_clippy_gate_before_publish() {
 }
 
 #[test]
-fn should_publish_only_version_matching_tags_with_least_privilege() {
+fn should_publish_only_version_matching_manual_tag_dispatch_with_least_privilege() {
     // Arrange
     let publish = read_workflow(".github/workflows/publish.yml");
 
     // Act
     // Assert
-    assert!(publish.contains("tags:\n      - \"v*\""));
-    assert!(!publish.contains("workflow_dispatch"));
+    assert!(publish.contains("workflow_dispatch:"));
+    assert!(publish.contains("test \"${GITHUB_REF_TYPE}\" = \"tag\""));
     assert!(publish.contains("test \"${GITHUB_REF_NAME}\" = \"v${crate_version}\""));
     assert!(publish.contains("environment: crates-io"));
     assert!(publish.contains("id-token: write"));
