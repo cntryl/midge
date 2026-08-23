@@ -373,11 +373,18 @@ fn should_reject_assertion_only_commit_given_dropped_column_family() {
     // Act
     let result = tx.commit(WriteOptions::buffered());
 
-    // Assert
+    // Assert: an assertion-only commit is rejected the same way a write commit
+    // is, even though it is validated on a distinct path that never touches
+    // the write batch (see `should_reject_write_given_dropped_column_family_when_committing`
+    // for the write-carrying counterpart).
     assert!(matches!(
         result,
         Err(MidgeError::InvalidArgument(message))
             if message.contains("column family") && message.contains("does not exist")
+    ));
+    assert!(matches!(
+        engine.begin_tx(cf_id, TransactionMode::ReadOnly),
+        Err(MidgeError::InvalidArgument(_))
     ));
 }
 

@@ -4,6 +4,7 @@
 //! Test 13: memory-only mode (no spill files)
 
 use bytes::Bytes;
+use cntryl_midge::Query;
 mod common;
 use common::*;
 
@@ -158,19 +159,30 @@ fn should_preserve_key_order_given_large_transaction_when_iterating() {
         }
         tx.commit(buffered_write_options(mode)).expect("commit");
 
-        // Assert
+        // Assert: a real scan must return every key in ascending sorted
+        // order, not merely be individually gettable.
         let tx_read = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .expect("begin_tx");
-        for i in 0..200 {
-            let key = format!("order_test_{i:04}");
-            let got = tx_read.get(key.as_bytes()).expect("get");
-            assert_eq!(
-                got,
-                Some(Bytes::from_static(b"v")),
-                "order check failed for key {key}"
-            );
-        }
+        let scanned = tx_read
+            .scan(&Query::new())
+            .expect("scan all keys")
+            .try_collect()
+            .expect("collect scanned keys");
+
+        let expected_keys: Vec<Bytes> = (0..200)
+            .map(|i| Bytes::from(format!("order_test_{i:04}").into_bytes()))
+            .collect();
+        let actual_keys: Vec<Bytes> = scanned.iter().map(|(k, _)| k.clone()).collect();
+
+        assert_eq!(
+            actual_keys, expected_keys,
+            "scan did not return keys in sorted order for mode: {mode}"
+        );
+        assert!(
+            scanned.iter().all(|(_, v)| v == &Bytes::from_static(b"v")),
+            "scanned values corrupted in mode: {mode}"
+        );
     });
 }
 
@@ -345,46 +357,102 @@ fn should_recover_committed_spill_given_restart_after_commit() {
 }
 
 /// `should_not_starve_foreground_writes_given_background_spill_activity`
-/// Verify foreground writes not blocked by spill
+/// Verify foreground writes make real, bounded-latency progress while a
+/// concurrent background thread continuously runs large transactions that
+/// spill to disk.
 #[test]
 fn should_not_starve_foreground_writes_given_background_spill_activity() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
         let mut opts = opts;
-        opts = opts.memory_budget(256 * 1024);
+        opts = opts.memory_budget(64 * 1024); // small budget forces real spill activity
 
-        let engine = open_with_mode(&opts, mode);
+        let engine = std::sync::Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
+        let write_options = buffered_write_options(mode);
 
-        // Act
-        let mut tx = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-            .expect("begin_tx");
-        for i in 0..500 {
-            let key = format!("tx_{i:04}");
-            tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
-                .expect("put");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        // Background thread: repeatedly commits large transactions that
+        // exceed the memory budget and spill to disk, for as long as the
+        // foreground thread is still working.
+        let bg_engine = std::sync::Arc::clone(&engine);
+        let bg_cf_id = cf.id();
+        let bg_stop = std::sync::Arc::clone(&stop);
+        let background = std::thread::spawn(move || {
+            let mut round: u32 = 0;
+            while !bg_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let mut tx = bg_engine
+                    .begin_tx(bg_cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                    .expect("begin background tx");
+                for i in 0..300 {
+                    let key = format!("bg_{round}_{i:04}");
+                    tx.put(key.as_bytes().to_vec(), vec![b'b'; 512], None)
+                        .expect("background put");
+                }
+                tx.commit(write_options).expect("background commit");
+                round += 1;
+            }
+        });
+
+        // Act: run foreground writes concurrently with the background spill
+        // activity and measure how long they take to complete. The shared
+        // memory budget means a foreground commit can legitimately observe
+        // transient backpressure (WriteStall) while the background thread is
+        // saturating the budget; a correctly-behaving engine surfaces that as
+        // a retryable signal rather than starving the foreground writer
+        // forever, so the foreground loop retries on WriteStall and the test
+        // asserts the *overall* wall-clock time stays bounded.
+        let fg_count = 50;
+        let start = std::time::Instant::now();
+        for i in 0..fg_count {
+            let key = format!("foreground_{i:04}");
+            loop {
+                let mut tx_fg = engine
+                    .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                    .expect("begin foreground tx");
+                tx_fg
+                    .put(key.as_bytes().to_vec(), b"works".to_vec(), None)
+                    .expect("foreground put");
+                match tx_fg.commit(write_options) {
+                    Ok(()) => break,
+                    Err(cntryl_midge::MidgeError::WriteStall(_)) => {
+                        assert!(
+                            start.elapsed() < std::time::Duration::from_secs(30),
+                            "foreground writes starved by background spill activity \
+                             after {i} commits, mode: {mode}"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(other) => panic!("foreground commit failed: {other:?}"),
+                }
+            }
         }
+        let elapsed = start.elapsed();
 
-        let mut tx_fg = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-            .expect("begin_tx");
-        tx_fg
-            .put(b"foreground".to_vec(), b"works".to_vec(), None)
-            .expect("put");
-        tx_fg.commit(buffered_write_options(mode)).expect("commit");
-        tx.commit(buffered_write_options(mode)).expect("commit");
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        background.join().expect("background thread panicked");
 
-        // Assert
+        // Assert: foreground writes completed in bounded time and are all
+        // durably visible, despite concurrent background spill activity.
+        assert!(
+            elapsed < std::time::Duration::from_secs(30),
+            "foreground writes starved by background spill activity: {elapsed:?} \
+             for {fg_count} commits, mode: {mode}"
+        );
+
         let tx_read = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .expect("begin_tx");
-        let fg = tx_read.get(b"foreground").expect("get");
-        assert_eq!(
-            fg,
-            Some(Bytes::from_static(b"works")),
-            "foreground write lost"
-        );
+        for i in 0..fg_count {
+            let key = format!("foreground_{i:04}");
+            let got = tx_read.get(key.as_bytes()).expect("get");
+            assert_eq!(
+                got,
+                Some(Bytes::from_static(b"works")),
+                "foreground write {key} lost, mode: {mode}"
+            );
+        }
     });
 }
 
@@ -542,12 +610,34 @@ fn should_handle_mixed_value_sizes_in_spilled_transaction_when_committed() {
     });
 }
 
+/// Count on-disk directories that the engine's in-memory storage path would
+/// use for a spill/data directory (see `StartupStoragePath::resolve` for
+/// `Storage::InMemory`, which names such directories
+/// `target/tmp/midge_test_memory_*`). `StartupStoragePath::prepare` never
+/// calls `create_dir_all` for memory-mode engines, so in-memory mode should
+/// never cause any such directory to come into existence.
+fn count_memory_mode_artifact_dirs() -> usize {
+    let tmp_root = std::path::Path::new("target/tmp");
+    std::fs::read_dir(tmp_root).map_or(0, |entries| {
+        entries
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with("midge_test_memory_"))
+            })
+            .count()
+    })
+}
+
 /// `should_not_create_disk_artifacts_given_large_transaction_when_memory_mode`
 /// Verify memory-only mode doesn't create spill files
 #[test]
 fn should_not_create_disk_artifacts_given_large_transaction_when_memory_mode() {
     // Arrange
     let opts = memory_opts();
+    let dirs_before = count_memory_mode_artifact_dirs();
 
     let engine = open_with_mode(&opts, "memory");
     let cf = engine.create_column_family("test").expect("create cf");
@@ -564,7 +654,14 @@ fn should_not_create_disk_artifacts_given_large_transaction_when_memory_mode() {
     tx.commit(cntryl_midge::WriteOptions::buffered())
         .expect("commit");
 
-    // Assert
+    // Assert: no filesystem artifacts (spill directory or otherwise) were
+    // created as a side effect of this large in-memory transaction.
+    let dirs_after = count_memory_mode_artifact_dirs();
+    assert_eq!(
+        dirs_after, dirs_before,
+        "memory mode must not create on-disk artifacts"
+    );
+
     let tx_read = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .expect("begin_tx");

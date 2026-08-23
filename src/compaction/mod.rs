@@ -207,19 +207,6 @@ mod tests {
     }
 
     #[test]
-    fn should_use_sst_extension_when_generating_filename() {
-        // Arrange
-        let plan = CompactionPlan::new(0, 0, 1).with_output_seq(5);
-        let cf_dir = Path::new("cf_00");
-
-        // Act
-        let filename = output_filename(&plan, cf_dir);
-
-        // Assert: must end with .sst
-        assert!(filename.to_string_lossy().ends_with(".sst"));
-    }
-
-    #[test]
     fn should_handle_zero_sequence_number_when_formatting() {
         // Arrange
         let plan = CompactionPlan::new(0, 0, 1).with_output_seq(0);
@@ -233,81 +220,6 @@ mod tests {
             filename,
             PathBuf::from("cf_00/000000_01_00000000000000000000.sst")
         );
-    }
-
-    // ============================================================================
-    // Tests for CompactionPlan builder pattern and invariants
-    // ============================================================================
-
-    #[test]
-    fn should_create_compaction_plan_with_constructor() {
-        // Arrange
-        // (constructor args)
-
-        // Act
-        let plan = CompactionPlan::new(5, 2, 3);
-
-        // Assert: plan initialized correctly
-        assert_eq!(plan.cf_id, 5);
-        assert_eq!(plan.source_level, 2);
-        assert_eq!(plan.target_level, 3);
-        assert!(plan.input_files.is_empty());
-        assert!(plan.output_files.is_empty());
-        assert_eq!(plan.output_seq, 0);
-    }
-
-    #[test]
-    fn should_set_output_sequence_when_using_with_output_seq() {
-        // Arrange
-        let plan = CompactionPlan::new(0, 0, 1);
-
-        // Act
-        let plan_with_seq = plan.with_output_seq(123);
-
-        // Assert
-        assert_eq!(plan_with_seq.output_seq, 123);
-    }
-
-    #[test]
-    fn should_allow_chaining_builder_methods_when_using_with_output_seq() {
-        // Arrange
-        // (builder chaining)
-
-        // Act
-        let plan = CompactionPlan::new(1, 0, 1)
-            .with_output_seq(456)
-            .with_output_seq(789);
-
-        // Assert: last call wins
-        assert_eq!(plan.output_seq, 789);
-    }
-
-    // ============================================================================
-    // Tests for level target size calculations
-    // ============================================================================
-
-    #[test]
-    fn should_calculate_l0_target_size_correctly() {
-        // Arrange
-        let config = LeveledCompactionConfig::default();
-
-        // Act
-        let l0_target = config.l0_compaction_threshold;
-
-        // Assert
-        assert_eq!(l0_target, 4 * 1024 * 1024);
-    }
-
-    #[test]
-    fn should_calculate_level_multiplier_correctly() {
-        // Arrange
-        let config = LeveledCompactionConfig::default();
-
-        // Act
-        let level_multiplier = config.level_multiplier;
-
-        // Assert
-        assert_eq!(level_multiplier, 10);
     }
 
     #[test]
@@ -324,63 +236,6 @@ mod tests {
         assert_eq!(config.level_multiplier, 10);
         assert_eq!(config.l1_target_size, 40 * 1024 * 1024);
         assert_eq!(config.max_levels, 7);
-    }
-
-    // ============================================================================
-    // Tests for CompactionPlan invariants
-    // ============================================================================
-
-    #[test]
-    fn should_initialize_empty_file_vectors_when_creating_plan() {
-        // Arrange
-        // (constructor)
-
-        // Act
-        let plan = CompactionPlan::new(0, 0, 1);
-
-        // Assert: input and output file lists should be empty
-        assert!(plan.input_files.is_empty());
-        assert!(plan.output_files.is_empty());
-    }
-
-    #[test]
-    fn should_preserve_level_information_in_plan() {
-        // Arrange
-        let cf_id = 3;
-        let source_level = 1;
-        let target_level = 2;
-
-        // Act
-        let plan = CompactionPlan::new(cf_id, source_level, target_level);
-
-        // Assert
-        assert_eq!(plan.cf_id, cf_id);
-        assert_eq!(plan.source_level, source_level);
-        assert_eq!(plan.target_level, target_level);
-    }
-
-    #[test]
-    fn should_handle_maximum_column_family_id() {
-        // Arrange
-        // (constructor with max cf id)
-
-        // Act
-        let plan = CompactionPlan::new(u32::MAX, 0, 1).with_output_seq(100);
-
-        // Assert
-        assert_eq!(plan.cf_id, u32::MAX);
-    }
-
-    #[test]
-    fn should_handle_maximum_output_sequence_number() {
-        // Arrange
-        // (constructor with max output seq)
-
-        // Act
-        let plan = CompactionPlan::new(0, 0, 1).with_output_seq(u64::MAX);
-
-        // Assert
-        assert_eq!(plan.output_seq, u64::MAX);
     }
 
     #[test]

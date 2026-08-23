@@ -252,60 +252,58 @@ mod tests {
         assert_eq!(actor.pending_edits, 0);
     }
 
-    #[test]
-    fn should_initialize_via_default() {
-        // Arrange
-        // (no setup needed)
-
-        // Act
-        let actor = ManifestActor::default();
-
-        // Assert
-        assert_eq!(actor.pending_edits, 0);
+    fn memory_file_meta(name: &str) -> crate::runtime::FileMeta {
+        crate::runtime::FileMeta {
+            name: name.to_string(),
+            level: 0,
+            size_bytes: 0,
+            content_crc32c: None,
+            cf_id: 0,
+            smallest_key: None,
+            largest_key: None,
+            smallest_seq: None,
+            largest_seq: None,
+        }
     }
 
     #[test]
     fn should_increment_pending_edits_on_add_sst() {
-        // Arrange
+        // Arrange - memory mode skips on-disk SST validation, so add_sst runs
+        // its real bookkeeping without needing a file on disk
+        let mut state = crate::runtime::state::RuntimeState::new("/tmp/test_midge_mf".into(), true);
         let mut actor = ManifestActor::new();
         assert_eq!(actor.pending_edits, 0);
 
-        // Act: manually simulate adding an edit
-        actor.pending_edits += 1;
+        // Act - the real handler, not a direct field write
+        actor
+            .add_sst(&mut state, memory_file_meta("a.sst"))
+            .expect("add_sst should succeed in memory mode");
 
         // Assert
         assert_eq!(actor.pending_edits, 1);
+        assert_eq!(state.manifest.files.len(), 1);
     }
 
     #[test]
-    fn should_accumulate_pending_edits_across_operations() {
+    fn should_accumulate_pending_edits_across_add_sst_calls() {
         // Arrange
+        let mut state = crate::runtime::state::RuntimeState::new("/tmp/test_midge_mf".into(), true);
         let mut actor = ManifestActor::new();
 
-        // Act
-        actor.pending_edits += 1; // Add SST
-        actor.pending_edits += 1; // Compaction complete
-        actor.pending_edits += 1; // Another add
+        // Act - three real add_sst calls
+        actor
+            .add_sst(&mut state, memory_file_meta("a.sst"))
+            .expect("add a.sst");
+        actor
+            .add_sst(&mut state, memory_file_meta("b.sst"))
+            .expect("add b.sst");
+        actor
+            .add_sst(&mut state, memory_file_meta("c.sst"))
+            .expect("add c.sst");
 
         // Assert
         assert_eq!(actor.pending_edits, 3);
-    }
-
-    #[test]
-    fn should_maintain_monotonic_edit_count() {
-        // Arrange
-        let mut actor = ManifestActor::new();
-        let count1 = actor.pending_edits;
-
-        // Act
-        actor.pending_edits += 1;
-        let count2 = actor.pending_edits;
-        actor.pending_edits += 1;
-        let count3 = actor.pending_edits;
-
-        // Assert: counts only increase
-        assert!(count2 > count1);
-        assert!(count3 > count2);
+        assert_eq!(state.manifest.files.len(), 3);
     }
 
     #[test]

@@ -192,6 +192,7 @@ impl Default for TrieBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sst::trie::reader::TrieReader;
 
     #[test]
     fn should_create_new_builder() {
@@ -264,9 +265,14 @@ mod tests {
         builder.add_key(b"tester", 1).unwrap();
         builder.add_key(b"testing", 2).unwrap();
 
-        // Assert
+        // Assert - round-trip through the reader and verify each prefix key
+        // resolves to its own block, independent of its sibling prefixes.
         let data = builder.finish();
-        assert!(!data.is_empty());
+        let reader = TrieReader::new(&data).unwrap();
+        assert_eq!(reader.find_block(b"test"), Some(0));
+        assert_eq!(reader.find_block(b"tester"), Some(1));
+        assert_eq!(reader.find_block(b"testing"), Some(2));
+        assert_eq!(reader.find_block(b"teste"), None);
     }
 
     #[test]
@@ -288,14 +294,15 @@ mod tests {
         // Arrange
         let mut builder = TrieBuilder::new();
 
-        // Act
+        // Act - re-adding the same key must overwrite its block id
         builder.add_key(b"same", 0).unwrap();
         builder.add_key(b"same", 1).unwrap();
         builder.add_key(b"same", 2).unwrap();
 
-        // Assert
+        // Assert - the last write wins after round-tripping through the reader
         let data = builder.finish();
-        assert!(!data.is_empty());
+        let reader = TrieReader::new(&data).unwrap();
+        assert_eq!(reader.find_block(b"same"), Some(2));
     }
 
     #[test]
@@ -343,15 +350,23 @@ mod tests {
     fn should_handle_many_keys() {
         // Arrange
         let mut builder = TrieBuilder::new();
+        let keys: Vec<(Vec<u8>, u32)> = (0..100)
+            .map(|i| (format!("key_{i:04}").into_bytes(), i))
+            .collect();
 
         // Act
-        for i in 0..100 {
-            let key = format!("key_{i:04}").into_bytes();
-            builder.add_key(&key, u32::try_from(i).unwrap()).unwrap();
+        for (key, block_id) in &keys {
+            builder.add_key(key, *block_id).unwrap();
         }
 
-        // Assert
-        assert!(builder.node_count() >= 10);
+        // Assert - round-trip every one of the 100 keys and confirm each
+        // resolves to its own correct block id, not just that some nodes
+        // exist.
+        let data = builder.finish();
+        let reader = TrieReader::new(&data).unwrap();
+        for (key, block_id) in &keys {
+            assert_eq!(reader.find_block(key), Some(*block_id));
+        }
     }
 
     #[test]
@@ -362,8 +377,9 @@ mod tests {
         // Act
         let data = builder.finish();
 
-        // Assert
-        assert!(!data.is_empty()); // Root node encoded
+        // Assert - an empty trie decodes cleanly and resolves no keys
+        let reader = TrieReader::new(&data).unwrap();
+        assert_eq!(reader.find_block(b"anything"), None);
     }
 
     #[test]
@@ -376,8 +392,11 @@ mod tests {
         // Act
         let data = builder.finish();
 
-        // Assert
-        assert!(!data.is_empty());
+        // Assert - the serialized trie decodes back to the exact keys added
+        let reader = TrieReader::new(&data).unwrap();
+        assert_eq!(reader.find_block(b"apple"), Some(0));
+        assert_eq!(reader.find_block(b"banana"), Some(1));
+        assert_eq!(reader.find_block(b"cherry"), None);
     }
 
     #[test]

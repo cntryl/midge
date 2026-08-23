@@ -18,10 +18,27 @@ use common::*;
 // FILESYSTEM ARTIFACT TESTS
 // ============================================================================
 
+/// Top-level entries directly under the crate root. Every other test that
+/// touches disk does so through `test_temp_dir()` / `target/tmp/...`
+/// (verified across `tests/*.rs`), so a real bug that made memory mode fall
+/// back to some default on-disk path would most plausibly show up as a new
+/// entry at this top level - unlike scanning `target/tmp`, this is safe to
+/// check even while other tests run concurrently in the same process.
+fn crate_root_top_level_entries() -> std::collections::BTreeSet<std::ffi::OsString> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    std::fs::read_dir(root)
+        .expect("read crate root")
+        .filter_map(|entry| entry.ok().map(|entry| entry.file_name()))
+        .collect()
+}
+
 #[test]
 fn should_not_create_filesystem_artifacts_when_memory_mode() {
-    // Arrange
-    // Memory mode only test
+    // Arrange: snapshot the crate root before the engine runs, so the
+    // assertion actually inspects the filesystem instead of trusting a
+    // comment.
+    let entries_before = crate_root_top_level_entries();
+
     let opts = opts_for_mode("memory");
 
     // Act: Open, write, close
@@ -35,11 +52,17 @@ fn should_not_create_filesystem_artifacts_when_memory_mode() {
     tx.put(b"test_key_2".to_vec(), b"test_value_2".to_vec(), None)
         .expect("put");
     tx.commit(WriteOptions::buffered()).unwrap();
-    // engine dropped here - memory mode stores nothing on disk
+    drop(engine); // memory mode should store nothing on disk
 
-    // Assert: Memory mode produces no persistent artifacts
-    // This is implicitly validated by memory mode operations (no disk writes)
-    // Memory mode completed without filesystem operations
+    // Assert: no new top-level filesystem entries appeared. Memory mode's
+    // `OpenOptions` never carries a path at all, so this catches the real
+    // bug class of a hard-coded/default on-disk fallback slipping in.
+    let entries_after = crate_root_top_level_entries();
+    let new_entries: Vec<_> = entries_after.difference(&entries_before).collect();
+    assert!(
+        new_entries.is_empty(),
+        "memory mode created unexpected filesystem entries: {new_entries:?}"
+    );
 }
 
 #[test]

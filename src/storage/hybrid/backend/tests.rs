@@ -2153,6 +2153,19 @@ fn should_enforce_internal_storage_event_queue_limits() {
     // Assert
     assert!(entry_error.contains("entries=1/1"));
     assert!(byte_error.contains("bytes="));
-    assert_eq!(entry_limited.terminal_entries.len(), 1);
-    assert_eq!(byte_limited.terminal_pending_bytes, ack_bytes);
+    // Drain through the same accessor callers use to confirm the rejected
+    // second event never made it into the queue: only the first `ack`
+    // survived for each queue.
+    let entry_limited_drained = entry_limited.drain();
+    assert_eq!(entry_limited_drained.len(), 1);
+    assert!(matches!(
+        entry_limited_drained[0].event,
+        StorageEvent::CloudAck { segment_id: 1, .. }
+    ));
+    let byte_limited_drained = byte_limited.drain();
+    assert_eq!(byte_limited_drained.len(), 1);
+    assert!(matches!(
+        byte_limited_drained[0].event,
+        StorageEvent::CloudAck { segment_id: 1, .. }
+    ));
 }

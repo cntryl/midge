@@ -1098,7 +1098,7 @@ fn object_metadata_from_azure_response(
         .ok_or_else(|| {
             CloudError::Protocol("Azure metadata response is missing ETag".to_string())
         })?;
-    Ok(ObjectMetadata::new(size, etag.to_string(), 0))
+    Ok(ObjectMetadata::new(size, etag.to_string()))
 }
 
 fn azure_response_error(
@@ -2217,15 +2217,29 @@ mod tests {
     }
 
     #[test]
-    fn should_expose_from_env_constructor_for_credential_discovery() {
-        // Arrange
-        let constructor: fn(String, String) -> MidgeResult<AzureProvider> = AzureProvider::from_env;
+    fn should_discover_shared_key_credential_via_from_env() {
+        // Arrange: `from_env` is a thin convenience wrapper over `from_env_and_endpoint(..,
+        // None)`; that endpoint-taking constructor's behavior is exercised precisely elsewhere,
+        // so here we only need to confirm the wrapper actually reaches it (rather than, say,
+        // silently defaulting the account or credential) with an explicit account argument.
+        let _env_guard = azure_client_id_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _connection_string = TestEnvVar::remove("AZURE_STORAGE_CONNECTION_STRING");
+        let _key = TestEnvVar::set("AZURE_STORAGE_KEY", "dGVzdA==");
+        let _sas = TestEnvVar::remove("AZURE_STORAGE_SAS_TOKEN");
 
         // Act
-        let type_name = std::any::type_name_of_val(&constructor);
+        let provider = AzureProvider::from_env("myaccount".to_string(), "container".to_string())
+            .expect("environment-backed Azure provider");
 
         // Assert
-        assert!(type_name.contains("fn"));
+        assert_eq!(provider.account_name(), "myaccount");
+        assert_eq!(provider.container(), "container");
+        assert!(matches!(
+            provider.credential(),
+            AzureCredential::SharedKey { .. }
+        ));
     }
 
     // =========== AzureProvider Construction Tests ===========
@@ -2365,8 +2379,22 @@ mod tests {
         let p1 = p1.expect("should create first provider");
         let p2 = p2.expect("should create second provider");
 
-        // Assert
+        // Assert: each provider retains its own account, container, and key rather than any
+        // one of them leaking into or overwriting the other.
+        assert_eq!(p1.account_name(), "a1");
+        assert_eq!(p2.account_name(), "a2");
         assert_ne!(p1.account_name(), p2.account_name());
+        match (p1.credential(), p2.credential()) {
+            (
+                AzureCredential::SharedKey { account_key: k1 },
+                AzureCredential::SharedKey { account_key: k2 },
+            ) => {
+                assert_eq!(k1, "YTEta2V5");
+                assert_eq!(k2, "YTIta2V5");
+                assert_ne!(k1, k2);
+            }
+            other => panic!("expected SharedKey credentials, got {other:?}"),
+        }
     }
 
     #[test]

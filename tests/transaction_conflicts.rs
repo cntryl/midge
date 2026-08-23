@@ -959,36 +959,6 @@ fn should_allow_concurrent_puts_to_same_key_given_lww_semantics() {
 }
 
 #[test]
-fn should_allow_both_puts_to_succeed_given_concurrent_writes_when_lww() {
-    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        // Arrange
-        let engine = Arc::new(open_with_mode(&opts, mode));
-        let cf = engine.create_column_family("test").expect("create cf");
-
-        // Act
-        let result1 = {
-            let mut txn = engine
-                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-                .unwrap();
-            txn.put(b"key".to_vec(), b"value1".to_vec(), None).unwrap();
-            txn.commit(buffered_write_options(mode))
-        };
-
-        let result2 = {
-            let mut txn = engine
-                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-                .unwrap();
-            txn.put(b"key".to_vec(), b"value2".to_vec(), None).unwrap();
-            txn.commit(buffered_write_options(mode))
-        };
-
-        // Assert - both commits succeed
-        assert!(result1.is_ok());
-        assert!(result2.is_ok());
-    });
-}
-
-#[test]
 fn should_accept_both_committers_given_concurrent_puts_when_lww() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -1324,38 +1294,6 @@ fn should_allow_delete_range_delete_operations_given_lww_semantics() {
 // ============================================================================
 
 #[test]
-fn should_allow_both_same_key_puts_given_lww_semantics_when_committed_in_order() {
-    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        // Arrange
-        let engine = Arc::new(open_with_mode(&opts, mode));
-        let cf = engine.create_column_family("test").expect("create cf");
-
-        // Act - both transactions try to put same key
-        let mut txn1 = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
-        let mut txn2 = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
-
-        txn1.put(b"key".to_vec(), b"value1".to_vec(), None).unwrap();
-        txn2.put(b"key".to_vec(), b"value2".to_vec(), None).unwrap();
-
-        let result1 = txn1.commit(buffered_write_options(mode));
-        let result2 = txn2.commit(buffered_write_options(mode));
-
-        // Assert - both succeed with LWW semantics (last write wins)
-        assert!(result1.is_ok());
-        assert!(result2.is_ok());
-        let read_tx = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
-            .unwrap();
-        let value = read_tx.get(b"key").unwrap();
-        assert_eq!(value, Some(Bytes::from_static(b"value2")));
-    });
-}
-
-#[test]
 fn should_overwrite_existing_value_given_put_on_existing_key_when_committed() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
@@ -1450,14 +1388,22 @@ fn should_detect_lost_update_given_cas_pattern_when_value_changed() {
             .unwrap();
         setup_tx.commit(buffered_write_options(mode)).unwrap();
 
-        // Act - read-modify-write pattern with concurrent modification
+        // Act - compare-and-swap pattern: read the counter, then commit a write
+        // guarded by an assertion that the value has not changed since the read.
         let read_tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
         let original = read_tx.get(b"counter").unwrap().unwrap();
         assert_eq!(original, Bytes::from_static(b"0"));
 
-        // Concurrent transaction modifies the counter
+        let mut txn = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        txn.put(b"counter".to_vec(), b"1".to_vec(), None).unwrap();
+        txn.assert_value(b"counter".to_vec(), Some(original.to_vec()))
+            .expect("register CAS assertion");
+
+        // Concurrent transaction modifies the counter before the CAS transaction commits.
         let mut txn_concurrent = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
@@ -1466,20 +1412,27 @@ fn should_detect_lost_update_given_cas_pattern_when_value_changed() {
             .unwrap();
         txn_concurrent.commit(buffered_write_options(mode)).unwrap();
 
-        // Original transaction continues with stale value
-        let mut txn = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
-        txn.put(b"counter".to_vec(), b"1".to_vec(), None).unwrap();
+        // The stale CAS transaction now tries to commit its read-modify-write.
         let result = txn.commit(buffered_write_options(mode));
 
-        // Assert - LWW semantics mean last write wins (value is 1)
-        assert!(result.is_ok());
+        // Assert - the CAS assertion detects that the value changed underneath it
+        // and rejects the commit as a write conflict, so the update is not lost.
+        assert!(
+            matches!(result, Err(cntryl_midge::MidgeError::WriteConflict(_))),
+            "expected stale CAS commit to be rejected in mode {mode}, got: {result:?}"
+        );
+
+        // The winning value is the concurrent transaction's write, not the stale
+        // transaction's "1" - the lost update was successfully prevented.
         let read_tx2 = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
         let value = read_tx2.get(b"counter").unwrap();
-        assert_eq!(value, Some(Bytes::from_static(b"1")));
+        assert_eq!(
+            value,
+            Some(Bytes::from_static(b"2")),
+            "concurrent writer's value must win when the CAS commit is rejected in mode {mode}"
+        );
     });
 }
 
@@ -1832,12 +1785,69 @@ fn should_handle_high_concurrency_optimistic_locking() {
 fn should_maintain_transaction_isolation_under_stress() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let _engine = Arc::new(open_with_mode(&opts, mode));
+        let engine = Arc::new(open_with_mode(&opts, mode));
+        let cf = engine.create_column_family("test").expect("create cf");
+        let cf_id = cf.id();
+        let mut setup_tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .unwrap();
+        setup_tx
+            .put(b"isolated".to_vec(), b"initial".to_vec(), None)
+            .unwrap();
+        setup_tx.commit(buffered_write_options(mode)).unwrap();
 
-        // Act
-        // Test transaction isolation under concurrent load
+        // Take a read-only snapshot before any concurrent stress writers start.
+        let snapshot_tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .unwrap();
 
-        // Assert: concurrency executed without panicking
+        // Act - many threads hammering the same key with concurrent read-modify-writes
+        // while the snapshot transaction above stays open.
+        let mut handles = vec![];
+        for i in 0..20 {
+            let engine_clone = Arc::clone(&engine);
+            let write_options = buffered_write_options(mode);
+            let handle = std::thread::spawn(move || {
+                let read_tx = engine_clone
+                    .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+                    .unwrap();
+                let _current = read_tx.get(b"isolated").unwrap();
+                let mut txn = engine_clone
+                    .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                    .unwrap();
+                let value = format!("stress{i}");
+                txn.put(b"isolated".to_vec(), value.as_bytes().to_vec(), None)
+                    .unwrap();
+                txn.commit(write_options)
+            });
+            handles.push(handle);
+        }
+
+        // Assert - all concurrent commits succeed without panicking
+        for handle in handles {
+            assert!(handle.join().unwrap().is_ok());
+        }
+
+        // The long-lived snapshot must still observe the pre-stress value: isolation
+        // means none of the concurrent stress commits are visible to it.
+        assert_eq!(
+            snapshot_tx.get(b"isolated").unwrap(),
+            Some(Bytes::from_static(b"initial")),
+            "snapshot transaction leaked a concurrent stress write in mode {mode}"
+        );
+
+        // The committed state, on the other hand, must reflect one of the stress
+        // writes - proving the stress writers actually raced and mutated the key.
+        let read_tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .unwrap();
+        let final_value = read_tx.get(b"isolated").unwrap();
+        assert_ne!(
+            final_value,
+            Some(Bytes::from_static(b"initial")),
+            "expected concurrent stress writers to update the key in mode {mode}"
+        );
+        assert!(final_value.is_some());
     });
 }
 
@@ -1940,44 +1950,6 @@ fn should_persist_lost_update_prevention_after_restart() {
 // ============================================================================
 // BASELINE CONFLICT PREVENTION (Negative Tests)
 // ============================================================================
-
-#[test]
-fn should_not_reject_writes_when_no_conflict_exists_given_disjoint_keys() {
-    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        // Verify that non-conflicting writes are never rejected
-        // Arrange
-        let engine = Arc::new(open_with_mode(&opts, mode));
-        let cf = engine.create_column_family("test").expect("create cf");
-
-        // Act: Two transactions writing to different keys (no conflict)
-        let mut txn1 = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
-        let mut txn2 = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
-
-        txn1.put(b"key1".to_vec(), b"value1".to_vec(), None)
-            .unwrap();
-        txn2.put(b"key2".to_vec(), b"value2".to_vec(), None)
-            .unwrap();
-
-        let r1 = txn1.commit(buffered_write_options(mode));
-        let r2 = txn2.commit(buffered_write_options(mode));
-
-        // Assert: Both must succeed (no false positive conflict detection)
-        assert!(r1.is_ok(), "Non-conflicting write 1 was rejected in {mode}");
-        assert!(r2.is_ok(), "Non-conflicting write 2 was rejected in {mode}");
-
-        let read_tx = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
-            .unwrap();
-        let v1 = read_tx.get(b"key1").unwrap();
-        let v2 = read_tx.get(b"key2").unwrap();
-        assert_eq!(v1, Some(Bytes::from_static(b"value1")));
-        assert_eq!(v2, Some(Bytes::from_static(b"value2")));
-    });
-}
 
 #[test]
 fn should_preserve_both_writes_when_non_overlapping_keys_given_concurrent_commits() {

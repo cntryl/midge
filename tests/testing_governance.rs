@@ -231,23 +231,29 @@ fn should_keep_expensive_testing_governance_scheduled_or_manual() {
     // Arrange
     let workflow = fs::read_to_string(".github/workflows/testing-governance.yml")
         .expect("read testing governance workflow");
+    // Collapse all whitespace (indentation, line wraps, blank lines) to single
+    // spaces so the assertions below tolerate harmless YAML/shell reformatting
+    // (e.g. re-indenting a step, wrapping a long `run:` command onto another
+    // line) without losing the ability to catch a real change to which jobs
+    // exist, how they trigger, or what commands/flags they run.
+    let normalized = workflow.split_whitespace().collect::<Vec<_>>().join(" ");
 
     // Act
-    let has_expensive_jobs = workflow.contains("coverage-tier-diff:")
-        && workflow.contains("mutation-pilot:")
-        && workflow.contains("cargo llvm-cov")
-        && workflow.contains("cargo mutants");
+    let has_expensive_jobs = normalized.contains("coverage-tier-diff:")
+        && normalized.contains("mutation-pilot:")
+        && normalized.contains("cargo llvm-cov")
+        && normalized.contains("cargo mutants");
 
     // Assert
-    assert!(workflow.contains("workflow_dispatch:"));
-    assert!(workflow.contains("schedule:"));
-    assert!(!workflow.contains("pull_request:"));
-    assert!(!workflow.contains("workflow_run:"));
-    assert!(workflow.contains("find tests -maxdepth 1"));
-    assert!(!workflow.contains("cargo llvm-cov --tests"));
-    assert!(workflow.contains("--shard 1/512 --sharding round-robin --jobs 2"));
-    assert!(!workflow.contains("continue-on-error: true"));
-    assert!(workflow.contains("scripts/mutation_report.py"));
+    assert!(normalized.contains("workflow_dispatch:"));
+    assert!(normalized.contains("schedule:"));
+    assert!(!normalized.contains("pull_request:"));
+    assert!(!normalized.contains("workflow_run:"));
+    assert!(normalized.contains("find tests -maxdepth 1"));
+    assert!(!normalized.contains("cargo llvm-cov --tests"));
+    assert!(normalized.contains("--shard 1/512 --sharding round-robin --jobs 2"));
+    assert!(!normalized.contains("continue-on-error: true"));
+    assert!(normalized.contains("scripts/mutation_report.py"));
     assert!(has_expensive_jobs);
 }
 

@@ -1456,9 +1456,51 @@ mod tests {
         let e = ManifestEdit::BumpWalSeq { seq: 1 };
         append_edit_batch(db, std::slice::from_ref(&e)).expect("append batch failed");
 
-        // Assert: journal file contains an FSYNC_MARKER_TYPE record
-        let data = std::fs::read(db.join(JOURNAL_FILE)).expect("read journal");
-        assert!(data.contains(&FSYNC_MARKER_TYPE));
+        // Assert: the journal contains exactly two structurally valid
+        // records in order - the batch edit record immediately followed
+        // by an FSYNC_MARKER_TYPE record (not just the marker byte
+        // appearing somewhere in the raw file bytes) - and the marker's
+        // own payload references the edit it is durability-confirming.
+        let fs: std::sync::Arc<dyn crate::io::traits::Fs> =
+            std::sync::Arc::new(crate::io::real::RealFs::new(db).expect("open RealFs"));
+        let file = open_journal_for_replay(&fs)
+            .expect("open journal for replay")
+            .expect("journal file must exist after append");
+        let file_len = std::fs::metadata(db.join(JOURNAL_FILE))
+            .expect("stat journal")
+            .len();
+
+        let JournalRecordStatus::Record(batch_record) =
+            read_journal_record(&*file, 0, file_len).expect("read first journal record")
+        else {
+            panic!("expected a complete record at offset 0");
+        };
+        assert_eq!(
+            batch_record.typ, BATCH_RECORD_TYPE,
+            "first record must be the batch edit record"
+        );
+
+        let JournalRecordStatus::Record(marker_record) =
+            read_journal_record(&*file, batch_record.next_offset, file_len)
+                .expect("read second journal record")
+        else {
+            panic!("expected a complete record immediately after the batch record");
+        };
+        assert_eq!(
+            marker_record.typ, FSYNC_MARKER_TYPE,
+            "second record must be the fsync marker, positioned right after the batch record"
+        );
+        assert_eq!(
+            marker_record.next_offset, file_len,
+            "fsync marker must be the last record in the journal"
+        );
+
+        let marker: FsyncMarker = journal_deserialize(&marker_record.payload)
+            .expect("fsync marker payload must deserialize");
+        assert_eq!(
+            marker.last_persisted_sequence, 1,
+            "fsync marker must reference the edit id it confirms durability for"
+        );
     }
 
     proptest! {

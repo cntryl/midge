@@ -414,33 +414,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_create_fs_path() {
-        let path = FsPath::new("test/file.txt");
-        assert_eq!(path.0, "test/file.txt");
-    }
-
-    #[test]
-    fn should_compare_paths() {
-        let p1 = FsPath::new("test");
-        let p2 = FsPath::new("test");
-        assert_eq!(p1, p2);
-    }
-
-    #[test]
-    fn should_use_path_as_key() {
-        // Arrange
-        use std::collections::HashMap;
-        let mut map = HashMap::new();
-        let path = FsPath::new("key");
-
-        // Act
-        map.insert(path, "value");
-
-        // Assert
-        assert_eq!(map.get(&FsPath::new("key")), Some(&"value"));
-    }
-
-    #[test]
     fn should_have_empty_capabilities() {
         let caps = FileCaps::empty();
         assert!(!caps.contains(FileCaps::READV_AT));

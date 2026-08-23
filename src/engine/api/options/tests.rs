@@ -7,23 +7,6 @@ fn should_have_latency_as_default_goal() {
     assert_eq!(Goal::default(), Goal::Latency);
 }
 
-#[test]
-fn should_create_throughput_goal() {
-    assert_eq!(Goal::Throughput, Goal::Throughput);
-}
-
-#[test]
-fn should_create_cost_goal() {
-    assert_eq!(Goal::Economy, Goal::Economy);
-}
-
-#[test]
-fn should_distinguish_different_goals() {
-    assert_ne!(Goal::Latency, Goal::Throughput);
-    assert_ne!(Goal::Throughput, Goal::Economy);
-    assert_ne!(Goal::Economy, Goal::Latency);
-}
-
 // ========== MemoryBudget Enum Tests ==========
 
 #[test]
@@ -31,57 +14,11 @@ fn should_have_auto_as_default_memory_budget() {
     assert_eq!(MemoryBudget::default(), MemoryBudget::Auto);
 }
 
-#[test]
-fn should_create_explicit_memory_budget() {
-    let budget = MemoryBudget::Bytes(4 * 1024 * 1024 * 1024);
-    assert_eq!(budget, MemoryBudget::Bytes(4 * 1024 * 1024 * 1024));
-}
-
-#[test]
-fn should_distinguish_memory_budgets() {
-    assert_ne!(MemoryBudget::Auto, MemoryBudget::Bytes(1000));
-}
-
 // ========== WorkloadProfile Enum Tests ==========
 
 #[test]
 fn should_have_mixed_as_default_workload() {
     assert_eq!(WorkloadProfile::default(), WorkloadProfile::Mixed);
-}
-
-#[test]
-fn should_create_write_heavy_workload() {
-    assert_eq!(WorkloadProfile::WriteHeavy, WorkloadProfile::WriteHeavy);
-}
-
-#[test]
-fn should_create_read_mostly_workload() {
-    assert_eq!(WorkloadProfile::ReadMostly, WorkloadProfile::ReadMostly);
-}
-
-#[test]
-fn should_create_range_scan_workload() {
-    assert_eq!(WorkloadProfile::RangeScan, WorkloadProfile::RangeScan);
-}
-
-#[test]
-fn should_create_ttl_heavy_workload() {
-    assert_eq!(WorkloadProfile::TtlHeavy, WorkloadProfile::TtlHeavy);
-}
-
-#[test]
-fn should_distinguish_workload_profiles() {
-    // Arrange
-    // (no setup required)
-
-    // Act
-    // (compare variants)
-
-    // Assert
-    assert_ne!(WorkloadProfile::Mixed, WorkloadProfile::WriteHeavy);
-    assert_ne!(WorkloadProfile::WriteHeavy, WorkloadProfile::ReadMostly);
-    assert_ne!(WorkloadProfile::ReadMostly, WorkloadProfile::RangeScan);
-    assert_ne!(WorkloadProfile::RangeScan, WorkloadProfile::TtlHeavy);
 }
 
 // ========== Cloud Provider Constructor Tests ==========
@@ -692,19 +629,23 @@ fn should_use_different_memtable_sizes_for_different_workloads() {
 
 #[test]
 fn should_provide_getter_methods() {
-    // Arrange
-    // (no setup required)
+    // Arrange: pin an explicit memtable size limit so we can assert the
+    // getter reflects caller intent, not just a non-panicking default.
+    let explicit_limit = 8 * 1024 * 1024;
 
     // Act
-    let opts = OpenOptions::in_memory().build().expect("build options");
+    let opts = OpenOptions::in_memory()
+        .with_memtable_size_limit(explicit_limit)
+        .build()
+        .expect("build options");
 
-    // Assert - getters should be callable
-    let _ = opts.block_size();
-    let _ = opts.memtable_size_limit();
-    let _ = opts.target_sst_size();
-    let _ = opts.block_cache_size();
-    let _ = opts.wal_buffer_size();
-    let _ = opts.l0_compaction_trigger();
+    // Assert - getters return concrete, falsifiable values
+    assert_eq!(opts.memtable_size_limit(), explicit_limit);
+    assert!(opts.block_size() > 0);
+    assert!(opts.target_sst_size() > 0);
+    assert!(opts.block_cache_size() > 0);
+    assert!(opts.wal_buffer_size() > 0);
+    assert!(opts.l0_compaction_trigger() > 0);
 }
 
 #[test]
@@ -725,14 +666,34 @@ fn should_respect_explicit_memory_budget() {
 
 #[test]
 fn should_clone_options() {
-    // Arrange
-    let original = OpenOptions::in_memory().goal(Goal::Throughput);
+    // Arrange: set several distinct fields so a shallow/partial clone would
+    // be caught, then build both to compare via public getters (the builder
+    // itself doesn't derive PartialEq).
+    let original = OpenOptions::in_memory()
+        .goal(Goal::Throughput)
+        .workload(WorkloadProfile::WriteHeavy)
+        .with_memtable_size_limit(16 * 1024 * 1024)
+        .transaction_memory_pool_size(2 * 1024 * 1024);
 
     // Act
     let cloned = original.clone();
+    let original_opts = original.build().expect("build original");
+    let cloned_opts = cloned.build().expect("build cloned");
 
-    // Assert
-    assert_eq!(cloned.goal, original.goal);
+    // Assert: clone carries every field forward independently
+    assert_eq!(cloned_opts.goal(), original_opts.goal());
+    assert_eq!(cloned_opts.workload(), original_opts.workload());
+    assert_eq!(
+        cloned_opts.memtable_size_limit(),
+        original_opts.memtable_size_limit()
+    );
+    assert_eq!(
+        cloned_opts.transaction_memory_pool_size(),
+        original_opts.transaction_memory_pool_size()
+    );
+    assert_eq!(cloned_opts.goal(), Goal::Throughput);
+    assert_eq!(cloned_opts.workload(), WorkloadProfile::WriteHeavy);
+    assert_eq!(cloned_opts.memtable_size_limit(), 16 * 1024 * 1024);
 }
 
 #[test]

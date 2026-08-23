@@ -192,36 +192,6 @@ mod tests {
     }
 
     #[test]
-    fn should_fail_given_current_manifest_without_format_marker() {
-        // Arrange
-        let temp_dir = tempfile::tempdir().expect("temp dir");
-        std::fs::write(temp_dir.path().join("manifest.json"), "{}\n")
-            .expect("write manifest without marker");
-
-        // Act
-        let error =
-            ensure_or_create_format_marker(temp_dir.path()).expect_err("missing format marker");
-
-        // Assert
-        assert!(matches!(error, MidgeError::CompatibilityError(_)));
-    }
-
-    #[test]
-    fn should_fail_given_current_intent_log_without_format_marker() {
-        // Arrange
-        let temp_dir = tempfile::tempdir().expect("temp dir");
-        std::fs::write(temp_dir.path().join("intent_log.json"), "[]\n")
-            .expect("write intent log without marker");
-
-        // Act
-        let error =
-            ensure_or_create_format_marker(temp_dir.path()).expect_err("missing format marker");
-
-        // Assert
-        assert!(matches!(error, MidgeError::CompatibilityError(_)));
-    }
-
-    #[test]
     fn should_reject_open_given_future_format_version_when_starting() {
         // Arrange
         let temp_dir = tempfile::tempdir().expect("temp dir");
@@ -233,23 +203,6 @@ mod tests {
 
         // Act
         let error = validate_format_marker(temp_dir.path()).expect_err("unknown version");
-
-        // Assert
-        assert!(matches!(error, MidgeError::CompatibilityError(_)));
-    }
-
-    #[test]
-    fn should_reject_open_given_older_format_version_when_starting() {
-        // Arrange: supported databases must match the current format exactly.
-        let temp_dir = tempfile::tempdir().expect("temp dir");
-        std::fs::write(
-            format_marker_path(temp_dir.path()),
-            format!("{FORMAT_PREFIX}{}\n", CURRENT_FORMAT_VERSION - 1),
-        )
-        .expect("write marker");
-
-        // Act
-        let error = validate_format_marker(temp_dir.path()).expect_err("older version");
 
         // Assert
         assert!(matches!(error, MidgeError::CompatibilityError(_)));

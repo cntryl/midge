@@ -62,7 +62,20 @@ fn should_clear_acquisition_lock_when_simulating_crash_timeout() {
 
     // Assert
     assert!(!db_path.join(".midge_leader.lock").exists());
-    let _reopened = open_cloud_engine(db_path, None);
+    let reopened = open_cloud_engine(db_path, None);
+    commit_value(
+        &reopened,
+        b"crash-timeout-key",
+        b"crash-timeout-value",
+        WriteOptions::cloud_async(),
+    );
+    assert_value_visible(&reopened, b"crash-timeout-key", b"crash-timeout-value");
+    let lease_content = std::fs::read_to_string(db_path.join("midge_primary_lease.json"))
+        .expect("read refreshed lease record");
+    assert!(
+        !lease_content.contains("crashed@host"),
+        "reopen should re-acquire the lease with a fresh holder instead of keeping the stale one: {lease_content}"
+    );
 }
 
 #[test]
@@ -82,7 +95,20 @@ fn should_clear_incomplete_acquisition_lock_when_crashed_child_has_exited() {
 
     // Assert
     assert!(!db_path.join(".midge_leader.lock").exists());
-    let _reopened = open_cloud_engine(db_path, None);
+    let reopened = open_cloud_engine(db_path, None);
+    commit_value(
+        &reopened,
+        b"incomplete-lock-key",
+        b"incomplete-lock-value",
+        WriteOptions::cloud_async(),
+    );
+    assert_value_visible(&reopened, b"incomplete-lock-key", b"incomplete-lock-value");
+    let lease_content = std::fs::read_to_string(db_path.join("midge_primary_lease.json"))
+        .expect("read refreshed lease record");
+    assert!(
+        !lease_content.contains("crashed@host"),
+        "reopen should re-acquire the lease with a fresh holder instead of keeping the stale one: {lease_content}"
+    );
 }
 
 #[test]

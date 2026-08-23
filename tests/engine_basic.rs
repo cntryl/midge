@@ -184,19 +184,41 @@ fn should_return_none_given_deleted_key_when_get() {
 #[test]
 fn should_succeed_given_nonexistent_key_when_delete() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        // Arrange
+        // Arrange: a sibling key exists so we can prove the no-op delete
+        // didn't disturb unrelated state.
         let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
+        let mut seed = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin_tx");
+        seed.put(b"sibling".to_vec(), b"value".to_vec(), None)
+            .expect("put sibling");
+        seed.commit(buffered_write_options(mode))
+            .expect("commit sibling");
 
         // Act
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin_tx");
         tx.delete(b"nonexistent".to_vec()).expect("delete");
-        let result = tx.commit(buffered_write_options(mode));
+        tx.commit(buffered_write_options(mode))
+            .expect("delete nonexistent");
 
-        // Assert
-        result.expect("delete nonexistent");
+        // Assert: the deleted key still doesn't exist, and the sibling key
+        // committed before it is untouched.
+        let tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("begin_tx");
+        assert_eq!(
+            tx.get(b"nonexistent").expect("get nonexistent"),
+            None,
+            "deleting a nonexistent key must leave it absent in mode: {mode}"
+        );
+        assert_eq!(
+            tx.get(b"sibling").expect("get sibling"),
+            Some(Bytes::from_static(b"value")),
+            "deleting an unrelated key must not disturb other state in mode: {mode}"
+        );
     });
 }
 
@@ -236,36 +258,5 @@ fn should_handle_many_operations_when_sequential() {
                 "mismatch for key {key} in mode: {mode}"
             );
         }
-    });
-}
-
-#[test]
-fn should_retrieve_written_data_across_storage_modes() {
-    // Validate that data written is retrievable across all storage modes.
-    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        // Arrange: Open engine and write data
-        let engine = open_with_mode(&opts, mode);
-        let cf = engine.create_column_family("test").expect("create cf");
-
-        // Act: Perform various operations
-        for i in 0..50 {
-            let key = format!("artifact_test_{i}");
-            let mut tx = engine
-                .begin_tx(cf.id(), TransactionMode::ReadWrite)
-                .expect("begin_tx");
-            tx.put(key.as_bytes().to_vec(), b"test_value".to_vec(), None)
-                .expect("put");
-            tx.commit(buffered_write_options(mode)).expect("commit");
-        }
-
-        // Assert: All data is readable (operations succeeded)
-        let tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadOnly)
-            .expect("begin_tx");
-        let got = tx.get(b"artifact_test_0").expect("get");
-        assert!(
-            got.is_some(),
-            "failed to retrieve written data in mode: {mode}"
-        );
     });
 }

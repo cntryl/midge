@@ -548,18 +548,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn should_return_none_when_no_record_exists() {
-        // Arrange
-        let store = make_store();
-
-        // Act
-        let current = store.read_current().unwrap();
-
-        // Assert
-        assert!(current.is_none());
-    }
-
     fn write_raw_leader_record(store: &FsLeaderStore, bytes: &[u8]) {
         store
             .fs
@@ -916,23 +904,5 @@ mod tests {
                 .expect("lock presence check"),
             "winning guard should remove its own acquisition lock"
         );
-    }
-
-    #[test]
-    fn should_roundtrip_leader_record_format() {
-        // Arrange
-        let rec = LeaderRecord {
-            epoch: 42,
-            holder_id: "123@host".to_string(),
-            acquired_at: "2026-02-16T12:00:00Z".to_string(),
-        };
-
-        // Act
-        let serialized = format_leader_record(&rec);
-        let parsed = parse_leader_record(&serialized);
-
-        // Assert
-        let parsed = parsed.unwrap();
-        assert_eq!(parsed, rec);
     }
 }

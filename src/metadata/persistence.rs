@@ -580,21 +580,6 @@ mod tests {
     }
 
     #[test]
-    fn should_name_snapshot_file_with_json_extension() {
-        // Arrange
-        let test_dir = create_test_dir();
-
-        // Act
-        let snapshot_path = ManifestPersistence::manifest_snapshot_path(&test_dir);
-
-        // Assert
-        assert!(
-            snapshot_path.ends_with("manifest.snapshot.json"),
-            "snapshot should persist to manifest.snapshot.json"
-        );
-    }
-
-    #[test]
     fn should_return_default_when_manifest_file_missing() {
         // Arrange
         let test_dir = create_test_dir();

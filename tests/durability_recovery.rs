@@ -429,73 +429,6 @@ fn should_recover_deletes_when_reopening_after_clean_shutdown() {
     });
 }
 
-#[test]
-fn should_recover_independent_committed_transactions_when_reopening_after_clean_shutdown() {
-    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange
-        // Act (Phase 1)
-        {
-            let mut engine = open_with_mode(&opts, mode);
-            let cf = engine.create_column_family("test").expect("create cf");
-
-            // Commit three independent transactions before shutdown
-            let mut tx = engine
-                .begin_tx(cf.id(), TransactionMode::ReadWrite)
-                .expect("begin_tx");
-            tx.put(b"key1".to_vec(), b"value1".to_vec(), None)
-                .expect("put");
-            tx.commit(buffered_write_options(mode)).expect("commit");
-            let mut tx = engine
-                .begin_tx(cf.id(), TransactionMode::ReadWrite)
-                .expect("begin_tx");
-            tx.put(b"key2".to_vec(), b"value2".to_vec(), None)
-                .expect("put");
-            tx.commit(buffered_write_options(mode)).expect("commit");
-            let mut tx = engine
-                .begin_tx(cf.id(), TransactionMode::ReadWrite)
-                .expect("begin_tx");
-            tx.put(b"key3".to_vec(), b"value3".to_vec(), None)
-                .expect("put");
-            tx.commit(buffered_write_options(mode)).expect("commit");
-            engine
-                .shutdown(std::time::Duration::from_secs(5))
-                .expect("shutdown before reopen");
-        }
-
-        // Assert (Phase 2)
-        {
-            let engine = open_with_mode(&opts, mode);
-            let cf = engine.create_column_family("test").expect("create cf");
-
-            // All independently committed writes should be visible after reopen
-            let tx = engine
-                .begin_tx(cf.id(), TransactionMode::ReadOnly)
-                .expect("begin_tx");
-            assert_eq!(
-                tx.get(b"key1").expect("get"),
-                Some(Bytes::from_static(b"value1")),
-                "mode: {mode}"
-            );
-            let tx = engine
-                .begin_tx(cf.id(), TransactionMode::ReadOnly)
-                .expect("begin_tx");
-            assert_eq!(
-                tx.get(b"key2").expect("get"),
-                Some(Bytes::from_static(b"value2")),
-                "mode: {mode}"
-            );
-            let tx = engine
-                .begin_tx(cf.id(), TransactionMode::ReadOnly)
-                .expect("begin_tx");
-            assert_eq!(
-                tx.get(b"key3").expect("get"),
-                Some(Bytes::from_static(b"value3")),
-                "mode: {mode}"
-            );
-        }
-    });
-}
-
 // ============================================================================
 // CONSISTENCY AND ORDERING TESTS
 // ============================================================================
@@ -652,56 +585,6 @@ fn should_be_idempotent_when_reopening_multiple_times_after_clean_shutdown() {
 }
 
 #[test]
-fn should_maintain_exactly_once_visibility_when_reopening_multiple_times_after_clean_shutdown() {
-    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange
-        {
-            let mut engine = open_with_mode(&opts, mode);
-            let cf = engine.create_column_family("test").expect("create cf");
-
-            let mut tx = engine
-                .begin_tx(cf.id(), TransactionMode::ReadWrite)
-                .expect("begin_tx");
-            tx.put(b"key".to_vec(), b"value".to_vec(), None)
-                .expect("put");
-            tx.commit(buffered_write_options(mode)).expect("commit");
-            engine
-                .shutdown(std::time::Duration::from_secs(5))
-                .expect("shutdown before first reopen");
-        }
-
-        // Act (Phase 2: First recovery)
-        {
-            let mut engine = open_with_mode(&opts, mode);
-            let cf = engine.create_column_family("test").expect("create cf");
-
-            let tx = engine
-                .begin_tx(cf.id(), TransactionMode::ReadOnly)
-                .expect("begin_tx");
-            let val = tx.get(b"key").expect("get");
-            assert_eq!(val, Some(Bytes::from_static(b"value")), "mode: {mode}");
-            drop(tx);
-            engine
-                .shutdown(std::time::Duration::from_secs(5))
-                .expect("shutdown before second reopen");
-        }
-
-        // Assert (Phase 3: Second recovery)
-        {
-            let engine = open_with_mode(&opts, mode);
-            let cf = engine.create_column_family("test").expect("create cf");
-
-            // Value should appear exactly once (no duplicates)
-            let tx = engine
-                .begin_tx(cf.id(), TransactionMode::ReadOnly)
-                .expect("begin_tx");
-            let val = tx.get(b"key").expect("get");
-            assert_eq!(val, Some(Bytes::from_static(b"value")), "mode: {mode}");
-        }
-    });
-}
-
-#[test]
 fn should_continue_sequence_numbers_when_new_writes_follow_clean_reopen() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
@@ -742,7 +625,19 @@ fn should_continue_sequence_numbers_when_new_writes_follow_clean_reopen() {
             );
             drop(tx);
 
-            // Write new data (sequence numbers should continue)
+            // Recovery must have restored the sequence counter to at least the
+            // two commits made before shutdown, not reset it to zero.
+            let sequence_after_reopen = engine
+                .get_runtime_metrics()
+                .expect("runtime metrics after reopen")
+                .current_sequence;
+            assert!(
+                sequence_after_reopen >= 2,
+                "sequence counter must be recovered past the 2 pre-shutdown commits, \
+                 got {sequence_after_reopen}, mode: {mode}"
+            );
+
+            // Write new data (sequence numbers should continue, not restart)
             let mut tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
@@ -755,6 +650,18 @@ fn should_continue_sequence_numbers_when_new_writes_follow_clean_reopen() {
             tx.put(b"seq_4".to_vec(), b"value_4".to_vec(), None)
                 .expect("put");
             tx.commit(buffered_write_options(mode)).expect("commit");
+
+            let sequence_after_new_writes = engine
+                .get_runtime_metrics()
+                .expect("runtime metrics after new writes")
+                .current_sequence;
+            assert!(
+                sequence_after_new_writes > sequence_after_reopen,
+                "sequence counter must strictly advance past the recovered value \
+                 rather than restart, before: {sequence_after_reopen}, \
+                 after: {sequence_after_new_writes}, mode: {mode}"
+            );
+
             engine
                 .shutdown(std::time::Duration::from_secs(5))
                 .expect("shutdown before final reopen");

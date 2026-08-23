@@ -184,28 +184,58 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_create_wal_reader_io() {
+    fn should_create_wal_reader_io_without_requiring_file_to_exist() -> MidgeResult<()> {
         // Arrange
+        // `new` is the lazy constructor used before a WAL file has been
+        // created; unlike `open`, it must not eagerly check the filesystem.
         let fs = Arc::new(crate::io::MockFs::new());
+        assert!(fs.metadata(&FsPath::new("wal.log")).is_err());
 
         // Act
-        let reader = FsWalReaderIo::new("wal.log", fs);
+        let reader = FsWalReaderIo::new("wal.log", Arc::clone(&fs) as Arc<dyn crate::io::Fs>)?;
 
-        // Assert
-        assert!(reader.is_ok());
+        // Assert: construction succeeded despite the file not existing yet,
+        // and it starts at position 0.
+        assert_eq!(reader.current_pos, 0);
+        assert!(
+            FsWalReaderIo::open("wal.log", fs).is_err(),
+            "open() should still reject a missing file, unlike new()"
+        );
+        Ok(())
     }
 
     #[test]
-    fn should_support_close() {
-        // Arrange
+    fn should_reset_current_pos_when_closed() -> MidgeResult<()> {
+        // Arrange: write one record to the backing file and read it, so the
+        // reader has advanced past position 0.
         let fs = Arc::new(crate::io::MockFs::new());
-        let mut reader = FsWalReaderIo::new("wal.log", fs).unwrap();
+        let writer = crate::wal::fs::FsWalWriterIo::new(
+            "wal.log",
+            Arc::clone(&fs) as Arc<dyn crate::io::Fs>,
+        )?;
+        let record = crate::wal::types::WalRecord::new(
+            crate::wal::types::WalOpKind::Put,
+            bytes::Bytes::from_static(b"key"),
+            Some(bytes::Bytes::from_static(b"value")),
+            1,
+            1,
+        );
+        crate::wal::WalWriter::append_record(&writer, &record)?;
+        crate::wal::WalWriter::close(&writer)?;
+
+        let mut reader = FsWalReaderIo::new("wal.log", fs)?;
+        WalReader::read_at(&mut reader, 0)?;
+        assert!(
+            reader.current_pos > 0,
+            "read_at should have advanced current_pos"
+        );
 
         // Act
-        let result = WalReader::close(&mut reader);
+        WalReader::close(&mut reader)?;
 
         // Assert
-        assert!(result.is_ok());
+        assert_eq!(reader.current_pos, 0);
+        Ok(())
     }
 
     #[test]

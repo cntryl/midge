@@ -315,26 +315,3 @@ pub trait StorageBackend: Send + Sync + 'static {
         });
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn should_preserve_list_complete_prefix_for_test_backends() {
-        // Arrange
-        let event = StorageEvent::ListComplete {
-            prefix: "sst/".to_string(),
-            result: StorageOutcome::Ok(vec!["sst/1.sst".to_string()]),
-        };
-
-        // Act
-        let StorageEvent::ListComplete { prefix, result } = event else {
-            panic!("expected list complete event");
-        };
-
-        // Assert
-        assert_eq!(prefix, "sst/");
-        assert!(matches!(result, StorageOutcome::Ok(keys) if keys == vec!["sst/1.sst"]));
-    }
-}

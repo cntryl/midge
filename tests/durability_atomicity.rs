@@ -350,53 +350,6 @@ fn should_maintain_atomicity_given_concurrent_flush_manifest_fsync_when_updating
 }
 
 #[test]
-fn should_preserve_single_cf_data_when_reopening_after_flush() {
-    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange
-        // Act (Phase 1)
-        {
-            let mut engine = open_with_mode(&opts, mode);
-            let cf_default = engine.create_column_family("test").expect("create cf");
-
-            // Write to a single CF, then flush it
-            for i in 0..5 {
-                let key = format!("key_{i:02}");
-                let mut tx = engine
-                    .begin_tx(cf_default.id(), TransactionMode::ReadWrite)
-                    .expect("begin_tx");
-                tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
-                    .expect("put");
-                tx.commit(buffered_write_options(mode)).expect("commit");
-            }
-
-            // Flush the CF
-            engine.flush_cf(&cf_default).expect("flush");
-            engine
-                .shutdown(std::time::Duration::from_secs(5))
-                .expect("shutdown before reopen");
-        }
-
-        // Assert (Phase 2)
-        {
-            let engine = open_with_mode(&opts, mode);
-            let cf_default = engine.create_column_family("test").expect("create cf");
-
-            // All data should be recoverable after reopen
-            for i in 0..5 {
-                let key = format!("key_{i:02}");
-                let tx = engine
-                    .begin_tx(cf_default.id(), TransactionMode::ReadOnly)
-                    .expect("begin_tx");
-                assert!(
-                    tx.get(key.as_bytes()).expect("get").is_some(),
-                    "mode: {mode}"
-                );
-            }
-        }
-    });
-}
-
-#[test]
 fn should_preserve_data_when_reopening_after_flush_with_optional_compaction() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
@@ -433,51 +386,6 @@ fn should_preserve_data_when_reopening_after_flush_with_optional_compaction() {
             // All data should still be present
             for i in 0..30 {
                 let key = format!("key_{i:03}");
-                let tx = engine
-                    .begin_tx(cf.id(), TransactionMode::ReadOnly)
-                    .expect("begin_tx");
-                assert!(
-                    tx.get(key.as_bytes()).expect("get").is_some(),
-                    "mode: {mode}"
-                );
-            }
-        }
-    });
-}
-
-#[test]
-fn should_preserve_original_data_when_reopening_after_flush() {
-    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange
-        // Act (Phase 1)
-        {
-            let mut engine = open_with_mode(&opts, mode);
-            let cf = engine.create_column_family("test").expect("create cf");
-
-            // Create data
-            for i in 0..20 {
-                let key = format!("key_{i:02}");
-                let mut tx = engine
-                    .begin_tx(cf.id(), TransactionMode::ReadWrite)
-                    .expect("begin_tx");
-                tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
-                    .expect("put");
-                tx.commit(buffered_write_options(mode)).expect("commit");
-            }
-            engine.flush_cf(&cf).expect("flush");
-            engine
-                .shutdown(std::time::Duration::from_secs(5))
-                .expect("shutdown before reopen");
-        }
-
-        // Assert (Phase 2)
-        {
-            let engine = open_with_mode(&opts, mode);
-            let cf = engine.create_column_family("test").expect("create cf");
-
-            // All original data should be present
-            for i in 0..20 {
-                let key = format!("key_{i:02}");
                 let tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadOnly)
                     .expect("begin_tx");
@@ -599,38 +507,19 @@ fn should_recover_valid_wal_records_when_reopening_after_clean_shutdown() {
 
 /// Phase 0 Guardrail #2: Idempotency cache bounded growth
 ///
-/// Validates that idempotency cache mechanism is functional under load.
-/// Note: Uses 2k iterations for fast execution; full 100k+ eviction behavior
-/// is better tested in dedicated unit tests.
-#[test]
-fn should_evict_oldest_entries_when_idempotency_cache_exceeds_limit() {
-    // Arrange: Create engine in memory mode
-    let opts = memory_opts();
-    let engine = open_with_mode(&opts, "memory");
-    let cf = engine.create_column_family("test").expect("create cf");
-
-    // Act: Simulate 2k sequence allocations (enough to test cache behavior without hanging)
-    // Note: Full 200k test would take >60s; 2k is sufficient to validate the mechanism
-    // Use buffered writes since we're in memory mode and testing cache logic, not durability
-    for i in 0..2_000 {
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .expect("begin_tx");
-
-        let key = format!("key_{i:08}");
-        tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
-            .expect("put");
-
-        tx.commit(WriteOptions::buffered()).expect("commit");
-    }
-
-    // Assert: Engine should not OOM, cache should be bounded
-    // Note: With 2k writes, we're verifying the mechanism works without triggering
-    // actual eviction (which requires 100k+ entries). Full-scale eviction testing
-    // should be done via targeted unit tests or benchmarks.
-    eprintln!("Successfully completed 2k writes without OOM");
-}
-
+/// Removed: the eviction mechanism (`allocate_sequences_idempotent` /
+/// `MAX_IDEMPOTENCY_CACHE_SIZE` in `src/runtime/state.rs`) is only reachable
+/// through a `#[cfg(test)]`-gated internal API, invisible to this
+/// integration-test binary, and is not driven by any public engine API:
+/// ordinary commits are periodically cleaned up by
+/// `cleanup_old_idempotency_entries` well before the 100k-entry cap, so no
+/// sequence of public writes can deterministically force eviction here. There
+/// is no reasonable way to exercise the real eviction path from this crate
+/// without adding new production surface area purely for testability, so this
+/// test — which only performed 2k non-evicting writes and asserted nothing
+/// beyond an `eprintln!` — was removed rather than kept as a false signal.
+/// Real coverage for this path would belong in a `#[cfg(test)]` unit test
+/// inside `src/runtime/state.rs`, which does not currently exist.
 /// Phase 0 Guardrail #3: Transaction atomicity barrier enforcement
 ///
 /// Validates that reads see consistent state when a transaction is committed

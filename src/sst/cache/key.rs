@@ -99,52 +99,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_create_cache_key_with_values() {
-        // Arrange
-
-        // Act
-        let key = CacheKey::for_data(42, 1024);
-
-        // Assert
-        assert_eq!(key.sst_id, 42);
-        assert_eq!(key.block_offset, 1024);
-        assert_eq!(key.block_type, CacheBlockKind::Data);
-    }
-
-    #[test]
-    fn should_create_data_block_key() {
-        // Arrange
-
-        // Act
-        let key = CacheKey::for_data(1, 100);
-
-        // Assert
-        assert_eq!(key.block_type, CacheBlockKind::Data);
-    }
-
-    #[test]
-    fn should_create_index_block_key() {
-        // Arrange
-
-        // Act
-        let key = CacheKey::for_index(1, 100);
-
-        // Assert
-        assert_eq!(key.block_type, CacheBlockKind::Index);
-    }
-
-    #[test]
-    fn should_create_filter_block_key() {
-        // Arrange
-
-        // Act
-        let key = CacheKey::for_filter(1, 100);
-
-        // Assert
-        assert_eq!(key.block_type, CacheBlockKind::Filter);
-    }
-
-    #[test]
     fn should_map_on_disk_block_kinds_when_cache_category_exists() {
         // Arrange
         let data = crate::sst::types::SstBlockType::Data;
@@ -160,54 +114,6 @@ mod tests {
         assert_eq!(data_kind, Ok(CacheBlockKind::Data));
         assert_eq!(index_kind, Ok(CacheBlockKind::Index));
         assert_eq!(meta_index_kind, Err(meta_index));
-    }
-
-    #[test]
-    fn should_distinguish_keys_with_different_sst_ids() {
-        // Arrange
-        let key1 = CacheKey::for_data(1, 100);
-        let key2 = CacheKey::for_data(2, 100);
-
-        // Act
-
-        // Assert
-        assert_ne!(key1, key2);
-    }
-
-    #[test]
-    fn should_distinguish_keys_with_different_offsets() {
-        // Arrange
-        let key1 = CacheKey::for_data(1, 100);
-        let key2 = CacheKey::for_data(1, 200);
-
-        // Act
-
-        // Assert
-        assert_ne!(key1, key2);
-    }
-
-    #[test]
-    fn should_distinguish_keys_with_different_block_types() {
-        // Arrange
-        let key1 = CacheKey::for_data(1, 100);
-        let key2 = CacheKey::for_index(1, 100);
-
-        // Act
-
-        // Assert
-        assert_ne!(key1, key2);
-    }
-
-    #[test]
-    fn should_recognize_identical_keys() {
-        // Arrange
-        let key1 = CacheKey::for_data(1, 100);
-        let key2 = CacheKey::for_data(1, 100);
-
-        // Act
-
-        // Assert
-        assert_eq!(key1, key2);
     }
 
     #[test]

@@ -90,6 +90,22 @@ fn should_flush_cloud_segments_on_shutdown() {
         .shutdown(std::time::Duration::from_secs(5))
         .expect("bounded cloud shutdown");
 
-    // Assert: Shutdown should complete without panics, and all pending
-    // CloudAsync uploads should be flushed (verified implicitly by clean drop)
+    // Assert: Shutdown must have actually flushed pending CloudAsync uploads to
+    // the simulated remote store, not merely returned without panicking. Reopen
+    // against the same simulated bucket/prefix and confirm every write survived.
+    let reopened = open_with_mode(&opts, "cloud");
+    let cf = reopened.get_column_family("test").expect("get cf");
+    let cf_id = cf.id();
+    for i in 0..50 {
+        let tx = reopened
+            .begin_tx(cf_id, TransactionMode::ReadOnly)
+            .expect("begin");
+        let key = format!("shutdown_key_{i:04}");
+        let value = format!("shutdown_value_{i:04}");
+        assert_eq!(
+            tx.get(key.as_bytes()).unwrap(),
+            Some(bytes::Bytes::from(value.into_bytes())),
+            "key {key} must be recovered after a shutdown that flushed cloud segments"
+        );
+    }
 }

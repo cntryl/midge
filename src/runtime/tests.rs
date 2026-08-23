@@ -874,20 +874,6 @@ fn should_extract_request_id_from_all_responses() {
 // =========== ResponseRouter Tests ===========
 
 #[test]
-fn should_create_response_router() {
-    // Arrange
-    // (no setup)
-
-    // Act
-    let router = ResponseRouter::new();
-
-    // Assert - Should be usable, register should return a receiver
-    let rx = router.register(1);
-    // Just verify we got a receiver back (doesn't block, nonblocking channel)
-    drop(rx);
-}
-
-#[test]
 fn should_register_then_complete_response() {
     // Arrange
     let router = ResponseRouter::new();
@@ -922,14 +908,19 @@ fn should_handle_multiple_pending_requests() {
 
 #[test]
 fn should_handle_orphaned_response() {
-    // Arrange
+    // Arrange - a receiver registered under a different request id
     let router = ResponseRouter::new();
+    let rx = router.register(1);
 
-    // Act - Try to complete response with no matching request
-    // (Should not panic, logs warning)
+    // Act - complete a response with no matching registered request id
     router.complete(RuntimeResponse::Ok { request_id: 999 });
 
-    // Assert - Should not crash
+    // Assert - the orphaned completion must be dropped, not misdelivered to an
+    // unrelated pending receiver
+    assert!(matches!(
+        rx.try_recv(),
+        Err(crossbeam::channel::TryRecvError::Empty)
+    ));
 }
 
 // =========== RuntimeHandle Tests ===========
@@ -937,16 +928,17 @@ fn should_handle_orphaned_response() {
 #[test]
 fn should_create_runtime_handle() {
     // Arrange
-    // (no setup)
-
-    // Act
     let (runtime, handle) = Runtime::new();
 
-    // Assert
-    // Handle should be cloneable
+    // Act - clone the handle
     let handle2 = handle.clone();
+
+    // Assert - both handles submit onto the same underlying channel, so both
+    // sends must succeed against the still-live runtime
+    assert!(handle.send(RuntimeMsg::Noop { request_id: 1 }).is_ok());
+    assert!(handle2.send(RuntimeMsg::Noop { request_id: 2 }).is_ok());
+
     drop(runtime);
-    drop(handle2);
 }
 
 #[test]
@@ -998,114 +990,64 @@ fn should_require_request_id_for_send_wait() {
 #[test]
 fn should_create_runtime() {
     // Arrange
-    // (no setup)
 
     // Act
-    let (runtime, _handle) = Runtime::new();
+    let (runtime, handle) = Runtime::new();
 
-    // Assert
+    // Assert - a freshly created runtime starts life fully open for
+    // submissions, before any event loop thread has been spawned
+    assert_eq!(handle.lifecycle.state(), RuntimeLifecycleState::Open);
+
     drop(runtime);
-}
-
-#[test]
-fn should_create_with_trace_disabled_by_default() {
-    // Arrange
-    // (no setup)
-
-    // Act
-    let (_runtime, _handle) = Runtime::new();
-
-    // Assert - Default should have tracing disabled
-    // (Verified by not panicking)
 }
 
 #[test]
 fn should_shutdown_runtime() {
     // Arrange
-    let (runtime, _handle) = Runtime::new();
+    let (runtime, handle) = Runtime::new();
 
-    // Act - Shutdown should not panic
+    // Act
     runtime.shutdown();
 
-    // Assert - Just checking no panic
+    // Assert - shutdown must drive the lifecycle to Closed even when no
+    // event loop thread was ever started
+    assert_eq!(handle.lifecycle.state(), RuntimeLifecycleState::Closed);
 }
 
 // =========== CompactionPlan Tests ===========
 
 #[test]
-fn should_create_compaction_plan() {
+fn should_clone_compaction_plan_preserving_all_fields() {
     // Arrange
-    // (no setup)
-
-    // Act
+    let sst_name = crate::sst::file_name(0, 0, 1);
     let plan = CompactionPlan {
-        input_files: vec![crate::sst::file_name(0, 0, 1)],
+        input_files: vec![sst_name.clone()],
         source_level: 0,
         target_level: 1,
-        cf_id: 0,
-    };
-
-    // Assert
-    assert_eq!(plan.input_files.len(), 1);
-    assert_eq!(plan.source_level, 0);
-    assert_eq!(plan.target_level, 1);
-    assert_eq!(plan.cf_id, 0);
-}
-
-#[test]
-fn should_clone_compaction_plan() {
-    // Arrange
-    let plan = CompactionPlan {
-        input_files: vec!["sst.sst".to_string()],
-        source_level: 0,
-        target_level: 1,
-        cf_id: 0,
+        cf_id: 3,
     };
 
     // Act
     let cloned = plan.clone();
 
-    // Assert
-    assert_eq!(plan.input_files, cloned.input_files);
+    // Assert - clone must be an independent, field-complete copy
+    assert_eq!(cloned.input_files, vec![sst_name]);
+    assert_eq!(cloned.source_level, plan.source_level);
+    assert_eq!(cloned.target_level, plan.target_level);
+    assert_eq!(cloned.cf_id, plan.cf_id);
 }
 
 // =========== FileMeta Tests ===========
 
 #[test]
-fn should_create_file_meta() {
-    // Arrange
-    // (no setup)
-
-    // Act
-    let sst_name = crate::sst::file_name(0, 0, 1);
-    let meta = FileMeta {
-        name: sst_name.clone(),
-        level: 0,
-        size_bytes: 1024,
-        content_crc32c: None,
-        cf_id: 0,
-        smallest_key: None,
-        largest_key: None,
-        smallest_seq: None,
-        largest_seq: None,
-    };
-
-    // Assert
-    assert_eq!(meta.name, sst_name);
-    assert_eq!(meta.level, 0);
-    assert_eq!(meta.size_bytes, 1024);
-    assert_eq!(meta.cf_id, 0);
-}
-
-#[test]
-fn should_clone_file_meta() {
+fn should_clone_file_meta_preserving_all_fields() {
     // Arrange
     let meta = FileMeta {
         name: "sst.sst".to_string(),
-        level: 0,
+        level: 2,
         size_bytes: 100,
-        content_crc32c: None,
-        cf_id: 0,
+        content_crc32c: Some(0xdead_beef),
+        cf_id: 4,
         smallest_key: Some(b"a".to_vec()),
         largest_key: Some(b"z".to_vec()),
         smallest_seq: Some(1),
@@ -1115,7 +1057,14 @@ fn should_clone_file_meta() {
     // Act
     let cloned = meta.clone();
 
-    // Assert
-    assert_eq!(meta.name, cloned.name);
-    assert_eq!(meta.smallest_key, cloned.smallest_key);
+    // Assert - clone must be an independent, field-complete copy
+    assert_eq!(cloned.name, meta.name);
+    assert_eq!(cloned.level, meta.level);
+    assert_eq!(cloned.size_bytes, meta.size_bytes);
+    assert_eq!(cloned.content_crc32c, meta.content_crc32c);
+    assert_eq!(cloned.cf_id, meta.cf_id);
+    assert_eq!(cloned.smallest_key, meta.smallest_key);
+    assert_eq!(cloned.largest_key, meta.largest_key);
+    assert_eq!(cloned.smallest_seq, meta.smallest_seq);
+    assert_eq!(cloned.largest_seq, meta.largest_seq);
 }

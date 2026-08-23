@@ -330,26 +330,54 @@ mod tests {
     }
 
     #[test]
-    fn should_have_handle_read_method() {
+    fn should_handle_read_return_value_written_to_memtable() {
         // Arrange
-        let event_loop = create_test_event_loop().expect("Should create event loop");
+        let mut event_loop = create_test_event_loop().expect("Should create event loop");
+        event_loop
+            .state
+            .get_cf_mut(0)
+            .expect("default cf")
+            .memtable
+            .put_with_seq(b"k1".to_vec(), b"v1".to_vec(), 5, None)
+            .expect("seed memtable");
 
-        // Act - The method should exist (private, so can't call directly)
-        // We verify it exists by checking the struct compiles with it
+        // Act
+        let found = event_loop.handle_read(0, b"k1", 5);
+        let missing = event_loop.handle_read(0, b"absent", 5);
 
-        // Assert - Just verify event_loop is created
-        assert!(!event_loop.trace_enabled);
+        // Assert
+        assert_eq!(found, Some(b"v1".to_vec()));
+        assert_eq!(missing, None);
     }
 
     #[test]
-    fn should_have_handle_range_scan_method() {
+    fn should_handle_range_scan_return_keys_written_to_memtable() {
         // Arrange
-        let event_loop = create_test_event_loop().expect("Should create event loop");
+        let mut event_loop = create_test_event_loop().expect("Should create event loop");
+        {
+            let cf = event_loop.state.get_cf_mut(0).expect("default cf");
+            cf.memtable
+                .put_with_seq(b"a".to_vec(), b"va".to_vec(), 1, None)
+                .expect("seed a");
+            cf.memtable
+                .put_with_seq(b"b".to_vec(), b"vb".to_vec(), 2, None)
+                .expect("seed b");
+            cf.memtable
+                .put_with_seq(b"z".to_vec(), b"vz".to_vec(), 3, None)
+                .expect("seed z outside range");
+        }
 
-        // Act - Similar to handle_read, verify method exists
+        // Act
+        let results = event_loop.handle_range_scan(0, b"a", b"c", 3);
 
         // Assert
-        assert!(!event_loop.trace_enabled);
+        assert_eq!(
+            results,
+            vec![
+                (b"a".to_vec(), b"va".to_vec()),
+                (b"b".to_vec(), b"vb".to_vec())
+            ]
+        );
     }
 
     #[test]

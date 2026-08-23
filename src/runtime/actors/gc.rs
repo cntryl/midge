@@ -489,65 +489,34 @@ mod tests {
     }
 
     #[test]
-    fn should_initialize_via_default() {
-        // Arrange
-        // (no setup needed)
-
-        // Act
-        let actor = GcActor::default();
-
-        // Assert
-        assert!(actor.last_gc_run().is_none());
-    }
-
-    #[test]
-    fn should_record_gc_run_timestamp() {
+    fn should_record_gc_run_timestamp_when_delete_ssts_runs() {
         // Arrange
         let mut actor = GcActor::new();
+        let mut state = RuntimeState::new("/tmp/test_midge_gc".into(), true);
         assert!(actor.last_gc_run().is_none());
 
-        // Act
-        actor.last_gc_run = Some(std::time::Instant::now());
+        // Act - the real deletion pass, not a direct field write
+        actor.delete_ssts(&mut state, &[], None);
 
         // Assert
         assert!(actor.last_gc_run().is_some());
     }
 
     #[test]
-    fn should_update_timestamp_on_successive_gc_runs() {
+    fn should_advance_timestamp_on_successive_gc_runs() {
         // Arrange
         let mut actor = GcActor::new();
+        let mut state = RuntimeState::new("/tmp/test_midge_gc".into(), true);
 
         // Act
-        let run1 = std::time::Instant::now();
-        actor.last_gc_run = Some(run1);
-        let first_run = actor.last_gc_run();
+        actor.delete_ssts(&mut state, &[], None);
+        let first_run = actor.last_gc_run().expect("first run recorded");
 
-        // Sleep briefly to ensure different timestamp
         std::thread::sleep(std::time::Duration::from_millis(1));
+        actor.delete_ssts(&mut state, &[], None);
+        let second_run = actor.last_gc_run().expect("second run recorded");
 
-        let run2 = std::time::Instant::now();
-        actor.last_gc_run = Some(run2);
-        let second_run = actor.last_gc_run();
-
-        // Assert: both runs recorded
-        assert!(first_run.is_some());
-        assert!(second_run.is_some());
-        // Second run should be later
-        assert!(second_run.unwrap() > first_run.unwrap());
-    }
-
-    #[test]
-    fn should_clear_gc_run_timestamp() {
-        // Arrange
-        let mut actor = GcActor::new();
-        actor.last_gc_run = Some(std::time::Instant::now());
-        assert!(actor.last_gc_run().is_some());
-
-        // Act
-        actor.last_gc_run = None;
-
-        // Assert
-        assert!(actor.last_gc_run().is_none());
+        // Assert - each real run advances the timestamp monotonically
+        assert!(second_run > first_run);
     }
 }

@@ -588,12 +588,36 @@ mod tests {
     fn should_create_wal_writer_io() -> MidgeResult<()> {
         // Arrange
         let fs = Arc::new(crate::io::MockFs::new());
+        assert!(fs.get_file("wal.log").is_none());
 
         // Act
-        let writer = FsWalWriterIo::new("wal.log", fs)?;
+        let writer = FsWalWriterIo::new("wal.log", Arc::clone(&fs) as Arc<dyn crate::io::Fs>)?;
 
-        // Assert
+        // Assert: construction must actually create the backing WAL file
+        // (not just report success).
         assert_eq!(writer.current_pos(), 0);
+        assert_eq!(
+            fs.get_file("wal.log"),
+            Some(Vec::new()),
+            "constructing the writer should create the WAL file on disk"
+        );
+
+        let record = WalRecord::new(
+            WalOpKind::Put,
+            Bytes::from_static(b"key"),
+            Some(Bytes::from_static(b"value")),
+            1,
+            1,
+        );
+        writer.append_record(&record)?;
+        writer.close()?;
+        let written_len = fs.get_file("wal.log").expect("wal file should exist").len() as u64;
+        drop(writer);
+
+        // Reopening the same file must resume from its existing length
+        // instead of always defaulting current_pos to zero.
+        let reopened = FsWalWriterIo::new("wal.log", Arc::clone(&fs) as Arc<dyn crate::io::Fs>)?;
+        assert_eq!(reopened.current_pos(), written_len);
         Ok(())
     }
 
@@ -669,13 +693,27 @@ mod tests {
     fn should_support_flush() -> MidgeResult<()> {
         // Arrange
         let fs = Arc::new(crate::io::MockFs::new());
-        let writer = FsWalWriterIo::new("wal.log", fs)?;
+        let writer = FsWalWriterIo::new("wal.log", Arc::clone(&fs) as Arc<dyn crate::io::Fs>)?;
+        let record = WalRecord::new(
+            WalOpKind::Put,
+            Bytes::from_static(b"flush-key"),
+            Some(Bytes::from_static(b"flush-value")),
+            1,
+            1,
+        );
+        writer.append_record(&record)?;
 
         // Act
-        let result = writer.flush();
+        writer.flush()?;
 
-        // Assert
-        assert!(result.is_ok());
+        // Assert: the appended bytes must actually be visible in the backing
+        // file once flush returns, not merely queued.
+        let on_disk = fs.get_file("wal.log").expect("wal file should exist");
+        assert!(
+            !on_disk.is_empty(),
+            "flush() returned before data reached the backing filesystem"
+        );
+        assert_eq!(on_disk.len() as u64, writer.current_pos());
         Ok(())
     }
 
@@ -699,13 +737,27 @@ mod tests {
     fn should_support_close() -> MidgeResult<()> {
         // Arrange
         let fs = Arc::new(crate::io::MockFs::new());
-        let writer = FsWalWriterIo::new("wal.log", fs)?;
+        let writer = FsWalWriterIo::new("wal.log", Arc::clone(&fs) as Arc<dyn crate::io::Fs>)?;
+        let record = WalRecord::new(
+            WalOpKind::Put,
+            Bytes::from_static(b"close-key"),
+            Some(Bytes::from_static(b"close-value")),
+            1,
+            1,
+        );
+        writer.append_record(&record)?;
 
         // Act
-        let result = writer.close();
+        writer.close()?;
 
-        // Assert
-        assert!(result.is_ok());
+        // Assert: close() must drain and durably write pending data before
+        // returning, not merely report success.
+        let on_disk = fs.get_file("wal.log").expect("wal file should exist");
+        assert!(
+            !on_disk.is_empty(),
+            "close() returned before pending data reached the backing filesystem"
+        );
+        assert_eq!(on_disk.len() as u64, writer.current_pos());
         Ok(())
     }
 

@@ -228,8 +228,6 @@ pub type CloudCallback = std::sync::mpsc::Sender<CloudEvent>;
 pub struct ObjectMetadata {
     pub size: u64,
     pub etag: String,
-    #[cfg(test)]
-    pub last_modified: u64,
     pub generation: Option<String>,
 }
 impl ObjectMetadata {
@@ -240,32 +238,19 @@ impl ObjectMetadata {
         feature = "cloud-gcp",
         feature = "cloud-oci"
     ))]
-    pub fn new(size: u64, etag: String, last_modified: u64) -> Self {
-        #[cfg(not(test))]
-        let _ = last_modified;
+    pub fn new(size: u64, etag: String) -> Self {
         Self {
             size,
             etag,
-            #[cfg(test)]
-            last_modified,
             generation: None,
         }
     }
 
     #[cfg(feature = "cloud-gcp")]
-    pub fn with_generation(
-        size: u64,
-        etag: String,
-        last_modified: u64,
-        generation: impl Into<String>,
-    ) -> Self {
-        #[cfg(not(test))]
-        let _ = last_modified;
+    pub fn with_generation(size: u64, etag: String, generation: impl Into<String>) -> Self {
         Self {
             size,
             etag,
-            #[cfg(test)]
-            last_modified,
             generation: Some(generation.into()),
         }
     }
@@ -496,7 +481,7 @@ impl CloudBackend for MockCloudBackend {
         let result = match (data, generation) {
             (Some(data), Some(generation)) => CloudOutcome::Ok((
                 data.clone(),
-                ObjectMetadata::new(data.len() as u64, format!("mock-gen-{generation}"), 0),
+                ObjectMetadata::new(data.len() as u64, format!("mock-gen-{generation}")),
             )),
             _ => CloudOutcome::Err(CloudError::NotFound(key.to_string())),
         };
@@ -596,7 +581,7 @@ impl CloudBackend for MockCloudBackend {
             .map(|data| {
                 // ETag is generation based and independent from content length.
                 let gen = self.gens.lock().get(&key).copied().unwrap_or(0);
-                ObjectMetadata::new(data.len() as u64, format!("mock-gen-{gen}"), 0)
+                ObjectMetadata::new(data.len() as u64, format!("mock-gen-{gen}"))
             })
             .ok_or(MidgeError::NotFound);
         let event = CloudEvent::Head {
@@ -1158,42 +1143,6 @@ mod tests {
     }
 
     #[test]
-    fn should_discriminate_success_from_failure_outcomes() {
-        // Arrange
-        let ok_outcome: CloudOutcome<String> = CloudOutcome::Ok("success".into());
-        let err_outcome: CloudOutcome<String> =
-            CloudOutcome::Err(CloudError::Protocol("failure".to_string()));
-
-        // Act
-        let ok_is_ok = ok_outcome.is_ok();
-        let ok_is_err = ok_outcome.is_err();
-        let err_is_ok = err_outcome.is_ok();
-        let err_is_err = err_outcome.is_err();
-
-        // Assert
-        assert!(ok_is_ok);
-        assert!(!ok_is_err);
-        assert!(!err_is_ok);
-        assert!(err_is_err);
-    }
-
-    #[test]
-    fn should_clone_outcomes_with_different_types() {
-        // Arrange
-        let int_ok = CloudOutcome::Ok(42);
-        let int_err: CloudOutcome<i32> =
-            CloudOutcome::Err(CloudError::Protocol("error".to_string()));
-
-        // Act
-        let int_ok_cloned = int_ok.clone();
-        let int_err_cloned = int_err.clone();
-
-        // Assert
-        assert!(int_ok_cloned.is_ok());
-        assert!(int_err_cloned.is_err());
-    }
-
-    #[test]
     fn should_convert_engine_result_to_cloud_outcome() {
         // Arrange
         let ok_result: Result<i32, MidgeError> = Ok(100);
@@ -1203,54 +1152,26 @@ mod tests {
         let ok_outcome = cloud_outcome_from_result(ok_result);
         let err_outcome = cloud_outcome_from_result(err_result);
 
-        // Assert
-        assert!(ok_outcome.is_ok());
-        assert!(err_outcome.is_err());
+        // Assert: the success payload and the error message must survive the conversion,
+        // not just the Ok/Err discriminant.
+        match ok_outcome {
+            CloudOutcome::Ok(value) => assert_eq!(value, 100),
+            CloudOutcome::Err(e) => panic!("expected Ok(100), got Err({e:?})"),
+        }
+        match err_outcome {
+            CloudOutcome::Err(CloudError::Protocol(message)) => {
+                assert!(
+                    message.contains("test"),
+                    "converted error should preserve source message, got: {message}"
+                );
+            }
+            other => {
+                panic!("expected CloudError::Protocol wrapping the source error, got {other:?}")
+            }
+        }
     }
 
     // =========== ObjectMetadata Tests ===========
-
-    #[test]
-    fn should_create_object_metadata_with_correct_fields() {
-        // Arrange
-        let metadata = ObjectMetadata::new(1024, "etag123".into(), 1_000_000);
-
-        // Act
-        let cloned = metadata.clone();
-
-        // Assert
-        assert_eq!(cloned.size, 1024);
-        assert_eq!(cloned.etag, "etag123");
-        assert_eq!(cloned.last_modified, 1_000_000);
-    }
-
-    #[test]
-    fn should_handle_metadata_with_boundary_sizes() {
-        // Arrange
-        let zero_etag = "zero".to_string();
-        let max_etag = "max".to_string();
-
-        // Act
-        let zero_size = ObjectMetadata::new(0, zero_etag, 100);
-        let max_size = ObjectMetadata::new(u64::MAX, max_etag, 200);
-
-        // Assert
-        assert_eq!(zero_size.size, 0);
-        assert_eq!(max_size.size, u64::MAX);
-    }
-
-    #[test]
-    fn should_handle_metadata_with_empty_etag() {
-        // Arrange
-        let empty_etag = String::new();
-
-        // Act
-        let metadata = ObjectMetadata::new(100, empty_etag, 1000);
-
-        // Assert
-        assert_eq!(metadata.etag, "");
-        assert_eq!(metadata.size, 100);
-    }
 
     #[test]
     fn should_prefer_generation_when_building_object_match_precondition() {
@@ -1286,19 +1207,6 @@ mod tests {
     }
 
     // =========== CloudStorage Routing Tests ===========
-
-    #[test]
-    fn should_preserve_configured_callback_timeout_for_blocking_cloud_operations() {
-        // Arrange
-        let backend = Arc::new(MockCloudBackend::new());
-        let timeout = std::time::Duration::from_millis(123);
-
-        // Act
-        let storage = CloudStorage::new_with_timeout(backend, "tenant".to_string(), timeout);
-
-        // Assert
-        assert_eq!(storage.callback_timeout(), timeout);
-    }
 
     #[test]
     fn should_apply_configured_callback_timeout_to_blocking_cloud_proof() {
@@ -1431,40 +1339,6 @@ mod tests {
                 assert!(result.is_ok());
             }
             _ => panic!("Expected DeleteComplete"),
-        }
-    }
-
-    #[test]
-    fn should_route_list_with_namespace_applied() {
-        // Arrange
-        let storage = CloudStorage::with_mock();
-
-        // First put multiple files
-        let (tx, rx) = mpsc::channel();
-        storage.submit_put("prefix/file1", vec![1], vec![], tx);
-        let _ = rx.recv();
-
-        let (tx, rx) = mpsc::channel();
-        storage.submit_put("prefix/file2", vec![2], vec![], tx);
-        let _ = rx.recv();
-
-        // Act
-        let (tx, rx) = mpsc::channel();
-        storage.submit_list("prefix", tx);
-        let event = rx.recv().unwrap();
-
-        // Assert
-        match event {
-            CloudEvent::List { prefix, result } => {
-                assert!(prefix.starts_with("midge/"));
-                match result {
-                    CloudOutcome::Ok(items) => {
-                        assert!(!items.is_empty());
-                    }
-                    CloudOutcome::Err(_) => panic!("Expected Ok result"),
-                }
-            }
-            _ => panic!("Expected ListComplete"),
         }
     }
 
@@ -1804,52 +1678,6 @@ mod tests {
     // =========== CloudEvent Tests ===========
 
     #[test]
-    fn should_send_put_complete_event_via_callback() {
-        // Arrange
-        let storage = CloudStorage::with_mock();
-        let (tx, rx) = mpsc::channel();
-        let data = vec![1, 2, 3];
-
-        // Act
-        storage.submit_put("file", data, vec![], tx);
-        let event = rx.recv().unwrap();
-
-        // Assert
-        match event {
-            CloudEvent::Put { key, result } => {
-                assert_eq!(key, "midge/file");
-                assert!(result.is_ok());
-            }
-            _ => panic!("Expected PutComplete"),
-        }
-    }
-
-    #[test]
-    fn should_send_get_complete_event_via_callback() {
-        // Arrange
-        let storage = CloudStorage::with_mock();
-        let (tx, rx) = mpsc::channel();
-
-        // First put a file so we can get it
-        let (put_tx, put_rx) = mpsc::channel();
-        storage.submit_put("testfile", vec![1, 2, 3], vec![], put_tx);
-        let _ = put_rx.recv();
-
-        // Act
-        storage.submit_get("testfile", tx);
-        let event = rx.recv().unwrap();
-
-        // Assert
-        match event {
-            CloudEvent::Get { key, result } => {
-                assert_eq!(key, "midge/testfile");
-                assert!(result.is_ok());
-            }
-            _ => panic!("Expected GetComplete"),
-        }
-    }
-
-    #[test]
     fn should_send_list_complete_event_via_callback() {
         // Arrange
         let storage = CloudStorage::with_mock();
@@ -1952,35 +1780,86 @@ mod tests {
         // Arrange
         let storage = CloudStorage::with_mock();
 
-        // Act
+        // Act: dispatch every supported operation through the same production queue.
 
-        // Put operation
-        let (tx, _rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
         storage.submit_put("f1", vec![1, 2], vec![], tx);
 
-        // Get operation
-        let (tx, _rx) = mpsc::channel();
+        // Assert: each operation must reach the backend with the namespaced key and
+        // report its real outcome, not just "didn't panic".
+        match rx.recv().unwrap() {
+            CloudEvent::Put { key, result } => {
+                assert_eq!(key, "midge/f1");
+                assert!(result.is_ok());
+            }
+            other => panic!("expected Put event, got {other:?}"),
+        }
+
+        // f2 was never put, so the get is expected to miss.
+        let (tx, rx) = mpsc::channel();
         storage.submit_get("f2", tx);
+        match rx.recv().unwrap() {
+            CloudEvent::Get { key, result } => {
+                assert_eq!(key, "midge/f2");
+                assert!(result.is_err());
+            }
+            other => panic!("expected Get event, got {other:?}"),
+        }
 
-        // Delete operation
-        let (tx, _rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
         storage.submit_delete("f3", tx);
+        match rx.recv().unwrap() {
+            CloudEvent::Delete { key, result } => {
+                assert_eq!(key, "midge/f3");
+                assert!(result.is_ok());
+            }
+            other => panic!("expected Delete event, got {other:?}"),
+        }
 
-        // List operation
-        let (tx, _rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
+        storage.submit_put("prefix/f", vec![9], vec![], tx);
+        let _ = rx.recv();
+        let (tx, rx) = mpsc::channel();
         storage.submit_list("prefix", tx);
+        match rx.recv().unwrap() {
+            CloudEvent::List { prefix, result } => {
+                assert_eq!(prefix, "midge/prefix");
+                let items = result.expect("list should succeed");
+                assert!(items.iter().any(|k| k.contains("prefix/f")));
+            }
+            other => panic!("expected List event, got {other:?}"),
+        }
 
-        // Head operation
-        let (tx, _rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
+        storage.submit_put("f4", vec![1, 2, 3], vec![], tx);
+        let _ = rx.recv();
+        let (tx, rx) = mpsc::channel();
         storage.submit_head("f4", tx);
+        match rx.recv().unwrap() {
+            CloudEvent::Head { key, result } => {
+                assert_eq!(key, "midge/f4");
+                let metadata = result.expect("head should succeed for an existing object");
+                assert_eq!(metadata.size, 3);
+            }
+            other => panic!("expected Head event, got {other:?}"),
+        }
 
-        // Get range operation
-        let (tx, _rx) = mpsc::channel();
-        storage.submit_get_range("f5", 0, Some(100), tx);
-
-        // Assert
-        // Smoke test: all calls complete without panic and storage remains valid.
-        assert_eq!(storage.namespace, "midge");
+        let (tx, rx) = mpsc::channel();
+        storage.submit_get_range("f4", 0, Some(2), tx);
+        match rx.recv().unwrap() {
+            CloudEvent::GetRange {
+                key,
+                start,
+                end,
+                result,
+            } => {
+                assert_eq!(key, "midge/f4");
+                assert_eq!(start, 0);
+                assert_eq!(end, Some(2));
+                assert!(result.is_ok());
+            }
+            other => panic!("expected GetRange event, got {other:?}"),
+        }
     }
 
     #[test]

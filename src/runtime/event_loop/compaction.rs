@@ -63,8 +63,6 @@ impl CompactionCoordinator {
 
         let cplan = crate::compaction::CompactionPlan {
             input_files: plan.input_files,
-            #[cfg(test)]
-            output_files: Vec::new(),
             source_level: plan.source_level,
             target_level: plan.target_level,
             cf_id: plan.cf_id,

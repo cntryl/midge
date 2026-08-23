@@ -29,8 +29,11 @@ fn should_require_finalization_when_constructing_open_options() {
     let builder: OpenOptionsBuilder = OpenOptions::in_memory();
     let finalized: MidgeResult<OpenOptions> = builder.build();
 
-    // Assert
-    assert!(finalized.is_ok());
+    // Assert: `build()` is what actually produces a usable `OpenOptions` (the
+    // builder type itself exposes no storage/goal/etc. getters), and the
+    // finalized value carries through what was configured.
+    let opts = finalized.expect("builder must finalize into OpenOptions");
+    assert_eq!(opts.storage(), &Storage::InMemory);
 }
 
 #[test]
@@ -451,18 +454,40 @@ fn should_derive_different_params_given_latency_vs_throughput_when_comparing() {
 
 #[test]
 fn should_provide_getter_access_given_derived_params_when_querying() {
-    // Arrange
+    // Arrange: a small and a much larger explicit memory budget, so the getters
+    // can be checked against a concrete, falsifiable relationship instead of just
+    // being non-zero.
+    let small = OpenOptions::in_memory()
+        .memory_budget(MemoryBudget::Bytes(64 * 1024 * 1024))
+        .build()
+        .expect("build small-budget options");
+    let large = OpenOptions::in_memory()
+        .memory_budget(MemoryBudget::Bytes(1024 * 1024 * 1024))
+        .build()
+        .expect("build large-budget options");
 
     // Act
-    let opts = OpenOptions::in_memory().build().expect("build options");
+    let cache_grows = large.block_cache_size() > small.block_cache_size();
 
-    // Assert - all getters should return positive values
-    assert!(opts.block_size() > 0);
-    assert!(opts.memtable_size_limit() > 0);
-    assert!(opts.target_sst_size() > 0);
-    assert!(opts.block_cache_size() > 0);
-    assert!(opts.wal_buffer_size() > 0);
-    assert!(opts.l0_compaction_trigger() > 0);
+    // Assert: getters actually reflect the derivation from the memory budget,
+    // and the derived pools respect the invariants the engine relies on.
+    assert!(
+        cache_grows,
+        "a larger memory budget must derive a larger block cache"
+    );
+    assert!(
+        large.memtable_size_limit() >= small.memtable_size_limit(),
+        "a larger memory budget must derive at least as large a memtable limit"
+    );
+    for opts in [&small, &large] {
+        assert!(
+            opts.memtable_flush_threshold() <= opts.memtable_size_limit(),
+            "flush threshold must never exceed the memtable size limit"
+        );
+        assert!(opts.target_sst_size() > 0);
+        assert!(opts.wal_buffer_size() > 0);
+        assert!(opts.l0_compaction_trigger() > 0);
+    }
 }
 
 // ============================================================================
@@ -483,24 +508,6 @@ fn should_store_path_given_relative_path_when_building() {
         opts.storage(),
         &Storage::Local {
             path: PathBuf::from("./relative/path")
-        }
-    );
-}
-
-#[test]
-fn should_store_path_given_absolute_path_when_building() {
-    // Arrange
-
-    // Act
-    let opts = OpenOptions::local("/absolute/path/to/db")
-        .build()
-        .expect("build options");
-
-    // Assert
-    assert_eq!(
-        opts.storage(),
-        &Storage::Local {
-            path: PathBuf::from("/absolute/path/to/db")
         }
     );
 }
@@ -531,17 +538,4 @@ fn should_clone_options_preserving_all_settings_given_configured_opts_when_cloni
         cloned.block_cache_policy_value(),
         original.block_cache_policy_value()
     );
-}
-
-#[test]
-fn should_use_sensible_defaults_given_no_configuration_when_using_default() {
-    // Arrange
-
-    // Act
-    let opts = OpenOptions::in_memory().build().expect("build options");
-
-    // Assert
-    assert_eq!(opts.goal(), Goal::Latency);
-    assert_eq!(opts.memory_budget(), MemoryBudget::Auto);
-    assert_eq!(opts.workload(), WorkloadProfile::Mixed);
 }

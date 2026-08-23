@@ -609,47 +609,87 @@ fn should_expire_after_restart_given_ttl_elapsed_during_shutdown_when_reopening(
 #[test]
 fn should_remove_expired_entries_given_compaction_when_ttl_exceeded() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        // Arrange
+        // Arrange: four separate L0 generations so `compact_all()` crosses
+        // the default L0 file-count trigger and performs a real merge,
+        // rather than flush_cf() alone (the test name promises compaction
+        // specifically). The TTL'd key sits alongside unrelated filler
+        // keys so a genuine multi-file merge is required to resolve it.
         let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
+        for batch in 0..3 {
+            let mut tx = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .unwrap();
+            let key = format!("compaction_ttl_filler_{batch}");
+            tx.put(key.into_bytes(), b"filler".to_vec(), None).unwrap();
+            tx.commit(buffered_write_options(mode)).unwrap();
+            engine.flush_cf(&cf).unwrap();
+        }
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .unwrap();
         tx.put(b"key1".to_vec(), b"value1".to_vec(), Some(1))
             .unwrap(); // 1 second
         tx.commit(buffered_write_options(mode)).unwrap();
+        engine.flush_cf(&cf).unwrap();
         thread::sleep(Duration::from_millis(1100));
 
-        // Act - trigger flush
-        engine.flush_cf(&cf).unwrap();
+        // Act - trigger a real compaction (not just a flush)
+        engine.compact_all().unwrap();
 
-        // Assert - expired entry should be removed
+        // Assert - expired entry should be removed, filler keys survive
         let read_tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
         let result = read_tx.get(b"key1").unwrap();
-        assert_eq!(result, None);
+        assert_eq!(
+            result, None,
+            "TTL-expired entry should be dropped by compaction in mode: {mode}"
+        );
+        for batch in 0..3 {
+            let key = format!("compaction_ttl_filler_{batch}");
+            assert!(
+                read_tx.get(key.as_bytes()).unwrap().is_some(),
+                "unrelated key {key} should survive compaction in mode: {mode}"
+            );
+        }
     });
 }
 
 #[test]
 fn should_preserve_non_expired_entries_given_compaction_when_ttl_not_exceeded() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        // Arrange
+        // Arrange: same reasoning as the sibling expiry test — four L0
+        // generations so `compact_all()` performs a genuine merge instead
+        // of a silent no-op.
         let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
+        for batch in 0..3 {
+            let mut tx = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .unwrap();
+            let key = format!("compaction_ttl_filler_{batch}");
+            tx.put(key.into_bytes(), b"filler".to_vec(), None).unwrap();
+            tx.commit(buffered_write_options(mode)).unwrap();
+            engine.flush_cf(&cf).unwrap();
+        }
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .unwrap();
         tx.put(b"key1".to_vec(), b"value1".to_vec(), Some(3600))
             .unwrap(); // 1 hour
         tx.commit(buffered_write_options(mode)).unwrap();
-
-        // Act - trigger flush
         engine.flush_cf(&cf).unwrap();
+
+        // Act - trigger a real compaction (not just a flush)
+        engine.compact_all().unwrap();
 
         // Assert - non-expired entry preserved
         let read_tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
         let result = read_tx.get(b"key1").unwrap();
-        assert_eq!(result, Some(Bytes::from_static(b"value1")));
+        assert_eq!(
+            result,
+            Some(Bytes::from_static(b"value1")),
+            "non-expired entry should survive compaction in mode: {mode}"
+        );
     });
 }
 

@@ -61,11 +61,21 @@ fn should_not_see_uncommitted_write_given_concurrent_transaction_when_reading() 
             .unwrap();
         let value = txn2.get(b"key").unwrap();
 
-        // Assert
+        // Assert - concurrent read-write transaction does not see the
+        // uncommitted write either
         assert_eq!(value, None);
 
+        // Assert - once txn1 commits, a fresh reader observes the value
+        txn1.commit(buffered_write_options(mode)).unwrap();
+        let confirm_tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .unwrap();
+        assert_eq!(
+            confirm_tx.get(b"key").unwrap(),
+            Some(Bytes::from_static(b"uncommitted"))
+        );
+
         // Cleanup
-        drop(txn1);
         drop(txn2);
     });
 }
@@ -121,29 +131,6 @@ fn should_read_uncommitted_value_given_put_in_same_transaction_when_reading() {
 
         // Assert - should read own uncommitted write
         assert_eq!(value, Some(Bytes::from_static(b"value")));
-    });
-}
-
-#[test]
-fn should_see_own_writes_given_transaction_when_reading() {
-    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        // Arrange
-        let engine = Arc::new(open_with_mode(&opts, mode));
-        let cf = engine.create_column_family("test").expect("create cf");
-
-        // Act
-        let mut txn = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
-        txn.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
-        txn.put(b"key2".to_vec(), b"value2".to_vec(), None).unwrap();
-
-        let val1 = txn.get(b"key1").unwrap();
-        let val2 = txn.get(b"key2").unwrap();
-
-        // Assert - should see both own writes
-        assert_eq!(val1, Some(Bytes::from_static(b"value1")));
-        assert_eq!(val2, Some(Bytes::from_static(b"value2")));
     });
 }
 
@@ -245,12 +232,11 @@ fn should_allow_commit_given_read_key_modified_when_concurrent_write() {
         let txn = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
-        let read_tx = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
-            .unwrap();
-        let _value = read_tx.get(b"key").unwrap();
+        // The transaction actually reads the key before any concurrent write
+        let read_value = txn.get(b"key").unwrap();
+        assert_eq!(read_value, Some(Bytes::from_static(b"initial")));
 
-        // Concurrent modification
+        // Concurrent transaction modifies the same key
         let mut concurrent_tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
             .unwrap();
@@ -259,11 +245,21 @@ fn should_allow_commit_given_read_key_modified_when_concurrent_write() {
             .unwrap();
         concurrent_tx.commit(buffered_write_options(mode)).unwrap();
 
-        // Transaction commit should succeed (LWW semantics)
+        // Transaction commit should succeed (LWW semantics) even though it
+        // only read a key that a concurrent transaction subsequently
+        // modified and committed
         let result = txn.commit(buffered_write_options(mode));
-
-        // Assert
         assert!(result.is_ok());
+
+        // Assert - since the transaction made no writes of its own, the
+        // concurrent write stands as the final value
+        let final_tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .unwrap();
+        assert_eq!(
+            final_tx.get(b"key").unwrap(),
+            Some(Bytes::from_static(b"concurrent"))
+        );
     });
 }
 
@@ -358,42 +354,6 @@ fn should_allow_concurrent_puts_given_different_keys_when_multiple_transactions(
             tx.get(b"key2").unwrap(),
             Some(Bytes::from_static(b"value2"))
         );
-    });
-}
-
-#[test]
-fn should_allow_commit_after_reading_stale_value_when_lww_semantics_apply() {
-    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        // Arrange
-        let engine = Arc::new(open_with_mode(&opts, mode));
-        let cf = engine.create_column_family("test").expect("create cf");
-        let mut setup_tx = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
-        setup_tx.put(b"key".to_vec(), b"v1".to_vec(), None).unwrap();
-        setup_tx.commit(buffered_write_options(mode)).unwrap();
-
-        // Act
-        let mut txn = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
-        let read_tx = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
-            .unwrap();
-        let _value = read_tx.get(b"key").unwrap();
-
-        // Concurrent modification
-        let mut mod_tx = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-            .unwrap();
-        mod_tx.put(b"key".to_vec(), b"v2".to_vec(), None).unwrap();
-        mod_tx.commit(buffered_write_options(mode)).unwrap();
-
-        // Transaction writes
-        txn.put(b"key".to_vec(), b"v3".to_vec(), None).unwrap();
-
-        // Assert
-        assert!(txn.commit(buffered_write_options(mode)).is_ok());
     });
 }
 
@@ -532,25 +492,39 @@ fn should_handle_high_concurrency_readers_given_many_transactions_when_active() 
 
         let mut handles = vec![];
 
-        // Act - 50 readers
+        // Act - 50 readers, each capturing what it actually observed
         for _ in 0..50 {
             let engine_clone = Arc::clone(&engine);
             let handle = std::thread::spawn(move || {
-                // Read all keys
+                // Read all keys and collect the results
+                let mut observed = Vec::with_capacity(10);
                 for i in 0..10 {
                     let key = format!("key{i}");
                     let read_tx = engine_clone
                         .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
                         .unwrap();
-                    let _value = read_tx.get(key.as_bytes()).unwrap();
+                    let value = read_tx.get(key.as_bytes()).unwrap();
+                    observed.push(value);
                 }
+                observed
             });
             handles.push(handle);
         }
 
-        // Assert - all readers complete successfully
+        // Assert - every reader observes exactly the value that was written
+        // for each key; nothing is missing (None) or torn/garbled, since all
+        // writes committed before any reader began.
         for handle in handles {
-            handle.join().unwrap();
+            let observed = handle.join().unwrap();
+            assert_eq!(observed.len(), 10);
+            for (i, value) in observed.into_iter().enumerate() {
+                let expected = format!("value{i}");
+                assert_eq!(
+                    value,
+                    Some(Bytes::copy_from_slice(expected.as_bytes())),
+                    "reader observed unexpected value for key{i}"
+                );
+            }
         }
     });
 }
@@ -582,28 +556,65 @@ fn should_maintain_consistency_with_mixed_reader_writer_load_when_concurrent() {
             writer_handles.push(handle);
         }
 
-        // 20 readers
+        // 20 readers, each capturing what it actually observed per key
         for _ in 0..20 {
             let engine_clone = Arc::clone(&engine);
             let handle = std::thread::spawn(move || {
-                // Read random keys
+                let mut observed = Vec::with_capacity(5);
                 for i in 0..5 {
                     let key = format!("key{i}");
                     let read_tx = engine_clone
                         .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
                         .unwrap();
-                    let _value = read_tx.get(key.as_bytes()).unwrap();
+                    let value = read_tx.get(key.as_bytes()).unwrap();
+                    observed.push((i, value));
                 }
+                observed
             });
             reader_handles.push(handle);
         }
 
-        // Assert - all complete successfully
+        // Assert - all writers succeed
         for handle in writer_handles {
             handle.join().unwrap().unwrap();
         }
+
+        // Assert - readers racing with writers only ever observe a
+        // consistent state for each key: either the key hasn't committed yet
+        // (None), or it holds exactly the value that was written for it.
+        // This engine does not guarantee snapshot isolation for read-write
+        // transactions, so either outcome is valid, but no reader may ever
+        // observe a phantom or torn value.
         for handle in reader_handles {
-            handle.join().unwrap();
+            let observed = handle.join().unwrap();
+            for (i, value) in observed {
+                let expected = format!("value{i}");
+                match value {
+                    None => {}
+                    Some(bytes) => {
+                        assert_eq!(
+                            bytes,
+                            Bytes::copy_from_slice(expected.as_bytes()),
+                            "reader observed a phantom/torn value for key{i}"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Final state after all writers have committed must reflect every
+        // write exactly - no lost updates.
+        let final_tx = engine
+            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+            .unwrap();
+        for i in 0..10 {
+            let key = format!("key{i}");
+            let expected = format!("value{i}");
+            assert_eq!(
+                final_tx.get(key.as_bytes()).unwrap(),
+                Some(Bytes::copy_from_slice(expected.as_bytes())),
+                "missing or incorrect final value for key{i}"
+            );
         }
     });
 }

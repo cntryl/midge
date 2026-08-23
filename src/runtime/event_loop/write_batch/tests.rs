@@ -1325,27 +1325,19 @@ fn should_detect_overlapping_point_range_touches_when_staging_transactions() {
 }
 
 #[test]
-fn should_keep_strict_group_commit_window_inside_screened_candidates() {
+fn should_select_strict_group_commit_window_given_batch_capacity() {
     // Arrange
-    // Act
-    let selected = LOCAL_STRICT_GROUP_COMMIT_CANDIDATE_WINDOWS_US
-        [LOCAL_STRICT_GROUP_COMMIT_SELECTED_WINDOW_INDEX];
+    let at_capacity = true;
+    let below_capacity = false;
 
-    // Assert
-    assert_eq!(
-        LOCAL_STRICT_GROUP_COMMIT_CANDIDATE_WINDOWS_US,
-        [0, 10, 25, 50, 100]
-    );
-    assert_eq!(selected, 100);
-    assert_eq!(
-        LOCAL_STRICT_GROUP_COMMIT_WINDOW,
-        Duration::from_micros(selected)
-    );
-    assert_eq!(local_strict_group_commit_collect_window(true), None);
-    assert_eq!(
-        local_strict_group_commit_collect_window(false),
-        Some(Duration::from_micros(selected))
-    );
+    // Act
+    let capped_window = local_strict_group_commit_collect_window(at_capacity);
+    let available_window = local_strict_group_commit_collect_window(below_capacity);
+
+    // Assert - the real production function, not a re-statement of the
+    // internal candidate-window constants it was tuned from.
+    assert_eq!(capped_window, None);
+    assert_eq!(available_window, Some(LOCAL_STRICT_GROUP_COMMIT_WINDOW));
 }
 
 #[test]

@@ -134,20 +134,6 @@ fn should_create_column_family_state_with_empty_memtables() {
 }
 
 #[test]
-fn should_track_immutable_memtables_in_cf_state() {
-    // Arrange
-    let mut cf = ColumnFamilyState::new(1, "cf".to_string());
-    let imm_memtable = Arc::new(SkipListMemtable::new());
-
-    // Act
-    cf.immutable_memtables.push(imm_memtable.clone());
-    cf.immutable_memtables.push(imm_memtable.clone());
-
-    // Assert
-    assert_eq!(cf.immutable_memtables.len(), 2);
-}
-
-#[test]
 fn should_select_due_pending_immutable_before_active_memtable() {
     // Arrange
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
@@ -432,6 +418,13 @@ fn should_hard_stall_when_external_backpressure_sets_write_stalled() {
 
 // =========== WalState Tests ===========
 
+// Scope: `WalState`/`CompactionState`/`CloudState` are plain field bags with
+// no invariant-enforcing methods of their own — the invariants that matter
+// (segment rotation, compacting-SST bookkeeping, upload tracking) are
+// exercised through the real actor/state methods elsewhere in this module
+// and in src/runtime/actors/*. These tests are kept only to pin the
+// documented default values, since a silent default change would be a
+// behavioral regression on a fresh RuntimeState.
 #[test]
 fn should_initialize_wal_state_with_defaults() {
     // Arrange
@@ -446,40 +439,6 @@ fn should_initialize_wal_state_with_defaults() {
     assert_eq!(wal.pending_writes, 0);
     assert_eq!(wal.local_durable_seq, 0);
     assert_eq!(wal.cloud_durable_seq, 0);
-}
-
-#[test]
-fn should_maintain_wal_durability_frontiers() {
-    // Arrange
-    let wal = WalState {
-        last_synced_seq: 10,
-        local_durable_seq: 10,
-        pending_writes: 5,
-        cloud_durable_seq: 8,
-        ..Default::default()
-    };
-
-    // Act
-    // (none)
-
-    // Assert - Verify monotonicity constraints
-    assert!(wal.cloud_durable_seq <= wal.local_durable_seq);
-    assert!(wal.local_durable_seq >= wal.last_synced_seq);
-    assert!(wal.pending_writes < usize::MAX);
-}
-
-#[test]
-fn should_track_segment_rotation() {
-    // Arrange
-    let mut wal = WalState::default();
-    let initial_segment = wal.current_segment_id;
-
-    // Act
-    wal.current_segment_id += 1;
-    wal.current_segment_id += 1;
-
-    // Assert
-    assert_eq!(wal.current_segment_id, initial_segment + 2);
 }
 
 // =========== CompactionState Tests ===========
@@ -497,25 +456,6 @@ fn should_initialize_compaction_state() {
     assert_eq!(compaction.pending_tasks, 0);
 }
 
-#[test]
-fn should_track_compacting_ssts() {
-    // Arrange
-    let mut compaction = CompactionState::default();
-
-    // Act
-    compaction
-        .compacting_ssts
-        .push(crate::sst::file_name(0, 0, 1));
-    compaction
-        .compacting_ssts
-        .push(crate::sst::file_name(0, 0, 2));
-    compaction.pending_tasks = 2;
-
-    // Assert
-    assert_eq!(compaction.compacting_ssts.len(), 2);
-    assert_eq!(compaction.pending_tasks, 2);
-}
-
 // =========== CloudState Tests ===========
 
 #[test]
@@ -529,20 +469,6 @@ fn should_initialize_cloud_state() {
     // Assert
     assert!(cloud.pending_uploads.is_empty());
     assert_eq!(cloud.last_cloud_checkpoint_seq, 0);
-}
-
-#[test]
-fn should_track_pending_uploads() {
-    // Arrange
-    let mut cloud = CloudState::default();
-
-    // Act
-    cloud.pending_uploads.push(crate::sst::file_name(0, 0, 1));
-    cloud.last_cloud_checkpoint_seq = 100;
-
-    // Assert
-    assert_eq!(cloud.pending_uploads.len(), 1);
-    assert_eq!(cloud.last_cloud_checkpoint_seq, 100);
 }
 
 // =========== RuntimeState Tests ===========
@@ -561,20 +487,6 @@ fn should_create_runtime_state_in_memory_mode() {
     assert_eq!(state.next_txn_id, 0);
     assert!(state.column_families.contains_key(&0)); // Default CF
     assert_eq!(state.column_families.len(), 1);
-}
-
-#[test]
-fn should_initialize_default_column_family() {
-    // Arrange
-    // (no setup)
-
-    // Act
-    let state = RuntimeState::new("/tmp/test_midge".into(), true);
-
-    // Assert
-    let cf0 = state.get_cf(0).expect("Default CF should exist");
-    assert_eq!(cf0.memtable.size_bytes(), 0);
-    assert!(cf0.immutable_memtables.is_empty());
 }
 
 #[test]
@@ -1339,54 +1251,6 @@ fn should_delete_untracked_compaction_output_during_startup_residue_cleanup() {
 }
 
 #[test]
-fn should_track_wal_state_separately() {
-    // Arrange
-    let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
-
-    // Act
-    state.wal.current_segment_id = 5;
-    state.wal.pending_writes = 10;
-
-    // Assert
-    assert_eq!(state.wal.current_segment_id, 5);
-    assert_eq!(state.wal.pending_writes, 10);
-}
-
-#[test]
-fn should_track_compaction_state_separately() {
-    // Arrange
-    let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
-
-    // Act
-    state
-        .compaction
-        .compacting_ssts
-        .push(crate::sst::file_name(0, 0, 1));
-    state.compaction.pending_tasks = 3;
-
-    // Assert
-    assert_eq!(state.compaction.compacting_ssts.len(), 1);
-    assert_eq!(state.compaction.pending_tasks, 3);
-}
-
-#[test]
-fn should_track_cloud_state_separately() {
-    // Arrange
-    let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
-
-    // Act
-    state
-        .cloud
-        .pending_uploads
-        .push(crate::sst::file_name(0, 0, 50));
-    state.cloud.last_cloud_checkpoint_seq = 50;
-
-    // Assert
-    assert_eq!(state.cloud.pending_uploads.len(), 1);
-    assert_eq!(state.cloud.last_cloud_checkpoint_seq, 50);
-}
-
-#[test]
 fn should_maintain_memtable_size_limit() {
     // Arrange
     let state = RuntimeState::new("/tmp/test_midge".into(), true);
@@ -1435,24 +1299,4 @@ fn should_handle_multiple_column_families() {
     assert!(state.get_cf(cf1).is_some());
     assert!(state.get_cf(cf2).is_some());
     assert!(state.get_cf(cf3).is_some());
-}
-
-#[test]
-fn should_track_all_state_components_independently() {
-    // Arrange
-    let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
-
-    // Act
-    let seq1 = state.next_sequence();
-    let txn1 = state.next_txn_id();
-    state.wal.pending_writes = 5;
-    state.compaction.pending_tasks = 2;
-    state.cloud.last_cloud_checkpoint_seq = 100;
-
-    // Assert
-    assert_eq!(seq1, 1);
-    assert_eq!(txn1, 1);
-    assert_eq!(state.wal.pending_writes, 5);
-    assert_eq!(state.compaction.pending_tasks, 2);
-    assert_eq!(state.cloud.last_cloud_checkpoint_seq, 100);
 }

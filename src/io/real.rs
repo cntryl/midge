@@ -609,8 +609,20 @@ mod tests {
 
     #[test]
     fn should_create_real_fs() -> FsResult<()> {
+        // Arrange: point at a nested directory that does not exist yet, to
+        // exercise RealFs::new's create_dir_all behavior concretely.
         let temp = TempDir::new().map_err(|e| FsError::Io(e.to_string()))?;
-        let _fs = RealFs::new(temp.path())?;
+        let nested = temp.path().join("a").join("b").join("c");
+        assert!(
+            !nested.exists(),
+            "precondition: nested dir must not exist yet"
+        );
+
+        // Act
+        let _fs = RealFs::new(&nested)?;
+
+        // Assert: RealFs::new created the full directory chain
+        assert!(nested.is_dir());
         Ok(())
     }
 
@@ -786,6 +798,12 @@ mod tests {
         // Arrange
         let temp = TempDir::new().map_err(|error| FsError::Io(error.to_string()))?;
         let fs = RealFs::new(temp.path())?;
+
+        // Assert: syncing a directory that does not exist must fail, proving
+        // sync_dir genuinely opens a handle to the target (with
+        // FILE_FLAG_BACKUP_SEMANTICS) rather than being a stubbed no-op.
+        let missing = fs.sync_dir(&FsPath::new("does-not-exist"), Durability::Durable);
+        assert!(missing.is_err());
 
         // Act
         fs.sync_dir(&FsPath::new("."), Durability::Durable)?;

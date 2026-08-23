@@ -178,12 +178,10 @@ fn should_return_write_stall_when_memory_budget_exceeded() {
 
     // Assert
     for (mode, write_stall_observed) in results.into_inner() {
-        if mode == "local" {
-            assert!(
-                !write_stall_observed,
-                "local mode should now relieve soft memtable pressure without returning WriteStall"
-            );
-        }
+        assert!(
+            !write_stall_observed,
+            "{mode} mode should now relieve soft memtable pressure without returning WriteStall"
+        );
     }
 }
 
@@ -365,7 +363,7 @@ fn should_handle_concurrent_writes_with_consistent_backpressure() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     // Act
-    let results = std::cell::RefCell::new(Vec::<(String, u64)>::new());
+    let results = std::cell::RefCell::new(Vec::<(String, u64, Vec<(u64, u64)>, bool)>::new());
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         let mut opts = opts;
         opts = opts.memory_budget(4 * 1024 * 1024);
@@ -382,8 +380,8 @@ fn should_handle_concurrent_writes_with_consistent_backpressure() {
             let write_opts = buffered_write_options(mode);
 
             let handle = std::thread::spawn(move || {
-                let mut writes = 0;
-                let mut stalls = 0;
+                let mut writes = 0u64;
+                let mut stalls = 0u64;
 
                 while !shutdown_clone.load(Ordering::Relaxed) {
                     let key = format!("thread_{thread_id}_key_{writes}");
@@ -417,19 +415,49 @@ fn should_handle_concurrent_writes_with_consistent_backpressure() {
         std::thread::sleep(Duration::from_secs(2));
         shutdown.store(true, Ordering::Relaxed);
 
-        let mut total_writes = 0;
-        let mut _total_stalls = 0;
+        let mut total_writes = 0u64;
+        let mut per_thread = Vec::new();
         for handle in handles {
             let (writes, stalls) = handle.join().expect("panic");
             total_writes += writes;
-            _total_stalls += stalls;
+            per_thread.push((writes, stalls));
         }
 
-        results.borrow_mut().push((mode.to_string(), total_writes));
+        // Backpressure is "consistent" only if it clears again after the
+        // concurrent burst instead of leaving the runtime permanently
+        // stalled for later writers. Memory mode has no meaningful
+        // backpressure (everything stays resident), so there is nothing to
+        // clear there.
+        let stall_cleared = if mode == "memory" {
+            true
+        } else {
+            engine
+                .wait_for_write_stall_clear(cf.id(), Duration::from_secs(5))
+                .expect("wait for stall clear after concurrent burst")
+        };
+
+        results
+            .borrow_mut()
+            .push((mode.to_string(), total_writes, per_thread, stall_cleared));
     });
 
     // Assert
-    for (mode, total_writes) in results.into_inner() {
+    for (mode, total_writes, per_thread, stall_cleared) in results.into_inner() {
+        assert_eq!(
+            per_thread.len(),
+            4,
+            "expected all 4 worker threads to report in mode {mode}"
+        );
+        for (thread_index, (writes, stalls)) in per_thread.iter().enumerate() {
+            assert!(
+                writes + stalls > 0,
+                "thread {thread_index} made no progress (neither committed nor stalled) in mode {mode}"
+            );
+        }
+        assert!(
+            stall_cleared,
+            "backpressure should clear again after the concurrent burst in mode {mode}, not stay permanently stalled"
+        );
         if !mode.eq("memory") {
             assert!(total_writes > 0, "should have writes in mode {mode}");
         }

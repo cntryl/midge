@@ -554,13 +554,31 @@ fn write_runtime_l0_sst_for_test(
 // =========== EventLoop Creation Tests ===========
 
 #[test]
-fn should_create_event_loop_in_memory_mode() {
+fn should_create_event_loop_given_supported_storage_modes() {
     // Arrange
-    // Act
-    let result = create_test_event_loop();
+    let memory_state = RuntimeState::new("/tmp/test_memory".into(), true);
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let fs_state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
 
-    // Assert
-    assert!(result.is_ok());
+    // Act
+    let memory_result = EventLoop::new(
+        memory_state,
+        false,
+        Arc::new(ResponseRouter::new()),
+        crate::runtime::RuntimeConfig::default(),
+        None,
+    );
+    let fs_result = EventLoop::new(
+        fs_state,
+        false,
+        Arc::new(ResponseRouter::new()),
+        crate::runtime::RuntimeConfig::default(),
+        None,
+    );
+
+    // Assert - both storage modes must construct successfully
+    assert!(memory_result.is_ok());
+    assert!(fs_result.is_ok());
 }
 
 #[test]
@@ -1394,99 +1412,6 @@ mod compaction_scheduling {
     }
 }
 
-#[test]
-fn should_initialize_all_actors() {
-    // Arrange
-    // Act
-    let event_loop = create_test_event_loop().expect("Should create event loop");
-
-    // Assert - Just verify construction doesn't panic and has all actors
-    // We can't directly inspect actors, but we verify no errors during init
-    drop(event_loop);
-}
-
-#[test]
-fn should_initialize_with_tracing_disabled() {
-    // Arrange
-    let state = create_test_state();
-    let router = Arc::new(ResponseRouter::new());
-
-    // Act
-    let event_loop = EventLoop::new(
-        state,
-        false,
-        router,
-        crate::runtime::RuntimeConfig::default(),
-        None,
-    );
-
-    // Assert
-    assert!(event_loop.is_ok());
-}
-
-#[test]
-fn should_initialize_with_tracing_enabled() {
-    // Arrange
-    let state = create_test_state();
-    let router = Arc::new(ResponseRouter::new());
-
-    // Act
-    let event_loop = EventLoop::new(
-        state,
-        true,
-        router,
-        crate::runtime::RuntimeConfig::default(),
-        None,
-    );
-
-    // Assert
-    assert!(event_loop.is_ok());
-}
-
-// =========== Response Routing Tests ===========
-
-#[test]
-fn should_route_responses_via_router() {
-    // Arrange
-    let state = create_test_state();
-    let router = Arc::new(ResponseRouter::new());
-
-    // Act
-    let event_loop = EventLoop::new(
-        state,
-        false,
-        router.clone(),
-        crate::runtime::RuntimeConfig::default(),
-        None,
-    );
-
-    // Assert
-    assert!(event_loop.is_ok());
-    // Response routing happens through the router, which we test separately
-}
-
-// =========== State Management Tests ===========
-
-#[test]
-fn should_maintain_runtime_state_invariants() {
-    // Arrange
-    let state = create_test_state();
-
-    // Act - Create event loop (should not modify state invariants during init)
-    let router = Arc::new(ResponseRouter::new());
-    let result = EventLoop::new(
-        state,
-        false,
-        router,
-        crate::runtime::RuntimeConfig::default(),
-        None,
-    );
-
-    // Assert
-    assert!(result.is_ok());
-    // State is moved into EventLoop, can't inspect after, but construction validates it
-}
-
 // =========== Trace Flag Tests ===========
 
 #[test]
@@ -1523,79 +1448,47 @@ fn should_respect_trace_enabled_flag() {
 // =========== Actor Initialization Tests ===========
 
 #[test]
-fn should_initialize_flush_actor() {
+fn should_initialize_actors_with_expected_starting_state() {
     // Arrange
+
     // Act
     let event_loop = create_test_event_loop().expect("Should create event loop");
 
-    // Assert - Verify through construction success
-    // FlushActor is initialized and owned by EventLoop
-    assert!(event_loop.hybrid_storage.is_none()); // Related check
-}
-
-#[test]
-fn should_initialize_compaction_actor() {
-    // Arrange
-    // Act
-    let event_loop = create_test_event_loop().expect("Should create event loop");
-
-    // Assert - CompactionActor is initialized
-    // We verify this indirectly through successful construction
-    drop(event_loop);
-}
-
-#[test]
-fn should_initialize_wal_actor() {
-    // Arrange
-    // Act
-    let event_loop = create_test_event_loop().expect("Should create event loop");
-
-    // Assert - WalActor is initialized
-    drop(event_loop);
-}
-
-#[test]
-fn should_initialize_cloud_actor() {
-    // Arrange
-    // Act
-    let event_loop = create_test_event_loop().expect("Should create event loop");
-
-    // Assert
-    drop(event_loop);
-}
-
-#[test]
-fn should_initialize_gc_actor() {
-    // Arrange
-    // Act
-    let event_loop = create_test_event_loop().expect("Should create event loop");
-
-    // Assert
-    drop(event_loop);
-}
-
-#[test]
-fn should_initialize_manifest_actor() {
-    // Arrange
-    // Act
-    let event_loop = create_test_event_loop().expect("Should create event loop");
-
-    // Assert
-    drop(event_loop);
-}
-
-// =========== Invariant Tests ===========
-
-#[test]
-fn should_maintain_actor_ownership() {
-    // Arrange
-    // Act
-    let event_loop = create_test_event_loop().expect("Should create event loop");
-
-    // Assert - All actors should be owned by event loop
-    // They're private fields, so we verify through successful construction
-    // and that event_loop doesn't expose uninitialized actors
-    assert!(event_loop.hybrid_storage.is_none()); // Hybrid storage is optional
+    // Assert - each actor's real, publicly observable starting state (not a
+    // re-read of a field the test just set itself). ManifestActor has no such
+    // accessor and is only implicitly covered here via successful construction.
+    assert!(
+        !event_loop.flush_actor.is_inflight(),
+        "FlushActor must start with no in-flight flush"
+    );
+    assert_eq!(
+        event_loop.wal_actor.pending_sync_count(),
+        0,
+        "WalActor must start with no pending syncs"
+    );
+    assert_eq!(
+        event_loop.wal_actor.sync_calls(),
+        0,
+        "WalActor must start with no recorded sync calls"
+    );
+    assert_eq!(
+        event_loop.compaction_actor.l0_file_count_threshold(),
+        4,
+        "CompactionActor must start with the default L0 file-count threshold"
+    );
+    assert_eq!(
+        event_loop.cloud_actor.uploads_in_progress(),
+        0,
+        "CloudActor must start with no uploads in progress"
+    );
+    assert!(
+        event_loop.gc_actor.last_gc_run().is_none(),
+        "GcActor must start with no recorded GC run"
+    );
+    assert!(
+        event_loop.hybrid_storage.is_none(),
+        "hybrid storage is optional and unset by default"
+    );
 }
 
 #[test]
@@ -1603,87 +1496,20 @@ fn should_maintain_router_reference() {
     // Arrange
     let state = create_test_state();
     let router = Arc::new(ResponseRouter::new());
-    let router_clone = router.clone();
 
     // Act
-    let _event_loop = EventLoop::new(
+    let event_loop = EventLoop::new(
         state,
         false,
-        router,
+        Arc::clone(&router),
         crate::runtime::RuntimeConfig::default(),
         None,
     )
     .expect("Should create");
 
-    // Assert - Router is properly stored
-    // The router's methods can be called independently
-    let _rx = router_clone.register(1);
-}
-
-// =========== Memory Mode Tests ===========
-
-#[test]
-fn should_handle_memory_mode_initialization() {
-    // Arrange
-    let state = RuntimeState::new("/tmp/test_memory".into(), true);
-
-    // Act
-    let router = Arc::new(ResponseRouter::new());
-    let result = EventLoop::new(
-        state,
-        false,
-        router,
-        crate::runtime::RuntimeConfig::default(),
-        None,
-    );
-
-    // Assert
-    assert!(result.is_ok());
-}
-
-#[test]
-fn should_handle_filesystem_mode_initialization() {
-    // Arrange - Create state in filesystem mode
-    let temp_dir = tempfile::tempdir().expect("temp dir");
-    let state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
-
-    // Act
-    let router = Arc::new(ResponseRouter::new());
-    let result = EventLoop::new(
-        state,
-        false,
-        router,
-        crate::runtime::RuntimeConfig::default(),
-        None,
-    );
-
-    // Assert
-    assert!(result.is_ok());
-}
-
-// =========== Actor Factory Tests ===========
-
-#[test]
-fn should_create_sst_factory_for_compaction_actor() {
-    // Arrange
-    // Act
-    let event_loop = create_test_event_loop().expect("Should create event loop");
-
-    // Assert - SST factory is created and passed to CompactionActor
-    // This is verified by successful construction
-    drop(event_loop);
-}
-
-#[test]
-fn should_use_correct_block_size_for_sst_factory() {
-    // Arrange - Create event loop which creates SST factory with 64KB block size
-    let event_loop = create_test_event_loop().expect("Should create event loop");
-
-    // Act
-
-    // Assert - The 64KB block size is hardcoded in EventLoop::new
-    // This test documents that invariant
-    drop(event_loop);
+    // Assert - the event loop must retain the exact same router instance the
+    // caller passed in, not a copy, so responses actually reach callers
+    assert!(Arc::ptr_eq(&event_loop.router, &router));
 }
 
 #[test]

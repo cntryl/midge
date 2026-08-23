@@ -502,43 +502,6 @@ fn should_persist_writes_given_kv_transaction_when_committed_boxed() {
     });
 }
 
-#[test]
-fn should_succeed_given_best_effort_when_committing_transaction_during_bulk_load() {
-    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        // Arrange: Simulate bulk load scenario with best_effort()
-        let engine = Arc::new(open_with_mode(&opts, mode));
-        let cf = engine.create_column_family("test").expect("create cf");
-        let write_opts = WriteOptions::best_effort();
-
-        // Act: Load many keys with best_effort() (acceptable for initialization phase)
-        for i in 0..100 {
-            let mut txn = engine
-                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-                .unwrap();
-            let key = format!("bulk_key_{i}").into_bytes();
-            let value = format!("bulk_value_{i}").into_bytes();
-            txn.put(key, value, None).unwrap();
-            txn.commit(write_opts).unwrap();
-        }
-
-        // Flush to ensure data reaches storage
-        engine.flush_cf(&cf).unwrap();
-
-        // Assert: Data should be persisted after flush
-        let read_tx = engine
-            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
-            .unwrap();
-        assert_eq!(
-            read_tx.get(b"bulk_key_50").unwrap(),
-            Some(Bytes::from_static(b"bulk_value_50"))
-        );
-        assert_eq!(
-            read_tx.get(b"bulk_key_99").unwrap(),
-            Some(Bytes::from_static(b"bulk_value_99"))
-        );
-    });
-}
-
 // ============================================================================
 // Transaction Operations
 // ============================================================================

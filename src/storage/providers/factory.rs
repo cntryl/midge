@@ -117,13 +117,8 @@ mod tests {
         CloudProviderConfig::aws_s3_static("bucket", "us-east-1", "access", "secret")
     }
 
-    fn s3_compatible_provider() -> CloudProviderConfig {
-        CloudProviderConfig::s3_compatible_static(
-            "bucket",
-            "http://127.0.0.1:9000",
-            "access",
-            "secret",
-        )
+    fn s3_compatible_provider(endpoint: &str) -> CloudProviderConfig {
+        CloudProviderConfig::s3_compatible_static("bucket", endpoint, "access", "secret")
     }
 
     #[cfg(feature = "cloud-aws")]
@@ -133,10 +128,20 @@ mod tests {
         let provider = aws_provider();
 
         // Act
-        let result = CloudProviderFactory::build_backend(&provider);
+        let backend = CloudProviderFactory::build_backend(&provider)
+            .expect("AWS provider must build when cloud-aws is enabled");
 
-        // Assert
-        assert!(result.is_ok());
+        // Assert: `build_backend` for AWS always routes through `s3_resolver`, which is the
+        // same code path exercised end-to-end (real request wiring, bucket/endpoint plumbing)
+        // by the S3-compatible case below via a local mock server; here we only need to confirm
+        // the AWS branch actually produced a live backend rather than the "feature disabled"
+        // stub error, which a second independent build call must reproduce identically.
+        let second = CloudProviderFactory::build_backend(&provider)
+            .expect("AWS provider must build deterministically");
+        assert!(
+            !Arc::ptr_eq(&backend, &second),
+            "each build must own its backend"
+        );
     }
 
     #[cfg(not(feature = "cloud-aws"))]
@@ -158,20 +163,35 @@ mod tests {
     #[test]
     fn should_build_s3_compatible_provider_when_s3_family_feature_is_enabled() {
         // Arrange
-        let provider = s3_compatible_provider();
+        let server = crate::storage::providers::test_support::spawn_recording_http_server(
+            Vec::new(),
+            Vec::new(),
+        );
+        let provider = s3_compatible_provider(&server.endpoint);
 
         // Act
-        let result = CloudProviderFactory::build_backend(&provider);
+        let backend = CloudProviderFactory::build_backend(&provider)
+            .expect("S3-compatible provider must build when an S3-family feature is enabled");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        backend.submit_put("object", b"value".to_vec(), Vec::new(), sender);
+        let _ = receiver.recv_timeout(std::time::Duration::from_secs(5));
+        let request = server.finish();
 
-        // Assert
-        assert!(result.is_ok());
+        // Assert: the resolved backend actually targets the configured endpoint/bucket, not
+        // just "some" backend.
+        assert_eq!(request.method, "PUT");
+        assert!(
+            request.target.contains("bucket"),
+            "expected request targeting the configured bucket, got: {}",
+            request.target
+        );
     }
 
     #[cfg(not(any(feature = "cloud-aws", feature = "cloud-oci")))]
     #[test]
     fn should_reject_s3_compatible_provider_when_s3_family_features_are_disabled() {
         // Arrange
-        let provider = s3_compatible_provider();
+        let provider = s3_compatible_provider("http://127.0.0.1:9000");
 
         // Act
         let error = CloudProviderFactory::build_backend(&provider)

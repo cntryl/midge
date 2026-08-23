@@ -76,8 +76,8 @@ mod tests {
         let policy = CachePolicyType::Lru.create();
         policy.on_access(key);
 
-        // Assert - trait object should work
-        // Should not panic
+        // Assert - the only tracked key must be the eviction victim
+        assert_eq!(policy.pick_victim(&[]), Some(key));
     }
 
     #[test]
@@ -89,8 +89,8 @@ mod tests {
         let policy = CachePolicyType::TinyLfu.create();
         policy.on_access(key);
 
-        // Assert
-        // Should not panic
+        // Assert - the only tracked key must be the eviction victim
+        assert_eq!(policy.pick_victim(&[]), Some(key));
     }
 
     #[test]
@@ -102,8 +102,8 @@ mod tests {
         let policy = CachePolicyType::ClockPro.create();
         policy.on_access(key);
 
-        // Assert
-        // Should not panic
+        // Assert - the only tracked key must be the eviction victim
+        assert_eq!(policy.pick_victim(&[]), Some(key));
     }
 
     #[test]
@@ -114,19 +114,27 @@ mod tests {
             CachePolicyType::TinyLfu.create(),
             CachePolicyType::ClockPro.create(),
         ];
+        let keys: Vec<CacheKey> = (0..5).map(|i| CacheKey::for_data(i, 0)).collect();
 
         // Act
         for policy in &policies {
-            for i in 0..5 {
-                let key = CacheKey::for_data(i, 0);
-                policy.on_access(key);
+            for key in &keys {
+                policy.on_access(*key);
             }
-            policy.pick_victim(&[]);
-            policy.clear();
-        }
 
-        // Assert - all should work without panic
-        assert_eq!(policies.len(), 3);
+            // Assert
+            let victim = policy.pick_victim(&[]);
+            assert!(
+                victim.is_some_and(|v| keys.contains(&v)),
+                "victim {victim:?} must be one of the accessed keys"
+            );
+            policy.clear();
+            assert_eq!(
+                policy.pick_victim(&[]),
+                None,
+                "clear() must remove all tracked keys"
+            );
+        }
     }
 
     #[test]
@@ -143,10 +151,11 @@ mod tests {
         for policy in &policies {
             policy.on_access(key);
             policy.on_remove(key);
-        }
 
-        // Assert - all should handle removal without panic
-        assert_eq!(policies.len(), 3);
+            // Assert - a key removed right after being accessed must never
+            // be reported as an eviction victim.
+            assert_eq!(policy.pick_victim(&[]), None);
+        }
     }
 
     #[test]
@@ -192,64 +201,59 @@ mod tests {
         // Arrange
         let policy_type = CachePolicyType::Lru;
 
-        // Act
+        // Act - `CachePolicyType` is `Copy`, so the original is still usable
         let policy_type_copy = policy_type;
-
-        // Assert
         let policy1 = policy_type.create();
         let policy2 = policy_type_copy.create();
 
-        let key = CacheKey::for_data(1, 0);
-        policy1.on_access(key);
-        policy2.on_access(key);
-        // Both should work independently
+        let key1 = CacheKey::for_data(1, 0);
+        let key2 = CacheKey::for_data(2, 0);
+        policy1.on_access(key1);
+        policy2.on_access(key2);
+
+        // Assert - both instances built from the copy behave independently
+        assert_eq!(policy1.pick_victim(&[]), Some(key1));
+        assert_eq!(policy2.pick_victim(&[]), Some(key2));
     }
 
     #[test]
     fn should_create_multiple_instances_of_same_type() {
         // Arrange
         let policy_type = CachePolicyType::Lru;
-
-        // Act
         let policy1 = policy_type.create();
         let policy2 = policy_type.create();
+        let key = CacheKey::for_data(1, 0);
 
-        // Assert - independent instances
-        let key1 = CacheKey::for_data(1, 0);
-        let key2 = CacheKey::for_data(2, 0);
+        // Act - only policy1 observes the access
+        policy1.on_access(key);
 
-        policy1.on_access(key1);
-        policy2.on_access(key2);
-
-        // Both should work independently
-        let victim1 = policy1.pick_victim(&[]);
-        let victim2 = policy2.pick_victim(&[]);
-
-        assert!(victim1.is_some() || victim1.is_none()); // Can be either
-        assert!(victim2.is_some() || victim2.is_none()); // Can be either
+        // Assert - state must not leak between independently created instances
+        assert_eq!(policy2.pick_victim(&[]), None);
+        assert_eq!(policy1.pick_victim(&[]), Some(key));
     }
 
     #[test]
     fn should_handle_policy_trait_bound() {
         // Arrange
-        fn use_policy(policy: &dyn CachePolicy) {
+        fn use_policy(policy: &dyn CachePolicy) -> Option<CacheKey> {
             let key = CacheKey::for_data(1, 0);
             policy.on_access(key);
-            let _ = policy.pick_victim(&[]);
+            let victim = policy.pick_victim(&[]);
             policy.clear();
+            victim
         }
+        let expected = Some(CacheKey::for_data(1, 0));
 
         // Act
         let lru = CachePolicyType::Lru.create();
-        use_policy(&*lru);
-
-        let tinyfu = CachePolicyType::TinyLfu.create();
-        use_policy(&*tinyfu);
-
+        let tinylfu = CachePolicyType::TinyLfu.create();
         let clockpro = CachePolicyType::ClockPro.create();
-        use_policy(&*clockpro);
 
-        // Assert
+        // Assert - the trait-object function must work identically regardless
+        // of the concrete policy behind it.
+        assert_eq!(use_policy(&*lru), expected);
+        assert_eq!(use_policy(&*tinylfu), expected);
+        assert_eq!(use_policy(&*clockpro), expected);
     }
 
     #[test]

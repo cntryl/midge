@@ -467,7 +467,7 @@ fn should_preserve_snapshot_range_scan_when_compaction_gc_runs_with_snapshot_act
 fn should_keep_snapshot_range_scan_stable_when_compaction_runs_concurrently() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(&opts, mode);
+        let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");
 
         let mut seed = engine
@@ -488,27 +488,38 @@ fn should_keep_snapshot_range_scan_stable_when_compaction_runs_concurrently() {
         wait_for_active_snapshots(&engine, 1, Duration::from_secs(1))
             .expect("wait for active snapshot");
 
-        // Act
-        for round in 0..5 {
-            let mut tx = engine
-                .begin_tx(cf.id(), TransactionMode::ReadWrite)
-                .expect("begin overwrite tx");
-            for i in 0..32 {
-                let key = format!("concurrent_key_{i:03}");
-                let value = format!("round_{round}").into_bytes();
-                tx.put(key.into_bytes(), value, None)
-                    .expect("overwrite put");
+        // Act: drive several overwrite+flush+compact rounds on a background
+        // thread while the foreground concurrently rescans the pinned
+        // snapshot, so compaction is genuinely racing the scan rather than
+        // being sequenced strictly between scan calls.
+        let compact_engine = Arc::clone(&engine);
+        let compact_cf = cf.clone();
+        let compact_write_options = buffered_write_options(mode);
+        let worker = std::thread::spawn(move || {
+            for round in 0..5 {
+                let mut tx = compact_engine
+                    .begin_tx(compact_cf.id(), TransactionMode::ReadWrite)
+                    .expect("begin overwrite tx");
+                for i in 0..32 {
+                    let key = format!("concurrent_key_{i:03}");
+                    let value = format!("round_{round}").into_bytes();
+                    tx.put(key.into_bytes(), value, None)
+                        .expect("overwrite put");
+                }
+                tx.commit(compact_write_options).expect("overwrite commit");
+                compact_engine
+                    .flush_cf(&compact_cf)
+                    .expect("overwrite flush");
+                compact_engine.compact_all().expect("compact all");
             }
-            tx.commit(buffered_write_options(mode))
-                .expect("overwrite commit");
-            engine.flush_cf(&cf).expect("overwrite flush");
-            engine.compact_all().expect("compact all");
+        });
 
+        while !worker.is_finished() {
             let rows = snapshot
                 .scan(&Query::new())
-                .expect("snapshot scan after compaction round")
+                .expect("snapshot scan during concurrent compaction")
                 .try_collect()
-                .expect("collect snapshot scan after compaction round");
+                .expect("collect snapshot scan during concurrent compaction");
             assert_eq!(rows.len(), 32, "mode: {mode}");
             for (_key, value) in rows {
                 assert_eq!(
@@ -518,6 +529,7 @@ fn should_keep_snapshot_range_scan_stable_when_compaction_runs_concurrently() {
                 );
             }
         }
+        worker.join().expect("join concurrent compaction worker");
 
         // Assert
         let rows = snapshot

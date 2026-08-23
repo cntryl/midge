@@ -82,14 +82,15 @@ fn should_handle_concurrent_writes_correctly_with_runtime_coalescing() {
             thread::spawn(move || {
                 for op_num in 0..ops_per_thread {
                     let key = format!("key_{thread_id}_{op_num}");
-                    let value = "x".repeat(100); // 100 bytes value
+                    let value = format!("val_{thread_id}_{op_num}");
 
                     let mut tx = engine_clone
                         .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
                         .expect("begin_tx");
                     tx.put(key.into_bytes(), value.into_bytes(), None)
                         .expect("put");
-                    let _ = tx.commit(cntryl_midge::WriteOptions::buffered());
+                    tx.commit(cntryl_midge::WriteOptions::buffered())
+                        .expect("commit");
                 }
             })
         })
@@ -101,15 +102,39 @@ fn should_handle_concurrent_writes_correctly_with_runtime_coalescing() {
 
     let elapsed = start.elapsed();
 
-    // Assert: Verify operations completed
-    let key = format!("key_0_{}", ops_per_thread - 1);
+    // Assert: every logical write from every thread is durably visible with
+    // the exact value that thread wrote, not merely "readable".
     let read_tx = engine
         .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
         .expect("begin_tx");
-    let result = read_tx.get(key.as_bytes());
-    assert!(result.is_ok(), "Should be able to read back values");
+    for thread_id in 0..num_threads {
+        for op_num in 0..ops_per_thread {
+            let key = format!("key_{thread_id}_{op_num}");
+            let expected_value = format!("val_{thread_id}_{op_num}");
+            let result = read_tx
+                .get(key.as_bytes())
+                .expect("read should not error")
+                .unwrap_or_else(|| panic!("key {key} should be present after concurrent commits"));
+            assert_eq!(
+                result.as_ref(),
+                expected_value.as_bytes(),
+                "value for {key} should match what its writer thread committed"
+            );
+        }
+    }
 
     let total_ops = ops_per_thread * num_threads;
+    let rows = read_tx
+        .scan(&cntryl_midge::Query::new())
+        .expect("scan writes")
+        .try_collect()
+        .expect("collect writes");
+    assert_eq!(
+        rows.len() as u64,
+        total_ops,
+        "scan should return exactly the rows written by all threads"
+    );
+
     let total_ops_f64 =
         f64::from(u32::try_from(total_ops).expect("test operation count fits in u32"));
     let throughput = total_ops_f64 / elapsed.as_secs_f64();
@@ -145,23 +170,26 @@ fn should_maintain_ordering_with_runtime_coalescing() {
             .expect("commit");
     }
 
-    // Assert: Verify final value
+    // Assert: Verify final value. Use expect (not `if let`) so a missing or
+    // errored read fails the test instead of silently skipping the assertion.
     let read_tx = engine
         .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
         .expect("begin_tx");
-    if let Ok(Some(val)) = read_tx.get("counter".as_bytes()) {
-        let final_val: u64 = std::str::from_utf8(&val)
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .expect("Should parse as u64");
+    let val = read_tx
+        .get("counter".as_bytes())
+        .expect("read should not error")
+        .expect("counter key should be present after sequential commits");
+    let final_val: u64 = std::str::from_utf8(&val)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .expect("Should parse as u64");
 
-        // The final value should be the last one we wrote
-        assert_eq!(
-            final_val,
-            num_sequential_ops - 1,
-            "Final value should match last written value"
-        );
-    }
+    // The final value should be the last one we wrote
+    assert_eq!(
+        final_val,
+        num_sequential_ops - 1,
+        "Final value should match last written value"
+    );
 
     println!("OK: Ordering maintained across {num_sequential_ops} sequential operations");
 }

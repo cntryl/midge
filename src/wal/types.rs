@@ -287,7 +287,11 @@ mod tests {
 
     #[test]
     fn should_estimate_size_for_put_operation() {
-        // Arrange
+        // Arrange: compare against a record with an empty key/value so the
+        // assertion is pinned to the *formula's* per-byte accounting rather
+        // than a hardcoded overhead constant that would go stale the moment
+        // the internal frame layout changes.
+        let baseline = WalRecord::new(WalOpKind::Put, Bytes::new(), Some(Bytes::new()), 42, 1);
         let record = WalRecord::new(
             WalOpKind::Put,
             Bytes::from_static(b"mykey"),
@@ -299,20 +303,48 @@ mod tests {
         // Act
         let size = record.estimated_size();
 
-        // Assert
-        assert_eq!(size, 61);
+        // Assert: growing the key by 5 bytes and the value by 7 bytes must
+        // grow the estimate by exactly 12 bytes over the empty baseline.
+        assert_eq!(
+            size,
+            baseline.estimated_size() + "mykey".len() + "myvalue".len()
+        );
     }
 
     #[test]
     fn should_estimate_size_without_value() {
         // Arrange
-        let record = WalRecord::new(WalOpKind::Delete, Bytes::from_static(b"key"), None, 1, 1);
+        let with_empty_value = WalRecord::new(
+            WalOpKind::Delete,
+            Bytes::from_static(b"key"),
+            Some(Bytes::new()),
+            1,
+            1,
+        );
+        let without_value =
+            WalRecord::new(WalOpKind::Delete, Bytes::from_static(b"key"), None, 1, 1);
+        let longer_key = WalRecord::new(
+            WalOpKind::Delete,
+            Bytes::from_static(b"key-longer"),
+            None,
+            1,
+            1,
+        );
 
         // Act
-        let size = record.estimated_size();
+        let empty_value_size = with_empty_value.estimated_size();
+        let missing_value_size = without_value.estimated_size();
+        let longer_key_size = longer_key.estimated_size();
 
-        // Assert
-        assert_eq!(size, 52);
+        // Assert: a missing value must cost nothing beyond an explicit empty
+        // value (both contribute 0 value bytes) ...
+        assert_eq!(missing_value_size, empty_value_size);
+        // ... and lengthening the key must grow the estimate by exactly the
+        // number of added key bytes.
+        assert_eq!(
+            longer_key_size,
+            missing_value_size + (b"key-longer".len() - b"key".len())
+        );
     }
 
     #[test]

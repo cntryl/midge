@@ -67,39 +67,6 @@ fn should_read_from_sst_after_flush() -> MidgeResult<()> {
 }
 
 #[test]
-fn should_track_l0_sst_reads() -> MidgeResult<()> {
-    // Arrange: Create engine and write multiple batches to create L0 files
-    let engine = open_with_mode(&opts_for_mode("memory"), "memory");
-    let cf = engine.create_column_family("test").expect("create cf");
-
-    // Write and flush multiple times to create multiple L0 SSTs
-    for batch in 0..3 {
-        for i in 0..5 {
-            let key = format!("batch{batch}_key{i}");
-            let mut tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
-            tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)?;
-            tx.commit(WriteOptions::buffered())?;
-        }
-        engine.flush_cf(&cf)?;
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-
-    // Act: Read keys that require checking multiple L0 files
-    // Assert: Reads succeed across multiple L0 files
-    for batch in 0..3 {
-        let key = format!("batch{batch}_key0");
-        let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)?;
-        let value = read_tx.get(key.as_bytes())?;
-        assert_eq!(value, Some(b"value".to_vec().into()));
-    }
-
-    // Note: Metrics are tracked in RuntimeState but not yet exposed to Engine API
-    // This test verifies the read path works correctly with multiple L0 files
-    println!("Multi-L0 reads completed successfully");
-    Ok(())
-}
-
-#[test]
 fn should_use_key_ranges_for_higher_levels() -> MidgeResult<()> {
     // Arrange: Create engine
     let engine = open_with_mode(&opts_for_mode("memory"), "memory");

@@ -13,7 +13,7 @@
 //!   should_<behavior>_given_<context>_when_<condition>
 
 mod common;
-use cntryl_midge::TransactionMode;
+use cntryl_midge::{TransactionMode, WriteOptions};
 use common::*;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -146,52 +146,92 @@ fn should_not_collect_sst_files_referenced_by_manifest() {
 
 #[test]
 fn should_run_gc_after_configurable_interval() {
-    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-        eprintln!("\n=== GC: Configurable Interval Triggering (mode: {mode}) ===");
+    eprintln!("\n=== GC: Configurable Interval Triggering ===");
 
-        // Arrange: Set up engine with default compaction and GC timing
-        let engine = open_with_mode(&opts, mode);
-        let cf = engine.create_column_family("test").expect("create cf");
+    // Arrange: `for_each_storage_mode`'s helper opens every mode with
+    // background compaction disabled (deterministic for other tests), so
+    // this test needs its own engine with it explicitly enabled — the
+    // whole point here is proving GC runs *on its own periodic interval*,
+    // never via a manual `compact_all()` call.
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let db_path = temp_dir.path();
+    let engine = cntryl_midge::Engine::open(
+        cntryl_midge::OpenOptions::local(db_path)
+            .background_compaction(true)
+            .build()
+            .expect("build options"),
+    )
+    .expect("open engine");
+    let cf = engine.create_column_family("test").expect("create cf");
 
-        // Write and flush batch 1
+    // Four overlapping-key L0 generations cross the default L0 file-count
+    // compaction trigger. Background compaction is scheduled immediately
+    // after each flush publication, so it can start collecting earlier
+    // generations before this loop even finishes — record each newly
+    // flushed L0 input's name as it's created rather than assuming all
+    // four coexist once the loop completes. SST names encode their level
+    // as `<cf>_<level>_<seq>.sst`, so an L0 flush output is always tagged
+    // `_00_`, distinguishing it from a compacted (level >= 1) output that
+    // might already exist by the time we check.
+    let is_l0_output = |name: &String| name.split('_').nth(1) == Some("00");
+    let mut input_names = std::collections::BTreeSet::new();
+    for batch in 0..4 {
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin_tx");
-        for i in 0..100 {
-            let key = format!("batch1_key_{i:04}");
-            tx.put(key.as_bytes().to_vec(), b"v1".to_vec(), None).ok();
+        for index in 0..25 {
+            let key = format!("interval_key_{index:04}");
+            tx.put(key.into_bytes(), format!("v{batch}").into_bytes(), None)
+                .expect("put");
         }
-        tx.commit(buffered_write_options(mode)).expect("commit");
-        engine.flush_cf(&cf).expect("flush batch 1");
+        tx.commit(WriteOptions::buffered()).expect("commit");
+        engine.flush_cf(&cf).expect("flush L0 generation");
+        input_names.extend(local_sst_names(db_path).into_iter().filter(is_l0_output));
+    }
+    assert_eq!(
+        input_names.len(),
+        4,
+        "expected four distinct flushed L0 generations across the run"
+    );
 
-        // Act: Write and flush batch 2 (triggers potential compaction)
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .expect("begin_tx");
-        for i in 0..100 {
-            let key = format!("batch2_key_{i:04}");
-            tx.put(key.as_bytes().to_vec(), b"v2".to_vec(), None).ok();
-        }
-        tx.commit(buffered_write_options(mode)).expect("commit");
-        engine.flush_cf(&cf).expect("flush batch 2");
+    // Act: wait for background GC/compaction to run on its own; poll
+    // rather than sleep a fixed amount so this doesn't depend on exactly
+    // when the trigger fires while still bounding total runtime.
+    let any_input_collected = |db_path: &std::path::Path| {
+        input_names
+            .iter()
+            .any(|name| !db_path.join("sst").join(name).exists())
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(45);
+    while !any_input_collected(db_path) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "background GC never ran within its interval; all four flushed \
+             inputs are still present on disk: {input_names:?}"
+        );
+        thread::sleep(Duration::from_millis(200));
+    }
 
-        // Wait for background compaction/GC (if configured)
-        thread::sleep(Duration::from_millis(500));
+    // Assert: at least one obsolete compaction input is now gone from
+    // disk — proof the background interval actually triggered GC, not
+    // just that reads kept working.
+    assert!(
+        any_input_collected(db_path),
+        "background GC did not collect any obsolete compaction input"
+    );
 
-        // Assert: All data still readable (GC didn't corrupt anything)
-        let tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadOnly)
-            .expect("begin_tx");
-        for i in 0..100 {
-            let key = format!("batch1_key_{i:04}");
-            assert!(
-                tx.get(key.as_bytes()).ok().flatten().is_some(),
-                "batch 1 data lost in mode: {mode}"
-            );
-        }
+    let tx = engine
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+        .expect("begin_tx");
+    for index in 0..25 {
+        let key = format!("interval_key_{index:04}");
+        assert!(
+            tx.get(key.as_bytes()).ok().flatten().is_some(),
+            "data lost during background GC"
+        );
+    }
 
-        eprintln!("âœ“ GC interval completed without data loss");
-    });
+    eprintln!("✓ Background GC collected obsolete inputs within its interval");
 }
 
 #[test]
@@ -355,8 +395,17 @@ fn should_collect_orphaned_wal_segments_after_flush() {
             assert!(val.is_some(), "data lost after flush in mode: {mode}");
         }
 
-        // For local/cloud modes, old WAL segments should be marked for deletion
+        // For local/cloud modes, flush must advance the durability frontier
+        // past the WAL it just captured, leaving no outstanding
+        // memtable/WAL segment gap — the observable signal that the old
+        // segment is now orphaned and eligible for GC (the same contract
+        // `observability_api.rs` checks after an explicit flush).
         if mode != "memory" {
+            let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+            assert_eq!(
+                metrics.max_memtable_wal_segment_gap, 0,
+                "flush should leave no outstanding WAL segment gap in mode: {mode}"
+            );
             eprintln!("âœ“ WAL segment orphaned and eligible for collection");
         }
     });

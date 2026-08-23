@@ -15,8 +15,6 @@ use crate::metadata::FileMeta;
 #[derive(Debug, Clone)]
 pub struct CompactionPlan {
     pub input_files: Vec<String>,
-    #[cfg(test)]
-    pub output_files: Vec<String>,
     pub source_level: u32,
     pub target_level: u32,
     pub cf_id: u32,
@@ -40,8 +38,6 @@ impl CompactionPlan {
     pub fn new(cf_id: u32, source_level: u32, target_level: u32) -> Self {
         Self {
             input_files: Vec::new(),
-            #[cfg(test)]
-            output_files: Vec::new(),
             source_level,
             target_level,
             cf_id,
@@ -262,8 +258,6 @@ impl Compactor {
 
         Ok(Some(CompactionPlan {
             input_files,
-            #[cfg(test)]
-            output_files: Vec::new(),
             source_level: 0,
             target_level: 1,
             cf_id,
@@ -307,8 +301,6 @@ impl Compactor {
 
         Ok(Some(CompactionPlan {
             input_files,
-            #[cfg(test)]
-            output_files: Vec::new(),
             source_level: u32::try_from(level).expect("level index fits in u32"),
             target_level: u32::try_from(level + 1).expect("level index fits in u32"),
             cf_id,
@@ -520,60 +512,6 @@ mod tests {
     }
 
     // ============================================================================
-    // Tests for Compactor initialization invariants
-    // ============================================================================
-
-    #[test]
-    fn should_create_compactor_with_default_config_when_new() {
-        // Arrange
-        // (no setup required)
-
-        // Act
-        let compactor = Compactor::new();
-
-        // Assert
-        assert_eq!(compactor.config.max_levels, 7);
-        assert_eq!(compactor.config.l0_compaction_threshold, 4 * 1024 * 1024);
-        assert_eq!(compactor.config.level_multiplier, 10);
-    }
-
-    #[test]
-    fn should_create_compactor_with_default_when_using_default_trait() {
-        // Arrange
-        // (no setup required)
-
-        // Act
-        let compactor = Compactor::default();
-
-        // Assert
-        assert_eq!(compactor.config.max_levels, 7);
-        assert_eq!(compactor.config.l0_file_count_threshold, 4);
-        assert_eq!(compactor.config.max_compaction_input_files, 64);
-    }
-
-    #[test]
-    fn should_create_compactor_with_custom_config() {
-        // Arrange
-        let config = LeveledCompactionConfig {
-            l0_compaction_threshold: 8 * 1024 * 1024,
-            l0_file_count_threshold: 8,
-            max_compaction_input_files: 32,
-            level_multiplier: 5,
-            l1_target_size: 80 * 1024 * 1024,
-            max_levels: 10,
-        };
-
-        // Act
-        let compactor = Compactor::with_config(config.clone());
-
-        // Assert
-        assert_eq!(compactor.config.l0_compaction_threshold, 8 * 1024 * 1024);
-        assert_eq!(compactor.config.level_multiplier, 5);
-        assert_eq!(compactor.config.max_levels, 10);
-        assert_eq!(compactor.config.max_compaction_input_files, 32);
-    }
-
-    // ============================================================================
     // Tests for level target size calculation invariant
     // ============================================================================
 
@@ -591,30 +529,6 @@ mod tests {
         assert_eq!(l1_target, compactor.config.l1_target_size);
         assert_eq!(l1_target, l0_target * 10);
         assert_eq!(l2_target, l1_target * 10);
-    }
-
-    #[test]
-    fn should_use_l0_threshold_for_level_zero() {
-        // Arrange
-        let compactor = Compactor::new();
-
-        // Act
-        let l0_target = compactor.level_target_size(0);
-
-        // Assert
-        assert_eq!(l0_target, compactor.config.l0_compaction_threshold);
-    }
-
-    #[test]
-    fn should_use_l1_target_for_level_one() {
-        // Arrange
-        let compactor = Compactor::new();
-
-        // Act
-        let l1_target = compactor.level_target_size(1);
-
-        // Assert
-        assert_eq!(l1_target, compactor.config.l1_target_size);
     }
 
     #[test]
@@ -640,35 +554,21 @@ mod tests {
 
     #[test]
     fn should_handle_saturation_with_large_exponents() {
-        // Arrange
+        // Arrange: a level high enough that multiplier^(level-1) overflows u64
+        // (10^25 vastly exceeds u64::MAX), so saturating_pow/saturating_mul
+        // must clamp instead of panicking.
         let compactor = Compactor::new();
 
-        // Act: calculate target for very high level
-        let high_level_target = compactor.level_target_size(10);
+        // Act
+        let saturated_target = compactor.level_target_size(25);
 
-        // Assert: should not panic, should saturate or calculate correctly
-        assert!(high_level_target > 0);
+        // Assert: result is clamped to u64::MAX, not wrapped or panicked
+        assert_eq!(saturated_target, u64::MAX);
     }
 
     // ============================================================================
     // Tests for LeveledCompactionConfig invariants
     // ============================================================================
-
-    #[test]
-    fn should_create_default_config_with_sensible_values() {
-        // Arrange
-        // (no setup required)
-
-        // Act
-        let config = LeveledCompactionConfig::default();
-
-        // Assert
-        assert_eq!(config.l0_compaction_threshold, 4 * 1024 * 1024);
-        assert_eq!(config.l0_file_count_threshold, 4);
-        assert_eq!(config.level_multiplier, 10);
-        assert_eq!(config.l1_target_size, 40 * 1024 * 1024);
-        assert_eq!(config.max_levels, 7);
-    }
 
     #[test]
     fn should_have_l1_target_as_multiple_of_l0_threshold() {
@@ -1046,43 +946,40 @@ mod tests {
 
     #[test]
     fn should_deduplicate_files_in_compaction_plan() {
-        // Arrange
-        let compactor = Compactor::new();
-        let threshold = compactor.config.l0_compaction_threshold;
-
+        // Arrange: force a real collision through bounded_overlap_closure by
+        // giving the *same* file name at both the source level (L1) and the
+        // overlapping target level (L2). The overlap closure independently
+        // collects source files and overlapping target files, so without
+        // `dedupe_sort` this name would appear twice in `input_files`.
+        let compactor = Compactor::with_config(LeveledCompactionConfig {
+            l1_target_size: 1,
+            ..LeveledCompactionConfig::default()
+        });
         let files = vec![
-            // L0 files
             make_file(
-                "l0_file1.sst",
+                "dup.sst",
                 0,
-                0,
-                threshold / 2 + 1,
+                1,
+                2, // exceeds l1_target_size of 1, triggers L1->L2 planning
                 Some(b"a".to_vec()),
-                Some(b"m".to_vec()),
-            ),
-            make_file(
-                "l0_file2.sst",
-                0,
-                0,
-                threshold / 2 + 1,
-                Some(b"n".to_vec()),
                 Some(b"z".to_vec()),
             ),
+            make_file("dup.sst", 0, 2, 1, Some(b"a".to_vec()), Some(b"z".to_vec())),
         ];
 
         // Act
         let plan = compactor
             .pick_compaction(&files, 0)
-            .expect("compaction planning");
+            .expect("compaction planning")
+            .expect("plan for oversized L1");
 
-        // Assert: no duplicates in input_files
-        let plan = plan.unwrap();
-        let unique_count = plan
-            .input_files
-            .iter()
-            .collect::<std::collections::HashSet<_>>()
-            .len();
-        assert_eq!(unique_count, plan.input_files.len());
+        // Assert: the colliding name is deduplicated to a single entry
+        assert_eq!(
+            plan.input_files.iter().filter(|n| *n == "dup.sst").count(),
+            1,
+            "duplicate file name across source/target overlap must be deduplicated"
+        );
+        assert_eq!(plan.input_files, vec!["dup.sst".to_string()]);
     }
 
     #[test]
@@ -1223,72 +1120,6 @@ mod tests {
         let plan = plan.unwrap();
         assert_eq!(plan.cf_id, 0);
         assert!(!plan.input_files.iter().any(|f| f.contains("cf1")));
-    }
-
-    // ============================================================================
-    // Tests for CompactionPlan invariants
-    // ============================================================================
-
-    #[test]
-    fn should_initialize_output_files_empty_in_plan() {
-        // Arrange
-        // (no setup required)
-
-        // Act
-        let plan = CompactionPlan::new(0, 0, 1);
-
-        // Assert
-        assert!(plan.output_files.is_empty());
-    }
-
-    #[test]
-    fn should_initialize_input_files_empty_in_plan() {
-        // Arrange
-        // (no setup required)
-
-        // Act
-        let plan = CompactionPlan::new(0, 0, 1);
-
-        // Assert
-        assert!(plan.input_files.is_empty());
-    }
-
-    #[test]
-    fn should_initialize_output_seq_zero_in_plan() {
-        // Arrange
-        // (no setup required)
-
-        // Act
-        let plan = CompactionPlan::new(0, 0, 1);
-
-        // Assert
-        assert_eq!(plan.output_seq, 0);
-    }
-
-    #[test]
-    fn should_set_output_seq_with_builder() {
-        // Arrange
-        // (no setup required)
-
-        // Act
-        let plan = CompactionPlan::new(0, 0, 1).with_output_seq(42);
-
-        // Assert
-        assert_eq!(plan.output_seq, 42);
-    }
-
-    #[test]
-    fn should_set_levels_correctly_in_plan() {
-        // Arrange
-        // (no setup required)
-
-        // Act
-        let plan = CompactionPlan::new(5, 2, 3);
-
-        // Assert
-        assert_eq!(plan.cf_id, 5);
-        assert_eq!(plan.source_level, 2);
-        assert_eq!(plan.target_level, 3);
     }
 
     #[test]
