@@ -390,8 +390,16 @@ fn should_not_starve_foreground_writes_given_background_spill_activity() {
                     tx.put(key.as_bytes().to_vec(), vec![b'b'; 512], None)
                         .expect("background put");
                 }
-                tx.commit(write_options).expect("background commit");
-                round += 1;
+                match tx.commit(write_options) {
+                    Ok(()) => round += 1,
+                    Err(cntryl_midge::MidgeError::WriteStall(_)) => {
+                        // The foreground and background writers share the
+                        // same deliberately tiny budget. Backpressure is an
+                        // expected retry signal, not a worker failure.
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(other) => panic!("background commit failed: {other:?}"),
+                }
             }
         });
 
