@@ -40,7 +40,7 @@ fn should_create_engine_in_all_modes() {
             .begin_tx(cf.id(), TransactionMode::ReadOnly)
             .unwrap_or_else(|e| panic!("begin_tx (read) failed in mode {mode}: {e}"));
         assert_eq!(
-            read_tx.get(b"init_probe").ok().flatten(),
+            read_tx.get(b"init_probe").expect("read init probe"),
             Some(bytes::Bytes::from_static(b"ok")),
             "engine opened in mode {mode} could not read back a write it just committed"
         );

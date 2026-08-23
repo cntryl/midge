@@ -176,7 +176,11 @@ fn should_not_collect_cloud_objects_referenced_by_manifest() {
         let mut found = 0;
         for i in 0..100 {
             let key = format!("ref_key_{i:04}");
-            if tx.get(key.as_bytes()).ok().flatten().is_some() {
+            if tx
+                .get(key.as_bytes())
+                .expect("read manifest-referenced key")
+                .is_some()
+            {
                 found += 1;
             }
         }

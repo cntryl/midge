@@ -135,7 +135,9 @@ fn should_trigger_eviction_at_high_watermark() {
         let readable = (0..10)
             .filter(|i| {
                 let key = format!("large_key_{i:02}");
-                tx.get(key.as_bytes()).ok().flatten().is_some()
+                tx.get(key.as_bytes())
+                    .expect("read after high-watermark eviction")
+                    .is_some()
             })
             .count();
 
@@ -326,7 +328,11 @@ fn should_prefer_local_reads_before_eviction() {
     let mut local_hits = 0;
     for i in 0..50 {
         let key = format!("local_pref_key_{i:04}");
-        if tx.get(key.as_bytes()).ok().flatten().is_some() {
+        if tx
+            .get(key.as_bytes())
+            .expect("read locally cached key")
+            .is_some()
+        {
             local_hits += 1;
         }
     }
@@ -416,7 +422,11 @@ fn should_fetch_from_cloud_after_local_eviction() {
     let mut cloud_fetched = 0;
     for i in 0..20 {
         let key = format!("evict_fetch_key_{i:02}");
-        if tx.get(key.as_bytes()).ok().flatten().is_some() {
+        if tx
+            .get(key.as_bytes())
+            .expect("read cloud-evicted key")
+            .is_some()
+        {
             cloud_fetched += 1;
         }
     }
@@ -477,7 +487,11 @@ fn should_persist_eviction_state_across_restart() {
             let mut persisted = 0;
             for i in 0..15 {
                 let key = format!("persist_evict_key_{i:02}");
-                if tx.get(key.as_bytes()).ok().flatten().is_some() {
+                if tx
+                    .get(key.as_bytes())
+                    .expect("read after eviction-state restart")
+                    .is_some()
+                {
                     persisted += 1;
                 }
             }
@@ -561,7 +575,11 @@ fn should_handle_cloud_unavailable_during_eviction() {
     let mut accessible = 0;
     for i in 0..12 {
         let key = format!("cloud_down_key_{i:02}");
-        if tx.get(key.as_bytes()).ok().flatten().is_some() {
+        if tx
+            .get(key.as_bytes())
+            .expect("read during cloud outage")
+            .is_some()
+        {
             accessible += 1;
         }
     }
@@ -618,13 +636,19 @@ fn should_keep_pinned_sst_local_given_active_snapshot_when_eviction_runs() {
         });
 
         // Wait for eviction to complete
-        eviction_handle.join().ok();
+        eviction_handle
+            .join()
+            .expect("background eviction thread should not panic");
 
         // Assert: Snapshot reads still succeed (SST not evicted)
         let mut snapshot_reads = 0;
         for i in 0..25 {
             let key = format!("reader_protect_key_{i:02}");
-            if snapshot.get(key.as_bytes()).ok().flatten().is_some() {
+            if snapshot
+                .get(key.as_bytes())
+                .expect("read pinned snapshot key")
+                .is_some()
+            {
                 snapshot_reads += 1;
             }
         }

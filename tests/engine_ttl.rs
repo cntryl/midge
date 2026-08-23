@@ -811,7 +811,7 @@ fn should_expire_keys_covered_by_range_tombstone_during_compaction() {
         thread::sleep(Duration::from_millis(1100));
 
         // Act: Trigger compaction
-        engine.compact_all().ok();
+        engine.compact_all().expect("compact TTL levels");
 
         // Assert: All keys expired and/or tombstoned, compaction cleaned them up
         let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
@@ -879,7 +879,9 @@ fn should_handle_ttl_expiry_during_multi_level_compaction() {
         let l0_found = (0..50)
             .filter(|i| {
                 let key = format!("level0_key_{i:04}");
-                tx.get(key.as_bytes()).ok().flatten().is_some()
+                tx.get(key.as_bytes())
+                    .expect("read expired L0 key")
+                    .is_some()
             })
             .count();
         assert_eq!(l0_found, 0, "L0 expired keys should be removed");
@@ -888,7 +890,9 @@ fn should_handle_ttl_expiry_during_multi_level_compaction() {
         let l1_found = (50..100)
             .filter(|i| {
                 let key = format!("level1_key_{i:04}");
-                tx.get(key.as_bytes()).ok().flatten().is_some()
+                tx.get(key.as_bytes())
+                    .expect("read retained L1 key")
+                    .is_some()
             })
             .count();
         assert!(l1_found >= 40, "L1 keys should remain");

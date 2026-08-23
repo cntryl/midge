@@ -226,7 +226,9 @@ fn should_run_gc_after_configurable_interval() {
     for index in 0..25 {
         let key = format!("interval_key_{index:04}");
         assert!(
-            tx.get(key.as_bytes()).ok().flatten().is_some(),
+            tx.get(key.as_bytes())
+                .expect("read after background GC")
+                .is_some(),
             "data lost during background GC"
         );
     }
@@ -286,7 +288,9 @@ fn should_persist_gc_state_across_restart() {
             for i in 0..150 {
                 let key = format!("persist_key_{i:04}");
                 assert!(
-                    tx.get(key.as_bytes()).ok().flatten().is_some(),
+                    tx.get(key.as_bytes())
+                        .expect("read after GC state restart")
+                        .is_some(),
                     "data lost after restart in mode: {mode}"
                 );
             }
@@ -339,7 +343,9 @@ fn should_handle_gc_with_active_readers() {
         );
 
         // Wait for compaction thread
-        compaction_handle.join().ok();
+        compaction_handle
+            .join()
+            .expect("background compaction thread should not panic");
 
         // Assert: Drop snapshot; verify data still present
         drop(snapshot);
@@ -349,7 +355,9 @@ fn should_handle_gc_with_active_readers() {
         for i in 0..100 {
             let key = format!("reader_key_{i:04}");
             assert!(
-                tx.get(key.as_bytes()).ok().flatten().is_some(),
+                tx.get(key.as_bytes())
+                    .expect("read after active-reader compaction")
+                    .is_some(),
                 "data lost after compaction in mode: {mode}"
             );
         }
