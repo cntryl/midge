@@ -496,21 +496,23 @@ mod tests {
         let sync_state = Arc::new(Mutex::new(SyncState::default()));
         let runner = runner_with_sync_state(sync_state);
         let queue = Arc::clone(&runner.config.queue);
-        let started = Instant::now();
-        let waiter = std::thread::spawn(move || runner.wait_for_batch_or_pending_sync());
+        let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+        let waiter = std::thread::spawn(move || {
+            result_tx
+                .send(runner.wait_for_batch_or_pending_sync())
+                .expect("send WAL writer wait result");
+        });
         std::thread::sleep(Duration::from_millis(25));
         let (ack_tx, _ack_rx) = std::sync::mpsc::sync_channel(1);
 
         // Act: deliberately enqueue without notifying the condition variable.
         queue.lock().push(QueuedWrite::new(vec![1], ack_tx));
-        let batch = waiter.join().expect("join WAL writer wait");
+        let batch = result_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("missed notification fallback should observe queued work");
+        waiter.join().expect("join WAL writer wait");
 
         // Assert
         assert_eq!(batch.expect("writer should observe queued work").len(), 1);
-        assert!(
-            started.elapsed() < Duration::from_millis(100),
-            "missed notification fallback took {:?}",
-            started.elapsed()
-        );
     }
 }

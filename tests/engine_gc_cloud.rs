@@ -204,7 +204,7 @@ fn should_not_collect_cloud_objects_referenced_by_manifest() {
 /// `slice6::after_manifest_persist_before_sst_gc` failpoint so the prior
 /// (successful) upload of the compacted output isn't itself blocked.
 #[test]
-#[cfg(feature = "failpoints")]
+#[cfg(all(feature = "failpoints", unix))]
 fn should_handle_gc_when_cloud_delete_fails() {
     use std::os::unix::fs::PermissionsExt;
 

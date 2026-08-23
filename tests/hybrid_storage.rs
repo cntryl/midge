@@ -16,7 +16,9 @@
 //!   should_<behavior>_given_<context>_when_<condition>
 
 mod common;
-use cntryl_midge::{Engine, EngineHealth, MidgeError, OpenOptions, TransactionMode, WriteOptions};
+#[cfg(unix)]
+use cntryl_midge::EngineHealth;
+use cntryl_midge::{Engine, MidgeError, OpenOptions, TransactionMode, WriteOptions};
 use common::*;
 use std::sync::Arc;
 use std::thread;
