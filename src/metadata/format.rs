@@ -239,6 +239,23 @@ mod tests {
     }
 
     #[test]
+    fn should_reject_open_given_older_format_version_when_starting() {
+        // Arrange: supported databases must match the current format exactly.
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            format_marker_path(temp_dir.path()),
+            format!("{FORMAT_PREFIX}{}\n", CURRENT_FORMAT_VERSION - 1),
+        )
+        .expect("write marker");
+
+        // Act
+        let error = validate_format_marker(temp_dir.path()).expect_err("older version");
+
+        // Assert
+        assert!(matches!(error, MidgeError::CompatibilityError(_)));
+    }
+
+    #[test]
     fn should_reject_open_given_invalid_format_marker_when_starting() {
         // Arrange
         let temp_dir = tempfile::tempdir().expect("temp dir");

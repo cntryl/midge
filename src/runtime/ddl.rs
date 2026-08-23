@@ -156,9 +156,7 @@ impl DdlRegistry {
     fn apply_edit(&mut self, edit: &ManifestEdit) -> MidgeResult<()> {
         if !matches!(
             edit,
-            ManifestEdit::CreateColumnFamily { .. }
-                | ManifestEdit::DropColumnFamily { .. }
-                | ManifestEdit::DropColumnFamilyAt { .. }
+            ManifestEdit::CreateColumnFamily { .. } | ManifestEdit::DropColumnFamilyAt { .. }
         ) {
             return Err(MidgeError::InvalidArgument(
                 "remote DDL registry accepts only column-family edits".to_string(),
@@ -296,11 +294,6 @@ fn local_edit_matches(state: &RuntimeState, edit: &ManifestEdit) -> bool {
             .column_families
             .iter()
             .any(|cf| cf.id == *id && cf.name == *name && cf.deleted_at.is_none()),
-        ManifestEdit::DropColumnFamily { id } => state
-            .manifest
-            .column_families
-            .iter()
-            .any(|cf| cf.id == *id && cf.deleted_at.is_some()),
         ManifestEdit::DropColumnFamilyAt {
             id, drop_sequence, ..
         } => state.manifest.column_families.iter().any(|cf| {
@@ -321,7 +314,7 @@ fn apply_remote_committed_visibility(state: &mut RuntimeState, edit: &ManifestEd
                 crate::runtime::state::ColumnFamilyState::new(*id, name.clone())
             });
         }
-        ManifestEdit::DropColumnFamily { id } | ManifestEdit::DropColumnFamilyAt { id, .. } => {
+        ManifestEdit::DropColumnFamilyAt { id, .. } => {
             state.column_families.remove(id);
         }
         _ => {}
@@ -353,7 +346,7 @@ pub(crate) fn apply_local_edit(state: &mut RuntimeState, edit: &ManifestEdit) ->
                 crate::runtime::state::ColumnFamilyState::new(*id, name.clone())
             });
         }
-        ManifestEdit::DropColumnFamily { id } | ManifestEdit::DropColumnFamilyAt { id, .. } => {
+        ManifestEdit::DropColumnFamilyAt { id, .. } => {
             state.column_families.remove(id);
         }
         _ => {}

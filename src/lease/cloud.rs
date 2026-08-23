@@ -410,6 +410,7 @@ impl LeaderStore for SimulatedLeaderStore {
                     .to_rfc3339(),
                 })
             },
+            0,
         )?;
         self.validity.activate(record.epoch, valid_until)?;
         Ok(record)
@@ -758,7 +759,8 @@ impl PrimaryLease for CloudStorageLease {
             self.validity.remaining(expected_epoch)?;
             self.leader_store
                 .renew_leadership(&self.holder_id, expected_epoch)?;
-            self.leader_store.validate_epoch(expected_epoch)?;
+            self.leader_store
+                .validate_epoch(&self.holder_id, expected_epoch)?;
             tracing::trace!("cloud storage lease renewed");
             Ok(())
         })();

@@ -176,6 +176,7 @@ pub struct EventLoop {
     compaction_publication_degraded: bool,
     writer_epoch: u64,
     leader_store: Option<Arc<dyn crate::lease::LeaderStore>>,
+    leader_holder_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -260,7 +261,7 @@ impl EventLoop {
 
         // Wire leader store for epoch validation at sync boundaries.
         if let Some(store) = config.leader_store.clone() {
-            wal_actor.set_leader_store(store);
+            wal_actor.set_leader_store(store, config.leader_holder_id.clone().unwrap_or_default());
         }
 
         // 🔑 CRITICAL: Use the correct key for durability_waiters based on mode
@@ -330,6 +331,7 @@ impl EventLoop {
             compaction_publication_degraded: false,
             writer_epoch: config.writer_epoch,
             leader_store: config.leader_store.clone(),
+            leader_holder_id: config.leader_holder_id.clone(),
         };
 
         if let Some(storage) = config.hybrid_storage {
@@ -432,7 +434,10 @@ impl EventLoop {
         self.check_lease_health()?;
         if let Some(store) = &self.leader_store {
             store
-                .validate_epoch(self.writer_epoch)
+                .validate_epoch(
+                    self.leader_holder_id.as_deref().unwrap_or_default(),
+                    self.writer_epoch,
+                )
                 .map_err(|error| crate::common::MidgeError::Fenced(error.to_string()))?;
         }
         Ok(())

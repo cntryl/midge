@@ -703,6 +703,12 @@ fn expire_crashed_process_lease(db_path: &Path) {
         if content.contains("acquired_at: ") {
             content = content
                 .lines()
+                // Drop the checksum line rather than recompute it: a
+                // record with no checksum field is valid-but-unchecked
+                // (backward compatibility with pre-checksum records), so
+                // this keeps the rewritten timestamp from being rejected
+                // as corrupt.
+                .filter(|line| !line.starts_with("checksum: "))
                 .map(|line| {
                     if line.starts_with("acquired_at: ") {
                         "acquired_at: 1970-01-01T00:00:00Z".to_string()

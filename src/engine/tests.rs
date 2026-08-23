@@ -1209,8 +1209,16 @@ fn should_recover_valid_active_cloud_wal_prefix_given_zero_filled_tail() {
 }
 
 #[test]
-fn should_fail_strict_cloud_recovery_given_mixed_writer_epochs_in_active_wal() {
+fn should_accept_strict_cloud_recovery_given_mixed_writer_epochs_in_active_wal() {
     // Arrange
+    //
+    // A local active WAL spanning more than one writer_epoch is the normal
+    // shape after an ordinary failover (the file is reopened in place under
+    // a new epoch and appended to), not corruption. Unlike a single
+    // cloud-uploaded segment object — which is scoped to one epoch and
+    // enforces that separately in `cloud_segment::inspect_bytes` — local
+    // active-WAL inspection must accept this under the default (non-Salvage)
+    // recovery policy. See lsm-spec format/wal.md §6.4 point 3.
     let temp_dir = tempfile::tempdir().expect("create temp dir");
     let cloud_wal_dir = temp_dir.path().join("cloud_store").join("wal");
     let local_wal_dir = temp_dir.path().join("wal");
@@ -1233,23 +1241,28 @@ fn should_fail_strict_cloud_recovery_given_mixed_writer_epochs_in_active_wal() {
     let catalog = cloud_wal_test_catalog(9, &[]);
 
     // Act
-    let result = startup::CloudStartupRecovery::materialize_simulated_cloud_wal_recovery_dir(
+    let plan = startup::CloudStartupRecovery::materialize_simulated_cloud_wal_recovery_dir(
         &cloud_wal_dir,
         temp_dir.path(),
         RecoveryPolicy::Strict,
         &catalog,
-    );
+    )
+    .expect("recover active WAL spanning a failover epoch bump");
 
     // Assert
-    assert!(matches!(
-        result,
-        Err(crate::common::MidgeError::RecoveryFailed(message))
-            if message.contains("mixes writer epochs 7 and 8")
-    ));
     assert_eq!(
-        std::fs::read(active_path).expect("read authoritative active WAL after failed recovery"),
-        active_bytes,
-        "strict recovery must retain the mixed-epoch active WAL"
+        plan.active_wal,
+        Some(crate::runtime::RecoveredCloudActiveWal {
+            max_sequence: 2,
+            writer_epoch: 8,
+            record_count: 2,
+            valid_bytes: active_bytes.len(),
+        })
+    );
+    assert_eq!(
+        std::fs::read(plan.replay_dir.join(crate::wal::ACTIVE_FILE_NAME))
+            .expect("read staged active WAL"),
+        active_bytes
     );
 }
 

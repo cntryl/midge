@@ -363,15 +363,6 @@ impl Manifest {
                     });
                 }
             }
-            crate::metadata::ManifestEdit::DropColumnFamily { id } => {
-                let names = self
-                    .files
-                    .iter()
-                    .filter(|file| file.cf_id == *id)
-                    .map(|file| file.name.clone())
-                    .collect();
-                let _ = self.delete_column_family_with_reclamation(*id, 0, names);
-            }
             crate::metadata::ManifestEdit::DropColumnFamilyAt {
                 id,
                 drop_sequence,
