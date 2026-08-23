@@ -209,6 +209,17 @@ fn should_drop_column_family_given_empty_cf_when_requested() {
 
         // Assert
         assert!(result.is_ok());
+        assert!(
+            engine.get_column_family("test_cf").is_none(),
+            "dropped cf must no longer be resolvable by name, mode: {mode}"
+        );
+        assert!(
+            matches!(
+                engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly),
+                Err(MidgeError::InvalidArgument(_))
+            ),
+            "transactions against a dropped cf id must be rejected, mode: {mode}"
+        );
     });
 }
 
@@ -229,8 +240,20 @@ fn should_drop_column_family_given_flushed_data_when_requested() {
         // Act
         let result = engine.drop_column_family(cf_id);
 
-        // Assert
+        // Assert: the cf and its already-flushed data are gone, not just the
+        // drop call returning Ok.
         assert!(result.is_ok());
+        assert!(
+            engine.get_column_family("test_cf").is_none(),
+            "dropped cf with flushed data must no longer be resolvable, mode: {mode}"
+        );
+        assert!(
+            matches!(
+                engine.begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly),
+                Err(MidgeError::InvalidArgument(_))
+            ),
+            "reads against a dropped cf with flushed sst data must be rejected, mode: {mode}"
+        );
     });
 }
 
@@ -392,7 +415,10 @@ fn should_fail_drop_default_column_family_given_drop_request_when_default_cf() {
         let result = engine.drop_column_family(default_cf_id);
 
         // Assert
-        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(MidgeError::InvalidArgument(message)) if message.contains("default")
+        ));
     });
 }
 

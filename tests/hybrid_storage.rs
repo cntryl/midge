@@ -16,11 +16,62 @@
 //!   should_<behavior>_given_<context>_when_<condition>
 
 mod common;
-use cntryl_midge::{Engine, OpenOptions, TransactionMode};
+use cntryl_midge::{Engine, EngineHealth, MidgeError, OpenOptions, TransactionMode, WriteOptions};
 use common::*;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+
+/// Count files nested anywhere under `root`, used to prove that the
+/// filesystem-backed simulated cloud/local stores actually received or lost
+/// data, rather than trusting a `get()` result alone.
+fn count_files_recursive(root: &std::path::Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    let mut count = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            count += count_files_recursive(&path);
+        } else {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// A value that defeats SST compression, so its on-disk footprint tracks its
+/// logical size closely enough to reliably cross a storage budget.
+fn incompressible_value(len: usize, seed: u8) -> Vec<u8> {
+    (0..len)
+        .map(|i| {
+            i.wrapping_mul(2_654_435_761)
+                .wrapping_add(usize::from(seed))
+                .wrapping_shr(13)
+                .to_le_bytes()[0]
+        })
+        .collect()
+}
+
+/// Recursively apply a permission mode to every directory under (and
+/// including) `root`. Unix directory-write checks are per-directory, so
+/// blocking writes anywhere under a simulated cloud bucket (not just its
+/// top-level directory) requires chmod'ing every subdirectory that already
+/// exists, such as the WAL directory created at engine-open time.
+#[cfg(unix)]
+fn set_dir_permissions_recursive(root: &std::path::Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                set_dir_permissions_recursive(&path, mode);
+            }
+        }
+    }
+    let _ = std::fs::set_permissions(root, std::fs::Permissions::from_mode(mode));
+}
 
 // ============================================================================
 // TEST GROUP: Memory Budget & Eviction Control
@@ -84,7 +135,9 @@ fn should_trigger_eviction_at_high_watermark() {
         let readable = (0..10)
             .filter(|i| {
                 let key = format!("large_key_{i:02}");
-                tx.get(key.as_bytes()).ok().flatten().is_some()
+                tx.get(key.as_bytes())
+                    .expect("read after high-watermark eviction")
+                    .is_some()
             })
             .count();
 
@@ -99,60 +152,81 @@ fn should_trigger_eviction_at_high_watermark() {
 
 #[test]
 fn should_block_writes_at_emergency_watermark() {
-    for_each_storage_mode(&["local"], |mode, opts| {
-        eprintln!("\n=== Hybrid: Block Writes at Emergency (mode: {mode}) ===");
+    // Arrange
+    // Note: "local" storage mode has no hybrid/cloud tier at all, so it never
+    // exercises `StorageBudgetActor::reserve_for_flush_with_token`. This test
+    // needs the real hybrid storage path, so it opens a cloud-simulated
+    // engine directly with a tiny local storage budget instead of looping
+    // over `for_each_storage_mode`.
+    let temp_dir = test_temp_dir();
+    let budget_bytes = 256 * 1024; // 256KB local budget
+    let opts = OpenOptions::cloud_simulated(temp_dir.path(), "test-bucket", "test-prefix")
+        .with_simulated_cloud_local_storage_budget(budget_bytes)
+        .build()
+        .expect("build options");
+    let engine = Engine::open(opts).expect("open cloud-simulated engine");
+    let cf = engine.create_column_family("test").expect("create cf");
 
-        // Arrange
-        let engine = open_with_mode(&opts, mode);
-        let cf = engine.create_column_family("test").expect("create cf");
+    // 100KB values against a 256KB budget: a handful of explicit flushes must
+    // exceed the emergency watermark (98% used). The memtable is left at its
+    // default (large) size and every write is flushed immediately, so any
+    // stall observed here comes from `StorageBudgetActor` (the hybrid local
+    // storage budget), not from ordinary memtable backpressure. Values must
+    // be incompressible or the SST compression policy shrinks them to
+    // nothing and the budget is never actually approached.
+    let mut backpressure_error: Option<MidgeError> = None;
 
-        // Act: Fill close to emergency watermark
-        let large_value = vec![b'Y'; 512 * 1024]; // 512KB value
+    // Act
+    for attempt in 0_u8..40 {
+        let large_value = incompressible_value(100 * 1024, attempt);
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin_tx");
+        let key = format!("emergency_key_{attempt:02}");
 
-        let mut emergency_write_blocked = false;
-        let mut writes_completed = 0;
-
-        for attempt in 0..30 {
-            let mut tx = engine
-                .begin_tx(cf.id(), TransactionMode::ReadWrite)
-                .expect("begin_tx");
-            let key = format!("emergency_key_{attempt:02}");
-
-            if let Ok(()) = tx.put(key.as_bytes().to_vec(), large_value.clone(), None) {
-                // Write succeeded in transaction
-                if let Ok(()) = tx.commit(buffered_write_options(mode)) {
-                    writes_completed += 1;
-                } else {
-                    // Commit may fail at emergency watermark
-                    emergency_write_blocked = true;
-                    break;
-                }
-            } else {
-                // Put may fail at emergency watermark
-                emergency_write_blocked = true;
-                break;
-            }
-
-            // Wait for eviction to process
-            if attempt % 5 == 0 {
-                thread::sleep(Duration::from_millis(100));
-            }
+        if let Err(err) = tx.put(key.as_bytes().to_vec(), large_value.clone(), None) {
+            backpressure_error = Some(err);
+            break;
         }
+        if let Err(err) = tx.commit(WriteOptions::cloud_async()) {
+            backpressure_error = Some(err);
+            break;
+        }
+        if let Err(err) = engine.flush_cf(&cf) {
+            backpressure_error = Some(err);
+            break;
+        }
+    }
 
-        // Assert: Either:
-        // 1. Writes completed (eviction kept up with load)
-        // 2. Writes blocked (backpressure activated)
-        // NOT: Panic or crash
+    // Assert: the emergency/critical watermark actually fired through the
+    // real hybrid storage backpressure mechanism, not some unrelated
+    // failure. `StorageBudgetActor::reserve_for_flush_with_token` (see
+    // `src/runtime/actors/flush.rs`) is the only place these exact message
+    // fragments are produced, so matching on them (rather than just the
+    // error variant) proves this specific code path fired.
+    let error = backpressure_error
+        .expect("expected the storage budget watermark to eventually reject a write or flush");
+    let message = error.to_string();
+    assert!(
+        matches!(error, MidgeError::NoSpace(_) | MidgeError::WriteStall(_))
+            && (message.contains("waiting for cloud upload capacity")
+                || message.contains("waiting for compaction capacity")
+                || message.contains("has no durable capacity")),
+        "backpressure fired but not through the hybrid storage budget actor: {error:?}"
+    );
 
-        assert!(
-            writes_completed > 0 || emergency_write_blocked,
-            "neither writes completed nor backpressure activated in mode: {mode}"
-        );
+    // Cross-check against the hybrid budget's own usage accounting (not
+    // dependent on global telemetry being enabled): the local store must
+    // actually have been under real pressure (>= the high watermark) when
+    // this fired, not some unrelated error.
+    let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+    assert!(
+        metrics.hybrid_usage_percent >= 90,
+        "backpressure error was raised but hybrid local storage usage ({}%) never reached the high watermark",
+        metrics.hybrid_usage_percent
+    );
 
-        eprintln!(
-            "âœ“ Emergency watermark handling active; writes: {writes_completed}, blocked: {emergency_write_blocked}"
-        );
-    });
+    eprintln!("âœ“ Emergency watermark blocked writes via {error:?}");
 }
 
 #[test]
@@ -218,96 +292,152 @@ fn should_resume_writes_given_cloud_upload_completes_when_emergency_watermark_is
 
 #[test]
 fn should_prefer_local_reads_before_eviction() {
-    for_each_storage_mode(&["local"], |mode, opts| {
-        eprintln!("\n=== Hybrid: Prefer Local Reads (mode: {mode}) ===");
+    // Arrange
+    // "local" storage mode has no cloud tier, so it cannot distinguish a
+    // local read from a cloud fallback. Use the real hybrid storage path
+    // with a budget generous enough that nothing is ever evicted, then prove
+    // the reads were local via the eviction-queue metric and the on-disk
+    // local cache, not just "get() returned something".
+    let temp_dir = test_temp_dir();
+    let budget_bytes = 64 * 1024 * 1024; // comfortably above the data written
+    let opts = OpenOptions::cloud_simulated(temp_dir.path(), "test-bucket", "test-prefix")
+        .with_simulated_cloud_local_storage_budget(budget_bytes)
+        .build()
+        .expect("build options");
+    let engine = Engine::open(opts).expect("open cloud-simulated engine");
+    let cf = engine.create_column_family("test").expect("create cf");
 
-        // Arrange: Write small data that fits comfortably in cache
-        let engine = open_with_mode(&opts, mode);
-        let cf = engine.create_column_family("test").expect("create cf");
+    let small_value = b"cached_value";
 
-        let small_value = b"cached_value";
+    let mut tx = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .expect("begin_tx");
+    for i in 0..50 {
+        let key = format!("local_pref_key_{i:04}");
+        tx.put(key.as_bytes().to_vec(), small_value.to_vec(), None)
+            .expect("put");
+    }
+    tx.commit(WriteOptions::cloud_async()).expect("commit");
+    engine.flush_cf(&cf).expect("flush");
 
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .expect("begin_tx");
-        for i in 0..50 {
-            let key = format!("local_pref_key_{i:04}");
-            tx.put(key.as_bytes().to_vec(), small_value.to_vec(), None)
-                .ok();
+    // Act: Read from cached SST (should be local, not cloud)
+    let tx = engine
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+        .expect("begin_tx");
+
+    let mut local_hits = 0;
+    for i in 0..50 {
+        let key = format!("local_pref_key_{i:04}");
+        if tx
+            .get(key.as_bytes())
+            .expect("read locally cached key")
+            .is_some()
+        {
+            local_hits += 1;
         }
-        tx.commit(buffered_write_options(mode)).expect("commit");
-        engine.flush_cf(&cf).expect("flush");
+    }
 
-        // Act: Read from cached SST (should be local, not cloud)
-        let tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadOnly)
-            .expect("begin_tx");
+    // Assert: every read succeeded...
+    assert_eq!(
+        local_hits, 50,
+        "expected every key to be readable while comfortably under budget"
+    );
 
-        let mut local_hits = 0;
-        for i in 0..50 {
-            let key = format!("local_pref_key_{i:04}");
-            if tx.get(key.as_bytes()).ok().flatten().is_some() {
-                local_hits += 1;
-            }
-        }
+    // ...and, crucially, nothing was queued for eviction to cloud, so those
+    // reads are provably local rather than a cloud round-trip.
+    let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+    assert_eq!(
+        metrics.hybrid_pending_evictions, 0,
+        "no eviction should have been queued while comfortably under budget"
+    );
 
-        // Assert: Local reads succeed with high hit rate
-        // (In a real scenario with cloud metrics, we'd verify 0 cloud fetches)
-        assert!(
-            local_hits >= 45,
-            "local cache hit rate too low in mode: {mode}"
-        );
+    let hybrid_local_dir = temp_dir.path().join("hybrid_local");
+    assert!(
+        count_files_recursive(&hybrid_local_dir) > 0,
+        "expected flushed SST data to remain on local disk in {}",
+        hybrid_local_dir.display()
+    );
 
-        eprintln!("âœ“ Local read preference working; {local_hits} cache hits");
-    });
+    eprintln!("âœ“ Local read preference confirmed; {local_hits} cache hits, 0 pending evictions");
 }
 
 #[test]
 fn should_fetch_from_cloud_after_local_eviction() {
-    for_each_storage_mode(&["local"], |mode, opts| {
-        eprintln!("\n=== Hybrid: Fetch from Cloud After Eviction (mode: {mode}) ===");
+    // Arrange
+    // "local" storage mode never uploads anything, so it cannot exercise a
+    // cloud fetch. Use a tiny local budget against the real hybrid storage
+    // path so eviction genuinely happens, then prove it via the simulated
+    // cloud bucket's on-disk contents and the pending-eviction metric before
+    // trusting `get()` to return the right values.
+    let temp_dir = test_temp_dir();
+    let budget_bytes = 256 * 1024; // small budget forces eviction under load
+    let opts = OpenOptions::cloud_simulated(temp_dir.path(), "test-bucket", "test-prefix")
+        .with_simulated_cloud_local_storage_budget(budget_bytes)
+        .build()
+        .expect("build options");
+    let engine = Engine::open(opts).expect("open cloud-simulated engine");
+    let cf = engine.create_column_family("test").expect("create cf");
 
-        // Arrange: Write and evict to cloud
-        let engine = open_with_mode(&opts, mode);
-        let cf = engine.create_column_family("test").expect("create cf");
+    // Write large batch (20 * 64KB = 1.28MB, well over the 256KB budget)
+    let value = vec![b'V'; 64 * 1024];
 
-        // Write large batch
-        let value = vec![b'V'; 64 * 1024]; // 64KB per value
+    let mut tx = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .expect("begin_tx");
+    for i in 0..20 {
+        let key = format!("evict_fetch_key_{i:02}");
+        tx.put(key.as_bytes().to_vec(), value.clone(), None)
+            .expect("put");
+    }
+    tx.commit(WriteOptions::cloud_async()).expect("commit");
+    engine.flush_cf(&cf).ok(); // may itself hit backpressure once over budget; that's fine
 
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .expect("begin_tx");
-        for i in 0..20 {
-            let key = format!("evict_fetch_key_{i:02}");
-            tx.put(key.as_bytes().to_vec(), value.clone(), None).ok();
+    // Act: Wait for the eviction/upload pipeline to actually drain to cloud.
+    let cloud_store_dir = temp_dir.path().join("cloud_store");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+        if metrics.hybrid_pending_evictions == 0 && count_files_recursive(&cloud_store_dir) > 0 {
+            break;
         }
-        tx.commit(buffered_write_options(mode)).expect("commit");
-        engine.flush_cf(&cf).expect("flush");
-
-        // Act: Eviction should happen during flush
-        thread::sleep(Duration::from_millis(200));
-
-        // Now read evicted data (should trigger cloud fetch)
-        let tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadOnly)
-            .expect("begin_tx");
-
-        let mut cloud_fetched = 0;
-        for i in 0..20 {
-            let key = format!("evict_fetch_key_{i:02}");
-            if tx.get(key.as_bytes()).ok().flatten().is_some() {
-                cloud_fetched += 1;
-            }
-        }
-
-        // Assert: Data accessible via cloud fetch
         assert!(
-            cloud_fetched >= 15,
-            "cloud fetch after eviction failed in mode: {mode}"
+            std::time::Instant::now() < deadline,
+            "eviction never drained to the simulated cloud store; pending_evictions={}",
+            metrics.hybrid_pending_evictions
         );
+        thread::sleep(Duration::from_millis(50));
+    }
 
-        eprintln!("âœ“ Cloud fetch working after eviction; {cloud_fetched} keys fetched");
-    });
+    // Assert: the simulated cloud bucket actually received uploaded objects.
+    assert!(
+        count_files_recursive(&cloud_store_dir) > 0,
+        "expected evicted SSTs to be uploaded into the simulated cloud store"
+    );
+
+    // Now read evicted data (must trigger a cloud fetch to succeed)
+    let tx = engine
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+        .expect("begin_tx");
+
+    let mut cloud_fetched = 0;
+    for i in 0..20 {
+        let key = format!("evict_fetch_key_{i:02}");
+        if tx
+            .get(key.as_bytes())
+            .expect("read cloud-evicted key")
+            .is_some()
+        {
+            cloud_fetched += 1;
+        }
+    }
+
+    // Assert: Data accessible via cloud fetch
+    assert_eq!(
+        cloud_fetched, 20,
+        "cloud fetch after eviction failed to return all keys"
+    );
+
+    eprintln!("âœ“ Cloud fetch working after eviction; {cloud_fetched} keys fetched");
 }
 
 #[test]
@@ -357,7 +487,11 @@ fn should_persist_eviction_state_across_restart() {
             let mut persisted = 0;
             for i in 0..15 {
                 let key = format!("persist_evict_key_{i:02}");
-                if tx.get(key.as_bytes()).ok().flatten().is_some() {
+                if tx
+                    .get(key.as_bytes())
+                    .expect("read after eviction-state restart")
+                    .is_some()
+                {
                     persisted += 1;
                 }
             }
@@ -373,58 +507,97 @@ fn should_persist_eviction_state_across_restart() {
 }
 
 #[test]
+#[cfg(unix)]
 fn should_handle_cloud_unavailable_during_eviction() {
-    for_each_storage_mode(&["local"], |mode, opts| {
-        eprintln!("\n=== Hybrid: Cloud Down During Eviction (mode: {mode}) ===");
+    // "local" storage mode has no cloud tier and no upload to fail, so the
+    // scenario this test names was never exercised. The simulated cloud
+    // backend is itself just a filesystem directory (see
+    // `storage::test_support::build_cloud_backed_filesystem_simulation`), so
+    // a real outage can be reproduced by making that directory unwritable
+    // right before the flush/eviction pipeline tries to upload to it -
+    // without inventing any new production fault-injection API.
+    let temp_dir = test_temp_dir();
+    let budget_bytes = 256 * 1024; // small budget forces eviction attempts
+    let opts = OpenOptions::cloud_simulated(temp_dir.path(), "test-bucket", "test-prefix")
+        .with_simulated_cloud_local_storage_budget(budget_bytes)
+        .build()
+        .expect("build options");
+    let engine = Engine::open(opts).expect("open cloud-simulated engine");
+    let cf = engine.create_column_family("test").expect("create cf");
 
-        // Arrange: Fill cache near capacity
-        let engine = open_with_mode(&opts, mode);
-        let cf = engine.create_column_family("test").expect("create cf");
+    let large_value = vec![b'U'; 64 * 1024];
 
-        let large_value = vec![b'U'; 512 * 1024]; // 512KB
+    let mut tx = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .expect("begin_tx");
+    for i in 0..12 {
+        let key = format!("cloud_down_key_{i:02}");
+        tx.put(key.as_bytes().to_vec(), large_value.clone(), None)
+            .expect("put");
+    }
+    tx.commit(WriteOptions::cloud_async()).expect("commit");
 
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .expect("begin_tx");
-        for i in 0..12 {
-            let key = format!("cloud_down_key_{i:02}");
-            tx.put(key.as_bytes().to_vec(), large_value.clone(), None)
-                .ok();
-        }
-        tx.commit(buffered_write_options(mode)).expect("commit");
+    // Simulate a cloud outage: make every directory under the simulated
+    // cloud bucket unwritable before eviction tries to upload into it. This
+    // has to be recursive (not just the top-level bucket dir) because the
+    // WAL subdirectory already exists with its own write permission.
+    let cloud_store_dir = temp_dir.path().join("cloud_store");
+    std::fs::create_dir_all(&cloud_store_dir).expect("cloud store dir exists");
+    let files_before_outage_attempt = count_files_recursive(&cloud_store_dir);
+    set_dir_permissions_recursive(&cloud_store_dir, 0o500);
 
-        // Act: Flush with cloud down (upload fails)
-        engine.flush_cf(&cf).ok(); // May fail, but should handle gracefully
+    // Act: Flush with cloud "down" (uploads should fail, not panic)
+    let flush_result = engine.flush_cf(&cf);
+    thread::sleep(Duration::from_millis(200));
 
-        // Engine should either:
-        // 1. Queue for later retry
-        // 2. Keep data local (delay eviction)
-        // 3. Not crash
+    // Restore the bucket so later ops (and temp-dir cleanup) can proceed.
+    set_dir_permissions_recursive(&cloud_store_dir, 0o755);
 
-        thread::sleep(Duration::from_millis(100));
-
-        // Assert: Engine still operational
-        let tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadOnly)
-            .expect("begin_tx");
-
-        let mut accessible = 0;
-        for i in 0..12 {
-            let key = format!("cloud_down_key_{i:02}");
-            if tx.get(key.as_bytes()).ok().flatten().is_some() {
-                accessible += 1;
-            }
-        }
-
+    // Assert: the outage genuinely blocked the upload (no new object landed
+    // in the bucket while it was read-only) rather than trivially succeeding.
+    assert_eq!(
+        count_files_recursive(&cloud_store_dir),
+        files_before_outage_attempt,
+        "expected no objects to be written to the cloud store while it was unwritable"
+    );
+    if let Err(err) = &flush_result {
         assert!(
-            accessible >= 10,
-            "cloud unavailability during eviction caused data loss in mode: {mode}"
+            !matches!(err, MidgeError::Internal(msg) if msg.contains("panic")),
+            "flush surfaced an internal panic-shaped error during the outage: {err:?}"
         );
+    }
 
-        eprintln!(
-            "âœ“ Handled cloud unavailability gracefully; {accessible} keys still accessible"
-        );
-    });
+    // Assert: Engine still operational and data stayed available locally.
+    let tx = engine
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+        .expect("begin_tx");
+
+    let mut accessible = 0;
+    for i in 0..12 {
+        let key = format!("cloud_down_key_{i:02}");
+        if tx
+            .get(key.as_bytes())
+            .expect("read during cloud outage")
+            .is_some()
+        {
+            accessible += 1;
+        }
+    }
+    assert_eq!(
+        accessible, 12,
+        "cloud unavailability during eviction caused local data loss"
+    );
+
+    let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+    assert_ne!(
+        metrics.health,
+        EngineHealth::Corrupt,
+        "engine must not become corrupt after a transient cloud outage"
+    );
+
+    eprintln!(
+        "âœ“ Handled cloud unavailability gracefully; {accessible} keys still accessible, flush_result={flush_result:?}"
+    );
 }
 
 #[test]
@@ -463,13 +636,19 @@ fn should_keep_pinned_sst_local_given_active_snapshot_when_eviction_runs() {
         });
 
         // Wait for eviction to complete
-        eviction_handle.join().ok();
+        eviction_handle
+            .join()
+            .expect("background eviction thread should not panic");
 
         // Assert: Snapshot reads still succeed (SST not evicted)
         let mut snapshot_reads = 0;
         for i in 0..25 {
             let key = format!("reader_protect_key_{i:02}");
-            if snapshot.get(key.as_bytes()).ok().flatten().is_some() {
+            if snapshot
+                .get(key.as_bytes())
+                .expect("read pinned snapshot key")
+                .is_some()
+            {
                 snapshot_reads += 1;
             }
         }

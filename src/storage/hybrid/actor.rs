@@ -633,10 +633,14 @@ mod tests {
             }
         }
 
-        // Assert: Should have processed multiple operations
+        // Assert: 10 flushes each add 140_000 to sst_bytes; compactions at
+        // i=2,5,8 replace their input bytes with a smaller output, netting
+        // out to this exact figure (hand-traced from the loop above).
         let state = actor.disk_state();
-        assert!(state.sst_bytes > 0, "SSTs should have been created");
-        assert!(state.total_committed() > 0, "Total committed should be > 0");
+        assert_eq!(state.sst_bytes, 575_000);
+        assert_eq!(state.compaction_reserve, 0, "all compactions settled");
+        assert_eq!(state.new_sst_reserve, 0, "all flushes settled");
+        assert_eq!(state.total_committed(), 575_000);
     }
 
     #[test]

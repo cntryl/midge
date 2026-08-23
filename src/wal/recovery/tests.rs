@@ -110,11 +110,6 @@ fn wal_with_corrupted_length_before_valid_suffix() -> Vec<u8> {
 fn should_initialize_stats_with_zeros_when_created() {
     let stats = RecoveryStats::new();
     assert_eq!(stats.record_count, 0);
-}
-
-#[test]
-fn should_initialize_bytes_with_zero_when_created() {
-    let stats = RecoveryStats::new();
     assert_eq!(stats.bytes, 0);
 }
 
@@ -137,7 +132,7 @@ fn should_not_tolerate_generic_corruption_based_on_incomplete_tail_error_text() 
 }
 
 #[test]
-fn should_return_empty_record_count_when_wal_directory_missing() {
+fn should_return_empty_stats_when_wal_directory_missing() {
     // Arrange
     let mut memtables = HashMap::new();
     let dir = TempDir::new().unwrap();
@@ -149,20 +144,6 @@ fn should_return_empty_record_count_when_wal_directory_missing() {
 
     // Assert
     assert_eq!(stats.record_count, 0);
-}
-
-#[test]
-fn should_return_none_max_sequence_when_wal_directory_missing() {
-    // Arrange
-    let mut memtables = HashMap::new();
-    let dir = TempDir::new().unwrap();
-    let storage = RealFs::new(dir.path()).unwrap();
-    let non_existent = FsPath::new("midge_nonexistent_wal_dir_12345");
-
-    // Act
-    let stats = replay_wal(&storage, &non_existent, &mut memtables).unwrap();
-
-    // Assert
     assert_eq!(stats.max_sequence, None);
 }
 
@@ -469,8 +450,19 @@ fn should_count_records_across_multiple_column_families() {
     let mut memtables = HashMap::new();
     let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
 
-    // Assert
+    // Assert: record_count aggregates across every column family, and each
+    // record still lands in its own CF's memtable rather than being merged
+    // or double-counted into a shared one.
     assert_eq!(stats.record_count, 2);
+    assert_eq!(
+        memtables[&0].get(b"key0").unwrap(),
+        Some(b"value0".to_vec())
+    );
+    assert_eq!(
+        memtables[&1].get(b"key1").unwrap(),
+        Some(b"value1".to_vec())
+    );
+    assert!(memtables[&0].get(b"key1").unwrap().is_none());
 }
 
 #[test]
@@ -519,85 +511,17 @@ fn should_restore_sequence_frontier_given_recovered_wal_with_sequence_gaps() {
     let mut memtables = HashMap::new();
     let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
 
-    // Assert
+    // Assert: sequence-gap ordering must not affect either the frontier or
+    // the record count (previously covered separately by a near-identical
+    // fixture in `should_count_multiple_records_correctly`).
     assert_eq!(stats.max_sequence, Some(10));
-}
-
-#[test]
-fn should_count_multiple_records_correctly() {
-    // Arrange
-    let dir = TempDir::new().unwrap();
-    let wal_subdir = dir.path().join("wal");
-    std::fs::create_dir(&wal_subdir).unwrap();
-    let storage = RealFs::new(dir.path()).unwrap();
-    let wal_dir = FsPath::new("wal");
-
-    {
-        let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
-        let writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
-
-        let record1 = WalRecord::new(
-            WalOpKind::Put,
-            Bytes::from_static(b"key1"),
-            Some(Bytes::from_static(b"value1")),
-            5,
-            1,
-        );
-        writer.append_record(&record1).unwrap();
-
-        let record2 = WalRecord::new(
-            WalOpKind::Put,
-            Bytes::from_static(b"key2"),
-            Some(Bytes::from_static(b"value2")),
-            10,
-            1,
-        );
-        writer.append_record(&record2).unwrap();
-
-        let record3 = WalRecord::new(
-            WalOpKind::Put,
-            Bytes::from_static(b"key3"),
-            Some(Bytes::from_static(b"value3")),
-            7,
-            1,
-        );
-        writer.append_record(&record3).unwrap();
-        writer.sync().unwrap();
-    }
-
-    // Act
-    let mut memtables = HashMap::new();
-    let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
-
-    // Assert
     assert_eq!(stats.record_count, 3);
 }
 
 #[test]
-fn should_return_none_max_sequence_when_no_records() {
-    // Arrange
-    let dir = TempDir::new().unwrap();
-    let wal_subdir = dir.path().join("wal");
-    std::fs::create_dir(&wal_subdir).unwrap();
-    let storage = RealFs::new(dir.path()).unwrap();
-    let wal_dir = FsPath::new("wal");
-
-    {
-        let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
-        let _writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
-    }
-
-    // Act
-    let mut memtables = HashMap::new();
-    let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
-
-    // Assert
-    assert_eq!(stats.max_sequence, None);
-}
-
-#[test]
-fn should_return_zero_record_count_when_no_records() {
-    // Arrange
+fn should_return_empty_stats_when_no_records() {
+    // Arrange: an existing but empty WAL file (as opposed to a missing
+    // directory, covered separately above).
     let dir = TempDir::new().unwrap();
     let wal_subdir = dir.path().join("wal");
     std::fs::create_dir(&wal_subdir).unwrap();
@@ -615,6 +539,7 @@ fn should_return_zero_record_count_when_no_records() {
 
     // Assert
     assert_eq!(stats.record_count, 0);
+    assert_eq!(stats.max_sequence, None);
 }
 
 // =========== TTL/Expiration Tests ===========

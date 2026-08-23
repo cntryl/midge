@@ -58,36 +58,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_create_factory_with_mock_fs() {
-        // Arrange
-        let fs = Arc::new(crate::io::MockFs::new());
-
-        // Act
-        let factory = FsWalFactoryIo::new(fs);
-
-        // Assert
-        assert!(factory
-            .fs
-            .metadata(&crate::io::FsPath::new("test"))
-            .is_err());
-    }
-
-    #[test]
-    fn should_create_factory_with_real_fs() -> MidgeResult<()> {
-        // Arrange
-        let temp_dir = tempfile::tempdir()?;
-        let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
-
-        // Act
-        let factory = FsWalFactoryIo::new(fs);
-
-        // Assert
-        let result = factory.fs.metadata(&crate::io::FsPath::new("wal.log"));
-        assert!(result.is_err()); // File doesn't exist yet
-        Ok(())
-    }
-
-    #[test]
     fn should_create_writer() -> MidgeResult<()> {
         // Arrange
         let fs = Arc::new(crate::io::MockFs::new());

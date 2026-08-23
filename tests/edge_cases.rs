@@ -345,14 +345,9 @@ fn should_handle_tombstone_accumulation_when_many_deletes_create_tombstones() {
 #[test]
 fn should_batch_concurrent_puts_when_cloud_async_mode() {
     // Arrange
+    // Cloud-upload counters are only populated once telemetry is enabled.
+    cntryl_midge::init_benchmark_telemetry().expect("enable test-visible cloud metrics");
     for_each_storage_mode(&["cloud"], |mode, opts| {
-        let cloud_wal_dir = match &opts.storage_mode {
-            StorageMode::CloudBacked { local_cache_path } => {
-                local_cache_path.join("cloud_store").join("wal")
-            }
-            _ => panic!("expected cloud storage mode"),
-        };
-
         let engine = open_with_mode(&opts, mode);
         let cf = engine
             .create_column_family("test")
@@ -363,6 +358,11 @@ fn should_batch_concurrent_puts_when_cloud_async_mode() {
         let threads: usize = 16;
         let puts_per_thread: usize = 200;
         let total_puts: usize = threads * puts_per_thread;
+
+        let before_uploads = engine
+            .get_runtime_metrics()
+            .expect("runtime metrics before puts")
+            .cloud_async_wal_uploads_completed;
 
         // Act: concurrent single puts (each put still blocks on CloudAck)
         std::thread::scope(|s| {
@@ -392,16 +392,47 @@ fn should_batch_concurrent_puts_when_cloud_async_mode() {
             }
         }
 
-        // Assert: batching occurred (uploads/segments < puts)
-        let uploads: usize = std::fs::read_dir(&cloud_wal_dir)
-            .unwrap_or_else(|e| panic!("read_dir({cloud_wal_dir:?}) failed: {e}"))
-            .filter_map(std::result::Result::ok)
-            .filter(|e| matches!(e.path().extension().and_then(|s| s.to_str()), Some("wal")))
-            .count();
+        // Assert: batching occurred. This is the observable contract of
+        // cloud-async group commit — concurrently-arriving CloudAck writes
+        // share upload requests rather than each paying for its own, so the
+        // number of completed cloud uploads must be well below one per put.
+        // CloudAsync commits return once locally durable; the uploads
+        // themselves finish on a background thread, so wait for that
+        // background work to settle before reading the final count.
+        let upload_deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let mut after_uploads;
+        loop {
+            after_uploads = engine
+                .get_runtime_metrics()
+                .expect("runtime metrics after puts")
+                .cloud_async_wal_uploads_completed;
+            if after_uploads > before_uploads {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                let settled = engine
+                    .get_runtime_metrics()
+                    .expect("runtime metrics after settling")
+                    .cloud_async_wal_uploads_completed;
+                if settled == after_uploads {
+                    break;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < upload_deadline,
+                "timed out waiting for background cloud uploads to complete"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let uploads_for_puts = usize::try_from(after_uploads.saturating_sub(before_uploads))
+            .expect("test upload count fits in usize");
 
         assert!(
-            uploads < total_puts,
-            "expected batching: uploads={uploads} puts={total_puts}"
+            uploads_for_puts > 0,
+            "expected at least one cloud upload for {total_puts} durable puts"
+        );
+        assert!(
+            uploads_for_puts < total_puts,
+            "expected group commit to batch concurrent puts into fewer cloud \
+             uploads: uploads={uploads_for_puts} puts={total_puts}"
         );
     });
 }

@@ -138,9 +138,7 @@ mod tests {
         policy.on_access(key2);
 
         // Assert - key2 should be evicted (lower frequency)
-        if let Some(victim) = policy.pick_victim(&[]) {
-            assert_eq!(victim, key2);
-        }
+        assert_eq!(policy.pick_victim(&[]), Some(key2));
     }
 
     #[test]
@@ -154,8 +152,8 @@ mod tests {
         policy.on_access(key1);
         policy.on_access(key1);
 
-        // Assert - can pick victim (frequencies tracked internally)
-        let _ = policy.pick_victim(&[]);
+        // Assert - each access increments the tracked frequency count
+        assert_eq!(policy.frequencies.lock().get(&key1), Some(&3));
     }
 
     #[test]
@@ -231,10 +229,8 @@ mod tests {
         policy.on_access(key2);
         policy.on_remove(key1);
 
-        // Assert - key1 should not be picked
-        if let Some(victim) = policy.pick_victim(&[]) {
-            assert_ne!(victim, key1);
-        }
+        // Assert - key1 was removed, so key2 is the only remaining victim
+        assert_eq!(policy.pick_victim(&[]), Some(key2));
     }
 
     #[test]
@@ -281,9 +277,7 @@ mod tests {
         policy.on_access(freq_low);
 
         // Assert - low frequency key should be evicted first
-        if let Some(victim) = policy.pick_victim(&[]) {
-            assert_eq!(victim, freq_low);
-        }
+        assert_eq!(policy.pick_victim(&[]), Some(freq_low));
     }
 
     #[test]
@@ -305,10 +299,10 @@ mod tests {
         }
         policy.on_access(keys[4]); // 1 access
 
-        // Assert - lowest frequency should be picked
-        if let Some(victim) = policy.pick_victim(&[]) {
-            assert!(victim == keys[0] || victim == keys[4]);
-        }
+        // Assert - lowest frequency should be picked; keys[0] and keys[4]
+        // are tied at frequency 1, but keys[0] is encountered first when
+        // scanning the recency queue, so it wins the tie deterministically.
+        assert_eq!(policy.pick_victim(&[]), Some(keys[0]));
     }
 
     #[test]

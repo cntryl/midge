@@ -3,6 +3,7 @@
 mod common;
 use cntryl_midge::{EngineHealth, MidgeError, TransactionMode};
 use common::*;
+use std::time::Duration;
 
 #[test]
 fn should_handle_small_memory_budget_without_unexpected_errors() {
@@ -69,7 +70,7 @@ fn should_handle_small_memory_budget_without_unexpected_errors() {
 fn should_complete_shutdown_when_wal_writer_drops() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
-        let engine = open_with_mode(&opts, mode);
+        let mut engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act: Write some data
@@ -79,8 +80,16 @@ fn should_complete_shutdown_when_wal_writer_drops() {
         tx.put(b"key".to_vec(), b"value".to_vec(), None).unwrap();
         tx.commit(buffered_write_options(mode)).unwrap();
 
+        // Act: shut down explicitly (this drops the WAL writer as part of an
+        // orderly shutdown) and assert it actually reports success within a
+        // bound, rather than only relying on the test harness's own timeout
+        // to catch a hang with no diagnostic about *why* it failed.
+        let result = engine.shutdown(Duration::from_secs(10));
+
         // Assert
-        drop(engine);
-        // If drop hangs, test harness will fail on timeout
+        assert!(
+            result.is_ok(),
+            "shutdown did not complete cleanly when the WAL writer dropped in mode {mode}: {result:?}"
+        );
     });
 }

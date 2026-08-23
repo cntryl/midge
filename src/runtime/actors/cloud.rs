@@ -158,70 +158,84 @@ mod tests {
         assert_eq!(actor.uploads_in_progress(), 0);
     }
 
-    #[test]
-    fn should_initialize_via_default() {
-        // Arrange
-        // (no setup needed)
-
-        // Act
-        let actor = CloudActor::default();
-
-        // Assert
-        assert_eq!(actor.uploads_in_progress(), 0);
+    /// `upload_sst`'s increment path additionally requires a live
+    /// `HybridStorage` backend, which is disproportionate to stand up for a
+    /// unit test here; `upload_wal` exercises the same
+    /// `uploads_in_progress` bookkeeping through a real handler that only
+    /// needs a `RuntimeState` and an on-disk segment file.
+    fn write_wal_segment(state: &RuntimeState, segment_id: u64) {
+        let wal_name = crate::wal::segment_file_name(segment_id);
+        std::fs::write(state.wal_dir.join(&wal_name), b"wal-bytes").expect("write wal segment");
     }
 
     #[test]
-    fn should_increment_uploads_on_sst_upload_request() {
+    fn should_increment_uploads_on_wal_upload_request() {
         // Arrange
+        let tmp = tempfile::tempdir().expect("create tmpdir");
+        let mut state = RuntimeState::new(tmp.path().to_path_buf(), false);
+        write_wal_segment(&state, 1);
         let mut actor = CloudActor::new();
-        let sst_count_before = actor.uploads_in_progress();
 
-        // Act
-        // Note: Would need MockRuntimeState for full test
-        // For now, verify the counter increment logic
-        actor.uploads_in_progress += 1;
+        // Act - the real upload handler, not a direct field write
+        actor.upload_wal(&mut state, 1);
 
         // Assert
-        assert_eq!(actor.uploads_in_progress(), sst_count_before + 1);
+        assert_eq!(actor.uploads_in_progress(), 1);
+        assert_eq!(state.cloud.pending_uploads.len(), 1);
     }
 
     #[test]
     fn should_track_multiple_uploads_in_progress() {
         // Arrange
+        let tmp = tempfile::tempdir().expect("create tmpdir");
+        let mut state = RuntimeState::new(tmp.path().to_path_buf(), false);
+        for segment_id in 1..=3 {
+            write_wal_segment(&state, segment_id);
+        }
         let mut actor = CloudActor::new();
 
-        // Act: simulate multiple upload starts
-        actor.uploads_in_progress = 1;
-        actor.uploads_in_progress = 2;
-        actor.uploads_in_progress = 3;
+        // Act - three real upload requests
+        actor.upload_wal(&mut state, 1);
+        actor.upload_wal(&mut state, 2);
+        actor.upload_wal(&mut state, 3);
 
         // Assert
         assert_eq!(actor.uploads_in_progress(), 3);
+        assert_eq!(state.cloud.pending_uploads.len(), 3);
     }
 
     #[test]
-    fn should_decrement_uploads_when_complete() {
+    fn should_decrement_uploads_via_handle_upload_complete() {
         // Arrange
+        let tmp = tempfile::tempdir().expect("create tmpdir");
+        let mut state = RuntimeState::new(tmp.path().to_path_buf(), false);
+        write_wal_segment(&state, 7);
         let mut actor = CloudActor::new();
-        actor.uploads_in_progress = 3;
+        actor.upload_wal(&mut state, 7);
+        assert_eq!(actor.uploads_in_progress(), 1);
+        let cloud_key = crate::wal::cloud_segment_object_key(7, state.writer_epoch);
 
-        // Act: simulate upload completion
-        actor.uploads_in_progress = actor.uploads_in_progress.saturating_sub(1);
+        // Act - the real completion handler
+        actor.handle_upload_complete(&mut state, &cloud_key);
 
         // Assert
-        assert_eq!(actor.uploads_in_progress(), 2);
+        assert_eq!(actor.uploads_in_progress(), 0);
+        assert!(state.cloud.pending_uploads.is_empty());
+        assert_eq!(state.cloud.last_cloud_checkpoint_seq, 7);
     }
 
     #[test]
-    fn should_handle_saturation_when_uploads_go_negative() {
-        // Arrange
+    fn should_saturate_at_zero_when_completing_without_pending_upload() {
+        // Arrange - no upload was ever started
+        let tmp = tempfile::tempdir().expect("create tmpdir");
+        let mut state = RuntimeState::new(tmp.path().to_path_buf(), false);
         let mut actor = CloudActor::new();
-        actor.uploads_in_progress = 0;
+        assert_eq!(actor.uploads_in_progress(), 0);
 
-        // Act: saturating_sub prevents underflow
-        actor.uploads_in_progress = actor.uploads_in_progress.saturating_sub(1);
+        // Act - completion handler must not underflow the counter
+        actor.handle_upload_complete(&mut state, "unrelated-resource");
 
-        // Assert: should not go negative
+        // Assert
         assert_eq!(actor.uploads_in_progress(), 0);
     }
 }

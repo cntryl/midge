@@ -1009,8 +1009,8 @@ mod tests {
         // Act
         sl.upsert(Bytes::from_static(b"k"), Some(Bytes::from_static(b"v")), 1);
 
-        // Assert
-        // Insert succeeds without panic
+        // Assert: the inserted value is readable back via get()
+        assert_eq!(sl.get(b"k", u64::MAX), Some(Bytes::from_static(b"v")));
     }
 
     #[test]
@@ -1160,7 +1160,18 @@ mod tests {
             h.join().unwrap();
         }
 
-        // Assert – no panics, all operations race-safe
+        // Assert: every key was updated exactly once (by whichever thread
+        // owned it) and is readable with its updated value post-join.
+        for i in 0..100 {
+            let key = format!("key_{i}");
+            let expected = Bytes::from(format!("updated_{i}"));
+            assert_eq!(
+                sl.get(key.as_bytes(), u64::MAX),
+                Some(expected),
+                "key_{i} should reflect the concurrent update"
+            );
+        }
+        assert_eq!(sl.get_all_keys().len(), 100);
     }
 
     #[test]
@@ -1235,32 +1246,6 @@ mod tests {
         assert_eq!(code, 2);
     }
 
-    #[test]
-    fn should_support_optype_equality() {
-        // Arrange
-        // (no setup)
-
-        // Act
-        // (none)
-
-        // Assert
-        assert_eq!(OpType::Put, OpType::Put);
-        assert_eq!(OpType::Delete, OpType::Delete);
-        assert_ne!(OpType::Put, OpType::Delete);
-    }
-
-    #[test]
-    fn should_support_optype_copy() {
-        // Arrange
-        let op1 = OpType::Put;
-
-        // Act
-        let op2 = op1;
-
-        // Assert: Copy trait works
-        assert_eq!(op1, op2);
-    }
-
     // ========================================================================
     // SkipList creation and initialization tests
     // ========================================================================
@@ -1274,19 +1259,6 @@ mod tests {
         let sl = SkipList::new();
 
         // Assert: creation succeeds
-        let keys = sl.get_all_keys();
-        assert_eq!(keys.len(), 0);
-    }
-
-    #[test]
-    fn should_support_default_trait() {
-        // Arrange
-        // (no setup)
-
-        // Act
-        let sl = SkipList::default();
-
-        // Assert: same as new()
         let keys = sl.get_all_keys();
         assert_eq!(keys.len(), 0);
     }
@@ -1746,21 +1718,6 @@ mod tests {
     // ========================================================================
     // delete_range tests
     // ========================================================================
-
-    #[test]
-    fn should_count_changed_keys_in_delete_range() {
-        // Arrange
-        let sl = SkipList::new();
-        sl.upsert(Bytes::from_static(b"a"), Some(Bytes::from_static(b"1")), 1);
-        sl.upsert(Bytes::from_static(b"b"), Some(Bytes::from_static(b"2")), 2);
-        sl.upsert(Bytes::from_static(b"c"), Some(Bytes::from_static(b"3")), 3);
-
-        // Act: delete range [a, c)
-        let changed = sl.delete_range(Some(b"a"), Some(b"c"), 10);
-
-        // Assert: a and b changed
-        assert_eq!(changed, 2);
-    }
 
     #[test]
     fn should_handle_delete_range_with_no_changes() {

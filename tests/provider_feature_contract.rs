@@ -24,6 +24,23 @@ fn feature_definition<'a>(manifest: &'a str, feature: &str) -> &'a str {
     &definition[..=end]
 }
 
+/// Collapse every run of whitespace (including newlines) to a single space.
+///
+/// These tests assert on architectural invariants ("this attribute governs
+/// that item") by matching source-code fragments. Comparing on token
+/// sequence rather than exact byte layout keeps that assertion real while no
+/// longer breaking on a harmless rustfmt reflow (e.g. an attribute wrapping
+/// onto its own line).
+fn normalize_whitespace(source: &str) -> String {
+    source.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// `haystack` contains `needle` once both are normalized with
+/// [`normalize_whitespace`].
+fn contains_normalized(haystack: &str, needle: &str) -> bool {
+    normalize_whitespace(haystack).contains(&normalize_whitespace(needle))
+}
+
 #[test]
 fn should_keep_common_cloud_transport_provider_neutral_when_features_are_split() {
     // Arrange
@@ -114,18 +131,36 @@ fn should_compile_provider_modules_only_for_their_owner_features() {
 
     // Act
     // Assert
-    assert!(providers.contains("#[cfg(feature = \"cloud-azure\")]\npub mod azure;"));
-    assert!(providers.contains("#[cfg(feature = \"cloud-gcp\")]\npub mod gcs;"));
-    assert!(providers
-        .contains("#[cfg(any(feature = \"cloud-aws\", feature = \"cloud-oci\"))]\npub mod s3;"));
-    assert!(!providers.contains("#[cfg(feature = \"cloud-common\")]\npub mod azure;"));
-    assert!(!providers.contains("#[cfg(feature = \"cloud-common\")]\npub mod gcs;"));
-    assert!(!providers.contains("#[cfg(feature = \"cloud-common\")]\npub mod s3;"));
+    assert!(contains_normalized(
+        &providers,
+        "#[cfg(feature = \"cloud-azure\")]\npub mod azure;"
+    ));
+    assert!(contains_normalized(
+        &providers,
+        "#[cfg(feature = \"cloud-gcp\")]\npub mod gcs;"
+    ));
+    assert!(contains_normalized(
+        &providers,
+        "#[cfg(any(feature = \"cloud-aws\", feature = \"cloud-oci\"))]\npub mod s3;"
+    ));
+    assert!(!contains_normalized(
+        &providers,
+        "#[cfg(feature = \"cloud-common\")]\npub mod azure;"
+    ));
+    assert!(!contains_normalized(
+        &providers,
+        "#[cfg(feature = \"cloud-common\")]\npub mod gcs;"
+    ));
+    assert!(!contains_normalized(
+        &providers,
+        "#[cfg(feature = \"cloud-common\")]\npub mod s3;"
+    ));
     assert!(factory.contains("CloudProviderConfig::AwsS3(_)"));
     assert!(factory.contains("CloudProviderConfig::S3Compatible(_)"));
     assert!(factory.contains("CloudProviderConfig::AzureBlob(_)"));
     assert!(factory.contains("CloudProviderConfig::OciObjectStorage(_)"));
-    assert!(factory.contains(
+    assert!(contains_normalized(
+        &factory,
         "#[cfg(any(feature = \"cloud-aws\", feature = \"cloud-oci\"))]\n    fn build_s3_compatible"
     ));
 }
@@ -138,9 +173,15 @@ fn should_keep_provider_dtos_in_configuration_layer() {
 
     // Act
     // Assert
-    assert!(provider_config.contains("pub enum CloudProviderConfig"));
+    assert!(contains_normalized(
+        &provider_config,
+        "pub enum CloudProviderConfig"
+    ));
     assert!(!provider_config.contains("cfg(feature = \"cloud-"));
-    assert!(storage_providers.contains("pub(crate) use crate::config::CloudProviderConfig;"));
+    assert!(contains_normalized(
+        &storage_providers,
+        "pub(crate) use crate::config::CloudProviderConfig;"
+    ));
     assert!(!repository_root()
         .join("src/storage/providers/config.rs")
         .exists());

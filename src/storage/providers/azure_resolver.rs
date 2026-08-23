@@ -82,37 +82,71 @@ mod tests {
     #[test]
     fn should_accept_account_scoped_https_endpoint_given_managed_identity() {
         // Arrange
-        let provider = CloudProviderConfig::azure_blob("account", "container")
+        let secure = CloudProviderConfig::azure_blob("account", "container")
             .with_azure_credentials(AzureCredentialSource::managed_identity())
             .expect("Azure credential override")
             .with_endpoint("https://account.blob.core.usgovcloudapi.net")
             .expect("Azure endpoint override");
+        let insecure = CloudProviderConfig::azure_blob("account", "container")
+            .with_azure_credentials(AzureCredentialSource::managed_identity())
+            .expect("Azure credential override")
+            .with_endpoint("http://account.blob.core.usgovcloudapi.net")
+            .expect("Azure endpoint override");
 
         // Act
-        let result = resolve_azure(&provider);
+        let secure_result = resolve_azure(&secure);
+        let insecure_result = resolve_azure(&insecure);
 
-        // Assert
-        assert!(result.is_ok(), "sovereign identity endpoint must resolve");
+        // Assert: only the HTTPS sovereign identity endpoint resolves; the same origin over
+        // plain HTTP must be rejected, proving the accept path is actually discriminating on
+        // scheme rather than always succeeding.
+        assert!(
+            secure_result.is_ok(),
+            "sovereign identity endpoint must resolve"
+        );
+        match &insecure_result {
+            Err(MidgeError::InvalidArgument(_)) => {}
+            Err(other) => panic!("expected InvalidArgument, got {other}"),
+            Ok(_) => panic!("insecure identity endpoint must be rejected"),
+        }
     }
 
     #[test]
     fn should_accept_account_scoped_https_endpoint_given_workload_identity() {
         // Arrange
-        let provider = CloudProviderConfig::azure_blob("account", "container")
-            .with_azure_credentials(AzureCredentialSource::workload_identity_with(
+        let credentials = || {
+            AzureCredentialSource::workload_identity_with(
                 Some("tenant".to_string()),
                 Some("client".to_string()),
                 Some(std::path::PathBuf::from("unused-federated-token")),
-            ))
+            )
+        };
+        let secure = CloudProviderConfig::azure_blob("account", "container")
+            .with_azure_credentials(credentials())
             .expect("Azure credential override")
             .with_endpoint("https://account.blob.core.chinacloudapi.cn")
             .expect("Azure endpoint override");
+        let insecure = CloudProviderConfig::azure_blob("account", "container")
+            .with_azure_credentials(credentials())
+            .expect("Azure credential override")
+            .with_endpoint("http://account.blob.core.chinacloudapi.cn")
+            .expect("Azure endpoint override");
 
         // Act
-        let result = resolve_azure(&provider);
+        let secure_result = resolve_azure(&secure);
+        let insecure_result = resolve_azure(&insecure);
 
-        // Assert
-        assert!(result.is_ok(), "sovereign OAuth endpoint must resolve");
+        // Assert: same discrimination as the managed-identity case, exercised through the
+        // workload-identity branch of resolve_azure.
+        assert!(
+            secure_result.is_ok(),
+            "sovereign OAuth endpoint must resolve"
+        );
+        match &insecure_result {
+            Err(MidgeError::InvalidArgument(_)) => {}
+            Err(other) => panic!("expected InvalidArgument, got {other}"),
+            Ok(_) => panic!("insecure OAuth endpoint must be rejected"),
+        }
     }
 
     #[test]
@@ -137,12 +171,29 @@ mod tests {
     #[test]
     fn should_preserve_path_style_http_endpoint_given_shared_key() {
         // Arrange
-        let provider = CloudProviderConfig::sqrzl_azure("container");
+        use crate::storage::providers::test_support::spawn_recording_http_server;
+        use crate::AzureBlobConfig;
+
+        let server = spawn_recording_http_server(Vec::new(), Vec::new());
+        let provider: CloudProviderConfig = AzureBlobConfig::new("admin", "container")
+            .with_endpoint(server.endpoint.clone())
+            .with_credentials(AzureCredentialSource::shared_key("easy-peasy"))
+            .into();
 
         // Act
-        let result = resolve_azure(&provider);
+        let backend = resolve_azure(&provider).expect("shared-key HTTP endpoint must resolve");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        backend.submit_put("blob", b"value".to_vec(), Vec::new(), sender);
+        let _ = receiver.recv_timeout(std::time::Duration::from_secs(5));
+        let request = server.finish();
 
-        // Assert
-        assert!(result.is_ok(), "Sqrzl Azure endpoint must resolve");
+        // Assert: shared-key credentials keep path-style emulator addressing, so the request
+        // target embeds account and container in the path rather than as a virtual-hosted
+        // subdomain.
+        assert!(
+            request.target.starts_with("/admin/container/"),
+            "expected path-style target with account and container, got: {}",
+            request.target
+        );
     }
 }

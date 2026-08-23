@@ -144,18 +144,6 @@ impl FileMeta {
 }
 
 impl Manifest {
-    /// Create a new manifest
-    #[cfg(test)]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Get the next WAL sequence
-    #[cfg(test)]
-    pub fn next_wal_seq(&self) -> u64 {
-        self.next_wal_seq
-    }
-
     /// Increment WAL sequence
     #[cfg(test)]
     pub fn increment_wal_seq(&mut self) {
@@ -440,37 +428,9 @@ mod tests {
         assert!(manifest.next_sst_seqs.is_empty());
     }
 
-    #[test]
-    fn should_create_manifest_via_new() {
-        // Arrange
-        // (no setup)
-
-        // Act
-        let manifest = Manifest::new();
-
-        // Assert: same as default
-        assert_eq!(manifest.last_persisted_sequence, 0);
-        assert!(manifest.files.is_empty());
-    }
-
     // ========================================================================
     // WAL sequence tests
     // ========================================================================
-
-    #[test]
-    fn should_return_next_wal_seq() {
-        // Arrange
-        let manifest = Manifest {
-            next_wal_seq: 42,
-            ..Default::default()
-        };
-
-        // Act
-        let seq = manifest.next_wal_seq();
-
-        // Assert
-        assert_eq!(seq, 42);
-    }
 
     #[test]
     fn should_increment_wal_seq() {
@@ -485,23 +445,6 @@ mod tests {
 
         // Assert
         assert_eq!(manifest.next_wal_seq, 6);
-    }
-
-    #[test]
-    fn should_increment_wal_seq_multiple_times() {
-        // Arrange
-        let mut manifest = Manifest {
-            next_wal_seq: 1,
-            ..Default::default()
-        };
-
-        // Act
-        manifest.increment_wal_seq();
-        manifest.increment_wal_seq();
-        manifest.increment_wal_seq();
-
-        // Assert
-        assert_eq!(manifest.next_wal_seq, 4);
     }
 
     // ========================================================================
@@ -534,15 +477,15 @@ mod tests {
     fn should_add_multiple_files_to_manifest() {
         // Arrange
         let mut manifest = Manifest::default();
+        let expected_names: Vec<String> = (0_u64..5)
+            .map(|i| crate::sst::file_name(0, u32::try_from(i).expect("loop index fits in u32"), i))
+            .collect();
 
         // Act
         for i in 0_u64..5 {
+            let idx = usize::try_from(i).expect("loop index fits in usize");
             let file = FileMeta {
-                name: crate::sst::file_name(
-                    0,
-                    u32::try_from(i).expect("loop index fits in u32"),
-                    i,
-                ),
+                name: expected_names[idx].clone(),
                 level: u32::try_from(i).expect("loop index fits in u32"),
                 size_bytes: 1000 + (i * 100),
                 ..Default::default()
@@ -550,8 +493,22 @@ mod tests {
             manifest.add_file(file);
         }
 
-        // Assert
+        // Assert: every file entry is present with its own distinct
+        // name, level, and size (not just an overall count)
         assert_eq!(manifest.files.len(), 5);
+        for i in 0_u64..5 {
+            let idx = usize::try_from(i).expect("loop index fits in usize");
+            let file = manifest
+                .files
+                .iter()
+                .find(|f| f.name == expected_names[idx])
+                .unwrap_or_else(|| panic!("file {idx} missing from manifest"));
+            assert_eq!(
+                file.level,
+                u32::try_from(i).expect("loop index fits in u32")
+            );
+            assert_eq!(file.size_bytes, 1000 + (i * 100));
+        }
     }
 
     #[test]
@@ -659,18 +616,6 @@ mod tests {
         // Assert
         assert_eq!(id1, 1);
         assert_eq!(id2, 2);
-    }
-
-    #[test]
-    fn should_return_one_for_empty_column_families() {
-        // Arrange
-        let manifest = Manifest::default();
-
-        // Act
-        let next_id = manifest.next_cf_id().expect("next column family id");
-
-        // Assert
-        assert_eq!(next_id, 1);
     }
 
     #[test]

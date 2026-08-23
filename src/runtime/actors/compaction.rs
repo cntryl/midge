@@ -629,68 +629,87 @@ mod tests {
 
     #[test]
     fn should_return_none_when_compaction_already_running() {
-        // Arrange
+        // Arrange - a compaction-eligible state, but the actor is already mid-compaction
         let mut actor = create_test_compaction_actor();
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
+        state.set_compaction_enabled(true);
+        state.manifest.files.extend([
+            make_l0_file("cf0_0001.sst", 0, b"a00", b"a99"),
+            make_l0_file("cf0_0002.sst", 0, b"b00", b"b99"),
+            make_l0_file("cf0_0003.sst", 0, b"c00", b"c99"),
+            make_l0_file("cf0_0004.sst", 0, b"d00", b"d99"),
+        ]);
         actor.compaction_running = true;
 
-        // Act: try to pick compaction while one is running
-        // Note: This would need a real RuntimeState for full test
-        // For now, verify state invariant
-        assert!(actor.compaction_running);
+        // Act - the real check must not schedule a second concurrent compaction
+        let plan = actor.check_compaction(&state).expect("compaction check");
 
         // Assert
-        // check_compaction would return None
+        assert!(plan.is_none());
     }
 
     #[test]
     fn should_set_running_flag_when_compaction_starts() {
         // Arrange
         let mut actor = create_test_compaction_actor();
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
+        state.set_compaction_enabled(true);
+        state.manifest.files.extend([
+            make_l0_file("cf0_0001.sst", 0, b"a00", b"a99"),
+            make_l0_file("cf0_0002.sst", 0, b"b00", b"b99"),
+            make_l0_file("cf0_0003.sst", 0, b"c00", b"c99"),
+            make_l0_file("cf0_0004.sst", 0, b"d00", b"d99"),
+        ]);
+        let plan = actor
+            .check_compaction(&state)
+            .expect("compaction planning")
+            .expect("expected compaction plan");
         assert!(!actor.compaction_running);
 
-        // Act
-        actor.compaction_running = true;
+        // Act - drive the real state transition that guards concurrent compactions
+        actor
+            .prepare_compaction(&mut state, &plan, None)
+            .expect("prepare compaction");
 
         // Assert
         assert!(actor.compaction_running);
+        assert_eq!(actor.active_input_ssts, plan.input_files);
+        assert!(actor.prepare_compaction(&mut state, &plan, None).is_err());
     }
 
     #[test]
     fn should_clear_running_flag_when_compaction_completes() {
         // Arrange
         let mut actor = create_test_compaction_actor();
-        actor.compaction_running = true;
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
+        state.set_compaction_enabled(true);
+        state.manifest.files.extend([
+            make_l0_file("cf0_0001.sst", 0, b"a00", b"a99"),
+            make_l0_file("cf0_0002.sst", 0, b"b00", b"b99"),
+            make_l0_file("cf0_0003.sst", 0, b"c00", b"c99"),
+            make_l0_file("cf0_0004.sst", 0, b"d00", b"d99"),
+        ]);
+        let plan = actor
+            .check_compaction(&state)
+            .expect("compaction planning")
+            .expect("expected compaction plan");
+        actor
+            .prepare_compaction(&mut state, &plan, None)
+            .expect("prepare compaction");
+        assert!(actor.compaction_running);
 
-        // Act
-        actor.compaction_running = false;
-
-        // Assert
-        assert!(!actor.compaction_running);
-    }
-
-    #[test]
-    fn should_be_cloneable() {
-        // Arrange
-        let actor1 = create_test_compaction_actor();
-
-        // Act
-        let actor2 = actor1.clone();
-
-        // Assert: clone should have same initial state
-        assert_eq!(actor1.compaction_running, actor2.compaction_running);
-    }
-
-    #[test]
-    fn should_preserve_state_through_handle_complete() {
-        // Arrange
-        let mut actor = create_test_compaction_actor();
-        actor.compaction_running = true;
-
-        // Act: Simulate handle_complete clearing the flag
-        actor.compaction_running = false;
+        // Act - the real completion handler, not a direct field write
+        let leftover_token = actor.handle_complete(&mut state, &plan.input_files, &[]);
 
         // Assert
         assert!(!actor.compaction_running);
+        assert!(actor.active_input_ssts.is_empty());
+        assert!(leftover_token.is_none());
+        assert!(state
+            .compaction
+            .compacting_ssts
+            .iter()
+            .all(|name| !plan.input_files.contains(name)));
     }
 
     #[test]

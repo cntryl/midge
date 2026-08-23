@@ -1544,7 +1544,6 @@ fn parse_gcs_json_object_metadata(body: &[u8]) -> CloudOutcome<ObjectMetadata> {
     Ok(ObjectMetadata::with_generation(
         size,
         etag.to_string(),
-        0,
         generation,
     ))
 }
@@ -1556,7 +1555,7 @@ fn parse_gcs_media_object_metadata(
     let size = u64::try_from(response.body.len()).unwrap_or(u64::MAX);
     let etag = required_gcs_metadata_header(response, "etag", "ETag")?;
     let generation = required_gcs_generation(response, mode)?;
-    Ok(ObjectMetadata::with_generation(size, etag, 0, generation))
+    Ok(ObjectMetadata::with_generation(size, etag, generation))
 }
 
 fn parse_gcs_xml_object_metadata(response: &CloudResponse) -> CloudOutcome<ObjectMetadata> {
@@ -1576,7 +1575,7 @@ fn parse_gcs_xml_object_metadata(response: &CloudResponse) -> CloudOutcome<Objec
         })?;
     let etag = required_gcs_metadata_header(response, "etag", "ETag")?;
     let generation = required_gcs_generation(response, GcsBackendMode::Xml)?;
-    Ok(ObjectMetadata::with_generation(size, etag, 0, generation))
+    Ok(ObjectMetadata::with_generation(size, etag, generation))
 }
 
 fn required_gcs_metadata_header(

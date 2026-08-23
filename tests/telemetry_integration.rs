@@ -1,15 +1,13 @@
 //! Operation-integrity checks for code paths that are expected to emit
-//! telemetry when instrumentation is available.
-//!
-//! These tests do not claim to verify metric counters because the integration
-//! suite does not currently consume a real telemetry API here.
+//! telemetry when instrumentation is available, plus direct assertions
+//! against the real runtime-metrics/telemetry API (`Engine::get_runtime_metrics`,
+//! `Engine::flush_cf`'s flush counters, `Engine::compact_all`'s compaction
+//! counters) where such an API exists.
 
 use bytes::Bytes;
 mod common;
 use cntryl_midge::TransactionMode;
 use common::*;
-use std::thread;
-use std::time::Duration;
 
 #[test]
 fn should_initialize_global_telemetry_once_given_repeated_init_calls_when_starting() {
@@ -42,6 +40,8 @@ fn should_initialize_global_telemetry_once_given_repeated_init_calls_when_starti
 
 #[test]
 fn should_preserve_all_values_given_repeated_reads_when_values_accessed_repeatedly() {
+    cntryl_midge::init_benchmark_telemetry().expect("enable test-visible cache metrics");
+
     for_each_storage_mode(&["local", "cloud"], |mode, opts| {
         // Arrange
         let engine = open_with_mode(&opts, mode);
@@ -58,12 +58,11 @@ fn should_preserve_all_values_given_repeated_reads_when_values_accessed_repeated
         tx.commit(buffered_write_options(mode)).expect("commit");
         engine.flush_cf(&cf).expect("flush");
 
-        // Act
+        // Act: first read pass is expected to miss the block cache (data was
+        // just flushed to disk), the repeated second pass should hit it.
         let tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadOnly)
-            .expect("begin read transaction");
-
-        // Assert
+            .expect("begin first-pass read transaction");
         for i in 0..50 {
             let key = format!("metrics_read_key_{i:04}");
             assert_eq!(
@@ -72,140 +71,90 @@ fn should_preserve_all_values_given_repeated_reads_when_values_accessed_repeated
                 "mode: {mode} key: {key}"
             );
         }
-    });
-}
+        drop(tx);
 
-#[test]
-fn should_preserve_all_written_values_given_large_write_batch_when_written() {
-    for_each_storage_mode(&["local", "cloud"], |mode, opts| {
-        // Arrange
-        let engine = open_with_mode(&opts, mode);
-        let cf = engine.create_column_family("test").expect("create cf");
+        let before = engine.get_runtime_metrics().expect("runtime metrics");
 
-        let value = b"metric_write_value";
-
-        // Act
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .expect("begin write batch transaction");
-        for i in 0..100 {
-            let key = format!("metrics_write_key_{i:04}");
-            tx.put(key.as_bytes().to_vec(), value.to_vec(), None)
-                .expect("put write-batch value");
-        }
-        tx.commit(buffered_write_options(mode)).expect("commit");
-
-        // Assert
         let tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadOnly)
-            .expect("begin verification transaction");
-        for i in 0..100 {
-            let key = format!("metrics_write_key_{i:04}");
+            .expect("begin repeated-read transaction");
+        for i in 0..50 {
+            let key = format!("metrics_read_key_{i:04}");
             assert_eq!(
-                tx.get(key.as_bytes()).expect("read write-batch key"),
-                Some(Bytes::from_static(value)),
+                tx.get(key.as_bytes()).expect("read repeated-read key"),
+                Some(Bytes::from_static(b"metric_value")),
                 "mode: {mode} key: {key}"
             );
         }
+
+        // Assert: repeatedly accessing the same values must register block
+        // cache hits in the telemetry runtime metrics.
+        let after = engine.get_runtime_metrics().expect("runtime metrics");
+        assert!(
+            after.cache_hits > before.cache_hits,
+            "mode: {mode} repeated reads should register block cache hits (before: {}, after: {})",
+            before.cache_hits,
+            after.cache_hits
+        );
     });
 }
 
 #[test]
 fn should_preserve_all_values_given_compaction_when_requested() {
+    cntryl_midge::init_benchmark_telemetry().expect("enable test-visible compaction metrics");
+
     for_each_storage_mode(&["local", "cloud"], |mode, opts| {
         // Arrange
         let engine = open_with_mode(&opts, mode);
         let cf = engine.create_column_family("test").expect("create cf");
 
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .expect("begin first batch transaction");
-        for i in 0..100 {
-            let key = format!("compact_metric_key_{i:04}");
-            tx.put(key.as_bytes().to_vec(), b"gen1".to_vec(), None)
-                .expect("put first compaction batch value");
+        // Flush enough separate L0 files (default l0_file_count_threshold is
+        // 4) that compact_all() actually has work to schedule instead of
+        // observing only two files and deciding no compaction is needed.
+        let batches = 5;
+        let keys_per_batch = 50;
+        for batch in 0..batches {
+            let mut tx = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .expect("begin batch transaction");
+            for i in 0..keys_per_batch {
+                let key = format!("compact_metric_key_{:04}", batch * keys_per_batch + i);
+                let value = format!("gen{batch}").into_bytes();
+                tx.put(key.as_bytes().to_vec(), value, None)
+                    .expect("put compaction batch value");
+            }
+            tx.commit(buffered_write_options(mode)).expect("commit");
+            engine.flush_cf(&cf).expect("flush batch");
         }
-        tx.commit(buffered_write_options(mode)).expect("commit");
-        engine.flush_cf(&cf).expect("flush first batch");
 
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .expect("begin second batch transaction");
-        for i in 100..200 {
-            let key = format!("compact_metric_key_{i:04}");
-            tx.put(key.as_bytes().to_vec(), b"gen2".to_vec(), None)
-                .expect("put second compaction batch value");
-        }
-        tx.commit(buffered_write_options(mode)).expect("commit");
-        engine.flush_cf(&cf).expect("flush second batch");
+        let before = engine.get_runtime_metrics().expect("runtime metrics");
 
         // Act
         engine.compact_all().ok();
 
-        // Assert
+        // Assert: compaction must be recorded in the telemetry runtime
+        // metrics, not just leave the data intact.
+        let after = engine.get_runtime_metrics().expect("runtime metrics");
+        assert!(
+            after.compactions_run > before.compactions_run,
+            "mode: {mode} compact_all should increment compactions_run (before: {}, after: {})",
+            before.compactions_run,
+            after.compactions_run
+        );
+
         let tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadOnly)
             .expect("begin verification transaction");
-        for i in 0..200 {
-            let key = format!("compact_metric_key_{i:04}");
-            let expected = if i < 100 {
-                Bytes::from_static(b"gen1")
-            } else {
-                Bytes::from_static(b"gen2")
-            };
-            assert_eq!(
-                tx.get(key.as_bytes()).expect("read compacted key"),
-                Some(expected),
-                "mode: {mode} key: {key}"
-            );
-        }
-    });
-}
-
-#[test]
-fn should_preserve_repeated_reads_given_short_cache_warmup_window_when_reads_repeated() {
-    for_each_storage_mode(&["local", "cloud"], |mode, opts| {
-        // Arrange
-        let engine = open_with_mode(&opts, mode);
-        let cf = engine.create_column_family("test").expect("create cf");
-
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .expect("begin cache seed transaction");
-        for i in 0..100 {
-            let key = format!("cache_metric_key_{i:04}");
-            tx.put(key.as_bytes().to_vec(), b"cached_value".to_vec(), None)
-                .expect("put cache seed value");
-        }
-        tx.commit(buffered_write_options(mode)).expect("commit");
-        engine.flush_cf(&cf).expect("flush");
-
-        // Act
-        let tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadOnly)
-            .expect("begin first read transaction");
-        for i in 0..50 {
-            let key = format!("cache_metric_key_{i:04}");
-            assert_eq!(
-                tx.get(key.as_bytes()).expect("read first-pass cache key"),
-                Some(Bytes::from_static(b"cached_value"))
-            );
-        }
-
-        drop(tx);
-        thread::sleep(Duration::from_millis(50));
-
-        // Assert
-        let tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadOnly)
-            .expect("begin second read transaction");
-        for i in 0..50 {
-            let key = format!("cache_metric_key_{i:04}");
-            assert_eq!(
-                tx.get(key.as_bytes()).expect("read second-pass cache key"),
-                Some(Bytes::from_static(b"cached_value")),
-                "mode: {mode} key: {key}"
-            );
+        for batch in 0..batches {
+            for i in 0..keys_per_batch {
+                let key = format!("compact_metric_key_{:04}", batch * keys_per_batch + i);
+                let expected = Bytes::from(format!("gen{batch}").into_bytes());
+                assert_eq!(
+                    tx.get(key.as_bytes()).expect("read compacted key"),
+                    Some(expected),
+                    "mode: {mode} key: {key}"
+                );
+            }
         }
     });
 }
@@ -219,6 +168,8 @@ fn should_preserve_large_values_given_wal_backed_write_batch_when_flushed() {
 
         let value = vec![b'W'; 1024];
 
+        let before = engine.get_runtime_metrics().expect("runtime metrics");
+
         // Act
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -231,7 +182,22 @@ fn should_preserve_large_values_given_wal_backed_write_batch_when_flushed() {
         tx.commit(buffered_write_options(mode)).expect("commit");
         engine.flush_cf(&cf).expect("flush");
 
-        // Assert
+        // Assert: flushing the WAL-backed write batch to an SST must be
+        // recorded by the flush build/publish runtime metrics.
+        let after = engine.get_runtime_metrics().expect("runtime metrics");
+        assert!(
+            after.flush_build_count > before.flush_build_count,
+            "mode: {mode} flush_cf should increment flush_build_count (before: {}, after: {})",
+            before.flush_build_count,
+            after.flush_build_count
+        );
+        assert!(
+            after.flush_publish_count > before.flush_publish_count,
+            "mode: {mode} flush_cf should increment flush_publish_count (before: {}, after: {})",
+            before.flush_publish_count,
+            after.flush_publish_count
+        );
+
         let tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadOnly)
             .expect("begin verification transaction");
@@ -242,50 +208,6 @@ fn should_preserve_large_values_given_wal_backed_write_batch_when_flushed() {
         assert_eq!(
             tx.get(b"wal_metric_key_0099").expect("read last wal key"),
             Some(Bytes::from(value))
-        );
-    });
-}
-
-#[test]
-fn should_preserve_existing_data_given_placeholder_reset_when_new_write_added() {
-    for_each_storage_mode(&["local", "cloud"], |mode, opts| {
-        // Arrange
-        let engine = open_with_mode(&opts, mode);
-        let cf = engine.create_column_family("test").expect("create cf");
-
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .expect("begin initial seed transaction");
-        for i in 0..50 {
-            let key = format!("reset_metric_key_{i:04}");
-            tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
-                .expect("put initial reset key");
-        }
-        tx.commit(buffered_write_options(mode)).expect("commit");
-
-        // Act
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .expect("begin follow-up transaction");
-        tx.put(b"single_key".to_vec(), b"single_value".to_vec(), None)
-            .expect("put follow-up key");
-        tx.commit(buffered_write_options(mode)).expect("commit");
-
-        // Assert
-        let tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadOnly)
-            .expect("begin verification transaction");
-        for i in 0..50 {
-            let key = format!("reset_metric_key_{i:04}");
-            assert_eq!(
-                tx.get(key.as_bytes()).expect("read preserved reset key"),
-                Some(Bytes::from_static(b"value")),
-                "mode: {mode} key: {key}"
-            );
-        }
-        assert_eq!(
-            tx.get(b"single_key").expect("read follow-up key"),
-            Some(Bytes::from_static(b"single_value"))
         );
     });
 }

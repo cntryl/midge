@@ -76,19 +76,78 @@ fn durability_coverage(policy: DurabilityPolicy) -> &'static str {
 #[test]
 fn should_keep_coverage_manifest_exhaustive_given_public_behavior_axes() {
     // Arrange
-    let entries = [
-        s3_coverage(&S3CredentialSource::environment()),
-        azure_coverage(&AzureCredentialSource::default_chain()),
-        gcs_coverage(&GcsCredentialSource::application_default()),
-        compression_coverage(CompressionAlgo::Lz4),
-        compression_policy_coverage(&CompressionPolicy::None),
+    // The real exhaustiveness guarantee comes from the non-wildcard `match`
+    // arms in the `*_coverage` functions above: adding a new enum variant
+    // without updating them fails to *compile*, not merely to pass this test.
+    //
+    // What this test adds at runtime is a check those compile-time-exhaustive
+    // functions can't make for themselves: that every variant's description is
+    // non-empty *and* distinct within its axis, catching a copy-pasted
+    // coverage note left over from an adjacent match arm.
+    let recovery = [
         recovery_coverage(RecoveryPolicy::Strict),
+        recovery_coverage(RecoveryPolicy::Salvage),
+    ];
+    let durability = [
         durability_coverage(DurabilityPolicy::Sync),
+        durability_coverage(DurabilityPolicy::Buffered),
+        durability_coverage(DurabilityPolicy::BestEffort),
+        durability_coverage(DurabilityPolicy::CloudAsync),
+        durability_coverage(DurabilityPolicy::CloudStrict),
+    ];
+    let compression = [
+        compression_coverage(CompressionAlgo::None),
+        compression_coverage(CompressionAlgo::Lz4),
+        compression_coverage(CompressionAlgo::Zstd3),
+        compression_coverage(CompressionAlgo::Zstd9),
+    ];
+    let compression_policy = [
+        compression_policy_coverage(&CompressionPolicy::None),
+        compression_policy_coverage(&CompressionPolicy::Fixed(CompressionAlgo::Lz4)),
+        compression_policy_coverage(&CompressionPolicy::Adaptive {
+            min_savings_bytes: 64,
+            min_ratio: 0.1,
+            check_algorithms: vec![CompressionAlgo::Zstd3],
+        }),
+    ];
+    let azure = [
+        azure_coverage(&AzureCredentialSource::default_chain()),
+        azure_coverage(&AzureCredentialSource::StorageEnvironment),
+        azure_coverage(&AzureCredentialSource::EnvironmentClientSecret),
+    ];
+    let gcs = [
+        gcs_coverage(&GcsCredentialSource::application_default()),
+        gcs_coverage(&GcsCredentialSource::MetadataServer),
+    ];
+    let s3 = [
+        s3_coverage(&S3CredentialSource::environment()),
+        s3_coverage(&S3CredentialSource::AwsDefaultChain),
     ];
 
     // Act
-    let every_axis_is_classified = entries.iter().all(|entry| !entry.is_empty());
+    let axes = [
+        &recovery[..],
+        &durability[..],
+        &compression[..],
+        &compression_policy[..],
+        &azure[..],
+        &gcs[..],
+        &s3[..],
+    ];
 
     // Assert
-    assert!(every_axis_is_classified);
+    for axis in axes {
+        assert!(
+            axis.iter().all(|entry| !entry.is_empty()),
+            "every variant must carry a non-empty coverage note: {axis:?}"
+        );
+        let mut unique = axis.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            axis.len(),
+            "coverage notes within one axis must be distinct per variant, found a duplicate in {axis:?}"
+        );
+    }
 }

@@ -127,15 +127,36 @@ impl Telemetry {
 mod tests {
     use super::*;
 
+    // Telemetry::init publishes into a process-global `OnceLock` that can
+    // only be set successfully once per test binary, so only one test in
+    // the whole crate may exercise the successful-init path; every other
+    // caller must hit the "already initialized" branch. See
+    // `telemetry::config::tests::should_reject_zero_or_nonfinite_sample_rate_given_telemetry_config_when_initializing`
+    // for coverage of `init`'s validation-failure branch, which runs before
+    // the global is touched and so is safe to repeat.
     #[test]
-    fn should_initialize_telemetry_when_enabled() {
-        let config = TelemetryConfig::default().with_enabled(true);
-        assert!(config.enabled);
-    }
+    fn should_populate_global_telemetry_only_when_enabled_after_init() {
+        // Arrange: disable tracing/logging so init doesn't try to install a
+        // real subscriber, but keep it enabled so the global is published.
+        let mut config = TelemetryConfig::new()
+            .with_enabled(true)
+            .with_service_name("telemetry-mod-test".to_string());
+        config.features.enable_logging = false;
+        config.features.enable_tracing = false;
+        config.features.enable_metrics = true;
 
-    #[test]
-    fn should_support_disabled_telemetry() {
-        let config = TelemetryConfig::default().with_enabled(false);
-        assert!(!config.enabled);
+        // Act: call the real init path. Guard against this test binary
+        // having already run a successful init elsewhere (order-independent).
+        let result = Telemetry::init(&config);
+        if let Err(crate::common::MidgeError::Internal(message)) = &result {
+            assert_eq!(message, "Telemetry already initialized");
+        } else {
+            result.expect("valid enabled config must initialize successfully");
+        }
+
+        // Assert: an enabled init publishes a global instance, reachable via
+        // Telemetry::global(), with a working metrics collector.
+        let global = Telemetry::global().expect("enabled telemetry must be published globally");
+        let _ = global.metrics();
     }
 }

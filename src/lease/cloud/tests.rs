@@ -419,7 +419,7 @@ impl crate::storage::cloud::CloudBackend for NoCasTokenBackend {
                 key,
                 result: Ok((
                     bytes,
-                    crate::storage::cloud::ObjectMetadata::new(metadata.size, String::new(), 0),
+                    crate::storage::cloud::ObjectMetadata::new(metadata.size, String::new()),
                 )),
             },
             Ok(other) => other,
@@ -474,7 +474,6 @@ impl crate::storage::cloud::CloudBackend for NoCasTokenBackend {
                 result: Ok(crate::storage::cloud::ObjectMetadata::new(
                     metadata.size,
                     String::new(),
-                    0,
                 )),
             },
             Ok(other) => other,
@@ -784,14 +783,27 @@ fn should_refuse_simulated_takeover_given_malformed_expiry() {
 fn should_renew_lease_when_held() {
     // Arrange
     let cache_path = temp_cache_path();
-    let lease = Arc::new(CloudStorageLease::new(test_config(), cache_path));
+    let lease = Arc::new(CloudStorageLease::new(test_config(), cache_path.clone()));
     let _guard = Arc::clone(&lease).try_acquire().unwrap();
+    let lease_path = cache_path.join(LEASE_OBJECT_KEY);
+    let before = parse_lease_document(&std::fs::read_to_string(&lease_path).unwrap()).unwrap();
 
     // Act
     let result = lease.renew();
 
     // Assert
     assert!(result.is_ok());
+    let after = parse_lease_document(&std::fs::read_to_string(&lease_path).unwrap()).unwrap();
+    assert_eq!(
+        before.epoch, after.epoch,
+        "renewal must not change the fencing epoch"
+    );
+    assert!(
+        after.expires_at > before.expires_at,
+        "renewal must extend the lease expiry: before={}, after={}",
+        before.expires_at,
+        after.expires_at
+    );
 }
 
 #[test]
@@ -1183,7 +1195,7 @@ fn should_not_renew_newer_simulated_lease_from_stale_same_process_holder() {
 }
 
 #[test]
-fn should_persist_owner_token_in_simulated_lease_document() {
+fn should_persist_lease_identity_in_simulated_document() {
     // Arrange
     let cache_path = temp_cache_path();
     let lease = Arc::new(CloudStorageLease::new(test_config(), cache_path));
@@ -1200,22 +1212,6 @@ fn should_persist_owner_token_in_simulated_lease_document() {
         document.owner_token.as_deref(),
         Some(lease.owner_token.as_str())
     );
-}
-
-#[test]
-fn should_persist_epoch_in_simulated_lease_document() {
-    // Arrange
-    let cache_path = temp_cache_path();
-    let lease = Arc::new(CloudStorageLease::new(test_config(), cache_path));
-
-    // Act
-    let _guard = Arc::clone(&lease).try_acquire().unwrap();
-    let document = lease
-        .read_lease_file()
-        .expect("read lease")
-        .expect("lease exists");
-
-    // Assert
     assert_eq!(document.epoch, Some(lease.epoch()));
 }
 
@@ -1606,6 +1602,7 @@ fn should_allow_reacquire_after_release() {
     let cache_path = temp_cache_path();
     let lease = Arc::new(CloudStorageLease::new(test_config(), cache_path));
     let guard = Arc::clone(&lease).try_acquire().unwrap();
+    let first_epoch = lease.epoch();
     guard.release();
     lease.release().unwrap();
 
@@ -1614,19 +1611,12 @@ fn should_allow_reacquire_after_release() {
 
     // Assert
     assert!(result.is_ok());
-}
-
-#[test]
-fn should_return_correct_ttl() {
-    // Arrange
-    let cache_path = temp_cache_path();
-    let lease = Arc::new(CloudStorageLease::new(test_config(), cache_path));
-
-    // Act
-    let ttl = lease.ttl();
-
-    // Assert
-    assert_eq!(ttl, Duration::from_secs(DEFAULT_CLOUD_LEASE_TTL_SECS));
+    assert!(
+        lease.epoch() > first_epoch,
+        "reacquiring after a genuine release must mint a fresh, higher fencing epoch \
+         (first={first_epoch}, second={}), not silently keep the old one",
+        lease.epoch()
+    );
 }
 
 #[test]

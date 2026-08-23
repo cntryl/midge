@@ -1328,7 +1328,7 @@ fn object_metadata_from_s3_response(
         .map(|(_, value)| value.trim())
         .filter(|value| !value.is_empty())
         .ok_or_else(|| CloudError::Protocol("S3 metadata response is missing ETag".to_string()))?;
-    Ok(ObjectMetadata::new(size, etag.to_string(), 0))
+    Ok(ObjectMetadata::new(size, etag.to_string()))
 }
 
 fn s3_response_error(
@@ -2405,28 +2405,54 @@ mod tests {
     }
 
     #[test]
-    fn should_create_s3_provider_constructors() {
+    fn should_create_legacy_aws_provider_with_independent_backend() {
         // Arrange
         let creds = AwsCredentials::new("access".into(), "secret".into(), "us-east-1".into());
+
+        // Act: `new()` is documented as a thin wrapper over `aws()` for callers pinned to the
+        // legacy signature; the DTO plumbing itself (bucket/region/creds -> config) is exercised
+        // end-to-end for the general S3-compatible path by the custom-endpoint test below, since
+        // `aws()`'s hardcoded AWS host can't be pointed at a local mock server.
+        let provider = S3Provider::new("aws-bucket".into(), "us-east-1".into(), creds)
+            .expect("create legacy aws provider");
+
+        // Assert: each provider owns a distinct backend instance rather than sharing state.
+        let other = S3Provider::aws(
+            "aws-bucket".into(),
+            "us-east-1".into(),
+            AwsCredentials::new("access".into(), "secret".into(), "us-east-1".into()),
+        )
+        .expect("create aws provider directly");
+        assert!(!Arc::ptr_eq(&provider.backend(), &other.backend()));
+    }
+
+    #[test]
+    fn should_create_custom_provider_targeting_path_style_endpoint() {
+        // Arrange
+        let server = spawn_recording_http_server(Vec::new(), Vec::new());
         let custom_config = S3Config::custom(
             "custom-bucket".into(),
             "us-east-1".into(),
-            "http://localhost:9000".into(),
-            true,
+            server.endpoint.clone(),
+            true, // path-style: bucket appears in the URL path, not as a subdomain
         );
 
         // Act
-        let providers = vec![
-            S3Provider::new("aws-bucket".into(), "us-east-1".into(), creds)
-                .expect("create legacy aws provider"),
-            S3Provider::custom(custom_config, "access".into(), "secret".into())
-                .expect("create custom provider"),
-        ];
+        let provider = S3Provider::custom(custom_config, "access".into(), "secret".into())
+            .expect("create custom provider");
+        let backend = provider.backend();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        backend.submit_put("object", b"value".to_vec(), Vec::new(), sender);
+        let _ = receive_put_result(&receiver);
+        let request = server.finish();
 
-        // Assert
-        for provider in providers {
-            let backend = provider.backend();
-            assert!(Arc::strong_count(&backend) >= 1);
-        }
+        // Assert: the request actually reached the configured endpoint, path-style, carrying the
+        // configured bucket name in its request target.
+        assert_eq!(request.method, "PUT");
+        assert!(
+            request.target.contains("/custom-bucket/"),
+            "expected path-style target with bucket, got: {}",
+            request.target
+        );
     }
 }

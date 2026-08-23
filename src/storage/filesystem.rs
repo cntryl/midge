@@ -1179,12 +1179,22 @@ mod tests {
     fn should_construct_with_custom_base_path() {
         // Arrange
         let temp_dir = TempDir::new().unwrap();
+        let fs = FileSystem::new(temp_dir.path()).unwrap();
+        let (tx, rx) = mpsc::channel();
 
         // Act
-        let fs = FileSystem::new(temp_dir.path());
+        fs.submit_write("marker.txt", b"custom base path".to_vec(), tx);
+        let event = rx.recv().unwrap();
 
-        // Assert
-        assert!(fs.is_ok());
+        // Assert: the write must land under the base path passed to `new`, not some default.
+        match event {
+            StorageEvent::WriteComplete { result, .. } => assert!(result.is_ok()),
+            _ => panic!("Expected WriteComplete"),
+        }
+        assert_eq!(
+            fs::read(temp_dir.path().join("marker.txt")).unwrap(),
+            b"custom base path"
+        );
     }
 
     #[test]

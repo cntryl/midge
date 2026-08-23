@@ -329,19 +329,6 @@ mod tests {
     }
 
     #[test]
-    fn should_use_writer_as_boxed_trait_object() {
-        // Arrange
-        let writer: Box<dyn DynSstWriter> = Box::new(MockSstWriter::new());
-
-        // Act
-        // Trait object can be created and used
-        let _: Box<dyn DynSstWriter> = writer;
-
-        // Assert
-        // Just verifying it compiles and is object-safe
-    }
-
-    #[test]
     fn should_downcast_reader_through_trait_object() {
         // Arrange
         let mut reader = MockSstReader::new();
@@ -605,9 +592,9 @@ mod tests {
         // Act
         let result = boxed.finish_bytes();
 
-        // Assert
-        assert!(result.is_ok());
-        // Empty writer may produce empty or minimal output
+        // Assert - the mock encodes each entry as length-prefixed bytes, so
+        // finishing with zero entries deterministically produces zero bytes.
+        assert_eq!(result.unwrap(), Vec::<u8>::new());
     }
 
     #[test]
@@ -624,57 +611,6 @@ mod tests {
 
         // Assert - Should have accumulated data
         assert!(!result.is_empty());
-    }
-
-    #[test]
-    fn should_handle_empty_key_in_add() {
-        // Arrange
-        let mut writer = MockSstWriter::new();
-
-        // Act
-        let result = writer.add(b"", b"value");
-
-        // Assert
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn should_handle_empty_value_in_add() {
-        // Arrange
-        let mut writer = MockSstWriter::new();
-
-        // Act
-        let result = writer.add(b"key", b"");
-
-        // Assert
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn should_handle_binary_data_in_writer() {
-        // Arrange
-        let mut writer = MockSstWriter::new();
-        let binary_key = vec![0u8, 255u8, 128u8];
-        let binary_value = vec![1u8, 254u8, 127u8];
-
-        // Act
-        let result = writer.add(&binary_key, &binary_value);
-
-        // Assert
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn should_writer_handle_large_values() {
-        // Arrange
-        let mut writer = MockSstWriter::new();
-        let large_value = vec![42u8; 50000];
-
-        // Act
-        let result = writer.add(b"key", &large_value);
-
-        // Assert
-        assert!(result.is_ok());
     }
 
     // =========== Trait Polymorphism Edge Cases ===========

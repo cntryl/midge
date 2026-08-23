@@ -107,23 +107,14 @@ fn should_persist_write_given_fsync_enabled_when_crash_occurs() {
     });
 }
 
-#[test]
-fn should_call_fsync_given_wal_sync_enabled_when_put() {
-    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange
-        let engine = open_with_mode(&opts, mode);
-        let cf = engine.create_column_family("test").expect("create cf");
-        let cf_id = cf.id();
-
-        // Act: Write with WAL sync enabled (opts has fsync_enabled: true)
-        let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
-        let result = tx.put(b"test_key".to_vec(), b"test_value".to_vec(), None);
-
-        // Assert: Put succeeds (fsync was called without blocking)
-        assert!(result.is_ok(), "put should succeed in mode: {mode}");
-        tx.commit(buffered_write_options(mode)).unwrap();
-    });
-}
+// `should_call_fsync_given_wal_sync_enabled_when_put` was removed: it only
+// asserted `put()` returned `Ok`, never observing whether fsync actually ran,
+// and its commit used `buffered_write_options` (non-durable), so it exercised
+// no fsync path at all despite its name. A real fix — commit with a durable
+// `WriteOptions`, shut down, and reopen to prove the write survived — is
+// exactly what `should_persist_write_given_fsync_enabled_when_crash_occurs`
+// above already does, so it was pruned as a near-duplicate rather than
+// rewritten into a copy of that test.
 
 // ============================================================================
 // WAL ROTATION TESTS
@@ -288,75 +279,114 @@ fn should_recover_all_writes_given_concurrent_puts_when_crash_occurs() {
 
 #[test]
 fn should_skip_corrupted_wal_tail_given_truncated_tail_when_recovering() {
-    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange
-        // Act (Phase 1)
-        {
-            let mut engine = open_with_mode(&opts, mode);
-            let cf = engine.create_column_family("test").expect("create cf");
-            let cf_id = cf.id();
+    // Arrange
+    // Exercises the *default* open path (no explicit `.recovery_policy(..)` call),
+    // unlike the dedicated Strict/Salvage trust-boundary tests below which always
+    // set the policy explicitly. Several separately-committed frames are written so
+    // truncating only the final frame's tail leaves the earlier frames intact.
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
 
-            // Write data (some will be in incomplete record at tail)
+    {
+        let mut engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+            .expect("open engine");
+        let cf = engine.create_column_family("test").expect("create cf");
+        let cf_id = cf.id();
+
+        for i in 0..5 {
+            let key = format!("key_{i:02}");
             let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
-            for i in 0..10 {
-                let key = format!("key_{i:02}");
-                tx.put(key.into_bytes(), b"value".to_vec(), None)
-                    .expect("put");
-            }
-            tx.commit(buffered_write_options(mode)).unwrap();
-            engine
-                .shutdown(std::time::Duration::from_secs(5))
-                .expect("shutdown before reopen");
+            tx.put(key.into_bytes(), b"value".to_vec(), None)
+                .expect("put");
+            tx.commit(WriteOptions::sync()).expect("sync commit");
         }
+        engine
+            .shutdown(std::time::Duration::from_secs(5))
+            .expect("shutdown before corruption");
+    }
 
-        // Assert (Phase 2): Skips corrupted records, recovers valid ones
-        {
-            let engine = open_with_mode(&opts, mode);
-            let cf = engine.create_column_family("test").expect("create cf");
-            let cf_id = cf.id();
+    // Truncate a few trailing bytes so only the final commit's frame is incomplete.
+    truncate_last_bytes(&db_path.join("wal").join("wal.log"), 3);
 
-            // Some early records should be recovered (before corruption)
-            // Recovery should skip the truncated tail, not panic
-            let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
-            let _ = tx.get(b"key_00").expect("get");
-        }
-    });
+    // Act: reopen with default options (default recovery policy is Strict).
+    let reopened = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+        .expect("default recovery should tolerate a truncated tail frame");
+    let cf = reopened.get_column_family("test").expect("get cf");
+    let cf_id = cf.id();
+
+    // Assert: every frame before the truncated tail survives, the torn one does not.
+    let tx = reopened.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
+    for i in 0..4 {
+        let key = format!("key_{i:02}");
+        assert_eq!(
+            tx.get(key.as_bytes()).expect("get"),
+            Some(Bytes::from_static(b"value")),
+            "key_{i:02} committed before the truncated tail must survive"
+        );
+    }
+    assert_eq!(
+        tx.get(b"key_04").expect("get"),
+        None,
+        "key_04's frame was truncated and must not be recovered"
+    );
 }
 
 #[test]
 fn should_not_recover_data_given_truncated_wal_append_when_reopening() {
-    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange
-        // Act (Phase 1)
-        {
-            let mut engine = open_with_mode(&opts, mode);
-            let cf = engine
-                .get_column_family("test")
-                .unwrap_or_else(|| engine.create_column_family("test").expect("create cf"));
-            let cf_id = cf.id();
+    // Arrange
+    // Simulates a *torn write* (the OS only wrote part of the value bytes before the
+    // crash) by truncating deep into the payload of the final frame, as opposed to
+    // `should_drop_partial_wal_entry_given_manual_tail_append_when_reopening_in_salvage_mode`
+    // below, which appends synthetic garbage bytes *after* a clean shutdown.
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
 
-            // Write without fsync, simulating crash mid-write
-            let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
-            tx.put(b"unsafe_key".to_vec(), b"unsafe_value".to_vec(), None)
-                .expect("put");
-            tx.commit(buffered_write_options(mode)).unwrap();
-            engine
-                .shutdown(std::time::Duration::from_secs(5))
-                .expect("shutdown before reopen");
-        }
+    {
+        let mut engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+            .expect("open engine");
+        let cf = engine.create_column_family("test").expect("create cf");
+        let cf_id = cf.id();
 
-        // Assert (Phase 2): Graceful recovery
-        {
-            let engine = open_with_mode(&opts, mode);
-            let cf = engine.get_column_family("test").expect("get cf");
-            let cf_id = cf.id();
+        let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
+        tx.put(b"safe_key".to_vec(), b"safe_value".to_vec(), None)
+            .expect("put safe key");
+        tx.commit(WriteOptions::sync()).expect("sync safe commit");
 
-            // Key may or may not exist depending on fsync timing
-            // Recovery should not panic or corrupt data
-            let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
-            let _result = tx.get(b"unsafe_key").expect("get");
-        }
-    });
+        let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
+        tx.put(
+            b"unsafe_key".to_vec(),
+            b"unsafe_value_long_enough_to_truncate_mid_payload".to_vec(),
+            None,
+        )
+        .expect("put unsafe key");
+        tx.commit(WriteOptions::sync()).expect("sync unsafe commit");
+        engine
+            .shutdown(std::time::Duration::from_secs(5))
+            .expect("shutdown before corruption");
+    }
+
+    // Cut well into the last frame's payload, simulating a write that was torn
+    // mid-value rather than merely missing its trailing CRC bytes.
+    truncate_last_bytes(&db_path.join("wal").join("wal.log"), 20);
+
+    // Act
+    let reopened = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+        .expect("recovery must tolerate a torn final frame, not panic");
+    let cf = reopened.get_column_family("test").expect("get cf");
+    let cf_id = cf.id();
+
+    // Assert: the torn write is definitively lost; the prior committed key survives.
+    let tx = reopened.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
+    assert_eq!(
+        tx.get(b"safe_key").expect("get"),
+        Some(Bytes::from_static(b"safe_value")),
+        "commit preceding the torn write must survive"
+    );
+    assert_eq!(
+        tx.get(b"unsafe_key").expect("get"),
+        None,
+        "torn write must not be recovered"
+    );
 }
 
 // ============================================================================
@@ -365,81 +395,139 @@ fn should_not_recover_data_given_truncated_wal_append_when_reopening() {
 
 #[test]
 fn should_allow_data_loss_given_skipped_fsync_when_crash_occurs() {
-    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange: This tests the expected behavior of non-fsync mode
+    // Arrange
+    // Documents the fsync-disabled contract: a write that is committed without a
+    // durability guarantee (buffered, no fsync) can be lost on crash. A real crash
+    // can't be induced in-process, so the bytes that would never have made it past
+    // the OS page cache are removed directly, and the loss is asserted concretely.
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
+    let wal_path = db_path.join("wal").join("wal.log");
 
-        // Act (Phase 1)
-        {
-            let mut engine = open_with_mode(&opts, mode);
-            let cf = engine.create_column_family("test").expect("create cf");
-            let cf_id = cf.id();
+    let len_before_unsynced_write = {
+        let mut engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+            .expect("open engine");
+        let cf = engine.create_column_family("test").expect("create cf");
+        let cf_id = cf.id();
 
-            // Write without guaranteeing sync
-            let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
-            tx.put(b"transient_key".to_vec(), b"transient_value".to_vec(), None)
-                .expect("put");
-            tx.commit(buffered_write_options(mode)).unwrap();
-            engine
-                .shutdown(std::time::Duration::from_secs(5))
-                .expect("shutdown before reopen");
-        }
+        let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
+        tx.put(b"durable_key".to_vec(), b"durable_value".to_vec(), None)
+            .expect("put durable key");
+        tx.commit(WriteOptions::sync())
+            .expect("sync durable commit");
 
-        // Assert (Phase 2)
-        {
-            let engine = open_with_mode(&opts, mode);
-            let cf = engine.create_column_family("test").expect("create cf");
-            let cf_id = cf.id();
+        let len_before = std::fs::metadata(&wal_path)
+            .expect("wal metadata before unsynced write")
+            .len();
 
-            // With durable_storage_modes, if fsync is enabled, data should persist
-            // This test documents the contract: if you disable fsync, data loss is possible
-            let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
-            let _result = tx.get(b"transient_key").expect("get");
-        }
-    });
+        // Write without a durability guarantee, simulating a commit that only ever
+        // reached the OS page cache before the crash.
+        let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
+        tx.put(b"transient_key".to_vec(), b"transient_value".to_vec(), None)
+            .expect("put transient key");
+        tx.commit(WriteOptions::buffered())
+            .expect("buffered commit");
+        engine
+            .shutdown(std::time::Duration::from_secs(5))
+            .expect("shutdown before crash simulation");
+        len_before
+    };
+
+    // Simulate the crash: truncate away everything written after the last fsync'd
+    // commit, standing in for bytes that a real power-loss would never have
+    // persisted past the OS page cache.
+    truncate_last_bytes(
+        &wal_path,
+        std::fs::metadata(&wal_path)
+            .expect("wal metadata after crash")
+            .len()
+            - len_before_unsynced_write,
+    );
+
+    // Act
+    let reopened = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+        .expect("recovery after crash must not fail");
+    let cf = reopened.get_column_family("test").expect("get cf");
+    let cf_id = cf.id();
+
+    // Assert: the fsync'd write survives, the never-durable write is gone.
+    let tx = reopened.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
+    assert_eq!(
+        tx.get(b"durable_key").expect("get"),
+        Some(Bytes::from_static(b"durable_value")),
+        "fsync'd commit must survive the crash"
+    );
+    assert_eq!(
+        tx.get(b"transient_key").expect("get"),
+        None,
+        "commit without fsync must be lost when the crash occurs before it is durable"
+    );
 }
 
 #[test]
 fn should_tolerate_corrupted_tail_given_recovery_mode_set_when_reopening() {
-    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange
-        // Act (Phase 1)
-        {
-            let mut engine = open_with_mode(&opts, mode);
-            let cf = engine
-                .get_column_family("test")
-                .unwrap_or_else(|| engine.create_column_family("test").expect("create cf"));
-            let cf_id = cf.id();
+    // Arrange
+    // Unlike `should_fail_strict_but_salvage_valid_prefix_given_corrupted_first_wal_frame_when_reopening`,
+    // which corrupts the very first frame (leaving nothing valid to salvage), this
+    // corrupts a *later* frame so Salvage mode must actually preserve the valid
+    // records that precede the corruption rather than merely open successfully.
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
+    let wal_path = db_path.join("wal").join("wal.log");
 
-            // Write valid records followed by corruption
-            let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
-            tx.put(b"valid_key_1".to_vec(), b"value_1".to_vec(), None)
-                .expect("put");
-            tx.put(b"valid_key_2".to_vec(), b"value_2".to_vec(), None)
-                .expect("put");
-            tx.commit(buffered_write_options(mode)).unwrap();
-            engine
-                .shutdown(std::time::Duration::from_secs(5))
-                .expect("shutdown before reopen");
-        }
+    let offset_of_second_frame = {
+        let mut engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+            .expect("open engine");
+        let cf = engine.create_column_family("test").expect("create cf");
+        let cf_id = cf.id();
 
-        // Assert (Phase 2): Recovery is tolerant and doesn't crash
-        {
-            let engine = open_with_mode(&opts, mode);
-            let cf = engine.get_column_family("test").expect("get cf");
-            let cf_id = cf.id();
+        let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
+        tx.put(b"valid_key_1".to_vec(), b"value_1".to_vec(), None)
+            .expect("put");
+        tx.commit(WriteOptions::sync()).expect("sync commit 1");
 
-            // Valid records before corruption should be recovered
-            let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
-            assert!(
-                tx.get(b"valid_key_1").expect("get").is_some(),
-                "mode: {mode}"
-            );
-            assert!(
-                tx.get(b"valid_key_2").expect("get").is_some(),
-                "mode: {mode}"
-            );
-        }
-    });
+        let offset = std::fs::metadata(&wal_path)
+            .expect("wal metadata after first commit")
+            .len();
+
+        let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
+        tx.put(b"valid_key_2".to_vec(), b"value_2".to_vec(), None)
+            .expect("put");
+        tx.commit(WriteOptions::sync()).expect("sync commit 2");
+        engine
+            .shutdown(std::time::Duration::from_secs(5))
+            .expect("shutdown before corruption");
+        offset
+    };
+
+    // Flip a byte inside the second frame's header/payload region, leaving the
+    // first frame untouched.
+    corrupt_byte(&wal_path, offset_of_second_frame + 4);
+
+    // Act: Salvage mode must open despite the mid-stream corruption.
+    let reopened = Engine::open(
+        OpenOptions::local(db_path)
+            .recovery_policy(RecoveryPolicy::Salvage)
+            .build()
+            .expect("build options"),
+    )
+    .expect("salvage recovery should tolerate corruption after a valid prefix");
+    let cf = reopened.get_column_family("test").expect("get cf");
+    let cf_id = cf.id();
+
+    // Assert: the valid prefix before the corruption is preserved, the corrupted
+    // record is not.
+    let tx = reopened.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
+    assert_eq!(
+        tx.get(b"valid_key_1").expect("get"),
+        Some(Bytes::from_static(b"value_1")),
+        "record committed before the corruption must survive salvage recovery"
+    );
+    assert_eq!(
+        tx.get(b"valid_key_2").expect("get"),
+        None,
+        "corrupted record must not be recovered even in salvage mode"
+    );
 }
 
 // ============================================================================

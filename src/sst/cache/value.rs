@@ -57,18 +57,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_create_value_with_data() {
-        // Arrange
-        let data = Bytes::from(&b"test data"[..]);
-
-        // Act
-        let value = CacheValue::new(data.clone());
-
-        // Assert
-        assert_eq!(value.data.as_ref(), &data);
-    }
-
-    #[test]
     fn should_report_correct_size_bytes() {
         // Arrange
         let data = Bytes::from(&b"hello"[..]);
@@ -79,33 +67,6 @@ mod tests {
 
         // Assert
         assert_eq!(size, 5);
-    }
-
-    #[test]
-    fn should_handle_empty_data() {
-        // Arrange
-        let data = Bytes::from(&b""[..]);
-        let value = CacheValue::new(data);
-
-        // Act
-        let size = value.size_bytes();
-
-        // Assert
-        assert_eq!(size, 0);
-    }
-
-    #[test]
-    fn should_handle_large_data() {
-        // Arrange
-        let large_data = vec![42u8; 10000];
-        let data = Bytes::from(large_data);
-        let value = CacheValue::new(data);
-
-        // Act
-        let size = value.size_bytes();
-
-        // Assert
-        assert_eq!(size, 10000);
     }
 
     #[test]

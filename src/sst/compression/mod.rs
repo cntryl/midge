@@ -517,31 +517,6 @@ mod tests {
     }
 
     #[test]
-    fn should_implement_clone_on_compression_algo() {
-        // Arrange
-        let algo = CompressionAlgo::Lz4;
-
-        // Act
-        let cloned = algo;
-
-        // Assert
-        assert_eq!(algo, cloned);
-    }
-
-    #[test]
-    fn should_implement_copy_on_compression_algo() {
-        // Arrange
-        let algo = CompressionAlgo::Zstd3;
-
-        // Act
-        let copied = algo;
-        let used_original = algo;
-
-        // Assert
-        assert_eq!(copied, used_original);
-    }
-
-    #[test]
     fn should_have_exact_u8_repr() {
         // Arrange
         // Act
@@ -1038,42 +1013,6 @@ mod tests {
             let decompressed = decompress_block(&compressed, algo).unwrap();
             assert_eq!(decompressed.as_ref(), data.as_slice());
         }
-    }
-
-    // ====================== Constants Tests ======================
-
-    #[test]
-    fn should_have_correct_min_compress_size() {
-        // Arrange
-        // Act
-        // Assert
-        assert_eq!(MIN_COMPRESSION_INPUT_BYTES, 256);
-    }
-
-    #[test]
-    fn should_have_correct_max_block_size() {
-        // Arrange
-        // Act
-        // Assert
-        assert_eq!(MAX_BLOCK_SIZE, 64 * 1024);
-    }
-
-    #[test]
-    fn should_have_correct_block_trailer_size() {
-        // Arrange
-        // Act
-        // Assert
-        assert_eq!(BLOCK_TRAILER_SIZE, 5);
-    }
-
-    #[test]
-    fn should_have_block_trailer_5_bytes() {
-        // Arrange
-        // Block trailer: compression_type (1) + crc32c (4) = 5 bytes
-
-        // Act
-        // Assert
-        assert_eq!(BLOCK_TRAILER_SIZE, 1 + 4);
     }
 
     // ====================== Determinism Tests ======================

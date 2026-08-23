@@ -113,22 +113,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_create_disk_state_with_zeros() {
-        // Arrange
-
-        // Act
-        let state = DiskState::new();
-
-        // Assert
-        assert_eq!(state.wal_bytes, 0);
-        assert_eq!(state.sst_bytes, 0);
-        assert_eq!(state.compaction_reserve, 0);
-        assert_eq!(state.new_sst_reserve, 0);
-        assert_eq!(state.wal_reserve, 0);
-        assert_eq!(state.total_committed(), 0);
-    }
-
-    #[test]
     fn should_calculate_total_committed_correctly() {
         // Arrange
         let mut state = DiskState::new();
@@ -188,7 +172,9 @@ mod tests {
     }
 
     #[test]
-    fn should_return_100_percent_when_over_limit() {
+    fn should_not_cap_percent_when_over_limit() {
+        // usage_percent does not clamp to 100; callers (watermark checks)
+        // rely on the raw, uncapped ratio to distinguish degrees of overage.
         // Arrange
         let mut state = DiskState::new();
         state.sst_bytes = 1000;
@@ -198,7 +184,7 @@ mod tests {
         let percent = state.usage_percent(limit);
 
         // Assert
-        assert_eq!(percent, 200); // 1000 / 500 * 100 = 200
+        assert_eq!(percent, 200); // 1000 / 500 * 100 = 200, not capped at 100
     }
 
     #[test]
@@ -222,6 +208,11 @@ mod tests {
         let state = DiskState::default();
 
         // Assert
+        assert_eq!(state.wal_bytes, 0);
+        assert_eq!(state.sst_bytes, 0);
+        assert_eq!(state.compaction_reserve, 0);
+        assert_eq!(state.new_sst_reserve, 0);
+        assert_eq!(state.wal_reserve, 0);
         assert_eq!(state.total_committed(), 0);
     }
 
@@ -276,17 +267,6 @@ mod tests {
 
         // Assert
         assert_eq!(percent, 40);
-    }
-
-    #[test]
-    fn should_implement_default_for_atomic_disk_state() {
-        // Arrange
-
-        // Act
-        let state = AtomicDiskState::default();
-
-        // Assert
-        assert_eq!(state.total_committed(), 0);
     }
 
     #[test]

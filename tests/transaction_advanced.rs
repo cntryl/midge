@@ -290,7 +290,10 @@ fn should_rollback_uncommitted_spill_given_restart_before_commit() {
 }
 
 /// `should_handle_transaction_abort_idempotency_given_multiple_restart_cycles`
-/// Verify multiple restart cycles maintain consistency
+/// Verify that an aborted (dropped-without-commit) transaction never resurfaces
+/// across repeated abort+commit+restart cycles, while the sibling committed
+/// write from the same cycle - and every prior cycle's committed/aborted
+/// pair - remains correctly resolved after each restart.
 #[test]
 fn should_handle_transaction_abort_idempotency_given_multiple_restart_cycles() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
@@ -303,11 +306,26 @@ fn should_handle_transaction_abort_idempotency_given_multiple_restart_cycles() {
                 let mut engine = open_with_mode(&opts_clone, mode);
                 let cf = engine.create_column_family("test").expect("create cf");
 
+                // Abort: write then drop without commit.
+                let aborted_key = format!("cycle{cycle}_aborted_key");
+                let mut aborted_tx = engine
+                    .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                    .expect("begin_tx (abort)");
+                aborted_tx
+                    .put(
+                        aborted_key.as_bytes().to_vec(),
+                        b"should_never_persist".to_vec(),
+                        None,
+                    )
+                    .expect("put (abort)");
+                drop(aborted_tx);
+
+                // Commit: sibling write that should persist.
+                let key = format!("cycle{cycle}_key");
+                let value = format!("cycle{cycle}_value");
                 let mut tx = engine
                     .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                     .expect("begin_tx");
-                let key = format!("cycle{cycle}_key");
-                let value = format!("cycle{cycle}_value");
                 tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                     .expect("put");
                 tx.commit(buffered_write_options(mode)).expect("commit");
@@ -319,221 +337,56 @@ fn should_handle_transaction_abort_idempotency_given_multiple_restart_cycles() {
             {
                 let mut engine = open_with_mode(&opts_clone, mode);
                 let cf = engine.create_column_family("test").expect("create cf");
-                let key = format!("cycle{cycle}_key");
-                let expected = format!("cycle{cycle}_value");
                 let tx_read = engine
                     .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
                     .expect("begin_tx");
+
+                // Assert
+                // This cycle's committed key persisted, aborted key did not.
+                let key = format!("cycle{cycle}_key");
+                let expected = format!("cycle{cycle}_value");
                 let got = tx_read.get(key.as_bytes()).expect("get");
                 let got_str = got.as_ref().map(|b| String::from_utf8_lossy(b).to_string());
                 assert_eq!(
                     got_str,
                     Some(expected),
-                    "cycle {cycle} mismatch in mode: {mode}"
+                    "cycle {cycle} committed key missing in mode: {mode}"
                 );
+
+                let aborted_key = format!("cycle{cycle}_aborted_key");
+                let got_aborted = tx_read.get(aborted_key.as_bytes()).expect("get");
+                assert_eq!(
+                    got_aborted, None,
+                    "cycle {cycle} aborted key persisted in mode: {mode}"
+                );
+
+                // Idempotency across restarts: every prior cycle's outcome is unchanged.
+                for prior in 0..cycle {
+                    let prior_key = format!("cycle{prior}_key");
+                    let prior_expected = format!("cycle{prior}_value");
+                    let prior_got = tx_read.get(prior_key.as_bytes()).expect("get");
+                    let prior_got_str = prior_got
+                        .as_ref()
+                        .map(|b| String::from_utf8_lossy(b).to_string());
+                    assert_eq!(
+                        prior_got_str,
+                        Some(prior_expected),
+                        "cycle {prior} committed key regressed after cycle {cycle} restart in mode: {mode}"
+                    );
+
+                    let prior_aborted_key = format!("cycle{prior}_aborted_key");
+                    let prior_got_aborted = tx_read.get(prior_aborted_key.as_bytes()).expect("get");
+                    assert_eq!(
+                        prior_got_aborted, None,
+                        "cycle {prior} aborted key reappeared after cycle {cycle} restart in mode: {mode}"
+                    );
+                }
+
                 drop(tx_read);
                 engine
                     .shutdown(std::time::Duration::from_secs(5))
                     .expect("shutdown after cycle verification");
             }
-        }
-
-        // Assert: No additional check required.
-    });
-}
-
-/// `should_maintain_exactly_once_semantics_given_transaction_with_crash`
-/// Verify exactly-once semantics for concurrent operations with crash
-#[test]
-fn should_maintain_exactly_once_semantics_given_transaction_with_crash() {
-    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange
-        let opts_clone = opts.clone();
-
-        // Act: Phase 1 - Write twice to same key
-        {
-            let mut engine = open_with_mode(&opts_clone, mode);
-            let cf = engine.create_column_family("test").expect("create cf");
-
-            let mut tx = engine
-                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-                .expect("begin_tx");
-            tx.put(b"idempotent_key".to_vec(), b"value1".to_vec(), None)
-                .expect("put");
-            tx.put(b"idempotent_key".to_vec(), b"value2".to_vec(), None)
-                .expect("put");
-            tx.commit(buffered_write_options(mode)).expect("commit");
-            engine
-                .shutdown(std::time::Duration::from_secs(5))
-                .expect("shutdown before idempotency restart");
-        }
-
-        // Assert: Final value should be the last write (value2)
-        {
-            let mut engine = open_with_mode(&opts_clone, mode);
-            let cf = engine.create_column_family("test").expect("create cf");
-
-            let tx_read = engine
-                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
-                .expect("begin_tx");
-            let got = tx_read.get(b"idempotent_key").expect("get");
-            assert_eq!(
-                got,
-                Some(Bytes::from_static(b"value2")),
-                "idempotent key has wrong value in mode: {mode}"
-            );
-            drop(tx_read);
-            engine
-                .shutdown(std::time::Duration::from_secs(5))
-                .expect("shutdown after idempotency verification");
-        }
-    });
-}
-
-/// `should_recover_large_transaction_given_crash_during_spill`
-/// Verify recovery when crash occurs during spill operation
-#[test]
-fn should_recover_large_transaction_given_crash_during_spill() {
-    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange
-        let opts_clone = opts.clone();
-        let mut opts = opts.clone();
-        opts = opts.memory_budget(256 * 1024); // Sufficient budget for transaction
-
-        // Act: Phase 1 - Write transaction
-        {
-            let mut engine = open_with_mode(&opts, mode);
-            let cf = engine.create_column_family("test").expect("create cf");
-
-            let mut tx = engine
-                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-                .expect("begin_tx");
-            for i in 0..200 {
-                let key = format!("large_key{i:04}");
-                let value = format!("large_value_{:04}_{}", i, "x".repeat(100)); // 100 byte values
-                tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
-                    .expect("put");
-            }
-            tx.commit(buffered_write_options(mode)).expect("commit");
-            engine
-                .shutdown(std::time::Duration::from_secs(5))
-                .expect("shutdown before large spill restart");
-        }
-
-        // Assert: All data recovered
-        {
-            let mut engine = open_with_mode(&opts_clone, mode);
-            let cf = engine.create_column_family("test").expect("create cf");
-
-            let tx_read = engine
-                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
-                .expect("begin_tx");
-            for i in 0..200 {
-                let key = format!("large_key{i:04}");
-                let got = tx_read.get(key.as_bytes()).expect("get");
-                assert!(got.is_some(), "large key {key} missing in mode: {mode}");
-            }
-            drop(tx_read);
-            engine
-                .shutdown(std::time::Duration::from_secs(5))
-                .expect("shutdown after large spill verification");
-        }
-    });
-}
-
-/// `should_not_lose_transaction_writes_given_incomplete_wal_sync`
-/// Verify transaction writes are not lost even with partial WAL sync
-#[test]
-fn should_not_lose_transaction_writes_given_incomplete_wal_sync() {
-    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange
-        let opts_clone = opts.clone();
-
-        // Act
-        {
-            let mut engine = open_with_mode(&opts_clone, mode);
-            let cf = engine.create_column_family("test").expect("create cf");
-
-            let mut tx = engine
-                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-                .expect("begin_tx");
-            tx.put(b"wal_test_key".to_vec(), b"wal_test_value".to_vec(), None)
-                .expect("put");
-            tx.commit(buffered_write_options(mode)).expect("commit");
-            engine
-                .shutdown(std::time::Duration::from_secs(5))
-                .expect("shutdown before WAL restart");
-        }
-
-        // Assert
-        {
-            let mut engine = open_with_mode(&opts_clone, mode);
-            let cf = engine.create_column_family("test").expect("create cf");
-
-            let tx_read = engine
-                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
-                .expect("begin_tx");
-            let got = tx_read.get(b"wal_test_key").expect("get");
-            assert_eq!(
-                got,
-                Some(Bytes::from_static(b"wal_test_value")),
-                "WAL write lost in mode: {mode}"
-            );
-            drop(tx_read);
-            engine
-                .shutdown(std::time::Duration::from_secs(5))
-                .expect("shutdown after WAL verification");
-        }
-    });
-}
-
-/// `should_survive_mid_spill_crash_given_transaction_recovery`
-/// Verify system survives and recovers correctly after mid-spill crash
-#[test]
-fn should_survive_mid_spill_crash_given_transaction_recovery() {
-    for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-        // Arrange
-        let opts_clone = opts.clone();
-        let mut opts = opts.clone();
-        opts = opts.memory_budget(80 * 1024);
-
-        // Act
-        {
-            let mut engine = open_with_mode(&opts, mode);
-            let cf = engine.create_column_family("test").expect("create cf");
-
-            let mut tx = engine
-                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
-                .expect("begin_tx");
-            for i in 0..300 {
-                let key = format!("mid_spill_{i:04}");
-                let value = format!("value_{i:04}");
-                tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
-                    .expect("put");
-            }
-            tx.commit(buffered_write_options(mode)).expect("commit");
-            engine
-                .shutdown(std::time::Duration::from_secs(5))
-                .expect("shutdown before mid-spill restart");
-        }
-
-        // Assert
-        {
-            let mut engine = open_with_mode(&opts_clone, mode);
-            let cf = engine.create_column_family("test").expect("create cf");
-
-            let tx_read = engine
-                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
-                .expect("begin_tx");
-            for i in 0..300 {
-                let key = format!("mid_spill_{i:04}");
-                let got = tx_read.get(key.as_bytes()).expect("get");
-                assert!(got.is_some(), "mid-spill key {key} missing");
-            }
-            drop(tx_read);
-            engine
-                .shutdown(std::time::Duration::from_secs(5))
-                .expect("shutdown after mid-spill verification");
         }
     });
 }

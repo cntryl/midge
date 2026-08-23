@@ -175,15 +175,24 @@ mod tests {
     fn should_reject_unseen_among_many() {
         // Arrange
         let counter = AdmissionCounter::new(64, 1000);
+        let unseen_key = b"never_seen";
+        let unseen_cell = usize::try_from(AdmissionCounter::hash_key(unseen_key)).unwrap_or(0) % 64;
         for i in 0..50 {
-            counter.record_access(format!("key_{i}").as_bytes());
+            let key = format!("key_{i}").into_bytes();
+            // `hash_key` is deterministic, so we can guarantee this test is
+            // not flaky by skipping any recorded key that happens to hash
+            // into the same cell as the unseen key.
+            let cell = usize::try_from(AdmissionCounter::hash_key(&key)).unwrap_or(0) % 64;
+            if cell != unseen_cell {
+                counter.record_access(&key);
+            }
         }
 
         // Act
-        let new_key_admitted = counter.estimate(b"never_seen");
+        let new_key_admitted = counter.estimate(unseen_key);
 
-        // Assert - verify estimate returns a bool (may vary due to hash collisions)
-        let _ = new_key_admitted;
+        // Assert - a key whose cell was never touched must be rejected
+        assert!(!new_key_admitted);
     }
 
     // ===== New comprehensive tests =====

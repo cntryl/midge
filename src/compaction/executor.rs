@@ -15,8 +15,6 @@ use crate::sst::traits::SstFactory;
 use crate::sst::types::{KeyState, RangeTombstone};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-#[cfg(test)]
-use std::collections::BTreeMap;
 use std::collections::BinaryHeap;
 use std::path::Path;
 
@@ -39,51 +37,6 @@ pub struct CompactionVersion {
     pub value: Option<Vec<u8>>,
     /// Expiration time in milliseconds since epoch (optional)
     pub expiration: Option<u64>,
-}
-
-/// Stream-based deduplicator: yields only the first (highest-seq) version per key.
-///
-/// This adapter sits between the version merge and the write path. It consumes
-/// the merged stream (which is already key-ascending, seq-descending) and emits
-/// exactly one entry per unique key—the first one it sees for that key.
-///
-/// Memory usage: O(deduplicated key count) only for tracking the most recent key.
-#[cfg(test)]
-pub struct StreamDeduplicate<I: Iterator<Item = CompactionVersion>> {
-    inner: I,
-    last_key: Option<Vec<u8>>,
-}
-
-#[cfg(test)]
-impl<I: Iterator<Item = CompactionVersion>> StreamDeduplicate<I> {
-    pub fn new(inner: I) -> Self {
-        Self {
-            inner,
-            last_key: None,
-        }
-    }
-}
-
-#[cfg(test)]
-impl<I: Iterator<Item = CompactionVersion>> Iterator for StreamDeduplicate<I> {
-    type Item = CompactionVersion;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            let version = self.inner.next()?;
-
-            // Skip duplicate keys (we already emitted the highest-seq version of this key)
-            if let Some(ref last_key) = self.last_key {
-                if last_key == &version.key {
-                    continue;
-                }
-            }
-
-            // New key; remember it and emit this version
-            self.last_key = Some(version.key.clone());
-            return Some(version);
-        }
-    }
 }
 
 fn tombstone_is_obsolete(sequence: u64, snapshot_horizon: Option<u64>) -> bool {
@@ -294,74 +247,6 @@ pub(crate) fn collect_compaction_stream_inputs(
     Ok((streams, normalize_range_tombstones(range_tombstones)))
 }
 
-/// Deduplicate versions, keeping the newest entry per key without interpreting TTL.
-///
-/// Rules:
-///   - TTL expiration is preserved as metadata and is never interpreted here.
-///   - Among remaining versions, we keep the one with the highest `seq` per key.
-///   - Output is sorted by key in ascending order.
-///
-/// This is a pure, side-effect-free helper and is intentionally independent of
-/// any particular SST layout.
-#[cfg(test)]
-pub fn deduplicate_versions(versions: &[CompactionVersion]) -> Vec<CompactionVersion> {
-    // Map: key -> newest visible version (by sequence).
-    let mut newest_by_key: BTreeMap<Vec<u8>, CompactionVersion> = BTreeMap::new();
-
-    for version in versions {
-        let normalized = version.clone();
-
-        let key = &normalized.key;
-
-        match newest_by_key.get(key) {
-            None => {
-                // First observation of this key.
-                newest_by_key.insert(key.clone(), normalized);
-            }
-            Some(existing) => {
-                // Keep the one with the higher sequence number.
-                if normalized.seq > existing.seq {
-                    newest_by_key.insert(key.clone(), normalized);
-                }
-            }
-        }
-    }
-
-    // BTreeMap keeps keys sorted; just collect in order.
-    newest_by_key.into_values().collect()
-}
-
-/// Filter out tombstones from a deduplicated version set.
-///
-/// NOTE:
-///   - This default function removes all tombstones unconditionally (legacy behavior).
-///   - Prefer `filter_tombstones_with_horizon()` which is snapshot-aware and only
-///     drops tombstones older than the provided snapshot horizon.
-#[cfg(test)]
-pub fn filter_tombstones(versions: &[CompactionVersion]) -> Vec<CompactionVersion> {
-    filter_tombstones_with_horizon(versions, None)
-}
-
-/// Filter tombstones but preserve those newer than `snapshot_horizon` (if provided).
-///
-/// Semantics:
-///   - If `snapshot_horizon` is `None`, all tombstones are dropped (legacy behavior).
-///   - If `Some(h)`, tombstones with `seq > h` are preserved to prevent resurrection
-///     for snapshots reading at sequence `h` or earlier.
-#[cfg(test)]
-pub fn filter_tombstones_with_horizon(
-    versions: &[CompactionVersion],
-    snapshot_horizon: Option<u64>,
-) -> Vec<CompactionVersion> {
-    versions
-        .iter()
-        .filter(|version| {
-            !(version.is_tombstone && tombstone_is_obsolete(version.seq, snapshot_horizon))
-        })
-        .cloned()
-        .collect()
-}
-
 /// Merge, normalize, deduplicate, and write compaction versions without
 /// materializing a second deduplicated result vector.
 pub(crate) fn write_merged_compaction_output_to_sst(
@@ -486,89 +371,6 @@ mod tests {
             value: value.map(|v| v.as_ref().to_vec()),
             expiration,
         }
-    }
-
-    #[test]
-    fn should_keep_highest_sequence_when_deduplicating_versions() {
-        // Arrange
-        let versions = vec![
-            mk_version("key1", 1, false, Some("value1"), None),
-            mk_version("key1", 2, false, Some("value1_updated"), None),
-        ];
-
-        // Act
-        let deduped = deduplicate_versions(&versions);
-
-        // Assert
-        assert_eq!(deduped.len(), 1);
-        assert_eq!(deduped[0].seq, 2);
-        assert_eq!(
-            deduped[0].value.as_deref(),
-            Some(b"value1_updated".as_ref())
-        );
-    }
-
-    #[test]
-    fn should_remove_tombstones_when_filtering_versions() {
-        // Arrange
-        let versions = vec![
-            mk_version("key1", 1, false, Some("value1"), None),
-            mk_version("key2", 2, true, None::<&[u8]>, None),
-        ];
-
-        // Act
-        let filtered = filter_tombstones(&versions);
-
-        // Assert
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].key, b"key1".to_vec());
-    }
-
-    #[test]
-    fn should_preserve_expired_value_metadata_when_deduplicating_for_compaction() {
-        // Arrange
-        let now = 1_000_u64;
-
-        let versions = vec![
-            mk_version(
-                "key1",
-                2,
-                false,
-                Some("expired"),
-                Some(now.saturating_sub(1)), // Expired
-            ),
-            mk_version("key1", 1, false, Some("older"), None),
-        ];
-
-        // Act
-        let deduped = deduplicate_versions(&versions);
-
-        // Assert
-        assert_eq!(deduped.len(), 1);
-        assert_eq!(deduped[0].value.as_deref(), Some(b"expired".as_ref()));
-        assert_eq!(deduped[0].expiration, Some(now.saturating_sub(1)));
-    }
-
-    #[test]
-    fn should_deduplicate_multiple_keys_independently() {
-        // Arrange
-        let versions = vec![
-            mk_version("a", 1, false, Some("a1"), None),
-            mk_version("a", 3, false, Some("a3"), None),
-            mk_version("b", 2, false, Some("b2"), None),
-            mk_version("b", 1, false, Some("b1"), None),
-        ];
-
-        // Act
-        let deduped = deduplicate_versions(&versions);
-
-        // Assert
-
-        assert_eq!(deduped.len(), 2);
-        assert_eq!(deduped[0].key, b"a".to_vec());
-        assert_eq!(deduped[0].seq, 3);
-        assert_eq!(deduped[1].key, b"b".to_vec());
-        assert_eq!(deduped[1].seq, 2);
     }
 
     #[test]
@@ -704,166 +506,48 @@ mod tests {
     }
 
     #[test]
-    fn should_stream_deduplicate_multiple_versions_when_using_iterator() {
-        // Arrange: Create two input iterators (simulating SST readers)
-        let stream1 = vec![
-            mk_version("a", 3, false, Some("a3"), None),
-            mk_version("a", 1, false, Some("a1"), None),
-            mk_version("c", 2, false, Some("c2"), None),
-        ];
-
-        let stream2 = vec![
-            mk_version("a", 2, false, Some("a2"), None),
-            mk_version("b", 5, false, Some("b5"), None),
-        ];
-
-        // Act: Create merge iterator from both streams
-        let version_iter = VersionMergeIterator::new(vec![stream1, stream2]);
-
-        // Stream deduplicate (keeps only first/highest-seq per key)
-        let dedup_iter = StreamDeduplicate::new(version_iter);
-
-        // Collect results
-        let deduped: Vec<_> = dedup_iter.collect();
-
-        // Assert
-        // Should have 3 unique keys: a (seq 3), b (seq 5), c (seq 2)
-        assert_eq!(deduped.len(), 3);
-
-        // Check order: keys should be in ascending order
-        assert_eq!(deduped[0].key, b"a".to_vec());
-        assert_eq!(deduped[0].seq, 3); // Highest seq for 'a'
-
-        assert_eq!(deduped[1].key, b"b".to_vec());
-        assert_eq!(deduped[1].seq, 5);
-
-        assert_eq!(deduped[2].key, b"c".to_vec());
-        assert_eq!(deduped[2].seq, 2);
-    }
-
-    #[test]
-    fn should_retain_recent_tombstone_given_snapshot_horizon_when_compacting() {
-        // Arrange: create versions where one key has a recent tombstone
-        let recent_tombstone = mk_version("k", 200, true, None::<&[u8]>, None);
-        let older_put = mk_version("k", 100, false, Some("v"), None);
-        let versions = vec![older_put, recent_tombstone.clone()];
-
-        // Act: filter tombstones with a snapshot horizon of 150
-        // Tombstones newer than the horizon (seq > 150) must be preserved.
-        let filtered = filter_tombstones_with_horizon(&versions, Some(150));
-
-        // Assert: recent tombstone (seq 200) should be preserved
-        assert!(
-            filtered.iter().any(|v| v.is_tombstone && v.seq == 200),
-            "expected recent tombstone to be preserved by compaction filter (snapshot-aware)"
-        );
-    }
-
-    #[test]
-    fn should_drop_tombstone_when_sequence_equals_snapshot_horizon() {
+    fn should_treat_all_tombstones_as_obsolete_when_no_snapshot_horizon() {
         // Arrange
-        let versions = vec![
-            mk_version("k_old", 5, false, Some("old"), None),
-            mk_version("k_eq", 150, true, None::<&[u8]>, None),
-            mk_version("k_new", 151, true, None::<&[u8]>, None),
-        ];
+        let horizon = None;
 
         // Act
-        let filtered = filter_tombstones_with_horizon(&versions, Some(150));
+        let zero_is_obsolete = tombstone_is_obsolete(0, horizon);
+        let large_is_obsolete = tombstone_is_obsolete(1_000_000, horizon);
 
-        // Assert
-        assert!(
-            !filtered
-                .iter()
-                .any(|v| v.key == b"k_eq".to_vec() && v.is_tombstone),
-            "tombstone at the exact horizon must be dropped"
-        );
-        assert!(
-            filtered
-                .iter()
-                .any(|v| v.key == b"k_new".to_vec() && v.is_tombstone),
-            "tombstone above horizon must be preserved"
-        );
-        assert!(
-            filtered
-                .iter()
-                .any(|v| v.key == b"k_old".to_vec() && !v.is_tombstone),
-            "non-tombstone entries should remain"
-        );
+        // Assert: with no snapshot horizon, every sequence is
+        // eligible for GC (legacy "drop all tombstones" behavior).
+        assert!(zero_is_obsolete);
+        assert!(large_is_obsolete);
     }
 
     #[test]
-    fn should_drop_tombstone_when_sequence_is_below_snapshot_horizon() {
+    fn should_treat_tombstone_as_obsolete_when_sequence_is_at_or_below_horizon() {
         // Arrange
-        let versions = vec![
-            mk_version("k_low", 149, true, None::<&[u8]>, None),
-            mk_version("k_high", 200, true, None::<&[u8]>, None),
-        ];
+        let horizon = Some(150);
 
         // Act
-        let filtered = filter_tombstones_with_horizon(&versions, Some(150));
+        let at_horizon = tombstone_is_obsolete(150, horizon);
+        let below_horizon = tombstone_is_obsolete(149, horizon);
 
-        // Assert
-        assert!(
-            !filtered
-                .iter()
-                .any(|v| v.key == b"k_low".to_vec() && v.is_tombstone),
-            "tombstone below horizon must be dropped"
-        );
-        assert!(
-            filtered
-                .iter()
-                .any(|v| v.key == b"k_high".to_vec() && v.is_tombstone),
-            "tombstone above horizon must be preserved"
-        );
+        // Assert: sequences at or below the horizon are obsolete, since
+        // no live snapshot can observe them being resurrected.
+        assert!(at_horizon);
+        assert!(below_horizon);
     }
 
     #[test]
-    fn should_merge_nonempty_stream_when_another_input_stream_is_empty() {
+    fn should_retain_tombstone_when_sequence_is_above_horizon() {
         // Arrange
-        let stream1 = vec![];
-        let stream2 = vec![mk_version("k", 10, false, Some("v"), None)];
+        let horizon = Some(150);
 
         // Act
-        let version_iter = VersionMergeIterator::new(vec![stream1, stream2]);
+        let above_horizon = tombstone_is_obsolete(151, horizon);
+        let maximum_sequence = tombstone_is_obsolete(u64::MAX, horizon);
 
-        let dedup_iter = StreamDeduplicate::new(version_iter);
-        let result: Vec<_> = dedup_iter.collect();
-
-        // Assert
-
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].key, b"k".to_vec());
-        assert_eq!(result[0].seq, 10);
-    }
-
-    #[test]
-    fn should_deduplicate_correctly_across_streams_with_overlapping_keys() {
-        // Arrange
-        // Stream 1: a(5), a(3), b(4)
-        let stream1 = vec![
-            mk_version("a", 5, false, Some("a5"), None),
-            mk_version("a", 3, false, Some("a3"), None),
-            mk_version("b", 4, false, Some("b4"), None),
-        ];
-
-        // Stream 2: a(4), b(6), c(2)
-        let stream2 = vec![
-            mk_version("a", 4, false, Some("a4"), None),
-            mk_version("b", 6, false, Some("b6"), None),
-            mk_version("c", 2, false, Some("c2"), None),
-        ];
-
-        let version_iter = VersionMergeIterator::new(vec![stream1, stream2]);
-
-        // Act
-        let dedup_iter = StreamDeduplicate::new(version_iter);
-        let result: Vec<_> = dedup_iter.collect();
-
-        // Assert: Should have 3 keys: a(5), b(6), c(2)
-        assert_eq!(result.len(), 3);
-        assert_eq!(result[0].seq, 5); // a: highest is 5
-        assert_eq!(result[1].seq, 6); // b: highest is 6
-        assert_eq!(result[2].seq, 2); // c: only has 2
+        // Assert: a tombstone newer than the horizon must be preserved
+        // so a snapshot reading at or below the horizon does not observe a
+        // resurrected key.
+        assert!(!above_horizon);
+        assert!(!maximum_sequence);
     }
 }

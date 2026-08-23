@@ -209,25 +209,44 @@ fn should_use_poison_tolerant_shared_test_locks_across_repository() {
 
 #[test]
 fn should_cascade_no_further_test_failures_when_prior_failpoint_guard_panics() {
-    // Arrange
-    let lock = std::sync::Arc::new(std::sync::Mutex::new(()));
+    // Arrange: this exercises the poison-tolerant lock pattern that
+    // `should_use_poison_tolerant_shared_test_locks_across_repository`
+    // enforces repository-wide for locks shared across tests (including
+    // failpoint test guards, which are `pub(crate)` and so cannot be driven
+    // directly from an external integration-test binary). A panic while
+    // holding such a lock must not cascade into a failure for whoever
+    // acquires it next.
+    let lock = std::sync::Arc::new(std::sync::Mutex::new(0u32));
     let poisoner_lock = std::sync::Arc::clone(&lock);
     let poisoner = std::thread::spawn(move || {
-        let _guard = poisoner_lock
+        let mut guard = poisoner_lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard += 1;
         panic!("synthetic assertion failure while holding test guard");
     });
     assert!(poisoner.join().is_err());
+    assert!(lock.is_poisoned());
 
-    // Act
-    let recovered = lock
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Act: a second, independent acquisition - standing in for the next
+    // test in the suite grabbing the same shared lock - must still succeed
+    // and observe the poisoner's partial work, rather than cascading.
+    let follower_lock = std::sync::Arc::clone(&lock);
+    let follower = std::thread::spawn(move || {
+        let guard = follower_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard
+    });
+    let value_seen_by_follower = follower
+        .join()
+        .expect("follower must not cascade the panic");
 
     // Assert
-    drop(recovered);
-    assert!(lock.is_poisoned());
+    assert_eq!(
+        value_seen_by_follower, 1,
+        "follower must observe the poisoner's work rather than a reset/lost state"
+    );
 }
 
 #[test]

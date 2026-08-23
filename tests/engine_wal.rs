@@ -165,10 +165,12 @@ fn should_recover_range_tombstones_from_wal() {
 #[test]
 fn should_handle_wal_rotation_multiple_segments() {
     // Arrange
-    let engine = open_with_mode(&opts_for_mode("local"), "local");
+    let opts = opts_for_mode("local");
+    let mut engine = open_with_mode(&opts, "local");
     let cf = engine.create_column_family("test").expect("create cf");
 
     let mut batch_count = 0;
+    let mut segment_ids = Vec::new();
 
     for batch in 0..5 {
         for i in 0..100 {
@@ -181,11 +183,27 @@ fn should_handle_wal_rotation_multiple_segments() {
             tx.commit(WriteOptions::buffered()).expect("commit");
         }
 
+        // flush_cf() seals the active WAL segment and rotates to a new one,
+        // which is the actual "rotation" this test is named for.
         engine.flush_cf(&cf).expect("flush cf");
         batch_count += 1;
+        segment_ids.push(
+            engine
+                .get_runtime_metrics()
+                .expect("runtime metrics")
+                .wal_current_segment_id,
+        );
     }
 
-    // Act
+    // Assert: the WAL genuinely rotated to a new segment after every flush,
+    // not just that the data happened to survive.
+    assert!(
+        segment_ids.windows(2).all(|pair| pair[1] > pair[0]),
+        "expected the active WAL segment id to strictly increase across \
+         rotations, got: {segment_ids:?}"
+    );
+
+    // Assert: all batches are still readable pre-restart.
     let final_tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .expect("begin read tx");
@@ -195,9 +213,48 @@ fn should_handle_wal_rotation_multiple_segments() {
         .try_collect()
         .expect("collect scan")
         .len();
-
-    // Assert
     assert_eq!(total, batch_count * 100, "expected every batch to survive");
+    drop(final_tx);
+
+    // Act: write one more batch that is *not* flushed, so it's only durable
+    // via the (now rotated-many-times) WAL, then restart the engine. This
+    // is what distinguishes rotation handling from a plain post-flush
+    // recovery check: replay must walk every rotated segment plus the
+    // final unflushed one to reconstruct the full data set.
+    for i in 0..100 {
+        let key = format!("batch5_key{i:04}");
+        let mut tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin tx");
+        tx.put(key.as_bytes().to_vec(), b"batch_value".to_vec(), None)
+            .expect("put");
+        tx.commit(WriteOptions::sync()).expect("commit");
+    }
+    engine
+        .shutdown(std::time::Duration::from_secs(5))
+        .expect("shutdown before restart");
+
+    let reopened = open_with_mode(&opts, "local");
+    let cf = reopened
+        .get_column_family("test")
+        .expect("column family survives restart");
+    let read_tx = reopened
+        .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+        .expect("begin read tx after restart");
+    let total_after_restart = read_tx
+        .scan(&cntryl_midge::Query::new())
+        .expect("scan after restart")
+        .try_collect()
+        .expect("collect scan after restart")
+        .len();
+
+    // Assert: recovery replayed across every rotated WAL segment plus the
+    // final unflushed one.
+    assert_eq!(
+        total_after_restart,
+        (batch_count + 1) * 100,
+        "expected data spanning every rotated WAL segment to survive restart"
+    );
 }
 
 #[test]

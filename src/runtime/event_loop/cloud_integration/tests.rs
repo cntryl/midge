@@ -1099,27 +1099,33 @@ fn should_start_with_no_hybrid_storage() {
 #[test]
 fn should_set_hybrid_storage() {
     // Arrange
-    let event_loop = create_test_event_loop().expect("Should create event loop");
+    let mut event_loop = create_test_event_loop().expect("Should create event loop");
+    assert!(event_loop.hybrid_storage.is_none());
 
-    // Act
-    // Create a mock hybrid storage (we need to use a real one or skip this test)
-    // For now, we'll skip detailed testing of set_hybrid_storage since it requires
-    // complex setup with actual HybridStorage instance
+    let db_path = event_loop.state.db_path.clone();
+    let local = std::sync::Arc::new(
+        crate::storage::filesystem::FileSystem::new(db_path.join("hybrid_local"))
+            .expect("create local backend"),
+    );
+    let cloud = std::sync::Arc::new(
+        crate::storage::filesystem::FileSystem::new(db_path.join("cloud_store"))
+            .expect("create cloud backend"),
+    );
+    let hybrid_storage = std::sync::Arc::new(crate::storage::HybridStorage::with_policy(
+        local,
+        cloud,
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    ));
 
-    // Assert - Method exists and is callable
-    drop(event_loop);
-}
-
-#[test]
-fn should_support_hybrid_storage_optional_field() {
-    // Arrange
-    let event_loop = create_test_event_loop().expect("Should create event loop");
-
-    // Act
+    // Act - the real setter, not just a construction check
+    event_loop.set_hybrid_storage(std::sync::Arc::clone(&hybrid_storage));
 
     // Assert
-    // hybrid_storage starts as None
-    assert!(event_loop.hybrid_storage.is_none());
+    let stored = event_loop
+        .hybrid_storage
+        .as_ref()
+        .expect("hybrid storage should now be set");
+    assert!(std::sync::Arc::ptr_eq(stored, &hybrid_storage));
 }
 
 #[test]

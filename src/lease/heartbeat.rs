@@ -612,18 +612,37 @@ mod tests {
 
     #[test]
     fn should_stop_heartbeat_given_renewal_failure_when_running() {
-        // Arrange
+        // Arrange: distinct from
+        // `should_mark_heartbeat_unhealthy_given_renewal_failure_when_running`,
+        // which only checks the unhealthy flag while the worker threads are
+        // still alive. This test verifies `stop()` itself actually tears the
+        // worker threads down and that no renewal attempt sneaks in after.
         let mock = Arc::new(MockLease::new());
         mock.set_should_fail(true);
-        let mut heartbeat = LeaseHeartbeat::new(mock as Arc<dyn PrimaryLease>);
+        let mut heartbeat = LeaseHeartbeat::new(mock.clone() as Arc<dyn PrimaryLease>);
 
         // Act
         heartbeat.start();
         std::thread::sleep(Duration::from_millis(200));
         heartbeat.stop();
+        let renewal_count_at_stop = mock.get_renewal_count();
+        std::thread::sleep(Duration::from_millis(200));
 
         // Assert
         assert!(!heartbeat.is_healthy());
+        assert!(
+            heartbeat.renewal_handle.is_none(),
+            "stop() must join and clear the renewal thread"
+        );
+        assert!(
+            heartbeat.watchdog_handle.is_none(),
+            "stop() must join and clear the watchdog thread"
+        );
+        assert_eq!(
+            mock.get_renewal_count(),
+            renewal_count_at_stop,
+            "no renewal attempts should occur after stop() returns"
+        );
     }
 
     #[test]
