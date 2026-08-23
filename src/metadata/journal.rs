@@ -59,9 +59,6 @@ pub enum ManifestEdit {
         name: String,
         created_at: u64,
     },
-    DropColumnFamily {
-        id: u32,
-    },
     /// Durable drop intent carrying the snapshot frontier and exact SST set.
     DropColumnFamilyAt {
         id: u32,
@@ -112,7 +109,6 @@ impl ManifestEdit {
             ManifestEdit::AddSst(_) => 1,
             ManifestEdit::RemoveSst { .. } => 2,
             ManifestEdit::CreateColumnFamily { .. } => 3,
-            ManifestEdit::DropColumnFamily { .. } => 4,
             ManifestEdit::BumpWalSeq { .. } => 5,
             ManifestEdit::BumpNextSstSeq { .. } => 6,
             ManifestEdit::SetCloudCheckpoint(_) => 7,
@@ -155,7 +151,6 @@ impl ManifestEdit {
                 Ok(())
             }
             ManifestEdit::CreateColumnFamily { .. }
-            | ManifestEdit::DropColumnFamily { .. }
             | ManifestEdit::BumpWalSeq { .. }
             | ManifestEdit::BumpNextSstSeq { .. } => Ok(()),
         }

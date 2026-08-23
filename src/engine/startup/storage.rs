@@ -311,6 +311,7 @@ impl RuntimeStorageMaterialization {
             writer_epoch: startup_lease.writer_epoch,
             lease_healthy: Some(startup_lease.runtime_lease_health()),
             leader_store: startup_lease.leader_store.clone(),
+            leader_holder_id: Some(startup_lease.lease.holder_id()),
             ..Default::default()
         };
 
@@ -409,6 +410,7 @@ impl RuntimeStorageMaterialization {
             writer_epoch: startup_lease.writer_epoch,
             lease_healthy: Some(startup_lease.runtime_lease_health()),
             leader_store: startup_lease.leader_store.clone(),
+            leader_holder_id: Some(startup_lease.lease.holder_id()),
             ..Default::default()
         };
 
@@ -444,6 +446,7 @@ impl RuntimeStorageMaterialization {
             writer_epoch: startup_lease.writer_epoch,
             lease_healthy: Some(startup_lease.runtime_lease_health()),
             leader_store: startup_lease.leader_store.clone(),
+            leader_holder_id: Some(startup_lease.lease.holder_id()),
             ..Default::default()
         };
 

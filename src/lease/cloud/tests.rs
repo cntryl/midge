@@ -382,7 +382,11 @@ impl LeaderStore for ValidateFailureLeaderStore {
         self.inner.set_clock_skew_tolerance(tolerance)
     }
 
-    fn validate_epoch(&self, _expected_epoch: u64) -> Result<(), LeaseError> {
+    fn validate_epoch(
+        &self,
+        _expected_holder_id: &str,
+        _expected_epoch: u64,
+    ) -> Result<(), LeaseError> {
         Err(LeaseError::RenewalFailed(
             "scripted post-renew validation failure".to_string(),
         ))
@@ -1389,9 +1393,10 @@ fn should_validate_provider_epoch_through_leader_store() {
     };
 
     // Act
-    let current_result = leader_store.validate_epoch(acquired_epoch);
+    let holder_id = lease.holder_id();
+    let current_result = leader_store.validate_epoch(&holder_id, acquired_epoch);
     put_remote_lease(&cloud, format_lease_document(&newer));
-    let stale_result = leader_store.validate_epoch(acquired_epoch);
+    let stale_result = leader_store.validate_epoch(&holder_id, acquired_epoch);
 
     // Assert
     assert!(current_result.is_ok());

@@ -75,7 +75,7 @@ impl WalActor {
         // Epoch fencing check: verify our epoch is still current before making
         // data durable.  If a newer writer has taken over, we must stop.
         if let Some(store) = &self.leader_store {
-            store.validate_epoch(self.current_epoch).map_err(|e| {
+            store.validate_epoch(&self.leader_holder_id, self.current_epoch).map_err(|e| {
                 tracing::error!(epoch = self.current_epoch, err = %e, "fenced at sync boundary");
                 e
             })?;

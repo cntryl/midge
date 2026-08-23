@@ -24,7 +24,7 @@
 //! *last* occurrence wins.
 
 use crate::common::{MidgeError, MidgeResult};
-use crate::wal::types::{WalOpKind, WalRecord};
+use crate::wal::types::{WalOpKind, WalOpRole, WalRecord};
 use bytes::{Buf, Bytes};
 
 const MAGIC: [u8; 2] = *b"MW";
@@ -320,6 +320,29 @@ fn encode_into_inner(record: &WalRecord, buf: &mut Vec<u8>) -> MidgeResult<()> {
     Ok(())
 }
 
+/// Reject WAL record shapes that decode successfully field-by-field but are
+/// corrupt for a given operation. lsm-spec format/wal.md §5.1, §5.4.
+fn reject_op_specific_corruption(op: WalOpKind, has_value: bool) -> MidgeResult<()> {
+    // A Delete (point-delete) record carries no payload: VALUE (and
+    // therefore COMPRESSION, which only qualifies a VALUE) MUST NOT be
+    // present. A record carrying either is corrupt, not a delete with an
+    // ignorable extra field.
+    if op.role() == WalOpRole::PointDelete && has_value {
+        return Err(corruption("Delete record carries a VALUE tag"));
+    }
+
+    // NOTE: a TxnBatch outer record carrying COMPRESSION is *not* rejected
+    // here, despite lsm-spec format/wal.md §5.4 describing it as corrupt.
+    // `runtime/actors/wal/transaction.rs` legitimately compresses a large
+    // batch payload through the same value-compression path any other
+    // record uses, so a real writer does produce this shape — rejecting it
+    // would break ordinary large-transaction WAL replay. Flagged back to
+    // the spec rather than enforced; see lsm-spec `notes/
+    // implementation-findings.md` for this kind of prose/code correction.
+
+    Ok(())
+}
+
 /// Zero-copy decode into a borrowed view.
 ///
 /// # Errors
@@ -416,8 +439,11 @@ pub fn decode_view(data: &[u8]) -> MidgeResult<WalRecordView<'_>> {
         Ok(())
     })?;
 
+    let op = op.ok_or_else(|| corruption("missing OP"))?;
+    reject_op_specific_corruption(op, value.is_some())?;
+
     Ok(WalRecordView {
-        op: op.ok_or_else(|| corruption("missing OP"))?,
+        op,
         cf_id: cf_id.ok_or_else(|| corruption("missing CF_ID"))?,
         seq: seq.ok_or_else(|| corruption("missing SEQ"))?,
         key: key.ok_or_else(|| corruption("missing KEY"))?,
@@ -884,6 +910,28 @@ mod tests {
     }
 
     #[test]
+    fn should_reject_delete_record_carrying_a_value() {
+        // Arrange
+        let record = WalRecord::new(
+            WalOpKind::Delete,
+            Bytes::from_static(b"k"),
+            Some(Bytes::from_static(b"unexpected")),
+            7,
+            1,
+        );
+
+        // Act
+        let encoded = encode(&record).unwrap();
+        let error = decode(&encoded[..]).unwrap_err();
+
+        // Assert
+        assert!(
+            matches!(error, MidgeError::Corruption(ref msg) if msg.contains("VALUE")),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn should_roundtrip_empty_value_distinct_from_delete() {
         // Arrange
         let record = WalRecord::new(
@@ -1168,6 +1216,45 @@ mod tests {
                 .contains("op_count exceeds remaining bytes"),
             "the allocation guard must reject below-minimum payloads before decoding: {error}"
         );
+    }
+
+    #[test]
+    fn should_roundtrip_txn_batch_outer_record_carrying_compression_tag() {
+        // Arrange: lsm-spec format/wal.md §5.4 describes a TxnBatch outer
+        // record carrying COMPRESSION as corrupt, but
+        // `runtime/actors/wal/transaction.rs` legitimately compresses a
+        // large batch payload through the same value-compression path any
+        // other record uses (see `encode()`'s size-threshold compression).
+        // Rejecting this shape would break ordinary large-transaction WAL
+        // replay, so it is intentionally accepted, not enforced as corrupt.
+        let large_value = Bytes::from(vec![b'v'; 4096]); // large enough to trigger auto-compression
+        let mut inner = WalRecord::new_cf(
+            0,
+            WalOpKind::Put,
+            Bytes::from_static(b"k"),
+            Some(large_value),
+            11,
+            9,
+        );
+        inner.txn_id = Some(42);
+        let payload = encode_txn_batch_payload(42, 10, 12, 9, &[inner]).unwrap();
+        let mut outer = WalRecord::new_cf(
+            0,
+            WalOpKind::TxnBatch,
+            Bytes::from_static(b"txn"),
+            Some(payload),
+            12,
+            9,
+        );
+        outer.txn_id = Some(42);
+
+        // Act: encode() decides whether to compress the payload based on
+        // size, same as any other record — no manual compression tag here.
+        let encoded = encode(&outer).unwrap();
+        let decoded = decode(&encoded[..]).unwrap();
+
+        // Assert
+        assert_eq!(decoded.op, WalOpKind::TxnBatch);
     }
 
     #[test]

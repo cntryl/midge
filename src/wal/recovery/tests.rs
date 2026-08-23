@@ -47,6 +47,24 @@ fn should_fail_replay_closed_given_duplicate_key_sequence() {
     );
 }
 
+#[test]
+fn should_reject_delete_range_record_missing_range_end() {
+    // Arrange: RANGE_END is required for DeleteRange (lsm-spec format/wal.md
+    // §5.1) — a record missing it must be rejected, not silently skipped.
+    let mut memtables = HashMap::new();
+    let record = WalRecord::new(WalOpKind::DeleteRange, Bytes::from_static(b"a"), None, 1, 1);
+    assert_eq!(record.range_end, None);
+
+    // Act
+    let result = apply_record(&record, &mut memtables);
+
+    // Assert
+    assert!(
+        matches!(result, Err(MidgeError::Corruption(_))),
+        "{result:?}"
+    );
+}
+
 fn put_record(key: &'static [u8], sequence: u64, writer_epoch: u64) -> WalRecord {
     WalRecord::new(
         WalOpKind::Put,
@@ -55,6 +73,26 @@ fn put_record(key: &'static [u8], sequence: u64, writer_epoch: u64) -> WalRecord
         sequence,
         writer_epoch,
     )
+}
+
+#[test]
+fn should_reject_active_wal_given_writer_epoch_regression() {
+    // Arrange
+    let bytes = [
+        encode_frame(&put_record(b"epoch-7", 1, 7)),
+        encode_frame(&put_record(b"epoch-8", 2, 8)),
+        encode_frame(&put_record(b"stale-epoch-7", 3, 7)),
+    ]
+    .concat();
+
+    // Act
+    let result = inspect_active_wal_bytes(&bytes);
+
+    // Assert
+    let failure = result.expect_err("regressing epoch must be corrupt");
+    assert!(matches!(failure.failure.error(), MidgeError::Corruption(_)));
+    assert_eq!(failure.verified_prefix.writer_epoch, 8);
+    assert_eq!(failure.verified_prefix.record_count, 2);
 }
 
 fn wal_with_corrupted_length_before_valid_suffix() -> Vec<u8> {

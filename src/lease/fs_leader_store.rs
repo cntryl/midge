@@ -152,6 +152,20 @@ impl LeaderStore for FsLeaderStore {
         self.acquire_leadership_after_validation(holder_id, |_| Ok(()))
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn acquire_leadership_with_minimum_epoch(
+        &self,
+        holder_id: &str,
+        minimum_epoch: u64,
+    ) -> Result<LeaderRecord, LeaseError> {
+        self.acquire_leadership_after_validation_and_publish(
+            holder_id,
+            |_| Ok(()),
+            |_| Ok(()),
+            minimum_epoch,
+        )
+    }
+
     fn read_current(&self) -> Result<Option<LeaderRecord>, LeaseError> {
         let path = FsPath::new(LEADER_RECORD_FILE);
 
@@ -186,8 +200,17 @@ impl LeaderStore for FsLeaderStore {
             LeaseError::IoError(format!("failed to read leader record length: {e}"))
         })?;
 
+        // Only a genuinely absent file (ENOENT, handled above/below) means
+        // "no lease ever held" — an *existing* file that is empty,
+        // non-UTF-8, or missing a required field means something was there
+        // and its state can't be trusted, which is a stricter, distinct
+        // condition from absence. Fail closed as Indeterminate rather than
+        // collapsing it into Ok(None), which would silently reset fencing
+        // state for the next acquirer. lsm-spec format/lease.md §7, §6 item 3.
         if len == 0 {
-            return Ok(None);
+            return Err(LeaseError::Indeterminate(
+                "leader record file exists but is empty".to_string(),
+            ));
         }
 
         let data = file
@@ -195,9 +218,13 @@ impl LeaderStore for FsLeaderStore {
             .map_err(|e| LeaseError::IoError(format!("failed to read leader record: {e}")))?;
 
         let content = String::from_utf8(data.to_vec())
-            .map_err(|e| LeaseError::IoError(format!("leader record not UTF-8: {e}")))?;
+            .map_err(|e| LeaseError::Indeterminate(format!("leader record not UTF-8: {e}")))?;
 
-        Ok(parse_leader_record(&content))
+        parse_leader_record(&content).map(Some).ok_or_else(|| {
+            LeaseError::Indeterminate(
+                "leader record is missing one or more required fields".to_string(),
+            )
+        })
     }
 }
 
@@ -227,14 +254,20 @@ impl FsLeaderStore {
             holder_id,
             validate_current,
             |_| Ok(()),
+            0,
         )
     }
 
+    /// As [`Self::acquire_leadership_after_validation_and_publish`], but
+    /// guaranteeing the granted epoch is at least
+    /// `max(current_epoch, minimum_epoch) + 1`. See
+    /// `LeaderStore::acquire_leadership_with_minimum_epoch`.
     pub(crate) fn acquire_leadership_after_validation_and_publish<V, P>(
         &self,
         holder_id: &str,
         validate_current: V,
         publish: P,
+        minimum_epoch: u64,
     ) -> Result<LeaderRecord, LeaseError>
     where
         V: FnOnce(Option<&LeaderRecord>) -> Result<(), LeaseError>,
@@ -243,7 +276,7 @@ impl FsLeaderStore {
         let _lock = self.acquire_lock(holder_id)?;
         let current = self.read_current()?;
         validate_current(current.as_ref())?;
-        let record = self.acquire_inner(holder_id)?;
+        let record = self.acquire_inner(holder_id, minimum_epoch)?;
         publish(&record)?;
         Ok(record)
     }
@@ -363,7 +396,15 @@ impl FsLeaderStore {
     }
 
     /// Core CAS logic, called under the lock file held by `acquire_leadership`.
-    fn acquire_inner(&self, holder_id: &str) -> Result<LeaderRecord, LeaseError> {
+    ///
+    /// The granted epoch is `max(current_epoch, minimum_epoch) + 1` — passing
+    /// `minimum_epoch: 0` reproduces the unconditional `current_epoch + 1`
+    /// behavior exactly.
+    fn acquire_inner(
+        &self,
+        holder_id: &str,
+        minimum_epoch: u64,
+    ) -> Result<LeaderRecord, LeaseError> {
         // 1. Read current leader record (epoch 0 if absent)
         let current_epoch = match self.read_current()? {
             Some(rec) => rec.epoch,
@@ -371,6 +412,7 @@ impl FsLeaderStore {
         };
 
         let new_epoch = current_epoch
+            .max(minimum_epoch)
             .checked_add(1)
             .ok_or(LeaseError::EpochExhausted)?;
         let now = chrono::Utc::now().to_rfc3339();
@@ -518,6 +560,101 @@ mod tests {
         assert!(current.is_none());
     }
 
+    fn write_raw_leader_record(store: &FsLeaderStore, bytes: &[u8]) {
+        store
+            .fs
+            .open(
+                &FsPath::new(LEADER_RECORD_FILE),
+                OpenOptions {
+                    mode: OpenMode::ReadWrite,
+                    create: true,
+                    create_new: true,
+                    truncate: false,
+                },
+            )
+            .expect("create leader record")
+            .write_at(0, bytes::Bytes::copy_from_slice(bytes))
+            .expect("write raw leader record");
+    }
+
+    #[test]
+    fn should_return_indeterminate_when_leader_record_is_empty() {
+        // Arrange: an existing-but-empty file is not the same as a genuinely
+        // absent one — something was there and can't be trusted.
+        let store = make_store();
+        write_raw_leader_record(&store, b"");
+
+        // Act
+        let result = store.read_current();
+
+        // Assert
+        assert!(
+            matches!(result, Err(LeaseError::Indeterminate(_))),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn should_return_indeterminate_when_leader_record_is_missing_a_field() {
+        // Arrange
+        let store = make_store();
+        write_raw_leader_record(&store, b"epoch: 1\nholder_id: node-a\n"); // no acquired_at
+
+        // Act
+        let result = store.read_current();
+
+        // Assert
+        assert!(
+            matches!(result, Err(LeaseError::Indeterminate(_))),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn should_return_indeterminate_when_leader_record_is_not_utf8() {
+        // Arrange
+        let store = make_store();
+        write_raw_leader_record(&store, &[0xFF, 0xFE, 0xFD]);
+
+        // Act
+        let result = store.read_current();
+
+        // Assert
+        assert!(
+            matches!(result, Err(LeaseError::Indeterminate(_))),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn should_return_none_when_leader_record_file_is_genuinely_absent() {
+        // Arrange
+        let store = make_store();
+
+        // Act
+        let result = store.read_current();
+
+        // Assert
+        assert!(matches!(result, Ok(None)), "{result:?}");
+    }
+
+    #[test]
+    fn should_fail_closed_acquisition_when_existing_leader_record_is_corrupt() {
+        // Arrange: acquisition must not treat a corrupted record as a clean
+        // slate and hand out epoch 1 as if unclaimed.
+        let store = make_store();
+        write_raw_leader_record(&store, b"");
+
+        // Act
+        let result = store.acquire_leadership("new-holder");
+
+        // Assert
+        assert!(
+            matches!(result, Err(LeaseError::Indeterminate(_))),
+            "{result:?}"
+        );
+    }
+
     #[test]
     fn should_validate_epoch_when_matching() {
         // Arrange
@@ -525,7 +662,7 @@ mod tests {
         store.acquire_leadership("node-1").unwrap();
 
         // Act
-        let result = store.validate_epoch(1);
+        let result = store.validate_epoch("node-1", 1);
 
         // Assert
         assert!(result.is_ok());
@@ -539,10 +676,25 @@ mod tests {
         store.acquire_leadership("node-2").unwrap();
 
         // Act
-        let result = store.validate_epoch(1);
+        let result = store.validate_epoch("node-2", 1);
 
         // Assert
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_fail_validate_epoch_when_holder_id_mismatches_despite_matching_epoch() {
+        // Arrange: a forged/tampered record can carry a matching epoch with
+        // a different holder_id — the shared default validate_epoch must
+        // reject that, not just compare epoch.
+        let store = make_store();
+        store.acquire_leadership("node-1").unwrap();
+
+        // Act
+        let result = store.validate_epoch("impostor", 1);
+
+        // Assert
+        assert!(result.is_err(), "{result:?}");
     }
 
     #[test]
@@ -560,6 +712,69 @@ mod tests {
         assert!(e1 < e2);
         assert!(e2 < e3);
         assert!(e3 < e4);
+    }
+
+    #[test]
+    fn should_respect_minimum_epoch_floor_above_current_on_disk_epoch() {
+        // Arrange
+        let store = make_store();
+        store.acquire_leadership("node-a").unwrap(); // epoch 1
+
+        // Act
+        let record = store
+            .acquire_leadership_with_minimum_epoch("node-b", 100)
+            .unwrap();
+
+        // Assert
+        assert_eq!(record.epoch, 101);
+        assert_eq!(record.holder_id, "node-b");
+    }
+
+    #[test]
+    fn should_ignore_minimum_epoch_floor_below_current_on_disk_epoch() {
+        // Arrange
+        let store = make_store();
+        store.acquire_leadership("node-a").unwrap(); // epoch 1
+        store.acquire_leadership("node-b").unwrap(); // epoch 2
+
+        // Act
+        let record = store
+            .acquire_leadership_with_minimum_epoch("node-c", 1)
+            .unwrap();
+
+        // Assert: floor below the current epoch changes nothing — the
+        // granted epoch is still current_epoch + 1.
+        assert_eq!(record.epoch, 3);
+    }
+
+    #[test]
+    fn should_default_minimum_epoch_floor_to_zero_reproducing_current_behavior() {
+        // Arrange
+        let store = make_store();
+
+        // Act
+        let via_default = store.acquire_leadership("node-a").unwrap();
+        let via_explicit_floor =
+            LeaderStore::acquire_leadership_with_minimum_epoch(&store, "node-b", 0).unwrap();
+
+        // Assert
+        assert_eq!(via_default.epoch, 1);
+        assert_eq!(via_explicit_floor.epoch, 2);
+    }
+
+    #[test]
+    fn should_fail_closed_at_epoch_exhaustion_even_with_minimum_epoch_floor() {
+        // Arrange
+        let store = make_store();
+
+        // Act
+        let result = store.acquire_leadership_with_minimum_epoch("node-a", u64::MAX);
+
+        // Assert
+        assert!(
+            matches!(result, Err(LeaseError::EpochExhausted)),
+            "{result:?}"
+        );
     }
 
     #[test]

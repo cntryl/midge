@@ -97,6 +97,10 @@ pub struct RuntimeConfig {
     /// Injected into the WAL actor so it can verify the epoch is still
     /// valid before flushing to durable storage.
     pub leader_store: Option<Arc<dyn crate::lease::LeaderStore>>,
+    /// This instance's own lease holder identity, paired with
+    /// `leader_store` for fencing checks that must verify `holder_id` as
+    /// well as epoch (lsm-spec format/lease.md §5.1, §6 item 1).
+    pub leader_holder_id: Option<String>,
 }
 
 impl Default for RuntimeConfig {
@@ -124,6 +128,7 @@ impl Default for RuntimeConfig {
             writer_epoch: 0,
             lease_healthy: None,
             leader_store: None,
+            leader_holder_id: None,
         }
     }
 }

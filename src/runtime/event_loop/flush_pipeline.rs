@@ -180,6 +180,7 @@ impl EventLoop {
             cloud_metadata_storage: self.cloud_metadata_storage.clone(),
             lease_healthy: self.lease_healthy.clone(),
             leader_store: self.leader_store.clone(),
+            leader_holder_id: self.leader_holder_id.clone(),
         };
         if let Err(error) = self.flush_actor.submit_publish(task) {
             self.publication_gate.active = false;
@@ -354,7 +355,10 @@ impl EventLoop {
         }
         if let Some(store) = &self.leader_store {
             store
-                .validate_epoch(identity.writer_epoch)
+                .validate_epoch(
+                    self.leader_holder_id.as_deref().unwrap_or_default(),
+                    identity.writer_epoch,
+                )
                 .map_err(|error| crate::common::MidgeError::Fenced(error.to_string()))?;
         }
         let Some((cf_id, flush)) = self.state.immutable_flush_by_id(identity.flush_id) else {
@@ -541,7 +545,10 @@ impl EventLoop {
         self.check_lease_health()?;
         if let Some(store) = &self.leader_store {
             store
-                .validate_epoch(self.writer_epoch)
+                .validate_epoch(
+                    self.leader_holder_id.as_deref().unwrap_or_default(),
+                    self.writer_epoch,
+                )
                 .map_err(|error| crate::common::MidgeError::Fenced(error.to_string()))?;
         }
         Ok(())

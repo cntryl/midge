@@ -162,6 +162,9 @@ pub struct WalActor {
     /// Optional leader store for epoch validation at sync boundaries.
     /// When set, each fsync checks that our epoch is still current.
     leader_store: Option<Arc<dyn crate::lease::LeaderStore>>,
+    /// This writer's own lease holder identity, checked alongside epoch at
+    /// each fencing validation.
+    leader_holder_id: String,
 
     // === Optional instrumentation ===
     sync_calls: u64,
@@ -262,6 +265,7 @@ impl WalActor {
             storage_io_timeout,
             current_epoch: writer_epoch,
             leader_store: None,
+            leader_holder_id: String::new(),
         };
 
         // Log resolved WAL mode for diagnostics
@@ -280,9 +284,15 @@ impl WalActor {
         self.durability_policy
     }
 
-    /// Attach a leader store for epoch validation at sync boundaries.
-    pub fn set_leader_store(&mut self, store: Arc<dyn crate::lease::LeaderStore>) {
+    /// Attach a leader store for epoch validation at sync boundaries, along
+    /// with this writer's own holder identity.
+    pub fn set_leader_store(
+        &mut self,
+        store: Arc<dyn crate::lease::LeaderStore>,
+        holder_id: String,
+    ) {
         self.leader_store = Some(store);
+        self.leader_holder_id = holder_id;
     }
 
     pub fn batch_config(&self) -> crate::wal::policy::BatchConfig {

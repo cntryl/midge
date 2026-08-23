@@ -52,6 +52,7 @@ pub(crate) struct FlushPublishTask {
     pub cloud_metadata_storage: Option<Arc<crate::storage::cloud::CloudStorage>>,
     pub lease_healthy: Option<Arc<AtomicBool>>,
     pub leader_store: Option<Arc<dyn crate::lease::LeaderStore>>,
+    pub leader_holder_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -496,7 +497,10 @@ fn validate_task_lease(task: &FlushPublishTask) -> MidgeResult<()> {
     }
     if let Some(store) = &task.leader_store {
         store
-            .validate_epoch(task.build.identity.writer_epoch)
+            .validate_epoch(
+                task.leader_holder_id.as_deref().unwrap_or_default(),
+                task.build.identity.writer_epoch,
+            )
             .map_err(|error| MidgeError::Fenced(error.to_string()))?;
     }
     Ok(())
@@ -876,6 +880,7 @@ mod tests {
             cloud_metadata_storage: Some(control_cloud),
             lease_healthy: Some(Arc::new(AtomicBool::new(true))),
             leader_store: Some(leader_store),
+            leader_holder_id: Some("flush-test".to_string()),
         };
         Ok(PublicationFixture {
             directory,

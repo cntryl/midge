@@ -245,11 +245,13 @@ pub(crate) fn inspect_active_wal_bytes(
                 return Err(wal_prefix_failure(prefix, ReplayFailure::Error(error)));
             }
         };
-        if prefix.record_count > 0 && record.writer_epoch != prefix.writer_epoch {
+        // An active WAL may span a failover and therefore increase epochs,
+        // but it must never return to an older, fenced writer.
+        if prefix.record_count > 0 && record.writer_epoch < prefix.writer_epoch {
             return Err(wal_prefix_failure(
                 prefix,
                 ReplayFailure::Error(MidgeError::Corruption(format!(
-                    "active WAL mixes writer epochs {} and {}",
+                    "active WAL writer epoch regressed from {} to {}",
                     prefix.writer_epoch, record.writer_epoch
                 ))),
             ));
@@ -1089,14 +1091,15 @@ fn apply_record<S: BuildHasher>(
             memtable.delete_with_seq(record.key.to_vec(), record.seq)?;
         }
         WalOpRole::RangeDelete => {
-            // Apply delete_range to memtable during recovery
-            if let Some(end_key) = &record.range_end {
-                memtable.delete_range_with_seq(
-                    record.key.as_ref(),
-                    end_key.as_ref(),
-                    record.seq,
-                )?;
-            }
+            // RANGE_END is required for DeleteRange (lsm-spec format/wal.md
+            // §5.1); a record missing it is corrupt, not a harmless no-op.
+            let Some(end_key) = &record.range_end else {
+                return Err(MidgeError::Corruption(format!(
+                    "DeleteRange WAL record at seq {} is missing RANGE_END",
+                    record.seq
+                )));
+            };
+            memtable.delete_range_with_seq(record.key.as_ref(), end_key.as_ref(), record.seq)?;
         }
         WalOpRole::TransactionBegin
         | WalOpRole::TransactionCommit

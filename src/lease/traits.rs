@@ -387,19 +387,38 @@ pub struct LeaderRecord {
     pub acquired_at: String,
 }
 
-/// Format a `LeaderRecord` as a simple line-based text document.
-pub fn format_leader_record(rec: &LeaderRecord) -> String {
+/// Canonical serialization of the checksummed fields, in the fixed order
+/// `format_leader_record` writes them — the exact bytes the checksum covers.
+fn leader_record_checksum_body(rec: &LeaderRecord) -> String {
     format!(
         "epoch: {}\nholder_id: {}\nacquired_at: {}\n",
         rec.epoch, rec.holder_id, rec.acquired_at
     )
 }
 
+/// Format a `LeaderRecord` as a simple line-based text document, with a
+/// trailing CRC32C checksum over the other three fields — this is the one
+/// on-disk structure whose entire purpose is preventing concurrent-writer
+/// corruption via fencing, so (like WAL frames and SST blocks) it must
+/// detect bit-flip corruption rather than silently accept it.
+pub fn format_leader_record(rec: &LeaderRecord) -> String {
+    let body = leader_record_checksum_body(rec);
+    let checksum = crc32c::crc32c(body.as_bytes());
+    format!("{body}checksum: {checksum}\n")
+}
+
 /// Parse a `LeaderRecord` from the line-based text format.
+///
+/// A record with no `checksum` field is treated as valid-but-unchecked, so
+/// upgrading in place over an existing pre-checksum on-disk record doesn't
+/// break it. A record that *does* carry a `checksum` field is rejected
+/// (returns `None`, the same "unparseable/corrupt" outcome as a missing
+/// required field) if the checksum doesn't verify or doesn't parse.
 pub fn parse_leader_record(content: &str) -> Option<LeaderRecord> {
     let mut epoch = None;
     let mut holder_id = None;
     let mut acquired_at = None;
+    let mut checksum = None;
 
     for line in content.lines() {
         if let Some(value) = line.strip_prefix("epoch: ") {
@@ -408,14 +427,24 @@ pub fn parse_leader_record(content: &str) -> Option<LeaderRecord> {
             holder_id = Some(value.to_string());
         } else if let Some(value) = line.strip_prefix("acquired_at: ") {
             acquired_at = Some(value.to_string());
+        } else if let Some(value) = line.strip_prefix("checksum: ") {
+            checksum = Some(value.parse::<u32>().ok()?);
         }
     }
 
-    Some(LeaderRecord {
+    let record = LeaderRecord {
         epoch: epoch?,
         holder_id: holder_id?,
         acquired_at: acquired_at?,
-    })
+    };
+
+    if let Some(expected) = checksum {
+        if crc32c::crc32c(leader_record_checksum_body(&record).as_bytes()) != expected {
+            return None;
+        }
+    }
+
+    Some(record)
 }
 
 /// Abstraction over the persistent leader record storage.
@@ -429,6 +458,35 @@ pub trait LeaderStore: Send + Sync {
     /// higher epoch than the previous one.  On conflict (another node won
     /// the race) returns `LeaseError::AcquisitionFailed`.
     fn acquire_leadership(&self, holder_id: &str) -> Result<LeaderRecord, LeaseError>;
+
+    /// Atomically acquire leadership, guaranteeing the granted epoch is at
+    /// least `max(current_epoch, minimum_epoch) + 1`.
+    ///
+    /// `minimum_epoch` lets a caller with out-of-band knowledge of a higher
+    /// epoch (disaster recovery, a multi-replica coordinator, a migration
+    /// tool) guarantee the granted epoch exceeds it — the property WAL
+    /// fencing (`format/wal.md` §6.4) depends on. The default of `0` does
+    /// not itself close that gap; it only enables a caller who *has*
+    /// out-of-band epoch knowledge to use it.
+    ///
+    /// The default implementation ignores `minimum_epoch` and delegates to
+    /// [`Self::acquire_leadership`] — preserving today's behavior exactly
+    /// for any implementor that hasn't opted in by overriding this method.
+    /// `FsLeaderStore` overrides it to honor the floor.
+    ///
+    /// Not yet wired into engine startup — that requires reordering startup
+    /// so WAL recovery's `max_epoch_seen` can be threaded in as the floor,
+    /// tracked as separate follow-up work. Exercised directly by
+    /// `FsLeaderStore` tests today.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn acquire_leadership_with_minimum_epoch(
+        &self,
+        holder_id: &str,
+        minimum_epoch: u64,
+    ) -> Result<LeaderRecord, LeaseError> {
+        let _ = minimum_epoch;
+        self.acquire_leadership(holder_id)
+    }
 
     /// Read the current leader record from storage (non-locking).
     fn read_current(&self) -> Result<Option<LeaderRecord>, LeaseError>;
@@ -478,17 +536,140 @@ pub trait LeaderStore: Send + Sync {
         ))
     }
 
-    /// Convenience: read current record and verify the epoch matches.
-    fn validate_epoch(&self, expected_epoch: u64) -> Result<(), LeaseError> {
+    /// Convenience: read current record and verify both the epoch and the
+    /// expected holder still own it.
+    ///
+    /// Comparing `epoch` alone is not sufficient fencing: under the
+    /// epoch-CAS acquisition protocol two legitimate holders never share one
+    /// epoch through conforming writers alone, but `holder_id` is the
+    /// defense against what that protocol doesn't cover — a tampered or
+    /// externally rewritten leader record, a non-conforming writer sharing
+    /// the directory, or a defect in another implementation's CAS logic.
+    /// lsm-spec format/lease.md §5.1, §6 item 1.
+    fn validate_epoch(
+        &self,
+        expected_holder_id: &str,
+        expected_epoch: u64,
+    ) -> Result<(), LeaseError> {
         match self.read_current()? {
-            Some(rec) if rec.epoch == expected_epoch => Ok(()),
+            Some(rec) if rec.epoch == expected_epoch && rec.holder_id == expected_holder_id => {
+                Ok(())
+            }
             Some(rec) => Err(LeaseError::RenewalFailed(format!(
-                "epoch mismatch: expected {}, found {} (holder: {})",
-                expected_epoch, rec.epoch, rec.holder_id
+                "epoch/holder mismatch: expected holder={expected_holder_id} epoch={expected_epoch}, found holder={} epoch={}",
+                rec.holder_id, rec.epoch
             ))),
             None => Err(LeaseError::RenewalFailed(
                 "leader record missing".to_string(),
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod checksum_tests {
+    use super::{format_leader_record, parse_leader_record, LeaderRecord};
+
+    fn sample_record() -> LeaderRecord {
+        LeaderRecord {
+            epoch: 42,
+            holder_id: "node-a@host".to_string(),
+            acquired_at: "2026-02-16T12:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn should_roundtrip_record_with_checksum() {
+        // Arrange
+        let record = sample_record();
+
+        // Act
+        let serialized = format_leader_record(&record);
+        let parsed = parse_leader_record(&serialized);
+
+        // Assert
+        assert!(serialized.contains("checksum: "), "{serialized}");
+        assert_eq!(parsed, Some(record));
+    }
+
+    #[test]
+    fn should_reject_record_when_checksum_mismatches_a_bit_flipped_epoch() {
+        // Arrange: flip the epoch after the checksum was computed, as a
+        // corrupted-on-disk bit-flip would — the value still parses as a
+        // smaller-but-valid u64, so only the checksum can catch it.
+        let record = sample_record();
+        let serialized = format_leader_record(&record);
+        let corrupted = serialized.replacen("epoch: 42\n", "epoch: 41\n", 1);
+
+        // Act
+        let parsed = parse_leader_record(&corrupted);
+
+        // Assert
+        assert_eq!(
+            parsed, None,
+            "a checksum mismatch must be treated as corrupt"
+        );
+    }
+
+    #[test]
+    fn should_reject_record_when_checksum_mismatches_a_corrupted_holder_id() {
+        // Arrange
+        let record = sample_record();
+        let serialized = format_leader_record(&record);
+        let corrupted =
+            serialized.replacen("holder_id: node-a@host\n", "holder_id: node-x@host\n", 1);
+
+        // Act
+        let parsed = parse_leader_record(&corrupted);
+
+        // Assert
+        assert_eq!(parsed, None);
+    }
+
+    #[test]
+    fn should_accept_record_with_no_checksum_field_for_backward_compatibility() {
+        // Arrange: the pre-checksum on-disk format, so upgrade-in-place
+        // doesn't reject an existing valid lease record.
+        let legacy = "epoch: 7\nholder_id: legacy-holder\nacquired_at: 2026-01-01T00:00:00Z\n";
+
+        // Act
+        let parsed = parse_leader_record(legacy);
+
+        // Assert
+        assert_eq!(
+            parsed,
+            Some(LeaderRecord {
+                epoch: 7,
+                holder_id: "legacy-holder".to_string(),
+                acquired_at: "2026-01-01T00:00:00Z".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn should_reject_record_with_unparseable_checksum_field() {
+        // Arrange
+        let record = sample_record();
+        let serialized = format_leader_record(&record);
+        let corrupted = serialized.replacen(
+            &format!(
+                "checksum: {}",
+                crc32c::crc32c(
+                    format!(
+                        "epoch: {}\nholder_id: {}\nacquired_at: {}\n",
+                        record.epoch, record.holder_id, record.acquired_at
+                    )
+                    .as_bytes(),
+                )
+            ),
+            "checksum: not-a-number",
+            1,
+        );
+
+        // Act
+        let parsed = parse_leader_record(&corrupted);
+
+        // Assert
+        assert_eq!(parsed, None);
     }
 }
