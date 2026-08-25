@@ -475,7 +475,7 @@ mod tests {
             0
         );
         let first_request = 88;
-        let first_response = event_loop.router.register(first_request);
+        let first_response = event_loop.router.register(first_request, "TestRequest");
         event_loop
             .durability
             .queue_waiter(DurabilityWaiter::CloudDurability {
@@ -503,7 +503,7 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(1))
             .expect("generation drift response");
         let second_request = 89;
-        let second_response = event_loop.router.register(second_request);
+        let second_response = event_loop.router.register(second_request, "TestRequest");
         event_loop
             .durability
             .queue_waiter(DurabilityWaiter::CloudDurability {
@@ -649,7 +649,7 @@ mod tests {
             .expect("secondary column family")
             .immutable_memtables
             .push(Arc::new(crate::sst::SkipListMemtable::new()));
-        let response_rx = event_loop.router.register(101);
+        let response_rx = event_loop.router.register(101, "TestRequest");
         let waiter = DurabilityWaiter::TransactionApply {
             request_id: 101,
             last_sequence: 9,

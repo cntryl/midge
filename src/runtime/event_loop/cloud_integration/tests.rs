@@ -134,8 +134,8 @@ fn should_fail_all_generation_waiters_given_terminal_cloud_upload_error(
     )?;
     let direct_request = 43;
     let pending_request = 44;
-    let direct_response = event_loop.router.register(direct_request);
-    let pending_response = event_loop.router.register(pending_request);
+    let direct_response = event_loop.router.register(direct_request, "TestRequest");
+    let pending_response = event_loop.router.register(pending_request, "TestRequest");
     event_loop.durability.queue_waiter_for_key(
         0,
         DurabilityWaiter::CloudDurability {
@@ -547,8 +547,8 @@ fn should_notify_all_waiters_given_multiple_seal_requests_for_same_cloud_segment
     let sequence = append_cloud_async_put(&mut el)?;
     let first_id = 18_101;
     let second_id = 18_102;
-    let first_rx = el.router.register(first_id);
-    let second_rx = el.router.register(second_id);
+    let first_rx = el.router.register(first_id, "TestRequest");
+    let second_rx = el.router.register(second_id, "TestRequest");
     let msg_rx = crossbeam::channel::unbounded::<RuntimeMsg>().1;
 
     // Act
@@ -583,7 +583,7 @@ fn should_notify_all_waiters_given_multiple_seal_requests_for_same_cloud_segment
         ));
     }
     let metrics_id = 18_103;
-    let metrics_rx = el.router.register(metrics_id);
+    let metrics_rx = el.router.register(metrics_id, "TestRequest");
     el.handle_runtime_msg(
         RuntimeMsg::GetRuntimeMetrics {
             request_id: metrics_id,
@@ -1451,7 +1451,7 @@ fn should_publish_control_intent_before_remote_compaction_sst() -> crate::common
     el.compaction_actor
         .prepare_for_completion_test(&mut el.state, &[input_sst.to_string()])?;
     let request_id = 4141;
-    let response_rx = el.router.register(request_id);
+    let response_rx = el.router.register(request_id, "TestRequest");
     let (_tx, msg_rx) = crossbeam::channel::unbounded();
 
     // Act
@@ -1507,7 +1507,7 @@ fn should_mirror_cleared_compaction_intent_after_cloud_sst_publish(
     el.compaction_actor
         .prepare_for_completion_test(&mut el.state, &[input_sst.to_string()])?;
     let request_id = 4242;
-    let response_rx = el.router.register(request_id);
+    let response_rx = el.router.register(request_id, "TestRequest");
     let (_tx, msg_rx) = crossbeam::channel::unbounded();
 
     // Act
@@ -1572,9 +1572,9 @@ fn should_unblock_compaction_waiters_when_cleared_compaction_intent_mirror_fails
     el.compaction_actor
         .prepare_for_completion_test(&mut el.state, &[input_sst.to_string()])?;
     let completion_request_id = 4343;
-    let completion_rx = el.router.register(completion_request_id);
+    let completion_rx = el.router.register(completion_request_id, "TestRequest");
     let waiter_request_id = 4344;
-    let waiter_rx = el.router.register(waiter_request_id);
+    let waiter_rx = el.router.register(waiter_request_id, "TestRequest");
     el.state
         .pending_compaction_waits
         .lock()
@@ -1669,7 +1669,7 @@ fn should_delete_obsolete_cloud_sst_objects_after_compaction() -> crate::common:
     el.compaction_actor
         .prepare_for_completion_test(&mut el.state, &[input_sst.to_string()])?;
     let request_id = 4545;
-    let response_rx = el.router.register(request_id);
+    let response_rx = el.router.register(request_id, "TestRequest");
     let (_tx, msg_rx) = crossbeam::channel::unbounded();
 
     // Act
@@ -1752,7 +1752,7 @@ fn should_not_block_runtime_when_cloud_sst_delete_is_slow() -> crate::common::Mi
     hybrid_storage.write_sst_object(sst_name, sst_bytes)?;
 
     let request_id = 4546;
-    let response_rx = el.router.register(request_id);
+    let response_rx = el.router.register(request_id, "TestRequest");
     let (_tx, msg_rx) = crossbeam::channel::unbounded();
     let release_delete_for_thread = Arc::clone(&release_delete);
     let release_thread = std::thread::spawn(move || {
@@ -3606,7 +3606,7 @@ fn should_retry_seal_wal_for_cloud_after_failpoint_before_rotate() -> crate::com
     let last_sequence = append_cloud_async_put(&mut el)?;
 
     let fail_request_id = 401u64;
-    let fail_rx = el.router.register(fail_request_id);
+    let fail_rx = el.router.register(fail_request_id, "TestRequest");
     fail::cfg(
         "midge::cloud::inject_fail_after_wal_flush_before_rotate",
         "return",
@@ -3640,7 +3640,7 @@ fn should_retry_seal_wal_for_cloud_after_failpoint_before_rotate() -> crate::com
     fail::remove("midge::cloud::inject_fail_after_wal_flush_before_rotate");
 
     let retry_request_id = 402u64;
-    let retry_rx = el.router.register(retry_request_id);
+    let retry_rx = el.router.register(retry_request_id, "TestRequest");
     let outcome = el.handle_runtime_msg(
         RuntimeMsg::SealWalForCloud {
             request_id: retry_request_id,
