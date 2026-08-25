@@ -28,7 +28,7 @@ Midge uses explicit transactions. There is no auto-commit mode.
 Within a committed transaction:
 
 - all writes publish atomically
-- all writes receive one commit sequence number
+- write operations occupy one contiguous transaction sequence range
 - readers either observe the full committed batch or none of it
 
 ## Read Semantics
@@ -58,7 +58,10 @@ This is the practical transaction model an external caller should assume:
 
 ## Write-Write Semantics
 
-Midge intentionally permits last-writer-wins behavior for overlapping writes.
+Midge's default `ConflictPolicy::LastWriteWins` intentionally permits
+last-writer-wins behavior for overlapping writes. Callers can instead select
+`ConflictPolicy::AbortOnWriteConflict` for overlapping write-set detection or
+attach explicit value preconditions with `Transaction::assert_value`.
 
 For conflicting writes to the same key:
 
@@ -81,18 +84,42 @@ The externally visible rule is simple:
 
 - Midge provides atomic commits and snapshot reads
 - Midge does not promise serializable conflict detection
-- applications that must reject lost updates must enforce that policy themselves
+- applications that must reject lost updates must explicitly select a conflict
+  policy or assert the values on which an update depends
 
 ## Lost Update Posture
 
-Callers must assume that read-modify-write races can lose updates unless the application adds its own coordination.
+Callers using the default conflict policy must assume that read-modify-write
+races can lose updates unless they add an explicit guard.
 
 Examples of patterns that are not guaranteed to fail automatically:
 
 - two transactions read the same counter, increment it, and both commit
 - two transactions read the same value, derive new values, and commit in sequence
 
-If the application requires compare-and-set behavior or strict lost-update prevention, that logic belongs above the storage engine.
+`ConflictPolicy::AbortOnWriteConflict` rejects mutations that overlap the
+transaction's write set after its snapshot. It does not make the transaction
+serializable and does not protect values that were read but not written.
+
+For compare-and-set behavior, call `assert_value(key, expected)` before staging
+the replacement. Pass `None` to require absence. The assertion:
+
+- compares `expected` with the transaction's frozen start snapshot, not with a
+  pending write in the same transaction
+- rejects any later point mutation or covering range deletion before runtime
+  commit serialization, even under `LastWriteWins`
+- uses sequence movement as its runtime guard, so changing a value and restoring
+  it does not evade the assertion
+- reserves from the shared transaction memory pool and can return
+  `MidgeError::ResourceLimit`; callers must not ignore that result
+
+Assertions protect only the named keys. They do not provide predicate locking,
+phantom protection, or general serializable isolation.
+
+An assertion-only commit allocates no new sequence and writes no transaction
+frame. It still validates at runtime serialization and honors the selected
+durability barrier: local `sync()` establishes a covering fsync, while
+`cloud_strict()` establishes cloud coverage for the current runtime sequence.
 
 ## Atomicity and Crash Semantics
 
@@ -119,7 +146,15 @@ A write can cross several boundaries:
 3. cloud durable: the cloud-backed WAL segment upload has been acknowledged
 4. SST-published: the data is represented by manifest-visible SST state instead of WAL replay
 
-`commit()` does not always wait for all of them. The selected `WriteOptions` define the acknowledgment boundary.
+`commit()` does not always wait for all of them. The selected `WriteOptions`
+define the acknowledgment boundary on a successful return.
+
+Every synchronous runtime response also has a deadline. If `commit()` returns
+`MidgeError::Timeout`, the runtime may already have accepted the transaction and
+may complete it later; the timeout removes the caller's response route but does
+not cancel the mutation. Treat the outcome as unknown, correlate the request in
+runtime diagnostics, and use recovery or an application-level idempotency check
+before retrying.
 
 `WriteOptions::sync()` and `WriteOptions::buffered()` are local-only. `WriteOptions::cloud_async()` and `WriteOptions::cloud_strict()` are cloud-only. Non-cloud storage rejects the cloud-only modes, and cloud-backed storage rejects the local-only modes.
 
@@ -242,7 +277,9 @@ Empty cloud-backed `cloud_strict()` transactions are allowed and do not invent a
 Midge does not currently promise:
 
 - serializable transaction isolation
-- automatic lost-update rejection for arbitrary read-modify-write races
+- automatic lost-update rejection for arbitrary read-modify-write races whose
+  dependencies are not covered by the selected conflict policy or explicit
+  value assertions
 - multi-process shared-writer coordination
 - deployment-specific cloud guarantees such as provider availability, IAM,
   quotas, network policy, lifecycle configuration, or workload capacity

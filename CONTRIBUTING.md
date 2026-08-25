@@ -35,7 +35,7 @@ Be respectful, constructive, and professional. We're here to build reliable infr
 
 ### Prerequisites
 
-- Rust 1.70+ (latest stable recommended)
+- Rust 1.97 or newer (the minimum supported version declared in `Cargo.toml`)
 - Python 3 (used by coverage-tier governance checks)
 - cntryl-tools (install with `cargo install --git https://github.com/cntryl/tools --locked`)
 - Git

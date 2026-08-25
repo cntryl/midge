@@ -28,6 +28,8 @@ migration must export their own expiration source of truth and reconstruct the
 remaining TTL when importing. Do not overwrite the old database: it is the
 only binary rollback path. Older binaries cannot open a FORMAT 3 database.
 
+## Cloud provider configuration
+
 The provider-backed cloud configuration API intentionally changed before
 1.0. Replace `CloudStorageBuckets` with one `CloudStorageLocation` passed to
 `OpenOptions::cloud`. If separate locations remain necessary, construct a
@@ -44,6 +46,8 @@ which prevents cross-provider credential combinations. `OpenOptions::build`
 performs structural validation only and may therefore reject names or endpoints
 that older releases deferred until startup.
 
+## Cloud WAL publication catalog v1
+
 Cloud WAL publication catalog format v1 is a breaking persisted-layout
 change. Sealed objects now use
 `wal/epochs/<writer-epoch>/<segment-id>.wal`, and
@@ -56,10 +60,31 @@ as ambiguous instead of being silently ignored during catalog initialization.
 Preserve the old database, open/export it with a compatible release, then
 import into a new prefix. Do not synthesize a catalog by hand.
 
+Migrate cloud WAL state as a logical database move:
+
+1. Stop writers and complete `engine.shutdown(timeout)` with the compatible old
+   binary.
+2. Preserve the old database prefix and local cache as the rollback copy.
+3. Export every column family's logical key/value contents while the old binary
+   can still recover the segment-only layout.
+4. Create a new empty prefix with the new binary, recreate the column families,
+   and import the logical data.
+5. Verify reads, writes, restart recovery, and the required Sqrzl or real-cloud
+   qualification before switching traffic.
+
+Rollback is unsupported within a migrated prefix. Roll back by restoring
+traffic to the preserved old prefix with its compatible binary; do not let an
+older binary open or write the new prefix.
+
+## General rollout checks
+
+For any Midge binary upgrade:
+
 1. Stop writers and complete `engine.shutdown(timeout)`.
-2. Preserve the database directory and WAL as a recoverable copy.
-3. Test the new binary against a separate copy with verification and compatibility
-   checks.
+2. Preserve the database directory, local WAL, and relevant cloud prefix as a
+   recoverable copy.
+3. Test the new binary against a separate copy with verification and
+   compatibility checks.
 4. Roll forward only after reads, writes, restart recovery, and required cloud
    qualification pass.
 
