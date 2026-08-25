@@ -69,7 +69,8 @@ dropped column family.
 
 ```rust
 let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
-tx.assert_value(b"guard".to_vec(), Some(b"expected".to_vec()))?;
+let expected = tx.get(b"key")?.map(|value| value.to_vec());
+tx.assert_value(b"key".to_vec(), expected)?;
 tx.put(b"key".to_vec(), b"value".to_vec(), None)?;
 tx.delete(b"old".to_vec())?;
 tx.delete_range(b"prefix/".to_vec(), b"prefix0".to_vec())?;
