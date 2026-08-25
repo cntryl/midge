@@ -53,9 +53,10 @@ impl AbandonedRequests {
     }
 }
 
-/// Uses `DashMap` for lock-free concurrent access, eliminating the
-/// `Mutex<HashMap>` contention point between caller threads (register)
-/// and the event loop thread (complete).
+/// Uses `DashMap` for sharded concurrent access between caller threads
+/// (register) and the event loop thread (complete). The tombstone mutex is
+/// acquired only for abandonment and unmatched completion, keeping normal
+/// matched routing off that lock.
 #[derive(Debug)]
 pub(crate) struct ResponseRouter {
     pending: DashMap<u64, PendingRequest>,
@@ -98,6 +99,7 @@ impl ResponseRouter {
         if let Some((_, pending)) = self.pending.remove(&request_id) {
             let _ = pending.response_tx.send(response);
         } else {
+            let completed_at = Instant::now();
             let response_variant = response.kind_name();
             let pending_depth = self.pending_len();
             let abandoned = self
@@ -109,13 +111,12 @@ impl ResponseRouter {
                 .copied();
 
             if let Some(abandoned) = abandoned {
-                let now = Instant::now();
                 tracing::warn!(
                     request_id,
                     request_kind = abandoned.request_kind,
                     configured_timeout = ?abandoned.timeout,
-                    age_since_abandonment = ?now.saturating_duration_since(abandoned.abandoned_at),
-                    total_age_since_registration = ?now.saturating_duration_since(abandoned.registered_at),
+                    age_since_abandonment = ?completed_at.saturating_duration_since(abandoned.abandoned_at),
+                    total_age_since_registration = ?completed_at.saturating_duration_since(abandoned.registered_at),
                     response_variant,
                     pending_depth,
                     "response received with no matching pending request"
@@ -142,6 +143,7 @@ impl ResponseRouter {
     /// ensures a concurrent completion either wins the response race or observes
     /// the newly inserted tombstone.
     pub fn abandon(&self, request_id: u64, timeout: Duration) {
+        let abandoned_at = Instant::now();
         let mut abandoned = self
             .abandoned
             .lock()
@@ -152,7 +154,7 @@ impl ResponseRouter {
                 AbandonedRequest {
                     request_kind: pending.request_kind,
                     timeout,
-                    abandoned_at: Instant::now(),
+                    abandoned_at,
                     registered_at: pending.registered_at,
                 },
             );
