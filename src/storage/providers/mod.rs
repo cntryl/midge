@@ -64,7 +64,7 @@ mod s3_resolver;
 pub(crate) mod test_support {
     use crate::storage::cloud::{CloudBackend, CloudEvent, CloudOutcome};
     use std::io::{ErrorKind, Read, Write};
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -128,7 +128,13 @@ pub(crate) mod test_support {
         }
     }
 
-    fn read_complete_http_request(stream: &mut impl Read) -> Vec<u8> {
+    fn read_complete_http_request(stream: &mut TcpStream) -> Vec<u8> {
+        stream
+            .set_nonblocking(false)
+            .expect("configure blocking HTTP request stream");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("configure HTTP request timeout");
         let mut bytes = Vec::new();
         let mut chunk = [0_u8; 4096];
 
@@ -191,9 +197,6 @@ pub(crate) mod test_support {
             while served < responses.len() && !server_finished.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        stream
-                            .set_read_timeout(Some(Duration::from_secs(5)))
-                            .expect("configure request timeout");
                         let _request = read_complete_http_request(&mut stream);
 
                         let (status, content_type, body) = &responses[served];
@@ -240,10 +243,6 @@ pub(crate) mod test_support {
         let endpoint = format!("http://{}", listener.local_addr().expect("server address"));
         let handle = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept recorded HTTP request");
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .expect("configure recorded request timeout");
-
             let bytes = read_complete_http_request(&mut stream);
 
             let head = String::from_utf8_lossy(&bytes);
