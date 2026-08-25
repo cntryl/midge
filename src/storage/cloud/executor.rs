@@ -573,12 +573,10 @@ mod tests {
     use std::io::{ErrorKind, Read, Write};
     use std::net::TcpListener;
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Barrier,
     };
     use std::time::{Duration, Instant};
-
-    const LOOPBACK_SERVER_TIMEOUT: Duration = Duration::from_secs(10);
 
     struct SlowFailingSigner;
     struct SlowSuccessfulSigner;
@@ -844,13 +842,16 @@ mod tests {
         let address = listener.local_addr().expect("redirect server address");
         let endpoint = format!("http://{address}/object");
         let redirected = format!("http://{address}/redirected");
+        let request_finished = Arc::new(AtomicBool::new(false));
+        let server_request_finished = Arc::clone(&request_finished);
         let server = std::thread::spawn(move || {
-            // This test deliberately expects only one request, so keep its
-            // observation window short instead of using the load-tolerant
-            // accept timeout needed by request/response tests below.
-            let deadline = Instant::now() + Duration::from_secs(2);
             let mut served = 0;
-            while Instant::now() < deadline {
+            let mut last_request: Option<Instant> = None;
+            // A wall-clock startup timeout is unsafe here: the parallel test
+            // runner may not schedule the client before that timeout expires.
+            while !server_request_finished.load(Ordering::Acquire)
+                || last_request.is_some_and(|last| last.elapsed() < Duration::from_millis(250))
+            {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         let mut request = [0_u8; 2048];
@@ -866,9 +867,7 @@ mod tests {
                         )
                         .expect("write redirect response");
                         served += 1;
-                        if served > 1 {
-                            break;
-                        }
+                        last_request = Some(Instant::now());
                     }
                     Err(error) if error.kind() == ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(5));
@@ -882,16 +881,18 @@ mod tests {
         let executor = CloudExecutor::new(None).expect("cloud executor");
 
         // Act
-        let response = executor
-            .rt
-            .as_ref()
-            .expect("cloud runtime")
-            .block_on(CloudExecutor::execute_request(
-                executor.client.clone(),
-                request,
-            ))
-            .expect("redirect response");
+        let response =
+            executor
+                .rt
+                .as_ref()
+                .expect("cloud runtime")
+                .block_on(CloudExecutor::execute_request(
+                    executor.client.clone(),
+                    request,
+                ));
+        request_finished.store(true, Ordering::Release);
         let request_count = server.join().expect("join redirect server");
+        let response = response.expect("redirect response");
 
         // Assert
         assert_eq!(response.status, 303);
@@ -925,12 +926,13 @@ mod tests {
             "http://{}/object",
             listener.local_addr().expect("server address")
         );
+        let request_finished = Arc::new(AtomicBool::new(false));
+        let server_request_finished = Arc::clone(&request_finished);
         let server = std::thread::spawn(move || {
-            let deadline = Instant::now() + LOOPBACK_SERVER_TIMEOUT;
             let mut served = 0;
             let mut last_request: Option<Instant> = None;
-            while Instant::now() < deadline
-                && last_request.is_none_or(|last| last.elapsed() < Duration::from_millis(250))
+            while !server_request_finished.load(Ordering::Acquire)
+                || last_request.is_some_and(|last| last.elapsed() < Duration::from_millis(250))
             {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
@@ -961,10 +963,10 @@ mod tests {
             .expect("test runtime");
 
         // Act
-        let response = runtime
-            .block_on(CloudExecutor::execute_request(Client::new(), request))
-            .expect("transient HTTP response");
+        let response = runtime.block_on(CloudExecutor::execute_request(Client::new(), request));
+        request_finished.store(true, Ordering::Release);
         let request_count = server.join().expect("join test server");
+        let response = response.expect("transient HTTP response");
 
         // Assert
         assert_eq!(response.status, 503);
@@ -985,10 +987,11 @@ mod tests {
             "http://{}/object",
             listener.local_addr().expect("server address")
         );
+        let request_finished = Arc::new(AtomicBool::new(false));
+        let server_request_finished = Arc::clone(&request_finished);
         let server = std::thread::spawn(move || {
-            let deadline = Instant::now() + LOOPBACK_SERVER_TIMEOUT;
             let mut served = 0;
-            while served < 2 && Instant::now() < deadline {
+            while served < 2 && !server_request_finished.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         let mut request = [0_u8; 2048];
@@ -1023,10 +1026,10 @@ mod tests {
             .expect("test runtime");
 
         // Act
-        let response = runtime
-            .block_on(CloudExecutor::execute_request(Client::new(), request))
-            .expect("read should recover from partial body disconnect");
+        let response = runtime.block_on(CloudExecutor::execute_request(Client::new(), request));
+        request_finished.store(true, Ordering::Release);
         let request_count = server.join().expect("join test server");
+        let response = response.expect("read should recover from partial body disconnect");
 
         // Assert
         assert_eq!(response.status, 200);
@@ -1045,12 +1048,13 @@ mod tests {
             "http://{}/object",
             listener.local_addr().expect("server address")
         );
+        let request_finished = Arc::new(AtomicBool::new(false));
+        let server_request_finished = Arc::clone(&request_finished);
         let server = std::thread::spawn(move || {
-            let deadline = Instant::now() + LOOPBACK_SERVER_TIMEOUT;
             let mut served = 0;
             let mut last_request: Option<Instant> = None;
-            while Instant::now() < deadline
-                && last_request.is_none_or(|last| last.elapsed() < Duration::from_millis(250))
+            while !server_request_finished.load(Ordering::Acquire)
+                || last_request.is_some_and(|last| last.elapsed() < Duration::from_millis(250))
             {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
@@ -1079,10 +1083,10 @@ mod tests {
             .expect("test runtime");
 
         // Act
-        let response = runtime
-            .block_on(CloudExecutor::execute_request(Client::new(), request))
-            .expect("transient HTTP response");
+        let response = runtime.block_on(CloudExecutor::execute_request(Client::new(), request));
+        request_finished.store(true, Ordering::Release);
         let request_count = server.join().expect("join test server");
+        let response = response.expect("transient HTTP response");
 
         // Assert
         assert_eq!(response.status, 503);
@@ -1103,12 +1107,13 @@ mod tests {
             "http://{}/object",
             listener.local_addr().expect("server address")
         );
+        let request_finished = Arc::new(AtomicBool::new(false));
+        let server_request_finished = Arc::clone(&request_finished);
         let server = std::thread::spawn(move || {
-            let deadline = Instant::now() + LOOPBACK_SERVER_TIMEOUT;
             let mut served = 0;
             let mut last_request: Option<Instant> = None;
-            while Instant::now() < deadline
-                && last_request.is_none_or(|last| last.elapsed() < Duration::from_millis(250))
+            while !server_request_finished.load(Ordering::Acquire)
+                || last_request.is_some_and(|last| last.elapsed() < Duration::from_millis(250))
             {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
@@ -1138,10 +1143,10 @@ mod tests {
             .expect("test runtime");
 
         // Act
-        let response = runtime
-            .block_on(CloudExecutor::execute_request(Client::new(), request))
-            .expect("transient HTTP response");
+        let response = runtime.block_on(CloudExecutor::execute_request(Client::new(), request));
+        request_finished.store(true, Ordering::Release);
         let request_count = server.join().expect("join test server");
+        let response = response.expect("transient HTTP response");
 
         // Assert
         assert_eq!(response.status, 503);

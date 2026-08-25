@@ -65,12 +65,17 @@ pub(crate) mod test_support {
     use crate::storage::cloud::{CloudBackend, CloudEvent, CloudOutcome};
     use std::io::{ErrorKind, Read, Write};
     use std::net::TcpListener;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
     use std::thread::JoinHandle;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     pub(crate) struct ScriptedHttpServer {
         pub(crate) endpoint: String,
-        handle: JoinHandle<usize>,
+        handle: Option<JoinHandle<usize>>,
+        finished: Arc<AtomicBool>,
     }
 
     #[derive(Debug)]
@@ -101,8 +106,25 @@ pub(crate) mod test_support {
     }
 
     impl ScriptedHttpServer {
-        pub(crate) fn finish(self) -> usize {
-            self.handle.join().expect("scripted HTTP server panicked")
+        pub(crate) fn finish(mut self) -> usize {
+            self.finished.store(true, Ordering::Release);
+            self.handle
+                .take()
+                .expect("scripted HTTP server handle")
+                .join()
+                .expect("scripted HTTP server panicked")
+        }
+    }
+
+    impl Drop for ScriptedHttpServer {
+        fn drop(&mut self) {
+            self.finished.store(true, Ordering::Release);
+            if let Some(handle) = self.handle.take() {
+                let result = handle.join();
+                if !std::thread::panicking() {
+                    result.expect("scripted HTTP server panicked");
+                }
+            }
         }
     }
 
@@ -123,12 +145,14 @@ pub(crate) mod test_support {
             .set_nonblocking(true)
             .expect("configure scripted HTTP server");
         let endpoint = format!("http://{}", listener.local_addr().expect("server address"));
+        let finished = Arc::new(AtomicBool::new(false));
+        let server_finished = Arc::clone(&finished);
         let handle = std::thread::spawn(move || {
-            let overall_deadline = Instant::now() + Duration::from_secs(5);
-            let mut idle_deadline = None;
             let mut served = 0;
 
-            while served < responses.len() && Instant::now() < overall_deadline {
+            // Keep the listener alive until the caller's provider operation
+            // finishes; test-runner scheduling is not a server lifetime.
+            while served < responses.len() && !server_finished.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         stream
@@ -147,12 +171,8 @@ pub(crate) mod test_support {
                             .write_all(response.as_bytes())
                             .expect("write scripted response");
                         served += 1;
-                        idle_deadline = Some(Instant::now() + Duration::from_millis(500));
                     }
                     Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                        if idle_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-                            break;
-                        }
                         std::thread::sleep(Duration::from_millis(5));
                     }
                     Err(error) => panic!("scripted HTTP server accept failed: {error}"),
@@ -162,7 +182,11 @@ pub(crate) mod test_support {
             served
         });
 
-        ScriptedHttpServer { endpoint, handle }
+        ScriptedHttpServer {
+            endpoint,
+            handle: Some(handle),
+            finished,
+        }
     }
 
     pub(crate) fn spawn_recording_http_server(
