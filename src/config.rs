@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 pub(crate) const DEFAULT_STORAGE_IO_TIMEOUT: Duration = Duration::from_secs(30);
-pub(crate) const DEFAULT_RUNTIME_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const DEFAULT_RUNTIME_RESPONSE_TIMEOUT: Duration = Duration::from_mins(1);
 const RUNTIME_RESPONSE_TIMEOUT_MARGIN: Duration = Duration::from_secs(30);
 
 pub(crate) fn default_runtime_response_timeout(storage_io_timeout: Duration) -> Duration {
