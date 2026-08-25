@@ -140,13 +140,10 @@ impl RuntimeHandle {
     /// never reach a quiescent state.
     pub(crate) fn release_storage_verification_barrier(&self, token: u64) -> MidgeResult<()> {
         let request_id = next_request_id()?;
-        let response_rx = self.router.register(request_id);
-        if self
-            .msg_tx
-            .send(RuntimeMsg::EndStorageVerification { request_id, token })
-            .is_err()
-        {
-            self.router.unregister(request_id);
+        let msg = RuntimeMsg::EndStorageVerification { request_id, token };
+        let response_rx = self.router.register(request_id, msg.kind_name());
+        if self.msg_tx.send(msg).is_err() {
+            self.router.cancel(request_id);
             return Err(MidgeError::Internal(
                 "runtime channel closed before verification barrier release".to_string(),
             ));
@@ -180,10 +177,10 @@ impl RuntimeHandle {
         let msg_kind = msg.kind_name();
 
         // Register for the response before sending the request.
-        let rx = self.router.register(request_id);
+        let rx = self.router.register(request_id, msg_kind);
 
         if let Err(error) = self.msg_tx.try_send(msg) {
-            self.router.unregister(request_id);
+            self.router.cancel(request_id);
             return Err(Self::map_submission_error(error));
         }
         drop(submission_guard);
@@ -216,7 +213,7 @@ impl RuntimeHandle {
     /// Submit a message and wait up to `timeout` for its response.
     ///
     /// Returns `Ok(None)` on timeout. In that case, the pending response slot
-    /// is unregistered to avoid leaking the router map.
+    /// becomes a bounded diagnostic tombstone for any late response.
     pub fn send_and_wait_timeout(
         &self,
         msg: RuntimeMsg,
@@ -228,12 +225,13 @@ impl RuntimeHandle {
                 "send_and_wait_timeout called with message that has no request_id".to_string(),
             )
         })?;
+        let msg_kind = msg.kind_name();
 
         // Register for the response before sending the request.
-        let rx = self.router.register(request_id);
+        let rx = self.router.register(request_id, msg_kind);
 
         if let Err(error) = self.msg_tx.try_send(msg) {
-            self.router.unregister(request_id);
+            self.router.cancel(request_id);
             return Err(Self::map_submission_error(error));
         }
         drop(submission_guard);
@@ -241,11 +239,11 @@ impl RuntimeHandle {
         match rx.recv_timeout(timeout) {
             Ok(resp) => Ok(Some(resp)),
             Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
-                self.router.unregister(request_id);
+                self.router.abandon(request_id, timeout);
                 Ok(None)
             }
             Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
-                self.router.unregister(request_id);
+                self.router.cancel(request_id);
                 Err(MidgeError::Internal("Response channel closed".to_string()))
             }
         }
@@ -362,11 +360,9 @@ impl RuntimeHandle {
                 return Err(error);
             }
         };
-        let response_rx = self.router.register(request_id);
-        match self.msg_tx.send_timeout(
-            RuntimeMsg::ShutdownWithResponse { request_id },
-            deadline.remaining(),
-        ) {
+        let msg = RuntimeMsg::ShutdownWithResponse { request_id };
+        let response_rx = self.router.register(request_id, msg.kind_name());
+        match self.msg_tx.send_timeout(msg, deadline.remaining()) {
             Ok(()) => {
                 let mut shutdown = self
                     .lifecycle
@@ -379,14 +375,14 @@ impl RuntimeHandle {
                 self.receive_shutdown_response(request_id, response_rx, deadline)
             }
             Err(crossbeam::channel::SendTimeoutError::Timeout(_)) => {
-                self.router.unregister(request_id);
+                self.router.cancel(request_id);
                 self.reset_shutdown_sender();
                 Err(MidgeError::Timeout(
                     "runtime shutdown request queue remained full until deadline".to_string(),
                 ))
             }
             Err(crossbeam::channel::SendTimeoutError::Disconnected(_)) => {
-                self.router.unregister(request_id);
+                self.router.cancel(request_id);
                 self.mark_shutdown_response_disconnected();
                 self.wait_for_shutdown_stop(deadline)
             }
@@ -406,7 +402,7 @@ impl RuntimeHandle {
                     if let Ok(response) = response_rx.try_recv() {
                         return self.publish_shutdown_terminal(Self::shutdown_terminal(response));
                     }
-                    self.router.unregister(request_id);
+                    self.router.cancel(request_id);
                     return self.publish_shutdown_terminal(ShutdownTerminal::Success);
                 }
                 let mut shutdown = self

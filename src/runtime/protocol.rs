@@ -815,4 +815,38 @@ impl RuntimeResponse {
             | RuntimeResponse::IngestState { request_id, .. } => *request_id,
         }
     }
+
+    pub(crate) fn kind_name(&self) -> &'static str {
+        match self {
+            RuntimeResponse::Ok { .. } => "Ok",
+            RuntimeResponse::TransactionApplied { .. } => "TransactionApplied",
+            RuntimeResponse::Error { .. } => "Error",
+            RuntimeResponse::ColumnFamilyCreated { .. } => "ColumnFamilyCreated",
+            RuntimeResponse::ReadAmpMetricsSnapshot { .. } => "ReadAmpMetricsSnapshot",
+            RuntimeResponse::RecoveryMetricsSnapshot { .. } => "RecoveryMetricsSnapshot",
+            RuntimeResponse::RuntimeMetricsSnapshot { .. } => "RuntimeMetricsSnapshot",
+            RuntimeResponse::StorageLayoutSnapshot { .. } => "StorageLayoutSnapshot",
+            RuntimeResponse::StorageVerificationBarrier { .. } => "StorageVerificationBarrier",
+            RuntimeResponse::BeginTransactionResult { .. } => "BeginTransactionResult",
+            RuntimeResponse::WriteStallStatus { .. } => "WriteStallStatus",
+            #[cfg(test)]
+            RuntimeResponse::WalAppended { .. } => "WalAppended",
+            #[cfg(test)]
+            RuntimeResponse::ReadValue { .. } => "ReadValue",
+            #[cfg(test)]
+            RuntimeResponse::RangeScanResults { .. } => "RangeScanResults",
+            #[cfg(test)]
+            RuntimeResponse::FlushComplete { .. } => "FlushComplete",
+            #[cfg(test)]
+            RuntimeResponse::CompactionComplete { .. } => "CompactionComplete",
+            #[cfg(test)]
+            RuntimeResponse::CurrentSequence { .. } => "CurrentSequence",
+            #[cfg(test)]
+            RuntimeResponse::ReadSnapshot { .. } => "ReadSnapshot",
+            #[cfg(test)]
+            RuntimeResponse::RuntimeConfigSnapshot { .. } => "RuntimeConfigSnapshot",
+            #[cfg(test)]
+            RuntimeResponse::IngestState { .. } => "IngestState",
+        }
+    }
 }

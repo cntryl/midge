@@ -879,7 +879,7 @@ fn should_register_then_complete_response() {
     let router = ResponseRouter::new();
 
     // Act - Register and deliver response
-    let rx = router.register(42);
+    let rx = router.register(42, "TestRequest");
     router.complete(RuntimeResponse::Ok { request_id: 42 });
 
     // Assert - Should receive response
@@ -891,9 +891,9 @@ fn should_register_then_complete_response() {
 fn should_handle_multiple_pending_requests() {
     // Arrange
     let router = Arc::new(ResponseRouter::new());
-    let rx1 = router.register(1);
-    let rx2 = router.register(2);
-    let rx3 = router.register(3);
+    let rx1 = router.register(1, "TestRequest");
+    let rx2 = router.register(2, "TestRequest");
+    let rx3 = router.register(3, "TestRequest");
 
     // Act - Complete in different order
     router.complete(RuntimeResponse::Ok { request_id: 2 });
@@ -910,7 +910,7 @@ fn should_handle_multiple_pending_requests() {
 fn should_handle_orphaned_response() {
     // Arrange - a receiver registered under a different request id
     let router = ResponseRouter::new();
-    let rx = router.register(1);
+    let rx = router.register(1, "TestRequest");
 
     // Act - complete a response with no matching registered request id
     router.complete(RuntimeResponse::Ok { request_id: 999 });

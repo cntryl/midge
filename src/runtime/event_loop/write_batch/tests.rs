@@ -51,7 +51,7 @@ impl EventLoopFixture {
     }
 
     fn register(&self, request_id: u64) -> crossbeam::channel::Receiver<RuntimeResponse> {
-        self.router.register(request_id)
+        self.router.register(request_id, "TestRequest")
     }
 }
 
@@ -306,7 +306,7 @@ fn should_fence_runtime_when_storage_acknowledgement_times_out() -> MidgeResult<
         },
         None,
     )?;
-    let response = router.register(1);
+    let response = router.register(1, "TestRequest");
 
     // Act
     event_loop.handle_write_error(

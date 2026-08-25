@@ -94,7 +94,12 @@ fn should_fail_every_held_request_when_shutdown_drain_restores_deferred_work() {
     let request_ids = [8101_u64, 8102, 8103, 8104, 8105, 8106, 8107, 8108];
     let receivers = request_ids
         .into_iter()
-        .map(|request_id| (request_id, event_loop.router.register(request_id)))
+        .map(|request_id| {
+            (
+                request_id,
+                event_loop.router.register(request_id, "TestRequest"),
+            )
+        })
         .collect::<Vec<_>>();
     event_loop.pending_msg = Some(RuntimeMsg::ManifestCreateColumnFamily {
         request_id: 8101,
@@ -211,7 +216,7 @@ fn should_return_invalid_argument_given_column_family_create_during_ingest() {
         .store(true, std::sync::atomic::Ordering::SeqCst);
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
     let request_id = 901;
-    let response_rx = event_loop.router.register(request_id);
+    let response_rx = event_loop.router.register(request_id, "TestRequest");
 
     // Act
     super::manifest::ManifestCoordinator::create_column_family(
@@ -244,7 +249,7 @@ fn should_return_invalid_argument_given_column_family_drop_during_ingest() {
         .store(true, std::sync::atomic::Ordering::SeqCst);
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
     let request_id = 902;
-    let response_rx = event_loop.router.register(request_id);
+    let response_rx = event_loop.router.register(request_id, "TestRequest");
 
     // Act
     super::manifest::ManifestCoordinator::drop_column_family(
@@ -355,8 +360,8 @@ fn should_leave_later_write_queued_when_destructively_dropping_column_family() {
         .expect("create column family");
     let drop_request_id = 903;
     let write_request_id = 904;
-    let drop_response = event_loop.router.register(drop_request_id);
-    let write_response = event_loop.router.register(write_request_id);
+    let drop_response = event_loop.router.register(drop_request_id, "TestRequest");
+    let write_response = event_loop.router.register(write_request_id, "TestRequest");
     let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
     msg_tx
         .send(RuntimeMsg::ApplyTransaction {
@@ -419,9 +424,9 @@ fn should_cancel_column_family_waiters_after_drop_commits() {
     let flush_request_id = 905;
     let stall_request_id = 906;
     let drop_request_id = 907;
-    let flush_response = event_loop.router.register(flush_request_id);
-    let stall_response = event_loop.router.register(stall_request_id);
-    let drop_response = event_loop.router.register(drop_request_id);
+    let flush_response = event_loop.router.register(flush_request_id, "TestRequest");
+    let stall_response = event_loop.router.register(stall_request_id, "TestRequest");
+    let drop_response = event_loop.router.register(drop_request_id, "TestRequest");
     event_loop.flush_barrier_waiters.insert(
         cf_id,
         vec![super::flush::FlushBarrierWaiter {
@@ -826,7 +831,7 @@ fn should_apply_l0_compaction_trigger_from_runtime_config() {
     // Arrange
     let mut event_loop = create_test_local_event_loop().expect("create local event loop");
     let request_id = 99;
-    let response_rx = event_loop.router.register(request_id);
+    let response_rx = event_loop.router.register(request_id, "TestRequest");
     let (_tx, msg_rx) = crossbeam::channel::unbounded();
 
     event_loop.handle_runtime_msg(
@@ -862,7 +867,7 @@ fn should_reject_runtime_config_atomically_given_invalid_memtable_candidate() {
     // Arrange
     let mut event_loop = create_test_local_event_loop().expect("create local event loop");
     let request_id = 100;
-    let response_rx = event_loop.router.register(request_id);
+    let response_rx = event_loop.router.register(request_id, "TestRequest");
     let (_tx, msg_rx) = crossbeam::channel::unbounded();
     let original_size = event_loop.state.memtable_size_limit;
     let original_threshold = event_loop.state.memtable_flush_threshold;
@@ -955,7 +960,9 @@ fn should_defer_layout_completion_until_verification_barrier_releases() {
     // Arrange
     let mut event_loop = create_test_event_loop().expect("create memory event loop");
     let barrier_request_id = 100;
-    let barrier_rx = event_loop.router.register(barrier_request_id);
+    let barrier_rx = event_loop
+        .router
+        .register(barrier_request_id, "TestRequest");
     event_loop.begin_storage_verification(barrier_request_id);
     assert!(matches!(
         barrier_rx
@@ -965,7 +972,9 @@ fn should_defer_layout_completion_until_verification_barrier_releases() {
     ));
 
     let mutation_request_id = 101;
-    let mutation_rx = event_loop.router.register(mutation_request_id);
+    let mutation_rx = event_loop
+        .router
+        .register(mutation_request_id, "TestRequest");
     let completion = RuntimeMsg::CompactionComplete {
         request_id: 102,
         input_ssts: vec!["input.sst".to_string()],
@@ -985,7 +994,9 @@ fn should_defer_layout_completion_until_verification_barrier_releases() {
     let duplicate_gc = event_loop.gate_message_for_storage_verification(RuntimeMsg::RetryGc);
 
     let release_request_id = 103;
-    let release_rx = event_loop.router.register(release_request_id);
+    let release_rx = event_loop
+        .router
+        .register(release_request_id, "TestRequest");
     event_loop.end_storage_verification(release_request_id, barrier_request_id);
 
     // Assert
@@ -1032,7 +1043,7 @@ fn should_reject_storage_verification_while_flush_publication_is_active() {
     let mut event_loop = create_test_local_event_loop().expect("create local event loop");
     event_loop.publication_gate.active = true;
     let request_id = 104;
-    let response_rx = event_loop.router.register(request_id);
+    let response_rx = event_loop.router.register(request_id, "TestRequest");
 
     // Act
     event_loop.begin_storage_verification(request_id);
@@ -1730,7 +1741,7 @@ fn should_defer_column_family_drop_until_compaction_publication_finishes() {
         .prepare_for_completion_test(&mut event_loop.state, std::slice::from_ref(&input_name))
         .expect("prepare active compaction fixture");
     let request_id = 8_155;
-    let response_rx = event_loop.router.register(request_id);
+    let response_rx = event_loop.router.register(request_id, "TestRequest");
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
 
     // Act: the DDL arrives while the worker still owns its input set.
@@ -1853,7 +1864,7 @@ fn should_restore_deferred_column_family_drop_before_emergent_compaction_followu
         .prepare_for_completion_test(&mut event_loop.state, std::slice::from_ref(&current_input))
         .expect("prepare active compaction fixture");
     let drop_request_id = 8_157;
-    let drop_response = event_loop.router.register(drop_request_id);
+    let drop_response = event_loop.router.register(drop_request_id, "TestRequest");
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
     event_loop.handle_runtime_msg(
         RuntimeMsg::ManifestDropColumnFamily {
@@ -1926,7 +1937,7 @@ fn should_reject_late_compaction_output_after_column_family_is_dropped() {
         .prepare_for_completion_test(&mut event_loop.state, std::slice::from_ref(&input_name))
         .expect("prepare active compaction fixture");
     let request_id = 8_156;
-    let response_rx = event_loop.router.register(request_id);
+    let response_rx = event_loop.router.register(request_id, "TestRequest");
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
 
     // Act
