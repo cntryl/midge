@@ -34,6 +34,17 @@ pub struct Runtime {
 impl Runtime {
     /// Create a new runtime and a corresponding handle for submitting work.
     pub fn new() -> (Self, RuntimeHandle) {
+        Self::create(crate::config::DEFAULT_RUNTIME_RESPONSE_TIMEOUT)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_response_timeout(
+        runtime_response_timeout: Duration,
+    ) -> (Self, RuntimeHandle) {
+        Self::create(runtime_response_timeout)
+    }
+
+    fn create(runtime_response_timeout: Duration) -> (Self, RuntimeHandle) {
         let (msg_tx, msg_rx) = channel::bounded(RUNTIME_QUEUE_CAPACITY);
         let router = Arc::new(ResponseRouter::new());
 
@@ -53,6 +64,7 @@ impl Runtime {
             snapshot_pins,
             diagnostics: Arc::clone(&diagnostics),
             lifecycle: Arc::clone(&lifecycle),
+            runtime_response_timeout,
         };
 
         let runtime = Self {
@@ -78,6 +90,7 @@ impl Runtime {
     ) -> MidgeResult<(Self, RuntimeHandle)> {
         let trace_enabled = self.trace_enabled;
         let router = self.router.clone();
+        let runtime_response_timeout = config.runtime_response_timeout;
 
         // Channel to signal successful event loop initialization
         let (init_tx, init_rx) = channel::bounded::<Result<(), String>>(1);
@@ -98,6 +111,7 @@ impl Runtime {
             snapshot_pins,
             diagnostics: Arc::clone(&self.diagnostics),
             lifecycle,
+            runtime_response_timeout,
         };
 
         let msg_tx_for_loop = self.msg_tx.clone();

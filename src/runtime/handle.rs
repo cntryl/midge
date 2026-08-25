@@ -53,6 +53,7 @@ pub struct RuntimeHandle {
     /// read resources.
     pub(crate) diagnostics: Arc<crate::diagnostics::RuntimeDiagnostics>,
     pub(super) lifecycle: Arc<RuntimeLifecycle>,
+    pub(super) runtime_response_timeout: Duration,
 }
 
 impl RuntimeHandle {
@@ -67,6 +68,16 @@ impl RuntimeHandle {
                 MidgeError::Internal("Runtime channel closed".to_string())
             }
         }
+    }
+
+    fn response_timeout_error(
+        request_kind: &'static str,
+        request_id: u64,
+        timeout: Duration,
+    ) -> MidgeError {
+        MidgeError::Timeout(format!(
+            "runtime request {request_kind} request_id={request_id} exceeded response timeout {timeout:?}"
+        ))
     }
 
     pub(crate) fn ensure_open(&self) -> MidgeResult<()> {
@@ -141,73 +152,69 @@ impl RuntimeHandle {
     pub(crate) fn release_storage_verification_barrier(&self, token: u64) -> MidgeResult<()> {
         let request_id = next_request_id()?;
         let msg = RuntimeMsg::EndStorageVerification { request_id, token };
-        let response_rx = self.router.register(request_id, msg.kind_name());
-        if self.msg_tx.send(msg).is_err() {
-            self.router.cancel(request_id);
-            return Err(MidgeError::Internal(
-                "runtime channel closed before verification barrier release".to_string(),
-            ));
+        let msg_kind = msg.kind_name();
+        let deadline = ShutdownDeadline::new(self.runtime_response_timeout);
+        let response_rx = self.router.register(request_id, msg_kind);
+        match self.msg_tx.send_timeout(msg, deadline.remaining()) {
+            Ok(()) => {}
+            Err(crossbeam::channel::SendTimeoutError::Timeout(_)) => {
+                self.router.cancel(request_id);
+                return Err(Self::response_timeout_error(
+                    msg_kind,
+                    request_id,
+                    self.runtime_response_timeout,
+                ));
+            }
+            Err(crossbeam::channel::SendTimeoutError::Disconnected(_)) => {
+                self.router.cancel(request_id);
+                return Err(MidgeError::Internal(
+                    "runtime channel closed before verification barrier release".to_string(),
+                ));
+            }
         }
 
-        match response_rx.recv() {
+        match response_rx.recv_timeout(deadline.remaining()) {
             Ok(RuntimeResponse::Ok { .. }) => Ok(()),
             Ok(RuntimeResponse::Error { error, .. }) => Err(error),
             Ok(other) => Err(MidgeError::Internal(format!(
                 "unexpected verification barrier release response: {other:?}"
             ))),
-            Err(_) => Err(MidgeError::Internal(
-                "runtime response channel closed during verification barrier release".to_string(),
-            )),
+            Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
+                self.router
+                    .abandon(request_id, self.runtime_response_timeout);
+                Err(Self::response_timeout_error(
+                    msg_kind,
+                    request_id,
+                    self.runtime_response_timeout,
+                ))
+            }
+            Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
+                self.router.cancel(request_id);
+                Err(MidgeError::Internal(
+                    "runtime response channel closed during verification barrier release"
+                        .to_string(),
+                ))
+            }
         }
     }
 
     /// Submit a message and wait synchronously for its response.
     ///
     /// The `RuntimeMsg` MUST carry a `request_id`. Use `next_request_id()` when
-    /// constructing such messages.
+    /// constructing such messages. The wait is bounded by the runtime response
+    /// timeout configured when the Engine was opened.
     pub fn send_and_wait(&self, msg: RuntimeMsg) -> MidgeResult<RuntimeResponse> {
-        let submission_guard = self.lifecycle.begin_submission()?;
         let request_id = msg.request_id().ok_or_else(|| {
             MidgeError::Internal(
                 "send_and_wait called with message that has no request_id (e.g. Shutdown)"
                     .to_string(),
             )
         })?;
-
         let msg_kind = msg.kind_name();
-
-        // Register for the response before sending the request.
-        let rx = self.router.register(request_id, msg_kind);
-
-        if let Err(error) = self.msg_tx.try_send(msg) {
-            self.router.cancel(request_id);
-            return Err(Self::map_submission_error(error));
-        }
-        drop(submission_guard);
-
-        // Block waiting for the single response.
-        // If debug-wait mode is enabled, emit a periodic warning to help
-        // diagnose hangs (e.g., CloudAsync waiting on CloudAck).
-        if std::env::var_os("MIDGE_DEBUG_WAIT").is_some() {
-            let mut waited = std::time::Duration::from_secs(0);
-            loop {
-                match rx.recv_timeout(std::time::Duration::from_secs(2)) {
-                    Ok(resp) => return Ok(resp),
-                    Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
-                        waited += std::time::Duration::from_secs(2);
-                        eprintln!(
-                            "[midge] still waiting for response: request_id={request_id} kind={msg_kind} waited={waited:?}"
-                        );
-                    }
-                    Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
-                        return Err(MidgeError::Internal("Response channel closed".to_string()));
-                    }
-                }
-            }
-        }
-
-        rx.recv()
-            .map_err(|_| MidgeError::Internal("Response channel closed".to_string()))
+        self.send_and_wait_with_timeout(msg, self.runtime_response_timeout, true)?
+            .ok_or_else(|| {
+                Self::response_timeout_error(msg_kind, request_id, self.runtime_response_timeout)
+            })
     }
 
     /// Submit a message and wait up to `timeout` for its response.
@@ -218,6 +225,15 @@ impl RuntimeHandle {
         &self,
         msg: RuntimeMsg,
         timeout: std::time::Duration,
+    ) -> MidgeResult<Option<RuntimeResponse>> {
+        self.send_and_wait_with_timeout(msg, timeout, false)
+    }
+
+    fn send_and_wait_with_timeout(
+        &self,
+        msg: RuntimeMsg,
+        timeout: Duration,
+        emit_debug_waits: bool,
     ) -> MidgeResult<Option<RuntimeResponse>> {
         let submission_guard = self.lifecycle.begin_submission()?;
         let request_id = msg.request_id().ok_or_else(|| {
@@ -236,15 +252,33 @@ impl RuntimeHandle {
         }
         drop(submission_guard);
 
-        match rx.recv_timeout(timeout) {
-            Ok(resp) => Ok(Some(resp)),
-            Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
-                self.router.abandon(request_id, timeout);
-                Ok(None)
-            }
-            Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
-                self.router.cancel(request_id);
-                Err(MidgeError::Internal("Response channel closed".to_string()))
+        let started_at = std::time::Instant::now();
+        let debug_waits = emit_debug_waits && std::env::var_os("MIDGE_DEBUG_WAIT").is_some();
+        loop {
+            let remaining = timeout.saturating_sub(started_at.elapsed());
+            let wait_for = if debug_waits {
+                remaining.min(Duration::from_secs(2))
+            } else {
+                remaining
+            };
+            match rx.recv_timeout(wait_for) {
+                Ok(resp) => return Ok(Some(resp)),
+                Err(crossbeam::channel::RecvTimeoutError::Timeout)
+                    if started_at.elapsed() >= timeout =>
+                {
+                    self.router.abandon(request_id, timeout);
+                    return Ok(None);
+                }
+                Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
+                    eprintln!(
+                        "[midge] still waiting for response: request_id={request_id} kind={msg_kind} waited={:?}",
+                        started_at.elapsed()
+                    );
+                }
+                Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
+                    self.router.cancel(request_id);
+                    return Err(MidgeError::Internal("Response channel closed".to_string()));
+                }
             }
         }
     }
@@ -515,9 +549,12 @@ impl RuntimeHandle {
             .map_err(Self::map_submission_error)?;
         drop(submission_guard);
 
-        response_rx
-            .recv()
-            .map_err(|_| MidgeError::Internal("Response channel closed".to_string()))
+        Self::receive_inline_response(
+            &response_rx,
+            "ApplyTransaction",
+            request_id,
+            self.runtime_response_timeout,
+        )
     }
 
     pub(crate) fn send_spilled_transaction_and_wait(
@@ -540,9 +577,29 @@ impl RuntimeHandle {
             .map_err(Self::map_submission_error)?;
         drop(submission_guard);
 
-        response_rx
-            .recv()
-            .map_err(|_| MidgeError::Internal("Response channel closed".to_string()))
+        Self::receive_inline_response(
+            &response_rx,
+            "ApplySpilledTransaction",
+            request_id,
+            self.runtime_response_timeout,
+        )
+    }
+
+    fn receive_inline_response(
+        response_rx: &crossbeam::channel::Receiver<RuntimeResponse>,
+        request_kind: &'static str,
+        request_id: u64,
+        timeout: Duration,
+    ) -> MidgeResult<RuntimeResponse> {
+        match response_rx.recv_timeout(timeout) {
+            Ok(response) => Ok(response),
+            Err(crossbeam::channel::RecvTimeoutError::Timeout) => Err(
+                Self::response_timeout_error(request_kind, request_id, timeout),
+            ),
+            Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
+                Err(MidgeError::Internal("Response channel closed".to_string()))
+            }
+        }
     }
 
     /// Check if writes should be stalled for the given column family.

@@ -139,6 +139,57 @@ fn should_preserve_storage_io_timeout_given_valid_override() {
 }
 
 #[test]
+fn should_preserve_runtime_response_timeout_given_valid_override() {
+    // Arrange
+    let timeout = Duration::from_secs(45);
+
+    // Act
+    let opts = OpenOptions::in_memory()
+        .runtime_response_timeout(timeout)
+        .build()
+        .expect("build options");
+
+    // Assert
+    assert_eq!(opts.runtime_response_timeout(), timeout);
+}
+
+#[test]
+fn should_derive_runtime_response_timeout_above_storage_timeout_when_not_overridden() {
+    // Arrange
+    let storage_timeout = Duration::from_secs(75);
+
+    // Act
+    let opts = OpenOptions::in_memory()
+        .storage_io_timeout(storage_timeout)
+        .build()
+        .expect("derive coherent runtime deadline");
+
+    // Assert
+    assert!(opts.runtime_response_timeout() > storage_timeout);
+}
+
+#[test]
+fn should_reject_runtime_response_timeout_when_not_above_storage_timeout() {
+    // Arrange
+    let timeout = Duration::from_secs(30);
+
+    // Act
+    let error = OpenOptions::in_memory()
+        .storage_io_timeout(timeout)
+        .runtime_response_timeout(timeout)
+        .build()
+        .expect_err("runtime response timeout must enclose storage I/O");
+
+    // Assert
+    assert!(matches!(
+        error,
+        MidgeError::InvalidArgument(message)
+            if message.contains("runtime response timeout")
+                && message.contains("greater than storage I/O timeout")
+    ));
+}
+
+#[test]
 fn should_reject_zero_storage_io_timeout_when_building() {
     // Arrange
 
@@ -522,6 +573,7 @@ fn should_clone_options_preserving_all_settings_given_configured_opts_when_cloni
     let original = OpenOptions::in_memory()
         .goal(Goal::Throughput)
         .workload(WorkloadProfile::WriteHeavy)
+        .runtime_response_timeout(Duration::from_secs(45))
         .build()
         .expect("build options");
 
@@ -534,6 +586,10 @@ fn should_clone_options_preserving_all_settings_given_configured_opts_when_cloni
     assert_eq!(cloned.workload(), original.workload());
     assert_eq!(cloned.block_size(), original.block_size());
     assert_eq!(cloned.memtable_size_limit(), original.memtable_size_limit());
+    assert_eq!(
+        cloned.runtime_response_timeout(),
+        original.runtime_response_timeout()
+    );
     assert_eq!(
         cloned.block_cache_policy_value(),
         original.block_cache_policy_value()
