@@ -571,7 +571,7 @@ mod tests {
     use crate::storage::cloud::{CloudError, CloudEvent, CloudOutcome};
     use reqwest::{Client, Method};
     use std::io::{ErrorKind, Read, Write};
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
     use std::sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Barrier,
@@ -623,6 +623,46 @@ mod tests {
         }
         ready.wait();
         release
+    }
+
+    fn read_complete_http_request(stream: &mut TcpStream) {
+        stream
+            .set_nonblocking(false)
+            .expect("configure blocking HTTP request stream");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("configure HTTP request timeout");
+        let mut bytes = Vec::new();
+        let mut chunk = [0_u8; 4096];
+
+        loop {
+            if let Some(header_end) = bytes
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .map(|position| position + 4)
+            {
+                let head = String::from_utf8_lossy(&bytes[..header_end]);
+                let content_length = head
+                    .split("\r\n")
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                    .map_or(0, |(_, value)| {
+                        value
+                            .trim()
+                            .parse::<usize>()
+                            .expect("valid request Content-Length")
+                    });
+                if bytes.len() >= header_end + content_length {
+                    break;
+                }
+            }
+
+            let read = stream.read(&mut chunk).expect("read complete HTTP request");
+            if read == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+        }
     }
 
     #[test]
@@ -854,8 +894,7 @@ mod tests {
             {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        let mut request = [0_u8; 2048];
-                        let _ = stream.read(&mut request);
+                        read_complete_http_request(&mut stream);
                         let (status, location) = if served == 0 {
                             ("303 See Other", format!("Location: {redirected}\r\n"))
                         } else {
@@ -936,8 +975,7 @@ mod tests {
             {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        let mut request = [0_u8; 2048];
-                        let _ = stream.read(&mut request);
+                        read_complete_http_request(&mut stream);
                         write!(
                             stream,
                             "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -994,8 +1032,7 @@ mod tests {
             while served < 2 && !server_request_finished.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        let mut request = [0_u8; 2048];
-                        let _ = stream.read(&mut request);
+                        read_complete_http_request(&mut stream);
                         if served == 0 {
                             stream
                                 .write_all(
@@ -1058,8 +1095,7 @@ mod tests {
             {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        let mut request = [0_u8; 2048];
-                        let _ = stream.read(&mut request);
+                        read_complete_http_request(&mut stream);
                         write!(
                             stream,
                             "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -1117,8 +1153,7 @@ mod tests {
             {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        let mut request = [0_u8; 2048];
-                        let _ = stream.read(&mut request);
+                        read_complete_http_request(&mut stream);
                         write!(
                             stream,
                             "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -1167,11 +1202,7 @@ mod tests {
         let server_committed = std::sync::Arc::clone(&committed);
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept request");
-            stream
-                .set_read_timeout(Some(Duration::from_secs(1)))
-                .expect("set server read timeout");
-            let mut request = [0_u8; 4096];
-            let _ = stream.read(&mut request).expect("read request");
+            read_complete_http_request(&mut stream);
             request_seen_tx.send(()).expect("signal request receipt");
             inspect_rx.recv().expect("wait until request deadline");
 

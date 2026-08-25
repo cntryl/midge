@@ -64,7 +64,7 @@ mod s3_resolver;
 pub(crate) mod test_support {
     use crate::storage::cloud::{CloudBackend, CloudEvent, CloudOutcome};
     use std::io::{ErrorKind, Read, Write};
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -128,6 +128,48 @@ pub(crate) mod test_support {
         }
     }
 
+    fn read_complete_http_request(stream: &mut TcpStream) -> Vec<u8> {
+        stream
+            .set_nonblocking(false)
+            .expect("configure blocking HTTP request stream");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("configure HTTP request timeout");
+        let mut bytes = Vec::new();
+        let mut chunk = [0_u8; 4096];
+
+        loop {
+            if let Some(header_end) = bytes
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .map(|position| position + 4)
+            {
+                let head = String::from_utf8_lossy(&bytes[..header_end]);
+                let content_length = head
+                    .split("\r\n")
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                    .map_or(0, |(_, value)| {
+                        value
+                            .trim()
+                            .parse::<usize>()
+                            .expect("valid request Content-Length")
+                    });
+                if bytes.len() >= header_end + content_length {
+                    break;
+                }
+            }
+
+            let read = stream.read(&mut chunk).expect("read complete HTTP request");
+            if read == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+        }
+
+        bytes
+    }
+
     pub(crate) fn spawn_scripted_http_server(bodies: Vec<String>) -> ScriptedHttpServer {
         spawn_scripted_http_response_server(
             bodies
@@ -155,11 +197,7 @@ pub(crate) mod test_support {
             while served < responses.len() && !server_finished.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        stream
-                            .set_read_timeout(Some(Duration::from_secs(1)))
-                            .expect("configure request timeout");
-                        let mut request = [0_u8; 4096];
-                        let _ = stream.read(&mut request);
+                        let _request = read_complete_http_request(&mut stream);
 
                         let (status, content_type, body) = &responses[served];
                         let response = format!(
@@ -205,19 +243,7 @@ pub(crate) mod test_support {
         let endpoint = format!("http://{}", listener.local_addr().expect("server address"));
         let handle = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept recorded HTTP request");
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .expect("configure recorded request timeout");
-
-            let mut bytes = Vec::new();
-            let mut chunk = [0_u8; 4096];
-            while !bytes.windows(4).any(|window| window == b"\r\n\r\n") {
-                let read = stream.read(&mut chunk).expect("read recorded HTTP request");
-                if read == 0 {
-                    break;
-                }
-                bytes.extend_from_slice(&chunk[..read]);
-            }
+            let bytes = read_complete_http_request(&mut stream);
 
             let head = String::from_utf8_lossy(&bytes);
             let mut lines = head.split("\r\n");
