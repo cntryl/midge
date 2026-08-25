@@ -1000,6 +1000,10 @@ fn should_cleanup_response_route_given_runtime_timeout_when_runtime_accepts_with
 
     // Assert
     assert!(
+        started_at.elapsed() >= timeout,
+        "response wait returned before its configured deadline"
+    );
+    assert!(
         started_at.elapsed() < Duration::from_secs(1),
         "configured deadline did not bound the response wait"
     );
@@ -1028,7 +1032,13 @@ fn should_bound_inline_transaction_response_when_runtime_accepts_without_respond
     handle.lifecycle.mark_running();
     let request_id = next_request_id().expect("allocate request id");
     let submission = TransactionSubmission {
-        ops: Vec::new(),
+        ops: vec![TransactionOp::Put {
+            cf_id: 0,
+            key: bytes::Bytes::from_static(b"deadline-key"),
+            value: bytes::Bytes::from_static(b"deadline-value"),
+            ttl_seconds: None,
+            insert_only: false,
+        }],
         assertions: Vec::new(),
         durability_policy: None,
         start_sequence: None,
