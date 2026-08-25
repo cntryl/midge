@@ -142,6 +142,26 @@ impl DurabilityCoordinator {
         }
     }
 
+    /// Request ids of the cloud-durability waiters queued at `key`.
+    ///
+    /// Read before the work runs so the event loop can derive one shared
+    /// deadline from the callers it is about to serve.
+    pub(crate) fn cloud_durability_request_ids_at(&self, key: u64) -> Vec<u64> {
+        self.waiters
+            .as_ref()
+            .map(|waiters| {
+                waiters
+                    .inspect_key(&key, |waiter| match waiter {
+                        DurabilityWaiter::CloudDurability { request_id } => Some(*request_id),
+                        _ => None,
+                    })
+                    .into_iter()
+                    .flatten()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Get all waiters ready for completion at the given key.
     pub fn complete_waiters_at(&self, key: u64) -> Vec<DurabilityWaiter> {
         let completed = self

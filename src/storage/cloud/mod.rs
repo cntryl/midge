@@ -821,9 +821,18 @@ fn usize_to_u64(value: usize) -> u64 {
 
 impl StorageBackend for CloudStorage {
     fn submit_read(&self, key: &str, callback: StorageCallback) {
+        self.submit_read_with_timeout(key, self.callback_timeout, callback);
+    }
+
+    fn submit_read_with_timeout(
+        &self,
+        key: &str,
+        timeout: std::time::Duration,
+        callback: StorageCallback,
+    ) {
         let (tx, rx) = std::sync::mpsc::channel();
         self.submit_get(key, tx);
-        let event = match rx.recv_timeout(self.callback_timeout) {
+        let event = match rx.recv_timeout(timeout) {
             Ok(CloudEvent::Get { key, result }) => StorageEvent::ReadComplete {
                 key,
                 result: cloud_to_storage_outcome(result),
@@ -871,9 +880,26 @@ impl StorageBackend for CloudStorage {
         headers: Vec<(String, String)>,
         callback: StorageCallback,
     ) {
+        self.submit_write_with_headers_and_timeout(
+            key,
+            data,
+            headers,
+            self.callback_timeout,
+            callback,
+        );
+    }
+
+    fn submit_write_with_headers_and_timeout(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        timeout: std::time::Duration,
+        callback: StorageCallback,
+    ) {
         let (tx, rx) = std::sync::mpsc::channel();
         self.submit_put(key, data, headers, tx);
-        let event = match rx.recv_timeout(self.callback_timeout) {
+        let event = match rx.recv_timeout(timeout) {
             Ok(CloudEvent::Put { key, result }) => StorageEvent::WriteComplete {
                 key,
                 result: cloud_to_storage_outcome(result),
@@ -968,9 +994,18 @@ impl StorageBackend for CloudStorage {
     }
 
     fn submit_head(&self, key: &str, callback: StorageCallback) {
+        self.submit_head_with_timeout(key, self.callback_timeout, callback);
+    }
+
+    fn submit_head_with_timeout(
+        &self,
+        key: &str,
+        timeout: std::time::Duration,
+        callback: StorageCallback,
+    ) {
         let (tx, rx) = std::sync::mpsc::channel();
         CloudStorage::submit_head(self, key, tx);
-        let event = match rx.recv_timeout(self.callback_timeout) {
+        let event = match rx.recv_timeout(timeout) {
             Ok(CloudEvent::Head { key, result }) => {
                 let outcome = match result {
                     CloudOutcome::Ok(metadata) => StorageOutcome::Ok(StorageObjectMetadata {
@@ -1073,9 +1108,13 @@ mod tests {
             _headers: Vec<(String, String)>,
             callback: CloudCallback,
         ) {
-            let _ = callback.send(CloudEvent::Put {
-                key: key.to_string(),
-                result: CloudOutcome::Err(CloudError::Protocol("unsupported".to_string())),
+            let key = key.to_string();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                let _ = callback.send(CloudEvent::Put {
+                    key,
+                    result: CloudOutcome::Err(CloudError::Protocol("unsupported".to_string())),
+                });
             });
         }
 
@@ -1102,6 +1141,17 @@ mod tests {
                 start,
                 end,
                 result: CloudOutcome::Err(CloudError::Protocol("unsupported".to_string())),
+            });
+        }
+
+        fn submit_head(&self, key: &str, callback: CloudCallback) {
+            let key = key.to_string();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                let _ = callback.send(CloudEvent::Head {
+                    key,
+                    result: CloudOutcome::Err(CloudError::NotFound("delayed miss".to_string())),
+                });
             });
         }
     }
@@ -1243,6 +1293,101 @@ mod tests {
         assert!(matches!(
             event,
             StorageEvent::ReadComplete {
+                result: StorageOutcome::Err(message),
+                ..
+            } if message.contains("timed out")
+        ));
+    }
+
+    #[test]
+    fn should_apply_operation_timeout_to_cloud_read_adapter_when_shorter_than_configured_timeout() {
+        // Arrange
+        let storage = CloudStorage::new_with_timeout(
+            Arc::new(DelayedMissingGetBackend),
+            "tenant".to_string(),
+            std::time::Duration::from_secs(1),
+        );
+        let (sender, receiver) = mpsc::channel();
+
+        // Act
+        let started = std::time::Instant::now();
+        StorageBackend::submit_read_with_timeout(
+            &storage,
+            "metadata/manifest.json",
+            std::time::Duration::from_millis(5),
+            sender,
+        );
+        let event = receiver.recv().expect("receive bounded adapter result");
+
+        // Assert
+        assert!(started.elapsed() < std::time::Duration::from_millis(40));
+        assert!(matches!(
+            event,
+            StorageEvent::ReadComplete {
+                result: StorageOutcome::Err(message),
+                ..
+            } if message.contains("timed out")
+        ));
+    }
+
+    #[test]
+    fn should_apply_operation_timeout_to_cloud_head_adapter_when_shorter_than_configured_timeout() {
+        // Arrange
+        let storage = CloudStorage::new_with_timeout(
+            Arc::new(DelayedMissingGetBackend),
+            "tenant".to_string(),
+            std::time::Duration::from_secs(1),
+        );
+        let (sender, receiver) = mpsc::channel();
+
+        // Act
+        let started = std::time::Instant::now();
+        StorageBackend::submit_head_with_timeout(
+            &storage,
+            "metadata/manifest.json",
+            std::time::Duration::from_millis(5),
+            sender,
+        );
+        let event = receiver.recv().expect("receive bounded adapter result");
+
+        // Assert
+        assert!(started.elapsed() < std::time::Duration::from_millis(40));
+        assert!(matches!(
+            event,
+            StorageEvent::HeadComplete {
+                result: StorageOutcome::Err(message),
+                ..
+            } if message.contains("timed out")
+        ));
+    }
+
+    #[test]
+    fn should_apply_operation_timeout_to_cloud_cas_adapter_when_shorter_than_configured_timeout() {
+        // Arrange
+        let storage = CloudStorage::new_with_timeout(
+            Arc::new(DelayedMissingGetBackend),
+            "tenant".to_string(),
+            std::time::Duration::from_secs(1),
+        );
+        let (sender, receiver) = mpsc::channel();
+
+        // Act
+        let started = std::time::Instant::now();
+        StorageBackend::submit_write_with_headers_and_timeout(
+            &storage,
+            "metadata/manifest.json",
+            b"manifest".to_vec(),
+            vec![("If-None-Match".to_string(), "*".to_string())],
+            std::time::Duration::from_millis(5),
+            sender,
+        );
+        let event = receiver.recv().expect("receive bounded adapter result");
+
+        // Assert
+        assert!(started.elapsed() < std::time::Duration::from_millis(40));
+        assert!(matches!(
+            event,
+            StorageEvent::WriteComplete {
                 result: StorageOutcome::Err(message),
                 ..
             } if message.contains("timed out")

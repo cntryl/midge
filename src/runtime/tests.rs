@@ -1144,3 +1144,84 @@ fn should_clone_file_meta_preserving_all_fields() {
     assert_eq!(cloned.smallest_seq, meta.smallest_seq);
     assert_eq!(cloned.largest_seq, meta.largest_seq);
 }
+
+#[test]
+fn should_report_runtime_timeout_counters_when_callers_time_out() {
+    // Arrange
+    let temp_dir = tempfile::TempDir::new().expect("create runtime directory");
+    let (runtime, _) = Runtime::new();
+    let state = RuntimeState::new(temp_dir.path().to_path_buf(), true);
+    let (mut runtime, handle) = runtime
+        .start_with_config(state, RuntimeConfig::default())
+        .expect("start runtime");
+
+    // Act: one caller gives up on its request, and one response arrives with no
+    // caller left to receive it.
+    let abandoned_id = next_request_id().expect("allocate abandoned request id");
+    let _rx = handle.router.register(abandoned_id, "GetRuntimeMetrics");
+    handle
+        .router
+        .abandon(abandoned_id, Duration::from_millis(20));
+    handle.router.complete(RuntimeResponse::Ok {
+        request_id: abandoned_id,
+    });
+
+    let response = handle
+        .send_and_wait(RuntimeMsg::GetRuntimeMetrics {
+            request_id: next_request_id().expect("allocate metrics request id"),
+        })
+        .expect("metrics request answered");
+
+    // Assert
+    let RuntimeResponse::RuntimeMetricsSnapshot { snapshot, .. } = response else {
+        panic!("expected a runtime metrics snapshot, got {response:?}");
+    };
+    assert_eq!(
+        snapshot.abandoned_runtime_requests_total, 1,
+        "a caller that timed out must be visible to operators"
+    );
+    assert_eq!(
+        snapshot.late_runtime_responses_total, 1,
+        "work completed after its caller gave up must be visible to operators"
+    );
+
+    handle.shutdown(Duration::from_secs(1)).expect("shutdown");
+    assert!(runtime.wait_for_exit(Duration::from_secs(1)));
+}
+
+#[test]
+fn should_count_abandoned_request_given_inline_transaction_when_caller_times_out() {
+    // Arrange: the inline transaction path bypasses the router's pending table,
+    // so its timeouts must still be reported to operators.
+    let timeout = Duration::from_millis(20);
+    let (runtime, handle) = Runtime::new_with_response_timeout(timeout);
+    handle.lifecycle.mark_running();
+    let request_id = next_request_id().expect("allocate request id");
+    let submission = TransactionSubmission {
+        ops: vec![TransactionOp::Put {
+            cf_id: 0,
+            key: bytes::Bytes::from_static(b"abandoned-key"),
+            value: bytes::Bytes::from_static(b"abandoned-value"),
+            ttl_seconds: None,
+            insert_only: false,
+        }],
+        assertions: Vec::new(),
+        durability_policy: None,
+        start_sequence: None,
+        conflict_policy: ConflictPolicy::LastWriteWins,
+    };
+
+    // Act
+    let result = handle.send_apply_transaction_and_wait(request_id, submission);
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::Timeout(_))));
+    assert_eq!(
+        handle.router.abandoned_requests_total(),
+        1,
+        "an inline transaction timeout must be counted like a routed one"
+    );
+
+    handle.lifecycle.mark_closed();
+    drop(runtime);
+}

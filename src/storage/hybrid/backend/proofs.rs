@@ -4,6 +4,7 @@ use super::{
     mpsc, thread, Arc, Duration, HybridStorage, JoinHandle, StorageBackend, StorageEvent,
     StorageOutcome,
 };
+use crate::common::OperationDeadline;
 use crate::storage::StorageObjectMetadata;
 
 /// A stable read plus identity observation for one remote object.
@@ -124,6 +125,87 @@ impl HybridStorage {
         )
     }
 
+    /// Read a stable object proof, charging each round trip against a shared
+    /// budget.
+    ///
+    /// One proof is three sequential cloud calls (HEAD, GET, HEAD), and a single
+    /// runtime request can chain several proofs. Clamping each call to what the
+    /// deadline still allows keeps the whole sequence inside the caller's
+    /// budget instead of letting every call restart a fresh `callback_timeout`.
+    pub(crate) fn remote_object_proof_within(
+        &self,
+        key: &str,
+        deadline: &OperationDeadline,
+    ) -> crate::common::MidgeResult<RemoteObjectProof> {
+        Self::deadline_guard(key, "read object proof", deadline)?;
+        let backend = self.cloud_backend_for_key(key);
+
+        let before_timeout = deadline.clamp(self.callback_timeout);
+        let before = Self::head_object_from_backend_blocking(backend, key, before_timeout)
+            .map_err(|error| Self::proof_round_trip_error(key, "initial HEAD", error, deadline))?;
+
+        Self::deadline_guard(key, "GET during object proof", deadline)?;
+        let read_timeout = deadline.clamp(self.callback_timeout);
+        let bytes = Self::read_object_from_backend_blocking(backend, key, read_timeout)
+            .map_err(|error| Self::proof_round_trip_error(key, "GET", error, deadline))?;
+
+        Self::deadline_guard(key, "final HEAD during object proof", deadline)?;
+        let after_timeout = deadline.clamp(self.callback_timeout);
+        let after = Self::head_object_from_backend_blocking(backend, key, after_timeout)
+            .map_err(|error| Self::proof_round_trip_error(key, "final HEAD", error, deadline))?;
+
+        if before != after {
+            return Err(crate::common::MidgeError::Internal(format!(
+                "object '{key}' identity changed during read: before {before:?}, after {after:?}"
+            )));
+        }
+        if after.size != bytes.len() as u64 {
+            return Err(crate::common::MidgeError::Internal(format!(
+                "object '{key}' size changed during read: bytes={}, metadata={} ",
+                bytes.len(),
+                after.size
+            )));
+        }
+        Ok(RemoteObjectProof {
+            key: key.to_string(),
+            bytes,
+            metadata: after,
+        })
+    }
+
+    /// Refuse to start another cloud round trip once the shared budget is gone.
+    ///
+    /// Returning here rather than issuing a zero-timeout call keeps the failure
+    /// legible: the caller learns which step ran out of budget instead of seeing
+    /// a generic transport error.
+    fn deadline_guard(
+        key: &str,
+        step: &str,
+        deadline: &OperationDeadline,
+    ) -> crate::common::MidgeResult<()> {
+        if deadline.is_expired() {
+            return Err(crate::common::MidgeError::Timeout(format!(
+                "operation deadline exhausted before '{step}' for '{key}'"
+            )));
+        }
+        Ok(())
+    }
+
+    fn proof_round_trip_error(
+        key: &str,
+        step: &str,
+        error: String,
+        deadline: &OperationDeadline,
+    ) -> crate::common::MidgeError {
+        if deadline.is_expired() || Self::storage_error_indicates_timeout(&error) {
+            crate::common::MidgeError::Timeout(format!(
+                "{step} timed out while reading object proof for '{key}': {error}"
+            ))
+        } else {
+            crate::common::MidgeError::Internal(error)
+        }
+    }
+
     /// Return a stable proof when the remote key exists, or `None` for a
     /// provider-confirmed missing key.
     pub(crate) fn remote_object_proof_optional(
@@ -165,6 +247,26 @@ impl HybridStorage {
         expected: Option<&StorageObjectMetadata>,
         data: Vec<u8>,
     ) -> crate::common::MidgeResult<RemoteObjectProof> {
+        self.compare_exchange_remote_object_within(
+            key,
+            expected,
+            data,
+            &OperationDeadline::unbounded(),
+        )
+    }
+
+    /// Conditionally replace or create a remote object within a shared budget.
+    ///
+    /// The CAS itself is one round trip, but the readback proof that follows is
+    /// three more, so both participate in the deadline.
+    pub(crate) fn compare_exchange_remote_object_within(
+        &self,
+        key: &str,
+        expected: Option<&StorageObjectMetadata>,
+        data: Vec<u8>,
+        deadline: &OperationDeadline,
+    ) -> crate::common::MidgeResult<RemoteObjectProof> {
+        Self::deadline_guard(key, "remote CAS", deadline)?;
         let headers = if let Some(expected) = expected {
             crate::storage::cloud::object_match_precondition_headers(
                 &expected.etag,
@@ -180,9 +282,10 @@ impl HybridStorage {
         };
         let expected_bytes = data.clone();
         let (tx, rx) = std::sync::mpsc::channel();
+        let timeout = deadline.clamp(self.callback_timeout);
         self.cloud_backend_for_key(key)
-            .submit_write_with_headers(key, data, headers, tx);
-        match rx.recv_timeout(self.callback_timeout) {
+            .submit_write_with_headers_and_timeout(key, data, headers, timeout, tx);
+        match rx.recv_timeout(timeout) {
             Ok(StorageEvent::WriteComplete {
                 result: StorageOutcome::Ok(()),
                 ..
@@ -191,6 +294,11 @@ impl HybridStorage {
                 result: StorageOutcome::Err(error),
                 ..
             }) => {
+                if Self::storage_error_indicates_timeout(&error) {
+                    return Err(crate::common::MidgeError::Timeout(format!(
+                        "remote CAS timed out for '{key}': {error}"
+                    )));
+                }
                 if Self::storage_error_indicates_precondition_failure(&error) {
                     return Err(crate::common::MidgeError::Busy(format!(
                         "remote CAS conflict for '{key}': {error}"
@@ -217,9 +325,7 @@ impl HybridStorage {
             }
         }
 
-        let proof = self
-            .remote_object_proof(key)
-            .map_err(crate::common::MidgeError::Internal)?;
+        let proof = self.remote_object_proof_within(key, deadline)?;
         if proof.bytes != expected_bytes {
             return Err(crate::common::MidgeError::Corruption(format!(
                 "remote CAS for '{key}' read back different bytes"

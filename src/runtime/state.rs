@@ -446,6 +446,8 @@ impl RuntimeState {
             wal_fsync_ns_total: telemetry.as_ref().map_or(0, |m| m.wal_fsync_ns_total),
             wal_fsync_ns_max: telemetry.as_ref().map_or(0, |m| m.wal_fsync_ns_max),
             durability_waiters_fanned_out_total: 0,
+            abandoned_runtime_requests_total: 0,
+            late_runtime_responses_total: 0,
             sst_bloom_rejects_total: read_path.bloom_rejects,
             sst_bloom_checks_total: read_path.bloom_checks,
             sst_data_blocks_read_total: read_path.data_blocks_read,

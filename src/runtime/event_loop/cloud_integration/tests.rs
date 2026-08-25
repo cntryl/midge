@@ -515,7 +515,13 @@ fn seal_segment_for_test(el: &mut EventLoop) -> crate::common::MidgeResult<(u64,
     if let Some(storage) = el.hybrid_storage.as_ref() {
         let local_path = el.state.wal_dir.join(crate::wal::segment_file_name(seg_id));
         storage
-            .publish_remote_wal_segment(seg_id, max_sequence, &local_path, el.state.writer_epoch)
+            .publish_remote_wal_segment(
+                seg_id,
+                max_sequence,
+                &local_path,
+                el.state.writer_epoch,
+                &crate::common::OperationDeadline::unbounded(),
+            )
             .expect("publish remote WAL for test CloudAck");
     }
     Ok((seg_id, max_sequence))
@@ -661,6 +667,7 @@ fn publish_remote_wal_bytes_for_test(
                 max_sequence,
                 &local_path,
                 el.state.writer_epoch,
+                &crate::common::OperationDeadline::unbounded(),
             )
             .expect("publish authoritative remote WAL for test");
     }
@@ -2769,7 +2776,13 @@ fn should_keep_local_wal_when_cached_remote_wal_proof_becomes_stale_before_cloud
     el.hybrid_storage
         .as_ref()
         .expect("hybrid storage")
-        .publish_remote_wal_segment(segment_id, max_sequence, &local_wal, el.state.writer_epoch)
+        .publish_remote_wal_segment(
+            segment_id,
+            max_sequence,
+            &local_wal,
+            el.state.writer_epoch,
+            &crate::common::OperationDeadline::unbounded(),
+        )
         .expect("establish authoritative remote WAL publication");
     std::fs::remove_file(remote_wal_path_for_test(&el, segment_id))
         .expect("delete remote WAL after proof");
@@ -3453,6 +3466,7 @@ fn should_seal_cloud_wal_with_segment_max_sequence_not_global_sequence(
                 .wal_dir
                 .join(crate::wal::segment_file_name(segment_id)),
             el.state.writer_epoch,
+            &crate::common::OperationDeadline::unbounded(),
         )
         .expect("publish the actual segment frontier");
     storage
@@ -3577,6 +3591,7 @@ fn complete_retry_and_ack(
             last_sequence,
             &el.state.wal_dir.join(crate::wal::segment_file_name(seg_id)),
             el.state.writer_epoch,
+            &crate::common::OperationDeadline::unbounded(),
         )
         .expect("publish retry remote WAL for test CloudAck");
     el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
@@ -3663,5 +3678,365 @@ fn should_retry_seal_wal_for_cloud_after_failpoint_before_rotate() -> crate::com
     );
 
     scenario.teardown();
+    Ok(())
+}
+
+/// Counts `read_current` calls so a test can prove how many lease round trips a
+/// single drain pass performs. Under `ProviderLeaderStore` each one is a cloud
+/// GET, so the count is the cost being measured.
+#[derive(Debug, Default)]
+struct CountingLeaderStore {
+    reads: std::sync::atomic::AtomicUsize,
+    holder_id: String,
+    epoch: u64,
+}
+
+impl CountingLeaderStore {
+    fn new(holder_id: &str, epoch: u64) -> Self {
+        Self {
+            reads: std::sync::atomic::AtomicUsize::new(0),
+            holder_id: holder_id.to_string(),
+            epoch,
+        }
+    }
+
+    fn reads(&self) -> usize {
+        self.reads.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl crate::lease::LeaderStore for CountingLeaderStore {
+    fn acquire_leadership(
+        &self,
+        _holder_id: &str,
+    ) -> Result<crate::lease::LeaderRecord, crate::lease::LeaseError> {
+        Err(crate::lease::LeaseError::AcquisitionFailed(
+            "counting store does not acquire".to_string(),
+        ))
+    }
+
+    fn read_current(&self) -> Result<Option<crate::lease::LeaderRecord>, crate::lease::LeaseError> {
+        self.reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(Some(crate::lease::LeaderRecord {
+            epoch: self.epoch,
+            holder_id: self.holder_id.clone(),
+            acquired_at: "2026-08-25T00:00:00Z".to_string(),
+        }))
+    }
+}
+
+#[test]
+fn should_validate_writer_lease_once_given_multi_segment_backlog_when_draining_uploads(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: a CloudAsync loop holding several sealed WAL segments that still
+    // need uploading, with a leader store that counts its lease round trips.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let leader_store = std::sync::Arc::new(CountingLeaderStore::new("writer-1", 1));
+    el.leader_store =
+        Some(std::sync::Arc::clone(&leader_store) as std::sync::Arc<dyn crate::lease::LeaderStore>);
+    el.leader_holder_id = Some("writer-1".to_string());
+
+    let mut sealed = Vec::new();
+    for _ in 0..4 {
+        append_cloud_async_put(&mut el)?;
+        sealed.push(seal_segment_without_remote_proof_for_test(&mut el)?);
+    }
+    el.cloud_wal.upload_backlog.clear();
+    for (segment_id, max_sequence) in &sealed {
+        el.cloud_wal
+            .upload_backlog
+            .insert(*segment_id, *max_sequence);
+    }
+    let before = leader_store.reads();
+
+    // Act
+    el.drain_cloud_wal_upload_backlog();
+
+    // Assert
+    assert!(
+        el.cloud_wal.upload_backlog.is_empty(),
+        "the pass must actually drain every segment, or the count below is vacuous"
+    );
+    let lease_reads = leader_store.reads() - before;
+    assert_eq!(
+        lease_reads, 1,
+        "one drain pass must validate the writer lease once, not once per segment"
+    );
+    Ok(())
+}
+
+#[test]
+fn should_derive_ack_deadline_from_waiting_caller_when_verifying_remote_segment(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: a cloud-durability waiter that registered long enough ago that
+    // its response budget is already spent.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let sequence = append_cloud_async_put(&mut el)?;
+    let request_id = 90_101;
+    let _rx = el.router.register(request_id, "SealWalForCloud");
+    let msg_rx = crossbeam::channel::unbounded::<RuntimeMsg>().1;
+    assert_eq!(
+        el.handle_runtime_msg(
+            RuntimeMsg::SealWalForCloud {
+                request_id,
+                sequence,
+                wait_for_ack: true,
+            },
+            &msg_rx,
+        ),
+        super::super::HandleOutcome::Continue
+    );
+    let segment_id = el
+        .durability
+        .inflight_segment_for_sequence(sequence)
+        .expect("inflight segment");
+
+    // Act
+    let request_ids = el.durability.cloud_durability_request_ids_at(segment_id);
+
+    // Assert: the ack path can see which caller it is serving, which is what
+    // lets it bound its storage work by that caller's remaining budget.
+    assert_eq!(
+        request_ids,
+        vec![request_id],
+        "the ack path must be able to find the caller whose budget it shares"
+    );
+    assert!(
+        el.router.registered_at(request_id).is_some(),
+        "the caller's start instant must still be resolvable"
+    );
+    Ok(())
+}
+
+#[test]
+fn should_complete_accepted_wal_publication_given_abandoned_caller_when_every_waiter_gave_up(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: a caller waits for a cloud-strict seal, then gives up.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let sequence = append_cloud_async_put(&mut el)?;
+    let request_id = 90_201;
+    let _rx = el.router.register(request_id, "SealWalForCloud");
+    let msg_rx = crossbeam::channel::unbounded::<RuntimeMsg>().1;
+    assert_eq!(
+        el.handle_runtime_msg(
+            RuntimeMsg::SealWalForCloud {
+                request_id,
+                sequence,
+                wait_for_ack: true,
+            },
+            &msg_rx,
+        ),
+        super::super::HandleOutcome::Continue
+    );
+    let segment_id = el
+        .durability
+        .inflight_segment_for_sequence(sequence)
+        .expect("inflight segment");
+    copy_local_segment_to_remote_wal_for_test(&el, segment_id);
+
+    // Act: the caller times out and abandons before the upload is acked.
+    el.router.abandon(request_id, Duration::from_millis(20));
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id,
+        max_sequence: sequence,
+    });
+
+    // Assert: caller abandonment only stops response delivery. The sealed WAL
+    // is already an accepted durability obligation and must still close the
+    // inflight gap so later strict waiters cannot stall behind it.
+    assert!(
+        !el.state.persistence_anomaly_detected(),
+        "caller abandonment must not turn valid publication into a persistence failure"
+    );
+    assert_eq!(el.state.wal.cloud_durable_seq, sequence);
+    assert!(
+        el.durability
+            .inflight_segment_for_sequence(sequence)
+            .is_none(),
+        "callerless completion must retire the accepted inflight segment"
+    );
+    Ok(())
+}
+
+#[test]
+fn should_use_latest_surviving_waiter_deadline_given_older_waiter_already_expired() {
+    // Arrange: the first waiter has exhausted its response budget while a
+    // newer waiter on the same segment still has substantial time remaining.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )
+    .expect("create cloud event loop");
+    el.runtime_response_timeout = Duration::from_millis(200);
+    let segment_id = 91_001;
+    let old_request_id = 91_002;
+    let new_request_id = 91_003;
+    let _old_rx = el.router.register(old_request_id, "SealWalForCloud");
+    el.durability.queue_waiter_for_key(
+        segment_id,
+        DurabilityWaiter::CloudDurability {
+            request_id: old_request_id,
+        },
+    );
+    std::thread::sleep(Duration::from_millis(150));
+    let _new_rx = el.router.register(new_request_id, "SealWalForCloud");
+    el.durability.queue_waiter_for_key(
+        segment_id,
+        DurabilityWaiter::CloudDurability {
+            request_id: new_request_id,
+        },
+    );
+    std::thread::sleep(Duration::from_millis(75));
+
+    // Act
+    let deadline = el
+        .cloud_ack_deadline(segment_id)
+        .expect("a surviving waiter supplies a deadline");
+
+    // Assert
+    assert!(
+        !deadline.is_expired(),
+        "the expired older waiter must not cancel a newer caller's remaining budget"
+    );
+}
+
+#[test]
+fn should_bound_strict_seal_lease_validation_given_request_deadline_is_exhausted(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: a strict request has no response budget left. No provider lease
+    // GET may start after that point, including the validations performed by
+    // sealing and upload admission.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let sequence = append_cloud_async_put(&mut el)?;
+    let leader_store = std::sync::Arc::new(CountingLeaderStore::new("writer-1", 1));
+    el.leader_store =
+        Some(std::sync::Arc::clone(&leader_store) as std::sync::Arc<dyn crate::lease::LeaderStore>);
+    el.leader_holder_id = Some("writer-1".to_string());
+    el.runtime_response_timeout = Duration::ZERO;
+    let request_id = 91_101;
+    let response_rx = el.router.register(request_id, "SealWalForCloud");
+    let msg_rx = crossbeam::channel::unbounded::<RuntimeMsg>().1;
+
+    // Act
+    el.handle_runtime_msg(
+        RuntimeMsg::SealWalForCloud {
+            request_id,
+            sequence,
+            wait_for_ack: true,
+        },
+        &msg_rx,
+    );
+
+    // Assert
+    assert_eq!(
+        leader_store.reads(),
+        0,
+        "an exhausted caller budget must prevent every strict-seal lease read"
+    );
+    assert!(matches!(
+        response_rx.try_recv(),
+        Ok(RuntimeResponse::Error {
+            error: crate::common::MidgeError::Timeout(_),
+            ..
+        })
+    ));
+    assert!(
+        el.durability
+            .inflight_segment_for_sequence(sequence)
+            .is_none(),
+        "deadline expiry before sealing must leave the active WAL retryable"
+    );
+    Ok(())
+}
+
+#[test]
+fn should_requeue_publication_with_timeout_given_ack_deadline_expires_before_lease_check(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: the upload completed, but its strict caller's shared deadline is
+    // exhausted before acknowledgement validation begins.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let sequence = append_cloud_async_put(&mut el)?;
+    let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    let leader_store = std::sync::Arc::new(CountingLeaderStore::new("writer-1", 1));
+    el.leader_store =
+        Some(std::sync::Arc::clone(&leader_store) as std::sync::Arc<dyn crate::lease::LeaderStore>);
+    el.leader_holder_id = Some("writer-1".to_string());
+    el.runtime_response_timeout = Duration::ZERO;
+    let request_id = 91_201;
+    let response_rx = el.router.register(request_id, "SealWalForCloud");
+    el.durability
+        .queue_waiter_for_key(segment_id, DurabilityWaiter::CloudDurability { request_id });
+
+    // Act
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id,
+        max_sequence,
+    });
+
+    // Assert
+    assert_eq!(sequence, max_sequence);
+    assert_eq!(
+        leader_store.reads(),
+        0,
+        "acknowledgement lease validation must not start outside the caller deadline"
+    );
+    assert!(matches!(
+        response_rx.try_recv(),
+        Ok(RuntimeResponse::Error {
+            error: crate::common::MidgeError::Timeout(_),
+            ..
+        })
+    ));
+    assert_eq!(
+        el.cloud_wal.upload_backlog.get(&segment_id),
+        Some(&max_sequence),
+        "deadline expiry must requeue the accepted WAL obligation"
+    );
+    assert_eq!(
+        el.durability.inflight_segment_for_sequence(max_sequence),
+        Some(segment_id),
+        "failed acknowledgement must retain the inflight frontier gap"
+    );
+    Ok(())
+}
+
+#[test]
+fn should_not_bound_background_ack_given_no_waiting_caller_when_publishing_async(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: a CloudAsync segment sealed with nobody waiting on a response.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    append_cloud_async_put(&mut el)?;
+    let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    copy_local_segment_to_remote_wal_for_test(&el, segment_id);
+    assert!(
+        el.durability
+            .cloud_durability_request_ids_at(segment_id)
+            .is_empty(),
+        "background seal must have no caller attached"
+    );
+
+    // Act
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id,
+        max_sequence,
+    });
+
+    // Assert: background publication is not failed for want of a caller budget.
+    assert!(
+        !el.state.persistence_anomaly_detected(),
+        "callerless background publication must not be treated as abandoned"
+    );
     Ok(())
 }

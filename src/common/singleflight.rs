@@ -83,6 +83,20 @@ where
         Ok(Self::rotate_locked(&mut state, new_key))
     }
 
+    /// Inspect the waiters queued at `key` without completing them.
+    ///
+    /// Lets a caller derive a shared budget from the waiters it is about to
+    /// serve, which requires reading them before the work runs rather than
+    /// after.
+    pub fn inspect_key<T>(&self, key: &K, project: impl Fn(&W) -> T) -> Vec<T> {
+        let state = self.state.lock();
+        state
+            .inflight
+            .get(key)
+            .map(|waiters| waiters.iter().map(project).collect())
+            .unwrap_or_default()
+    }
+
     /// Drain all waiters for the given key.
     pub fn complete(&self, key: &K) -> Vec<W> {
         let mut state = self.state.lock();

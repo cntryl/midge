@@ -1968,3 +1968,43 @@ fn should_reject_late_compaction_output_after_column_family_is_dropped() {
         .iter()
         .all(|file| file.name != output_name));
 }
+
+#[test]
+fn should_count_late_response_given_inline_route_when_caller_already_gave_up() {
+    // Arrange: an inline caller registers a response channel and then stops
+    // waiting, mirroring a transaction commit that hit its response timeout.
+    let event_loop = create_test_event_loop().expect("create event loop");
+    let request_id = 4242;
+    let (response_tx, response_rx) = crossbeam::channel::bounded(1);
+    event_loop.register_inline_response(request_id, response_tx);
+    drop(response_rx);
+
+    // Act: the loop finishes the work anyway.
+    event_loop.respond(request_id, RuntimeResponse::Ok { request_id });
+
+    // Assert
+    assert_eq!(
+        event_loop.router.late_responses_total(),
+        1,
+        "a discarded inline response must still be visible to operators"
+    );
+}
+
+#[test]
+fn should_not_count_late_response_given_inline_route_when_caller_is_still_waiting() {
+    // Arrange
+    let event_loop = create_test_event_loop().expect("create event loop");
+    let request_id = 4243;
+    let (response_tx, response_rx) = crossbeam::channel::bounded(1);
+    event_loop.register_inline_response(request_id, response_tx);
+
+    // Act
+    event_loop.respond(request_id, RuntimeResponse::Ok { request_id });
+
+    // Assert
+    assert!(matches!(
+        response_rx.try_recv(),
+        Ok(RuntimeResponse::Ok { .. })
+    ));
+    assert_eq!(event_loop.router.late_responses_total(), 0);
+}

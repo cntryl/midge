@@ -137,6 +137,18 @@ pub struct RuntimeMetricsSnapshot {
     pub wal_fsync_ns_max: u64,
     /// Durability waiters completed through keyed fan-out events.
     pub durability_waiters_fanned_out_total: u64,
+    /// Runtime requests whose caller stopped waiting before a response arrived.
+    ///
+    /// Pairs with `late_runtime_responses_total` for aggregate diagnosis of
+    /// ambiguous `MidgeError::Timeout` behavior. The process-wide totals cannot
+    /// identify the outcome of an individual request.
+    pub abandoned_runtime_requests_total: u64,
+    /// Runtime responses that arrived with no caller waiting for them.
+    ///
+    /// Includes successful and error responses for every request kind, so this
+    /// process-wide total cannot identify whether one timed-out mutation took
+    /// effect.
+    pub late_runtime_responses_total: u64,
     /// SST data blocks skipped after a definite bloom-filter rejection.
     pub sst_bloom_rejects_total: u64,
     /// Persisted SST block bloom filters consulted by point reads.

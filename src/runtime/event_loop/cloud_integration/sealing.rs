@@ -8,18 +8,26 @@ impl EventLoop {
     pub(crate) fn seal_current_cloud_segment(
         &mut self,
     ) -> crate::common::MidgeResult<Option<(u64, u64)>> {
-        self.seal_current_cloud_segment_inner(false)
+        self.seal_current_cloud_segment_inner(false, &crate::common::OperationDeadline::unbounded())
+    }
+
+    pub(in crate::runtime::event_loop) fn seal_current_cloud_segment_within(
+        &mut self,
+        deadline: &crate::common::OperationDeadline,
+    ) -> crate::common::MidgeResult<Option<(u64, u64)>> {
+        self.seal_current_cloud_segment_inner(false, deadline)
     }
 
     pub(in crate::runtime::event_loop) fn seal_recovered_cloud_active_segment(
         &mut self,
     ) -> crate::common::MidgeResult<Option<(u64, u64)>> {
-        self.seal_current_cloud_segment_inner(true)
+        self.seal_current_cloud_segment_inner(true, &crate::common::OperationDeadline::unbounded())
     }
 
     fn seal_current_cloud_segment_inner(
         &mut self,
         recovered_active: bool,
+        deadline: &crate::common::OperationDeadline,
     ) -> crate::common::MidgeResult<Option<(u64, u64)>> {
         if !self.wal_actor.is_cloud_async() {
             return Ok(None);
@@ -37,7 +45,7 @@ impl EventLoop {
                 "older CloudAsync WAL segments are still awaiting upload admission".to_string(),
             ));
         }
-        self.validate_runtime_writer_lease()?;
+        self.validate_runtime_writer_lease_within(deadline)?;
 
         let segment_id = self.state.wal.current_segment_id;
         let bytes_buffered = self.wal_actor.bytes_since_sync() as u64;
@@ -61,7 +69,7 @@ impl EventLoop {
         // Revalidate after the potentially slow flush but before the active
         // file is irreversibly rotated. A failure here leaves the same active
         // segment intact for a later retry.
-        self.validate_runtime_writer_lease()?;
+        self.validate_runtime_writer_lease_within(deadline)?;
         if let Err(error) = self.wal_actor.rotate(&mut self.state) {
             tracing::error!(error = %error, "CloudAsync: WAL rotate failed");
             return Err(error);
@@ -86,7 +94,7 @@ impl EventLoop {
                 "failpoint: cloud seal failed after WAL rotate before enqueue".to_string(),
             ))
         );
-        self.try_drain_cloud_wal_upload_backlog()?;
+        self.try_drain_cloud_wal_upload_backlog_within(deadline)?;
 
         if let Some(telemetry) = crate::telemetry::Telemetry::global() {
             telemetry.metrics().record_cloud_async_wal_segment_sealed(
@@ -99,6 +107,15 @@ impl EventLoop {
     }
 
     fn try_drain_cloud_wal_upload_backlog(&mut self) -> crate::common::MidgeResult<()> {
+        self.try_drain_cloud_wal_upload_backlog_within(
+            &crate::common::OperationDeadline::unbounded(),
+        )
+    }
+
+    fn try_drain_cloud_wal_upload_backlog_within(
+        &mut self,
+        deadline: &crate::common::OperationDeadline,
+    ) -> crate::common::MidgeResult<()> {
         let Some(storage) = self.hybrid_storage.clone() else {
             if self.cloud_wal.upload_backlog.is_empty() {
                 return Ok(());
@@ -108,13 +125,23 @@ impl EventLoop {
             ));
         };
 
+        if self.cloud_wal.upload_backlog.is_empty() {
+            return Ok(());
+        }
+        // Validate once per drain pass, not once per segment. Under a provider
+        // leader store each validation is a cloud GET, and the durable guarantee
+        // is not this poll: `WalPublicationCatalog::require_epoch` plus the
+        // catalog compare-exchange reject a fenced writer's publish at the object
+        // store regardless. This check is a fast-fail, so paying for it per
+        // segment buys nothing and multiplies the stall on a deep backlog.
+        self.validate_runtime_writer_lease_within(deadline)?;
+
         loop {
             let Some((&segment_id, &max_sequence)) =
                 self.cloud_wal.upload_backlog.first_key_value()
             else {
                 return Ok(());
             };
-            self.validate_runtime_writer_lease()?;
             let local_path = self
                 .state
                 .wal_dir

@@ -175,6 +175,10 @@ pub struct EventLoop {
     /// remains fenced until reopen replays the durable intent.
     compaction_publication_degraded: bool,
     writer_epoch: u64,
+    /// Response budget a caller is given for one runtime request. Cloud work
+    /// performed on a caller's behalf shares this budget rather than restarting
+    /// a fresh `storage_io_timeout` per round trip.
+    runtime_response_timeout: std::time::Duration,
     leader_store: Option<Arc<dyn crate::lease::LeaderStore>>,
     leader_holder_id: Option<String>,
 }
@@ -330,6 +334,7 @@ impl EventLoop {
             ddl_authority_ambiguous: false,
             compaction_publication_degraded: false,
             writer_epoch: config.writer_epoch,
+            runtime_response_timeout: config.runtime_response_timeout,
             leader_store: config.leader_store.clone(),
             leader_holder_id: config.leader_holder_id.clone(),
         };
@@ -430,17 +435,36 @@ impl EventLoop {
         Ok(())
     }
 
-    fn validate_runtime_writer_lease(&self) -> crate::common::MidgeResult<()> {
+    fn validate_runtime_writer_lease_within(
+        &self,
+        deadline: &crate::common::OperationDeadline,
+    ) -> crate::common::MidgeResult<()> {
         self.check_lease_health()?;
-        if let Some(store) = &self.leader_store {
-            store
-                .validate_epoch(
-                    self.leader_holder_id.as_deref().unwrap_or_default(),
-                    self.writer_epoch,
-                )
-                .map_err(|error| crate::common::MidgeError::Fenced(error.to_string()))?;
+        if deadline.is_expired() {
+            return Err(crate::common::MidgeError::Timeout(
+                "operation deadline exhausted before writer lease validation".to_string(),
+            ));
         }
-        Ok(())
+        let Some(store) = &self.leader_store else {
+            return Ok(());
+        };
+        let holder_id = self.leader_holder_id.as_deref().unwrap_or_default();
+        let result = if deadline.is_bounded() {
+            store.validate_epoch_with_timeout(holder_id, self.writer_epoch, deadline.remaining())
+        } else {
+            store.validate_epoch(holder_id, self.writer_epoch)
+        };
+        result.map_err(|error| {
+            if deadline.is_bounded()
+                && (deadline.is_expired() || error.to_string().contains("timed out"))
+            {
+                crate::common::MidgeError::Timeout(format!(
+                    "writer lease validation exceeded the operation deadline: {error}"
+                ))
+            } else {
+                crate::common::MidgeError::Fenced(error.to_string())
+            }
+        })
     }
 
     /// Set the snapshot cache for read-path bypass.
@@ -979,7 +1003,12 @@ impl EventLoop {
     pub(super) fn respond(&self, request_id: u64, resp: RuntimeResponse) {
         let inline_tx = self.inline_responses.borrow_mut().remove(&request_id);
         if let Some(response_tx) = inline_tx {
-            let _ = response_tx.send(resp);
+            // A failed send means the inline caller already timed out and
+            // dropped its receiver. That is the late-response signal for this
+            // route, which the router's pending table never sees.
+            if response_tx.send(resp).is_err() {
+                self.router.record_late_response();
+            }
         } else {
             self.router.complete(resp);
         }

@@ -234,6 +234,18 @@ pub trait StorageBackend: Send + Sync + 'static {
     /// Submit a read operation. Returns immediately.
     fn submit_read(&self, key: &str, callback: StorageCallback);
 
+    /// Submit a read whose callback adapter must not wait longer than
+    /// `timeout`. Backends whose submission path is already non-blocking may
+    /// retain this default; blocking adapters must override it.
+    fn submit_read_with_timeout(
+        &self,
+        key: &str,
+        _timeout: std::time::Duration,
+        callback: StorageCallback,
+    ) {
+        self.submit_read(key, callback);
+    }
+
     /// Submit a write operation. Returns immediately.
     fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback);
 
@@ -257,6 +269,18 @@ pub trait StorageBackend: Send + Sync + 'static {
                 "conditional write is not supported by this storage backend".to_string(),
             ),
         });
+    }
+
+    /// Submit a conditional write with a bounded callback-adapter wait.
+    fn submit_write_with_headers_and_timeout(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        _timeout: std::time::Duration,
+        callback: StorageCallback,
+    ) {
+        self.submit_write_with_headers(key, data, headers, callback);
     }
 
     /// Submit a delete operation. Returns immediately.
@@ -313,5 +337,15 @@ pub trait StorageBackend: Send + Sync + 'static {
             key: key.to_string(),
             result,
         });
+    }
+
+    /// Submit an object metadata lookup with a bounded callback-adapter wait.
+    fn submit_head_with_timeout(
+        &self,
+        key: &str,
+        _timeout: std::time::Duration,
+        callback: StorageCallback,
+    ) {
+        self.submit_head(key, callback);
     }
 }

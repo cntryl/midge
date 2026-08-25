@@ -80,13 +80,20 @@ pub(crate) trait HybridPersistence {
         expected_max_sequence: u64,
     ) -> Result<(), String>;
 
+    /// Publish a sealed WAL segment to the authoritative cloud catalog.
+    ///
+    /// `deadline` is the shared budget for every cloud round trip this makes —
+    /// two object proofs plus a catalog compare-exchange, up to seven calls. It
+    /// belongs to the caller waiting on the acknowledgement, so the whole
+    /// sequence stays inside that caller's response timeout.
     fn publish_remote_wal_segment(
         &self,
         segment_id: u64,
         expected_max_sequence: u64,
         local_path: &Path,
         fencing_epoch: u64,
-    ) -> Result<(), String>;
+        deadline: &crate::common::OperationDeadline,
+    ) -> MidgeResult<()>;
 
     fn remote_wal_segment_covered_by_manifest(
         &self,
@@ -174,7 +181,9 @@ impl HybridPersistence for HybridStorage {
                 entry.max_sequence
             ));
         }
-        validate_remote_wal(self, &entry).map(|_| ())
+        validate_remote_wal(self, &entry, &crate::common::OperationDeadline::unbounded())
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     }
 
     fn publish_remote_wal_segment(
@@ -183,46 +192,58 @@ impl HybridPersistence for HybridStorage {
         expected_max_sequence: u64,
         local_path: &Path,
         fencing_epoch: u64,
-    ) -> Result<(), String> {
+        deadline: &crate::common::OperationDeadline,
+    ) -> MidgeResult<()> {
         let local_bytes = std::fs::read(local_path).map_err(|error| {
-            format!(
-                "failed to read local WAL segment '{}' before cloud acknowledgement: {error}",
-                local_path.display()
-            )
+            MidgeError::Io(std::io::Error::new(
+                error.kind(),
+                format!(
+                    "failed to read local WAL segment '{}' before cloud acknowledgement: {error}",
+                    local_path.display()
+                ),
+            ))
         })?;
         let local_readback = crate::wal::cloud_segment::validate_bytes(
             &local_path.display().to_string(),
             &local_bytes,
             expected_max_sequence,
-        )?;
+        )
+        .map_err(MidgeError::Internal)?;
         let entry = PublishedWalSegment::from_validated_bytes(
             segment_id,
             expected_max_sequence,
             local_readback.validation.writer_epoch,
             &local_bytes,
         );
-        let remote = validate_remote_wal(self, &entry)?;
+        let remote = validate_remote_wal(self, &entry, deadline)?;
         if remote.proof.bytes() != local_bytes {
-            return Err(format!(
+            return Err(MidgeError::Internal(format!(
                 "cloud WAL segment {segment_id} does not match the locally sealed bytes for writer epoch {}",
                 local_readback.validation.writer_epoch
-            ));
+            )));
         }
         let catalog_proof = self
-            .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
-            .map_err(|error| format!("cloud WAL publication catalog unavailable: {error}"))?;
-        let mut catalog = WalPublicationCatalog::decode(catalog_proof.bytes())?;
-        if !catalog.publish(fencing_epoch, entry)? {
+            .remote_object_proof_within(crate::wal::cloud_catalog::OBJECT_KEY, deadline)
+            .map_err(|error| {
+                contextualize_cloud_error(error, "cloud WAL publication catalog unavailable")
+            })?;
+        let mut catalog =
+            WalPublicationCatalog::decode(catalog_proof.bytes()).map_err(MidgeError::Internal)?;
+        if !catalog
+            .publish(fencing_epoch, entry)
+            .map_err(MidgeError::Internal)?
+        {
             return Ok(());
         }
-        let catalog_bytes = catalog.encode()?;
-        self.compare_exchange_remote_object(
+        let catalog_bytes = catalog.encode().map_err(MidgeError::Internal)?;
+        self.compare_exchange_remote_object_within(
             crate::wal::cloud_catalog::OBJECT_KEY,
             Some(catalog_proof.metadata()),
             catalog_bytes,
+            deadline,
         )
         .map(|_| ())
-        .map_err(|error| format!("cloud WAL catalog publication failed: {error}"))
+        .map_err(|error| contextualize_cloud_error(error, "cloud WAL catalog publication failed"))
     }
 
     fn remote_wal_segment_covered_by_manifest(
@@ -238,7 +259,9 @@ impl HybridPersistence for HybridStorage {
                 entry.max_sequence
             ));
         }
-        let validated = validate_remote_wal(self, &entry)?;
+        let validated =
+            validate_remote_wal(self, &entry, &crate::common::OperationDeadline::unbounded())
+                .map_err(|error| error.to_string())?;
         Ok(wal_data_records_covered_by_manifest(
             &validated.data_records,
             manifest,
@@ -266,7 +289,9 @@ impl HybridPersistence for HybridStorage {
                 entry.max_sequence
             ));
         }
-        let validated = validate_remote_wal(self, &entry)?;
+        let validated =
+            validate_remote_wal(self, &entry, &crate::common::OperationDeadline::unbounded())
+                .map_err(|error| error.to_string())?;
         if !wal_data_records_covered_by_manifest(&validated.data_records, &guard.manifest) {
             return Err(format!(
                 "cloud WAL segment {segment_id} contains records not covered by the committed manifest"
@@ -369,18 +394,29 @@ fn authoritative_wal_entry(
 fn validate_remote_wal(
     storage: &HybridStorage,
     entry: &PublishedWalSegment,
-) -> Result<ValidatedWalObject, String> {
-    let proof = storage.remote_object_proof(&entry.object_key)?;
-    entry.validate_bytes(proof.bytes())?;
+    deadline: &crate::common::OperationDeadline,
+) -> MidgeResult<ValidatedWalObject> {
+    let proof = storage.remote_object_proof_within(&entry.object_key, deadline)?;
+    entry
+        .validate_bytes(proof.bytes())
+        .map_err(MidgeError::Internal)?;
     let readback = crate::wal::cloud_segment::validate_bytes(
         &entry.object_key,
         proof.bytes(),
         entry.max_sequence,
-    )?;
+    )
+    .map_err(MidgeError::Internal)?;
     Ok(ValidatedWalObject {
         proof,
         data_records: readback.data_records,
     })
+}
+
+fn contextualize_cloud_error(error: MidgeError, context: &str) -> MidgeError {
+    match error {
+        MidgeError::Timeout(message) => MidgeError::Timeout(format!("{context}: {message}")),
+        other => MidgeError::Internal(format!("{context}: {other}")),
+    }
 }
 
 pub(crate) fn wal_data_records_covered_by_manifest(
@@ -534,6 +570,24 @@ fn verify_sst_summary_matches_manifest(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn should_preserve_timeout_variant_when_adding_cloud_publication_context() {
+        // Arrange
+        let timeout = MidgeError::Timeout("remote CAS timed out".to_string());
+
+        // Act
+        let contextualized =
+            contextualize_cloud_error(timeout, "cloud WAL catalog publication failed");
+
+        // Assert
+        assert!(matches!(
+            contextualized,
+            MidgeError::Timeout(message)
+                if message.contains("catalog publication")
+                    && message.contains("remote CAS timed out")
+        ));
+    }
 
     #[test]
     fn should_require_manifest_coverage_for_wal_records() {

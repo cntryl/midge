@@ -47,8 +47,28 @@ startup should retain an outer process or startup watchdog.
 A configured runtime-response `MidgeError::Timeout` identifies the request kind
 and request ID. The timeout removes the caller's response route but does not
 cancel work already accepted by the runtime; a mutating operation can still
-complete later. Use recovery and runtime diagnostics to determine its outcome
-before retrying.
+complete later.
+
+`Engine::get_runtime_metrics` reports that ambiguity as a pair of counters:
+
+- `abandoned_runtime_requests_total` — callers that stopped waiting for a
+  response.
+- `late_runtime_responses_total` — responses that arrived with no caller left to
+  receive them.
+
+These process-wide counters are aggregate diagnostics only. They include every
+request kind and concurrent caller, and a late response may be either success or
+error, so counter deltas cannot identify the outcome of one timed-out mutation.
+Do not use them to decide whether that mutation should be retried. Use an
+application-level idempotency key or read the affected state through the normal
+API before retrying; otherwise the original and retry can both apply.
+
+Cloud work performed on a caller's behalf is bounded by that caller's remaining
+budget rather than restarting a full `storage_io_timeout` per round trip, and a
+cloud acknowledgement continues as callerless work after all response waiters
+abandon it. The sealed WAL is already an accepted durability obligation and
+must still close its inflight frontier gap. This keeps later strict waits from
+stalling, but it also means a caller timeout remains outcome-ambiguous.
 
 ## Column-family lifecycle
 

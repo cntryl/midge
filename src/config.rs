@@ -11,6 +11,22 @@ pub(crate) const DEFAULT_STORAGE_IO_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const DEFAULT_RUNTIME_RESPONSE_TIMEOUT: Duration = Duration::from_mins(1);
 const RUNTIME_RESPONSE_TIMEOUT_MARGIN: Duration = Duration::from_secs(30);
 
+/// Derive the enclosing runtime deadline from the storage deadline.
+///
+/// The margin gives the storage layer room to fail first with a clean terminal
+/// error, so the caller sees that error rather than an ambiguous runtime
+/// timeout.
+///
+/// Known limitation: one margin covers one storage operation. Several cloud
+/// paths perform many sequential operations under a single runtime request —
+/// SST publication, manifest mirroring, and WAL prune each chain well past this
+/// margin, and each restarts a full `storage_io_timeout`. The cloud
+/// acknowledgement path shares one `OperationDeadline` derived from the waiting
+/// caller and so stays inside this budget; the others do not yet. Until they do,
+/// operators on slow providers should expect a runtime timeout to be reachable
+/// on those paths. `abandoned_runtime_requests_total` and
+/// `late_runtime_responses_total` expose aggregate timeout behavior, but cannot
+/// determine the outcome of an individual request.
 pub(crate) fn default_runtime_response_timeout(storage_io_timeout: Duration) -> Duration {
     DEFAULT_RUNTIME_RESPONSE_TIMEOUT.max(
         storage_io_timeout

@@ -11,6 +11,39 @@ Midge is currently in the 0.1 release line. Compatibility expectations for pre-1
 
 ### Changed
 
+- Cloud work performed for a waiting caller now shares one deadline derived from
+  when that caller began waiting, instead of restarting a full
+  `storage_io_timeout` on every round trip. The cloud WAL acknowledgement path
+  chains several object proofs and a catalog compare-exchange, which previously
+  could exceed `runtime_response_timeout` on a slow provider. Deployments on
+  degraded providers may now see `MidgeError::Timeout` naming the storage step
+  where earlier releases blocked longer.
+- A cloud WAL acknowledgement whose callers have all abandoned their requests now
+  continues as callerless durability work. Once a sealed WAL segment is accepted,
+  publication failures requeue it so an inflight frontier gap cannot strand later
+  strict waits. Background CloudAsync publication remains callerless as before.
+- Draining the CloudAsync WAL upload backlog validates the writer lease once per
+  pass rather than once per segment. Durable fencing is unchanged: the
+  publication catalog's epoch check and compare-exchange remain authoritative.
+
+### Added
+
+- `RuntimeMetricsSnapshot::abandoned_runtime_requests_total` and
+  `RuntimeMetricsSnapshot::late_runtime_responses_total` report callers that
+  stopped waiting and responses that arrived with no caller left. They diagnose
+  aggregate runtime-timeout behavior across routed and inline transaction paths;
+  because they are process-wide and late responses include errors, they do not
+  identify the outcome of an individual timed-out mutation.
+
+### Fixed
+
+- A response arriving after its caller gave up no longer blocks the event loop on
+  the tombstone mutex that timing-out callers contend for.
+- Pending requests are now failed reliably when the event loop panics: the
+  submission gate is closed before the pending table is drained, so a caller
+  submitting concurrently is failed rather than left to wait out its full
+  response timeout.
+
 - **Breaking:** cloud provider enum variants now contain private-field typed
   AWS, Azure, GCS, OCI, and generic S3-compatible configurations. Cloud
   locations normalize surrounding prefix slashes, and `OpenOptions::build`

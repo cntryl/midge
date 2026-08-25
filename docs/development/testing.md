@@ -175,6 +175,17 @@ persisted bloom is consulted and a definite rejection avoids a data block
 read. Add counters only for shipping mechanisms. Do not recreate a sparse-index
 counter after that dormant implementation was removed.
 
+`abandoned_runtime_requests_total` and `late_runtime_responses_total` are a pair
+and must be read together. The first counts callers that stopped waiting for a
+runtime response; the second counts responses that arrived with no caller left to
+receive them. A runtime-response `MidgeError::Timeout` removes the caller's
+route but does not cancel work the runtime already accepted. Both counters cover
+routed requests and the inline transaction path, which does not use the router's
+pending table. Tests and diagnostics may use the pair to measure aggregate
+timeout and late-response behavior, but must not correlate their deltas with one
+request or infer whether a timed-out mutation succeeded: unrelated requests and
+error responses contribute to the same totals.
+
 When two implementations of one concept deliberately coexist, keep a shared
 corpus differential test that proves agreement. Do not preserve an alternate
 implementation solely to satisfy this convention: delete nonshipping variants

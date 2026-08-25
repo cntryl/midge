@@ -109,6 +109,8 @@ impl EventLoop {
         let mut snapshot = self.state.runtime_metrics_snapshot();
         let read_path = self.state.diagnostics.snapshot();
         snapshot.durability_waiters_fanned_out_total = self.durability.waiters_fanned_out();
+        snapshot.abandoned_runtime_requests_total = self.router.abandoned_requests_total();
+        snapshot.late_runtime_responses_total = self.router.late_responses_total();
         snapshot.sst_bloom_rejects_total = read_path.bloom_rejects;
         snapshot.sst_bloom_checks_total = read_path.bloom_checks;
         snapshot.sst_data_blocks_read_total = read_path.data_blocks_read;

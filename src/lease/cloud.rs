@@ -128,6 +128,30 @@ impl LeaderStore for ProviderLeaderStore {
         )
     }
 
+    fn validate_epoch_with_timeout(
+        &self,
+        expected_holder_id: &str,
+        expected_epoch: u64,
+        timeout: Duration,
+    ) -> Result<(), LeaseError> {
+        match provider_read_doc_with_timeout(&self.cloud, timeout)? {
+            Some(document)
+                if document.epoch == Some(expected_epoch)
+                    && document.holder_id == expected_holder_id =>
+            {
+                Ok(())
+            }
+            Some(document) => Err(LeaseError::RenewalFailed(format!(
+                "epoch/holder mismatch: expected holder={expected_holder_id} epoch={expected_epoch}, found holder={} epoch={}",
+                document.holder_id,
+                document.epoch.unwrap_or(0)
+            ))),
+            None => Err(LeaseError::RenewalFailed(
+                "leader record missing".to_string(),
+            )),
+        }
+    }
+
     fn renew_leadership(&self, holder_id: &str, expected_epoch: u64) -> Result<(), LeaseError> {
         let (existing, metadata) =
             provider_read_doc_with_metadata(&self.cloud, self.validity.remaining(expected_epoch)?)?

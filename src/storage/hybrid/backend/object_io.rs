@@ -30,7 +30,7 @@ impl HybridStorage {
         callback_timeout: Duration,
     ) -> Result<Vec<u8>, String> {
         let (tx, rx) = std::sync::mpsc::channel();
-        backend.submit_read(key, tx);
+        backend.submit_read_with_timeout(key, callback_timeout, tx);
         match rx.recv_timeout(callback_timeout) {
             Ok(StorageEvent::ReadComplete {
                 result: StorageOutcome::Ok(data),
@@ -53,7 +53,7 @@ impl HybridStorage {
         callback_timeout: Duration,
     ) -> Result<StorageObjectMetadata, String> {
         let (tx, rx) = std::sync::mpsc::channel();
-        backend.submit_head(key, tx);
+        backend.submit_head_with_timeout(key, callback_timeout, tx);
         match rx.recv_timeout(callback_timeout) {
             Ok(StorageEvent::HeadComplete {
                 key: returned_key,
@@ -86,6 +86,11 @@ impl HybridStorage {
     pub(super) fn storage_error_indicates_precondition_failure(error: &str) -> bool {
         let error = error.trim().to_ascii_lowercase();
         error == "precondition failed" || error.starts_with("precondition failed:")
+    }
+
+    pub(super) fn storage_error_indicates_timeout(error: &str) -> bool {
+        let error = error.trim().to_ascii_lowercase();
+        error.contains("timed out") || error.contains("timeout")
     }
 
     pub(super) fn object_exists_in_backend_blocking(

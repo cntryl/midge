@@ -348,11 +348,20 @@ fn should_reject_wal_catalog_publication_from_stale_epoch_after_takeover() {
         .expect("new lease fences WAL catalog");
 
     // Act
-    let result = storage.publish_remote_wal_segment(segment_id, max_sequence, &local_path, 2);
+    let result = storage.publish_remote_wal_segment(
+        segment_id,
+        max_sequence,
+        &local_path,
+        2,
+        &crate::common::OperationDeadline::unbounded(),
+    );
 
     // Assert
     let error = result.expect_err("stale lease epoch must not publish WAL authority");
-    assert!(error.contains("requires fencing epoch 3"), "{error}");
+    assert!(
+        error.to_string().contains("requires fencing epoch 3"),
+        "{error}"
+    );
     let catalog_proof = storage
         .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
         .expect("read winning WAL catalog");
@@ -663,6 +672,73 @@ impl StorageBackend for AlwaysFailingWriteBackend {
 #[derive(Default)]
 struct NeverCompletesBackend {
     callbacks: Mutex<Vec<StorageCallback>>,
+}
+
+struct BudgetConsumingProofBackend {
+    first_head_delay: Duration,
+    head_calls: AtomicUsize,
+    retained_callbacks: Mutex<Vec<StorageCallback>>,
+}
+
+impl BudgetConsumingProofBackend {
+    fn new(first_head_delay: Duration) -> Self {
+        Self {
+            first_head_delay,
+            head_calls: AtomicUsize::new(0),
+            retained_callbacks: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn retain_callback(&self, callback: StorageCallback) {
+        self.retained_callbacks.lock().push(callback);
+    }
+}
+
+impl StorageBackend for BudgetConsumingProofBackend {
+    fn submit_read(&self, _key: &str, callback: StorageCallback) {
+        self.retain_callback(callback);
+    }
+
+    fn submit_write(&self, key: &str, _data: Vec<u8>, callback: StorageCallback) {
+        let _ = callback.send(StorageEvent::WriteComplete {
+            key: key.to_string(),
+            result: StorageOutcome::Err("writes are not used by this proof fixture".to_string()),
+        });
+    }
+
+    fn submit_delete(&self, key: &str, callback: StorageCallback) {
+        let _ = callback.send(StorageEvent::DeleteComplete {
+            key: key.to_string(),
+            result: StorageOutcome::Err("deletes are not used by this proof fixture".to_string()),
+        });
+    }
+
+    fn submit_list(&self, prefix: &str, callback: StorageCallback) {
+        let _ = callback.send(StorageEvent::ListComplete {
+            prefix: prefix.to_string(),
+            result: StorageOutcome::Ok(Vec::new()),
+        });
+    }
+
+    fn submit_head(&self, key: &str, callback: StorageCallback) {
+        if self.head_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            let delay = self.first_head_delay;
+            let key = key.to_string();
+            std::thread::spawn(move || {
+                std::thread::sleep(delay);
+                let _ = callback.send(StorageEvent::HeadComplete {
+                    key,
+                    result: StorageOutcome::Ok(StorageObjectMetadata {
+                        size: 7,
+                        etag: "slow-first-head".to_string(),
+                        generation: None,
+                    }),
+                });
+            });
+        } else {
+            self.retain_callback(callback);
+        }
+    }
 }
 
 struct RacingReadDeleteBackend {
@@ -2168,4 +2244,81 @@ fn should_enforce_internal_storage_event_queue_limits() {
         byte_limited_drained[0].event,
         StorageEvent::CloudAck { segment_id: 1, .. }
     ));
+}
+
+#[test]
+fn should_fail_with_timeout_given_expired_deadline_when_reading_object_proof() {
+    // Arrange: a caller whose shared budget is already spent.
+    let (_mock_cloud, storage) = hybrid_with_mock_cloud();
+    write_cloud_object(&storage, "sst/expired.sst", b"payload".to_vec());
+    let expired = crate::common::OperationDeadline::from_start(
+        std::time::Instant::now()
+            .checked_sub(Duration::from_secs(120))
+            .expect("test instant supports expired deadline offset"),
+        Duration::from_secs(60),
+    );
+
+    // Act
+    let result = storage.remote_object_proof_within("sst/expired.sst", &expired);
+
+    // Assert
+    let error = result.expect_err("an exhausted budget must not start another cloud round trip");
+    assert!(matches!(
+        error,
+        crate::common::MidgeError::Timeout(message)
+            if message.contains("deadline") && message.contains("sst/expired.sst")
+    ));
+}
+
+#[test]
+fn should_read_object_proof_given_ample_deadline_when_budget_remains() {
+    // Arrange
+    let (_mock_cloud, storage) = hybrid_with_mock_cloud();
+    write_cloud_object(&storage, "sst/ample.sst", b"payload".to_vec());
+    let deadline = crate::common::OperationDeadline::from_budget(Duration::from_secs(60));
+
+    // Act
+    let proof = storage
+        .remote_object_proof_within("sst/ample.sst", &deadline)
+        .expect("ample budget reads the object");
+
+    // Assert
+    assert_eq!(proof.bytes(), b"payload");
+}
+
+#[test]
+fn should_recompute_remaining_budget_before_each_round_trip_when_reading_object_proof() {
+    // Arrange: HEAD consumes most of the shared budget, then GET never answers.
+    // Reusing the allowance calculated before HEAD would refund that elapsed
+    // time and make the proof run well beyond the advertised deadline.
+    let tmp = tempfile::tempdir().expect("create deadline proof directory");
+    let local = Arc::new(
+        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
+            .expect("create deadline proof local backend"),
+    );
+    let cloud = Arc::new(BudgetConsumingProofBackend::new(Duration::from_millis(80)));
+    let limits = HybridQueueLimits {
+        callback_timeout: Duration::from_secs(1),
+        ..HybridQueueLimits::default()
+    };
+    let storage = HybridStorage::with_policy_event_sender_and_limits(
+        local,
+        cloud,
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        None,
+        limits,
+    );
+    let deadline = crate::common::OperationDeadline::from_budget(Duration::from_millis(100));
+
+    // Act
+    let started = Instant::now();
+    let result = storage.remote_object_proof_within("sst/slow-proof.sst", &deadline);
+    let elapsed = started.elapsed();
+
+    // Assert
+    assert!(result.is_err(), "the never-completing GET must time out");
+    assert!(
+        elapsed < Duration::from_millis(150),
+        "proof reused the pre-HEAD allowance and exceeded its shared budget: {elapsed:?}"
+    );
 }
