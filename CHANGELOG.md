@@ -10,15 +10,34 @@ Midge is currently in the 0.1 release line. Compatibility expectations for pre-1
 ## [Unreleased]
 
 ### Changed
+
 - **Breaking:** cloud provider enum variants now contain private-field typed
   AWS, Azure, GCS, OCI, and generic S3-compatible configurations. Cloud
   locations normalize surrounding prefix slashes, and `OpenOptions::build`
-  performs automatic side-effect-free structural validation.
+  performs automatic side-effect-free structural validation. See the
+  [migration guide](docs/operations/migration-guide.md).
 - **Breaking:** database FORMAT 3 now requires SST V4. V4 uses a fixed,
   self-identifying checksummed footer, mandatory checksummed block trailers,
   exact block-handle validation, and explicit TTL presence. FORMAT 1/2 and SST
   V1-V3 require logical export with the old binary and import into a new
-  database; there is no in-place migration or legacy fallback.
+  database; there is no in-place migration or legacy fallback. See the
+  [FORMAT 3 migration](docs/operations/migration-guide.md).
+- **Breaking:** cloud WAL recovery now trusts only publication catalog v1 and
+  epoch-scoped objects. Prefixes containing the older segment-only layout, or
+  epoch-scoped objects without a valid catalog, fail startup rather than
+  guessing publication authority. There is no in-place migration; export with
+  a compatible binary and import into a new prefix as described in the
+  [cloud WAL migration](docs/operations/migration-guide.md).
+- Synchronous runtime operations now have a bounded response wait. The default
+  is 60 seconds with the default storage I/O timeout and is configurable with
+  `runtime_response_timeout`; when it expires, Midge returns
+  `MidgeError::Timeout` without cancelling work already accepted by the runtime.
+  Treat a timed-out mutation as outcome-unknown until runtime and recovery
+  evidence establish its result.
+- `drop_column_family` now refuses to discard committed data still present in
+  the active memtable and returns `MidgeError::Busy`. Callers must flush and
+  retry, or explicitly opt into data loss with
+  `drop_column_family_discarding_unflushed`.
 - Scan iterators retain stable SST handles for the scan lifetime on supporting
   filesystem backends and expose explicit active, exhausted, and failed
   states. Terminal read errors remain sticky instead of becoming clean
@@ -26,8 +45,23 @@ Midge is currently in the 0.1 release line. Compatibility expectations for pre-1
 - Provider-backed cloud storage now defaults to one bucket/container and one
   database prefix. Advanced deployments can route WAL, SST, and control
   objects separately with `CloudStorageTopology` and `OpenOptions::cloud_multi`.
+- Option construction now rejects invalid memtable limits, zero transaction
+  pools, invalid cloud write policies, invalid lease skew tolerances, and a
+  runtime response timeout that does not enclose the storage I/O timeout.
+  Scans with an explicit start key greater than the end key now return
+  `MidgeError::InvalidArgument`.
 
 ### Added
+
+- `Transaction::assert_value` provides an opt-in, ABA-safe value precondition.
+  It checks the frozen transaction snapshot and rejects any later point or
+  covering range mutation before commit serialization, regardless of the
+  transaction's ambient conflict policy. Assertion reservations share the
+  bounded transaction memory pool and can return `MidgeError::ResourceLimit`.
+- Public `EngineMetrics` and `StorageVerifier` facades, including bounded
+  runtime-metrics capture, plus explicit `IteratorState` reporting.
+- Lease-loss notification and clock-safety controls through `on_lease_loss`,
+  `lease_clock_skew_tolerance`, and `ttl_clock`.
 - Read-only cloud location/topology preflight with an overall deadline,
   topology deduplication, bounded range reads, and serializable redacted
   readiness reports. Preflight does not qualify write, CAS, fencing, or delete
@@ -52,7 +86,30 @@ Midge is currently in the 0.1 release line. Compatibility expectations for pre-1
 - Runtime recovery metrics snapshot path (`GetRecoveryMetrics`) for WAL and intent-log replay visibility
 - Integration coverage for recovery metrics API, including deterministic `intent_log.yaml` replay fixture
 
+### Fixed
+
+- Durability acknowledgements now remain tied to their covering persistence
+  barrier: concurrent strict commits may share one physical fsync, but no
+  caller succeeds before that barrier completes successfully.
+- Cloud WAL upload, publication, takeover, and recovery now preserve writer
+  fencing and fail closed on ambiguous or stale publication state.
+- Shutdown retains writer fencing while accepted durability work is still
+  draining, including after the caller's shutdown deadline expires.
+- WAL replay, manifest publication, flush/compaction cleanup, and column-family
+  DDL now preserve committed state across their failure and recovery paths.
+- TTL expiry is a nondestructive visibility decision until compaction can prove
+  that physical reclamation is safe for every active snapshot.
+
+### Upgrade and rollback
+
+- Rollback is unsupported within a database or cloud prefix after the new
+  persisted formats have been written. Preserve the old database or prefix and
+  use its compatible binary as the rollback target. Follow the logical
+  export/import procedures in the [migration guide](docs/operations/migration-guide.md)
+  before switching traffic.
+
 ### Documentation
+
 - Architecture guide
 - Recovery and durability guide
 - Performance tuning guide
@@ -71,6 +128,7 @@ Midge is currently in the 0.1 release line. Compatibility expectations for pre-1
   and deployment assumptions.
 
 ### Removed
+
 - Unsupported legacy SST codec identifiers and the nonshipping compression
   fast-accept heuristic. Unknown or removed codec identifiers now fail closed.
 - The mandatory three-location `CloudStorageBuckets` API.

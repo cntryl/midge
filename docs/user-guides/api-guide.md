@@ -19,7 +19,8 @@ options before opening. Public builder controls include `goal`,
 `memory_budget`, `workload`, `with_memtable_size_limit`,
 `with_memtable_flush_threshold`, `transaction_memory_pool_size`,
 `block_cache_policy`, `cloud_write_policy`, `background_compaction`,
-`recovery_policy`, `storage_io_timeout`, and `runtime_response_timeout`.
+`recovery_policy`, `storage_io_timeout`, `runtime_response_timeout`,
+`on_lease_loss`, `lease_clock_skew_tolerance`, and `ttl_clock`.
 
 ## Runtime response deadlines
 
@@ -68,6 +69,7 @@ dropped column family.
 
 ```rust
 let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
+tx.assert_value(b"guard".to_vec(), Some(b"expected".to_vec()))?;
 tx.put(b"key".to_vec(), b"value".to_vec(), None)?;
 tx.delete(b"old".to_vec())?;
 tx.delete_range(b"prefix/".to_vec(), b"prefix0".to_vec())?;
@@ -98,6 +100,17 @@ transaction operation. A read-only transaction cannot write. A transaction is
 bound to one column family. `rollback()` explicitly abandons buffered writes;
 dropping an uncommitted transaction has the same write-discard effect.
 
+`assert_value(key, expected)` is an opt-in compare-and-set guard. It compares
+against the transaction's frozen start snapshot and rejects any later point or
+covering range mutation before commit serialization, regardless of
+`ConflictPolicy`; pass `None` to require absence. Pending writes in the same
+transaction do not change the asserted snapshot value. Assertions share the
+bounded transaction memory pool, so callers must handle a possible
+`MidgeError::ResourceLimit` and must not proceed as though a failed assertion
+registration installed a guard. See the
+[transaction durability contract](transaction-durability-contract.md)
+for the exact isolation and durability boundaries.
+
 ## Durability and cloud
 
 `WriteOptions::sync`, `buffered`, and `best_effort` describe local behavior.
@@ -110,13 +123,27 @@ cross-provider credential combinations cannot be assembled through the public
 API. `validate()` is side-effect-free; `preflight(CloudPreflightOptions)` is an
 explicit read-only deployment check returning a serializable redacted report.
 
+Cloud WAL recovery uses the catalog-authoritative, epoch-scoped layout described
+in the [migration guide](../operations/migration-guide.md).
+An older segment-only prefix is not opened or migrated automatically. Preserve
+the old prefix, export it with a compatible binary, and import into a new prefix.
+
+`on_lease_loss` registers a process-local notification for the transition to a
+fenced writer. Begin orderly shutdown from the callback without blocking it;
+the engine remains readable but rejects new writes. Shutdown timeouts bound the
+caller's wait without releasing fencing ahead of still-running durability work.
+
 ## Errors and diagnostics
 
 Operations return `MidgeResult<T>`. The public error variants include `Io`,
 `NotFound`, `InvalidArgument`, `Corruption`, `NotSupported`, `RecoveryFailed`,
 `WriteConflict`, `Timeout`, and resource/backpressure errors. Runtime,
 recovery, read-amplification, storage-layout, and verification snapshots are
-available through the methods documented on `Engine`.
+available through the methods documented on `Engine`. `Engine::metrics()`
+returns a cloneable `EngineMetrics` facade, including
+`get_runtime_metrics_with_timeout`; `Engine::storage_verifier()` returns a
+`StorageVerifier` for online and offline integrity checks. The existing direct
+`Engine` methods remain available.
 
 For crash boundaries and recovery handling, use the [durability contract](transaction-durability-contract.md)
 and [operator runbook](../operations/operator-runbook.md).
