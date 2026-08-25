@@ -19,7 +19,28 @@ options before opening. Public builder controls include `goal`,
 `memory_budget`, `workload`, `with_memtable_size_limit`,
 `with_memtable_flush_threshold`, `transaction_memory_pool_size`,
 `block_cache_policy`, `cloud_write_policy`, `background_compaction`,
-`recovery_policy`, and `storage_io_timeout`.
+`recovery_policy`, `storage_io_timeout`, and `runtime_response_timeout`.
+
+## Runtime response deadlines
+
+Every synchronous Engine operation that waits for the runtime is bounded.
+Transactions, column-family changes, flushes, compaction, metrics, storage-layout
+capture, and post-start configuration use `runtime_response_timeout`. The
+default is 60 seconds. When `storage_io_timeout` is raised without an explicit
+runtime override, Midge derives the enclosing deadline as at least 30 seconds
+longer than the storage deadline; an explicit runtime timeout must be greater
+than `storage_io_timeout`.
+
+APIs that already accept a timeout, including `shutdown`, `verify_storage`,
+`wait_for_write_stall_clear`, and `get_runtime_metrics_with_timeout`, honor the
+caller's operation-specific budget. Fire-and-forget messages do not wait for a
+response. Engine drop hands teardown to a reaper which may continue waiting for
+durability workers so writer fencing is not released early.
+
+`MidgeError::Timeout` identifies the runtime request kind and request ID. A
+timeout removes the caller's response route but does not cancel work already
+accepted by the runtime; a mutating operation can still complete later. Use
+recovery and runtime diagnostics to determine its outcome before retrying.
 
 ## Column-family lifecycle
 

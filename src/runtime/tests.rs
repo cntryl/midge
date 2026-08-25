@@ -985,6 +985,72 @@ fn should_require_request_id_for_send_wait() {
     drop(runtime);
 }
 
+#[test]
+fn should_cleanup_response_route_given_runtime_timeout_when_runtime_accepts_without_responding() {
+    // Arrange: keep the message receiver and lifecycle alive without starting
+    // an event loop, so the request is accepted but no response is produced.
+    let timeout = Duration::from_millis(20);
+    let (runtime, handle) = Runtime::new_with_response_timeout(timeout);
+    handle.lifecycle.mark_running();
+    let request_id = next_request_id().expect("allocate request id");
+    let started_at = std::time::Instant::now();
+
+    // Act
+    let result = handle.send_and_wait(RuntimeMsg::GetRuntimeMetrics { request_id });
+
+    // Assert
+    assert!(
+        started_at.elapsed() < Duration::from_secs(1),
+        "configured deadline did not bound the response wait"
+    );
+    assert!(matches!(
+        result,
+        Err(MidgeError::Timeout(message))
+            if message.contains("GetRuntimeMetrics")
+                && message.contains(&format!("request_id={request_id}"))
+                && message.contains("20ms")
+    ));
+    assert_eq!(
+        handle.router.pending_len(),
+        0,
+        "timed-out response route must be removed"
+    );
+
+    handle.lifecycle.mark_closed();
+    drop(runtime);
+}
+
+#[test]
+fn should_bound_inline_transaction_response_when_runtime_accepts_without_responding() {
+    // Arrange
+    let timeout = Duration::from_millis(20);
+    let (runtime, handle) = Runtime::new_with_response_timeout(timeout);
+    handle.lifecycle.mark_running();
+    let request_id = next_request_id().expect("allocate request id");
+    let submission = TransactionSubmission {
+        ops: Vec::new(),
+        assertions: Vec::new(),
+        durability_policy: None,
+        start_sequence: None,
+        conflict_policy: ConflictPolicy::LastWriteWins,
+    };
+
+    // Act
+    let result = handle.send_apply_transaction_and_wait(request_id, submission);
+
+    // Assert
+    assert!(matches!(
+        result,
+        Err(MidgeError::Timeout(message))
+            if message.contains("ApplyTransaction")
+                && message.contains(&format!("request_id={request_id}"))
+                && message.contains("20ms")
+    ));
+
+    handle.lifecycle.mark_closed();
+    drop(runtime);
+}
+
 // =========== Runtime Tests ===========
 
 #[test]

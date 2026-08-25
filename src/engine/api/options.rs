@@ -157,6 +157,7 @@ pub struct OpenOptions {
     cache: CachePolicyConfig,
     compaction: crate::compaction::OpenCompactionConfig,
     cloud: CloudWritePolicyConfig,
+    runtime_response_timeout: Duration,
     wal: crate::wal::WalBatchingConfig,
     lease_loss_hook: Option<LeaseLossHook>,
     lease_clock_skew_tolerance: Duration,
@@ -180,6 +181,7 @@ pub struct OpenOptionsBuilder {
     cache: CachePolicyConfig,
     compaction: crate::compaction::OpenCompactionConfig,
     cloud: CloudWritePolicyConfig,
+    runtime_response_timeout: Option<Duration>,
     wal: crate::wal::WalBatchingConfig,
     lease_loss_hook: Option<LeaseLossHook>,
     lease_clock_skew_tolerance: Duration,
@@ -343,6 +345,12 @@ impl OpenOptions {
         self.cloud.storage_io_timeout
     }
 
+    /// Return the maximum wait for an enclosing runtime response.
+    #[must_use]
+    pub fn runtime_response_timeout(&self) -> Duration {
+        self.runtime_response_timeout
+    }
+
     /// Return the derived WAL buffer size.
     #[must_use]
     pub fn wal_buffer_size(&self) -> usize {
@@ -434,6 +442,7 @@ impl OpenOptionsBuilder {
                 Self::derive_compression_policy(Goal::default()),
             ),
             cloud: CloudWritePolicyConfig::default(),
+            runtime_response_timeout: None,
             wal: crate::wal::WalBatchingConfig::new(0, None),
             lease_loss_hook: None,
             // Half a lease TTL tolerates ordinary NTP/VM clock correction while
@@ -522,6 +531,17 @@ impl OpenOptionsBuilder {
         self
     }
 
+    /// Set the maximum wait for a synchronous runtime response.
+    ///
+    /// This enclosing deadline must be greater than [`Self::storage_io_timeout`]
+    /// so a provider callback can exhaust its own budget before the runtime
+    /// response wait expires.
+    #[must_use]
+    pub fn runtime_response_timeout(mut self, timeout: Duration) -> Self {
+        self.runtime_response_timeout = Some(timeout);
+        self
+    }
+
     /// Override the CloudAsync drain budget used by deterministic shutdown
     /// fault-injection tests.
     #[cfg(feature = "failpoints")]
@@ -575,7 +595,8 @@ impl OpenOptionsBuilder {
     /// Returns [`MidgeError::InvalidArgument`] for invalid required limits and
     /// [`MidgeError::ResourceLimit`] when an override cannot fit inside the
     /// total memory budget. Storage I/O timeouts must be representable by the
-    /// providers' millisecond-granularity deadlines.
+    /// providers' millisecond-granularity deadlines, and the enclosing runtime
+    /// response timeout must be greater than the storage I/O timeout.
     pub fn build(self) -> MidgeResult<OpenOptions> {
         if let Storage::Cloud { topology, .. } = &self.storage {
             let report = topology.validate();
@@ -595,6 +616,14 @@ impl OpenOptionsBuilder {
         if self.cloud.storage_io_timeout < Duration::from_millis(1) {
             return Err(MidgeError::InvalidArgument(
                 "storage I/O timeout must be at least 1 millisecond".to_string(),
+            ));
+        }
+        let runtime_response_timeout = self.runtime_response_timeout.unwrap_or_else(|| {
+            crate::config::default_runtime_response_timeout(self.cloud.storage_io_timeout)
+        });
+        if runtime_response_timeout <= self.cloud.storage_io_timeout {
+            return Err(MidgeError::InvalidArgument(
+                "runtime response timeout must be greater than storage I/O timeout".to_string(),
             ));
         }
         if self.cloud.shutdown_drain_timeout.is_zero() {
@@ -656,6 +685,7 @@ impl OpenOptionsBuilder {
                 compression_policy,
             ),
             cloud: self.cloud,
+            runtime_response_timeout,
             wal: crate::wal::WalBatchingConfig::new(wal_buffer_size, self.wal.batch),
             lease_loss_hook: self.lease_loss_hook,
             lease_clock_skew_tolerance: self.lease_clock_skew_tolerance,

@@ -21,7 +21,10 @@ Check whether the transaction is read-only, whether keys/ranges are valid, and
 whether the conflict policy rejected a concurrent write. A `WriteStall` or
 `ResourceLimit` means the caller must apply backpressure and inspect memory,
 flush, and compaction progress. A timeout is not proof that the operation had
-no effect; use the relevant recovery and runtime snapshots.
+no effect; use the request kind and request ID in the timeout plus the relevant
+recovery and runtime snapshots. A later `response received with no matching
+pending request` warning carries the same kind, configured timeout, response
+variant, and timing context while its bounded diagnostic tombstone survives.
 
 ## Cloud problems
 
