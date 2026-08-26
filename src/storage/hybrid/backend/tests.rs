@@ -374,21 +374,7 @@ fn should_reject_wal_catalog_publication_from_stale_epoch_after_takeover() {
 fn should_report_fenced_when_catalog_authority_changes_before_publication() {
     // Arrange
     let tmp = tempfile::tempdir().expect("create takeover race test dir");
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
-            .expect("create takeover race local backend"),
-    );
-    let mock_cloud = Arc::new(MockCloudBackend::new());
-    let pausing_cloud = Arc::new(PausingCatalogCasBackend::new(Arc::clone(&mock_cloud)));
-    let cloud = Arc::new(CloudStorage::new(pausing_cloud.clone(), String::new()));
-    let storage = Arc::new(HybridStorage::with_policy(
-        local,
-        cloud,
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-    ));
-    storage
-        .fence_cloud_wal_catalog(2)
-        .expect("initialize publisher catalog epoch");
+    let (pausing_cloud, storage) = hybrid_with_pausing_catalog_cloud(tmp.path());
 
     let segment_id = 1;
     let max_sequence = 11;
@@ -431,6 +417,186 @@ fn should_report_fenced_when_catalog_authority_changes_before_publication() {
     assert_eq!(catalog.fencing_epoch, 3);
     assert!(!catalog.segments.contains_key(&segment_id));
     assert_cloud_object_exists(&storage, &object_key);
+}
+
+#[test]
+fn should_serialize_same_epoch_wal_publication_and_catalog_retirement() {
+    // Arrange
+    let tmp = tempfile::tempdir().expect("create catalog mutation race test dir");
+    let (pausing_cloud, storage) = hybrid_with_pausing_catalog_cloud(tmp.path());
+
+    let retired_segment_id = 1;
+    let retired_max_sequence = 11;
+    write_authoritative_cloud_wal(
+        &storage,
+        retired_segment_id,
+        retired_max_sequence,
+        valid_wal_bytes(retired_max_sequence),
+    );
+    let sst_name = "catalog-mutation-race.sst";
+    let sst_bytes = valid_sst_bytes(b"k", b"v", retired_max_sequence);
+    write_cloud_object(
+        &storage,
+        &crate::sst::object_key(sst_name),
+        sst_bytes.clone(),
+    );
+    let manifest = manifest_covering_wal(
+        sst_name,
+        &sst_bytes,
+        retired_max_sequence,
+        Some(crc32c::crc32c(&sst_bytes)),
+    );
+
+    let published_segment_id = 2;
+    let published_max_sequence = 12;
+    let published_bytes = valid_wal_bytes(published_max_sequence);
+    let published_local_path = tmp
+        .path()
+        .join(crate::wal::segment_file_name(published_segment_id));
+    std::fs::write(&published_local_path, &published_bytes)
+        .expect("write concurrently published local WAL");
+    let published_object_key = crate::wal::cloud_segment::object_key(published_segment_id, 1);
+    write_cloud_object(&storage, &published_object_key, published_bytes);
+
+    pausing_cloud.pause_next_catalog_compare_exchange();
+    let publisher_storage = Arc::clone(&storage);
+    let publisher = std::thread::spawn(move || {
+        publisher_storage.publish_remote_wal_segment(
+            published_segment_id,
+            published_max_sequence,
+            &published_local_path,
+            2,
+            &crate::common::OperationDeadline::unbounded(),
+        )
+    });
+    pausing_cloud.wait_for_catalog_compare_exchange();
+
+    let (prune_tx, prune_rx) = std::sync::mpsc::channel();
+    let pruner_storage = Arc::clone(&storage);
+    let pruner = std::thread::spawn(move || {
+        let result = pruner_storage.prune_cloud_wal_segment(
+            retired_segment_id,
+            retired_max_sequence,
+            CloudWalPruneGuard::new(manifest, None),
+            2,
+        );
+        prune_tx
+            .send(result)
+            .expect("send concurrent catalog retirement result");
+    });
+    let early_prune_result = match prune_rx.recv_timeout(Duration::from_millis(100)) {
+        Ok(result) => Some(result),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("catalog retirement thread disconnected before publication release")
+        }
+    };
+
+    // Act
+    pausing_cloud.release_catalog_compare_exchange();
+    let publication_result = publisher.join().expect("publisher thread must not panic");
+    let retirement_result = early_prune_result.unwrap_or_else(|| {
+        prune_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("catalog retirement must complete after publication release")
+    });
+    pruner
+        .join()
+        .expect("catalog retirement thread must not panic");
+
+    // Assert
+    publication_result.expect("same-epoch WAL publication must succeed");
+    retirement_result.expect("same-epoch WAL catalog retirement must succeed");
+    let delete_result = wait_for_wal_prune_result(&storage, retired_segment_id);
+    assert!(
+        delete_result.is_ok(),
+        "retired WAL object deletion must succeed: {delete_result:?}"
+    );
+
+    let catalog_proof = storage
+        .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
+        .expect("read catalog after serialized mutations");
+    let catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(catalog_proof.bytes())
+        .expect("decode catalog after serialized mutations");
+    assert!(!catalog.segments.contains_key(&retired_segment_id));
+    assert!(catalog.segments.contains_key(&published_segment_id));
+    storage
+        .verify_remote_wal_segment(published_segment_id, published_max_sequence)
+        .expect("newly published segment must remain authoritative");
+}
+
+#[test]
+fn should_bound_wal_catalog_lock_wait_by_publication_deadline() {
+    // Arrange
+    let tmp = tempfile::tempdir().expect("create bounded catalog lock test dir");
+    let (pausing_cloud, storage) = hybrid_with_pausing_catalog_cloud(tmp.path());
+
+    let holding_segment_id = 1;
+    let holding_max_sequence = 11;
+    let holding_bytes = valid_wal_bytes(holding_max_sequence);
+    let holding_local_path = tmp
+        .path()
+        .join(crate::wal::segment_file_name(holding_segment_id));
+    std::fs::write(&holding_local_path, &holding_bytes).expect("write lock-holding local WAL");
+    write_cloud_object(
+        &storage,
+        &crate::wal::cloud_segment::object_key(holding_segment_id, 1),
+        holding_bytes,
+    );
+
+    let waiting_segment_id = 2;
+    let waiting_max_sequence = 12;
+    let waiting_bytes = valid_wal_bytes(waiting_max_sequence);
+    let waiting_local_path = tmp
+        .path()
+        .join(crate::wal::segment_file_name(waiting_segment_id));
+    std::fs::write(&waiting_local_path, &waiting_bytes).expect("write lock-waiting local WAL");
+    write_cloud_object(
+        &storage,
+        &crate::wal::cloud_segment::object_key(waiting_segment_id, 1),
+        waiting_bytes,
+    );
+
+    pausing_cloud.pause_next_catalog_compare_exchange();
+    let publisher_storage = Arc::clone(&storage);
+    let holder = std::thread::spawn(move || {
+        publisher_storage.publish_remote_wal_segment(
+            holding_segment_id,
+            holding_max_sequence,
+            &holding_local_path,
+            2,
+            &crate::common::OperationDeadline::unbounded(),
+        )
+    });
+    pausing_cloud.wait_for_catalog_compare_exchange();
+
+    // Act
+    let started = Instant::now();
+    let waiting_result = storage.publish_remote_wal_segment(
+        waiting_segment_id,
+        waiting_max_sequence,
+        &waiting_local_path,
+        2,
+        &crate::common::OperationDeadline::from_budget(Duration::from_millis(100)),
+    );
+    let elapsed = started.elapsed();
+    pausing_cloud.release_catalog_compare_exchange();
+    let holding_result = holder.join().expect("lock holder thread must not panic");
+
+    // Assert
+    holding_result.expect("lock-holding publication must finish after release");
+    assert!(
+        matches!(
+            &waiting_result,
+            Err(crate::common::MidgeError::Timeout(message))
+                if message.contains("waiting to mutate the cloud WAL catalog")
+        ),
+        "bounded publication must time out waiting for the catalog lock: {waiting_result:?}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "catalog lock wait exceeded the shared publication deadline: {elapsed:?}"
+    );
 }
 
 #[test]
@@ -544,6 +710,27 @@ fn hybrid_with_mock_cloud() -> (Arc<MockCloudBackend>, HybridStorage) {
         .fence_cloud_wal_catalog(2)
         .expect("initialize test WAL publication catalog");
     (mock_cloud, storage)
+}
+
+fn hybrid_with_pausing_catalog_cloud(
+    root: &std::path::Path,
+) -> (Arc<PausingCatalogCasBackend>, Arc<HybridStorage>) {
+    let local = Arc::new(
+        crate::storage::filesystem::FileSystem::new(root.join("local"))
+            .expect("create pausing catalog local backend"),
+    );
+    let mock_cloud = Arc::new(MockCloudBackend::new());
+    let pausing_cloud = Arc::new(PausingCatalogCasBackend::new(Arc::clone(&mock_cloud)));
+    let cloud = Arc::new(CloudStorage::new(pausing_cloud.clone(), String::new()));
+    let storage = Arc::new(HybridStorage::with_policy(
+        local,
+        cloud,
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    ));
+    storage
+        .fence_cloud_wal_catalog(2)
+        .expect("initialize pausing WAL publication catalog");
+    (pausing_cloud, storage)
 }
 
 struct PausingCatalogCasBackend {

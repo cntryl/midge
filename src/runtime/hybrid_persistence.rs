@@ -352,6 +352,8 @@ impl HybridPersistence for HybridStorage {
                 local_readback.validation.writer_epoch
             )));
         }
+        let _catalog_mutation =
+            self.lock_wal_catalog_mutation_within(deadline, "cloud WAL publication")?;
         let catalog_proof = self
             .remote_object_proof_within(crate::wal::cloud_catalog::OBJECT_KEY, deadline)
             .map_err(|error| {
@@ -456,7 +458,7 @@ impl HybridPersistence for HybridStorage {
         fencing_epoch: u64,
         deadline: &crate::common::OperationDeadline,
     ) -> MidgeResult<()> {
-        let (catalog_proof, catalog) = authoritative_wal_catalog_within(self, deadline)?;
+        let (_, catalog) = authoritative_wal_catalog_within(self, deadline)?;
         let Some(entry) = catalog.segments.get(&segment_id).cloned() else {
             // Eligibility and retirement are separate provider round trips. If
             // another attempt committed between them, settle this request as
@@ -501,22 +503,36 @@ impl HybridPersistence for HybridStorage {
 
         // Publication authority is retired before physical deletion. A crash or
         // delete failure after this point can leak an ignored object but cannot
-        // make recovery depend on a missing object.
+        // make recovery depend on a missing object. Re-read under the local
+        // mutation lock so a same-epoch publication cannot be overwritten by a
+        // retirement CAS built from an older catalog snapshot.
         self.verify_remote_delete_guards_within(&validated.proof, &dependencies, deadline)?;
-        let mut catalog = catalog;
-        if catalog
-            .retire(fencing_epoch, &entry)
-            .map_err(MidgeError::Internal)?
         {
-            self.compare_exchange_remote_object_within(
-                crate::wal::cloud_catalog::OBJECT_KEY,
-                Some(catalog_proof.metadata()),
-                catalog.encode().map_err(MidgeError::Internal)?,
-                deadline,
-            )
-            .map_err(|error| {
-                contextualize_cloud_error(error, "cloud WAL catalog retirement failed")
-            })?;
+            let catalog_mutation =
+                self.lock_wal_catalog_mutation_within(deadline, "cloud WAL retirement")?;
+            let (catalog_proof, mut catalog) = authoritative_wal_catalog_within(self, deadline)?;
+            if !catalog.segments.contains_key(&segment_id) {
+                drop(catalog_mutation);
+                self.queue_cloud_wal_prune_complete(
+                    segment_id,
+                    crate::storage::StorageOutcome::Ok(()),
+                );
+                return Ok(());
+            }
+            if catalog
+                .retire(fencing_epoch, &entry)
+                .map_err(MidgeError::Internal)?
+            {
+                self.compare_exchange_remote_object_within(
+                    crate::wal::cloud_catalog::OBJECT_KEY,
+                    Some(catalog_proof.metadata()),
+                    catalog.encode().map_err(MidgeError::Internal)?,
+                    deadline,
+                )
+                .map_err(|error| {
+                    contextualize_cloud_error(error, "cloud WAL catalog retirement failed")
+                })?;
+            }
         }
 
         if let Err(error) =
