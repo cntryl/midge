@@ -213,7 +213,7 @@ fn should_preserve_timeout_variant_given_terminal_cloud_upload_timeout(
 }
 
 #[test]
-fn should_retain_waiter_and_retry_identity_given_storage_owned_upload_failure(
+fn should_retain_cloud_retry_state_given_storage_owned_upload_failure(
 ) -> crate::common::MidgeResult<()> {
     // Arrange: the storage queue still owns this segment because its internal
     // retry budget has not been exhausted.
@@ -6230,8 +6230,7 @@ fn should_bound_runtime_owned_wal_admission_by_shutdown_deadline() -> crate::com
 }
 
 #[test]
-fn should_bound_pending_cloud_ack_by_shutdown_deadline_and_requeue_on_timeout(
-) -> crate::common::MidgeResult<()> {
+fn should_bound_pending_cloud_ack_given_shutdown_deadline() -> crate::common::MidgeResult<()> {
     // Arrange: the upload worker has completed and queued its acknowledgement,
     // but the runtime has not yet settled that ACK. Its readback proof is slower
     // than the entire shutdown drain budget.
@@ -6371,7 +6370,7 @@ fn should_poll_inflight_cloud_upload_on_interval_without_busy_spin(
 }
 
 #[test]
-fn should_bound_callerless_ack_and_requeue_when_provider_exceeds_maintenance_budget(
+fn should_bound_callerless_ack_when_provider_exceeds_maintenance_budget(
 ) -> crate::common::MidgeResult<()> {
     // Arrange: a CloudAsync segment has no waiting caller, but its synchronous
     // acknowledgement proof must still yield the event loop after one bounded
