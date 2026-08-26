@@ -302,7 +302,9 @@ fn write_remote_registry_within(
     deadline: &crate::common::OperationDeadline,
 ) -> MidgeResult<RemoteObjectProof> {
     crate::failpoints::fail_point!("midge::ddl::before_remote_cas", |_| Err(
-        MidgeError::Internal("failpoint: DDL remote CAS failed".to_string())
+        MidgeError::Internal(
+            "remote DDL CAS failed before submission: injected failure".to_string()
+        )
     ));
     let bytes = serialize(registry)?;
     let result = storage.compare_exchange_remote_object_within(
@@ -520,14 +522,14 @@ pub(crate) fn execute_within(
     let (remote, proof) = read_remote_registry_within(storage, deadline)?;
     let mut registry = remote.unwrap_or_else(|| DdlRegistry::from_manifest(&state.manifest));
     let expected_epoch = registry.epoch;
-    let prepare = DdlPrepare {
+    let mut prepare = DdlPrepare {
         op_id: uuid::Uuid::new_v4().to_string(),
         expected_remote_epoch: expected_epoch,
         edit: edit.clone(),
-        // Conservatively mark the provider phase before the first durable
-        // prepare. Definite pre-submit/conditional failures clear it below;
-        // every admitted mutation retains it until positive readback.
-        remote_cas_ambiguous: true,
+        // The first durable prepare proves that no provider mutation has been
+        // admitted yet. A failure while writing this phase can therefore be
+        // aborted safely during the next reconciliation.
+        remote_cas_ambiguous: false,
     };
     write_local_prepare(state, &prepare)?;
     registry.apply_edit(edit)?;
@@ -536,6 +538,11 @@ pub(crate) fn execute_within(
         op_id: prepare.op_id.clone(),
         edit: edit.clone(),
     });
+    // Persist the ambiguous phase before submitting the provider mutation.
+    // From this point until positive readback, absence from an immediate GET
+    // is not proof that a delayed CAS will never commit.
+    prepare.remote_cas_ambiguous = true;
+    write_local_prepare(state, &prepare)?;
     if let Err(error) = write_remote_registry_within(storage, &registry, proof.as_ref(), deadline) {
         if remote_cas_definitely_not_committed(&error) {
             clear_local_prepare(state)?;
@@ -586,6 +593,7 @@ pub(crate) fn execute_within(
 fn remote_cas_definitely_not_committed(error: &MidgeError) -> bool {
     match error {
         MidgeError::Busy(_) | MidgeError::InvalidArgument(_) => true,
+        MidgeError::Internal(message) => message.contains("failed before submission"),
         MidgeError::Timeout(message) => {
             message.contains("before mutation")
                 || message.contains("operation deadline exhausted before 'remote CAS'")
