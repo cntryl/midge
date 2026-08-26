@@ -4772,10 +4772,9 @@ fn should_retry_background_cloud_seal_after_failpoint_before_rotate(
         el.wal_actor.bytes_since_sync() > 0,
         "failed seal must preserve buffered byte accounting for retry"
     );
-    assert!(
-        el.has_actionable_work(),
-        "failed seal should leave the runtime actionable for retry"
-    );
+    assert!(!el.has_actionable_work(), "seal retry must back off");
+    std::thread::sleep(Duration::from_millis(15));
+    assert!(el.has_actionable_work(), "seal retry must become due");
 
     fail::remove("midge::cloud::inject_fail_after_wal_flush_before_rotate");
 

@@ -34,46 +34,16 @@ impl EventLoop {
             return;
         };
         let persisted_sequence = self.state.manifest.last_persisted_sequence;
-        let candidates: Vec<_> = self
-            .cloud_wal
-            .acked_segments
-            .iter()
-            .filter(|(segment_id, max_sequence)| {
-                **segment_id < recovery_floor_segment
-                    && **max_sequence <= self.state.wal.cloud_durable_seq
-                    && **max_sequence <= persisted_sequence
-                    && !self.cloud_wal.prune_inflight.contains(segment_id)
-            })
-            .map(|(segment_id, max_sequence)| (*segment_id, *max_sequence))
-            .collect();
-        let candidate = candidates
-            .iter()
-            .copied()
-            .find(|(segment_id, _)| {
-                self.cloud_wal
-                    .prune_cursor
-                    .is_none_or(|cursor| *segment_id > cursor)
-            })
-            .or_else(|| candidates.first().copied());
-        let Some((segment_id, max_sequence)) = candidate else {
+        let Some((segment_id, max_sequence)) =
+            self.next_cloud_wal_prune_candidate(recovery_floor_segment, persisted_sequence)
+        else {
             return;
         };
         // Advance before starting the attempt. A permanently unverifiable low
         // segment therefore cannot starve later independently eligible WALs.
         self.cloud_wal.prune_cursor = Some(segment_id);
 
-        let metadata_snapshot = match self.cloud_metadata_prune_snapshot_for_wal_cleanup() {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                self.state.mark_persistence_anomaly();
-                tracing::warn!(
-                    segment_id,
-                    error = %error,
-                    "Skipping remote WAL prune because committed metadata could not be captured"
-                );
-                return;
-            }
-        };
+        let metadata_snapshot = self.cloud_metadata_prune_snapshot_for_wal_cleanup();
         // Filesystem-backed cloud simulation has no separate control store;
         // its event-loop manifest is the authority snapshot guarded below.
         let local_manifest = self.state.manifest.clone();
@@ -131,6 +101,35 @@ impl EventLoop {
                 );
             }
         }
+    }
+
+    fn next_cloud_wal_prune_candidate(
+        &self,
+        recovery_floor_segment: u64,
+        persisted_sequence: u64,
+    ) -> Option<(u64, u64)> {
+        let candidates: Vec<_> = self
+            .cloud_wal
+            .acked_segments
+            .iter()
+            .filter(|(segment_id, max_sequence)| {
+                **segment_id < recovery_floor_segment
+                    && **max_sequence <= self.state.wal.cloud_durable_seq
+                    && **max_sequence <= persisted_sequence
+                    && !self.cloud_wal.prune_inflight.contains(segment_id)
+            })
+            .map(|(segment_id, max_sequence)| (*segment_id, *max_sequence))
+            .collect();
+
+        candidates
+            .iter()
+            .copied()
+            .find(|(segment_id, _)| {
+                self.cloud_wal
+                    .prune_cursor
+                    .is_none_or(|cursor| *segment_id > cursor)
+            })
+            .or_else(|| candidates.first().copied())
     }
 
     pub(super) fn reap_cloud_wal_prune_worker(&mut self) {

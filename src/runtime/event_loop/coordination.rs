@@ -12,7 +12,7 @@ pub(crate) struct CloudWalUploadTracker {
     pub(super) acked_segments: BTreeMap<u64, u64>,
     pub(super) upload_backlog: BTreeMap<u64, u64>,
     /// Earliest time at which runtime-owned WAL upload obligations may be
-    /// resubmitted after HybridStorage exhausts its internal attempt budget.
+    /// resubmitted after `HybridStorage` exhausts its internal attempt budget.
     upload_retry_at: Option<Instant>,
     pub(super) prune_inflight: HashSet<u64>,
     pub(super) prune_cursor: Option<u64>,

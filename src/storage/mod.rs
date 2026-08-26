@@ -182,7 +182,7 @@ pub enum StorageEvent {
     CloudAck { segment_id: u64, max_sequence: u64 },
     /// Cloud upload attempt failed - segment NOT durable.
     ///
-    /// While `terminal` is false, HybridStorage still owns an internal retry.
+    /// While `terminal` is false, `HybridStorage` still owns an internal retry.
     /// A terminal failure transfers the accepted local WAL obligation back to
     /// the runtime for delayed callerless retry.
     CloudFail {

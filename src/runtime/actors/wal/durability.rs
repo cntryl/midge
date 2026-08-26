@@ -184,6 +184,7 @@ impl WalActor {
     /// `CloudAsync` durability uses local WAL as a staging file for upload.
     /// We avoid fsync on every write, but do a flush+fsync only when sealing
     /// a segment right before upload so the uploader reads a complete file.
+    #[cfg(test)]
     pub fn flush_for_cloud_upload(&mut self, state: &mut RuntimeState) -> MidgeResult<u64> {
         self.flush_for_cloud_upload_within(state, &crate::common::OperationDeadline::unbounded())
     }
