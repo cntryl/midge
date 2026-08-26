@@ -156,6 +156,11 @@ not cancel the mutation. Treat the outcome as unknown, correlate the request in
 runtime diagnostics, and use recovery or an application-level idempotency check
 before retrying.
 
+`abandoned_runtime_requests_total` and `late_runtime_responses_total` are global
+diagnostic counters. Their deltas include unrelated requests and both successful
+and failed late responses, so they cannot establish whether one specific timed-out
+commit applied.
+
 `WriteOptions::sync()` and `WriteOptions::buffered()` are local-only. `WriteOptions::cloud_async()` and `WriteOptions::cloud_strict()` are cloud-only. Non-cloud storage rejects the cloud-only modes, and cloud-backed storage rejects the local-only modes.
 
 | Write option | `commit()` returns after | Local durability at return | Crash outcome | Recovery source on restart |

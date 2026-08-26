@@ -63,12 +63,25 @@ Do not use them to decide whether that mutation should be retried. Use an
 application-level idempotency key or read the affected state through the normal
 API before retrying; otherwise the original and retry can both apply.
 
-Cloud work performed on a caller's behalf is bounded by that caller's remaining
-budget rather than restarting a full `storage_io_timeout` per round trip, and a
-cloud acknowledgement continues as callerless work after all response waiters
-abandon it. The sealed WAL is already an accepted durability obligation and
-must still close its inflight frontier gap. This keeps later strict waits from
-stalling, but it also means a caller timeout remains outcome-ambiguous.
+Deadline-aware foreground paths—including strict WAL sealing and acknowledgement
+validation, remote DDL compare-exchange, and direct manifest mirroring—share the
+caller's remaining budget rather than restarting a full `storage_io_timeout` per
+round trip. Accepted flush, WAL-prune, and reclamation work can continue through
+callerless workers or maintenance retries after the response waiter leaves. A
+sealed WAL is already a durability obligation and must still close its inflight
+frontier gap; this keeps later strict waits from stalling, but also means a
+caller timeout remains outcome-ambiguous.
+
+Compaction publication does not yet share one aggregate caller deadline across
+its provider operations. On a degraded provider, an explicit compaction request
+can therefore reach `runtime_response_timeout` while its accepted work continues.
+
+If a remote DDL compare-exchange times out or disconnects after submission,
+Midge retains its durable prepare and returns `MidgeError::Fenced` unless the
+operation ID can be positively confirmed. New writes, flushes, and compactions
+remain fenced until a later DDL request reconciles that authority state. A
+negative read immediately after the timeout is not proof that the provider will
+not commit later.
 
 ## Column-family lifecycle
 
@@ -84,6 +97,11 @@ unflushed writes is deliberate, call the explicitly destructive
 `drop_column_family_discarding_unflushed` method. Writes ordered after either
 drop request are not pulled across its WAL barrier and fail against the
 dropped column family.
+
+Reclamation is callerless once the drop is locally committed. If authoritative
+manifest publication times out, Midge retains the SSTs and retries publication
+with bounded maintenance attempts; physical deletion starts only after that
+publication succeeds.
 
 ## Transactions
 

@@ -11,17 +11,32 @@ Midge is currently in the 0.1 release line. Compatibility expectations for pre-1
 
 ### Changed
 
-- Cloud work performed for a waiting caller now shares one deadline derived from
-  when that caller began waiting, instead of restarting a full
-  `storage_io_timeout` on every round trip. The cloud WAL acknowledgement path
-  chains several object proofs and a catalog compare-exchange, which previously
-  could exceed `runtime_response_timeout` on a slow provider. Deployments on
+- Strict WAL acknowledgement, remote DDL authority calls, and direct manifest mirroring now
+  share a deadline derived from when the caller began waiting, instead of
+  restarting a full `storage_io_timeout` on every round trip. Deployments on
   degraded providers may now see `MidgeError::Timeout` naming the storage step
-  where earlier releases blocked longer.
+  where earlier releases blocked longer. Callerless flush and maintenance work
+  retain their own retry lifecycles; compaction publication does not yet have one
+  aggregate deadline across all provider operations.
 - A cloud WAL acknowledgement whose callers have all abandoned their requests now
   continues as callerless durability work. Once a sealed WAL segment is accepted,
   publication failures requeue it so an inflight frontier gap cannot strand later
-  strict waits. Background CloudAsync publication remains callerless as before.
+  strict waits. A newer dependent waiter's remaining budget prevents an expired
+  older waiter from prematurely failing it. Background CloudAsync publication
+  remains callerless as before.
+- Timed-out column-family reclamation remains retained and is retried by idle
+  maintenance until authoritative manifest publication succeeds; physical SST
+  deletion begins only afterward. The retry deadline pauses under online
+  verification rather than spinning the event loop and receives a bounded
+  fairness slot under sustained request load.
+- Cloud WAL pruning now runs off the event loop behind the metadata-publication
+  gate. It proves an exact committed metadata snapshot and its referenced SSTs
+  before conditionally retiring catalog authority, retains WAL on missing,
+  mismatched, or timed-out proof, and rotates candidates so one unverifiable low
+  segment cannot starve later safe cleanup.
+- Ambiguous remote DDL compare-exchange outcomes retain the durable prepare and
+  fence writes, flushes, and compactions until the operation ID is positively
+  observed in authority state.
 - Draining the CloudAsync WAL upload backlog validates the writer lease once per
   pass rather than once per segment. Durable fencing is unchanged: the
   publication catalog's epoch check and compare-exchange remain authoritative.
