@@ -420,7 +420,7 @@ fn should_report_fenced_when_catalog_authority_changes_before_publication() {
 }
 
 #[test]
-fn should_serialize_same_epoch_wal_publication_and_catalog_retirement() {
+fn should_preserve_same_epoch_catalog_updates_when_publication_races_retirement() {
     // Arrange
     let tmp = tempfile::tempdir().expect("create catalog mutation race test dir");
     let (pausing_cloud, storage) = hybrid_with_pausing_catalog_cloud(tmp.path());
