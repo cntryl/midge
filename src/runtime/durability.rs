@@ -10,6 +10,11 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+#[cfg(not(test))]
+const CLOUD_SEAL_RETRY_DELAY: Duration = Duration::from_secs(1);
+#[cfg(test)]
+const CLOUD_SEAL_RETRY_DELAY: Duration = Duration::from_millis(10);
+
 /// Single `CloudAsync` segment being uploaded
 #[derive(Debug, Clone)]
 pub struct CloudAsyncInflightSegment {
@@ -79,8 +84,11 @@ pub struct DurabilityCoordinator {
     /// `CloudAsync`: timestamp of last flush/rotate
     last_cloud_flush: Instant,
 
-    /// `CloudAsync`: a seal failed after local WAL flush and must be retried.
+    /// `CloudAsync`: a seal failed and must be retried.
     cloud_seal_retry_needed: bool,
+
+    /// Earliest time at which a failed cloud seal may be attempted again.
+    cloud_seal_retry_at: Option<Instant>,
 
     /// Is `CloudAsync` enabled? (read from `wal_actor.is_cloud_async()`)
     is_cloud_async: bool,
@@ -101,6 +109,7 @@ impl DurabilityCoordinator {
             inflight: HashMap::new(),
             last_cloud_flush: Instant::now(),
             cloud_seal_retry_needed: false,
+            cloud_seal_retry_at: None,
             is_cloud_async,
             cloud_runtime_policy,
             waiters_fanned_out: AtomicU64::new(0),
@@ -343,12 +352,16 @@ impl DurabilityCoordinator {
         // Pending writers may be used for metrics/backpressure, but MUST NOT trigger flushes.
         // Only threshold-based conditions below are allowed to trigger uploads.
 
-        pending_writes > 0
-            && (self.cloud_seal_retry_needed
-                || bytes_buffered >= self.cloud_runtime_policy.wal_seal.min_segment_bytes
-                || pending_writes >= self.cloud_runtime_policy.wal_seal.max_pending_writes
-                || self.last_cloud_flush.elapsed()
-                    >= self.cloud_runtime_policy.wal_seal.max_flush_delay)
+        if pending_writes == 0 {
+            return false;
+        }
+        if self.cloud_seal_retry_needed {
+            return self.cloud_seal_retry_due();
+        }
+
+        bytes_buffered >= self.cloud_runtime_policy.wal_seal.min_segment_bytes
+            || pending_writes >= self.cloud_runtime_policy.wal_seal.max_pending_writes
+            || self.last_cloud_flush.elapsed() >= self.cloud_runtime_policy.wal_seal.max_flush_delay
     }
 
     /// Return the remaining time before a non-empty `CloudAsync` WAL must be
@@ -358,6 +371,11 @@ impl DurabilityCoordinator {
     pub fn cloud_seal_deadline_timeout(&self, pending_writes: usize) -> Option<Duration> {
         if !self.is_cloud_async || pending_writes == 0 {
             return None;
+        }
+        if self.cloud_seal_retry_needed {
+            return Some(self.cloud_seal_retry_at.map_or(Duration::ZERO, |retry_at| {
+                retry_at.saturating_duration_since(Instant::now())
+            }));
         }
 
         Some(
@@ -372,13 +390,28 @@ impl DurabilityCoordinator {
         self.cloud_seal_retry_needed = true;
     }
 
+    pub fn defer_cloud_seal_retry(&mut self) {
+        if self.cloud_seal_retry_needed {
+            self.cloud_seal_retry_at = Some(Instant::now() + CLOUD_SEAL_RETRY_DELAY);
+        }
+    }
+
     pub fn clear_cloud_seal_retry_needed(&mut self) {
         self.cloud_seal_retry_needed = false;
+        self.cloud_seal_retry_at = None;
     }
 
     #[must_use]
     pub fn cloud_seal_retry_needed(&self) -> bool {
         self.cloud_seal_retry_needed
+    }
+
+    #[must_use]
+    pub fn cloud_seal_retry_due(&self) -> bool {
+        self.cloud_seal_retry_needed
+            && self
+                .cloud_seal_retry_at
+                .is_none_or(|retry_at| Instant::now() >= retry_at)
     }
 
     /// Update last flush timestamp (call after `CloudAsync` segment is enqueued).

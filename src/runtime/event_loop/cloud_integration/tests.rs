@@ -5189,6 +5189,29 @@ struct DelayedLeaderStore {
     epoch: u64,
 }
 
+#[derive(Debug)]
+struct FailAfterFirstLeaderStore {
+    reads: AtomicUsize,
+    failure_delay: Duration,
+    holder_id: String,
+    epoch: u64,
+}
+
+impl FailAfterFirstLeaderStore {
+    fn new(failure_delay: Duration, holder_id: &str, epoch: u64) -> Self {
+        Self {
+            reads: AtomicUsize::new(0),
+            failure_delay,
+            holder_id: holder_id.to_string(),
+            epoch,
+        }
+    }
+
+    fn reads(&self) -> usize {
+        self.reads.load(Ordering::SeqCst)
+    }
+}
+
 impl DelayedLeaderStore {
     fn new(delay: Duration, holder_id: &str, epoch: u64) -> Self {
         Self {
@@ -5238,6 +5261,31 @@ impl crate::lease::LeaderStore for DelayedLeaderStore {
                 self.holder_id, self.epoch
             )))
         }
+    }
+}
+
+impl crate::lease::LeaderStore for FailAfterFirstLeaderStore {
+    fn acquire_leadership(
+        &self,
+        _holder_id: &str,
+    ) -> Result<crate::lease::LeaderRecord, crate::lease::LeaseError> {
+        Err(crate::lease::LeaseError::AcquisitionFailed(
+            "failing test store does not acquire".to_string(),
+        ))
+    }
+
+    fn read_current(&self) -> Result<Option<crate::lease::LeaderRecord>, crate::lease::LeaseError> {
+        if self.reads.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Ok(Some(crate::lease::LeaderRecord {
+                epoch: self.epoch,
+                holder_id: self.holder_id.clone(),
+                acquired_at: "2026-08-25T00:00:00Z".to_string(),
+            }));
+        }
+        std::thread::sleep(self.failure_delay);
+        Err(crate::lease::LeaseError::RenewalFailed(
+            "persistent delayed lease validation failure".to_string(),
+        ))
     }
 }
 
@@ -5800,6 +5848,75 @@ fn should_not_start_wal_flush_when_lease_check_leaves_less_than_storage_budget(
     );
     assert!(el.state.wal.pending_writes > 0);
     assert!(el.durability.cloud_seal_retry_needed());
+    Ok(())
+}
+
+#[test]
+fn should_back_off_failed_cloud_seal_while_normal_requests_make_progress(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: the first lease validation permits the WAL flush, then every
+    // post-flush validation fails slowly. The active segment remains retryable.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    append_cloud_async_put(&mut el)?;
+    let leader_store = Arc::new(FailAfterFirstLeaderStore::new(
+        Duration::from_millis(75),
+        "writer-1",
+        1,
+    ));
+    el.leader_store = Some(Arc::clone(&leader_store) as Arc<dyn crate::lease::LeaderStore>);
+    el.leader_holder_id = Some("writer-1".to_string());
+    el.seal_current_cloud_segment()
+        .expect_err("post-flush lease validation must fail");
+    assert!(el.durability.cloud_seal_retry_needed());
+    let reads_after_failure = leader_store.reads();
+    assert_eq!(reads_after_failure, 2);
+    let (msg_tx, msg_rx) = crossbeam::channel::unbounded::<RuntimeMsg>();
+    let mut response_receivers = Vec::new();
+    for request_id in 91_301..91_304 {
+        response_receivers.push((request_id, el.router.register(request_id, "Noop")));
+        msg_tx
+            .send(RuntimeMsg::Noop { request_id })
+            .expect("queue unrelated request");
+    }
+
+    // Act: process unrelated requests immediately after the failed attempt,
+    // then drive two maintenance passes after the retry becomes due.
+    let request_start = Instant::now();
+    for _ in 0..response_receivers.len() {
+        let message = msg_rx.recv().expect("receive unrelated request");
+        el.process_one(message, &msg_rx);
+    }
+    let request_elapsed = request_start.elapsed();
+    std::thread::sleep(Duration::from_millis(25));
+    el.progress_pass(&msg_rx);
+    let reads_after_due_retry = leader_store.reads();
+    el.progress_pass(&msg_rx);
+
+    // Assert
+    assert!(
+        request_elapsed < Duration::from_millis(50),
+        "seal maintenance delayed normal request progress: {request_elapsed:?}"
+    );
+    for (request_id, response_rx) in response_receivers {
+        assert!(matches!(
+            response_rx.try_recv(),
+            Ok(RuntimeResponse::Ok {
+                request_id: response_id
+            }) if response_id == request_id
+        ));
+    }
+    assert_eq!(
+        reads_after_due_retry,
+        reads_after_failure + 1,
+        "exactly one seal retry should run once the backoff expires"
+    );
+    assert_eq!(
+        leader_store.reads(),
+        reads_after_due_retry,
+        "a failed due retry must re-arm backoff before another maintenance pass"
+    );
     Ok(())
 }
 

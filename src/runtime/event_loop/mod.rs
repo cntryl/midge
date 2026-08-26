@@ -1217,7 +1217,7 @@ impl EventLoop {
             return true;
         }
 
-        if self.durability.cloud_seal_retry_needed() && self.state.wal.pending_writes > 0 {
+        if self.durability.cloud_seal_retry_due() && self.state.wal.pending_writes > 0 {
             return true;
         }
 

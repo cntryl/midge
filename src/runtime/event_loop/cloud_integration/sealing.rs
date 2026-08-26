@@ -29,6 +29,18 @@ impl EventLoop {
         recovered_active: bool,
         deadline: &crate::common::OperationDeadline,
     ) -> crate::common::MidgeResult<Option<(u64, u64)>> {
+        let result = self.try_seal_current_cloud_segment(recovered_active, deadline);
+        if result.is_err() && self.durability.cloud_seal_retry_needed() {
+            self.durability.defer_cloud_seal_retry();
+        }
+        result
+    }
+
+    fn try_seal_current_cloud_segment(
+        &mut self,
+        recovered_active: bool,
+        deadline: &crate::common::OperationDeadline,
+    ) -> crate::common::MidgeResult<Option<(u64, u64)>> {
         if !self.wal_actor.is_cloud_async() {
             return Ok(None);
         }
@@ -45,6 +57,7 @@ impl EventLoop {
                 "older CloudAsync WAL segments are still awaiting upload admission".to_string(),
             ));
         }
+        self.durability.mark_cloud_seal_retry_needed();
         self.validate_runtime_writer_lease_within(deadline)?;
 
         let segment_id = self.state.wal.current_segment_id;
@@ -58,7 +71,6 @@ impl EventLoop {
             storage.ensure_wal_upload_capacity(existing_bytes.max(bytes_buffered))?;
         }
         let seal_start = Instant::now();
-        self.durability.mark_cloud_seal_retry_needed();
         let max_sequence = self
             .wal_actor
             .flush_for_cloud_upload_within(&mut self.state, deadline)?;
