@@ -28,15 +28,12 @@ struct AbandonedRequest {
 
 #[derive(Debug, Default)]
 struct AbandonedRequests {
-    /// `None` retains only the fact that the caller timed out. This is the
-    /// completion/timeout boundary case where `complete` already removed the
-    /// pending route, so its richer request context is no longer available.
-    by_request_id: HashMap<u64, Option<AbandonedRequest>>,
+    by_request_id: HashMap<u64, AbandonedRequest>,
     fifo: VecDeque<u64>,
 }
 
 impl AbandonedRequests {
-    fn insert(&mut self, request_id: u64, request: Option<AbandonedRequest>) -> bool {
+    fn insert(&mut self, request_id: u64, request: AbandonedRequest) -> bool {
         if self.by_request_id.contains_key(&request_id) {
             return false;
         }
@@ -98,12 +95,6 @@ impl ResponseRouter {
         self.late_responses_total.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Record a caller that stopped waiting on a route this router does not own.
-    pub(crate) fn record_abandoned_request(&self) {
-        self.abandoned_requests_total
-            .fetch_add(1, Ordering::Relaxed);
-    }
-
     /// Instant at which `request_id` began waiting, when it is still pending.
     ///
     /// `None` means the caller is already gone — either it never registered or
@@ -142,7 +133,20 @@ impl ResponseRouter {
     pub fn complete(&self, response: RuntimeResponse) {
         let request_id = response.request_id();
         if let Some((_, pending)) = self.pending.remove(&request_id) {
-            let _ = pending.response_tx.send(response);
+            // Removing the route is the completion ownership claim. A caller
+            // that reaches its timeout concurrently observes that the route is
+            // gone and receives from the channel instead of returning Timeout.
+            // If the receiver was independently dropped, this completion is
+            // genuinely late and must still be reflected in telemetry.
+            if pending.response_tx.send(response).is_err() {
+                self.late_responses_total.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(
+                    request_id,
+                    request_kind = pending.request_kind,
+                    pending_depth = self.pending_len(),
+                    "response receiver disappeared after completion claimed its route"
+                );
+            }
         } else {
             self.late_responses_total.fetch_add(1, Ordering::Relaxed);
 
@@ -154,13 +158,12 @@ impl ResponseRouter {
             // busy, so the loop must never wait here: the counter above is
             // already exact, and only the enriched context is best-effort.
             let abandoned = match self.abandoned.try_lock() {
-                Ok(abandoned) => abandoned.by_request_id.get(&request_id).copied().flatten(),
+                Ok(abandoned) => abandoned.by_request_id.get(&request_id).copied(),
                 Err(TryLockError::Poisoned(poisoned)) => poisoned
                     .into_inner()
                     .by_request_id
                     .get(&request_id)
-                    .copied()
-                    .flatten(),
+                    .copied(),
                 Err(TryLockError::WouldBlock) => None,
             };
 
@@ -196,23 +199,30 @@ impl ResponseRouter {
     /// response. Locking the tombstone store before removing the pending entry
     /// ensures a concurrent completion either wins the response race or observes
     /// the newly inserted tombstone.
-    pub fn abandon(&self, request_id: u64, timeout: Duration) {
+    ///
+    /// Returns `true` when the caller claimed timeout ownership. `false` means
+    /// completion already removed the route and the caller must receive the
+    /// response that completion now owns.
+    pub fn abandon(&self, request_id: u64, timeout: Duration) -> bool {
         let abandoned_at = Instant::now();
         let mut abandoned = self
             .abandoned
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let pending = self.pending.remove(&request_id).map(|(_, pending)| pending);
-        let context = pending.map(|pending| AbandonedRequest {
+        let Some((_, pending)) = self.pending.remove(&request_id) else {
+            return false;
+        };
+        let context = AbandonedRequest {
             request_kind: pending.request_kind,
             timeout,
             abandoned_at,
             registered_at: pending.registered_at,
-        });
+        };
         if abandoned.insert(request_id, context) {
             self.abandoned_requests_total
                 .fetch_add(1, Ordering::Relaxed);
         }
+        true
     }
 
     /// Fail every pending request.
@@ -526,13 +536,13 @@ mod tests {
     }
 
     #[test]
-    fn should_count_abandoned_request_given_completion_removed_route_before_timeout_is_recorded() {
+    fn should_deliver_response_given_completion_claimed_route_before_timeout_is_recorded() {
         // Arrange: model the deadline-boundary ordering where the event loop
-        // removes the pending route just after `recv_timeout` decides to time
-        // out, but before the caller records that timeout with `abandon`.
+        // removes and completes the pending route just after `recv_timeout`
+        // decides to time out, but before the caller records that decision.
         let router = ResponseRouter::new();
         let request_id = 19;
-        let _rx = router.register(request_id, "Queue");
+        let rx = router.register(request_id, "Queue");
         router.complete(RuntimeResponse::Ok { request_id });
 
         // Act
@@ -541,8 +551,56 @@ mod tests {
         // Assert
         assert_eq!(
             router.abandoned_requests_total(),
+            0,
+            "completion ownership must turn the boundary timeout into a delivered response"
+        );
+        assert_eq!(router.late_responses_total(), 0);
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(1)),
+            Ok(RuntimeResponse::Ok {
+                request_id: response_id
+            }) if response_id == request_id
+        ));
+    }
+
+    #[test]
+    fn should_count_late_response_given_receiver_drops_after_completion_claims_route() {
+        // Arrange: a rendezvous channel pauses `complete` after it removes the
+        // route, making the remove/send boundary deterministic.
+        let router = Arc::new(ResponseRouter::new());
+        let request_id = 20;
+        let (response_tx, response_rx) = channel::bounded(0);
+        router.pending.insert(
+            request_id,
+            PendingRequest {
+                response_tx,
+                request_kind: "Queue",
+                registered_at: Instant::now(),
+            },
+        );
+        let completer = Arc::clone(&router);
+        let completion = std::thread::spawn(move || {
+            completer.complete(RuntimeResponse::Ok { request_id });
+        });
+        let started = Instant::now();
+        while router.pending.contains_key(&request_id) && started.elapsed() < Duration::from_secs(1)
+        {
+            std::thread::yield_now();
+        }
+        assert!(
+            !router.pending.contains_key(&request_id),
+            "completion must claim the route before the receiver is dropped"
+        );
+
+        // Act
+        drop(response_rx);
+        completion.join().expect("completion thread");
+
+        // Assert
+        assert_eq!(
+            router.late_responses_total(),
             1,
-            "a caller-visible timeout must be counted even when completion won the route-removal race"
+            "a failed boundary send is a late response"
         );
     }
 

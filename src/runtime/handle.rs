@@ -7,7 +7,7 @@ use super::{
     SpilledTransactionSubmission, TransactionSubmission,
 };
 use crate::common::{MidgeError, MidgeResult, OperationDeadline};
-use crossbeam::channel::{self, Sender};
+use crossbeam::channel::Sender;
 use std::sync::{atomic::Ordering, Arc};
 use std::time::Duration;
 
@@ -171,13 +171,30 @@ impl RuntimeHandle {
                 "unexpected verification barrier release response: {other:?}"
             ))),
             Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
-                self.router
-                    .abandon(request_id, self.runtime_response_timeout);
-                Err(Self::response_timeout_error(
-                    msg_kind,
-                    request_id,
-                    self.runtime_response_timeout,
-                ))
+                if self
+                    .router
+                    .abandon(request_id, self.runtime_response_timeout)
+                {
+                    Err(Self::response_timeout_error(
+                        msg_kind,
+                        request_id,
+                        self.runtime_response_timeout,
+                    ))
+                } else {
+                    let response = response_rx.recv().map_err(|_| {
+                        MidgeError::Internal(
+                            "runtime response channel closed while completion owned verification barrier release"
+                                .to_string(),
+                        )
+                    })?;
+                    match response {
+                        RuntimeResponse::Ok { .. } => Ok(()),
+                        RuntimeResponse::Error { error, .. } => Err(error),
+                        other => Err(MidgeError::Internal(format!(
+                            "unexpected verification barrier release response: {other:?}"
+                        ))),
+                    }
+                }
             }
             Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
                 self.router.cancel(request_id);
@@ -262,8 +279,15 @@ impl RuntimeHandle {
                 Err(crossbeam::channel::RecvTimeoutError::Timeout)
                     if started_at.elapsed() >= timeout =>
                 {
-                    self.router.abandon(request_id, timeout);
-                    return Ok(None);
+                    if self.router.abandon(request_id, timeout) {
+                        return Ok(None);
+                    }
+                    return rx.recv().map(Some).map_err(|_| {
+                        MidgeError::Internal(
+                            "Response channel closed while completion owned the request"
+                                .to_string(),
+                        )
+                    });
                 }
                 Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
                     tracing::debug!(
@@ -533,21 +557,22 @@ impl RuntimeHandle {
         submission: TransactionSubmission,
     ) -> MidgeResult<RuntimeResponse> {
         let submission_guard = self.lifecycle.begin_submission()?;
-        let (response_tx, response_rx) = channel::bounded(1);
-        self.msg_tx
-            .try_send(RuntimeMsg::ApplyTransaction {
-                request_id,
-                ops: submission.ops,
-                assertions: submission.assertions,
-                durability_policy: submission.durability_policy,
-                start_sequence: submission.start_sequence,
-                conflict_policy: submission.conflict_policy,
-                response_tx: Some(response_tx),
-            })
-            .map_err(Self::map_submission_error)?;
+        let response_rx = self.router.register(request_id, "ApplyTransaction");
+        if let Err(error) = self.msg_tx.try_send(RuntimeMsg::ApplyTransaction {
+            request_id,
+            ops: submission.ops,
+            assertions: submission.assertions,
+            durability_policy: submission.durability_policy,
+            start_sequence: submission.start_sequence,
+            conflict_policy: submission.conflict_policy,
+            response_tx: None,
+        }) {
+            self.router.cancel(request_id);
+            return Err(Self::map_submission_error(error));
+        }
         drop(submission_guard);
 
-        self.receive_inline_response(
+        self.receive_routed_response(
             &response_rx,
             "ApplyTransaction",
             request_id,
@@ -561,21 +586,22 @@ impl RuntimeHandle {
         submission: SpilledTransactionSubmission,
     ) -> MidgeResult<RuntimeResponse> {
         let submission_guard = self.lifecycle.begin_submission()?;
-        let (response_tx, response_rx) = channel::bounded(1);
-        self.msg_tx
-            .try_send(RuntimeMsg::ApplySpilledTransaction {
-                request_id,
-                source: submission.source,
-                assertions: submission.assertions,
-                durability_policy: submission.durability_policy,
-                start_sequence: submission.start_sequence,
-                conflict_policy: submission.conflict_policy,
-                response_tx: Some(response_tx),
-            })
-            .map_err(Self::map_submission_error)?;
+        let response_rx = self.router.register(request_id, "ApplySpilledTransaction");
+        if let Err(error) = self.msg_tx.try_send(RuntimeMsg::ApplySpilledTransaction {
+            request_id,
+            source: submission.source,
+            assertions: submission.assertions,
+            durability_policy: submission.durability_policy,
+            start_sequence: submission.start_sequence,
+            conflict_policy: submission.conflict_policy,
+            response_tx: None,
+        }) {
+            self.router.cancel(request_id);
+            return Err(Self::map_submission_error(error));
+        }
         drop(submission_guard);
 
-        self.receive_inline_response(
+        self.receive_routed_response(
             &response_rx,
             "ApplySpilledTransaction",
             request_id,
@@ -583,13 +609,7 @@ impl RuntimeHandle {
         )
     }
 
-    /// Wait for a response delivered through the event loop's inline channel.
-    ///
-    /// This path bypasses `ResponseRouter`'s pending table, so a timeout here is
-    /// reported to the router explicitly. Without it the transaction commit path
-    /// — the most durability-critical caller — would produce no operator signal
-    /// at all when it gives up.
-    fn receive_inline_response(
+    fn receive_routed_response(
         &self,
         response_rx: &crossbeam::channel::Receiver<RuntimeResponse>,
         request_kind: &'static str,
@@ -599,12 +619,20 @@ impl RuntimeHandle {
         match response_rx.recv_timeout(timeout) {
             Ok(response) => Ok(response),
             Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
-                self.router.record_abandoned_request();
-                Err(Self::response_timeout_error(
-                    request_kind,
-                    request_id,
-                    timeout,
-                ))
+                if self.router.abandon(request_id, timeout) {
+                    Err(Self::response_timeout_error(
+                        request_kind,
+                        request_id,
+                        timeout,
+                    ))
+                } else {
+                    response_rx.recv().map_err(|_| {
+                        MidgeError::Internal(
+                            "Response channel closed while transaction completion owned the request"
+                                .to_string(),
+                        )
+                    })
+                }
             }
             Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
                 Err(MidgeError::Internal("Response channel closed".to_string()))
