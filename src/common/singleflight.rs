@@ -83,10 +83,46 @@ where
         Ok(Self::rotate_locked(&mut state, new_key))
     }
 
+    /// Inspect the waiters queued at `key` without completing them.
+    ///
+    /// Lets a caller derive a shared budget from the waiters it is about to
+    /// serve, which requires reading them before the work runs rather than
+    /// after.
+    pub fn inspect_key<T>(&self, key: &K, project: impl Fn(&W) -> T) -> Vec<T> {
+        let state = self.state.lock();
+        state
+            .inflight
+            .get(key)
+            .map(|waiters| waiters.iter().map(project).collect())
+            .unwrap_or_default()
+    }
+
     /// Drain all waiters for the given key.
     pub fn complete(&self, key: &K) -> Vec<W> {
         let mut state = self.state.lock();
         state.inflight.remove(key).unwrap_or_default()
+    }
+
+    /// Drain selected sealed generations and the current pending generation
+    /// when it also matches `predicate`.
+    pub fn drain_where(&self, predicate: impl Fn(&K) -> bool) -> Vec<W> {
+        let mut state = self.state.lock();
+        let selected_keys = state
+            .inflight
+            .keys()
+            .filter(|key| predicate(key))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut drained = Vec::new();
+        for key in selected_keys {
+            if let Some(mut waiters) = state.inflight.remove(&key) {
+                drained.append(&mut waiters);
+            }
+        }
+        if predicate(&state.current_key) {
+            drained.append(&mut state.pending);
+        }
+        drained
     }
 
     /// Drain all pending + inflight waiters.

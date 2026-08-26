@@ -3,12 +3,10 @@ use crate::runtime::hybrid_persistence::{
     CloudMetadataPruneGuard, CloudMetadataPruneProof, CloudWalPruneGuard, HybridPersistence,
 };
 use crate::sst::SstFactory;
-#[cfg(feature = "failpoints")]
-use crate::storage::cloud::CloudBackend;
-use crate::storage::cloud::{CloudStorage, MockCloudBackend};
+use crate::storage::cloud::{CloudBackend, CloudStorage, MockCloudBackend};
 use bytes::Bytes;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc, Barrier,
 };
 use std::time::{Duration, Instant};
@@ -243,6 +241,28 @@ fn should_only_classify_structured_precondition_failure_as_cas_conflict() {
 }
 
 #[test]
+fn should_classify_only_canonical_storage_timeout_errors_as_timeouts() {
+    // Arrange: provider detail text is untrusted diagnostic content. Merely
+    // mentioning "timeout" must not change a public error into Timeout.
+    let timeout = crate::storage::storage_timeout_error("cloud HEAD callback expired");
+    let unrelated = [
+        "unauthorized: workload token for timeout.example was rejected",
+        "invalid request: timeout must be a positive integer",
+        "protocol error: response included x-timeout metadata",
+    ];
+
+    // Act
+    let classified_timeout = HybridStorage::storage_error_indicates_timeout(&timeout);
+    let any_unrelated = unrelated
+        .iter()
+        .any(|error| HybridStorage::storage_error_indicates_timeout(error));
+
+    // Assert
+    assert!(classified_timeout);
+    assert!(!any_unrelated);
+}
+
+#[test]
 fn should_retain_terminal_upload_completion_when_transient_queue_is_saturated() {
     // Arrange
     let mut queue = BoundedEventQueue::new(1, std::mem::size_of::<StorageEvent>() * 2);
@@ -348,11 +368,21 @@ fn should_reject_wal_catalog_publication_from_stale_epoch_after_takeover() {
         .expect("new lease fences WAL catalog");
 
     // Act
-    let result = storage.publish_remote_wal_segment(segment_id, max_sequence, &local_path, 2);
+    let result = storage.publish_remote_wal_segment(
+        segment_id,
+        max_sequence,
+        &local_path,
+        2,
+        &crate::common::OperationDeadline::unbounded(),
+    );
 
     // Assert
     let error = result.expect_err("stale lease epoch must not publish WAL authority");
-    assert!(error.contains("requires fencing epoch 3"), "{error}");
+    assert!(matches!(
+        error,
+        crate::common::MidgeError::Fenced(message)
+            if message.contains("requires fencing epoch 3")
+    ));
     let catalog_proof = storage
         .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
         .expect("read winning WAL catalog");
@@ -360,6 +390,235 @@ fn should_reject_wal_catalog_publication_from_stale_epoch_after_takeover() {
         .expect("decode winning WAL catalog");
     assert!(!catalog.segments.contains_key(&segment_id));
     assert_cloud_object_exists(&storage, &object_key);
+}
+
+#[test]
+fn should_report_fenced_when_catalog_authority_changes_before_publication() {
+    // Arrange
+    let tmp = tempfile::tempdir().expect("create takeover race test dir");
+    let (pausing_cloud, storage) = hybrid_with_pausing_catalog_cloud(tmp.path());
+
+    let segment_id = 1;
+    let max_sequence = 11;
+    let bytes = valid_wal_bytes(max_sequence);
+    let local_path = tmp.path().join(crate::wal::segment_file_name(segment_id));
+    std::fs::write(&local_path, &bytes).expect("write publisher local WAL");
+    let object_key = crate::wal::cloud_segment::object_key(segment_id, 1);
+    write_cloud_object(&storage, &object_key, bytes);
+
+    pausing_cloud.pause_next_catalog_compare_exchange();
+    let publisher_storage = Arc::clone(&storage);
+    let publisher = std::thread::spawn(move || {
+        publisher_storage.publish_remote_wal_segment(
+            segment_id,
+            max_sequence,
+            &local_path,
+            2,
+            &crate::common::OperationDeadline::unbounded(),
+        )
+    });
+    pausing_cloud.wait_for_catalog_compare_exchange();
+    storage
+        .fence_cloud_wal_catalog(3)
+        .expect("takeover must advance catalog authority");
+
+    // Act
+    pausing_cloud.release_catalog_compare_exchange();
+    let error = publisher
+        .join()
+        .expect("publisher thread must not panic")
+        .expect_err("stale publisher must lose catalog authority");
+
+    // Assert
+    assert!(matches!(error, crate::common::MidgeError::Fenced(_)));
+    let catalog_proof = storage
+        .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
+        .expect("read takeover catalog");
+    let catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(catalog_proof.bytes())
+        .expect("decode takeover catalog");
+    assert_eq!(catalog.fencing_epoch, 3);
+    assert!(!catalog.segments.contains_key(&segment_id));
+    assert_cloud_object_exists(&storage, &object_key);
+}
+
+#[test]
+fn should_preserve_same_epoch_catalog_updates_when_publication_races_retirement() {
+    // Arrange
+    let tmp = tempfile::tempdir().expect("create catalog mutation race test dir");
+    let (pausing_cloud, storage) = hybrid_with_pausing_catalog_cloud(tmp.path());
+
+    let retired_segment_id = 1;
+    let retired_max_sequence = 11;
+    write_authoritative_cloud_wal(
+        &storage,
+        retired_segment_id,
+        retired_max_sequence,
+        valid_wal_bytes(retired_max_sequence),
+    );
+    let sst_name = "catalog-mutation-race.sst";
+    let sst_bytes = valid_sst_bytes(b"k", b"v", retired_max_sequence);
+    write_cloud_object(
+        &storage,
+        &crate::sst::object_key(sst_name),
+        sst_bytes.clone(),
+    );
+    let manifest = manifest_covering_wal(
+        sst_name,
+        &sst_bytes,
+        retired_max_sequence,
+        Some(crc32c::crc32c(&sst_bytes)),
+    );
+
+    let published_segment_id = 2;
+    let published_max_sequence = 12;
+    let published_bytes = valid_wal_bytes(published_max_sequence);
+    let published_local_path = tmp
+        .path()
+        .join(crate::wal::segment_file_name(published_segment_id));
+    std::fs::write(&published_local_path, &published_bytes)
+        .expect("write concurrently published local WAL");
+    let published_object_key = crate::wal::cloud_segment::object_key(published_segment_id, 1);
+    write_cloud_object(&storage, &published_object_key, published_bytes);
+
+    pausing_cloud.pause_next_catalog_compare_exchange();
+    let publisher_storage = Arc::clone(&storage);
+    let publisher = std::thread::spawn(move || {
+        publisher_storage.publish_remote_wal_segment(
+            published_segment_id,
+            published_max_sequence,
+            &published_local_path,
+            2,
+            &crate::common::OperationDeadline::unbounded(),
+        )
+    });
+    pausing_cloud.wait_for_catalog_compare_exchange();
+
+    let (prune_tx, prune_rx) = std::sync::mpsc::channel();
+    let pruner_storage = Arc::clone(&storage);
+    let pruner = std::thread::spawn(move || {
+        let result = pruner_storage.prune_cloud_wal_segment(
+            retired_segment_id,
+            retired_max_sequence,
+            CloudWalPruneGuard::new(manifest, None),
+            2,
+        );
+        prune_tx
+            .send(result)
+            .expect("send concurrent catalog retirement result");
+    });
+    let early_prune_result = match prune_rx.recv_timeout(Duration::from_millis(100)) {
+        Ok(result) => Some(result),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("catalog retirement thread disconnected before publication release")
+        }
+    };
+
+    // Act
+    pausing_cloud.release_catalog_compare_exchange();
+    let publication_result = publisher.join().expect("publisher thread must not panic");
+    let retirement_result = early_prune_result.unwrap_or_else(|| {
+        prune_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("catalog retirement must complete after publication release")
+    });
+    pruner
+        .join()
+        .expect("catalog retirement thread must not panic");
+
+    // Assert
+    publication_result.expect("same-epoch WAL publication must succeed");
+    retirement_result.expect("same-epoch WAL catalog retirement must succeed");
+    let delete_result = wait_for_wal_prune_result(&storage, retired_segment_id);
+    assert!(
+        delete_result.is_ok(),
+        "retired WAL object deletion must succeed: {delete_result:?}"
+    );
+
+    let catalog_proof = storage
+        .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
+        .expect("read catalog after serialized mutations");
+    let catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(catalog_proof.bytes())
+        .expect("decode catalog after serialized mutations");
+    assert!(!catalog.segments.contains_key(&retired_segment_id));
+    assert!(catalog.segments.contains_key(&published_segment_id));
+    storage
+        .verify_remote_wal_segment(published_segment_id, published_max_sequence)
+        .expect("newly published segment must remain authoritative");
+}
+
+#[test]
+fn should_bound_wal_catalog_lock_wait_by_publication_deadline() {
+    // Arrange
+    let tmp = tempfile::tempdir().expect("create bounded catalog lock test dir");
+    let (pausing_cloud, storage) = hybrid_with_pausing_catalog_cloud(tmp.path());
+
+    let holding_segment_id = 1;
+    let holding_max_sequence = 11;
+    let holding_bytes = valid_wal_bytes(holding_max_sequence);
+    let holding_local_path = tmp
+        .path()
+        .join(crate::wal::segment_file_name(holding_segment_id));
+    std::fs::write(&holding_local_path, &holding_bytes).expect("write lock-holding local WAL");
+    write_cloud_object(
+        &storage,
+        &crate::wal::cloud_segment::object_key(holding_segment_id, 1),
+        holding_bytes,
+    );
+
+    let waiting_segment_id = 2;
+    let waiting_max_sequence = 12;
+    let waiting_bytes = valid_wal_bytes(waiting_max_sequence);
+    let waiting_local_path = tmp
+        .path()
+        .join(crate::wal::segment_file_name(waiting_segment_id));
+    std::fs::write(&waiting_local_path, &waiting_bytes).expect("write lock-waiting local WAL");
+    write_cloud_object(
+        &storage,
+        &crate::wal::cloud_segment::object_key(waiting_segment_id, 1),
+        waiting_bytes,
+    );
+
+    pausing_cloud.pause_next_catalog_compare_exchange();
+    let publisher_storage = Arc::clone(&storage);
+    let holder = std::thread::spawn(move || {
+        publisher_storage.publish_remote_wal_segment(
+            holding_segment_id,
+            holding_max_sequence,
+            &holding_local_path,
+            2,
+            &crate::common::OperationDeadline::unbounded(),
+        )
+    });
+    pausing_cloud.wait_for_catalog_compare_exchange();
+
+    // Act
+    let started = Instant::now();
+    let waiting_result = storage.publish_remote_wal_segment(
+        waiting_segment_id,
+        waiting_max_sequence,
+        &waiting_local_path,
+        2,
+        &crate::common::OperationDeadline::from_budget(Duration::from_millis(100)),
+    );
+    let elapsed = started.elapsed();
+    pausing_cloud.release_catalog_compare_exchange();
+    let holding_result = holder.join().expect("lock holder thread must not panic");
+
+    // Assert
+    holding_result.expect("lock-holding publication must finish after release");
+    assert!(
+        matches!(
+            &waiting_result,
+            Err(crate::common::MidgeError::Timeout(message))
+                if message.contains("waiting to mutate the cloud WAL catalog")
+        ),
+        "bounded publication must time out waiting for the catalog lock: {waiting_result:?}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "catalog lock wait exceeded the shared publication deadline: {elapsed:?}"
+    );
 }
 
 #[test]
@@ -473,6 +732,117 @@ fn hybrid_with_mock_cloud() -> (Arc<MockCloudBackend>, HybridStorage) {
         .fence_cloud_wal_catalog(2)
         .expect("initialize test WAL publication catalog");
     (mock_cloud, storage)
+}
+
+fn hybrid_with_pausing_catalog_cloud(
+    root: &std::path::Path,
+) -> (Arc<PausingCatalogCasBackend>, Arc<HybridStorage>) {
+    let local = Arc::new(
+        crate::storage::filesystem::FileSystem::new(root.join("local"))
+            .expect("create pausing catalog local backend"),
+    );
+    let mock_cloud = Arc::new(MockCloudBackend::new());
+    let pausing_cloud = Arc::new(PausingCatalogCasBackend::new(Arc::clone(&mock_cloud)));
+    let cloud = Arc::new(CloudStorage::new(pausing_cloud.clone(), String::new()));
+    let storage = Arc::new(HybridStorage::with_policy(
+        local,
+        cloud,
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    ));
+    storage
+        .fence_cloud_wal_catalog(2)
+        .expect("initialize pausing WAL publication catalog");
+    (pausing_cloud, storage)
+}
+
+struct PausingCatalogCasBackend {
+    inner: Arc<MockCloudBackend>,
+    pause_next_catalog_compare_exchange: AtomicBool,
+    catalog_compare_exchange_started: Barrier,
+    release_catalog_compare_exchange: Barrier,
+}
+
+impl PausingCatalogCasBackend {
+    fn new(inner: Arc<MockCloudBackend>) -> Self {
+        Self {
+            inner,
+            pause_next_catalog_compare_exchange: AtomicBool::new(false),
+            catalog_compare_exchange_started: Barrier::new(2),
+            release_catalog_compare_exchange: Barrier::new(2),
+        }
+    }
+
+    fn pause_next_catalog_compare_exchange(&self) {
+        self.pause_next_catalog_compare_exchange
+            .store(true, Ordering::SeqCst);
+    }
+
+    fn wait_for_catalog_compare_exchange(&self) {
+        self.catalog_compare_exchange_started.wait();
+    }
+
+    fn release_catalog_compare_exchange(&self) {
+        self.release_catalog_compare_exchange.wait();
+    }
+}
+
+impl CloudBackend for PausingCatalogCasBackend {
+    fn submit_put(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        let is_catalog_compare_exchange = key == crate::wal::cloud_catalog::OBJECT_KEY
+            && headers
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("if-match"));
+        if is_catalog_compare_exchange
+            && self
+                .pause_next_catalog_compare_exchange
+                .swap(false, Ordering::SeqCst)
+        {
+            self.catalog_compare_exchange_started.wait();
+            self.release_catalog_compare_exchange.wait();
+        }
+        self.inner.submit_put(key, data, headers, callback);
+    }
+
+    fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        self.inner.submit_get(key, callback);
+    }
+
+    fn submit_get_with_metadata(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        self.inner.submit_get_with_metadata(key, callback);
+    }
+
+    fn submit_get_range(
+        &self,
+        key: &str,
+        start: u64,
+        end: Option<u64>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        self.inner.submit_get_range(key, start, end, callback);
+    }
+
+    fn submit_delete(
+        &self,
+        key: &str,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        self.inner.submit_delete(key, headers, callback);
+    }
+
+    fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
+        self.inner.submit_list(prefix, callback);
+    }
+
+    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        self.inner.submit_head(key, callback);
+    }
 }
 
 #[test]
@@ -606,9 +976,57 @@ struct AlwaysFailingWriteBackend {
     write_attempts: Arc<AtomicUsize>,
 }
 
+struct PanickingWriteBackend {
+    write_attempts: Arc<AtomicUsize>,
+}
+
 impl AlwaysFailingWriteBackend {
     fn new(write_attempts: Arc<AtomicUsize>) -> Self {
         Self { write_attempts }
+    }
+}
+
+impl PanickingWriteBackend {
+    fn new(write_attempts: Arc<AtomicUsize>) -> Self {
+        Self { write_attempts }
+    }
+}
+
+impl StorageBackend for PanickingWriteBackend {
+    fn submit_read(&self, key: &str, callback: StorageCallback) {
+        let _ = callback.send(StorageEvent::ReadComplete {
+            key: key.to_string(),
+            result: StorageOutcome::Err("read unavailable".to_string()),
+        });
+    }
+
+    fn submit_write(&self, _key: &str, _data: Vec<u8>, _callback: StorageCallback) {
+        self.write_attempts.fetch_add(1, Ordering::SeqCst);
+        panic!("injected cloud upload worker panic");
+    }
+
+    fn submit_write_with_headers(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        _headers: Vec<(String, String)>,
+        callback: StorageCallback,
+    ) {
+        self.submit_write(key, data, callback);
+    }
+
+    fn submit_delete(&self, key: &str, callback: StorageCallback) {
+        let _ = callback.send(StorageEvent::DeleteComplete {
+            key: key.to_string(),
+            result: StorageOutcome::Ok(()),
+        });
+    }
+
+    fn submit_list(&self, prefix: &str, callback: StorageCallback) {
+        let _ = callback.send(StorageEvent::ListComplete {
+            prefix: prefix.to_string(),
+            result: StorageOutcome::Ok(Vec::new()),
+        });
     }
 }
 
@@ -663,6 +1081,140 @@ impl StorageBackend for AlwaysFailingWriteBackend {
 #[derive(Default)]
 struct NeverCompletesBackend {
     callbacks: Mutex<Vec<StorageCallback>>,
+}
+
+struct BudgetConsumingProofBackend {
+    first_head_delay: Duration,
+    head_calls: AtomicUsize,
+    retained_callbacks: Mutex<Vec<StorageCallback>>,
+}
+
+struct BudgetConsumingSstPublicationBackend {
+    first_head_delay: Duration,
+    head_calls: AtomicUsize,
+    retained_callbacks: Mutex<Vec<StorageCallback>>,
+}
+
+impl BudgetConsumingSstPublicationBackend {
+    fn new(first_head_delay: Duration) -> Self {
+        Self {
+            first_head_delay,
+            head_calls: AtomicUsize::new(0),
+            retained_callbacks: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn retain_callback(&self, callback: StorageCallback) {
+        self.retained_callbacks.lock().push(callback);
+    }
+}
+
+impl StorageBackend for BudgetConsumingSstPublicationBackend {
+    fn submit_read(&self, _key: &str, callback: StorageCallback) {
+        self.retain_callback(callback);
+    }
+
+    fn submit_write(&self, _key: &str, _data: Vec<u8>, callback: StorageCallback) {
+        self.retain_callback(callback);
+    }
+
+    fn submit_write_with_headers(
+        &self,
+        _key: &str,
+        _data: Vec<u8>,
+        _headers: Vec<(String, String)>,
+        callback: StorageCallback,
+    ) {
+        self.retain_callback(callback);
+    }
+
+    fn submit_delete(&self, _key: &str, callback: StorageCallback) {
+        self.retain_callback(callback);
+    }
+
+    fn submit_list(&self, prefix: &str, callback: StorageCallback) {
+        let _ = callback.send(StorageEvent::ListComplete {
+            prefix: prefix.to_string(),
+            result: StorageOutcome::Ok(Vec::new()),
+        });
+    }
+
+    fn submit_head(&self, key: &str, callback: StorageCallback) {
+        if self.head_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            let delay = self.first_head_delay;
+            let key = key.to_string();
+            std::thread::spawn(move || {
+                std::thread::sleep(delay);
+                let _ = callback.send(StorageEvent::HeadComplete {
+                    key,
+                    result: StorageOutcome::Err("not found: delayed miss".to_string()),
+                });
+            });
+        } else {
+            self.retain_callback(callback);
+        }
+    }
+}
+
+impl BudgetConsumingProofBackend {
+    fn new(first_head_delay: Duration) -> Self {
+        Self {
+            first_head_delay,
+            head_calls: AtomicUsize::new(0),
+            retained_callbacks: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn retain_callback(&self, callback: StorageCallback) {
+        self.retained_callbacks.lock().push(callback);
+    }
+}
+
+impl StorageBackend for BudgetConsumingProofBackend {
+    fn submit_read(&self, _key: &str, callback: StorageCallback) {
+        self.retain_callback(callback);
+    }
+
+    fn submit_write(&self, key: &str, _data: Vec<u8>, callback: StorageCallback) {
+        let _ = callback.send(StorageEvent::WriteComplete {
+            key: key.to_string(),
+            result: StorageOutcome::Err("writes are not used by this proof fixture".to_string()),
+        });
+    }
+
+    fn submit_delete(&self, key: &str, callback: StorageCallback) {
+        let _ = callback.send(StorageEvent::DeleteComplete {
+            key: key.to_string(),
+            result: StorageOutcome::Err("deletes are not used by this proof fixture".to_string()),
+        });
+    }
+
+    fn submit_list(&self, prefix: &str, callback: StorageCallback) {
+        let _ = callback.send(StorageEvent::ListComplete {
+            prefix: prefix.to_string(),
+            result: StorageOutcome::Ok(Vec::new()),
+        });
+    }
+
+    fn submit_head(&self, key: &str, callback: StorageCallback) {
+        if self.head_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            let delay = self.first_head_delay;
+            let key = key.to_string();
+            std::thread::spawn(move || {
+                std::thread::sleep(delay);
+                let _ = callback.send(StorageEvent::HeadComplete {
+                    key,
+                    result: StorageOutcome::Ok(StorageObjectMetadata {
+                        size: 7,
+                        etag: "slow-first-head".to_string(),
+                        generation: None,
+                    }),
+                });
+            });
+        } else {
+            self.retain_callback(callback);
+        }
+    }
 }
 
 struct RacingReadDeleteBackend {
@@ -1904,6 +2456,63 @@ fn should_readback_remote_wal_before_upload_worker_emits_ack() {
     );
 }
 
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_emit_one_upload_terminal_event_when_wal_ack_logging_panics() {
+    // Arrange
+    let _test_guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    let (_mock_cloud, storage) = hybrid_with_mock_cloud();
+    let tmp = tempfile::tempdir().expect("create WAL post-ack panic test dir");
+    let segment_id = 10;
+    let max_sequence = 14;
+    let wal_path = tmp.path().join(crate::wal::segment_file_name(segment_id));
+    let wal_bytes = valid_wal_bytes(max_sequence);
+    std::fs::write(&wal_path, &wal_bytes).expect("write local WAL");
+    let upload = UploadState {
+        segment_id,
+        object_key: crate::wal::cloud_segment::object_key(segment_id, 1),
+        local_path: wal_path,
+        status: UploadStatus::InFlight {
+            started_at: Instant::now(),
+        },
+        max_sequence,
+        retries: 0,
+        size_bytes: wal_bytes.len() as u64,
+    };
+    let (external_event_tx, external_event_rx) = cb::bounded(4);
+    fail::cfg("midge::cloud::in_wal_upload_ack_log", "panic")
+        .expect("configure WAL ack logging panic");
+
+    // Act
+    HybridStorage::process_wal_upload_attempt(
+        &upload,
+        &storage.wal_cloud,
+        &storage.event_queue,
+        Some(&external_event_tx),
+        storage.callback_timeout,
+    );
+    let terminal_events = external_event_rx.try_iter().collect::<Vec<_>>();
+    fail::remove("midge::cloud::in_wal_upload_ack_log");
+    scenario.teardown();
+
+    // Assert
+    assert_eq!(
+        terminal_events.len(),
+        1,
+        "one upload attempt must publish exactly one terminal event: {terminal_events:?}"
+    );
+    assert!(matches!(
+        terminal_events.as_slice(),
+        [StorageEvent::CloudFail {
+            segment_id: failed_segment,
+            terminal: false,
+            failure_kind: crate::storage::CloudUploadFailureKind::Other,
+            ..
+        }] if *failed_segment == segment_id
+    ));
+}
+
 #[test]
 fn should_stop_retrying_failed_wal_upload_after_retry_budget_exhausted() {
     // Arrange
@@ -1929,13 +2538,17 @@ fn should_stop_retrying_failed_wal_upload_after_retry_budget_exhausted() {
         .expect("enqueue WAL upload");
 
     let deadline = Instant::now() + Duration::from_secs(2);
-    let mut observed_failures = 0usize;
+    let mut observed_terminal_failures = Vec::new();
     while Instant::now() < deadline {
         let events = storage.process_uploads();
-        observed_failures += events
-            .iter()
-            .filter(|event| matches!(event, StorageEvent::CloudFail { .. }))
-            .count();
+        observed_terminal_failures.extend(events.into_iter().filter_map(|event| match event {
+            StorageEvent::CloudFail {
+                terminal,
+                failure_kind,
+                ..
+            } => Some((terminal, failure_kind)),
+            _ => None,
+        }));
         if storage.pending_upload_count() == 0 {
             break;
         }
@@ -1950,14 +2563,71 @@ fn should_stop_retrying_failed_wal_upload_after_retry_budget_exhausted() {
         "permanently failing WAL uploads should stop after the retry budget"
     );
     assert_eq!(
-        observed_failures, 3,
-        "each failed WAL upload attempt should surface exactly one CloudFail"
+        observed_terminal_failures,
+        vec![
+            (false, crate::storage::CloudUploadFailureKind::Other),
+            (false, crate::storage::CloudUploadFailureKind::Other),
+            (true, crate::storage::CloudUploadFailureKind::Other),
+        ],
+        "only the failure that exhausts storage retry ownership may be terminal"
     );
     assert_eq!(
         storage.pending_upload_count(),
         0,
         "exhausted WAL uploads must leave the queue so cleanup and shutdown are bounded"
     );
+}
+
+#[test]
+fn should_transfer_wal_retry_ownership_when_upload_worker_panics() {
+    // Arrange
+    let tmp = tempfile::tempdir().expect("create WAL worker panic test dir");
+    let local = Arc::new(
+        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
+            .expect("create local backend"),
+    );
+    let write_attempts = Arc::new(AtomicUsize::new(0));
+    let cloud = Arc::new(PanickingWriteBackend::new(Arc::clone(&write_attempts)));
+    let storage = HybridStorage::with_policy(
+        local,
+        cloud,
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    );
+    let segment_id = 12;
+    let max_sequence = 22;
+    let wal_path = tmp.path().join(crate::wal::segment_file_name(segment_id));
+    std::fs::write(&wal_path, valid_wal_bytes(max_sequence)).expect("write local WAL");
+    storage
+        .enqueue_wal_segment(segment_id, &wal_path, max_sequence)
+        .expect("enqueue WAL upload");
+
+    // Act
+    let deadline = Instant::now() + Duration::from_millis(500);
+    let mut terminal_failure = false;
+    while Instant::now() < deadline {
+        terminal_failure |= storage.process_uploads().into_iter().any(|event| {
+            matches!(
+                event,
+                StorageEvent::CloudFail {
+                    segment_id: failed_segment,
+                    terminal: true,
+                    ..
+                } if failed_segment == segment_id
+            )
+        });
+        if storage.pending_upload_count() == 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    // Assert
+    assert_eq!(write_attempts.load(Ordering::SeqCst), 3);
+    assert!(
+        terminal_failure,
+        "worker panic must transfer retry ownership"
+    );
+    assert_eq!(storage.pending_upload_count(), 0);
 }
 
 #[test]
@@ -2103,7 +2773,11 @@ fn should_release_storage_reservation_given_upload_callback_is_lost_when_worker_
             .filter(|event| {
                 matches!(
                     event,
-                    StorageEvent::CloudFail { error, .. } if error.contains("timed out")
+                    StorageEvent::CloudFail {
+                        error,
+                        failure_kind: crate::storage::CloudUploadFailureKind::Timeout,
+                        ..
+                    } if error.contains("timed out")
                 )
             })
             .count();
@@ -2168,4 +2842,172 @@ fn should_enforce_internal_storage_event_queue_limits() {
         byte_limited_drained[0].event,
         StorageEvent::CloudAck { segment_id: 1, .. }
     ));
+}
+
+#[test]
+fn should_fail_with_timeout_given_expired_deadline_when_reading_object_proof() {
+    // Arrange: a zero-budget caller and a backend that records every submitted
+    // callback. Returning Timeout is insufficient if a provider call starts.
+    let tmp = tempfile::tempdir().expect("create expired deadline directory");
+    let local = Arc::new(
+        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
+            .expect("create expired deadline local backend"),
+    );
+    let cloud = Arc::new(NeverCompletesBackend::default());
+    let storage = HybridStorage::with_policy(
+        local,
+        cloud.clone(),
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    );
+    let expired = crate::common::OperationDeadline::from_budget(Duration::ZERO);
+
+    // Act
+    let result = storage.remote_object_proof_within("sst/expired.sst", &expired);
+
+    // Assert
+    let error = result.expect_err("an exhausted budget must not start another cloud round trip");
+    assert!(matches!(
+        error,
+        crate::common::MidgeError::Timeout(message)
+            if message.contains("deadline") && message.contains("sst/expired.sst")
+    ));
+    assert!(
+        cloud.callbacks.lock().is_empty(),
+        "an exhausted deadline must not submit a zero-timeout provider call"
+    );
+}
+
+#[test]
+fn should_not_submit_provider_call_given_configured_callback_timeout_is_zero() {
+    // Arrange: the aggregate deadline is live, but configuration allows no
+    // time for even the first provider round trip.
+    let tmp = tempfile::tempdir().expect("create zero callback timeout directory");
+    let local = Arc::new(
+        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
+            .expect("create zero callback timeout local backend"),
+    );
+    let cloud = Arc::new(NeverCompletesBackend::default());
+    let limits = HybridQueueLimits {
+        callback_timeout: Duration::ZERO,
+        ..HybridQueueLimits::default()
+    };
+    let storage = HybridStorage::with_policy_event_sender_and_limits(
+        local,
+        cloud.clone(),
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        None,
+        limits,
+    );
+
+    // Act
+    let result = storage.remote_object_proof_within(
+        "sst/zero-timeout.sst",
+        &crate::common::OperationDeadline::unbounded(),
+    );
+
+    // Assert
+    assert!(matches!(result, Err(crate::common::MidgeError::Timeout(_))));
+    assert!(
+        cloud.callbacks.lock().is_empty(),
+        "a zero per-operation budget must not reach the provider"
+    );
+}
+
+#[test]
+fn should_read_object_proof_given_ample_deadline_when_budget_remains() {
+    // Arrange
+    let (_mock_cloud, storage) = hybrid_with_mock_cloud();
+    write_cloud_object(&storage, "sst/ample.sst", b"payload".to_vec());
+    let deadline = crate::common::OperationDeadline::from_budget(Duration::from_secs(60));
+
+    // Act
+    let proof = storage
+        .remote_object_proof_within("sst/ample.sst", &deadline)
+        .expect("ample budget reads the object");
+
+    // Assert
+    assert_eq!(proof.bytes(), b"payload");
+}
+
+#[test]
+fn should_recompute_remaining_budget_before_each_round_trip_when_reading_object_proof() {
+    // Arrange: HEAD consumes most of the shared budget, then GET never answers.
+    // Reusing the allowance calculated before HEAD would refund that elapsed
+    // time and make the proof run well beyond the advertised deadline.
+    let tmp = tempfile::tempdir().expect("create deadline proof directory");
+    let local = Arc::new(
+        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
+            .expect("create deadline proof local backend"),
+    );
+    let cloud = Arc::new(BudgetConsumingProofBackend::new(Duration::from_millis(80)));
+    let limits = HybridQueueLimits {
+        callback_timeout: Duration::from_secs(1),
+        ..HybridQueueLimits::default()
+    };
+    let storage = HybridStorage::with_policy_event_sender_and_limits(
+        local,
+        cloud,
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        None,
+        limits,
+    );
+    let deadline = crate::common::OperationDeadline::from_budget(Duration::from_millis(100));
+
+    // Act
+    let started = Instant::now();
+    let result = storage.remote_object_proof_within("sst/slow-proof.sst", &deadline);
+    let elapsed = started.elapsed();
+
+    // Assert
+    assert!(result.is_err(), "the never-completing GET must time out");
+    assert!(
+        elapsed < Duration::from_millis(150),
+        "proof reused the pre-HEAD allowance and exceeded its shared budget: {elapsed:?}"
+    );
+}
+
+#[test]
+fn should_bound_sst_publication_with_shared_deadline_when_remote_preflight_consumes_budget() {
+    // Arrange: remote HEAD consumes most of the shared budget, then the
+    // conditional PUT never answers. A fresh per-call timeout would let this
+    // attempt outlive its advertised deadline by nearly a second.
+    let tmp = tempfile::tempdir().expect("create deadline publication directory");
+    let local = Arc::new(
+        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
+            .expect("create deadline publication local backend"),
+    );
+    let cloud = Arc::new(BudgetConsumingSstPublicationBackend::new(
+        Duration::from_millis(80),
+    ));
+    let limits = HybridQueueLimits {
+        callback_timeout: Duration::from_secs(1),
+        ..HybridQueueLimits::default()
+    };
+    let storage = HybridStorage::with_policy_event_sender_and_limits(
+        local,
+        cloud,
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        None,
+        limits,
+    );
+    let deadline = crate::common::OperationDeadline::from_budget(Duration::from_millis(100));
+
+    // Act
+    let started = Instant::now();
+    let result = storage.write_sst_object_within(
+        "deadline-publication.sst",
+        valid_sst_bytes(b"deadline", b"value", 1),
+        &deadline,
+    );
+    let elapsed = started.elapsed();
+
+    // Assert
+    assert!(
+        matches!(result, Err(crate::common::MidgeError::Timeout(_))),
+        "deadline expiry must remain typed as Timeout: {result:?}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(150),
+        "SST publication reused a fresh callback timeout: {elapsed:?}"
+    );
 }

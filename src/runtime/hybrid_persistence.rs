@@ -45,6 +45,115 @@ impl CloudMetadataPruneGuard {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct CloudMetadataPruneSnapshot {
+    cloud: Arc<CloudStorage>,
+    db_path: std::path::PathBuf,
+    fs: Arc<dyn crate::io::traits::Fs>,
+    recovery_policy: crate::config::RecoveryPolicy,
+}
+
+impl CloudMetadataPruneSnapshot {
+    pub(crate) fn new(
+        cloud: Arc<CloudStorage>,
+        db_path: std::path::PathBuf,
+        fs: Arc<dyn crate::io::traits::Fs>,
+        recovery_policy: crate::config::RecoveryPolicy,
+    ) -> Self {
+        Self {
+            cloud,
+            db_path,
+            fs,
+            recovery_policy,
+        }
+    }
+
+    /// Verify an exact, read-only metadata snapshot and keep cloud metadata
+    /// publication serialized through the authority-changing operation.
+    ///
+    /// Cleanup must never repair cloud metadata from a captured snapshot: an
+    /// intent or DDL edit can change without advancing the manifest sequence,
+    /// so writing stale bytes here could roll authoritative metadata backward.
+    /// A mismatch is a safe cleanup deferral. Holding the publication lock
+    /// through `operation` prevents a verified snapshot from changing before
+    /// the WAL catalog compare-exchange retires recovery authority.
+    pub(crate) fn verify_exact_then<T>(
+        &self,
+        operation: impl FnOnce(Manifest, CloudMetadataPruneGuard) -> MidgeResult<T>,
+    ) -> MidgeResult<T> {
+        let deadline = crate::common::OperationDeadline::unbounded();
+        let _publication_guard = self.cloud.lock_metadata_publication();
+
+        let mut proofs = Vec::with_capacity(crate::storage::cloud::CLOUD_METADATA_FILES.len());
+        let mut has_manifest_base = false;
+        for file_name in crate::storage::cloud::CLOUD_METADATA_FILES {
+            let local_path = self.db_path.join(file_name);
+            let local_bytes = match std::fs::read(&local_path) {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => {
+                    return Err(MidgeError::Io(std::io::Error::new(
+                        error.kind(),
+                        format!(
+                            "local metadata '{}' is unreadable during WAL cleanup: {error}",
+                            local_path.display()
+                        ),
+                    )))
+                }
+            };
+            let key = crate::storage::cloud::cloud_metadata_key(file_name);
+            let proof = crate::storage::cloud::blocking_cloud_object_proof_within(
+                &self.cloud,
+                &key,
+                &deadline,
+            )?;
+
+            let (local_bytes, proof) = match (local_bytes, proof) {
+                (Some(local_bytes), Some(proof)) => (local_bytes, proof),
+                (None, None) => continue,
+                (Some(_), None) => {
+                    return Err(MidgeError::Internal(format!(
+                        "cloud metadata '{key}' is missing"
+                    )))
+                }
+                (None, Some(_)) => {
+                    return Err(MidgeError::Internal(format!(
+                        "cloud metadata '{key}' exists without committed local metadata"
+                    )))
+                }
+            };
+
+            if proof.bytes != local_bytes {
+                return Err(MidgeError::Internal(format!(
+                    "cloud metadata '{key}' does not match the captured committed metadata"
+                )));
+            }
+            if matches!(*file_name, "manifest.snapshot.json" | "manifest.json") {
+                has_manifest_base = true;
+            }
+            proofs.push(CloudMetadataPruneProof {
+                key,
+                expected_bytes: local_bytes,
+                remote: proof.metadata,
+            });
+        }
+
+        if !has_manifest_base {
+            return Err(MidgeError::Internal(
+                "no committed cloud manifest base is available to guard WAL cleanup".to_string(),
+            ));
+        }
+
+        let manifest = crate::metadata::ManifestPersistence::load_with_fs_and_policy(
+            &self.fs,
+            self.recovery_policy,
+        )
+        .map_err(MidgeError::Internal)?;
+        let guard = CloudMetadataPruneGuard::new(Arc::clone(&self.cloud), proofs);
+        operation(manifest, guard)
+    }
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct CloudWalPruneGuard {
     manifest: Manifest,
@@ -80,23 +189,32 @@ pub(crate) trait HybridPersistence {
         expected_max_sequence: u64,
     ) -> Result<(), String>;
 
+    /// Publish a sealed WAL segment to the authoritative cloud catalog.
+    ///
+    /// `deadline` is the shared budget for every cloud round trip this makes —
+    /// two object proofs plus a catalog compare-exchange, up to seven calls. It
+    /// belongs to the caller waiting on the acknowledgement, so the whole
+    /// sequence stays inside that caller's response timeout.
     fn publish_remote_wal_segment(
         &self,
         segment_id: u64,
         expected_max_sequence: u64,
         local_path: &Path,
         fencing_epoch: u64,
-    ) -> Result<(), String>;
+        deadline: &crate::common::OperationDeadline,
+    ) -> MidgeResult<()>;
 
-    fn remote_wal_segment_covered_by_manifest(
-        &self,
-        segment_id: u64,
-        expected_max_sequence: u64,
-        manifest: &Manifest,
-    ) -> Result<bool, String>;
-
+    #[cfg(test)]
     fn verify_manifest_cloud_objects(&self, manifest: &Manifest) -> Result<(), String>;
 
+    #[cfg(test)]
+    fn verify_manifest_cloud_objects_within(
+        &self,
+        manifest: &Manifest,
+        deadline: &crate::common::OperationDeadline,
+    ) -> MidgeResult<()>;
+
+    #[cfg(test)]
     fn prune_cloud_wal_segment(
         &self,
         segment_id: u64,
@@ -105,7 +223,26 @@ pub(crate) trait HybridPersistence {
         fencing_epoch: u64,
     ) -> Result<(), String>;
 
+    fn prune_cloud_wal_segment_within(
+        &self,
+        segment_id: u64,
+        expected_max_sequence: u64,
+        guard: CloudWalPruneGuard,
+        fencing_epoch: u64,
+        deadline: &crate::common::OperationDeadline,
+    ) -> MidgeResult<()>;
+
     fn write_sst_object(&self, sst_name: &str, data: Vec<u8>) -> MidgeResult<()>;
+
+    fn write_sst_object_within(
+        &self,
+        sst_name: &str,
+        data: Vec<u8>,
+        deadline: &crate::common::OperationDeadline,
+    ) -> MidgeResult<()> {
+        let _ = deadline;
+        self.write_sst_object(sst_name, data)
+    }
 
     fn delete_sst_object_blocking(&self, sst_name: &str) -> MidgeResult<()>;
 }
@@ -174,7 +311,9 @@ impl HybridPersistence for HybridStorage {
                 entry.max_sequence
             ));
         }
-        validate_remote_wal(self, &entry).map(|_| ())
+        validate_remote_wal(self, &entry, &crate::common::OperationDeadline::unbounded())
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     }
 
     fn publish_remote_wal_segment(
@@ -183,75 +322,117 @@ impl HybridPersistence for HybridStorage {
         expected_max_sequence: u64,
         local_path: &Path,
         fencing_epoch: u64,
-    ) -> Result<(), String> {
+        deadline: &crate::common::OperationDeadline,
+    ) -> MidgeResult<()> {
         let local_bytes = std::fs::read(local_path).map_err(|error| {
-            format!(
-                "failed to read local WAL segment '{}' before cloud acknowledgement: {error}",
-                local_path.display()
-            )
+            MidgeError::Io(std::io::Error::new(
+                error.kind(),
+                format!(
+                    "failed to read local WAL segment '{}' before cloud acknowledgement: {error}",
+                    local_path.display()
+                ),
+            ))
         })?;
         let local_readback = crate::wal::cloud_segment::validate_bytes(
             &local_path.display().to_string(),
             &local_bytes,
             expected_max_sequence,
-        )?;
+        )
+        .map_err(MidgeError::Internal)?;
         let entry = PublishedWalSegment::from_validated_bytes(
             segment_id,
             expected_max_sequence,
             local_readback.validation.writer_epoch,
             &local_bytes,
         );
-        let remote = validate_remote_wal(self, &entry)?;
+        let remote = validate_remote_wal(self, &entry, deadline)?;
         if remote.proof.bytes() != local_bytes {
-            return Err(format!(
+            return Err(MidgeError::Internal(format!(
                 "cloud WAL segment {segment_id} does not match the locally sealed bytes for writer epoch {}",
                 local_readback.validation.writer_epoch
-            ));
+            )));
         }
+        let _catalog_mutation =
+            self.lock_wal_catalog_mutation_within(deadline, "cloud WAL publication")?;
         let catalog_proof = self
-            .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
-            .map_err(|error| format!("cloud WAL publication catalog unavailable: {error}"))?;
-        let mut catalog = WalPublicationCatalog::decode(catalog_proof.bytes())?;
-        if !catalog.publish(fencing_epoch, entry)? {
+            .remote_object_proof_within(crate::wal::cloud_catalog::OBJECT_KEY, deadline)
+            .map_err(|error| {
+                contextualize_cloud_error(error, "cloud WAL publication catalog unavailable")
+            })?;
+        let mut catalog =
+            WalPublicationCatalog::decode(catalog_proof.bytes()).map_err(MidgeError::Internal)?;
+        if catalog.fencing_epoch != fencing_epoch {
+            return Err(MidgeError::Fenced(format!(
+                "cloud WAL catalog mutation requires fencing epoch {}, writer epoch {fencing_epoch} rejected",
+                catalog.fencing_epoch
+            )));
+        }
+        if !catalog
+            .publish(fencing_epoch, entry)
+            .map_err(MidgeError::Internal)?
+        {
             return Ok(());
         }
-        let catalog_bytes = catalog.encode()?;
-        self.compare_exchange_remote_object(
+        let catalog_bytes = catalog.encode().map_err(MidgeError::Internal)?;
+        let publication = self.compare_exchange_remote_object_within(
             crate::wal::cloud_catalog::OBJECT_KEY,
             Some(catalog_proof.metadata()),
             catalog_bytes,
-        )
-        .map(|_| ())
-        .map_err(|error| format!("cloud WAL catalog publication failed: {error}"))
-    }
-
-    fn remote_wal_segment_covered_by_manifest(
-        &self,
-        segment_id: u64,
-        expected_max_sequence: u64,
-        manifest: &Manifest,
-    ) -> Result<bool, String> {
-        let (_, entry) = authoritative_wal_entry(self, segment_id)?;
-        if entry.max_sequence != expected_max_sequence {
-            return Err(format!(
-                "cloud WAL catalog segment {segment_id} max sequence {} does not match expected {expected_max_sequence}",
-                entry.max_sequence
-            ));
+            deadline,
+        );
+        match publication {
+            Ok(_) => Ok(()),
+            Err(MidgeError::Busy(conflict)) => {
+                let winning_proof = self
+                    .remote_object_proof_within(crate::wal::cloud_catalog::OBJECT_KEY, deadline)
+                    .map_err(|error| {
+                        contextualize_cloud_error(
+                            error,
+                            "cloud WAL catalog publication conflict readback failed",
+                        )
+                    })?;
+                let winning_catalog = WalPublicationCatalog::decode(winning_proof.bytes())
+                    .map_err(MidgeError::Internal)?;
+                if winning_catalog.fencing_epoch > fencing_epoch {
+                    return Err(MidgeError::Fenced(format!(
+                        "cloud WAL catalog advanced to fencing epoch {}, writer epoch {fencing_epoch} rejected during publication",
+                        winning_catalog.fencing_epoch
+                    )));
+                }
+                Err(contextualize_cloud_error(
+                    MidgeError::Busy(conflict),
+                    "cloud WAL catalog publication failed",
+                ))
+            }
+            Err(error) => Err(contextualize_cloud_error(
+                error,
+                "cloud WAL catalog publication failed",
+            )),
         }
-        let validated = validate_remote_wal(self, &entry)?;
-        Ok(wal_data_records_covered_by_manifest(
-            &validated.data_records,
-            manifest,
-        ))
     }
 
+    #[cfg(test)]
     fn verify_manifest_cloud_objects(&self, manifest: &Manifest) -> Result<(), String> {
+        self.verify_manifest_cloud_objects_within(
+            manifest,
+            &crate::common::OperationDeadline::unbounded(),
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    #[cfg(test)]
+    fn verify_manifest_cloud_objects_within(
+        &self,
+        manifest: &Manifest,
+        deadline: &crate::common::OperationDeadline,
+    ) -> MidgeResult<()> {
         for file in &manifest.files {
-            validate_remote_sst(self, file)?;
+            validate_remote_sst_within(self, file, deadline)?;
         }
         Ok(())
     }
 
+    #[cfg(test)]
     fn prune_cloud_wal_segment(
         &self,
         segment_id: u64,
@@ -259,18 +440,43 @@ impl HybridPersistence for HybridStorage {
         guard: CloudWalPruneGuard,
         fencing_epoch: u64,
     ) -> Result<(), String> {
-        let (catalog_proof, entry) = authoritative_wal_entry(self, segment_id)?;
+        self.prune_cloud_wal_segment_within(
+            segment_id,
+            expected_max_sequence,
+            guard,
+            fencing_epoch,
+            &crate::common::OperationDeadline::unbounded(),
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    fn prune_cloud_wal_segment_within(
+        &self,
+        segment_id: u64,
+        expected_max_sequence: u64,
+        guard: CloudWalPruneGuard,
+        fencing_epoch: u64,
+        deadline: &crate::common::OperationDeadline,
+    ) -> MidgeResult<()> {
+        let (_, catalog) = authoritative_wal_catalog_within(self, deadline)?;
+        let Some(entry) = catalog.segments.get(&segment_id).cloned() else {
+            // Eligibility and retirement are separate provider round trips. If
+            // another attempt committed between them, settle this request as
+            // idempotently complete and retain the now-unguarded object.
+            self.queue_cloud_wal_prune_complete(segment_id, crate::storage::StorageOutcome::Ok(()));
+            return Ok(());
+        };
         if entry.max_sequence != expected_max_sequence {
-            return Err(format!(
+            return Err(MidgeError::Internal(format!(
                 "cloud WAL catalog segment {segment_id} max sequence {} does not match expected {expected_max_sequence}",
                 entry.max_sequence
-            ));
+            )));
         }
-        let validated = validate_remote_wal(self, &entry)?;
+        let validated = validate_remote_wal(self, &entry, deadline)?;
         if !wal_data_records_covered_by_manifest(&validated.data_records, &guard.manifest) {
-            return Err(format!(
+            return Err(MidgeError::Internal(format!(
                 "cloud WAL segment {segment_id} contains records not covered by the committed manifest"
-            ));
+            )));
         }
 
         let mut dependencies = Vec::with_capacity(
@@ -282,7 +488,7 @@ impl HybridPersistence for HybridStorage {
             ),
         );
         for file in &guard.manifest.files {
-            let proof = validate_remote_sst(self, file)?;
+            let proof = validate_remote_sst_within(self, file, deadline)?;
             dependencies.push(self.remote_identity_guard(&proof));
         }
         if let Some(metadata) = guard.metadata {
@@ -297,16 +503,36 @@ impl HybridPersistence for HybridStorage {
 
         // Publication authority is retired before physical deletion. A crash or
         // delete failure after this point can leak an ignored object but cannot
-        // make recovery depend on a missing object.
-        self.verify_remote_delete_guards(&validated.proof, &dependencies)?;
-        let mut catalog = WalPublicationCatalog::decode(catalog_proof.bytes())?;
-        if catalog.retire(fencing_epoch, &entry)? {
-            self.compare_exchange_remote_object(
-                crate::wal::cloud_catalog::OBJECT_KEY,
-                Some(catalog_proof.metadata()),
-                catalog.encode()?,
-            )
-            .map_err(|error| format!("cloud WAL catalog retirement failed: {error}"))?;
+        // make recovery depend on a missing object. Re-read under the local
+        // mutation lock so a same-epoch publication cannot be overwritten by a
+        // retirement CAS built from an older catalog snapshot.
+        self.verify_remote_delete_guards_within(&validated.proof, &dependencies, deadline)?;
+        {
+            let catalog_mutation =
+                self.lock_wal_catalog_mutation_within(deadline, "cloud WAL retirement")?;
+            let (catalog_proof, mut catalog) = authoritative_wal_catalog_within(self, deadline)?;
+            if !catalog.segments.contains_key(&segment_id) {
+                drop(catalog_mutation);
+                self.queue_cloud_wal_prune_complete(
+                    segment_id,
+                    crate::storage::StorageOutcome::Ok(()),
+                );
+                return Ok(());
+            }
+            if catalog
+                .retire(fencing_epoch, &entry)
+                .map_err(MidgeError::Internal)?
+            {
+                self.compare_exchange_remote_object_within(
+                    crate::wal::cloud_catalog::OBJECT_KEY,
+                    Some(catalog_proof.metadata()),
+                    catalog.encode().map_err(MidgeError::Internal)?,
+                    deadline,
+                )
+                .map_err(|error| {
+                    contextualize_cloud_error(error, "cloud WAL catalog retirement failed")
+                })?;
+            }
         }
 
         if let Err(error) =
@@ -323,6 +549,19 @@ impl HybridPersistence for HybridStorage {
     }
 
     fn write_sst_object(&self, sst_name: &str, data: Vec<u8>) -> MidgeResult<()> {
+        self.write_sst_object_within(
+            sst_name,
+            data,
+            &crate::common::OperationDeadline::unbounded(),
+        )
+    }
+
+    fn write_sst_object_within(
+        &self,
+        sst_name: &str,
+        data: Vec<u8>,
+        deadline: &crate::common::OperationDeadline,
+    ) -> MidgeResult<()> {
         let expected_size = data.len() as u64;
         let expected_crc = crc32c::crc32c(&data);
         validate_sst_object_bytes(sst_name, expected_size, None, None, &data)
@@ -332,10 +571,10 @@ impl HybridPersistence for HybridStorage {
         ));
 
         let key = crate::sst::object_key(sst_name);
-        self.publish_immutable_object(&key, data)?;
+        self.publish_immutable_object_within(&key, data, deadline)?;
         let proof = self
-            .remote_object_proof(&key)
-            .map_err(MidgeError::Internal)?;
+            .remote_object_proof_within(&key, deadline)
+            .map_err(|error| contextualize_cloud_error(error, "cloud SST readback failed"))?;
         validate_sst_object_bytes(
             sst_name,
             expected_size,
@@ -352,35 +591,73 @@ impl HybridPersistence for HybridStorage {
     }
 }
 
+#[cfg(test)]
 fn authoritative_wal_entry(
     storage: &HybridStorage,
     segment_id: u64,
 ) -> Result<(RemoteObjectProof, PublishedWalSegment), String> {
-    let proof = storage
-        .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
-        .map_err(|error| format!("cloud WAL publication catalog unavailable: {error}"))?;
-    let catalog = WalPublicationCatalog::decode(proof.bytes())?;
+    authoritative_wal_entry_within(
+        storage,
+        segment_id,
+        &crate::common::OperationDeadline::unbounded(),
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+fn authoritative_wal_entry_within(
+    storage: &HybridStorage,
+    segment_id: u64,
+    deadline: &crate::common::OperationDeadline,
+) -> MidgeResult<(RemoteObjectProof, PublishedWalSegment)> {
+    let (proof, catalog) = authoritative_wal_catalog_within(storage, deadline)?;
     let entry = catalog.segments.get(&segment_id).cloned().ok_or_else(|| {
-        format!("cloud WAL segment {segment_id} is not authoritative in the publication catalog")
+        MidgeError::Internal(format!(
+            "cloud WAL segment {segment_id} is not authoritative in the publication catalog"
+        ))
     })?;
     Ok((proof, entry))
+}
+
+fn authoritative_wal_catalog_within(
+    storage: &HybridStorage,
+    deadline: &crate::common::OperationDeadline,
+) -> MidgeResult<(RemoteObjectProof, WalPublicationCatalog)> {
+    let proof = storage
+        .remote_object_proof_within(crate::wal::cloud_catalog::OBJECT_KEY, deadline)
+        .map_err(|error| {
+            contextualize_cloud_error(error, "cloud WAL publication catalog unavailable")
+        })?;
+    let catalog = WalPublicationCatalog::decode(proof.bytes()).map_err(MidgeError::Internal)?;
+    Ok((proof, catalog))
 }
 
 fn validate_remote_wal(
     storage: &HybridStorage,
     entry: &PublishedWalSegment,
-) -> Result<ValidatedWalObject, String> {
-    let proof = storage.remote_object_proof(&entry.object_key)?;
-    entry.validate_bytes(proof.bytes())?;
+    deadline: &crate::common::OperationDeadline,
+) -> MidgeResult<ValidatedWalObject> {
+    let proof = storage.remote_object_proof_within(&entry.object_key, deadline)?;
+    entry
+        .validate_bytes(proof.bytes())
+        .map_err(MidgeError::Internal)?;
     let readback = crate::wal::cloud_segment::validate_bytes(
         &entry.object_key,
         proof.bytes(),
         entry.max_sequence,
-    )?;
+    )
+    .map_err(MidgeError::Internal)?;
     Ok(ValidatedWalObject {
         proof,
         data_records: readback.data_records,
     })
+}
+
+fn contextualize_cloud_error(error: MidgeError, context: &str) -> MidgeError {
+    match error {
+        MidgeError::Timeout(message) => MidgeError::Timeout(format!("{context}: {message}")),
+        other => MidgeError::Internal(format!("{context}: {other}")),
+    }
 }
 
 pub(crate) fn wal_data_records_covered_by_manifest(
@@ -421,19 +698,21 @@ fn file_covers_record(file: &FileMeta, record: &DataCoverageRecord) -> bool {
     }
 }
 
-fn validate_remote_sst(
+fn validate_remote_sst_within(
     storage: &HybridStorage,
     file: &FileMeta,
-) -> Result<RemoteObjectProof, String> {
+    deadline: &crate::common::OperationDeadline,
+) -> MidgeResult<RemoteObjectProof> {
     let key = crate::sst::object_key(&file.name);
-    let proof = storage.remote_object_proof(&key)?;
+    let proof = storage.remote_object_proof_within(&key, deadline)?;
     validate_sst_object_bytes(
         &file.name,
         file.size_bytes,
         file.content_crc32c,
         Some(file),
         proof.bytes(),
-    )?;
+    )
+    .map_err(MidgeError::Internal)?;
     Ok(proof)
 }
 
@@ -534,6 +813,24 @@ fn verify_sst_summary_matches_manifest(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn should_preserve_timeout_variant_when_adding_cloud_publication_context() {
+        // Arrange
+        let timeout = MidgeError::Timeout("remote CAS timed out".to_string());
+
+        // Act
+        let contextualized =
+            contextualize_cloud_error(timeout, "cloud WAL catalog publication failed");
+
+        // Assert
+        assert!(matches!(
+            contextualized,
+            MidgeError::Timeout(message)
+                if message.contains("catalog publication")
+                    && message.contains("remote CAS timed out")
+        ));
+    }
 
     #[test]
     fn should_require_manifest_coverage_for_wal_records() {

@@ -89,7 +89,11 @@ impl EventLoop {
     }
 
     pub(super) fn schedule_next_flush_worker(&mut self) {
-        if self.shutting_down || self.state.is_memory_mode() || self.flush_actor.is_inflight() {
+        if self.shutting_down
+            || self.state.is_memory_mode()
+            || self.flush_actor.is_inflight()
+            || self.publication_gate.active
+        {
             return;
         }
         let Some(flush) = self.state.begin_next_immutable_flush() else {

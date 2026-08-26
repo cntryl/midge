@@ -8,6 +8,7 @@ use cntryl_midge::{
 };
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 #[derive(Clone)]
 pub enum StorageMode {
@@ -27,6 +28,7 @@ pub struct MidgeOptions {
     pub memory_budget: Option<usize>,
     pub cloud_write_policy: Option<CloudWritePolicy>,
     pub simulated_cloud_local_storage_budget_bytes: Option<u64>,
+    pub shutdown_cloud_drain_timeout: Option<Duration>,
 }
 
 impl Default for MidgeOptions {
@@ -41,6 +43,7 @@ impl Default for MidgeOptions {
             memory_budget: None,
             cloud_write_policy: None,
             simulated_cloud_local_storage_budget_bytes: None,
+            shutdown_cloud_drain_timeout: None,
         }
     }
 }
@@ -58,6 +61,11 @@ impl MidgeOptions {
 
     pub fn with_simulated_cloud_local_storage_budget(mut self, bytes: u64) -> Self {
         self.simulated_cloud_local_storage_budget_bytes = Some(bytes);
+        self
+    }
+
+    pub fn with_shutdown_cloud_drain_timeout(mut self, timeout: Duration) -> Self {
+        self.shutdown_cloud_drain_timeout = Some(timeout);
         self
     }
 
@@ -101,6 +109,10 @@ impl MidgeOptions {
         if let Some(bytes) = self.simulated_cloud_local_storage_budget_bytes {
             open_opts = open_opts.with_simulated_cloud_local_storage_budget(bytes);
         }
+        #[cfg(feature = "failpoints")]
+        if let Some(timeout) = self.shutdown_cloud_drain_timeout {
+            open_opts = open_opts.shutdown_cloud_drain_timeout_for_testing(timeout);
+        }
         open_opts.build().expect("build test open options")
     }
 }
@@ -137,6 +149,7 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
             memory_budget: None,
             cloud_write_policy: None,
             simulated_cloud_local_storage_budget_bytes: None,
+            shutdown_cloud_drain_timeout: None,
         },
         "local" => {
             let timestamp = std::time::SystemTime::now()
@@ -159,6 +172,7 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
                 memory_budget: None,
                 cloud_write_policy: None,
                 simulated_cloud_local_storage_budget_bytes: None,
+                shutdown_cloud_drain_timeout: None,
             }
         }
         "cloud" => {
@@ -184,6 +198,7 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
                 memory_budget: None,
                 cloud_write_policy: None,
                 simulated_cloud_local_storage_budget_bytes: None,
+                shutdown_cloud_drain_timeout: None,
             }
         }
         _ => panic!("unknown storage mode: {mode}"),

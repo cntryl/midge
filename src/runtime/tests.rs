@@ -405,16 +405,150 @@ fn should_answer_pending_apply_transaction_request_given_event_loop_panic_when_a
         submission,
     );
 
-    // Assert: ApplyTransaction uses its own inline response channel. Dropping
-    // the panicked EventLoop must still close that channel and unblock caller.
+    // Assert: routed transactions receive the same explicit panic response as
+    // every other request instead of waiting for their response deadline.
     assert!(fired.load(std::sync::atomic::Ordering::SeqCst));
     assert!(matches!(
         response,
-        Err(MidgeError::Internal(message)) if message == "Response channel closed"
+        Ok(RuntimeResponse::Error {
+            error: MidgeError::Internal(message),
+            ..
+        }) if message == "runtime event loop panicked before responding"
     ));
     assert!(runtime.wait_for_exit(Duration::from_secs(1)));
     fail::remove("midge::runtime::strict_group_before_collect");
     scenario.teardown();
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_finish_accepted_transaction_given_caller_times_out_before_event_loop_resumes() {
+    if std::env::var(RUNTIME_PANIC_CHILD).as_deref() != Ok("accepted-timeout") {
+        run_runtime_panic_child(
+            "accepted-timeout",
+            "runtime::tests::should_finish_accepted_transaction_given_caller_times_out_before_event_loop_resumes",
+        );
+        return;
+    }
+
+    // Arrange: pause the event loop after it accepts and prepares a strict
+    // transaction but before it can append the WAL record or answer.
+    let scenario = fail::FailScenario::setup();
+    let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+    let release_gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let callback_gate = Arc::clone(&release_gate);
+    fail::cfg_callback("midge::runtime::strict_group_before_collect", move || {
+        entered_tx
+            .send(())
+            .expect("signal accepted transaction boundary");
+        let (released, changed) = &*callback_gate;
+        let mut released = released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while !*released {
+            released = changed
+                .wait(released)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    })
+    .expect("configure accepted transaction boundary");
+    let temp_dir = tempfile::TempDir::new().expect("create runtime directory");
+    let (runtime, _) = Runtime::new();
+    let state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
+    let config = RuntimeConfig {
+        wal_durability_policy: DurabilityPolicy::Strict,
+        runtime_response_timeout: Duration::from_millis(20),
+        ..RuntimeConfig::default()
+    };
+    let (mut runtime, handle) = runtime
+        .start_with_config(state, config)
+        .expect("start runtime");
+    let caller_handle = handle.clone();
+    let request_id = next_request_id().expect("allocate transaction request id");
+    let submission = TransactionSubmission {
+        ops: vec![TransactionOp::Put {
+            cf_id: 0,
+            key: bytes::Bytes::from_static(b"accepted-timeout-key"),
+            value: bytes::Bytes::from_static(b"accepted-timeout-value"),
+            ttl_seconds: None,
+            insert_only: false,
+        }],
+        assertions: Vec::new(),
+        durability_policy: Some(DurabilityPolicy::Strict),
+        start_sequence: None,
+        conflict_policy: ConflictPolicy::LastWriteWins,
+    };
+    let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+    let caller = thread::spawn(move || {
+        let result = caller_handle.send_apply_transaction_and_wait(request_id, submission);
+        result_tx.send(result).expect("send transaction result");
+    });
+    entered_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("event loop must accept transaction before caller deadline");
+
+    // Act: keep the accepted request paused until its caller has returned.
+    let caller_result = result_rx.recv_timeout(Duration::from_secs(1));
+    let (released, changed) = &*release_gate;
+    *released
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+    changed.notify_all();
+    caller.join().expect("join transaction caller");
+
+    // Assert: timeout ends only the wait. The event loop still commits the WAL
+    // and memtable mutation, then exposes its unmatched completion as late.
+    assert!(matches!(
+        caller_result,
+        Ok(Err(MidgeError::Timeout(message)))
+            if message.contains("ApplyTransaction")
+                && message.contains(&format!("request_id={request_id}"))
+    ));
+    assert_strict_runtime_value(&handle, b"accepted-timeout-key", b"accepted-timeout-value");
+    assert_eq!(handle.router.abandoned_requests_total(), 1);
+    assert_eq!(handle.router.late_responses_total(), 1);
+
+    handle.shutdown(Duration::from_secs(1)).expect("shutdown");
+    assert!(runtime.wait_for_exit(Duration::from_secs(1)));
+    fail::remove("midge::runtime::strict_group_before_collect");
+    scenario.teardown();
+}
+
+#[cfg(feature = "failpoints")]
+fn assert_strict_runtime_value(handle: &RuntimeHandle, key: &[u8], expected: &[u8]) {
+    let sequence = match handle
+        .send_and_wait_timeout(
+            RuntimeMsg::GetCurrentSequence {
+                request_id: next_request_id().expect("allocate sequence request id"),
+            },
+            Duration::from_secs(1),
+        )
+        .expect("query sequence after accepted transaction")
+        .expect("sequence response before deadline")
+    {
+        RuntimeResponse::CurrentSequence { sequence, .. } => sequence,
+        other => panic!("expected current sequence, got {other:?}"),
+    };
+    let read = handle
+        .send_and_wait_timeout(
+            RuntimeMsg::Read {
+                request_id: next_request_id().expect("allocate read request id"),
+                cf_id: 0,
+                key: key.to_vec(),
+                sequence,
+                requested_durability: crate::types::ReadDurability::Strict,
+            },
+            Duration::from_secs(1),
+        )
+        .expect("read accepted transaction")
+        .expect("read response before deadline");
+    assert!(matches!(
+        read,
+        RuntimeResponse::ReadValue {
+            value: Some(value),
+            ..
+        } if value == expected
+    ));
 }
 
 #[cfg(feature = "failpoints")]
@@ -1025,7 +1159,7 @@ fn should_cleanup_response_route_given_runtime_timeout_when_runtime_accepts_with
 }
 
 #[test]
-fn should_bound_inline_transaction_response_when_runtime_accepts_without_responding() {
+fn should_bound_routed_transaction_response_when_runtime_accepts_without_responding() {
     // Arrange
     let timeout = Duration::from_millis(20);
     let (runtime, handle) = Runtime::new_with_response_timeout(timeout);
@@ -1143,4 +1277,84 @@ fn should_clone_file_meta_preserving_all_fields() {
     assert_eq!(cloned.largest_key, meta.largest_key);
     assert_eq!(cloned.smallest_seq, meta.smallest_seq);
     assert_eq!(cloned.largest_seq, meta.largest_seq);
+}
+
+#[test]
+fn should_report_runtime_timeout_counters_when_callers_time_out() {
+    // Arrange
+    let temp_dir = tempfile::TempDir::new().expect("create runtime directory");
+    let (runtime, _) = Runtime::new();
+    let state = RuntimeState::new(temp_dir.path().to_path_buf(), true);
+    let (mut runtime, handle) = runtime
+        .start_with_config(state, RuntimeConfig::default())
+        .expect("start runtime");
+
+    // Act: one caller gives up on its request, and one response arrives with no
+    // caller left to receive it.
+    let abandoned_id = next_request_id().expect("allocate abandoned request id");
+    let _rx = handle.router.register(abandoned_id, "GetRuntimeMetrics");
+    handle
+        .router
+        .abandon(abandoned_id, Duration::from_millis(20));
+    handle.router.complete(RuntimeResponse::Ok {
+        request_id: abandoned_id,
+    });
+
+    let response = handle
+        .send_and_wait(RuntimeMsg::GetRuntimeMetrics {
+            request_id: next_request_id().expect("allocate metrics request id"),
+        })
+        .expect("metrics request answered");
+
+    // Assert
+    let RuntimeResponse::RuntimeMetricsSnapshot { snapshot, .. } = response else {
+        panic!("expected a runtime metrics snapshot, got {response:?}");
+    };
+    assert_eq!(
+        snapshot.abandoned_runtime_requests_total, 1,
+        "a caller that timed out must be visible to operators"
+    );
+    assert_eq!(
+        snapshot.late_runtime_responses_total, 1,
+        "work completed after its caller gave up must be visible to operators"
+    );
+
+    handle.shutdown(Duration::from_secs(1)).expect("shutdown");
+    assert!(runtime.wait_for_exit(Duration::from_secs(1)));
+}
+
+#[test]
+fn should_count_abandoned_request_given_routed_transaction_when_caller_times_out() {
+    // Arrange
+    let timeout = Duration::from_millis(20);
+    let (runtime, handle) = Runtime::new_with_response_timeout(timeout);
+    handle.lifecycle.mark_running();
+    let request_id = next_request_id().expect("allocate request id");
+    let submission = TransactionSubmission {
+        ops: vec![TransactionOp::Put {
+            cf_id: 0,
+            key: bytes::Bytes::from_static(b"abandoned-key"),
+            value: bytes::Bytes::from_static(b"abandoned-value"),
+            ttl_seconds: None,
+            insert_only: false,
+        }],
+        assertions: Vec::new(),
+        durability_policy: None,
+        start_sequence: None,
+        conflict_policy: ConflictPolicy::LastWriteWins,
+    };
+
+    // Act
+    let result = handle.send_apply_transaction_and_wait(request_id, submission);
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::Timeout(_))));
+    assert_eq!(
+        handle.router.abandoned_requests_total(),
+        1,
+        "a routed transaction timeout must be counted"
+    );
+
+    handle.lifecycle.mark_closed();
+    drop(runtime);
 }

@@ -184,11 +184,34 @@ impl WalActor {
     /// `CloudAsync` durability uses local WAL as a staging file for upload.
     /// We avoid fsync on every write, but do a flush+fsync only when sealing
     /// a segment right before upload so the uploader reads a complete file.
+    #[cfg(test)]
     pub fn flush_for_cloud_upload(&mut self, state: &mut RuntimeState) -> MidgeResult<u64> {
+        self.flush_for_cloud_upload_within(state, &crate::common::OperationDeadline::unbounded())
+    }
+
+    /// Flush a cloud-staging WAL only when its complete configured I/O wait can
+    /// still fit inside the shared operation deadline.
+    ///
+    /// The filesystem writer treats an in-progress flush timeout as a sticky
+    /// write failure because completion is ambiguous. Refusing before it starts
+    /// keeps a short caller budget from poisoning an otherwise healthy writer;
+    /// the unchanged active segment can be retried by callerless maintenance.
+    pub fn flush_for_cloud_upload_within(
+        &mut self,
+        state: &mut RuntimeState,
+        deadline: &crate::common::OperationDeadline,
+    ) -> MidgeResult<u64> {
         let pending = state.wal.pending_writes;
         let segment_max_sequence = self.segment_max_sequence;
 
         if let Some(writer) = &mut self.writer {
+            if deadline.is_bounded() && deadline.remaining() < self.storage_io_timeout {
+                return Err(crate::common::MidgeError::Timeout(format!(
+                    "insufficient operation budget for WAL flush: remaining={:?}, required={:?}",
+                    deadline.remaining(),
+                    self.storage_io_timeout
+                )));
+            }
             writer.flush()?;
             if let Some(t) = crate::telemetry::Telemetry::global() {
                 t.metrics().record_wal_flush();

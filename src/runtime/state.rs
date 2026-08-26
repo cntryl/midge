@@ -446,6 +446,8 @@ impl RuntimeState {
             wal_fsync_ns_total: telemetry.as_ref().map_or(0, |m| m.wal_fsync_ns_total),
             wal_fsync_ns_max: telemetry.as_ref().map_or(0, |m| m.wal_fsync_ns_max),
             durability_waiters_fanned_out_total: 0,
+            abandoned_runtime_requests_total: 0,
+            late_runtime_responses_total: 0,
             sst_bloom_rejects_total: read_path.bloom_rejects,
             sst_bloom_checks_total: read_path.bloom_checks,
             sst_data_blocks_read_total: read_path.data_blocks_read,
@@ -890,18 +892,6 @@ impl RuntimeState {
                 *confirmed_at == 0 || *confirmed_at > current_frontier.saturating_sub(100)
             },
         );
-    }
-
-    /// Invalidate cached idempotency allocations that are part of a failed WAL
-    /// segment upload. Any entry whose last allocated sequence is <= `max_sequence`
-    /// is removed so that retries will allocate fresh sequences.
-    pub fn invalidate_idempotency_allocations_up_to(&mut self, max_sequence: u64) {
-        self.sequence_idempotency_cache
-            .retain(|_request_id, (first_seq, count, _)| {
-                let last_seq = first_seq.saturating_add((*count as u64).saturating_sub(1));
-                // Keep entries that extend beyond the failed max_sequence
-                last_seq > max_sequence
-            });
     }
 
     /// Get the next transaction ID

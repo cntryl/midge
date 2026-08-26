@@ -109,8 +109,12 @@ The WAL store contains epoch-scoped immutable segment objects and the mutable
 conditionally advances the catalog fencing epoch before recovery. Uploads are
 recoverable only after a conditional catalog publication; an unlisted object
 is an orphan and is ignored. WAL pruning removes the catalog entry only after
-manifest/SST coverage has been validated, then best-effort deletes the orphaned
-object. Operators must not edit or reconstruct this catalog.
+an exact committed metadata snapshot has been proved, its manifest has been
+validated, and every referenced SST dependency has passed stable object proof.
+Midge then conditionally retires the matching catalog entry before best-effort
+deleting the now-ignored object. Missing, mismatched, changed, or timed-out proof
+retains catalog authority and the WAL object. Operators must not edit or
+reconstruct this catalog.
 
 Do not configure age-based expiration for current WAL, SST, or metadata
 objects. Their safe-deletion decision depends on manifest coverage and is owned

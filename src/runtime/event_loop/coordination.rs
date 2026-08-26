@@ -1,21 +1,21 @@
 use super::RuntimeMsg;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::time::Instant;
+use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MetadataCleanupProof {
-    pub(super) len: u64,
-    pub(super) crc32c: u32,
-    pub(super) remote: crate::storage::StorageObjectMetadata,
-}
+#[cfg(not(test))]
+const CLOUD_WAL_RUNTIME_RETRY_DELAY: Duration = Duration::from_secs(1);
+#[cfg(test)]
+const CLOUD_WAL_RUNTIME_RETRY_DELAY: Duration = Duration::from_millis(10);
 
 /// Owns cloud WAL admission, acknowledgement, pruning, and cleanup proof state.
 pub(crate) struct CloudWalUploadTracker {
     pub(super) acked_segments: BTreeMap<u64, u64>,
     pub(super) upload_backlog: BTreeMap<u64, u64>,
+    /// Earliest time at which runtime-owned WAL upload obligations may be
+    /// resubmitted after `HybridStorage` exhausts its internal attempt budget.
+    upload_retry_at: Option<Instant>,
     pub(super) prune_inflight: HashSet<u64>,
-    pub(super) prune_retries: HashMap<u64, (u32, Instant)>,
-    pub(super) metadata_cleanup_proofs: HashMap<String, MetadataCleanupProof>,
+    pub(super) prune_cursor: Option<u64>,
 }
 
 impl CloudWalUploadTracker {
@@ -23,14 +23,36 @@ impl CloudWalUploadTracker {
         Self {
             acked_segments,
             upload_backlog: BTreeMap::new(),
+            upload_retry_at: None,
             prune_inflight: HashSet::new(),
-            prune_retries: HashMap::new(),
-            metadata_cleanup_proofs: HashMap::new(),
+            prune_cursor: None,
         }
     }
 
     pub(super) fn has_pending_uploads(&self) -> bool {
         !self.upload_backlog.is_empty()
+    }
+
+    pub(super) fn uploads_ready(&self) -> bool {
+        !self.upload_backlog.is_empty()
+            && self
+                .upload_retry_at
+                .is_none_or(|retry_at| Instant::now() >= retry_at)
+    }
+
+    pub(super) fn defer_upload_retry(&mut self) {
+        self.upload_retry_at = Some(Instant::now() + CLOUD_WAL_RUNTIME_RETRY_DELAY);
+    }
+
+    pub(super) fn begin_upload_attempt(&mut self) {
+        self.upload_retry_at = None;
+    }
+
+    pub(super) fn upload_retry_deadline_timeout(&self) -> Option<Duration> {
+        (!self.upload_backlog.is_empty())
+            .then_some(self.upload_retry_at)
+            .flatten()
+            .map(|retry_at| retry_at.saturating_duration_since(Instant::now()))
     }
 }
 

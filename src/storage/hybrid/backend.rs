@@ -124,6 +124,10 @@ pub struct HybridStorage {
     /// Background WAL upload worker thread handle
     upload_worker_handle: Option<JoinHandle<()>>,
 
+    /// Serializes in-process WAL catalog publication and retirement updates.
+    /// Provider compare-exchange remains the cross-process authority boundary.
+    wal_catalog_mutation: Mutex<()>,
+
     /// Remote WAL prune workers are tracked so shutdown can join them before
     /// releasing the lease that fenced their conditional deletes.
     prune_workers: Mutex<PruneWorkerRegistry>,
@@ -286,11 +290,42 @@ impl HybridStorage {
             callback_timeout: limits.callback_timeout,
             upload_worker_failed,
             upload_worker_handle,
+            wal_catalog_mutation: Mutex::new(()),
             prune_workers: Mutex::new(PruneWorkerRegistry::new(
                 limits.prune_workers,
                 limits.prune_requests,
             )),
         }
+    }
+
+    /// Acquire the in-process WAL catalog mutation lock within the caller's budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::common::MidgeError::Timeout`] when a finite deadline
+    /// expires before the current catalog mutation releases the lock.
+    pub(crate) fn lock_wal_catalog_mutation_within(
+        &self,
+        deadline: &crate::common::OperationDeadline,
+        operation: &str,
+    ) -> crate::common::MidgeResult<parking_lot::MutexGuard<'_, ()>> {
+        if !deadline.is_bounded() {
+            return Ok(self.wal_catalog_mutation.lock());
+        }
+
+        let remaining = deadline.remaining();
+        if remaining.is_zero() {
+            return Err(crate::common::MidgeError::Timeout(format!(
+                "{operation} timed out waiting to mutate the cloud WAL catalog"
+            )));
+        }
+        self.wal_catalog_mutation
+            .try_lock_for(remaining)
+            .ok_or_else(|| {
+                crate::common::MidgeError::Timeout(format!(
+                    "{operation} timed out waiting to mutate the cloud WAL catalog"
+                ))
+            })
     }
 }
 

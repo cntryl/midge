@@ -1098,7 +1098,7 @@ impl CloudBackend for S3Backend {
             },
             Err(err) => CloudEvent::Put {
                 key: ctx,
-                result: CloudOutcome::Err(CloudError::Transport(format!("{err:?}"))),
+                result: CloudOutcome::Err(CloudError::from_transport_error(err)),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -1119,7 +1119,7 @@ impl CloudBackend for S3Backend {
             },
             Err(err) => CloudEvent::Get {
                 key: ctx,
-                result: CloudOutcome::Err(CloudError::Transport(format!("{err:?}"))),
+                result: CloudOutcome::Err(CloudError::from_transport_error(err)),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -1145,7 +1145,7 @@ impl CloudBackend for S3Backend {
             },
             Err(err) => CloudEvent::GetWithMetadata {
                 key: ctx,
-                result: CloudOutcome::Err(CloudError::Transport(format!("{err:?}"))),
+                result: CloudOutcome::Err(CloudError::from_transport_error(err)),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -1177,7 +1177,7 @@ impl CloudBackend for S3Backend {
                 key: ctx,
                 start,
                 end,
-                result: CloudOutcome::Err(CloudError::Transport(format!("{err:?}"))),
+                result: CloudOutcome::Err(CloudError::from_transport_error(err)),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -1211,7 +1211,7 @@ impl CloudBackend for S3Backend {
             },
             Err(err) => CloudEvent::Delete {
                 key: ctx,
-                result: CloudOutcome::Err(CloudError::Transport(format!("{err:?}"))),
+                result: CloudOutcome::Err(CloudError::from_transport_error(err)),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
@@ -1272,7 +1272,7 @@ impl CloudBackend for S3Backend {
                 },
                 Err(err) => CloudEvent::List {
                     prefix: ctx,
-                    result: CloudOutcome::Err(CloudError::Protocol(format!("{err:?}"))),
+                    result: CloudOutcome::Err(CloudError::from_protocol_or_timeout_error(err)),
                 },
             },
         );
@@ -1293,7 +1293,7 @@ impl CloudBackend for S3Backend {
             },
             Err(err) => CloudEvent::Head {
                 key: ctx,
-                result: CloudOutcome::Err(CloudError::Transport(format!("{err:?}"))),
+                result: CloudOutcome::Err(CloudError::from_transport_error(err)),
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);

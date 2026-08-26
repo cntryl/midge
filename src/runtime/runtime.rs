@@ -136,6 +136,14 @@ impl Runtime {
                             }));
                         if run_result.is_err() {
                             tracing::error!("Runtime event loop panicked");
+                            // Close the submission gate before failing pending
+                            // requests. On the clean shutdown path `begin_shutdown`
+                            // already drains in-flight submissions before
+                            // `fail_all` runs, but a spontaneous panic leaves the
+                            // lifecycle Open, so a caller could register after
+                            // `fail_all` snapshotted the pending table and then
+                            // wait out its full response timeout.
+                            lifecycle_for_thread.begin_shutdown();
                             router_for_thread
                                 .fail_all("runtime event loop panicked before responding");
                         }

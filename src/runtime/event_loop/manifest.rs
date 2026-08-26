@@ -13,10 +13,13 @@ impl ManifestCoordinator {
         request_id: u64,
         file_meta: FileMeta,
     ) -> HandleOutcome {
+        let deadline = event_loop.registered_request_deadline(request_id);
         let result = event_loop
             .manifest_actor
             .add_sst(&mut event_loop.state, file_meta)
-            .and_then(|()| event_loop.mirror_metadata_after_local_commit("manifest add sst"));
+            .and_then(|()| {
+                event_loop.mirror_metadata_after_local_commit_within("manifest add sst", &deadline)
+            });
         Self::respond_result(event_loop, request_id, result);
         HandleOutcome::Continue
     }
@@ -28,19 +31,26 @@ impl ManifestCoordinator {
         removed: &[String],
         added: &[FileMeta],
     ) -> HandleOutcome {
+        let deadline = event_loop.registered_request_deadline(request_id);
         let result = event_loop
             .manifest_actor
             .compaction_complete(&mut event_loop.state, removed, added)
             .and_then(|()| {
-                event_loop.mirror_metadata_after_local_commit("manifest compaction complete")
+                event_loop.mirror_metadata_after_local_commit_within(
+                    "manifest compaction complete",
+                    &deadline,
+                )
             });
         Self::respond_result(event_loop, request_id, result);
         HandleOutcome::Continue
     }
 
     pub(super) fn persist(event_loop: &mut EventLoop, request_id: u64) -> HandleOutcome {
-        let result = crate::runtime::actors::ManifestActor::persist(&event_loop.state)
-            .and_then(|()| event_loop.mirror_metadata_after_local_commit("manifest persist"));
+        let deadline = event_loop.registered_request_deadline(request_id);
+        let result =
+            crate::runtime::actors::ManifestActor::persist(&event_loop.state).and_then(|()| {
+                event_loop.mirror_metadata_after_local_commit_within("manifest persist", &deadline)
+            });
         Self::respond_result(event_loop, request_id, result);
         HandleOutcome::Continue
     }
@@ -51,6 +61,7 @@ impl ManifestCoordinator {
         request_id: u64,
         name: &str,
     ) -> HandleOutcome {
+        let deadline = event_loop.registered_request_deadline(request_id);
         if let Err(error) = crate::runtime::ddl::validate_column_family_name(name) {
             event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
             return HandleOutcome::Continue;
@@ -73,6 +84,28 @@ impl ManifestCoordinator {
             return HandleOutcome::Continue;
         }
 
+        if event_loop.ddl_authority_ambiguous {
+            match crate::runtime::ddl::reconcile_prepared_within(
+                &mut event_loop.state,
+                event_loop.hybrid_storage.as_ref(),
+                &deadline,
+            ) {
+                Ok(()) => event_loop.ddl_authority_ambiguous = false,
+                Err(error) => {
+                    event_loop.respond(
+                        request_id,
+                        RuntimeResponse::Error {
+                            request_id,
+                            error: crate::common::MidgeError::Fenced(format!(
+                                "DDL authority remains ambiguous: {error}"
+                            )),
+                        },
+                    );
+                    return HandleOutcome::Continue;
+                }
+            }
+        }
+
         let result = event_loop.force_wal_sync(msg_rx).and_then(|()| {
             let cf_id = if let Some(existing) = event_loop
                 .state
@@ -86,10 +119,11 @@ impl ManifestCoordinator {
                     crate::metadata::ManifestEdit::CreateColumnFamily { id, .. } => *id,
                     _ => unreachable!("create_edit returned a non-create edit"),
                 };
-                crate::runtime::ddl::execute(
+                crate::runtime::ddl::execute_within(
                     &mut event_loop.state,
                     event_loop.hybrid_storage.as_ref(),
                     &edit,
+                    &deadline,
                 )?;
                 event_loop.ddl_authority_ambiguous = false;
                 cf_id
@@ -99,7 +133,7 @@ impl ManifestCoordinator {
             // the authority switch. A later auxiliary metadata mirror error
             // must not report the create as rejected and strand Engine's
             // public handle registry behind the runtime state.
-            if let Err(error) = Self::mirror_committed_create(event_loop) {
+            if let Err(error) = Self::mirror_committed_create(event_loop, &deadline) {
                 event_loop.state.mark_persistence_anomaly();
                 tracing::warn!(%error, cf_id, "column-family create committed but metadata mirror remains degraded");
             }
@@ -120,14 +154,17 @@ impl ManifestCoordinator {
         HandleOutcome::Continue
     }
 
-    fn mirror_committed_create(event_loop: &mut EventLoop) -> crate::common::MidgeResult<()> {
+    fn mirror_committed_create(
+        event_loop: &mut EventLoop,
+        deadline: &crate::common::OperationDeadline,
+    ) -> crate::common::MidgeResult<()> {
         crate::failpoints::fail_point!(
             "midge::ddl::after_create_local_commit_before_metadata_mirror",
             |_| Err(crate::common::MidgeError::Internal(
                 "failpoint: create metadata mirror failed after local commit".to_string()
             ))
         );
-        event_loop.mirror_metadata_after_local_commit("create column family")
+        event_loop.mirror_metadata_after_local_commit_within("create column family", deadline)
     }
 
     pub(super) fn drop_column_family(
@@ -137,6 +174,7 @@ impl ManifestCoordinator {
         cf_id: crate::types::ColumnFamilyId,
         discard_unflushed: bool,
     ) -> HandleOutcome {
+        let deadline = event_loop.registered_request_deadline(request_id);
         if event_loop
             .state
             .ingest_active
@@ -156,9 +194,10 @@ impl ManifestCoordinator {
         }
 
         if event_loop.ddl_authority_ambiguous {
-            match crate::runtime::ddl::reconcile_prepared(
+            match crate::runtime::ddl::reconcile_prepared_within(
                 &mut event_loop.state,
                 event_loop.hybrid_storage.as_ref(),
+                &deadline,
             ) {
                 Ok(()) => {
                     event_loop.ddl_authority_ambiguous = false;
@@ -169,7 +208,7 @@ impl ManifestCoordinator {
                         .iter()
                         .any(|cf| cf.id == cf_id && cf.deleted_at.is_some());
                     if drop_committed {
-                        Self::finish_committed_drop(event_loop, request_id, cf_id);
+                        Self::finish_committed_drop(event_loop, request_id, cf_id, &deadline);
                         return HandleOutcome::Continue;
                     }
                 }
@@ -194,10 +233,11 @@ impl ManifestCoordinator {
         let result = crate::runtime::ddl::drop_edit(&event_loop.state, cf_id, discard_unflushed)
             .and_then(|edit| {
                 event_loop.sync_current_wal()?;
-                crate::runtime::ddl::execute(
+                crate::runtime::ddl::execute_within(
                     &mut event_loop.state,
                     event_loop.hybrid_storage.as_ref(),
                     &edit,
+                    &deadline,
                 )?;
                 event_loop.ddl_authority_ambiguous = false;
                 Ok(())
@@ -206,7 +246,7 @@ impl ManifestCoordinator {
             Self::record_ddl_authority_ambiguity(event_loop, &error);
             Self::respond_result(event_loop, request_id, Err(error));
         } else {
-            Self::finish_committed_drop(event_loop, request_id, cf_id);
+            Self::finish_committed_drop(event_loop, request_id, cf_id, &deadline);
         }
         HandleOutcome::Continue
     }
@@ -215,16 +255,17 @@ impl ManifestCoordinator {
         event_loop: &mut EventLoop,
         request_id: u64,
         cf_id: crate::types::ColumnFamilyId,
+        deadline: &crate::common::OperationDeadline,
     ) {
         Self::cancel_column_family_pending_work(event_loop, cf_id);
         event_loop.publish_snapshot();
-        let _ = event_loop.retry_gc();
+        let _ = event_loop.retry_gc_within(deadline);
 
         // The DDL registry/local journal authority switch has already
         // committed. An auxiliary manifest mirror failure must not report the
         // drop as rejected and leave Engine's handle registry split from
         // runtime state. Surface it through degraded health instead.
-        if let Err(error) = Self::mirror_committed_drop(event_loop) {
+        if let Err(error) = Self::mirror_committed_drop(event_loop, deadline) {
             event_loop.state.mark_persistence_anomaly();
             event_loop.publish_snapshot();
             tracing::warn!(%error, cf_id, "column-family drop committed but metadata mirror remains degraded");
@@ -247,14 +288,17 @@ impl ManifestCoordinator {
         }
     }
 
-    fn mirror_committed_drop(event_loop: &mut EventLoop) -> crate::common::MidgeResult<()> {
+    fn mirror_committed_drop(
+        event_loop: &mut EventLoop,
+        deadline: &crate::common::OperationDeadline,
+    ) -> crate::common::MidgeResult<()> {
         crate::failpoints::fail_point!(
             "midge::ddl::after_drop_local_commit_before_metadata_mirror",
             |_| Err(crate::common::MidgeError::Internal(
                 "failpoint: drop metadata mirror failed after local commit".to_string()
             ))
         );
-        event_loop.mirror_metadata_after_local_commit("drop column family")
+        event_loop.mirror_metadata_after_local_commit_within("drop column family", deadline)
     }
 
     fn cancel_column_family_pending_work(

@@ -47,8 +47,41 @@ startup should retain an outer process or startup watchdog.
 A configured runtime-response `MidgeError::Timeout` identifies the request kind
 and request ID. The timeout removes the caller's response route but does not
 cancel work already accepted by the runtime; a mutating operation can still
-complete later. Use recovery and runtime diagnostics to determine its outcome
-before retrying.
+complete later.
+
+`Engine::get_runtime_metrics` reports that ambiguity as a pair of counters:
+
+- `abandoned_runtime_requests_total` — callers that stopped waiting for a
+  response.
+- `late_runtime_responses_total` — responses that arrived with no caller left to
+  receive them.
+
+These process-wide counters are aggregate diagnostics only. They include every
+request kind and concurrent caller, and a late response may be either success or
+error, so counter deltas cannot identify the outcome of one timed-out mutation.
+Do not use them to decide whether that mutation should be retried. Use an
+application-level idempotency key or read the affected state through the normal
+API before retrying; otherwise the original and retry can both apply.
+
+Deadline-aware foreground paths—including strict WAL sealing and acknowledgement
+validation, remote DDL compare-exchange, and direct manifest mirroring—share the
+caller's remaining budget rather than restarting a full `storage_io_timeout` per
+round trip. Accepted flush, WAL-prune, and reclamation work can continue through
+callerless workers or maintenance retries after the response waiter leaves. A
+sealed WAL is already a durability obligation and must still close its inflight
+frontier gap; this keeps later strict waits from stalling, but also means a
+caller timeout remains outcome-ambiguous.
+
+Compaction publication does not yet share one aggregate caller deadline across
+its provider operations. On a degraded provider, an explicit compaction request
+can therefore reach `runtime_response_timeout` while its accepted work continues.
+
+If a remote DDL compare-exchange times out or disconnects after submission,
+Midge retains its durable prepare and returns `MidgeError::Fenced` unless the
+operation ID can be positively confirmed. New writes, flushes, and compactions
+remain fenced until a later DDL request reconciles that authority state. A
+negative read immediately after the timeout is not proof that the provider will
+not commit later.
 
 ## Column-family lifecycle
 
@@ -64,6 +97,11 @@ unflushed writes is deliberate, call the explicitly destructive
 `drop_column_family_discarding_unflushed` method. Writes ordered after either
 drop request are not pulled across its WAL barrier and fail against the
 dropped column family.
+
+Reclamation is callerless once the drop is locally committed. If authoritative
+manifest publication times out, Midge retains the SSTs and retries publication
+with bounded maintenance attempts; physical deletion starts only after that
+publication succeeds.
 
 ## Transactions
 

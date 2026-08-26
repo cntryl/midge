@@ -564,6 +564,20 @@ pub trait LeaderStore: Send + Sync {
             )),
         }
     }
+
+    /// Validate the current writer within a caller-supplied wait budget.
+    ///
+    /// Non-blocking and local stores may retain the default implementation.
+    /// Provider-backed stores override this so their coordination read cannot
+    /// outlive a runtime request's shared deadline.
+    fn validate_epoch_with_timeout(
+        &self,
+        expected_holder_id: &str,
+        expected_epoch: u64,
+        _timeout: Duration,
+    ) -> Result<(), LeaseError> {
+        self.validate_epoch(expected_holder_id, expected_epoch)
+    }
 }
 
 #[cfg(test)]

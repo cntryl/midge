@@ -6,30 +6,12 @@ use super::{
     RuntimeLifecycleState, RuntimeMsg, RuntimeResponse, RuntimeTransactionGuard,
     SpilledTransactionSubmission, TransactionSubmission,
 };
-use crate::common::{MidgeError, MidgeResult};
-use crossbeam::channel::{self, Sender};
+use crate::common::{MidgeError, MidgeResult, OperationDeadline};
+use crossbeam::channel::Sender;
 use std::sync::{atomic::Ordering, Arc};
 use std::time::Duration;
 
 const WRITE_STALL_STATUS_TIMEOUT: Duration = Duration::from_millis(250);
-
-struct ShutdownDeadline {
-    expires_at: Option<std::time::Instant>,
-}
-
-impl ShutdownDeadline {
-    fn new(timeout: Duration) -> Self {
-        Self {
-            expires_at: std::time::Instant::now().checked_add(timeout),
-        }
-    }
-
-    fn remaining(&self) -> Duration {
-        self.expires_at.map_or(Duration::MAX, |expires_at| {
-            expires_at.saturating_duration_since(std::time::Instant::now())
-        })
-    }
-}
 
 /// Handle for submitting work to the runtime.
 ///
@@ -68,6 +50,15 @@ impl RuntimeHandle {
                 MidgeError::Internal("Runtime channel closed".to_string())
             }
         }
+    }
+
+    /// Whether `MIDGE_DEBUG_WAIT` diagnostics are enabled.
+    ///
+    /// Read once rather than per request; this sits on the synchronous request
+    /// path.
+    fn debug_waits_enabled() -> bool {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(|| std::env::var_os("MIDGE_DEBUG_WAIT").is_some())
     }
 
     fn response_timeout_error(
@@ -153,7 +144,7 @@ impl RuntimeHandle {
         let request_id = next_request_id()?;
         let msg = RuntimeMsg::EndStorageVerification { request_id, token };
         let msg_kind = msg.kind_name();
-        let deadline = ShutdownDeadline::new(self.runtime_response_timeout);
+        let deadline = OperationDeadline::from_budget(self.runtime_response_timeout);
         let response_rx = self.router.register(request_id, msg_kind);
         match self.msg_tx.send_timeout(msg, deadline.remaining()) {
             Ok(()) => {}
@@ -180,13 +171,30 @@ impl RuntimeHandle {
                 "unexpected verification barrier release response: {other:?}"
             ))),
             Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
-                self.router
-                    .abandon(request_id, self.runtime_response_timeout);
-                Err(Self::response_timeout_error(
-                    msg_kind,
-                    request_id,
-                    self.runtime_response_timeout,
-                ))
+                if self
+                    .router
+                    .abandon(request_id, self.runtime_response_timeout)
+                {
+                    Err(Self::response_timeout_error(
+                        msg_kind,
+                        request_id,
+                        self.runtime_response_timeout,
+                    ))
+                } else {
+                    let response = response_rx.recv().map_err(|_| {
+                        MidgeError::Internal(
+                            "runtime response channel closed while completion owned verification barrier release"
+                                .to_string(),
+                        )
+                    })?;
+                    match response {
+                        RuntimeResponse::Ok { .. } => Ok(()),
+                        RuntimeResponse::Error { error, .. } => Err(error),
+                        other => Err(MidgeError::Internal(format!(
+                            "unexpected verification barrier release response: {other:?}"
+                        ))),
+                    }
+                }
             }
             Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
                 self.router.cancel(request_id);
@@ -238,7 +246,7 @@ impl RuntimeHandle {
         let submission_guard = self.lifecycle.begin_submission()?;
         let request_id = msg.request_id().ok_or_else(|| {
             MidgeError::Internal(
-                "send_and_wait_timeout called with message that has no request_id".to_string(),
+                "runtime request submitted without a request_id (e.g. Shutdown)".to_string(),
             )
         })?;
         let msg_kind = msg.kind_name();
@@ -246,6 +254,11 @@ impl RuntimeHandle {
         // Register for the response before sending the request.
         let rx = self.router.register(request_id, msg_kind);
 
+        // Deliberately non-blocking, unlike the shutdown and verification-barrier
+        // paths which spend their deadline on the send. A full queue here means
+        // the runtime is already saturated, and this is the hot write path: a
+        // caller is better served by immediate `WriteStall` backpressure it can
+        // react to than by silently spending its response budget queueing.
         if let Err(error) = self.msg_tx.try_send(msg) {
             self.router.cancel(request_id);
             return Err(Self::map_submission_error(error));
@@ -253,7 +266,7 @@ impl RuntimeHandle {
         drop(submission_guard);
 
         let started_at = std::time::Instant::now();
-        let debug_waits = emit_debug_waits && std::env::var_os("MIDGE_DEBUG_WAIT").is_some();
+        let debug_waits = emit_debug_waits && Self::debug_waits_enabled();
         loop {
             let remaining = timeout.saturating_sub(started_at.elapsed());
             let wait_for = if debug_waits {
@@ -266,13 +279,22 @@ impl RuntimeHandle {
                 Err(crossbeam::channel::RecvTimeoutError::Timeout)
                     if started_at.elapsed() >= timeout =>
                 {
-                    self.router.abandon(request_id, timeout);
-                    return Ok(None);
+                    if self.router.abandon(request_id, timeout) {
+                        return Ok(None);
+                    }
+                    return rx.recv().map(Some).map_err(|_| {
+                        MidgeError::Internal(
+                            "Response channel closed while completion owned the request"
+                                .to_string(),
+                        )
+                    });
                 }
                 Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
-                    eprintln!(
-                        "[midge] still waiting for response: request_id={request_id} kind={msg_kind} waited={:?}",
-                        started_at.elapsed()
+                    tracing::debug!(
+                        request_id,
+                        kind = msg_kind,
+                        waited = ?started_at.elapsed(),
+                        "still waiting for runtime response"
                     );
                 }
                 Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
@@ -308,7 +330,7 @@ impl RuntimeHandle {
     /// Request runtime shutdown and wait no longer than `timeout` for the
     /// final durability result.
     pub fn shutdown(&self, timeout: Duration) -> MidgeResult<()> {
-        let deadline = ShutdownDeadline::new(timeout);
+        let deadline = OperationDeadline::from_budget(timeout);
 
         {
             let shutdown = self
@@ -386,7 +408,7 @@ impl RuntimeHandle {
         }
     }
 
-    fn send_shutdown_request(&self, deadline: &ShutdownDeadline) -> MidgeResult<()> {
+    fn send_shutdown_request(&self, deadline: &OperationDeadline) -> MidgeResult<()> {
         let request_id = match next_request_id() {
             Ok(request_id) => request_id,
             Err(error) => {
@@ -427,7 +449,7 @@ impl RuntimeHandle {
         &self,
         request_id: u64,
         response_rx: crossbeam::channel::Receiver<RuntimeResponse>,
-        deadline: &ShutdownDeadline,
+        deadline: &OperationDeadline,
     ) -> MidgeResult<()> {
         match response_rx.recv_timeout(deadline.remaining()) {
             Ok(response) => self.publish_shutdown_terminal(Self::shutdown_terminal(response)),
@@ -465,7 +487,7 @@ impl RuntimeHandle {
         }
     }
 
-    fn wait_for_shutdown_stop(&self, deadline: &ShutdownDeadline) -> MidgeResult<()> {
+    fn wait_for_shutdown_stop(&self, deadline: &OperationDeadline) -> MidgeResult<()> {
         if self.lifecycle.wait_until_stopped(deadline.remaining()) {
             self.publish_shutdown_terminal(ShutdownTerminal::Success)
         } else {
@@ -535,21 +557,22 @@ impl RuntimeHandle {
         submission: TransactionSubmission,
     ) -> MidgeResult<RuntimeResponse> {
         let submission_guard = self.lifecycle.begin_submission()?;
-        let (response_tx, response_rx) = channel::bounded(1);
-        self.msg_tx
-            .try_send(RuntimeMsg::ApplyTransaction {
-                request_id,
-                ops: submission.ops,
-                assertions: submission.assertions,
-                durability_policy: submission.durability_policy,
-                start_sequence: submission.start_sequence,
-                conflict_policy: submission.conflict_policy,
-                response_tx: Some(response_tx),
-            })
-            .map_err(Self::map_submission_error)?;
+        let response_rx = self.router.register(request_id, "ApplyTransaction");
+        if let Err(error) = self.msg_tx.try_send(RuntimeMsg::ApplyTransaction {
+            request_id,
+            ops: submission.ops,
+            assertions: submission.assertions,
+            durability_policy: submission.durability_policy,
+            start_sequence: submission.start_sequence,
+            conflict_policy: submission.conflict_policy,
+            response_tx: None,
+        }) {
+            self.router.cancel(request_id);
+            return Err(Self::map_submission_error(error));
+        }
         drop(submission_guard);
 
-        Self::receive_inline_response(
+        self.receive_routed_response(
             &response_rx,
             "ApplyTransaction",
             request_id,
@@ -563,21 +586,22 @@ impl RuntimeHandle {
         submission: SpilledTransactionSubmission,
     ) -> MidgeResult<RuntimeResponse> {
         let submission_guard = self.lifecycle.begin_submission()?;
-        let (response_tx, response_rx) = channel::bounded(1);
-        self.msg_tx
-            .try_send(RuntimeMsg::ApplySpilledTransaction {
-                request_id,
-                source: submission.source,
-                assertions: submission.assertions,
-                durability_policy: submission.durability_policy,
-                start_sequence: submission.start_sequence,
-                conflict_policy: submission.conflict_policy,
-                response_tx: Some(response_tx),
-            })
-            .map_err(Self::map_submission_error)?;
+        let response_rx = self.router.register(request_id, "ApplySpilledTransaction");
+        if let Err(error) = self.msg_tx.try_send(RuntimeMsg::ApplySpilledTransaction {
+            request_id,
+            source: submission.source,
+            assertions: submission.assertions,
+            durability_policy: submission.durability_policy,
+            start_sequence: submission.start_sequence,
+            conflict_policy: submission.conflict_policy,
+            response_tx: None,
+        }) {
+            self.router.cancel(request_id);
+            return Err(Self::map_submission_error(error));
+        }
         drop(submission_guard);
 
-        Self::receive_inline_response(
+        self.receive_routed_response(
             &response_rx,
             "ApplySpilledTransaction",
             request_id,
@@ -585,7 +609,8 @@ impl RuntimeHandle {
         )
     }
 
-    fn receive_inline_response(
+    fn receive_routed_response(
+        &self,
         response_rx: &crossbeam::channel::Receiver<RuntimeResponse>,
         request_kind: &'static str,
         request_id: u64,
@@ -593,9 +618,22 @@ impl RuntimeHandle {
     ) -> MidgeResult<RuntimeResponse> {
         match response_rx.recv_timeout(timeout) {
             Ok(response) => Ok(response),
-            Err(crossbeam::channel::RecvTimeoutError::Timeout) => Err(
-                Self::response_timeout_error(request_kind, request_id, timeout),
-            ),
+            Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
+                if self.router.abandon(request_id, timeout) {
+                    Err(Self::response_timeout_error(
+                        request_kind,
+                        request_id,
+                        timeout,
+                    ))
+                } else {
+                    response_rx.recv().map_err(|_| {
+                        MidgeError::Internal(
+                            "Response channel closed while transaction completion owned the request"
+                                .to_string(),
+                        )
+                    })
+                }
+            }
             Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
                 Err(MidgeError::Internal("Response channel closed".to_string()))
             }

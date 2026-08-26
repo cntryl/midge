@@ -8,18 +8,38 @@ impl EventLoop {
     pub(crate) fn seal_current_cloud_segment(
         &mut self,
     ) -> crate::common::MidgeResult<Option<(u64, u64)>> {
-        self.seal_current_cloud_segment_inner(false)
+        self.seal_current_cloud_segment_inner(false, &crate::common::OperationDeadline::unbounded())
+    }
+
+    pub(in crate::runtime::event_loop) fn seal_current_cloud_segment_within(
+        &mut self,
+        deadline: &crate::common::OperationDeadline,
+    ) -> crate::common::MidgeResult<Option<(u64, u64)>> {
+        self.seal_current_cloud_segment_inner(false, deadline)
     }
 
     pub(in crate::runtime::event_loop) fn seal_recovered_cloud_active_segment(
         &mut self,
     ) -> crate::common::MidgeResult<Option<(u64, u64)>> {
-        self.seal_current_cloud_segment_inner(true)
+        self.seal_current_cloud_segment_inner(true, &crate::common::OperationDeadline::unbounded())
     }
 
     fn seal_current_cloud_segment_inner(
         &mut self,
         recovered_active: bool,
+        deadline: &crate::common::OperationDeadline,
+    ) -> crate::common::MidgeResult<Option<(u64, u64)>> {
+        let result = self.try_seal_current_cloud_segment(recovered_active, deadline);
+        if result.is_err() && self.durability.cloud_seal_retry_needed() {
+            self.durability.defer_cloud_seal_retry();
+        }
+        result
+    }
+
+    fn try_seal_current_cloud_segment(
+        &mut self,
+        recovered_active: bool,
+        deadline: &crate::common::OperationDeadline,
     ) -> crate::common::MidgeResult<Option<(u64, u64)>> {
         if !self.wal_actor.is_cloud_async() {
             return Ok(None);
@@ -37,7 +57,8 @@ impl EventLoop {
                 "older CloudAsync WAL segments are still awaiting upload admission".to_string(),
             ));
         }
-        self.validate_runtime_writer_lease()?;
+        self.durability.mark_cloud_seal_retry_needed();
+        self.validate_runtime_writer_lease_within(deadline)?;
 
         let segment_id = self.state.wal.current_segment_id;
         let bytes_buffered = self.wal_actor.bytes_since_sync() as u64;
@@ -50,8 +71,9 @@ impl EventLoop {
             storage.ensure_wal_upload_capacity(existing_bytes.max(bytes_buffered))?;
         }
         let seal_start = Instant::now();
-        let max_sequence = self.wal_actor.flush_for_cloud_upload(&mut self.state)?;
-        self.durability.mark_cloud_seal_retry_needed();
+        let max_sequence = self
+            .wal_actor
+            .flush_for_cloud_upload_within(&mut self.state, deadline)?;
         crate::failpoints::fail_point!(
             "midge::cloud::inject_fail_after_wal_flush_before_rotate",
             |_| Err(crate::common::MidgeError::Internal(
@@ -61,7 +83,7 @@ impl EventLoop {
         // Revalidate after the potentially slow flush but before the active
         // file is irreversibly rotated. A failure here leaves the same active
         // segment intact for a later retry.
-        self.validate_runtime_writer_lease()?;
+        self.validate_runtime_writer_lease_within(deadline)?;
         if let Err(error) = self.wal_actor.rotate(&mut self.state) {
             tracing::error!(error = %error, "CloudAsync: WAL rotate failed");
             return Err(error);
@@ -86,7 +108,7 @@ impl EventLoop {
                 "failpoint: cloud seal failed after WAL rotate before enqueue".to_string(),
             ))
         );
-        self.try_drain_cloud_wal_upload_backlog()?;
+        self.try_drain_cloud_wal_upload_backlog_within(deadline)?;
 
         if let Some(telemetry) = crate::telemetry::Telemetry::global() {
             telemetry.metrics().record_cloud_async_wal_segment_sealed(
@@ -98,7 +120,10 @@ impl EventLoop {
         Ok(Some((segment_id, max_sequence)))
     }
 
-    fn try_drain_cloud_wal_upload_backlog(&mut self) -> crate::common::MidgeResult<()> {
+    fn try_drain_cloud_wal_upload_backlog_within(
+        &mut self,
+        deadline: &crate::common::OperationDeadline,
+    ) -> crate::common::MidgeResult<()> {
         let Some(storage) = self.hybrid_storage.clone() else {
             if self.cloud_wal.upload_backlog.is_empty() {
                 return Ok(());
@@ -108,13 +133,27 @@ impl EventLoop {
             ));
         };
 
+        if self.cloud_wal.upload_backlog.is_empty() {
+            return Ok(());
+        }
+        if !self.cloud_wal.uploads_ready() {
+            return Ok(());
+        }
+        self.cloud_wal.begin_upload_attempt();
+        // Validate once per drain pass, not once per segment. Under a provider
+        // leader store each validation is a cloud GET, and the durable guarantee
+        // is not this poll: `WalPublicationCatalog::require_epoch` plus the
+        // catalog compare-exchange reject a fenced writer's publish at the object
+        // store regardless. This check is a fast-fail, so paying for it per
+        // segment buys nothing and multiplies the stall on a deep backlog.
+        self.validate_runtime_writer_lease_within(deadline)?;
+
         loop {
             let Some((&segment_id, &max_sequence)) =
                 self.cloud_wal.upload_backlog.first_key_value()
             else {
                 return Ok(());
             };
-            self.validate_runtime_writer_lease()?;
             let local_path = self
                 .state
                 .wal_dir
@@ -122,7 +161,14 @@ impl EventLoop {
             let resource = match storage.enqueue_wal_segment(segment_id, &local_path, max_sequence)
             {
                 Ok(resource) => resource,
-                Err(crate::common::MidgeError::WriteStall(_)) => return Ok(()),
+                Err(crate::common::MidgeError::WriteStall(_)) => {
+                    // Capacity remains owned by already admitted uploads. Keep
+                    // this segment in the runtime backlog and avoid repeatedly
+                    // paying lease validation and WAL readback while the queue
+                    // is still full.
+                    self.cloud_wal.defer_upload_retry();
+                    return Ok(());
+                }
                 Err(error) => return Err(error),
             };
             self.cloud_wal.upload_backlog.remove(&segment_id);
@@ -133,7 +179,16 @@ impl EventLoop {
     }
 
     pub(in crate::runtime::event_loop) fn drain_cloud_wal_upload_backlog(&mut self) {
-        if let Err(error) = self.try_drain_cloud_wal_upload_backlog() {
+        let deadline = crate::common::OperationDeadline::from_budget(self.runtime_response_timeout);
+        self.drain_cloud_wal_upload_backlog_within(&deadline);
+    }
+
+    pub(in crate::runtime::event_loop) fn drain_cloud_wal_upload_backlog_within(
+        &mut self,
+        deadline: &crate::common::OperationDeadline,
+    ) {
+        if let Err(error) = self.try_drain_cloud_wal_upload_backlog_within(deadline) {
+            self.cloud_wal.defer_upload_retry();
             self.state.mark_persistence_anomaly();
             tracing::warn!(%error, "could not admit recovered CloudAsync WAL upload");
         }

@@ -9,8 +9,26 @@ use std::time::Duration;
 
 pub(crate) const DEFAULT_STORAGE_IO_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const DEFAULT_RUNTIME_RESPONSE_TIMEOUT: Duration = Duration::from_mins(1);
+pub(crate) const DEFAULT_CLOUD_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_mins(1);
 const RUNTIME_RESPONSE_TIMEOUT_MARGIN: Duration = Duration::from_secs(30);
 
+/// Derive the enclosing runtime deadline from the storage deadline.
+///
+/// The margin gives the storage layer room to fail first with a clean terminal
+/// error, so the caller sees that error rather than an ambiguous runtime
+/// timeout.
+///
+/// Known limitation: one margin covers one storage operation, not every
+/// callback in a multi-step request. Strict WAL acknowledgement, foreground DDL,
+/// and direct manifest mirroring share an `OperationDeadline` derived from the
+/// waiting caller. Accepted flush, WAL-prune, and reclamation work can continue
+/// through callerless workers or maintenance retries after that caller leaves.
+/// Compaction publication still performs several provider operations without a
+/// shared caller deadline, so operators on slow providers should expect a
+/// runtime timeout to be reachable on that path.
+/// `abandoned_runtime_requests_total` and
+/// `late_runtime_responses_total` expose aggregate timeout behavior, but cannot
+/// determine the outcome of an individual request.
 pub(crate) fn default_runtime_response_timeout(storage_io_timeout: Duration) -> Duration {
     DEFAULT_RUNTIME_RESPONSE_TIMEOUT.max(
         storage_io_timeout

@@ -247,6 +247,14 @@ impl RuntimeState {
         self.recovery.policy
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_recovery_policy_for_test(
+        &mut self,
+        recovery_policy: crate::config::RecoveryPolicy,
+    ) {
+        self.recovery.policy = recovery_policy;
+    }
+
     pub fn opened_in_salvage_mode(&self) -> bool {
         self.recovery.opened_in_salvage_mode
     }

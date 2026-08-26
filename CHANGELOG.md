@@ -11,6 +11,54 @@ Midge is currently in the 0.1 release line. Compatibility expectations for pre-1
 
 ### Changed
 
+- Strict WAL acknowledgement, remote DDL authority calls, and direct manifest mirroring now
+  share a deadline derived from when the caller began waiting, instead of
+  restarting a full `storage_io_timeout` on every round trip. Deployments on
+  degraded providers may now see `MidgeError::Timeout` naming the storage step
+  where earlier releases blocked longer. Callerless flush and maintenance work
+  retain their own retry lifecycles; compaction publication does not yet have one
+  aggregate deadline across all provider operations.
+- A cloud WAL acknowledgement whose callers have all abandoned their requests now
+  continues as callerless durability work. Once a sealed WAL segment is accepted,
+  publication failures requeue it so an inflight frontier gap cannot strand later
+  strict waits. A newer dependent waiter's remaining budget prevents an expired
+  older waiter from prematurely failing it. Background CloudAsync publication
+  remains callerless as before.
+- Timed-out column-family reclamation remains retained and is retried by idle
+  maintenance until authoritative manifest publication succeeds; physical SST
+  deletion begins only afterward. The retry deadline pauses under online
+  verification rather than spinning the event loop and receives a bounded
+  fairness slot under sustained request load.
+- Cloud WAL pruning now runs off the event loop behind the metadata-publication
+  gate. It proves an exact committed metadata snapshot and its referenced SSTs
+  before conditionally retiring catalog authority, retains WAL on missing,
+  mismatched, or timed-out proof, and rotates candidates so one unverifiable low
+  segment cannot starve later safe cleanup.
+- Ambiguous remote DDL compare-exchange outcomes retain the durable prepare and
+  fence writes, flushes, and compactions until the operation ID is positively
+  observed in authority state.
+- Draining the CloudAsync WAL upload backlog validates the writer lease once per
+  pass rather than once per segment. Durable fencing is unchanged: the
+  publication catalog's epoch check and compare-exchange remain authoritative.
+
+### Added
+
+- `RuntimeMetricsSnapshot::abandoned_runtime_requests_total` and
+  `RuntimeMetricsSnapshot::late_runtime_responses_total` report callers that
+  stopped waiting and responses that arrived with no caller left. They diagnose
+  aggregate runtime-timeout behavior across routed and inline transaction paths;
+  because they are process-wide and late responses include errors, they do not
+  identify the outcome of an individual timed-out mutation.
+
+### Fixed
+
+- A response arriving after its caller gave up no longer blocks the event loop on
+  the tombstone mutex that timing-out callers contend for.
+- Pending requests are now failed reliably when the event loop panics: the
+  submission gate is closed before the pending table is drained, so a caller
+  submitting concurrently is failed rather than left to wait out its full
+  response timeout.
+
 - **Breaking:** cloud provider enum variants now contain private-field typed
   AWS, Azure, GCS, OCI, and generic S3-compatible configurations. Cloud
   locations normalize surrounding prefix slashes, and `OpenOptions::build`

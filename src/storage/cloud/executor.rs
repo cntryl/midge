@@ -363,7 +363,7 @@ impl CloudExecutor {
     }
 
     fn timeout_error(timeout: Duration) -> MidgeError {
-        MidgeError::Internal(format!(
+        MidgeError::Timeout(format!(
             "cloud request timed out after {} ms",
             timeout.as_millis()
         ))
@@ -407,6 +407,9 @@ impl CloudExecutor {
                 {
                     tokio::time::sleep(Self::retry_delay(attempt)).await;
                     attempt += 1;
+                }
+                Err(error) if error.timed_out => {
+                    return Err(MidgeError::Timeout(error.message));
                 }
                 Err(error) => return Err(MidgeError::Internal(error.message)),
             }
@@ -519,6 +522,7 @@ fn append_bounded_response_chunk(
 
 struct RequestError {
     transient: bool,
+    timed_out: bool,
     message: String,
 }
 
@@ -526,6 +530,7 @@ impl RequestError {
     fn permanent(message: String) -> Self {
         Self {
             transient: false,
+            timed_out: false,
             message,
         }
     }
@@ -538,6 +543,7 @@ impl RequestError {
             || error.is_decode();
         Self {
             transient,
+            timed_out: error.is_timeout(),
             message: format!("cloud request failed: {error}"),
         }
     }
@@ -734,7 +740,7 @@ mod tests {
                 key,
                 result: match result {
                     Ok(response) => CloudOutcome::Ok(response.body),
-                    Err(error) => CloudOutcome::Err(CloudError::Transport(error.to_string())),
+                    Err(error) => CloudOutcome::Err(CloudError::from_transport_error(error)),
                 },
             }
         });
@@ -768,9 +774,7 @@ mod tests {
         executor.spawn_request(request, "object".to_string(), sender, |key, result| {
             CloudEvent::Put {
                 key,
-                result: result
-                    .map(|_| ())
-                    .map_err(|error| CloudError::Transport(error.to_string())),
+                result: result.map(|_| ()).map_err(CloudError::from_transport_error),
             }
         });
         let event = receiver
@@ -782,7 +786,7 @@ mod tests {
         assert!(matches!(
             event,
             CloudEvent::Put {
-                result: CloudOutcome::Err(CloudError::Transport(message)),
+                result: CloudOutcome::Err(CloudError::Timeout(message)),
                 ..
             } if message.contains("timed out after 30 ms")
         ));
@@ -805,9 +809,7 @@ mod tests {
         executor.spawn_request(request, "object".to_string(), sender, |key, result| {
             CloudEvent::Put {
                 key,
-                result: result
-                    .map(|_| ())
-                    .map_err(|error| CloudError::Transport(error.to_string())),
+                result: result.map(|_| ()).map_err(CloudError::from_transport_error),
             }
         });
         std::thread::sleep(Duration::from_millis(60));
@@ -821,7 +823,7 @@ mod tests {
         assert!(matches!(
             event,
             CloudEvent::Put {
-                result: CloudOutcome::Err(CloudError::Transport(message)),
+                result: CloudOutcome::Err(CloudError::Timeout(message)),
                 ..
             } if message.contains("timed out after 30 ms")
         ));
@@ -852,7 +854,7 @@ mod tests {
             |_, _| Ok(false),
             |prefix, result| CloudEvent::List {
                 prefix,
-                result: result.map_err(|error| CloudError::Transport(error.to_string())),
+                result: result.map_err(CloudError::from_transport_error),
             },
         );
         std::thread::sleep(Duration::from_millis(60));
@@ -866,7 +868,7 @@ mod tests {
         assert!(matches!(
             event,
             CloudEvent::List {
-                result: CloudOutcome::Err(CloudError::Transport(message)),
+                result: CloudOutcome::Err(CloudError::Timeout(message)),
                 ..
             } if message.contains("timed out after 30 ms")
         ));

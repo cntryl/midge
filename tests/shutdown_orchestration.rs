@@ -117,7 +117,7 @@ fn should_release_primary_lease_given_shutdown_timeout_when_shutdown_completes()
         Err(MidgeError::Internal(message)) => message,
         other => panic!("expected terminal cloud-drain error, got {other:?}"),
     };
-    assert!(terminal_message.contains("pending cloud uploads"));
+    assert!(terminal_message.contains("cloud uploads"));
     assert!(matches!(
         replayed_shutdown,
         Err(MidgeError::Internal(message)) if message == terminal_message

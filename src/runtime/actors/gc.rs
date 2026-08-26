@@ -26,6 +26,11 @@ const CLOUD_DELETE_RETRY_DELAY: Duration = Duration::from_secs(1);
 #[cfg(test)]
 const CLOUD_DELETE_RETRY_DELAY: Duration = Duration::from_millis(10);
 
+#[cfg(not(test))]
+const MANIFEST_RECLAMATION_RETRY_DELAY: Duration = Duration::from_secs(1);
+#[cfg(test)]
+const MANIFEST_RECLAMATION_RETRY_DELAY: Duration = Duration::from_millis(10);
+
 /// Actor handling garbage collection
 pub struct GcActor {
     /// Last GC run timestamp
@@ -35,6 +40,10 @@ pub struct GcActor {
     /// SSTs removed from the local manifest but waiting for the updated
     /// manifest to be published to the remote authority before deletion.
     pending_manifest_reclamation: VecDeque<String>,
+    /// Earliest time at which a failed authoritative-manifest publication may
+    /// be retried. Reclamation is a database obligation after it is queued;
+    /// it must not depend on another caller submitting unrelated work.
+    manifest_reclamation_retry_at: Option<Instant>,
     /// Failed asynchronous cloud deletes. The worker owns this queue until the
     /// event loop imports it for a delayed retry, so a failed provider request
     /// cannot be lost when the worker exits.
@@ -56,6 +65,7 @@ impl GcActor {
             last_gc_run: None,
             pending_obsolete: VecDeque::new(),
             pending_manifest_reclamation: VecDeque::new(),
+            manifest_reclamation_retry_at: None,
             failed_cloud_deletes: Arc::new(parking_lot::Mutex::new(VecDeque::new())),
             failed_delete_retry_at: None,
             retry_notifier: None,
@@ -287,15 +297,43 @@ impl GcActor {
     }
 
     pub fn take_manifest_reclamation(&mut self) -> Vec<String> {
+        self.manifest_reclamation_retry_at = None;
         self.pending_manifest_reclamation.drain(..).collect()
+    }
+
+    /// Start an explicit or scheduled publication attempt. A failure must arm
+    /// a new retry before returning; success drains the queue.
+    pub fn begin_manifest_reclamation_attempt(&mut self) {
+        self.manifest_reclamation_retry_at = None;
+    }
+
+    /// Retain the queued reclamation and arrange another callerless attempt.
+    pub fn defer_manifest_reclamation_retry(&mut self) {
+        // This also owns discovery failures that occur before any names can be
+        // queued (for example, a failed reclamation journal append).
+        self.manifest_reclamation_retry_at =
+            Some(Instant::now() + MANIFEST_RECLAMATION_RETRY_DELAY);
+    }
+
+    #[must_use]
+    pub fn manifest_reclamation_retry_due(&self) -> bool {
+        self.manifest_reclamation_retry_at
+            .is_some_and(|retry_at| Instant::now() >= retry_at)
     }
 
     /// Return the duration until the next failed cloud-delete retry, if one is
     /// scheduled. The event loop folds this into its idle wakeup deadline.
     #[must_use]
     pub fn retry_deadline_timeout(&self) -> Option<Duration> {
-        self.failed_delete_retry_at
-            .map(|retry_at| retry_at.saturating_duration_since(Instant::now()))
+        let now = Instant::now();
+        [
+            self.failed_delete_retry_at,
+            self.manifest_reclamation_retry_at,
+        ]
+        .into_iter()
+        .flatten()
+        .map(|retry_at| retry_at.saturating_duration_since(now))
+        .min()
     }
 
     /// Retry only failures that came back from an asynchronous cloud worker.

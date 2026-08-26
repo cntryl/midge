@@ -112,7 +112,7 @@ impl Default for RuntimeConfig {
             wal_batch_config: BatchConfig::default(),
             storage_io_timeout: crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
             runtime_response_timeout: crate::config::DEFAULT_RUNTIME_RESPONSE_TIMEOUT,
-            shutdown_cloud_drain_timeout: Duration::from_secs(30),
+            shutdown_cloud_drain_timeout: crate::config::DEFAULT_CLOUD_SHUTDOWN_DRAIN_TIMEOUT,
             cloud_runtime_policy: CloudRuntimePolicy::default(),
             hybrid_storage: None,
             hybrid_storage_events: None,

@@ -376,7 +376,16 @@ impl WalCoordinator {
             && (event_loop.state.wal.pending_writes > 0
                 || event_loop.state.wal.local_durable_seq < sequence)
         {
-            match event_loop.seal_current_cloud_segment() {
+            let deadline = event_loop.router.registered_at(request_id).map_or_else(
+                crate::common::OperationDeadline::unbounded,
+                |registered_at| {
+                    crate::common::OperationDeadline::from_start(
+                        registered_at,
+                        event_loop.runtime_response_timeout,
+                    )
+                },
+            );
+            match event_loop.seal_current_cloud_segment_within(&deadline) {
                 Ok(Some((segment_id, max_sequence))) => {
                     if max_sequence < sequence {
                         event_loop.respond(

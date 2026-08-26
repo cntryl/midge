@@ -640,6 +640,7 @@ fn mirror_control_metadata(
     cloud: &crate::storage::cloud::CloudStorage,
     local_manifest_sequence: u64,
 ) -> MidgeResult<()> {
+    let _publication_guard = cloud.lock_metadata_publication();
     for file_name in crate::storage::cloud::CLOUD_METADATA_FILES {
         let path = task.db_path.join(file_name);
         if !path.exists() {
