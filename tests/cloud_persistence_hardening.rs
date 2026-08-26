@@ -418,7 +418,7 @@ fn should_keep_cloud_async_commit_visible_given_cloud_upload_failure_when_commit
     let _guard = failpoint_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let opts = opts_for_mode("cloud");
+    let opts = opts_for_mode("cloud").with_shutdown_cloud_drain_timeout(Duration::from_millis(100));
     let db_path = cloud_db_path(&opts);
     let scenario = fail::FailScenario::setup();
     fail::cfg("midge::cloud::inject_fail_wal_upload", "return")
@@ -446,9 +446,7 @@ fn should_keep_cloud_async_commit_visible_given_cloud_upload_failure_when_commit
         get_default(&engine, b"buffered-local-only"),
         Some(Bytes::from_static(b"buffered-value"))
     );
-    engine
-        .shutdown(std::time::Duration::from_secs(5))
-        .expect("shutdown before reopen");
+    assert_shutdown_fails_with_pending_cloud_uploads(&mut engine);
 
     fail::remove("midge::cloud::inject_fail_wal_upload");
     scenario.teardown();
@@ -466,7 +464,7 @@ fn should_recover_cloud_async_commit_given_intact_local_wal_when_upload_fails() 
     let _guard = failpoint_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let opts = opts_for_mode("cloud");
+    let opts = opts_for_mode("cloud").with_shutdown_cloud_drain_timeout(Duration::from_millis(100));
     let db_path = cloud_db_path(&opts);
     let remote_wal_dir = db_path.join("cloud_store").join("wal");
     let scenario = fail::FailScenario::setup();
@@ -481,9 +479,7 @@ fn should_recover_cloud_async_commit_given_intact_local_wal_when_upload_fails() 
         WriteOptions::cloud_async(),
     );
     let _metrics = wait_for_cloud_gap(&engine, 1);
-    engine
-        .shutdown(std::time::Duration::from_secs(5))
-        .expect("shutdown before same-node reopen");
+    assert_shutdown_fails_with_pending_cloud_uploads(&mut engine);
 
     fail::remove("midge::cloud::inject_fail_wal_upload");
     scenario.teardown();
@@ -515,7 +511,7 @@ fn should_fail_cloud_strict_commit_given_cloud_upload_failure_when_waiting_for_a
     let _guard = failpoint_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let opts = opts_for_mode("cloud");
+    let opts = opts_for_mode("cloud").with_shutdown_cloud_drain_timeout(Duration::from_millis(100));
     let db_path = cloud_db_path(&opts);
     let scenario = fail::FailScenario::setup();
     fail::cfg("midge::cloud::inject_fail_wal_upload", "return")
@@ -537,9 +533,7 @@ fn should_fail_cloud_strict_commit_given_cloud_upload_failure_when_waiting_for_a
     let error = tx
         .commit(WriteOptions::cloud_strict())
         .expect_err("cloud_strict should fail when the authoritative upload fails");
-    engine
-        .shutdown(std::time::Duration::from_secs(5))
-        .expect("shutdown before reopen");
+    assert_shutdown_fails_with_pending_cloud_uploads(&mut engine);
 
     // Assert
     match error {
@@ -723,6 +717,28 @@ fn shutdown_test_engine(mut engine: Engine) {
         .expect("shut down cloud test engine");
 }
 
+#[cfg(feature = "failpoints")]
+fn assert_shutdown_fails_with_pending_cloud_uploads(engine: &mut Engine) {
+    let started = Instant::now();
+    let error = engine
+        .shutdown(Duration::from_secs(5))
+        .expect_err("permanent upload failure must prevent a clean shutdown");
+    let elapsed = started.elapsed();
+
+    match error {
+        MidgeError::Internal(message) => assert!(
+            message.contains("cloud uploads")
+                && (message.contains("storage-owned") || message.contains("runtime-owned")),
+            "expected pending cloud-upload shutdown error, got: {message}"
+        ),
+        other => panic!("expected pending cloud-upload shutdown error, got: {other:?}"),
+    }
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "terminal cloud-upload shutdown exceeded its injected drain budget: {elapsed:?}"
+    );
+}
+
 fn cloud_open_options(db_path: &Path, recovery_policy: RecoveryPolicy) -> OpenOptions {
     OpenOptions::cloud_simulated(
         db_path.to_path_buf(),
@@ -790,13 +806,14 @@ fn wait_for_cloud_gap(engine: &Engine, min_sequence: u64) -> cntryl_midge::Runti
         let metrics = engine.get_runtime_metrics().expect("runtime metrics");
         if metrics.current_sequence >= min_sequence
             && metrics.wal_cloud_durable_seq < metrics.current_sequence
+            && metrics.health == EngineHealth::Degraded
         {
             return metrics;
         }
 
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for cloud durability gap; last metrics: seq={} cloud_seq={} health={:?}",
+            "timed out waiting for failed cloud durability; last metrics: seq={} cloud_seq={} health={:?}",
             metrics.current_sequence,
             metrics.wal_cloud_durable_seq,
             metrics.health

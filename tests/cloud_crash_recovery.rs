@@ -355,6 +355,7 @@ fn open_cloud_engine(db_path: &Path, policy: Option<CloudWritePolicy>) -> Engine
         memory_budget: None,
         cloud_write_policy: policy,
         simulated_cloud_local_storage_budget_bytes: None,
+        shutdown_cloud_drain_timeout: None,
     };
 
     Engine::open(opts.to_open_options()).expect("open cloud engine")
