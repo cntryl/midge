@@ -83,8 +83,8 @@ impl EventLoop {
                     // shutdown must keep admitting it until durability closes
                     // or the configured drain deadline expires.
                     self.drain_cloud_wal_upload_backlog_within(&shutdown_deadline);
-                    self.tick_hybrid_storage();
-                    self.drain_hybrid_storage_events();
+                    self.tick_hybrid_storage_within(&shutdown_deadline);
+                    self.drain_hybrid_storage_events_within(&shutdown_deadline);
                     if !shutdown_deadline.is_expired() {
                         self.drain_cloud_wal_upload_backlog_within(&shutdown_deadline);
                     }

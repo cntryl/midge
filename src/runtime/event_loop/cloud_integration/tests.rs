@@ -6230,6 +6230,91 @@ fn should_bound_runtime_owned_wal_admission_by_shutdown_deadline() -> crate::com
 }
 
 #[test]
+fn should_bound_pending_cloud_ack_by_shutdown_deadline_and_requeue_on_timeout(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: the upload worker has completed and queued its acknowledgement,
+    // but the runtime has not yet settled that ACK. Its readback proof is slower
+    // than the entire shutdown drain budget.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    el.runtime_response_timeout = Duration::from_millis(500);
+    el.shutdown_cloud_drain_timeout = Duration::from_millis(40);
+    let cloud_fs = Arc::new(
+        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
+            .expect("open delayed shutdown acknowledgement cloud backend"),
+    );
+    let delayed_cloud = Arc::new(ArmedDelayedHeadStorageBackend::new(
+        cloud_fs,
+        Duration::from_millis(250),
+    ));
+    let local: Arc<dyn crate::storage::StorageBackend> = Arc::new(
+        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("hybrid_local"))
+            .expect("open shutdown acknowledgement local backend"),
+    );
+    let cloud: Arc<dyn crate::storage::StorageBackend> = delayed_cloud.clone();
+    let (storage_event_tx, storage_event_rx) = crossbeam::channel::unbounded();
+    let storage = Arc::new(crate::storage::HybridStorage::new_with_event_sender(
+        local,
+        cloud,
+        storage_event_tx,
+    ));
+    el.set_hybrid_storage(Arc::clone(&storage));
+    el.hybrid_storage_events = Some(storage_event_rx.clone());
+
+    append_cloud_async_put(&mut el)?;
+    let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    let local_path = el
+        .state
+        .wal_dir
+        .join(crate::wal::segment_file_name(segment_id));
+    storage.enqueue_wal_segment(segment_id, &local_path, max_sequence)?;
+    assert!(storage.process_uploads().is_empty());
+    let ack_wait_started = Instant::now();
+    while storage_event_rx.is_empty() && ack_wait_started.elapsed() < Duration::from_secs(2) {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        !storage_event_rx.is_empty(),
+        "upload worker must queue the acknowledgement before shutdown begins"
+    );
+    assert_eq!(
+        storage.pending_upload_count(),
+        1,
+        "the unprocessed ACK must still own one storage queue entry"
+    );
+    delayed_cloud.arm();
+    let request_id = 90_405;
+    let response_rx = el.router.register(request_id, "Shutdown");
+
+    // Act
+    let started = Instant::now();
+    let outcome = el.handle_shutdown(Some(request_id));
+    let elapsed = started.elapsed();
+
+    // Assert
+    assert_eq!(outcome, super::super::HandleOutcome::Break);
+    assert!(
+        elapsed < Duration::from_millis(150),
+        "pending CloudAck settlement exceeded the shared shutdown deadline: {elapsed:?}"
+    );
+    assert!(matches!(
+        response_rx.try_recv(),
+        Ok(RuntimeResponse::Error {
+            request_id: response_id,
+            ..
+        }) if response_id == request_id
+    ));
+    assert_eq!(
+        el.cloud_wal.upload_backlog.get(&segment_id),
+        Some(&max_sequence),
+        "timed-out ACK settlement must retain the accepted WAL for retry"
+    );
+    assert_eq!(el.state.wal.cloud_durable_seq, 0);
+    Ok(())
+}
+
+#[test]
 fn should_poll_inflight_cloud_upload_on_interval_without_busy_spin(
 ) -> crate::common::MidgeResult<()> {
     // Arrange: the storage worker owns an upload whose provider proof is slow.

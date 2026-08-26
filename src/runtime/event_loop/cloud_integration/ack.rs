@@ -7,6 +7,17 @@ use crate::runtime::hybrid_persistence::HybridPersistence;
 
 impl EventLoop {
     pub(crate) fn tick_hybrid_storage(&mut self) {
+        self.tick_hybrid_storage_with_deadline(None);
+    }
+
+    pub(in crate::runtime::event_loop) fn tick_hybrid_storage_within(
+        &mut self,
+        deadline: &OperationDeadline,
+    ) {
+        self.tick_hybrid_storage_with_deadline(Some(deadline));
+    }
+
+    fn tick_hybrid_storage_with_deadline(&mut self, deadline: Option<&OperationDeadline>) {
         self.reap_cloud_wal_prune_worker();
         let Some(storage) = &self.hybrid_storage else {
             return;
@@ -17,12 +28,23 @@ impl EventLoop {
         // In polling mode, `process_uploads()` returns completion events.
         let storage_events = storage.process_uploads();
         for event in storage_events {
-            self.handle_storage_event(event);
+            self.handle_storage_event_with_deadline(event, deadline);
         }
         self.wake_write_stall_waiters();
     }
 
     pub(crate) fn drain_hybrid_storage_events(&mut self) {
+        self.drain_hybrid_storage_events_with_deadline(None);
+    }
+
+    pub(in crate::runtime::event_loop) fn drain_hybrid_storage_events_within(
+        &mut self,
+        deadline: &OperationDeadline,
+    ) {
+        self.drain_hybrid_storage_events_with_deadline(Some(deadline));
+    }
+
+    fn drain_hybrid_storage_events_with_deadline(&mut self, deadline: Option<&OperationDeadline>) {
         let Some(rx) = &self.hybrid_storage_events else {
             return;
         };
@@ -30,17 +52,25 @@ impl EventLoop {
         let rx = rx.clone();
 
         while let Ok(event) = rx.try_recv() {
-            self.handle_storage_event(event);
+            self.handle_storage_event_with_deadline(event, deadline);
         }
     }
 
     pub(crate) fn handle_storage_event(&mut self, event: crate::storage::StorageEvent) {
+        self.handle_storage_event_with_deadline(event, None);
+    }
+
+    fn handle_storage_event_with_deadline(
+        &mut self,
+        event: crate::storage::StorageEvent,
+        deadline: Option<&OperationDeadline>,
+    ) {
         match event {
             crate::storage::StorageEvent::CloudAck {
                 segment_id,
                 max_sequence,
             } => {
-                self.handle_storage_event_cloud_ack(segment_id, max_sequence);
+                self.handle_storage_event_cloud_ack(segment_id, max_sequence, deadline);
             }
             crate::storage::StorageEvent::CloudFail {
                 segment_id,
@@ -97,10 +127,16 @@ impl EventLoop {
         }
     }
 
-    fn handle_storage_event_cloud_ack(&mut self, segment_id: u64, max_sequence: u64) {
-        let deadline = self
-            .cloud_ack_deadline(segment_id)
-            .unwrap_or_else(OperationDeadline::unbounded);
+    fn handle_storage_event_cloud_ack(
+        &mut self,
+        segment_id: u64,
+        max_sequence: u64,
+        attempt_deadline: Option<&OperationDeadline>,
+    ) {
+        let deadline = attempt_deadline.copied().unwrap_or_else(|| {
+            self.cloud_ack_deadline(segment_id)
+                .unwrap_or_else(OperationDeadline::unbounded)
+        });
         if let Err(error) = self.validate_runtime_writer_lease_within(&deadline) {
             self.handle_cloud_upload_failure(
                 segment_id,
