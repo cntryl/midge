@@ -894,18 +894,6 @@ impl RuntimeState {
         );
     }
 
-    /// Invalidate cached idempotency allocations that are part of a failed WAL
-    /// segment upload. Any entry whose last allocated sequence is <= `max_sequence`
-    /// is removed so that retries will allocate fresh sequences.
-    pub fn invalidate_idempotency_allocations_up_to(&mut self, max_sequence: u64) {
-        self.sequence_idempotency_cache
-            .retain(|_request_id, (first_seq, count, _)| {
-                let last_seq = first_seq.saturating_add((*count as u64).saturating_sub(1));
-                // Keep entries that extend beyond the failed max_sequence
-                last_seq > max_sequence
-            });
-    }
-
     /// Get the next transaction ID
     pub fn next_txn_id(&mut self) -> u64 {
         self.next_txn_id += 1;

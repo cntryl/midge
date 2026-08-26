@@ -152,6 +152,8 @@ fn should_fail_all_generation_waiters_given_terminal_cloud_upload_error(
     event_loop.handle_storage_event(crate::storage::StorageEvent::CloudFail {
         segment_id: 0,
         error: "terminal upload failure".to_string(),
+        terminal: true,
+        failure_kind: crate::storage::CloudUploadFailureKind::Other,
     });
 
     // Assert
@@ -171,6 +173,93 @@ fn should_fail_all_generation_waiters_given_terminal_cloud_upload_error(
         ));
     }
     assert!(!event_loop.durability.has_pending_waiters());
+    Ok(())
+}
+
+#[test]
+fn should_preserve_timeout_variant_given_terminal_cloud_upload_timeout(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: a strict durability caller is still attached when the storage
+    // queue exhausts three callback-timeout attempts.
+    let mut event_loop = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let request_id = 46;
+    let response = event_loop.router.register(request_id, "TestRequest");
+    event_loop
+        .durability
+        .queue_waiter_for_key(0, DurabilityWaiter::CloudDurability { request_id });
+
+    // Act
+    event_loop.handle_storage_event(crate::storage::StorageEvent::CloudFail {
+        segment_id: 0,
+        error: "cloud WAL upload callback timed out".to_string(),
+        terminal: true,
+        failure_kind: crate::storage::CloudUploadFailureKind::Timeout,
+    });
+
+    // Assert
+    let response = response
+        .recv_timeout(Duration::from_secs(1))
+        .expect("terminal cloud timeout response");
+    assert!(matches!(
+        response,
+        RuntimeResponse::Error {
+            request_id: response_id,
+            error: crate::common::MidgeError::Timeout(message),
+        } if response_id == request_id && message.contains("timed out")
+    ));
+    Ok(())
+}
+
+#[test]
+fn should_retain_waiter_and_retry_identity_given_storage_owned_upload_failure(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: the storage queue still owns this segment because its internal
+    // retry budget has not been exhausted.
+    let mut event_loop = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    append_cloud_async_put(&mut event_loop)?;
+    let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut event_loop)?;
+    let request_id = 45;
+    let response = event_loop.router.register(request_id, "TestRequest");
+    event_loop
+        .durability
+        .queue_waiter_for_key(segment_id, DurabilityWaiter::CloudDurability { request_id });
+    event_loop
+        .state
+        .sequence_idempotency_cache
+        .insert(request_id, (max_sequence, 1, 0));
+
+    // Act
+    event_loop.handle_storage_event(crate::storage::StorageEvent::CloudFail {
+        segment_id,
+        error: "retryable upload failure".to_string(),
+        terminal: false,
+        failure_kind: crate::storage::CloudUploadFailureKind::Other,
+    });
+
+    // Assert
+    assert!(matches!(
+        response.try_recv(),
+        Err(crossbeam::channel::TryRecvError::Empty)
+    ));
+    assert_eq!(
+        event_loop
+            .durability
+            .cloud_durability_request_ids_at(segment_id),
+        vec![request_id]
+    );
+    assert_eq!(
+        event_loop.durability.cloud_segment_max_sequence(segment_id),
+        Some(max_sequence)
+    );
+    assert!(event_loop
+        .state
+        .sequence_idempotency_cache
+        .contains_key(&request_id));
+    assert!(!event_loop.state.persistence_anomaly_detected());
     Ok(())
 }
 
@@ -344,6 +433,446 @@ struct BlockingDeleteStorageBackend {
     block_key: String,
     delete_started: Mutex<Option<std::sync::mpsc::Sender<()>>>,
     release_delete: Arc<AtomicBool>,
+}
+
+struct ArmedDelayedHeadStorageBackend {
+    inner: Arc<crate::storage::filesystem::FileSystem>,
+    delay: Duration,
+    delay_next_head: AtomicBool,
+}
+
+struct CommitThenBlockCatalogReadbackBackend {
+    inner: Arc<crate::storage::filesystem::FileSystem>,
+    arm_catalog_write: AtomicBool,
+    block_next_catalog_head: AtomicBool,
+    retained_callbacks: Mutex<Vec<crate::storage::StorageCallback>>,
+}
+
+struct BudgetConsumingDdlBackend {
+    inner: Arc<crate::storage::filesystem::FileSystem>,
+    registry_head_calls: AtomicUsize,
+    registry_cas_timeouts: Mutex<Vec<Duration>>,
+}
+
+struct DelayedCommitDdlBackend {
+    inner: Arc<crate::storage::filesystem::FileSystem>,
+    delay_first_registry_cas: AtomicBool,
+    commit_complete: Arc<AtomicBool>,
+}
+
+impl DelayedCommitDdlBackend {
+    fn new(inner: Arc<crate::storage::filesystem::FileSystem>) -> Self {
+        Self {
+            inner,
+            delay_first_registry_cas: AtomicBool::new(true),
+            commit_complete: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn commit_complete(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.commit_complete)
+    }
+}
+
+impl BudgetConsumingDdlBackend {
+    fn new(inner: Arc<crate::storage::filesystem::FileSystem>) -> Self {
+        Self {
+            inner,
+            registry_head_calls: AtomicUsize::new(0),
+            registry_cas_timeouts: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn registry_cas_timeouts(&self) -> Vec<Duration> {
+        self.registry_cas_timeouts
+            .lock()
+            .expect("read observed DDL CAS timeouts")
+            .clone()
+    }
+}
+
+impl CommitThenBlockCatalogReadbackBackend {
+    fn new(inner: Arc<crate::storage::filesystem::FileSystem>) -> Self {
+        Self {
+            inner,
+            arm_catalog_write: AtomicBool::new(false),
+            block_next_catalog_head: AtomicBool::new(false),
+            retained_callbacks: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn arm(&self) {
+        self.arm_catalog_write.store(true, Ordering::SeqCst);
+    }
+}
+
+impl ArmedDelayedHeadStorageBackend {
+    fn new(inner: Arc<crate::storage::filesystem::FileSystem>, delay: Duration) -> Self {
+        Self {
+            inner,
+            delay,
+            delay_next_head: AtomicBool::new(false),
+        }
+    }
+
+    fn arm(&self) {
+        self.delay_next_head.store(true, Ordering::SeqCst);
+    }
+}
+
+impl crate::storage::StorageBackend for ArmedDelayedHeadStorageBackend {
+    fn submit_read(&self, key: &str, callback: crate::storage::StorageCallback) {
+        crate::storage::StorageBackend::submit_read(self.inner.as_ref(), key, callback);
+    }
+
+    fn submit_write(&self, key: &str, data: Vec<u8>, callback: crate::storage::StorageCallback) {
+        crate::storage::StorageBackend::submit_write(self.inner.as_ref(), key, data, callback);
+    }
+
+    fn submit_write_with_headers(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::StorageBackend::submit_write_with_headers(
+            self.inner.as_ref(),
+            key,
+            data,
+            headers,
+            callback,
+        );
+    }
+
+    fn submit_delete(&self, key: &str, callback: crate::storage::StorageCallback) {
+        crate::storage::StorageBackend::submit_delete(self.inner.as_ref(), key, callback);
+    }
+
+    fn submit_delete_with_headers(
+        &self,
+        key: &str,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::StorageBackend::submit_delete_with_headers(
+            self.inner.as_ref(),
+            key,
+            headers,
+            callback,
+        );
+    }
+
+    fn submit_list(&self, prefix: &str, callback: crate::storage::StorageCallback) {
+        crate::storage::StorageBackend::submit_list(self.inner.as_ref(), prefix, callback);
+    }
+
+    fn submit_head(&self, key: &str, callback: crate::storage::StorageCallback) {
+        if self.delay_next_head.swap(false, Ordering::SeqCst) {
+            let inner = Arc::clone(&self.inner);
+            let key = key.to_string();
+            let delay = self.delay;
+            std::thread::spawn(move || {
+                std::thread::sleep(delay);
+                crate::storage::StorageBackend::submit_head(inner.as_ref(), &key, callback);
+            });
+            return;
+        }
+        crate::storage::StorageBackend::submit_head(self.inner.as_ref(), key, callback);
+    }
+}
+
+impl crate::storage::StorageBackend for CommitThenBlockCatalogReadbackBackend {
+    fn submit_read(&self, key: &str, callback: crate::storage::StorageCallback) {
+        crate::storage::StorageBackend::submit_read(self.inner.as_ref(), key, callback);
+    }
+
+    fn submit_write(&self, key: &str, data: Vec<u8>, callback: crate::storage::StorageCallback) {
+        crate::storage::StorageBackend::submit_write(self.inner.as_ref(), key, data, callback);
+    }
+
+    fn submit_write_with_headers(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::StorageCallback,
+    ) {
+        if key == crate::wal::cloud_catalog::OBJECT_KEY
+            && self.arm_catalog_write.swap(false, Ordering::SeqCst)
+        {
+            let (inner_tx, inner_rx) = std::sync::mpsc::channel();
+            crate::storage::StorageBackend::submit_write_with_headers(
+                self.inner.as_ref(),
+                key,
+                data,
+                headers,
+                inner_tx,
+            );
+            let event = inner_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("catalog CAS fixture completion");
+            if matches!(
+                event,
+                crate::storage::StorageEvent::WriteComplete {
+                    result: crate::storage::StorageOutcome::Ok(()),
+                    ..
+                }
+            ) {
+                self.block_next_catalog_head.store(true, Ordering::SeqCst);
+            }
+            let _ = callback.send(event);
+            return;
+        }
+
+        crate::storage::StorageBackend::submit_write_with_headers(
+            self.inner.as_ref(),
+            key,
+            data,
+            headers,
+            callback,
+        );
+    }
+
+    fn submit_delete(&self, key: &str, callback: crate::storage::StorageCallback) {
+        crate::storage::StorageBackend::submit_delete(self.inner.as_ref(), key, callback);
+    }
+
+    fn submit_delete_with_headers(
+        &self,
+        key: &str,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::StorageBackend::submit_delete_with_headers(
+            self.inner.as_ref(),
+            key,
+            headers,
+            callback,
+        );
+    }
+
+    fn submit_list(&self, prefix: &str, callback: crate::storage::StorageCallback) {
+        crate::storage::StorageBackend::submit_list(self.inner.as_ref(), prefix, callback);
+    }
+
+    fn submit_head(&self, key: &str, callback: crate::storage::StorageCallback) {
+        if key == crate::wal::cloud_catalog::OBJECT_KEY
+            && self.block_next_catalog_head.swap(false, Ordering::SeqCst)
+        {
+            self.retained_callbacks
+                .lock()
+                .expect("retain blocked catalog readback callback")
+                .push(callback);
+            return;
+        }
+        crate::storage::StorageBackend::submit_head(self.inner.as_ref(), key, callback);
+    }
+}
+
+impl crate::storage::StorageBackend for BudgetConsumingDdlBackend {
+    fn submit_read(&self, key: &str, callback: crate::storage::StorageCallback) {
+        crate::storage::StorageBackend::submit_read(self.inner.as_ref(), key, callback);
+    }
+
+    fn submit_write(&self, key: &str, data: Vec<u8>, callback: crate::storage::StorageCallback) {
+        crate::storage::StorageBackend::submit_write(self.inner.as_ref(), key, data, callback);
+    }
+
+    fn submit_write_with_headers(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::StorageCallback,
+    ) {
+        if key == crate::runtime::ddl::REMOTE_DDL_REGISTRY_KEY {
+            let inner = Arc::clone(&self.inner);
+            let key = key.to_string();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(250));
+                crate::storage::StorageBackend::submit_write_with_headers(
+                    inner.as_ref(),
+                    &key,
+                    data,
+                    headers,
+                    callback,
+                );
+            });
+            return;
+        }
+        crate::storage::StorageBackend::submit_write_with_headers(
+            self.inner.as_ref(),
+            key,
+            data,
+            headers,
+            callback,
+        );
+    }
+
+    fn submit_write_with_headers_and_timeout(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        timeout: Duration,
+        callback: crate::storage::StorageCallback,
+    ) {
+        if key == crate::runtime::ddl::REMOTE_DDL_REGISTRY_KEY {
+            self.registry_cas_timeouts
+                .lock()
+                .expect("record deadline-bounded DDL CAS timeout")
+                .push(timeout);
+            let _ = callback.send(crate::storage::StorageEvent::WriteComplete {
+                key: key.to_string(),
+                result: crate::storage::StorageOutcome::Err(
+                    "remote request timed out before mutation".to_string(),
+                ),
+            });
+            return;
+        }
+        self.submit_write_with_headers(key, data, headers, callback);
+    }
+
+    fn submit_delete(&self, key: &str, callback: crate::storage::StorageCallback) {
+        crate::storage::StorageBackend::submit_delete(self.inner.as_ref(), key, callback);
+    }
+
+    fn submit_delete_with_headers(
+        &self,
+        key: &str,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::StorageBackend::submit_delete_with_headers(
+            self.inner.as_ref(),
+            key,
+            headers,
+            callback,
+        );
+    }
+
+    fn submit_list(&self, prefix: &str, callback: crate::storage::StorageCallback) {
+        crate::storage::StorageBackend::submit_list(self.inner.as_ref(), prefix, callback);
+    }
+
+    fn submit_head(&self, key: &str, callback: crate::storage::StorageCallback) {
+        if key == crate::runtime::ddl::REMOTE_DDL_REGISTRY_KEY
+            && self.registry_head_calls.fetch_add(1, Ordering::SeqCst) == 0
+        {
+            let inner = Arc::clone(&self.inner);
+            let key = key.to_string();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                crate::storage::StorageBackend::submit_head(inner.as_ref(), &key, callback);
+            });
+            return;
+        }
+        crate::storage::StorageBackend::submit_head(self.inner.as_ref(), key, callback);
+    }
+}
+
+impl crate::storage::StorageBackend for DelayedCommitDdlBackend {
+    fn submit_read(&self, key: &str, callback: crate::storage::StorageCallback) {
+        crate::storage::StorageBackend::submit_read(self.inner.as_ref(), key, callback);
+    }
+
+    fn submit_write(&self, key: &str, data: Vec<u8>, callback: crate::storage::StorageCallback) {
+        crate::storage::StorageBackend::submit_write(self.inner.as_ref(), key, data, callback);
+    }
+
+    fn submit_write_with_headers(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::StorageBackend::submit_write_with_headers(
+            self.inner.as_ref(),
+            key,
+            data,
+            headers,
+            callback,
+        );
+    }
+
+    fn submit_write_with_headers_and_timeout(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        timeout: Duration,
+        callback: crate::storage::StorageCallback,
+    ) {
+        if key == crate::runtime::ddl::REMOTE_DDL_REGISTRY_KEY
+            && self.delay_first_registry_cas.swap(false, Ordering::SeqCst)
+        {
+            let inner = Arc::clone(&self.inner);
+            let key_for_worker = key.to_string();
+            let commit_complete = Arc::clone(&self.commit_complete);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                let (tx, rx) = std::sync::mpsc::channel();
+                crate::storage::StorageBackend::submit_write_with_headers(
+                    inner.as_ref(),
+                    &key_for_worker,
+                    data,
+                    headers,
+                    tx,
+                );
+                let committed = matches!(
+                    rx.recv_timeout(Duration::from_secs(1)),
+                    Ok(crate::storage::StorageEvent::WriteComplete {
+                        result: crate::storage::StorageOutcome::Ok(()),
+                        ..
+                    })
+                );
+                commit_complete.store(committed, Ordering::SeqCst);
+            });
+            let _ = callback.send(crate::storage::StorageEvent::WriteComplete {
+                key: key.to_string(),
+                result: crate::storage::StorageOutcome::Err(format!(
+                    "remote request timed out after submission (budget {timeout:?})"
+                )),
+            });
+            return;
+        }
+        crate::storage::StorageBackend::submit_write_with_headers_and_timeout(
+            self.inner.as_ref(),
+            key,
+            data,
+            headers,
+            timeout,
+            callback,
+        );
+    }
+
+    fn submit_delete(&self, key: &str, callback: crate::storage::StorageCallback) {
+        crate::storage::StorageBackend::submit_delete(self.inner.as_ref(), key, callback);
+    }
+
+    fn submit_delete_with_headers(
+        &self,
+        key: &str,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::StorageBackend::submit_delete_with_headers(
+            self.inner.as_ref(),
+            key,
+            headers,
+            callback,
+        );
+    }
+
+    fn submit_list(&self, prefix: &str, callback: crate::storage::StorageCallback) {
+        crate::storage::StorageBackend::submit_list(self.inner.as_ref(), prefix, callback);
+    }
+
+    fn submit_head(&self, key: &str, callback: crate::storage::StorageCallback) {
+        crate::storage::StorageBackend::submit_head(self.inner.as_ref(), key, callback);
+    }
 }
 
 impl BlockingDeleteStorageBackend {
@@ -818,10 +1347,11 @@ fn add_valid_range_tombstone_manifest_sst_for_test(
 }
 
 fn drain_prune_completion_for_test(el: &mut EventLoop) {
-    let deadline = Instant::now() + Duration::from_secs(1);
+    let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline {
         el.tick_hybrid_storage();
-        if el.cloud_wal.prune_inflight.is_empty() {
+        el.drain_hybrid_storage_events();
+        if el.cloud_wal.prune_inflight.is_empty() && el.cloud_wal_prune_worker.is_none() {
             return;
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -882,6 +1412,216 @@ fn delete_cloud_metadata_for_test(cloud: &crate::storage::cloud::CloudStorage, f
             ..
         }) => {}
         other => panic!("metadata delete for '{key}' failed: {other:?}"),
+    }
+}
+
+struct BudgetConsumingMetadataBackend {
+    inner: crate::storage::cloud::MockCloudBackend,
+    get_calls: AtomicUsize,
+    retained_callbacks: Mutex<Vec<crate::storage::cloud::CloudCallback>>,
+}
+
+struct BudgetConsumingMetadataProofBackend {
+    inner: Arc<crate::storage::cloud::MockCloudBackend>,
+    get_calls: AtomicUsize,
+    retained_callbacks: Mutex<Vec<crate::storage::cloud::CloudCallback>>,
+}
+
+struct ProviderTimeoutMetadataBackend {
+    inner: crate::storage::cloud::MockCloudBackend,
+}
+
+impl ProviderTimeoutMetadataBackend {
+    fn new() -> Self {
+        Self {
+            inner: crate::storage::cloud::MockCloudBackend::new(),
+        }
+    }
+}
+
+impl crate::storage::cloud::CloudBackend for ProviderTimeoutMetadataBackend {
+    fn submit_put(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        self.inner.submit_put(key, data, headers, callback);
+    }
+
+    fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        let _ = callback.send(crate::storage::cloud::CloudEvent::Get {
+            key: key.to_string(),
+            result: crate::storage::cloud::CloudOutcome::Err(
+                crate::storage::cloud::CloudError::Transport(
+                    "request timed out after 30 ms".to_string(),
+                ),
+            ),
+        });
+    }
+
+    fn submit_get_range(
+        &self,
+        key: &str,
+        start: u64,
+        end: Option<u64>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        self.inner.submit_get_range(key, start, end, callback);
+    }
+
+    fn submit_delete(
+        &self,
+        key: &str,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        self.inner.submit_delete(key, headers, callback);
+    }
+
+    fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
+        self.inner.submit_list(prefix, callback);
+    }
+
+    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        self.inner.submit_head(key, callback);
+    }
+}
+
+impl BudgetConsumingMetadataProofBackend {
+    fn new(inner: Arc<crate::storage::cloud::MockCloudBackend>) -> Self {
+        Self {
+            inner,
+            get_calls: AtomicUsize::new(0),
+            retained_callbacks: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl crate::storage::cloud::CloudBackend for BudgetConsumingMetadataProofBackend {
+    fn submit_put(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        self.inner.submit_put(key, data, headers, callback);
+    }
+
+    fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        if self.get_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            let inner = Arc::clone(&self.inner);
+            let key = key.to_string();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(80));
+                inner.submit_get(&key, callback);
+            });
+        } else {
+            self.inner.submit_get(key, callback);
+        }
+    }
+
+    fn submit_get_range(
+        &self,
+        key: &str,
+        start: u64,
+        end: Option<u64>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        self.inner.submit_get_range(key, start, end, callback);
+    }
+
+    fn submit_delete(
+        &self,
+        key: &str,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        self.inner.submit_delete(key, headers, callback);
+    }
+
+    fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
+        self.inner.submit_list(prefix, callback);
+    }
+
+    fn submit_head(&self, _key: &str, callback: crate::storage::cloud::CloudCallback) {
+        self.retained_callbacks
+            .lock()
+            .expect("retain blocked metadata proof callback")
+            .push(callback);
+    }
+}
+
+impl BudgetConsumingMetadataBackend {
+    fn new() -> Self {
+        Self {
+            inner: crate::storage::cloud::MockCloudBackend::new(),
+            get_calls: AtomicUsize::new(0),
+            retained_callbacks: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl crate::storage::cloud::CloudBackend for BudgetConsumingMetadataBackend {
+    fn submit_put(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        self.inner.submit_put(key, data, headers, callback);
+    }
+
+    fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        if self.get_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            let key = key.to_string();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(80));
+                let _ = callback.send(crate::storage::cloud::CloudEvent::Get {
+                    key,
+                    result: crate::storage::cloud::CloudOutcome::Err(
+                        crate::storage::cloud::CloudError::NotFound(
+                            "delayed metadata miss".to_string(),
+                        ),
+                    ),
+                });
+            });
+        } else {
+            self.retained_callbacks
+                .lock()
+                .expect("retain blocked metadata callback")
+                .push(callback);
+        }
+    }
+
+    fn submit_get_range(
+        &self,
+        key: &str,
+        start: u64,
+        end: Option<u64>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        self.inner.submit_get_range(key, start, end, callback);
+    }
+
+    fn submit_delete(
+        &self,
+        key: &str,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        self.inner.submit_delete(key, headers, callback);
+    }
+
+    fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
+        self.inner.submit_list(prefix, callback);
+    }
+
+    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        self.inner.submit_head(key, callback);
     }
 }
 
@@ -954,6 +1694,276 @@ impl crate::storage::cloud::CloudBackend for AdvanceManifestBeforeHeadBackend {
         }
         self.inner.submit_head(key, callback);
     }
+}
+
+#[test]
+fn should_bound_create_metadata_mirror_by_runtime_response_deadline(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: the first metadata GET consumes most of the caller budget and
+    // the next callback never arrives. The committed DDL must still succeed,
+    // but its auxiliary mirror must not receive a fresh storage timeout.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    el.runtime_response_timeout = Duration::from_millis(300);
+    el.cloud_metadata_storage = Some(Arc::new(
+        crate::storage::cloud::CloudStorage::new_with_timeout(
+            Arc::new(BudgetConsumingMetadataBackend::new()),
+            "metadata-deadline".to_string(),
+            Duration::from_secs(1),
+        ),
+    ));
+    let request_id = 9_601;
+    let response_rx = el.router.register(request_id, "ManifestCreateColumnFamily");
+    let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
+
+    // Act
+    let started = Instant::now();
+    el.handle_runtime_msg(
+        RuntimeMsg::ManifestCreateColumnFamily {
+            request_id,
+            name: "deadline-bounded".to_string(),
+        },
+        &msg_rx,
+    );
+    let elapsed = started.elapsed();
+
+    // Assert
+    assert!(
+        elapsed < Duration::from_millis(350),
+        "metadata mirror exceeded the caller's shared deadline: {elapsed:?}"
+    );
+    assert!(matches!(
+        response_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("committed create response"),
+        RuntimeResponse::ColumnFamilyCreated {
+            request_id: 9_601,
+            ..
+        }
+    ));
+    assert!(
+        el.state.persistence_anomaly_detected(),
+        "an incomplete auxiliary metadata mirror must degrade persistence health"
+    );
+    Ok(())
+}
+
+#[test]
+fn should_share_create_deadline_with_remote_ddl_registry_cas() -> crate::common::MidgeResult<()> {
+    // Arrange: the registry existence check consumes most of the request
+    // budget. The following CAS must receive only the remaining allowance,
+    // rather than a fresh storage timeout.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    el.runtime_response_timeout = Duration::from_secs(1);
+    let cloud_fs = Arc::new(
+        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
+            .expect("open deadline-bounded DDL cloud backend"),
+    );
+    let ddl_cloud = Arc::new(BudgetConsumingDdlBackend::new(cloud_fs));
+    let local = Arc::new(
+        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("hybrid_local"))
+            .expect("open deadline-bounded DDL local backend"),
+    );
+    el.hybrid_storage = Some(Arc::new(crate::storage::HybridStorage::with_policy(
+        local,
+        ddl_cloud.clone(),
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )));
+    let request_id = 9_603;
+    let response_rx = el.router.register(request_id, "ManifestCreateColumnFamily");
+    let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
+
+    // Act
+    let started = Instant::now();
+    el.handle_runtime_msg(
+        RuntimeMsg::ManifestCreateColumnFamily {
+            request_id,
+            name: "ddl-deadline-bounded".to_string(),
+        },
+        &msg_rx,
+    );
+    let elapsed = started.elapsed();
+
+    // Assert
+    assert!(
+        elapsed < Duration::from_millis(1_200),
+        "remote DDL registry work escaped the shared deadline: {elapsed:?}"
+    );
+    let response = response_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("DDL deadline response");
+    assert!(
+        matches!(
+            response,
+            RuntimeResponse::Error {
+                error: crate::common::MidgeError::Timeout(_),
+                ..
+            }
+        ),
+        "unexpected DDL deadline response: {response:?}"
+    );
+    let cas_timeouts = ddl_cloud.registry_cas_timeouts();
+    assert_eq!(
+        cas_timeouts.len(),
+        1,
+        "the DDL registry CAS must be attempted once"
+    );
+    assert!(
+        cas_timeouts[0] < Duration::from_millis(900),
+        "DDL CAS received a fresh timeout instead of the remaining request budget: {:?}",
+        cas_timeouts[0]
+    );
+    assert!(
+        el.state
+            .manifest
+            .get_column_family_by_name("ddl-deadline-bounded")
+            .is_none(),
+        "a registry CAS that did not start within budget must not commit locally"
+    );
+    Ok(())
+}
+
+#[test]
+fn should_keep_ddl_fenced_until_delayed_cas_commit_is_observed() -> crate::common::MidgeResult<()> {
+    // Arrange: the provider reports a timeout after admitting the CAS, an
+    // immediate authority reread still sees the old registry, and the mutation
+    // commits later on its provider worker.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    el.runtime_response_timeout = Duration::from_secs(1);
+    let cloud_fs = Arc::new(
+        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
+            .expect("open delayed DDL cloud backend"),
+    );
+    let delayed_cloud = Arc::new(DelayedCommitDdlBackend::new(cloud_fs));
+    let commit_complete = delayed_cloud.commit_complete();
+    let local = Arc::new(
+        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("hybrid_local"))
+            .expect("open delayed DDL local backend"),
+    );
+    el.hybrid_storage = Some(Arc::new(crate::storage::HybridStorage::with_policy(
+        local,
+        delayed_cloud,
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )));
+    let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
+
+    // Act: the first request becomes ambiguous; a second DDL must not clear the
+    // prepare merely because its early reread is negative.
+    let first_request = 9_604;
+    let first_response = el
+        .router
+        .register(first_request, "ManifestCreateColumnFamily");
+    el.handle_runtime_msg(
+        RuntimeMsg::ManifestCreateColumnFamily {
+            request_id: first_request,
+            name: "delayed-authority".to_string(),
+        },
+        &msg_rx,
+    );
+    assert!(matches!(
+        first_response.recv_timeout(Duration::from_secs(1)),
+        Ok(RuntimeResponse::Error {
+            error: crate::common::MidgeError::Fenced(_),
+            ..
+        })
+    ));
+    assert!(el.ddl_authority_ambiguous);
+    assert!(el.state.db_path.join("ddl.prepare.json").exists());
+
+    let blocked_request = 9_605;
+    let blocked_response = el
+        .router
+        .register(blocked_request, "ManifestCreateColumnFamily");
+    el.handle_runtime_msg(
+        RuntimeMsg::ManifestCreateColumnFamily {
+            request_id: blocked_request,
+            name: "must-stay-fenced".to_string(),
+        },
+        &msg_rx,
+    );
+    assert!(matches!(
+        blocked_response.recv_timeout(Duration::from_secs(1)),
+        Ok(RuntimeResponse::Error {
+            error: crate::common::MidgeError::Fenced(_),
+            ..
+        })
+    ));
+    assert!(el.ddl_authority_ambiguous);
+    assert!(el.state.db_path.join("ddl.prepare.json").exists());
+
+    let commit_deadline = Instant::now() + Duration::from_secs(1);
+    while !commit_complete.load(Ordering::SeqCst) && Instant::now() < commit_deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(commit_complete.load(Ordering::SeqCst));
+
+    let reconcile_request = 9_606;
+    let reconcile_response = el
+        .router
+        .register(reconcile_request, "ManifestCreateColumnFamily");
+    el.handle_runtime_msg(
+        RuntimeMsg::ManifestCreateColumnFamily {
+            request_id: reconcile_request,
+            name: "delayed-authority".to_string(),
+        },
+        &msg_rx,
+    );
+
+    // Assert: positive operation-id readback applies the committed edit and is
+    // the only event that clears the in-process authority fence.
+    assert!(matches!(
+        reconcile_response.recv_timeout(Duration::from_secs(1)),
+        Ok(RuntimeResponse::ColumnFamilyCreated { .. })
+    ));
+    assert!(!el.ddl_authority_ambiguous);
+    assert!(!el.state.db_path.join("ddl.prepare.json").exists());
+    assert!(el
+        .state
+        .manifest
+        .get_column_family_by_name("delayed-authority")
+        .is_some());
+    Ok(())
+}
+
+#[test]
+fn should_preserve_provider_timeout_from_manifest_metadata_mirror() -> crate::common::MidgeResult<()>
+{
+    // Arrange: provider executors report their own request deadline through a
+    // typed transport error before the outer runtime deadline expires.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    el.cloud_metadata_storage = Some(Arc::new(crate::storage::cloud::CloudStorage::new(
+        Arc::new(ProviderTimeoutMetadataBackend::new()),
+        "metadata-provider-timeout".to_string(),
+    )));
+    let request_id = 9_602;
+    let response_rx = el.router.register(request_id, "ManifestPersist");
+    let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
+
+    // Act
+    el.handle_runtime_msg(RuntimeMsg::ManifestPersist { request_id }, &msg_rx);
+
+    // Assert
+    match response_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("manifest persistence response")
+    {
+        RuntimeResponse::Error {
+            error: crate::common::MidgeError::Timeout(message),
+            ..
+        } => assert!(
+            message.contains("metadata"),
+            "unexpected timeout: {message}"
+        ),
+        other => panic!("expected typed metadata timeout, got {other:?}"),
+    }
+    Ok(())
 }
 
 #[test]
@@ -1165,6 +2175,403 @@ fn should_not_prune_remote_wal_when_manifest_sst_is_missing_from_cloud(
 }
 
 #[test]
+fn should_keep_event_loop_responsive_while_callerless_wal_prune_finishes(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: seed a valid prune candidate while the backend is responsive,
+    // then make one healthy provider proof slower than the response budget.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    el.runtime_response_timeout = Duration::from_millis(100);
+    let cloud_fs = Arc::new(
+        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
+            .expect("open delayed prune cloud backend"),
+    );
+    let delayed_cloud = Arc::new(ArmedDelayedHeadStorageBackend::new(
+        cloud_fs,
+        Duration::from_millis(250),
+    ));
+    let local = Arc::new(
+        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("hybrid_local"))
+            .expect("open delayed prune local backend"),
+    );
+    el.hybrid_storage = Some(Arc::new(crate::storage::HybridStorage::with_policy(
+        local,
+        delayed_cloud.clone(),
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )));
+
+    let segment_id = 61;
+    let max_sequence = 61;
+    seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
+    el.state.wal.cloud_durable_seq = max_sequence;
+    add_valid_manifest_sst_for_test(&mut el, "deadline-prune.sst", max_sequence);
+    delayed_cloud.arm();
+
+    // Act
+    let started = Instant::now();
+    el.prune_cloud_wal_segments_covered_by_manifest();
+    let elapsed = started.elapsed();
+
+    // Assert
+    assert!(
+        elapsed < Duration::from_millis(150),
+        "callerless WAL prune monopolized the event loop: {elapsed:?}"
+    );
+    drain_prune_completion_for_test(&mut el);
+    assert!(
+        !remote_wal_path_for_test(&el, segment_id).exists(),
+        "slow-but-valid callerless cleanup should eventually finish"
+    );
+    assert!(!el.cloud_wal.acked_segments.contains_key(&segment_id));
+    assert!(!el.cloud_wal.prune_inflight.contains(&segment_id));
+    Ok(())
+}
+
+#[test]
+fn should_keep_event_loop_responsive_when_cloud_metadata_proof_times_out(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: all WAL/SST proofs are responsive. The metadata GET completes,
+    // but its following HEAD never answers.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    el.runtime_response_timeout = Duration::from_millis(100);
+    let segment_id = 62;
+    let max_sequence = 62;
+    seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
+    el.state.wal.cloud_durable_seq = max_sequence;
+    add_valid_manifest_sst_for_test(&mut el, "metadata-deadline-prune.sst", max_sequence);
+    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
+        .map_err(crate::common::MidgeError::Internal)?;
+
+    let inner = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+    let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new_with_timeout(
+        Arc::new(BudgetConsumingMetadataProofBackend::new(Arc::clone(&inner))),
+        "metadata-prune-deadline".to_string(),
+        Duration::from_secs(1),
+    ));
+    put_all_cloud_metadata_for_test(&metadata_storage, &el.state.db_path);
+    el.cloud_metadata_storage = Some(metadata_storage);
+
+    // Act
+    let started = Instant::now();
+    el.prune_cloud_wal_segments_covered_by_manifest();
+    let elapsed = started.elapsed();
+
+    // Assert
+    assert!(
+        elapsed < Duration::from_millis(150),
+        "metadata proof monopolized the event loop: {elapsed:?}"
+    );
+    drain_prune_completion_for_test(&mut el);
+    assert_eq!(
+        el.cloud_wal.acked_segments.get(&segment_id),
+        Some(&max_sequence),
+        "metadata timeout must retain WAL authority for retry"
+    );
+    assert!(!el.cloud_wal.prune_inflight.contains(&segment_id));
+    Ok(())
+}
+
+#[test]
+fn should_reconcile_wal_prune_when_catalog_retirement_commits_before_timeout(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: the provider commits the catalog retirement, then withholds the
+    // first readback HEAD until the maintenance deadline expires.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    el.runtime_response_timeout = Duration::from_millis(100);
+    let cloud_fs = Arc::new(
+        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
+            .expect("open ambiguous prune cloud backend"),
+    );
+    let ambiguous_cloud = Arc::new(CommitThenBlockCatalogReadbackBackend::new(cloud_fs));
+    let local: Arc<dyn crate::storage::StorageBackend> = Arc::new(
+        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("hybrid_local"))
+            .expect("open ambiguous prune local backend"),
+    );
+    let ambiguous_backend: Arc<dyn crate::storage::StorageBackend> = ambiguous_cloud.clone();
+    let (storage_event_tx, storage_event_rx) = crossbeam::channel::unbounded();
+    el.hybrid_storage = Some(Arc::new(
+        crate::storage::HybridStorage::new_with_class_stores_and_event_sender(
+            local,
+            Arc::clone(&ambiguous_backend),
+            Arc::clone(&ambiguous_backend),
+            ambiguous_backend,
+            storage_event_tx,
+            Duration::from_millis(100),
+        ),
+    ));
+    el.hybrid_storage_events = Some(storage_event_rx);
+
+    let segment_id = 63;
+    let max_sequence = 63;
+    seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
+    el.state.wal.cloud_durable_seq = max_sequence;
+    add_valid_manifest_sst_for_test(&mut el, "ambiguous-retirement.sst", max_sequence);
+    ambiguous_cloud.arm();
+
+    // Act: the first pass times out after the authority update. A later pass
+    // must recognize that committed state and finish local bookkeeping.
+    el.prune_cloud_wal_segments_covered_by_manifest();
+    drain_prune_completion_for_test(&mut el);
+    assert_eq!(
+        el.cloud_wal.acked_segments.get(&segment_id),
+        Some(&max_sequence),
+        "ambiguous completion should remain retryable until readback"
+    );
+    let catalog_proof = el
+        .hybrid_storage
+        .as_ref()
+        .expect("hybrid storage")
+        .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
+        .expect("read catalog after ambiguous retirement");
+    let catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(catalog_proof.bytes())
+        .expect("decode catalog after ambiguous retirement");
+    assert!(
+        !catalog.segments.contains_key(&segment_id),
+        "the first catalog CAS must have committed before its readback timed out"
+    );
+    el.prune_cloud_wal_segments_covered_by_manifest();
+    drain_prune_completion_for_test(&mut el);
+
+    // Assert
+    assert!(
+        !el.cloud_wal.acked_segments.contains_key(&segment_id),
+        "a confirmed-absent catalog entry must settle the prior ambiguous retirement"
+    );
+    assert!(!el.cloud_wal.prune_inflight.contains(&segment_id));
+    assert!(
+        remote_wal_path_for_test(&el, segment_id).exists(),
+        "ambiguous retirement may leak the ignored WAL object but must not delete it without its proof"
+    );
+    Ok(())
+}
+
+#[test]
+fn should_retain_reclaimed_sst_when_salvage_metadata_mirror_exceeds_deadline(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: salvage mode may keep serving through metadata degradation, but
+    // destructive GC still needs proof that the remote manifest was updated.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    el.state
+        .set_recovery_policy_for_test(crate::config::RecoveryPolicy::Salvage);
+    let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+    el.cloud_metadata_storage = Some(Arc::new(crate::storage::cloud::CloudStorage::new(
+        metadata_backend,
+        "salvage-gc-deadline".to_string(),
+    )));
+    let sst_name = "salvage-retained-after-mirror-timeout.sst";
+    let sst_bytes = valid_sst_bytes_for_test(b"salvage", b"value", 64);
+    el.hybrid_storage
+        .as_ref()
+        .expect("hybrid storage")
+        .write_sst_object(sst_name, sst_bytes)?;
+    el.gc_actor
+        .queue_manifest_reclamation([sst_name.to_string()]);
+    let expired = crate::common::OperationDeadline::from_budget(Duration::ZERO);
+
+    // Act
+    el.retry_gc_within(&expired);
+
+    // Assert
+    assert!(
+        el.gc_actor.has_manifest_reclamation(),
+        "metadata timeout must keep destructive reclamation queued even in salvage mode"
+    );
+    assert!(
+        remote_sst_path_for_test(&el, sst_name).exists(),
+        "remote SST must remain while remote metadata may still reference it"
+    );
+    Ok(())
+}
+
+#[test]
+fn should_retry_manifest_reclamation_after_metadata_publication_timeout(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: the first attempt has no budget left, so the SST must remain
+    // queued until callerless maintenance can publish the manifest safely.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+    el.cloud_metadata_storage = Some(Arc::new(crate::storage::cloud::CloudStorage::new(
+        metadata_backend,
+        "gc-publication-retry".to_string(),
+    )));
+    let sst_name = "reclaimed-after-metadata-retry.sst";
+    let sst_bytes = valid_sst_bytes_for_test(b"retry", b"value", 65);
+    el.hybrid_storage
+        .as_ref()
+        .expect("hybrid storage")
+        .write_sst_object(sst_name, sst_bytes)?;
+    el.gc_actor
+        .queue_manifest_reclamation([sst_name.to_string()]);
+    let expired = crate::common::OperationDeadline::from_budget(Duration::ZERO);
+    el.retry_gc_within(&expired);
+    assert!(el.gc_actor.has_manifest_reclamation());
+    assert!(remote_sst_path_for_test(&el, sst_name).exists());
+
+    // Act: no new GC request arrives. A normal event-loop progress pass after
+    // the retry backoff must resume the retained database obligation.
+    std::thread::sleep(Duration::from_millis(25));
+    let msg_rx = crossbeam::channel::unbounded::<RuntimeMsg>().1;
+    el.progress_pass(&msg_rx);
+    el.gc_actor.shutdown_workers();
+
+    // Assert
+    assert!(
+        !el.gc_actor.has_manifest_reclamation(),
+        "timed-out manifest reclamation must retry without unrelated activity"
+    );
+    assert!(
+        !remote_sst_path_for_test(&el, sst_name).exists(),
+        "the retained SST should be reclaimed after metadata publication succeeds"
+    );
+    Ok(())
+}
+
+#[test]
+fn should_retry_manifest_reclamation_under_continuous_request_load(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: an earlier bounded publication attempt retained the obligation,
+    // and more than one ordinary request is already waiting when retry becomes
+    // due.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    el.cloud_metadata_storage = Some(Arc::new(crate::storage::cloud::CloudStorage::new(
+        Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+        "gc-publication-busy-retry".to_string(),
+    )));
+    el.gc_actor
+        .queue_manifest_reclamation(["busy-retry-reclamation.sst".to_string()]);
+    let expired = crate::common::OperationDeadline::from_budget(Duration::ZERO);
+    el.retry_gc_within(&expired);
+    std::thread::sleep(Duration::from_millis(25));
+    assert!(el.gc_actor.manifest_reclamation_retry_due());
+    let (msg_tx, msg_rx) = crossbeam::channel::unbounded::<RuntimeMsg>();
+    msg_tx
+        .send(RuntimeMsg::Noop { request_id: 90_301 })
+        .expect("queue first request");
+    msg_tx
+        .send(RuntimeMsg::Noop { request_id: 90_302 })
+        .expect("queue continuing request load");
+
+    // Act: process one normal request while another remains queued.
+    let first = msg_rx.recv().expect("receive first queued request");
+    el.process_one(first, &msg_rx);
+    el.gc_actor.shutdown_workers();
+
+    // Assert
+    assert!(
+        !msg_rx.is_empty(),
+        "the fixture must keep request pressure present during the retry slot"
+    );
+    assert!(
+        !el.gc_actor.has_manifest_reclamation(),
+        "bounded maintenance must receive a fairness slot under sustained load"
+    );
+    Ok(())
+}
+
+#[test]
+fn should_bound_retry_gc_metadata_publication_by_maintenance_deadline(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: the metadata provider consumes most of the maintenance budget,
+    // then withholds the next callback. A fire-and-forget RetryGc message must
+    // not grant the provider an unbounded event-loop wait.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    el.runtime_response_timeout = Duration::from_millis(100);
+    el.cloud_metadata_storage = Some(Arc::new(
+        crate::storage::cloud::CloudStorage::new_with_timeout(
+            Arc::new(BudgetConsumingMetadataBackend::new()),
+            "gc-publication-bounded-retry".to_string(),
+            Duration::from_millis(250),
+        ),
+    ));
+    el.gc_actor
+        .queue_manifest_reclamation(["bounded-retry-reclamation.sst".to_string()]);
+    let msg_rx = crossbeam::channel::unbounded::<RuntimeMsg>().1;
+
+    // Act
+    let started = Instant::now();
+    el.handle_runtime_msg(RuntimeMsg::RetryGc, &msg_rx);
+    let elapsed = started.elapsed();
+
+    // Assert
+    assert!(
+        elapsed < Duration::from_millis(160),
+        "RetryGc exceeded its bounded maintenance attempt: {elapsed:?}"
+    );
+    assert!(
+        el.gc_actor.has_manifest_reclamation(),
+        "a bounded retry timeout must retain the reclamation obligation"
+    );
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_retry_reclamation_discovery_after_journal_append_failure(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: the reclaimable drop exists, but the first durable journal
+    // append fails before any SST names can enter the actor-owned queue.
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _test_guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let cf_id = el
+        .state
+        .manifest
+        .create_column_family("journal-retry-drop".to_string());
+    assert!(el
+        .state
+        .manifest
+        .delete_column_family_with_reclamation(cf_id, 0, Vec::new()));
+    fail::cfg(
+        "midge::manifest::inject_no_space_on_append_edit_batch",
+        "return",
+    )
+    .expect("configure reclaim journal failure");
+
+    // Act: fail once, clear the storage fault, then let callerless maintenance
+    // rediscover the still-reclaimable manifest state.
+    el.retry_gc();
+    fail::remove("midge::manifest::inject_no_space_on_append_edit_batch");
+    assert!(
+        el.gc_actor.manifest_reclamation_retry_due()
+            || el.gc_actor.retry_deadline_timeout().is_some(),
+        "journal failure must install an owned retry even before names are queued"
+    );
+    std::thread::sleep(Duration::from_millis(25));
+    let msg_rx = crossbeam::channel::unbounded::<RuntimeMsg>().1;
+    el.progress_pass(&msg_rx);
+
+    // Assert
+    assert!(
+        el.state
+            .manifest
+            .column_families
+            .iter()
+            .any(|cf| cf.id == cf_id && cf.reclaimed),
+        "idle retry must rediscover and durably apply the reclamation edit"
+    );
+    scenario.teardown();
+    Ok(())
+}
+
+#[test]
 fn should_not_prune_remote_wal_when_manifest_sst_is_corrupt_in_cloud(
 ) -> crate::common::MidgeResult<()> {
     // Arrange
@@ -1230,8 +2637,59 @@ fn should_not_prune_remote_wal_when_cloud_metadata_is_missing() -> crate::common
 }
 
 #[test]
-fn should_converge_stale_intent_metadata_before_remote_wal_prune() -> crate::common::MidgeResult<()>
-{
+fn should_not_retire_wal_authority_without_cloud_manifest_base() -> crate::common::MidgeResult<()> {
+    // Arrange: FORMAT is readable in both places, but neither recovery manifest
+    // base exists. Non-manifest metadata alone must never authorize cleanup.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let segment_id = 64;
+    let max_sequence = 64;
+    seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
+    el.state.wal.cloud_durable_seq = max_sequence;
+    add_valid_manifest_sst_for_test(&mut el, "missing-manifest-base.sst", max_sequence);
+    for file_name in ["manifest.snapshot.json", "manifest.json"] {
+        let path = el.state.db_path.join(file_name);
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(crate::common::MidgeError::Io(error)),
+        }
+    }
+    let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+    let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
+        metadata_backend,
+        "metadata-no-manifest-base".to_string(),
+    ));
+    let format_bytes = std::fs::read(el.state.db_path.join("FORMAT"))?;
+    put_cloud_metadata_for_test(&metadata_storage, "FORMAT", format_bytes);
+    el.cloud_metadata_storage = Some(metadata_storage);
+
+    // Act
+    el.prune_cloud_wal_segments_covered_by_manifest();
+    drain_prune_completion_for_test(&mut el);
+
+    // Assert
+    assert!(remote_wal_path_for_test(&el, segment_id).exists());
+    assert_eq!(
+        el.cloud_wal.acked_segments.get(&segment_id),
+        Some(&max_sequence)
+    );
+    let catalog_proof = el
+        .hybrid_storage
+        .as_ref()
+        .expect("hybrid storage")
+        .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
+        .expect("read WAL catalog after refused cleanup");
+    let catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(catalog_proof.bytes())
+        .expect("decode WAL catalog after refused cleanup");
+    assert!(catalog.segments.contains_key(&segment_id));
+    Ok(())
+}
+
+#[test]
+fn should_retain_remote_wal_when_intent_metadata_needs_convergence(
+) -> crate::common::MidgeResult<()> {
     // Arrange
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
@@ -1265,8 +2723,7 @@ fn should_converge_stale_intent_metadata_before_remote_wal_prune() -> crate::com
             segment_id: 2,
             seqno: max_sequence,
         })?;
-    let local_intent =
-        std::fs::read(el.state.db_path.join("intent_log.json")).expect("read local intent log");
+    let remote_intent_before = get_cloud_metadata_for_test(&metadata_storage, "intent_log.json");
     metadata_backend.clear_history();
 
     el.prune_cloud_wal_segments_covered_by_manifest();
@@ -1275,28 +2732,26 @@ fn should_converge_stale_intent_metadata_before_remote_wal_prune() -> crate::com
     // Act
     // Assert
     assert!(
-        !remote_wal_path_for_test(&el, segment_id).exists(),
-        "remote WAL should prune after stale intent metadata is mirrored and revalidated"
+        remote_wal_path_for_test(&el, segment_id).exists(),
+        "remote WAL must remain while intent metadata needs normal publisher convergence"
     );
     assert_eq!(
         get_cloud_metadata_for_test(&metadata_storage, "intent_log.json"),
-        local_intent,
-        "cloud intent metadata should converge to committed local metadata before WAL prune"
+        remote_intent_before,
+        "cleanup must never overwrite cloud metadata from a potentially stale snapshot"
     );
-    let proof = el
-        .cloud_wal
-        .metadata_cleanup_proofs
-        .get("intent_log.json")
-        .expect("retry validation should refresh the intent metadata proof");
-    assert_eq!(proof.len, local_intent.len() as u64);
-    assert_eq!(proof.crc32c, crc32c::crc32c(&local_intent));
     assert!(
-        metadata_backend
+        !metadata_backend
             .get_uploads()
             .iter()
             .any(|(key, _)| key.ends_with("metadata/intent_log.json")),
-        "stale intent metadata should be repaired by an authoritative metadata mirror"
+        "cleanup verification must remain read-only"
     );
+    assert_eq!(
+        el.cloud_wal.acked_segments.get(&segment_id),
+        Some(&max_sequence)
+    );
+    assert!(!el.cloud_wal.prune_inflight.contains(&segment_id));
 
     Ok(())
 }
@@ -2338,6 +3793,7 @@ fn should_retry_prune_after_preflight_failure_clears_inflight() -> crate::common
     std::fs::remove_file(remote_sst_path_for_test(&el, sst_name))
         .expect("delete remote SST after initial validation");
     el.prune_cloud_wal_segments_covered_by_manifest();
+    drain_prune_completion_for_test(&mut el);
 
     // Act
     // Assert
@@ -2363,6 +3819,49 @@ fn should_retry_prune_after_preflight_failure_clears_inflight() -> crate::common
         "restored manifest SST should allow a later guarded prune"
     );
 
+    Ok(())
+}
+
+#[test]
+fn should_not_starve_later_wal_prune_when_earlier_segment_is_unverifiable(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: the lower segment belongs to a CF with no manifest coverage;
+    // the following segment is independently covered and safe to retire.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let blocked_segment = 71;
+    let covered_segment = 72;
+    seed_cloud_prune_candidate_with_records(
+        &mut el,
+        blocked_segment,
+        blocked_segment,
+        vec![crate::wal::WalRecord::new_cf(
+            1,
+            crate::wal::WalOpKind::Put,
+            Bytes::from_static(b"uncovered-earlier-segment"),
+            Some(Bytes::from_static(b"value")),
+            blocked_segment,
+            0,
+        )],
+    );
+    seed_cloud_prune_candidate(&mut el, covered_segment, covered_segment);
+    el.state.wal.current_segment_id = covered_segment + 1;
+    el.state.wal.cloud_durable_seq = covered_segment;
+    add_valid_manifest_sst_for_test(&mut el, "later-covered.sst", covered_segment);
+
+    // Act: the first pass fails closed on segment 71. Round-robin selection
+    // must allow the next pass to make progress on segment 72.
+    el.prune_cloud_wal_segments_covered_by_manifest();
+    drain_prune_completion_for_test(&mut el);
+    el.prune_cloud_wal_segments_covered_by_manifest();
+    drain_prune_completion_for_test(&mut el);
+
+    // Assert
+    assert!(remote_wal_path_for_test(&el, blocked_segment).exists());
+    assert!(el.cloud_wal.acked_segments.contains_key(&blocked_segment));
+    assert!(!remote_wal_path_for_test(&el, covered_segment).exists());
+    assert!(!el.cloud_wal.acked_segments.contains_key(&covered_segment));
     Ok(())
 }
 
@@ -2725,6 +4224,8 @@ fn should_drop_buffered_cloud_acks_when_earlier_segment_fails() -> crate::common
     el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
         segment_id: first_segment,
         error: "injected upload failure".to_string(),
+        terminal: true,
+        failure_kind: crate::storage::CloudUploadFailureKind::Other,
     });
 
     assert_eq!(
@@ -2874,7 +4375,8 @@ fn should_reject_cached_cloud_metadata_proof_when_remote_metadata_is_deleted(
     assert!(
         error.contains("changed since validation")
             || error.contains("unreadable")
-            || error.contains("disappeared"),
+            || error.contains("disappeared")
+            || error.contains("is missing"),
         "unexpected stale metadata proof error: {error}"
     );
 
@@ -3060,7 +4562,7 @@ fn should_cloud_async_retry_after_ack_return_same_sequence_without_queueing(
 }
 
 #[test]
-fn should_cloud_async_fail_invalidates_idempotency_then_retry_allocates_new_seq(
+fn should_preserve_idempotency_allocation_when_failed_cloud_wal_remains_retryable(
 ) -> crate::common::MidgeResult<()> {
     // Arrange: create state and event loop with CloudAsync policy
     let tmp = tempfile::tempdir().expect("create tmpdir");
@@ -3109,29 +4611,16 @@ fn should_cloud_async_fail_invalidates_idempotency_then_retry_allocates_new_seq(
     el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
         segment_id: seg_id,
         error: "upload_failed".to_string(),
+        terminal: true,
+        failure_kind: crate::storage::CloudUploadFailureKind::Other,
     });
 
-    // Retry the same request_id: since the previous allocation failed, we expect a new sequence
-    let (seq2, deferred2) = el.wal_actor.append(
-        &mut el.state,
-        crate::runtime::actors::wal::AppendParams {
-            request_id,
-            cf_id,
-            key: bytes::Bytes::from("k2"),
-            value: Some(bytes::Bytes::from("v2")),
-            insert_only: false,
-            ttl_seconds: None,
-        },
-    )?;
-
-    // Assert: retry should allocate a new sequence and be deferred
-    assert_ne!(
-        seq1, seq2,
-        "retry after cloud fail should allocate a new sequence"
-    );
-    assert!(
-        deferred2,
-        "retry should be deferred when retried after fail (CloudAsync)"
+    // Assert: the original allocation remains the identity of the accepted
+    // mutation while its local WAL is still owned for callerless publication.
+    assert_eq!(
+        el.state.get_cached_sequences(request_id),
+        Some((seq1, 1)),
+        "requeued WAL publication must retain its original sequence allocation"
     );
 
     Ok(())
@@ -3185,6 +4674,8 @@ fn should_not_advance_cloud_frontier_across_failed_segment_gap() -> crate::commo
     el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
         segment_id: first_segment,
         error: "injected upload failure".to_string(),
+        terminal: true,
+        failure_kind: crate::storage::CloudUploadFailureKind::Other,
     });
     el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
         segment_id: second_segment,
@@ -3691,6 +5182,65 @@ struct CountingLeaderStore {
     epoch: u64,
 }
 
+#[derive(Debug)]
+struct DelayedLeaderStore {
+    delay: Duration,
+    holder_id: String,
+    epoch: u64,
+}
+
+impl DelayedLeaderStore {
+    fn new(delay: Duration, holder_id: &str, epoch: u64) -> Self {
+        Self {
+            delay,
+            holder_id: holder_id.to_string(),
+            epoch,
+        }
+    }
+}
+
+impl crate::lease::LeaderStore for DelayedLeaderStore {
+    fn acquire_leadership(
+        &self,
+        _holder_id: &str,
+    ) -> Result<crate::lease::LeaderRecord, crate::lease::LeaseError> {
+        Err(crate::lease::LeaseError::AcquisitionFailed(
+            "delayed test store does not acquire".to_string(),
+        ))
+    }
+
+    fn read_current(&self) -> Result<Option<crate::lease::LeaderRecord>, crate::lease::LeaseError> {
+        std::thread::sleep(self.delay);
+        Ok(Some(crate::lease::LeaderRecord {
+            epoch: self.epoch,
+            holder_id: self.holder_id.clone(),
+            acquired_at: "2026-08-25T00:00:00Z".to_string(),
+        }))
+    }
+
+    fn validate_epoch_with_timeout(
+        &self,
+        expected_holder_id: &str,
+        expected_epoch: u64,
+        timeout: Duration,
+    ) -> Result<(), crate::lease::LeaseError> {
+        std::thread::sleep(self.delay.min(timeout));
+        if timeout < self.delay {
+            return Err(crate::lease::LeaseError::RenewalFailed(format!(
+                "delayed leader validation timed out after {timeout:?}"
+            )));
+        }
+        if self.holder_id == expected_holder_id && self.epoch == expected_epoch {
+            Ok(())
+        } else {
+            Err(crate::lease::LeaseError::RenewalFailed(format!(
+                "epoch/holder mismatch: expected holder={expected_holder_id} epoch={expected_epoch}, found holder={} epoch={}",
+                self.holder_id, self.epoch
+            )))
+        }
+    }
+}
+
 impl CountingLeaderStore {
     fn new(holder_id: &str, epoch: u64) -> Self {
         Self {
@@ -3764,6 +5314,72 @@ fn should_validate_writer_lease_once_given_multi_segment_backlog_when_draining_u
     assert_eq!(
         lease_reads, 1,
         "one drain pass must validate the writer lease once, not once per segment"
+    );
+    Ok(())
+}
+
+#[test]
+fn should_back_off_runtime_wal_admission_when_storage_queue_is_full(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: one sealed segment occupies the only storage queue slot while a
+    // second accepted segment remains in the runtime-owned backlog.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    append_cloud_async_put(&mut el)?;
+    let (first_segment, first_max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    append_cloud_async_put(&mut el)?;
+    let (second_segment, second_max_sequence) =
+        seal_segment_without_remote_proof_for_test(&mut el)?;
+    let local = Arc::new(
+        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("bounded-retry-local"))
+            .expect("create bounded retry local storage"),
+    );
+    let cloud = Arc::new(
+        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("bounded-retry-cloud"))
+            .expect("create bounded retry cloud storage"),
+    );
+    let storage = Arc::new(crate::storage::HybridStorage::with_test_upload_limits(
+        local,
+        cloud,
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        1,
+        u64::MAX,
+    ));
+    storage.fence_cloud_wal_catalog(1)?;
+    storage.enqueue_wal_segment(
+        first_segment,
+        &el.state
+            .wal_dir
+            .join(crate::wal::segment_file_name(first_segment)),
+        first_max_sequence,
+    )?;
+    el.set_hybrid_storage(Arc::clone(&storage));
+    el.cloud_wal.upload_backlog.clear();
+    el.cloud_wal
+        .upload_backlog
+        .insert(second_segment, second_max_sequence);
+    let leader_store = Arc::new(CountingLeaderStore::new("writer-1", 1));
+    el.leader_store = Some(Arc::clone(&leader_store) as Arc<dyn crate::lease::LeaderStore>);
+    el.leader_holder_id = Some("writer-1".to_string());
+
+    // Act: the first pass discovers capacity pressure; an immediate second
+    // pass must respect runtime backoff instead of repeating lease and WAL I/O.
+    el.drain_cloud_wal_upload_backlog();
+    let reads_after_full_queue = leader_store.reads();
+    el.drain_cloud_wal_upload_backlog();
+
+    // Assert
+    assert_eq!(storage.pending_upload_count(), 1);
+    assert_eq!(
+        el.cloud_wal.upload_backlog.get(&second_segment),
+        Some(&second_max_sequence)
+    );
+    assert!(el.cloud_wal.upload_retry_deadline_timeout().is_some());
+    assert_eq!(
+        leader_store.reads(),
+        reads_after_full_queue,
+        "a full queue must not trigger another provider lease read before backoff expires"
     );
     Ok(())
 }
@@ -3907,6 +5523,158 @@ fn should_use_latest_surviving_waiter_deadline_given_older_waiter_already_expire
 }
 
 #[test]
+fn should_preserve_later_segment_waiter_when_earlier_gap_waiter_expired(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: segment two cannot become durable until segment one closes its
+    // frontier gap. Its newer caller therefore contributes budget to the
+    // acknowledgement work for that earlier segment.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    el.runtime_response_timeout = Duration::from_millis(200);
+    append_cloud_async_put(&mut el)?;
+    let (first_segment, first_max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    append_cloud_async_put(&mut el)?;
+    let (second_segment, second_max_sequence) =
+        seal_segment_without_remote_proof_for_test(&mut el)?;
+
+    let first_request_id = 91_011;
+    let second_request_id = 91_012;
+    let first_rx = el.router.register(first_request_id, "SealWalForCloud");
+    el.durability.queue_waiter_for_key(
+        first_segment,
+        DurabilityWaiter::CloudDurability {
+            request_id: first_request_id,
+        },
+    );
+    std::thread::sleep(Duration::from_millis(150));
+    let second_rx = el.router.register(second_request_id, "SealWalForCloud");
+    el.durability.queue_waiter_for_key(
+        second_segment,
+        DurabilityWaiter::CloudDurability {
+            request_id: second_request_id,
+        },
+    );
+    std::thread::sleep(Duration::from_millis(75));
+
+    // Act: the first caller's budget is exhausted, but publication of its
+    // segment is also required to serve the newer second caller.
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id: first_segment,
+        max_sequence: first_max_sequence,
+    });
+
+    // Assert: closing the first gap succeeds and does not prematurely drain
+    // the still-live waiter attached to the dependent segment.
+    assert!(matches!(
+        first_rx.try_recv(),
+        Ok(RuntimeResponse::Ok {
+            request_id
+        }) if request_id == first_request_id
+    ));
+    assert!(matches!(
+        second_rx.try_recv(),
+        Err(crossbeam::channel::TryRecvError::Empty)
+    ));
+    assert_eq!(el.state.wal.cloud_durable_seq, first_max_sequence);
+
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id: second_segment,
+        max_sequence: second_max_sequence,
+    });
+    assert!(matches!(
+        second_rx.try_recv(),
+        Ok(RuntimeResponse::Ok {
+            request_id
+        }) if request_id == second_request_id
+    ));
+    assert_eq!(el.state.wal.cloud_durable_seq, second_max_sequence);
+    Ok(())
+}
+
+#[test]
+fn should_preserve_earlier_waiter_when_later_segment_upload_fails() -> crate::common::MidgeResult<()>
+{
+    // Arrange: two independently addressable inflight generations. A failure
+    // in the later one does not prevent the earlier frontier from completing.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    append_cloud_async_put(&mut el)?;
+    let (first_segment, first_max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    append_cloud_async_put(&mut el)?;
+    let (second_segment, second_max_sequence) =
+        seal_segment_without_remote_proof_for_test(&mut el)?;
+    let first_request_id = 91_021;
+    let second_request_id = 91_022;
+    let first_rx = el.router.register(first_request_id, "SealWalForCloud");
+    let second_rx = el.router.register(second_request_id, "SealWalForCloud");
+    el.durability.queue_waiter_for_key(
+        first_segment,
+        DurabilityWaiter::CloudDurability {
+            request_id: first_request_id,
+        },
+    );
+    el.durability.queue_waiter_for_key(
+        second_segment,
+        DurabilityWaiter::CloudDurability {
+            request_id: second_request_id,
+        },
+    );
+    el.state
+        .sequence_idempotency_cache
+        .insert(first_request_id, (first_max_sequence, 1, 0));
+    el.state
+        .sequence_idempotency_cache
+        .insert(second_request_id, (second_max_sequence, 1, 0));
+
+    // Act: storage reports the later upload failure before the first
+    // acknowledgement arrives.
+    el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
+        segment_id: second_segment,
+        error: "injected later-segment failure".to_string(),
+        terminal: true,
+        failure_kind: crate::storage::CloudUploadFailureKind::Other,
+    });
+
+    // Assert: only the failed generation and its dependents fail. Segment one
+    // can still close normally when its valid acknowledgement arrives.
+    assert!(matches!(
+        second_rx.try_recv(),
+        Ok(RuntimeResponse::Error {
+            request_id,
+            ..
+        }) if request_id == second_request_id
+    ));
+    assert!(matches!(
+        first_rx.try_recv(),
+        Err(crossbeam::channel::TryRecvError::Empty)
+    ));
+    assert!(
+        el.state
+            .sequence_idempotency_cache
+            .contains_key(&first_request_id),
+        "later upload failure must preserve the earlier request's retry identity"
+    );
+    assert!(
+        el.state
+            .sequence_idempotency_cache
+            .contains_key(&second_request_id),
+        "the requeued segment must preserve its request identity while publication remains owned"
+    );
+
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id: first_segment,
+        max_sequence: first_max_sequence,
+    });
+    assert!(matches!(
+        first_rx.try_recv(),
+        Ok(RuntimeResponse::Ok { request_id }) if request_id == first_request_id
+    ));
+    Ok(())
+}
+
+#[test]
 fn should_bound_strict_seal_lease_validation_given_request_deadline_is_exhausted(
 ) -> crate::common::MidgeResult<()> {
     // Arrange: a strict request has no response budget left. No provider lease
@@ -3954,6 +5722,84 @@ fn should_bound_strict_seal_lease_validation_given_request_deadline_is_exhausted
             .is_none(),
         "deadline expiry before sealing must leave the active WAL retryable"
     );
+    Ok(())
+}
+
+#[test]
+fn should_not_start_wal_flush_when_lease_check_leaves_less_than_storage_budget(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: the first provider lease read consumes enough of the shared
+    // caller deadline that a WAL flush with its configured I/O timeout can no
+    // longer safely begin.
+    let tmp = tempfile::tempdir().expect("create bounded strict-seal directory");
+    let state = RuntimeState::new(tmp.path().to_path_buf(), false);
+    let local = Arc::new(
+        crate::storage::filesystem::FileSystem::new(tmp.path().join("hybrid-local"))
+            .expect("create bounded strict-seal local backend"),
+    );
+    let cloud = Arc::new(
+        crate::storage::filesystem::FileSystem::new(tmp.path().join("cloud-store"))
+            .expect("create bounded strict-seal cloud backend"),
+    );
+    let storage = Arc::new(crate::storage::HybridStorage::with_policy(
+        local,
+        cloud,
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    ));
+    storage.fence_cloud_wal_catalog(1)?;
+    let leader_store: Arc<dyn crate::lease::LeaderStore> = Arc::new(DelayedLeaderStore::new(
+        Duration::from_millis(80),
+        "writer-1",
+        1,
+    ));
+    let router = Arc::new(ResponseRouter::new());
+    let config = crate::runtime::RuntimeConfig {
+        wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
+        storage_io_timeout: Duration::from_millis(150),
+        runtime_response_timeout: Duration::from_millis(200),
+        hybrid_storage: Some(storage),
+        writer_epoch: 1,
+        leader_store: Some(leader_store),
+        leader_holder_id: Some("writer-1".to_string()),
+        ..crate::runtime::RuntimeConfig::default()
+    };
+    let mut el = EventLoop::new(state, false, Arc::clone(&router), config, None)?;
+    let sequence = append_cloud_async_put(&mut el)?;
+    let active_segment = el.state.wal.current_segment_id;
+    let request_id = 91_102;
+    let response_rx = router.register(request_id, "SealWalForCloud");
+    let msg_rx = crossbeam::channel::unbounded::<RuntimeMsg>().1;
+
+    // Act
+    let started = Instant::now();
+    el.handle_runtime_msg(
+        RuntimeMsg::SealWalForCloud {
+            request_id,
+            sequence,
+            wait_for_ack: true,
+        },
+        &msg_rx,
+    );
+    let elapsed = started.elapsed();
+
+    // Assert
+    assert!(matches!(
+        response_rx.try_recv(),
+        Ok(RuntimeResponse::Error {
+            error: crate::common::MidgeError::Timeout(_),
+            ..
+        })
+    ));
+    assert!(
+        elapsed < Duration::from_millis(150),
+        "strict seal started additional I/O outside the remaining budget: {elapsed:?}"
+    );
+    assert_eq!(
+        el.state.wal.current_segment_id, active_segment,
+        "deadline refusal before flush must leave the active WAL segment intact"
+    );
+    assert!(el.state.wal.pending_writes > 0);
+    assert!(el.durability.cloud_seal_retry_needed());
     Ok(())
 }
 
@@ -4011,12 +5857,344 @@ fn should_requeue_publication_with_timeout_given_ack_deadline_expires_before_lea
 }
 
 #[test]
-fn should_not_bound_background_ack_given_no_waiting_caller_when_publishing_async(
+fn should_requeue_known_wal_publication_when_sequence_range_is_inconsistent(
 ) -> crate::common::MidgeResult<()> {
-    // Arrange: a CloudAsync segment sealed with nobody waiting on a response.
+    // Arrange: recovery drift has already advanced the visible cloud frontier
+    // to this inflight segment's maximum. The scoped idempotency interval is
+    // therefore inconsistent, but ownership of the accepted local WAL remains
+    // sufficient to retry publication.
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
+    append_cloud_async_put(&mut el)?;
+    let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    el.state.wal.cloud_durable_seq = max_sequence;
+    let leader_store = std::sync::Arc::new(CountingLeaderStore::new("different-writer", 1));
+    el.leader_store =
+        Some(std::sync::Arc::clone(&leader_store) as std::sync::Arc<dyn crate::lease::LeaderStore>);
+    el.leader_holder_id = Some("writer-1".to_string());
+    let request_id = 91_202;
+    let response_rx = el.router.register(request_id, "SealWalForCloud");
+    el.durability
+        .queue_waiter_for_key(segment_id, DurabilityWaiter::CloudDurability { request_id });
+
+    // Act: lease validation fails before acknowledgement settlement.
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id,
+        max_sequence,
+    });
+
+    // Assert
+    assert_eq!(
+        el.cloud_wal.upload_backlog.get(&segment_id),
+        Some(&max_sequence),
+        "known accepted WAL must requeue even when its cache interval cannot be derived"
+    );
+    assert_eq!(
+        el.durability.inflight_segment_for_sequence(max_sequence),
+        Some(segment_id)
+    );
+    assert!(matches!(
+        response_rx.try_recv(),
+        Ok(RuntimeResponse::Error {
+            error: crate::common::MidgeError::Fenced(_),
+            ..
+        })
+    ));
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_resume_wal_upload_after_storage_retry_budget_is_exhausted(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: the storage-owned queue exhausts all three upload attempts while
+    // the sealed local WAL remains an accepted runtime obligation.
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let test_guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let sequence = append_cloud_async_put(&mut el)?;
+    let (segment_id, max_sequence) = el
+        .seal_current_cloud_segment()?
+        .expect("seal cloud WAL for terminal retry test");
+    fail::cfg("midge::cloud::inject_fail_wal_upload", "return")
+        .expect("configure WAL upload failures");
+
+    // Act: exhaust storage retries, restore the provider, and continue driving
+    // the event loop without reopening the database.
+    for _ in 0..8 {
+        el.tick_hybrid_storage();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    fail::remove("midge::cloud::inject_fail_wal_upload");
+    // The recovered upload runs on the storage worker. Release the test's
+    // process-global failpoint write lock before asking that worker to evaluate
+    // its (now disabled) failpoint hooks.
+    drop(test_guard);
+    assert_eq!(
+        el.hybrid_storage
+            .as_ref()
+            .expect("hybrid storage")
+            .pending_upload_count(),
+        0,
+        "the storage queue must actually exhaust its attempt budget"
+    );
+    assert_eq!(
+        el.cloud_wal.upload_backlog.get(&segment_id),
+        Some(&max_sequence),
+        "terminal queue failure must transfer ownership back to the runtime"
+    );
+
+    std::thread::sleep(Duration::from_millis(25));
+    let msg_rx = crossbeam::channel::unbounded::<RuntimeMsg>().1;
+    let recovery_deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < recovery_deadline && el.state.wal.cloud_durable_seq < max_sequence {
+        el.progress_pass(&msg_rx);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    // Assert
+    assert_eq!(sequence, max_sequence);
+    assert_eq!(
+        el.state.wal.cloud_durable_seq, max_sequence,
+        "callerless retry must close the frontier after provider recovery"
+    );
+    assert!(el.cloud_wal.upload_backlog.is_empty());
+    scenario.teardown();
+    Ok(())
+}
+
+#[test]
+fn should_retry_runtime_owned_wal_upload_under_continuous_request_load(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: storage exhausted its attempt budget and transferred a sealed
+    // segment back to the runtime while unrelated requests remain queued.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    append_cloud_async_put(&mut el)?;
+    let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
+        segment_id,
+        error: "storage retry budget exhausted".to_string(),
+        terminal: true,
+        failure_kind: crate::storage::CloudUploadFailureKind::Other,
+    });
+    std::thread::sleep(Duration::from_millis(25));
+    assert_eq!(
+        el.cloud_wal.upload_backlog.get(&segment_id),
+        Some(&max_sequence)
+    );
+    let (msg_tx, msg_rx) = crossbeam::channel::unbounded::<RuntimeMsg>();
+    msg_tx
+        .send(RuntimeMsg::Noop { request_id: 90_401 })
+        .expect("queue first request");
+    msg_tx
+        .send(RuntimeMsg::Noop { request_id: 90_402 })
+        .expect("queue continuing request load");
+
+    // Act: process one normal request while another remains queued.
+    let first = msg_rx.recv().expect("receive first queued request");
+    el.process_one(first, &msg_rx);
+
+    // Assert
+    assert!(
+        !msg_rx.is_empty(),
+        "the fixture must keep request pressure present during the retry slot"
+    );
+    assert!(
+        !el.cloud_wal.upload_backlog.contains_key(&segment_id),
+        "runtime-owned WAL publication must receive a fairness slot under sustained load"
+    );
+    Ok(())
+}
+
+#[test]
+fn should_drain_runtime_owned_wal_retry_before_shutdown_succeeds() -> crate::common::MidgeResult<()>
+{
+    // Arrange: a terminal storage failure has transferred an accepted segment
+    // into the runtime backlog immediately before shutdown begins.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    el.shutdown_cloud_drain_timeout = Duration::from_secs(2);
+    append_cloud_async_put(&mut el)?;
+    let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
+        segment_id,
+        error: "storage retry budget exhausted".to_string(),
+        terminal: true,
+        failure_kind: crate::storage::CloudUploadFailureKind::Other,
+    });
+    let request_id = 90_403;
+    let response_rx = el.router.register(request_id, "Shutdown");
+
+    // Act
+    let outcome = el.handle_shutdown(Some(request_id));
+
+    // Assert
+    assert_eq!(outcome, super::super::HandleOutcome::Break);
+    assert!(matches!(
+        response_rx.try_recv(),
+        Ok(RuntimeResponse::Ok {
+            request_id: response_id
+        }) if response_id == request_id
+    ));
+    assert!(el.cloud_wal.upload_backlog.is_empty());
+    assert_eq!(
+        el.hybrid_storage
+            .as_ref()
+            .expect("hybrid storage")
+            .pending_upload_count(),
+        0
+    );
+    assert_eq!(el.state.wal.cloud_durable_seq, max_sequence);
+    Ok(())
+}
+
+#[test]
+fn should_bound_runtime_owned_wal_admission_by_shutdown_deadline() -> crate::common::MidgeResult<()>
+{
+    // Arrange: terminal upload failure transfers a sealed WAL back to the
+    // runtime just before shutdown, and lease validation is slower than the
+    // entire shutdown drain budget.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    append_cloud_async_put(&mut el)?;
+    let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
+        segment_id,
+        error: "storage retry budget exhausted".to_string(),
+        terminal: true,
+        failure_kind: crate::storage::CloudUploadFailureKind::Other,
+    });
+    std::thread::sleep(Duration::from_millis(25));
+    el.leader_store = Some(Arc::new(DelayedLeaderStore::new(
+        Duration::from_millis(250),
+        "writer-1",
+        1,
+    )));
+    el.leader_holder_id = Some("writer-1".to_string());
+    el.runtime_response_timeout = Duration::from_millis(500);
+    el.shutdown_cloud_drain_timeout = Duration::from_millis(40);
+    let request_id = 90_404;
+    let response_rx = el.router.register(request_id, "Shutdown");
+
+    // Act
+    let started = Instant::now();
+    let outcome = el.handle_shutdown(Some(request_id));
+    let elapsed = started.elapsed();
+
+    // Assert
+    assert_eq!(outcome, super::super::HandleOutcome::Break);
+    assert!(
+        elapsed < Duration::from_millis(150),
+        "shutdown WAL admission exceeded its shared drain deadline: {elapsed:?}"
+    );
+    assert!(matches!(
+        response_rx.try_recv(),
+        Ok(RuntimeResponse::Error {
+            request_id: response_id,
+            ..
+        }) if response_id == request_id
+    ));
+    assert_eq!(
+        el.cloud_wal.upload_backlog.get(&segment_id),
+        Some(&max_sequence),
+        "timed-out shutdown must retain the runtime-owned WAL obligation"
+    );
+    Ok(())
+}
+
+#[test]
+fn should_poll_inflight_cloud_upload_on_interval_without_busy_spin(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: the storage worker owns an upload whose provider proof is slow.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let cloud_fs = Arc::new(
+        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
+            .expect("open delayed upload cloud backend"),
+    );
+    let delayed_cloud = Arc::new(ArmedDelayedHeadStorageBackend::new(
+        cloud_fs,
+        Duration::from_millis(250),
+    ));
+    let local = Arc::new(
+        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("hybrid_local"))
+            .expect("open delayed upload local backend"),
+    );
+    el.set_hybrid_storage(Arc::new(crate::storage::HybridStorage::with_policy(
+        local,
+        delayed_cloud.clone(),
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )));
+    append_cloud_async_put(&mut el)?;
+    el.seal_current_cloud_segment()?
+        .expect("seal slow cloud WAL upload");
+    delayed_cloud.arm();
+    el.tick_hybrid_storage();
+    std::thread::sleep(Duration::from_millis(10));
+    assert_eq!(
+        el.hybrid_storage
+            .as_ref()
+            .expect("hybrid storage")
+            .pending_upload_count(),
+        1
+    );
+
+    // Act
+    let actionable = el.has_actionable_work();
+    let idle_timeout = el.idle_progress_timeout();
+
+    // Assert
+    assert!(
+        !actionable,
+        "an in-flight provider callback must not drive the 50-microsecond actionable loop"
+    );
+    assert!(
+        idle_timeout.is_some_and(|timeout| {
+            timeout > Duration::ZERO && timeout <= Duration::from_millis(10)
+        }),
+        "slow storage work still needs a bounded polling wakeup: {idle_timeout:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn should_bound_callerless_ack_and_requeue_when_provider_exceeds_maintenance_budget(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: a CloudAsync segment has no waiting caller, but its synchronous
+    // acknowledgement proof must still yield the event loop after one bounded
+    // maintenance attempt.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    el.runtime_response_timeout = Duration::from_millis(100);
+    let cloud_fs = Arc::new(
+        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
+            .expect("open delayed acknowledgement cloud backend"),
+    );
+    let delayed_cloud = Arc::new(ArmedDelayedHeadStorageBackend::new(
+        cloud_fs,
+        Duration::from_millis(250),
+    ));
+    let local = Arc::new(
+        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("hybrid_local"))
+            .expect("open delayed acknowledgement local backend"),
+    );
+    el.set_hybrid_storage(Arc::new(crate::storage::HybridStorage::with_policy(
+        local,
+        delayed_cloud.clone(),
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )));
     append_cloud_async_put(&mut el)?;
     let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
     copy_local_segment_to_remote_wal_for_test(&el, segment_id);
@@ -4026,17 +6204,27 @@ fn should_not_bound_background_ack_given_no_waiting_caller_when_publishing_async
             .is_empty(),
         "background seal must have no caller attached"
     );
+    delayed_cloud.arm();
 
     // Act
+    let started = Instant::now();
     el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
         segment_id,
         max_sequence,
     });
+    let elapsed = started.elapsed();
 
-    // Assert: background publication is not failed for want of a caller budget.
+    // Assert
     assert!(
-        !el.state.persistence_anomaly_detected(),
-        "callerless background publication must not be treated as abandoned"
+        elapsed < Duration::from_millis(160),
+        "callerless acknowledgement monopolized the event loop: {elapsed:?}"
     );
+    assert!(el.state.persistence_anomaly_detected());
+    assert_eq!(
+        el.cloud_wal.upload_backlog.get(&segment_id),
+        Some(&max_sequence),
+        "bounded maintenance expiry must retain the accepted WAL for retry"
+    );
+    assert_eq!(el.state.wal.cloud_durable_seq, 0);
     Ok(())
 }

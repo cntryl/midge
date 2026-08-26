@@ -5,6 +5,7 @@ use super::{
     Path, StorageBackend, StorageEvent, StorageOutcome, UploadQueue, UploadState, UploadStatus,
     MAX_CLOUD_ERROR_BYTES,
 };
+use crate::storage::CloudUploadFailureKind;
 
 impl HybridStorage {
     pub(crate) fn queue_cloud_wal_prune_complete(
@@ -16,6 +17,14 @@ impl HybridStorage {
             &self.event_queue,
             self.external_event_tx.as_ref(),
             StorageEvent::CloudWalPruneComplete { segment_id, result },
+        );
+    }
+
+    pub(crate) fn queue_cloud_wal_prune_attempt_failed(&self, segment_id: u64, error: String) {
+        Self::queue_storage_event(
+            &self.event_queue,
+            self.external_event_tx.as_ref(),
+            StorageEvent::CloudWalPruneAttemptFailed { segment_id, error },
         );
     }
 
@@ -141,7 +150,9 @@ impl HybridStorage {
                         item.status = UploadStatus::Completed;
                     }
                 }
-                StorageEvent::CloudFail { segment_id, error } => {
+                StorageEvent::CloudFail {
+                    segment_id, error, ..
+                } => {
                     if let Some(item) = queue
                         .entries
                         .iter_mut()
@@ -191,6 +202,7 @@ impl HybridStorage {
                 Self::emit_wal_upload_failure(
                     upload,
                     "failpoint: cloud WAL upload failed",
+                    CloudUploadFailureKind::Other,
                     &self.event_queue,
                     self.external_event_tx.as_ref(),
                 );
@@ -201,6 +213,7 @@ impl HybridStorage {
                 Self::emit_wal_upload_failure(
                     upload,
                     "cloud upload worker failed to start",
+                    CloudUploadFailureKind::Other,
                     &self.event_queue,
                     self.external_event_tx.as_ref(),
                 );
@@ -211,6 +224,7 @@ impl HybridStorage {
                 Self::emit_wal_upload_failure(
                     upload,
                     "cloud upload worker is shutting down",
+                    CloudUploadFailureKind::Other,
                     &self.event_queue,
                     self.external_event_tx.as_ref(),
                 );
@@ -230,6 +244,7 @@ impl HybridStorage {
                     Self::emit_wal_upload_failure(
                         upload,
                         "cloud upload worker channel disconnected",
+                        CloudUploadFailureKind::Other,
                         &self.event_queue,
                         self.external_event_tx.as_ref(),
                     );
@@ -249,6 +264,7 @@ impl HybridStorage {
     ) {
         match &mut event {
             StorageEvent::CloudFail { error, .. }
+            | StorageEvent::CloudWalPruneAttemptFailed { error, .. }
             | StorageEvent::CloudWalPruneComplete {
                 result: StorageOutcome::Err(error),
                 ..
@@ -284,13 +300,27 @@ impl HybridStorage {
             .name("midge-wal-uploader".to_string())
             .spawn(move || {
                 while let Ok(upload) = wal_upload_rx.recv() {
-                    Self::process_wal_upload(
-                        &upload,
-                        &cloud,
-                        &event_queue,
-                        external_event_tx.as_ref(),
-                        callback_timeout,
-                    );
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        Self::process_wal_upload(
+                            &upload,
+                            &cloud,
+                            &event_queue,
+                            external_event_tx.as_ref(),
+                            callback_timeout,
+                        );
+                    }));
+                    if result.is_err() {
+                        if let Some(telemetry) = crate::telemetry::Telemetry::global() {
+                            telemetry.metrics().record_cloud_async_wal_upload_failed();
+                        }
+                        Self::emit_wal_upload_failure(
+                            &upload,
+                            "cloud WAL upload worker panicked",
+                            CloudUploadFailureKind::Other,
+                            &event_queue,
+                            external_event_tx.as_ref(),
+                        );
+                    }
                 }
             });
 
@@ -322,7 +352,13 @@ impl HybridStorage {
         let data = match Self::read_wal_file(upload) {
             Ok(data) => data,
             Err(error) => {
-                Self::emit_wal_upload_failure(upload, &error, event_queue, external_event_tx);
+                Self::emit_wal_upload_failure(
+                    upload,
+                    &error,
+                    CloudUploadFailureKind::Other,
+                    event_queue,
+                    external_event_tx,
+                );
                 return;
             }
         };
@@ -336,6 +372,7 @@ impl HybridStorage {
             Self::emit_wal_upload_failure(
                 upload,
                 "failpoint: cloud WAL upload failed",
+                CloudUploadFailureKind::Other,
                 event_queue,
                 external_event_tx,
             );
@@ -412,12 +449,15 @@ impl HybridStorage {
     fn emit_wal_upload_failure(
         upload: &UploadState,
         error: &str,
+        failure_kind: CloudUploadFailureKind,
         event_queue: &Arc<Mutex<BoundedEventQueue>>,
         external_event_tx: Option<&cb::Sender<StorageEvent>>,
     ) {
         let fail = StorageEvent::CloudFail {
             segment_id: upload.segment_id,
             error: error.to_string(),
+            terminal: upload.retries.saturating_add(1) >= 3,
+            failure_kind,
         };
         Self::queue_storage_event(event_queue, external_event_tx, fail);
     }
@@ -454,26 +494,36 @@ impl HybridStorage {
         callback_timeout: Duration,
         mut verify_remote: impl FnMut(u64, u64) -> Result<(), String>,
     ) {
-        let (write_reported_success, write_error) = match rx.recv_timeout(callback_timeout) {
-            Ok(StorageEvent::WriteComplete { key, result }) => {
-                let _ = key;
-                match result {
-                    StorageOutcome::Ok(()) => (true, None),
-                    StorageOutcome::Err(error) => (false, Some(error)),
+        let (write_reported_success, write_error, write_failure_kind) =
+            match rx.recv_timeout(callback_timeout) {
+                Ok(StorageEvent::WriteComplete { key, result }) => {
+                    let _ = key;
+                    match result {
+                        StorageOutcome::Ok(()) => (true, None, CloudUploadFailureKind::Other),
+                        StorageOutcome::Err(error) => {
+                            let failure_kind = if Self::storage_error_indicates_timeout(&error) {
+                                CloudUploadFailureKind::Timeout
+                            } else {
+                                CloudUploadFailureKind::Other
+                            };
+                            (false, Some(error), failure_kind)
+                        }
+                    }
                 }
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => (
-                false,
-                Some("cloud WAL upload callback timed out".to_string()),
-            ),
-            Err(mpsc::RecvTimeoutError::Disconnected) | Ok(_) => (
-                false,
-                Some(
-                    "cloud WAL upload callback channel closed or returned an unexpected event"
-                        .to_string(),
+                Err(mpsc::RecvTimeoutError::Timeout) => (
+                    false,
+                    Some("cloud WAL upload callback timed out".to_string()),
+                    CloudUploadFailureKind::Timeout,
                 ),
-            ),
-        };
+                Err(mpsc::RecvTimeoutError::Disconnected) | Ok(_) => (
+                    false,
+                    Some(
+                        "cloud WAL upload callback channel closed or returned an unexpected event"
+                            .to_string(),
+                    ),
+                    CloudUploadFailureKind::Other,
+                ),
+            };
 
         match verify_remote(upload.segment_id, upload.max_sequence) {
             Ok(()) => {
@@ -497,7 +547,20 @@ impl HybridStorage {
                         write_error.unwrap_or_else(|| "cloud WAL upload failed".to_string())
                     )
                 };
-                Self::emit_wal_upload_failure(upload, &error, event_queue, external_event_tx);
+                let failure_kind = if write_failure_kind == CloudUploadFailureKind::Timeout
+                    || Self::storage_error_indicates_timeout(&readback_error)
+                {
+                    CloudUploadFailureKind::Timeout
+                } else {
+                    CloudUploadFailureKind::Other
+                };
+                Self::emit_wal_upload_failure(
+                    upload,
+                    &error,
+                    failure_kind,
+                    event_queue,
+                    external_event_tx,
+                );
             }
         }
     }

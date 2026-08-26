@@ -1062,6 +1062,28 @@ fn should_reject_storage_verification_while_flush_publication_is_active() {
 }
 
 #[test]
+fn should_block_for_messages_when_manifest_retry_is_due_during_verification() {
+    // Arrange: maintenance has reached its retry time while online storage
+    // verification deliberately freezes publication progress.
+    let mut event_loop = create_test_local_event_loop().expect("create local event loop");
+    event_loop
+        .gc_actor
+        .queue_manifest_reclamation(["retained-during-verification.sst".to_string()]);
+    event_loop.gc_actor.defer_manifest_reclamation_retry();
+    std::thread::sleep(Duration::from_millis(15));
+    assert!(event_loop.gc_actor.manifest_reclamation_retry_due());
+    assert!(event_loop.verification_barrier.activate(105));
+
+    // Act
+    let idle_timeout = event_loop.idle_progress_timeout();
+
+    // Assert: the run loop uses blocking receive for `None`. Returning a due
+    // zero-duration maintenance timeout here would spin until verification
+    // released the barrier.
+    assert_eq!(idle_timeout, None);
+}
+
+#[test]
 fn should_not_spin_auto_flush_drain_in_memory_mode() {
     // Arrange
     let mut event_loop = create_test_event_loop().expect("create memory event loop");

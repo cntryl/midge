@@ -7,6 +7,7 @@ use crate::runtime::hybrid_persistence::HybridPersistence;
 
 impl EventLoop {
     pub(crate) fn tick_hybrid_storage(&mut self) {
+        self.reap_cloud_wal_prune_worker();
         let Some(storage) = &self.hybrid_storage else {
             return;
         };
@@ -41,17 +42,44 @@ impl EventLoop {
             } => {
                 self.handle_storage_event_cloud_ack(segment_id, max_sequence);
             }
-            crate::storage::StorageEvent::CloudFail { segment_id, error } => {
-                self.handle_cloud_upload_failure(
-                    segment_id,
-                    &crate::common::MidgeError::Internal(format!(
-                        "Cloud durability failed: {error}"
-                    )),
-                    false,
-                );
+            crate::storage::StorageEvent::CloudFail {
+                segment_id,
+                error,
+                terminal,
+                failure_kind,
+            } => {
+                if terminal {
+                    let error = match failure_kind {
+                        crate::storage::CloudUploadFailureKind::Timeout => {
+                            crate::common::MidgeError::Timeout(format!(
+                                "Cloud durability timed out after storage retries: {error}"
+                            ))
+                        }
+                        crate::storage::CloudUploadFailureKind::Other => {
+                            crate::common::MidgeError::Internal(format!(
+                                "Cloud durability failed after storage retries: {error}"
+                            ))
+                        }
+                    };
+                    self.handle_cloud_upload_failure(segment_id, &error, true);
+                } else {
+                    tracing::warn!(
+                        segment_id,
+                        error = %error,
+                        "Cloud WAL upload attempt failed; storage queue retains retry ownership"
+                    );
+                }
             }
             crate::storage::StorageEvent::CloudWalPruneComplete { segment_id, result } => {
                 self.handle_storage_event_cloud_wal_prune_complete(segment_id, result);
+            }
+            crate::storage::StorageEvent::CloudWalPruneAttemptFailed { segment_id, error } => {
+                self.cloud_wal.prune_inflight.remove(&segment_id);
+                tracing::debug!(
+                    segment_id,
+                    error = %error,
+                    "Cloud WAL prune preflight failed; retaining authority for retry"
+                );
             }
             crate::storage::StorageEvent::BackpressureOn => {
                 tracing::warn!("storage backpressure activated — pausing flushes");
@@ -175,7 +203,6 @@ impl EventLoop {
         self.cloud_wal.prune_inflight.remove(&segment_id);
         match result {
             crate::storage::StorageOutcome::Ok(()) => {
-                self.cloud_wal.prune_retries.remove(&segment_id);
                 self.cloud_wal.acked_segments.remove(&segment_id);
                 self.next_background_compaction_check = std::time::Instant::now();
                 tracing::debug!(segment_id, "Pruned cloud-covered remote WAL segment");
@@ -185,7 +212,6 @@ impl EventLoop {
                 // deletion is attempted. A failed delete is therefore a safe
                 // storage leak, not a recovery obligation that may be retried
                 // through a now-absent catalog entry.
-                self.cloud_wal.prune_retries.remove(&segment_id);
                 self.cloud_wal.acked_segments.remove(&segment_id);
                 self.state.mark_persistence_anomaly();
                 tracing::warn!(
@@ -199,28 +225,32 @@ impl EventLoop {
 
     /// Shared cloud budget for the work that answers `segment_id`.
     ///
-    /// Derived from the latest live caller waiting on the segment. Time already
-    /// spent queued is charged against that caller's budget, while an older
-    /// expired caller cannot prematurely fail a newer waiter. Once every caller
-    /// has abandoned, the accepted WAL obligation continues as callerless work.
+    /// Derived from the latest live caller waiting on this segment or on a
+    /// later segment that depends on this frontier gap. Time already spent
+    /// queued is charged against that caller's budget, while an older expired
+    /// caller cannot prematurely fail a newer dependent waiter. Once every
+    /// caller has abandoned, the accepted WAL obligation continues through
+    /// bounded maintenance attempts so provider latency cannot monopolize the
+    /// event loop.
     pub(super) fn cloud_ack_deadline(&self, segment_id: u64) -> Option<OperationDeadline> {
-        let request_ids = self.durability.cloud_durability_request_ids_at(segment_id);
+        let request_ids = self
+            .durability
+            .cloud_durability_request_ids_at_or_after(segment_id);
         if request_ids.is_empty() {
-            // Background acknowledgement with no caller attached (CloudAsync).
-            // Nobody is waiting on a response, so there is no budget to honour
-            // and no timeout to make ambiguous. Deliberately left unbounded:
-            // imposing a budget here would newly fail slow-but-healthy
-            // background publication that previously succeeded, without any
-            // caller benefiting. Bounding this work is part of moving cloud I/O
-            // off the event loop, not of honouring a caller's deadline.
-            return Some(OperationDeadline::unbounded());
+            return Some(OperationDeadline::from_budget(
+                self.runtime_response_timeout,
+            ));
         }
         let latest_start = request_ids
             .iter()
             .filter_map(|request_id| self.router.registered_at(*request_id))
             .max();
         latest_start.map_or_else(
-            || Some(OperationDeadline::unbounded()),
+            || {
+                Some(OperationDeadline::from_budget(
+                    self.runtime_response_timeout,
+                ))
+            },
             |latest_start| {
                 Some(OperationDeadline::from_start(
                     latest_start,
@@ -262,6 +292,9 @@ impl EventLoop {
             crate::common::MidgeError::Timeout(message) => {
                 crate::common::MidgeError::Timeout(format!("{context}: {message}"))
             }
+            crate::common::MidgeError::Fenced(message) => {
+                crate::common::MidgeError::Fenced(format!("{context}: {message}"))
+            }
             other => crate::common::MidgeError::Internal(format!("{context}: {other}")),
         }
     }
@@ -278,27 +311,24 @@ impl EventLoop {
         self.state.mark_persistence_anomaly();
         self.cloud_wal.acked_segments.remove(&segment_id);
 
-        // Attempt to recover the failed segment's max_sequence so we can
-        // invalidate idempotency allocations that were part of it. Keep the
-        // segment in the inflight frontier: the bounded storage queue retries
-        // upload failures itself, while acknowledgement/publication failures
-        // are explicitly requeued below. Later ACKs must not skip this gap.
-        let failed_max_seq = self.durability.cloud_segment_max_sequence(segment_id);
+        // Keep the segment in the inflight frontier and preserve its request
+        // identities. The accepted local WAL remains owned for callerless
+        // retry, so invalidating those identities would let a client retry
+        // create a second mutation that could also become durable.
+        let failed_max_sequence = self.durability.cloud_segment_max_sequence(segment_id);
 
         // Let WAL actor handle its internal failure handling and drop pending writes.
         tracing::error!(segment_id, error = %error, "Cloud upload failed");
 
-        // If we know the max_sequence for the failed segment, invalidate idempotency
-        // allocations up to that sequence so retries will allocate fresh sequences.
-        if let Some(max_seq) = failed_max_seq {
-            self.state.invalidate_idempotency_allocations_up_to(max_seq);
-            if requeue_publication {
+        if requeue_publication {
+            if let Some(max_seq) = failed_max_sequence {
                 let local_path = self
                     .state
                     .wal_dir
                     .join(crate::wal::segment_file_name(segment_id));
                 if local_path.exists() {
                     self.cloud_wal.upload_backlog.insert(segment_id, max_seq);
+                    self.cloud_wal.defer_upload_retry();
                 } else {
                     tracing::error!(
                         segment_id,
@@ -306,10 +336,18 @@ impl EventLoop {
                         "could not requeue failed cloud WAL publication because its local segment is missing"
                     );
                 }
+            } else {
+                tracing::error!(
+                    segment_id,
+                    "could not requeue failed cloud WAL publication because its inflight sequence maximum is unknown"
+                );
             }
         }
 
-        let waiters = self.durability.drain_all_waiters();
+        // A failure at this segment blocks its own and every later cloud
+        // durability generation, but an earlier sealed generation can still
+        // close independently when its acknowledgement arrives.
+        let waiters = self.durability.drain_waiters_at_or_after(segment_id);
         for w in waiters {
             let request_id = match w {
                 super::super::super::durability::DurabilityWaiter::ConfirmWalAppend {

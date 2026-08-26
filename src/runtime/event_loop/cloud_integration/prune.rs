@@ -3,12 +3,27 @@
 use super::super::EventLoop;
 use crate::runtime::hybrid_persistence::{CloudWalPruneGuard, HybridPersistence};
 
-const MAX_WAL_PRUNE_VALIDATIONS_PER_PASS: usize = 16;
-const MAX_WAL_PRUNE_REQUESTS_PER_PASS: usize = 4;
-
 impl EventLoop {
     pub(crate) fn prune_cloud_wal_segments_covered_by_manifest(&mut self) {
+        self.reap_cloud_wal_prune_worker();
         if !self.wal_actor.is_cloud_async() || self.state.is_memory_mode() {
+            return;
+        }
+
+        // A flush publication mutates the local control files on its worker.
+        // Start only between publication phases, then own the gate until the
+        // worker has verified metadata and retired catalog authority.
+        let layout_publication_active = self
+            .state
+            .active_compactions
+            .load(std::sync::atomic::Ordering::Acquire)
+            > 0
+            || !self.state.compaction.compacting_ssts.is_empty()
+            || self.flush_actor.is_inflight();
+        if self.cloud_wal_prune_worker.is_some()
+            || self.publication_gate.active
+            || layout_publication_active
+        {
             return;
         }
 
@@ -19,9 +34,7 @@ impl EventLoop {
             return;
         };
         let persisted_sequence = self.state.manifest.last_persisted_sequence;
-        let now = std::time::Instant::now();
-
-        let eligible_segments: Vec<(u64, u64)> = self
+        let candidates: Vec<_> = self
             .cloud_wal
             .acked_segments
             .iter()
@@ -30,80 +43,122 @@ impl EventLoop {
                     && **max_sequence <= self.state.wal.cloud_durable_seq
                     && **max_sequence <= persisted_sequence
                     && !self.cloud_wal.prune_inflight.contains(segment_id)
-                    && self
-                        .cloud_wal
-                        .prune_retries
-                        .get(segment_id)
-                        .is_none_or(|(_, retry_at)| *retry_at <= now)
             })
-            .take(MAX_WAL_PRUNE_VALIDATIONS_PER_PASS)
-            .filter_map(|(segment_id, max_sequence)| {
-                let Ok(covered_by_manifest) = storage.remote_wal_segment_covered_by_manifest(
-                    *segment_id,
-                    *max_sequence,
-                    &self.state.manifest,
-                ) else {
-                    return None;
-                };
-
-                covered_by_manifest.then_some((*segment_id, *max_sequence))
-            })
-            .take(MAX_WAL_PRUNE_REQUESTS_PER_PASS)
+            .map(|(segment_id, max_sequence)| (*segment_id, *max_sequence))
             .collect();
-
-        if eligible_segments.is_empty() {
+        let candidate = candidates
+            .iter()
+            .copied()
+            .find(|(segment_id, _)| {
+                self.cloud_wal
+                    .prune_cursor
+                    .is_none_or(|cursor| *segment_id > cursor)
+            })
+            .or_else(|| candidates.first().copied());
+        let Some((segment_id, max_sequence)) = candidate else {
             return;
-        }
+        };
+        // Advance before starting the attempt. A permanently unverifiable low
+        // segment therefore cannot starve later independently eligible WALs.
+        self.cloud_wal.prune_cursor = Some(segment_id);
 
-        if let Err(error) = storage.verify_manifest_cloud_objects(&self.state.manifest) {
-            self.state.mark_persistence_anomaly();
-            tracing::warn!(
-                error = %error,
-                "Skipping remote WAL prune because manifest-referenced cloud objects are not fully readable"
-            );
-            return;
-        }
+        let metadata_snapshot = match self.cloud_metadata_prune_snapshot_for_wal_cleanup() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.state.mark_persistence_anomaly();
+                tracing::warn!(
+                    segment_id,
+                    error = %error,
+                    "Skipping remote WAL prune because committed metadata could not be captured"
+                );
+                return;
+            }
+        };
+        // Filesystem-backed cloud simulation has no separate control store;
+        // its event-loop manifest is the authority snapshot guarded below.
+        let local_manifest = self.state.manifest.clone();
+        let writer_epoch = self.state.writer_epoch;
+        self.cloud_wal.prune_inflight.insert(segment_id);
+        self.publication_gate.active = true;
 
-        let metadata_guard =
-            match self.cloud_metadata_prune_guard_for_wal_cleanup_with_convergence() {
-                Ok(guard) => guard,
-                Err(error) => {
-                    self.state.mark_persistence_anomaly();
-                    tracing::warn!(
-                        error = %error,
-                        "Skipping remote WAL prune because cloud metadata is not fully readable"
-                    );
-                    return;
+        let worker_storage = storage.clone();
+        let worker = std::thread::Builder::new()
+            .name(format!("midge-wal-prune-preflight-{segment_id}"))
+            .spawn(move || {
+                let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let deadline = crate::common::OperationDeadline::unbounded();
+                    match metadata_snapshot {
+                        Some(snapshot) => snapshot.verify_exact_then(|manifest, metadata_guard| {
+                            worker_storage.prune_cloud_wal_segment_within(
+                                segment_id,
+                                max_sequence,
+                                CloudWalPruneGuard::new(manifest, Some(metadata_guard)),
+                                writer_epoch,
+                                &deadline,
+                            )
+                        }),
+                        None => worker_storage.prune_cloud_wal_segment_within(
+                            segment_id,
+                            max_sequence,
+                            CloudWalPruneGuard::new(local_manifest, None),
+                            writer_epoch,
+                            &deadline,
+                        ),
+                    }
+                }))
+                .unwrap_or_else(|_| {
+                    Err(crate::common::MidgeError::Internal(
+                        "cloud WAL prune preflight panicked".to_string(),
+                    ))
+                });
+
+                if let Err(error) = attempt {
+                    worker_storage
+                        .queue_cloud_wal_prune_attempt_failed(segment_id, error.to_string());
                 }
-            };
+            });
 
-        let prune_guard = CloudWalPruneGuard::new(self.state.manifest.clone(), metadata_guard);
-
-        for (segment_id, max_sequence) in eligible_segments {
-            self.cloud_wal.prune_inflight.insert(segment_id);
-            if let Err(error) = storage.prune_cloud_wal_segment(
-                segment_id,
-                max_sequence,
-                prune_guard.clone(),
-                self.state.writer_epoch,
-            ) {
+        match worker {
+            Ok(worker) => self.cloud_wal_prune_worker = Some(worker),
+            Err(error) => {
                 self.cloud_wal.prune_inflight.remove(&segment_id);
-                if error.contains("at capacity") {
-                    tracing::debug!(
-                        segment_id,
-                        error = %error,
-                        "Cloud WAL prune admission is full; retaining segment for retry"
-                    );
-                } else {
-                    self.state.mark_persistence_anomaly();
-                    tracing::warn!(
-                        segment_id,
-                        error = %error,
-                        "Failed to schedule cloud-covered remote WAL prune"
-                    );
-                }
+                self.publication_gate.active = false;
+                self.state.mark_persistence_anomaly();
+                tracing::warn!(
+                    segment_id,
+                    %error,
+                    "Failed to start cloud WAL prune preflight worker"
+                );
             }
         }
+    }
+
+    pub(super) fn reap_cloud_wal_prune_worker(&mut self) {
+        if self
+            .cloud_wal_prune_worker
+            .as_ref()
+            .is_none_or(std::thread::JoinHandle::is_finished)
+        {
+            self.join_cloud_wal_prune_worker();
+            self.restore_publication_deferred_message();
+            self.schedule_next_flush_worker();
+        }
+    }
+
+    pub(in crate::runtime::event_loop) fn join_cloud_wal_prune_worker(&mut self) {
+        if let Some(worker) = self.cloud_wal_prune_worker.take() {
+            if worker.join().is_err() {
+                self.state.mark_persistence_anomaly();
+                tracing::warn!("cloud WAL prune preflight worker panicked during join");
+            }
+            self.publication_gate.active = false;
+        }
+    }
+}
+
+impl Drop for EventLoop {
+    fn drop(&mut self) {
+        self.join_cloud_wal_prune_worker();
     }
 }
 

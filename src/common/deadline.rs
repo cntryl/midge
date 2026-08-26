@@ -10,8 +10,11 @@
 //! The deadline is a value, not a request handle. Work that has a caller builds
 //! one with [`OperationDeadline::from_start`] so the budget starts when the
 //! caller began waiting rather than when the event loop reached the message;
-//! callerless maintenance work builds one with
-//! [`OperationDeadline::from_budget`].
+//! callerless maintenance can build a fresh bounded attempt with
+//! [`OperationDeadline::from_budget`]. Accepted background obligations that
+//! must run independently of any response waiter may use
+//! [`OperationDeadline::unbounded`] while retaining per-callback storage
+//! timeouts and an owning retry lifecycle.
 
 use std::time::{Duration, Instant};
 
@@ -22,11 +25,12 @@ pub struct OperationDeadline {
 }
 
 impl OperationDeadline {
-    /// A deadline that never expires, for call sites that have no budget to
-    /// enforce yet.
+    /// A deadline that never expires.
     ///
-    /// This is the compatibility shim for paths not yet threaded; it is not a
-    /// substitute for a real budget.
+    /// Use this only where no aggregate caller or attempt budget applies, such
+    /// as accepted callerless durability work with separately bounded provider
+    /// callbacks and an owning retry lifecycle. It is also a compatibility shim
+    /// for paths that have not yet been threaded with an aggregate deadline.
     #[must_use]
     pub fn unbounded() -> Self {
         Self { expires_at: None }

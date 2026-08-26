@@ -162,6 +162,29 @@ impl DurabilityCoordinator {
             .unwrap_or_default()
     }
 
+    /// Request ids whose cloud-durability proof depends on `key` closing.
+    ///
+    /// A waiter attached to a later inflight segment also depends on every
+    /// earlier frontier gap. Its remaining budget therefore has to be
+    /// considered when validating an acknowledgement for that gap.
+    pub(crate) fn cloud_durability_request_ids_at_or_after(&self, key: u64) -> Vec<u64> {
+        let mut dependent_keys = self
+            .inflight
+            .keys()
+            .copied()
+            .filter(|candidate| *candidate >= key)
+            .collect::<Vec<_>>();
+        if !dependent_keys.contains(&key) {
+            dependent_keys.push(key);
+        }
+        dependent_keys.sort_unstable();
+        dependent_keys.dedup();
+        dependent_keys
+            .into_iter()
+            .flat_map(|dependent_key| self.cloud_durability_request_ids_at(dependent_key))
+            .collect()
+    }
+
     /// Get all waiters ready for completion at the given key.
     pub fn complete_waiters_at(&self, key: u64) -> Vec<DurabilityWaiter> {
         let completed = self
@@ -186,6 +209,15 @@ impl DurabilityCoordinator {
         self.waiters
             .as_ref()
             .map(super::super::common::singleflight::KeyedGroupCommit::drain_all)
+            .unwrap_or_default()
+    }
+
+    /// Drain waiters whose cloud durability depends on a failed segment.
+    /// Earlier sealed generations remain independently completable.
+    pub fn drain_waiters_at_or_after(&self, segment_id: u64) -> Vec<DurabilityWaiter> {
+        self.waiters
+            .as_ref()
+            .map(|waiters| waiters.drain_where(|key| *key >= segment_id))
             .unwrap_or_default()
     }
 
@@ -312,7 +344,8 @@ impl DurabilityCoordinator {
         // Only threshold-based conditions below are allowed to trigger uploads.
 
         pending_writes > 0
-            && (bytes_buffered >= self.cloud_runtime_policy.wal_seal.min_segment_bytes
+            && (self.cloud_seal_retry_needed
+                || bytes_buffered >= self.cloud_runtime_policy.wal_seal.min_segment_bytes
                 || pending_writes >= self.cloud_runtime_policy.wal_seal.max_pending_writes
                 || self.last_cloud_flush.elapsed()
                     >= self.cloud_runtime_policy.wal_seal.max_flush_delay)

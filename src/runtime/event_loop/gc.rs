@@ -5,11 +5,16 @@ use crate::runtime::RuntimeResponse;
 pub(super) struct GcCoordinator;
 
 impl GcCoordinator {
-    pub(super) fn retry(event_loop: &mut EventLoop) -> HandleOutcome {
+    pub(super) fn retry_within(
+        event_loop: &mut EventLoop,
+        deadline: &crate::common::OperationDeadline,
+    ) -> HandleOutcome {
         let hybrid_storage = event_loop.hybrid_storage.clone();
+        event_loop.gc_actor.begin_manifest_reclamation_attempt();
         match event_loop.state.reclaim_dropped_column_families() {
             Ok(names) => event_loop.gc_actor.queue_manifest_reclamation(names),
             Err(error) => {
+                event_loop.gc_actor.defer_manifest_reclamation_retry();
                 tracing::warn!(%error, "dropped column-family reclamation journal append failed; retaining files");
                 return HandleOutcome::Continue;
             }
@@ -17,10 +22,14 @@ impl GcCoordinator {
         if event_loop.gc_actor.has_manifest_reclamation() {
             let published = crate::runtime::actors::ManifestActor::persist(&event_loop.state)
                 .and_then(|()| {
-                    event_loop
-                        .mirror_metadata_after_local_commit("dropped column-family reclamation")
+                    // Reclamation cannot use salvage-mode best effort. Until
+                    // the remote manifest mirror succeeds, its old snapshot
+                    // may still reference every queued SST.
+                    event_loop.mirror_metadata_to_authoritative_cloud_within(deadline)
                 });
             if let Err(error) = published {
+                event_loop.gc_actor.defer_manifest_reclamation_retry();
+                event_loop.state.mark_persistence_anomaly();
                 tracing::warn!(%error, "dropped column-family manifest publication failed; retaining files");
                 return HandleOutcome::Continue;
             }

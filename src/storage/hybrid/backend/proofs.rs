@@ -114,43 +114,24 @@ impl HybridStorage {
         })
     }
 
-    /// Read one cloud object together with a stable provider identity. The
-    /// runtime may validate the bytes as WAL, SST, or metadata without giving
-    /// those formats to the storage layer.
-    pub(crate) fn remote_object_proof(&self, key: &str) -> Result<RemoteObjectProof, String> {
-        Self::stable_object_proof_from_backend(
-            self.cloud_backend_for_key(key),
-            key,
-            self.callback_timeout,
-        )
-    }
-
-    /// Read a stable object proof, charging each round trip against a shared
-    /// budget.
-    ///
-    /// One proof is three sequential cloud calls (HEAD, GET, HEAD), and a single
-    /// runtime request can chain several proofs. Clamping each call to what the
-    /// deadline still allows keeps the whole sequence inside the caller's
-    /// budget instead of letting every call restart a fresh `callback_timeout`.
-    pub(crate) fn remote_object_proof_within(
-        &self,
+    pub(super) fn stable_object_proof_from_backend_within(
+        backend: &Arc<dyn StorageBackend>,
         key: &str,
+        callback_timeout: Duration,
         deadline: &OperationDeadline,
     ) -> crate::common::MidgeResult<RemoteObjectProof> {
-        Self::deadline_guard(key, "read object proof", deadline)?;
-        let backend = self.cloud_backend_for_key(key);
-
-        let before_timeout = deadline.clamp(self.callback_timeout);
+        Self::deadline_guard(key, "initial HEAD during object proof", deadline)?;
+        let before_timeout = deadline.clamp(callback_timeout);
         let before = Self::head_object_from_backend_blocking(backend, key, before_timeout)
             .map_err(|error| Self::proof_round_trip_error(key, "initial HEAD", error, deadline))?;
 
         Self::deadline_guard(key, "GET during object proof", deadline)?;
-        let read_timeout = deadline.clamp(self.callback_timeout);
+        let read_timeout = deadline.clamp(callback_timeout);
         let bytes = Self::read_object_from_backend_blocking(backend, key, read_timeout)
             .map_err(|error| Self::proof_round_trip_error(key, "GET", error, deadline))?;
 
         Self::deadline_guard(key, "final HEAD during object proof", deadline)?;
-        let after_timeout = deadline.clamp(self.callback_timeout);
+        let after_timeout = deadline.clamp(callback_timeout);
         let after = Self::head_object_from_backend_blocking(backend, key, after_timeout)
             .map_err(|error| Self::proof_round_trip_error(key, "final HEAD", error, deadline))?;
 
@@ -173,12 +154,44 @@ impl HybridStorage {
         })
     }
 
+    /// Read one cloud object together with a stable provider identity. The
+    /// runtime may validate the bytes as WAL, SST, or metadata without giving
+    /// those formats to the storage layer.
+    #[cfg(test)]
+    pub(crate) fn remote_object_proof(&self, key: &str) -> Result<RemoteObjectProof, String> {
+        Self::stable_object_proof_from_backend(
+            self.cloud_backend_for_key(key),
+            key,
+            self.callback_timeout,
+        )
+    }
+
+    /// Read a stable object proof, charging each round trip against a shared
+    /// budget.
+    ///
+    /// One proof is three sequential cloud calls (HEAD, GET, HEAD), and a single
+    /// runtime request can chain several proofs. Clamping each call to what the
+    /// deadline still allows keeps the whole sequence inside the caller's
+    /// budget instead of letting every call restart a fresh `callback_timeout`.
+    pub(crate) fn remote_object_proof_within(
+        &self,
+        key: &str,
+        deadline: &OperationDeadline,
+    ) -> crate::common::MidgeResult<RemoteObjectProof> {
+        Self::stable_object_proof_from_backend_within(
+            self.cloud_backend_for_key(key),
+            key,
+            self.callback_timeout,
+            deadline,
+        )
+    }
+
     /// Refuse to start another cloud round trip once the shared budget is gone.
     ///
     /// Returning here rather than issuing a zero-timeout call keeps the failure
     /// legible: the caller learns which step ran out of budget instead of seeing
     /// a generic transport error.
-    fn deadline_guard(
+    pub(super) fn deadline_guard(
         key: &str,
         step: &str,
         deadline: &OperationDeadline,
@@ -212,13 +225,25 @@ impl HybridStorage {
         &self,
         key: &str,
     ) -> Result<Option<RemoteObjectProof>, String> {
+        self.remote_object_proof_optional_within(key, &OperationDeadline::unbounded())
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn remote_object_proof_optional_within(
+        &self,
+        key: &str,
+        deadline: &OperationDeadline,
+    ) -> crate::common::MidgeResult<Option<RemoteObjectProof>> {
+        Self::deadline_guard(key, "optional object HEAD", deadline)?;
+        let timeout = deadline.clamp(self.callback_timeout);
         let (tx, rx) = std::sync::mpsc::channel();
-        self.cloud_backend_for_key(key).submit_head(key, tx);
-        match rx.recv_timeout(self.callback_timeout) {
+        self.cloud_backend_for_key(key)
+            .submit_head_with_timeout(key, timeout, tx);
+        match rx.recv_timeout(timeout) {
             Ok(StorageEvent::HeadComplete {
                 result: StorageOutcome::Ok(_),
                 ..
-            }) => self.remote_object_proof(key).map(Some),
+            }) => self.remote_object_proof_within(key, deadline).map(Some),
             Ok(StorageEvent::HeadComplete {
                 result: StorageOutcome::Err(error),
                 ..
@@ -226,16 +251,21 @@ impl HybridStorage {
             Ok(StorageEvent::HeadComplete {
                 result: StorageOutcome::Err(error),
                 ..
-            }) => Err(format!("remote object '{key}' HEAD failed: {error}")),
-            Ok(other) => Err(format!(
-                "unexpected remote object HEAD response for '{key}': {other:?}"
+            }) => Err(Self::proof_round_trip_error(
+                key,
+                "optional object HEAD",
+                error,
+                deadline,
             )),
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                Err(format!("remote object HEAD timed out for '{key}'"))
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                Err(format!("remote object HEAD callback closed for '{key}'"))
-            }
+            Ok(other) => Err(crate::common::MidgeError::Internal(format!(
+                "unexpected remote object HEAD response for '{key}': {other:?}"
+            ))),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(crate::common::MidgeError::Timeout(
+                format!("optional object HEAD timed out for '{key}'"),
+            )),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(crate::common::MidgeError::Internal(
+                format!("remote object HEAD callback closed for '{key}'"),
+            )),
         }
     }
 
@@ -349,49 +379,68 @@ impl HybridStorage {
         proof: &GuardedObjectProof,
         callback_timeout: Duration,
     ) -> Result<(), String> {
+        Self::verify_guarded_object_proof_within(
+            proof,
+            callback_timeout,
+            &OperationDeadline::unbounded(),
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    fn verify_guarded_object_proof_within(
+        proof: &GuardedObjectProof,
+        callback_timeout: Duration,
+        deadline: &OperationDeadline,
+    ) -> crate::common::MidgeResult<()> {
         if let Some(expected_bytes) = proof.expected_bytes.as_ref() {
-            let actual = Self::stable_object_proof_from_backend(
+            let actual = Self::stable_object_proof_from_backend_within(
                 &proof.backend,
                 &proof.key,
                 callback_timeout,
+                deadline,
             )?;
             if actual.bytes != *expected_bytes {
-                return Err(format!(
+                return Err(crate::common::MidgeError::Internal(format!(
                     "guarded object '{}' changed before conditional delete",
                     proof.key
-                ));
+                )));
             }
             if actual.metadata != proof.metadata {
-                return Err(format!(
+                return Err(crate::common::MidgeError::Internal(format!(
                     "guarded object '{}' identity changed before conditional delete: expected {:?}, actual {:?}",
                     proof.key, proof.metadata, actual.metadata
-                ));
+                )));
             }
             return Ok(());
         }
 
-        let actual =
-            Self::head_object_from_backend_blocking(&proof.backend, &proof.key, callback_timeout)?;
+        Self::deadline_guard(&proof.key, "guarded object HEAD", deadline)?;
+        let timeout = deadline.clamp(callback_timeout);
+        let actual = Self::head_object_from_backend_blocking(&proof.backend, &proof.key, timeout)
+            .map_err(|error| {
+            Self::proof_round_trip_error(&proof.key, "guarded object HEAD", error, deadline)
+        })?;
         if actual == proof.metadata {
             return Ok(());
         }
-        Err(format!(
+        Err(crate::common::MidgeError::Internal(format!(
             "guarded object '{}' identity changed before conditional delete: expected {:?}, actual {actual:?}",
             proof.key, proof.metadata
-        ))
+        )))
     }
 
     /// Revalidate a pending delete target and every semantic dependency before
     /// the runtime retires an authority reference to that target.
-    pub(crate) fn verify_remote_delete_guards(
+    pub(crate) fn verify_remote_delete_guards_within(
         &self,
         target: &RemoteObjectProof,
         dependencies: &[GuardedObjectProof],
-    ) -> Result<(), String> {
+        deadline: &OperationDeadline,
+    ) -> crate::common::MidgeResult<()> {
         let target_guard = self.remote_identity_guard(target);
-        Self::verify_guarded_object_proof(&target_guard, self.callback_timeout)?;
+        Self::verify_guarded_object_proof_within(&target_guard, self.callback_timeout, deadline)?;
         for dependency in dependencies {
-            Self::verify_guarded_object_proof(dependency, self.callback_timeout)?;
+            Self::verify_guarded_object_proof_within(dependency, self.callback_timeout, deadline)?;
         }
         Ok(())
     }

@@ -17,14 +17,15 @@ const RUNTIME_RESPONSE_TIMEOUT_MARGIN: Duration = Duration::from_secs(30);
 /// error, so the caller sees that error rather than an ambiguous runtime
 /// timeout.
 ///
-/// Known limitation: one margin covers one storage operation. Several cloud
-/// paths perform many sequential operations under a single runtime request —
-/// SST publication, manifest mirroring, and WAL prune each chain well past this
-/// margin, and each restarts a full `storage_io_timeout`. The cloud
-/// acknowledgement path shares one `OperationDeadline` derived from the waiting
-/// caller and so stays inside this budget; the others do not yet. Until they do,
-/// operators on slow providers should expect a runtime timeout to be reachable
-/// on those paths. `abandoned_runtime_requests_total` and
+/// Known limitation: one margin covers one storage operation, not every
+/// callback in a multi-step request. Strict WAL acknowledgement, foreground DDL,
+/// and direct manifest mirroring share an `OperationDeadline` derived from the
+/// waiting caller. Accepted flush, WAL-prune, and reclamation work can continue
+/// through callerless workers or maintenance retries after that caller leaves.
+/// Compaction publication still performs several provider operations without a
+/// shared caller deadline, so operators on slow providers should expect a
+/// runtime timeout to be reachable on that path.
+/// `abandoned_runtime_requests_total` and
 /// `late_runtime_responses_total` expose aggregate timeout behavior, but cannot
 /// determine the outcome of an individual request.
 pub(crate) fn default_runtime_response_timeout(storage_io_timeout: Duration) -> Duration {

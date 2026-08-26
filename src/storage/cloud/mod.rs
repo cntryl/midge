@@ -45,8 +45,7 @@ pub(crate) use config::CloudWritePolicyConfig;
 use super::{StorageBackend, StorageCallback, StorageEvent, StorageObjectMetadata, StorageOutcome};
 #[cfg(test)]
 use crate::common::MidgeError;
-#[cfg(test)]
-use parking_lot::Mutex;
+use parking_lot::{Mutex, MutexGuard};
 #[cfg(test)]
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -133,6 +132,22 @@ impl CloudError {
         matches!(self, Self::PreconditionFailed(_))
     }
 
+    /// True when the provider or executor specifically reports deadline
+    /// exhaustion, rather than another transport failure such as DNS or TLS.
+    #[must_use]
+    pub(crate) fn is_timeout(&self) -> bool {
+        let message = match self {
+            Self::Transport(message) => message,
+            #[cfg(any(test, feature = "cloud-common"))]
+            Self::ServerError(message) if message.starts_with("status 408:") => message,
+            _ => return false,
+        };
+        let message = message.to_ascii_lowercase();
+        message.contains("timed out")
+            || message.contains("timeout")
+            || message.contains("deadline exceeded")
+    }
+
     /// Classify a raw HTTP status code from a provider response.
     ///
     /// Status alone is intentionally insufficient to classify a lost
@@ -171,6 +186,19 @@ impl std::fmt::Display for CloudError {
 }
 
 impl std::error::Error for CloudError {}
+
+pub(crate) fn contextualize_operation_error(
+    error: &CloudError,
+    context: impl std::fmt::Display,
+    deadline: &crate::common::OperationDeadline,
+) -> crate::common::MidgeError {
+    let message = format!("{context}: {error}");
+    if deadline.is_expired() || error.is_timeout() {
+        crate::common::MidgeError::Timeout(message)
+    } else {
+        crate::common::MidgeError::Internal(message)
+    }
+}
 
 /// Cloud operation outcome sent across the callback boundary.
 pub type CloudOutcome<T> = Result<T, CloudError>;
@@ -597,6 +625,7 @@ pub struct CloudStorage {
     backend: Arc<dyn CloudBackend>,
     namespace: String,
     callback_timeout: std::time::Duration,
+    metadata_publication_lock: Mutex<()>,
 }
 
 pub(crate) const CLOUD_METADATA_FILES: &[&str] = &[
@@ -632,9 +661,24 @@ pub(crate) fn blocking_cloud_object_proof(
     cloud: &CloudStorage,
     key: &str,
 ) -> Result<Option<CloudObjectProof>, String> {
+    blocking_cloud_object_proof_within(cloud, key, &crate::common::OperationDeadline::unbounded())
+        .map_err(|error| error.to_string())
+}
+
+pub(crate) fn blocking_cloud_object_proof_within(
+    cloud: &CloudStorage,
+    key: &str,
+    deadline: &crate::common::OperationDeadline,
+) -> crate::common::MidgeResult<Option<CloudObjectProof>> {
+    if deadline.is_expired() {
+        return Err(crate::common::MidgeError::Timeout(format!(
+            "operation deadline exhausted before cloud object GET for '{key}'"
+        )));
+    }
+    let get_timeout = deadline.clamp(cloud.callback_timeout());
     let (get_tx, get_rx) = std::sync::mpsc::channel();
     cloud.submit_get(key, get_tx);
-    let bytes = match get_rx.recv_timeout(cloud.callback_timeout()) {
+    let bytes = match get_rx.recv_timeout(get_timeout) {
         Ok(CloudEvent::Get {
             result: CloudOutcome::Ok(bytes),
             ..
@@ -646,18 +690,39 @@ pub(crate) fn blocking_cloud_object_proof(
         Ok(CloudEvent::Get {
             result: CloudOutcome::Err(error),
             ..
-        }) => return Err(format!("cloud object '{key}' is unreadable: {error}")),
-        Ok(other) => {
-            return Err(format!(
-                "unexpected cloud object GET response for '{key}': {other:?}"
+        }) => {
+            return Err(contextualize_operation_error(
+                &error,
+                format_args!("cloud object '{key}' is unreadable"),
+                deadline,
             ))
         }
-        Err(error) => return Err(format!("cloud object GET timed out for '{key}': {error}")),
+        Ok(other) => {
+            return Err(crate::common::MidgeError::Internal(format!(
+                "unexpected cloud object GET response for '{key}': {other:?}"
+            )))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            return Err(crate::common::MidgeError::Timeout(format!(
+                "cloud object GET exceeded the operation deadline for '{key}'"
+            )))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            return Err(crate::common::MidgeError::Internal(format!(
+                "cloud object GET callback closed for '{key}'"
+            )))
+        }
     };
 
+    if deadline.is_expired() {
+        return Err(crate::common::MidgeError::Timeout(format!(
+            "operation deadline exhausted before cloud object HEAD for '{key}'"
+        )));
+    }
+    let head_timeout = deadline.clamp(cloud.callback_timeout());
     let (head_tx, head_rx) = std::sync::mpsc::channel();
     cloud.submit_head(key, head_tx);
-    let metadata = match head_rx.recv_timeout(cloud.callback_timeout()) {
+    let metadata = match head_rx.recv_timeout(head_timeout) {
         Ok(CloudEvent::Head {
             result: CloudOutcome::Ok(metadata),
             ..
@@ -666,24 +731,35 @@ pub(crate) fn blocking_cloud_object_proof(
             result: CloudOutcome::Err(error),
             ..
         }) => {
-            return Err(format!(
-                "cloud object '{key}' identity is unreadable after GET: {error}"
+            return Err(contextualize_operation_error(
+                &error,
+                format_args!("cloud object '{key}' identity is unreadable after GET"),
+                deadline,
             ))
         }
         Ok(other) => {
-            return Err(format!(
+            return Err(crate::common::MidgeError::Internal(format!(
                 "unexpected cloud object HEAD response for '{key}': {other:?}"
-            ))
+            )))
         }
-        Err(error) => return Err(format!("cloud object HEAD timed out for '{key}': {error}")),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            return Err(crate::common::MidgeError::Timeout(format!(
+                "cloud object HEAD exceeded the operation deadline for '{key}'"
+            )))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            return Err(crate::common::MidgeError::Internal(format!(
+                "cloud object HEAD callback closed for '{key}'"
+            )))
+        }
     };
 
     let bytes_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
     if metadata.size != bytes_len {
-        return Err(format!(
+        return Err(crate::common::MidgeError::Internal(format!(
             "cloud object '{key}' changed during validation: read={bytes_len}, head={}",
             metadata.size
-        ));
+        )));
     }
 
     Ok(Some(CloudObjectProof { bytes, metadata }))
@@ -709,6 +785,7 @@ impl CloudStorage {
             backend,
             namespace,
             callback_timeout,
+            metadata_publication_lock: Mutex::new(()),
         }
     }
 
@@ -720,6 +797,14 @@ impl CloudStorage {
 
     pub(crate) fn callback_timeout(&self) -> std::time::Duration {
         self.callback_timeout
+    }
+
+    pub(crate) fn try_lock_metadata_publication(&self) -> Option<MutexGuard<'_, ()>> {
+        self.metadata_publication_lock.try_lock()
+    }
+
+    pub(crate) fn lock_metadata_publication(&self) -> MutexGuard<'_, ()> {
+        self.metadata_publication_lock.lock()
     }
 
     fn full_path(&self, suffix: &str) -> String {
@@ -1272,7 +1357,11 @@ mod tests {
             .expect_err("configured callback timeout must bound proof reads");
 
         // Assert
-        assert!(error.contains("timed out"), "unexpected error: {error}");
+        assert!(
+            error.contains("timed out")
+                || (error.contains("Timeout") && error.contains("deadline")),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

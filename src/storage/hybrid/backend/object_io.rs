@@ -16,14 +16,6 @@ impl HybridStorage {
         }
     }
 
-    pub(super) fn read_cloud_object_from_backend_blocking(
-        cloud: &Arc<dyn StorageBackend>,
-        key: &str,
-        callback_timeout: Duration,
-    ) -> Result<Vec<u8>, String> {
-        Self::read_object_from_backend_blocking(cloud, key, callback_timeout)
-    }
-
     pub(super) fn read_object_from_backend_blocking(
         backend: &Arc<dyn StorageBackend>,
         key: &str,
@@ -45,6 +37,25 @@ impl HybridStorage {
             )),
             Err(error) => Err(format!("cloud read timed out for '{key}': {error}")),
         }
+    }
+
+    pub(super) fn read_object_from_backend_within(
+        backend: &Arc<dyn StorageBackend>,
+        key: &str,
+        callback_timeout: Duration,
+        deadline: &crate::common::OperationDeadline,
+    ) -> crate::common::MidgeResult<Vec<u8>> {
+        Self::deadline_guard(key, "read object", deadline)?;
+        let timeout = deadline.clamp(callback_timeout);
+        Self::read_object_from_backend_blocking(backend, key, timeout).map_err(|error| {
+            if deadline.is_expired() || Self::storage_error_indicates_timeout(&error) {
+                crate::common::MidgeError::Timeout(format!(
+                    "object read timed out for '{key}': {error}"
+                ))
+            } else {
+                crate::common::MidgeError::Internal(error)
+            }
+        })
     }
 
     pub(super) fn head_object_from_backend_blocking(
@@ -93,39 +104,50 @@ impl HybridStorage {
         error.contains("timed out") || error.contains("timeout")
     }
 
-    pub(super) fn object_exists_in_backend_blocking(
+    pub(super) fn object_exists_in_backend_within(
         backend: &Arc<dyn StorageBackend>,
         key: &str,
         callback_timeout: Duration,
-    ) -> Result<bool, String> {
+        deadline: &crate::common::OperationDeadline,
+    ) -> crate::common::MidgeResult<bool> {
+        Self::deadline_guard(key, "HEAD object existence", deadline)?;
+        let timeout = deadline.clamp(callback_timeout);
         let (tx, rx) = std::sync::mpsc::channel();
-        backend.submit_head(key, tx);
-        match rx.recv_timeout(callback_timeout) {
+        backend.submit_head_with_timeout(key, timeout, tx);
+        match rx.recv_timeout(timeout) {
             Ok(StorageEvent::HeadComplete {
-                key: returned_key,
                 result: StorageOutcome::Ok(_),
-            }) => {
-                let _ = returned_key;
-                Ok(true)
-            }
+                ..
+            }) => Ok(true),
             Ok(StorageEvent::HeadComplete {
-                key: returned_key,
                 result: StorageOutcome::Err(error),
-            }) if Self::storage_error_indicates_missing(&error) => {
-                let _ = returned_key;
-                Ok(false)
-            }
+                ..
+            }) if Self::storage_error_indicates_missing(&error) => Ok(false),
             Ok(StorageEvent::HeadComplete {
-                key: returned_key,
                 result: StorageOutcome::Err(error),
+                ..
             }) => {
-                let _ = returned_key;
-                Err(format!("object '{key}' HEAD failed: {error}"))
+                if deadline.is_expired() || Self::storage_error_indicates_timeout(&error) {
+                    Err(crate::common::MidgeError::Timeout(format!(
+                        "object HEAD timed out for '{key}': {error}"
+                    )))
+                } else {
+                    Err(crate::common::MidgeError::Internal(format!(
+                        "object '{key}' HEAD failed: {error}"
+                    )))
+                }
             }
-            Ok(other) => Err(format!(
+            Ok(other) => Err(crate::common::MidgeError::Internal(format!(
                 "unexpected storage HEAD response for '{key}': {other:?}"
-            )),
-            Err(error) => Err(format!("storage HEAD timed out for '{key}': {error}")),
+            ))),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(
+                crate::common::MidgeError::Timeout(format!("object HEAD timed out for '{key}'")),
+            ),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                Err(crate::common::MidgeError::Internal(format!(
+                    "object HEAD callback closed for '{key}'"
+                )))
+            }
         }
     }
 

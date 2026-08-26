@@ -71,43 +71,43 @@ impl EventLoop {
                 let storage = storage.clone();
                 let shutdown_start = std::time::Instant::now();
                 let shutdown_timeout = self.shutdown_cloud_drain_timeout;
-                let mut last_pending = usize::MAX;
-                let mut stagnant_rounds = 0usize;
+                let shutdown_deadline =
+                    crate::common::OperationDeadline::from_start(shutdown_start, shutdown_timeout);
 
-                while storage.pending_upload_count() > 0
-                    && shutdown_start.elapsed() < shutdown_timeout
+                while (storage.pending_upload_count() > 0 || self.cloud_wal.has_pending_uploads())
+                    && !shutdown_deadline.is_expired()
                 {
+                    // UploadQueue and the runtime backlog are two ownership
+                    // domains for the same accepted WAL obligation. Terminal
+                    // storage failure transfers work back to the latter, so
+                    // shutdown must keep admitting it until durability closes
+                    // or the configured drain deadline expires.
+                    self.drain_cloud_wal_upload_backlog_within(&shutdown_deadline);
                     self.tick_hybrid_storage();
                     self.drain_hybrid_storage_events();
-
-                    let pending = storage.pending_upload_count();
-                    if pending < last_pending {
-                        last_pending = pending;
-                        stagnant_rounds = 0;
-                    } else if self.state.persistence_anomaly_detected() {
-                        stagnant_rounds = stagnant_rounds.saturating_add(1);
-                        if stagnant_rounds >= 25 {
-                            tracing::warn!(
-                                pending,
-                                "aborting cloud shutdown wait after repeated failed upload progress"
-                            );
-                            break;
-                        }
+                    if !shutdown_deadline.is_expired() {
+                        self.drain_cloud_wal_upload_backlog_within(&shutdown_deadline);
                     }
 
-                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    let sleep_for = shutdown_deadline
+                        .remaining()
+                        .min(std::time::Duration::from_millis(10));
+                    if !sleep_for.is_zero() {
+                        std::thread::sleep(sleep_for);
+                    }
                 }
 
-                if storage.pending_upload_count() > 0 {
+                let storage_pending = storage.pending_upload_count();
+                let runtime_pending = self.cloud_wal.upload_backlog.len();
+                if storage_pending > 0 || runtime_pending > 0 {
                     tracing::warn!(
-                        pending = storage.pending_upload_count(),
-                        "Shutdown timeout: {} pending CloudAsync uploads not completed",
-                        storage.pending_upload_count()
+                        storage_pending,
+                        runtime_pending,
+                        "Shutdown timeout: CloudAsync uploads remain owned"
                     );
                     if shutdown_error.is_none() {
                         shutdown_error = Some(MidgeError::Internal(format!(
-                            "shutdown timed out with {} pending cloud uploads",
-                            storage.pending_upload_count()
+                            "shutdown timed out with {storage_pending} storage-owned and {runtime_pending} runtime-owned cloud uploads"
                         )));
                     }
                 } else {
@@ -120,6 +120,7 @@ impl EventLoop {
         // Join them before the event loop exits; Engine releases its lease
         // only after this runtime has quiesced.
         self.gc_actor.shutdown_workers();
+        self.join_cloud_wal_prune_worker();
         if let Some(storage) = &self.hybrid_storage {
             storage.shutdown_background_workers();
         }

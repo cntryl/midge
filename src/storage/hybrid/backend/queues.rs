@@ -154,7 +154,8 @@ impl BoundedEventQueue {
             | StorageEvent::CloudFail { segment_id, .. } => {
                 Some(TerminalEventKey::Upload(*segment_id))
             }
-            StorageEvent::CloudWalPruneComplete { segment_id, .. } => {
+            StorageEvent::CloudWalPruneComplete { segment_id, .. }
+            | StorageEvent::CloudWalPruneAttemptFailed { segment_id, .. } => {
                 Some(TerminalEventKey::Prune(*segment_id))
             }
             _ => None,
@@ -198,6 +199,7 @@ impl BoundedEventQueue {
                 StorageOutcome::Ok(()) => 0,
                 StorageOutcome::Err(error) => error.len(),
             },
+            StorageEvent::CloudWalPruneAttemptFailed { error, .. } => error.len(),
             StorageEvent::CloudAck { .. }
             | StorageEvent::BackpressureOn
             | StorageEvent::BackpressureOff => 0,

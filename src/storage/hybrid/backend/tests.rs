@@ -615,9 +615,57 @@ struct AlwaysFailingWriteBackend {
     write_attempts: Arc<AtomicUsize>,
 }
 
+struct PanickingWriteBackend {
+    write_attempts: Arc<AtomicUsize>,
+}
+
 impl AlwaysFailingWriteBackend {
     fn new(write_attempts: Arc<AtomicUsize>) -> Self {
         Self { write_attempts }
+    }
+}
+
+impl PanickingWriteBackend {
+    fn new(write_attempts: Arc<AtomicUsize>) -> Self {
+        Self { write_attempts }
+    }
+}
+
+impl StorageBackend for PanickingWriteBackend {
+    fn submit_read(&self, key: &str, callback: StorageCallback) {
+        let _ = callback.send(StorageEvent::ReadComplete {
+            key: key.to_string(),
+            result: StorageOutcome::Err("read unavailable".to_string()),
+        });
+    }
+
+    fn submit_write(&self, _key: &str, _data: Vec<u8>, _callback: StorageCallback) {
+        self.write_attempts.fetch_add(1, Ordering::SeqCst);
+        panic!("injected cloud upload worker panic");
+    }
+
+    fn submit_write_with_headers(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        _headers: Vec<(String, String)>,
+        callback: StorageCallback,
+    ) {
+        self.submit_write(key, data, callback);
+    }
+
+    fn submit_delete(&self, key: &str, callback: StorageCallback) {
+        let _ = callback.send(StorageEvent::DeleteComplete {
+            key: key.to_string(),
+            result: StorageOutcome::Ok(()),
+        });
+    }
+
+    fn submit_list(&self, prefix: &str, callback: StorageCallback) {
+        let _ = callback.send(StorageEvent::ListComplete {
+            prefix: prefix.to_string(),
+            result: StorageOutcome::Ok(Vec::new()),
+        });
     }
 }
 
@@ -678,6 +726,73 @@ struct BudgetConsumingProofBackend {
     first_head_delay: Duration,
     head_calls: AtomicUsize,
     retained_callbacks: Mutex<Vec<StorageCallback>>,
+}
+
+struct BudgetConsumingSstPublicationBackend {
+    first_head_delay: Duration,
+    head_calls: AtomicUsize,
+    retained_callbacks: Mutex<Vec<StorageCallback>>,
+}
+
+impl BudgetConsumingSstPublicationBackend {
+    fn new(first_head_delay: Duration) -> Self {
+        Self {
+            first_head_delay,
+            head_calls: AtomicUsize::new(0),
+            retained_callbacks: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn retain_callback(&self, callback: StorageCallback) {
+        self.retained_callbacks.lock().push(callback);
+    }
+}
+
+impl StorageBackend for BudgetConsumingSstPublicationBackend {
+    fn submit_read(&self, _key: &str, callback: StorageCallback) {
+        self.retain_callback(callback);
+    }
+
+    fn submit_write(&self, _key: &str, _data: Vec<u8>, callback: StorageCallback) {
+        self.retain_callback(callback);
+    }
+
+    fn submit_write_with_headers(
+        &self,
+        _key: &str,
+        _data: Vec<u8>,
+        _headers: Vec<(String, String)>,
+        callback: StorageCallback,
+    ) {
+        self.retain_callback(callback);
+    }
+
+    fn submit_delete(&self, _key: &str, callback: StorageCallback) {
+        self.retain_callback(callback);
+    }
+
+    fn submit_list(&self, prefix: &str, callback: StorageCallback) {
+        let _ = callback.send(StorageEvent::ListComplete {
+            prefix: prefix.to_string(),
+            result: StorageOutcome::Ok(Vec::new()),
+        });
+    }
+
+    fn submit_head(&self, key: &str, callback: StorageCallback) {
+        if self.head_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            let delay = self.first_head_delay;
+            let key = key.to_string();
+            std::thread::spawn(move || {
+                std::thread::sleep(delay);
+                let _ = callback.send(StorageEvent::HeadComplete {
+                    key,
+                    result: StorageOutcome::Err("not found: delayed miss".to_string()),
+                });
+            });
+        } else {
+            self.retain_callback(callback);
+        }
+    }
 }
 
 impl BudgetConsumingProofBackend {
@@ -2005,13 +2120,17 @@ fn should_stop_retrying_failed_wal_upload_after_retry_budget_exhausted() {
         .expect("enqueue WAL upload");
 
     let deadline = Instant::now() + Duration::from_secs(2);
-    let mut observed_failures = 0usize;
+    let mut observed_terminal_failures = Vec::new();
     while Instant::now() < deadline {
         let events = storage.process_uploads();
-        observed_failures += events
-            .iter()
-            .filter(|event| matches!(event, StorageEvent::CloudFail { .. }))
-            .count();
+        observed_terminal_failures.extend(events.into_iter().filter_map(|event| match event {
+            StorageEvent::CloudFail {
+                terminal,
+                failure_kind,
+                ..
+            } => Some((terminal, failure_kind)),
+            _ => None,
+        }));
         if storage.pending_upload_count() == 0 {
             break;
         }
@@ -2026,14 +2145,71 @@ fn should_stop_retrying_failed_wal_upload_after_retry_budget_exhausted() {
         "permanently failing WAL uploads should stop after the retry budget"
     );
     assert_eq!(
-        observed_failures, 3,
-        "each failed WAL upload attempt should surface exactly one CloudFail"
+        observed_terminal_failures,
+        vec![
+            (false, crate::storage::CloudUploadFailureKind::Other),
+            (false, crate::storage::CloudUploadFailureKind::Other),
+            (true, crate::storage::CloudUploadFailureKind::Other),
+        ],
+        "only the failure that exhausts storage retry ownership may be terminal"
     );
     assert_eq!(
         storage.pending_upload_count(),
         0,
         "exhausted WAL uploads must leave the queue so cleanup and shutdown are bounded"
     );
+}
+
+#[test]
+fn should_transfer_wal_retry_ownership_when_upload_worker_panics() {
+    // Arrange
+    let tmp = tempfile::tempdir().expect("create WAL worker panic test dir");
+    let local = Arc::new(
+        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
+            .expect("create local backend"),
+    );
+    let write_attempts = Arc::new(AtomicUsize::new(0));
+    let cloud = Arc::new(PanickingWriteBackend::new(Arc::clone(&write_attempts)));
+    let storage = HybridStorage::with_policy(
+        local,
+        cloud,
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    );
+    let segment_id = 12;
+    let max_sequence = 22;
+    let wal_path = tmp.path().join(crate::wal::segment_file_name(segment_id));
+    std::fs::write(&wal_path, valid_wal_bytes(max_sequence)).expect("write local WAL");
+    storage
+        .enqueue_wal_segment(segment_id, &wal_path, max_sequence)
+        .expect("enqueue WAL upload");
+
+    // Act
+    let deadline = Instant::now() + Duration::from_millis(500);
+    let mut terminal_failure = false;
+    while Instant::now() < deadline {
+        terminal_failure |= storage.process_uploads().into_iter().any(|event| {
+            matches!(
+                event,
+                StorageEvent::CloudFail {
+                    segment_id: failed_segment,
+                    terminal: true,
+                    ..
+                } if failed_segment == segment_id
+            )
+        });
+        if storage.pending_upload_count() == 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    // Assert
+    assert_eq!(write_attempts.load(Ordering::SeqCst), 3);
+    assert!(
+        terminal_failure,
+        "worker panic must transfer retry ownership"
+    );
+    assert_eq!(storage.pending_upload_count(), 0);
 }
 
 #[test]
@@ -2179,7 +2355,11 @@ fn should_release_storage_reservation_given_upload_callback_is_lost_when_worker_
             .filter(|event| {
                 matches!(
                     event,
-                    StorageEvent::CloudFail { error, .. } if error.contains("timed out")
+                    StorageEvent::CloudFail {
+                        error,
+                        failure_kind: crate::storage::CloudUploadFailureKind::Timeout,
+                        ..
+                    } if error.contains("timed out")
                 )
             })
             .count();
@@ -2320,5 +2500,51 @@ fn should_recompute_remaining_budget_before_each_round_trip_when_reading_object_
     assert!(
         elapsed < Duration::from_millis(150),
         "proof reused the pre-HEAD allowance and exceeded its shared budget: {elapsed:?}"
+    );
+}
+
+#[test]
+fn should_bound_sst_publication_with_shared_deadline_when_remote_preflight_consumes_budget() {
+    // Arrange: remote HEAD consumes most of the shared budget, then the
+    // conditional PUT never answers. A fresh per-call timeout would let this
+    // attempt outlive its advertised deadline by nearly a second.
+    let tmp = tempfile::tempdir().expect("create deadline publication directory");
+    let local = Arc::new(
+        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
+            .expect("create deadline publication local backend"),
+    );
+    let cloud = Arc::new(BudgetConsumingSstPublicationBackend::new(
+        Duration::from_millis(80),
+    ));
+    let limits = HybridQueueLimits {
+        callback_timeout: Duration::from_secs(1),
+        ..HybridQueueLimits::default()
+    };
+    let storage = HybridStorage::with_policy_event_sender_and_limits(
+        local,
+        cloud,
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        None,
+        limits,
+    );
+    let deadline = crate::common::OperationDeadline::from_budget(Duration::from_millis(100));
+
+    // Act
+    let started = Instant::now();
+    let result = storage.write_sst_object_within(
+        "deadline-publication.sst",
+        valid_sst_bytes(b"deadline", b"value", 1),
+        &deadline,
+    );
+    let elapsed = started.elapsed();
+
+    // Assert
+    assert!(
+        matches!(result, Err(crate::common::MidgeError::Timeout(_))),
+        "deadline expiry must remain typed as Timeout: {result:?}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(150),
+        "SST publication reused a fresh callback timeout: {elapsed:?}"
     );
 }

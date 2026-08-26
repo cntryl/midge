@@ -103,6 +103,28 @@ where
         state.inflight.remove(key).unwrap_or_default()
     }
 
+    /// Drain selected sealed generations and the current pending generation
+    /// when it also matches `predicate`.
+    pub fn drain_where(&self, predicate: impl Fn(&K) -> bool) -> Vec<W> {
+        let mut state = self.state.lock();
+        let selected_keys = state
+            .inflight
+            .keys()
+            .filter(|key| predicate(key))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut drained = Vec::new();
+        for key in selected_keys {
+            if let Some(mut waiters) = state.inflight.remove(&key) {
+                drained.append(&mut waiters);
+            }
+        }
+        if predicate(&state.current_key) {
+            drained.append(&mut state.pending);
+        }
+        drained
+    }
+
     /// Drain all pending + inflight waiters.
     pub fn drain_all(&self) -> Vec<W> {
         let mut state = self.state.lock();

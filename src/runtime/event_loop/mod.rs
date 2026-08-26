@@ -47,6 +47,7 @@ use std::time::{Duration, Instant};
 
 const BACKGROUND_COMPACTION_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const STARTUP_CLOUD_MAINTENANCE_DELAY: Duration = Duration::from_millis(100);
+const HYBRID_STORAGE_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 #[cfg(test)]
 use super::actors::CloudActor;
@@ -97,7 +98,6 @@ impl From<&super::RuntimeConfig> for RecoveredCloudWalConfig {
     }
 }
 
-pub(super) use coordination::MetadataCleanupProof;
 use coordination::{CloudWalUploadTracker, ManifestPublicationGate, VerificationBarrier};
 
 /// Main synchronous event loop for the runtime.
@@ -124,6 +124,7 @@ pub struct EventLoop {
     pub(super) loop_debug_wakes: u64,
     pub(super) loop_debug_batch_total: u64,
     pub(super) cloud_wal: CloudWalUploadTracker,
+    cloud_wal_prune_worker: Option<std::thread::JoinHandle<()>>,
     next_background_compaction_check: Instant,
 
     // Durability coordination (extracted to reduce EventLoop cognitive load)
@@ -308,6 +309,7 @@ impl EventLoop {
             loop_debug_wakes: 0,
             loop_debug_batch_total: 0,
             cloud_wal: CloudWalUploadTracker::new(config.recovered_cloud_wal_segments.clone()),
+            cloud_wal_prune_worker: None,
             next_background_compaction_check: Instant::now() + BACKGROUND_COMPACTION_CHECK_INTERVAL,
             durability: DurabilityCoordinator::new(
                 initial_durability_key,
@@ -467,6 +469,25 @@ impl EventLoop {
         })
     }
 
+    /// Deadline for a routed request that began waiting in `RuntimeHandle`.
+    ///
+    /// A missing route means the caller already abandoned the request, not
+    /// that accepted caller-owned work should receive an unbounded budget.
+    pub(super) fn registered_request_deadline(
+        &self,
+        request_id: u64,
+    ) -> crate::common::OperationDeadline {
+        self.router.registered_at(request_id).map_or_else(
+            || crate::common::OperationDeadline::from_budget(Duration::ZERO),
+            |registered_at| {
+                crate::common::OperationDeadline::from_start(
+                    registered_at,
+                    self.runtime_response_timeout,
+                )
+            },
+        )
+    }
+
     /// Set the snapshot cache for read-path bypass.
     pub fn set_snapshot_cache(&mut self, cache: Arc<SnapshotCache>) {
         self.snapshot_cache = Some(cache);
@@ -586,6 +607,11 @@ impl EventLoop {
         &mut self,
         plan: crate::compaction::CompactionPlan,
     ) -> crate::common::MidgeResult<()> {
+        if self.publication_gate.active {
+            return Err(crate::common::MidgeError::Busy(
+                "manifest publication is already in progress".to_string(),
+            ));
+        }
         if self.compaction_publication_degraded {
             return Err(crate::common::MidgeError::Fenced(
                 "compaction publication is unsettled; refusing another compaction until recovery"
@@ -702,25 +728,6 @@ impl EventLoop {
             }
         }
         self.prune_cloud_wal_segments_covered_by_manifest();
-        self.rearm_wal_prune_retry_deadline();
-    }
-
-    /// Fold any still-pending cloud WAL-prune retry deadline back into the
-    /// background maintenance timer. Without this, resetting the timer above
-    /// to the full 30s interval would silently discard a tighter exponential
-    /// backoff deadline set by a failed prune (see ack.rs), stalling that
-    /// segment's retry on an otherwise-idle system.
-    fn rearm_wal_prune_retry_deadline(&mut self) {
-        if let Some(earliest_retry_at) = self
-            .cloud_wal
-            .prune_retries
-            .values()
-            .map(|(_, retry_at)| *retry_at)
-            .min()
-        {
-            self.next_background_compaction_check =
-                self.next_background_compaction_check.min(earliest_retry_at);
-        }
     }
 
     pub(super) fn schedule_background_compaction_on_startup(&mut self) {
@@ -753,13 +760,29 @@ impl EventLoop {
         Ok(())
     }
 
+    fn cloud_metadata_deadline_guard(
+        key: &str,
+        operation: &str,
+        deadline: &crate::common::OperationDeadline,
+    ) -> crate::common::MidgeResult<()> {
+        if deadline.is_expired() {
+            return Err(crate::common::MidgeError::Timeout(format!(
+                "operation deadline exhausted before cloud metadata {operation} for '{key}'"
+            )));
+        }
+        Ok(())
+    }
+
     fn cloud_metadata_get_optional(
         cloud: &crate::storage::cloud::CloudStorage,
         key: &str,
-    ) -> Result<Option<Vec<u8>>, String> {
+        deadline: &crate::common::OperationDeadline,
+    ) -> crate::common::MidgeResult<Option<Vec<u8>>> {
+        Self::cloud_metadata_deadline_guard(key, "GET", deadline)?;
+        let timeout = deadline.clamp(cloud.callback_timeout());
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_get(key, tx);
-        match rx.recv_timeout(cloud.callback_timeout()) {
+        match rx.recv_timeout(timeout) {
             Ok(crate::storage::cloud::CloudEvent::Get {
                 result: crate::storage::cloud::CloudOutcome::Ok(data),
                 ..
@@ -771,21 +794,37 @@ impl EventLoop {
             Ok(crate::storage::cloud::CloudEvent::Get {
                 result: crate::storage::cloud::CloudOutcome::Err(error),
                 ..
-            }) => Err(format!("cloud metadata get '{key}' failed: {error}")),
-            Ok(other) => Err(format!(
-                "unexpected cloud metadata get response for '{key}': {other:?}"
+            }) => Err(crate::storage::cloud::contextualize_operation_error(
+                &error,
+                format_args!("cloud metadata get '{key}' failed"),
+                deadline,
             )),
-            Err(error) => Err(format!("cloud metadata get '{key}' timed out: {error}")),
+            Ok(other) => Err(crate::common::MidgeError::Internal(format!(
+                "unexpected cloud metadata get response for '{key}': {other:?}"
+            ))),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                Err(crate::common::MidgeError::Timeout(format!(
+                    "cloud metadata get '{key}' exceeded the operation deadline"
+                )))
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                Err(crate::common::MidgeError::Internal(format!(
+                    "cloud metadata get callback closed for '{key}'"
+                )))
+            }
         }
     }
 
     fn cloud_metadata_head_optional(
         cloud: &crate::storage::cloud::CloudStorage,
         key: &str,
-    ) -> Result<Option<crate::storage::cloud::ObjectMetadata>, String> {
+        deadline: &crate::common::OperationDeadline,
+    ) -> crate::common::MidgeResult<Option<crate::storage::cloud::ObjectMetadata>> {
+        Self::cloud_metadata_deadline_guard(key, "HEAD", deadline)?;
+        let timeout = deadline.clamp(cloud.callback_timeout());
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_head(key, tx);
-        match rx.recv_timeout(cloud.callback_timeout()) {
+        match rx.recv_timeout(timeout) {
             Ok(crate::storage::cloud::CloudEvent::Head {
                 result: crate::storage::cloud::CloudOutcome::Ok(metadata),
                 ..
@@ -797,11 +836,24 @@ impl EventLoop {
             Ok(crate::storage::cloud::CloudEvent::Head {
                 result: crate::storage::cloud::CloudOutcome::Err(error),
                 ..
-            }) => Err(format!("cloud metadata head '{key}' failed: {error}")),
-            Ok(other) => Err(format!(
-                "unexpected cloud metadata head response for '{key}': {other:?}"
+            }) => Err(crate::storage::cloud::contextualize_operation_error(
+                &error,
+                format_args!("cloud metadata head '{key}' failed"),
+                deadline,
             )),
-            Err(error) => Err(format!("cloud metadata head '{key}' timed out: {error}")),
+            Ok(other) => Err(crate::common::MidgeError::Internal(format!(
+                "unexpected cloud metadata head response for '{key}': {other:?}"
+            ))),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                Err(crate::common::MidgeError::Timeout(format!(
+                    "cloud metadata head '{key}' exceeded the operation deadline"
+                )))
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                Err(crate::common::MidgeError::Internal(format!(
+                    "cloud metadata head callback closed for '{key}'"
+                )))
+            }
         }
     }
 
@@ -822,13 +874,12 @@ impl EventLoop {
     fn ensure_remote_manifest_metadata_not_ahead(
         &self,
         cloud: &crate::storage::cloud::CloudStorage,
+        deadline: &crate::common::OperationDeadline,
     ) -> crate::common::MidgeResult<()> {
         let local_sequence = self.state.manifest.last_persisted_sequence;
         for file_name in ["manifest.snapshot.json", "manifest.json"] {
             let key = crate::storage::cloud::cloud_metadata_key(file_name);
-            let Some(data) = Self::cloud_metadata_get_optional(cloud, &key)
-                .map_err(crate::common::MidgeError::Internal)?
-            else {
+            let Some(data) = Self::cloud_metadata_get_optional(cloud, &key, deadline)? else {
                 continue;
             };
             let Some(remote_sequence) =
@@ -852,10 +903,9 @@ impl EventLoop {
         key: &str,
         data: Vec<u8>,
         local_manifest_sequence: u64,
+        deadline: &crate::common::OperationDeadline,
     ) -> crate::common::MidgeResult<()> {
-        let headers = match Self::cloud_metadata_head_optional(cloud, key)
-            .map_err(crate::common::MidgeError::Internal)?
-        {
+        let headers = match Self::cloud_metadata_head_optional(cloud, key, deadline)? {
             Some(metadata) => {
                 let headers = crate::storage::cloud::object_match_precondition_headers(
                     &metadata.etag,
@@ -866,9 +916,8 @@ impl EventLoop {
                         "cloud metadata '{key}' cannot be conditionally updated without an identity token"
                     ))
                 })?;
-                let current = Self::cloud_metadata_get_optional(cloud, key)
-                    .map_err(crate::common::MidgeError::Internal)?
-                    .ok_or_else(|| {
+                let current =
+                    Self::cloud_metadata_get_optional(cloud, key, deadline)?.ok_or_else(|| {
                         crate::common::MidgeError::Internal(format!(
                             "cloud metadata '{key}' disappeared after HEAD precondition"
                         ))
@@ -891,36 +940,62 @@ impl EventLoop {
             None => vec![("If-None-Match".to_string(), "*".to_string())],
         };
 
+        Self::cloud_metadata_deadline_guard(key, "PUT", deadline)?;
+        let timeout = deadline.clamp(cloud.callback_timeout());
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_put(key, data, headers, tx);
 
-        match rx.recv_timeout(cloud.callback_timeout()) {
+        match rx.recv_timeout(timeout) {
             Ok(crate::storage::cloud::CloudEvent::Put { result, .. }) => match result {
                 crate::storage::cloud::CloudOutcome::Ok(()) => Ok(()),
                 crate::storage::cloud::CloudOutcome::Err(error) => {
-                    Err(crate::common::MidgeError::Internal(format!(
-                        "cloud metadata mirror failed for '{key}': {error}"
-                    )))
+                    Err(crate::storage::cloud::contextualize_operation_error(
+                        &error,
+                        format_args!("cloud metadata mirror failed for '{key}'"),
+                        deadline,
+                    ))
                 }
             },
             Ok(other) => Err(crate::common::MidgeError::Internal(format!(
                 "unexpected cloud metadata mirror response for '{key}': {other:?}"
             ))),
-            Err(error) => Err(crate::common::MidgeError::Internal(format!(
-                "cloud metadata mirror timed out for '{key}': {error}"
-            ))),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                Err(crate::common::MidgeError::Timeout(format!(
+                    "cloud metadata mirror put '{key}' exceeded the operation deadline"
+                )))
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                Err(crate::common::MidgeError::Internal(format!(
+                    "cloud metadata mirror callback closed for '{key}'"
+                )))
+            }
         }
     }
 
     fn mirror_metadata_to_authoritative_cloud(&self) -> crate::common::MidgeResult<()> {
+        self.mirror_metadata_to_authoritative_cloud_within(
+            &crate::common::OperationDeadline::unbounded(),
+        )
+    }
+
+    pub(super) fn mirror_metadata_to_authoritative_cloud_within(
+        &self,
+        deadline: &crate::common::OperationDeadline,
+    ) -> crate::common::MidgeResult<()> {
         let Some(cloud) = self.cloud_metadata_storage.as_ref() else {
             return Ok(());
         };
+        let _publication_guard = cloud.try_lock_metadata_publication().ok_or_else(|| {
+            crate::common::MidgeError::Busy(
+                "cloud metadata publication is already in progress".to_string(),
+            )
+        })?;
 
-        self.ensure_remote_manifest_metadata_not_ahead(cloud)?;
+        self.ensure_remote_manifest_metadata_not_ahead(cloud, deadline)?;
         let local_manifest_sequence = self.state.manifest.last_persisted_sequence;
 
         for file_name in crate::storage::cloud::CLOUD_METADATA_FILES {
+            Self::cloud_metadata_deadline_guard(file_name, "local mirror preparation", deadline)?;
             let local_path = self.state.db_path.join(file_name);
             if !local_path.exists() {
                 continue;
@@ -934,6 +1009,7 @@ impl EventLoop {
                 &key,
                 data,
                 local_manifest_sequence,
+                deadline,
             )?;
         }
 
@@ -944,7 +1020,18 @@ impl EventLoop {
         &mut self,
         context: &str,
     ) -> crate::common::MidgeResult<()> {
-        match self.mirror_metadata_to_authoritative_cloud() {
+        self.mirror_metadata_after_local_commit_within(
+            context,
+            &crate::common::OperationDeadline::unbounded(),
+        )
+    }
+
+    fn mirror_metadata_after_local_commit_within(
+        &mut self,
+        context: &str,
+        deadline: &crate::common::OperationDeadline,
+    ) -> crate::common::MidgeResult<()> {
+        match self.mirror_metadata_to_authoritative_cloud_within(deadline) {
             Ok(()) => Ok(()),
             Err(error)
                 if self.state.recovery_policy() == crate::config::RecoveryPolicy::Salvage =>
@@ -1020,7 +1107,15 @@ impl EventLoop {
     }
 
     pub(super) fn retry_gc(&mut self) -> HandleOutcome {
-        gc::GcCoordinator::retry(self)
+        let deadline = crate::common::OperationDeadline::from_budget(self.runtime_response_timeout);
+        gc::GcCoordinator::retry_within(self, &deadline)
+    }
+
+    pub(super) fn retry_gc_within(
+        &mut self,
+        deadline: &crate::common::OperationDeadline,
+    ) -> HandleOutcome {
+        gc::GcCoordinator::retry_within(self, deadline)
     }
 
     pub(super) fn defer_verification_message(&mut self, message: RuntimeMsg) {
@@ -1126,7 +1221,7 @@ impl EventLoop {
             return true;
         }
 
-        if !self.cloud_wal.upload_backlog.is_empty() {
+        if self.cloud_wal.uploads_ready() {
             return true;
         }
 
@@ -1142,12 +1237,6 @@ impl EventLoop {
             return true;
         }
 
-        if let Some(storage) = &self.hybrid_storage {
-            if storage.pending_upload_count() > 0 {
-                return true;
-            }
-        }
-
         if let Some(rx) = &self.hybrid_storage_events {
             if !rx.is_empty() {
                 return true;
@@ -1158,11 +1247,22 @@ impl EventLoop {
     }
 
     fn idle_progress_timeout(&self) -> Option<Duration> {
+        if self.verification_barrier.is_active() {
+            // Verification deliberately freezes maintenance. Ignoring due
+            // retry deadlines here makes the run loop block for the release
+            // message instead of repeatedly timing out at zero duration.
+            return None;
+        }
+
         [
             self.wal_actor.sync_deadline_timeout(),
             self.durability
                 .cloud_seal_deadline_timeout(self.state.wal.pending_writes),
             self.gc_actor.retry_deadline_timeout(),
+            self.cloud_wal.upload_retry_deadline_timeout(),
+            self.hybrid_storage.as_ref().and_then(|storage| {
+                (storage.pending_upload_count() > 0).then_some(HYBRID_STORAGE_POLL_INTERVAL)
+            }),
             self.state.flush_retry_deadline_timeout(),
             self.flush_actor
                 .is_inflight()
@@ -1188,8 +1288,26 @@ impl EventLoop {
         let hybrid_storage = self.hybrid_storage.clone();
         self.gc_actor
             .retry_failed_cloud_deletes_if_due(&mut self.state, hybrid_storage);
+        self.retry_manifest_reclamation_if_due();
         self.drain_auto_flush_memtables();
         self.run_background_compaction_maintenance_if_due();
+    }
+
+    fn retry_manifest_reclamation_if_due(&mut self) {
+        if !self.gc_actor.manifest_reclamation_retry_due() {
+            return;
+        }
+
+        // Do not interleave with a flush/prune publication snapshot. Deferring
+        // re-arms the idle wakeup instead of turning a busy publication gate
+        // into a spin loop.
+        if self.publication_gate.active {
+            self.gc_actor.defer_manifest_reclamation_retry();
+            return;
+        }
+
+        let deadline = crate::common::OperationDeadline::from_budget(self.runtime_response_timeout);
+        let _ = self.retry_gc_within(&deadline);
     }
 
     fn record_wake_batch(&mut self, batch: usize) {
@@ -1230,7 +1348,20 @@ impl EventLoop {
             self.drain_hybrid_storage_events();
             self.run_background_compaction_maintenance_if_due();
         }
-        self.handle_runtime_msg(msg, msg_rx)
+        let outcome = self.handle_runtime_msg(msg, msg_rx);
+        if outcome == HandleOutcome::Continue && self.verification_barrier.token.is_none() {
+            // A continuously non-empty request queue must not starve a sealed
+            // WAL segment whose storage-owned retry budget was exhausted. Run
+            // the bounded fairness slot after answering this request so slow
+            // provider admission cannot consume its response budget.
+            self.drain_cloud_wal_upload_backlog();
+            // A continuously non-empty request queue must not starve accepted
+            // reclamation work. The retry owns a bounded attempt deadline and
+            // re-arms backoff on failure, so this is one fairness slot rather
+            // than an unbounded maintenance loop.
+            self.retry_manifest_reclamation_if_due();
+        }
+        outcome
     }
 
     pub(super) fn handle_runtime_msg(

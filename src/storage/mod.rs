@@ -128,6 +128,13 @@ pub struct StorageObjectMetadata {
     pub generation: Option<String>,
 }
 
+/// Public error category retained across the asynchronous cloud WAL pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloudUploadFailureKind {
+    Other,
+    Timeout,
+}
+
 impl StorageObjectMetadata {
     pub fn content_crc(size: u64, data: &[u8]) -> Self {
         Self {
@@ -173,15 +180,26 @@ pub enum StorageEvent {
     /// Cloud upload acknowledged - segment is now durable
     /// WAL Actor MUST apply pending writes to memtable on receipt
     CloudAck { segment_id: u64, max_sequence: u64 },
-    /// Cloud upload failed - segment NOT durable
-    /// Runtime should retry or handle failure
-    CloudFail { segment_id: u64, error: String },
+    /// Cloud upload attempt failed - segment NOT durable.
+    ///
+    /// While `terminal` is false, HybridStorage still owns an internal retry.
+    /// A terminal failure transfers the accepted local WAL obligation back to
+    /// the runtime for delayed callerless retry.
+    CloudFail {
+        segment_id: u64,
+        error: String,
+        terminal: bool,
+        failure_kind: CloudUploadFailureKind,
+    },
     /// Remote WAL pruning completed after the segment became covered by
     /// cloud-published SST and metadata state.
     CloudWalPruneComplete {
         segment_id: u64,
         result: StorageOutcome<()>,
     },
+    /// A background prune attempt failed before catalog authority retirement.
+    /// The runtime clears inflight state but retains the segment for retry.
+    CloudWalPruneAttemptFailed { segment_id: u64, error: String },
     /// Backpressure activated - disk watermark exceeded
     /// Runtime should pause flushes until `BackpressureOff`
     BackpressureOn,
