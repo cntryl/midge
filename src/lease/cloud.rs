@@ -589,7 +589,20 @@ impl CloudStorageLease {
     ///
     /// `local_cache_path` must be the local staging directory for cloud storage.
     /// The lease coordination file will be written here.
+    #[cfg(test)]
     pub fn new(config: CloudLeaseConfig, local_cache_path: impl AsRef<std::path::Path>) -> Self {
+        Self::new_with_ttl(
+            config,
+            local_cache_path,
+            Duration::from_secs(DEFAULT_CLOUD_LEASE_TTL_SECS),
+        )
+    }
+
+    fn new_with_ttl(
+        config: CloudLeaseConfig,
+        local_cache_path: impl AsRef<std::path::Path>,
+        ttl: Duration,
+    ) -> Self {
         let holder_id = format!(
             "{}@{}",
             std::process::id(),
@@ -599,7 +612,6 @@ impl CloudStorageLease {
         );
         let owner_token = uuid::Uuid::new_v4().to_string();
 
-        let ttl = Duration::from_secs(DEFAULT_CLOUD_LEASE_TTL_SECS);
         let clock_skew_tolerance = Duration::from_secs(DEFAULT_CLOUD_LEASE_TTL_SECS / 2);
         let validity = Arc::new(LeaseValidity::new());
         let leader_store: Arc<dyn LeaderStore> = match RealFs::new(local_cache_path) {
@@ -643,21 +655,36 @@ impl CloudStorageLease {
         Ok(self)
     }
 
-    pub(crate) fn new_with_clock_skew_tolerance(
+    pub(crate) fn new_with_clock_skew_tolerance_and_ttl(
         config: CloudLeaseConfig,
         local_cache_path: impl AsRef<std::path::Path>,
         clock_skew_tolerance: Duration,
+        ttl: Duration,
     ) -> Self {
-        let lease = Self::new(config, local_cache_path);
-        lease
+        Self::new_with_ttl(config, local_cache_path, ttl)
             .with_clock_skew_tolerance(clock_skew_tolerance)
             .expect("engine validates lease clock-skew tolerance")
     }
 
+    #[cfg(test)]
     pub fn new_provider_backed(
+        config: CloudLeaseConfig,
+        local_cache_path: std::path::PathBuf,
+        cloud: Arc<CloudStorage>,
+    ) -> Self {
+        Self::new_provider_backed_with_ttl(
+            config,
+            local_cache_path,
+            cloud,
+            Duration::from_secs(DEFAULT_CLOUD_LEASE_TTL_SECS),
+        )
+    }
+
+    fn new_provider_backed_with_ttl(
         config: CloudLeaseConfig,
         _local_cache_path: std::path::PathBuf,
         cloud: Arc<CloudStorage>,
+        ttl: Duration,
     ) -> Self {
         let holder_id = format!(
             "{}@{}",
@@ -667,7 +694,6 @@ impl CloudStorageLease {
                 .to_string_lossy()
         );
         let owner_token = uuid::Uuid::new_v4().to_string();
-        let ttl = Duration::from_secs(DEFAULT_CLOUD_LEASE_TTL_SECS);
         let clock_skew_tolerance = Duration::from_secs(DEFAULT_CLOUD_LEASE_TTL_SECS / 2);
         let validity = Arc::new(LeaseValidity::new());
         let leader_store = Arc::new(ProviderLeaderStore::new(
@@ -691,14 +717,14 @@ impl CloudStorageLease {
         }
     }
 
-    pub(crate) fn new_provider_backed_with_clock_skew_tolerance(
+    pub(crate) fn new_provider_backed_with_clock_skew_tolerance_and_ttl(
         config: CloudLeaseConfig,
         local_cache_path: std::path::PathBuf,
         cloud: Arc<CloudStorage>,
         clock_skew_tolerance: Duration,
+        ttl: Duration,
     ) -> Self {
-        let lease = Self::new_provider_backed(config, local_cache_path, cloud);
-        lease
+        Self::new_provider_backed_with_ttl(config, local_cache_path, cloud, ttl)
             .with_clock_skew_tolerance(clock_skew_tolerance)
             .expect("engine validates lease clock-skew tolerance")
     }

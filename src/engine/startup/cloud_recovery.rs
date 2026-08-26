@@ -274,7 +274,7 @@ impl CloudStartupRecovery {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn blocking_cloud_get(
         cloud: &crate::storage::cloud::CloudStorage,
         key: &str,

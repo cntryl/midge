@@ -3,14 +3,49 @@ mod common;
 use cntryl_midge::{
     Engine, EngineHealth, MidgeError, OpenOptions, RecoveryPolicy, TransactionMode, WriteOptions,
 };
-use common::{opts_for_mode, MidgeOptions, StorageMode};
+use common::{crash, opts_for_mode, MidgeOptions, StorageMode};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 static FAILPOINT_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+const CORRUPT_WAL_CHILD_TEST_NAME: &str =
+    "should_abort_in_child_process_when_remote_wal_corruption_scenario_requested";
+const CORRUPT_WAL_ENV_DB_PATH: &str = "MIDGE_CORRUPT_REMOTE_WAL_DB_PATH";
+const CORRUPT_WAL_SCENARIO: &str = "remote_wal_corruption_after_strict_ack";
+const CORRUPT_WAL_TRIGGER: &str = "manual::remote_wal_corruption_after_strict_ack";
+
+#[test]
+fn should_abort_in_child_process_when_remote_wal_corruption_scenario_requested() {
+    // Arrange
+    let Some(db_path) = std::env::var_os(CORRUPT_WAL_ENV_DB_PATH) else {
+        return;
+    };
+    let engine = Engine::open(cloud_open_options(
+        Path::new(&db_path),
+        RecoveryPolicy::Strict,
+    ))
+    .expect("open cloud engine in crash child");
+    put_default(
+        &engine,
+        b"prefix-key",
+        b"prefix-value",
+        WriteOptions::cloud_strict(),
+    );
+    put_default(
+        &engine,
+        b"truncated-key",
+        b"truncated-value",
+        WriteOptions::cloud_strict(),
+    );
+
+    // Act
+    // Assert
+    crash::abort_at_trigger(CORRUPT_WAL_SCENARIO, CORRUPT_WAL_TRIGGER);
+}
 
 #[test]
 fn should_recover_cloud_strict_write_from_authoritative_remote_wal_after_local_cache_loss() {
@@ -563,23 +598,8 @@ fn should_salvage_valid_prefix_when_remote_wal_segment_is_corrupt() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let opts = opts_for_mode("cloud");
     let db_path = cloud_db_path(&opts);
-    let mut engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
-
-    put_default(
-        &engine,
-        b"prefix-key",
-        b"prefix-value",
-        WriteOptions::cloud_strict(),
-    );
-    put_default(
-        &engine,
-        b"truncated-key",
-        b"truncated-value",
-        WriteOptions::cloud_strict(),
-    );
-    engine
-        .shutdown(std::time::Duration::from_secs(5))
-        .expect("shutdown before reopen");
+    run_remote_wal_corruption_child(&db_path);
+    expire_crashed_process_lease(&db_path);
 
     let remote_wal_dir = db_path.join("cloud_store").join("wal");
     let corrupt_remote_wal = list_files_with_extension(&remote_wal_dir, "wal")
@@ -620,6 +640,48 @@ fn should_salvage_valid_prefix_when_remote_wal_segment_is_corrupt() {
         "salvage recovery must retain corrupt authoritative WAL byte-for-byte"
     );
     shutdown_test_engine(salvaged);
+}
+
+fn run_remote_wal_corruption_child(db_path: &Path) {
+    let current_exe = std::env::current_exe().expect("current test executable");
+    let mut command = Command::new(current_exe);
+    command
+        .arg("--exact")
+        .arg(CORRUPT_WAL_CHILD_TEST_NAME)
+        .arg("--nocapture")
+        .arg("--test-threads=1")
+        .env(CORRUPT_WAL_ENV_DB_PATH, db_path);
+    crash::run_child_expect_abort(
+        &mut command,
+        CORRUPT_WAL_SCENARIO,
+        CORRUPT_WAL_TRIGGER,
+        db_path,
+    );
+}
+
+fn expire_crashed_process_lease(db_path: &Path) {
+    let lease_path = db_path.join("midge_primary_lease.json");
+    if lease_path.exists() {
+        let mut content = fs::read_to_string(&lease_path).expect("read crashed lease record");
+        if content.contains("acquired_at: ") || content.contains("expires_at: ") {
+            content = content
+                .lines()
+                .map(|line| {
+                    if line.starts_with("acquired_at: ") {
+                        "acquired_at: 1970-01-01T00:00:00Z".to_string()
+                    } else if line.starts_with("expires_at: ") {
+                        "expires_at: 1970-01-01T00:00:00Z".to_string()
+                    } else {
+                        line.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            content.push('\n');
+            fs::write(&lease_path, content).expect("expire crashed lease record");
+        }
+    }
+    crash::clear_crashed_process_acquisition_lock(db_path);
 }
 
 #[test]

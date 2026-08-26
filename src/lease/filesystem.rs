@@ -26,6 +26,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(test)]
 const DEFAULT_TTL_SECS: u64 = 30;
 
 /// Per-process counter to ensure each `FileSystemLease` instance gets a unique
@@ -40,6 +41,7 @@ pub struct FileSystemLease {
     /// Epoch obtained during the most recent successful acquisition.
     acquired_epoch: AtomicU64,
     validity: Arc<LeaseValidity>,
+    ttl: Duration,
     clock_skew_tolerance: Duration,
 }
 
@@ -49,17 +51,20 @@ impl FileSystemLease {
     /// # Arguments
     /// * `db_path` - Path to the database directory
     /// * `use_mock_fs` - If true, uses `MockFs` (for in-memory mode); otherwise uses `RealFs`
+    #[cfg(test)]
     pub fn new(db_path: &Path, use_mock_fs: bool) -> Result<Self, LeaseError> {
-        Self::new_with_clock_skew_tolerance(
+        Self::new_with_ttl_and_clock_skew_tolerance(
             db_path,
             use_mock_fs,
+            Duration::from_secs(DEFAULT_TTL_SECS),
             Duration::from_secs(DEFAULT_TTL_SECS / 2),
         )
     }
 
-    pub(crate) fn new_with_clock_skew_tolerance(
+    pub(crate) fn new_with_ttl_and_clock_skew_tolerance(
         db_path: &Path,
         use_mock_fs: bool,
+        ttl: Duration,
         clock_skew_tolerance: Duration,
     ) -> Result<Self, LeaseError> {
         let fs: Arc<dyn Fs> = if use_mock_fs {
@@ -87,6 +92,7 @@ impl FileSystemLease {
             acquired: AtomicBool::new(false),
             acquired_epoch: AtomicU64::new(0),
             validity: Arc::new(LeaseValidity::new()),
+            ttl,
             clock_skew_tolerance,
         })
     }
@@ -147,8 +153,7 @@ impl PrimaryLease for FileSystemLease {
                     // trades failover latency for protection against a holder
                     // whose wall clock stepped backwards while its monotonic
                     // watchdog still considers the lease live.
-                    let stale_after = Duration::from_secs(DEFAULT_TTL_SECS * 2)
-                        .saturating_add(self.clock_skew_tolerance);
+                    let stale_after = self.ttl.saturating_add(self.clock_skew_tolerance);
                     if age < stale_after {
                         return Err(LeaseError::AcquisitionFailed(format!(
                             "another Midge instance is already running against this storage \
@@ -233,7 +238,7 @@ impl PrimaryLease for FileSystemLease {
     }
 
     fn ttl(&self) -> Duration {
-        Duration::from_secs(DEFAULT_TTL_SECS)
+        self.ttl
     }
 
     fn holder_id(&self) -> String {
@@ -401,6 +406,153 @@ mod tests {
                 .expect("read current leader"),
             Some(future_record),
             "an ambiguous future timestamp must retain the existing leader indefinitely"
+        );
+    }
+
+    #[test]
+    fn should_take_over_only_after_configured_lease_boundary() {
+        // Arrange
+        let temp_dir = tempfile::tempdir().unwrap();
+        let ttl = Duration::from_secs(2);
+        let skew = Duration::from_secs(1);
+        let live_record = LeaderRecord {
+            epoch: 17,
+            holder_id: "live-node".to_string(),
+            acquired_at: (chrono::Utc::now() - chrono::Duration::seconds(2)).to_rfc3339(),
+        };
+        std::fs::write(
+            temp_dir.path().join(".midge_leader"),
+            format_leader_record(&live_record),
+        )
+        .expect("write live leader record");
+        let lease = Arc::new(
+            FileSystemLease::new_with_ttl_and_clock_skew_tolerance(
+                temp_dir.path(),
+                false,
+                ttl,
+                skew,
+            )
+            .unwrap(),
+        );
+
+        // Act
+        let live_result = Arc::clone(&lease).try_acquire();
+        let stale_record = LeaderRecord {
+            acquired_at: (chrono::Utc::now() - chrono::Duration::seconds(4)).to_rfc3339(),
+            ..live_record.clone()
+        };
+        std::fs::write(
+            temp_dir.path().join(".midge_leader"),
+            format_leader_record(&stale_record),
+        )
+        .expect("write stale leader record");
+        let _guard = Arc::clone(&lease)
+            .try_acquire()
+            .expect("take over after configured boundary");
+
+        // Assert
+        assert!(matches!(live_result, Err(LeaseError::AcquisitionFailed(_))));
+        assert!(lease.epoch() > stale_record.epoch);
+    }
+
+    #[test]
+    fn should_reject_takeover_given_malformed_leader_timestamp_when_acquiring() {
+        // Arrange
+        let temp_dir = tempfile::tempdir().unwrap();
+        let malformed_record = LeaderRecord {
+            epoch: 23,
+            holder_id: "ambiguous-node".to_string(),
+            acquired_at: "not-a-timestamp".to_string(),
+        };
+        std::fs::write(
+            temp_dir.path().join(".midge_leader"),
+            format_leader_record(&malformed_record),
+        )
+        .expect("write malformed leader record");
+        let lease = Arc::new(FileSystemLease::new(temp_dir.path(), false).unwrap());
+
+        // Act
+        let result = Arc::clone(&lease).try_acquire();
+
+        // Assert
+        assert!(matches!(result, Err(LeaseError::Indeterminate(_))));
+        assert_eq!(
+            lease
+                .leader_store
+                .read_current()
+                .expect("read current leader"),
+            Some(malformed_record)
+        );
+    }
+
+    #[test]
+    fn should_fence_stale_holder_after_higher_epoch_takes_over() {
+        // Arrange
+        let temp_dir = tempfile::tempdir().unwrap();
+        let ttl = Duration::from_secs(2);
+        let first = Arc::new(
+            FileSystemLease::new_with_ttl_and_clock_skew_tolerance(
+                temp_dir.path(),
+                false,
+                ttl,
+                Duration::ZERO,
+            )
+            .unwrap(),
+        );
+        let _first_guard = Arc::clone(&first)
+            .try_acquire()
+            .expect("acquire first lease");
+        let first_epoch = first.epoch();
+        let stale_record = LeaderRecord {
+            epoch: first_epoch,
+            holder_id: first.holder_id(),
+            acquired_at: (chrono::Utc::now() - chrono::Duration::seconds(3)).to_rfc3339(),
+        };
+        std::fs::write(
+            temp_dir.path().join(".midge_leader"),
+            format_leader_record(&stale_record),
+        )
+        .expect("age first leader record");
+        let second = Arc::new(
+            FileSystemLease::new_with_ttl_and_clock_skew_tolerance(
+                temp_dir.path(),
+                false,
+                ttl,
+                Duration::ZERO,
+            )
+            .unwrap(),
+        );
+        let _second_guard = Arc::clone(&second)
+            .try_acquire()
+            .expect("higher epoch should take over");
+        let second_record = second
+            .leader_store
+            .read_current()
+            .expect("read second leader")
+            .expect("second leader exists");
+
+        // Act
+        let renew_result = first.renew();
+        let release_result = first.release();
+        let write_fence_result = first
+            .leader_store
+            .validate_epoch(&first.holder_id(), first_epoch);
+
+        // Assert
+        assert!(matches!(renew_result, Err(LeaseError::RenewalFailed(_))));
+        assert!(release_result.is_ok());
+        assert!(matches!(
+            write_fence_result,
+            Err(LeaseError::RenewalFailed(_))
+        ));
+        assert!(second_record.epoch > first_epoch);
+        assert_eq!(
+            second
+                .leader_store
+                .read_current()
+                .expect("read current leader"),
+            Some(second_record),
+            "stale renewal and release must preserve the higher-epoch holder"
         );
     }
 }

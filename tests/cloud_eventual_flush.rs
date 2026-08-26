@@ -248,7 +248,7 @@ fn should_publish_lightly_written_column_family_given_busy_neighbor_when_cloud_s
 }
 
 #[test]
-fn should_reset_memtable_wal_gap_after_reopen_before_new_segment_churn() {
+fn should_reset_memtable_wal_gap_given_graceful_checkpoint_reopen() {
     // Arrange
     let opts = opts_for_mode("cloud").with_cloud_write_policy(CloudWritePolicy {
         eventual_flush_segment_gap: CloudWritePolicy::default().eventual_flush_segment_gap,
@@ -300,7 +300,7 @@ fn should_reset_memtable_wal_gap_after_reopen_before_new_segment_churn() {
         "reopened non-empty memtables should start counting segment churn from the new runtime"
     );
     assert_eq!(
-        reopened_metrics.sst_count, 0,
-        "reopen should not immediately auto-flush based on historical WAL segment churn"
+        reopened_metrics.sst_count, 1,
+        "graceful shutdown should checkpoint the WAL-backed memtable exactly once"
     );
 }

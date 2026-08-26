@@ -74,47 +74,10 @@ impl EventLoop {
         }
 
         if cloud_async {
-            if let Some(storage) = &self.hybrid_storage {
-                let storage = storage.clone();
-
-                while (storage.pending_upload_count() > 0 || self.cloud_wal.has_pending_uploads())
-                    && !cloud_shutdown_deadline.is_expired()
-                {
-                    // UploadQueue and the runtime backlog are two ownership
-                    // domains for the same accepted WAL obligation. Terminal
-                    // storage failure transfers work back to the latter, so
-                    // shutdown must keep admitting it until durability closes
-                    // or the configured drain deadline expires.
-                    self.drain_cloud_wal_upload_backlog_within(&cloud_shutdown_deadline);
-                    self.tick_hybrid_storage_within(&cloud_shutdown_deadline);
-                    self.drain_hybrid_storage_events_within(&cloud_shutdown_deadline);
-                    if !cloud_shutdown_deadline.is_expired() {
-                        self.drain_cloud_wal_upload_backlog_within(&cloud_shutdown_deadline);
-                    }
-
-                    let sleep_for = cloud_shutdown_deadline
-                        .remaining()
-                        .min(std::time::Duration::from_millis(10));
-                    if !sleep_for.is_zero() {
-                        std::thread::sleep(sleep_for);
-                    }
-                }
-
-                let storage_pending = storage.pending_upload_count();
-                let runtime_pending = self.cloud_wal.upload_backlog.len();
-                if storage_pending > 0 || runtime_pending > 0 {
-                    tracing::warn!(
-                        storage_pending,
-                        runtime_pending,
-                        "Shutdown timeout: CloudAsync uploads remain owned"
-                    );
-                    if shutdown_error.is_none() {
-                        shutdown_error = Some(MidgeError::Internal(format!(
-                            "shutdown timed out with {storage_pending} storage-owned and {runtime_pending} runtime-owned cloud uploads"
-                        )));
-                    }
-                } else {
-                    tracing::info!("All CloudAsync uploads completed on shutdown");
+            if let Some(error) = self.drain_shutdown_cloud_uploads_within(&cloud_shutdown_deadline)
+            {
+                if shutdown_error.is_none() {
+                    shutdown_error = Some(error);
                 }
             }
         }
@@ -174,6 +137,51 @@ impl EventLoop {
         }
 
         HandleOutcome::Break
+    }
+
+    fn drain_shutdown_cloud_uploads_within(
+        &mut self,
+        deadline: &crate::common::OperationDeadline,
+    ) -> Option<MidgeError> {
+        let storage = self.hybrid_storage.as_ref()?.clone();
+        while (storage.pending_upload_count() > 0 || self.cloud_wal.has_pending_uploads())
+            && !deadline.is_expired()
+        {
+            // UploadQueue and the runtime backlog are two ownership domains
+            // for the same accepted WAL obligation. Terminal storage failure
+            // transfers work back to the latter, so shutdown must keep
+            // admitting it until durability closes or the configured drain
+            // deadline expires.
+            self.drain_cloud_wal_upload_backlog_within(deadline);
+            self.tick_hybrid_storage_within(deadline);
+            self.drain_hybrid_storage_events_within(deadline);
+            if !deadline.is_expired() {
+                self.drain_cloud_wal_upload_backlog_within(deadline);
+            }
+
+            let sleep_for = deadline
+                .remaining()
+                .min(std::time::Duration::from_millis(10));
+            if !sleep_for.is_zero() {
+                std::thread::sleep(sleep_for);
+            }
+        }
+
+        let storage_pending = storage.pending_upload_count();
+        let runtime_pending = self.cloud_wal.upload_backlog.len();
+        if storage_pending > 0 || runtime_pending > 0 {
+            tracing::warn!(
+                storage_pending,
+                runtime_pending,
+                "Shutdown timeout: CloudAsync uploads remain owned"
+            );
+            Some(MidgeError::Internal(format!(
+                "shutdown timed out with {storage_pending} storage-owned and {runtime_pending} runtime-owned cloud uploads"
+            )))
+        } else {
+            tracing::info!("All CloudAsync uploads completed on shutdown");
+            None
+        }
     }
 
     fn checkpoint_active_cloud_memtables_within(

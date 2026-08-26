@@ -724,3 +724,35 @@ fn should_reject_clock_skew_tolerance_larger_than_lease_ttl() {
     // Assert
     assert!(matches!(result, Err(MidgeError::InvalidArgument(_))));
 }
+
+#[test]
+fn should_allow_explicit_lease_profile() {
+    // Arrange
+    let ttl = Duration::from_secs(30);
+    let skew = Duration::from_secs(5);
+
+    // Act
+    let options = OpenOptions::in_memory()
+        .lease_ttl(ttl)
+        .lease_clock_skew_tolerance(skew)
+        .build()
+        .expect("valid lease timing profile");
+
+    // Assert
+    assert_eq!(options.lease_ttl(), ttl);
+    assert_eq!(options.lease_clock_skew_tolerance(), skew);
+}
+
+#[test]
+fn should_reject_zero_lease_ttl() {
+    // Arrange
+    let ttl = Duration::ZERO;
+
+    // Act
+    let result = OpenOptions::in_memory().lease_ttl(ttl).build();
+
+    // Assert
+    assert!(
+        matches!(result, Err(MidgeError::InvalidArgument(message)) if message.contains("lease TTL"))
+    );
+}
