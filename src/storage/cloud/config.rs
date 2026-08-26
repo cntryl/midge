@@ -61,7 +61,7 @@ impl Default for CloudWritePolicyConfig {
         Self {
             policy: CloudWritePolicy::default(),
             storage_io_timeout: crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
-            shutdown_drain_timeout: Duration::from_secs(30),
+            shutdown_drain_timeout: crate::config::DEFAULT_CLOUD_SHUTDOWN_DRAIN_TIMEOUT,
             simulated_local_budget_bytes: None,
         }
     }
