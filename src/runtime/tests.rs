@@ -422,7 +422,6 @@ fn should_answer_pending_apply_transaction_request_given_event_loop_panic_when_a
 
 #[cfg(feature = "failpoints")]
 #[test]
-#[allow(clippy::too_many_lines)]
 fn should_finish_accepted_transaction_given_caller_times_out_before_event_loop_resumes() {
     if std::env::var(RUNTIME_PANIC_CHILD).as_deref() != Ok("accepted-timeout") {
         run_runtime_panic_child(
@@ -505,6 +504,22 @@ fn should_finish_accepted_transaction_given_caller_times_out_before_event_loop_r
             if message.contains("ApplyTransaction")
                 && message.contains(&format!("request_id={request_id}"))
     ));
+    assert_strict_runtime_value(
+        &handle,
+        b"accepted-timeout-key",
+        b"accepted-timeout-value",
+    );
+    assert_eq!(handle.router.abandoned_requests_total(), 1);
+    assert_eq!(handle.router.late_responses_total(), 1);
+
+    handle.shutdown(Duration::from_secs(1)).expect("shutdown");
+    assert!(runtime.wait_for_exit(Duration::from_secs(1)));
+    fail::remove("midge::runtime::strict_group_before_collect");
+    scenario.teardown();
+}
+
+#[cfg(feature = "failpoints")]
+fn assert_strict_runtime_value(handle: &RuntimeHandle, key: &[u8], expected: &[u8]) {
     let sequence = match handle
         .send_and_wait_timeout(
             RuntimeMsg::GetCurrentSequence {
@@ -523,7 +538,7 @@ fn should_finish_accepted_transaction_given_caller_times_out_before_event_loop_r
             RuntimeMsg::Read {
                 request_id: next_request_id().expect("allocate read request id"),
                 cf_id: 0,
-                key: b"accepted-timeout-key".to_vec(),
+                key: key.to_vec(),
                 sequence,
                 requested_durability: crate::types::ReadDurability::Strict,
             },
@@ -536,15 +551,8 @@ fn should_finish_accepted_transaction_given_caller_times_out_before_event_loop_r
         RuntimeResponse::ReadValue {
             value: Some(value),
             ..
-        } if value == b"accepted-timeout-value"
+        } if value == expected
     ));
-    assert_eq!(handle.router.abandoned_requests_total(), 1);
-    assert_eq!(handle.router.late_responses_total(), 1);
-
-    handle.shutdown(Duration::from_secs(1)).expect("shutdown");
-    assert!(runtime.wait_for_exit(Duration::from_secs(1)));
-    fail::remove("midge::runtime::strict_group_before_collect");
-    scenario.teardown();
 }
 
 #[cfg(feature = "failpoints")]
