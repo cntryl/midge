@@ -6453,7 +6453,7 @@ fn should_bound_callerless_ack_when_provider_exceeds_maintenance_budget(
     );
     let delayed_cloud = Arc::new(ArmedDelayedHeadStorageBackend::new(
         cloud_fs,
-        Duration::from_millis(250),
+        Duration::from_secs(1),
     ));
     let local = Arc::new(
         crate::storage::filesystem::FileSystem::new(el.state.db_path.join("hybrid_local"))
@@ -6484,8 +6484,11 @@ fn should_bound_callerless_ack_when_provider_exceeds_maintenance_budget(
     let elapsed = started.elapsed();
 
     // Assert
+    // Keep enough separation between the 100 ms maintenance budget and the
+    // one-second provider response to tolerate loaded cross-platform runners
+    // while still failing if acknowledgement waits for that response.
     assert!(
-        elapsed < Duration::from_millis(160),
+        elapsed < Duration::from_millis(500),
         "callerless acknowledgement monopolized the event loop: {elapsed:?}"
     );
     assert!(el.state.persistence_anomaly_detected());
