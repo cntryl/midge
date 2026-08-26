@@ -2918,7 +2918,7 @@ fn should_read_object_proof_given_ample_deadline_when_budget_remains() {
     // Arrange
     let (_mock_cloud, storage) = hybrid_with_mock_cloud();
     write_cloud_object(&storage, "sst/ample.sst", b"payload".to_vec());
-    let deadline = crate::common::OperationDeadline::from_budget(Duration::from_secs(60));
+    let deadline = crate::common::OperationDeadline::from_budget(Duration::from_mins(1));
 
     // Act
     let proof = storage

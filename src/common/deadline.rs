@@ -135,11 +135,11 @@ mod tests {
     fn should_report_expired_given_start_older_than_budget_when_caller_already_timed_out() {
         // Arrange
         let start = Instant::now()
-            .checked_sub(Duration::from_secs(120))
+            .checked_sub(Duration::from_mins(2))
             .expect("test instant supports two-minute subtraction");
 
         // Act
-        let deadline = OperationDeadline::from_start(start, Duration::from_secs(60));
+        let deadline = OperationDeadline::from_start(start, Duration::from_mins(1));
 
         // Assert
         assert!(deadline.is_expired());
@@ -153,7 +153,7 @@ mod tests {
             Instant::now()
                 .checked_sub(Duration::from_secs(55))
                 .expect("test instant supports deadline offset"),
-            Duration::from_secs(60),
+            Duration::from_mins(1),
         );
 
         // Act
@@ -169,7 +169,7 @@ mod tests {
     #[test]
     fn should_keep_operation_timeout_given_ample_budget_when_sequence_is_short() {
         // Arrange
-        let deadline = OperationDeadline::from_budget(Duration::from_secs(600));
+        let deadline = OperationDeadline::from_budget(Duration::from_mins(10));
 
         // Act
         let clamped = deadline.clamp(Duration::from_secs(30));
