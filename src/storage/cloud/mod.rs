@@ -136,16 +136,20 @@ impl CloudError {
     /// exhaustion, rather than another transport failure such as DNS or TLS.
     #[must_use]
     pub(crate) fn is_timeout(&self) -> bool {
-        let message = match self {
-            Self::Transport(message) => message,
-            #[cfg(any(test, feature = "cloud-common"))]
-            Self::ServerError(message) if message.starts_with("status 408:") => message,
-            _ => return false,
+        let contains_timeout_marker = |message: &str| {
+            let message = message.to_ascii_lowercase();
+            message.contains("timed out")
+                || message.contains("timeout")
+                || message.contains("deadline exceeded")
         };
-        let message = message.to_ascii_lowercase();
-        message.contains("timed out")
-            || message.contains("timeout")
-            || message.contains("deadline exceeded")
+        match self {
+            Self::Transport(message) => contains_timeout_marker(message),
+            #[cfg(any(test, feature = "cloud-common"))]
+            Self::ServerError(message) if message.starts_with("status 408:") => {
+                contains_timeout_marker(message)
+            }
+            _ => false,
+        }
     }
 
     /// Classify a raw HTTP status code from a provider response.
