@@ -2175,7 +2175,7 @@ fn should_not_prune_remote_wal_when_manifest_sst_is_missing_from_cloud(
 }
 
 #[test]
-fn should_bound_callerless_wal_prune_attempt_and_retry_after_provider_recovers(
+fn should_retry_callerless_wal_prune_with_bounded_attempt_after_provider_recovers(
 ) -> crate::common::MidgeResult<()> {
     // Arrange: seed a valid prune candidate while the backend is responsive,
     // then make one healthy provider proof slower than the maintenance budget.
