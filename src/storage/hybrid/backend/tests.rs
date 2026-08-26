@@ -2456,6 +2456,63 @@ fn should_readback_remote_wal_before_upload_worker_emits_ack() {
     );
 }
 
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_emit_one_upload_terminal_event_when_wal_ack_logging_panics() {
+    // Arrange
+    let _test_guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    let (_mock_cloud, storage) = hybrid_with_mock_cloud();
+    let tmp = tempfile::tempdir().expect("create WAL post-ack panic test dir");
+    let segment_id = 10;
+    let max_sequence = 14;
+    let wal_path = tmp.path().join(crate::wal::segment_file_name(segment_id));
+    let wal_bytes = valid_wal_bytes(max_sequence);
+    std::fs::write(&wal_path, &wal_bytes).expect("write local WAL");
+    let upload = UploadState {
+        segment_id,
+        object_key: crate::wal::cloud_segment::object_key(segment_id, 1),
+        local_path: wal_path,
+        status: UploadStatus::InFlight {
+            started_at: Instant::now(),
+        },
+        max_sequence,
+        retries: 0,
+        size_bytes: wal_bytes.len() as u64,
+    };
+    let (external_event_tx, external_event_rx) = cb::bounded(4);
+    fail::cfg("midge::cloud::in_wal_upload_ack_log", "panic")
+        .expect("configure WAL ack logging panic");
+
+    // Act
+    HybridStorage::process_wal_upload_attempt(
+        &upload,
+        &storage.wal_cloud,
+        &storage.event_queue,
+        Some(&external_event_tx),
+        storage.callback_timeout,
+    );
+    let terminal_events = external_event_rx.try_iter().collect::<Vec<_>>();
+    fail::remove("midge::cloud::in_wal_upload_ack_log");
+    scenario.teardown();
+
+    // Assert
+    assert_eq!(
+        terminal_events.len(),
+        1,
+        "one upload attempt must publish exactly one terminal event: {terminal_events:?}"
+    );
+    assert!(matches!(
+        terminal_events.as_slice(),
+        [StorageEvent::CloudFail {
+            segment_id: failed_segment,
+            terminal: false,
+            failure_kind: crate::storage::CloudUploadFailureKind::Other,
+            ..
+        }] if *failed_segment == segment_id
+    ));
+}
+
 #[test]
 fn should_stop_retrying_failed_wal_upload_after_retry_budget_exhausted() {
     // Arrange
