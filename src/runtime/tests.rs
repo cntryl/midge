@@ -504,11 +504,7 @@ fn should_finish_accepted_transaction_given_caller_times_out_before_event_loop_r
             if message.contains("ApplyTransaction")
                 && message.contains(&format!("request_id={request_id}"))
     ));
-    assert_strict_runtime_value(
-        &handle,
-        b"accepted-timeout-key",
-        b"accepted-timeout-value",
-    );
+    assert_strict_runtime_value(&handle, b"accepted-timeout-key", b"accepted-timeout-value");
     assert_eq!(handle.router.abandoned_requests_total(), 1);
     assert_eq!(handle.router.late_responses_total(), 1);
 
