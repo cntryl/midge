@@ -48,6 +48,13 @@ impl EventLoop {
         // its event-loop manifest is the authority snapshot guarded below.
         let local_manifest = self.state.manifest.clone();
         let writer_epoch = self.state.writer_epoch;
+        // This callerless attempt has retry ownership, but shutdown must still
+        // be able to join it within the cloud drain window. Starting the budget
+        // here also bounds the whole multi-proof sequence rather than granting
+        // each provider callback a fresh timeout.
+        let attempt_budget = self
+            .runtime_response_timeout
+            .min(self.shutdown_cloud_drain_timeout);
         self.cloud_wal.prune_inflight.insert(segment_id);
         self.publication_gate.active = true;
 
@@ -56,7 +63,7 @@ impl EventLoop {
             .name(format!("midge-wal-prune-preflight-{segment_id}"))
             .spawn(move || {
                 let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let deadline = crate::common::OperationDeadline::unbounded();
+                    let deadline = crate::common::OperationDeadline::from_budget(attempt_budget);
                     match metadata_snapshot {
                         Some(snapshot) => snapshot.verify_exact_then(|manifest, metadata_guard| {
                             worker_storage.prune_cloud_wal_segment_within(

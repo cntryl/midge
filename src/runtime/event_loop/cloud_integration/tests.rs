@@ -2175,10 +2175,10 @@ fn should_not_prune_remote_wal_when_manifest_sst_is_missing_from_cloud(
 }
 
 #[test]
-fn should_keep_event_loop_responsive_while_callerless_wal_prune_finishes(
+fn should_bound_callerless_wal_prune_attempt_and_retry_after_provider_recovers(
 ) -> crate::common::MidgeResult<()> {
     // Arrange: seed a valid prune candidate while the backend is responsive,
-    // then make one healthy provider proof slower than the response budget.
+    // then make one healthy provider proof slower than the maintenance budget.
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
@@ -2208,20 +2208,41 @@ fn should_keep_event_loop_responsive_while_callerless_wal_prune_finishes(
     add_valid_manifest_sst_for_test(&mut el, "deadline-prune.sst", max_sequence);
     delayed_cloud.arm();
 
-    // Act
+    // Act: submission remains asynchronous, but joining the attempt must also
+    // be bounded so shutdown cannot inherit an unbounded provider wait.
     let started = Instant::now();
     el.prune_cloud_wal_segments_covered_by_manifest();
-    let elapsed = started.elapsed();
+    let submission_elapsed = started.elapsed();
+    el.join_cloud_wal_prune_worker();
+    let attempt_elapsed = started.elapsed();
+    el.tick_hybrid_storage();
 
-    // Assert
+    // Assert: the timed-out attempt retains authority. Once the fixture's one
+    // delayed HEAD is consumed, a later callerless retry completes cleanup.
     assert!(
-        elapsed < Duration::from_millis(150),
-        "callerless WAL prune monopolized the event loop: {elapsed:?}"
+        submission_elapsed < Duration::from_millis(150),
+        "callerless WAL prune monopolized the event loop: {submission_elapsed:?}"
     );
+    assert!(
+        attempt_elapsed < Duration::from_millis(200),
+        "callerless WAL prune exceeded its aggregate maintenance budget: {attempt_elapsed:?}"
+    );
+    assert!(
+        remote_wal_path_for_test(&el, segment_id).exists(),
+        "timed-out prune must retain the remote WAL"
+    );
+    assert_eq!(
+        el.cloud_wal.acked_segments.get(&segment_id),
+        Some(&max_sequence),
+        "timed-out prune must remain eligible for retry"
+    );
+    assert!(!el.cloud_wal.prune_inflight.contains(&segment_id));
+
+    el.prune_cloud_wal_segments_covered_by_manifest();
     drain_prune_completion_for_test(&mut el);
     assert!(
         !remote_wal_path_for_test(&el, segment_id).exists(),
-        "slow-but-valid callerless cleanup should eventually finish"
+        "callerless cleanup should finish after provider recovery"
     );
     assert!(!el.cloud_wal.acked_segments.contains_key(&segment_id));
     assert!(!el.cloud_wal.prune_inflight.contains(&segment_id));
