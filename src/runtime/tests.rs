@@ -422,6 +422,7 @@ fn should_answer_pending_apply_transaction_request_given_event_loop_panic_when_a
 
 #[cfg(feature = "failpoints")]
 #[test]
+#[allow(clippy::too_many_lines)]
 fn should_finish_accepted_transaction_given_caller_times_out_before_event_loop_resumes() {
     if std::env::var(RUNTIME_PANIC_CHILD).as_deref() != Ok("accepted-timeout") {
         run_runtime_panic_child(
