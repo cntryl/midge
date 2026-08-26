@@ -74,20 +74,23 @@ impl HybridStorage {
             );
         }
 
+        Self::deadline_timeout(
+            key,
+            "conditional immutable upload",
+            self.callback_timeout,
+            deadline,
+        )?;
+        let upload = data.to_vec();
+        let headers = vec![("If-None-Match".into(), "*".into())];
+        let (tx, rx) = std::sync::mpsc::channel();
         let timeout = Self::deadline_timeout(
             key,
             "conditional immutable upload",
             self.callback_timeout,
             deadline,
         )?;
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.cloud.submit_write_with_headers_and_timeout(
-            key,
-            data.to_vec(),
-            vec![("If-None-Match".into(), "*".into())],
-            timeout,
-            tx,
-        );
+        self.cloud
+            .submit_write_with_headers_and_timeout(key, upload, headers, timeout, tx);
         let event = rx.recv_timeout(timeout).map_err(|error| match error {
             mpsc::RecvTimeoutError::Timeout => {
                 MidgeError::Timeout("cloud immutable upload callback timed out".to_string())
@@ -160,20 +163,16 @@ impl HybridStorage {
         data: Vec<u8>,
         deadline: &OperationDeadline,
     ) -> MidgeResult<()> {
+        let headers = vec![("If-None-Match".into(), "*".into())];
+        let (tx, rx) = std::sync::mpsc::channel();
         let timeout = Self::deadline_timeout(
             key,
             "local immutable cache write",
             self.callback_timeout,
             deadline,
         )?;
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.local.submit_write_with_headers_and_timeout(
-            key,
-            data,
-            vec![("If-None-Match".into(), "*".into())],
-            timeout,
-            tx,
-        );
+        self.local
+            .submit_write_with_headers_and_timeout(key, data, headers, timeout, tx);
         let event = rx.recv_timeout(timeout).map_err(|error| match error {
             mpsc::RecvTimeoutError::Timeout => {
                 MidgeError::Timeout("local immutable cache write callback timed out".to_string())

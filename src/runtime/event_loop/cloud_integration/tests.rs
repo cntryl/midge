@@ -725,9 +725,9 @@ impl crate::storage::StorageBackend for BudgetConsumingDdlBackend {
                 .push(timeout);
             let _ = callback.send(crate::storage::StorageEvent::WriteComplete {
                 key: key.to_string(),
-                result: crate::storage::StorageOutcome::Err(
-                    "remote request timed out before mutation".to_string(),
-                ),
+                result: crate::storage::StorageOutcome::Err(crate::storage::storage_timeout_error(
+                    "remote request timed out before mutation",
+                )),
             });
             return;
         }
@@ -832,8 +832,8 @@ impl crate::storage::StorageBackend for DelayedCommitDdlBackend {
             });
             let _ = callback.send(crate::storage::StorageEvent::WriteComplete {
                 key: key.to_string(),
-                result: crate::storage::StorageOutcome::Err(format!(
-                    "remote request timed out after submission (budget {timeout:?})"
+                result: crate::storage::StorageOutcome::Err(crate::storage::storage_timeout_error(
+                    format!("remote request timed out after submission (budget {timeout:?})"),
                 )),
             });
             return;
@@ -1454,7 +1454,7 @@ impl crate::storage::cloud::CloudBackend for ProviderTimeoutMetadataBackend {
         let _ = callback.send(crate::storage::cloud::CloudEvent::Get {
             key: key.to_string(),
             result: crate::storage::cloud::CloudOutcome::Err(
-                crate::storage::cloud::CloudError::Transport(
+                crate::storage::cloud::CloudError::Timeout(
                     "request timed out after 30 ms".to_string(),
                 ),
             ),

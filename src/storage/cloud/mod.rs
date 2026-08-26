@@ -101,10 +101,22 @@ pub enum CloudError {
     /// (408 / 425 / 429 / 5xx).
     #[cfg(any(test, feature = "cloud-common"))]
     ServerError(String),
-    /// The request could not reach the provider or timed out (network,
-    /// DNS, TLS, connection, or client-side timeout failure).
+    /// The request could not reach the provider (network, DNS, TLS, or
+    /// connection failure) without a confirmed deadline expiry.
     #[cfg_attr(not(any(test, feature = "cloud-common")), allow(dead_code))]
     Transport(String),
+    /// A typed executor or provider deadline expired.
+    #[cfg_attr(
+        not(any(
+            test,
+            feature = "cloud-aws",
+            feature = "cloud-azure",
+            feature = "cloud-gcp",
+            feature = "cloud-oci"
+        )),
+        allow(dead_code)
+    )]
+    Timeout(String),
     /// The response did not match the expected protocol: malformed body,
     /// unexpected status, or a required header was missing.
     Protocol(String),
@@ -136,19 +148,42 @@ impl CloudError {
     /// exhaustion, rather than another transport failure such as DNS or TLS.
     #[must_use]
     pub(crate) fn is_timeout(&self) -> bool {
-        let contains_timeout_marker = |message: &str| {
-            let message = message.to_ascii_lowercase();
-            message.contains("timed out")
-                || message.contains("timeout")
-                || message.contains("deadline exceeded")
-        };
         match self {
-            Self::Transport(message) => contains_timeout_marker(message),
+            Self::Timeout(_) => true,
             #[cfg(any(test, feature = "cloud-common"))]
-            Self::ServerError(message) if message.starts_with("status 408:") => {
-                contains_timeout_marker(message)
-            }
+            Self::ServerError(message) if message.starts_with("status 408:") => true,
             _ => false,
+        }
+    }
+
+    #[cfg(any(
+        feature = "cloud-aws",
+        feature = "cloud-azure",
+        feature = "cloud-gcp",
+        feature = "cloud-oci"
+    ))]
+    #[must_use]
+    pub(crate) fn from_transport_error(error: crate::common::MidgeError) -> Self {
+        match error {
+            crate::common::MidgeError::Timeout(message) => Self::Timeout(message),
+            other => Self::Transport(format!("{other:?}")),
+        }
+    }
+
+    /// Preserve parser/protocol classification while retaining a typed
+    /// executor deadline from a multi-request operation such as LIST.
+    #[cfg(any(
+        test,
+        feature = "cloud-aws",
+        feature = "cloud-azure",
+        feature = "cloud-gcp",
+        feature = "cloud-oci"
+    ))]
+    #[must_use]
+    pub(crate) fn from_protocol_or_timeout_error(error: crate::common::MidgeError) -> Self {
+        match error {
+            crate::common::MidgeError::Timeout(message) => Self::Timeout(message),
+            other => Self::Protocol(format!("{other:?}")),
         }
     }
 
@@ -184,6 +219,7 @@ impl std::fmt::Display for CloudError {
             #[cfg(any(test, feature = "cloud-common"))]
             Self::ServerError(msg) => write!(f, "server error: {msg}"),
             Self::Transport(msg) => write!(f, "transport error: {msg}"),
+            Self::Timeout(msg) => write!(f, "timeout: {msg}"),
             Self::Protocol(msg) => write!(f, "protocol error: {msg}"),
         }
     }
@@ -901,7 +937,14 @@ pub(crate) fn is_not_found_error(error: &CloudError) -> bool {
 fn cloud_to_storage_outcome<T: Clone>(result: CloudOutcome<T>) -> StorageOutcome<T> {
     match result {
         CloudOutcome::Ok(value) => StorageOutcome::Ok(value),
-        CloudOutcome::Err(error) => StorageOutcome::Err(error.to_string()),
+        CloudOutcome::Err(error) => {
+            let message = if error.is_timeout() {
+                crate::storage::storage_timeout_error(error)
+            } else {
+                error.to_string()
+            };
+            StorageOutcome::Err(message)
+        }
     }
 }
 
@@ -921,6 +964,15 @@ impl StorageBackend for CloudStorage {
         timeout: std::time::Duration,
         callback: StorageCallback,
     ) {
+        if timeout.is_zero() {
+            let _ = callback.send(StorageEvent::ReadComplete {
+                key: key.to_string(),
+                result: StorageOutcome::Err(crate::storage::storage_timeout_error(
+                    "cloud GET refused because no callback budget remained",
+                )),
+            });
+            return;
+        }
         let (tx, rx) = std::sync::mpsc::channel();
         self.submit_get(key, tx);
         let event = match rx.recv_timeout(timeout) {
@@ -932,36 +984,28 @@ impl StorageBackend for CloudStorage {
                 key: key.to_string(),
                 result: StorageOutcome::Err(format!("unexpected cloud GET response: {other:?}")),
             },
-            Err(error) => StorageEvent::ReadComplete {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => StorageEvent::ReadComplete {
                 key: key.to_string(),
-                result: StorageOutcome::Err(format!(
-                    "cloud GET callback timed out or closed: {error}"
+                result: StorageOutcome::Err(crate::storage::storage_timeout_error(
+                    "cloud GET callback timed out",
                 )),
+            },
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => StorageEvent::ReadComplete {
+                key: key.to_string(),
+                result: StorageOutcome::Err("cloud GET callback closed".to_string()),
             },
         };
         let _ = callback.send(event);
     }
 
     fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback) {
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.submit_put(key, data, vec![], tx);
-        let event = match rx.recv_timeout(self.callback_timeout) {
-            Ok(CloudEvent::Put { key, result }) => StorageEvent::WriteComplete {
-                key,
-                result: cloud_to_storage_outcome(result),
-            },
-            Ok(other) => StorageEvent::WriteComplete {
-                key: key.to_string(),
-                result: StorageOutcome::Err(format!("unexpected cloud PUT response: {other:?}")),
-            },
-            Err(error) => StorageEvent::WriteComplete {
-                key: key.to_string(),
-                result: StorageOutcome::Err(format!(
-                    "cloud PUT callback timed out or closed: {error}"
-                )),
-            },
-        };
-        let _ = callback.send(event);
+        self.submit_write_with_headers_and_timeout(
+            key,
+            data,
+            Vec::new(),
+            self.callback_timeout,
+            callback,
+        );
     }
 
     fn submit_write_with_headers(
@@ -988,6 +1032,15 @@ impl StorageBackend for CloudStorage {
         timeout: std::time::Duration,
         callback: StorageCallback,
     ) {
+        if timeout.is_zero() {
+            let _ = callback.send(StorageEvent::WriteComplete {
+                key: key.to_string(),
+                result: StorageOutcome::Err(crate::storage::storage_timeout_error(
+                    "cloud PUT refused because no callback budget remained",
+                )),
+            });
+            return;
+        }
         let (tx, rx) = std::sync::mpsc::channel();
         self.submit_put(key, data, headers, tx);
         let event = match rx.recv_timeout(timeout) {
@@ -999,17 +1052,30 @@ impl StorageBackend for CloudStorage {
                 key: key.to_string(),
                 result: StorageOutcome::Err(format!("unexpected cloud PUT response: {other:?}")),
             },
-            Err(error) => StorageEvent::WriteComplete {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => StorageEvent::WriteComplete {
                 key: key.to_string(),
-                result: StorageOutcome::Err(format!(
-                    "cloud PUT callback timed out or closed: {error}"
+                result: StorageOutcome::Err(crate::storage::storage_timeout_error(
+                    "cloud PUT callback timed out",
                 )),
+            },
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => StorageEvent::WriteComplete {
+                key: key.to_string(),
+                result: StorageOutcome::Err("cloud PUT callback closed".to_string()),
             },
         };
         let _ = callback.send(event);
     }
 
     fn submit_delete(&self, key: &str, callback: StorageCallback) {
+        if self.callback_timeout.is_zero() {
+            let _ = callback.send(StorageEvent::DeleteComplete {
+                key: key.to_string(),
+                result: StorageOutcome::Err(crate::storage::storage_timeout_error(
+                    "cloud DELETE refused because no callback budget remained",
+                )),
+            });
+            return;
+        }
         let (tx, rx) = std::sync::mpsc::channel();
         CloudStorage::submit_delete(self, key, tx);
         let event = match rx.recv_timeout(self.callback_timeout) {
@@ -1021,11 +1087,15 @@ impl StorageBackend for CloudStorage {
                 key: key.to_string(),
                 result: StorageOutcome::Err(format!("unexpected cloud DELETE response: {other:?}")),
             },
-            Err(error) => StorageEvent::DeleteComplete {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => StorageEvent::DeleteComplete {
                 key: key.to_string(),
-                result: StorageOutcome::Err(format!(
-                    "cloud DELETE callback timed out or closed: {error}"
+                result: StorageOutcome::Err(crate::storage::storage_timeout_error(
+                    "cloud DELETE callback timed out",
                 )),
+            },
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => StorageEvent::DeleteComplete {
+                key: key.to_string(),
+                result: StorageOutcome::Err("cloud DELETE callback closed".to_string()),
             },
         };
         let _ = callback.send(event);
@@ -1037,6 +1107,15 @@ impl StorageBackend for CloudStorage {
         headers: Vec<(String, String)>,
         callback: StorageCallback,
     ) {
+        if self.callback_timeout.is_zero() {
+            let _ = callback.send(StorageEvent::DeleteComplete {
+                key: key.to_string(),
+                result: StorageOutcome::Err(crate::storage::storage_timeout_error(
+                    "cloud DELETE refused because no callback budget remained",
+                )),
+            });
+            return;
+        }
         let (tx, rx) = std::sync::mpsc::channel();
         CloudStorage::submit_delete_with_headers(self, key, headers, tx);
         let event = match rx.recv_timeout(self.callback_timeout) {
@@ -1048,11 +1127,15 @@ impl StorageBackend for CloudStorage {
                 key: key.to_string(),
                 result: StorageOutcome::Err(format!("unexpected cloud DELETE response: {other:?}")),
             },
-            Err(error) => StorageEvent::DeleteComplete {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => StorageEvent::DeleteComplete {
                 key: key.to_string(),
-                result: StorageOutcome::Err(format!(
-                    "cloud DELETE callback timed out or closed: {error}"
+                result: StorageOutcome::Err(crate::storage::storage_timeout_error(
+                    "cloud DELETE callback timed out",
                 )),
+            },
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => StorageEvent::DeleteComplete {
+                key: key.to_string(),
+                result: StorageOutcome::Err("cloud DELETE callback closed".to_string()),
             },
         };
         let _ = callback.send(event);
@@ -1060,6 +1143,15 @@ impl StorageBackend for CloudStorage {
 
     #[cfg(test)]
     fn submit_list(&self, prefix: &str, callback: StorageCallback) {
+        if self.callback_timeout.is_zero() {
+            let _ = callback.send(StorageEvent::ListComplete {
+                prefix: prefix.to_string(),
+                result: StorageOutcome::Err(crate::storage::storage_timeout_error(
+                    "cloud LIST refused because no callback budget remained",
+                )),
+            });
+            return;
+        }
         let (tx, rx) = std::sync::mpsc::channel();
         CloudStorage::submit_list(self, prefix, tx);
         let event = match rx.recv_timeout(self.callback_timeout) {
@@ -1074,11 +1166,15 @@ impl StorageBackend for CloudStorage {
                 prefix: prefix.to_string(),
                 result: StorageOutcome::Err(format!("unexpected cloud LIST response: {other:?}")),
             },
-            Err(error) => StorageEvent::ListComplete {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => StorageEvent::ListComplete {
                 prefix: prefix.to_string(),
-                result: StorageOutcome::Err(format!(
-                    "cloud LIST callback timed out or closed: {error}"
+                result: StorageOutcome::Err(crate::storage::storage_timeout_error(
+                    "cloud LIST callback timed out",
                 )),
+            },
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => StorageEvent::ListComplete {
+                prefix: prefix.to_string(),
+                result: StorageOutcome::Err("cloud LIST callback closed".to_string()),
             },
         };
         let _ = callback.send(event);
@@ -1094,6 +1190,15 @@ impl StorageBackend for CloudStorage {
         timeout: std::time::Duration,
         callback: StorageCallback,
     ) {
+        if timeout.is_zero() {
+            let _ = callback.send(StorageEvent::HeadComplete {
+                key: key.to_string(),
+                result: StorageOutcome::Err(crate::storage::storage_timeout_error(
+                    "cloud HEAD refused because no callback budget remained",
+                )),
+            });
+            return;
+        }
         let (tx, rx) = std::sync::mpsc::channel();
         CloudStorage::submit_head(self, key, tx);
         let event = match rx.recv_timeout(timeout) {
@@ -1104,7 +1209,9 @@ impl StorageBackend for CloudStorage {
                         etag: metadata.etag,
                         generation: metadata.generation,
                     }),
-                    CloudOutcome::Err(err) => StorageOutcome::Err(err.to_string()),
+                    CloudOutcome::Err(err) => {
+                        cloud_to_storage_outcome::<StorageObjectMetadata>(CloudOutcome::Err(err))
+                    }
                 };
                 StorageEvent::HeadComplete {
                     key,
@@ -1115,11 +1222,15 @@ impl StorageBackend for CloudStorage {
                 key: key.to_string(),
                 result: StorageOutcome::Err(format!("unexpected cloud HEAD response: {other:?}")),
             },
-            Err(error) => StorageEvent::HeadComplete {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => StorageEvent::HeadComplete {
                 key: key.to_string(),
-                result: StorageOutcome::Err(format!(
-                    "cloud HEAD callback timed out or closed: {error}"
+                result: StorageOutcome::Err(crate::storage::storage_timeout_error(
+                    "cloud HEAD callback timed out",
                 )),
+            },
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => StorageEvent::HeadComplete {
+                key: key.to_string(),
+                result: StorageOutcome::Err("cloud HEAD callback closed".to_string()),
             },
         };
         let _ = callback.send(event);
@@ -1136,10 +1247,16 @@ mod tests {
 
     #[derive(Default)]
     struct ConditionalPutOnlyBackend {
-        head_calls: AtomicUsize,
+        puts: AtomicUsize,
+        gets: AtomicUsize,
+        heads: AtomicUsize,
+        deletes: AtomicUsize,
+        lists: AtomicUsize,
     }
 
     struct DelayedMissingGetBackend;
+
+    struct DroppedHeadCallbackBackend;
 
     impl CloudBackend for ConditionalPutOnlyBackend {
         fn submit_put(
@@ -1149,6 +1266,7 @@ mod tests {
             headers: Vec<(String, String)>,
             callback: CloudCallback,
         ) {
+            self.puts.fetch_add(1, Ordering::SeqCst);
             let has_condition = headers
                 .iter()
                 .any(|(name, value)| name.eq_ignore_ascii_case("if-none-match") && value == "*");
@@ -1162,6 +1280,35 @@ mod tests {
             let _ = callback.send(CloudEvent::Put {
                 key: key.to_string(),
                 result,
+            });
+        }
+
+        fn submit_get(&self, key: &str, callback: CloudCallback) {
+            self.gets.fetch_add(1, Ordering::SeqCst);
+            let _ = callback.send(CloudEvent::Get {
+                key: key.to_string(),
+                result: CloudOutcome::Err(CloudError::Protocol("unsupported".to_string())),
+            });
+        }
+
+        fn submit_delete(
+            &self,
+            key: &str,
+            _headers: Vec<(String, String)>,
+            callback: CloudCallback,
+        ) {
+            self.deletes.fetch_add(1, Ordering::SeqCst);
+            let _ = callback.send(CloudEvent::Delete {
+                key: key.to_string(),
+                result: CloudOutcome::Ok(()),
+            });
+        }
+
+        fn submit_list(&self, prefix: &str, callback: CloudCallback) {
+            self.lists.fetch_add(1, Ordering::SeqCst);
+            let _ = callback.send(CloudEvent::List {
+                prefix: prefix.to_string(),
+                result: CloudOutcome::Ok(Vec::new()),
             });
         }
 
@@ -1181,7 +1328,7 @@ mod tests {
         }
 
         fn submit_head(&self, key: &str, callback: CloudCallback) {
-            self.head_calls.fetch_add(1, Ordering::SeqCst);
+            self.heads.fetch_add(1, Ordering::SeqCst);
             let _ = callback.send(CloudEvent::Head {
                 key: key.to_string(),
                 result: CloudOutcome::Err(CloudError::Unauthorized(
@@ -1247,6 +1394,40 @@ mod tests {
         }
     }
 
+    impl CloudBackend for DroppedHeadCallbackBackend {
+        fn submit_put(
+            &self,
+            key: &str,
+            _data: Vec<u8>,
+            _headers: Vec<(String, String)>,
+            callback: CloudCallback,
+        ) {
+            let _ = callback.send(CloudEvent::Put {
+                key: key.to_string(),
+                result: CloudOutcome::Err(CloudError::Protocol("unsupported".to_string())),
+            });
+        }
+
+        fn submit_get_range(
+            &self,
+            key: &str,
+            start: u64,
+            end: Option<u64>,
+            callback: CloudCallback,
+        ) {
+            let _ = callback.send(CloudEvent::GetRange {
+                key: key.to_string(),
+                start,
+                end,
+                result: CloudOutcome::Err(CloudError::Protocol("unsupported".to_string())),
+            });
+        }
+
+        fn submit_head(&self, _key: &str, callback: CloudCallback) {
+            drop(callback);
+        }
+    }
+
     // =========== CloudOutcome Tests ===========
 
     #[test]
@@ -1281,6 +1462,225 @@ mod tests {
         assert!(errors
             .iter()
             .all(|error| matches!(error, CloudError::ServerError(_))));
+    }
+
+    #[test]
+    fn should_classify_http_408_as_timeout_without_relying_on_provider_detail_text() {
+        // Arrange
+        let error = CloudError::from_http_status(408, "request rejected");
+
+        // Act
+        let is_timeout = error.is_timeout();
+
+        // Assert
+        assert!(is_timeout, "HTTP 408 is intrinsically a request timeout");
+    }
+
+    #[test]
+    fn should_not_classify_transport_diagnostic_text_as_timeout() {
+        // Arrange: a host or certificate name can legitimately contain this
+        // word without the transport failure being deadline exhaustion.
+        let error = CloudError::Transport(
+            "TLS certificate rejected for https://timeout.example".to_string(),
+        );
+
+        // Act
+        let is_timeout = error.is_timeout();
+
+        // Assert
+        assert!(!is_timeout);
+    }
+
+    #[test]
+    fn should_preserve_timeout_without_reclassifying_list_parser_errors() {
+        // Arrange
+        let timeout = MidgeError::Timeout("LIST deadline expired".to_string());
+        let malformed = MidgeError::Internal("LIST response contained invalid XML".to_string());
+
+        // Act
+        let timeout = CloudError::from_protocol_or_timeout_error(timeout);
+        let malformed = CloudError::from_protocol_or_timeout_error(malformed);
+
+        // Assert
+        assert!(matches!(timeout, CloudError::Timeout(_)));
+        assert!(matches!(malformed, CloudError::Protocol(_)));
+    }
+
+    #[test]
+    fn should_preserve_typed_timeout_when_crossing_storage_callback_bridge() {
+        // Arrange
+        let error = CloudError::from_http_status(408, "request rejected");
+
+        // Act
+        let outcome = cloud_to_storage_outcome::<()>(CloudOutcome::Err(error));
+
+        // Assert
+        assert!(matches!(
+            outcome,
+            StorageOutcome::Err(message)
+                if crate::storage::storage_error_is_timeout(&message)
+        ));
+    }
+
+    #[test]
+    fn should_not_classify_disconnected_cloud_callback_as_timeout() {
+        // Arrange
+        let storage = CloudStorage::new_with_timeout(
+            Arc::new(DroppedHeadCallbackBackend),
+            "tenant".to_string(),
+            std::time::Duration::from_secs(1),
+        );
+        let (sender, receiver) = mpsc::channel();
+
+        // Act
+        StorageBackend::submit_head_with_timeout(
+            &storage,
+            "metadata/manifest.json",
+            std::time::Duration::from_secs(1),
+            sender,
+        );
+        let event = receiver
+            .recv()
+            .expect("receive disconnected adapter result");
+
+        // Assert
+        assert!(matches!(
+            event,
+            StorageEvent::HeadComplete {
+                result: StorageOutcome::Err(message),
+                ..
+            } if !crate::storage::storage_error_is_timeout(&message)
+                && message.contains("closed")
+        ));
+    }
+
+    #[test]
+    fn should_not_submit_cloud_operations_given_operation_timeout_is_zero() {
+        // Arrange
+        let backend = Arc::new(ConditionalPutOnlyBackend::default());
+        let storage = CloudStorage::new_with_timeout(
+            backend.clone(),
+            "tenant".to_string(),
+            std::time::Duration::from_secs(1),
+        );
+        let (read_sender, read_receiver) = mpsc::channel();
+        let (write_sender, write_receiver) = mpsc::channel();
+        let (head_sender, head_receiver) = mpsc::channel();
+
+        // Act
+        StorageBackend::submit_read_with_timeout(
+            &storage,
+            "metadata/manifest.json",
+            std::time::Duration::ZERO,
+            read_sender,
+        );
+        StorageBackend::submit_write_with_headers_and_timeout(
+            &storage,
+            "metadata/manifest.json",
+            b"manifest".to_vec(),
+            vec![("If-None-Match".to_string(), "*".to_string())],
+            std::time::Duration::ZERO,
+            write_sender,
+        );
+        StorageBackend::submit_head_with_timeout(
+            &storage,
+            "metadata/manifest.json",
+            std::time::Duration::ZERO,
+            head_sender,
+        );
+        let read = read_receiver
+            .recv()
+            .expect("receive zero-budget read result");
+        let write = write_receiver
+            .recv()
+            .expect("receive zero-budget write result");
+        let head = head_receiver
+            .recv()
+            .expect("receive zero-budget head result");
+
+        // Assert
+        assert_eq!(backend.gets.load(Ordering::SeqCst), 0);
+        assert_eq!(backend.puts.load(Ordering::SeqCst), 0);
+        assert_eq!(backend.heads.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            read,
+            StorageEvent::ReadComplete {
+                result: StorageOutcome::Err(message),
+                ..
+            } if crate::storage::storage_error_is_timeout(&message)
+        ));
+        assert!(matches!(
+            write,
+            StorageEvent::WriteComplete {
+                result: StorageOutcome::Err(message),
+                ..
+            } if crate::storage::storage_error_is_timeout(&message)
+        ));
+        assert!(matches!(
+            head,
+            StorageEvent::HeadComplete {
+                result: StorageOutcome::Err(message),
+                ..
+            } if crate::storage::storage_error_is_timeout(&message)
+        ));
+    }
+
+    #[test]
+    fn should_not_submit_delete_or_list_given_configured_callback_timeout_is_zero() {
+        // Arrange
+        let backend = Arc::new(ConditionalPutOnlyBackend::default());
+        let storage = CloudStorage::new_with_timeout(
+            backend.clone(),
+            "tenant".to_string(),
+            std::time::Duration::ZERO,
+        );
+        let (delete_sender, delete_receiver) = mpsc::channel();
+        let (conditional_delete_sender, conditional_delete_receiver) = mpsc::channel();
+        let (list_sender, list_receiver) = mpsc::channel();
+
+        // Act
+        StorageBackend::submit_delete(&storage, "metadata/manifest.json", delete_sender);
+        StorageBackend::submit_delete_with_headers(
+            &storage,
+            "metadata/manifest.json",
+            vec![("If-Match".to_string(), "etag".to_string())],
+            conditional_delete_sender,
+        );
+        StorageBackend::submit_list(&storage, "metadata/", list_sender);
+        let delete = delete_receiver
+            .recv()
+            .expect("receive zero-budget delete result");
+        let conditional_delete = conditional_delete_receiver
+            .recv()
+            .expect("receive zero-budget conditional delete result");
+        let list = list_receiver
+            .recv()
+            .expect("receive zero-budget list result");
+
+        // Assert
+        assert_eq!(backend.deletes.load(Ordering::SeqCst), 0);
+        assert_eq!(backend.lists.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            delete,
+            StorageEvent::DeleteComplete {
+                result: StorageOutcome::Err(message),
+                ..
+            } if crate::storage::storage_error_is_timeout(&message)
+        ));
+        assert!(matches!(
+            conditional_delete,
+            StorageEvent::DeleteComplete {
+                result: StorageOutcome::Err(message),
+                ..
+            } if crate::storage::storage_error_is_timeout(&message)
+        ));
+        assert!(matches!(
+            list,
+            StorageEvent::ListComplete {
+                result: StorageOutcome::Err(message),
+                ..
+            } if crate::storage::storage_error_is_timeout(&message)
+        ));
     }
 
     #[test]
@@ -1534,7 +1934,7 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(backend.head_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(backend.heads.load(Ordering::SeqCst), 0);
     }
 
     #[test]

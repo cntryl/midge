@@ -234,6 +234,21 @@ impl<T: Clone> StorageOutcome<T> {
 /// Callback type: a sync channel to send `StorageEvent` back to runtime
 pub type StorageCallback = std::sync::mpsc::Sender<StorageEvent>;
 
+const STORAGE_TIMEOUT_PREFIX: &str = "midge storage timeout: ";
+
+/// Preserve a typed timeout category across the legacy string-valued storage
+/// callback boundary. Only trusted adapters add this canonical marker;
+/// provider diagnostic text alone must not control public error typing.
+#[must_use]
+pub(crate) fn storage_timeout_error(message: impl std::fmt::Display) -> String {
+    format!("{STORAGE_TIMEOUT_PREFIX}{message}")
+}
+
+#[must_use]
+pub(crate) fn storage_error_is_timeout(error: &str) -> bool {
+    error.trim_start().starts_with(STORAGE_TIMEOUT_PREFIX)
+}
+
 /// NEW async-compatible storage backend trait.
 ///
 /// CRITICAL DESIGN:

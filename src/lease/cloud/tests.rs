@@ -173,6 +173,7 @@ struct LateCommitRenewalBackend {
     conditional_puts: std::sync::atomic::AtomicUsize,
     pending: std::sync::Mutex<Option<PendingPut>>,
     old_read_seen: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    late_commit_complete: std::sync::atomic::AtomicBool,
 }
 
 impl LateCommitRenewalBackend {
@@ -185,8 +186,10 @@ impl LateCommitRenewalBackend {
             .expect("late renewal PUT is pending");
         let (callback, result) = std::sync::mpsc::channel();
         crate::storage::cloud::CloudBackend::submit_put(&self.inner, &key, data, headers, callback);
+        let result = result.recv_timeout(Duration::from_secs(5));
+        self.late_commit_complete.store(true, Ordering::Release);
         assert!(matches!(
-            result.recv_timeout(Duration::from_secs(5)),
+            result,
             Ok(crate::storage::cloud::CloudEvent::Put {
                 result: crate::storage::cloud::CloudOutcome::Ok(()),
                 ..
@@ -206,12 +209,11 @@ impl crate::storage::cloud::CloudBackend for LateCommitRenewalBackend {
         let conditional = headers.iter().any(|(name, _)| {
             name.eq_ignore_ascii_case("if-match") || name.eq_ignore_ascii_case("if-none-match")
         });
-        if conditional
-            && self
-                .conditional_puts
+        let conditional_ordinal = conditional.then(|| {
+            self.conditional_puts
                 .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
-                == 1
-        {
+        });
+        if conditional_ordinal == Some(1) {
             *self
                 .pending
                 .lock()
@@ -219,11 +221,21 @@ impl crate::storage::cloud::CloudBackend for LateCommitRenewalBackend {
                 Some((key.to_string(), data, headers));
             let _ = callback.send(crate::storage::cloud::CloudEvent::Put {
                 key: key.to_string(),
-                result: Err(crate::storage::cloud::CloudError::Transport(
+                result: Err(crate::storage::cloud::CloudError::Timeout(
                     "scripted renewal timeout before late commit".to_string(),
                 )),
             });
             return;
+        }
+        if conditional_ordinal.is_some_and(|ordinal| ordinal > 1) {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !self.late_commit_complete.load(Ordering::Acquire) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "late renewal commit did not finish before cleanup CAS"
+                );
+                std::thread::yield_now();
+            }
         }
         crate::storage::cloud::CloudBackend::submit_put(&self.inner, key, data, headers, callback);
     }
@@ -955,6 +967,7 @@ fn should_eventually_expire_late_renewal_after_timeout_readback_saw_old_object()
         conditional_puts: std::sync::atomic::AtomicUsize::new(0),
         pending: std::sync::Mutex::new(None),
         old_read_seen: std::sync::Mutex::new(Some(old_read_tx)),
+        late_commit_complete: std::sync::atomic::AtomicBool::new(false),
     });
     let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
         Arc::clone(&backend) as Arc<dyn crate::storage::cloud::CloudBackend>,

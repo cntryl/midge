@@ -306,7 +306,7 @@ impl HybridStorage {
         data: Vec<u8>,
         deadline: &OperationDeadline,
     ) -> crate::common::MidgeResult<RemoteObjectProof> {
-        let timeout = Self::deadline_timeout(key, "remote CAS", self.callback_timeout, deadline)?;
+        Self::deadline_timeout(key, "remote CAS", self.callback_timeout, deadline)?;
         let headers = if let Some(expected) = expected {
             crate::storage::cloud::object_match_precondition_headers(
                 &expected.etag,
@@ -322,6 +322,7 @@ impl HybridStorage {
         };
         let expected_bytes = data.clone();
         let (tx, rx) = std::sync::mpsc::channel();
+        let timeout = Self::deadline_timeout(key, "remote CAS", self.callback_timeout, deadline)?;
         self.cloud_backend_for_key(key)
             .submit_write_with_headers_and_timeout(key, data, headers, timeout, tx);
         match rx.recv_timeout(timeout) {

@@ -241,6 +241,28 @@ fn should_only_classify_structured_precondition_failure_as_cas_conflict() {
 }
 
 #[test]
+fn should_classify_only_canonical_storage_timeout_errors_as_timeouts() {
+    // Arrange: provider detail text is untrusted diagnostic content. Merely
+    // mentioning "timeout" must not change a public error into Timeout.
+    let timeout = crate::storage::storage_timeout_error("cloud HEAD callback expired");
+    let unrelated = [
+        "unauthorized: workload token for timeout.example was rejected",
+        "invalid request: timeout must be a positive integer",
+        "protocol error: response included x-timeout metadata",
+    ];
+
+    // Act
+    let classified_timeout = HybridStorage::storage_error_indicates_timeout(&timeout);
+    let any_unrelated = unrelated
+        .iter()
+        .any(|error| HybridStorage::storage_error_indicates_timeout(error));
+
+    // Assert
+    assert!(classified_timeout);
+    assert!(!any_unrelated);
+}
+
+#[test]
 fn should_retain_terminal_upload_completion_when_transient_queue_is_saturated() {
     // Arrange
     let mut queue = BoundedEventQueue::new(1, std::mem::size_of::<StorageEvent>() * 2);
@@ -2795,6 +2817,42 @@ fn should_fail_with_timeout_given_expired_deadline_when_reading_object_proof() {
     assert!(
         cloud.callbacks.lock().is_empty(),
         "an exhausted deadline must not submit a zero-timeout provider call"
+    );
+}
+
+#[test]
+fn should_not_submit_provider_call_given_configured_callback_timeout_is_zero() {
+    // Arrange: the aggregate deadline is live, but configuration allows no
+    // time for even the first provider round trip.
+    let tmp = tempfile::tempdir().expect("create zero callback timeout directory");
+    let local = Arc::new(
+        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
+            .expect("create zero callback timeout local backend"),
+    );
+    let cloud = Arc::new(NeverCompletesBackend::default());
+    let limits = HybridQueueLimits {
+        callback_timeout: Duration::ZERO,
+        ..HybridQueueLimits::default()
+    };
+    let storage = HybridStorage::with_policy_event_sender_and_limits(
+        local,
+        cloud.clone(),
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        None,
+        limits,
+    );
+
+    // Act
+    let result = storage.remote_object_proof_within(
+        "sst/zero-timeout.sst",
+        &crate::common::OperationDeadline::unbounded(),
+    );
+
+    // Assert
+    assert!(matches!(result, Err(crate::common::MidgeError::Timeout(_))));
+    assert!(
+        cloud.callbacks.lock().is_empty(),
+        "a zero per-operation budget must not reach the provider"
     );
 }
 
