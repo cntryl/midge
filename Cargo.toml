@@ -191,6 +191,11 @@ name = "shutdown_orchestration"
 path = "tests/shutdown_orchestration.rs"
 required-features = ["failpoints"]
 
+[[test]]
+name = "compaction_snapshot_publication"
+path = "tests/compaction_snapshot_publication.rs"
+required-features = ["failpoints"]
+
 
 # =============================================================================
 # Benchmarks — Active Targets

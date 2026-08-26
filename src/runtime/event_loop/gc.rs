@@ -34,12 +34,14 @@ impl GcCoordinator {
                 return HandleOutcome::Continue;
             }
             let reclaimed = event_loop.gc_actor.take_manifest_reclamation();
+            // Stop new transactions from capturing the reclaimed generation
+            // before GC samples the pins held by older snapshots.
+            event_loop.publish_snapshot();
             event_loop.gc_actor.delete_ssts(
                 &mut event_loop.state,
                 &reclaimed,
                 hybrid_storage.clone(),
             );
-            event_loop.publish_snapshot();
         }
         event_loop
             .gc_actor

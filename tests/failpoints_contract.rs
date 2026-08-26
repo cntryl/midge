@@ -94,6 +94,7 @@ fn should_require_failpoints_feature_when_injection_only_targets_are_selected() 
         "chaos_compaction",
         "background_flush_pipeline",
         "shutdown_orchestration",
+        "compaction_snapshot_publication",
     ];
 
     // Act

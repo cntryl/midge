@@ -384,6 +384,7 @@ impl CompactionCoordinator {
         reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
     ) {
         event_loop.compaction_publication_degraded = true;
+        event_loop.publish_snapshot();
         if let (Some(hybrid), Some(token)) = (&event_loop.hybrid_storage, reservation) {
             let output_sizes: Vec<u64> = output_ssts
                 .iter()
@@ -408,7 +409,6 @@ impl CompactionCoordinator {
                 .gc_actor
                 .delete_ssts(&mut event_loop.state, input_ssts, None);
         }
-        event_loop.publish_snapshot();
     }
 
     fn finalize_published_compaction(
@@ -419,6 +419,12 @@ impl CompactionCoordinator {
         reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
     ) -> bool {
         crate::failpoints::fail_point!("slice6::after_manifest_persist_before_sst_gc");
+
+        // Make the replacement manifest visible before GC samples pins and
+        // removes its inputs. Snapshot acquisition shares the pin registry's
+        // acquisition guard with GC, so readers either pin the old generation
+        // before this publication or capture the replacement generation.
+        event_loop.publish_snapshot();
 
         let hybrid_storage = event_loop.hybrid_storage.clone();
         if let (Some(hybrid), Some(token)) = (&hybrid_storage, reservation) {
@@ -435,6 +441,7 @@ impl CompactionCoordinator {
         event_loop
             .gc_actor
             .delete_ssts(&mut event_loop.state, input_ssts, hybrid_storage);
+        crate::failpoints::fail_point!("midge::compaction::after_input_sst_gc");
         tracing::info!(
             removed_count = input_ssts.len(),
             "Submitted compaction input SSTs for GC"
