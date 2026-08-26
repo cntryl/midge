@@ -50,6 +50,12 @@ pub(crate) struct DdlRegistry {
     pub(crate) operations: Vec<DdlOperation>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AmbiguousPrepareResolution {
+    ObserveOnly,
+    RedriveOnceOnStartup,
+}
+
 pub(crate) fn validate_column_family_name(name: &str) -> MidgeResult<()> {
     if name.is_empty() {
         return Err(MidgeError::InvalidArgument(
@@ -174,6 +180,16 @@ impl DdlRegistry {
         self.column_families = manifest.column_families;
         Ok(())
     }
+}
+
+fn append_prepared_operation(registry: &mut DdlRegistry, prepare: &DdlPrepare) -> MidgeResult<()> {
+    registry.apply_edit(&prepare.edit)?;
+    registry.epoch = registry.epoch.saturating_add(1);
+    registry.operations.push(DdlOperation {
+        op_id: prepare.op_id.clone(),
+        edit: prepare.edit.clone(),
+    });
+    Ok(())
 }
 
 fn serialize<T: Serialize>(value: &T) -> MidgeResult<Vec<u8>> {
@@ -386,17 +402,19 @@ pub(crate) fn apply_local_edit(state: &mut RuntimeState, edit: &ManifestEdit) ->
     Ok(())
 }
 
-/// Reconcile one local prepare with the remote registry.  A remote operation
-/// is committed locally; an operation absent remotely is aborted.  Ambiguous
-/// local visibility is refused rather than guessed.
-pub(crate) fn reconcile_prepared(
+/// Reconcile one local prepare with the remote registry. A remote operation is
+/// committed locally; a definitely pre-submit operation absent remotely is
+/// aborted. Ambiguous live requests remain fenced, while startup can safely
+/// re-drive the same durable operation once.
+fn reconcile_prepared_on_startup(
     state: &mut RuntimeState,
     storage: Option<&Arc<HybridStorage>>,
 ) -> MidgeResult<()> {
-    reconcile_prepared_within(
+    reconcile_prepared_with_resolution(
         state,
         storage,
         &crate::common::OperationDeadline::unbounded(),
+        AmbiguousPrepareResolution::RedriveOnceOnStartup,
     )
 }
 
@@ -404,6 +422,20 @@ pub(crate) fn reconcile_prepared_within(
     state: &mut RuntimeState,
     storage: Option<&Arc<HybridStorage>>,
     deadline: &crate::common::OperationDeadline,
+) -> MidgeResult<()> {
+    reconcile_prepared_with_resolution(
+        state,
+        storage,
+        deadline,
+        AmbiguousPrepareResolution::ObserveOnly,
+    )
+}
+
+fn reconcile_prepared_with_resolution(
+    state: &mut RuntimeState,
+    storage: Option<&Arc<HybridStorage>>,
+    deadline: &crate::common::OperationDeadline,
+    resolution: AmbiguousPrepareResolution,
 ) -> MidgeResult<()> {
     let Some(prepare) = read_local_prepare(state)? else {
         return Ok(());
@@ -417,40 +449,88 @@ pub(crate) fn reconcile_prepared_within(
         clear_local_prepare(state)?;
         return Ok(());
     };
-    let (remote, _proof) = read_remote_registry_within(storage, deadline)?;
-    let Some(remote) = remote else {
-        if local_edit_matches(state, &prepare.edit) {
-            return Err(MidgeError::RecoveryFailed(
-                "local DDL commit is present but the remote registry is missing".to_string(),
-            ));
-        }
-        if prepare.remote_cas_ambiguous {
-            return Err(MidgeError::Fenced(
-                "DDL authority is ambiguous: the admitted remote CAS is not yet visible"
-                    .to_string(),
-            ));
-        }
-        clear_local_prepare(state)?;
-        return Ok(());
-    };
-    if remote.operation(&prepare.op_id).is_some() {
+    let (remote, proof) = read_remote_registry_within(storage, deadline)?;
+    if remote
+        .as_ref()
+        .is_some_and(|registry| registry.operation(&prepare.op_id).is_some())
+    {
         apply_local_edit(state, &prepare.edit)?;
         clear_local_prepare(state)?;
         return Ok(());
     }
     if local_edit_matches(state, &prepare.edit) {
-        return Err(MidgeError::RecoveryFailed(
-            "local DDL commit is present but its operation is absent remotely".to_string(),
-        ));
+        let message = if remote.is_some() {
+            "local DDL commit is present but its operation is absent remotely"
+        } else {
+            "local DDL commit is present but the remote registry is missing"
+        };
+        return Err(MidgeError::RecoveryFailed(message.to_string()));
     }
     if prepare.remote_cas_ambiguous {
-        return Err(MidgeError::Fenced(
+        if resolution == AmbiguousPrepareResolution::RedriveOnceOnStartup {
+            return redrive_ambiguous_prepare_within(
+                state,
+                storage,
+                &prepare,
+                remote,
+                proof.as_ref(),
+                deadline,
+            );
+        }
+        let message = if remote.is_some() {
             "DDL authority is ambiguous: the admitted remote CAS operation is not yet visible"
-                .to_string(),
-        ));
+        } else {
+            "DDL authority is ambiguous: the admitted remote CAS is not yet visible"
+        };
+        return Err(MidgeError::Fenced(message.to_string()));
     }
     clear_local_prepare(state)?;
     Ok(())
+}
+
+fn redrive_ambiguous_prepare_within(
+    state: &mut RuntimeState,
+    storage: &HybridStorage,
+    prepare: &DdlPrepare,
+    remote: Option<DdlRegistry>,
+    proof: Option<&RemoteObjectProof>,
+    deadline: &crate::common::OperationDeadline,
+) -> MidgeResult<()> {
+    let mut registry = match remote {
+        Some(registry) if registry.epoch == prepare.expected_remote_epoch => registry,
+        Some(registry) => {
+            return Err(MidgeError::Fenced(format!(
+                "DDL authority is ambiguous: prepared operation expected remote epoch {}, but the registry advanced to {}",
+                prepare.expected_remote_epoch, registry.epoch
+            )));
+        }
+        None if prepare.expected_remote_epoch == 0 => DdlRegistry::from_manifest(&state.manifest),
+        None => {
+            return Err(MidgeError::Fenced(format!(
+                "DDL authority is ambiguous: prepared operation expected remote epoch {}, but the registry is missing",
+                prepare.expected_remote_epoch
+            )));
+        }
+    };
+    append_prepared_operation(&mut registry, prepare)?;
+
+    if let Err(write_error) = write_remote_registry_within(storage, &registry, proof, deadline) {
+        return match reread_remote_registry_after_ambiguous_cas_within(storage, deadline) {
+            Ok((Some(remote), _)) if remote.operation(&prepare.op_id).is_some() => {
+                apply_local_edit(state, &prepare.edit)?;
+                clear_local_prepare(state)
+            }
+            Ok(_) => Err(MidgeError::Fenced(format!(
+                "DDL authority is ambiguous after re-driving the prepared remote CAS ({write_error}); the operation id is not visible"
+            ))),
+            Err(read_error) => Err(MidgeError::Fenced(format!(
+                "DDL authority is ambiguous after re-driving the prepared remote CAS ({write_error}); authority re-read failed: {read_error}"
+            ))),
+        };
+    }
+
+    apply_local_edit(state, &prepare.edit)?;
+    clear_local_prepare(state)
 }
 
 /// Reconcile the remote CF registry into a freshly recovered local state.
@@ -463,7 +543,7 @@ pub(crate) fn reconcile_startup(
     let Some(storage) = storage else {
         return Ok(());
     };
-    reconcile_prepared(state, Some(storage))?;
+    reconcile_prepared_on_startup(state, Some(storage))?;
     let (remote, proof) = read_remote_registry(storage).map_err(MidgeError::Internal)?;
     let Some(remote) = remote else {
         let registry = DdlRegistry::from_manifest(&state.manifest);
@@ -532,17 +612,19 @@ pub(crate) fn execute_within(
         remote_cas_ambiguous: false,
     };
     write_local_prepare(state, &prepare)?;
-    registry.apply_edit(edit)?;
-    registry.epoch = registry.epoch.saturating_add(1);
-    registry.operations.push(DdlOperation {
-        op_id: prepare.op_id.clone(),
-        edit: edit.clone(),
-    });
+    append_prepared_operation(&mut registry, &prepare)?;
     // Persist the ambiguous phase before submitting the provider mutation.
     // From this point until positive readback, absence from an immediate GET
     // is not proof that a delayed CAS will never commit.
     prepare.remote_cas_ambiguous = true;
     write_local_prepare(state, &prepare)?;
+    crate::failpoints::fail_point!(
+        "midge::ddl::after_ambiguous_prepare_before_remote_cas_submission",
+        |_| Err(MidgeError::Internal(
+            "failpoint: DDL stopped after ambiguous prepare before remote CAS submission"
+                .to_string()
+        ))
+    );
     if let Err(error) = write_remote_registry_within(storage, &registry, proof.as_ref(), deadline) {
         if remote_cas_definitely_not_committed(&error) {
             clear_local_prepare(state)?;

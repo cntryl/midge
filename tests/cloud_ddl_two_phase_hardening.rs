@@ -443,3 +443,67 @@ fn should_abort_torn_ddl_prepare_given_local_prepare_without_remote_commit_when_
     assert!(!temp.path().join("ddl.prepare.json").exists());
     shutdown(engine);
 }
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_recover_ambiguous_ddl_once_when_reopening_after_crash_before_remote_cas_submission() {
+    // Arrange
+    let _guard = DDL_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::tempdir().expect("temp dir");
+    let engine = open_cloud(temp.path());
+    let scenario = fail::FailScenario::setup();
+    fail::cfg(
+        "midge::ddl::after_ambiguous_prepare_before_remote_cas_submission",
+        "return",
+    )
+    .expect("configure crash-before-CAS failpoint");
+
+    // Act
+    let first = engine.create_column_family("crash-before-cas");
+    fail::remove("midge::ddl::after_ambiguous_prepare_before_remote_cas_submission");
+    scenario.teardown();
+
+    // Assert: the accepted operation is durable locally but never reached the
+    // remote registry before the simulated crash boundary.
+    assert!(matches!(first, Err(MidgeError::Internal(_))));
+    let prepare = fs::read(temp.path().join("ddl.prepare.json")).expect("read DDL prepare");
+    let prepare: serde_json::Value = serde_json::from_slice(&prepare).expect("decode DDL prepare");
+    assert_eq!(prepare["remote_cas_ambiguous"], true);
+    let op_id = prepare["op_id"]
+        .as_str()
+        .expect("prepared operation id")
+        .to_string();
+    let registry = fs::read(temp.path().join("cloud_store/metadata/ddl.registry.json"))
+        .expect("read authoritative DDL registry");
+    let registry: serde_json::Value = serde_json::from_slice(&registry).expect("decode registry");
+    assert!(registry["operations"]
+        .as_array()
+        .expect("registry operations")
+        .iter()
+        .all(|operation| operation["op_id"].as_str() != Some(op_id.as_str())));
+    assert!(engine.get_column_family("crash-before-cas").is_none());
+    shutdown(engine);
+
+    // Act: startup must safely re-drive the same durable operation rather than
+    // fence the database forever or mint a replacement operation id.
+    let reopened = open_cloud(temp.path());
+
+    // Assert
+    assert!(reopened.get_column_family("crash-before-cas").is_some());
+    assert!(!temp.path().join("ddl.prepare.json").exists());
+    let registry = fs::read(temp.path().join("cloud_store/metadata/ddl.registry.json"))
+        .expect("read reconciled authoritative DDL registry");
+    let registry: serde_json::Value = serde_json::from_slice(&registry).expect("decode registry");
+    let matching_operations = registry["operations"]
+        .as_array()
+        .expect("registry operations")
+        .iter()
+        .filter(|operation| operation["op_id"].as_str() == Some(op_id.as_str()))
+        .count();
+    assert_eq!(matching_operations, 1);
+    assert_eq!(registry["epoch"], 1);
+    shutdown(reopened);
+}
