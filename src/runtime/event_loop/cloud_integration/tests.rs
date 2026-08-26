@@ -6152,6 +6152,76 @@ fn should_retry_runtime_owned_wal_upload_under_continuous_request_load(
 }
 
 #[test]
+fn should_checkpoint_active_cloud_memtable_before_shutdown_succeeds(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: keep one cloud write below the normal memtable flush threshold.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    el.shutdown_cloud_drain_timeout = Duration::from_secs(31);
+    let sequence = append_cloud_async_put(&mut el)?;
+    assert!(
+        el.state
+            .get_cf(0)
+            .expect("default CF")
+            .memtable
+            .size_bytes()
+            > 0
+    );
+    assert!(el.state.manifest.files.is_empty());
+    let request_id = 90_402;
+    let response_rx = el.router.register(request_id, "Shutdown");
+
+    // Act
+    let outcome = el.handle_shutdown(Some(request_id));
+
+    // Assert
+    assert_eq!(outcome, super::super::HandleOutcome::Break);
+    let response = response_rx.try_recv();
+    assert!(
+        matches!(
+            response,
+            Ok(RuntimeResponse::Ok {
+                request_id: response_id
+            }) if response_id == request_id
+        ),
+        "unexpected shutdown response: {response:?}"
+    );
+    assert!(el.state.manifest.last_persisted_sequence >= sequence);
+    assert_eq!(el.state.manifest.files.len(), 1);
+    let cf = el.state.get_cf(0).expect("default CF");
+    assert_eq!(cf.memtable.size_bytes(), 0);
+    assert!(cf.immutable_flushes.is_empty());
+    Ok(())
+}
+
+#[test]
+fn should_not_create_cloud_sst_when_shutdown_has_no_active_writes() -> crate::common::MidgeResult<()>
+{
+    // Arrange
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    el.shutdown_cloud_drain_timeout = Duration::from_secs(2);
+    let request_id = 90_401;
+    let response_rx = el.router.register(request_id, "Shutdown");
+
+    // Act
+    let outcome = el.handle_shutdown(Some(request_id));
+
+    // Assert
+    assert_eq!(outcome, super::super::HandleOutcome::Break);
+    assert!(matches!(
+        response_rx.try_recv(),
+        Ok(RuntimeResponse::Ok {
+            request_id: response_id
+        }) if response_id == request_id
+    ));
+    assert!(el.state.manifest.files.is_empty());
+    Ok(())
+}
+
+#[test]
 fn should_drain_runtime_owned_wal_retry_before_shutdown_succeeds() -> crate::common::MidgeResult<()>
 {
     // Arrange: a terminal storage failure has transferred an accepted segment

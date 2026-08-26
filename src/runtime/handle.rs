@@ -329,6 +329,11 @@ impl RuntimeHandle {
 
     /// Request runtime shutdown and wait no longer than `timeout` for the
     /// final durability result.
+    ///
+    /// A successful cloud-backed shutdown seals and publishes the active WAL,
+    /// checkpoints non-empty memtables through SST/manifest publication, and
+    /// conservatively retires covered WAL authority. Any checkpoint failure is
+    /// returned while the WAL is retained for recovery.
     pub fn shutdown(&self, timeout: Duration) -> MidgeResult<()> {
         let deadline = OperationDeadline::from_budget(timeout);
 

@@ -139,7 +139,7 @@ impl EventLoop {
             .or_else(|| candidates.first().copied())
     }
 
-    pub(super) fn reap_cloud_wal_prune_worker(&mut self) {
+    pub(in crate::runtime::event_loop) fn reap_cloud_wal_prune_worker(&mut self) {
         if self
             .cloud_wal_prune_worker
             .as_ref()

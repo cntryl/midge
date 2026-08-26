@@ -1,6 +1,7 @@
 use super::{EventLoop, HandleOutcome};
 use crate::common::MidgeError;
 use crate::runtime::durability::DurabilityWaiter;
+use crate::runtime::state::ImmutableFlushPhase;
 use crate::runtime::{RuntimeMsg, RuntimeResponse};
 
 impl EventLoop {
@@ -26,33 +27,35 @@ impl EventLoop {
         // observe shutdown promptly instead of inheriting the worker budget.
         self.fail_shutdown_held_work();
 
-        // Drain the currently owned flush pipeline before releasing the writer
-        // epoch. No new immutable is scheduled once shutdown admission closes.
-        while self.flush_actor.is_inflight() {
-            match self
-                .flush_worker_result_rx
-                .recv_timeout(std::time::Duration::from_millis(25))
-            {
-                Ok(result) => self.handle_flush_worker_result(result),
-                Err(crossbeam::channel::RecvTimeoutError::Timeout) => {}
-                Err(crossbeam::channel::RecvTimeoutError::Disconnected) => break,
-            }
-        }
-        if let Err(error) = self.flush_actor.shutdown_and_join() {
-            if shutdown_error.is_none() {
-                shutdown_error = Some(error);
-            }
-        }
-
-        // Stop compaction before the runtime drains cloud work. Its worker
-        // owns staged SST output and must finish while this lease epoch is
-        // still valid.
-        self.compaction_actor
-            .cancel_and_join_worker(&mut self.state, self.hybrid_storage.as_ref());
-
+        let cloud_async = self.wal_actor.is_cloud_async();
         let cloud_shutdown_deadline =
             crate::common::OperationDeadline::from_budget(self.shutdown_cloud_drain_timeout);
-        if self.wal_actor.is_cloud_async() && self.state.wal.pending_writes > 0 {
+
+        // Finish work already admitted to the flush pipeline before sealing
+        // the final WAL generation. Cloud shutdown uses the same bounded
+        // durability budget as upload drain; local shutdown retains its
+        // existing behavior.
+        if cloud_async {
+            if let Err(error) = self.drain_shutdown_flush_pipeline_within(&cloud_shutdown_deadline)
+            {
+                shutdown_error = Some(error);
+            }
+        } else {
+            while self.flush_actor.is_inflight() {
+                match self
+                    .flush_worker_result_rx
+                    .recv_timeout(std::time::Duration::from_millis(25))
+                {
+                    Ok(result) => self.handle_flush_worker_result(result),
+                    Err(crossbeam::channel::RecvTimeoutError::Timeout) => {}
+                    Err(crossbeam::channel::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        }
+
+        // Establish authoritative remote WAL durability before replacing that
+        // recovery authority with an SST/manifest checkpoint.
+        if cloud_async && self.state.wal.pending_writes > 0 {
             match self.seal_current_cloud_segment_within(&cloud_shutdown_deadline) {
                 Ok(Some((segment_id, _max_sequence))) => {
                     tracing::info!(segment_id, "Enqueued final CloudAsync segment on shutdown");
@@ -63,12 +66,14 @@ impl EventLoop {
                         error = %error,
                         "Failed to seal CloudAsync segment during shutdown"
                     );
-                    shutdown_error = Some(error);
+                    if shutdown_error.is_none() {
+                        shutdown_error = Some(error);
+                    }
                 }
             }
         }
 
-        if self.wal_actor.is_cloud_async() {
+        if cloud_async {
             if let Some(storage) = &self.hybrid_storage {
                 let storage = storage.clone();
 
@@ -114,11 +119,41 @@ impl EventLoop {
             }
         }
 
+        // Short-lived cloud writers can remain below the normal memtable
+        // threshold forever. Checkpoint their active memtables during a clean
+        // shutdown so reopen does not have to replay an ever-growing catalog
+        // of otherwise uncovered WAL segments. If remote WAL durability or an
+        // earlier flush failed, retain WAL authority and report the shutdown
+        // failure instead of attempting the authority switch.
+        if cloud_async && shutdown_error.is_none() {
+            if let Err(error) =
+                self.checkpoint_active_cloud_memtables_within(&cloud_shutdown_deadline)
+            {
+                shutdown_error = Some(error);
+            }
+        }
+
+        if let Err(error) = self.flush_actor.shutdown_and_join() {
+            if shutdown_error.is_none() {
+                shutdown_error = Some(error);
+            }
+        }
+
+        // Stop compaction only after the final checkpoint has settled. Its
+        // worker owns staged SST output and must finish while this lease epoch
+        // is still valid.
+        self.compaction_actor
+            .cancel_and_join_worker(&mut self.state, self.hybrid_storage.as_ref());
+
         // GC and remote WAL-prune workers can mutate local/cloud storage.
         // Join them before the event loop exits; Engine releases its lease
         // only after this runtime has quiesced.
         self.gc_actor.shutdown_workers();
-        self.join_cloud_wal_prune_worker();
+        if cloud_async {
+            self.drain_shutdown_cloud_wal_prunes_within(&cloud_shutdown_deadline);
+        } else {
+            self.join_cloud_wal_prune_worker();
+        }
         if let Some(storage) = &self.hybrid_storage {
             storage.shutdown_background_workers();
         }
@@ -139,6 +174,115 @@ impl EventLoop {
         }
 
         HandleOutcome::Break
+    }
+
+    fn checkpoint_active_cloud_memtables_within(
+        &mut self,
+        deadline: &crate::common::OperationDeadline,
+    ) -> crate::common::MidgeResult<()> {
+        let mut cf_ids: Vec<_> = self.state.column_families.keys().copied().collect();
+        cf_ids.sort_unstable();
+        for cf_id in cf_ids {
+            if deadline.is_expired() {
+                return Err(MidgeError::Timeout(
+                    "cloud shutdown checkpoint exceeded the durability deadline".to_string(),
+                ));
+            }
+            self.freeze_active_memtable(cf_id)?;
+        }
+        self.drain_shutdown_flush_pipeline_within(deadline)
+    }
+
+    fn drain_shutdown_flush_pipeline_within(
+        &mut self,
+        deadline: &crate::common::OperationDeadline,
+    ) -> crate::common::MidgeResult<()> {
+        loop {
+            let mut pending = 0usize;
+            let mut failed_flush = None;
+            for flush in self
+                .state
+                .column_families
+                .values()
+                .flat_map(|cf| &cf.immutable_flushes)
+            {
+                pending = pending.saturating_add(1);
+                if flush.phase == ImmutableFlushPhase::RetryPending {
+                    failed_flush = Some(flush.flush_id);
+                    break;
+                }
+            }
+
+            if let Some(flush_id) = failed_flush {
+                return Err(MidgeError::Internal(format!(
+                    "cloud shutdown checkpoint flush {flush_id} failed; WAL authority retained"
+                )));
+            }
+            if pending == 0 && !self.flush_actor.is_inflight() {
+                return Ok(());
+            }
+            if deadline.is_expired() {
+                return Err(MidgeError::Timeout(format!(
+                    "cloud shutdown checkpoint timed out with {pending} immutable memtable(s) pending"
+                )));
+            }
+
+            self.schedule_next_flush_worker_during_shutdown();
+            if self.flush_actor.is_inflight() {
+                let wait_for = deadline
+                    .remaining()
+                    .min(std::time::Duration::from_millis(25));
+                match self.flush_worker_result_rx.recv_timeout(wait_for) {
+                    Ok(result) => self.handle_flush_worker_result(result),
+                    Err(crossbeam::channel::RecvTimeoutError::Timeout) => {}
+                    Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
+                        return Err(MidgeError::Internal(
+                            "cloud shutdown checkpoint flush worker disconnected".to_string(),
+                        ));
+                    }
+                }
+                continue;
+            }
+
+            if self.publication_gate.active {
+                self.reap_cloud_wal_prune_worker();
+                let sleep_for = deadline
+                    .remaining()
+                    .min(std::time::Duration::from_millis(10));
+                if !sleep_for.is_zero() {
+                    std::thread::sleep(sleep_for);
+                }
+                continue;
+            }
+
+            return Err(MidgeError::Internal(format!(
+                "cloud shutdown checkpoint stalled with {pending} immutable memtable(s) pending"
+            )));
+        }
+    }
+
+    fn drain_shutdown_cloud_wal_prunes_within(
+        &mut self,
+        deadline: &crate::common::OperationDeadline,
+    ) {
+        // Bound retries to the authority snapshot observed at shutdown. A
+        // failed proof may leak an object, but must not turn cleanup into an
+        // unbounded terminal loop.
+        let attempts = self.cloud_wal.acked_segments.len();
+        self.join_cloud_wal_prune_worker();
+        self.drain_hybrid_storage_events_within(deadline);
+
+        for _ in 0..attempts {
+            if deadline.is_expired() {
+                break;
+            }
+            self.prune_cloud_wal_segments_covered_by_manifest();
+            if self.cloud_wal_prune_worker.is_none() {
+                break;
+            }
+            self.join_cloud_wal_prune_worker();
+            self.drain_hybrid_storage_events_within(deadline);
+        }
     }
 
     pub(super) fn fail_shutdown_held_work(&mut self) {

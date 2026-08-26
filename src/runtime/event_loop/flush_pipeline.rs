@@ -89,7 +89,15 @@ impl EventLoop {
     }
 
     pub(super) fn schedule_next_flush_worker(&mut self) {
-        if self.shutting_down
+        self.schedule_next_flush_worker_with_shutdown(false);
+    }
+
+    pub(super) fn schedule_next_flush_worker_during_shutdown(&mut self) {
+        self.schedule_next_flush_worker_with_shutdown(true);
+    }
+
+    fn schedule_next_flush_worker_with_shutdown(&mut self, allow_during_shutdown: bool) {
+        if (self.shutting_down && !allow_during_shutdown)
             || self.state.is_memory_mode()
             || self.flush_actor.is_inflight()
             || self.publication_gate.active
