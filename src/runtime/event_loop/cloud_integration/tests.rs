@@ -6175,6 +6175,54 @@ fn should_drain_runtime_owned_wal_retry_before_shutdown_succeeds() -> crate::com
 }
 
 #[test]
+fn should_bound_final_cloud_wal_seal_by_shutdown_deadline() -> crate::common::MidgeResult<()> {
+    // Arrange: shutdown owns an active CloudAsync WAL that still needs sealing,
+    // while the first provider lease read is slower than the entire drain budget.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    append_cloud_async_put(&mut el)?;
+    let active_segment = el.state.wal.current_segment_id;
+    el.leader_store = Some(Arc::new(DelayedLeaderStore::new(
+        Duration::from_millis(250),
+        "writer-1",
+        1,
+    )));
+    el.leader_holder_id = Some("writer-1".to_string());
+    el.shutdown_cloud_drain_timeout = Duration::from_millis(40);
+    let request_id = 90_406;
+    let response_rx = el.router.register(request_id, "Shutdown");
+
+    // Act
+    let started = Instant::now();
+    let outcome = el.handle_shutdown(Some(request_id));
+    let elapsed = started.elapsed();
+
+    // Assert
+    assert_eq!(outcome, super::super::HandleOutcome::Break);
+    assert!(
+        elapsed < Duration::from_millis(150),
+        "final cloud WAL seal exceeded the aggregate shutdown deadline: {elapsed:?}"
+    );
+    assert!(matches!(
+        response_rx.try_recv(),
+        Ok(RuntimeResponse::Error {
+            request_id: response_id,
+            error: crate::common::MidgeError::Timeout(_),
+        }) if response_id == request_id
+    ));
+    assert_eq!(
+        el.state.wal.current_segment_id, active_segment,
+        "timed-out final seal must retain the active WAL for recovery"
+    );
+    assert!(
+        el.state.wal.pending_writes > 0,
+        "timed-out final seal must retain pending WAL accounting"
+    );
+    Ok(())
+}
+
+#[test]
 fn should_bound_runtime_owned_wal_admission_by_shutdown_deadline() -> crate::common::MidgeResult<()>
 {
     // Arrange: terminal upload failure transfers a sealed WAL back to the
