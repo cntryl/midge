@@ -3,12 +3,10 @@ use crate::runtime::hybrid_persistence::{
     CloudMetadataPruneGuard, CloudMetadataPruneProof, CloudWalPruneGuard, HybridPersistence,
 };
 use crate::sst::SstFactory;
-#[cfg(feature = "failpoints")]
-use crate::storage::cloud::CloudBackend;
-use crate::storage::cloud::{CloudStorage, MockCloudBackend};
+use crate::storage::cloud::{CloudBackend, CloudStorage, MockCloudBackend};
 use bytes::Bytes;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc, Barrier,
 };
 use std::time::{Duration, Instant};
@@ -358,15 +356,79 @@ fn should_reject_wal_catalog_publication_from_stale_epoch_after_takeover() {
 
     // Assert
     let error = result.expect_err("stale lease epoch must not publish WAL authority");
-    assert!(
-        error.to_string().contains("requires fencing epoch 3"),
-        "{error}"
-    );
+    assert!(matches!(
+        error,
+        crate::common::MidgeError::Fenced(message)
+            if message.contains("requires fencing epoch 3")
+    ));
     let catalog_proof = storage
         .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
         .expect("read winning WAL catalog");
     let catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(catalog_proof.bytes())
         .expect("decode winning WAL catalog");
+    assert!(!catalog.segments.contains_key(&segment_id));
+    assert_cloud_object_exists(&storage, &object_key);
+}
+
+#[test]
+fn should_report_fenced_when_catalog_authority_changes_before_publication() {
+    // Arrange
+    let tmp = tempfile::tempdir().expect("create takeover race test dir");
+    let local = Arc::new(
+        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
+            .expect("create takeover race local backend"),
+    );
+    let mock_cloud = Arc::new(MockCloudBackend::new());
+    let pausing_cloud = Arc::new(PausingCatalogCasBackend::new(Arc::clone(&mock_cloud)));
+    let cloud = Arc::new(CloudStorage::new(pausing_cloud.clone(), String::new()));
+    let storage = Arc::new(HybridStorage::with_policy(
+        local,
+        cloud,
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    ));
+    storage
+        .fence_cloud_wal_catalog(2)
+        .expect("initialize publisher catalog epoch");
+
+    let segment_id = 1;
+    let max_sequence = 11;
+    let bytes = valid_wal_bytes(max_sequence);
+    let local_path = tmp.path().join(crate::wal::segment_file_name(segment_id));
+    std::fs::write(&local_path, &bytes).expect("write publisher local WAL");
+    let object_key = crate::wal::cloud_segment::object_key(segment_id, 1);
+    write_cloud_object(&storage, &object_key, bytes);
+
+    pausing_cloud.pause_next_catalog_compare_exchange();
+    let publisher_storage = Arc::clone(&storage);
+    let publisher = std::thread::spawn(move || {
+        publisher_storage.publish_remote_wal_segment(
+            segment_id,
+            max_sequence,
+            &local_path,
+            2,
+            &crate::common::OperationDeadline::unbounded(),
+        )
+    });
+    pausing_cloud.wait_for_catalog_compare_exchange();
+    storage
+        .fence_cloud_wal_catalog(3)
+        .expect("takeover must advance catalog authority");
+
+    // Act
+    pausing_cloud.release_catalog_compare_exchange();
+    let error = publisher
+        .join()
+        .expect("publisher thread must not panic")
+        .expect_err("stale publisher must lose catalog authority");
+
+    // Assert
+    assert!(matches!(error, crate::common::MidgeError::Fenced(_)));
+    let catalog_proof = storage
+        .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
+        .expect("read takeover catalog");
+    let catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(catalog_proof.bytes())
+        .expect("decode takeover catalog");
+    assert_eq!(catalog.fencing_epoch, 3);
     assert!(!catalog.segments.contains_key(&segment_id));
     assert_cloud_object_exists(&storage, &object_key);
 }
@@ -482,6 +544,96 @@ fn hybrid_with_mock_cloud() -> (Arc<MockCloudBackend>, HybridStorage) {
         .fence_cloud_wal_catalog(2)
         .expect("initialize test WAL publication catalog");
     (mock_cloud, storage)
+}
+
+struct PausingCatalogCasBackend {
+    inner: Arc<MockCloudBackend>,
+    pause_next_catalog_compare_exchange: AtomicBool,
+    catalog_compare_exchange_started: Barrier,
+    release_catalog_compare_exchange: Barrier,
+}
+
+impl PausingCatalogCasBackend {
+    fn new(inner: Arc<MockCloudBackend>) -> Self {
+        Self {
+            inner,
+            pause_next_catalog_compare_exchange: AtomicBool::new(false),
+            catalog_compare_exchange_started: Barrier::new(2),
+            release_catalog_compare_exchange: Barrier::new(2),
+        }
+    }
+
+    fn pause_next_catalog_compare_exchange(&self) {
+        self.pause_next_catalog_compare_exchange
+            .store(true, Ordering::SeqCst);
+    }
+
+    fn wait_for_catalog_compare_exchange(&self) {
+        self.catalog_compare_exchange_started.wait();
+    }
+
+    fn release_catalog_compare_exchange(&self) {
+        self.release_catalog_compare_exchange.wait();
+    }
+}
+
+impl CloudBackend for PausingCatalogCasBackend {
+    fn submit_put(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        let is_catalog_compare_exchange = key == crate::wal::cloud_catalog::OBJECT_KEY
+            && headers
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("if-match"));
+        if is_catalog_compare_exchange
+            && self
+                .pause_next_catalog_compare_exchange
+                .swap(false, Ordering::SeqCst)
+        {
+            self.catalog_compare_exchange_started.wait();
+            self.release_catalog_compare_exchange.wait();
+        }
+        self.inner.submit_put(key, data, headers, callback);
+    }
+
+    fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        self.inner.submit_get(key, callback);
+    }
+
+    fn submit_get_with_metadata(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        self.inner.submit_get_with_metadata(key, callback);
+    }
+
+    fn submit_get_range(
+        &self,
+        key: &str,
+        start: u64,
+        end: Option<u64>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        self.inner.submit_get_range(key, start, end, callback);
+    }
+
+    fn submit_delete(
+        &self,
+        key: &str,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        self.inner.submit_delete(key, headers, callback);
+    }
+
+    fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
+        self.inner.submit_list(prefix, callback);
+    }
+
+    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        self.inner.submit_head(key, callback);
+    }
 }
 
 #[test]

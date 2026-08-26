@@ -359,6 +359,12 @@ impl HybridPersistence for HybridStorage {
             })?;
         let mut catalog =
             WalPublicationCatalog::decode(catalog_proof.bytes()).map_err(MidgeError::Internal)?;
+        if catalog.fencing_epoch != fencing_epoch {
+            return Err(MidgeError::Fenced(format!(
+                "cloud WAL catalog mutation requires fencing epoch {}, writer epoch {fencing_epoch} rejected",
+                catalog.fencing_epoch
+            )));
+        }
         if !catalog
             .publish(fencing_epoch, entry)
             .map_err(MidgeError::Internal)?
@@ -366,14 +372,41 @@ impl HybridPersistence for HybridStorage {
             return Ok(());
         }
         let catalog_bytes = catalog.encode().map_err(MidgeError::Internal)?;
-        self.compare_exchange_remote_object_within(
+        let publication = self.compare_exchange_remote_object_within(
             crate::wal::cloud_catalog::OBJECT_KEY,
             Some(catalog_proof.metadata()),
             catalog_bytes,
             deadline,
-        )
-        .map(|_| ())
-        .map_err(|error| contextualize_cloud_error(error, "cloud WAL catalog publication failed"))
+        );
+        match publication {
+            Ok(_) => Ok(()),
+            Err(MidgeError::Busy(conflict)) => {
+                let winning_proof = self
+                    .remote_object_proof_within(crate::wal::cloud_catalog::OBJECT_KEY, deadline)
+                    .map_err(|error| {
+                        contextualize_cloud_error(
+                            error,
+                            "cloud WAL catalog publication conflict readback failed",
+                        )
+                    })?;
+                let winning_catalog = WalPublicationCatalog::decode(winning_proof.bytes())
+                    .map_err(MidgeError::Internal)?;
+                if winning_catalog.fencing_epoch > fencing_epoch {
+                    return Err(MidgeError::Fenced(format!(
+                        "cloud WAL catalog advanced to fencing epoch {}, writer epoch {fencing_epoch} rejected during publication",
+                        winning_catalog.fencing_epoch
+                    )));
+                }
+                Err(contextualize_cloud_error(
+                    MidgeError::Busy(conflict),
+                    "cloud WAL catalog publication failed",
+                ))
+            }
+            Err(error) => Err(contextualize_cloud_error(
+                error,
+                "cloud WAL catalog publication failed",
+            )),
+        }
     }
 
     #[cfg(test)]
