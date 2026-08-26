@@ -11,6 +11,8 @@ type LocalWalPaths = (
     Option<PathBuf>,
 );
 
+const CLOUD_WAL_RECOVERY_MAX_IN_FLIGHT: usize = 8;
+
 impl CloudStartupRecovery {
     pub(crate) fn cleanup_non_authoritative_compaction_outputs(
         state: &mut RuntimeState,
@@ -272,6 +274,7 @@ impl CloudStartupRecovery {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn blocking_cloud_get(
         cloud: &crate::storage::cloud::CloudStorage,
         key: &str,
@@ -656,52 +659,85 @@ impl CloudStartupRecovery {
         };
 
         let staging_fs = Self::recovery_staging_fs(db_path)?;
-        for (segment_id, publication) in &catalog.segments {
-            let data = match Self::blocking_cloud_get(cloud, &publication.object_key) {
-                Ok(data) => data,
-                Err(error) if recovery_policy == RecoveryPolicy::Salvage => {
-                    tracing::warn!(
-                        %error,
-                        key = %publication.object_key,
-                        "skipping authoritative cloud WAL object during salvage open"
-                    );
-                    plan.opened_in_salvage_mode = true;
-                    continue;
-                }
-                Err(error) => {
-                    return Err(MidgeError::RecoveryFailed(format!(
-                        "failed to download authoritative cloud WAL '{}': {error}",
+        let publications = catalog.segments.iter().collect::<Vec<_>>();
+        for batch in publications.chunks(CLOUD_WAL_RECOVERY_MAX_IN_FLIGHT) {
+            let deadline = std::time::Instant::now() + cloud.callback_timeout();
+            let pending = batch
+                .iter()
+                .map(|(segment_id, publication)| {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    cloud.submit_get(&publication.object_key, tx);
+                    (**segment_id, *publication, rx)
+                })
+                .collect::<Vec<_>>();
+
+            for (segment_id, publication, rx) in pending {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                let data = match rx.recv_timeout(remaining) {
+                    Ok(crate::storage::cloud::CloudEvent::Get { result, .. }) => match result {
+                        crate::storage::cloud::CloudOutcome::Ok(data) => Ok(data),
+                        crate::storage::cloud::CloudOutcome::Err(error) => {
+                            Err(MidgeError::Internal(format!(
+                                "cloud get '{}': {error}",
+                                publication.object_key
+                            )))
+                        }
+                    },
+                    Ok(other) => Err(MidgeError::Internal(format!(
+                        "unexpected cloud get response for '{}': {other:?}",
                         publication.object_key
-                    )))
+                    ))),
+                    Err(error) => Err(MidgeError::Internal(format!(
+                        "cloud get '{}' timed out or failed: {error}",
+                        publication.object_key
+                    ))),
+                };
+                let data = match data {
+                    Ok(data) => data,
+                    Err(error) if recovery_policy == RecoveryPolicy::Salvage => {
+                        tracing::warn!(
+                            %error,
+                            key = %publication.object_key,
+                            "skipping authoritative cloud WAL object during salvage open"
+                        );
+                        plan.opened_in_salvage_mode = true;
+                        continue;
+                    }
+                    Err(error) => {
+                        return Err(MidgeError::RecoveryFailed(format!(
+                            "failed to download authoritative cloud WAL '{}': {error}",
+                            publication.object_key
+                        )))
+                    }
+                };
+                if let Err(error) = publication.validate_bytes(&data) {
+                    if recovery_policy == RecoveryPolicy::Salvage {
+                        plan.opened_in_salvage_mode = true;
+                        tracing::warn!(
+                            %error,
+                            key = %publication.object_key,
+                            "skipping invalid authoritative cloud WAL during salvage open"
+                        );
+                        continue;
+                    }
+                    return Err(MidgeError::RecoveryFailed(format!(
+                        "authoritative cloud WAL '{}' failed catalog validation: {error}",
+                        publication.object_key
+                    )));
                 }
-            };
-            if let Err(error) = publication.validate_bytes(&data) {
-                if recovery_policy == RecoveryPolicy::Salvage {
-                    plan.opened_in_salvage_mode = true;
-                    tracing::warn!(
-                        %error,
-                        key = %publication.object_key,
-                        "skipping invalid authoritative cloud WAL during salvage open"
-                    );
-                    continue;
-                }
-                return Err(MidgeError::RecoveryFailed(format!(
-                    "authoritative cloud WAL '{}' failed catalog validation: {error}",
-                    publication.object_key
-                )));
+                Self::stage_recovery_wal_bytes(
+                    &staging_fs,
+                    &crate::wal::cloud_segment_file_name(segment_id),
+                    &data,
+                )?;
+                plan.remote_segments.insert(
+                    segment_id,
+                    crate::runtime::RecoveredCloudWalSegment {
+                        max_sequence: publication.max_sequence,
+                        writer_epoch: publication.writer_epoch,
+                    },
+                );
             }
-            Self::stage_recovery_wal_bytes(
-                &staging_fs,
-                &crate::wal::cloud_segment_file_name(*segment_id),
-                &data,
-            )?;
-            plan.remote_segments.insert(
-                *segment_id,
-                crate::runtime::RecoveredCloudWalSegment {
-                    max_sequence: publication.max_sequence,
-                    writer_epoch: publication.writer_epoch,
-                },
-            );
         }
 
         Self::enforce_recovered_wal_epoch_order(&mut plan, recovery_policy)?;

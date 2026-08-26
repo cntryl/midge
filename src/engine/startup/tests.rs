@@ -1,6 +1,271 @@
 use super::*;
 use crate::common::MidgeError;
 
+struct DelayedRecoveryBackend {
+    objects: std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>,
+    stalled: std::sync::Mutex<std::collections::BTreeSet<String>>,
+    in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    max_in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl DelayedRecoveryBackend {
+    fn new() -> Self {
+        Self {
+            objects: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            stalled: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+            in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            max_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    fn full_key(key: &str) -> String {
+        format!("midge/{key}")
+    }
+
+    fn insert(&self, key: &str, bytes: Vec<u8>) {
+        self.objects
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(Self::full_key(key), bytes);
+    }
+
+    fn remove(&self, key: &str) {
+        self.objects
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&Self::full_key(key));
+    }
+
+    fn stall(&self, key: &str) {
+        self.stalled
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(Self::full_key(key));
+    }
+
+    fn maximum_in_flight(&self) -> usize {
+        self.max_in_flight
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+impl crate::storage::cloud::CloudBackend for DelayedRecoveryBackend {
+    fn submit_put(
+        &self,
+        key: &str,
+        _data: Vec<u8>,
+        _headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        let _ = callback.send(crate::storage::cloud::CloudEvent::Put {
+            key: key.to_string(),
+            result: crate::storage::cloud::CloudOutcome::Err(
+                crate::storage::cloud::CloudError::Protocol(
+                    "delayed recovery backend is read-only".to_string(),
+                ),
+            ),
+        });
+    }
+
+    fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        let active = self
+            .in_flight
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+            .saturating_add(1);
+        self.max_in_flight
+            .fetch_max(active, std::sync::atomic::Ordering::AcqRel);
+
+        if self
+            .stalled
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(key)
+        {
+            return;
+        }
+
+        let key = key.to_string();
+        let bytes = self
+            .objects
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+            .cloned();
+        let in_flight = std::sync::Arc::clone(&self.in_flight);
+        std::thread::spawn(move || {
+            let delay = 2 + u64::from(
+                key.as_bytes()
+                    .iter()
+                    .fold(0_u8, |sum, byte| sum.wrapping_add(*byte))
+                    % 7,
+            );
+            std::thread::sleep(std::time::Duration::from_millis(delay));
+            let result = bytes.map_or_else(
+                || {
+                    crate::storage::cloud::CloudOutcome::Err(
+                        crate::storage::cloud::CloudError::NotFound(key.clone()),
+                    )
+                },
+                crate::storage::cloud::CloudOutcome::Ok,
+            );
+            let _ = callback.send(crate::storage::cloud::CloudEvent::Get { key, result });
+            in_flight.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        });
+    }
+
+    fn submit_get_range(
+        &self,
+        key: &str,
+        start: u64,
+        end: Option<u64>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        let _ = callback.send(crate::storage::cloud::CloudEvent::GetRange {
+            key: key.to_string(),
+            start,
+            end,
+            result: crate::storage::cloud::CloudOutcome::Err(
+                crate::storage::cloud::CloudError::Protocol(
+                    "ranged GET is unsupported".to_string(),
+                ),
+            ),
+        });
+    }
+}
+
+fn recovery_catalog(
+    backend: &DelayedRecoveryBackend,
+    segment_count: u64,
+) -> crate::wal::cloud_catalog::WalPublicationCatalog {
+    let mut catalog = crate::wal::cloud_catalog::WalPublicationCatalog::empty(7)
+        .expect("create recovery catalog");
+    for segment_id in 1..=segment_count {
+        let record = crate::wal::WalRecord::new(
+            crate::wal::WalOpKind::Put,
+            bytes::Bytes::from(format!("key-{segment_id}")),
+            Some(bytes::Bytes::from(format!("value-{segment_id}"))),
+            segment_id,
+            7,
+        );
+        let payload = crate::wal::encoding::encode(&record).expect("encode recovery WAL record");
+        let mut bytes = Vec::new();
+        crate::wal::frame::append_frame(&mut bytes, &payload).expect("frame recovery WAL record");
+        let publication = crate::wal::cloud_catalog::PublishedWalSegment::from_validated_bytes(
+            segment_id, segment_id, 7, &bytes,
+        );
+        backend.insert(&publication.object_key, bytes);
+        catalog.segments.insert(segment_id, publication);
+    }
+    catalog
+}
+
+#[test]
+fn should_bound_parallel_cloud_wal_hydration_to_eight_requests() -> MidgeResult<()> {
+    // Arrange
+    let db = tempfile::tempdir()?;
+    let backend = std::sync::Arc::new(DelayedRecoveryBackend::new());
+    let catalog = recovery_catalog(&backend, 17);
+    let cloud = crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".to_string());
+
+    // Act
+    let plan = CloudStartupRecovery::materialize_cloud_wal_recovery_dir(
+        &cloud,
+        db.path(),
+        crate::config::RecoveryPolicy::Strict,
+        &catalog,
+    )?;
+
+    // Assert
+    assert_eq!(plan.remote_segments.len(), 17);
+    assert!(backend.maximum_in_flight() > 1);
+    assert!(backend.maximum_in_flight() <= 8);
+    assert_eq!(
+        plan.remote_segments.keys().copied().collect::<Vec<_>>(),
+        (1..=17).collect::<Vec<_>>()
+    );
+    Ok(())
+}
+
+#[test]
+fn should_fail_strict_cloud_wal_hydration_when_publication_is_missing() -> MidgeResult<()> {
+    // Arrange
+    let db = tempfile::tempdir()?;
+    let backend = std::sync::Arc::new(DelayedRecoveryBackend::new());
+    let catalog = recovery_catalog(&backend, 9);
+    backend.remove(&catalog.segments[&3].object_key);
+    let cloud = crate::storage::cloud::CloudStorage::new(backend, "midge".to_string());
+
+    // Act
+    let result = CloudStartupRecovery::materialize_cloud_wal_recovery_dir(
+        &cloud,
+        db.path(),
+        crate::config::RecoveryPolicy::Strict,
+        &catalog,
+    );
+
+    // Assert
+    let error = result
+        .err()
+        .expect("missing publication should fail strict recovery");
+    assert!(error.to_string().contains(&catalog.segments[&3].object_key));
+    Ok(())
+}
+
+#[test]
+fn should_salvage_valid_cloud_wals_when_publications_are_missing_or_corrupt() -> MidgeResult<()> {
+    // Arrange
+    let db = tempfile::tempdir()?;
+    let backend = std::sync::Arc::new(DelayedRecoveryBackend::new());
+    let catalog = recovery_catalog(&backend, 9);
+    backend.remove(&catalog.segments[&3].object_key);
+    backend.insert(&catalog.segments[&7].object_key, b"corrupt".to_vec());
+    let cloud = crate::storage::cloud::CloudStorage::new(backend, "midge".to_string());
+
+    // Act
+    let plan = CloudStartupRecovery::materialize_cloud_wal_recovery_dir(
+        &cloud,
+        db.path(),
+        crate::config::RecoveryPolicy::Salvage,
+        &catalog,
+    )?;
+
+    // Assert
+    assert!(plan.opened_in_salvage_mode);
+    assert_eq!(plan.remote_segments.len(), 7);
+    assert!(!plan.remote_segments.contains_key(&3));
+    assert!(!plan.remote_segments.contains_key(&7));
+    Ok(())
+}
+
+#[test]
+fn should_bound_cloud_wal_hydration_timeout_to_one_batch_deadline() -> MidgeResult<()> {
+    // Arrange
+    let db = tempfile::tempdir()?;
+    let backend = std::sync::Arc::new(DelayedRecoveryBackend::new());
+    let catalog = recovery_catalog(&backend, 9);
+    backend.stall(&catalog.segments[&2].object_key);
+    let cloud = crate::storage::cloud::CloudStorage::new_with_timeout(
+        backend,
+        "midge".to_string(),
+        std::time::Duration::from_millis(25),
+    );
+
+    // Act
+    let started = std::time::Instant::now();
+    let result = CloudStartupRecovery::materialize_cloud_wal_recovery_dir(
+        &cloud,
+        db.path(),
+        crate::config::RecoveryPolicy::Strict,
+        &catalog,
+    );
+
+    // Assert
+    let error = result.err().expect("stalled publication should time out");
+    assert!(error.to_string().contains("timed out"));
+    assert!(started.elapsed() < std::time::Duration::from_millis(100));
+    Ok(())
+}
+
 struct StartupWatchdogLease {
     validity: std::sync::Arc<crate::lease::LeaseValidity>,
     renewals: std::sync::atomic::AtomicUsize,
