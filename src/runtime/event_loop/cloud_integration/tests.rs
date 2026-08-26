@@ -486,7 +486,7 @@ impl BudgetConsumingDdlBackend {
     fn registry_cas_timeouts(&self) -> Vec<Duration> {
         self.registry_cas_timeouts
             .lock()
-            .expect("read observed DDL CAS timeouts")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 }
@@ -662,7 +662,7 @@ impl crate::storage::StorageBackend for CommitThenBlockCatalogReadbackBackend {
         {
             self.retained_callbacks
                 .lock()
-                .expect("retain blocked catalog readback callback")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(callback);
             return;
         }
@@ -721,7 +721,7 @@ impl crate::storage::StorageBackend for BudgetConsumingDdlBackend {
         if key == crate::runtime::ddl::REMOTE_DDL_REGISTRY_KEY {
             self.registry_cas_timeouts
                 .lock()
-                .expect("record deadline-bounded DDL CAS timeout")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(timeout);
             let _ = callback.send(crate::storage::StorageEvent::WriteComplete {
                 key: key.to_string(),
@@ -1549,7 +1549,7 @@ impl crate::storage::cloud::CloudBackend for BudgetConsumingMetadataProofBackend
     fn submit_head(&self, _key: &str, callback: crate::storage::cloud::CloudCallback) {
         self.retained_callbacks
             .lock()
-            .expect("retain blocked metadata proof callback")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(callback);
     }
 }
@@ -1592,7 +1592,7 @@ impl crate::storage::cloud::CloudBackend for BudgetConsumingMetadataBackend {
         } else {
             self.retained_callbacks
                 .lock()
-                .expect("retain blocked metadata callback")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(callback);
         }
     }
