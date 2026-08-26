@@ -120,18 +120,26 @@ impl HybridStorage {
         callback_timeout: Duration,
         deadline: &OperationDeadline,
     ) -> crate::common::MidgeResult<RemoteObjectProof> {
-        Self::deadline_guard(key, "initial HEAD during object proof", deadline)?;
-        let before_timeout = deadline.clamp(callback_timeout);
+        let before_timeout = Self::deadline_timeout(
+            key,
+            "initial HEAD during object proof",
+            callback_timeout,
+            deadline,
+        )?;
         let before = Self::head_object_from_backend_blocking(backend, key, before_timeout)
             .map_err(|error| Self::proof_round_trip_error(key, "initial HEAD", error, deadline))?;
 
-        Self::deadline_guard(key, "GET during object proof", deadline)?;
-        let read_timeout = deadline.clamp(callback_timeout);
+        let read_timeout =
+            Self::deadline_timeout(key, "GET during object proof", callback_timeout, deadline)?;
         let bytes = Self::read_object_from_backend_blocking(backend, key, read_timeout)
             .map_err(|error| Self::proof_round_trip_error(key, "GET", error, deadline))?;
 
-        Self::deadline_guard(key, "final HEAD during object proof", deadline)?;
-        let after_timeout = deadline.clamp(callback_timeout);
+        let after_timeout = Self::deadline_timeout(
+            key,
+            "final HEAD during object proof",
+            callback_timeout,
+            deadline,
+        )?;
         let after = Self::head_object_from_backend_blocking(backend, key, after_timeout)
             .map_err(|error| Self::proof_round_trip_error(key, "final HEAD", error, deadline))?;
 
@@ -191,17 +199,19 @@ impl HybridStorage {
     /// Returning here rather than issuing a zero-timeout call keeps the failure
     /// legible: the caller learns which step ran out of budget instead of seeing
     /// a generic transport error.
-    pub(super) fn deadline_guard(
+    pub(super) fn deadline_timeout(
         key: &str,
         step: &str,
+        per_operation_timeout: Duration,
         deadline: &OperationDeadline,
-    ) -> crate::common::MidgeResult<()> {
-        if deadline.is_expired() {
-            return Err(crate::common::MidgeError::Timeout(format!(
-                "operation deadline exhausted before '{step}' for '{key}'"
-            )));
-        }
-        Ok(())
+    ) -> crate::common::MidgeResult<Duration> {
+        deadline
+            .clamp_nonzero(per_operation_timeout)
+            .ok_or_else(|| {
+                crate::common::MidgeError::Timeout(format!(
+                    "operation deadline exhausted before '{step}' for '{key}'"
+                ))
+            })
     }
 
     fn proof_round_trip_error(
@@ -234,8 +244,8 @@ impl HybridStorage {
         key: &str,
         deadline: &OperationDeadline,
     ) -> crate::common::MidgeResult<Option<RemoteObjectProof>> {
-        Self::deadline_guard(key, "optional object HEAD", deadline)?;
-        let timeout = deadline.clamp(self.callback_timeout);
+        let timeout =
+            Self::deadline_timeout(key, "optional object HEAD", self.callback_timeout, deadline)?;
         let (tx, rx) = std::sync::mpsc::channel();
         self.cloud_backend_for_key(key)
             .submit_head_with_timeout(key, timeout, tx);
@@ -296,7 +306,7 @@ impl HybridStorage {
         data: Vec<u8>,
         deadline: &OperationDeadline,
     ) -> crate::common::MidgeResult<RemoteObjectProof> {
-        Self::deadline_guard(key, "remote CAS", deadline)?;
+        let timeout = Self::deadline_timeout(key, "remote CAS", self.callback_timeout, deadline)?;
         let headers = if let Some(expected) = expected {
             crate::storage::cloud::object_match_precondition_headers(
                 &expected.etag,
@@ -312,7 +322,6 @@ impl HybridStorage {
         };
         let expected_bytes = data.clone();
         let (tx, rx) = std::sync::mpsc::channel();
-        let timeout = deadline.clamp(self.callback_timeout);
         self.cloud_backend_for_key(key)
             .submit_write_with_headers_and_timeout(key, data, headers, timeout, tx);
         match rx.recv_timeout(timeout) {
@@ -414,8 +423,12 @@ impl HybridStorage {
             return Ok(());
         }
 
-        Self::deadline_guard(&proof.key, "guarded object HEAD", deadline)?;
-        let timeout = deadline.clamp(callback_timeout);
+        let timeout = Self::deadline_timeout(
+            &proof.key,
+            "guarded object HEAD",
+            callback_timeout,
+            deadline,
+        )?;
         let actual = Self::head_object_from_backend_blocking(&proof.backend, &proof.key, timeout)
             .map_err(|error| {
             Self::proof_round_trip_error(&proof.key, "guarded object HEAD", error, deadline)

@@ -2767,15 +2767,20 @@ fn should_enforce_internal_storage_event_queue_limits() {
 
 #[test]
 fn should_fail_with_timeout_given_expired_deadline_when_reading_object_proof() {
-    // Arrange: a caller whose shared budget is already spent.
-    let (_mock_cloud, storage) = hybrid_with_mock_cloud();
-    write_cloud_object(&storage, "sst/expired.sst", b"payload".to_vec());
-    let expired = crate::common::OperationDeadline::from_start(
-        std::time::Instant::now()
-            .checked_sub(Duration::from_secs(120))
-            .expect("test instant supports expired deadline offset"),
-        Duration::from_secs(60),
+    // Arrange: a zero-budget caller and a backend that records every submitted
+    // callback. Returning Timeout is insufficient if a provider call starts.
+    let tmp = tempfile::tempdir().expect("create expired deadline directory");
+    let local = Arc::new(
+        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
+            .expect("create expired deadline local backend"),
     );
+    let cloud = Arc::new(NeverCompletesBackend::default());
+    let storage = HybridStorage::with_policy(
+        local,
+        cloud.clone(),
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    );
+    let expired = crate::common::OperationDeadline::from_budget(Duration::ZERO);
 
     // Act
     let result = storage.remote_object_proof_within("sst/expired.sst", &expired);
@@ -2787,6 +2792,10 @@ fn should_fail_with_timeout_given_expired_deadline_when_reading_object_proof() {
         crate::common::MidgeError::Timeout(message)
             if message.contains("deadline") && message.contains("sst/expired.sst")
     ));
+    assert!(
+        cloud.callbacks.lock().is_empty(),
+        "an exhausted deadline must not submit a zero-timeout provider call"
+    );
 }
 
 #[test]

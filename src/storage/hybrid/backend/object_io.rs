@@ -45,8 +45,7 @@ impl HybridStorage {
         callback_timeout: Duration,
         deadline: &crate::common::OperationDeadline,
     ) -> crate::common::MidgeResult<Vec<u8>> {
-        Self::deadline_guard(key, "read object", deadline)?;
-        let timeout = deadline.clamp(callback_timeout);
+        let timeout = Self::deadline_timeout(key, "read object", callback_timeout, deadline)?;
         Self::read_object_from_backend_blocking(backend, key, timeout).map_err(|error| {
             if deadline.is_expired() || Self::storage_error_indicates_timeout(&error) {
                 crate::common::MidgeError::Timeout(format!(
@@ -110,8 +109,8 @@ impl HybridStorage {
         callback_timeout: Duration,
         deadline: &crate::common::OperationDeadline,
     ) -> crate::common::MidgeResult<bool> {
-        Self::deadline_guard(key, "HEAD object existence", deadline)?;
-        let timeout = deadline.clamp(callback_timeout);
+        let timeout =
+            Self::deadline_timeout(key, "HEAD object existence", callback_timeout, deadline)?;
         let (tx, rx) = std::sync::mpsc::channel();
         backend.submit_head_with_timeout(key, timeout, tx);
         match rx.recv_timeout(timeout) {

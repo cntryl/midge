@@ -81,6 +81,17 @@ impl OperationDeadline {
     pub fn clamp(&self, per_operation_timeout: Duration) -> Duration {
         per_operation_timeout.min(self.remaining())
     }
+
+    /// Clamp a provider timeout and refuse to start work when no budget remains.
+    ///
+    /// Sampling once avoids the guard-then-clamp race where a deadline could
+    /// expire between two reads and a zero-duration provider call was still
+    /// submitted.
+    #[must_use]
+    pub fn clamp_nonzero(&self, per_operation_timeout: Duration) -> Option<Duration> {
+        let timeout = self.clamp(per_operation_timeout);
+        (!timeout.is_zero()).then_some(timeout)
+    }
 }
 
 #[cfg(test)]
@@ -165,5 +176,17 @@ mod tests {
 
         // Assert
         assert_eq!(clamped, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn should_refuse_provider_timeout_given_operation_deadline_is_exhausted() {
+        // Arrange
+        let deadline = OperationDeadline::from_budget(Duration::ZERO);
+
+        // Act
+        let timeout = deadline.clamp_nonzero(Duration::from_secs(30));
+
+        // Assert
+        assert_eq!(timeout, None);
     }
 }

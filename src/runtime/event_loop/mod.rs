@@ -760,17 +760,19 @@ impl EventLoop {
         Ok(())
     }
 
-    fn cloud_metadata_deadline_guard(
+    fn cloud_metadata_timeout(
         key: &str,
         operation: &str,
+        per_operation_timeout: std::time::Duration,
         deadline: &crate::common::OperationDeadline,
-    ) -> crate::common::MidgeResult<()> {
-        if deadline.is_expired() {
-            return Err(crate::common::MidgeError::Timeout(format!(
-                "operation deadline exhausted before cloud metadata {operation} for '{key}'"
-            )));
-        }
-        Ok(())
+    ) -> crate::common::MidgeResult<std::time::Duration> {
+        deadline
+            .clamp_nonzero(per_operation_timeout)
+            .ok_or_else(|| {
+                crate::common::MidgeError::Timeout(format!(
+                    "operation deadline exhausted before cloud metadata {operation} for '{key}'"
+                ))
+            })
     }
 
     fn cloud_metadata_get_optional(
@@ -778,8 +780,7 @@ impl EventLoop {
         key: &str,
         deadline: &crate::common::OperationDeadline,
     ) -> crate::common::MidgeResult<Option<Vec<u8>>> {
-        Self::cloud_metadata_deadline_guard(key, "GET", deadline)?;
-        let timeout = deadline.clamp(cloud.callback_timeout());
+        let timeout = Self::cloud_metadata_timeout(key, "GET", cloud.callback_timeout(), deadline)?;
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_get(key, tx);
         match rx.recv_timeout(timeout) {
@@ -820,8 +821,8 @@ impl EventLoop {
         key: &str,
         deadline: &crate::common::OperationDeadline,
     ) -> crate::common::MidgeResult<Option<crate::storage::cloud::ObjectMetadata>> {
-        Self::cloud_metadata_deadline_guard(key, "HEAD", deadline)?;
-        let timeout = deadline.clamp(cloud.callback_timeout());
+        let timeout =
+            Self::cloud_metadata_timeout(key, "HEAD", cloud.callback_timeout(), deadline)?;
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_head(key, tx);
         match rx.recv_timeout(timeout) {
@@ -940,8 +941,7 @@ impl EventLoop {
             None => vec![("If-None-Match".to_string(), "*".to_string())],
         };
 
-        Self::cloud_metadata_deadline_guard(key, "PUT", deadline)?;
-        let timeout = deadline.clamp(cloud.callback_timeout());
+        let timeout = Self::cloud_metadata_timeout(key, "PUT", cloud.callback_timeout(), deadline)?;
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_put(key, data, headers, tx);
 
@@ -995,7 +995,11 @@ impl EventLoop {
         let local_manifest_sequence = self.state.manifest.last_persisted_sequence;
 
         for file_name in crate::storage::cloud::CLOUD_METADATA_FILES {
-            Self::cloud_metadata_deadline_guard(file_name, "local mirror preparation", deadline)?;
+            if deadline.is_expired() {
+                return Err(crate::common::MidgeError::Timeout(format!(
+                    "operation deadline exhausted before cloud metadata local mirror preparation for '{file_name}'"
+                )));
+            }
             let local_path = self.state.db_path.join(file_name);
             if !local_path.exists() {
                 continue;

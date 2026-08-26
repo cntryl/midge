@@ -74,8 +74,12 @@ impl HybridStorage {
             );
         }
 
-        Self::deadline_guard(key, "conditional immutable upload", deadline)?;
-        let timeout = deadline.clamp(self.callback_timeout);
+        let timeout = Self::deadline_timeout(
+            key,
+            "conditional immutable upload",
+            self.callback_timeout,
+            deadline,
+        )?;
         let (tx, rx) = std::sync::mpsc::channel();
         self.cloud.submit_write_with_headers_and_timeout(
             key,
@@ -156,8 +160,12 @@ impl HybridStorage {
         data: Vec<u8>,
         deadline: &OperationDeadline,
     ) -> MidgeResult<()> {
-        Self::deadline_guard(key, "local immutable cache write", deadline)?;
-        let timeout = deadline.clamp(self.callback_timeout);
+        let timeout = Self::deadline_timeout(
+            key,
+            "local immutable cache write",
+            self.callback_timeout,
+            deadline,
+        )?;
         let (tx, rx) = std::sync::mpsc::channel();
         self.local.submit_write_with_headers_and_timeout(
             key,

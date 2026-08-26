@@ -674,12 +674,13 @@ pub(crate) fn blocking_cloud_object_proof_within(
     key: &str,
     deadline: &crate::common::OperationDeadline,
 ) -> crate::common::MidgeResult<Option<CloudObjectProof>> {
-    if deadline.is_expired() {
-        return Err(crate::common::MidgeError::Timeout(format!(
-            "operation deadline exhausted before cloud object GET for '{key}'"
-        )));
-    }
-    let get_timeout = deadline.clamp(cloud.callback_timeout());
+    let get_timeout = deadline
+        .clamp_nonzero(cloud.callback_timeout())
+        .ok_or_else(|| {
+            crate::common::MidgeError::Timeout(format!(
+                "operation deadline exhausted before cloud object GET for '{key}'"
+            ))
+        })?;
     let (get_tx, get_rx) = std::sync::mpsc::channel();
     cloud.submit_get(key, get_tx);
     let bytes = match get_rx.recv_timeout(get_timeout) {
@@ -718,12 +719,13 @@ pub(crate) fn blocking_cloud_object_proof_within(
         }
     };
 
-    if deadline.is_expired() {
-        return Err(crate::common::MidgeError::Timeout(format!(
-            "operation deadline exhausted before cloud object HEAD for '{key}'"
-        )));
-    }
-    let head_timeout = deadline.clamp(cloud.callback_timeout());
+    let head_timeout = deadline
+        .clamp_nonzero(cloud.callback_timeout())
+        .ok_or_else(|| {
+            crate::common::MidgeError::Timeout(format!(
+                "operation deadline exhausted before cloud object HEAD for '{key}'"
+            ))
+        })?;
     let (head_tx, head_rx) = std::sync::mpsc::channel();
     cloud.submit_head(key, head_tx);
     let metadata = match head_rx.recv_timeout(head_timeout) {
