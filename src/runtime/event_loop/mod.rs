@@ -1345,7 +1345,7 @@ impl EventLoop {
     }
 
     fn process_one(&mut self, msg: RuntimeMsg, msg_rx: &Receiver<RuntimeMsg>) -> HandleOutcome {
-        if self.verification_barrier.token.is_none() {
+        if self.verification_barrier.token.is_none() && msg.is_mutation() {
             self.drain_flush_worker_results();
             self.maybe_flush_cloud_async_wal();
             self.tick_hybrid_storage();
@@ -1363,6 +1363,22 @@ impl EventLoop {
             // reclamation work. The retry owns a bounded attempt deadline and
             // re-arms backoff on failure, so this is one fairness slot rather
             // than an unbounded maintenance loop.
+            self.retry_manifest_reclamation_if_due();
+        }
+        outcome
+    }
+
+    fn process_restored_one(
+        &mut self,
+        msg: RuntimeMsg,
+        msg_rx: &Receiver<RuntimeMsg>,
+    ) -> HandleOutcome {
+        // A restored message owns the publication turn that just became
+        // available. Running maintenance before dispatch can start another
+        // flush and re-defer the same request forever under steady flush debt.
+        let outcome = self.handle_runtime_msg(msg, msg_rx);
+        if outcome == HandleOutcome::Continue && self.verification_barrier.token.is_none() {
+            self.drain_cloud_wal_upload_backlog();
             self.retry_manifest_reclamation_if_due();
         }
         outcome
@@ -1432,14 +1448,17 @@ impl EventLoop {
 
     /// Main event loop — runs until Shutdown message or channel close.
     pub fn run(&mut self, msg_rx: &Receiver<RuntimeMsg>) {
-        const MAX_DRAIN_WRITES_ON_WAKE: usize = 4096;
+        // Bound write coalescing by a fairness quantum. Thousands of local
+        // writes are cheap, but the same wake on cloud durability can consume
+        // an entire control-request deadline before yielding.
+        const MAX_DRAIN_WRITES_ON_WAKE: usize = 64;
         const ACTIONABLE_IDLE_BACKOFF: Duration = Duration::from_micros(50);
 
         loop {
             self.restore_verification_deferred_message();
             self.restore_publication_deferred_message();
             if let Some(pending) = self.pending_msg.take() {
-                let outcome = self.process_one(pending, msg_rx);
+                let outcome = self.process_restored_one(pending, msg_rx);
                 if outcome == HandleOutcome::Break {
                     break;
                 }

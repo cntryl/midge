@@ -101,6 +101,7 @@ impl EventLoop {
             || self.state.is_memory_mode()
             || self.flush_actor.is_inflight()
             || self.publication_gate.active
+            || (!allow_during_shutdown && self.pending_msg.is_some())
         {
             return;
         }
@@ -863,6 +864,44 @@ mod tests {
             None,
         )?;
         Ok((event_loop, hybrid))
+    }
+
+    #[test]
+    fn should_yield_flush_publication_turn_to_restored_deferred_request(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let directory = tempfile::tempdir()?;
+        let (mut event_loop, _hybrid) = event_loop_with_hybrid_storage(&directory)?;
+        event_loop.state.sequence = 1;
+        event_loop
+            .state
+            .get_cf(0)
+            .expect("default column family")
+            .memtable
+            .put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)?;
+        event_loop
+            .freeze_active_memtable(0)?
+            .expect("freeze non-empty memtable");
+        event_loop.pending_msg = Some(crate::runtime::RuntimeMsg::CompactAll { request_id: 71 });
+
+        let request_id = 71;
+        let response = event_loop.router.register(request_id, "CompactAll");
+        let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
+        let restored = event_loop.pending_msg.take().expect("restored request");
+
+        // Act
+        event_loop.process_restored_one(restored, &msg_rx);
+
+        // Assert
+        assert!(
+            !event_loop.flush_actor.is_inflight(),
+            "a restored control request must run before the next flush takes the publication gate"
+        );
+        assert!(matches!(
+            response.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(crate::runtime::RuntimeResponse::Ok { request_id: 71 })
+        ));
+        Ok(())
     }
 
     #[test]

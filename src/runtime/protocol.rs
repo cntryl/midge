@@ -498,6 +498,14 @@ pub enum RuntimeMsg {
 }
 
 impl RuntimeMsg {
+    /// Whether dispatch applies a new mutation to runtime state.
+    pub(crate) fn is_mutation(&self) -> bool {
+        matches!(
+            self,
+            RuntimeMsg::ApplyTransaction { .. } | RuntimeMsg::ApplySpilledTransaction { .. }
+        )
+    }
+
     /// Extract the `request_id` for messages that expect a response.
     ///
     /// Returns `None` for messages that do not participate in request/response

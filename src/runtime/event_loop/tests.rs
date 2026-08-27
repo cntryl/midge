@@ -7,6 +7,18 @@ use std::sync::{Arc, Mutex};
 
 static TEST_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+#[test]
+fn should_dispatch_compact_all_before_background_cloud_progress() {
+    // Arrange
+    let request = RuntimeMsg::CompactAll { request_id: 91 };
+
+    // Act
+    let progress_first = request.is_mutation();
+
+    // Assert
+    assert!(!progress_first);
+}
+
 fn unique_test_db_path(prefix: &str) -> std::path::PathBuf {
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
