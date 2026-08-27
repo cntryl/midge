@@ -793,6 +793,9 @@ pub(crate) fn wal_data_records_covered_by_manifest(
     manifest: &Manifest,
 ) -> bool {
     data_records.iter().all(|record| {
+        if !matches!(record.op.role(), crate::wal::types::WalOpRole::ValueWrite) {
+            return false;
+        }
         manifest
             .files
             .iter()
@@ -816,19 +819,20 @@ pub(crate) fn wal_record_covered_by_verified_manifest(
     use crate::wal::types::WalOpRole;
 
     let range_end = match record.op.role() {
-        WalOpRole::ValueWrite | WalOpRole::PointDelete => None,
-        WalOpRole::RangeDelete => {
-            let Some(range_end) = record.range_end.as_ref() else {
-                return false;
-            };
-            Some(range_end.to_vec())
-        }
-        WalOpRole::TransactionBegin
+        WalOpRole::ValueWrite => None,
+        // An SST's key and sequence bounds do not prove that a particular
+        // tombstone was included: a concurrent flush can publish unrelated
+        // entries on both sides of it. Replaying deletes is conservative and
+        // sequence-safe, whereas suppressing one can resurrect an older value.
+        WalOpRole::PointDelete
+        | WalOpRole::RangeDelete
+        | WalOpRole::TransactionBegin
         | WalOpRole::TransactionCommit
         | WalOpRole::TransactionBatch => return false,
     };
     let coverage = DataCoverageRecord {
         cf_id: record.cf_id,
+        op: record.op,
         key: record.key.to_vec(),
         range_end,
         seq: record.seq,
@@ -1015,6 +1019,7 @@ mod tests {
         };
         let covered = DataCoverageRecord {
             cf_id: 7,
+            op: crate::wal::WalOpKind::Put,
             key: b"b".to_vec(),
             range_end: None,
             seq: 12,
@@ -1063,11 +1068,17 @@ mod tests {
             op: crate::wal::WalOpKind::TxnBatch,
             ..covered.clone()
         };
+        let point_tombstone = crate::wal::WalRecord {
+            op: crate::wal::WalOpKind::Delete,
+            value: None,
+            ..covered.clone()
+        };
 
         // Act
         let covered_result = wal_record_covered_by_manifest(&covered, &manifest);
         let outside_result = wal_record_covered_by_manifest(&outside_sequence, &manifest);
         let marker_result = wal_record_covered_by_manifest(&transaction_marker, &manifest);
+        let tombstone_result = wal_record_covered_by_manifest(&point_tombstone, &manifest);
         let unverified_result =
             wal_record_covered_by_verified_manifest(&covered, &manifest, &|_| false);
 
@@ -1075,6 +1086,7 @@ mod tests {
         assert!(covered_result);
         assert!(!outside_result);
         assert!(!marker_result);
+        assert!(!tombstone_result);
         assert!(!unverified_result);
     }
 
@@ -1091,6 +1103,7 @@ mod tests {
         };
         let covered = DataCoverageRecord {
             cf_id: 1,
+            op: crate::wal::WalOpKind::DeleteRange,
             key: b"c".to_vec(),
             range_end: Some(b"k".to_vec()),
             seq: 5,

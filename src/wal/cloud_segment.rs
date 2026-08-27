@@ -8,6 +8,7 @@ use super::types::{WalOpKind, WalOpRole, WalRecord};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DataCoverageRecord {
     pub(crate) cf_id: u32,
+    pub(crate) op: WalOpKind,
     pub(crate) key: Vec<u8>,
     pub(crate) range_end: Option<Vec<u8>>,
     pub(crate) seq: u64,
@@ -174,6 +175,7 @@ fn push_data_coverage_record(
         WalOpRole::ValueWrite | WalOpRole::PointDelete => {
             data_records.push(DataCoverageRecord {
                 cf_id,
+                op,
                 key: key.to_vec(),
                 range_end: None,
                 seq,
@@ -185,6 +187,7 @@ fn push_data_coverage_record(
             })?;
             data_records.push(DataCoverageRecord {
                 cf_id,
+                op,
                 key: key.to_vec(),
                 range_end: Some(range_end.to_vec()),
                 seq,

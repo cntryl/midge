@@ -375,7 +375,7 @@ fn should_recover_delete_range_given_remote_wal_only_when_local_cache_is_lost() 
 
     // Act
     engine.flush_cf(&default_cf).expect("flush range tombstone");
-    let remote_segments = wait_for_remote_wal_count(&remote_wal_dir, 0);
+    let remote_segments = wait_for_remote_wal_count_at_least(&remote_wal_dir, 1);
     engine
         .shutdown(std::time::Duration::from_secs(5))
         .expect("shutdown before reopen");
@@ -385,8 +385,8 @@ fn should_recover_delete_range_given_remote_wal_only_when_local_cache_is_lost() 
 
     // Assert
     assert!(
-        remote_segments.is_empty(),
-        "remote WAL should be pruned after the range tombstone is covered by cloud SST"
+        !remote_segments.is_empty(),
+        "range tombstone WAL must be retained without an exact per-record SST coverage proof"
     );
     assert_eq!(get_default(&reopened, b"range-10"), None);
     assert_eq!(get_default(&reopened, b"range-15"), None);

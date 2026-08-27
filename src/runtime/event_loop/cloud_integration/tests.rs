@@ -3662,7 +3662,7 @@ fn should_prune_remote_wal_when_segment_max_sequence_equals_manifest_coverage(
 }
 
 #[test]
-fn should_prune_remote_wal_when_delete_range_record_is_manifest_covered(
+fn should_retain_remote_wal_when_delete_range_record_has_only_manifest_bounds(
 ) -> crate::common::MidgeResult<()> {
     // Arrange
     let mut el = create_test_cloud_event_loop(
@@ -3695,9 +3695,9 @@ fn should_prune_remote_wal_when_delete_range_record_is_manifest_covered(
     // Act
     // Assert
     assert!(
-            !remote_wal_path_for_test(&el, segment_id).exists(),
-            "remote WAL may be pruned when a delete-range record is physically covered by a manifest SST"
-        );
+        remote_wal_path_for_test(&el, segment_id).exists(),
+        "manifest key and sequence bounds must not prove that a delete-range tombstone was flushed"
+    );
 
     Ok(())
 }
