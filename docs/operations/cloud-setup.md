@@ -104,17 +104,19 @@ Provision lifecycle behavior by object class:
 | `metadata/` | control | Never age-expire current objects. Retain only a small, bounded noncurrent recovery window. |
 | `midge_primary_lease.json` | control | Keep current lease state; use the shortest practical noncurrent-version lifetime. |
 
-The WAL store contains epoch-scoped immutable segment objects and the mutable
-`wal/publication-catalog.v1.json` authority document. Lease acquisition
-conditionally advances the catalog fencing epoch before recovery. Uploads are
-recoverable only after a conditional catalog publication; an unlisted object
-is an orphan and is ignored. WAL pruning removes the catalog entry only after
-an exact committed metadata snapshot has been proved, its manifest has been
-validated, and every referenced SST dependency has passed stable object proof.
+The WAL store contains epoch-scoped immutable segment objects and two identical
+copies of the mutable publication authority document:
+`wal/publication-catalog.v1.json` and
+`wal/publication-catalog.v1.mirror.json`. Lease acquisition conditionally
+advances both catalog copies before recovery. Uploads are recoverable only
+after both copies converge on a conditional catalog publication; an unlisted
+object is an orphan and is ignored. WAL pruning removes the catalog entry only
+after an exact committed metadata snapshot has been proved, its manifest has
+been validated, and every referenced SST dependency has passed stable object proof.
 Midge then conditionally retires the matching catalog entry before best-effort
 deleting the now-ignored object. Missing, mismatched, changed, or timed-out proof
 retains catalog authority and the WAL object. Operators must not edit or
-reconstruct this catalog.
+reconstruct either catalog copy.
 
 Do not configure age-based expiration for current WAL, SST, or metadata
 objects. Their safe-deletion decision depends on manifest coverage and is owned

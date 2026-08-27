@@ -10,6 +10,8 @@ use std::collections::BTreeMap;
 
 pub(crate) const FORMAT_VERSION: u32 = 1;
 pub(crate) const OBJECT_KEY: &str = crate::cloud_layout::CloudObjectLayout::WAL_CATALOG_OBJECT_KEY;
+pub(crate) const MIRROR_OBJECT_KEY: &str =
+    crate::cloud_layout::CloudObjectLayout::WAL_CATALOG_MIRROR_OBJECT_KEY;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct PublishedWalSegment {

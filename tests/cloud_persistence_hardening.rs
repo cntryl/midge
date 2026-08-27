@@ -17,6 +17,8 @@ const CORRUPT_WAL_CHILD_TEST_NAME: &str =
 const CORRUPT_WAL_ENV_DB_PATH: &str = "MIDGE_CORRUPT_REMOTE_WAL_DB_PATH";
 const CORRUPT_WAL_SCENARIO: &str = "remote_wal_corruption_after_strict_ack";
 const CORRUPT_WAL_TRIGGER: &str = "manual::remote_wal_corruption_after_strict_ack";
+const TRUNCATED_PRIMARY_CATALOG: &[u8] = b"{\"format_version\":1";
+const TRUNCATED_MIRROR_CATALOG: &[u8] = b"{\"format_version\":1,\"fencing_epoch\":";
 
 #[test]
 fn should_abort_in_child_process_when_remote_wal_corruption_scenario_requested() {
@@ -77,6 +79,99 @@ fn should_recover_cloud_strict_write_from_authoritative_remote_wal_after_local_c
         Some(Bytes::from_static(b"strict-remote-value"))
     );
     shutdown_test_engine(reopened);
+}
+
+#[test]
+fn should_recover_from_valid_catalog_mirror_when_primary_catalog_has_torn_tail() {
+    // Arrange
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let opts = opts_for_mode("cloud");
+    let db_path = cloud_db_path(&opts);
+    let mut engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
+    put_default(
+        &engine,
+        b"catalog-mirror-key",
+        b"catalog-mirror-value",
+        WriteOptions::cloud_strict(),
+    );
+    engine
+        .shutdown(Duration::from_secs(5))
+        .expect("shutdown before damaging primary catalog");
+
+    let remote_wal_dir = db_path.join("cloud_store").join("wal");
+    let primary_catalog = remote_wal_dir.join("publication-catalog.v1.json");
+    let mirror_catalog = remote_wal_dir.join("publication-catalog.v1.mirror.json");
+    let valid_catalog = fs::read(&primary_catalog).expect("read valid primary WAL catalog");
+    assert_eq!(
+        fs::read(&mirror_catalog).expect("read valid WAL catalog mirror"),
+        valid_catalog,
+        "successful strict publication must converge the catalog mirror"
+    );
+    fs::write(
+        &primary_catalog,
+        &valid_catalog[..valid_catalog.len().saturating_sub(7)],
+    )
+    .expect("truncate primary WAL catalog tail");
+    reset_dir(&db_path.join("wal"));
+
+    // Act
+    let reopened = Engine::open(opts.to_open_options()).expect("recover through catalog mirror");
+
+    // Assert
+    assert_eq!(
+        get_default(&reopened, b"catalog-mirror-key"),
+        Some(Bytes::from_static(b"catalog-mirror-value"))
+    );
+    assert_eq!(
+        fs::read(&primary_catalog).expect("read repaired primary WAL catalog"),
+        fs::read(&mirror_catalog).expect("read converged WAL catalog mirror"),
+        "startup must repair and fence both catalog copies"
+    );
+    shutdown_test_engine(reopened);
+}
+
+#[test]
+fn should_fail_closed_when_both_cloud_wal_catalog_copies_are_invalid() {
+    // Arrange
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let opts = opts_for_mode("cloud");
+    let db_path = cloud_db_path(&opts);
+    let mut engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
+    put_default(
+        &engine,
+        b"doubly-corrupt-catalog-key",
+        b"must-not-be-ambiguously-recovered",
+        WriteOptions::cloud_strict(),
+    );
+    engine
+        .shutdown(Duration::from_secs(5))
+        .expect("shutdown before damaging catalog copies");
+
+    let remote_wal_dir = db_path.join("cloud_store").join("wal");
+    fs::write(
+        remote_wal_dir.join("publication-catalog.v1.json"),
+        TRUNCATED_PRIMARY_CATALOG,
+    )
+    .expect("damage primary WAL catalog");
+    fs::write(
+        remote_wal_dir.join("publication-catalog.v1.mirror.json"),
+        TRUNCATED_MIRROR_CATALOG,
+    )
+    .expect("damage WAL catalog mirror");
+    reset_dir(&db_path.join("wal"));
+
+    // Act
+    let error = expect_engine_open_error(opts.to_open_options());
+
+    // Assert
+    assert!(
+        matches!(&error, MidgeError::Corruption(message) if message.contains("both cloud WAL publication catalogs are invalid")),
+        "unexpected catalog corruption error: {error:?}"
+    );
 }
 
 #[test]
@@ -991,4 +1086,11 @@ fn reset_dir(dir: &Path) {
 
 fn failpoint_test_lock() -> &'static Mutex<()> {
     FAILPOINT_TEST_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn expect_engine_open_error(options: OpenOptions) -> MidgeError {
+    match Engine::open(options) {
+        Ok(_) => panic!("engine open unexpectedly succeeded"),
+        Err(error) => error,
+    }
 }

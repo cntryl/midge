@@ -51,8 +51,11 @@ uncompressed block.
 - any format movement must be called out in the changelog and migration guide
 
 The current cloud WAL layout is publication catalog format v1. Mere object
-presence is not authority: recovery reads only entries in
-`wal/publication-catalog.v1.json`. The pre-v1 segment-only cloud layout is not
+presence is not authority: recovery reads only entries in the validated
+publication catalog. Midge stores identical primary and recovery-mirror copies
+at `wal/publication-catalog.v1.json` and
+`wal/publication-catalog.v1.mirror.json`; the mirror is used only when the
+primary is missing or malformed. The pre-v1 segment-only cloud layout is not
 auto-migrated because it cannot prove whether a late stale-writer upload was
 accepted before fencing.
 
@@ -61,7 +64,8 @@ and a segment-id map. Each segment entry records its writer epoch, maximum
 sequence, exact byte length, CRC32C, and canonical epoch-scoped object key.
 Unknown versions, malformed entries, a future writer epoch, or WAL objects
 without the required catalog fail startup explicitly; salvage mode does not
-invent publication authority.
+invent publication authority. If both catalog copies are invalid, startup
+fails closed.
 
 ### At 1.0 and Within 1.x
 

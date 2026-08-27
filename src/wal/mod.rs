@@ -13,11 +13,12 @@
 //! (real and mock). All production code has been migrated to this interface.
 //!
 //! Cloud WAL durability uses epoch-scoped immutable segment objects plus a
-//! lease-fenced publication catalog. Recovery replays only catalog entries, so
-//! an uploader that finishes after losing its lease can create only an ignored
-//! orphan. The catalog is advanced to every newly acquired lease epoch before
-//! recovery and is conditionally updated before a cloud durability
-//! acknowledgement can advance the runtime frontier.
+//! lease-fenced publication catalog with a conditionally updated recovery
+//! mirror. Recovery replays only validated catalog entries, so an uploader that
+//! finishes after losing its lease can create only an ignored orphan. Both
+//! catalog copies advance to every newly acquired lease epoch before recovery
+//! and converge before a cloud durability acknowledgement can advance the
+//! runtime frontier.
 
 pub(crate) mod cloud_catalog;
 pub(crate) mod cloud_segment;

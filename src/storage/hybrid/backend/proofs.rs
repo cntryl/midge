@@ -281,6 +281,7 @@ impl HybridStorage {
 
     /// Conditionally replace or create a remote object and return a stable
     /// proof of the exact bytes that won the provider CAS.
+    #[cfg(test)]
     pub(crate) fn compare_exchange_remote_object(
         &self,
         key: &str,

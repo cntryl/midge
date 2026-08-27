@@ -826,6 +826,11 @@ impl CloudStartupRecovery {
     ) -> MidgeResult<()> {
         if Self::blocking_cloud_head_optional(cloud, crate::wal::cloud_catalog::OBJECT_KEY)?
             .is_some()
+            || Self::blocking_cloud_head_optional(
+                cloud,
+                crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
+            )?
+            .is_some()
         {
             return Ok(());
         }
@@ -843,10 +848,18 @@ impl CloudStartupRecovery {
     pub(in crate::engine) fn reject_simulated_cloud_wal_without_catalog(
         cloud_wal_dir: &Path,
     ) -> MidgeResult<()> {
-        let catalog_name = crate::wal::cloud_catalog::OBJECT_KEY
-            .strip_prefix(crate::cloud_layout::CloudObjectLayout::WAL_PREFIX)
-            .unwrap_or(crate::wal::cloud_catalog::OBJECT_KEY);
-        if cloud_wal_dir.join(catalog_name).exists() {
+        let has_catalog_copy = [
+            crate::wal::cloud_catalog::OBJECT_KEY,
+            crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
+        ]
+        .into_iter()
+        .any(|key| {
+            let catalog_name = key
+                .strip_prefix(crate::cloud_layout::CloudObjectLayout::WAL_PREFIX)
+                .unwrap_or(key);
+            cloud_wal_dir.join(catalog_name).exists()
+        });
+        if has_catalog_copy {
             return Ok(());
         }
         match std::fs::read_dir(cloud_wal_dir) {

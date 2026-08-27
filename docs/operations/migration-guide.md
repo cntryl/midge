@@ -51,9 +51,12 @@ that older releases deferred until startup.
 Cloud WAL publication catalog format v1 is a breaking persisted-layout
 change. Sealed objects now use
 `wal/epochs/<writer-epoch>/<segment-id>.wal`, and
-`wal/publication-catalog.v1.json` is the sole authority for remote WAL
-recovery. A database prefix that contains the older segment-only
-`wal/<segment-id>.wal` layout without a v1 catalog is rejected explicitly;
+`wal/publication-catalog.v1.json` and its identically encoded
+`wal/publication-catalog.v1.mirror.json` recovery copy represent the sole
+authority for remote WAL recovery. Current Midge releases create the mirror
+when opening a valid primary-only v1 deployment. A database prefix that
+contains the older segment-only `wal/<segment-id>.wal` layout without a v1
+catalog is rejected explicitly;
 Midge does not guess whether those objects were published before or after a
 lease takeover. Epoch-scoped WAL objects without the catalog are also rejected
 as ambiguous instead of being silently ignored during catalog initialization.

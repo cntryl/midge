@@ -393,6 +393,51 @@ fn should_reject_wal_catalog_publication_from_stale_epoch_after_takeover() {
 }
 
 #[test]
+fn should_converge_catalog_copies_after_publication() {
+    // Arrange
+    let (_mock_cloud, storage) = hybrid_with_mock_cloud();
+    let tmp = tempfile::tempdir().expect("create mirrored catalog WAL dir");
+    let segment_id = 1;
+    let max_sequence = 11;
+    let bytes = valid_wal_bytes(max_sequence);
+    let local_path = tmp.path().join(crate::wal::segment_file_name(segment_id));
+    std::fs::write(&local_path, &bytes).expect("write mirrored catalog local WAL");
+    let object_key = crate::wal::cloud_segment_object_key(segment_id, 1);
+    write_cloud_object(&storage, &object_key, bytes);
+
+    // Act
+    storage
+        .publish_remote_wal_segment(
+            segment_id,
+            max_sequence,
+            &local_path,
+            2,
+            &crate::common::OperationDeadline::unbounded(),
+        )
+        .expect("publish WAL through mirrored catalog");
+
+    // Assert
+    let catalog = assert_wal_catalog_copies_match(&storage);
+    assert_eq!(catalog.fencing_epoch, 2);
+    assert!(catalog.segments.contains_key(&segment_id));
+}
+
+#[test]
+fn should_converge_catalog_copies_after_takeover() {
+    // Arrange
+    let (_mock_cloud, storage) = hybrid_with_mock_cloud();
+
+    // Act
+    storage
+        .fence_cloud_wal_catalog(3)
+        .expect("advance mirrored catalog authority");
+
+    // Assert
+    let catalog = assert_wal_catalog_copies_match(&storage);
+    assert_eq!(catalog.fencing_epoch, 3);
+}
+
+#[test]
 fn should_report_fenced_when_catalog_authority_changes_before_publication() {
     // Arrange
     let tmp = tempfile::tempdir().expect("create takeover race test dir");
@@ -732,6 +777,24 @@ fn hybrid_with_mock_cloud() -> (Arc<MockCloudBackend>, HybridStorage) {
         .fence_cloud_wal_catalog(2)
         .expect("initialize test WAL publication catalog");
     (mock_cloud, storage)
+}
+
+fn assert_wal_catalog_copies_match(
+    storage: &HybridStorage,
+) -> crate::wal::cloud_catalog::WalPublicationCatalog {
+    let primary = storage
+        .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
+        .expect("read primary WAL catalog");
+    let mirror = storage
+        .remote_object_proof(crate::wal::cloud_catalog::MIRROR_OBJECT_KEY)
+        .expect("read WAL catalog mirror");
+    assert_eq!(
+        primary.bytes(),
+        mirror.bytes(),
+        "successful catalog mutations must converge both copies"
+    );
+    crate::wal::cloud_catalog::WalPublicationCatalog::decode(primary.bytes())
+        .expect("decode converged WAL catalog")
 }
 
 fn hybrid_with_pausing_catalog_cloud(
@@ -2316,6 +2379,7 @@ fn should_prune_remote_wal_when_worker_side_guard_remains_valid() {
         !catalog.segments.contains_key(&segment_id),
         "catalog authority must retire before physical delete completion"
     );
+    assert_wal_catalog_copies_match(&storage);
 
     let result = wait_for_wal_prune_result(&storage, segment_id);
     // Act

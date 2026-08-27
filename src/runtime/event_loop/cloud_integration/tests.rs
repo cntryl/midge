@@ -4837,6 +4837,41 @@ fn should_retry_background_cloud_seal_after_failpoint_before_rotate(
     Ok(())
 }
 
+#[test]
+fn should_back_off_forced_cloud_seal_when_older_segment_awaits_admission(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    append_cloud_async_put(&mut el)?;
+    el.cloud_wal.upload_backlog.insert(41, 1);
+    el.cloud_wal.defer_upload_retry();
+    el.durability.mark_cloud_seal_retry_needed();
+
+    // Act
+    let error = el
+        .seal_current_cloud_segment()
+        .expect_err("an older runtime-owned WAL must block a later seal");
+
+    // Assert
+    assert!(matches!(
+        error,
+        crate::common::MidgeError::WriteStall(message)
+            if message.contains("awaiting upload admission")
+    ));
+    assert!(
+        !el.has_actionable_work(),
+        "a failed forced seal must not immediately re-enter the event loop"
+    );
+    std::thread::sleep(Duration::from_millis(15));
+    assert!(
+        el.has_actionable_work(),
+        "the retained seal or upload obligation must become due after backoff"
+    );
+    Ok(())
+}
+
 #[cfg(feature = "failpoints")]
 #[test]
 fn should_retain_upload_obligation_given_failure_after_cloud_wal_rotation(

@@ -171,6 +171,11 @@ struct ValidatedWalObject {
     data_records: Vec<DataCoverageRecord>,
 }
 
+struct CatalogAuthority {
+    primary: RemoteObjectProof,
+    catalog: WalPublicationCatalog,
+}
+
 /// Runtime-owned format operations layered over raw hybrid object I/O.
 pub(crate) trait HybridPersistence {
     fn enqueue_wal_segment(
@@ -191,10 +196,11 @@ pub(crate) trait HybridPersistence {
 
     /// Publish a sealed WAL segment to the authoritative cloud catalog.
     ///
-    /// `deadline` is the shared budget for every cloud round trip this makes —
-    /// two object proofs plus a catalog compare-exchange, up to seven calls. It
-    /// belongs to the caller waiting on the acknowledgement, so the whole
-    /// sequence stays inside that caller's response timeout.
+    /// `deadline` is the shared budget for every cloud round trip this makes,
+    /// including immutable-WAL proof, both catalog proofs, conditional writes,
+    /// and exact readback. It belongs to the caller waiting on the
+    /// acknowledgement, so the whole sequence stays inside that caller's
+    /// response timeout.
     fn publish_remote_wal_segment(
         &self,
         segment_id: u64,
@@ -268,32 +274,24 @@ impl HybridPersistence for HybridStorage {
     }
 
     fn fence_cloud_wal_catalog(&self, writer_epoch: u64) -> MidgeResult<WalPublicationCatalog> {
-        let existing = self
-            .remote_object_proof_optional(crate::wal::cloud_catalog::OBJECT_KEY)
-            .map_err(MidgeError::Internal)?;
-        let (mut catalog, expected) = match existing.as_ref() {
-            Some(proof) => (
-                WalPublicationCatalog::decode(proof.bytes()).map_err(MidgeError::Corruption)?,
-                Some(proof.metadata()),
-            ),
-            None => (
+        let deadline = crate::common::OperationDeadline::unbounded();
+        let existing = load_and_repair_catalog_within(self, &deadline)?;
+        let (mut catalog, expected) = if let Some(authority) = existing {
+            (authority.catalog, Some(authority.primary))
+        } else {
+            (
                 WalPublicationCatalog::empty(writer_epoch).map_err(MidgeError::Internal)?,
                 None,
-            ),
+            )
         };
 
-        let changed = if existing.is_some() {
+        let changed = if expected.is_some() {
             catalog.fence_to(writer_epoch).map_err(MidgeError::Fenced)?
         } else {
             true
         };
         if changed {
-            let bytes = catalog.encode().map_err(MidgeError::Internal)?;
-            self.compare_exchange_remote_object(
-                crate::wal::cloud_catalog::OBJECT_KEY,
-                expected,
-                bytes,
-            )?;
+            commit_catalog_within(self, expected.as_ref(), &catalog, &deadline)?;
         }
         Ok(catalog)
     }
@@ -354,13 +352,10 @@ impl HybridPersistence for HybridStorage {
         }
         let _catalog_mutation =
             self.lock_wal_catalog_mutation_within(deadline, "cloud WAL publication")?;
-        let catalog_proof = self
-            .remote_object_proof_within(crate::wal::cloud_catalog::OBJECT_KEY, deadline)
-            .map_err(|error| {
-                contextualize_cloud_error(error, "cloud WAL publication catalog unavailable")
-            })?;
-        let mut catalog =
-            WalPublicationCatalog::decode(catalog_proof.bytes()).map_err(MidgeError::Internal)?;
+        let authority = load_and_repair_catalog_within(self, deadline)?.ok_or_else(|| {
+            MidgeError::Internal("cloud WAL publication catalog is missing".to_string())
+        })?;
+        let mut catalog = authority.catalog;
         if catalog.fencing_epoch != fencing_epoch {
             return Err(MidgeError::Fenced(format!(
                 "cloud WAL catalog mutation requires fencing epoch {}, writer epoch {fencing_epoch} rejected",
@@ -373,26 +368,17 @@ impl HybridPersistence for HybridStorage {
         {
             return Ok(());
         }
-        let catalog_bytes = catalog.encode().map_err(MidgeError::Internal)?;
-        let publication = self.compare_exchange_remote_object_within(
-            crate::wal::cloud_catalog::OBJECT_KEY,
-            Some(catalog_proof.metadata()),
-            catalog_bytes,
-            deadline,
-        );
+        let publication = commit_catalog_within(self, Some(&authority.primary), &catalog, deadline);
         match publication {
             Ok(_) => Ok(()),
             Err(MidgeError::Busy(conflict)) => {
-                let winning_proof = self
-                    .remote_object_proof_within(crate::wal::cloud_catalog::OBJECT_KEY, deadline)
-                    .map_err(|error| {
-                        contextualize_cloud_error(
-                            error,
-                            "cloud WAL catalog publication conflict readback failed",
+                let winning_catalog = load_and_repair_catalog_within(self, deadline)?
+                    .ok_or_else(|| {
+                        MidgeError::Internal(
+                            "cloud WAL publication catalog disappeared after conflict".to_string(),
                         )
-                    })?;
-                let winning_catalog = WalPublicationCatalog::decode(winning_proof.bytes())
-                    .map_err(MidgeError::Internal)?;
+                    })?
+                    .catalog;
                 if winning_catalog.fencing_epoch > fencing_epoch {
                     return Err(MidgeError::Fenced(format!(
                         "cloud WAL catalog advanced to fencing epoch {}, writer epoch {fencing_epoch} rejected during publication",
@@ -510,7 +496,10 @@ impl HybridPersistence for HybridStorage {
         {
             let catalog_mutation =
                 self.lock_wal_catalog_mutation_within(deadline, "cloud WAL retirement")?;
-            let (catalog_proof, mut catalog) = authoritative_wal_catalog_within(self, deadline)?;
+            let authority = load_and_repair_catalog_within(self, deadline)?.ok_or_else(|| {
+                MidgeError::Internal("cloud WAL publication catalog is missing".to_string())
+            })?;
+            let mut catalog = authority.catalog;
             if !catalog.segments.contains_key(&segment_id) {
                 drop(catalog_mutation);
                 self.queue_cloud_wal_prune_complete(
@@ -523,15 +512,9 @@ impl HybridPersistence for HybridStorage {
                 .retire(fencing_epoch, &entry)
                 .map_err(MidgeError::Internal)?
             {
-                self.compare_exchange_remote_object_within(
-                    crate::wal::cloud_catalog::OBJECT_KEY,
-                    Some(catalog_proof.metadata()),
-                    catalog.encode().map_err(MidgeError::Internal)?,
-                    deadline,
-                )
-                .map_err(|error| {
-                    contextualize_cloud_error(error, "cloud WAL catalog retirement failed")
-                })?;
+                commit_catalog_within(self, Some(&authority.primary), &catalog, deadline).map_err(
+                    |error| contextualize_cloud_error(error, "cloud WAL catalog retirement failed"),
+                )?;
             }
         }
 
@@ -623,13 +606,158 @@ fn authoritative_wal_catalog_within(
     storage: &HybridStorage,
     deadline: &crate::common::OperationDeadline,
 ) -> MidgeResult<(RemoteObjectProof, WalPublicationCatalog)> {
-    let proof = storage
-        .remote_object_proof_within(crate::wal::cloud_catalog::OBJECT_KEY, deadline)
+    let _catalog_mutation =
+        storage.lock_wal_catalog_mutation_within(deadline, "cloud WAL catalog read")?;
+    let authority = load_and_repair_catalog_within(storage, deadline)?.ok_or_else(|| {
+        MidgeError::Internal("cloud WAL publication catalog is missing".to_string())
+    })?;
+    Ok((authority.primary, authority.catalog))
+}
+
+fn load_and_repair_catalog_within(
+    storage: &HybridStorage,
+    deadline: &crate::common::OperationDeadline,
+) -> MidgeResult<Option<CatalogAuthority>> {
+    let primary = storage
+        .remote_object_proof_optional_within(crate::wal::cloud_catalog::OBJECT_KEY, deadline)
         .map_err(|error| {
             contextualize_cloud_error(error, "cloud WAL publication catalog unavailable")
         })?;
-    let catalog = WalPublicationCatalog::decode(proof.bytes()).map_err(MidgeError::Internal)?;
-    Ok((proof, catalog))
+
+    if let Some(primary) = primary {
+        match WalPublicationCatalog::decode(primary.bytes()) {
+            Ok(catalog) => {
+                sync_catalog_copy_within(
+                    storage,
+                    crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
+                    primary.bytes(),
+                    deadline,
+                )?;
+                return Ok(Some(CatalogAuthority { primary, catalog }));
+            }
+            Err(primary_error) => {
+                let mirror = storage
+                    .remote_object_proof_optional_within(
+                        crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
+                        deadline,
+                    )
+                    .map_err(|error| {
+                        contextualize_cloud_error(
+                            error,
+                            "cloud WAL publication catalog mirror unavailable",
+                        )
+                    })?
+                    .ok_or_else(|| {
+                        MidgeError::Corruption(format!(
+                            "primary cloud WAL publication catalog is invalid and no mirror exists: {primary_error}"
+                        ))
+                    })?;
+                let catalog = WalPublicationCatalog::decode(mirror.bytes()).map_err(|mirror_error| {
+                    MidgeError::Corruption(format!(
+                        "both cloud WAL publication catalogs are invalid; primary: {primary_error}; mirror: {mirror_error}"
+                    ))
+                })?;
+                tracing::warn!(
+                    error = %primary_error,
+                    "repairing invalid cloud WAL publication catalog from validated mirror"
+                );
+                let repaired = sync_catalog_copy_within(
+                    storage,
+                    crate::wal::cloud_catalog::OBJECT_KEY,
+                    mirror.bytes(),
+                    deadline,
+                )?;
+                return Ok(Some(CatalogAuthority {
+                    primary: repaired,
+                    catalog,
+                }));
+            }
+        }
+    }
+
+    let Some(mirror) = storage
+        .remote_object_proof_optional_within(crate::wal::cloud_catalog::MIRROR_OBJECT_KEY, deadline)
+        .map_err(|error| {
+            contextualize_cloud_error(error, "cloud WAL publication catalog mirror unavailable")
+        })?
+    else {
+        return Ok(None);
+    };
+    let catalog = WalPublicationCatalog::decode(mirror.bytes()).map_err(|error| {
+        MidgeError::Corruption(format!(
+            "primary cloud WAL publication catalog is missing and its mirror is invalid: {error}"
+        ))
+    })?;
+    tracing::warn!("restoring missing cloud WAL publication catalog from validated mirror");
+    let repaired = sync_catalog_copy_within(
+        storage,
+        crate::wal::cloud_catalog::OBJECT_KEY,
+        mirror.bytes(),
+        deadline,
+    )?;
+    Ok(Some(CatalogAuthority {
+        primary: repaired,
+        catalog,
+    }))
+}
+
+fn commit_catalog_within(
+    storage: &HybridStorage,
+    expected_primary: Option<&RemoteObjectProof>,
+    catalog: &WalPublicationCatalog,
+    deadline: &crate::common::OperationDeadline,
+) -> MidgeResult<CatalogAuthority> {
+    let bytes = catalog.encode().map_err(MidgeError::Internal)?;
+
+    if expected_primary.is_none() {
+        sync_catalog_copy_within(
+            storage,
+            crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
+            &bytes,
+            deadline,
+        )?;
+    }
+
+    let primary = storage.compare_exchange_remote_object_within(
+        crate::wal::cloud_catalog::OBJECT_KEY,
+        expected_primary.map(RemoteObjectProof::metadata),
+        bytes.clone(),
+        deadline,
+    )?;
+    sync_catalog_copy_within(
+        storage,
+        crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
+        &bytes,
+        deadline,
+    )?;
+    Ok(CatalogAuthority {
+        primary,
+        catalog: catalog.clone(),
+    })
+}
+
+fn sync_catalog_copy_within(
+    storage: &HybridStorage,
+    key: &str,
+    bytes: &[u8],
+    deadline: &crate::common::OperationDeadline,
+) -> MidgeResult<RemoteObjectProof> {
+    let existing = storage
+        .remote_object_proof_optional_within(key, deadline)
+        .map_err(|error| contextualize_cloud_error(error, "cloud WAL catalog copy unavailable"))?;
+    if let Some(existing) = existing.as_ref() {
+        if existing.bytes() == bytes {
+            return Ok(existing.clone());
+        }
+    }
+    storage
+        .compare_exchange_remote_object_within(
+            key,
+            existing.as_ref().map(RemoteObjectProof::metadata),
+            bytes.to_vec(),
+            deadline,
+        )
+        .map_err(|error| contextualize_cloud_error(error, "cloud WAL catalog copy update failed"))
 }
 
 fn validate_remote_wal(
