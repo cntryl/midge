@@ -688,14 +688,21 @@ impl EventLoop {
     }
 
     fn handle_write_error(&mut self, request_id: u64, error: crate::common::MidgeError) {
-        if matches!(error, crate::common::MidgeError::Timeout(_)) {
+        let must_fence = matches!(error, crate::common::MidgeError::Timeout(_))
+            || matches!(
+                &error,
+                crate::common::MidgeError::NoSpace(message)
+                    if message.contains("wal writer")
+            );
+        if must_fence {
             self.state.mark_persistence_anomaly();
             if let Some(healthy) = &self.lease_healthy {
                 healthy.store(false, std::sync::atomic::Ordering::Release);
             }
             tracing::error!(
                 request_id,
-                "storage acknowledgement timed out; runtime fenced from further writes"
+                error = %error,
+                "storage persistence became ambiguous; runtime fenced from further writes"
             );
         }
         self.respond(request_id, RuntimeResponse::Error { request_id, error });

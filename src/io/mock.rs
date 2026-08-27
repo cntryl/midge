@@ -244,6 +244,17 @@ impl File for MockFile<'_> {
         }
     }
 
+    fn truncate(&mut self, len: u64) -> FsResult<()> {
+        let len = usize::try_from(len)
+            .map_err(|_| FsError::Io("truncate length does not fit usize".to_string()))?;
+        let mut files = self.fs.files.lock();
+        let file_data = files
+            .get_mut(&self.path)
+            .ok_or_else(|| FsError::NotFound(self.path.clone()))?;
+        file_data.data.truncate(len);
+        Ok(())
+    }
+
     fn append(&mut self, data: Bytes) -> FsResult<u64> {
         let mut files = self.fs.files.lock();
         if let Some(file_data) = files.get_mut(&self.path) {
@@ -322,6 +333,22 @@ impl File for MockPersistentFile {
         } else {
             Err(FsError::NotFound(self.path.clone()))
         }
+    }
+
+    fn truncate(&mut self, len: u64) -> FsResult<()> {
+        if self.readonly_snapshot.is_some() {
+            return Err(FsError::Unsupported(
+                "cannot truncate through a read-only persistent mock handle".to_string(),
+            ));
+        }
+        let len = usize::try_from(len)
+            .map_err(|_| FsError::Io("truncate length does not fit usize".to_string()))?;
+        let mut files = self.files.lock();
+        let file_data = files
+            .get_mut(&self.path)
+            .ok_or_else(|| FsError::NotFound(self.path.clone()))?;
+        file_data.data.truncate(len);
+        Ok(())
     }
 
     fn append(&mut self, data: Bytes) -> FsResult<u64> {

@@ -213,13 +213,35 @@ impl WriterRunner {
         self.ensure_file_handle(file_opt)?;
 
         if let Some(file) = file_opt.as_mut() {
-            return file
-                .write_at(start_pos, big_bytes)
-                .map(|()| start_pos)
-                .map_err(|error| {
-                    tracing::error!(error = ?error, start_pos, "wal writer write_at failed");
-                    format!("wal writer write_at failed: {error}")
-                });
+            let write_result =
+                if crate::failpoints::is_active("midge::wal::partial_write_then_no_space") {
+                    let partial_len = (big_bytes.len() / 2).max(1);
+                    file.write_at(start_pos, big_bytes.slice(..partial_len))
+                        .and_then(|()| {
+                            Err(crate::io::FsError::Io(
+                                "no space after partial positional WAL write".to_string(),
+                            ))
+                        })
+                } else {
+                    file.write_at(start_pos, big_bytes)
+                };
+            return match write_result {
+                Ok(()) => Ok(start_pos),
+                Err(write_error) => {
+                    tracing::error!(error = ?write_error, start_pos, "wal writer write_at failed");
+                    match file
+                        .truncate(start_pos)
+                        .and_then(|()| file.sync(Durability::Durable))
+                    {
+                        Ok(()) => Err(format!(
+                            "wal writer write_at failed: {write_error}; partial WAL append rolled back to {start_pos}"
+                        )),
+                        Err(rollback_error) => Err(format!(
+                            "wal writer write_at failed: {write_error}; partial WAL rollback to {start_pos} failed: {rollback_error}"
+                        )),
+                    }
+                }
+            };
         }
 
         Err("wal writer has no file handle".to_string())
