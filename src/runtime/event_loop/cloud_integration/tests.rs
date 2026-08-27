@@ -3887,6 +3887,44 @@ fn should_not_starve_later_wal_prune_when_earlier_segment_is_unverifiable(
 }
 
 #[test]
+fn should_dispatch_deferred_control_before_starting_next_wal_prune(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    seed_cloud_prune_candidate(&mut el, 81, 81);
+    el.state.wal.cloud_durable_seq = 81;
+    add_valid_manifest_sst_for_test(&mut el, "covered.sst", 81);
+    el.publication_gate.active = true;
+    el.publication_gate
+        .defer(crate::runtime::RuntimeMsg::CompactAll { request_id: 8105 });
+    let completed_worker = std::thread::spawn(|| {});
+    while !completed_worker.is_finished() {
+        std::thread::yield_now();
+    }
+    el.cloud_wal_prune_worker = Some(completed_worker);
+
+    // Act
+    el.prune_cloud_wal_segments_covered_by_manifest();
+
+    // Assert
+    assert!(matches!(
+        el.pending_msg,
+        Some(crate::runtime::RuntimeMsg::CompactAll { request_id: 8105 })
+    ));
+    assert!(
+        !el.publication_gate.active,
+        "a new prune must not reacquire the gate ahead of restored control work"
+    );
+    assert!(
+        el.cloud_wal_prune_worker.is_none(),
+        "the next maintenance pass owns starting another prune"
+    );
+    Ok(())
+}
+
+#[test]
 fn should_ignore_listing_only_ssts_when_deciding_remote_wal_cleanup(
 ) -> crate::common::MidgeResult<()> {
     // Arrange

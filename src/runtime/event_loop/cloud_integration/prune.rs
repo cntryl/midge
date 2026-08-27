@@ -6,6 +6,13 @@ use crate::runtime::hybrid_persistence::{CloudWalPruneGuard, HybridPersistence};
 impl EventLoop {
     pub(crate) fn prune_cloud_wal_segments_covered_by_manifest(&mut self) {
         self.reap_cloud_wal_prune_worker();
+        // Reaping may restore a control request that was deferred behind the
+        // publication gate. Give the run loop a chance to dispatch it before
+        // another maintenance prune reacquires the gate; otherwise a steady
+        // stream of eligible WAL segments can defer the same request forever.
+        if self.pending_msg.is_some() || !self.publication_gate.deferred_messages.is_empty() {
+            return;
+        }
         if !self.wal_actor.is_cloud_async() || self.state.is_memory_mode() {
             return;
         }
