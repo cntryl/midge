@@ -4,6 +4,7 @@ use crate::common::MidgeError;
 struct DelayedRecoveryBackend {
     objects: std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>,
     stalled: std::sync::Mutex<std::collections::BTreeSet<String>>,
+    submitted: std::sync::Mutex<std::collections::BTreeSet<String>>,
     in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     max_in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -13,6 +14,7 @@ impl DelayedRecoveryBackend {
         Self {
             objects: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             stalled: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+            submitted: std::sync::Mutex::new(std::collections::BTreeSet::new()),
             in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             max_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
@@ -47,6 +49,13 @@ impl DelayedRecoveryBackend {
         self.max_in_flight
             .load(std::sync::atomic::Ordering::Acquire)
     }
+
+    fn was_submitted(&self, key: &str) -> bool {
+        self.submitted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&Self::full_key(key))
+    }
 }
 
 impl crate::storage::cloud::CloudBackend for DelayedRecoveryBackend {
@@ -68,6 +77,10 @@ impl crate::storage::cloud::CloudBackend for DelayedRecoveryBackend {
     }
 
     fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        self.submitted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key.to_string());
         let active = self
             .in_flight
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
@@ -245,13 +258,12 @@ fn should_bound_cloud_wal_hydration_timeout_to_one_batch_deadline() -> MidgeResu
     let catalog = recovery_catalog(&backend, 9);
     backend.stall(&catalog.segments[&2].object_key);
     let cloud = crate::storage::cloud::CloudStorage::new_with_timeout(
-        backend,
+        backend.clone(),
         "midge".to_string(),
         std::time::Duration::from_millis(25),
     );
 
     // Act
-    let started = std::time::Instant::now();
     let result = CloudStartupRecovery::materialize_cloud_wal_recovery_dir(
         &cloud,
         db.path(),
@@ -262,7 +274,8 @@ fn should_bound_cloud_wal_hydration_timeout_to_one_batch_deadline() -> MidgeResu
     // Assert
     let error = result.err().expect("stalled publication should time out");
     assert!(error.to_string().contains("timed out"));
-    assert!(started.elapsed() < std::time::Duration::from_millis(100));
+    assert!(backend.was_submitted(&catalog.segments[&8].object_key));
+    assert!(!backend.was_submitted(&catalog.segments[&9].object_key));
     Ok(())
 }
 
