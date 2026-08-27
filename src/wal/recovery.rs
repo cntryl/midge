@@ -445,6 +445,7 @@ fn replay_wal_with_policy_and_filter<S: BuildHasher>(
             open_txns: &mut open_txns,
             epoch_frontiers: &epoch_frontiers,
             should_apply,
+            seen_records: std::collections::HashMap::new(),
             replay_ordinal: 0,
         };
         replay_wal_paths(storage, &replay_paths, replay_policy, &mut replay_state)
@@ -541,6 +542,7 @@ struct WalReplayState<'a, S: BuildHasher> {
     open_txns: &'a mut std::collections::HashMap<(u64, u64), RecoveryTxnSpool>,
     epoch_frontiers: &'a WriterEpochFrontiers,
     should_apply: Option<&'a dyn Fn(&WalRecord) -> bool>,
+    seen_records: std::collections::HashMap<WalRecord, String>,
     replay_ordinal: u64,
 }
 
@@ -704,6 +706,19 @@ fn replay_wal_file<S: BuildHasher>(
             NextWalFrame::Eof => break,
             NextWalFrame::Frame(frame) => {
                 let next_pos = frame.next_pos;
+                let source = file_path.to_string();
+                if replay_state
+                    .seen_records
+                    .get(&frame.record)
+                    .is_some_and(|first_source| first_source != &source)
+                {
+                    pos = next_pos;
+                    continue;
+                }
+                replay_state
+                    .seen_records
+                    .entry(frame.record.clone())
+                    .or_insert(source);
                 let record_ordinal = replay_state.replay_ordinal;
                 let mut apply_ctx = WalReplayApplyContext {
                     file_path,

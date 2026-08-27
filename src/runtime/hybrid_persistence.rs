@@ -808,13 +808,13 @@ pub(crate) fn wal_record_covered_by_manifest(
     record: &crate::wal::WalRecord,
     manifest: &Manifest,
 ) -> bool {
-    wal_record_covered_by_verified_manifest(record, manifest, &|_| true)
+    wal_record_covered_by_verified_manifest(record, manifest, &|_, _| true)
 }
 
 pub(crate) fn wal_record_covered_by_verified_manifest(
     record: &crate::wal::WalRecord,
     manifest: &Manifest,
-    is_file_verified: &dyn Fn(&FileMeta) -> bool,
+    contains_record: &dyn Fn(&FileMeta, &crate::wal::WalRecord) -> bool,
 ) -> bool {
     use crate::wal::types::WalOpRole;
 
@@ -840,7 +840,7 @@ pub(crate) fn wal_record_covered_by_verified_manifest(
     manifest
         .files
         .iter()
-        .any(|file| file_covers_record(file, &coverage) && is_file_verified(file))
+        .any(|file| file_covers_record(file, &coverage) && contains_record(file, record))
 }
 
 fn file_covers_record(file: &FileMeta, record: &DataCoverageRecord) -> bool {
@@ -1080,7 +1080,7 @@ mod tests {
         let marker_result = wal_record_covered_by_manifest(&transaction_marker, &manifest);
         let tombstone_result = wal_record_covered_by_manifest(&point_tombstone, &manifest);
         let unverified_result =
-            wal_record_covered_by_verified_manifest(&covered, &manifest, &|_| false);
+            wal_record_covered_by_verified_manifest(&covered, &manifest, &|_, _| false);
 
         // Assert
         assert!(covered_result);
@@ -1088,6 +1088,37 @@ mod tests {
         assert!(!marker_result);
         assert!(!tombstone_result);
         assert!(!unverified_result);
+    }
+
+    #[test]
+    fn should_not_treat_manifest_bounds_as_exact_value_coverage() {
+        // Arrange: a concurrent flush can place unrelated entries on both
+        // sides of this WAL write without persisting the write itself.
+        let manifest = Manifest {
+            files: vec![FileMeta {
+                cf_id: 7,
+                smallest_key: Some(b"a".to_vec()),
+                largest_key: Some(b"z".to_vec()),
+                smallest_seq: Some(10),
+                largest_seq: Some(20),
+                ..FileMeta::default()
+            }],
+            ..Manifest::default()
+        };
+        let overwrite = crate::wal::WalRecord::new_cf(
+            7,
+            crate::wal::WalOpKind::Put,
+            bytes::Bytes::from_static(b"target"),
+            Some(bytes::Bytes::from_static(b"new")),
+            15,
+            1,
+        );
+
+        // Act
+        let covered = wal_record_covered_by_verified_manifest(&overwrite, &manifest, &|_, _| false);
+
+        // Assert
+        assert!(!covered, "bounds alone cannot prove exact value coverage");
     }
 
     #[test]
