@@ -67,6 +67,7 @@ impl RuntimeState {
         let wal_recovery = Self::recover_wal_state(
             memory_mode,
             &wal_dir,
+            &sst_dir,
             recovery_wal_dir,
             recovery_policy,
             &manifest,
@@ -283,14 +284,21 @@ impl RuntimeState {
     fn recover_wal_state(
         memory_mode: bool,
         wal_dir: &std::path::Path,
+        sst_dir: &std::path::Path,
         recovery_wal_dir: Option<&PathBuf>,
         recovery_policy: crate::config::RecoveryPolicy,
         manifest: &Manifest,
         column_families: HashMap<u32, ColumnFamilyState>,
     ) -> MidgeResult<WalRecoveryState> {
         let replay_dir = recovery_wal_dir.map_or(wal_dir, PathBuf::as_path);
-        let mut wal_recovery =
-            Self::replay_wal(memory_mode, replay_dir, recovery_policy, column_families)?;
+        let mut wal_recovery = Self::replay_wal(
+            memory_mode,
+            replay_dir,
+            sst_dir,
+            recovery_policy,
+            manifest,
+            column_families,
+        )?;
         wal_recovery.recovered_sequence = wal_recovery
             .recovered_sequence
             .max(Self::manifest_visible_sequence_floor(manifest));
@@ -301,7 +309,9 @@ impl RuntimeState {
     fn replay_wal(
         memory_mode: bool,
         replay_dir: &std::path::Path,
+        sst_dir: &std::path::Path,
         recovery_policy: crate::config::RecoveryPolicy,
+        manifest: &Manifest,
         mut column_families: HashMap<u32, ColumnFamilyState>,
     ) -> MidgeResult<WalRecoveryState> {
         if memory_mode || !replay_dir.exists() {
@@ -332,11 +342,26 @@ impl RuntimeState {
                 crate::wal::recovery::ReplayPolicy::SalvageValidPrefix
             }
         };
-        let stats = match crate::wal::recovery::replay_wal_with_policy(
+        let verified_files = std::cell::RefCell::new(std::collections::HashMap::new());
+        let is_file_verified = |file: &crate::metadata::FileMeta| {
+            *verified_files
+                .borrow_mut()
+                .entry(file.name.clone())
+                .or_insert_with(|| Self::verify_manifest_sst_for_wal_filter(sst_dir, file))
+        };
+        let should_apply = |record: &crate::wal::WalRecord| {
+            !crate::runtime::hybrid_persistence::wal_record_covered_by_verified_manifest(
+                record,
+                manifest,
+                &is_file_verified,
+            )
+        };
+        let stats = match crate::wal::recovery::replay_wal_with_manifest_filter(
             &storage,
             &crate::io::FsPath::new(""),
             &mut recovery_memtables,
             replay_policy,
+            &should_apply,
         ) {
             Ok(stats) => stats,
             Err(error) => {
@@ -365,6 +390,24 @@ impl RuntimeState {
             bytes_replayed: stats.bytes,
             opened_in_salvage_mode,
         })
+    }
+
+    fn verify_manifest_sst_for_wal_filter(
+        sst_dir: &std::path::Path,
+        file: &crate::metadata::FileMeta,
+    ) -> bool {
+        let Ok(name) = crate::sst::PersistedSstName::parse(&file.name) else {
+            return false;
+        };
+        let Ok(bytes) = std::fs::read(sst_dir.join(name.as_str())) else {
+            return false;
+        };
+        let actual_size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        if file.size_bytes != 0 && actual_size != file.size_bytes {
+            return false;
+        }
+        file.content_crc32c
+            .is_some_and(|expected| crc32c::crc32c(&bytes) == expected)
     }
 
     fn handle_wal_recovery_failure(

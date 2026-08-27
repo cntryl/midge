@@ -794,6 +794,59 @@ fn should_apply_txn_batch_atomically_during_recovery() {
 }
 
 #[test]
+fn should_replay_only_uncovered_operations_from_retained_txn_batch() {
+    // Arrange
+    let dir = TempDir::new().unwrap();
+    let wal_subdir = dir.path().join("wal");
+    std::fs::create_dir(&wal_subdir).unwrap();
+    let storage = RealFs::new(dir.path()).unwrap();
+    let wal_dir = FsPath::new("wal");
+    {
+        let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
+        let writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
+        let mut covered = put_record(b"covered", 2, 7);
+        covered.txn_id = Some(11);
+        let mut uncovered = put_record(b"uncovered", 3, 7);
+        uncovered.txn_id = Some(11);
+        let payload =
+            crate::wal::encoding::encode_txn_batch_payload(11, 1, 4, 7, &[covered, uncovered])
+                .unwrap();
+        let mut batch = WalRecord::new_cf(
+            0,
+            WalOpKind::TxnBatch,
+            Bytes::from_static(b"txn"),
+            Some(payload),
+            4,
+            7,
+        );
+        batch.txn_id = Some(11);
+        writer.append_record(&batch).unwrap();
+        writer.sync().unwrap();
+    }
+    let should_apply = |record: &WalRecord| record.key.as_ref() != b"covered";
+
+    // Act
+    let mut memtables = HashMap::new();
+    let stats = replay_wal_with_manifest_filter(
+        &storage,
+        &wal_dir,
+        &mut memtables,
+        ReplayPolicy::Strict,
+        &should_apply,
+    )
+    .unwrap();
+
+    // Assert
+    assert_eq!(stats.record_count, 1);
+    let recovered = &memtables[&0];
+    assert_eq!(recovered.get(b"covered").unwrap(), None);
+    assert_eq!(
+        recovered.get(b"uncovered").unwrap(),
+        Some(b"value".to_vec())
+    );
+}
+
+#[test]
 fn should_recover_only_committed_transaction_given_split_wal_records_when_commit_marker_is_missing()
 {
     // Arrange

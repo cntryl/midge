@@ -800,6 +800,45 @@ pub(crate) fn wal_data_records_covered_by_manifest(
     })
 }
 
+#[cfg(test)]
+pub(crate) fn wal_record_covered_by_manifest(
+    record: &crate::wal::WalRecord,
+    manifest: &Manifest,
+) -> bool {
+    wal_record_covered_by_verified_manifest(record, manifest, &|_| true)
+}
+
+pub(crate) fn wal_record_covered_by_verified_manifest(
+    record: &crate::wal::WalRecord,
+    manifest: &Manifest,
+    is_file_verified: &dyn Fn(&FileMeta) -> bool,
+) -> bool {
+    use crate::wal::types::WalOpRole;
+
+    let range_end = match record.op.role() {
+        WalOpRole::ValueWrite | WalOpRole::PointDelete => None,
+        WalOpRole::RangeDelete => {
+            let Some(range_end) = record.range_end.as_ref() else {
+                return false;
+            };
+            Some(range_end.to_vec())
+        }
+        WalOpRole::TransactionBegin
+        | WalOpRole::TransactionCommit
+        | WalOpRole::TransactionBatch => return false,
+    };
+    let coverage = DataCoverageRecord {
+        cf_id: record.cf_id,
+        key: record.key.to_vec(),
+        range_end,
+        seq: record.seq,
+    };
+    manifest
+        .files
+        .iter()
+        .any(|file| file_covers_record(file, &coverage) && is_file_verified(file))
+}
+
 fn file_covers_record(file: &FileMeta, record: &DataCoverageRecord) -> bool {
     if file.cf_id != record.cf_id {
         return false;
@@ -992,6 +1031,51 @@ mod tests {
         // Assert
         assert!(covered_result);
         assert!(!outside_result);
+    }
+
+    #[test]
+    fn should_classify_individual_wal_record_coverage_from_manifest_proof() {
+        // Arrange
+        let manifest = Manifest {
+            files: vec![FileMeta {
+                cf_id: 7,
+                smallest_key: Some(b"a".to_vec()),
+                largest_key: Some(b"m".to_vec()),
+                smallest_seq: Some(10),
+                largest_seq: Some(20),
+                ..FileMeta::default()
+            }],
+            ..Manifest::default()
+        };
+        let covered = crate::wal::WalRecord::new_cf(
+            7,
+            crate::wal::WalOpKind::Put,
+            bytes::Bytes::from_static(b"b"),
+            Some(bytes::Bytes::from_static(b"old")),
+            12,
+            1,
+        );
+        let outside_sequence = crate::wal::WalRecord {
+            seq: 21,
+            ..covered.clone()
+        };
+        let transaction_marker = crate::wal::WalRecord {
+            op: crate::wal::WalOpKind::TxnBatch,
+            ..covered.clone()
+        };
+
+        // Act
+        let covered_result = wal_record_covered_by_manifest(&covered, &manifest);
+        let outside_result = wal_record_covered_by_manifest(&outside_sequence, &manifest);
+        let marker_result = wal_record_covered_by_manifest(&transaction_marker, &manifest);
+        let unverified_result =
+            wal_record_covered_by_verified_manifest(&covered, &manifest, &|_| false);
+
+        // Assert
+        assert!(covered_result);
+        assert!(!outside_result);
+        assert!(!marker_result);
+        assert!(!unverified_result);
     }
 
     #[test]

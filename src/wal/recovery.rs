@@ -390,6 +390,32 @@ pub fn replay_wal_with_policy<S: BuildHasher>(
     memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>, S>,
     replay_policy: ReplayPolicy,
 ) -> MidgeResult<RecoveryStats> {
+    replay_wal_with_policy_and_filter(storage, wal_dir, memtables, replay_policy, None)
+}
+
+pub(crate) fn replay_wal_with_manifest_filter<S: BuildHasher>(
+    storage: &dyn Fs,
+    wal_dir: &FsPath,
+    memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>, S>,
+    replay_policy: ReplayPolicy,
+    should_apply: &dyn Fn(&WalRecord) -> bool,
+) -> MidgeResult<RecoveryStats> {
+    replay_wal_with_policy_and_filter(
+        storage,
+        wal_dir,
+        memtables,
+        replay_policy,
+        Some(should_apply),
+    )
+}
+
+fn replay_wal_with_policy_and_filter<S: BuildHasher>(
+    storage: &dyn Fs,
+    wal_dir: &FsPath,
+    memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>, S>,
+    replay_policy: ReplayPolicy,
+    should_apply: Option<&dyn Fn(&WalRecord) -> bool>,
+) -> MidgeResult<RecoveryStats> {
     // Invariant: recovery may keep only a verified prefix of the WAL, but it
     // must never materialize a partial frame or reorder committed records.
     let mut stats = RecoveryStats::new();
@@ -418,6 +444,7 @@ pub fn replay_wal_with_policy<S: BuildHasher>(
             memtables,
             open_txns: &mut open_txns,
             epoch_frontiers: &epoch_frontiers,
+            should_apply,
             replay_ordinal: 0,
         };
         replay_wal_paths(storage, &replay_paths, replay_policy, &mut replay_state)
@@ -513,6 +540,7 @@ struct WalReplayState<'a, S: BuildHasher> {
     memtables: &'a mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>, S>,
     open_txns: &'a mut std::collections::HashMap<(u64, u64), RecoveryTxnSpool>,
     epoch_frontiers: &'a WriterEpochFrontiers,
+    should_apply: Option<&'a dyn Fn(&WalRecord) -> bool>,
     replay_ordinal: u64,
 }
 
@@ -683,6 +711,7 @@ fn replay_wal_file<S: BuildHasher>(
                     memtables: &mut *replay_state.memtables,
                     open_txns: &mut *replay_state.open_txns,
                     epoch_frontiers: replay_state.epoch_frontiers,
+                    should_apply: replay_state.should_apply,
                     file_apply_ns: &mut file_apply_ns,
                 };
                 apply_replayed_wal_record(&frame.record, pos, record_ordinal, &mut apply_ctx)?;
@@ -712,6 +741,7 @@ struct WalReplayApplyContext<'a, S: BuildHasher> {
     memtables: &'a mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>, S>,
     open_txns: &'a mut std::collections::HashMap<(u64, u64), RecoveryTxnSpool>,
     epoch_frontiers: &'a WriterEpochFrontiers,
+    should_apply: Option<&'a dyn Fn(&WalRecord) -> bool>,
     file_apply_ns: &'a mut u128,
 }
 
@@ -987,7 +1017,12 @@ fn apply_replayed_wal_record<S: BuildHasher>(
                     writer_epoch: batch.writer_epoch,
                     compression: None,
                 };
-                apply_wal_record_to_memtables(&replay_record, ctx.memtables, ctx.file_apply_ns)?;
+                apply_wal_record_to_memtables(
+                    &replay_record,
+                    ctx.memtables,
+                    ctx.file_apply_ns,
+                    ctx.should_apply,
+                )?;
             }
         }
         WalOpRole::TransactionBegin => {
@@ -1010,7 +1045,12 @@ fn apply_replayed_wal_record<S: BuildHasher>(
             if let Some(txn_id) = record.txn_id {
                 if let Some(spool) = ctx.open_txns.remove(&(record.writer_epoch, txn_id)) {
                     spool.replay(|buffered| {
-                        apply_wal_record_to_memtables(&buffered, ctx.memtables, ctx.file_apply_ns)
+                        apply_wal_record_to_memtables(
+                            &buffered,
+                            ctx.memtables,
+                            ctx.file_apply_ns,
+                            ctx.should_apply,
+                        )
                     })?;
                 }
             }
@@ -1023,7 +1063,12 @@ fn apply_replayed_wal_record<S: BuildHasher>(
                 }
             }
 
-            apply_wal_record_to_memtables(record, ctx.memtables, ctx.file_apply_ns)?;
+            apply_wal_record_to_memtables(
+                record,
+                ctx.memtables,
+                ctx.file_apply_ns,
+                ctx.should_apply,
+            )?;
         }
     }
 
@@ -1034,7 +1079,11 @@ fn apply_wal_record_to_memtables<S: BuildHasher>(
     record: &WalRecord,
     memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>, S>,
     file_apply_ns: &mut u128,
+    should_apply: Option<&dyn Fn(&WalRecord) -> bool>,
 ) -> MidgeResult<()> {
+    if should_apply.is_some_and(|filter| !filter(record)) {
+        return Ok(());
+    }
     let apply_start = std::time::Instant::now();
     apply_record(record, memtables)?;
     *file_apply_ns = file_apply_ns.saturating_add(apply_start.elapsed().as_nanos());
