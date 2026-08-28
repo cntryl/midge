@@ -404,6 +404,45 @@ fn should_recompute_total_memtable_bytes_from_all_memtables() {
 }
 
 #[test]
+fn should_account_for_recovered_wal_memtable_bytes_when_reopening() {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create recovery directory");
+    let state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
+    crate::metadata::ManifestPersistence::save(temp_dir.path(), &state.manifest)
+        .expect("persist manifest");
+    drop(state);
+    let record = crate::wal::WalRecord::new_cf(
+        0,
+        crate::wal::WalOpKind::Put,
+        bytes::Bytes::from_static(b"recovered-key"),
+        Some(bytes::Bytes::from(vec![0xA5; 4096])),
+        1,
+        1,
+    );
+    let payload = crate::wal::encoding::encode(&record).expect("encode WAL record");
+    let mut frame = Vec::new();
+    crate::wal::frame::append_frame(&mut frame, &payload).expect("frame WAL record");
+    std::fs::write(temp_dir.path().join("wal").join("wal.log"), frame).expect("write retained WAL");
+
+    // Act
+    let reopened = RuntimeState::try_new(
+        temp_dir.path().to_path_buf(),
+        false,
+        crate::config::RecoveryPolicy::Strict,
+    )
+    .expect("recover state");
+
+    // Assert
+    let recovered_bytes = reopened
+        .get_cf(0)
+        .expect("default column family")
+        .memtable
+        .size_bytes();
+    assert!(recovered_bytes > 0);
+    assert_eq!(reopened.total_memtable_bytes, recovered_bytes);
+}
+
+#[test]
 fn should_hard_stall_when_external_backpressure_sets_write_stalled() {
     // Arrange
     let mut state = RuntimeState::new(isolated_test_db_path(), false);

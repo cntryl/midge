@@ -207,11 +207,17 @@ impl SstFileIo {
         };
         let mut first_candidate = last_candidate;
 
-        while first_candidate > start_bound && index[first_candidate - 1].0.as_slice() == key {
+        // A single logical key can span arbitrarily many data blocks when it
+        // has large or numerous retained versions. The trie deliberately
+        // keeps the last block id for duplicate block-boundary keys, so its
+        // narrow search window is only a lookup accelerator. Expand through
+        // the complete equal-key run before selecting the predecessor block
+        // that may contain the first versions of the key.
+        while first_candidate > 0 && index[first_candidate - 1].0.as_slice() == key {
             first_candidate -= 1;
         }
 
-        if index[first_candidate].0.as_slice() == key && first_candidate > start_bound {
+        if index[first_candidate].0.as_slice() == key && first_candidate > 0 {
             first_candidate -= 1;
         }
 

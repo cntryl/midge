@@ -114,6 +114,44 @@ fn should_initialize_stats_with_zeros_when_created() {
 }
 
 #[test]
+fn should_open_each_wal_file_once_per_recovery_pass() {
+    // Arrange
+    let directory = TempDir::new().expect("create WAL recovery directory");
+    let storage = RealFs::new(directory.path()).expect("create recovery filesystem");
+    let wal_dir = FsPath::new("wal");
+    storage
+        .create_dir_all(&wal_dir)
+        .expect("create WAL directory");
+    let wal_path = directory
+        .path()
+        .join("wal")
+        .join(crate::wal::segment_file_name(1));
+    let bytes = (1..=128)
+        .map(|sequence| encode_frame(&put_record(b"key", sequence, 1)))
+        .collect::<Vec<_>>()
+        .concat();
+    std::fs::write(wal_path, bytes).expect("write WAL fixture");
+    let mut memtables = HashMap::new();
+    reset_wal_replay_file_open_count();
+
+    // Act
+    replay_wal_with_policy(&storage, &wal_dir, &mut memtables, ReplayPolicy::Strict)
+        .expect("replay WAL fixture");
+
+    // Assert
+    assert_eq!(
+        wal_replay_file_open_count(),
+        2,
+        "epoch discovery and record replay should each open the WAL once"
+    );
+    assert_eq!(
+        wal_replay_file_read_count(),
+        2,
+        "epoch discovery and record replay should each snapshot the WAL once"
+    );
+}
+
+#[test]
 fn should_not_tolerate_generic_corruption_based_on_incomplete_tail_error_text() {
     // Arrange
     let replay_file = ReplayFile {

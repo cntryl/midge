@@ -2,7 +2,7 @@
 
 use super::{
     Arc, CloudState, ColumnFamilyState, CompactionConfig, CompactionState, Fs, HashMap,
-    IntentLogEntry, Manifest, MidgeError, MidgeResult, PathBuf, PublicationPhase,
+    IntentLogEntry, Manifest, Memtable, MidgeError, MidgeResult, PathBuf, PublicationPhase,
     RecoveryLoadState, RecoveryStatus, RuntimeDiagnostics, RuntimeMode, RuntimeState,
     SkipListMemtable, SnapshotPinRegistry, SnapshotState, WalRecoveryState, WalState,
     WritePressureState,
@@ -73,6 +73,17 @@ impl RuntimeState {
             &manifest,
             column_families,
         )?;
+        let recovered_memtable_bytes = wal_recovery
+            .column_families
+            .values()
+            .map(|cf| {
+                cf.immutable_memtables
+                    .iter()
+                    .fold(cf.memtable.size_bytes(), |total, memtable| {
+                        total.saturating_add(memtable.size_bytes())
+                    })
+            })
+            .fold(0_usize, usize::saturating_add);
 
         let mut state = Self {
             db_path,
@@ -125,7 +136,7 @@ impl RuntimeState {
             writer_epoch: 0,
             flush_metrics: super::FlushRuntimeMetrics::default(),
             write_pressure: WritePressureState { stalled: false },
-            total_memtable_bytes: 0,
+            total_memtable_bytes: recovered_memtable_bytes,
             wal_recovery_records_replayed: wal_recovery.records_replayed,
             wal_recovery_bytes_replayed: wal_recovery.bytes_replayed,
             intent_log_replay_runs: 0,

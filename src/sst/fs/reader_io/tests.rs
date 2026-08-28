@@ -845,6 +845,53 @@ fn should_get_state_at_return_newest_visible_version_across_duplicate_blocks() -
 }
 
 #[test]
+fn should_get_state_at_return_newest_visible_version_across_many_trie_blocks() -> MidgeResult<()> {
+    // Arrange
+    let temp_dir = tempfile::tempdir()?;
+    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+    let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+    let mut writer = factory.create()?;
+    for index in 0..128u64 {
+        let key = format!("tenant/shared/key/{index:04}");
+        writer.add_with_meta(key.as_bytes(), Some(b"filler"), index + 1, 0, None)?;
+    }
+    let target_key = b"tenant/shared/key/0064-target";
+    for sequence in 1..=32u64 {
+        let value = vec![u8::try_from(sequence).unwrap_or(u8::MAX); 8192];
+        writer.add_with_meta(target_key, Some(&value), sequence + 1_000, 0, None)?;
+    }
+    crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join("trie-versions.sst"))?;
+
+    let reader = SstFileIo::open(
+        "trie-versions.sst",
+        Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+    )?;
+    let index = reader.index_entries()?;
+    let duplicate_blocks = index
+        .iter()
+        .filter(|(first_key, _handle)| first_key.as_slice() == target_key)
+        .count();
+    assert_eq!(reader.index_kind, IndexKind::Trie);
+    assert!(
+        duplicate_blocks >= 3,
+        "duplicate versions should span at least three trie-indexed blocks"
+    );
+
+    // Act
+    let latest = reader.get_state_at(target_key, u64::MAX)?;
+
+    // Assert
+    match latest {
+        KeyState::Value(value, sequence, _, _) => {
+            assert_eq!(sequence, 1_032);
+            assert_eq!(value[0], 32);
+        }
+        other => panic!("expected latest visible trie value, got {other:?}"),
+    }
+    Ok(())
+}
+
+#[test]
 fn should_preserve_tombstone_ttl_semantics_when_get_state_at_reads() -> MidgeResult<()> {
     // Arrange
     let temp_dir = tempfile::tempdir()?;
