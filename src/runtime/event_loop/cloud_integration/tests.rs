@@ -2525,7 +2525,11 @@ fn should_reconcile_wal_prune_when_catalog_retirement_commits_before_timeout(
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.runtime_response_timeout = Duration::from_millis(100);
+    // Leave enough budget for manifest/SST proof collection under a fully
+    // parallel test run. The fixture itself deterministically withholds the
+    // committed CAS callback, so the ambiguity does not depend on racing the
+    // pre-CAS setup against an artificially tiny deadline.
+    el.runtime_response_timeout = Duration::from_secs(1);
     let cloud_fs = Arc::new(
         crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
             .expect("open ambiguous prune cloud backend"),
@@ -2544,7 +2548,7 @@ fn should_reconcile_wal_prune_when_catalog_retirement_commits_before_timeout(
             Arc::clone(&ambiguous_backend),
             ambiguous_backend,
             storage_event_tx,
-            Duration::from_millis(100),
+            Duration::from_secs(1),
         ),
     ));
     el.hybrid_storage_events = Some(storage_event_rx);
