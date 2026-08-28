@@ -4393,15 +4393,18 @@ fn should_resume_ordered_wal_prune_when_oldest_segment_becomes_verifiable(
 
 #[test]
 fn should_retire_bounded_wal_batch_in_one_maintenance_pass() -> crate::common::MidgeResult<()> {
-    // Arrange
+    // Arrange: strict cloud writes can produce many small authoritative WAL
+    // segments before a memtable checkpoint makes them eligible for cleanup.
+    // One maintenance pass must amortize catalog and SST proof work across a
+    // meaningfully sized, but still bounded, prefix.
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    for segment_id in 1..=9 {
+    for segment_id in 1..=33 {
         seed_cloud_prune_candidate(&mut el, segment_id, segment_id);
     }
-    el.state.wal.cloud_durable_seq = 9;
-    add_valid_manifest_sst_for_test(&mut el, "batch-covered.sst", 9);
+    el.state.wal.cloud_durable_seq = 33;
+    add_valid_manifest_sst_for_test(&mut el, "batch-covered.sst", 33);
 
     // Act
     el.prune_cloud_wal_segments_covered_by_manifest();
@@ -4414,8 +4417,8 @@ fn should_retire_bounded_wal_batch_in_one_maintenance_pass() -> crate::common::M
             .keys()
             .copied()
             .collect::<Vec<_>>(),
-        vec![9],
-        "one maintenance worker should retire one bounded batch of eight"
+        vec![33],
+        "one maintenance worker should retire one bounded batch of 32"
     );
     let catalog_proof = el
         .hybrid_storage
@@ -4427,7 +4430,7 @@ fn should_retire_bounded_wal_batch_in_one_maintenance_pass() -> crate::common::M
         .expect("decode catalog after bounded batch retirement");
     assert_eq!(
         catalog.segments.keys().copied().collect::<Vec<_>>(),
-        vec![9],
+        vec![33],
         "the authoritative catalog must retire the same bounded batch as local ACK state"
     );
     Ok(())

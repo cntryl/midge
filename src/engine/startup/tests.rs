@@ -173,6 +173,32 @@ fn recovery_catalog(
 }
 
 #[test]
+fn should_not_require_durable_directory_sync_when_staging_ephemeral_cloud_wal() -> MidgeResult<()> {
+    // Arrange: the recovery directory is discarded and rebuilt from
+    // authoritative cloud WAL on every open, so its temporary materialization
+    // must not pay or depend on a durable directory barrier per segment.
+    let fs = Arc::new(crate::io::MockFs::new());
+    fs.set_sync_dir_failure(true);
+    let staging_fs: Arc<dyn crate::io::Fs> = fs.clone();
+    let file_name = crate::wal::cloud_segment_file_name(17);
+
+    // Act
+    CloudStartupRecovery::stage_recovery_wal_bytes(
+        &staging_fs,
+        &file_name,
+        b"authoritative-cloud-wal",
+    )?;
+
+    // Assert
+    assert_eq!(
+        fs.get_file(&format!("cloud_recovery/wal/{file_name}")),
+        Some(b"authoritative-cloud-wal".to_vec())
+    );
+    assert!(fs.sync_dir_calls().is_empty());
+    Ok(())
+}
+
+#[test]
 fn should_bound_parallel_cloud_wal_hydration_to_eight_requests() -> MidgeResult<()> {
     // Arrange
     let db = tempfile::tempdir()?;

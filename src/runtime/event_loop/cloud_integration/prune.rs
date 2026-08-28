@@ -3,7 +3,10 @@
 use super::super::EventLoop;
 use crate::runtime::hybrid_persistence::{CloudWalPruneGuard, HybridPersistence};
 
-const CLOUD_WAL_PRUNE_BATCH_SIZE: usize = 8;
+// Amortize catalog, metadata, and SST proof round trips across strict-write
+// workloads that publish many small WAL segments. Keep the batch bounded so a
+// maintenance worker cannot monopolize the publication gate indefinitely.
+const CLOUD_WAL_PRUNE_BATCH_SIZE: usize = 32;
 
 fn run_cloud_wal_prune_preflight(
     storage: &crate::storage::HybridStorage,
