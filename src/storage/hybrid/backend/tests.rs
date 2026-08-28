@@ -743,18 +743,78 @@ fn should_reject_guarded_delete_when_worker_capacity_is_exhausted() {
         },
     };
     storage
-        .delete_remote_object_guarded(1, target.clone(), Vec::new())
+        .delete_remote_object_guarded(1, target.clone())
         .expect("first guarded delete should occupy the worker");
 
     // Act
     let started = Instant::now();
     let error = storage
-        .delete_remote_object_guarded(2, target, Vec::new())
+        .delete_remote_object_guarded(2, target)
         .expect_err("second guarded delete must be rejected at worker capacity");
 
     // Assert
     assert!(error.contains("workers at capacity"), "{error}");
     assert!(started.elapsed() < Duration::from_millis(50));
+}
+
+#[test]
+fn should_bound_guarded_delete_batch_by_one_callback_budget() {
+    // Arrange
+    let tmp = tempfile::tempdir().expect("create bounded guarded-delete batch directory");
+    let local = Arc::new(
+        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
+            .expect("create bounded guarded-delete local backend"),
+    );
+    let cloud = Arc::new(NeverCompletesBackend::default());
+    let callback_timeout = Duration::from_millis(30);
+    let limits = HybridQueueLimits {
+        prune_workers: 1,
+        prune_requests: 8,
+        callback_timeout,
+        ..HybridQueueLimits::default()
+    };
+    let storage = HybridStorage::with_policy_event_sender_and_limits(
+        local,
+        cloud.clone(),
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        None,
+        limits,
+    );
+    let targets = (1..=8)
+        .map(|request_id| {
+            (
+                request_id,
+                RemoteObjectProof {
+                    key: format!("wal/bounded-batch-{request_id}"),
+                    bytes: vec![u8::try_from(request_id).expect("request id fits in u8")],
+                    metadata: StorageObjectMetadata {
+                        size: 1,
+                        etag: format!("bounded-etag-{request_id}"),
+                        generation: None,
+                    },
+                },
+            )
+        })
+        .collect();
+    storage
+        .delete_remote_objects_guarded(targets)
+        .expect("admit bounded guarded-delete batch");
+
+    // Act
+    let started = Instant::now();
+    storage.shutdown_background_workers();
+    let elapsed = started.elapsed();
+
+    // Assert
+    assert_eq!(
+        cloud.callbacks.lock().len(),
+        1,
+        "an exhausted batch budget must not submit another provider callback"
+    );
+    assert!(
+        elapsed < Duration::from_millis(150),
+        "guarded-delete batch multiplied its callback budget: {elapsed:?}"
+    );
 }
 
 fn hybrid_with_mock_cloud() -> (Arc<MockCloudBackend>, HybridStorage) {
@@ -1405,6 +1465,15 @@ impl StorageBackend for NeverCompletesBackend {
         self.retain_callback(callback);
     }
 
+    fn submit_delete_with_headers(
+        &self,
+        _key: &str,
+        _headers: Vec<(String, String)>,
+        callback: StorageCallback,
+    ) {
+        self.retain_callback(callback);
+    }
+
     fn submit_list(&self, _prefix: &str, callback: StorageCallback) {
         self.retain_callback(callback);
     }
@@ -2007,7 +2076,7 @@ fn should_reject_stale_remote_wal_target_identity_when_guarded_delete_runs() {
 
     write_cloud_object(&storage, &key, valid_wal_bytes(max_sequence));
     storage
-        .delete_remote_object_guarded(segment_id, stale_proof, Vec::new())
+        .delete_remote_object_guarded(segment_id, stale_proof)
         .expect("schedule prune");
 
     let result = wait_for_wal_prune_result(&storage, segment_id);
@@ -2050,7 +2119,7 @@ fn should_reject_reader_proof_when_guarded_prune_deletes_wal_during_download() {
 
     // Act
     storage
-        .delete_remote_object_guarded(segment_id, target, Vec::new())
+        .delete_remote_object_guarded(segment_id, target)
         .expect("schedule guarded WAL prune");
     let prune_result = wait_for_wal_prune_result(&storage, segment_id);
     backend.release_read.wait();
@@ -2083,7 +2152,7 @@ fn should_not_prune_remote_wal_when_manifest_sst_disappears_after_initial_valida
     );
     let sst_name = "missing-after-validation.sst";
     let sst_key = crate::sst::object_key(sst_name);
-    let sst_bytes = valid_sst_bytes(b"k", b"v1", max_sequence);
+    let sst_bytes = valid_sst_bytes(b"k", b"v", max_sequence);
     let manifest = manifest_covering_wal(sst_name, &sst_bytes, max_sequence, None);
 
     write_cloud_object(&storage, &sst_key, sst_bytes);
@@ -2127,7 +2196,7 @@ fn should_not_prune_remote_wal_given_manifest_validation_failure_when_gc_runs() 
     );
     let sst_name = "wrong-crc-prune-guard.sst";
     let sst_key = crate::sst::object_key(sst_name);
-    let sst_bytes = valid_sst_bytes(b"k", b"v1", max_sequence);
+    let sst_bytes = valid_sst_bytes(b"k", b"v", max_sequence);
     let wrong_crc = crc32c::crc32c(&sst_bytes) ^ 0xffff_ffff;
     let manifest = manifest_covering_wal(sst_name, &sst_bytes, max_sequence, Some(wrong_crc));
 
@@ -2170,7 +2239,7 @@ fn should_not_prune_remote_wal_given_remote_sst_identity_change_when_gc_runs() {
     );
     let sst_name = "changed-after-validation.sst";
     let sst_key = crate::sst::object_key(sst_name);
-    let original = valid_sst_bytes(b"k", b"v1", max_sequence);
+    let original = valid_sst_bytes(b"k", b"v", max_sequence);
     let replacement = valid_sst_bytes(b"k", b"v2", max_sequence);
     let manifest = manifest_covering_wal(
         sst_name,
@@ -2248,7 +2317,7 @@ fn should_not_prune_remote_wal_when_cloud_metadata_changes_after_initial_validat
     );
     let sst_name = "metadata-guard.sst";
     let sst_key = crate::sst::object_key(sst_name);
-    let sst_bytes = valid_sst_bytes(b"k", b"v1", max_sequence);
+    let sst_bytes = valid_sst_bytes(b"k", b"v", max_sequence);
     let manifest = manifest_covering_wal(
         sst_name,
         &sst_bytes,
@@ -2320,7 +2389,7 @@ fn should_prune_remote_wal_when_worker_side_guard_remains_valid() {
     );
     let sst_name = "guard-valid.sst";
     let sst_key = crate::sst::object_key(sst_name);
-    let sst_bytes = valid_sst_bytes(b"k", b"v1", max_sequence);
+    let sst_bytes = valid_sst_bytes(b"k", b"v", max_sequence);
     let manifest = crate::metadata::Manifest {
         files: vec![crate::metadata::FileMeta {
             name: sst_name.to_string(),
@@ -2938,6 +3007,47 @@ fn should_fail_with_timeout_given_expired_deadline_when_reading_object_proof() {
     assert!(
         cloud.callbacks.lock().is_empty(),
         "an exhausted deadline must not submit a zero-timeout provider call"
+    );
+}
+
+#[test]
+fn should_not_submit_conditional_delete_given_expired_deadline() {
+    // Arrange
+    let tmp = tempfile::tempdir().expect("create expired delete deadline directory");
+    let local = Arc::new(
+        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
+            .expect("create expired delete deadline local backend"),
+    );
+    let cloud = Arc::new(NeverCompletesBackend::default());
+    let storage = HybridStorage::with_policy(
+        local,
+        cloud.clone(),
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    );
+    let target = RemoteObjectProof {
+        key: "wal/expired-delete".to_string(),
+        bytes: vec![1],
+        metadata: StorageObjectMetadata {
+            size: 1,
+            etag: "expired-delete-etag".to_string(),
+            generation: None,
+        },
+    };
+    let expired = crate::common::OperationDeadline::from_budget(Duration::ZERO);
+
+    // Act
+    let result = storage.delete_remote_object_guarded_blocking_within(target, &expired);
+
+    // Assert
+    let error = result.expect_err("an exhausted budget must not submit a conditional delete");
+    assert!(matches!(
+        error,
+        crate::common::MidgeError::Timeout(message)
+            if message.contains("deadline") && message.contains("wal/expired-delete")
+    ));
+    assert!(
+        cloud.callbacks.lock().is_empty(),
+        "an exhausted deadline must not mutate the provider"
     );
 }
 

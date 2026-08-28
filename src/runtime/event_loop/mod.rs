@@ -457,7 +457,7 @@ impl EventLoop {
             store.validate_epoch(holder_id, self.writer_epoch)
         };
         result.map_err(|error| {
-            if deadline.is_bounded()
+            let error = if deadline.is_bounded()
                 && (deadline.is_expired() || error.to_string().contains("timed out"))
             {
                 crate::common::MidgeError::Timeout(format!(
@@ -465,7 +465,14 @@ impl EventLoop {
                 ))
             } else {
                 crate::common::MidgeError::Fenced(error.to_string())
+            };
+            if matches!(error, crate::common::MidgeError::Fenced(_)) {
+                if let Some(healthy) = &self.lease_healthy {
+                    healthy.store(false, std::sync::atomic::Ordering::Release);
+                }
+                tracing::error!(%error, "writer lease validation failed; runtime fenced");
             }
+            error
         })
     }
 
