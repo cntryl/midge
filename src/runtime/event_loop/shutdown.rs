@@ -1,7 +1,6 @@
 use super::{EventLoop, HandleOutcome};
 use crate::common::MidgeError;
 use crate::runtime::durability::DurabilityWaiter;
-use crate::runtime::state::ImmutableFlushPhase;
 use crate::runtime::{RuntimeMsg, RuntimeResponse};
 
 impl EventLoop {
@@ -201,31 +200,17 @@ impl EventLoop {
         self.drain_shutdown_flush_pipeline_within(deadline)
     }
 
-    fn drain_shutdown_flush_pipeline_within(
+    pub(super) fn drain_shutdown_flush_pipeline_within(
         &mut self,
         deadline: &crate::common::OperationDeadline,
     ) -> crate::common::MidgeResult<()> {
         loop {
-            let mut pending = 0usize;
-            let mut failed_flush = None;
-            for flush in self
+            let pending = self
                 .state
                 .column_families
                 .values()
-                .flat_map(|cf| &cf.immutable_flushes)
-            {
-                pending = pending.saturating_add(1);
-                if flush.phase == ImmutableFlushPhase::RetryPending {
-                    failed_flush = Some(flush.flush_id);
-                    break;
-                }
-            }
-
-            if let Some(flush_id) = failed_flush {
-                return Err(MidgeError::Internal(format!(
-                    "cloud shutdown checkpoint flush {flush_id} failed; WAL authority retained"
-                )));
-            }
+                .map(|cf| cf.immutable_flushes.len())
+                .sum::<usize>();
             if pending == 0 && !self.flush_actor.is_inflight() {
                 return Ok(());
             }
@@ -257,6 +242,14 @@ impl EventLoop {
                 let sleep_for = deadline
                     .remaining()
                     .min(std::time::Duration::from_millis(10));
+                if !sleep_for.is_zero() {
+                    std::thread::sleep(sleep_for);
+                }
+                continue;
+            }
+
+            if let Some(retry_after) = self.state.flush_retry_deadline_timeout() {
+                let sleep_for = deadline.remaining().min(retry_after);
                 if !sleep_for.is_zero() {
                     std::thread::sleep(sleep_for);
                 }

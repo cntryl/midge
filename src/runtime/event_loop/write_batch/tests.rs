@@ -756,6 +756,50 @@ fn should_not_drop_non_write_after_coalescing_stashes_pending_message() -> Midge
 }
 
 #[test]
+fn should_leave_control_message_queued_when_pending_slot_is_occupied_during_coalescing(
+) -> MidgeResult<()> {
+    // Arrange
+    let mut fixture = EventLoopFixture::batched()?;
+    let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
+    let transaction_rx = fixture.register(41);
+    fixture.event_loop.pending_msg = Some(RuntimeMsg::Noop { request_id: 42 });
+    msg_tx
+        .send(RuntimeMsg::FlushMemtable {
+            request_id: 43,
+            cf_id: 0,
+        })
+        .expect("queue control request behind occupied pending slot");
+
+    // Act
+    let handled = fixture.event_loop.apply_transaction_with_coalescing(
+        &msg_rx,
+        txn_request(
+            41,
+            vec![put_op(0, b"pending-slot", b"value")],
+            Some(DurabilityPolicy::Batched),
+        ),
+        1024,
+    );
+
+    // Assert
+    assert_eq!(handled, 1);
+    assert_eq!(expect_transaction_applied(&transaction_rx, 41).1, 1);
+    assert!(matches!(
+        fixture.event_loop.pending_msg,
+        Some(RuntimeMsg::Noop { request_id: 42 })
+    ));
+    assert!(matches!(
+        msg_rx.try_recv(),
+        Ok(RuntimeMsg::FlushMemtable {
+            request_id: 43,
+            cf_id: 0,
+        })
+    ));
+
+    Ok(())
+}
+
+#[test]
 fn should_error_insert_only_fallback_after_first_transaction_publishes() -> MidgeResult<()> {
     // Arrange
     let mut fixture = EventLoopFixture::batched()?;
@@ -1172,6 +1216,8 @@ fn should_fail_all_event_loop_strict_transactions_when_shared_sync_fails() -> Mi
     let test_guard = crate::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     let mut fixture = EventLoopFixture::with_policy(DurabilityPolicy::Strict)?;
+    let lease_healthy = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    fixture.event_loop.lease_healthy = Some(Arc::clone(&lease_healthy));
     let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
     let first_rx = fixture.register(65);
     let second_rx = fixture.register(66);
@@ -1205,6 +1251,8 @@ fn should_fail_all_event_loop_strict_transactions_when_shared_sync_fails() -> Mi
     });
     assert_eq!(fixture.event_loop.wal_actor.append_calls(), 1);
     assert_eq!(fixture.event_loop.wal_actor.sync_calls(), 0);
+    assert!(fixture.event_loop.state.persistence_anomaly_detected());
+    assert!(!lease_healthy.load(std::sync::atomic::Ordering::Acquire));
     assert!(fixture
         .event_loop
         .state

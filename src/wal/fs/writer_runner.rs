@@ -312,7 +312,7 @@ impl WriterRunner {
             let sync_start = Instant::now();
             if let Err(e) = file.sync(Durability::Durable) {
                 tracing::error!(error = ?e, "WAL fsync failed - marking sync as failed");
-                self.mark_sync_failure(e.to_string());
+                self.mark_sync_failure(format!("wal writer fsync failed: {e}"));
                 return Err(());
             }
             let sync_elapsed = sync_start.elapsed();
@@ -404,10 +404,39 @@ mod tests {
     use super::*;
     use crate::io::traits::{DirEntry, FsError, Metadata};
     use crate::io::{Fs, FsPath, FsResult, OpenOptions as FsOpenOptions};
+    use bytes::Bytes;
     use std::sync::atomic::{AtomicBool, AtomicU64};
     use std::time::Duration;
 
     struct FailingOpenFs;
+
+    struct NoSpaceSyncFile;
+
+    impl crate::io::File for NoSpaceSyncFile {
+        fn read_at(&self, _offset: u64, _len: u64) -> FsResult<Bytes> {
+            Ok(Bytes::new())
+        }
+
+        fn write_at(&mut self, _offset: u64, _data: Bytes) -> FsResult<()> {
+            Ok(())
+        }
+
+        fn append(&mut self, _data: Bytes) -> FsResult<u64> {
+            Ok(0)
+        }
+
+        fn len(&self) -> FsResult<u64> {
+            Ok(0)
+        }
+
+        fn sync(&mut self, _durability: Durability) -> FsResult<()> {
+            Err(FsError::Io("No space left on device".to_string()))
+        }
+
+        fn close(self: Box<Self>) -> FsResult<()> {
+            Ok(())
+        }
+    }
 
     impl Fs for FailingOpenFs {
         fn open(
@@ -510,6 +539,33 @@ mod tests {
             .last_sync_error
             .as_deref()
             .is_some_and(|error| error.contains("could not reopen file handle")));
+    }
+
+    #[test]
+    fn should_identify_physical_fsync_no_space_as_wal_writer_failure() {
+        // Arrange
+        let sync_state = Arc::new(Mutex::new(SyncState {
+            pending_fsyncs: 1,
+            ..SyncState::default()
+        }));
+        let runner = runner_with_sync_state(Arc::clone(&sync_state));
+        let mut file_opt: Option<Box<dyn crate::io::File>> = Some(Box::new(NoSpaceSyncFile));
+
+        // Act
+        let result = runner.complete_pending_fsyncs(&mut file_opt);
+
+        // Assert
+        assert!(result.is_err());
+        let state = sync_state.lock();
+        let message = state
+            .last_sync_error
+            .as_deref()
+            .expect("physical fsync error should be retained");
+        assert!(message.contains("wal writer fsync failed"));
+        assert!(matches!(
+            WriterRunner::error_from_message(message),
+            crate::common::MidgeError::NoSpace(_)
+        ));
     }
 
     #[test]

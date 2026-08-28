@@ -1361,16 +1361,7 @@ impl EventLoop {
         }
         let outcome = self.handle_runtime_msg(msg, msg_rx);
         if outcome == HandleOutcome::Continue && self.verification_barrier.token.is_none() {
-            // A continuously non-empty request queue must not starve a sealed
-            // WAL segment whose storage-owned retry budget was exhausted. Run
-            // the bounded fairness slot after answering this request so slow
-            // provider admission cannot consume its response budget.
-            self.drain_cloud_wal_upload_backlog();
-            // A continuously non-empty request queue must not starve accepted
-            // reclamation work. The retry owns a bounded attempt deadline and
-            // re-arms backoff on failure, so this is one fairness slot rather
-            // than an unbounded maintenance loop.
-            self.retry_manifest_reclamation_if_due();
+            self.run_request_fairness_slot();
         }
         outcome
     }
@@ -1385,10 +1376,25 @@ impl EventLoop {
         // flush and re-defer the same request forever under steady flush debt.
         let outcome = self.handle_runtime_msg(msg, msg_rx);
         if outcome == HandleOutcome::Continue && self.verification_barrier.token.is_none() {
-            self.drain_cloud_wal_upload_backlog();
-            self.retry_manifest_reclamation_if_due();
+            self.run_request_fairness_slot();
         }
         outcome
+    }
+
+    fn run_request_fairness_slot(&mut self) {
+        // A continuously non-empty request queue must not starve background
+        // durability and storage progress. Run this bounded slot only after
+        // dispatch so a restored control request keeps the publication turn
+        // that made it eligible.
+        self.drain_flush_worker_results();
+        self.maybe_flush_cloud_async_wal();
+        self.drain_cloud_wal_upload_backlog();
+        self.tick_hybrid_storage();
+        self.drain_hybrid_storage_events();
+        self.drain_cloud_wal_upload_backlog();
+        self.drain_auto_flush_memtables();
+        self.run_background_compaction_maintenance_if_due();
+        self.retry_manifest_reclamation_if_due();
     }
 
     pub(super) fn handle_runtime_msg(

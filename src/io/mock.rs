@@ -251,7 +251,7 @@ impl File for MockFile<'_> {
         let file_data = files
             .get_mut(&self.path)
             .ok_or_else(|| FsError::NotFound(self.path.clone()))?;
-        file_data.data.truncate(len);
+        file_data.data.resize(len, 0);
         Ok(())
     }
 
@@ -347,7 +347,7 @@ impl File for MockPersistentFile {
         let file_data = files
             .get_mut(&self.path)
             .ok_or_else(|| FsError::NotFound(self.path.clone()))?;
-        file_data.data.truncate(len);
+        file_data.data.resize(len, 0);
         Ok(())
     }
 
@@ -503,6 +503,56 @@ mod tests {
         // Assert
         assert_eq!(bytes.as_ref(), b"stable bytes");
         assert!(!fs.exists(&path)?);
+        Ok(())
+    }
+
+    #[test]
+    fn should_zero_extend_regular_file_when_truncating_to_larger_length() -> FsResult<()> {
+        // Arrange
+        let fs = MockFs::new();
+        let path = FsPath::new("grow-regular.txt");
+        let mut file = fs.open(
+            &path,
+            OpenOptions {
+                mode: OpenMode::ReadWrite,
+                create: true,
+                create_new: false,
+                truncate: false,
+            },
+        )?;
+        file.append(Bytes::from_static(b"abc"))?;
+
+        // Act
+        file.truncate(5)?;
+
+        // Assert
+        assert_eq!(file.len()?, 5);
+        assert_eq!(file.read_at(0, 5)?.as_ref(), b"abc\0\0");
+        Ok(())
+    }
+
+    #[test]
+    fn should_zero_extend_persistent_file_when_truncating_to_larger_length() -> FsResult<()> {
+        // Arrange
+        let fs = MockFs::new();
+        let path = FsPath::new("grow-persistent.txt");
+        let mut file = fs.open_persistent_handle(
+            &path,
+            OpenOptions {
+                mode: OpenMode::ReadWrite,
+                create: true,
+                create_new: false,
+                truncate: false,
+            },
+        )?;
+        file.append(Bytes::from_static(b"abc"))?;
+
+        // Act
+        file.truncate(5)?;
+
+        // Assert
+        assert_eq!(file.len()?, 5);
+        assert_eq!(file.read_at(0, 5)?.as_ref(), b"abc\0\0");
         Ok(())
     }
 }

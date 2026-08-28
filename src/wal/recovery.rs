@@ -729,6 +729,11 @@ fn replay_wal_file<S: BuildHasher>(
             NextWalFrame::Frame(frame) => {
                 let next_pos = frame.next_pos;
                 let source = file_path.to_string();
+                // Writer-epoch discovery assigns an ordinal to every verified
+                // frame. Keep this second pass in lockstep even when replay
+                // suppresses a cross-file duplicate.
+                let record_ordinal = replay_state.replay_ordinal;
+                replay_state.replay_ordinal = replay_state.replay_ordinal.saturating_add(1);
                 if replay_state
                     .seen_records
                     .get(&frame.record)
@@ -741,7 +746,6 @@ fn replay_wal_file<S: BuildHasher>(
                     .seen_records
                     .entry(frame.record.clone())
                     .or_insert(source);
-                let record_ordinal = replay_state.replay_ordinal;
                 let mut apply_ctx = WalReplayApplyContext {
                     file_path,
                     stats: &mut *replay_state.stats,
@@ -752,7 +756,6 @@ fn replay_wal_file<S: BuildHasher>(
                     file_apply_ns: &mut file_apply_ns,
                 };
                 apply_replayed_wal_record(&frame.record, pos, record_ordinal, &mut apply_ctx)?;
-                replay_state.replay_ordinal = replay_state.replay_ordinal.saturating_add(1);
                 pos = next_pos;
             }
         }

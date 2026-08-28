@@ -1626,6 +1626,48 @@ fn should_skip_lower_epoch_record_when_seen_after_fresh_epoch_with_lower_sequenc
 }
 
 #[test]
+fn should_preserve_fencing_ordinal_when_duplicate_frame_is_skipped_across_wal_files() {
+    // Arrange
+    let dir = TempDir::new().unwrap();
+    let wal_subdir = dir.path().join("wal");
+    std::fs::create_dir(&wal_subdir).unwrap();
+    let storage = RealFs::new(dir.path()).unwrap();
+    let wal_dir = FsPath::new("wal");
+    let duplicate = put_record(b"rotation-duplicate", 1, 1);
+    append_raw_bytes(
+        &wal_subdir.join(crate::wal::segment_file_name(1)),
+        &encode_frame(&duplicate),
+    );
+    let active_path = wal_subdir.join(crate::wal::ACTIVE_FILE_NAME);
+    append_raw_bytes(&active_path, &encode_frame(&duplicate));
+    append_raw_bytes(
+        &active_path,
+        &encode_frame(&put_record(b"fresh-epoch", 10, 2)),
+    );
+    append_raw_bytes(
+        &active_path,
+        &encode_frame(&put_record(b"stale-low-sequence", 2, 1)),
+    );
+    let mut memtables = HashMap::new();
+
+    // Act
+    let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
+
+    // Assert
+    assert_eq!(stats.max_epoch_seen, 2);
+    assert_eq!(stats.stale_records_skipped, 1);
+    assert_eq!(
+        memtables[&0].get(b"rotation-duplicate").unwrap(),
+        Some(b"value".to_vec())
+    );
+    assert_eq!(
+        memtables[&0].get(b"fresh-epoch").unwrap(),
+        Some(b"value".to_vec())
+    );
+    assert_eq!(memtables[&0].get(b"stale-low-sequence").unwrap(), None);
+}
+
+#[test]
 fn should_preserve_raw_value_given_forward_clock_skew_during_wal_replay_when_recovering() {
     // Arrange
     let mut record = WalRecord::new(

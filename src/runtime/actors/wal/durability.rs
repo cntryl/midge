@@ -83,7 +83,9 @@ impl WalActor {
 
         if let Some(writer) = &mut self.writer {
             crate::failpoints::fail_point!("midge::wal::inject_no_space_on_sync", |_| Err(
-                MidgeError::NoSpace("failpoint: no space on WAL sync".to_string())
+                MidgeError::NoSpace(
+                    "wal writer fsync failed: failpoint: no space on WAL sync".to_string()
+                )
             ));
 
             // Bound the acknowledgement wait so a degraded storage device cannot

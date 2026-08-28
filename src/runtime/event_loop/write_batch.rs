@@ -332,6 +332,12 @@ impl EventLoop {
         let collect_until = explicit_collect_window.map(|window| Instant::now() + window);
 
         while batch.handled < max {
+            // A prior progress pass may have filled the single FIFO lookahead
+            // slot before dispatching the current transaction. Do not consume
+            // another message until the run loop restores that request.
+            if self.pending_msg.is_some() {
+                break;
+            }
             match msg_rx.try_recv() {
                 Ok(msg) => {
                     if !self.collect_coalesced_transaction_msg(msg, batch) {
