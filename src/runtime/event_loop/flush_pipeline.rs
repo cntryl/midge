@@ -555,61 +555,11 @@ impl EventLoop {
         &self,
         records: &[crate::wal::cloud_segment::DataCoverageRecord],
     ) -> bool {
-        use crate::sst::types::KeyState;
-        use crate::wal::types::WalOpRole;
-
-        let Ok(fs) = crate::io::RealFs::new(&self.state.sst_dir) else {
-            return false;
-        };
-        let factory = crate::sst::FsSstFactoryIo::new(std::sync::Arc::new(fs), 64 * 1024);
-        let mut readers = std::collections::HashMap::new();
-
-        records.iter().all(|record| {
-            if !matches!(record.op.role(), WalOpRole::ValueWrite) {
-                return false;
-            }
-            self.state.manifest.files.iter().any(|file| {
-                if file.cf_id != record.cf_id
-                    || file
-                        .smallest_seq
-                        .is_none_or(|sequence| sequence > record.seq)
-                    || file
-                        .largest_seq
-                        .is_none_or(|sequence| sequence < record.seq)
-                    || file
-                        .smallest_key
-                        .as_ref()
-                        .is_none_or(|key| key.as_slice() > record.key.as_slice())
-                    || file
-                        .largest_key
-                        .as_ref()
-                        .is_none_or(|key| key.as_slice() < record.key.as_slice())
-                {
-                    return false;
-                }
-                let reader = readers.entry(file.name.clone()).or_insert_with(|| {
-                    let path = self.state.sst_dir.join(&file.name);
-                    let bytes = std::fs::read(&path).ok()?;
-                    if file.size_bytes != 0 && bytes.len() as u64 != file.size_bytes {
-                        return None;
-                    }
-                    if file
-                        .content_crc32c
-                        .is_none_or(|expected| crc32c::crc32c(&bytes) != expected)
-                    {
-                        return None;
-                    }
-                    factory.open(std::path::Path::new(&file.name)).ok()
-                });
-                reader.as_ref().is_some_and(|reader| {
-                    matches!(
-                        reader.get_state(&record.key),
-                        Ok(KeyState::Value(_, sequence, _, _) | KeyState::Tombstone(sequence))
-                            if sequence >= record.seq
-                    )
-                })
-            })
-        })
+        crate::runtime::hybrid_persistence::VerifiedManifestWalCoverage::open(
+            &self.state.sst_dir,
+            &self.state.manifest,
+        )
+        .exactly_covers_data_records(records)
     }
 
     fn validate_runtime_lease_for_wal_prune(&self) -> crate::common::MidgeResult<()> {

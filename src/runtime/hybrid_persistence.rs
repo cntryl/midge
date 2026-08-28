@@ -999,15 +999,6 @@ fn commit_catalog_within(
 ) -> MidgeResult<CatalogAuthority> {
     let bytes = catalog.encode().map_err(MidgeError::Internal)?;
 
-    if expected_primary.is_none() {
-        sync_catalog_copy_within(
-            storage,
-            crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
-            &bytes,
-            deadline,
-        )?;
-    }
-
     let primary = storage.compare_exchange_remote_object_within(
         crate::wal::cloud_catalog::OBJECT_KEY,
         expected_primary.map(RemoteObjectProof::metadata),
@@ -1128,6 +1119,88 @@ impl ExactCoverageState {
                     || *sequence == record.seq && matches!(record.op.role(), WalOpRole::PointDelete)
             }
             Some(KeyState::Absent) | None => false,
+        }
+    }
+}
+
+pub(crate) struct VerifiedManifestWalCoverage<'a> {
+    sst_dir: std::path::PathBuf,
+    manifest: &'a Manifest,
+    readers: std::cell::RefCell<
+        std::collections::HashMap<String, Option<Box<dyn crate::sst::traits::SstReaderExt>>>,
+    >,
+}
+
+impl<'a> VerifiedManifestWalCoverage<'a> {
+    pub(crate) fn open(sst_dir: &Path, manifest: &'a Manifest) -> Self {
+        Self {
+            sst_dir: sst_dir.to_path_buf(),
+            manifest,
+            readers: std::cell::RefCell::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn state_for(&self, file: &FileMeta, key: &[u8]) -> Option<crate::sst::types::KeyState> {
+        let mut readers = self.readers.borrow_mut();
+        let reader = readers.entry(file.name.clone()).or_insert_with(|| {
+            let name = crate::sst::PersistedSstName::parse(&file.name).ok()?;
+            let bytes = std::fs::read(self.sst_dir.join(name.as_str())).ok()?;
+            if file.size_bytes != 0
+                && u64::try_from(bytes.len()).unwrap_or(u64::MAX) != file.size_bytes
+            {
+                return None;
+            }
+            if file
+                .content_crc32c
+                .is_none_or(|expected| crc32c::crc32c(&bytes) != expected)
+            {
+                return None;
+            }
+            let fs = crate::io::RealFs::new(&self.sst_dir).ok()?;
+            let factory = crate::sst::FsSstFactoryIo::new(Arc::new(fs), 64 * 1024);
+            crate::sst::SstFactory::open(&factory, Path::new(&file.name)).ok()
+        });
+        reader.as_ref()?.get_state(key).ok()
+    }
+
+    pub(crate) fn exactly_covers_data_records(&self, records: &[DataCoverageRecord]) -> bool {
+        records.iter().all(|record| {
+            if !matches!(record.op.role(), crate::wal::types::WalOpRole::ValueWrite) {
+                return false;
+            }
+            let mut state = ExactCoverageState::default();
+            for file in &self.manifest.files {
+                if !file_covers_record(file, record) {
+                    continue;
+                }
+                let Some(observed) = self.state_for(file, &record.key) else {
+                    return false;
+                };
+                state.observe(observed);
+            }
+            state.exactly_covers(record)
+        })
+    }
+
+    pub(crate) fn contains_wal_record(
+        &self,
+        file: &FileMeta,
+        record: &crate::wal::WalRecord,
+    ) -> bool {
+        let Some(state) = self.state_for(file, record.key.as_ref()) else {
+            return false;
+        };
+        match state {
+            crate::sst::types::KeyState::Value(value, sequence, _, _) => {
+                sequence > record.seq
+                    || sequence == record.seq
+                        && record
+                            .value
+                            .as_ref()
+                            .is_some_and(|expected| expected == &value)
+            }
+            crate::sst::types::KeyState::Tombstone(sequence) => sequence >= record.seq,
+            crate::sst::types::KeyState::Absent => false,
         }
     }
 }

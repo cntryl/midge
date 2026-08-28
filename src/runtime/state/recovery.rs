@@ -342,36 +342,14 @@ impl RuntimeState {
                 crate::wal::recovery::ReplayPolicy::SalvageValidPrefix
             }
         };
-        let verified_readers = manifest
-            .files
-            .iter()
-            .filter_map(|file| {
-                Self::open_verified_manifest_sst_for_wal_filter(sst_dir, file)
-                    .map(|reader| (file.name.clone(), reader))
-            })
-            .collect::<std::collections::HashMap<_, _>>();
-        let contains_record = |file: &crate::metadata::FileMeta, record: &crate::wal::WalRecord| {
-            let Some(reader) = verified_readers.get(&file.name) else {
-                return false;
-            };
-            match reader.get_state(record.key.as_ref()) {
-                Ok(crate::sst::types::KeyState::Value(value, sequence, _, _)) => {
-                    sequence > record.seq
-                        || sequence == record.seq
-                            && record
-                                .value
-                                .as_ref()
-                                .is_some_and(|expected| expected == &value)
-                }
-                Ok(crate::sst::types::KeyState::Tombstone(sequence)) => sequence >= record.seq,
-                Ok(crate::sst::types::KeyState::Absent) | Err(_) => false,
-            }
-        };
+        let coverage = crate::runtime::hybrid_persistence::VerifiedManifestWalCoverage::open(
+            sst_dir, manifest,
+        );
         let should_apply = |record: &crate::wal::WalRecord| {
             !crate::runtime::hybrid_persistence::wal_record_covered_by_verified_manifest(
                 record,
                 manifest,
-                &contains_record,
+                &|file, record| coverage.contains_wal_record(file, record),
             )
         };
         let stats = match crate::wal::recovery::replay_wal_with_manifest_filter(
@@ -408,36 +386,6 @@ impl RuntimeState {
             bytes_replayed: stats.bytes,
             opened_in_salvage_mode,
         })
-    }
-
-    fn verify_manifest_sst_for_wal_filter(
-        sst_dir: &std::path::Path,
-        file: &crate::metadata::FileMeta,
-    ) -> bool {
-        let Ok(name) = crate::sst::PersistedSstName::parse(&file.name) else {
-            return false;
-        };
-        let Ok(bytes) = std::fs::read(sst_dir.join(name.as_str())) else {
-            return false;
-        };
-        let actual_size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        if file.size_bytes != 0 && actual_size != file.size_bytes {
-            return false;
-        }
-        file.content_crc32c
-            .is_some_and(|expected| crc32c::crc32c(&bytes) == expected)
-    }
-
-    fn open_verified_manifest_sst_for_wal_filter(
-        sst_dir: &std::path::Path,
-        file: &crate::metadata::FileMeta,
-    ) -> Option<Box<dyn crate::sst::traits::SstReaderExt>> {
-        if !Self::verify_manifest_sst_for_wal_filter(sst_dir, file) {
-            return None;
-        }
-        let fs = crate::io::RealFs::new(sst_dir).ok()?;
-        let factory = crate::sst::FsSstFactoryIo::new(std::sync::Arc::new(fs), 64 * 1024);
-        factory.open(std::path::Path::new(&file.name)).ok()
     }
 
     fn handle_wal_recovery_failure(

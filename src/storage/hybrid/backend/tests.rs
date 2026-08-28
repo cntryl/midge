@@ -438,6 +438,54 @@ fn should_converge_catalog_copies_after_takeover() {
 }
 
 #[test]
+fn should_not_publish_losing_mirror_when_initial_catalog_cas_loses() {
+    // Arrange
+    let tmp = tempfile::tempdir().expect("create initial catalog race test dir");
+    let local = Arc::new(
+        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
+            .expect("create local backend"),
+    );
+    let mock_cloud = Arc::new(MockCloudBackend::new());
+    let winning_catalog = crate::wal::cloud_catalog::WalPublicationCatalog::empty(7)
+        .expect("create winning catalog")
+        .encode()
+        .expect("encode winning catalog");
+    let racing_cloud = Arc::new(WinningInitialCatalogCasBackend {
+        inner: Arc::clone(&mock_cloud),
+        winning_catalog: winning_catalog.clone(),
+        inject_winner: AtomicBool::new(true),
+    });
+    let cloud = Arc::new(CloudStorage::new(racing_cloud, String::new()));
+    let storage = HybridStorage::with_policy(
+        local,
+        cloud,
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    );
+
+    // Act
+    let error = storage
+        .fence_cloud_wal_catalog(2)
+        .expect_err("losing initial catalog CAS must fail");
+
+    // Assert
+    assert!(matches!(error, crate::common::MidgeError::Busy(_)));
+    assert_eq!(
+        storage
+            .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
+            .expect("read winning primary catalog")
+            .bytes(),
+        winning_catalog
+    );
+    assert!(
+        storage
+            .remote_object_proof_optional(crate::wal::cloud_catalog::MIRROR_OBJECT_KEY)
+            .expect("check losing mirror")
+            .is_none(),
+        "a draft that lost primary authority must never be published to the mirror"
+    );
+}
+
+#[test]
 fn should_report_fenced_when_catalog_authority_changes_before_publication() {
     // Arrange
     let tmp = tempfile::tempdir().expect("create takeover race test dir");
@@ -883,6 +931,71 @@ struct PausingCatalogCasBackend {
     pause_next_catalog_compare_exchange: AtomicBool,
     catalog_compare_exchange_started: Barrier,
     release_catalog_compare_exchange: Barrier,
+}
+
+struct WinningInitialCatalogCasBackend {
+    inner: Arc<MockCloudBackend>,
+    winning_catalog: Vec<u8>,
+    inject_winner: AtomicBool,
+}
+
+impl CloudBackend for WinningInitialCatalogCasBackend {
+    fn submit_put(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        let is_initial_catalog_compare_exchange = key == crate::wal::cloud_catalog::OBJECT_KEY
+            && headers
+                .iter()
+                .any(|(name, value)| name.eq_ignore_ascii_case("if-none-match") && value == "*");
+        if is_initial_catalog_compare_exchange && self.inject_winner.swap(false, Ordering::SeqCst) {
+            let (winner_tx, winner_rx) = std::sync::mpsc::channel();
+            self.inner
+                .submit_put(key, self.winning_catalog.clone(), Vec::new(), winner_tx);
+            winner_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("competing initial catalog write must complete");
+        }
+        self.inner.submit_put(key, data, headers, callback);
+    }
+
+    fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        self.inner.submit_get(key, callback);
+    }
+
+    fn submit_get_with_metadata(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        self.inner.submit_get_with_metadata(key, callback);
+    }
+
+    fn submit_get_range(
+        &self,
+        key: &str,
+        start: u64,
+        end: Option<u64>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        self.inner.submit_get_range(key, start, end, callback);
+    }
+
+    fn submit_delete(
+        &self,
+        key: &str,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        self.inner.submit_delete(key, headers, callback);
+    }
+
+    fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
+        self.inner.submit_list(prefix, callback);
+    }
+
+    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        self.inner.submit_head(key, callback);
+    }
 }
 
 impl PausingCatalogCasBackend {
