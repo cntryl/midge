@@ -2,7 +2,7 @@
 
 use super::{
     Arc, CloudState, ColumnFamilyState, CompactionConfig, CompactionState, Fs, HashMap,
-    IntentLogEntry, Manifest, MidgeError, MidgeResult, PathBuf, PublicationPhase,
+    IntentLogEntry, Manifest, Memtable, MidgeError, MidgeResult, PathBuf, PublicationPhase,
     RecoveryLoadState, RecoveryStatus, RuntimeDiagnostics, RuntimeMode, RuntimeState,
     SkipListMemtable, SnapshotPinRegistry, SnapshotState, WalRecoveryState, WalState,
     WritePressureState,
@@ -67,11 +67,23 @@ impl RuntimeState {
         let wal_recovery = Self::recover_wal_state(
             memory_mode,
             &wal_dir,
+            &sst_dir,
             recovery_wal_dir,
             recovery_policy,
             &manifest,
             column_families,
         )?;
+        let recovered_memtable_bytes = wal_recovery
+            .column_families
+            .values()
+            .map(|cf| {
+                cf.immutable_memtables
+                    .iter()
+                    .fold(cf.memtable.size_bytes(), |total, memtable| {
+                        total.saturating_add(memtable.size_bytes())
+                    })
+            })
+            .fold(0_usize, usize::saturating_add);
 
         let mut state = Self {
             db_path,
@@ -124,7 +136,7 @@ impl RuntimeState {
             writer_epoch: 0,
             flush_metrics: super::FlushRuntimeMetrics::default(),
             write_pressure: WritePressureState { stalled: false },
-            total_memtable_bytes: 0,
+            total_memtable_bytes: recovered_memtable_bytes,
             wal_recovery_records_replayed: wal_recovery.records_replayed,
             wal_recovery_bytes_replayed: wal_recovery.bytes_replayed,
             intent_log_replay_runs: 0,
@@ -283,14 +295,21 @@ impl RuntimeState {
     fn recover_wal_state(
         memory_mode: bool,
         wal_dir: &std::path::Path,
+        sst_dir: &std::path::Path,
         recovery_wal_dir: Option<&PathBuf>,
         recovery_policy: crate::config::RecoveryPolicy,
         manifest: &Manifest,
         column_families: HashMap<u32, ColumnFamilyState>,
     ) -> MidgeResult<WalRecoveryState> {
         let replay_dir = recovery_wal_dir.map_or(wal_dir, PathBuf::as_path);
-        let mut wal_recovery =
-            Self::replay_wal(memory_mode, replay_dir, recovery_policy, column_families)?;
+        let mut wal_recovery = Self::replay_wal(
+            memory_mode,
+            replay_dir,
+            sst_dir,
+            recovery_policy,
+            manifest,
+            column_families,
+        )?;
         wal_recovery.recovered_sequence = wal_recovery
             .recovered_sequence
             .max(Self::manifest_visible_sequence_floor(manifest));
@@ -301,7 +320,9 @@ impl RuntimeState {
     fn replay_wal(
         memory_mode: bool,
         replay_dir: &std::path::Path,
+        sst_dir: &std::path::Path,
         recovery_policy: crate::config::RecoveryPolicy,
+        manifest: &Manifest,
         mut column_families: HashMap<u32, ColumnFamilyState>,
     ) -> MidgeResult<WalRecoveryState> {
         if memory_mode || !replay_dir.exists() {
@@ -332,11 +353,22 @@ impl RuntimeState {
                 crate::wal::recovery::ReplayPolicy::SalvageValidPrefix
             }
         };
-        let stats = match crate::wal::recovery::replay_wal_with_policy(
+        let coverage = crate::runtime::hybrid_persistence::VerifiedManifestWalCoverage::open(
+            sst_dir, manifest,
+        );
+        let should_apply = |record: &crate::wal::WalRecord| {
+            !crate::runtime::hybrid_persistence::wal_record_covered_by_verified_manifest(
+                record,
+                manifest,
+                &|file, record| coverage.contains_wal_record(file, record),
+            )
+        };
+        let stats = match crate::wal::recovery::replay_wal_with_manifest_filter(
             &storage,
             &crate::io::FsPath::new(""),
             &mut recovery_memtables,
             replay_policy,
+            &should_apply,
         ) {
             Ok(stats) => stats,
             Err(error) => {

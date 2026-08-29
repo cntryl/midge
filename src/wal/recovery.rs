@@ -17,6 +17,28 @@ use std::io::{Read as _, Seek as _, Write as _};
 use std::sync::Arc;
 use tracing::instrument;
 
+#[cfg(test)]
+thread_local! {
+    static WAL_REPLAY_FILE_OPEN_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static WAL_REPLAY_FILE_READ_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_wal_replay_file_open_count() {
+    WAL_REPLAY_FILE_OPEN_COUNT.set(0);
+    WAL_REPLAY_FILE_READ_COUNT.set(0);
+}
+
+#[cfg(test)]
+fn wal_replay_file_open_count() -> usize {
+    WAL_REPLAY_FILE_OPEN_COUNT.get()
+}
+
+#[cfg(test)]
+fn wal_replay_file_read_count() -> usize {
+    WAL_REPLAY_FILE_READ_COUNT.get()
+}
+
 struct RecoveryTxnSpool {
     file: std::fs::File,
     record_count: usize,
@@ -390,6 +412,32 @@ pub fn replay_wal_with_policy<S: BuildHasher>(
     memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>, S>,
     replay_policy: ReplayPolicy,
 ) -> MidgeResult<RecoveryStats> {
+    replay_wal_with_policy_and_filter(storage, wal_dir, memtables, replay_policy, None)
+}
+
+pub(crate) fn replay_wal_with_manifest_filter<S: BuildHasher>(
+    storage: &dyn Fs,
+    wal_dir: &FsPath,
+    memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>, S>,
+    replay_policy: ReplayPolicy,
+    should_apply: &dyn Fn(&WalRecord) -> bool,
+) -> MidgeResult<RecoveryStats> {
+    replay_wal_with_policy_and_filter(
+        storage,
+        wal_dir,
+        memtables,
+        replay_policy,
+        Some(should_apply),
+    )
+}
+
+fn replay_wal_with_policy_and_filter<S: BuildHasher>(
+    storage: &dyn Fs,
+    wal_dir: &FsPath,
+    memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>, S>,
+    replay_policy: ReplayPolicy,
+    should_apply: Option<&dyn Fn(&WalRecord) -> bool>,
+) -> MidgeResult<RecoveryStats> {
     // Invariant: recovery may keep only a verified prefix of the WAL, but it
     // must never materialize a partial frame or reorder committed records.
     let mut stats = RecoveryStats::new();
@@ -418,6 +466,8 @@ pub fn replay_wal_with_policy<S: BuildHasher>(
             memtables,
             open_txns: &mut open_txns,
             epoch_frontiers: &epoch_frontiers,
+            should_apply,
+            seen_records: std::collections::HashMap::new(),
             replay_ordinal: 0,
         };
         replay_wal_paths(storage, &replay_paths, replay_policy, &mut replay_state)
@@ -513,6 +563,8 @@ struct WalReplayState<'a, S: BuildHasher> {
     memtables: &'a mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>, S>,
     open_txns: &'a mut std::collections::HashMap<(u64, u64), RecoveryTxnSpool>,
     epoch_frontiers: &'a WriterEpochFrontiers,
+    should_apply: Option<&'a dyn Fn(&WalRecord) -> bool>,
+    seen_records: std::collections::HashMap<WalRecord, String>,
     replay_ordinal: u64,
 }
 
@@ -611,14 +663,14 @@ fn discover_writer_epoch_frontiers(
     for replay_file in replay_paths {
         let mut pos = 0_u64;
         let mut file_read_ns = 0_u128;
+        let Some(file) = open_wal_replay_file(storage, &replay_file.path, &mut file_read_ns)?
+        else {
+            continue;
+        };
+        let snapshot = read_wal_snapshot(&*file, &replay_file.path, &mut file_read_ns)?;
 
         loop {
-            let Some(file) = open_wal_replay_file(storage, &replay_file.path, &mut file_read_ns)?
-            else {
-                break;
-            };
-
-            match read_next_wal_frame(&*file, &replay_file.path, pos, &mut file_read_ns) {
+            match read_next_wal_frame(&snapshot, &replay_file.path, pos) {
                 Ok(NextWalFrame::Eof) => break,
                 Ok(NextWalFrame::Frame(frame)) => {
                     frontiers.record(&frame.record, ordinal);
@@ -660,33 +712,50 @@ fn replay_wal_file<S: BuildHasher>(
     let mut pos: u64 = 0;
     let mut file_read_ns: u128 = 0;
     let mut file_apply_ns: u128 = 0;
+    let Some(file) = open_wal_replay_file(storage, file_path, &mut file_read_ns)? else {
+        finalize_wal_file_replay(
+            &mut *replay_state.stats,
+            file_path,
+            file_read_ns,
+            file_apply_ns,
+        );
+        return Ok(());
+    };
+    let snapshot = read_wal_snapshot(&*file, file_path, &mut file_read_ns)?;
 
     loop {
-        let Some(file) = open_wal_replay_file(storage, file_path, &mut file_read_ns)? else {
-            finalize_wal_file_replay(
-                &mut *replay_state.stats,
-                file_path,
-                file_read_ns,
-                file_apply_ns,
-            );
-            return Ok(());
-        };
-
-        match read_next_wal_frame(&*file, file_path, pos, &mut file_read_ns)? {
+        match read_next_wal_frame(&snapshot, file_path, pos)? {
             NextWalFrame::Eof => break,
             NextWalFrame::Frame(frame) => {
                 let next_pos = frame.next_pos;
+                let source = file_path.to_string();
+                // Writer-epoch discovery assigns an ordinal to every verified
+                // frame. Keep this second pass in lockstep even when replay
+                // suppresses a cross-file duplicate.
                 let record_ordinal = replay_state.replay_ordinal;
+                replay_state.replay_ordinal = replay_state.replay_ordinal.saturating_add(1);
+                if replay_state
+                    .seen_records
+                    .get(&frame.record)
+                    .is_some_and(|first_source| first_source != &source)
+                {
+                    pos = next_pos;
+                    continue;
+                }
+                replay_state
+                    .seen_records
+                    .entry(frame.record.clone())
+                    .or_insert(source);
                 let mut apply_ctx = WalReplayApplyContext {
                     file_path,
                     stats: &mut *replay_state.stats,
                     memtables: &mut *replay_state.memtables,
                     open_txns: &mut *replay_state.open_txns,
                     epoch_frontiers: replay_state.epoch_frontiers,
+                    should_apply: replay_state.should_apply,
                     file_apply_ns: &mut file_apply_ns,
                 };
                 apply_replayed_wal_record(&frame.record, pos, record_ordinal, &mut apply_ctx)?;
-                replay_state.replay_ordinal = replay_state.replay_ordinal.saturating_add(1);
                 pos = next_pos;
             }
         }
@@ -712,6 +781,7 @@ struct WalReplayApplyContext<'a, S: BuildHasher> {
     memtables: &'a mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>, S>,
     open_txns: &'a mut std::collections::HashMap<(u64, u64), RecoveryTxnSpool>,
     epoch_frontiers: &'a WriterEpochFrontiers,
+    should_apply: Option<&'a dyn Fn(&WalRecord) -> bool>,
     file_apply_ns: &'a mut u128,
 }
 
@@ -730,6 +800,8 @@ fn open_wal_replay_file<'a>(
     }
 
     let open_start = std::time::Instant::now();
+    #[cfg(test)]
+    WAL_REPLAY_FILE_OPEN_COUNT.set(WAL_REPLAY_FILE_OPEN_COUNT.get().saturating_add(1));
     let file = match storage.open(
         file_path,
         OpenOptions {
@@ -748,12 +820,15 @@ fn open_wal_replay_file<'a>(
 }
 
 fn read_next_wal_frame(
-    file: &dyn File,
+    snapshot: &[u8],
     file_path: &FsPath,
     pos: u64,
-    file_read_ns: &mut u128,
 ) -> Result<NextWalFrame, ReplayFailure> {
-    let file_len = file.len().map_err(map_fs_error)?;
+    let file_len = u64::try_from(snapshot.len()).map_err(|_| {
+        MidgeError::Corruption(format!(
+            "WAL snapshot length does not fit u64 in {file_path}"
+        ))
+    })?;
     if pos == file_len {
         return Ok(NextWalFrame::Eof);
     }
@@ -775,23 +850,22 @@ fn read_next_wal_frame(
         )));
     }
 
-    let header = read_wal_bytes(
-        file,
-        file_path,
-        pos,
-        crate::wal::frame::WAL_FRAME_HEADER_LEN as u64,
-        file_read_ns,
-    )?;
+    let header_start = usize::try_from(pos).map_err(|_| {
+        MidgeError::Corruption(format!(
+            "WAL frame offset does not fit memory in {file_path}"
+        ))
+    })?;
+    let header_end = header_start + crate::wal::frame::WAL_FRAME_HEADER_LEN;
+    let header = &snapshot[header_start..header_end];
     let payload_start = pos + crate::wal::frame::WAL_FRAME_HEADER_LEN as u64;
-    if header.iter().all(|byte| *byte == 0)
-        && is_zero_filled_wal_tail(file, file_path, payload_start, file_len, file_read_ns)?
+    if header.iter().all(|byte| *byte == 0) && snapshot[header_end..].iter().all(|byte| *byte == 0)
     {
         return Err(ReplayFailure::IncompleteTail(MidgeError::Corruption(
             format!("Zero-filled WAL tail at pos {pos} in {file_path}"),
         )));
     }
 
-    let (len, expected_crc) = crate::wal::frame::decode_frame_header(&header)?;
+    let (len, expected_crc) = crate::wal::frame::decode_frame_header(header)?;
     let need_end = payload_start
         .checked_add(u64::try_from(len).unwrap_or(u64::MAX))
         .ok_or_else(|| {
@@ -800,13 +874,7 @@ fn read_next_wal_frame(
             ))
         })?;
     if need_end > file_len {
-        let hides_verified_suffix = truncated_frame_hides_verified_wal_suffix(
-            file,
-            file_path,
-            payload_start,
-            file_len,
-            file_read_ns,
-        )?;
+        let hides_verified_suffix = contains_verified_wal_frame(&snapshot[header_end..]);
         let error = MidgeError::Corruption(if hides_verified_suffix {
             format!(
                 "WAL frame length at pos {pos} in {file_path} overruns EOF and hides a verified later frame (len={len}, file_len={file_len})"
@@ -823,15 +891,32 @@ fn read_next_wal_frame(
         });
     }
 
-    let payload = read_wal_frame_payload(file, file_path, payload_start, len, file_read_ns)?;
+    let payload_end = usize::try_from(need_end).map_err(|_| {
+        MidgeError::Corruption(format!(
+            "WAL payload end does not fit memory in {file_path}"
+        ))
+    })?;
+    let payload = &snapshot[header_end..payload_end];
 
-    crate::wal::frame::verify_frame_crc(&payload[..len], expected_crc)?;
-    let record = super::encoding::decode(&payload[..])?;
+    crate::wal::frame::verify_frame_crc(payload, expected_crc)?;
+    let record = super::encoding::decode(payload)?;
 
     Ok(NextWalFrame::Frame(ReplayedWalFrame {
         record,
         next_pos: need_end,
     }))
+}
+
+fn read_wal_snapshot(
+    file: &dyn File,
+    file_path: &FsPath,
+    file_read_ns: &mut u128,
+) -> MidgeResult<bytes::Bytes> {
+    let file_len = file.len().map_err(map_fs_error)?;
+    if file_len == 0 {
+        return Ok(bytes::Bytes::new());
+    }
+    read_wal_bytes(file, file_path, 0, file_len, file_read_ns)
 }
 
 fn read_wal_bytes(
@@ -842,6 +927,8 @@ fn read_wal_bytes(
     file_read_ns: &mut u128,
 ) -> MidgeResult<bytes::Bytes> {
     let read_start = std::time::Instant::now();
+    #[cfg(test)]
+    WAL_REPLAY_FILE_READ_COUNT.set(WAL_REPLAY_FILE_READ_COUNT.get().saturating_add(1));
     let bytes = file.read_at(offset, len).map_err(map_fs_error)?;
     *file_read_ns = file_read_ns.saturating_add(read_start.elapsed().as_nanos());
     let expected_len = usize::try_from(len).map_err(|_| {
@@ -856,61 +943,6 @@ fn read_wal_bytes(
         )));
     }
     Ok(bytes)
-}
-
-fn read_wal_frame_payload(
-    file: &dyn File,
-    file_path: &FsPath,
-    payload_start: u64,
-    len: usize,
-    file_read_ns: &mut u128,
-) -> MidgeResult<bytes::Bytes> {
-    read_wal_bytes(
-        file,
-        file_path,
-        payload_start,
-        u64::try_from(len).unwrap_or(u64::MAX),
-        file_read_ns,
-    )
-}
-
-fn is_zero_filled_wal_tail(
-    file: &dyn File,
-    file_path: &FsPath,
-    mut offset: u64,
-    file_len: u64,
-    file_read_ns: &mut u128,
-) -> MidgeResult<bool> {
-    const SCAN_CHUNK_LEN: u64 = 64 * 1024;
-
-    while offset < file_len {
-        let read_len = file_len.saturating_sub(offset).min(SCAN_CHUNK_LEN);
-        let bytes = read_wal_bytes(file, file_path, offset, read_len, file_read_ns)?;
-        if bytes.iter().any(|byte| *byte != 0) {
-            return Ok(false);
-        }
-        offset = offset.saturating_add(read_len);
-    }
-    Ok(true)
-}
-
-fn truncated_frame_hides_verified_wal_suffix(
-    file: &dyn File,
-    file_path: &FsPath,
-    payload_start: u64,
-    file_len: u64,
-    file_read_ns: &mut u128,
-) -> MidgeResult<bool> {
-    let available = file_len.saturating_sub(payload_start);
-    if available == 0 {
-        return Ok(false);
-    }
-
-    // `decode_frame_header` caps the claimed payload at 64 MiB. Reaching this
-    // branch means the bytes actually available are fewer than that bound, so
-    // inspecting the complete ambiguous tail cannot exceed one WAL frame.
-    let tail = read_wal_bytes(file, file_path, payload_start, available, file_read_ns)?;
-    Ok(contains_verified_wal_frame(&tail))
 }
 
 fn contains_verified_wal_frame(bytes: &[u8]) -> bool {
@@ -987,7 +1019,12 @@ fn apply_replayed_wal_record<S: BuildHasher>(
                     writer_epoch: batch.writer_epoch,
                     compression: None,
                 };
-                apply_wal_record_to_memtables(&replay_record, ctx.memtables, ctx.file_apply_ns)?;
+                apply_wal_record_to_memtables(
+                    &replay_record,
+                    ctx.memtables,
+                    ctx.file_apply_ns,
+                    ctx.should_apply,
+                )?;
             }
         }
         WalOpRole::TransactionBegin => {
@@ -1010,7 +1047,12 @@ fn apply_replayed_wal_record<S: BuildHasher>(
             if let Some(txn_id) = record.txn_id {
                 if let Some(spool) = ctx.open_txns.remove(&(record.writer_epoch, txn_id)) {
                     spool.replay(|buffered| {
-                        apply_wal_record_to_memtables(&buffered, ctx.memtables, ctx.file_apply_ns)
+                        apply_wal_record_to_memtables(
+                            &buffered,
+                            ctx.memtables,
+                            ctx.file_apply_ns,
+                            ctx.should_apply,
+                        )
                     })?;
                 }
             }
@@ -1023,7 +1065,12 @@ fn apply_replayed_wal_record<S: BuildHasher>(
                 }
             }
 
-            apply_wal_record_to_memtables(record, ctx.memtables, ctx.file_apply_ns)?;
+            apply_wal_record_to_memtables(
+                record,
+                ctx.memtables,
+                ctx.file_apply_ns,
+                ctx.should_apply,
+            )?;
         }
     }
 
@@ -1034,7 +1081,11 @@ fn apply_wal_record_to_memtables<S: BuildHasher>(
     record: &WalRecord,
     memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>, S>,
     file_apply_ns: &mut u128,
+    should_apply: Option<&dyn Fn(&WalRecord) -> bool>,
 ) -> MidgeResult<()> {
+    if should_apply.is_some_and(|filter| !filter(record)) {
+        return Ok(());
+    }
     let apply_start = std::time::Instant::now();
     apply_record(record, memtables)?;
     *file_apply_ns = file_apply_ns.saturating_add(apply_start.elapsed().as_nanos());

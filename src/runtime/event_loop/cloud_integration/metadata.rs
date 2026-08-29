@@ -20,7 +20,12 @@ impl EventLoop {
     #[cfg(test)]
     pub(super) fn verify_cloud_metadata_for_wal_cleanup(&self) -> Result<(), String> {
         self.cloud_metadata_prune_snapshot_for_wal_cleanup()
-            .map_or(Ok(()), |snapshot| snapshot.verify_exact_then(|_, _| Ok(())))
+            .map_or(Ok(()), |snapshot| {
+                snapshot.verify_exact_then(
+                    &crate::common::OperationDeadline::unbounded(),
+                    |_, _| Ok(()),
+                )
+            })
             .map_err(|error| error.to_string())
     }
 }

@@ -393,6 +393,99 @@ fn should_reject_wal_catalog_publication_from_stale_epoch_after_takeover() {
 }
 
 #[test]
+fn should_converge_catalog_copies_after_publication() {
+    // Arrange
+    let (_mock_cloud, storage) = hybrid_with_mock_cloud();
+    let tmp = tempfile::tempdir().expect("create mirrored catalog WAL dir");
+    let segment_id = 1;
+    let max_sequence = 11;
+    let bytes = valid_wal_bytes(max_sequence);
+    let local_path = tmp.path().join(crate::wal::segment_file_name(segment_id));
+    std::fs::write(&local_path, &bytes).expect("write mirrored catalog local WAL");
+    let object_key = crate::wal::cloud_segment_object_key(segment_id, 1);
+    write_cloud_object(&storage, &object_key, bytes);
+
+    // Act
+    storage
+        .publish_remote_wal_segment(
+            segment_id,
+            max_sequence,
+            &local_path,
+            2,
+            &crate::common::OperationDeadline::unbounded(),
+        )
+        .expect("publish WAL through mirrored catalog");
+
+    // Assert
+    let catalog = assert_wal_catalog_copies_match(&storage);
+    assert_eq!(catalog.fencing_epoch, 2);
+    assert!(catalog.segments.contains_key(&segment_id));
+}
+
+#[test]
+fn should_converge_catalog_copies_after_takeover() {
+    // Arrange
+    let (_mock_cloud, storage) = hybrid_with_mock_cloud();
+
+    // Act
+    storage
+        .fence_cloud_wal_catalog(3)
+        .expect("advance mirrored catalog authority");
+
+    // Assert
+    let catalog = assert_wal_catalog_copies_match(&storage);
+    assert_eq!(catalog.fencing_epoch, 3);
+}
+
+#[test]
+fn should_not_publish_losing_mirror_when_initial_catalog_cas_loses() {
+    // Arrange
+    let tmp = tempfile::tempdir().expect("create initial catalog race test dir");
+    let local = Arc::new(
+        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
+            .expect("create local backend"),
+    );
+    let mock_cloud = Arc::new(MockCloudBackend::new());
+    let winning_catalog = crate::wal::cloud_catalog::WalPublicationCatalog::empty(7)
+        .expect("create winning catalog")
+        .encode()
+        .expect("encode winning catalog");
+    let racing_cloud = Arc::new(WinningInitialCatalogCasBackend {
+        inner: Arc::clone(&mock_cloud),
+        winning_catalog: winning_catalog.clone(),
+        inject_winner: AtomicBool::new(true),
+    });
+    let cloud = Arc::new(CloudStorage::new(racing_cloud, String::new()));
+    let storage = HybridStorage::with_policy(
+        local,
+        cloud,
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    );
+
+    // Act
+    let error = storage
+        .fence_cloud_wal_catalog(2)
+        .expect_err("losing initial catalog CAS must fail");
+
+    // Assert
+    assert!(matches!(error, crate::common::MidgeError::Busy(_)));
+    assert_eq!(
+        storage
+            .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
+            .expect("read winning primary catalog")
+            .bytes(),
+        winning_catalog
+    );
+    assert!(
+        storage
+            .remote_object_proof_optional(crate::wal::cloud_catalog::MIRROR_OBJECT_KEY)
+            .expect("check losing mirror")
+            .is_none(),
+        "a draft that lost primary authority must never be published to the mirror"
+    );
+}
+
+#[test]
 fn should_report_fenced_when_catalog_authority_changes_before_publication() {
     // Arrange
     let tmp = tempfile::tempdir().expect("create takeover race test dir");
@@ -698,18 +791,78 @@ fn should_reject_guarded_delete_when_worker_capacity_is_exhausted() {
         },
     };
     storage
-        .delete_remote_object_guarded(1, target.clone(), Vec::new())
+        .delete_remote_object_guarded(1, target.clone())
         .expect("first guarded delete should occupy the worker");
 
     // Act
     let started = Instant::now();
     let error = storage
-        .delete_remote_object_guarded(2, target, Vec::new())
+        .delete_remote_object_guarded(2, target)
         .expect_err("second guarded delete must be rejected at worker capacity");
 
     // Assert
     assert!(error.contains("workers at capacity"), "{error}");
     assert!(started.elapsed() < Duration::from_millis(50));
+}
+
+#[test]
+fn should_bound_guarded_delete_batch_by_one_callback_budget() {
+    // Arrange
+    let tmp = tempfile::tempdir().expect("create bounded guarded-delete batch directory");
+    let local = Arc::new(
+        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
+            .expect("create bounded guarded-delete local backend"),
+    );
+    let cloud = Arc::new(NeverCompletesBackend::default());
+    let callback_timeout = Duration::from_millis(30);
+    let limits = HybridQueueLimits {
+        prune_workers: 1,
+        prune_requests: 8,
+        callback_timeout,
+        ..HybridQueueLimits::default()
+    };
+    let storage = HybridStorage::with_policy_event_sender_and_limits(
+        local,
+        cloud.clone(),
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        None,
+        limits,
+    );
+    let targets = (1..=8)
+        .map(|request_id| {
+            (
+                request_id,
+                RemoteObjectProof {
+                    key: format!("wal/bounded-batch-{request_id}"),
+                    bytes: vec![u8::try_from(request_id).expect("request id fits in u8")],
+                    metadata: StorageObjectMetadata {
+                        size: 1,
+                        etag: format!("bounded-etag-{request_id}"),
+                        generation: None,
+                    },
+                },
+            )
+        })
+        .collect();
+    storage
+        .delete_remote_objects_guarded(targets)
+        .expect("admit bounded guarded-delete batch");
+
+    // Act
+    let started = Instant::now();
+    storage.shutdown_background_workers();
+    let elapsed = started.elapsed();
+
+    // Assert
+    assert_eq!(
+        cloud.callbacks.lock().len(),
+        1,
+        "an exhausted batch budget must not submit another provider callback"
+    );
+    assert!(
+        elapsed < Duration::from_millis(150),
+        "guarded-delete batch multiplied its callback budget: {elapsed:?}"
+    );
 }
 
 fn hybrid_with_mock_cloud() -> (Arc<MockCloudBackend>, HybridStorage) {
@@ -732,6 +885,24 @@ fn hybrid_with_mock_cloud() -> (Arc<MockCloudBackend>, HybridStorage) {
         .fence_cloud_wal_catalog(2)
         .expect("initialize test WAL publication catalog");
     (mock_cloud, storage)
+}
+
+fn assert_wal_catalog_copies_match(
+    storage: &HybridStorage,
+) -> crate::wal::cloud_catalog::WalPublicationCatalog {
+    let primary = storage
+        .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
+        .expect("read primary WAL catalog");
+    let mirror = storage
+        .remote_object_proof(crate::wal::cloud_catalog::MIRROR_OBJECT_KEY)
+        .expect("read WAL catalog mirror");
+    assert_eq!(
+        primary.bytes(),
+        mirror.bytes(),
+        "successful catalog mutations must converge both copies"
+    );
+    crate::wal::cloud_catalog::WalPublicationCatalog::decode(primary.bytes())
+        .expect("decode converged WAL catalog")
 }
 
 fn hybrid_with_pausing_catalog_cloud(
@@ -760,6 +931,71 @@ struct PausingCatalogCasBackend {
     pause_next_catalog_compare_exchange: AtomicBool,
     catalog_compare_exchange_started: Barrier,
     release_catalog_compare_exchange: Barrier,
+}
+
+struct WinningInitialCatalogCasBackend {
+    inner: Arc<MockCloudBackend>,
+    winning_catalog: Vec<u8>,
+    inject_winner: AtomicBool,
+}
+
+impl CloudBackend for WinningInitialCatalogCasBackend {
+    fn submit_put(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        let is_initial_catalog_compare_exchange = key == crate::wal::cloud_catalog::OBJECT_KEY
+            && headers
+                .iter()
+                .any(|(name, value)| name.eq_ignore_ascii_case("if-none-match") && value == "*");
+        if is_initial_catalog_compare_exchange && self.inject_winner.swap(false, Ordering::SeqCst) {
+            let (winner_tx, winner_rx) = std::sync::mpsc::channel();
+            self.inner
+                .submit_put(key, self.winning_catalog.clone(), Vec::new(), winner_tx);
+            winner_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("competing initial catalog write must complete");
+        }
+        self.inner.submit_put(key, data, headers, callback);
+    }
+
+    fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        self.inner.submit_get(key, callback);
+    }
+
+    fn submit_get_with_metadata(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        self.inner.submit_get_with_metadata(key, callback);
+    }
+
+    fn submit_get_range(
+        &self,
+        key: &str,
+        start: u64,
+        end: Option<u64>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        self.inner.submit_get_range(key, start, end, callback);
+    }
+
+    fn submit_delete(
+        &self,
+        key: &str,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        self.inner.submit_delete(key, headers, callback);
+    }
+
+    fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
+        self.inner.submit_list(prefix, callback);
+    }
+
+    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        self.inner.submit_head(key, callback);
+    }
 }
 
 impl PausingCatalogCasBackend {
@@ -1339,6 +1575,15 @@ impl StorageBackend for NeverCompletesBackend {
     }
 
     fn submit_delete(&self, _key: &str, callback: StorageCallback) {
+        self.retain_callback(callback);
+    }
+
+    fn submit_delete_with_headers(
+        &self,
+        _key: &str,
+        _headers: Vec<(String, String)>,
+        callback: StorageCallback,
+    ) {
         self.retain_callback(callback);
     }
 
@@ -1944,7 +2189,7 @@ fn should_reject_stale_remote_wal_target_identity_when_guarded_delete_runs() {
 
     write_cloud_object(&storage, &key, valid_wal_bytes(max_sequence));
     storage
-        .delete_remote_object_guarded(segment_id, stale_proof, Vec::new())
+        .delete_remote_object_guarded(segment_id, stale_proof)
         .expect("schedule prune");
 
     let result = wait_for_wal_prune_result(&storage, segment_id);
@@ -1987,7 +2232,7 @@ fn should_reject_reader_proof_when_guarded_prune_deletes_wal_during_download() {
 
     // Act
     storage
-        .delete_remote_object_guarded(segment_id, target, Vec::new())
+        .delete_remote_object_guarded(segment_id, target)
         .expect("schedule guarded WAL prune");
     let prune_result = wait_for_wal_prune_result(&storage, segment_id);
     backend.release_read.wait();
@@ -2020,7 +2265,7 @@ fn should_not_prune_remote_wal_when_manifest_sst_disappears_after_initial_valida
     );
     let sst_name = "missing-after-validation.sst";
     let sst_key = crate::sst::object_key(sst_name);
-    let sst_bytes = valid_sst_bytes(b"k", b"v1", max_sequence);
+    let sst_bytes = valid_sst_bytes(b"k", b"v", max_sequence);
     let manifest = manifest_covering_wal(sst_name, &sst_bytes, max_sequence, None);
 
     write_cloud_object(&storage, &sst_key, sst_bytes);
@@ -2064,7 +2309,7 @@ fn should_not_prune_remote_wal_given_manifest_validation_failure_when_gc_runs() 
     );
     let sst_name = "wrong-crc-prune-guard.sst";
     let sst_key = crate::sst::object_key(sst_name);
-    let sst_bytes = valid_sst_bytes(b"k", b"v1", max_sequence);
+    let sst_bytes = valid_sst_bytes(b"k", b"v", max_sequence);
     let wrong_crc = crc32c::crc32c(&sst_bytes) ^ 0xffff_ffff;
     let manifest = manifest_covering_wal(sst_name, &sst_bytes, max_sequence, Some(wrong_crc));
 
@@ -2107,7 +2352,7 @@ fn should_not_prune_remote_wal_given_remote_sst_identity_change_when_gc_runs() {
     );
     let sst_name = "changed-after-validation.sst";
     let sst_key = crate::sst::object_key(sst_name);
-    let original = valid_sst_bytes(b"k", b"v1", max_sequence);
+    let original = valid_sst_bytes(b"k", b"v", max_sequence);
     let replacement = valid_sst_bytes(b"k", b"v2", max_sequence);
     let manifest = manifest_covering_wal(
         sst_name,
@@ -2185,7 +2430,7 @@ fn should_not_prune_remote_wal_when_cloud_metadata_changes_after_initial_validat
     );
     let sst_name = "metadata-guard.sst";
     let sst_key = crate::sst::object_key(sst_name);
-    let sst_bytes = valid_sst_bytes(b"k", b"v1", max_sequence);
+    let sst_bytes = valid_sst_bytes(b"k", b"v", max_sequence);
     let manifest = manifest_covering_wal(
         sst_name,
         &sst_bytes,
@@ -2257,7 +2502,7 @@ fn should_prune_remote_wal_when_worker_side_guard_remains_valid() {
     );
     let sst_name = "guard-valid.sst";
     let sst_key = crate::sst::object_key(sst_name);
-    let sst_bytes = valid_sst_bytes(b"k", b"v1", max_sequence);
+    let sst_bytes = valid_sst_bytes(b"k", b"v", max_sequence);
     let manifest = crate::metadata::Manifest {
         files: vec![crate::metadata::FileMeta {
             name: sst_name.to_string(),
@@ -2316,6 +2561,7 @@ fn should_prune_remote_wal_when_worker_side_guard_remains_valid() {
         !catalog.segments.contains_key(&segment_id),
         "catalog authority must retire before physical delete completion"
     );
+    assert_wal_catalog_copies_match(&storage);
 
     let result = wait_for_wal_prune_result(&storage, segment_id);
     // Act
@@ -2874,6 +3120,47 @@ fn should_fail_with_timeout_given_expired_deadline_when_reading_object_proof() {
     assert!(
         cloud.callbacks.lock().is_empty(),
         "an exhausted deadline must not submit a zero-timeout provider call"
+    );
+}
+
+#[test]
+fn should_not_submit_conditional_delete_given_expired_deadline() {
+    // Arrange
+    let tmp = tempfile::tempdir().expect("create expired delete deadline directory");
+    let local = Arc::new(
+        crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
+            .expect("create expired delete deadline local backend"),
+    );
+    let cloud = Arc::new(NeverCompletesBackend::default());
+    let storage = HybridStorage::with_policy(
+        local,
+        cloud.clone(),
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    );
+    let target = RemoteObjectProof {
+        key: "wal/expired-delete".to_string(),
+        bytes: vec![1],
+        metadata: StorageObjectMetadata {
+            size: 1,
+            etag: "expired-delete-etag".to_string(),
+            generation: None,
+        },
+    };
+    let expired = crate::common::OperationDeadline::from_budget(Duration::ZERO);
+
+    // Act
+    let result = storage.delete_remote_object_guarded_blocking_within(target, &expired);
+
+    // Assert
+    let error = result.expect_err("an exhausted budget must not submit a conditional delete");
+    assert!(matches!(
+        error,
+        crate::common::MidgeError::Timeout(message)
+            if message.contains("deadline") && message.contains("wal/expired-delete")
+    ));
+    assert!(
+        cloud.callbacks.lock().is_empty(),
+        "an exhausted deadline must not mutate the provider"
     );
 }
 

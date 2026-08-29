@@ -6,6 +6,7 @@ use bytes::Bytes;
 use cntryl_midge::MidgeError;
 mod common;
 use common::*;
+use std::collections::BTreeMap;
 use std::sync::{mpsc, Arc, Barrier};
 use std::time::Duration;
 
@@ -928,6 +929,96 @@ fn should_persist_multiple_cfs_given_restart_when_all_flushed() {
             assert_eq!(cfs.len(), 3); // default + cf1 + cf2
         }
     });
+}
+
+#[test]
+fn should_preserve_cold_tombstone_given_hot_cold_compaction_when_reopening() {
+    for_each_storage_mode(&["local"], |mode, opts| {
+        // Arrange
+        let mut expected = BTreeMap::<(String, Vec<u8>), Option<Vec<u8>>>::new();
+        {
+            let mut engine = open_with_mode(&opts, mode);
+            let cold = engine.create_column_family("cold").expect("create cold cf");
+            let hot = engine.create_column_family("hot").expect("create hot cf");
+
+            // Act
+            for chunk_start in (0..1_280_usize).step_by(64) {
+                for sequence in chunk_start..chunk_start + 64 {
+                    let cf_name = if sequence.is_multiple_of(5) {
+                        "cold"
+                    } else {
+                        "hot"
+                    };
+                    let key = format!("key-{:03}", sequence % 128).into_bytes();
+                    let value = (!sequence.is_multiple_of(13) || sequence < 128)
+                        .then(|| format!("value-{sequence:04}").into_bytes());
+                    expected.insert((cf_name.to_string(), key), value);
+                }
+                let barrier = Barrier::new(3);
+                std::thread::scope(|scope| {
+                    let hot_lane = scope.spawn(|| {
+                        barrier.wait();
+                        apply_hot_cold_chunk(&engine, &hot, chunk_start, false);
+                    });
+                    let cold_lane = scope.spawn(|| {
+                        barrier.wait();
+                        apply_hot_cold_chunk(&engine, &cold, chunk_start, true);
+                    });
+                    barrier.wait();
+                    engine.flush_cf(&hot).expect("flush hot cf");
+                    engine.flush_cf(&cold).expect("flush cold cf");
+                    engine.compact_all().expect("compact hot and cold cfs");
+                    hot_lane.join().expect("join hot lane");
+                    cold_lane.join().expect("join cold lane");
+                });
+            }
+            engine
+                .shutdown(Duration::from_secs(5))
+                .expect("shutdown before recovery verification");
+        }
+
+        // Assert
+        let engine = open_with_mode(&opts, mode);
+        for ((cf_name, key), expected_value) in expected {
+            let cf = engine
+                .get_column_family(&cf_name)
+                .expect("recover workload column family");
+            let tx = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+                .expect("begin recovery read");
+            assert_eq!(
+                tx.get(&key).expect("read recovered workload key"),
+                expected_value.map(Bytes::from),
+                "recovered value mismatch for {cf_name}/{:?}",
+                String::from_utf8_lossy(&key)
+            );
+        }
+    });
+}
+
+fn apply_hot_cold_chunk(
+    engine: &cntryl_midge::Engine,
+    cf: &cntryl_midge::ColumnFamilyHandle,
+    chunk_start: usize,
+    cold: bool,
+) {
+    for sequence in chunk_start..chunk_start + 64 {
+        if sequence.is_multiple_of(5) != cold {
+            continue;
+        }
+        let key = format!("key-{:03}", sequence % 128).into_bytes();
+        let mut tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin workload transaction");
+        if sequence >= 128 && sequence.is_multiple_of(13) {
+            tx.delete(key).expect("stage workload delete");
+        } else {
+            tx.put(key, format!("value-{sequence:04}").into_bytes(), None)
+                .expect("stage workload put");
+        }
+        tx.commit(cntryl_midge::WriteOptions::sync())
+            .expect("commit workload mutation");
+    }
 }
 
 #[test]

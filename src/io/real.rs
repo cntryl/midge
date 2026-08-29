@@ -382,6 +382,12 @@ impl File for RealFile {
         }
     }
 
+    fn truncate(&mut self, len: u64) -> FsResult<()> {
+        self.file
+            .set_len(len)
+            .map_err(|error| FsError::Io(format!("truncate len={len}: {error}")))
+    }
+
     fn append(&mut self, data: bytes::Bytes) -> FsResult<u64> {
         // Keep as cursor-based: append implies a shared logical end anyway.
         use std::io::{Seek, SeekFrom, Write};

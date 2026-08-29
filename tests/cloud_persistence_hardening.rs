@@ -3,14 +3,51 @@ mod common;
 use cntryl_midge::{
     Engine, EngineHealth, MidgeError, OpenOptions, RecoveryPolicy, TransactionMode, WriteOptions,
 };
-use common::{opts_for_mode, MidgeOptions, StorageMode};
+use common::{crash, opts_for_mode, MidgeOptions, StorageMode};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 static FAILPOINT_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+const CORRUPT_WAL_CHILD_TEST_NAME: &str =
+    "should_abort_in_child_process_when_remote_wal_corruption_scenario_requested";
+const CORRUPT_WAL_ENV_DB_PATH: &str = "MIDGE_CORRUPT_REMOTE_WAL_DB_PATH";
+const CORRUPT_WAL_SCENARIO: &str = "remote_wal_corruption_after_strict_ack";
+const CORRUPT_WAL_TRIGGER: &str = "manual::remote_wal_corruption_after_strict_ack";
+const TRUNCATED_PRIMARY_CATALOG: &[u8] = b"{\"format_version\":1";
+const TRUNCATED_MIRROR_CATALOG: &[u8] = b"{\"format_version\":1,\"fencing_epoch\":";
+
+#[test]
+fn should_abort_in_child_process_when_remote_wal_corruption_scenario_requested() {
+    // Arrange
+    let Some(db_path) = std::env::var_os(CORRUPT_WAL_ENV_DB_PATH) else {
+        return;
+    };
+    let engine = Engine::open(cloud_open_options(
+        Path::new(&db_path),
+        RecoveryPolicy::Strict,
+    ))
+    .expect("open cloud engine in crash child");
+    put_default(
+        &engine,
+        b"prefix-key",
+        b"prefix-value",
+        WriteOptions::cloud_strict(),
+    );
+    put_default(
+        &engine,
+        b"truncated-key",
+        b"truncated-value",
+        WriteOptions::cloud_strict(),
+    );
+
+    // Act
+    // Assert
+    crash::abort_at_trigger(CORRUPT_WAL_SCENARIO, CORRUPT_WAL_TRIGGER);
+}
 
 #[test]
 fn should_recover_cloud_strict_write_from_authoritative_remote_wal_after_local_cache_loss() {
@@ -42,6 +79,99 @@ fn should_recover_cloud_strict_write_from_authoritative_remote_wal_after_local_c
         Some(Bytes::from_static(b"strict-remote-value"))
     );
     shutdown_test_engine(reopened);
+}
+
+#[test]
+fn should_recover_from_valid_catalog_mirror_when_primary_catalog_has_torn_tail() {
+    // Arrange
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let opts = opts_for_mode("cloud");
+    let db_path = cloud_db_path(&opts);
+    let mut engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
+    put_default(
+        &engine,
+        b"catalog-mirror-key",
+        b"catalog-mirror-value",
+        WriteOptions::cloud_strict(),
+    );
+    engine
+        .shutdown(Duration::from_secs(5))
+        .expect("shutdown before damaging primary catalog");
+
+    let remote_wal_dir = db_path.join("cloud_store").join("wal");
+    let primary_catalog = remote_wal_dir.join("publication-catalog.v1.json");
+    let mirror_catalog = remote_wal_dir.join("publication-catalog.v1.mirror.json");
+    let valid_catalog = fs::read(&primary_catalog).expect("read valid primary WAL catalog");
+    assert_eq!(
+        fs::read(&mirror_catalog).expect("read valid WAL catalog mirror"),
+        valid_catalog,
+        "successful strict publication must converge the catalog mirror"
+    );
+    fs::write(
+        &primary_catalog,
+        &valid_catalog[..valid_catalog.len().saturating_sub(7)],
+    )
+    .expect("truncate primary WAL catalog tail");
+    reset_dir(&db_path.join("wal"));
+
+    // Act
+    let reopened = Engine::open(opts.to_open_options()).expect("recover through catalog mirror");
+
+    // Assert
+    assert_eq!(
+        get_default(&reopened, b"catalog-mirror-key"),
+        Some(Bytes::from_static(b"catalog-mirror-value"))
+    );
+    assert_eq!(
+        fs::read(&primary_catalog).expect("read repaired primary WAL catalog"),
+        fs::read(&mirror_catalog).expect("read converged WAL catalog mirror"),
+        "startup must repair and fence both catalog copies"
+    );
+    shutdown_test_engine(reopened);
+}
+
+#[test]
+fn should_fail_closed_when_both_cloud_wal_catalog_copies_are_invalid() {
+    // Arrange
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let opts = opts_for_mode("cloud");
+    let db_path = cloud_db_path(&opts);
+    let mut engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
+    put_default(
+        &engine,
+        b"doubly-corrupt-catalog-key",
+        b"must-not-be-ambiguously-recovered",
+        WriteOptions::cloud_strict(),
+    );
+    engine
+        .shutdown(Duration::from_secs(5))
+        .expect("shutdown before damaging catalog copies");
+
+    let remote_wal_dir = db_path.join("cloud_store").join("wal");
+    fs::write(
+        remote_wal_dir.join("publication-catalog.v1.json"),
+        TRUNCATED_PRIMARY_CATALOG,
+    )
+    .expect("damage primary WAL catalog");
+    fs::write(
+        remote_wal_dir.join("publication-catalog.v1.mirror.json"),
+        TRUNCATED_MIRROR_CATALOG,
+    )
+    .expect("damage WAL catalog mirror");
+    reset_dir(&db_path.join("wal"));
+
+    // Act
+    let error = expect_engine_open_error(opts.to_open_options());
+
+    // Assert
+    assert!(
+        matches!(&error, MidgeError::Corruption(message) if message.contains("both cloud WAL publication catalogs are invalid")),
+        "unexpected catalog corruption error: {error:?}"
+    );
 }
 
 #[test]
@@ -245,7 +375,7 @@ fn should_recover_delete_range_given_remote_wal_only_when_local_cache_is_lost() 
 
     // Act
     engine.flush_cf(&default_cf).expect("flush range tombstone");
-    let remote_segments = wait_for_remote_wal_count(&remote_wal_dir, 0);
+    let remote_segments = wait_for_remote_wal_count_at_least(&remote_wal_dir, 1);
     engine
         .shutdown(std::time::Duration::from_secs(5))
         .expect("shutdown before reopen");
@@ -255,8 +385,8 @@ fn should_recover_delete_range_given_remote_wal_only_when_local_cache_is_lost() 
 
     // Assert
     assert!(
-        remote_segments.is_empty(),
-        "remote WAL should be pruned after the range tombstone is covered by cloud SST"
+        !remote_segments.is_empty(),
+        "range tombstone WAL must be retained without an exact per-record SST coverage proof"
     );
     assert_eq!(get_default(&reopened, b"range-10"), None);
     assert_eq!(get_default(&reopened, b"range-15"), None);
@@ -563,23 +693,8 @@ fn should_salvage_valid_prefix_when_remote_wal_segment_is_corrupt() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let opts = opts_for_mode("cloud");
     let db_path = cloud_db_path(&opts);
-    let mut engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
-
-    put_default(
-        &engine,
-        b"prefix-key",
-        b"prefix-value",
-        WriteOptions::cloud_strict(),
-    );
-    put_default(
-        &engine,
-        b"truncated-key",
-        b"truncated-value",
-        WriteOptions::cloud_strict(),
-    );
-    engine
-        .shutdown(std::time::Duration::from_secs(5))
-        .expect("shutdown before reopen");
+    run_remote_wal_corruption_child(&db_path);
+    expire_crashed_process_lease(&db_path);
 
     let remote_wal_dir = db_path.join("cloud_store").join("wal");
     let corrupt_remote_wal = list_files_with_extension(&remote_wal_dir, "wal")
@@ -620,6 +735,48 @@ fn should_salvage_valid_prefix_when_remote_wal_segment_is_corrupt() {
         "salvage recovery must retain corrupt authoritative WAL byte-for-byte"
     );
     shutdown_test_engine(salvaged);
+}
+
+fn run_remote_wal_corruption_child(db_path: &Path) {
+    let current_exe = std::env::current_exe().expect("current test executable");
+    let mut command = Command::new(current_exe);
+    command
+        .arg("--exact")
+        .arg(CORRUPT_WAL_CHILD_TEST_NAME)
+        .arg("--nocapture")
+        .arg("--test-threads=1")
+        .env(CORRUPT_WAL_ENV_DB_PATH, db_path);
+    crash::run_child_expect_abort(
+        &mut command,
+        CORRUPT_WAL_SCENARIO,
+        CORRUPT_WAL_TRIGGER,
+        db_path,
+    );
+}
+
+fn expire_crashed_process_lease(db_path: &Path) {
+    let lease_path = db_path.join("midge_primary_lease.json");
+    if lease_path.exists() {
+        let mut content = fs::read_to_string(&lease_path).expect("read crashed lease record");
+        if content.contains("acquired_at: ") || content.contains("expires_at: ") {
+            content = content
+                .lines()
+                .map(|line| {
+                    if line.starts_with("acquired_at: ") {
+                        "acquired_at: 1970-01-01T00:00:00Z".to_string()
+                    } else if line.starts_with("expires_at: ") {
+                        "expires_at: 1970-01-01T00:00:00Z".to_string()
+                    } else {
+                        line.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            content.push('\n');
+            fs::write(&lease_path, content).expect("expire crashed lease record");
+        }
+    }
+    crash::clear_crashed_process_acquisition_lock(db_path);
 }
 
 #[test]
@@ -929,4 +1086,11 @@ fn reset_dir(dir: &Path) {
 
 fn failpoint_test_lock() -> &'static Mutex<()> {
     FAILPOINT_TEST_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn expect_engine_open_error(options: OpenOptions) -> MidgeError {
+    match Engine::open(options) {
+        Ok(_) => panic!("engine open unexpectedly succeeded"),
+        Err(error) => error,
+    }
 }

@@ -218,6 +218,64 @@ fn should_keep_foreground_responsive_while_publication_is_blocked() {
 }
 
 #[test]
+fn should_preserve_followup_mutations_after_concurrent_flush_when_reopening() {
+    // Arrange
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let scenario = fail::FailScenario::setup();
+    fail::cfg("midge::flush_worker::before_build", "pause").expect("configure build pause");
+    let temp_dir = TempDir::new().expect("temp dir");
+    let options = OpenOptions::local(temp_dir.path())
+        .with_memtable_size_limit(512 * 1024)
+        .with_memtable_flush_threshold(128 * 1024)
+        .background_compaction(false)
+        .build()
+        .expect("build options");
+    let engine = Arc::new(Engine::open(options.clone()).expect("open engine"));
+    let cf = engine
+        .create_column_family("concurrent-followup")
+        .expect("create column family");
+    commit_sync_put(&engine, cf.id(), b"overwrite", b"old".to_vec());
+    commit_sync_put(&engine, cf.id(), b"deleted", b"old".to_vec());
+    commit_sync_put(&engine, cf.id(), b"rotation", vec![0xA5; 160 * 1024]);
+    wait_for_metrics(&engine, Duration::from_secs(2), |metrics| {
+        metrics.flush_inflight == 1 && metrics.immutable_memtables >= 1
+    });
+
+    // Act
+    commit_sync_put(&engine, cf.id(), b"overwrite", b"new".to_vec());
+    let mut delete = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .expect("begin delete transaction");
+    delete.delete(b"deleted".to_vec()).expect("stage delete");
+    delete
+        .commit(WriteOptions::sync())
+        .expect("commit followup delete");
+    fail::remove("midge::flush_worker::before_build");
+    engine.flush_cf(&cf).expect("flush followup memtable");
+    let mut engine = Arc::try_unwrap(engine).ok().expect("unique engine");
+    engine
+        .shutdown(Duration::from_secs(5))
+        .expect("shutdown before reopen");
+    scenario.teardown();
+    let reopened = Engine::open(options).expect("reopen engine");
+    let reopened_cf = reopened
+        .get_column_family("concurrent-followup")
+        .expect("reopen column family");
+    let read = reopened
+        .begin_tx(reopened_cf.id(), TransactionMode::ReadOnly)
+        .expect("begin recovery read");
+
+    // Assert
+    assert_eq!(
+        read.get(b"overwrite").expect("read overwrite"),
+        Some(Bytes::from_static(b"new"))
+    );
+    assert_eq!(read.get(b"deleted").expect("read delete"), None);
+}
+
+#[test]
 fn should_retry_retained_immutable_after_flush_worker_panics() {
     // Arrange
     let _guard = failpoint_test_lock()

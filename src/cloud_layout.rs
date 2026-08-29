@@ -13,6 +13,9 @@ impl CloudObjectLayout {
     pub const WAL_PREFIX: &'static str = "wal/";
     /// Lease-fenced authority document for remotely recoverable WAL segments.
     pub const WAL_CATALOG_OBJECT_KEY: &'static str = "wal/publication-catalog.v1.json";
+    /// Crash-recovery mirror of the WAL publication authority document.
+    pub const WAL_CATALOG_MIRROR_OBJECT_KEY: &'static str =
+        "wal/publication-catalog.v1.mirror.json";
     /// Immutable sorted-string tables in the data store.
     pub const SST_PREFIX: &'static str = "sst/";
     /// Mutable recovery metadata in the control store.
@@ -45,5 +48,14 @@ mod tests {
         // Assert
         assert!(distinct_prefixes);
         assert!(!CloudObjectLayout::LEASE_OBJECT_KEY.contains('/'));
+        assert!(
+            CloudObjectLayout::WAL_CATALOG_OBJECT_KEY.starts_with(CloudObjectLayout::WAL_PREFIX)
+        );
+        assert!(CloudObjectLayout::WAL_CATALOG_MIRROR_OBJECT_KEY
+            .starts_with(CloudObjectLayout::WAL_PREFIX));
+        assert_ne!(
+            CloudObjectLayout::WAL_CATALOG_OBJECT_KEY,
+            CloudObjectLayout::WAL_CATALOG_MIRROR_OBJECT_KEY
+        );
     }
 }

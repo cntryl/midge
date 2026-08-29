@@ -89,10 +89,19 @@ impl EventLoop {
     }
 
     pub(super) fn schedule_next_flush_worker(&mut self) {
-        if self.shutting_down
+        self.schedule_next_flush_worker_with_shutdown(false);
+    }
+
+    pub(super) fn schedule_next_flush_worker_during_shutdown(&mut self) {
+        self.schedule_next_flush_worker_with_shutdown(true);
+    }
+
+    fn schedule_next_flush_worker_with_shutdown(&mut self, allow_during_shutdown: bool) {
+        if (self.shutting_down && !allow_during_shutdown)
             || self.state.is_memory_mode()
             || self.flush_actor.is_inflight()
             || self.publication_gate.active
+            || (!allow_during_shutdown && self.pending_msg.is_some())
         {
             return;
         }
@@ -520,18 +529,15 @@ impl EventLoop {
                     continue;
                 }
             };
-            if !crate::runtime::hybrid_persistence::wal_data_records_covered_by_manifest(
-                &readback.data_records,
-                &self.state.manifest,
-            ) {
+            if !self.local_wal_records_exactly_covered(&readback.data_records) {
                 continue;
             }
             match std::fs::remove_file(&path) {
-                Ok(()) => tracing::debug!(segment_id, "removed manifest-covered local WAL segment"),
+                Ok(()) => tracing::debug!(segment_id, "removed exactly covered local WAL segment"),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
                     self.state.mark_persistence_anomaly();
-                    tracing::warn!(segment_id, %error, "failed to remove manifest-covered local WAL segment");
+                    tracing::warn!(segment_id, %error, "failed to remove exactly covered local WAL segment");
                 }
             }
         }
@@ -543,6 +549,17 @@ impl EventLoop {
             self.state.mark_persistence_anomaly();
             tracing::warn!(%error, "failed to sync local WAL directory after pruning");
         }
+    }
+
+    fn local_wal_records_exactly_covered(
+        &self,
+        records: &[crate::wal::cloud_segment::DataCoverageRecord],
+    ) -> bool {
+        crate::runtime::hybrid_persistence::VerifiedManifestWalCoverage::open(
+            &self.state.sst_dir,
+            &self.state.manifest,
+        )
+        .exactly_covers_data_records(records)
     }
 
     fn validate_runtime_lease_for_wal_prune(&self) -> crate::common::MidgeResult<()> {
@@ -797,6 +814,44 @@ mod tests {
             None,
         )?;
         Ok((event_loop, hybrid))
+    }
+
+    #[test]
+    fn should_yield_flush_publication_turn_to_restored_deferred_request(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let directory = tempfile::tempdir()?;
+        let (mut event_loop, _hybrid) = event_loop_with_hybrid_storage(&directory)?;
+        event_loop.state.sequence = 1;
+        event_loop
+            .state
+            .get_cf(0)
+            .expect("default column family")
+            .memtable
+            .put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)?;
+        event_loop
+            .freeze_active_memtable(0)?
+            .expect("freeze non-empty memtable");
+        event_loop.pending_msg = Some(crate::runtime::RuntimeMsg::CompactAll { request_id: 71 });
+
+        let request_id = 71;
+        let response = event_loop.router.register(request_id, "CompactAll");
+        let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
+        let restored = event_loop.pending_msg.take().expect("restored request");
+
+        // Act
+        event_loop.process_restored_one(restored, &msg_rx);
+
+        // Assert
+        assert!(
+            !event_loop.flush_actor.is_inflight(),
+            "a restored control request must run before the next flush takes the publication gate"
+        );
+        assert!(matches!(
+            response.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(crate::runtime::RuntimeResponse::Ok { request_id: 71 })
+        ));
+        Ok(())
     }
 
     #[test]

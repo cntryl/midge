@@ -128,7 +128,7 @@ fn should_release_primary_lease_given_shutdown_timeout_when_shutdown_completes()
     );
     fail::remove(BLOCKED_UPLOAD_FAILPOINT);
     scenario.teardown();
-    let mut reopened = Engine::open(cloud_options(&db_path, Arc::clone(&lease_loss_calls)))
+    let mut reopened = Engine::open(reopen_options(&db_path, Arc::clone(&lease_loss_calls)))
         .expect("reopen only after blocked runtime has exited");
     let default_cf = reopened
         .get_column_family("default")
@@ -150,6 +150,18 @@ fn should_release_primary_lease_given_shutdown_timeout_when_shutdown_completes()
 }
 
 fn cloud_options(db_path: &Path, lease_loss_calls: Arc<AtomicUsize>) -> cntryl_midge::OpenOptions {
+    cloud_options_with_drain_timeout(db_path, lease_loss_calls, Duration::from_millis(100))
+}
+
+fn reopen_options(db_path: &Path, lease_loss_calls: Arc<AtomicUsize>) -> cntryl_midge::OpenOptions {
+    cloud_options_with_drain_timeout(db_path, lease_loss_calls, Duration::from_secs(5))
+}
+
+fn cloud_options_with_drain_timeout(
+    db_path: &Path,
+    lease_loss_calls: Arc<AtomicUsize>,
+    shutdown_cloud_drain_timeout: Duration,
+) -> cntryl_midge::OpenOptions {
     OpenOptions::cloud_simulated(db_path, "shutdown-bucket", "shutdown/")
         .background_compaction(false)
         .cloud_write_policy(CloudWritePolicy {
@@ -158,7 +170,7 @@ fn cloud_options(db_path: &Path, lease_loss_calls: Arc<AtomicUsize>) -> cntryl_m
             wal_seal_max_flush_delay: Duration::from_mins(1),
             wal_seal_max_pending_writes: 1,
         })
-        .shutdown_cloud_drain_timeout_for_testing(Duration::from_millis(100))
+        .shutdown_cloud_drain_timeout_for_testing(shutdown_cloud_drain_timeout)
         .on_lease_loss(move || {
             lease_loss_calls.fetch_add(1, Ordering::SeqCst);
         })

@@ -149,6 +149,21 @@ pub trait File: Send {
     /// filesystem or storage backend.
     fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()>;
 
+    /// Truncate the file to an exact length.
+    ///
+    /// Writers use this to roll back a positional append that may have written
+    /// a partial durability frame before returning an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the backing file cannot be truncated or does not
+    /// support truncation.
+    fn truncate(&mut self, len: u64) -> FsResult<()> {
+        Err(FsError::Unsupported(format!(
+            "file handle does not support truncation to {len} bytes"
+        )))
+    }
+
     /// Append to end of file, return starting offset
     ///
     /// # Errors

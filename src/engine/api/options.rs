@@ -160,6 +160,7 @@ pub struct OpenOptions {
     runtime_response_timeout: Duration,
     wal: crate::wal::WalBatchingConfig,
     lease_loss_hook: Option<LeaseLossHook>,
+    lease_ttl: Duration,
     lease_clock_skew_tolerance: Duration,
     ttl_clock: crate::common::time::ClockHandle,
 }
@@ -184,6 +185,7 @@ pub struct OpenOptionsBuilder {
     runtime_response_timeout: Option<Duration>,
     wal: crate::wal::WalBatchingConfig,
     lease_loss_hook: Option<LeaseLossHook>,
+    lease_ttl: Duration,
     lease_clock_skew_tolerance: Duration,
     ttl_clock: crate::common::time::ClockHandle,
 }
@@ -418,6 +420,10 @@ impl OpenOptions {
         self.lease_clock_skew_tolerance
     }
 
+    pub(crate) fn lease_ttl(&self) -> Duration {
+        self.lease_ttl
+    }
+
     pub(crate) fn ttl_clock(&self) -> Arc<crate::common::time::ObservedClock> {
         Arc::clone(&self.ttl_clock.0)
     }
@@ -445,6 +451,7 @@ impl OpenOptionsBuilder {
             runtime_response_timeout: None,
             wal: crate::wal::WalBatchingConfig::new(0, None),
             lease_loss_hook: None,
+            lease_ttl: Duration::from_secs(30),
             // Half a lease TTL tolerates ordinary NTP/VM clock correction while
             // bounding additional failover latency.
             lease_clock_skew_tolerance: Duration::from_secs(15),
@@ -563,10 +570,17 @@ impl OpenOptionsBuilder {
     }
 
     /// Set the wall-clock skew allowance used before a persisted lease may be
-    /// taken over. Values are bounded to one 30-second lease TTL.
+    /// taken over. Values are bounded by the configured lease TTL.
     #[must_use]
     pub fn lease_clock_skew_tolerance(mut self, tolerance: Duration) -> Self {
         self.lease_clock_skew_tolerance = tolerance;
+        self
+    }
+
+    /// Set the primary lease TTL used by local and cloud coordination.
+    #[must_use]
+    pub fn lease_ttl(mut self, ttl: Duration) -> Self {
+        self.lease_ttl = ttl;
         self
     }
 
@@ -631,9 +645,14 @@ impl OpenOptionsBuilder {
                 "cloud shutdown drain timeout must be greater than zero".to_string(),
             ));
         }
-        if self.lease_clock_skew_tolerance > Duration::from_secs(30) {
+        if self.lease_ttl.is_zero() {
             return Err(MidgeError::InvalidArgument(
-                "lease clock-skew tolerance must not exceed the 30-second lease TTL".to_string(),
+                "lease TTL must be greater than zero".to_string(),
+            ));
+        }
+        if self.lease_clock_skew_tolerance > self.lease_ttl {
+            return Err(MidgeError::InvalidArgument(
+                "lease clock-skew tolerance must not exceed the lease TTL".to_string(),
             ));
         }
         self.cloud.policy.validate()?;
@@ -688,6 +707,7 @@ impl OpenOptionsBuilder {
             runtime_response_timeout,
             wal: crate::wal::WalBatchingConfig::new(wal_buffer_size, self.wal.batch),
             lease_loss_hook: self.lease_loss_hook,
+            lease_ttl: self.lease_ttl,
             lease_clock_skew_tolerance: self.lease_clock_skew_tolerance,
             ttl_clock: self.ttl_clock,
         })

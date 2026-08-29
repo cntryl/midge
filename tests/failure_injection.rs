@@ -287,6 +287,101 @@ fn should_reject_transaction_when_no_space_hits_before_batch_append_and_remain_u
 }
 
 #[test]
+fn should_preserve_acknowledged_state_when_no_space_tears_wal_frame() {
+    // Arrange
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
+    let mut engine = open_local_engine(db_path);
+    let cf = default_cf(&engine);
+    write_cf_value(&engine, &cf, b"stream-record", b"original-stream-bytes");
+    write_cf_value(&engine, &cf, b"queue-record-a", b"queue-a");
+    write_cf_value(&engine, &cf, b"queue-record-b", b"queue-b");
+    let wal_path = db_path.join("wal").join("wal.log");
+    let wal_len_before_failure = std::fs::metadata(&wal_path)
+        .expect("WAL metadata before partial write")
+        .len();
+    let scenario = fail::FailScenario::setup();
+    fail::cfg("midge::wal::partial_write_then_no_space", "return")
+        .expect("configure partial WAL no-space failpoint");
+
+    // Act
+    let mut failed = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .expect("begin failed mutation");
+    failed
+        .put(
+            b"stream-record".to_vec(),
+            b"corrupt-replacement".to_vec(),
+            None,
+        )
+        .expect("stage failed overwrite");
+    failed
+        .delete(b"queue-record-a".to_vec())
+        .expect("stage failed delete");
+    failed
+        .put(b"failed-new".to_vec(), b"must-not-appear".to_vec(), None)
+        .expect("stage failed insertion");
+    let failed_result = failed.commit(WriteOptions::sync());
+    let wal_len_after_failure = std::fs::metadata(&wal_path)
+        .expect("WAL metadata after partial write")
+        .len();
+    fail::remove("midge::wal::partial_write_then_no_space");
+    scenario.teardown();
+
+    let health_after_failure = engine
+        .get_runtime_metrics()
+        .expect("runtime metrics after ambiguous WAL failure")
+        .health;
+    let mut followup = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .expect("begin followup mutation");
+    followup
+        .put(b"followup".to_vec(), b"must-be-fenced".to_vec(), None)
+        .expect("stage followup mutation");
+    let followup_result = followup.commit(WriteOptions::sync());
+
+    // Assert
+    assert_no_space_like(&failed_result.expect_err("partial WAL write must fail"));
+    assert_eq!(
+        wal_len_after_failure, wal_len_before_failure,
+        "failed positional WAL append must roll back its physical partial tail"
+    );
+    assert_eq!(health_after_failure, EngineHealth::Degraded);
+    assert!(matches!(followup_result, Err(MidgeError::Fenced(_))));
+    assert_acknowledged_exhaustion_fixture(&engine, &cf);
+    assert_absent(&engine, &cf, b"failed-new");
+    assert_absent(&engine, &cf, b"followup");
+
+    let _ = engine.shutdown(std::time::Duration::from_secs(5));
+    let reopened = open_local_engine(db_path);
+    let reopened_cf = default_cf(&reopened);
+    assert_acknowledged_exhaustion_fixture(&reopened, &reopened_cf);
+    assert_absent(&reopened, &reopened_cf, b"failed-new");
+    assert_absent(&reopened, &reopened_cf, b"followup");
+    write_cf_value(
+        &reopened,
+        &reopened_cf,
+        b"post-recovery",
+        b"durable-after-tail-repair",
+    );
+    shutdown_engine(reopened);
+
+    let reopened_again = open_local_engine(db_path);
+    let reopened_again_cf = default_cf(&reopened_again);
+    assert_acknowledged_exhaustion_fixture(&reopened_again, &reopened_again_cf);
+    assert_visible(
+        &reopened_again,
+        &reopened_again_cf,
+        b"post-recovery",
+        b"durable-after-tail-repair",
+    );
+    assert_absent(&reopened_again, &reopened_again_cf, b"failed-new");
+}
+
+#[test]
 fn should_not_leak_partial_transaction_when_no_space_hits_before_commit_marker_append() {
     // Arrange
     let _guard = failpoint_test_lock()
@@ -2201,6 +2296,12 @@ fn assert_absent(engine: &Engine, cf: &cntryl_midge::ColumnFamilyHandle, key: &[
         "key {:?} must not become visible",
         String::from_utf8_lossy(key)
     );
+}
+
+fn assert_acknowledged_exhaustion_fixture(engine: &Engine, cf: &cntryl_midge::ColumnFamilyHandle) {
+    assert_visible(engine, cf, b"stream-record", b"original-stream-bytes");
+    assert_visible(engine, cf, b"queue-record-a", b"queue-a");
+    assert_visible(engine, cf, b"queue-record-b", b"queue-b");
 }
 
 fn assert_no_space_like(error: &MidgeError) {

@@ -7,6 +7,88 @@ use std::sync::{Arc, Mutex};
 
 static TEST_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+#[test]
+fn should_dispatch_compact_all_before_background_cloud_progress() {
+    // Arrange
+    let request = RuntimeMsg::CompactAll { request_id: 91 };
+
+    // Act
+    let progress_first = request.is_mutation();
+
+    // Assert
+    assert!(!progress_first);
+}
+
+#[test]
+fn should_drain_flush_completion_after_non_mutating_request() -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut event_loop = create_test_local_event_loop()?;
+    event_loop.state.sequence = 1;
+    event_loop
+        .state
+        .get_cf(0)
+        .expect("default column family")
+        .memtable
+        .put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)?;
+    event_loop.freeze_active_memtable(0)?;
+    event_loop.schedule_next_flush_worker();
+    let completion_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while event_loop.flush_worker_result_rx.is_empty()
+        && std::time::Instant::now() < completion_deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(!event_loop.flush_worker_result_rx.is_empty());
+    let request_id = 92;
+    let response = event_loop.router.register(request_id, "Noop");
+    let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
+
+    // Act
+    event_loop.process_one(RuntimeMsg::Noop { request_id }, &msg_rx);
+
+    // Assert
+    assert!(matches!(
+        response.recv_timeout(std::time::Duration::from_secs(1)),
+        Ok(RuntimeResponse::Ok { request_id: 92 })
+    ));
+    assert_eq!(event_loop.state.flush_metrics.build_count, 1);
+    Ok(())
+}
+
+#[test]
+fn should_retry_transient_flush_failure_during_shutdown_checkpoint(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut event_loop = create_test_local_event_loop()?;
+    event_loop.state.sequence = 1;
+    event_loop
+        .state
+        .get_cf(0)
+        .expect("default column family")
+        .memtable
+        .put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)?;
+    let flush_id = event_loop
+        .freeze_active_memtable(0)?
+        .expect("freeze non-empty memtable");
+    event_loop
+        .state
+        .mark_immutable_flush_failed(flush_id)
+        .expect("retain failed immutable for retry");
+    let deadline = crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(2));
+
+    // Act
+    event_loop.drain_shutdown_flush_pipeline_within(&deadline)?;
+
+    // Assert
+    assert!(event_loop
+        .state
+        .get_cf(0)
+        .expect("default column family")
+        .immutable_flushes
+        .is_empty());
+    Ok(())
+}
+
 fn unique_test_db_path(prefix: &str) -> std::path::PathBuf {
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

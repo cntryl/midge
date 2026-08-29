@@ -1,8 +1,8 @@
 //! Remote object identity proofs and guarded deletion.
 
+use super::thread;
 use super::{
-    mpsc, thread, Arc, Duration, HybridStorage, JoinHandle, StorageBackend, StorageEvent,
-    StorageOutcome,
+    mpsc, Arc, Duration, HybridStorage, JoinHandle, StorageBackend, StorageEvent, StorageOutcome,
 };
 use crate::common::OperationDeadline;
 use crate::storage::StorageObjectMetadata;
@@ -70,9 +70,22 @@ impl GuardedObjectProof {
 
 pub(super) struct PruneWorkerRegistry {
     shutting_down: bool,
-    handles: Vec<JoinHandle<()>>,
+    handles: Vec<PruneWorker>,
     max_workers: usize,
     max_requests: usize,
+}
+
+struct PruneWorker {
+    handle: JoinHandle<()>,
+    requests: usize,
+}
+
+struct PreparedGuardedDelete {
+    request_id: u64,
+    cloud: Arc<dyn StorageBackend>,
+    target_guard: GuardedObjectProof,
+    target_key: String,
+    delete_headers: Vec<(String, String)>,
 }
 
 impl PruneWorkerRegistry {
@@ -281,6 +294,7 @@ impl HybridStorage {
 
     /// Conditionally replace or create a remote object and return a stable
     /// proof of the exact bytes that won the provider CAS.
+    #[cfg(test)]
     pub(crate) fn compare_exchange_remote_object(
         &self,
         key: &str,
@@ -385,18 +399,6 @@ impl HybridStorage {
         )
     }
 
-    fn verify_guarded_object_proof(
-        proof: &GuardedObjectProof,
-        callback_timeout: Duration,
-    ) -> Result<(), String> {
-        Self::verify_guarded_object_proof_within(
-            proof,
-            callback_timeout,
-            &OperationDeadline::unbounded(),
-        )
-        .map_err(|error| error.to_string())
-    }
-
     fn verify_guarded_object_proof_within(
         proof: &GuardedObjectProof,
         callback_timeout: Duration,
@@ -443,56 +445,66 @@ impl HybridStorage {
         )))
     }
 
-    /// Revalidate a pending delete target and every semantic dependency before
-    /// the runtime retires an authority reference to that target.
-    pub(crate) fn verify_remote_delete_guards_within(
+    /// Revalidate every delete target and shared semantic dependency once.
+    /// The runtime can then retire a bounded set of catalog entries with one
+    /// compare-exchange without multiplying the same SST/metadata proofs by
+    /// the number of WAL segments in that set.
+    pub(crate) fn verify_remote_delete_batch_guards_within(
         &self,
-        target: &RemoteObjectProof,
+        targets: &[RemoteObjectProof],
         dependencies: &[GuardedObjectProof],
         deadline: &OperationDeadline,
     ) -> crate::common::MidgeResult<()> {
-        let target_guard = self.remote_identity_guard(target);
-        Self::verify_guarded_object_proof_within(&target_guard, self.callback_timeout, deadline)?;
+        for target in targets {
+            let target_guard = self.remote_identity_guard(target);
+            Self::verify_guarded_object_proof_within(
+                &target_guard,
+                self.callback_timeout,
+                deadline,
+            )?;
+        }
         for dependency in dependencies {
             Self::verify_guarded_object_proof_within(dependency, self.callback_timeout, deadline)?;
         }
         Ok(())
     }
 
-    /// Conditionally delete a remote object after revalidating format-neutral
-    /// dependency identities. The runtime must first establish all semantic
-    /// coverage relationships and supply the resulting proofs.
-    pub(crate) fn delete_remote_object_guarded(
+    fn prepare_guarded_deletes(
         &self,
-        request_id: u64,
-        target: RemoteObjectProof,
-        dependencies: Vec<GuardedObjectProof>,
+        targets: Vec<(u64, RemoteObjectProof)>,
+    ) -> Result<Vec<PreparedGuardedDelete>, String> {
+        targets
+            .into_iter()
+            .map(|(request_id, target)| {
+                let delete_headers = crate::storage::cloud::object_match_precondition_headers(
+                    &target.metadata.etag,
+                    target.metadata.generation.as_deref(),
+                )
+                .ok_or_else(|| {
+                    format!(
+                        "cannot conditionally delete remote object '{}' without an identity token",
+                        target.key
+                    )
+                })?;
+                Ok(PreparedGuardedDelete {
+                    request_id,
+                    cloud: Arc::clone(self.cloud_backend_for_key(&target.key)),
+                    target_guard: self.remote_identity_guard(&target),
+                    target_key: target.key,
+                    delete_headers,
+                })
+            })
+            .collect()
+    }
+
+    fn ensure_guarded_delete_capacity(
+        &self,
+        workers: &PruneWorkerRegistry,
+        request_count: usize,
     ) -> Result<(), String> {
-        self.reap_finished_prune_workers();
-
-        let delete_headers = crate::storage::cloud::object_match_precondition_headers(
-            &target.metadata.etag,
-            target.metadata.generation.as_deref(),
-        )
-        .ok_or_else(|| {
-            format!(
-                "cannot conditionally delete remote object '{}' without an identity token",
-                target.key
-            )
-        })?;
-
-        let cloud = Arc::clone(self.cloud_backend_for_key(&target.key));
-        let target_guard = self.remote_identity_guard(&target);
-        let target_key = target.key;
-        let event_queue = Arc::clone(&self.event_queue);
-        let external_event_tx = self.external_event_tx.clone();
-        let callback_timeout = self.callback_timeout;
-
-        let mut workers = self.prune_workers.lock();
         if workers.shutting_down {
             return Err("hybrid storage is shutting down; guarded delete rejected".to_string());
         }
-        let pending_completions = self.event_queue.lock().pending_prune_completions();
         if workers.handles.len() >= workers.max_workers {
             return Err(format!(
                 "guarded delete workers at capacity: running={}/{}",
@@ -500,51 +512,131 @@ impl HybridStorage {
                 workers.max_workers
             ));
         }
-        if workers.handles.len().saturating_add(pending_completions) >= workers.max_requests {
+
+        let pending_completions = self.event_queue.lock().pending_prune_completions();
+        let active_requests = workers
+            .handles
+            .iter()
+            .map(|worker| worker.requests)
+            .sum::<usize>();
+        if active_requests
+            .saturating_add(pending_completions)
+            .saturating_add(request_count)
+            > workers.max_requests
+        {
             return Err(format!(
                 "guarded delete completion queue at capacity: outstanding={}/{}",
-                workers.handles.len().saturating_add(pending_completions),
+                active_requests.saturating_add(pending_completions),
                 workers.max_requests
             ));
         }
+        Ok(())
+    }
+
+    /// Schedule physical cleanup after the runtime has verified every semantic
+    /// dependency and retired the object's catalog authority. Dependency proofs
+    /// make that ordering explicit but are not re-read after the authority
+    /// switch; only the target's conditional identity still matters then.
+    #[cfg(test)]
+    pub(crate) fn delete_remote_object_guarded(
+        &self,
+        request_id: u64,
+        target: RemoteObjectProof,
+    ) -> Result<(), String> {
+        self.delete_remote_objects_guarded(vec![(request_id, target)])
+    }
+
+    pub(crate) fn delete_remote_objects_guarded(
+        &self,
+        targets: Vec<(u64, RemoteObjectProof)>,
+    ) -> Result<(), String> {
+        if targets.is_empty() {
+            return Ok(());
+        }
+        self.reap_finished_prune_workers();
+
+        let prepared = self.prepare_guarded_deletes(targets)?;
+        let request_count = prepared.len();
+        let first_request_id = prepared.first().map_or(0, |entry| entry.request_id);
+        let last_request_id = prepared.last().map_or(0, |entry| entry.request_id);
+        let event_queue = Arc::clone(&self.event_queue);
+        let external_event_tx = self.external_event_tx.clone();
+        let callback_timeout = self.callback_timeout;
+
+        let mut workers = self.prune_workers.lock();
+        self.ensure_guarded_delete_capacity(&workers, request_count)?;
 
         let worker = thread::Builder::new()
-            .name(format!("midge-object-pruner-{request_id}"))
+            .name(format!(
+                "midge-object-pruner-{first_request_id}-{last_request_id}"
+            ))
             .spawn(move || {
-                let result = (|| {
-                    Self::verify_guarded_object_proof(&target_guard, callback_timeout)?;
-                    for dependency in &dependencies {
-                        Self::verify_guarded_object_proof(dependency, callback_timeout)?;
-                    }
+                // Catalog retirement already established and atomically
+                // published every semantic coverage dependency. Re-reading
+                // mutable manifest metadata here would race the next valid
+                // publication without adding safety. Physical cleanup only
+                // needs the retired target's conditional provider identity.
+                let deadline = OperationDeadline::from_budget(callback_timeout);
 
-                    let (tx, rx) = std::sync::mpsc::channel();
-                    cloud.submit_delete_with_headers(&target_key, delete_headers, tx);
-                    match rx.recv_timeout(callback_timeout) {
-                        Ok(StorageEvent::DeleteComplete { result, .. }) => match result {
-                            StorageOutcome::Ok(()) => Ok(()),
-                            StorageOutcome::Err(error) => Err(error),
-                        },
-                        Ok(other) => Err(format!(
-                            "unexpected guarded delete response for '{target_key}': {other:?}"
-                        )),
-                        Err(error) => Err(format!(
-                            "guarded delete timed out for '{target_key}': {error}"
-                        )),
-                    }
-                })();
+                for PreparedGuardedDelete {
+                    request_id,
+                    cloud,
+                    target_guard,
+                    target_key,
+                    delete_headers,
+                } in prepared
+                {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        Self::verify_guarded_object_proof_within(
+                            &target_guard,
+                            callback_timeout,
+                            &deadline,
+                        )
+                        .map_err(|error| error.to_string())?;
 
-                let result = match result {
-                    Ok(()) => StorageOutcome::Ok(()),
-                    Err(error) => StorageOutcome::Err(error),
-                };
-                let event = StorageEvent::CloudWalPruneComplete {
-                    segment_id: request_id,
-                    result,
-                };
-                Self::queue_storage_event(&event_queue, external_event_tx.as_ref(), event);
+                        let timeout = Self::deadline_timeout(
+                            &target_key,
+                            "conditional DELETE",
+                            callback_timeout,
+                            &deadline,
+                        )
+                        .map_err(|error| error.to_string())?;
+
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        cloud.submit_delete_with_headers(&target_key, delete_headers, tx);
+                        match rx.recv_timeout(timeout) {
+                            Ok(StorageEvent::DeleteComplete { result, .. }) => match result {
+                                StorageOutcome::Ok(()) => Ok(()),
+                                StorageOutcome::Err(error) => Err(error),
+                            },
+                            Ok(other) => Err(format!(
+                                "unexpected guarded delete response for '{target_key}': {other:?}"
+                            )),
+                            Err(error) => Err(format!(
+                                "guarded delete timed out for '{target_key}': {error}"
+                            )),
+                        }
+                    }));
+
+                    let result = match result {
+                        Ok(Ok(())) => StorageOutcome::Ok(()),
+                        Ok(Err(error)) => StorageOutcome::Err(error),
+                        Err(_) => StorageOutcome::Err(format!(
+                            "guarded delete worker panicked for '{target_key}'"
+                        )),
+                    };
+                    let event = StorageEvent::CloudWalPruneComplete {
+                        segment_id: request_id,
+                        result,
+                    };
+                    Self::queue_storage_event(&event_queue, external_event_tx.as_ref(), event);
+                }
             })
             .map_err(|error| format!("failed to spawn guarded delete worker: {error}"))?;
-        workers.handles.push(worker);
+        workers.handles.push(PruneWorker {
+            handle: worker,
+            requests: request_count,
+        });
         Ok(())
     }
 
@@ -556,18 +648,33 @@ impl HybridStorage {
         &self,
         target: RemoteObjectProof,
     ) -> Result<(), String> {
+        self.delete_remote_object_guarded_blocking_within(target, &OperationDeadline::unbounded())
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn delete_remote_object_guarded_blocking_within(
+        &self,
+        target: RemoteObjectProof,
+        deadline: &OperationDeadline,
+    ) -> crate::common::MidgeResult<()> {
         let delete_headers = crate::storage::cloud::object_match_precondition_headers(
             &target.metadata.etag,
             target.metadata.generation.as_deref(),
         )
         .ok_or_else(|| {
-            format!(
+            crate::common::MidgeError::Internal(format!(
                 "cannot conditionally delete remote object '{}' without an identity token",
                 target.key
-            )
+            ))
         })?;
         let cloud = Arc::clone(self.cloud_backend_for_key(&target.key));
         let target_key = target.key;
+        let timeout = Self::deadline_timeout(
+            &target_key,
+            "conditional DELETE",
+            self.callback_timeout,
+            deadline,
+        )?;
 
         // This deterministic boundary proves the provider condition, rather
         // than a preceding HEAD, closes the proof/delete race.
@@ -575,17 +682,22 @@ impl HybridStorage {
 
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_delete_with_headers(&target_key, delete_headers, tx);
-        match rx.recv_timeout(self.callback_timeout) {
+        match rx.recv_timeout(timeout) {
             Ok(StorageEvent::DeleteComplete { result, .. }) => match result {
                 StorageOutcome::Ok(()) => Ok(()),
-                StorageOutcome::Err(error) => Err(error),
+                StorageOutcome::Err(error) => Err(Self::proof_round_trip_error(
+                    &target_key,
+                    "conditional DELETE",
+                    error,
+                    deadline,
+                )),
             },
-            Ok(other) => Err(format!(
+            Ok(other) => Err(crate::common::MidgeError::Internal(format!(
                 "unexpected guarded delete response for '{target_key}': {other:?}"
-            )),
-            Err(error) => Err(format!(
+            ))),
+            Err(error) => Err(crate::common::MidgeError::Timeout(format!(
                 "guarded delete timed out for '{target_key}': {error}"
-            )),
+            ))),
         }
     }
 
@@ -601,7 +713,7 @@ impl HybridStorage {
         };
 
         for worker in handles {
-            if let Ok(()) = worker.join() {
+            if let Ok(()) = worker.handle.join() {
                 tracing::debug!("cloud WAL prune worker joined");
             } else {
                 tracing::warn!("cloud WAL prune worker panicked during join");
@@ -613,8 +725,8 @@ impl HybridStorage {
         let mut workers = self.prune_workers.lock();
         let mut still_running = Vec::new();
         for worker in std::mem::take(&mut workers.handles) {
-            if worker.is_finished() {
-                if let Ok(()) = worker.join() {
+            if worker.handle.is_finished() {
+                if let Ok(()) = worker.handle.join() {
                     tracing::debug!("cloud WAL prune worker completed");
                 } else {
                     tracing::warn!("cloud WAL prune worker panicked");

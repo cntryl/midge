@@ -15,7 +15,7 @@
 
 use bytes::Bytes;
 mod common;
-use cntryl_midge::{TransactionMode, WriteOptions};
+use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
 use common::*;
 
 // ============================================================================
@@ -232,6 +232,90 @@ fn should_apply_wal_tombstone_when_reopening_after_clean_shutdown() {
             assert_eq!(tx.get(b"key").expect("get"), None, "mode: {mode}");
         }
     });
+}
+
+#[test]
+fn should_not_resurrect_manifest_covered_value_from_retained_wal_after_tombstone_gc() {
+    // Arrange
+    let directory = tempfile::tempdir().expect("create database directory");
+    let options = || {
+        OpenOptions::local(directory.path())
+            .build()
+            .expect("build local options")
+    };
+    let mut engine = Engine::open(options()).expect("open database");
+    let cf = engine
+        .get_column_family("default")
+        .expect("default column family");
+    let mut seed = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .expect("begin seed transaction");
+    seed.put(b"a-anchor".to_vec(), b"a".to_vec(), None)
+        .expect("put lower anchor");
+    seed.put(b"target".to_vec(), b"stale".to_vec(), None)
+        .expect("put target");
+    seed.put(b"z-anchor".to_vec(), b"z".to_vec(), None)
+        .expect("put upper anchor");
+    seed.commit(WriteOptions::sync()).expect("commit seed");
+    let retained_wal =
+        std::fs::read(directory.path().join("wal/wal.log")).expect("capture retained WAL bytes");
+    engine.flush_cf(&cf).expect("flush seed values");
+
+    let mut delete = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .expect("begin delete transaction");
+    delete.delete(b"target".to_vec()).expect("delete target");
+    delete
+        .commit(WriteOptions::sync())
+        .expect("commit durable delete");
+    engine.flush_cf(&cf).expect("flush delete tombstone");
+    for index in 0..2 {
+        let mut filler = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin filler transaction");
+        filler
+            .put(
+                format!("m-filler-{index}").into_bytes(),
+                b"filler".to_vec(),
+                None,
+            )
+            .expect("put filler");
+        filler.commit(WriteOptions::sync()).expect("commit filler");
+        engine.flush_cf(&cf).expect("flush filler");
+    }
+    engine
+        .compact_all()
+        .expect("compact tombstone and old value");
+    let read = engine
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+        .expect("begin pre-reopen read");
+    assert_eq!(read.get(b"target").expect("read deleted target"), None);
+    drop(read);
+    engine
+        .shutdown(std::time::Duration::from_secs(5))
+        .expect("shutdown database");
+
+    // Act: model conservative WAL retention after an unrelated record prevents
+    // whole-segment pruning. The manifest already incorporates this old batch.
+    std::fs::write(
+        directory.path().join("wal/00000000000000000000.wal"),
+        retained_wal,
+    )
+    .expect("restore retained WAL segment");
+    let reopened = Engine::open(options()).expect("reopen database");
+    let cf = reopened
+        .get_column_family("default")
+        .expect("default column family after reopen");
+    let read = reopened
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+        .expect("begin post-reopen read");
+
+    // Assert
+    assert_eq!(
+        read.get(b"target").expect("read target after reopen"),
+        None,
+        "manifest-covered WAL history must not resurrect a compacted tombstone"
+    );
 }
 
 // ============================================================================

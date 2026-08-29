@@ -435,16 +435,115 @@ struct BlockingDeleteStorageBackend {
     release_delete: Arc<AtomicBool>,
 }
 
+struct PostRetirementDependencyChangeBackend {
+    inner: Arc<crate::storage::filesystem::FileSystem>,
+    armed: AtomicBool,
+    catalog_retired: AtomicBool,
+    post_retirement_sst_heads: AtomicUsize,
+}
+
+struct BlockedDeleteReleaseGuard(Arc<AtomicBool>);
+
+impl Drop for BlockedDeleteReleaseGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+impl PostRetirementDependencyChangeBackend {
+    fn new(inner: Arc<crate::storage::filesystem::FileSystem>) -> Self {
+        Self {
+            inner,
+            armed: AtomicBool::new(false),
+            catalog_retired: AtomicBool::new(false),
+            post_retirement_sst_heads: AtomicUsize::new(0),
+        }
+    }
+
+    fn arm(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+
+    fn post_retirement_sst_heads(&self) -> usize {
+        self.post_retirement_sst_heads.load(Ordering::SeqCst)
+    }
+}
+
+impl crate::storage::StorageBackend for PostRetirementDependencyChangeBackend {
+    fn submit_read(&self, key: &str, callback: crate::storage::StorageCallback) {
+        crate::storage::StorageBackend::submit_read(self.inner.as_ref(), key, callback);
+    }
+
+    fn submit_write(&self, key: &str, data: Vec<u8>, callback: crate::storage::StorageCallback) {
+        crate::storage::StorageBackend::submit_write(self.inner.as_ref(), key, data, callback);
+    }
+
+    fn submit_write_with_headers(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::StorageCallback,
+    ) {
+        if self.armed.load(Ordering::SeqCst) && key == crate::wal::cloud_catalog::OBJECT_KEY {
+            self.catalog_retired.store(true, Ordering::SeqCst);
+        }
+        crate::storage::StorageBackend::submit_write_with_headers(
+            self.inner.as_ref(),
+            key,
+            data,
+            headers,
+            callback,
+        );
+    }
+
+    fn submit_delete(&self, key: &str, callback: crate::storage::StorageCallback) {
+        crate::storage::StorageBackend::submit_delete(self.inner.as_ref(), key, callback);
+    }
+
+    fn submit_delete_with_headers(
+        &self,
+        key: &str,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::StorageBackend::submit_delete_with_headers(
+            self.inner.as_ref(),
+            key,
+            headers,
+            callback,
+        );
+    }
+
+    fn submit_list(&self, prefix: &str, callback: crate::storage::StorageCallback) {
+        crate::storage::StorageBackend::submit_list(self.inner.as_ref(), prefix, callback);
+    }
+
+    fn submit_head(&self, key: &str, callback: crate::storage::StorageCallback) {
+        if self.catalog_retired.load(Ordering::SeqCst) && key.starts_with("sst/") {
+            self.post_retirement_sst_heads
+                .fetch_add(1, Ordering::SeqCst);
+            let _ = callback.send(crate::storage::StorageEvent::HeadComplete {
+                key: key.to_string(),
+                result: crate::storage::StorageOutcome::Err(
+                    "injected post-retirement SST identity change".to_string(),
+                ),
+            });
+            return;
+        }
+        crate::storage::StorageBackend::submit_head(self.inner.as_ref(), key, callback);
+    }
+}
+
 struct ArmedDelayedHeadStorageBackend {
     inner: Arc<crate::storage::filesystem::FileSystem>,
     delay: Duration,
     delay_next_head: AtomicBool,
 }
 
-struct CommitThenBlockCatalogReadbackBackend {
+struct CommitThenBlockCatalogCasCallbackBackend {
     inner: Arc<crate::storage::filesystem::FileSystem>,
     arm_catalog_write: AtomicBool,
-    block_next_catalog_head: AtomicBool,
     retained_callbacks: Mutex<Vec<crate::storage::StorageCallback>>,
 }
 
@@ -491,12 +590,11 @@ impl BudgetConsumingDdlBackend {
     }
 }
 
-impl CommitThenBlockCatalogReadbackBackend {
+impl CommitThenBlockCatalogCasCallbackBackend {
     fn new(inner: Arc<crate::storage::filesystem::FileSystem>) -> Self {
         Self {
             inner,
             arm_catalog_write: AtomicBool::new(false),
-            block_next_catalog_head: AtomicBool::new(false),
             retained_callbacks: Mutex::new(Vec::new()),
         }
     }
@@ -582,7 +680,7 @@ impl crate::storage::StorageBackend for ArmedDelayedHeadStorageBackend {
     }
 }
 
-impl crate::storage::StorageBackend for CommitThenBlockCatalogReadbackBackend {
+impl crate::storage::StorageBackend for CommitThenBlockCatalogCasCallbackBackend {
     fn submit_read(&self, key: &str, callback: crate::storage::StorageCallback) {
         crate::storage::StorageBackend::submit_read(self.inner.as_ref(), key, callback);
     }
@@ -619,7 +717,11 @@ impl crate::storage::StorageBackend for CommitThenBlockCatalogReadbackBackend {
                     ..
                 }
             ) {
-                self.block_next_catalog_head.store(true, Ordering::SeqCst);
+                self.retained_callbacks
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(callback);
+                return;
             }
             let _ = callback.send(event);
             return;
@@ -657,15 +759,6 @@ impl crate::storage::StorageBackend for CommitThenBlockCatalogReadbackBackend {
     }
 
     fn submit_head(&self, key: &str, callback: crate::storage::StorageCallback) {
-        if key == crate::wal::cloud_catalog::OBJECT_KEY
-            && self.block_next_catalog_head.swap(false, Ordering::SeqCst)
-        {
-            self.retained_callbacks
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(callback);
-            return;
-        }
         crate::storage::StorageBackend::submit_head(self.inner.as_ref(), key, callback);
     }
 }
@@ -889,6 +982,20 @@ impl BlockingDeleteStorageBackend {
             release_delete,
         }
     }
+
+    fn block_matching_delete(&self, key: &str) {
+        if key != self.block_key {
+            return;
+        }
+        if let Ok(mut started) = self.delete_started.lock() {
+            if let Some(tx) = started.take() {
+                let _ = tx.send(());
+            }
+        }
+        while !self.release_delete.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
 }
 
 impl crate::storage::StorageBackend for BlockingDeleteStorageBackend {
@@ -917,17 +1024,7 @@ impl crate::storage::StorageBackend for BlockingDeleteStorageBackend {
     }
 
     fn submit_delete(&self, key: &str, callback: crate::storage::StorageCallback) {
-        if key == self.block_key {
-            if let Ok(mut started) = self.delete_started.lock() {
-                if let Some(tx) = started.take() {
-                    let _ = tx.send(());
-                }
-            }
-            while !self.release_delete.load(Ordering::SeqCst) {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-        }
-
+        self.block_matching_delete(key);
         crate::storage::StorageBackend::submit_delete(self.inner.as_ref(), key, callback);
     }
 
@@ -937,6 +1034,7 @@ impl crate::storage::StorageBackend for BlockingDeleteStorageBackend {
         headers: Vec<(String, String)>,
         callback: crate::storage::StorageCallback,
     ) {
+        self.block_matching_delete(key);
         crate::storage::StorageBackend::submit_delete_with_headers(
             self.inner.as_ref(),
             key,
@@ -974,6 +1072,11 @@ impl FailOnceDeleteStorageBackend {
     fn delete_attempts(&self) -> usize {
         self.delete_attempts.load(Ordering::SeqCst)
     }
+
+    fn should_fail_delete(&self, key: &str) -> bool {
+        self.delete_attempts.fetch_add(1, Ordering::SeqCst);
+        key == self.fail_key && !self.failed.swap(true, Ordering::SeqCst)
+    }
 }
 
 impl crate::storage::StorageBackend for FailOnceDeleteStorageBackend {
@@ -1002,8 +1105,7 @@ impl crate::storage::StorageBackend for FailOnceDeleteStorageBackend {
     }
 
     fn submit_delete(&self, key: &str, callback: crate::storage::StorageCallback) {
-        self.delete_attempts.fetch_add(1, Ordering::SeqCst);
-        if key == self.fail_key && !self.failed.swap(true, Ordering::SeqCst) {
+        if self.should_fail_delete(key) {
             let _ = callback.send(crate::storage::StorageEvent::DeleteComplete {
                 key: key.to_string(),
                 result: crate::storage::StorageOutcome::Err(
@@ -1022,6 +1124,16 @@ impl crate::storage::StorageBackend for FailOnceDeleteStorageBackend {
         headers: Vec<(String, String)>,
         callback: crate::storage::StorageCallback,
     ) {
+        if self.should_fail_delete(key) {
+            let _ = callback.send(crate::storage::StorageEvent::DeleteComplete {
+                key: key.to_string(),
+                result: crate::storage::StorageOutcome::Err(
+                    "injected first cloud WAL delete failure".to_string(),
+                ),
+            });
+            return;
+        }
+
         crate::storage::StorageBackend::submit_delete_with_headers(
             self.inner.as_ref(),
             key,
@@ -1287,6 +1399,59 @@ fn valid_sst_bytes_for_test(key: &[u8], value: &[u8], seq: u64) -> Vec<u8> {
     writer.finish_bytes().expect("finish test SST bytes")
 }
 
+fn valid_value_sst_bytes_with_expiration_for_test(
+    key: &[u8],
+    value: &[u8],
+    seq: u64,
+    expiration: u64,
+) -> Vec<u8> {
+    use crate::sst::SstFactory;
+
+    let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
+    let mut writer = factory.create().expect("create test SST writer");
+    writer
+        .add_with_meta(
+            key,
+            Some(value),
+            seq,
+            crate::wal::WalOpKind::Put.to_wire_format(),
+            Some(expiration),
+        )
+        .expect("add expiring test SST entry");
+    writer.finish_bytes().expect("finish test SST bytes")
+}
+
+fn valid_sst_bytes_without_key_for_test(seq: u64) -> Vec<u8> {
+    use crate::sst::SstFactory;
+
+    let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
+    let mut writer = factory.create().expect("create test SST writer");
+    writer
+        .add_with_meta(b"a", Some(b"first"), seq, 0, None)
+        .expect("add first test SST entry");
+    writer
+        .add_with_meta(b"z", Some(b"last"), seq, 0, None)
+        .expect("add last test SST entry");
+    writer.finish_bytes().expect("finish test SST bytes")
+}
+
+fn valid_point_tombstone_sst_bytes_for_test(key: &[u8], seq: u64) -> Vec<u8> {
+    use crate::sst::SstFactory;
+
+    let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
+    let mut writer = factory.create().expect("create test SST writer");
+    writer
+        .add_with_meta(
+            key,
+            None,
+            seq,
+            crate::wal::WalOpKind::Delete.to_wire_format(),
+            None,
+        )
+        .expect("add point tombstone test SST entry");
+    writer.finish_bytes().expect("finish test SST bytes")
+}
+
 fn valid_range_tombstone_sst_bytes_for_test(start: &[u8], end: &[u8], seq: u64) -> Vec<u8> {
     use crate::sst::SstFactory;
 
@@ -1316,6 +1481,54 @@ fn add_valid_manifest_sst_for_test(
         largest_key: Some(b"prune-candidate".to_vec()),
         smallest_seq: Some(max_sequence),
         largest_seq: Some(max_sequence),
+        ..Default::default()
+    });
+    write_test_file(remote_sst_path_for_test(el, sst_name), &bytes);
+    bytes
+}
+
+fn add_valid_value_manifest_sst_with_expiration_for_test(
+    el: &mut EventLoop,
+    sst_name: &str,
+    key: &[u8],
+    value: &[u8],
+    seq: u64,
+    expiration: u64,
+) -> Vec<u8> {
+    let bytes = valid_value_sst_bytes_with_expiration_for_test(key, value, seq, expiration);
+    el.state.manifest.files.push(crate::metadata::FileMeta {
+        name: sst_name.to_string(),
+        level: 0,
+        size_bytes: bytes.len() as u64,
+        content_crc32c: Some(crc32c::crc32c(&bytes)),
+        cf_id: 0,
+        smallest_key: Some(key.to_vec()),
+        largest_key: Some(key.to_vec()),
+        smallest_seq: Some(seq),
+        largest_seq: Some(seq),
+        ..Default::default()
+    });
+    write_test_file(remote_sst_path_for_test(el, sst_name), &bytes);
+    bytes
+}
+
+fn add_valid_point_tombstone_manifest_sst_for_test(
+    el: &mut EventLoop,
+    sst_name: &str,
+    key: &[u8],
+    seq: u64,
+) -> Vec<u8> {
+    let bytes = valid_point_tombstone_sst_bytes_for_test(key, seq);
+    el.state.manifest.files.push(crate::metadata::FileMeta {
+        name: sst_name.to_string(),
+        level: 0,
+        size_bytes: bytes.len() as u64,
+        content_crc32c: Some(crc32c::crc32c(&bytes)),
+        cf_id: 0,
+        smallest_key: Some(key.to_vec()),
+        largest_key: Some(key.to_vec()),
+        smallest_seq: Some(seq),
+        largest_seq: Some(seq),
         ..Default::default()
     });
     write_test_file(remote_sst_path_for_test(el, sst_name), &bytes);
@@ -2238,6 +2451,10 @@ fn should_retry_callerless_wal_prune_with_bounded_attempt_after_provider_recover
     );
     assert!(!el.cloud_wal.prune_inflight.contains(&segment_id));
 
+    // Restore a normal maintenance budget for the recovery attempt. The
+    // initial 100 ms budget is deliberately adversarial and can also expire
+    // under parallel test-runner load after the injected delay is gone.
+    el.runtime_response_timeout = Duration::from_secs(1);
     el.prune_cloud_wal_segments_covered_by_manifest();
     drain_prune_completion_for_test(&mut el);
     assert!(
@@ -2286,6 +2503,11 @@ fn should_keep_event_loop_responsive_when_cloud_metadata_proof_times_out(
         "metadata proof monopolized the event loop: {elapsed:?}"
     );
     drain_prune_completion_for_test(&mut el);
+    let attempt_elapsed = started.elapsed();
+    assert!(
+        attempt_elapsed < Duration::from_millis(750),
+        "metadata proof outlived the bounded prune attempt: {attempt_elapsed:?}"
+    );
     assert_eq!(
         el.cloud_wal.acked_segments.get(&segment_id),
         Some(&max_sequence),
@@ -2298,17 +2520,21 @@ fn should_keep_event_loop_responsive_when_cloud_metadata_proof_times_out(
 #[test]
 fn should_reconcile_wal_prune_when_catalog_retirement_commits_before_timeout(
 ) -> crate::common::MidgeResult<()> {
-    // Arrange: the provider commits the catalog retirement, then withholds the
-    // first readback HEAD until the maintenance deadline expires.
+    // Arrange: the provider commits the catalog retirement, then withholds its
+    // CAS callback until the maintenance deadline expires.
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.runtime_response_timeout = Duration::from_millis(100);
+    // Leave enough budget for manifest/SST proof collection under a fully
+    // parallel test run. The fixture itself deterministically withholds the
+    // committed CAS callback, so the ambiguity does not depend on racing the
+    // pre-CAS setup against an artificially tiny deadline.
+    el.runtime_response_timeout = Duration::from_secs(1);
     let cloud_fs = Arc::new(
         crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
             .expect("open ambiguous prune cloud backend"),
     );
-    let ambiguous_cloud = Arc::new(CommitThenBlockCatalogReadbackBackend::new(cloud_fs));
+    let ambiguous_cloud = Arc::new(CommitThenBlockCatalogCasCallbackBackend::new(cloud_fs));
     let local: Arc<dyn crate::storage::StorageBackend> = Arc::new(
         crate::storage::filesystem::FileSystem::new(el.state.db_path.join("hybrid_local"))
             .expect("open ambiguous prune local backend"),
@@ -2322,7 +2548,7 @@ fn should_reconcile_wal_prune_when_catalog_retirement_commits_before_timeout(
             Arc::clone(&ambiguous_backend),
             ambiguous_backend,
             storage_event_tx,
-            Duration::from_millis(100),
+            Duration::from_secs(1),
         ),
     ));
     el.hybrid_storage_events = Some(storage_event_rx);
@@ -3610,6 +3836,46 @@ fn should_not_prune_remote_wal_when_manifest_sst_metadata_does_not_match_actual_
 }
 
 #[test]
+fn should_not_prune_remote_wal_when_manifest_bounds_cover_absent_value(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let segment_id = 1;
+    let max_sequence = 10;
+    let sst_name = "bounds-with-gap.sst";
+    seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
+    el.state.wal.cloud_durable_seq = max_sequence;
+    let bytes = valid_sst_bytes_without_key_for_test(max_sequence);
+    el.state.manifest.files.push(crate::metadata::FileMeta {
+        name: sst_name.to_string(),
+        level: 0,
+        size_bytes: bytes.len() as u64,
+        content_crc32c: Some(crc32c::crc32c(&bytes)),
+        cf_id: 0,
+        smallest_key: Some(b"a".to_vec()),
+        largest_key: Some(b"z".to_vec()),
+        smallest_seq: Some(max_sequence),
+        largest_seq: Some(max_sequence),
+        ..Default::default()
+    });
+    write_test_file(remote_sst_path_for_test(&el, sst_name), &bytes);
+
+    // Act
+    el.prune_cloud_wal_segments_covered_by_manifest();
+    drain_prune_completion_for_test(&mut el);
+
+    // Assert
+    assert!(
+        remote_wal_path_for_test(&el, segment_id).exists(),
+        "manifest bounds must not substitute for exact WAL value coverage"
+    );
+    assert!(el.cloud_wal.acked_segments.contains_key(&segment_id));
+    Ok(())
+}
+
+#[test]
 fn should_not_prune_remote_wal_when_segment_max_sequence_exceeds_manifest_coverage(
 ) -> crate::common::MidgeResult<()> {
     // Arrange
@@ -3662,7 +3928,232 @@ fn should_prune_remote_wal_when_segment_max_sequence_equals_manifest_coverage(
 }
 
 #[test]
-fn should_prune_remote_wal_when_delete_range_record_is_manifest_covered(
+fn should_prune_remote_wal_when_insert_is_canonically_persisted_as_put(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let segment_id = 1;
+    let sequence = 10;
+    let insert = crate::wal::WalRecord::new(
+        crate::wal::WalOpKind::Insert,
+        Bytes::from_static(b"prune-candidate"),
+        Some(Bytes::from_static(b"value")),
+        sequence,
+        0,
+    );
+    seed_cloud_prune_candidate_with_records(&mut el, segment_id, sequence, vec![insert]);
+    el.state.wal.cloud_durable_seq = sequence;
+    add_valid_manifest_sst_for_test(&mut el, "insert-coverage.sst", sequence);
+
+    // Act
+    el.prune_cloud_wal_segments_covered_by_manifest();
+    drain_prune_completion_for_test(&mut el);
+
+    // Assert
+    assert!(
+        !remote_wal_path_for_test(&el, segment_id).exists(),
+        "a committed Insert is canonically persisted as the same Put value state"
+    );
+    assert!(!el.cloud_wal.acked_segments.contains_key(&segment_id));
+    Ok(())
+}
+
+#[test]
+fn should_prune_remote_wal_when_point_delete_is_exactly_covered_by_manifest_sst(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let segment_id = 1;
+    let max_sequence = 10;
+    let key = b"deleted-key";
+    let delete = crate::wal::WalRecord::new(
+        crate::wal::WalOpKind::Delete,
+        Bytes::copy_from_slice(key),
+        None,
+        max_sequence,
+        0,
+    );
+    seed_cloud_prune_candidate_with_records(&mut el, segment_id, max_sequence, vec![delete]);
+    el.state.wal.cloud_durable_seq = max_sequence;
+    add_valid_point_tombstone_manifest_sst_for_test(
+        &mut el,
+        "covered-delete.sst",
+        key,
+        max_sequence,
+    );
+
+    // Act
+    el.prune_cloud_wal_segments_covered_by_manifest();
+    drain_prune_completion_for_test(&mut el);
+
+    // Assert
+    assert!(
+        !remote_wal_path_for_test(&el, segment_id).exists(),
+        "an exact committed point tombstone should retire redundant WAL authority"
+    );
+    assert!(!el.cloud_wal.acked_segments.contains_key(&segment_id));
+    Ok(())
+}
+
+#[test]
+fn should_not_prune_remote_wal_when_point_delete_has_same_sequence_value(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let segment_id = 1;
+    let max_sequence = 10;
+    let key = b"prune-candidate";
+    let delete = crate::wal::WalRecord::new(
+        crate::wal::WalOpKind::Delete,
+        Bytes::copy_from_slice(key),
+        None,
+        max_sequence,
+        0,
+    );
+    seed_cloud_prune_candidate_with_records(&mut el, segment_id, max_sequence, vec![delete]);
+    el.state.wal.cloud_durable_seq = max_sequence;
+    add_valid_manifest_sst_for_test(&mut el, "same-sequence-value.sst", max_sequence);
+
+    // Act
+    el.prune_cloud_wal_segments_covered_by_manifest();
+    drain_prune_completion_for_test(&mut el);
+
+    // Assert
+    assert!(
+        remote_wal_path_for_test(&el, segment_id).exists(),
+        "a same-sequence value must not be accepted as proof of a point delete"
+    );
+    assert!(el.cloud_wal.acked_segments.contains_key(&segment_id));
+    Ok(())
+}
+
+#[test]
+fn should_not_prune_remote_wal_when_expired_value_masquerades_as_same_sequence_point_delete(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let segment_id = 1;
+    let sequence = 10;
+    let key = b"expired-value";
+    let expired_at = 1;
+    let delete = crate::wal::WalRecord::new(
+        crate::wal::WalOpKind::Delete,
+        Bytes::copy_from_slice(key),
+        None,
+        sequence,
+        0,
+    );
+    seed_cloud_prune_candidate_with_records(&mut el, segment_id, sequence, vec![delete]);
+    el.state.wal.cloud_durable_seq = sequence;
+    add_valid_value_manifest_sst_with_expiration_for_test(
+        &mut el,
+        "expired-value.sst",
+        key,
+        b"not-a-delete",
+        sequence,
+        expired_at,
+    );
+
+    // Act
+    el.prune_cloud_wal_segments_covered_by_manifest();
+    drain_prune_completion_for_test(&mut el);
+
+    // Assert
+    assert!(
+        remote_wal_path_for_test(&el, segment_id).exists(),
+        "an expired value must not masquerade as an exact point tombstone"
+    );
+    assert!(el.cloud_wal.acked_segments.contains_key(&segment_id));
+    Ok(())
+}
+
+#[test]
+fn should_prune_remote_wal_when_expired_value_is_exactly_covered_by_manifest_sst(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let segment_id = 1;
+    let sequence = 10;
+    let key = b"expired-value";
+    let value = b"durable-value";
+    let expired_at = 1;
+    let mut put = crate::wal::WalRecord::new(
+        crate::wal::WalOpKind::Put,
+        Bytes::copy_from_slice(key),
+        Some(Bytes::copy_from_slice(value)),
+        sequence,
+        0,
+    );
+    put.expiration = Some(expired_at);
+    seed_cloud_prune_candidate_with_records(&mut el, segment_id, sequence, vec![put]);
+    el.state.wal.cloud_durable_seq = sequence;
+    add_valid_value_manifest_sst_with_expiration_for_test(
+        &mut el,
+        "exact-expired-value.sst",
+        key,
+        value,
+        sequence,
+        expired_at,
+    );
+
+    // Act
+    el.prune_cloud_wal_segments_covered_by_manifest();
+    drain_prune_completion_for_test(&mut el);
+
+    // Assert
+    assert!(
+        !remote_wal_path_for_test(&el, segment_id).exists(),
+        "exact persisted value coverage must not change when its TTL expires"
+    );
+    assert!(!el.cloud_wal.acked_segments.contains_key(&segment_id));
+    Ok(())
+}
+
+#[test]
+fn should_not_prune_remote_wal_when_manifest_ssts_conflict_at_same_sequence(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let segment_id = 1;
+    let sequence = 10;
+    let key = b"prune-candidate";
+    seed_cloud_prune_candidate(&mut el, segment_id, sequence);
+    el.state.wal.cloud_durable_seq = sequence;
+    add_valid_manifest_sst_for_test(&mut el, "matching-value.sst", sequence);
+    add_valid_point_tombstone_manifest_sst_for_test(
+        &mut el,
+        "conflicting-tombstone.sst",
+        key,
+        sequence,
+    );
+
+    // Act
+    el.prune_cloud_wal_segments_covered_by_manifest();
+    drain_prune_completion_for_test(&mut el);
+
+    // Assert
+    assert!(
+        remote_wal_path_for_test(&el, segment_id).exists(),
+        "conflicting same-sequence SST states must make exact coverage ambiguous"
+    );
+    assert!(el.cloud_wal.acked_segments.contains_key(&segment_id));
+    Ok(())
+}
+
+#[test]
+fn should_retain_remote_wal_when_delete_range_record_has_only_manifest_bounds(
 ) -> crate::common::MidgeResult<()> {
     // Arrange
     let mut el = create_test_cloud_event_loop(
@@ -3695,9 +4186,9 @@ fn should_prune_remote_wal_when_delete_range_record_is_manifest_covered(
     // Act
     // Assert
     assert!(
-            !remote_wal_path_for_test(&el, segment_id).exists(),
-            "remote WAL may be pruned when a delete-range record is physically covered by a manifest SST"
-        );
+        remote_wal_path_for_test(&el, segment_id).exists(),
+        "manifest key and sequence bounds must not prove that a delete-range tombstone was flushed"
+    );
 
     Ok(())
 }
@@ -3844,10 +4335,10 @@ fn should_retry_prune_after_preflight_failure_clears_inflight() -> crate::common
 }
 
 #[test]
-fn should_not_starve_later_wal_prune_when_earlier_segment_is_unverifiable(
+fn should_resume_ordered_wal_prune_when_oldest_segment_becomes_verifiable(
 ) -> crate::common::MidgeResult<()> {
-    // Arrange: the lower segment belongs to a CF with no manifest coverage;
-    // the following segment is independently covered and safe to retire.
+    // Arrange: the oldest segment initially belongs to a CF with no manifest
+    // coverage. A newer segment must remain behind that authority gap.
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
@@ -3871,18 +4362,424 @@ fn should_not_starve_later_wal_prune_when_earlier_segment_is_unverifiable(
     el.state.wal.cloud_durable_seq = covered_segment;
     add_valid_manifest_sst_for_test(&mut el, "later-covered.sst", covered_segment);
 
-    // Act: the first pass fails closed on segment 71. Round-robin selection
-    // must allow the next pass to make progress on segment 72.
-    el.prune_cloud_wal_segments_covered_by_manifest();
-    drain_prune_completion_for_test(&mut el);
+    // Act
     el.prune_cloud_wal_segments_covered_by_manifest();
     drain_prune_completion_for_test(&mut el);
 
     // Assert
     assert!(remote_wal_path_for_test(&el, blocked_segment).exists());
     assert!(el.cloud_wal.acked_segments.contains_key(&blocked_segment));
+    assert!(remote_wal_path_for_test(&el, covered_segment).exists());
+    assert!(el.cloud_wal.acked_segments.contains_key(&covered_segment));
+
+    add_manifest_sst_meta_for_test(
+        &mut el,
+        "oldest-now-covered.sst",
+        1,
+        b"uncovered-earlier-segment",
+        blocked_segment,
+        blocked_segment,
+    );
+    el.prune_cloud_wal_segments_covered_by_manifest();
+    drain_prune_completion_for_test(&mut el);
+
+    // Assert: once the oldest authority is covered, the prefix can drain.
+    assert!(!remote_wal_path_for_test(&el, blocked_segment).exists());
+    assert!(!el.cloud_wal.acked_segments.contains_key(&blocked_segment));
     assert!(!remote_wal_path_for_test(&el, covered_segment).exists());
     assert!(!el.cloud_wal.acked_segments.contains_key(&covered_segment));
+    Ok(())
+}
+
+#[test]
+fn should_retire_bounded_wal_batch_in_one_maintenance_pass() -> crate::common::MidgeResult<()> {
+    // Arrange: strict cloud writes can produce many small authoritative WAL
+    // segments before a memtable checkpoint makes them eligible for cleanup.
+    // One maintenance pass must amortize catalog and SST proof work across a
+    // meaningfully sized, but still bounded, prefix.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    for segment_id in 1..=33 {
+        seed_cloud_prune_candidate(&mut el, segment_id, segment_id);
+    }
+    el.state.wal.cloud_durable_seq = 33;
+    add_valid_manifest_sst_for_test(&mut el, "batch-covered.sst", 33);
+
+    // Act
+    el.prune_cloud_wal_segments_covered_by_manifest();
+    drain_prune_completion_for_test(&mut el);
+
+    // Assert
+    assert_eq!(
+        el.cloud_wal
+            .acked_segments
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![33],
+        "one maintenance worker should retire one bounded batch of 32"
+    );
+    let catalog_proof = el
+        .hybrid_storage
+        .as_ref()
+        .expect("hybrid storage")
+        .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
+        .expect("read catalog after bounded batch retirement");
+    let catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(catalog_proof.bytes())
+        .expect("decode catalog after bounded batch retirement");
+    assert_eq!(
+        catalog.segments.keys().copied().collect::<Vec<_>>(),
+        vec![33],
+        "the authoritative catalog must retire the same bounded batch as local ACK state"
+    );
+    Ok(())
+}
+
+#[test]
+fn should_release_publication_gate_before_post_cas_cloud_wal_delete_completes(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let segment_id = 82;
+    let max_sequence = 82;
+    let wal_key = crate::wal::cloud_segment_object_key(segment_id, el.state.writer_epoch);
+    let local_backend: Arc<dyn crate::storage::StorageBackend> = Arc::new(
+        crate::storage::filesystem::FileSystem::new(
+            el.state.db_path.join("hybrid_local_blocked_wal_prune"),
+        )
+        .expect("create blocked WAL prune local backend"),
+    );
+    let cloud_backend_inner = Arc::new(
+        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
+            .expect("create blocked WAL prune cloud backend"),
+    );
+    let (delete_started_tx, delete_started_rx) = std::sync::mpsc::channel();
+    let release_delete = Arc::new(AtomicBool::new(false));
+    let _release_guard = BlockedDeleteReleaseGuard(Arc::clone(&release_delete));
+    let cloud_backend: Arc<dyn crate::storage::StorageBackend> =
+        Arc::new(BlockingDeleteStorageBackend::new(
+            cloud_backend_inner,
+            wal_key,
+            delete_started_tx,
+            Arc::clone(&release_delete),
+        ));
+    el.set_hybrid_storage(Arc::new(crate::storage::HybridStorage::with_policy(
+        local_backend,
+        cloud_backend,
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )));
+    seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
+    el.state.wal.cloud_durable_seq = max_sequence;
+    add_valid_manifest_sst_for_test(&mut el, "blocked-post-cas-delete.sst", max_sequence);
+
+    // Act: wait until the storage-owned conditional delete is blocked, then
+    // join only the preflight worker that owned the publication gate.
+    el.prune_cloud_wal_segments_covered_by_manifest();
+    delete_started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("post-CAS conditional WAL delete should start");
+    assert!(el.publication_gate.active);
+    assert!(el.cloud_wal_prune_worker.is_some());
+    el.join_cloud_wal_prune_worker();
+    el.tick_hybrid_storage();
+    let catalog_proof = el
+        .hybrid_storage
+        .as_ref()
+        .expect("hybrid storage")
+        .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
+        .expect("read catalog while physical WAL delete is blocked");
+    let catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(catalog_proof.bytes())
+        .expect("decode catalog while physical WAL delete is blocked");
+
+    // Assert: publication authority and its gate settle before the physical
+    // cleanup completion. Local ACK state stays until that completion arrives.
+    assert!(
+        !el.publication_gate.active,
+        "joining WAL prune preflight must release the publication gate"
+    );
+    assert!(el.cloud_wal_prune_worker.is_none());
+    assert!(
+        !catalog.segments.contains_key(&segment_id),
+        "catalog authority must be retired before physical cleanup"
+    );
+    assert!(remote_wal_path_for_test(&el, segment_id).exists());
+    assert_eq!(
+        el.cloud_wal.acked_segments.get(&segment_id),
+        Some(&max_sequence),
+        "delete completion must not settle before the blocked provider call returns"
+    );
+    assert!(el.cloud_wal.prune_inflight.contains(&segment_id));
+
+    release_delete.store(true, Ordering::SeqCst);
+    drain_prune_completion_for_test(&mut el);
+    assert!(!remote_wal_path_for_test(&el, segment_id).exists());
+    assert!(!el.cloud_wal.acked_segments.contains_key(&segment_id));
+    assert!(!el.cloud_wal.prune_inflight.contains(&segment_id));
+    assert!(!el.state.persistence_anomaly_detected());
+    Ok(())
+}
+
+#[test]
+fn should_delete_retired_wal_when_coverage_dependency_changes_after_catalog_cas(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: catalog retirement is the authority switch. Once it commits,
+    // changing an SST dependency must not turn safe physical cleanup into a
+    // persistence anomaly; the target's conditional identity is sufficient.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let segment_id = 84;
+    let max_sequence = 84;
+    let local_backend: Arc<dyn crate::storage::StorageBackend> = Arc::new(
+        crate::storage::filesystem::FileSystem::new(
+            el.state
+                .db_path
+                .join("hybrid_local_post_retirement_dependency_change"),
+        )
+        .expect("create post-retirement dependency local backend"),
+    );
+    let cloud_backend_inner = Arc::new(
+        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
+            .expect("create post-retirement dependency cloud backend"),
+    );
+    let changing_cloud = Arc::new(PostRetirementDependencyChangeBackend::new(
+        cloud_backend_inner,
+    ));
+    let cloud_backend: Arc<dyn crate::storage::StorageBackend> = changing_cloud.clone();
+    el.set_hybrid_storage(Arc::new(crate::storage::HybridStorage::with_policy(
+        local_backend,
+        cloud_backend,
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )));
+    seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
+    el.state.wal.cloud_durable_seq = max_sequence;
+    add_valid_manifest_sst_for_test(
+        &mut el,
+        "changed-after-catalog-retirement.sst",
+        max_sequence,
+    );
+    changing_cloud.arm();
+
+    // Act
+    el.prune_cloud_wal_segments_covered_by_manifest();
+    drain_prune_completion_for_test(&mut el);
+
+    // Assert
+    assert_eq!(
+        changing_cloud.post_retirement_sst_heads(),
+        0,
+        "post-CAS physical cleanup must not re-read retired coverage dependencies"
+    );
+    assert!(!remote_wal_path_for_test(&el, segment_id).exists());
+    assert!(!el.cloud_wal.acked_segments.contains_key(&segment_id));
+    assert!(!el.cloud_wal.prune_inflight.contains(&segment_id));
+    assert!(!el.state.persistence_anomaly_detected());
+    Ok(())
+}
+
+#[test]
+fn should_mark_persistence_anomaly_when_post_cas_cloud_wal_delete_fails(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let segment_id = 83;
+    let max_sequence = 83;
+    let wal_key = crate::wal::cloud_segment_object_key(segment_id, el.state.writer_epoch);
+    let local_backend: Arc<dyn crate::storage::StorageBackend> = Arc::new(
+        crate::storage::filesystem::FileSystem::new(
+            el.state.db_path.join("hybrid_local_failed_wal_prune"),
+        )
+        .expect("create failed WAL prune local backend"),
+    );
+    let cloud_backend_inner = Arc::new(
+        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
+            .expect("create failed WAL prune cloud backend"),
+    );
+    let failing_cloud = Arc::new(FailOnceDeleteStorageBackend::new(
+        cloud_backend_inner,
+        wal_key,
+    ));
+    let cloud_backend: Arc<dyn crate::storage::StorageBackend> =
+        Arc::clone(&failing_cloud) as Arc<dyn crate::storage::StorageBackend>;
+    el.set_hybrid_storage(Arc::new(crate::storage::HybridStorage::with_policy(
+        local_backend,
+        cloud_backend,
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )));
+    seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
+    el.state.wal.cloud_durable_seq = max_sequence;
+    add_valid_manifest_sst_for_test(&mut el, "failed-post-cas-delete.sst", max_sequence);
+    assert!(!el.state.persistence_anomaly_detected());
+
+    // Act
+    el.prune_cloud_wal_segments_covered_by_manifest();
+    drain_prune_completion_for_test(&mut el);
+    let catalog_proof = el
+        .hybrid_storage
+        .as_ref()
+        .expect("hybrid storage")
+        .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
+        .expect("read catalog after failed physical WAL delete");
+    let catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(catalog_proof.bytes())
+        .expect("decode catalog after failed physical WAL delete");
+
+    // Assert
+    assert_eq!(failing_cloud.delete_attempts(), 1);
+    assert!(
+        !catalog.segments.contains_key(&segment_id),
+        "failed physical cleanup must not restore retired catalog authority"
+    );
+    assert!(
+        remote_wal_path_for_test(&el, segment_id).exists(),
+        "a failed conditional delete should leave an ignored physical orphan"
+    );
+    assert!(
+        !el.cloud_wal.acked_segments.contains_key(&segment_id),
+        "post-CAS failure must remove local ACK authority rather than retry an absent catalog entry"
+    );
+    assert!(!el.cloud_wal.prune_inflight.contains(&segment_id));
+    assert!(el.state.persistence_anomaly_detected());
+    Ok(())
+}
+
+#[test]
+fn should_retain_later_batch_members_when_oldest_wal_is_uncovered() -> crate::common::MidgeResult<()>
+{
+    // Arrange
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    seed_cloud_prune_candidate_with_records(
+        &mut el,
+        1,
+        1,
+        vec![crate::wal::WalRecord::new_cf(
+            1,
+            crate::wal::WalOpKind::Put,
+            Bytes::from_static(b"uncovered-earlier-segment"),
+            Some(Bytes::from_static(b"value")),
+            1,
+            0,
+        )],
+    );
+    for segment_id in 2..=9 {
+        seed_cloud_prune_candidate(&mut el, segment_id, segment_id);
+    }
+    el.state.wal.current_segment_id = 10;
+    el.state.wal.cloud_durable_seq = 9;
+    add_valid_manifest_sst_for_test(&mut el, "later-batch-covered.sst", 9);
+
+    // Act
+    el.prune_cloud_wal_segments_covered_by_manifest();
+    drain_prune_completion_for_test(&mut el);
+
+    // Assert
+    for segment_id in 1..=9 {
+        assert!(
+            el.cloud_wal.acked_segments.contains_key(&segment_id),
+            "segment {segment_id} must not retire across the uncovered oldest authority gap"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn should_retain_later_delete_wal_when_older_authoritative_segment_is_uncovered(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let key = Bytes::from_static(b"authority-gap-key");
+    let put = crate::wal::WalRecord::new(
+        crate::wal::WalOpKind::Put,
+        key.clone(),
+        Some(Bytes::from_static(b"older-value")),
+        1,
+        0,
+    );
+    let mut uncovered_range_delete = crate::wal::WalRecord::new(
+        crate::wal::WalOpKind::DeleteRange,
+        Bytes::from_static(b"uncovered-range-start"),
+        None,
+        2,
+        0,
+    );
+    uncovered_range_delete.range_end = Some(Bytes::from_static(b"uncovered-range-end"));
+    seed_cloud_prune_candidate_with_records(&mut el, 1, 2, vec![put, uncovered_range_delete]);
+    let delete = crate::wal::WalRecord::new(crate::wal::WalOpKind::Delete, key.clone(), None, 3, 0);
+    seed_cloud_prune_candidate_with_records(&mut el, 2, 3, vec![delete]);
+    el.state.wal.cloud_durable_seq = 3;
+    add_valid_point_tombstone_manifest_sst_for_test(
+        &mut el,
+        "authority-gap-tombstone.sst",
+        key.as_ref(),
+        3,
+    );
+
+    // Act
+    el.prune_cloud_wal_segments_covered_by_manifest();
+    drain_prune_completion_for_test(&mut el);
+
+    // Assert
+    assert!(el.cloud_wal.acked_segments.contains_key(&1));
+    assert!(
+        el.cloud_wal.acked_segments.contains_key(&2),
+        "retiring the newer delete while an older value can still replay would permit resurrection"
+    );
+    let storage = el.hybrid_storage.as_ref().expect("hybrid storage");
+    let catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(
+        storage
+            .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
+            .expect("read WAL catalog")
+            .bytes(),
+    )
+    .expect("decode WAL catalog");
+    assert!(catalog.segments.contains_key(&1));
+    assert!(catalog.segments.contains_key(&2));
+    Ok(())
+}
+
+#[test]
+fn should_dispatch_deferred_control_before_starting_next_wal_prune(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    seed_cloud_prune_candidate(&mut el, 81, 81);
+    el.state.wal.cloud_durable_seq = 81;
+    add_valid_manifest_sst_for_test(&mut el, "covered.sst", 81);
+    el.publication_gate.active = true;
+    el.publication_gate
+        .defer(crate::runtime::RuntimeMsg::CompactAll { request_id: 8105 });
+    let completed_worker = std::thread::spawn(|| {});
+    while !completed_worker.is_finished() {
+        std::thread::yield_now();
+    }
+    el.cloud_wal_prune_worker = Some(completed_worker);
+
+    // Act
+    el.prune_cloud_wal_segments_covered_by_manifest();
+
+    // Assert
+    assert!(matches!(
+        el.pending_msg,
+        Some(crate::runtime::RuntimeMsg::CompactAll { request_id: 8105 })
+    ));
+    assert!(
+        !el.publication_gate.active,
+        "a new prune must not reacquire the gate ahead of restored control work"
+    );
+    assert!(
+        el.cloud_wal_prune_worker.is_none(),
+        "the next maintenance pass owns starting another prune"
+    );
     Ok(())
 }
 
@@ -4837,6 +5734,41 @@ fn should_retry_background_cloud_seal_after_failpoint_before_rotate(
     Ok(())
 }
 
+#[test]
+fn should_back_off_forced_cloud_seal_when_older_segment_awaits_admission(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    append_cloud_async_put(&mut el)?;
+    el.cloud_wal.upload_backlog.insert(41, 1);
+    el.cloud_wal.defer_upload_retry();
+    el.durability.mark_cloud_seal_retry_needed();
+
+    // Act
+    let error = el
+        .seal_current_cloud_segment()
+        .expect_err("an older runtime-owned WAL must block a later seal");
+
+    // Assert
+    assert!(matches!(
+        error,
+        crate::common::MidgeError::WriteStall(message)
+            if message.contains("awaiting upload admission")
+    ));
+    assert!(
+        !el.has_actionable_work(),
+        "a failed forced seal must not immediately re-enter the event loop"
+    );
+    std::thread::sleep(Duration::from_millis(15));
+    assert!(
+        el.has_actionable_work(),
+        "the retained seal or upload obligation must become due after backoff"
+    );
+    Ok(())
+}
+
 #[cfg(feature = "failpoints")]
 #[test]
 fn should_retain_upload_obligation_given_failure_after_cloud_wal_rotation(
@@ -5203,6 +6135,27 @@ struct CountingLeaderStore {
 }
 
 #[derive(Debug)]
+struct RecoveringMissingLeaderStore {
+    present: AtomicBool,
+    holder_id: String,
+    epoch: u64,
+}
+
+impl RecoveringMissingLeaderStore {
+    fn new(holder_id: &str, epoch: u64) -> Self {
+        Self {
+            present: AtomicBool::new(false),
+            holder_id: holder_id.to_string(),
+            epoch,
+        }
+    }
+
+    fn restore(&self) {
+        self.present.store(true, Ordering::Release);
+    }
+}
+
+#[derive(Debug)]
 struct DelayedLeaderStore {
     delay: Duration,
     holder_id: String,
@@ -5342,6 +6295,103 @@ impl crate::lease::LeaderStore for CountingLeaderStore {
             acquired_at: "2026-08-25T00:00:00Z".to_string(),
         }))
     }
+}
+
+impl crate::lease::LeaderStore for RecoveringMissingLeaderStore {
+    fn acquire_leadership(
+        &self,
+        _holder_id: &str,
+    ) -> Result<crate::lease::LeaderRecord, crate::lease::LeaseError> {
+        Err(crate::lease::LeaseError::AcquisitionFailed(
+            "recovering test store does not acquire".to_string(),
+        ))
+    }
+
+    fn read_current(&self) -> Result<Option<crate::lease::LeaderRecord>, crate::lease::LeaseError> {
+        Ok(self
+            .present
+            .load(Ordering::Acquire)
+            .then(|| crate::lease::LeaderRecord {
+                epoch: self.epoch,
+                holder_id: self.holder_id.clone(),
+                acquired_at: "2026-08-27T00:00:00Z".to_string(),
+            }))
+    }
+}
+
+#[test]
+fn should_reject_later_write_when_cloud_seal_cannot_find_leader_record(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut event_loop = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    append_cloud_async_put(&mut event_loop)?;
+    let lease_healthy = Arc::new(AtomicBool::new(true));
+    let leader_store = Arc::new(RecoveringMissingLeaderStore::new("writer-1", 1));
+    event_loop.lease_healthy = Some(Arc::clone(&lease_healthy));
+    event_loop.leader_store = Some(Arc::clone(&leader_store) as Arc<dyn crate::lease::LeaderStore>);
+    event_loop.leader_holder_id = Some("writer-1".to_string());
+    let first_result = event_loop.seal_current_cloud_segment();
+    let sequence_before = event_loop.state.sequence;
+    let pending_writes_before = event_loop.state.wal.pending_writes;
+    let wal_bytes_before = event_loop.wal_actor.bytes_since_sync();
+    leader_store.restore();
+    let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
+    let (response_tx, response_rx) = crossbeam::channel::bounded(1);
+
+    // Act
+    let outcome = WalCoordinator::apply_transaction(
+        &mut event_loop,
+        &msg_rx,
+        ApplyTransactionRequest {
+            request_id: 91_001,
+            ops: vec![crate::runtime::TransactionOp::Put {
+                cf_id: 0,
+                key: Bytes::from_static(b"write-after-missing-leader"),
+                value: Bytes::from_static(b"must-not-enter-runtime"),
+                ttl_seconds: None,
+                insert_only: false,
+            }],
+            assertions: Vec::new(),
+            durability_policy: Some(DurabilityPolicy::CloudAsync),
+            start_sequence: None,
+            conflict_policy: ConflictPolicy::LastWriteWins,
+        },
+        Some(response_tx),
+    );
+    let response = response_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("later write response");
+
+    // Assert
+    assert!(matches!(
+        first_result,
+        Err(crate::common::MidgeError::Fenced(message))
+            if message.contains("leader record missing")
+    ));
+    assert_eq!(outcome, super::super::HandleOutcome::Continue);
+    assert!(matches!(
+        response,
+        RuntimeResponse::Error {
+            request_id: 91_001,
+            error: crate::common::MidgeError::Fenced(_),
+        }
+    ));
+    assert!(!lease_healthy.load(Ordering::Acquire));
+    assert_eq!(event_loop.state.sequence, sequence_before);
+    assert_eq!(event_loop.state.wal.pending_writes, pending_writes_before);
+    assert_eq!(event_loop.wal_actor.bytes_since_sync(), wal_bytes_before);
+    assert_eq!(
+        event_loop
+            .state
+            .get_cf(0)
+            .expect("default CF")
+            .memtable
+            .get(b"write-after-missing-leader")?,
+        None
+    );
+    Ok(())
 }
 
 #[test]
@@ -6148,6 +7198,76 @@ fn should_retry_runtime_owned_wal_upload_under_continuous_request_load(
         !el.cloud_wal.upload_backlog.contains_key(&segment_id),
         "runtime-owned WAL publication must receive a fairness slot under sustained load"
     );
+    Ok(())
+}
+
+#[test]
+fn should_checkpoint_active_cloud_memtable_before_shutdown_succeeds(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: keep one cloud write below the normal memtable flush threshold.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    el.shutdown_cloud_drain_timeout = Duration::from_secs(31);
+    let sequence = append_cloud_async_put(&mut el)?;
+    assert!(
+        el.state
+            .get_cf(0)
+            .expect("default CF")
+            .memtable
+            .size_bytes()
+            > 0
+    );
+    assert!(el.state.manifest.files.is_empty());
+    let request_id = 90_402;
+    let response_rx = el.router.register(request_id, "Shutdown");
+
+    // Act
+    let outcome = el.handle_shutdown(Some(request_id));
+
+    // Assert
+    assert_eq!(outcome, super::super::HandleOutcome::Break);
+    let response = response_rx.try_recv();
+    assert!(
+        matches!(
+            response,
+            Ok(RuntimeResponse::Ok {
+                request_id: response_id
+            }) if response_id == request_id
+        ),
+        "unexpected shutdown response: {response:?}"
+    );
+    assert!(el.state.manifest.last_persisted_sequence >= sequence);
+    assert_eq!(el.state.manifest.files.len(), 1);
+    let cf = el.state.get_cf(0).expect("default CF");
+    assert_eq!(cf.memtable.size_bytes(), 0);
+    assert!(cf.immutable_flushes.is_empty());
+    Ok(())
+}
+
+#[test]
+fn should_not_create_cloud_sst_when_shutdown_has_no_active_writes() -> crate::common::MidgeResult<()>
+{
+    // Arrange
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    el.shutdown_cloud_drain_timeout = Duration::from_secs(2);
+    let request_id = 90_401;
+    let response_rx = el.router.register(request_id, "Shutdown");
+
+    // Act
+    let outcome = el.handle_shutdown(Some(request_id));
+
+    // Assert
+    assert_eq!(outcome, super::super::HandleOutcome::Break);
+    assert!(matches!(
+        response_rx.try_recv(),
+        Ok(RuntimeResponse::Ok {
+            request_id: response_id
+        }) if response_id == request_id
+    ));
+    assert!(el.state.manifest.files.is_empty());
     Ok(())
 }
 

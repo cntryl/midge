@@ -114,6 +114,44 @@ fn should_initialize_stats_with_zeros_when_created() {
 }
 
 #[test]
+fn should_open_each_wal_file_once_per_recovery_pass() {
+    // Arrange
+    let directory = TempDir::new().expect("create WAL recovery directory");
+    let storage = RealFs::new(directory.path()).expect("create recovery filesystem");
+    let wal_dir = FsPath::new("wal");
+    storage
+        .create_dir_all(&wal_dir)
+        .expect("create WAL directory");
+    let wal_path = directory
+        .path()
+        .join("wal")
+        .join(crate::wal::segment_file_name(1));
+    let bytes = (1..=128)
+        .map(|sequence| encode_frame(&put_record(b"key", sequence, 1)))
+        .collect::<Vec<_>>()
+        .concat();
+    std::fs::write(wal_path, bytes).expect("write WAL fixture");
+    let mut memtables = HashMap::new();
+    reset_wal_replay_file_open_count();
+
+    // Act
+    replay_wal_with_policy(&storage, &wal_dir, &mut memtables, ReplayPolicy::Strict)
+        .expect("replay WAL fixture");
+
+    // Assert
+    assert_eq!(
+        wal_replay_file_open_count(),
+        2,
+        "epoch discovery and record replay should each open the WAL once"
+    );
+    assert_eq!(
+        wal_replay_file_read_count(),
+        2,
+        "epoch discovery and record replay should each snapshot the WAL once"
+    );
+}
+
+#[test]
 fn should_not_tolerate_generic_corruption_based_on_incomplete_tail_error_text() {
     // Arrange
     let replay_file = ReplayFile {
@@ -791,6 +829,59 @@ fn should_apply_txn_batch_atomically_during_recovery() {
         Some(b"batch-value".to_vec())
     );
     assert_eq!(stats.max_sequence, Some(3));
+}
+
+#[test]
+fn should_replay_only_uncovered_operations_from_retained_txn_batch() {
+    // Arrange
+    let dir = TempDir::new().unwrap();
+    let wal_subdir = dir.path().join("wal");
+    std::fs::create_dir(&wal_subdir).unwrap();
+    let storage = RealFs::new(dir.path()).unwrap();
+    let wal_dir = FsPath::new("wal");
+    {
+        let fs = Arc::new(RealFs::new(&wal_subdir).unwrap());
+        let writer = FsWalWriterIo::new("wal.log", fs as Arc<dyn crate::io::Fs>).unwrap();
+        let mut covered = put_record(b"covered", 2, 7);
+        covered.txn_id = Some(11);
+        let mut uncovered = put_record(b"uncovered", 3, 7);
+        uncovered.txn_id = Some(11);
+        let payload =
+            crate::wal::encoding::encode_txn_batch_payload(11, 1, 4, 7, &[covered, uncovered])
+                .unwrap();
+        let mut batch = WalRecord::new_cf(
+            0,
+            WalOpKind::TxnBatch,
+            Bytes::from_static(b"txn"),
+            Some(payload),
+            4,
+            7,
+        );
+        batch.txn_id = Some(11);
+        writer.append_record(&batch).unwrap();
+        writer.sync().unwrap();
+    }
+    let should_apply = |record: &WalRecord| record.key.as_ref() != b"covered";
+
+    // Act
+    let mut memtables = HashMap::new();
+    let stats = replay_wal_with_manifest_filter(
+        &storage,
+        &wal_dir,
+        &mut memtables,
+        ReplayPolicy::Strict,
+        &should_apply,
+    )
+    .unwrap();
+
+    // Assert
+    assert_eq!(stats.record_count, 1);
+    let recovered = &memtables[&0];
+    assert_eq!(recovered.get(b"covered").unwrap(), None);
+    assert_eq!(
+        recovered.get(b"uncovered").unwrap(),
+        Some(b"value".to_vec())
+    );
 }
 
 #[test]
@@ -1532,6 +1623,48 @@ fn should_skip_lower_epoch_record_when_seen_after_fresh_epoch_with_lower_sequenc
         Some(b"v2".to_vec())
     );
     assert_eq!(memtables[&0].get(b"zombie-low-seq").unwrap(), None);
+}
+
+#[test]
+fn should_preserve_fencing_ordinal_when_duplicate_frame_is_skipped_across_wal_files() {
+    // Arrange
+    let dir = TempDir::new().unwrap();
+    let wal_subdir = dir.path().join("wal");
+    std::fs::create_dir(&wal_subdir).unwrap();
+    let storage = RealFs::new(dir.path()).unwrap();
+    let wal_dir = FsPath::new("wal");
+    let duplicate = put_record(b"rotation-duplicate", 1, 1);
+    append_raw_bytes(
+        &wal_subdir.join(crate::wal::segment_file_name(1)),
+        &encode_frame(&duplicate),
+    );
+    let active_path = wal_subdir.join(crate::wal::ACTIVE_FILE_NAME);
+    append_raw_bytes(&active_path, &encode_frame(&duplicate));
+    append_raw_bytes(
+        &active_path,
+        &encode_frame(&put_record(b"fresh-epoch", 10, 2)),
+    );
+    append_raw_bytes(
+        &active_path,
+        &encode_frame(&put_record(b"stale-low-sequence", 2, 1)),
+    );
+    let mut memtables = HashMap::new();
+
+    // Act
+    let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
+
+    // Assert
+    assert_eq!(stats.max_epoch_seen, 2);
+    assert_eq!(stats.stale_records_skipped, 1);
+    assert_eq!(
+        memtables[&0].get(b"rotation-duplicate").unwrap(),
+        Some(b"value".to_vec())
+    );
+    assert_eq!(
+        memtables[&0].get(b"fresh-epoch").unwrap(),
+        Some(b"value".to_vec())
+    );
+    assert_eq!(memtables[&0].get(b"stale-low-sequence").unwrap(), None);
 }
 
 #[test]

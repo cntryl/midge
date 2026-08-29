@@ -61,10 +61,11 @@ impl StartupStoragePath {
 impl StartupLease {
     pub(super) fn acquire(opts: &OpenOptions) -> MidgeResult<Self> {
         let storage = opts.storage();
-        let created = crate::lease::create_lease_with_validity_and_timeout(
+        let created = crate::lease::create_lease_with_validity_and_timeout_and_ttl(
             storage,
             opts.lease_clock_skew_tolerance(),
             opts.storage_io_timeout(),
+            opts.lease_ttl(),
         )
         .map_err(|error| match MidgeError::from(error) {
             MidgeError::LeaseHeld(message) => MidgeError::LeaseHeld(message),

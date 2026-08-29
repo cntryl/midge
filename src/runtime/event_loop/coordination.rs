@@ -15,7 +15,6 @@ pub(crate) struct CloudWalUploadTracker {
     /// resubmitted after `HybridStorage` exhausts its internal attempt budget.
     upload_retry_at: Option<Instant>,
     pub(super) prune_inflight: HashSet<u64>,
-    pub(super) prune_cursor: Option<u64>,
 }
 
 impl CloudWalUploadTracker {
@@ -25,7 +24,6 @@ impl CloudWalUploadTracker {
             upload_backlog: BTreeMap::new(),
             upload_retry_at: None,
             prune_inflight: HashSet::new(),
-            prune_cursor: None,
         }
     }
 

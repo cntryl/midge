@@ -78,10 +78,25 @@ pub(crate) fn create_lease_with_validity(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn create_lease_with_validity_and_timeout(
     storage: &Storage,
     clock_skew_tolerance: std::time::Duration,
     storage_io_timeout: std::time::Duration,
+) -> Result<CreatedLease, LeaseError> {
+    create_lease_with_validity_and_timeout_and_ttl(
+        storage,
+        clock_skew_tolerance,
+        storage_io_timeout,
+        std::time::Duration::from_secs(30),
+    )
+}
+
+pub(crate) fn create_lease_with_validity_and_timeout_and_ttl(
+    storage: &Storage,
+    clock_skew_tolerance: std::time::Duration,
+    storage_io_timeout: std::time::Duration,
+    lease_ttl: std::time::Duration,
 ) -> Result<CreatedLease, LeaseError> {
     match storage {
         Storage::InMemory => {
@@ -103,15 +118,21 @@ pub(crate) fn create_lease_with_validity_and_timeout(
             ));
             // Memory mode: use MockFs for lease coordination (no disk I/O)
             Ok(CreatedLease {
-                lease: Arc::new(FileSystemLease::new(&temp_path, true)?),
+                lease: Arc::new(FileSystemLease::new_with_ttl_and_clock_skew_tolerance(
+                    &temp_path,
+                    true,
+                    lease_ttl,
+                    clock_skew_tolerance,
+                )?),
                 validity: None,
             })
         }
         Storage::Local { path } => {
             // Local storage: use filesystem lease with RealFs
-            let lease = Arc::new(FileSystemLease::new_with_clock_skew_tolerance(
+            let lease = Arc::new(FileSystemLease::new_with_ttl_and_clock_skew_tolerance(
                 path.as_path(),
                 false,
+                lease_ttl,
                 clock_skew_tolerance,
             )?);
             Ok(CreatedLease {
@@ -138,11 +159,12 @@ pub(crate) fn create_lease_with_validity_and_timeout(
             )
             .map_err(|error| LeaseError::IoError(format!("cloud lease backend: {error}")))?;
             let lease = Arc::new(
-                CloudStorageLease::new_provider_backed_with_clock_skew_tolerance(
+                CloudStorageLease::new_provider_backed_with_clock_skew_tolerance_and_ttl(
                     config,
                     local_cache_path.clone(),
                     cloud,
                     clock_skew_tolerance,
+                    lease_ttl,
                 ),
             );
             Ok(CreatedLease {
@@ -159,10 +181,11 @@ pub(crate) fn create_lease_with_validity_and_timeout(
                 bucket: bucket.clone(),
                 prefix: prefix.clone(),
             };
-            let lease = Arc::new(CloudStorageLease::new_with_clock_skew_tolerance(
+            let lease = Arc::new(CloudStorageLease::new_with_clock_skew_tolerance_and_ttl(
                 config,
                 local_cache_path.clone(),
                 clock_skew_tolerance,
+                lease_ttl,
             ));
             Ok(CreatedLease {
                 validity: Some(lease.lease_validity()),

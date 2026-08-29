@@ -108,7 +108,7 @@ impl WalOpKind {
 }
 
 /// A single WAL record using TLV encoding format.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct WalRecord {
     /// Column family ID this record belongs to.
     #[serde(default)]
