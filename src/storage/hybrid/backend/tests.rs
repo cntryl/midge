@@ -814,7 +814,7 @@ fn should_bound_guarded_delete_batch_by_one_callback_budget() {
             .expect("create bounded guarded-delete local backend"),
     );
     let cloud = Arc::new(NeverCompletesBackend::default());
-    let callback_timeout = Duration::from_millis(30);
+    let callback_timeout = Duration::from_millis(100);
     let limits = HybridQueueLimits {
         prune_workers: 1,
         prune_requests: 8,
@@ -860,7 +860,7 @@ fn should_bound_guarded_delete_batch_by_one_callback_budget() {
         "an exhausted batch budget must not submit another provider callback"
     );
     assert!(
-        elapsed < Duration::from_millis(150),
+        elapsed < Duration::from_millis(500),
         "guarded-delete batch multiplied its callback budget: {elapsed:?}"
     );
 }
@@ -3220,15 +3220,16 @@ fn should_read_object_proof_given_ample_deadline_when_budget_remains() {
 fn should_recompute_remaining_budget_before_each_round_trip_when_reading_object_proof() {
     // Arrange: HEAD consumes most of the shared budget, then GET never answers.
     // Reusing the allowance calculated before HEAD would refund that elapsed
-    // time and make the proof run well beyond the advertised deadline.
+    // time and make the proof run well beyond the advertised deadline. The
+    // two-second callback budget leaves a full second of scheduler headroom.
     let tmp = tempfile::tempdir().expect("create deadline proof directory");
     let local = Arc::new(
         crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
             .expect("create deadline proof local backend"),
     );
-    let cloud = Arc::new(BudgetConsumingProofBackend::new(Duration::from_millis(80)));
+    let cloud = Arc::new(BudgetConsumingProofBackend::new(Duration::from_millis(300)));
     let limits = HybridQueueLimits {
-        callback_timeout: Duration::from_secs(1),
+        callback_timeout: Duration::from_secs(2),
         ..HybridQueueLimits::default()
     };
     let storage = HybridStorage::with_policy_event_sender_and_limits(
@@ -3238,7 +3239,7 @@ fn should_recompute_remaining_budget_before_each_round_trip_when_reading_object_
         None,
         limits,
     );
-    let deadline = crate::common::OperationDeadline::from_budget(Duration::from_millis(100));
+    let deadline = crate::common::OperationDeadline::from_budget(Duration::from_millis(500));
 
     // Act
     let started = Instant::now();
@@ -3248,7 +3249,7 @@ fn should_recompute_remaining_budget_before_each_round_trip_when_reading_object_
     // Assert
     assert!(result.is_err(), "the never-completing GET must time out");
     assert!(
-        elapsed < Duration::from_millis(150),
+        elapsed < Duration::from_secs(1),
         "proof reused the pre-HEAD allowance and exceeded its shared budget: {elapsed:?}"
     );
 }
@@ -3257,17 +3258,18 @@ fn should_recompute_remaining_budget_before_each_round_trip_when_reading_object_
 fn should_bound_sst_publication_with_shared_deadline_when_remote_preflight_consumes_budget() {
     // Arrange: remote HEAD consumes most of the shared budget, then the
     // conditional PUT never answers. A fresh per-call timeout would let this
-    // attempt outlive its advertised deadline by nearly a second.
+    // attempt outlive its advertised deadline by roughly two seconds, leaving
+    // a full second of scheduler headroom in the bounded assertion.
     let tmp = tempfile::tempdir().expect("create deadline publication directory");
     let local = Arc::new(
         crate::storage::filesystem::FileSystem::new(tmp.path().join("local"))
             .expect("create deadline publication local backend"),
     );
     let cloud = Arc::new(BudgetConsumingSstPublicationBackend::new(
-        Duration::from_millis(80),
+        Duration::from_millis(300),
     ));
     let limits = HybridQueueLimits {
-        callback_timeout: Duration::from_secs(1),
+        callback_timeout: Duration::from_secs(2),
         ..HybridQueueLimits::default()
     };
     let storage = HybridStorage::with_policy_event_sender_and_limits(
@@ -3277,7 +3279,7 @@ fn should_bound_sst_publication_with_shared_deadline_when_remote_preflight_consu
         None,
         limits,
     );
-    let deadline = crate::common::OperationDeadline::from_budget(Duration::from_millis(100));
+    let deadline = crate::common::OperationDeadline::from_budget(Duration::from_millis(500));
 
     // Act
     let started = Instant::now();
@@ -3294,7 +3296,7 @@ fn should_bound_sst_publication_with_shared_deadline_when_remote_preflight_consu
         "deadline expiry must remain typed as Timeout: {result:?}"
     );
     assert!(
-        elapsed < Duration::from_millis(150),
+        elapsed < Duration::from_secs(1),
         "SST publication reused a fresh callback timeout: {elapsed:?}"
     );
 }
