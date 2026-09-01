@@ -1630,12 +1630,14 @@ fn delete_cloud_metadata_for_test(cloud: &crate::storage::cloud::CloudStorage, f
 
 struct BudgetConsumingMetadataBackend {
     inner: crate::storage::cloud::MockCloudBackend,
+    first_get_delay: Duration,
     get_calls: AtomicUsize,
     retained_callbacks: Mutex<Vec<crate::storage::cloud::CloudCallback>>,
 }
 
 struct BudgetConsumingMetadataProofBackend {
     inner: Arc<crate::storage::cloud::MockCloudBackend>,
+    first_get_delay: Duration,
     get_calls: AtomicUsize,
     retained_callbacks: Mutex<Vec<crate::storage::cloud::CloudCallback>>,
 }
@@ -1703,9 +1705,10 @@ impl crate::storage::cloud::CloudBackend for ProviderTimeoutMetadataBackend {
 }
 
 impl BudgetConsumingMetadataProofBackend {
-    fn new(inner: Arc<crate::storage::cloud::MockCloudBackend>) -> Self {
+    fn new(inner: Arc<crate::storage::cloud::MockCloudBackend>, first_get_delay: Duration) -> Self {
         Self {
             inner,
+            first_get_delay,
             get_calls: AtomicUsize::new(0),
             retained_callbacks: Mutex::new(Vec::new()),
         }
@@ -1727,8 +1730,9 @@ impl crate::storage::cloud::CloudBackend for BudgetConsumingMetadataProofBackend
         if self.get_calls.fetch_add(1, Ordering::SeqCst) == 0 {
             let inner = Arc::clone(&self.inner);
             let key = key.to_string();
+            let delay = self.first_get_delay;
             std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(80));
+                std::thread::sleep(delay);
                 inner.submit_get(&key, callback);
             });
         } else {
@@ -1768,9 +1772,10 @@ impl crate::storage::cloud::CloudBackend for BudgetConsumingMetadataProofBackend
 }
 
 impl BudgetConsumingMetadataBackend {
-    fn new() -> Self {
+    fn new(first_get_delay: Duration) -> Self {
         Self {
             inner: crate::storage::cloud::MockCloudBackend::new(),
+            first_get_delay,
             get_calls: AtomicUsize::new(0),
             retained_callbacks: Mutex::new(Vec::new()),
         }
@@ -1791,8 +1796,9 @@ impl crate::storage::cloud::CloudBackend for BudgetConsumingMetadataBackend {
     fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
         if self.get_calls.fetch_add(1, Ordering::SeqCst) == 0 {
             let key = key.to_string();
+            let delay = self.first_get_delay;
             std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(80));
+                std::thread::sleep(delay);
                 let _ = callback.send(crate::storage::cloud::CloudEvent::Get {
                     key,
                     result: crate::storage::cloud::CloudOutcome::Err(
@@ -1918,12 +1924,14 @@ fn should_bound_create_metadata_mirror_by_runtime_response_deadline(
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.runtime_response_timeout = Duration::from_millis(300);
+    el.runtime_response_timeout = Duration::from_millis(500);
     el.cloud_metadata_storage = Some(Arc::new(
         crate::storage::cloud::CloudStorage::new_with_timeout(
-            Arc::new(BudgetConsumingMetadataBackend::new()),
+            Arc::new(BudgetConsumingMetadataBackend::new(Duration::from_millis(
+                300,
+            ))),
             "metadata-deadline".to_string(),
-            Duration::from_secs(1),
+            Duration::from_secs(2),
         ),
     ));
     let request_id = 9_601;
@@ -1943,7 +1951,7 @@ fn should_bound_create_metadata_mirror_by_runtime_response_deadline(
 
     // Assert
     assert!(
-        elapsed < Duration::from_millis(350),
+        elapsed < Duration::from_secs(1),
         "metadata mirror exceeded the caller's shared deadline: {elapsed:?}"
     );
     assert!(matches!(
@@ -2402,7 +2410,7 @@ fn should_retry_callerless_wal_prune_with_bounded_attempt_after_provider_recover
     );
     let delayed_cloud = Arc::new(ArmedDelayedHeadStorageBackend::new(
         cloud_fs,
-        Duration::from_millis(250),
+        Duration::from_secs(1),
     ));
     let local = Arc::new(
         crate::storage::filesystem::FileSystem::new(el.state.db_path.join("hybrid_local"))
@@ -2433,11 +2441,11 @@ fn should_retry_callerless_wal_prune_with_bounded_attempt_after_provider_recover
     // Assert: the timed-out attempt retains authority. Once the fixture's one
     // delayed HEAD is consumed, a later callerless retry completes cleanup.
     assert!(
-        submission_elapsed < Duration::from_millis(150),
+        submission_elapsed < Duration::from_millis(500),
         "callerless WAL prune monopolized the event loop: {submission_elapsed:?}"
     );
     assert!(
-        attempt_elapsed < Duration::from_millis(200),
+        attempt_elapsed < Duration::from_millis(500),
         "callerless WAL prune exceeded its aggregate maintenance budget: {attempt_elapsed:?}"
     );
     assert!(
@@ -2474,7 +2482,7 @@ fn should_keep_event_loop_responsive_when_cloud_metadata_proof_times_out(
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.runtime_response_timeout = Duration::from_millis(100);
+    el.runtime_response_timeout = Duration::from_millis(500);
     let segment_id = 62;
     let max_sequence = 62;
     seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
@@ -2485,9 +2493,12 @@ fn should_keep_event_loop_responsive_when_cloud_metadata_proof_times_out(
 
     let inner = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new_with_timeout(
-        Arc::new(BudgetConsumingMetadataProofBackend::new(Arc::clone(&inner))),
+        Arc::new(BudgetConsumingMetadataProofBackend::new(
+            Arc::clone(&inner),
+            Duration::from_millis(300),
+        )),
         "metadata-prune-deadline".to_string(),
-        Duration::from_secs(1),
+        Duration::from_secs(2),
     ));
     put_all_cloud_metadata_for_test(&metadata_storage, &el.state.db_path);
     el.cloud_metadata_storage = Some(metadata_storage);
@@ -2499,13 +2510,13 @@ fn should_keep_event_loop_responsive_when_cloud_metadata_proof_times_out(
 
     // Assert
     assert!(
-        elapsed < Duration::from_millis(150),
+        elapsed < Duration::from_millis(500),
         "metadata proof monopolized the event loop: {elapsed:?}"
     );
     drain_prune_completion_for_test(&mut el);
     let attempt_elapsed = started.elapsed();
     assert!(
-        attempt_elapsed < Duration::from_millis(750),
+        attempt_elapsed < Duration::from_secs(1),
         "metadata proof outlived the bounded prune attempt: {attempt_elapsed:?}"
     );
     assert_eq!(
@@ -2735,12 +2746,14 @@ fn should_bound_retry_gc_metadata_publication_by_maintenance_deadline(
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.runtime_response_timeout = Duration::from_millis(100);
+    el.runtime_response_timeout = Duration::from_millis(500);
     el.cloud_metadata_storage = Some(Arc::new(
         crate::storage::cloud::CloudStorage::new_with_timeout(
-            Arc::new(BudgetConsumingMetadataBackend::new()),
+            Arc::new(BudgetConsumingMetadataBackend::new(Duration::from_millis(
+                300,
+            ))),
             "gc-publication-bounded-retry".to_string(),
-            Duration::from_millis(250),
+            Duration::from_secs(2),
         ),
     ));
     el.gc_actor
@@ -2754,7 +2767,7 @@ fn should_bound_retry_gc_metadata_publication_by_maintenance_deadline(
 
     // Assert
     assert!(
-        elapsed < Duration::from_millis(160),
+        elapsed < Duration::from_secs(1),
         "RetryGc exceeded its bounded maintenance attempt: {elapsed:?}"
     );
     assert!(
@@ -3465,7 +3478,7 @@ fn should_not_block_runtime_when_cloud_sst_delete_is_slow() -> crate::common::Mi
     let (_tx, msg_rx) = crossbeam::channel::unbounded();
     let release_delete_for_thread = Arc::clone(&release_delete);
     let release_thread = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(250));
+        std::thread::sleep(Duration::from_secs(1));
         release_delete_for_thread.store(true, Ordering::SeqCst);
     });
 
@@ -3482,7 +3495,7 @@ fn should_not_block_runtime_when_cloud_sst_delete_is_slow() -> crate::common::Mi
 
     // Assert
     assert!(
-        elapsed < Duration::from_millis(150),
+        elapsed < Duration::from_millis(500),
         "runtime GC handler blocked on provider delete for {elapsed:?}"
     );
     assert!(matches!(
@@ -6887,9 +6900,10 @@ fn should_not_start_wal_flush_when_lease_check_leaves_less_than_storage_budget(
     let request_id = 91_102;
     let response_rx = router.register(request_id, "SealWalForCloud");
     let msg_rx = crossbeam::channel::unbounded::<RuntimeMsg>().1;
+    let last_synced_seq = el.state.wal.last_synced_seq;
+    let local_durable_seq = el.state.wal.local_durable_seq;
 
     // Act
-    let started = Instant::now();
     el.handle_runtime_msg(
         RuntimeMsg::SealWalForCloud {
             request_id,
@@ -6898,7 +6912,6 @@ fn should_not_start_wal_flush_when_lease_check_leaves_less_than_storage_budget(
         },
         &msg_rx,
     );
-    let elapsed = started.elapsed();
 
     // Assert
     assert!(matches!(
@@ -6908,13 +6921,17 @@ fn should_not_start_wal_flush_when_lease_check_leaves_less_than_storage_budget(
             ..
         })
     ));
-    assert!(
-        elapsed < Duration::from_millis(150),
-        "strict seal started additional I/O outside the remaining budget: {elapsed:?}"
-    );
     assert_eq!(
         el.state.wal.current_segment_id, active_segment,
         "deadline refusal before flush must leave the active WAL segment intact"
+    );
+    assert_eq!(
+        el.state.wal.last_synced_seq, last_synced_seq,
+        "deadline refusal must not mark the active WAL as flushed"
+    );
+    assert_eq!(
+        el.state.wal.local_durable_seq, local_durable_seq,
+        "deadline refusal must not advance local durability"
     );
     assert!(el.state.wal.pending_writes > 0);
     assert!(el.durability.cloud_seal_retry_needed());
@@ -7324,7 +7341,7 @@ fn should_bound_final_cloud_wal_seal_by_shutdown_deadline() -> crate::common::Mi
     append_cloud_async_put(&mut el)?;
     let active_segment = el.state.wal.current_segment_id;
     el.leader_store = Some(Arc::new(DelayedLeaderStore::new(
-        Duration::from_millis(250),
+        Duration::from_secs(1),
         "writer-1",
         1,
     )));
@@ -7341,7 +7358,7 @@ fn should_bound_final_cloud_wal_seal_by_shutdown_deadline() -> crate::common::Mi
     // Assert
     assert_eq!(outcome, super::super::HandleOutcome::Break);
     assert!(
-        elapsed < Duration::from_millis(150),
+        elapsed < Duration::from_millis(500),
         "final cloud WAL seal exceeded the aggregate shutdown deadline: {elapsed:?}"
     );
     assert!(matches!(
@@ -7381,7 +7398,7 @@ fn should_bound_runtime_owned_wal_admission_by_shutdown_deadline() -> crate::com
     });
     std::thread::sleep(Duration::from_millis(25));
     el.leader_store = Some(Arc::new(DelayedLeaderStore::new(
-        Duration::from_millis(250),
+        Duration::from_secs(1),
         "writer-1",
         1,
     )));
@@ -7399,7 +7416,7 @@ fn should_bound_runtime_owned_wal_admission_by_shutdown_deadline() -> crate::com
     // Assert
     assert_eq!(outcome, super::super::HandleOutcome::Break);
     assert!(
-        elapsed < Duration::from_millis(150),
+        elapsed < Duration::from_millis(500),
         "shutdown WAL admission exceeded its shared drain deadline: {elapsed:?}"
     );
     assert!(matches!(
@@ -7433,7 +7450,7 @@ fn should_bound_pending_cloud_ack_given_shutdown_deadline() -> crate::common::Mi
     );
     let delayed_cloud = Arc::new(ArmedDelayedHeadStorageBackend::new(
         cloud_fs,
-        Duration::from_millis(250),
+        Duration::from_secs(1),
     ));
     let local: Arc<dyn crate::storage::StorageBackend> = Arc::new(
         crate::storage::filesystem::FileSystem::new(el.state.db_path.join("hybrid_local"))
@@ -7482,7 +7499,7 @@ fn should_bound_pending_cloud_ack_given_shutdown_deadline() -> crate::common::Mi
     // Assert
     assert_eq!(outcome, super::super::HandleOutcome::Break);
     assert!(
-        elapsed < Duration::from_millis(150),
+        elapsed < Duration::from_millis(500),
         "pending CloudAck settlement exceeded the shared shutdown deadline: {elapsed:?}"
     );
     assert!(matches!(

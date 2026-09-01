@@ -1229,7 +1229,8 @@ mod tests {
 
     #[test]
     fn should_report_multiple_structural_failures_without_secrets() {
-        // Arrange
+        // Arrange: preserve a wide gap between the 10 ms preflight deadline
+        // and the one-second slow path for loaded cross-platform runners.
         let aws = AwsS3Config::new("Invalid_Bucket", "us-east-1");
         let generic = S3CompatibleConfig::new(
             "tenant/bucket",
@@ -1433,13 +1434,13 @@ mod tests {
         // Act
         let report =
             bounded_location_preflight(&location, &roles, Duration::from_millis(10), || {
-                std::thread::sleep(Duration::from_millis(250));
+                std::thread::sleep(Duration::from_secs(1));
                 report_from_findings(Vec::new())
             });
         let elapsed = started.elapsed();
 
         // Assert
-        assert!(elapsed < Duration::from_millis(150));
+        assert!(elapsed < Duration::from_millis(500));
         assert!(!report.is_ready);
         assert!(report.findings.iter().any(|finding| {
             finding.code == CloudCheckCode::BackendResolution

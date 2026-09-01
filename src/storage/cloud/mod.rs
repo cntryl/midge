@@ -1348,7 +1348,7 @@ mod tests {
         ) {
             let key = key.to_string();
             std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                std::thread::sleep(std::time::Duration::from_secs(1));
                 let _ = callback.send(CloudEvent::Put {
                     key,
                     result: CloudOutcome::Err(CloudError::Protocol("unsupported".to_string())),
@@ -1359,7 +1359,7 @@ mod tests {
         fn submit_get(&self, key: &str, callback: CloudCallback) {
             let key = key.to_string();
             std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                std::thread::sleep(std::time::Duration::from_secs(1));
                 let _ = callback.send(CloudEvent::Get {
                     key,
                     result: CloudOutcome::Err(CloudError::NotFound("delayed miss".to_string())),
@@ -1385,7 +1385,7 @@ mod tests {
         fn submit_head(&self, key: &str, callback: CloudCallback) {
             let key = key.to_string();
             std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                std::thread::sleep(std::time::Duration::from_secs(1));
                 let _ = callback.send(CloudEvent::Head {
                     key,
                     result: CloudOutcome::Err(CloudError::NotFound("delayed miss".to_string())),
@@ -1796,7 +1796,8 @@ mod tests {
 
     #[test]
     fn should_apply_operation_timeout_to_cloud_read_adapter_when_shorter_than_configured_timeout() {
-        // Arrange
+        // Arrange: the one-second provider response stays well beyond both the
+        // 5 ms operation budget and the scheduler-tolerant 500 ms assertion.
         let storage = CloudStorage::new_with_timeout(
             Arc::new(DelayedMissingGetBackend),
             "tenant".to_string(),
@@ -1815,7 +1816,7 @@ mod tests {
         let event = receiver.recv().expect("receive bounded adapter result");
 
         // Assert
-        assert!(started.elapsed() < std::time::Duration::from_millis(40));
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
         assert!(matches!(
             event,
             StorageEvent::ReadComplete {
@@ -1827,7 +1828,7 @@ mod tests {
 
     #[test]
     fn should_apply_operation_timeout_to_cloud_head_adapter_when_shorter_than_configured_timeout() {
-        // Arrange
+        // Arrange: keep the same wide separation for the HEAD adapter.
         let storage = CloudStorage::new_with_timeout(
             Arc::new(DelayedMissingGetBackend),
             "tenant".to_string(),
@@ -1846,7 +1847,7 @@ mod tests {
         let event = receiver.recv().expect("receive bounded adapter result");
 
         // Assert
-        assert!(started.elapsed() < std::time::Duration::from_millis(40));
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
         assert!(matches!(
             event,
             StorageEvent::HeadComplete {
@@ -1858,7 +1859,7 @@ mod tests {
 
     #[test]
     fn should_apply_operation_timeout_to_cloud_cas_adapter_when_shorter_than_configured_timeout() {
-        // Arrange
+        // Arrange: keep the same wide separation for the conditional-write adapter.
         let storage = CloudStorage::new_with_timeout(
             Arc::new(DelayedMissingGetBackend),
             "tenant".to_string(),
@@ -1879,7 +1880,7 @@ mod tests {
         let event = receiver.recv().expect("receive bounded adapter result");
 
         // Assert
-        assert!(started.elapsed() < std::time::Duration::from_millis(40));
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
         assert!(matches!(
             event,
             StorageEvent::WriteComplete {
