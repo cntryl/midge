@@ -6620,26 +6620,35 @@ fn should_use_latest_surviving_waiter_deadline_given_older_waiter_already_expire
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )
     .expect("create cloud event loop");
-    el.runtime_response_timeout = Duration::from_millis(200);
+    el.runtime_response_timeout = Duration::from_secs(1);
     let segment_id = 91_001;
     let old_request_id = 91_002;
     let new_request_id = 91_003;
-    let _old_rx = el.router.register(old_request_id, "SealWalForCloud");
+    let now = Instant::now();
+    let old_registered_at = now
+        .checked_sub(Duration::from_secs(2))
+        .expect("represent expired waiter start");
+    let new_registered_at = now
+        .checked_sub(Duration::from_millis(50))
+        .expect("represent live waiter start");
+    let _old_rx =
+        el.router
+            .register_at_for_test(old_request_id, "SealWalForCloud", old_registered_at);
     el.durability.queue_waiter_for_key(
         segment_id,
         DurabilityWaiter::CloudDurability {
             request_id: old_request_id,
         },
     );
-    std::thread::sleep(Duration::from_millis(150));
-    let _new_rx = el.router.register(new_request_id, "SealWalForCloud");
+    let _new_rx =
+        el.router
+            .register_at_for_test(new_request_id, "SealWalForCloud", new_registered_at);
     el.durability.queue_waiter_for_key(
         segment_id,
         DurabilityWaiter::CloudDurability {
             request_id: new_request_id,
         },
     );
-    std::thread::sleep(Duration::from_millis(75));
 
     // Act
     let deadline = el
@@ -6662,7 +6671,7 @@ fn should_preserve_later_segment_waiter_when_earlier_gap_waiter_expired(
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.runtime_response_timeout = Duration::from_millis(200);
+    el.runtime_response_timeout = Duration::from_secs(1);
     append_cloud_async_put(&mut el)?;
     let (first_segment, first_max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
     append_cloud_async_put(&mut el)?;
@@ -6671,23 +6680,31 @@ fn should_preserve_later_segment_waiter_when_earlier_gap_waiter_expired(
 
     let first_request_id = 91_011;
     let second_request_id = 91_012;
-    let first_rx = el.router.register(first_request_id, "SealWalForCloud");
+    let now = Instant::now();
+    let first_registered_at = now
+        .checked_sub(Duration::from_secs(2))
+        .expect("represent expired gap waiter start");
+    let second_registered_at = now
+        .checked_sub(Duration::from_millis(50))
+        .expect("represent live dependent waiter start");
+    let first_rx =
+        el.router
+            .register_at_for_test(first_request_id, "SealWalForCloud", first_registered_at);
     el.durability.queue_waiter_for_key(
         first_segment,
         DurabilityWaiter::CloudDurability {
             request_id: first_request_id,
         },
     );
-    std::thread::sleep(Duration::from_millis(150));
-    let second_rx = el.router.register(second_request_id, "SealWalForCloud");
+    let second_rx =
+        el.router
+            .register_at_for_test(second_request_id, "SealWalForCloud", second_registered_at);
     el.durability.queue_waiter_for_key(
         second_segment,
         DurabilityWaiter::CloudDurability {
             request_id: second_request_id,
         },
     );
-    std::thread::sleep(Duration::from_millis(75));
-
     // Act: the first caller's budget is exhausted, but publication of its
     // segment is also required to serve the newer second caller.
     el.handle_storage_event(crate::storage::StorageEvent::CloudAck {

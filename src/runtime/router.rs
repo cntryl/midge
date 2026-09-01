@@ -114,16 +114,35 @@ impl ResponseRouter {
         request_id: u64,
         request_kind: &'static str,
     ) -> Receiver<RuntimeResponse> {
+        self.register_at(request_id, request_kind, Instant::now())
+    }
+
+    fn register_at(
+        &self,
+        request_id: u64,
+        request_kind: &'static str,
+        registered_at: Instant,
+    ) -> Receiver<RuntimeResponse> {
         let (tx, rx) = channel::bounded(1);
         self.pending.insert(
             request_id,
             PendingRequest {
                 response_tx: tx,
                 request_kind,
-                registered_at: Instant::now(),
+                registered_at,
             },
         );
         rx
+    }
+
+    #[cfg(test)]
+    pub(crate) fn register_at_for_test(
+        &self,
+        request_id: u64,
+        request_kind: &'static str,
+        registered_at: Instant,
+    ) -> Receiver<RuntimeResponse> {
+        self.register_at(request_id, request_kind, registered_at)
     }
 
     /// Complete a request by delivering its response to the waiting receiver.
