@@ -6620,16 +6620,16 @@ fn should_use_latest_surviving_waiter_deadline_given_older_waiter_already_expire
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )
     .expect("create cloud event loop");
-    el.runtime_response_timeout = Duration::from_secs(5);
+    el.runtime_response_timeout = Duration::from_secs(1);
     let segment_id = 91_001;
     let old_request_id = 91_002;
     let new_request_id = 91_003;
     let now = Instant::now();
     let old_registered_at = now
-        .checked_sub(Duration::from_secs(6))
+        .checked_sub(Duration::from_secs(2))
         .expect("represent expired waiter start");
     let new_registered_at = now
-        .checked_sub(Duration::from_millis(250))
+        .checked_sub(Duration::from_millis(50))
         .expect("represent live waiter start");
     let _old_rx =
         el.router
@@ -6671,7 +6671,7 @@ fn should_preserve_later_segment_waiter_when_earlier_gap_waiter_expired(
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.runtime_response_timeout = Duration::from_secs(5);
+    el.runtime_response_timeout = Duration::from_secs(1);
     append_cloud_async_put(&mut el)?;
     let (first_segment, first_max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
     append_cloud_async_put(&mut el)?;
@@ -6682,10 +6682,10 @@ fn should_preserve_later_segment_waiter_when_earlier_gap_waiter_expired(
     let second_request_id = 91_012;
     let now = Instant::now();
     let first_registered_at = now
-        .checked_sub(Duration::from_secs(6))
+        .checked_sub(Duration::from_secs(2))
         .expect("represent expired gap waiter start");
     let second_registered_at = now
-        .checked_sub(Duration::from_millis(250))
+        .checked_sub(Duration::from_millis(50))
         .expect("represent live dependent waiter start");
     let first_rx =
         el.router
