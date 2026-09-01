@@ -121,8 +121,11 @@ impl crate::storage::cloud::CloudBackend for DelayedRecoveryBackend {
                 },
                 crate::storage::cloud::CloudOutcome::Ok,
             );
-            let _ = callback.send(crate::storage::cloud::CloudEvent::Get { key, result });
+            // Completion transfers ownership back to the recovery caller. End
+            // the measured in-flight interval before publishing the callback,
+            // which may immediately admit the next bounded batch.
             in_flight.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            let _ = callback.send(crate::storage::cloud::CloudEvent::Get { key, result });
         });
     }
 

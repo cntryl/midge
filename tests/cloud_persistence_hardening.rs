@@ -548,13 +548,16 @@ fn should_keep_cloud_async_commit_visible_given_cloud_upload_failure_when_commit
     let _guard = failpoint_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let opts = opts_for_mode("cloud").with_shutdown_cloud_drain_timeout(Duration::from_millis(100));
-    let db_path = cloud_db_path(&opts);
+    let recovery_opts = opts_for_mode("cloud");
+    let failure_opts = recovery_opts
+        .clone()
+        .with_shutdown_cloud_drain_timeout(Duration::from_millis(100));
+    let db_path = cloud_db_path(&recovery_opts);
     let scenario = fail::FailScenario::setup();
     fail::cfg("midge::cloud::inject_fail_wal_upload", "return")
         .expect("configure wal upload failure failpoint");
 
-    let mut engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
+    let mut engine = Engine::open(failure_opts.to_open_options()).expect("open cloud engine");
     put_default(
         &engine,
         b"buffered-local-only",
@@ -582,7 +585,7 @@ fn should_keep_cloud_async_commit_visible_given_cloud_upload_failure_when_commit
     scenario.teardown();
 
     reset_dir(&db_path.join("wal"));
-    let reopened = Engine::open(opts.to_open_options()).expect("reopen cloud engine");
+    let reopened = Engine::open(recovery_opts.to_open_options()).expect("reopen cloud engine");
     assert_eq!(get_default(&reopened, b"buffered-local-only"), None);
     shutdown_test_engine(reopened);
 }
@@ -594,14 +597,17 @@ fn should_recover_cloud_async_commit_given_intact_local_wal_when_upload_fails() 
     let _guard = failpoint_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let opts = opts_for_mode("cloud").with_shutdown_cloud_drain_timeout(Duration::from_millis(100));
-    let db_path = cloud_db_path(&opts);
+    let recovery_opts = opts_for_mode("cloud");
+    let failure_opts = recovery_opts
+        .clone()
+        .with_shutdown_cloud_drain_timeout(Duration::from_millis(100));
+    let db_path = cloud_db_path(&recovery_opts);
     let remote_wal_dir = db_path.join("cloud_store").join("wal");
     let scenario = fail::FailScenario::setup();
     fail::cfg("midge::cloud::inject_fail_wal_upload", "return")
         .expect("configure wal upload failure failpoint");
 
-    let mut engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
+    let mut engine = Engine::open(failure_opts.to_open_options()).expect("open cloud engine");
     put_default(
         &engine,
         b"intact-local-cloud-async",
@@ -615,7 +621,7 @@ fn should_recover_cloud_async_commit_given_intact_local_wal_when_upload_fails() 
     scenario.teardown();
 
     // Act
-    let reopened = Engine::open(opts.to_open_options()).expect("reopen cloud engine");
+    let reopened = Engine::open(recovery_opts.to_open_options()).expect("reopen cloud engine");
 
     // Assert
     assert_eq!(
@@ -641,13 +647,16 @@ fn should_fail_cloud_strict_commit_given_cloud_upload_failure_when_waiting_for_a
     let _guard = failpoint_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let opts = opts_for_mode("cloud").with_shutdown_cloud_drain_timeout(Duration::from_millis(100));
-    let db_path = cloud_db_path(&opts);
+    let recovery_opts = opts_for_mode("cloud");
+    let failure_opts = recovery_opts
+        .clone()
+        .with_shutdown_cloud_drain_timeout(Duration::from_millis(100));
+    let db_path = cloud_db_path(&recovery_opts);
     let scenario = fail::FailScenario::setup();
     fail::cfg("midge::cloud::inject_fail_wal_upload", "return")
         .expect("configure wal upload failure failpoint");
 
-    let mut engine = Engine::open(opts.clone().to_open_options()).expect("open cloud engine");
+    let mut engine = Engine::open(failure_opts.to_open_options()).expect("open cloud engine");
     let default_cf = default_cf(&engine);
     let mut tx = engine
         .begin_tx(default_cf.id(), TransactionMode::ReadWrite)
@@ -680,7 +689,7 @@ fn should_fail_cloud_strict_commit_given_cloud_upload_failure_when_waiting_for_a
     scenario.teardown();
 
     reset_dir(&db_path.join("wal"));
-    let reopened = Engine::open(opts.to_open_options()).expect("reopen cloud engine");
+    let reopened = Engine::open(recovery_opts.to_open_options()).expect("reopen cloud engine");
     assert_eq!(get_default(&reopened, b"cloud-strict-fail"), None);
     shutdown_test_engine(reopened);
 }
