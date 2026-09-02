@@ -30,7 +30,7 @@ const POINT_SAMPLES: u64 = 1_000;
 const PREFIX_SAMPLES: u32 = 200;
 const PREFIX_SCAN_LIMIT: usize = 100;
 const RSS_SAMPLE_INTERVAL: Duration = Duration::from_millis(100);
-const QUALIFICATION_TARGET_SST_SIZE: usize = 16 * 1024 * 1024;
+const MIB: usize = 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct DigestEvidence {
@@ -180,13 +180,21 @@ fn primary_value(id: u64) -> [u8; 16] {
     value
 }
 
-fn options(path: &Path) -> MidgeResult<OpenOptions> {
+fn qualification_target_sst_size(base_records: u64) -> usize {
+    match base_records {
+        0..=1_000_000 => 16 * MIB,
+        1_000_001..=10_000_000 => 64 * MIB,
+        _ => 128 * MIB,
+    }
+}
+
+fn options(path: &Path, base_records: u64) -> MidgeResult<OpenOptions> {
     OpenOptions::local(path)
         .goal(Goal::Throughput)
         .workload(WorkloadProfile::WriteHeavy)
         .memory_budget(MemoryBudget::Bytes(4 * 1024 * 1024 * 1024))
         .with_memtable_size_limit(256 * 1024 * 1024)
-        .target_sst_size_for_testing(QUALIFICATION_TARGET_SST_SIZE)
+        .target_sst_size_for_testing(qualification_target_sst_size(base_records))
         .runtime_response_timeout(Duration::from_hours(4))
         .lease_ttl(Duration::from_secs(2))
         .lease_clock_skew_tolerance(Duration::ZERO)
@@ -194,10 +202,10 @@ fn options(path: &Path) -> MidgeResult<OpenOptions> {
         .build()
 }
 
-fn open_after_crash(path: &Path) -> MidgeResult<Engine> {
+fn open_after_crash(path: &Path, base_records: u64) -> MidgeResult<Engine> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        match Engine::open(options(path)?) {
+        match Engine::open(options(path, base_records)?) {
             Ok(engine) => return Ok(engine),
             Err(MidgeError::LeaseHeld(_)) if Instant::now() < deadline => {
                 thread::sleep(Duration::from_millis(100));
@@ -398,7 +406,7 @@ fn write_amplification(compaction_bytes_rewritten: u64, pre_compaction_sst_bytes
 fn run_worker(base_records: u64, path: &Path, partial_path: &Path) -> MidgeResult<()> {
     init_benchmark_telemetry()?;
     let sampler = RssSampler::start()?;
-    let open_options = options(path)?;
+    let open_options = options(path, base_records)?;
     let target_sst_size = open_options.target_sst_size();
     let block_size = open_options.block_size();
     let engine = Engine::open(open_options)?;
@@ -605,7 +613,7 @@ fn run_parent(base_records: u64, path: &Path, output: &Path) -> MidgeResult<()> 
         .map_err(|error| json_error(&error))?;
 
     let recovery_started = Instant::now();
-    let mut recovered = open_after_crash(path)?;
+    let mut recovered = open_after_crash(path, base_records)?;
     let recovered_cf = recovered.get_column_family("addresses").ok_or_else(|| {
         MidgeError::RecoveryFailed("addresses column family missing after crash".to_string())
     })?;
@@ -625,7 +633,7 @@ fn run_parent(base_records: u64, path: &Path, output: &Path) -> MidgeResult<()> 
     recovered.shutdown(Duration::from_secs(30))?;
 
     let clean_started = Instant::now();
-    let mut reopened = Engine::open(options(path)?)?;
+    let mut reopened = Engine::open(options(path, base_records)?)?;
     let reopened_cf = reopened.get_column_family("addresses").ok_or_else(|| {
         MidgeError::RecoveryFailed("addresses column family missing after clean reopen".to_string())
     })?;
