@@ -2074,6 +2074,126 @@ fn should_reject_late_compaction_output_after_column_family_is_dropped() {
 }
 
 #[test]
+fn should_reject_out_of_order_compaction_output_set_before_publication(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut event_loop = create_test_local_event_loop()?;
+    let input_name = crate::sst::file_name(0, 0, 1);
+    let input_bytes = valid_sst_bytes_for_event_loop_test(b"input", b"value", 1);
+    std::fs::write(event_loop.state.sst_dir.join(&input_name), &input_bytes)?;
+    event_loop
+        .state
+        .manifest
+        .files
+        .push(crate::metadata::FileMeta {
+            name: input_name.clone(),
+            level: 0,
+            size_bytes: u64::try_from(input_bytes.len()).expect("input length fits u64"),
+            content_crc32c: Some(crc32c::crc32c(&input_bytes)),
+            cf_id: 0,
+            smallest_key: Some(b"input".to_vec()),
+            largest_key: Some(b"input".to_vec()),
+            smallest_seq: Some(1),
+            largest_seq: Some(1),
+            ..Default::default()
+        });
+    let first_name = crate::sst::compaction_file_name(0, 1, 2, 0);
+    let second_name = crate::sst::compaction_file_name(0, 1, 2, 1);
+    let first_bytes = valid_sst_bytes_for_event_loop_test(b"a", b"first", 2);
+    let second_bytes = valid_sst_bytes_for_event_loop_test(b"z", b"second", 2);
+    std::fs::write(event_loop.state.sst_dir.join(&first_name), first_bytes)?;
+    std::fs::write(event_loop.state.sst_dir.join(&second_name), second_bytes)?;
+    event_loop
+        .compaction_actor
+        .prepare_for_completion_test(&mut event_loop.state, std::slice::from_ref(&input_name))?;
+    let request_id = 8_159;
+    let response_rx = event_loop.router.register(request_id, "TestRequest");
+    let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
+
+    // Act
+    event_loop.handle_runtime_msg(
+        RuntimeMsg::CompactionComplete {
+            request_id,
+            input_ssts: vec![input_name.clone()],
+            output_ssts: vec![second_name.clone(), first_name.clone()],
+            cf_id: 0,
+            target_level: 1,
+            succeeded: true,
+        },
+        &msg_rx,
+    );
+
+    // Assert
+    match response_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("invalid completion response")
+    {
+        RuntimeResponse::Error { error, .. } => assert!(
+            error.to_string().contains("sorted and uniquely named"),
+            "unexpected validation error: {error}"
+        ),
+        other => panic!("expected rejected output set, got {other:?}"),
+    }
+    assert!(event_loop.state.manifest_has_file(&input_name));
+    assert!(!event_loop.state.manifest_has_file(&first_name));
+    assert!(!event_loop.state.manifest_has_file(&second_name));
+    assert!(event_loop.state.intent_log.is_empty());
+    for _ in 0..100 {
+        if !event_loop.state.sst_dir.join(&first_name).exists()
+            && !event_loop.state.sst_dir.join(&second_name).exists()
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(!event_loop.state.sst_dir.join(first_name).exists());
+    assert!(!event_loop.state.sst_dir.join(second_name).exists());
+    Ok(())
+}
+
+#[test]
+fn should_reject_cloud_partition_read_before_exceeding_compaction_pool(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let temp_dir = tempfile::tempdir()?;
+    let path = temp_dir.path().join("oversized-partition.sst");
+    std::fs::write(&path, vec![0u8; 128])?;
+    let budget = crate::common::resource_budget::ResourceBudget::new(64);
+
+    // Act
+    let result = EventLoop::read_file_with_budget(&path, &budget);
+
+    // Assert
+    assert!(matches!(
+        result,
+        Err(crate::common::MidgeError::ResourceLimit(_))
+    ));
+    assert!(path.is_file());
+    Ok(())
+}
+
+#[test]
+fn should_reject_sst_checksum_buffer_before_exceeding_compaction_pool(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let temp_dir = tempfile::tempdir()?;
+    let path = temp_dir.path().join("checksum-input.sst");
+    std::fs::write(&path, [1u8; 128])?;
+    let budget = crate::common::resource_budget::ResourceBudget::new(64);
+
+    // Act
+    let result = EventLoop::checksummed_file_crc(&path, &budget);
+
+    // Assert
+    assert!(matches!(
+        result,
+        Err(crate::common::MidgeError::ResourceLimit(_))
+    ));
+    assert!(path.is_file());
+    Ok(())
+}
+
+#[test]
 fn should_count_late_response_given_inline_route_when_caller_already_gave_up() {
     // Arrange: an inline caller registers a response channel and then stops
     // waiting, mirroring a transaction commit that hit its response timeout.

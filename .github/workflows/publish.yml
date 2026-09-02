@@ -95,7 +95,7 @@ jobs:
         run: cargo test --lib --features sqrzl-tests storage::providers::qualification -- --ignored --test-threads=1
 
       - name: Sqrzl engine qualification
-        run: cargo test --test cloud_provider_engine_qualification --features sqrzl-tests -- --ignored --test-threads=1
+        run: cargo test --test cloud_provider_engine_qualification --features sqrzl-tests,failpoints -- --ignored --test-threads=1
 
       - name: Trust-critical smoke suite
         run: cargo test --test external_adopter_smoke --features failpoints

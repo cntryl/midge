@@ -130,7 +130,13 @@ impl SstFileIo {
         self.footer = Some(footer);
         self.load_sst_metadata()?;
         self.load_block_bloom()?;
-        let index = self.parse_index_entries()?;
+        let index_handle = self
+            .footer
+            .as_ref()
+            .ok_or_else(|| MidgeError::Corruption("SST footer is missing".into()))?
+            .index_handle;
+        let index_data = self.read_metadata_block(&index_handle, "SST index")?;
+        let index = self.decode_index_entries(&index_data)?;
         self.validate_nonoverlapping_references(&index)?;
         self.index_entries.store(Some(Arc::new(index)));
 
@@ -142,7 +148,7 @@ impl SstFileIo {
             return Ok(());
         };
 
-        let metadata_bytes = self.read_block(&footer.meta_index_handle)?;
+        let metadata_bytes = self.read_metadata_block(&footer.meta_index_handle, "SST metadata")?;
         if metadata_bytes.is_empty() {
             return Err(MidgeError::Corruption(
                 "SST V4 metadata block is empty".into(),
@@ -164,14 +170,14 @@ impl SstFileIo {
         self.range_tombstones = match metadata.range_tombstone_handle {
             Some(handle) => {
                 Self::validate_block_handle(handle, self.block_region_end, "range tombstone")?;
-                let tombstone_bytes = self.read_block(&handle)?;
+                let tombstone_bytes = self.read_metadata_block(&handle, "SST range tombstones")?;
                 decode_range_tombstones(&tombstone_bytes)?
             }
             _ => Vec::new(),
         };
         self.trie_reader = match (self.index_kind, footer.trie_handle) {
             (IndexKind::Trie, Some(handle)) => {
-                let trie_bytes = self.read_block(&handle)?;
+                let trie_bytes = self.read_metadata_block(&handle, "SST trie")?;
                 Some(Arc::new(TrieReader::new(&trie_bytes)?))
             }
             (IndexKind::Trie, None) => {
@@ -265,6 +271,57 @@ impl SstFileIo {
         )?;
 
         self.read_block_from(file.as_ref(), handle)
+    }
+
+    pub(super) fn read_metadata_block(
+        &mut self,
+        handle: &BlockHandle,
+        resource: &'static str,
+    ) -> MidgeResult<bytes::Bytes> {
+        let Some(budget) = self.metadata_budget.clone() else {
+            return self.read_block(handle);
+        };
+
+        Self::validate_block_handle(*handle, self.block_region_end, resource)?;
+        let compressed_size = usize::try_from(handle.size).map_err(|_| {
+            MidgeError::ResourceLimit(format!("{resource} exceeds addressable memory"))
+        })?;
+        let compressed_reservation = budget.reserve(compressed_size, resource)?;
+        let file = self.fs.open(
+            &self.path,
+            crate::io::OpenOptions {
+                mode: crate::io::OpenMode::ReadOnly,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        )?;
+        let buffer = file.read_at(handle.offset, handle.size)?;
+        if buffer.len() < 4 {
+            return Err(MidgeError::Corruption("Block too short".into()));
+        }
+        let payload_len = u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
+        if payload_len.checked_add(4) != Some(buffer.len()) {
+            return Err(MidgeError::Corruption(
+                "SST block length prefix does not exactly match its handle".into(),
+            ));
+        }
+        let raw = &buffer[4..];
+        let decoded_size = crate::sst::compression::decompressed_size_with_trailer(raw)?;
+        let retained_size = decoded_size.saturating_mul(4).saturating_add(256);
+        let retained_reservation = budget.reserve(retained_size, resource)?;
+        let decoded = crate::sst::compression::decompress_block_with_trailer(raw)?;
+        if decoded.len() > decoded_size {
+            return Err(MidgeError::Corruption(format!(
+                "decoded {resource} exceeded its declared size"
+            )));
+        }
+        drop(compressed_reservation);
+        // The decoded bytes are transient, but their decoded reader structure
+        // remains live (index, filter, trie, or range tombstones). Keep this
+        // conservative reservation with the reader for that parsed structure.
+        self.metadata_reservations.push(retained_reservation);
+        Ok(decoded)
     }
 
     pub(super) fn read_block_from(

@@ -845,6 +845,96 @@ fn should_get_state_at_return_newest_visible_version_across_duplicate_blocks() -
 }
 
 #[test]
+fn should_stream_raw_versions_in_compaction_order_across_blocks() -> MidgeResult<()> {
+    // Arrange
+    let temp_dir = tempfile::tempdir()?;
+    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+    let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+    let mut writer = factory.create()?;
+    writer.add_with_meta(b"aaa", Some(b"first"), 100, 0, None)?;
+    for sequence in 1..=32u64 {
+        let value = vec![u8::try_from(sequence).unwrap_or(u8::MAX); 512];
+        writer.add_with_meta(b"dup", Some(&value), sequence, 0, None)?;
+    }
+    writer.add_with_meta(b"zzz", Some(b"last"), 100, 0, None)?;
+    crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join("raw-versions.sst"))?;
+    let reader = Box::new(SstFileIo::open(
+        "raw-versions.sst",
+        Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+    )?);
+
+    // Act
+    let versions = reader
+        .raw_version_cursor(None, None)?
+        .collect::<MidgeResult<Vec<_>>>()?;
+
+    // Assert
+    assert_eq!(versions.len(), 34);
+    assert_eq!(
+        versions.first().map(|version| version.key.as_slice()),
+        Some(b"aaa".as_slice())
+    );
+    assert_eq!(
+        versions.last().map(|version| version.key.as_slice()),
+        Some(b"zzz".as_slice())
+    );
+    let duplicate_sequences = versions
+        .iter()
+        .filter(|version| version.key == b"dup")
+        .map(|version| version.seq)
+        .collect::<Vec<_>>();
+    assert_eq!(duplicate_sequences, (1..=32u64).rev().collect::<Vec<_>>());
+    Ok(())
+}
+
+#[test]
+fn should_fail_raw_cursor_before_decoded_block_exceeds_compaction_pool() -> MidgeResult<()> {
+    // Arrange
+    let temp_dir = tempfile::tempdir()?;
+    write_unique_key_sst(&temp_dir, "budgeted-raw-cursor.sst")?;
+    let path = temp_dir.path().join("budgeted-raw-cursor.sst");
+    let reader = Box::new(SstFileIo::open(
+        "budgeted-raw-cursor.sst",
+        Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+    )?);
+    let budget = crate::common::resource_budget::ResourceBudget::new(1024);
+    let mut cursor = reader.raw_version_cursor_with_budget(None, None, Some(budget))?;
+
+    // Act
+    let result = cursor.next().expect("cursor reports resource failure");
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::ResourceLimit(_))));
+    assert!(
+        path.is_file(),
+        "resource failure must retain the authoritative SST"
+    );
+    Ok(())
+}
+
+#[test]
+fn should_fail_compaction_open_before_sst_metadata_exceeds_pool() -> MidgeResult<()> {
+    // Arrange
+    let temp_dir = tempfile::tempdir()?;
+    write_unique_key_sst(&temp_dir, "budgeted-metadata.sst")?;
+    let path = temp_dir.path().join("budgeted-metadata.sst");
+    let factory =
+        crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::RealFs::new(temp_dir.path())?), 4096);
+    let budget = crate::common::resource_budget::ResourceBudget::new(64);
+
+    // Act
+    let result = factory.open_for_compaction(std::path::Path::new("budgeted-metadata.sst"), budget);
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::ResourceLimit(_))));
+    assert!(
+        path.is_file(),
+        "metadata admission must retain the input SST"
+    );
+    Ok(())
+}
+
+#[test]
 fn should_get_state_at_return_newest_visible_version_across_many_trie_blocks() -> MidgeResult<()> {
     // Arrange
     let temp_dir = tempfile::tempdir()?;

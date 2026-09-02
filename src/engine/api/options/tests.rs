@@ -335,6 +335,27 @@ fn should_clamp_memtable_for_small_explicit_budget() {
 }
 
 #[test]
+fn should_deduct_bounded_compaction_pool_before_assigning_block_cache() {
+    // Arrange
+    let total = 1024 * 1024 * 1024;
+
+    // Act
+    let opts = OpenOptions::in_memory()
+        .memory_budget(MemoryBudget::Bytes(total))
+        .build()
+        .expect("build bounded compaction pools");
+
+    // Assert
+    assert_eq!(opts.compaction_memory_pool_size(), total / 10);
+    let accounted = opts
+        .transaction_memory_pool_size()
+        .saturating_add(opts.compaction_memory_pool_size())
+        .saturating_add(opts.memtable_size_limit().saturating_mul(2))
+        .saturating_add(opts.block_cache_size());
+    assert!(accounted <= total);
+}
+
+#[test]
 fn should_use_explicit_memtable_size_for_flush_threshold_when_only_size_override_is_set() {
     // Arrange
     let size_limit = 128 * 1024;
@@ -409,6 +430,23 @@ fn should_reject_memory_budget_given_value_below_minimum_when_building() {
 
     // Assert
     assert!(matches!(result, Err(MidgeError::ResourceLimit(_))));
+}
+
+#[test]
+fn should_reject_memory_budget_when_no_compaction_capacity_remains() {
+    // Arrange
+
+    // Act
+    let results = (3..10).map(|bytes| {
+        OpenOptions::in_memory()
+            .memory_budget(MemoryBudget::Bytes(bytes))
+            .build()
+    });
+
+    // Assert
+    assert!(results
+        .into_iter()
+        .all(|result| matches!(result, Err(MidgeError::ResourceLimit(_)))));
 }
 
 #[test]

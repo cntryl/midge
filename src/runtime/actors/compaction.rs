@@ -22,6 +22,8 @@ pub struct CompactionActor {
     sst_factory: Arc<dyn SstFactory>,
     /// Compaction strategy
     compactor: Compactor,
+    target_sst_size: usize,
+    compaction_memory_limit: usize,
     /// Last column family selected for the global compaction slot. Planning
     /// resumes after this ID so a perpetually eligible low ID cannot starve
     /// unrelated families.
@@ -52,6 +54,8 @@ impl CompactionActor {
             compaction_running: false,
             sst_factory,
             compactor: Compactor::with_config(config),
+            target_sst_size: crate::compaction::DEFAULT_TARGET_SST_SIZE,
+            compaction_memory_limit: crate::compaction::DEFAULT_COMPACTION_MEMORY_LIMIT,
             last_scheduled_cf: None,
             storage_reservation: None,
             active_input_ssts: Vec::new(),
@@ -62,6 +66,23 @@ impl CompactionActor {
 
     pub fn set_l0_file_count_threshold(&mut self, threshold: usize) {
         self.compactor.config.l0_file_count_threshold = threshold.max(1);
+    }
+
+    pub(crate) fn set_execution_limits(
+        &mut self,
+        target_sst_size: usize,
+        compaction_memory_limit: usize,
+    ) {
+        self.target_sst_size = target_sst_size.max(1);
+        self.compaction_memory_limit = compaction_memory_limit;
+    }
+
+    pub(crate) fn target_sst_size(&self) -> usize {
+        self.target_sst_size
+    }
+
+    pub(crate) fn compaction_memory_limit(&self) -> usize {
+        self.compaction_memory_limit
     }
 
     #[cfg(test)]
@@ -139,6 +160,8 @@ impl CompactionActor {
                 .pick_compaction(&state.manifest.files, cf_id)?
             {
                 plan.snapshot_horizon = state.oldest_active_snapshot_sequence();
+                plan.target_sst_size = self.target_sst_size;
+                plan.compaction_memory_limit = self.compaction_memory_limit;
                 self.last_scheduled_cf = Some(cf_id);
                 return Ok(Some(plan));
             }
@@ -480,6 +503,8 @@ impl Clone for CompactionActor {
             compaction_running: self.compaction_running,
             sst_factory: Arc::clone(&self.sst_factory),
             compactor: Compactor::with_config(self.compactor.config.clone()),
+            target_sst_size: self.target_sst_size,
+            compaction_memory_limit: self.compaction_memory_limit,
             last_scheduled_cf: self.last_scheduled_cf,
             storage_reservation: self.storage_reservation,
             active_input_ssts: self.active_input_ssts.clone(),

@@ -195,6 +195,7 @@ struct DerivedMemoryPools {
     memtable_flush_threshold: usize,
     block_cache_size: usize,
     transaction_memory_pool_size: usize,
+    compaction_memory_pool_size: usize,
 }
 
 impl OpenOptions {
@@ -315,6 +316,15 @@ impl OpenOptions {
     #[must_use]
     pub fn target_sst_size(&self) -> usize {
         self.compaction.target_sst_size
+    }
+
+    pub(crate) fn compaction_memory_pool_size(&self) -> usize {
+        self.compaction.memory_pool_size
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_compaction_target_sst_size_for_test(&mut self, bytes: usize) {
+        self.compaction.target_sst_size = bytes.max(1);
     }
 
     /// Return the block-cache allocation.
@@ -444,6 +454,7 @@ impl OpenOptionsBuilder {
             compaction: crate::compaction::OpenCompactionConfig::new(
                 0,
                 0,
+                0,
                 true,
                 Self::derive_compression_policy(Goal::default()),
             ),
@@ -521,6 +532,18 @@ impl OpenOptionsBuilder {
     #[must_use]
     pub fn background_compaction(mut self, enabled: bool) -> Self {
         self.compaction.set_background_enabled(enabled);
+        self
+    }
+
+    /// Override the internal compaction output target for deterministic fault tests.
+    ///
+    /// This is intentionally available only with the non-production `failpoints`
+    /// feature and is not a supported tuning surface.
+    #[cfg(feature = "failpoints")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn target_sst_size_for_testing(mut self, bytes: usize) -> Self {
+        self.compaction.target_sst_size = bytes.max(1);
         self
     }
 
@@ -666,11 +689,7 @@ impl OpenOptionsBuilder {
             (Goal::Throughput, WorkloadProfile::RangeScan) => 128 * 1024,
             (Goal::Throughput, _) => 64 * 1024,
         };
-        let target_sst_size = match self.goal {
-            Goal::Latency => 128 * 1024 * 1024,
-            Goal::Throughput => 512 * 1024 * 1024,
-            Goal::Economy => 256 * 1024 * 1024,
-        };
+        let target_sst_size = self.derive_target_sst_size();
         let wal_buffer_size = match self.goal {
             Goal::Latency => 128 * 1024,
             Goal::Throughput => 1024 * 1024,
@@ -699,6 +718,7 @@ impl OpenOptionsBuilder {
             cache: CachePolicyConfig::new(block_size, pools.block_cache_size, self.cache.policy),
             compaction: crate::compaction::OpenCompactionConfig::new(
                 target_sst_size,
+                pools.compaction_memory_pool_size,
                 l0_compaction_trigger,
                 self.compaction.background_enabled,
                 compression_policy,
@@ -742,7 +762,21 @@ impl OpenOptionsBuilder {
             )));
         }
 
-        let max_memtable_size = total_memory.saturating_sub(transaction_memory_pool_size) / 2;
+        let desired_compaction_pool = (total_memory / 10).min(256 * 1024 * 1024);
+        let compaction_memory_pool_size = desired_compaction_pool.min(
+            total_memory
+                .saturating_sub(transaction_memory_pool_size)
+                .saturating_sub(2),
+        );
+        if compaction_memory_pool_size == 0 {
+            return Err(MidgeError::ResourceLimit(
+                "memory budget leaves no capacity for bounded compaction".to_string(),
+            ));
+        }
+        let max_memtable_size = total_memory
+            .saturating_sub(transaction_memory_pool_size)
+            .saturating_sub(compaction_memory_pool_size)
+            / 2;
         if max_memtable_size == 0 {
             return Err(MidgeError::ResourceLimit(
                 "memory budget leaves no capacity for memtables".to_string(),
@@ -754,6 +788,7 @@ impl OpenOptionsBuilder {
         crate::config::validate_memtable_limits(memtable_size_limit, memtable_flush_threshold)?;
         let mut block_cache_size = total_memory
             .saturating_sub(transaction_memory_pool_size)
+            .saturating_sub(compaction_memory_pool_size)
             .saturating_sub(memtable_size_limit.saturating_mul(2));
         if self.goal == Goal::Economy {
             block_cache_size = block_cache_size.min(256 * 1024 * 1024);
@@ -764,6 +799,7 @@ impl OpenOptionsBuilder {
             memtable_flush_threshold,
             block_cache_size,
             transaction_memory_pool_size,
+            compaction_memory_pool_size,
         })
     }
 
@@ -791,6 +827,17 @@ impl OpenOptionsBuilder {
             ))),
             Some(bytes) => Ok(bytes),
             None => Ok(desired_memtable.min(max_memtable_size).max(1)),
+        }
+    }
+
+    fn derive_target_sst_size(&self) -> usize {
+        if self.compaction.target_sst_size != 0 {
+            return self.compaction.target_sst_size;
+        }
+        match self.goal {
+            Goal::Latency => 128 * 1024 * 1024,
+            Goal::Throughput => 512 * 1024 * 1024,
+            Goal::Economy => 256 * 1024 * 1024,
         }
     }
 

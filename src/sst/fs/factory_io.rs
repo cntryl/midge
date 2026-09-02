@@ -57,9 +57,21 @@ impl FsSstFactoryIo {
     ///
     /// Returns an error if the file cannot be opened or parsed as an SST reader.
     pub fn open(&self, path: &Path) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+        self.open_internal(path, None)
+    }
+
+    fn open_internal(
+        &self,
+        path: &Path,
+        budget: Option<crate::common::resource_budget::ResourceBudget>,
+    ) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
         let path_str = path.to_str().unwrap_or("").to_string();
         let start = std::time::Instant::now();
-        let reader = super::SstFileIo::open(&path_str, Arc::clone(&self.fs))?;
+        let reader = if let Some(budget) = budget {
+            super::SstFileIo::open_for_compaction(&path_str, Arc::clone(&self.fs), budget)?
+        } else {
+            super::SstFileIo::open(&path_str, Arc::clone(&self.fs))?
+        };
         let elapsed = start.elapsed();
         // Try to gather file size for diagnostics (best-effort)
         let size = self
@@ -82,6 +94,8 @@ struct InMemorySstWriter {
     /// contract. Complete encoded blocks are spilled to a scratch file rather
     /// than retained as logical entries until finalization.
     streaming: Option<StreamingState>,
+    budget: Option<crate::common::resource_budget::ResourceBudget>,
+    range_tombstone_reservations: Vec<crate::common::resource_budget::ResourceReservation>,
 }
 
 #[derive(Debug, Clone)]
@@ -116,10 +130,13 @@ struct StreamingState {
     last_sequence: u64,
     smallest_key: Option<Vec<u8>>,
     largest_key: Option<Vec<u8>>,
+    budget: Option<crate::common::resource_budget::ResourceBudget>,
+    current_reservations: Vec<crate::common::resource_budget::ResourceReservation>,
+    persistent_reservations: Vec<crate::common::resource_budget::ResourceReservation>,
 }
 
 impl StreamingState {
-    fn new() -> MidgeResult<Self> {
+    fn new(budget: Option<crate::common::resource_budget::ResourceBudget>) -> MidgeResult<Self> {
         Ok(Self {
             scratch: tempfile::NamedTempFile::new().map_err(crate::common::MidgeError::Io)?,
             offset: 0,
@@ -134,18 +151,31 @@ impl StreamingState {
             last_sequence: 0,
             smallest_key: None,
             largest_key: None,
+            budget,
+            current_reservations: Vec::new(),
+            persistent_reservations: Vec::new(),
         })
     }
 }
 
 impl InMemorySstWriter {
     fn new(compression_policy: CompressionPolicy, block_size: usize) -> Self {
+        Self::new_with_budget(compression_policy, block_size, None)
+    }
+
+    fn new_with_budget(
+        compression_policy: CompressionPolicy,
+        block_size: usize,
+        budget: Option<crate::common::resource_budget::ResourceBudget>,
+    ) -> Self {
         Self {
             entries: Vec::new(),
             range_tombstones: Vec::new(),
             block_size,
             compression_policy,
             streaming: None,
+            budget,
+            range_tombstone_reservations: Vec::new(),
         }
     }
 
@@ -310,6 +340,30 @@ impl InMemorySstWriter {
             return Ok(());
         }
 
+        let compression_workspace_bytes = state
+            .current_block
+            .len()
+            .saturating_mul(2)
+            .saturating_add(4096);
+        let _compression_workspace = state
+            .budget
+            .as_ref()
+            .map(|budget| budget.reserve(compression_workspace_bytes, "SST compression workspace"))
+            .transpose()?;
+        let persistent_bytes = state
+            .current_first_key
+            .as_ref()
+            .map_or(0, |key| {
+                key.len()
+                    .saturating_add(std::mem::size_of::<(Vec<u8>, BlockHandle)>())
+            })
+            .saturating_add(state.current_block_keys.len().saturating_mul(16));
+        let persistent_reservation = state
+            .budget
+            .as_ref()
+            .map(|budget| budget.reserve(persistent_bytes, "SST index and bloom metadata"))
+            .transpose()?;
+
         let handle = Self::append_block_to_stream(
             state.scratch.as_file_mut(),
             &mut state.offset,
@@ -325,6 +379,10 @@ impl InMemorySstWriter {
         }
         state.block_bloom.add_block_bloom(&bloom);
         state.current_block.clear();
+        state.current_reservations.clear();
+        if let Some(reservation) = persistent_reservation {
+            state.persistent_reservations.push(reservation);
+        }
         Ok(())
     }
 
@@ -333,6 +391,7 @@ impl InMemorySstWriter {
         entry: PendingEntry,
         block_size: usize,
         compression_policy: &CompressionPolicy,
+        entry_reservation: Option<crate::common::resource_budget::ResourceReservation>,
     ) -> MidgeResult<()> {
         if let Some(last_key) = &state.last_key {
             match entry.key.cmp(last_key) {
@@ -371,6 +430,9 @@ impl InMemorySstWriter {
         state.previous_key.clone_from(&entry.key);
         state.last_sequence = entry.sequence;
         state.last_key = Some(entry.key);
+        if let Some(reservation) = entry_reservation {
+            state.current_reservations.push(reservation);
+        }
         Ok(())
     }
 
@@ -599,6 +661,33 @@ impl InMemorySstWriter {
     ) -> MidgeResult<tempfile::NamedTempFile> {
         Self::flush_streaming_current_block(&mut state, compression_policy)?;
 
+        let index_bytes = state.block_index_entries.iter().fold(
+            state
+                .block_index_entries
+                .len()
+                .saturating_mul(std::mem::size_of::<(Vec<u8>, BlockHandle)>()),
+            |total, (key, _)| total.saturating_add(key.len()),
+        );
+        let tombstone_bytes = range_tombstones.iter().fold(
+            range_tombstones
+                .len()
+                .saturating_mul(std::mem::size_of::<RangeTombstone>()),
+            |total, tombstone| {
+                total
+                    .saturating_add(tombstone.start.len())
+                    .saturating_add(tombstone.end.len())
+            },
+        );
+        let finalization_bytes = index_bytes
+            .saturating_mul(4)
+            .saturating_add(tombstone_bytes.saturating_mul(3))
+            .saturating_add(16 * 1024);
+        let _finalization_reservation = state
+            .budget
+            .as_ref()
+            .map(|budget| budget.reserve(finalization_bytes, "SST finalization buffers"))
+            .transpose()?;
+
         for tombstone in range_tombstones {
             Self::update_key_bounds(
                 &mut state.smallest_key,
@@ -651,6 +740,41 @@ impl InMemorySstWriter {
 }
 
 impl DynSstWriter for InMemorySstWriter {
+    fn estimated_size_bytes(&self) -> usize {
+        if let Some(streaming) = &self.streaming {
+            let persisted = usize::try_from(streaming.offset).unwrap_or(usize::MAX);
+            let index = streaming.block_index_entries.iter().fold(
+                streaming
+                    .block_index_entries
+                    .len()
+                    .saturating_mul(std::mem::size_of::<(Vec<u8>, BlockHandle)>()),
+                |total, (key, _)| total.saturating_add(key.len()),
+            );
+            let current_bloom = if streaming.current_block_keys.is_empty() {
+                0
+            } else {
+                BloomWriter::with_defaults(streaming.current_block_keys.len())
+                    .size_bytes()
+                    .saturating_add(13)
+            };
+            let bloom = streaming
+                .block_bloom
+                .size_bytes()
+                .saturating_add(current_bloom);
+            return persisted
+                .saturating_add(streaming.current_block.len())
+                .saturating_add(index.saturating_mul(2))
+                .saturating_add(bloom)
+                .saturating_add(16 * 1024);
+        }
+        self.entries.iter().fold(0usize, |total, entry| {
+            total
+                .saturating_add(entry.key.len())
+                .saturating_add(entry.value.as_ref().map_or(0, Vec::len))
+                .saturating_add(32)
+        })
+    }
+
     fn add(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()> {
         self.add_with_meta(key, Some(value), 0, 0, None)
     }
@@ -693,11 +817,20 @@ impl DynSstWriter for InMemorySstWriter {
             ));
         }
         if self.streaming.is_none() {
-            self.streaming = Some(StreamingState::new()?);
+            self.streaming = Some(StreamingState::new(self.budget.clone())?);
         }
 
         let block_size = self.block_size;
         let compression_policy = self.compression_policy.clone();
+        let retained_bytes = std::mem::size_of::<PendingEntry>()
+            .saturating_add(key.len().saturating_mul(4))
+            .saturating_add(value.map_or(0, <[u8]>::len))
+            .saturating_add(64);
+        let entry_reservation = self
+            .budget
+            .as_ref()
+            .map(|budget| budget.reserve(retained_bytes, "SST current block entry"))
+            .transpose()?;
         let entry = PendingEntry {
             key: key.to_vec(),
             value: value.map(<[u8]>::to_vec),
@@ -712,13 +845,50 @@ impl DynSstWriter for InMemorySstWriter {
             entry,
             block_size,
             &compression_policy,
+            entry_reservation,
         )
     }
 
     fn add_range_tombstone(&mut self, start: &[u8], end: &[u8], seq: u64) -> MidgeResult<()> {
+        let retained_bytes = std::mem::size_of::<RangeTombstone>()
+            .saturating_add(start.len())
+            .saturating_add(end.len());
+        let reservation = self
+            .budget
+            .as_ref()
+            .map(|budget| budget.reserve(retained_bytes, "SST range tombstone metadata"))
+            .transpose()?;
         self.range_tombstones
             .push(RangeTombstone::new(start.to_vec(), end.to_vec(), seq));
+        if let Some(reservation) = reservation {
+            self.range_tombstone_reservations.push(reservation);
+        }
         Ok(())
+    }
+
+    fn finish_to_path(self: Box<Self>, path: &Path) -> MidgeResult<()> {
+        if self.streaming.is_none() {
+            let bytes = self.finish_bytes()?;
+            return crate::sst::fs::persist_sst_bytes_to_path(&bytes, path);
+        }
+
+        let InMemorySstWriter {
+            entries,
+            range_tombstones,
+            block_size: _,
+            compression_policy,
+            streaming,
+            budget: _,
+            range_tombstone_reservations: _range_tombstone_reservations,
+        } = *self;
+        debug_assert!(entries.is_empty());
+        let scratch = Self::finish_streaming(
+            streaming.expect("streaming writer checked above"),
+            &range_tombstones,
+            &compression_policy,
+        )?;
+        let mut source = scratch.reopen().map_err(crate::common::MidgeError::Io)?;
+        crate::sst::fs::persist_sst_stream_to_path(&mut source, path)
     }
 
     fn finish_bytes(self: Box<Self>) -> MidgeResult<Vec<u8>> {
@@ -728,6 +898,8 @@ impl DynSstWriter for InMemorySstWriter {
             block_size,
             compression_policy,
             streaming,
+            budget,
+            range_tombstone_reservations: _range_tombstone_reservations,
         } = *self;
 
         if let Some(streaming) = streaming {
@@ -747,6 +919,8 @@ impl DynSstWriter for InMemorySstWriter {
             block_size,
             compression_policy,
             streaming: None,
+            budget,
+            range_tombstone_reservations: Vec::new(),
         };
 
         let entries = Self::sort_entries(entries);
@@ -792,9 +966,30 @@ impl SstFactory for FsSstFactoryIo {
         )))
     }
 
+    fn create_for_compaction(
+        &self,
+        budget: crate::common::resource_budget::ResourceBudget,
+    ) -> MidgeResult<Box<dyn DynSstWriter>> {
+        let mut writer = InMemorySstWriter::new_with_budget(
+            self.compression_policy.clone(),
+            self.block_size,
+            Some(budget.clone()),
+        );
+        writer.streaming = Some(StreamingState::new(Some(budget))?);
+        Ok(Box::new(writer))
+    }
+
     /// Open an existing SST file
     fn open(&self, path: &Path) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
         FsSstFactoryIo::open(self, path)
+    }
+
+    fn open_for_compaction(
+        &self,
+        path: &Path,
+        budget: crate::common::resource_budget::ResourceBudget,
+    ) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+        self.open_internal(path, Some(budget))
     }
 }
 

@@ -694,24 +694,59 @@ fn should_keep_moved_config_types_out_of_lower_layers_engine_imports() {
 }
 
 #[test]
-fn should_keep_filesystem_persistence_out_of_dyn_sst_writer_trait() {
+fn should_limit_streaming_sst_persistence_to_compaction_or_fs_layers() {
     // Arrange
     let traits = read_source("src/sst/traits.rs");
+    let fs_writer = read_source("src/sst/fs/factory_io.rs");
     let mut sources = Vec::new();
     collect_rust_sources(&source_path("src"), &mut sources);
+    let allowed_callers = ["src/compaction/executor.rs", "src/sst/fs/mod.rs"];
 
-    // Act / Assert
+    // Act
+    let direct_callers: Vec<_> = sources
+        .into_iter()
+        .filter_map(|source| {
+            let relative = source
+                .strip_prefix(source_path(""))
+                .expect("source should live under repo")
+                .to_string_lossy()
+                .replace('\\', "/");
+            production_source(&relative)
+                .contains(".finish_to_path(")
+                .then_some(relative)
+        })
+        .collect();
+
     // Assert
     assert!(traits.contains("fn finish_bytes"));
-    assert!(!traits.contains("finish_to_path"));
-    for source in sources {
-        let content = fs::read_to_string(&source).expect("rust source should be readable");
-        assert!(
-            !content.contains(".finish_to_path("),
-            "{} should use sst::fs::finish_writer_to_path",
-            source.display()
-        );
-    }
+    assert!(traits.contains("fn finish_to_path"));
+    assert!(fs_writer.contains("fn finish_to_path"));
+    assert!(fs_writer.contains("persist_sst_stream_to_path"));
+    assert!(direct_callers
+        .iter()
+        .all(|caller| allowed_callers.contains(&caller.as_str())));
+}
+
+#[test]
+fn should_keep_compaction_publication_validation_streaming() {
+    // Arrange
+    let event_loop = read_source("src/runtime/event_loop/mod.rs");
+    let publication = read_source("src/runtime/event_loop/compaction.rs");
+    let reader = read_source("src/sst/fs/reader_io/mod.rs");
+    let writer = read_source("src/sst/fs/factory_io.rs");
+
+    // Act
+    let materializes_crc_input = event_loop.contains("crc32c::crc32c(&std::fs::read");
+    let streaming_summary_is_used = reader.contains("into_streaming_summary()");
+
+    // Assert
+    assert!(!materializes_crc_input);
+    assert!(event_loop.contains("checksummed_file_crc"));
+    assert!(event_loop.contains("budget.reserve(CRC_BUFFER_SIZE, \"SST checksum buffer\")"));
+    assert!(event_loop.contains("read_file_with_budget"));
+    assert!(publication.contains("mirror_ssts_to_authoritative_cloud(output_ssts, budget)"));
+    assert!(streaming_summary_is_used);
+    assert!(writer.contains("writer.streaming = Some(StreamingState::new"));
 }
 
 #[test]

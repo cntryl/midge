@@ -333,6 +333,65 @@ pub fn decompress_block_with_trailer(block: &[u8]) -> MidgeResult<Bytes> {
     decompress_block(&block[..compressed_data_len], algo)
 }
 
+/// Return the maximum decoded allocation required by a checksummed block.
+/// Compaction uses this before decompression so its output buffer is reserved
+/// against the internal memory pool first.
+pub(crate) fn decompressed_size_with_trailer(block: &[u8]) -> MidgeResult<usize> {
+    if block.len() < BLOCK_TRAILER_SIZE {
+        return Err(crate::common::MidgeError::Corruption(
+            "block too small for trailer".into(),
+        ));
+    }
+    let compressed_data_len = block.len() - BLOCK_TRAILER_SIZE;
+    let algo = CompressionAlgo::from_u8(block[compressed_data_len]).ok_or_else(|| {
+        crate::common::MidgeError::Corruption(format!(
+            "unknown compression algorithm code: {}",
+            block[compressed_data_len]
+        ))
+    })?;
+    let compressed = &block[..compressed_data_len];
+    match algo {
+        CompressionAlgo::None => Ok(compressed.len()),
+        CompressionAlgo::Lz4 => {
+            if compressed.len() < 4 {
+                return Err(crate::common::MidgeError::Corruption(
+                    "LZ4 block is missing its size prefix".to_string(),
+                ));
+            }
+            let size =
+                u32::from_le_bytes([compressed[0], compressed[1], compressed[2], compressed[3]])
+                    as usize;
+            if size > MAX_DECOMPRESSED_BLOCK_SIZE {
+                return Err(crate::common::MidgeError::Corruption(format!(
+                    "LZ4 declared output size {size} exceeds {MAX_DECOMPRESSED_BLOCK_SIZE} byte limit"
+                )));
+            }
+            Ok(size)
+        }
+        CompressionAlgo::Zstd3 | CompressionAlgo::Zstd9 => {
+            let size = match zstd::zstd_safe::get_frame_content_size(compressed) {
+                Ok(Some(size)) => usize::try_from(size).map_err(|_| {
+                    crate::common::MidgeError::Corruption(format!(
+                        "Zstd frame content size {size} exceeds addressable memory"
+                    ))
+                })?,
+                Ok(None) => MAX_DECOMPRESSED_BLOCK_SIZE,
+                Err(error) => {
+                    return Err(crate::common::MidgeError::Corruption(format!(
+                        "Zstd frame content size unavailable: {error}"
+                    )))
+                }
+            };
+            if size > MAX_DECOMPRESSED_BLOCK_SIZE {
+                return Err(crate::common::MidgeError::Corruption(format!(
+                    "Zstd declared output size {size} exceeds {MAX_DECOMPRESSED_BLOCK_SIZE} byte limit"
+                )));
+            }
+            Ok(size)
+        }
+    }
+}
+
 /// Quick entropy check to detect if value is likely compressible.
 ///
 /// Samples the first 32 bytes (or full value if smaller) to detect

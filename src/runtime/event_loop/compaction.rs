@@ -67,6 +67,8 @@ impl CompactionCoordinator {
             target_level: plan.target_level,
             cf_id: plan.cf_id,
             output_seq: 0,
+            target_sst_size: crate::compaction::DEFAULT_TARGET_SST_SIZE,
+            compaction_memory_limit: crate::compaction::DEFAULT_COMPACTION_MEMORY_LIMIT,
             snapshot_horizon: None,
             point_tombstone_gc_eligible: false,
             range_tombstone_gc_eligible: false,
@@ -269,15 +271,35 @@ impl CompactionCoordinator {
             );
         }
 
-        let added = match Self::build_output_metadata(event_loop, cf_id, target_level, output_ssts)
-        {
+        let publication_budget = crate::common::resource_budget::ResourceBudget::new(
+            event_loop.compaction_actor.compaction_memory_limit(),
+        );
+        let added = match Self::build_output_metadata(
+            event_loop,
+            cf_id,
+            target_level,
+            output_ssts,
+            &publication_budget,
+        ) {
             Ok(added) => added,
-            Err(error) => return Self::respond_publish_failure(event_loop, request_id, &error),
+            Err(error) => {
+                event_loop.gc_actor.delete_ssts(
+                    &mut event_loop.state,
+                    output_ssts,
+                    event_loop.hybrid_storage.clone(),
+                );
+                return Self::respond_publish_failure(event_loop, request_id, &error);
+            }
         };
 
-        if let Err(error) =
-            Self::publish_compaction_manifest(event_loop, input_ssts, output_ssts, cf_id, &added)
-        {
+        if let Err(error) = Self::publish_compaction_manifest(
+            event_loop,
+            input_ssts,
+            output_ssts,
+            cf_id,
+            &added,
+            &publication_budget,
+        ) {
             return Self::respond_publish_failure(event_loop, request_id, &error);
         }
 
@@ -299,11 +321,56 @@ impl CompactionCoordinator {
         cf_id: crate::types::ColumnFamilyId,
         target_level: u32,
         output_ssts: &[String],
+        budget: &crate::common::resource_budget::ResourceBudget,
     ) -> Result<Vec<crate::runtime::FileMeta>, crate::common::MidgeError> {
-        output_ssts
+        if output_ssts.windows(2).any(|names| names[0] >= names[1]) {
+            return Err(crate::common::MidgeError::Corruption(
+                "compaction output set must be sorted and uniquely named".to_string(),
+            ));
+        }
+
+        let mut generation = None;
+        for (expected_partition, name) in output_ssts.iter().enumerate() {
+            let (name_cf, name_level, name_generation, name_partition) =
+                crate::sst::parse_compaction_file_name(name).ok_or_else(|| {
+                    crate::common::MidgeError::Corruption(format!(
+                        "compaction output has non-canonical partition name: {name}"
+                    ))
+                })?;
+            let expected_partition = u32::try_from(expected_partition).map_err(|_| {
+                crate::common::MidgeError::ResourceLimit(
+                    "compaction output count exceeds partition identity capacity".to_string(),
+                )
+            })?;
+            if name_cf != cf_id
+                || name_level != target_level
+                || name_partition != expected_partition
+                || generation.is_some_and(|expected| expected != name_generation)
+            {
+                return Err(crate::common::MidgeError::Corruption(format!(
+                    "compaction output does not belong to expected cf={cf_id} level={target_level} generation/partition set: {name}"
+                )));
+            }
+            generation.get_or_insert(name_generation);
+        }
+
+        let metadata: Vec<_> = output_ssts
             .iter()
-            .map(|name| event_loop.build_sst_file_meta(cf_id, target_level, name))
-            .collect()
+            .map(|name| event_loop.build_sst_file_meta(cf_id, target_level, name, budget))
+            .collect::<Result<_, _>>()?;
+        for pair in metadata.windows(2) {
+            if let (Some(left_largest), Some(right_smallest)) =
+                (&pair[0].largest_key, &pair[1].smallest_key)
+            {
+                if left_largest > right_smallest {
+                    return Err(crate::common::MidgeError::Corruption(format!(
+                        "compaction output key ranges overlap out of order: {} then {}",
+                        pair[0].name, pair[1].name
+                    )));
+                }
+            }
+        }
+        Ok(metadata)
     }
 
     fn publish_compaction_manifest(
@@ -312,6 +379,7 @@ impl CompactionCoordinator {
         output_ssts: &[String],
         cf_id: crate::types::ColumnFamilyId,
         added: &[crate::runtime::FileMeta],
+        budget: &crate::common::resource_budget::ResourceBudget,
     ) -> Result<(), crate::common::MidgeError> {
         // Persist the rollback/cleanup obligation before remote upload. If
         // intent persistence fails, no untracked cloud object is created; if
@@ -334,7 +402,7 @@ impl CompactionCoordinator {
                 event_loop.hybrid_storage.clone(),
             );
         }
-        event_loop.mirror_ssts_to_authoritative_cloud(output_ssts)?;
+        event_loop.mirror_ssts_to_authoritative_cloud(output_ssts, budget)?;
 
         crate::failpoints::fail_point!(
             "slice7::after_compaction_output_durable_before_manifest_publish"

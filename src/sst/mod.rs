@@ -70,6 +70,41 @@ pub fn file_name(cf_id: u32, level: u32, sequence: u64) -> String {
     format!("{cf_id:06}_{level:02}_{sequence:0SST_SEQUENCE_WIDTH$}.sst")
 }
 
+/// Format a deterministic compaction partition filename. One compaction
+/// generation owns every zero-based partition ordinal in its replacement set.
+#[must_use]
+pub fn compaction_file_name(cf_id: u32, level: u32, generation: u64, partition: u32) -> String {
+    format!("{cf_id:06}_{level:02}_{generation:0SST_SEQUENCE_WIDTH$}_{partition:010}.sst")
+}
+
+/// Parse a canonical compaction partition filename.
+///
+/// This remains internal because partition identity is an implementation detail,
+/// not part of the stable SST naming API.
+pub(crate) fn parse_compaction_file_name(name: &str) -> Option<(u32, u32, u64, u32)> {
+    let stem = name.strip_suffix(".sst")?;
+    let mut parts = stem.split('_');
+    let cf = parts.next()?;
+    let level = parts.next()?;
+    let generation = parts.next()?;
+    let partition = parts.next()?;
+    if parts.next().is_some()
+        || [cf, level, generation, partition]
+            .iter()
+            .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return None;
+    }
+
+    let parsed = (
+        cf.parse().ok()?,
+        level.parse().ok()?,
+        generation.parse().ok()?,
+        partition.parse().ok()?,
+    );
+    (compaction_file_name(parsed.0, parsed.1, parsed.2, parsed.3) == name).then_some(parsed)
+}
+
 /// Format the cloud object key for an SST file.
 #[must_use]
 pub fn object_key(file_name: &str) -> String {
@@ -583,6 +618,38 @@ mod tests {
         assert_eq!(names, sorted);
         assert_eq!(names[0], "000007_02_00000000000000000001.sst");
         assert_eq!(names[3], "000007_02_18446744073709551615.sst");
+    }
+
+    #[test]
+    fn should_round_trip_canonical_compaction_partition_names() {
+        // Arrange
+        let name = super::compaction_file_name(7, 2, 41, 3);
+
+        // Act
+        let parsed = super::parse_compaction_file_name(&name);
+
+        // Assert
+        assert_eq!(name, "000007_02_00000000000000000041_0000000003.sst");
+        assert_eq!(parsed, Some((7, 2, 41, 3)));
+    }
+
+    #[test]
+    fn should_reject_non_canonical_compaction_partition_names() {
+        // Arrange
+        let invalid = [
+            "000007_02_00000000000000000041.sst",
+            "7_2_41_3.sst",
+            "000007_02_00000000000000000041_0000000003.tmp",
+            "000007_02_00000000000000000041_0000000003_extra.sst",
+        ];
+
+        // Act
+        let all_rejected = invalid
+            .iter()
+            .all(|name| super::parse_compaction_file_name(name).is_none());
+
+        // Assert
+        assert!(all_rejected);
     }
 
     #[test]

@@ -5,6 +5,37 @@ use std::path::Path;
 
 use crate::common::MidgeResult;
 
+/// One owned logical version yielded by an SST's raw compaction cursor.
+///
+/// This is an internal/diagnostic SST contract rather than part of Midge's
+/// stable engine API. Values retain their persisted TTL metadata verbatim.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct RawSstVersion {
+    pub key: Vec<u8>,
+    pub seq: u64,
+    pub is_tombstone: bool,
+    pub value: Option<Vec<u8>>,
+    pub expiration: Option<u64>,
+}
+
+/// Owned, fallible stream of raw SST versions in key-ascending,
+/// sequence-descending order.
+pub type RawSstVersionCursor =
+    Box<dyn Iterator<Item = MidgeResult<RawSstVersion>> + Send + 'static>;
+
+struct MaterializedRawVersionCursor {
+    versions: std::vec::IntoIter<RawSstVersion>,
+    _reservation: Option<crate::common::resource_budget::ResourceReservation>,
+}
+
+impl Iterator for MaterializedRawVersionCursor {
+    type Item = MidgeResult<RawSstVersion>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.versions.next().map(Ok)
+    }
+}
+
 /// Reader contract for SST implementations
 pub trait SstReader: Send + Sync {
     /// Get the value for a specific key, if present
@@ -65,6 +96,75 @@ pub trait SstStateReader: Send + Sync {
         end: Option<&[u8]>,
     ) -> MidgeResult<Vec<(Bytes, super::types::KeyState)>>;
 
+    /// Consume this reader and stream persisted logical versions without
+    /// interpreting TTL expiration.
+    ///
+    /// Filesystem readers override this compatibility implementation with a
+    /// block-at-a-time cursor. Implementations used only by compatibility
+    /// callers may retain the materializing fallback.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the requested range cannot be read or decoded.
+    fn raw_version_cursor(
+        self: Box<Self>,
+        start: Option<Vec<u8>>,
+        end: Option<Vec<u8>>,
+    ) -> MidgeResult<RawSstVersionCursor> {
+        self.raw_version_cursor_with_budget(start, end, None)
+    }
+
+    /// Budgeted form of [`SstStateReader::raw_version_cursor`] used by
+    /// compaction. Implementations must reserve retained cursor buffers before
+    /// growing them whenever a budget is supplied.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MidgeError::ResourceLimit` before retaining data that cannot fit.
+    fn raw_version_cursor_with_budget(
+        self: Box<Self>,
+        start: Option<Vec<u8>>,
+        end: Option<Vec<u8>>,
+        budget: Option<crate::common::resource_budget::ResourceBudget>,
+    ) -> MidgeResult<RawSstVersionCursor> {
+        let states = self.scan_range_raw_state(start.as_deref(), end.as_deref())?;
+        let versions = states
+            .into_iter()
+            .filter_map(|(key, state)| match state {
+                super::types::KeyState::Absent => None,
+                super::types::KeyState::Tombstone(seq) => Some(RawSstVersion {
+                    key: key.to_vec(),
+                    seq,
+                    is_tombstone: true,
+                    value: None,
+                    expiration: None,
+                }),
+                super::types::KeyState::Value(value, seq, expiration, _op_type) => {
+                    Some(RawSstVersion {
+                        key: key.to_vec(),
+                        seq,
+                        is_tombstone: false,
+                        value: Some(value.to_vec()),
+                        expiration,
+                    })
+                }
+            })
+            .collect::<Vec<_>>();
+        let retained_bytes = versions.iter().fold(0usize, |total, version| {
+            total
+                .saturating_add(version.key.capacity())
+                .saturating_add(version.value.as_ref().map_or(0, Vec::capacity))
+                .saturating_add(std::mem::size_of::<RawSstVersion>())
+        });
+        let reservation = budget
+            .map(|budget| budget.reserve(retained_bytes, "compatibility raw-version cursor"))
+            .transpose()?;
+        Ok(Box::new(MaterializedRawVersionCursor {
+            versions: versions.into_iter(),
+            _reservation: reservation,
+        }))
+    }
+
     /// Snapshot-aware point lookup (entries with seq > `snapshot_seq` are ignored)
     ///
     /// # Errors
@@ -97,6 +197,12 @@ pub trait SstStateReader: Send + Sync {
     fn range_tombstones(&self) -> Vec<super::types::RangeTombstone> {
         Vec::new()
     }
+
+    /// Return the retained bytes required to clone this SST's range tombstones.
+    /// Budgeted compaction reserves this amount before requesting the clone.
+    fn range_tombstone_memory_usage(&self) -> usize {
+        0
+    }
 }
 
 /// Combined reader contract used by the SST factory.
@@ -106,6 +212,13 @@ impl<T> SstReaderExt for T where T: SstReader + SstStateReader {}
 
 /// Object-safe SST writer for polymorphic use
 pub trait DynSstWriter: Send {
+    /// Best-effort retained/encoded size used for soft compaction rollover.
+    /// Implementations that cannot estimate return zero and therefore retain
+    /// the compatibility single-output behavior.
+    fn estimated_size_bytes(&self) -> usize {
+        0
+    }
+
     /// Add a simple key-value entry
     ///
     /// # Errors
@@ -166,6 +279,20 @@ pub trait DynSstWriter: Send {
         ))
     }
 
+    /// Finalize and atomically persist this SST directly to `path`.
+    ///
+    /// The compatibility default uses [`DynSstWriter::finish_bytes`].
+    /// Filesystem streaming writers override it so compaction never
+    /// reconstructs the completed SST in one byte vector.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when finalization or atomic persistence fails.
+    fn finish_to_path(self: Box<Self>, path: &Path) -> MidgeResult<()> {
+        let bytes = self.finish_bytes()?;
+        crate::sst::fs::persist_sst_bytes_to_path(&bytes, path)
+    }
+
     /// Finalize and get SST bytes
     ///
     /// # Errors
@@ -182,6 +309,33 @@ pub trait SstFactory: Send + Sync {
     ///
     /// Returns an error when the writer cannot be created.
     fn create(&self) -> MidgeResult<Box<dyn DynSstWriter>>;
+
+    /// Create a writer for a budgeted compaction operation.
+    ///
+    /// The default preserves compatibility for non-filesystem factories.
+    fn create_for_compaction(
+        &self,
+        _budget: crate::common::resource_budget::ResourceBudget,
+    ) -> MidgeResult<Box<dyn DynSstWriter>> {
+        self.create()
+    }
+
+    /// Open a reader whose retained metadata is charged to compaction.
+    ///
+    /// Compatibility factories may use the ordinary reader path. Production
+    /// filesystem factories override this method and reserve before metadata
+    /// block reads and decoding.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the SST cannot be opened within the supplied budget.
+    fn open_for_compaction(
+        &self,
+        path: &Path,
+        _budget: crate::common::resource_budget::ResourceBudget,
+    ) -> MidgeResult<Box<dyn SstReaderExt>> {
+        self.open(path)
+    }
 
     /// Open an existing SST file for reading
     ///
