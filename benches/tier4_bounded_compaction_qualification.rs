@@ -215,6 +215,14 @@ fn open_after_crash(path: &Path, base_records: u64) -> MidgeResult<Engine> {
     }
 }
 
+fn clear_crashed_process_acquisition_lock(path: &Path) -> MidgeResult<()> {
+    match std::fs::remove_file(path.join(".midge_leader.lock")) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(MidgeError::Io(error)),
+    }
+}
+
 fn add_base_record(transaction: &mut cntryl_midge::Transaction, id: u64) -> MidgeResult<()> {
     let id_value = id.to_be_bytes();
     transaction.put(primary_key(id).to_vec(), primary_value(id).to_vec(), None)?;
@@ -609,6 +617,10 @@ fn run_parent(base_records: u64, path: &Path, output: &Path) -> MidgeResult<()> 
             "qualification crash worker exited with {status}"
         )));
     }
+    // The private child is now gone, so no live process can own its
+    // lease-mutation lock. Preserve the authoritative lease record and remove
+    // only this process-local acquisition artifact, matching crash tests.
+    clear_crashed_process_acquisition_lock(path)?;
     let worker: WorkerEvidence = serde_json::from_slice(&std::fs::read(&partial_path)?)
         .map_err(|error| json_error(&error))?;
 
