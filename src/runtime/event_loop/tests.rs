@@ -2074,7 +2074,7 @@ fn should_reject_late_compaction_output_after_column_family_is_dropped() {
 }
 
 #[test]
-fn should_reject_and_remove_out_of_order_compaction_output_set_before_publication(
+fn should_reject_out_of_order_compaction_output_set_before_publication(
 ) -> crate::common::MidgeResult<()> {
     // Arrange
     let mut event_loop = create_test_local_event_loop()?;

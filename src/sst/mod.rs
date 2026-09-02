@@ -643,10 +643,13 @@ mod tests {
             "000007_02_00000000000000000041_0000000003_extra.sst",
         ];
 
-        // Act / Assert
-        assert!(invalid
+        // Act
+        let all_rejected = invalid
             .iter()
-            .all(|name| super::parse_compaction_file_name(name).is_none()));
+            .all(|name| super::parse_compaction_file_name(name).is_none());
+
+        // Assert
+        assert!(all_rejected);
     }
 
     #[test]

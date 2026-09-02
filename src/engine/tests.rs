@@ -488,50 +488,10 @@ fn partitioned_compaction_value(index: usize) -> Vec<u8> {
         .collect()
 }
 
-#[allow(clippy::too_many_lines)]
-fn assert_partitioned_compaction_engine_round_trip(
-    mut open_options: impl FnMut() -> MidgeResult<OpenOptions>,
+fn assert_partitioned_compaction_reads(
+    engine: &Engine,
+    cf: &ColumnFamilyHandle,
 ) -> MidgeResult<()> {
-    const KEY_COUNT: usize = 192;
-    const TARGET_SST_SIZE: usize = 4 * 1024;
-
-    // Arrange
-    let mut options = open_options()?;
-    options.set_compaction_target_sst_size_for_test(TARGET_SST_SIZE);
-    let mut engine = Engine::open(options)?;
-    let cf = engine.create_column_family("partitioned")?;
-    for batch in 0..4 {
-        let mut transaction = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
-        for offset in 0..(KEY_COUNT / 4) {
-            let index = batch * (KEY_COUNT / 4) + offset;
-            transaction.put(
-                format!("key-{index:04}").into_bytes(),
-                partitioned_compaction_value(index),
-                None,
-            )?;
-        }
-        let write_options = if engine.cloud_mode {
-            WriteOptions::cloud_strict()
-        } else {
-            WriteOptions::buffered()
-        };
-        transaction.commit(write_options)?;
-        engine.flush_cf(&cf)?;
-    }
-    let mut delete = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
-    delete.delete_range(b"key-0040".to_vec(), b"key-0080".to_vec())?;
-    let delete_options = if engine.cloud_mode {
-        WriteOptions::cloud_strict()
-    } else {
-        WriteOptions::buffered()
-    };
-    delete.commit(delete_options)?;
-    engine.flush_cf(&cf)?;
-
-    // Act
-    engine.compact_all()?;
-
-    // Assert
     let layout = engine.get_storage_layout()?;
     let output_files: Vec<_> = layout
         .levels
@@ -585,11 +545,13 @@ fn assert_partitioned_compaction_engine_round_trip(
         expected.iter().rev().map(Vec::as_slice).collect::<Vec<_>>()
     );
     drop(read);
-    engine.shutdown(Duration::from_secs(5))?;
 
-    let mut reopen_options = open_options()?;
-    reopen_options.set_compaction_target_sst_size_for_test(TARGET_SST_SIZE);
-    let mut reopened = Engine::open(reopen_options)?;
+    Ok(())
+}
+
+fn assert_partitioned_compaction_reopen(mut reopened: Engine) -> MidgeResult<()> {
+    const KEY_COUNT: usize = 192;
+
     let reopened_cf = reopened.get_column_family("partitioned").ok_or_else(|| {
         MidgeError::Internal("partitioned column family missing after reopen".to_string())
     })?;
@@ -619,31 +581,92 @@ fn assert_partitioned_compaction_engine_round_trip(
             .len(),
         reopened_names.len()
     );
-    reopened.shutdown(Duration::from_secs(5))?;
-    Ok(())
+    reopened.shutdown(Duration::from_secs(5))
+}
+
+fn assert_partitioned_compaction_engine_round_trip(
+    mut open_options: impl FnMut() -> MidgeResult<OpenOptions>,
+) -> MidgeResult<()> {
+    const KEY_COUNT: usize = 192;
+    const TARGET_SST_SIZE: usize = 4 * 1024;
+
+    // Arrange
+    let mut options = open_options()?;
+    options.set_compaction_target_sst_size_for_test(TARGET_SST_SIZE);
+    let mut engine = Engine::open(options)?;
+    let cf = engine.create_column_family("partitioned")?;
+    for batch in 0..4 {
+        let mut transaction = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
+        for offset in 0..(KEY_COUNT / 4) {
+            let index = batch * (KEY_COUNT / 4) + offset;
+            transaction.put(
+                format!("key-{index:04}").into_bytes(),
+                partitioned_compaction_value(index),
+                None,
+            )?;
+        }
+        let write_options = if engine.cloud_mode {
+            WriteOptions::cloud_strict()
+        } else {
+            WriteOptions::buffered()
+        };
+        transaction.commit(write_options)?;
+        engine.flush_cf(&cf)?;
+    }
+    let mut delete = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
+    delete.delete_range(b"key-0040".to_vec(), b"key-0080".to_vec())?;
+    let delete_options = if engine.cloud_mode {
+        WriteOptions::cloud_strict()
+    } else {
+        WriteOptions::buffered()
+    };
+    delete.commit(delete_options)?;
+    engine.flush_cf(&cf)?;
+
+    // Act
+    engine.compact_all()?;
+
+    // Assert
+    assert_partitioned_compaction_reads(&engine, &cf)?;
+    engine.shutdown(Duration::from_secs(5))?;
+
+    let mut reopen_options = open_options()?;
+    reopen_options.set_compaction_target_sst_size_for_test(TARGET_SST_SIZE);
+    assert_partitioned_compaction_reopen(Engine::open(reopen_options)?)
 }
 
 #[test]
-fn should_publish_partitioned_compaction_outputs_and_reopen_locally() -> MidgeResult<()> {
+fn should_preserve_partitioned_compaction_across_local_reopen() -> MidgeResult<()> {
+    // Arrange
     let temp_dir = tempfile::tempdir().map_err(MidgeError::Io)?;
-    assert_partitioned_compaction_engine_round_trip(|| {
+
+    // Act
+    let result = assert_partitioned_compaction_engine_round_trip(|| {
         OpenOptions::local(temp_dir.path())
             .background_compaction(false)
             .with_memtable_size_limit(64 * 1024)
             .build()
-    })
+    });
+
+    // Assert
+    result
 }
 
 #[test]
-fn should_publish_partitioned_compaction_outputs_and_reopen_in_simulated_cloud() -> MidgeResult<()>
-{
+fn should_preserve_partitioned_compaction_across_simulated_cloud_reopen() -> MidgeResult<()> {
+    // Arrange
     let temp_dir = tempfile::tempdir().map_err(MidgeError::Io)?;
-    assert_partitioned_compaction_engine_round_trip(|| {
+
+    // Act
+    let result = assert_partitioned_compaction_engine_round_trip(|| {
         OpenOptions::cloud_simulated(temp_dir.path(), "partitioned-bucket", "partitioned-prefix")
             .background_compaction(false)
             .with_memtable_size_limit(64 * 1024)
             .build()
-    })
+    });
+
+    // Assert
+    result
 }
 
 fn cloud_wal_test_bytes(sequence: u64, writer_epoch: u64, key: &'static [u8]) -> Vec<u8> {
