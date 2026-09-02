@@ -433,6 +433,23 @@ fn should_reject_memory_budget_given_value_below_minimum_when_building() {
 }
 
 #[test]
+fn should_reject_memory_budget_when_no_compaction_capacity_remains() {
+    // Arrange
+
+    // Act
+    let results = (3..10).map(|bytes| {
+        OpenOptions::in_memory()
+            .memory_budget(MemoryBudget::Bytes(bytes))
+            .build()
+    });
+
+    // Assert
+    assert!(results
+        .into_iter()
+        .all(|result| matches!(result, Err(MidgeError::ResourceLimit(_)))));
+}
+
+#[test]
 fn should_reject_zero_transaction_memory_pool_size_when_building() {
     // Arrange
 

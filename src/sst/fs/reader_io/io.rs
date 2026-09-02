@@ -317,6 +317,9 @@ impl SstFileIo {
             )));
         }
         drop(compressed_reservation);
+        // The decoded bytes are transient, but their decoded reader structure
+        // remains live (index, filter, trie, or range tombstones). Keep this
+        // conservative reservation with the reader for that parsed structure.
         self.metadata_reservations.push(retained_reservation);
         Ok(decoded)
     }

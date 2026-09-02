@@ -71,6 +71,11 @@ impl RetainedVersion {
         version: CompactionVersion,
         budget: &crate::common::resource_budget::ResourceBudget,
     ) -> MidgeResult<Self> {
+        // The filesystem cursor keeps a yielded-version reservation until its
+        // next advance. This deliberately overlaps the merge reservation: the
+        // merge head outlives that advance, and its key is also cloned into the
+        // heap. The conservative handoff prevents either allocation from ever
+        // becoming unaccounted while input advancement can allocate again.
         let retained_bytes = std::mem::size_of::<CompactionVersion>()
             .saturating_add(version.key.capacity().saturating_mul(2))
             .saturating_add(version.value.as_ref().map_or(0, Vec::capacity));
@@ -283,6 +288,9 @@ pub(crate) fn collect_compaction_stream_inputs(
         let path = Path::new(filename);
 
         let reader = sst_factory.open_for_compaction(path, budget.clone())?;
+        // The reader remains Arc-owned by the raw cursor, so its parsed
+        // tombstones stay live. Reserve the distinct clone collected here as
+        // aggregate compaction metadata before requesting it from the reader.
         let tombstone_bytes = reader.range_tombstone_memory_usage();
         range_tombstone_reservations
             .push(budget.reserve(tombstone_bytes, "range tombstone metadata")?);
@@ -374,6 +382,116 @@ fn add_partition_range_tombstones(
     Ok(added)
 }
 
+struct PartitionRangeTombstoneSizeIndex<'a> {
+    by_start: &'a [&'a RangeTombstone],
+    by_end: Vec<&'a RangeTombstone>,
+    start_length_prefix: Vec<usize>,
+    end_length_prefix: Vec<usize>,
+    _reservation: crate::common::resource_budget::ResourceReservation,
+}
+
+impl<'a> PartitionRangeTombstoneSizeIndex<'a> {
+    fn new(
+        tombstones: &'a [&'a RangeTombstone],
+        budget: &crate::common::resource_budget::ResourceBudget,
+    ) -> MidgeResult<Self> {
+        let prefix_len = tombstones.len().saturating_add(1);
+        let retained_bytes = tombstones
+            .len()
+            .saturating_mul(std::mem::size_of::<&RangeTombstone>())
+            .saturating_add(
+                prefix_len
+                    .saturating_mul(std::mem::size_of::<usize>())
+                    .saturating_mul(2),
+            );
+        let reservation = budget.reserve(retained_bytes, "range tombstone size index")?;
+        let mut by_end = Vec::with_capacity(tombstones.len());
+        by_end.extend_from_slice(tombstones);
+        by_end.sort_by(|left, right| {
+            left.end
+                .cmp(&right.end)
+                .then_with(|| left.start.cmp(&right.start))
+                .then_with(|| right.seq.cmp(&left.seq))
+        });
+
+        let mut start_length_prefix = Vec::with_capacity(prefix_len);
+        start_length_prefix.push(0usize);
+        for tombstone in tombstones {
+            start_length_prefix.push(
+                start_length_prefix
+                    .last()
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_add(tombstone.start.len()),
+            );
+        }
+        let mut end_length_prefix = Vec::with_capacity(prefix_len);
+        end_length_prefix.push(0usize);
+        for tombstone in &by_end {
+            end_length_prefix.push(
+                end_length_prefix
+                    .last()
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_add(tombstone.end.len()),
+            );
+        }
+
+        Ok(Self {
+            by_start: tombstones,
+            by_end,
+            start_length_prefix,
+            end_length_prefix,
+            _reservation: reservation,
+        })
+    }
+
+    fn estimate(&self, lower_bound: Option<&[u8]>, upper_bound: &[u8]) -> usize {
+        let start_upper = self
+            .by_start
+            .partition_point(|tombstone| tombstone.start.as_slice() < upper_bound);
+        let start_lower = lower_bound.map_or(0, |lower| {
+            self.by_start
+                .partition_point(|tombstone| tombstone.start.as_slice() < lower)
+        });
+        let end_lower = lower_bound.map_or(0, |lower| {
+            self.by_end
+                .partition_point(|tombstone| tombstone.end.as_slice() <= lower)
+        });
+        let end_upper = self
+            .by_end
+            .partition_point(|tombstone| tombstone.end.as_slice() <= upper_bound);
+        let intersecting = start_upper.saturating_sub(end_lower);
+        if intersecting == 0 {
+            return 0;
+        }
+
+        let spanning = start_lower.saturating_sub(end_lower);
+        let starts_within_partition = self.start_length_prefix[start_upper]
+            .saturating_sub(self.start_length_prefix[start_lower]);
+        let ends_within_partition =
+            self.end_length_prefix[end_upper].saturating_sub(self.end_length_prefix[end_lower]);
+        let spanning_upper = start_upper.saturating_sub(end_upper);
+        let lower_length = lower_bound.map_or(0, <[u8]>::len);
+        let encoded_bytes = std::mem::size_of::<u32>()
+            .saturating_add(
+                intersecting.saturating_mul(
+                    std::mem::size_of::<u32>()
+                        .saturating_mul(2)
+                        .saturating_add(std::mem::size_of::<u64>()),
+                ),
+            )
+            .saturating_add(spanning.saturating_mul(lower_length))
+            .saturating_add(starts_within_partition)
+            .saturating_add(ends_within_partition)
+            .saturating_add(spanning_upper.saturating_mul(upper_bound.len()));
+        // SST blocks add a four-byte length prefix and a five-byte
+        // codec/checksum trailer. This remains a soft target for codecs that
+        // can expand incompressible input slightly.
+        encoded_bytes.saturating_add(9)
+    }
+}
+
 #[derive(Clone, Copy)]
 struct PartitionIdentity {
     cf_id: u32,
@@ -447,13 +565,21 @@ pub(crate) fn write_partitioned_compaction_outputs(
     let mut partition_ordinal = 0u32;
     let mut output_names = Vec::new();
     let mut cleanup = OutputSetCleanup::new();
+    let had_range_tombstones = !range_tombstones.is_empty();
     let (obsolete_range_tombstones, retained_range_tombstones): (Vec<_>, Vec<_>) =
         range_tombstones.iter().partition(|tombstone| {
             tombstone_gc.range_eligible
                 && tombstone_is_obsolete(tombstone.seq, tombstone_gc.snapshot_horizon)
         });
+    let tombstone_size_index =
+        PartitionRangeTombstoneSizeIndex::new(&retained_range_tombstones, budget)?;
 
     let mut merged = VersionMergeIterator::new(cursors, budget.clone())?;
+    if merged.peek_version().is_none() && !had_range_tombstones {
+        return Err(crate::common::MidgeError::Internal(
+            "compaction produced no output; inputs were not replaced".to_string(),
+        ));
+    }
     let mut seen = 0usize;
     while let Some(version) = merged.next_version()? {
         if seen.is_multiple_of(1024) {
@@ -503,7 +629,18 @@ pub(crate) fn write_partitioned_compaction_outputs(
             continue;
         }
 
-        if partition_point_count > 0 && writer.estimated_size_bytes() >= target_sst_size.max(1) {
+        let estimated_tombstone_bytes = tombstone_size_index.estimate(
+            partition_lower_bound
+                .as_ref()
+                .map(|(key, _reservation)| key.as_slice()),
+            &version.key,
+        );
+        if partition_point_count > 0
+            && writer
+                .estimated_size_bytes()
+                .saturating_add(estimated_tombstone_bytes)
+                >= target_sst_size.max(1)
+        {
             let boundary_reservation =
                 budget.reserve(version.key.len(), "output partition boundary")?;
             let boundary = version.key.clone();

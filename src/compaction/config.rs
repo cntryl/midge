@@ -1,5 +1,8 @@
 use crate::sst::compression::CompressionPolicy;
 
+pub(crate) const DEFAULT_TARGET_SST_SIZE: usize = 256 * 1024 * 1024;
+pub(crate) const DEFAULT_COMPACTION_MEMORY_LIMIT: usize = 64 * 1024 * 1024;
+
 /// Engine-open compaction policy owned by the compaction subsystem.
 #[derive(Debug, Clone)]
 pub(crate) struct OpenCompactionConfig {

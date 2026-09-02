@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
-use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+use sysinfo::{Disks, ProcessRefreshKind, ProcessesToUpdate, System};
 use xxhash_rust::xxh3::Xxh3;
 
 const LOGICAL_ENTRIES_PER_BASE: u64 = 4;
@@ -494,31 +494,21 @@ fn run_worker(base_records: u64, path: &Path, partial_path: &Path) -> MidgeResul
     std::process::exit(0);
 }
 
-#[cfg(unix)]
 fn available_disk_bytes(path: &Path) -> MidgeResult<u64> {
-    use std::os::unix::ffi::OsStrExt;
-    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
-        MidgeError::InvalidArgument("qualification path contains a NUL byte".to_string())
-    })?;
-    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-    // SAFETY: `path` is NUL-terminated and `stats` points to writable storage.
-    if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
-        return Err(MidgeError::Io(std::io::Error::last_os_error()));
-    }
-    // SAFETY: successful statvfs initializes the output structure.
-    let stats = unsafe { stats.assume_init() };
-    let available_blocks = stats.f_bavail;
-    #[cfg(target_vendor = "apple")]
-    let available_blocks = u64::from(available_blocks);
-    Ok(available_blocks.saturating_mul(stats.f_frsize))
-}
-
-#[cfg(not(unix))]
-fn available_disk_bytes(_path: &Path) -> MidgeResult<u64> {
-    Err(MidgeError::NotSupported(
-        "bounded compaction qualification disk preflight is not implemented on this platform"
-            .to_string(),
-    ))
+    let canonical_path = std::fs::canonicalize(path)?;
+    let disks = Disks::new_with_refreshed_list();
+    disks
+        .list()
+        .iter()
+        .filter(|disk| canonical_path.starts_with(disk.mount_point()))
+        .max_by_key(|disk| disk.mount_point().components().count())
+        .map(sysinfo::Disk::available_space)
+        .ok_or_else(|| {
+            MidgeError::NotSupported(format!(
+                "no mounted disk contains qualification path {}",
+                canonical_path.display()
+            ))
+        })
 }
 
 fn parse_args() -> MidgeResult<(bool, u64, PathBuf, PathBuf)> {

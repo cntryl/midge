@@ -768,6 +768,11 @@ impl OpenOptionsBuilder {
                 .saturating_sub(transaction_memory_pool_size)
                 .saturating_sub(2),
         );
+        if compaction_memory_pool_size == 0 {
+            return Err(MidgeError::ResourceLimit(
+                "memory budget leaves no capacity for bounded compaction".to_string(),
+            ));
+        }
         let max_memtable_size = total_memory
             .saturating_sub(transaction_memory_pool_size)
             .saturating_sub(compaction_memory_pool_size)

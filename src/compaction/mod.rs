@@ -2,7 +2,9 @@ mod config;
 pub mod executor;
 pub mod strategy;
 
-pub(crate) use config::OpenCompactionConfig;
+pub(crate) use config::{
+    OpenCompactionConfig, DEFAULT_COMPACTION_MEMORY_LIMIT, DEFAULT_TARGET_SST_SIZE,
+};
 pub use strategy::{CompactionPlan, Compactor, LeveledCompactionConfig};
 
 #[cfg(test)]
@@ -32,9 +34,8 @@ pub fn execute_compaction(
     abort_check: Option<&dyn Fn() -> bool>,
 ) -> MidgeResult<Vec<String>> {
     // An empty plan is a planner no-op and must not create an unreferenced
-    // output. Keep the later no-output error for non-empty plans: silently
-    // replacing actual inputs with nothing would be unsafe without a proven
-    // tombstone-only removal policy.
+    // output. The executor separately rejects non-empty plans whose selected
+    // inputs decode to no versions or range tombstones.
     if plan.input_files.is_empty() {
         return Ok(Vec::new());
     }
@@ -267,6 +268,26 @@ mod tests {
         // Assert
         assert!(output_names.is_empty());
         assert!(!output_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn should_reject_nonempty_plan_when_selected_sst_contains_no_entries() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let input = factory.create()?;
+        crate::sst::fs::finish_writer_to_path(input, &temp_dir.path().join("empty-input.sst"))?;
+        let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(40);
+        plan.input_files.push("empty-input.sst".to_string());
+
+        // Act
+        let result = execute_compaction(&plan, &factory, temp_dir.path(), None);
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::Internal(_))));
+        assert!(temp_dir.path().join("empty-input.sst").is_file());
         Ok(())
     }
 
@@ -1045,6 +1066,60 @@ mod tests {
             .windows(2)
             .all(|pair| pair[0].end == pair[1].start));
         assert!(fragments.iter().all(|fragment| fragment.seq == 200));
+        Ok(())
+    }
+
+    #[test]
+    fn should_include_range_tombstone_metadata_in_partition_rollover() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096)
+            .with_compression_policy(crate::sst::compression::CompressionPolicy::None);
+        let mut input = factory.create()?;
+        let value = vec![b'v'; 256];
+        let keys = (0..512u64)
+            .map(|index| format!("key-{index:04}-{index:0112x}").into_bytes())
+            .collect::<Vec<_>>();
+        for (index, key) in keys.iter().enumerate() {
+            input.add_with_meta(
+                key,
+                Some(&value),
+                u64::try_from(index).expect("index fits") + 1,
+                0,
+                None,
+            )?;
+        }
+        for index in 0..256usize {
+            input.add_range_tombstone(
+                &keys[index],
+                &keys[index + 256],
+                u64::try_from(index).expect("index fits") + 1_000,
+            )?;
+        }
+        crate::sst::fs::finish_writer_to_path(
+            input,
+            &temp_dir.path().join("metadata-heavy-input.sst"),
+        )?;
+        let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(54);
+        plan.target_sst_size = 64 * 1024;
+        plan.input_files
+            .push("metadata-heavy-input.sst".to_string());
+
+        // Act
+        let outputs = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
+
+        // Assert
+        assert!(outputs.len() > 1);
+        let allowance =
+            u64::try_from(value.len() + 4096 + 16 * 1024).expect("partition allowance fits in u64");
+        for output in outputs {
+            let size = std::fs::metadata(temp_dir.path().join(output))?.len();
+            assert!(
+                size <= u64::try_from(plan.target_sst_size).unwrap_or(u64::MAX) + allowance,
+                "partition size {size} exceeded target plus indivisible entry/block allowance"
+            );
+        }
         Ok(())
     }
 

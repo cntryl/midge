@@ -67,7 +67,7 @@ fn should_derive_same_pools_when_builder_calls_are_reordered() {
 #[test]
 fn should_keep_accounted_pools_within_total_given_tiny_and_normal_budgets() {
     // Arrange
-    let budgets = [3usize, 9, 10, 31, 1024, 128 * 1024, 512 * 1024 * 1024];
+    let budgets = [10usize, 31, 1024, 128 * 1024, 512 * 1024 * 1024];
 
     for budget in budgets {
         // Act
@@ -79,7 +79,8 @@ fn should_keep_accounted_pools_within_total_given_tiny_and_normal_budgets() {
             .memtable_size_limit()
             .saturating_mul(2)
             .saturating_add(opts.block_cache_size())
-            .saturating_add(opts.transaction_memory_pool_size());
+            .saturating_add(opts.transaction_memory_pool_size())
+            .saturating_add((budget / 10).min(256 * 1024 * 1024));
 
         // Assert
         assert!(
@@ -90,6 +91,22 @@ fn should_keep_accounted_pools_within_total_given_tiny_and_normal_budgets() {
             opts.transaction_memory_pool_size() > 0,
             "budget={budget} must retain a nonzero transaction pool"
         );
+    }
+}
+
+#[test]
+fn should_reject_tiny_budget_when_bounded_compaction_pool_cannot_fit() {
+    // Arrange
+    let budgets = [3usize, 9];
+
+    for budget in budgets {
+        // Act
+        let result = OpenOptions::in_memory()
+            .memory_budget(MemoryBudget::Bytes(budget))
+            .build();
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::ResourceLimit(_))));
     }
 }
 
