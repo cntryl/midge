@@ -507,7 +507,10 @@ fn available_disk_bytes(path: &Path) -> MidgeResult<u64> {
     }
     // SAFETY: successful statvfs initializes the output structure.
     let stats = unsafe { stats.assume_init() };
-    Ok(u64::from(stats.f_bavail).saturating_mul(stats.f_frsize))
+    let available_blocks = stats.f_bavail;
+    #[cfg(target_vendor = "apple")]
+    let available_blocks = u64::from(available_blocks);
+    Ok(available_blocks.saturating_mul(stats.f_frsize))
 }
 
 #[cfg(not(unix))]
