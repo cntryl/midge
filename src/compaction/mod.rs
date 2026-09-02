@@ -35,19 +35,14 @@ pub fn execute_compaction(
         return Ok(Vec::new());
     }
 
-    // --- 1. Materialize reader-provided per-SST streams ---------------------
-    //
-    // The reader contract currently returns one vector per SST. Keep those
-    // independent and merge their heads below rather than building a second
-    // all-input vector followed by a deduplicated result vector.
-    let (streams, range_tombstones) =
-        executor::collect_compaction_stream_inputs(sst_factory, &plan.input_files, abort_check)?;
-
-    if streams.iter().all(Vec::is_empty) && range_tombstones.is_empty() {
-        return Err(MidgeError::Internal(
-            "compaction produced no output; inputs were not replaced".to_string(),
-        ));
-    }
+    // --- 1. Open one lazy raw-version cursor per input SST ------------------
+    let budget = crate::common::resource_budget::ResourceBudget::new(plan.compaction_memory_limit);
+    let inputs = executor::collect_compaction_stream_inputs(
+        sst_factory,
+        &plan.input_files,
+        &budget,
+        abort_check,
+    )?;
 
     // --- 2. Prepare output file path ----------------------------------------
     let output_file = output_filename(plan, output_dir);
@@ -57,8 +52,8 @@ pub fn execute_compaction(
     let output_written = executor::write_merged_compaction_output_to_sst(
         sst_factory,
         output_file_str,
-        streams,
-        &range_tombstones,
+        inputs,
+        &budget,
         executor::TombstoneGcPolicy {
             snapshot_horizon: plan.snapshot_horizon,
             point_eligible: plan.point_tombstone_gc_eligible,
@@ -801,6 +796,100 @@ mod tests {
                 .exists(),
             "aborted output must not survive for a later manifest publication"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn should_stream_compaction_finalization_when_finish_bytes_is_rejected() -> MidgeResult<()> {
+        // Arrange
+        struct RejectFinishBytesWriter {
+            inner: Box<dyn crate::sst::traits::DynSstWriter>,
+        }
+
+        impl crate::sst::traits::DynSstWriter for RejectFinishBytesWriter {
+            fn add(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()> {
+                self.inner.add(key, value)
+            }
+
+            fn add_with_meta(
+                &mut self,
+                key: &[u8],
+                value: Option<&[u8]>,
+                seq: u64,
+                op_type: u8,
+                expiration: Option<u64>,
+            ) -> MidgeResult<()> {
+                self.inner
+                    .add_with_meta(key, value, seq, op_type, expiration)
+            }
+
+            fn add_sorted_with_meta(
+                &mut self,
+                key: &[u8],
+                value: Option<&[u8]>,
+                seq: u64,
+                op_type: u8,
+                expiration: Option<u64>,
+            ) -> MidgeResult<()> {
+                self.inner
+                    .add_sorted_with_meta(key, value, seq, op_type, expiration)
+            }
+
+            fn add_range_tombstone(
+                &mut self,
+                start: &[u8],
+                end: &[u8],
+                seq: u64,
+            ) -> MidgeResult<()> {
+                self.inner.add_range_tombstone(start, end, seq)
+            }
+
+            fn finish_to_path(self: Box<Self>, path: &Path) -> MidgeResult<()> {
+                self.inner.finish_to_path(path)
+            }
+
+            fn finish_bytes(self: Box<Self>) -> MidgeResult<Vec<u8>> {
+                Err(MidgeError::Internal(
+                    "finish_bytes must not be used by compaction".to_string(),
+                ))
+            }
+        }
+
+        struct RejectFinishBytesFactory {
+            inner: crate::sst::FsSstFactoryIo,
+        }
+
+        impl crate::sst::traits::SstFactory for RejectFinishBytesFactory {
+            fn create(&self) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
+                Ok(Box::new(RejectFinishBytesWriter {
+                    inner: self.inner.create()?,
+                }))
+            }
+
+            fn open(&self, path: &Path) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+                self.inner.open(path)
+            }
+        }
+
+        let temp_dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let base_factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let mut input = base_factory.create()?;
+        input.add_with_meta(b"key", Some(b"value"), 7, 0, None)?;
+        crate::sst::fs::finish_writer_to_path(input, &temp_dir.path().join("input.sst"))?;
+        let factory = RejectFinishBytesFactory {
+            inner: base_factory,
+        };
+        let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(46);
+        plan.input_files.push("input.sst".to_string());
+
+        // Act
+        let outputs = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
+
+        // Assert
+        assert_eq!(outputs.len(), 1);
+        let reader = factory.open(Path::new(&outputs[0]))?;
+        assert_eq!(reader.get(b"key")?.as_deref(), Some(b"value".as_slice()));
         Ok(())
     }
 }

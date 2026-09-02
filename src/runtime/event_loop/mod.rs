@@ -294,7 +294,9 @@ impl EventLoop {
                     l0_file_count_threshold: config.l0_compaction_trigger.max(1),
                     ..Default::default()
                 };
-                CompactionActor::new_with_config(sst_factory, compaction_config)
+                let mut actor = CompactionActor::new_with_config(sst_factory, compaction_config);
+                actor.set_execution_limits(config.target_sst_size, config.compaction_memory_limit);
+                actor
             },
             wal_actor,
             #[cfg(test)]
@@ -600,6 +602,8 @@ impl EventLoop {
     ) -> crate::common::MidgeResult<crate::compaction::CompactionPlan> {
         let mut plan = self.assign_compaction_output_sequence(plan);
         plan.snapshot_horizon = self.state.oldest_active_snapshot_sequence();
+        plan.target_sst_size = self.compaction_actor.target_sst_size();
+        plan.compaction_memory_limit = self.compaction_actor.compaction_memory_limit();
 
         if plan.output_seq == 0 {
             return Err(crate::common::MidgeError::Internal(

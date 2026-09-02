@@ -67,6 +67,8 @@ impl CompactionCoordinator {
             target_level: plan.target_level,
             cf_id: plan.cf_id,
             output_seq: 0,
+            target_sst_size: usize::MAX,
+            compaction_memory_limit: 256 * 1024 * 1024,
             snapshot_horizon: None,
             point_tombstone_gc_eligible: false,
             range_tombstone_gc_eligible: false,

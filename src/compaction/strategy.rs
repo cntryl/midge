@@ -20,6 +20,11 @@ pub struct CompactionPlan {
     pub cf_id: u32,
     /// Output SST sequence number (assigned by sequence allocator)
     pub output_seq: u64,
+    /// Soft output partition target derived from the engine goal.
+    pub target_sst_size: usize,
+    /// Internal byte pool covering compaction-owned readers, merge heads, and
+    /// output buffers.
+    pub compaction_memory_limit: usize,
     /// Oldest active snapshot sequence, if any, used for tombstone retention.
     pub snapshot_horizon: Option<u64>,
     /// Point tombstones may be removed only when every unselected file whose
@@ -42,6 +47,8 @@ impl CompactionPlan {
             target_level,
             cf_id,
             output_seq: 0,
+            target_sst_size: usize::MAX,
+            compaction_memory_limit: 256 * 1024 * 1024,
             snapshot_horizon: None,
             point_tombstone_gc_eligible: false,
             range_tombstone_gc_eligible: false,
@@ -262,6 +269,8 @@ impl Compactor {
             target_level: 1,
             cf_id,
             output_seq: 0,
+            target_sst_size: usize::MAX,
+            compaction_memory_limit: 256 * 1024 * 1024,
             snapshot_horizon: None,
             point_tombstone_gc_eligible,
             range_tombstone_gc_eligible,
@@ -305,6 +314,8 @@ impl Compactor {
             target_level: u32::try_from(level + 1).expect("level index fits in u32"),
             cf_id,
             output_seq: 0,
+            target_sst_size: usize::MAX,
+            compaction_memory_limit: 256 * 1024 * 1024,
             snapshot_horizon: None,
             point_tombstone_gc_eligible,
             range_tombstone_gc_eligible,

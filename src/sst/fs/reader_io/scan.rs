@@ -149,6 +149,18 @@ impl SstFileIo {
 }
 
 impl crate::sst::SstStateReader for SstFileIo {
+    fn raw_version_cursor_with_budget(
+        self: Box<Self>,
+        start: Option<Vec<u8>>,
+        end: Option<Vec<u8>>,
+        budget: Option<crate::common::resource_budget::ResourceBudget>,
+    ) -> MidgeResult<crate::sst::traits::RawSstVersionCursor> {
+        let reader: std::sync::Arc<Self> = self.into();
+        Ok(Box::new(super::SstRawVersionScan::new(
+            reader, start, end, budget,
+        )?))
+    }
+
     fn scan_range_raw_state(
         &self,
         start: Option<&[u8]>,

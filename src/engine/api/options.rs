@@ -195,6 +195,7 @@ struct DerivedMemoryPools {
     memtable_flush_threshold: usize,
     block_cache_size: usize,
     transaction_memory_pool_size: usize,
+    compaction_memory_pool_size: usize,
 }
 
 impl OpenOptions {
@@ -315,6 +316,10 @@ impl OpenOptions {
     #[must_use]
     pub fn target_sst_size(&self) -> usize {
         self.compaction.target_sst_size
+    }
+
+    pub(crate) fn compaction_memory_pool_size(&self) -> usize {
+        self.compaction.memory_pool_size
     }
 
     /// Return the block-cache allocation.
@@ -442,6 +447,7 @@ impl OpenOptionsBuilder {
             transaction_memory_pool_size: None,
             cache: CachePolicyConfig::new(0, 0, BlockCachePolicy::default()),
             compaction: crate::compaction::OpenCompactionConfig::new(
+                0,
                 0,
                 0,
                 true,
@@ -699,6 +705,7 @@ impl OpenOptionsBuilder {
             cache: CachePolicyConfig::new(block_size, pools.block_cache_size, self.cache.policy),
             compaction: crate::compaction::OpenCompactionConfig::new(
                 target_sst_size,
+                pools.compaction_memory_pool_size,
                 l0_compaction_trigger,
                 self.compaction.background_enabled,
                 compression_policy,
@@ -742,7 +749,16 @@ impl OpenOptionsBuilder {
             )));
         }
 
-        let max_memtable_size = total_memory.saturating_sub(transaction_memory_pool_size) / 2;
+        let desired_compaction_pool = (total_memory / 10).min(256 * 1024 * 1024);
+        let compaction_memory_pool_size = desired_compaction_pool.min(
+            total_memory
+                .saturating_sub(transaction_memory_pool_size)
+                .saturating_sub(2),
+        );
+        let max_memtable_size = total_memory
+            .saturating_sub(transaction_memory_pool_size)
+            .saturating_sub(compaction_memory_pool_size)
+            / 2;
         if max_memtable_size == 0 {
             return Err(MidgeError::ResourceLimit(
                 "memory budget leaves no capacity for memtables".to_string(),
@@ -754,6 +770,7 @@ impl OpenOptionsBuilder {
         crate::config::validate_memtable_limits(memtable_size_limit, memtable_flush_threshold)?;
         let mut block_cache_size = total_memory
             .saturating_sub(transaction_memory_pool_size)
+            .saturating_sub(compaction_memory_pool_size)
             .saturating_sub(memtable_size_limit.saturating_mul(2));
         if self.goal == Goal::Economy {
             block_cache_size = block_cache_size.min(256 * 1024 * 1024);
@@ -764,6 +781,7 @@ impl OpenOptionsBuilder {
             memtable_flush_threshold,
             block_cache_size,
             transaction_memory_pool_size,
+            compaction_memory_pool_size,
         })
     }
 

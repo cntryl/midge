@@ -87,6 +87,8 @@ pub struct RuntimeConfig {
     pub compression_policy: crate::sst::compression::CompressionPolicy,
     pub block_cache_size: usize,
     pub block_cache_policy: crate::sst::cache::CachePolicyType,
+    pub(crate) target_sst_size: usize,
+    pub(crate) compaction_memory_limit: usize,
     pub l0_compaction_trigger: usize,
     pub background_compaction: bool,
     /// Fencing epoch from leader election.  Stamped on every WAL record.
@@ -125,6 +127,8 @@ impl Default for RuntimeConfig {
             compression_policy: crate::sst::compression::CompressionPolicy::default(),
             block_cache_size: 128 * 1024 * 1024,
             block_cache_policy: crate::sst::cache::CachePolicyType::Lru,
+            target_sst_size: 256 * 1024 * 1024,
+            compaction_memory_limit: 64 * 1024 * 1024,
             l0_compaction_trigger: 4,
             background_compaction: true,
             writer_epoch: 0,

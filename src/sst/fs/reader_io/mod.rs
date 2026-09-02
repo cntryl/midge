@@ -108,6 +108,337 @@ pub(crate) struct SstStateScan {
     pending_entry: Option<SstEntry>,
 }
 
+/// Fallible, block-at-a-time cursor over every persisted logical version.
+///
+/// Unlike [`SstStateScan`], this cursor does not collapse equal keys or apply a
+/// snapshot/TTL view. Compaction needs the exact persisted ordering and decides
+/// which versions remain authoritative itself.
+struct SstRawVersionScan {
+    reader: Arc<SstFileIo>,
+    start: Option<Vec<u8>>,
+    end: Option<Vec<u8>>,
+    initialized: bool,
+    lifecycle: SstScanLifecycle,
+    file: Option<Box<dyn File>>,
+    index: Option<IndexEntries>,
+    first_block: usize,
+    last_block: usize,
+    next_block: usize,
+    block: Option<Bytes>,
+    block_offset: usize,
+    previous_key: Vec<u8>,
+    budget: Option<crate::common::resource_budget::ResourceBudget>,
+    _bounds_reservation: Option<crate::common::resource_budget::ResourceReservation>,
+    _metadata_reservation: Option<crate::common::resource_budget::ResourceReservation>,
+    block_reservation: Option<crate::common::resource_budget::ResourceReservation>,
+    decoder_reservation: Option<crate::common::resource_budget::ResourceReservation>,
+    yield_reservation: Option<crate::common::resource_budget::ResourceReservation>,
+}
+
+impl SstRawVersionScan {
+    fn new(
+        reader: Arc<SstFileIo>,
+        start: Option<Vec<u8>>,
+        end: Option<Vec<u8>>,
+        budget: Option<crate::common::resource_budget::ResourceBudget>,
+    ) -> MidgeResult<Self> {
+        let bounds_bytes = start
+            .as_ref()
+            .map_or(0, Vec::capacity)
+            .saturating_add(end.as_ref().map_or(0, Vec::capacity));
+        let bounds_reservation = budget
+            .as_ref()
+            .map(|budget| budget.reserve(bounds_bytes, "raw cursor bounds"))
+            .transpose()?;
+        let (file, lifecycle) = match reader.fs.open_persistent_handle(
+            &reader.path,
+            OpenOptions {
+                mode: OpenMode::ReadOnly,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        ) {
+            Ok(file) => (Some(file), SstScanLifecycle::Active),
+            Err(FsError::Unsupported(_)) => (None, SstScanLifecycle::Active),
+            Err(error) => (None, SstScanLifecycle::Failed(error.into())),
+        };
+        Ok(Self {
+            reader,
+            start,
+            end,
+            initialized: false,
+            lifecycle,
+            file,
+            index: None,
+            first_block: 0,
+            last_block: 0,
+            next_block: 0,
+            block: None,
+            block_offset: 0,
+            previous_key: Vec::new(),
+            budget,
+            _bounds_reservation: bounds_reservation,
+            _metadata_reservation: None,
+            block_reservation: None,
+            decoder_reservation: None,
+            yield_reservation: None,
+        })
+    }
+
+    fn initialize(&mut self) -> MidgeResult<()> {
+        if self.initialized {
+            return Ok(());
+        }
+        self.initialized = true;
+        if self
+            .reader
+            .range_outside_persisted_bounds(self.start.as_deref(), self.end.as_deref())
+        {
+            self.lifecycle = SstScanLifecycle::Exhausted;
+            return Ok(());
+        }
+
+        let index = self.reader.index_entries_from(self.file.as_deref())?;
+        if index.is_empty() {
+            self.lifecycle = SstScanLifecycle::Exhausted;
+            return Ok(());
+        }
+        let index_bytes = index.iter().fold(
+            index
+                .len()
+                .saturating_mul(std::mem::size_of::<(Vec<u8>, BlockHandle)>()),
+            |total, (key, _)| total.saturating_add(key.capacity()),
+        );
+        let tombstone_bytes = self.reader.range_tombstones.iter().fold(
+            self.reader
+                .range_tombstones
+                .len()
+                .saturating_mul(std::mem::size_of::<RangeTombstone>()),
+            |total, tombstone| {
+                total
+                    .saturating_add(tombstone.start.capacity())
+                    .saturating_add(tombstone.end.capacity())
+            },
+        );
+        self._metadata_reservation = self
+            .budget
+            .as_ref()
+            .map(|budget| {
+                budget.reserve(
+                    index_bytes.saturating_add(tombstone_bytes),
+                    "SST index and range tombstones",
+                )
+            })
+            .transpose()?;
+
+        self.first_block = self
+            .start
+            .as_deref()
+            .and_then(|start| self.reader.candidate_block_indices(index.as_ref(), start))
+            .map_or(0, |range| *range.start());
+        self.last_block = self
+            .end
+            .as_deref()
+            .and_then(|end| self.reader.candidate_block_indices(index.as_ref(), end))
+            .map_or_else(|| index.len().saturating_sub(1), |range| *range.end());
+        if self.first_block >= index.len() || self.first_block > self.last_block {
+            self.lifecycle = SstScanLifecycle::Exhausted;
+            return Ok(());
+        }
+        self.last_block = self.last_block.min(index.len() - 1);
+        self.next_block = self.first_block;
+        self.index = Some(index);
+        Ok(())
+    }
+
+    fn load_next_block(&mut self) -> MidgeResult<bool> {
+        self.initialize()?;
+        if matches!(self.lifecycle, SstScanLifecycle::Exhausted) {
+            return Ok(false);
+        }
+        let block_index = self.next_block;
+        let handle = self
+            .index
+            .as_ref()
+            .and_then(|index| index.get(block_index))
+            .map(|(_, handle)| *handle)
+            .ok_or_else(|| {
+                MidgeError::Corruption("SST raw cursor block index is invalid".into())
+            })?;
+        if block_index == self.last_block {
+            self.lifecycle = SstScanLifecycle::Exhausted;
+        } else {
+            self.next_block = block_index + 1;
+        }
+
+        SstFileIo::validate_block_handle(handle, self.reader.block_region_end, "compaction data")?;
+        let compressed_size = usize::try_from(handle.size).map_err(|_| {
+            MidgeError::ResourceLimit("compressed SST block exceeds addressable memory".into())
+        })?;
+        let compressed_reservation = self
+            .budget
+            .as_ref()
+            .map(|budget| budget.reserve(compressed_size, "compressed SST block"))
+            .transpose()?;
+        let buffer = if let Some(file) = self.file.as_deref() {
+            file.read_at(handle.offset, handle.size)?
+        } else {
+            let file = self.reader.fs.open(
+                &self.reader.path,
+                OpenOptions {
+                    mode: OpenMode::ReadOnly,
+                    create: false,
+                    create_new: false,
+                    truncate: false,
+                },
+            )?;
+            file.read_at(handle.offset, handle.size)?
+        };
+        if buffer.len() < 4 {
+            return Err(MidgeError::Corruption("Block too short".into()));
+        }
+        let payload_len = u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
+        if payload_len.checked_add(4) != Some(buffer.len()) {
+            return Err(MidgeError::Corruption(
+                "SST block length prefix does not exactly match its handle".into(),
+            ));
+        }
+        let raw = &buffer[4..];
+        let decompressed_size = crate::sst::compression::decompressed_size_with_trailer(raw)?;
+        let decompressed_reservation = self
+            .budget
+            .as_ref()
+            .map(|budget| budget.reserve(decompressed_size, "decompressed SST block"))
+            .transpose()?;
+        let block = crate::sst::compression::decompress_block_with_trailer(raw)?;
+        if block.len() > decompressed_size {
+            return Err(MidgeError::Corruption(
+                "decoded SST block exceeded its declared size".into(),
+            ));
+        }
+        drop(compressed_reservation);
+
+        self.reader
+            .diagnostics
+            .sst_metrics()
+            .record_candidate_blocks_checked(1);
+        self.reader
+            .diagnostics
+            .sst_metrics()
+            .record_data_block_read();
+        self.block = Some(block);
+        self.block_reservation = decompressed_reservation;
+        self.block_offset = 0;
+        self.previous_key.clear();
+        self.decoder_reservation = None;
+        Ok(true)
+    }
+
+    fn next_version(&mut self) -> MidgeResult<Option<crate::sst::traits::RawSstVersion>> {
+        self.yield_reservation = None;
+        loop {
+            let needs_block = self
+                .block
+                .as_ref()
+                .is_none_or(|block| self.block_offset >= block.len());
+            if needs_block {
+                self.block = None;
+                self.block_reservation = None;
+                self.decoder_reservation = None;
+                self.previous_key.clear();
+                if !self.load_next_block()? {
+                    return Ok(None);
+                }
+            }
+
+            let block = self.block.as_ref().expect("raw cursor loaded a block");
+            let (entry, next_offset) = crate::sst::encoding::decode_with_format(
+                block.as_ref(),
+                self.block_offset,
+                self.reader.format_version,
+            )?;
+            let shared_len = usize::from(entry.shared_len);
+            if shared_len > self.previous_key.len() {
+                return Err(MidgeError::Corruption(
+                    "Invalid shared prefix length in SST entry".into(),
+                ));
+            }
+            let key_len = shared_len.saturating_add(entry.key_delta.len());
+            let value_len = entry.value.map_or(0, <[u8]>::len);
+            let decoder_reservation = self
+                .budget
+                .as_ref()
+                .map(|budget| budget.reserve(key_len, "raw cursor decoder key"))
+                .transpose()?;
+            let yield_bytes = std::mem::size_of::<crate::sst::traits::RawSstVersion>()
+                .saturating_add(key_len)
+                .saturating_add(value_len);
+            let yield_reservation = self
+                .budget
+                .as_ref()
+                .map(|budget| budget.reserve(yield_bytes, "raw cursor yielded version"))
+                .transpose()?;
+
+            let mut key = Vec::with_capacity(key_len);
+            key.extend_from_slice(&self.previous_key[..shared_len]);
+            key.extend_from_slice(entry.key_delta);
+            self.previous_key.clone_from(&key);
+            self.decoder_reservation = decoder_reservation;
+            self.block_offset = next_offset;
+            if self
+                .start
+                .as_deref()
+                .is_some_and(|start| key.as_slice() < start)
+                || self.end.as_deref().is_some_and(|end| key.as_slice() >= end)
+            {
+                continue;
+            }
+
+            let value = entry.value_offset.map(|offset| {
+                let end = offset.saturating_add(value_len);
+                block[offset..end].to_vec()
+            });
+            self.yield_reservation = yield_reservation;
+            return Ok(Some(crate::sst::traits::RawSstVersion {
+                key,
+                seq: entry.sequence,
+                is_tombstone: matches!(entry.entry_type, crate::sst::encoding::EntryType::Delete),
+                value,
+                expiration: entry.expiration,
+            }));
+        }
+    }
+}
+
+impl Iterator for SstRawVersionScan {
+    type Item = MidgeResult<crate::sst::traits::RawSstVersion>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match &self.lifecycle {
+            SstScanLifecycle::Failed(error) => return Some(Err(error.replay())),
+            SstScanLifecycle::Exhausted if self.block.is_none() => return None,
+            SstScanLifecycle::Active | SstScanLifecycle::Exhausted => {}
+        }
+
+        match self.next_version() {
+            Ok(Some(version)) => Some(Ok(version)),
+            Ok(None) => {
+                self.lifecycle = SstScanLifecycle::Exhausted;
+                None
+            }
+            Err(error) => {
+                self.block = None;
+                self.lifecycle = SstScanLifecycle::Failed(error);
+                match &self.lifecycle {
+                    SstScanLifecycle::Failed(error) => Some(Err(error.replay())),
+                    SstScanLifecycle::Active | SstScanLifecycle::Exhausted => unreachable!(),
+                }
+            }
+        }
+    }
+}
+
 enum SstScanLifecycle {
     Active,
     Exhausted,

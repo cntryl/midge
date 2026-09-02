@@ -721,6 +721,29 @@ impl DynSstWriter for InMemorySstWriter {
         Ok(())
     }
 
+    fn finish_to_path(self: Box<Self>, path: &Path) -> MidgeResult<()> {
+        if self.streaming.is_none() {
+            let bytes = self.finish_bytes()?;
+            return crate::sst::fs::persist_sst_bytes_to_path(&bytes, path);
+        }
+
+        let InMemorySstWriter {
+            entries,
+            range_tombstones,
+            block_size: _,
+            compression_policy,
+            streaming,
+        } = *self;
+        debug_assert!(entries.is_empty());
+        let scratch = Self::finish_streaming(
+            streaming.expect("streaming writer checked above"),
+            &range_tombstones,
+            &compression_policy,
+        )?;
+        let mut source = scratch.reopen().map_err(crate::common::MidgeError::Io)?;
+        crate::sst::fs::persist_sst_stream_to_path(&mut source, path)
+    }
+
     fn finish_bytes(self: Box<Self>) -> MidgeResult<Vec<u8>> {
         let InMemorySstWriter {
             entries,

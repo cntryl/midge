@@ -21,8 +21,7 @@ pub use reader_io::{SstFileIo, SstFileSummary};
 ///
 /// Returns an error if finalizing the writer, writing the temp file, syncing, or renaming fails.
 pub fn finish_writer_to_path(writer: Box<dyn DynSstWriter>, path: &Path) -> MidgeResult<()> {
-    let bytes = writer.finish_bytes()?;
-    persist_sst_bytes_to_path(&bytes, path)
+    writer.finish_to_path(path)
 }
 
 /// Atomically persist finalized SST bytes. This is public within the crate so

@@ -1,19 +1,20 @@
-//! Compaction execution: version collection, merging, and output
+//! Compaction execution: lazy version merging and output
 //!
 //! This module implements a K-way compaction pipeline:
-//!   1. Collect one logical-version buffer per input SST.
+//!   1. Open one block-at-a-time logical-version cursor per input SST.
 //!   2. Merge their heads into a sorted stream (key ascending, seq descending).
 //!   3. Deduplicate one key at a time (newest version first).
 //!   4. Preserve raw TTL values; read snapshots alone interpret expiration.
 //!   5. Feed the result directly to the `SstFactory` writer.
 //!
-//! This avoids an additional all-input vector, key map, and deduplicated output
-//! vector. The reader trait currently materializes one buffer per SST.
+//! This keeps one merge head per input and avoids materializing either an input
+//! SST, the aggregate plan, or a second deduplicated output vector.
 
 use crate::common::MidgeResult;
-use crate::sst::traits::SstFactory;
-use crate::sst::types::{KeyState, RangeTombstone};
-use serde::{Deserialize, Serialize};
+use crate::sst::traits::{RawSstVersion, RawSstVersionCursor, SstFactory};
+#[cfg(test)]
+use crate::sst::types::KeyState;
+use crate::sst::types::RangeTombstone;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::path::Path;
@@ -25,19 +26,7 @@ use std::path::Path;
 ///   - Higher `seq` means "newer".
 ///   - Tombstones represent deletions.
 ///   - TTL is expressed as an absolute expiry timestamp (milliseconds since epoch).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CompactionVersion {
-    /// User key
-    pub key: Vec<u8>,
-    /// Sequence number (higher = newer)
-    pub seq: u64,
-    /// Whether this is a tombstone (deletion marker)
-    pub is_tombstone: bool,
-    /// Value bytes (None if tombstone)
-    pub value: Option<Vec<u8>>,
-    /// Expiration time in milliseconds since epoch (optional)
-    pub expiration: Option<u64>,
-}
+pub type CompactionVersion = RawSstVersion;
 
 fn tombstone_is_obsolete(sequence: u64, snapshot_horizon: Option<u64>) -> bool {
     snapshot_horizon.is_none_or(|horizon| sequence <= horizon)
@@ -52,6 +41,7 @@ fn ensure_compaction_not_aborted(abort_check: Option<&dyn Fn() -> bool>) -> Midg
     Ok(())
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SstCompactionInput {
     pub versions: Vec<CompactionVersion>,
@@ -67,8 +57,29 @@ pub(crate) struct TombstoneGcPolicy {
 
 /// One sorted input and its current merge head.
 struct VersionMergeInput {
-    iter: std::vec::IntoIter<CompactionVersion>,
-    current: Option<CompactionVersion>,
+    cursor: RawSstVersionCursor,
+    current: Option<RetainedVersion>,
+}
+
+struct RetainedVersion {
+    version: CompactionVersion,
+    _reservation: crate::common::resource_budget::ResourceReservation,
+}
+
+impl RetainedVersion {
+    fn new(
+        version: CompactionVersion,
+        budget: &crate::common::resource_budget::ResourceBudget,
+    ) -> MidgeResult<Self> {
+        let retained_bytes = std::mem::size_of::<CompactionVersion>()
+            .saturating_add(version.key.capacity())
+            .saturating_add(version.value.as_ref().map_or(0, Vec::capacity));
+        let reservation = budget.reserve(retained_bytes, "merge head")?;
+        Ok(Self {
+            version,
+            _reservation: reservation,
+        })
+    }
 }
 
 /// Heap item that orders compaction versions by key ascending and sequence
@@ -114,53 +125,71 @@ impl Ord for VersionHeapItem {
 struct VersionMergeIterator {
     inputs: Vec<VersionMergeInput>,
     heap: BinaryHeap<VersionHeapItem>,
+    budget: crate::common::resource_budget::ResourceBudget,
 }
 
 impl VersionMergeIterator {
-    fn new(mut streams: Vec<Vec<CompactionVersion>>) -> Self {
-        let mut inputs = Vec::with_capacity(streams.len());
+    fn new(
+        mut cursors: Vec<RawSstVersionCursor>,
+        budget: crate::common::resource_budget::ResourceBudget,
+    ) -> MidgeResult<Self> {
+        let mut inputs = Vec::with_capacity(cursors.len());
         let mut heap = BinaryHeap::new();
 
-        for (input_idx, stream) in streams.iter_mut().enumerate() {
-            stream.sort_by(|left, right| {
-                left.key
-                    .cmp(&right.key)
-                    .then_with(|| right.seq.cmp(&left.seq))
-            });
-            let mut iter = std::mem::take(stream).into_iter();
-            let current = iter.next();
+        for (input_idx, mut cursor) in cursors.drain(..).enumerate() {
+            let current = cursor
+                .next()
+                .transpose()?
+                .map(|version| RetainedVersion::new(version, &budget))
+                .transpose()?;
             if let Some(entry) = &current {
                 heap.push(VersionHeapItem {
-                    key: entry.key.clone(),
-                    seq: entry.seq,
+                    key: entry.version.key.clone(),
+                    seq: entry.version.seq,
                     input_idx,
                 });
             }
-            inputs.push(VersionMergeInput { iter, current });
+            inputs.push(VersionMergeInput { cursor, current });
         }
 
-        Self { inputs, heap }
+        Ok(Self {
+            inputs,
+            heap,
+            budget,
+        })
     }
-}
 
-impl Iterator for VersionMergeIterator {
-    type Item = CompactionVersion;
+    fn next_version(&mut self) -> MidgeResult<Option<CompactionVersion>> {
+        let Some(head) = self.heap.pop() else {
+            return Ok(None);
+        };
+        let input = self.inputs.get_mut(head.input_idx).ok_or_else(|| {
+            crate::common::MidgeError::Internal("compaction merge input is missing".to_string())
+        })?;
+        let current = input.current.take().ok_or_else(|| {
+            crate::common::MidgeError::Internal("compaction merge head is missing".to_string())
+        })?;
 
-    fn next(&mut self) -> Option<Self::Item> {
-        let head = self.heap.pop()?;
-        let input = self.inputs.get_mut(head.input_idx)?;
-        let current = input.current.take()?;
-
-        if let Some(next) = input.iter.next() {
+        if let Some(next) = input.cursor.next().transpose()? {
+            let next = RetainedVersion::new(next, &self.budget)?;
             self.heap.push(VersionHeapItem {
-                key: next.key.clone(),
-                seq: next.seq,
+                key: next.version.key.clone(),
+                seq: next.version.seq,
                 input_idx: head.input_idx,
             });
             input.current = Some(next);
         }
 
-        Some(current)
+        Ok(Some(current.version))
+    }
+
+    fn peek_version(&self) -> Option<&CompactionVersion> {
+        let head = self.heap.peek()?;
+        self.inputs
+            .get(head.input_idx)?
+            .current
+            .as_ref()
+            .map(|retained| &retained.version)
     }
 }
 
@@ -175,6 +204,7 @@ fn normalize_range_tombstones(mut tombstones: Vec<RangeTombstone>) -> Vec<RangeT
     tombstones
 }
 
+#[cfg(test)]
 fn collect_reader_input(
     reader: &dyn crate::sst::traits::SstReaderExt,
 ) -> MidgeResult<SstCompactionInput> {
@@ -206,17 +236,23 @@ fn collect_reader_input(
     })
 }
 
-/// Materialize each input SST independently for a K-way merge. Reader APIs
-/// currently return vectors, but retaining those per-input buffers avoids a
-/// second all-input vector and lets downstream deduplication write directly
-/// to the output stream.
+pub(crate) struct CompactionStreamInputs {
+    cursors: Vec<RawSstVersionCursor>,
+    range_tombstones: Vec<RangeTombstone>,
+    _range_tombstone_reservations: Vec<crate::common::resource_budget::ResourceReservation>,
+}
+
+/// Open every selected SST without advancing any input beyond its first merge
+/// head. Each production filesystem cursor retains at most one decoded block.
 pub(crate) fn collect_compaction_stream_inputs(
     sst_factory: &dyn SstFactory,
     input_files: &[String],
+    budget: &crate::common::resource_budget::ResourceBudget,
     abort_check: Option<&dyn Fn() -> bool>,
-) -> MidgeResult<(Vec<Vec<CompactionVersion>>, Vec<RangeTombstone>)> {
-    let mut streams = Vec::with_capacity(input_files.len());
+) -> MidgeResult<CompactionStreamInputs> {
+    let mut cursors = Vec::with_capacity(input_files.len());
     let mut range_tombstones = Vec::new();
+    let mut range_tombstone_reservations = Vec::new();
 
     for filename in input_files {
         // Periodically check whether we should abort (cooperative cancellation)
@@ -232,19 +268,35 @@ pub(crate) fn collect_compaction_stream_inputs(
         let path = Path::new(filename);
 
         let reader = sst_factory.open(path)?;
-        let input = collect_reader_input(reader.as_ref())?;
-        if !input.range_tombstones.is_empty() {
+        let input_range_tombstones = reader.range_tombstones();
+        let tombstone_bytes = input_range_tombstones.iter().fold(
+            input_range_tombstones
+                .len()
+                .saturating_mul(std::mem::size_of::<RangeTombstone>()),
+            |total, tombstone| {
+                total
+                    .saturating_add(tombstone.start.capacity())
+                    .saturating_add(tombstone.end.capacity())
+            },
+        );
+        range_tombstone_reservations
+            .push(budget.reserve(tombstone_bytes, "range tombstone metadata")?);
+        if !input_range_tombstones.is_empty() {
             tracing::debug!(
                 file = %filename,
-                count = input.range_tombstones.len(),
+                count = input_range_tombstones.len(),
                 "compaction observed SST range tombstones"
             );
         }
-        streams.push(input.versions);
-        range_tombstones.extend(input.range_tombstones);
+        range_tombstones.extend(input_range_tombstones);
+        cursors.push(reader.raw_version_cursor_with_budget(None, None, Some(budget.clone()))?);
     }
 
-    Ok((streams, normalize_range_tombstones(range_tombstones)))
+    Ok(CompactionStreamInputs {
+        cursors,
+        range_tombstones: normalize_range_tombstones(range_tombstones),
+        _range_tombstone_reservations: range_tombstone_reservations,
+    })
 }
 
 /// Merge, normalize, deduplicate, and write compaction versions without
@@ -252,11 +304,16 @@ pub(crate) fn collect_compaction_stream_inputs(
 pub(crate) fn write_merged_compaction_output_to_sst(
     sst_factory: &dyn SstFactory,
     output_filename: &str,
-    streams: Vec<Vec<CompactionVersion>>,
-    range_tombstones: &[RangeTombstone],
+    inputs: CompactionStreamInputs,
+    budget: &crate::common::resource_budget::ResourceBudget,
     tombstone_gc: TombstoneGcPolicy,
     abort_check: Option<&dyn Fn() -> bool>,
 ) -> MidgeResult<bool> {
+    let CompactionStreamInputs {
+        cursors,
+        range_tombstones,
+        _range_tombstone_reservations,
+    } = inputs;
     let mut writer = sst_factory.create()?;
     let mut last_key: Option<Vec<u8>> = None;
     let mut written = 0usize;
@@ -266,19 +323,21 @@ pub(crate) fn write_merged_compaction_output_to_sst(
                 && tombstone_is_obsolete(tombstone.seq, tombstone_gc.snapshot_horizon)
         });
 
-    let mut merged = VersionMergeIterator::new(streams).peekable();
+    let mut merged = VersionMergeIterator::new(cursors, budget.clone())?;
     let mut seen = 0usize;
-    while let Some(version) = merged.next() {
+    while let Some(version) = merged.next_version()? {
         if seen.is_multiple_of(1024) {
             ensure_compaction_not_aborted(abort_check)?;
         }
         seen = seen.saturating_add(1);
 
         while merged
-            .peek()
+            .peek_version()
             .is_some_and(|candidate| candidate.key == version.key && candidate.seq == version.seq)
         {
-            let duplicate = merged.next().expect("peeked compaction version exists");
+            let duplicate = merged
+                .next_version()?
+                .expect("peeked compaction version exists");
             seen = seen.saturating_add(1);
             if seen.is_multiple_of(1024) {
                 ensure_compaction_not_aborted(abort_check)?;
@@ -357,6 +416,62 @@ pub(crate) fn write_merged_compaction_output_to_sst(
 mod tests {
     use super::*;
 
+    #[test]
+    fn should_initialize_merge_with_one_raw_version_per_input() {
+        use crate::sst::traits::RawSstVersionCursor;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        // Arrange
+        struct InstrumentedCursor {
+            versions: std::vec::IntoIter<CompactionVersion>,
+            advances: Arc<AtomicUsize>,
+        }
+
+        impl Iterator for InstrumentedCursor {
+            type Item = MidgeResult<CompactionVersion>;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                self.versions.next().map(|version| {
+                    self.advances.fetch_add(1, Ordering::SeqCst);
+                    Ok(version)
+                })
+            }
+        }
+
+        let left_advances = Arc::new(AtomicUsize::new(0));
+        let right_advances = Arc::new(AtomicUsize::new(0));
+        let cursors: Vec<RawSstVersionCursor> = vec![
+            Box::new(InstrumentedCursor {
+                versions: vec![
+                    mk_version("a", 3, false, Some("a3"), None),
+                    mk_version("c", 1, false, Some("c1"), None),
+                ]
+                .into_iter(),
+                advances: Arc::clone(&left_advances),
+            }),
+            Box::new(InstrumentedCursor {
+                versions: vec![
+                    mk_version("b", 2, false, Some("b2"), None),
+                    mk_version("d", 1, false, Some("d1"), None),
+                ]
+                .into_iter(),
+                advances: Arc::clone(&right_advances),
+            }),
+        ];
+
+        // Act
+        let _merge = VersionMergeIterator::new(
+            cursors,
+            crate::common::resource_budget::ResourceBudget::new(1024 * 1024),
+        )
+        .expect("initialize lazy merge");
+
+        // Assert
+        assert_eq!(left_advances.load(Ordering::SeqCst), 1);
+        assert_eq!(right_advances.load(Ordering::SeqCst), 1);
+    }
+
     fn mk_version<K: AsRef<[u8]>, V: AsRef<[u8]>>(
         key: K,
         seq: u64,
@@ -373,6 +488,15 @@ mod tests {
         }
     }
 
+    fn cursor_from_versions(mut versions: Vec<CompactionVersion>) -> RawSstVersionCursor {
+        versions.sort_by(|left, right| {
+            left.key
+                .cmp(&right.key)
+                .then_with(|| right.seq.cmp(&left.seq))
+        });
+        Box::new(versions.into_iter().map(Ok))
+    }
+
     #[test]
     fn should_merge_version_streams_by_key_then_descending_sequence() {
         // Arrange
@@ -386,7 +510,15 @@ mod tests {
         ];
 
         // Act
-        let merged: Vec<_> = VersionMergeIterator::new(vec![left, right]).collect();
+        let mut merge = VersionMergeIterator::new(
+            vec![cursor_from_versions(left), cursor_from_versions(right)],
+            crate::common::resource_budget::ResourceBudget::new(1024 * 1024),
+        )
+        .expect("initialize merge");
+        let mut merged = Vec::new();
+        while let Some(version) = merge.next_version().expect("advance merge") {
+            merged.push(version);
+        }
 
         // Assert
         assert_eq!(
@@ -410,7 +542,15 @@ mod tests {
         let second = vec![mk_version("same", 7, false, Some("second"), None)];
 
         // Act
-        let merged: Vec<_> = VersionMergeIterator::new(vec![first, second]).collect();
+        let mut merge = VersionMergeIterator::new(
+            vec![cursor_from_versions(first), cursor_from_versions(second)],
+            crate::common::resource_budget::ResourceBudget::new(1024 * 1024),
+        )
+        .expect("initialize merge");
+        let mut merged = Vec::new();
+        while let Some(version) = merge.next_version().expect("advance merge") {
+            merged.push(version);
+        }
 
         // Assert
         assert_eq!(merged.len(), 2);
