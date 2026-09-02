@@ -7,14 +7,13 @@ use crate::common::{MidgeError, MidgeResult};
 use crate::io::Fs;
 use crate::metadata::FileMeta;
 use crate::runtime::read_resources::ReadResources;
+use crate::runtime::sst_read_view::{LevelRangeCandidates, RangeCandidates, SstReadView};
 use crate::sst::fs::reader_io::SstStateScan;
 use crate::sst::fs::SstFileIo;
 use crate::sst::traits::SstStateReader;
 use crate::sst::types::{KeyState, RangeTombstone};
 use crate::sst::SkipListMemtable;
-#[cfg(test)]
 use std::collections::BTreeMap;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Immutable snapshot of readable state for a column family
@@ -29,8 +28,8 @@ pub struct ReadSnapshot {
     pub memtable: Arc<SkipListMemtable>,
     /// Immutable memtables (newest to oldest)
     pub immutable_memtables: Vec<Arc<SkipListMemtable>>,
-    /// SST file metadata for this CF
-    pub sst_files: Vec<FileMeta>,
+    /// Immutable indexed SST catalog for this column family.
+    pub(crate) sst_view: Arc<SstReadView>,
     /// SST filesystem handle (rooted at `db_path`)
     pub sst_fs: Arc<dyn Fs>,
     /// SST path prefix relative to the fs root (typically "sst")
@@ -42,12 +41,12 @@ pub struct ReadSnapshot {
     pub read_time_millis: u64,
     read_resources: Option<Arc<ReadResources>>,
     diagnostics: Arc<crate::diagnostics::RuntimeDiagnostics>,
-    sst_readers: HashMap<String, Arc<SstFileIo>>,
 }
 
 enum SnapshotStateIterator {
     Memory(std::vec::IntoIter<(bytes::Bytes, KeyState)>),
     Sst(Box<SstStateScan>),
+    SstLevel(Box<SstLevelStateIterator>),
 }
 
 impl SnapshotStateIterator {
@@ -55,6 +54,101 @@ impl SnapshotStateIterator {
         match self {
             Self::Memory(entries) => entries.next().map(Ok),
             Self::Sst(entries) => entries.next(),
+            Self::SstLevel(entries) => entries.next(),
+        }
+    }
+}
+
+struct SstLevelStateIterator {
+    snapshot: Arc<ReadSnapshot>,
+    files: std::vec::IntoIter<Arc<FileMeta>>,
+    current: Option<SstStateScan>,
+    start: Option<Vec<u8>>,
+    end: Option<Vec<u8>>,
+    reverse: bool,
+    sequence: u64,
+    pending: Option<MidgeResult<(bytes::Bytes, KeyState)>>,
+}
+
+impl SstLevelStateIterator {
+    fn new(
+        snapshot: Arc<ReadSnapshot>,
+        mut files: Vec<Arc<FileMeta>>,
+        start: Option<Vec<u8>>,
+        end: Option<Vec<u8>>,
+        reverse: bool,
+        sequence: u64,
+    ) -> Self {
+        if reverse {
+            files.reverse();
+        }
+        Self {
+            snapshot,
+            files: files.into_iter(),
+            current: None,
+            start,
+            end,
+            reverse,
+            sequence,
+            pending: None,
+        }
+    }
+
+    fn next_raw(&mut self) -> Option<MidgeResult<(bytes::Bytes, KeyState)>> {
+        loop {
+            if let Some(current) = &mut self.current {
+                if let Some(next) = current.next() {
+                    return Some(next);
+                }
+                self.current = None;
+            }
+
+            let file_meta = self.files.next()?;
+            file_meta.record_read();
+            self.snapshot
+                .diagnostics
+                .sst_metrics()
+                .record_candidate_sst_file_checked();
+            let reader = match self.snapshot.sst_reader(&file_meta) {
+                Ok(reader) => reader,
+                Err(error) => return Some(Err(error)),
+            };
+            self.current = Some(reader.state_scan(
+                self.start.clone(),
+                self.end.clone(),
+                self.reverse,
+                self.sequence,
+                self.snapshot.read_time_millis,
+            ));
+        }
+    }
+
+    fn next(&mut self) -> Option<MidgeResult<(bytes::Bytes, KeyState)>> {
+        let first = self.pending.take().or_else(|| self.next_raw())?;
+        let (key, first_state) = match first {
+            Ok(entry) => entry,
+            Err(error) => return Some(Err(error)),
+        };
+        let mut best = None;
+        ReadSnapshot::merge_best_state(&mut best, first_state, self.snapshot.read_time_millis);
+
+        loop {
+            let Some(next) = self.next_raw() else {
+                return Some(Ok((key, best.unwrap_or(KeyState::Absent))));
+            };
+            match next {
+                Ok((candidate_key, candidate_state)) if candidate_key == key => {
+                    ReadSnapshot::merge_best_state(
+                        &mut best,
+                        candidate_state,
+                        self.snapshot.read_time_millis,
+                    );
+                }
+                other => {
+                    self.pending = Some(other);
+                    return Some(Ok((key, best.unwrap_or(KeyState::Absent))));
+                }
+            }
         }
     }
 }
@@ -145,15 +239,126 @@ impl SnapshotScan {
         )
     }
 
+    fn append_reader_tombstones(
+        &mut self,
+        file_meta: &FileMeta,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+    ) -> MidgeResult<Arc<SstFileIo>> {
+        let reader = self.snapshot.sst_reader(file_meta)?;
+        self.range_tombstones
+            .extend(reader.range_tombstones().into_iter().filter(|tombstone| {
+                self.snapshot
+                    .diagnostics
+                    .sst_metrics()
+                    .record_range_tombstone_scan();
+                (self.sequence == u64::MAX || tombstone.seq <= self.sequence)
+                    && ReadSnapshot::range_tombstone_overlaps_query(tombstone, start, end)
+            }));
+        Ok(reader)
+    }
+
+    fn add_l0_sources(
+        &mut self,
+        files: Vec<Arc<FileMeta>>,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+    ) -> MidgeResult<()> {
+        for file_meta in files {
+            file_meta.record_read();
+            self.snapshot
+                .diagnostics
+                .sst_metrics()
+                .record_candidate_sst_file_checked();
+            let reader = self.append_reader_tombstones(&file_meta, start, end)?;
+            self.sources
+                .push(SnapshotStateSource::new(SnapshotStateIterator::Sst(
+                    Box::new(reader.state_scan(
+                        self.start.clone(),
+                        self.end.clone(),
+                        self.reverse,
+                        self.sequence,
+                        self.snapshot.read_time_millis,
+                    )),
+                )));
+        }
+        Ok(())
+    }
+
+    fn add_level_source(
+        &mut self,
+        candidates: LevelRangeCandidates,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+    ) -> MidgeResult<()> {
+        for file_meta in &candidates.ordered {
+            let _reader = self.append_reader_tombstones(file_meta, start, end)?;
+        }
+        if !candidates.ordered.is_empty() {
+            self.sources
+                .push(SnapshotStateSource::new(SnapshotStateIterator::SstLevel(
+                    Box::new(SstLevelStateIterator::new(
+                        Arc::clone(&self.snapshot),
+                        candidates.ordered,
+                        self.start.clone(),
+                        self.end.clone(),
+                        self.reverse,
+                        self.sequence,
+                    )),
+                )));
+        }
+
+        if candidates.fallback.is_empty() {
+            return Ok(());
+        }
+
+        // Unknown or quarantined files cannot safely be chained by advisory
+        // bounds. Read them one at a time into one sorted logical source so
+        // correctness is preserved without retaining one cursor per file.
+        let mut states = BTreeMap::<Vec<u8>, KeyState>::new();
+        for file_meta in candidates.fallback {
+            file_meta.record_read();
+            self.snapshot
+                .diagnostics
+                .sst_metrics()
+                .record_candidate_sst_file_checked();
+            let reader = self.append_reader_tombstones(&file_meta, start, end)?;
+            let scan = reader.state_scan(
+                self.start.clone(),
+                self.end.clone(),
+                self.reverse,
+                self.sequence,
+                self.snapshot.read_time_millis,
+            );
+            for entry in scan {
+                let (key, state) = entry?;
+                ReadSnapshot::merge_state(
+                    &mut states,
+                    key.to_vec(),
+                    state,
+                    self.snapshot.read_time_millis,
+                );
+            }
+        }
+        self.sources
+            .push(SnapshotStateSource::new(Self::memory_iterator(
+                states.into_iter().collect(),
+                self.reverse,
+            )));
+        Ok(())
+    }
+
     fn initialize(&mut self) -> MidgeResult<()> {
         if self.initialized {
             return Ok(());
         }
         self.initialized = true;
 
-        let start = self.start.as_deref();
-        let end = self.end.as_deref();
-        let snapshot = &self.snapshot;
+        let start_bound = self.start.clone();
+        let end_bound = self.end.clone();
+        let start = start_bound.as_deref();
+        let end = end_bound.as_deref();
+        let snapshot = Arc::clone(&self.snapshot);
 
         self.sources
             .push(SnapshotStateSource::new(Self::memory_iterator(
@@ -197,32 +402,10 @@ impl SnapshotScan {
         }
 
         if !snapshot.memory_mode {
-            for file_meta in &snapshot.sst_files {
-                file_meta.record_read();
-                snapshot
-                    .diagnostics
-                    .sst_metrics()
-                    .record_candidate_sst_file_checked();
-                let reader = snapshot.sst_reader(file_meta)?;
-                self.range_tombstones
-                    .extend(reader.range_tombstones().into_iter().filter(|tombstone| {
-                        snapshot
-                            .diagnostics
-                            .sst_metrics()
-                            .record_range_tombstone_scan();
-                        (self.sequence == u64::MAX || tombstone.seq <= self.sequence)
-                            && ReadSnapshot::range_tombstone_overlaps_query(tombstone, start, end)
-                    }));
-                self.sources
-                    .push(SnapshotStateSource::new(SnapshotStateIterator::Sst(
-                        Box::new(reader.state_scan(
-                            self.start.clone(),
-                            self.end.clone(),
-                            self.reverse,
-                            self.sequence,
-                            snapshot.read_time_millis,
-                        )),
-                    )));
+            let RangeCandidates { l0, levels } = snapshot.sst_view.range_candidates(start, end);
+            self.add_l0_sources(l0, start, end)?;
+            for level in levels {
+                self.add_level_source(level, start, end)?;
             }
         }
         Ok(())
@@ -367,7 +550,6 @@ impl ReadSnapshot {
                 && !matches!(existing, KeyState::Tombstone(_)))
     }
 
-    #[cfg(test)]
     fn merge_state(
         states: &mut BTreeMap<Vec<u8>, KeyState>,
         key: Vec<u8>,
@@ -469,33 +651,47 @@ impl ReadSnapshot {
         read_time_millis: u64,
         read_resources: Option<Arc<ReadResources>>,
     ) -> Self {
-        // Extract cf_id from first SST file or default to DEFAULT
         let cf_id = sst_files.first().map_or(0, |f| f.cf_id);
+        Self::new_with_view_resources(
+            cf_id,
+            memtable,
+            immutable_memtables,
+            Arc::new(SstReadView::new(cf_id, sst_files)),
+            sst_fs,
+            sst_path_prefix,
+            memory_mode,
+            read_time_millis,
+            read_resources,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_view_resources(
+        cf_id: crate::types::ColumnFamilyId,
+        memtable: Arc<SkipListMemtable>,
+        immutable_memtables: Vec<Arc<SkipListMemtable>>,
+        sst_view: Arc<SstReadView>,
+        sst_fs: Arc<dyn Fs>,
+        sst_path_prefix: std::path::PathBuf,
+        memory_mode: bool,
+        read_time_millis: u64,
+        read_resources: Option<Arc<ReadResources>>,
+    ) -> Self {
         let diagnostics = read_resources.as_ref().map_or_else(
             crate::diagnostics::legacy_runtime_diagnostics,
             |resources| resources.diagnostics(),
         );
-        let sst_readers = if memory_mode {
-            HashMap::new()
-        } else {
-            read_resources
-                .as_ref()
-                .map_or_else(HashMap::new, |resources| {
-                    resources.capture_readers(&sst_files)
-                })
-        };
         Self {
             cf_id,
             memtable,
             immutable_memtables,
-            sst_files,
+            sst_view,
             sst_fs,
             sst_path_prefix,
             memory_mode,
             read_time_millis,
             read_resources,
             diagnostics,
-            sst_readers,
         }
     }
 
@@ -515,10 +711,6 @@ impl ReadSnapshot {
     }
 
     fn sst_reader(&self, file_meta: &FileMeta) -> crate::common::MidgeResult<Arc<SstFileIo>> {
-        if let Some(reader) = self.sst_readers.get(&file_meta.name) {
-            self.diagnostics.sst_metrics().record_reader_cache_hit();
-            return Ok(Arc::clone(reader));
-        }
         if let Some(resources) = &self.read_resources {
             return resources.reader_for(file_meta);
         }
@@ -530,6 +722,15 @@ impl ReadSnapshot {
             crate::sst::fs::SstFileIo::open(&path_str, Arc::clone(&self.sst_fs))?
                 .with_read_path_diagnostics(Arc::clone(&self.diagnostics)),
         ))
+    }
+
+    pub(crate) fn pinned_sst_names(&self) -> Arc<std::collections::HashSet<String>> {
+        self.sst_view.pinned_sst_names()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shares_sst_view_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.sst_view, &other.sst_view)
     }
 
     /// Perform a point read on this snapshot without copying the value.
@@ -561,17 +762,15 @@ impl ReadSnapshot {
                 .filter(|tombstone| tombstone.covers(key)),
         );
 
-        // Manifest key bounds are advisory and older manifests may not
-        // include range-tombstone endpoints. Let each opened SST's persisted
-        // metadata make the exclusion decision instead of risking a skipped
-        // masking tombstone.
+        // Complete manifest bounds drive indexed selection. Legacy bounds stay
+        // in the view's fallback bucket and are still opened conservatively.
         if !self.memory_mode {
-            for file_meta in &self.sst_files {
+            for file_meta in self.sst_view.point_candidates(key) {
                 file_meta.record_read();
                 self.diagnostics
                     .sst_metrics()
                     .record_candidate_sst_file_checked();
-                let reader = self.sst_reader(file_meta)?;
+                let reader = self.sst_reader(&file_meta)?;
                 let (state, read_stats) =
                     reader.get_state_at_with_time_and_stats(key, seq, self.read_time_millis)?;
                 if read_stats.sst_touched {
@@ -647,8 +846,8 @@ impl ReadSnapshot {
         );
 
         if !self.memory_mode {
-            for file_meta in &self.sst_files {
-                let reader = self.sst_reader(file_meta)?;
+            for file_meta in self.sst_view.point_candidates(key) {
+                let reader = self.sst_reader(&file_meta)?;
                 let state = reader.get_state_at_with_time(key, u64::MAX, self.read_time_millis)?;
                 Self::merge_best_state(&mut best_state, state, self.read_time_millis);
 
@@ -717,8 +916,14 @@ impl ReadSnapshot {
         }
 
         if !self.memory_mode {
-            for file_meta in &self.sst_files {
-                let reader = self.sst_reader(file_meta)?;
+            let RangeCandidates { l0, levels } = self.sst_view.range_candidates(start_opt, end_opt);
+            let files = l0.into_iter().chain(
+                levels
+                    .into_iter()
+                    .flat_map(|level| level.ordered.into_iter().chain(level.fallback)),
+            );
+            for file_meta in files {
+                let reader = self.sst_reader(&file_meta)?;
                 let entries =
                     reader.scan_range_state_with_time(start_opt, end_opt, self.read_time_millis)?;
                 for (_key, state) in entries {
@@ -786,9 +991,15 @@ impl ReadSnapshot {
         }
 
         if !self.memory_mode {
-            for file_meta in &self.sst_files {
+            let RangeCandidates { l0, levels } = self.sst_view.range_candidates(start_opt, end_opt);
+            let files = l0.into_iter().chain(
+                levels
+                    .into_iter()
+                    .flat_map(|level| level.ordered.into_iter().chain(level.fallback)),
+            );
+            for file_meta in files {
                 file_meta.record_read();
-                let reader = self.sst_reader(file_meta)?;
+                let reader = self.sst_reader(&file_meta)?;
                 self.diagnostics
                     .sst_metrics()
                     .record_candidate_sst_file_checked();
@@ -836,13 +1047,12 @@ impl std::fmt::Debug for ReadSnapshot {
             .field("cf_id", &self.cf_id)
             .field("memtable", &"<memtable>")
             .field("immutable_memtables_len", &self.immutable_memtables.len())
-            .field("sst_files_len", &self.sst_files.len())
+            .field("sst_files_len", &self.sst_view.file_count())
             .field("sst_fs", &"<dyn Fs>")
             .field("sst_path_prefix", &self.sst_path_prefix)
             .field("memory_mode", &self.memory_mode)
             .field("read_time_millis", &self.read_time_millis)
             .field("read_resources", &self.read_resources.is_some())
-            .field("sst_readers", &self.sst_readers.len())
             .finish_non_exhaustive()
     }
 }
@@ -890,6 +1100,11 @@ mod tests {
             Some(Arc::clone(&read_resources)),
         );
         let block_cache = read_resources.block_cache();
+        assert_eq!(
+            read_resources.cached_reader_count(),
+            0,
+            "snapshot construction must not eagerly open every SST reader"
+        );
 
         // Act
         let first = snapshot.get(b"cache-key", u64::MAX);
@@ -908,6 +1123,259 @@ mod tests {
             hits_after > hits_before,
             "second snapshot read should hit shared block cache"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn should_share_indexed_sst_view_across_consecutive_snapshots() {
+        // Arrange
+        let sst_view = Arc::new(SstReadView::new(0, Vec::new()));
+        let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::MockFs::new());
+
+        // Act
+        let first = ReadSnapshot::new_with_view_resources(
+            0,
+            Arc::new(SkipListMemtable::new()),
+            Vec::new(),
+            Arc::clone(&sst_view),
+            Arc::clone(&fs),
+            std::path::PathBuf::new(),
+            true,
+            1,
+            None,
+        );
+        let second = ReadSnapshot::new_with_view_resources(
+            0,
+            Arc::new(SkipListMemtable::new()),
+            Vec::new(),
+            sst_view,
+            fs,
+            std::path::PathBuf::new(),
+            true,
+            2,
+            None,
+        );
+
+        // Assert
+        assert!(first.shares_sst_view_with(&second));
+    }
+
+    #[test]
+    fn should_open_only_adjacent_lower_level_readers_for_point_lookup(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096);
+        let mut files = Vec::new();
+        for index in 0..128_u64 {
+            let name = format!("point-{index:04}.sst");
+            let key = index.to_be_bytes();
+            let mut writer = factory.create()?;
+            writer.add_with_meta(&key, Some(key.as_slice()), index + 1, 0, None)?;
+            crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join(&name))?;
+            files.push(FileMeta {
+                name,
+                level: 1,
+                size_bytes: 1,
+                cf_id: 0,
+                sst_seq: index + 1,
+                smallest_key: Some(key.to_vec()),
+                largest_key: Some((index + 1).to_be_bytes().to_vec()),
+                smallest_seq: Some(index + 1),
+                largest_seq: Some(index + 1),
+                key_bounds_complete: true,
+                ..Default::default()
+            });
+        }
+        let read_resources = Arc::new(ReadResources::new(
+            Arc::clone(&fs),
+            std::path::PathBuf::new(),
+            1024 * 1024,
+            crate::sst::cache::CachePolicyType::Lru,
+        ));
+        let snapshot = ReadSnapshot::new_with_resources(
+            Arc::new(SkipListMemtable::new()),
+            Vec::new(),
+            files,
+            fs,
+            std::path::PathBuf::new(),
+            false,
+            0,
+            Some(Arc::clone(&read_resources)),
+        );
+        let key = 64_u64.to_be_bytes();
+
+        // Act
+        let value = snapshot.get(&key, u64::MAX)?;
+
+        // Assert
+        assert_eq!(value.as_deref(), Some(key.as_slice()));
+        assert_eq!(
+            read_resources.cached_reader_count(),
+            2,
+            "an equality boundary may open both adjacent files, never the full level"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn should_use_one_sequential_cursor_per_complete_lower_level_in_both_directions(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096);
+        let mut files = Vec::new();
+        for index in 0..64_u64 {
+            let name = format!("level-{index:04}.sst");
+            let key = format!("key-{index:04}").into_bytes();
+            let mut writer = factory.create()?;
+            writer.add_with_meta(&key, Some(key.as_slice()), index + 1, 0, None)?;
+            crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join(&name))?;
+            files.push(FileMeta {
+                name,
+                level: 1,
+                size_bytes: 1,
+                cf_id: 0,
+                sst_seq: index + 1,
+                smallest_key: Some(key.clone()),
+                largest_key: Some(key),
+                smallest_seq: Some(index + 1),
+                largest_seq: Some(index + 1),
+                key_bounds_complete: true,
+                ..Default::default()
+            });
+        }
+        let snapshot = Arc::new(ReadSnapshot::new(
+            Arc::new(SkipListMemtable::new()),
+            Vec::new(),
+            files,
+            fs,
+            std::path::PathBuf::new(),
+            false,
+            0,
+        ));
+
+        // Act
+        let mut forward = snapshot.state_scan(None, None, false, u64::MAX);
+        forward.initialize()?;
+        let forward_cursor_slots = forward
+            .sources
+            .iter()
+            .filter(|source| {
+                matches!(
+                    &source.iterator,
+                    SnapshotStateIterator::Sst(_) | SnapshotStateIterator::SstLevel(_)
+                )
+            })
+            .count();
+        let forward_rows = forward.collect::<MidgeResult<Vec<_>>>()?;
+
+        let mut reverse = snapshot.state_scan(None, None, true, u64::MAX);
+        reverse.initialize()?;
+        let reverse_cursor_slots = reverse
+            .sources
+            .iter()
+            .filter(|source| {
+                matches!(
+                    &source.iterator,
+                    SnapshotStateIterator::Sst(_) | SnapshotStateIterator::SstLevel(_)
+                )
+            })
+            .count();
+        let reverse_rows = reverse.collect::<MidgeResult<Vec<_>>>()?;
+
+        // Assert
+        assert_eq!(forward_cursor_slots, 1);
+        assert_eq!(reverse_cursor_slots, 1);
+        assert_eq!(forward_rows.len(), 64);
+        assert_eq!(reverse_rows.len(), 64);
+        assert_eq!(
+            forward_rows.first().map(|row| row.0.as_ref()),
+            Some(b"key-0000".as_slice())
+        );
+        assert_eq!(
+            forward_rows.last().map(|row| row.0.as_ref()),
+            Some(b"key-0063".as_slice())
+        );
+        assert_eq!(
+            reverse_rows.first().map(|row| row.0.as_ref()),
+            Some(b"key-0063".as_slice())
+        );
+        assert_eq!(
+            reverse_rows.last().map(|row| row.0.as_ref()),
+            Some(b"key-0000".as_slice())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn should_merge_equal_boundary_key_once_in_each_scan_direction(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096);
+        let mut first_writer = factory.create()?;
+        first_writer.add_with_meta(b"a", Some(b"first-a"), 1, 0, None)?;
+        first_writer.add_with_meta(b"b", Some(b"old-b"), 2, 0, None)?;
+        crate::sst::fs::finish_writer_to_path(first_writer, &temp_dir.path().join("first.sst"))?;
+        let mut second_writer = factory.create()?;
+        second_writer.add_with_meta(b"b", Some(b"new-b"), 3, 0, None)?;
+        second_writer.add_with_meta(b"c", Some(b"second-c"), 4, 0, None)?;
+        crate::sst::fs::finish_writer_to_path(second_writer, &temp_dir.path().join("second.sst"))?;
+        let files = vec![
+            FileMeta {
+                name: "first.sst".to_string(),
+                level: 1,
+                cf_id: 0,
+                smallest_key: Some(b"a".to_vec()),
+                largest_key: Some(b"b".to_vec()),
+                smallest_seq: Some(1),
+                largest_seq: Some(2),
+                key_bounds_complete: true,
+                ..Default::default()
+            },
+            FileMeta {
+                name: "second.sst".to_string(),
+                level: 1,
+                cf_id: 0,
+                smallest_key: Some(b"b".to_vec()),
+                largest_key: Some(b"c".to_vec()),
+                smallest_seq: Some(3),
+                largest_seq: Some(4),
+                key_bounds_complete: true,
+                ..Default::default()
+            },
+        ];
+        let snapshot = Arc::new(ReadSnapshot::new(
+            Arc::new(SkipListMemtable::new()),
+            Vec::new(),
+            files,
+            fs,
+            std::path::PathBuf::new(),
+            false,
+            0,
+        ));
+
+        // Act
+        let point = snapshot.get(b"b", u64::MAX)?;
+        let forward = snapshot
+            .state_scan(None, None, false, u64::MAX)
+            .collect::<MidgeResult<Vec<_>>>()?;
+        let reverse = snapshot
+            .state_scan(None, None, true, u64::MAX)
+            .collect::<MidgeResult<Vec<_>>>()?;
+
+        // Assert
+        assert_eq!(point.as_deref(), Some(b"new-b".as_slice()));
+        assert_eq!(forward.len(), 3);
+        assert_eq!(reverse.len(), 3);
+        assert_eq!(forward[1].0.as_ref(), b"b");
+        assert_eq!(forward[1].1.as_ref(), b"new-b");
+        assert_eq!(reverse[1].0.as_ref(), b"b");
+        assert_eq!(reverse[1].1.as_ref(), b"new-b");
         Ok(())
     }
 

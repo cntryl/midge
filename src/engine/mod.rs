@@ -573,11 +573,7 @@ impl Engine {
                 .with_read_time_millis(self.ttl_clock.now_millis()),
         );
 
-        let pinned_sst_names = read_snapshot
-            .sst_files
-            .iter()
-            .map(|file| file.name.clone())
-            .collect::<Vec<_>>();
+        let pinned_sst_names = read_snapshot.pinned_sst_names();
 
         let txn_id = self
             .next_snapshot_id

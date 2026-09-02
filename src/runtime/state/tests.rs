@@ -33,6 +33,7 @@ fn write_valid_sst_for_recovery_test(
         largest_key: Some(key.to_vec()),
         smallest_seq: Some(sequence),
         largest_seq: Some(sequence),
+        key_bounds_complete: true,
     }
 }
 
@@ -65,6 +66,7 @@ fn should_preserve_column_family_identity_given_sst_add_is_appended_to_manifest(
         largest_key: Some(b"omega".to_vec()),
         smallest_seq: Some(7),
         largest_seq: Some(9),
+        key_bounds_complete: true,
     };
 
     // Act
@@ -852,6 +854,7 @@ fn should_not_mutate_compaction_intent_when_persistence_rejects_output() {
         largest_key: None,
         smallest_seq: None,
         largest_seq: None,
+        key_bounds_complete: false,
     };
 
     // Act
@@ -987,6 +990,7 @@ fn should_supersede_stale_output_durable_intent_when_retrying_same_compaction_in
         largest_key: Some(b"a".to_vec()),
         smallest_seq: Some(2),
         largest_seq: Some(2),
+        key_bounds_complete: true,
     };
     let retry_output = crate::runtime::FileMeta {
         name: crate::sst::file_name(0, 1, 3),
@@ -998,6 +1002,7 @@ fn should_supersede_stale_output_durable_intent_when_retrying_same_compaction_in
         largest_key: Some(b"a".to_vec()),
         smallest_seq: Some(3),
         largest_seq: Some(3),
+        key_bounds_complete: true,
     };
     state
         .record_compaction_publication_intent(0, vec![input_name.clone()], vec![first_output])

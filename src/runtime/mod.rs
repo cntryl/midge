@@ -20,6 +20,7 @@ pub(crate) mod read_resources;
 pub mod read_snapshot;
 pub mod snapshot_cache;
 pub(crate) mod snapshot_pins;
+pub(crate) mod sst_read_view;
 pub mod state;
 pub(crate) mod storage_residue;
 pub(crate) mod transaction_spill;

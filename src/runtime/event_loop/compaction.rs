@@ -411,6 +411,7 @@ impl CompactionCoordinator {
         event_loop
             .manifest_actor
             .compaction_complete(&mut event_loop.state, input_ssts, added)?;
+        event_loop.invalidate_sst_read_views();
         crate::failpoints::fail_point!(
             "midge::compaction::inject_failure_after_manifest_batch",
             |_| Err(crate::common::MidgeError::Internal(

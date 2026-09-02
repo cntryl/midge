@@ -115,20 +115,6 @@ impl ReadResources {
         Ok(reader)
     }
 
-    pub(crate) fn capture_readers(
-        &self,
-        sst_files: &[FileMeta],
-    ) -> HashMap<String, Arc<SstFileIo>> {
-        sst_files
-            .iter()
-            .filter_map(|file_meta| {
-                self.reader_for_with_metrics(file_meta, false)
-                    .ok()
-                    .map(|reader| (file_meta.name.clone(), reader))
-            })
-            .collect()
-    }
-
     pub(crate) fn prune_to_live_ssts(&self, live_names: &HashSet<String>) {
         if let Ok(mut readers) = self.readers.lock() {
             let stale_sst_ids: Vec<u64> = readers

@@ -104,7 +104,7 @@ impl RuntimeHandle {
         &self,
         snapshot_id: u64,
         sequence: u64,
-        pinned_sst_names: Vec<String>,
+        pinned_sst_names: std::sync::Arc<std::collections::HashSet<String>>,
     ) -> bool {
         self.snapshot_pins
             .register_while_acquired(snapshot_id, sequence, pinned_sst_names)

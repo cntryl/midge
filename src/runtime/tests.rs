@@ -711,6 +711,7 @@ fn write_side_request_response_messages() -> Vec<RuntimeMsg> {
         largest_key: None,
         smallest_seq: None,
         largest_seq: None,
+        key_bounds_complete: false,
     };
     let compaction_plan = CompactionPlan {
         input_files: vec!["input.sst".to_string()],
@@ -1262,6 +1263,7 @@ fn should_clone_file_meta_preserving_all_fields() {
         largest_key: Some(b"z".to_vec()),
         smallest_seq: Some(1),
         largest_seq: Some(100),
+        key_bounds_complete: true,
     };
 
     // Act
@@ -1277,6 +1279,7 @@ fn should_clone_file_meta_preserving_all_fields() {
     assert_eq!(cloned.largest_key, meta.largest_key);
     assert_eq!(cloned.smallest_seq, meta.smallest_seq);
     assert_eq!(cloned.largest_seq, meta.largest_seq);
+    assert_eq!(cloned.key_bounds_complete, meta.key_bounds_complete);
 }
 
 #[test]

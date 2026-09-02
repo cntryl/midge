@@ -11,6 +11,62 @@ use super::super::durability::DurabilityWaiter;
 use super::super::RuntimeResponse;
 
 impl EventLoop {
+    /// Verify and durably publish complete bounds for at most one legacy SST.
+    ///
+    /// The file remains authoritative and in the conservative fallback bucket
+    /// until its full contents have been summarized and the additive manifest
+    /// edit is durable. A failed pass never narrows read visibility.
+    pub(super) fn backfill_one_legacy_sst_bounds(&mut self) -> crate::common::MidgeResult<bool> {
+        if self.state.is_memory_mode() {
+            return Ok(false);
+        }
+        let Some(mut updated) = self
+            .state
+            .manifest
+            .files
+            .iter()
+            .find(|file| !file.key_bounds_complete)
+            .cloned()
+        else {
+            return Ok(false);
+        };
+
+        let path_prefix = self
+            .state
+            .sst_dir
+            .strip_prefix(&self.state.db_path)
+            .unwrap_or_else(|_| std::path::Path::new("sst"));
+        let path = path_prefix.join(&updated.name);
+        let summary = crate::sst::fs::SstFileIo::summarize_with_fs(
+            &path.to_string_lossy(),
+            std::sync::Arc::clone(&self.state.fs),
+        )?;
+        updated.smallest_key = Some(summary.smallest_key);
+        updated.largest_key = Some(summary.largest_key);
+        updated.smallest_seq = Some(summary.smallest_seq);
+        updated.largest_seq = Some(summary.largest_seq);
+        updated.key_bounds_complete = true;
+
+        crate::failpoints::fail_point!(
+            "midge::manifest::after_sst_bounds_verified_before_persist",
+            |_| Err(crate::common::MidgeError::Internal(
+                "failpoint: stopped after SST bound verification before manifest persistence"
+                    .to_string()
+            ))
+        );
+        crate::metadata::append_edit(
+            &self.state.db_path,
+            &crate::metadata::ManifestEdit::AddSst(updated.clone()),
+        )?;
+        self.state.manifest.add_file(updated);
+        self.invalidate_sst_read_views();
+        self.publish_snapshot();
+
+        crate::runtime::actors::ManifestActor::persist(&self.state)?;
+        self.mirror_metadata_after_local_commit("SST key-bound backfill")?;
+        Ok(true)
+    }
+
     /// Create an immutable read snapshot for a column family
     pub(super) fn create_read_snapshot(
         &self,
@@ -18,15 +74,10 @@ impl EventLoop {
     ) -> Option<super::super::ReadSnapshot> {
         let cf_state = self.state.column_families.get(&cf_id)?;
 
-        // Collect SST metadata for this CF
-        let sst_files: Vec<_> = self
-            .state
-            .manifest
-            .files
-            .iter()
-            .filter(|f| f.cf_id == cf_id)
-            .cloned()
-            .collect();
+        let sst_view = self
+            .sst_read_views
+            .borrow_mut()
+            .view_for(&self.state.manifest, cf_id);
 
         let sst_path_prefix = self
             .state
@@ -34,17 +85,17 @@ impl EventLoop {
             .strip_prefix(&self.state.db_path)
             .unwrap_or_else(|_| std::path::Path::new("sst"))
             .to_path_buf();
-        let mut snapshot = super::super::ReadSnapshot::new_with_resources(
+        let snapshot = super::super::ReadSnapshot::new_with_view_resources(
+            cf_id,
             cf_state.memtable.clone(),
             cf_state.immutable_memtables.clone(),
-            sst_files,
+            sst_view,
             std::sync::Arc::clone(&self.state.fs),
             sst_path_prefix,
             self.state.is_memory_mode(),
             self.state.observed_time_millis(),
             self.read_resources.clone(),
         );
-        snapshot.cf_id = cf_id;
         Some(snapshot)
     }
 
@@ -311,6 +362,7 @@ mod tests {
         let factory = std::sync::Arc::new(crate::sst::FsSstFactoryIo::new(fs, 64 * 1024));
         let mut writer = factory.create()?;
         writer.add_with_meta(b"a", Some(b"va".as_ref()), 10, 0, None)?;
+        writer.add_range_tombstone(b"b", b"z", 9)?;
         crate::sst::fs::finish_writer_to_path(writer, &sst_path)?;
 
         el.state.manifest.files.push(crate::metadata::FileMeta {
@@ -398,6 +450,74 @@ mod tests {
             .iter()
             .any(|(k, v)| k.as_slice() == b"a" && v.as_slice() == b"va"));
 
+        Ok(())
+    }
+
+    #[test]
+    fn should_backfill_complete_bounds_from_authoritative_sst_contents(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let (tmp, mut event_loop, _sst_path) = create_event_loop_with_test_sst()?;
+        let file = event_loop
+            .state
+            .manifest
+            .files
+            .first_mut()
+            .expect("legacy manifest file");
+        file.smallest_key = Some(b"narrow".to_vec());
+        file.largest_key = Some(b"narrow".to_vec());
+        file.key_bounds_complete = false;
+        crate::runtime::actors::ManifestActor::persist(&event_loop.state)?;
+
+        // Act
+        let changed = event_loop.backfill_one_legacy_sst_bounds()?;
+        let second = event_loop.backfill_one_legacy_sst_bounds()?;
+        let reopened = crate::metadata::ManifestPersistence::load(tmp.path())
+            .map_err(crate::common::MidgeError::Internal)?;
+
+        // Assert
+        assert!(changed);
+        assert!(!second, "backfill must be idempotent");
+        let file = reopened.files.first().expect("persisted SST metadata");
+        assert!(file.key_bounds_complete);
+        assert_eq!(file.smallest_key.as_deref(), Some(b"a".as_slice()));
+        assert_eq!(
+            file.largest_key.as_deref(),
+            Some(b"z".as_slice()),
+            "complete coverage must include the range tombstone endpoint"
+        );
+        assert_eq!(file.smallest_seq, Some(9));
+        assert_eq!(file.largest_seq, Some(10));
+        Ok(())
+    }
+
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn should_retain_untrusted_authority_when_bound_backfill_crashes_before_persist(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let (tmp, mut event_loop, _sst_path) = create_event_loop_with_test_sst()?;
+        crate::runtime::actors::ManifestActor::persist(&event_loop.state)?;
+        let _test_guard = crate::failpoints::test_failpoint_guard();
+        let guard = fail::FailGuard::new(
+            "midge::manifest::after_sst_bounds_verified_before_persist",
+            "return",
+        )
+        .map_err(crate::common::MidgeError::Internal)?;
+
+        // Act
+        let error = event_loop
+            .backfill_one_legacy_sst_bounds()
+            .expect_err("backfill must stop before manifest persistence");
+        drop(guard);
+        let reopened = crate::metadata::ManifestPersistence::load(tmp.path())
+            .map_err(crate::common::MidgeError::Internal)?;
+
+        // Assert
+        assert!(error.to_string().contains("before manifest persistence"));
+        let file = reopened.files.first().expect("authoritative legacy SST");
+        assert!(!file.key_bounds_complete);
+        assert!(event_loop.handle_read(0, b"a", u64::MAX).is_some());
         Ok(())
     }
 }

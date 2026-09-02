@@ -58,6 +58,8 @@ pub struct FileMeta {
     pub largest_key: Option<Vec<u8>>,
     pub smallest_seq: Option<u64>,
     pub largest_seq: Option<u64>,
+    #[serde(default)]
+    pub key_bounds_complete: bool,
 }
 
 /// A single operation within an atomic transaction apply.

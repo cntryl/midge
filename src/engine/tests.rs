@@ -1916,6 +1916,7 @@ fn should_reject_intent_replay_sst_when_cloud_object_crc_differs_from_intent() {
                 largest_key: Some(b"cloud-list-key".to_vec()),
                 smallest_seq: Some(1),
                 largest_seq: Some(1),
+                key_bounds_complete: true,
             },
         });
     let cloud = cloud_with_stale_sst_listing();

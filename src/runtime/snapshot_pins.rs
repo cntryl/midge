@@ -5,13 +5,14 @@ use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 struct SnapshotPin {
     sequence: u64,
     created_at: Instant,
     ref_count: usize,
-    pinned_ssts: HashSet<String>,
+    pinned_ssts: Arc<HashSet<String>>,
 }
 
 #[derive(Default)]
@@ -34,16 +35,19 @@ impl SnapshotPinRegistry {
         pinned_sst_names: Vec<String>,
     ) -> bool {
         let _guard = self.acquisition.write();
-        self.register_while_acquired(snapshot_id, sequence, pinned_sst_names)
+        self.register_while_acquired(
+            snapshot_id,
+            sequence,
+            Arc::new(pinned_sst_names.into_iter().collect()),
+        )
     }
 
     pub(crate) fn register_while_acquired(
         &self,
         snapshot_id: u64,
         sequence: u64,
-        pinned_sst_names: Vec<String>,
+        pinned_ssts: Arc<HashSet<String>>,
     ) -> bool {
-        let pinned_ssts = pinned_sst_names.into_iter().collect::<HashSet<_>>();
         match self.active.entry(snapshot_id) {
             Entry::Occupied(_) => false,
             Entry::Vacant(entry) => {

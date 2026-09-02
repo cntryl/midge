@@ -280,6 +280,7 @@ impl RuntimeState {
             largest_key: file_meta.largest_key.clone(),
             smallest_seq: file_meta.smallest_seq,
             largest_seq: file_meta.largest_seq,
+            key_bounds_complete: file_meta.key_bounds_complete,
             ..Default::default()
         });
         true
@@ -326,6 +327,7 @@ impl RuntimeState {
                 largest_key: file_meta.largest_key.clone(),
                 smallest_seq: file_meta.smallest_seq,
                 largest_seq: file_meta.largest_seq,
+                key_bounds_complete: file_meta.key_bounds_complete,
                 ..Default::default()
             }),
         )
@@ -356,6 +358,7 @@ impl RuntimeState {
                     largest_key: file_meta.largest_key.clone(),
                     smallest_seq: file_meta.smallest_seq,
                     largest_seq: file_meta.largest_seq,
+                    key_bounds_complete: file_meta.key_bounds_complete,
                     ..Default::default()
                 },
             ));
