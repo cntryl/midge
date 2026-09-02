@@ -738,9 +738,22 @@ impl DynSstWriter for InMemorySstWriter {
                     .saturating_mul(std::mem::size_of::<(Vec<u8>, BlockHandle)>()),
                 |total, (key, _)| total.saturating_add(key.len()),
             );
+            let current_bloom = if streaming.current_block_keys.is_empty() {
+                0
+            } else {
+                BloomWriter::with_defaults(streaming.current_block_keys.len())
+                    .size_bytes()
+                    .saturating_add(13)
+            };
+            let bloom = streaming
+                .block_bloom
+                .size_bytes()
+                .saturating_add(current_bloom);
             return persisted
                 .saturating_add(streaming.current_block.len())
-                .saturating_add(index);
+                .saturating_add(index.saturating_mul(2))
+                .saturating_add(bloom)
+                .saturating_add(16 * 1024);
         }
         self.entries.iter().fold(0usize, |total, entry| {
             total

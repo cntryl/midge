@@ -30,6 +30,7 @@ const POINT_SAMPLES: u64 = 1_000;
 const PREFIX_SAMPLES: u32 = 200;
 const PREFIX_SCAN_LIMIT: usize = 100;
 const RSS_SAMPLE_INTERVAL: Duration = Duration::from_millis(100);
+const QUALIFICATION_TARGET_SST_SIZE: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct DigestEvidence {
@@ -55,8 +56,11 @@ struct WorkerEvidence {
     post_compaction_sst_bytes: u64,
     compaction_bytes_rewritten: u64,
     write_amplification: f64,
+    target_sst_size: usize,
     output_count: usize,
     output_sizes: Vec<u64>,
+    remaining_l0_file_count: usize,
+    remaining_l0_bytes: u64,
     peak_rss_bytes: u64,
     write_stalls_total: u64,
     pending_compactions: usize,
@@ -182,6 +186,7 @@ fn options(path: &Path) -> MidgeResult<OpenOptions> {
         .workload(WorkloadProfile::WriteHeavy)
         .memory_budget(MemoryBudget::Bytes(4 * 1024 * 1024 * 1024))
         .with_memtable_size_limit(256 * 1024 * 1024)
+        .target_sst_size_for_testing(QUALIFICATION_TARGET_SST_SIZE)
         .runtime_response_timeout(Duration::from_hours(4))
         .lease_ttl(Duration::from_secs(2))
         .lease_clock_skew_tolerance(Duration::ZERO)
@@ -332,7 +337,7 @@ fn validate_partition_layout(
     cf_id: u32,
     target: usize,
     block_size: usize,
-) -> MidgeResult<(Vec<u64>, u64)> {
+) -> MidgeResult<(Vec<u64>, u64, usize, u64)> {
     let layout = engine.get_storage_layout()?;
     let files: Vec<_> = layout
         .levels
@@ -345,6 +350,12 @@ fn validate_partition_layout(
         return Err(MidgeError::Corruption(
             "compaction manifest contains duplicate output names".to_string(),
         ));
+    }
+    if files.len() < 2 {
+        return Err(MidgeError::ResourceLimit(format!(
+            "qualification expected multiple compaction outputs at target {target}, observed {}",
+            files.len()
+        )));
     }
     let allowance =
         u64::try_from(block_size.saturating_add(16 * 1024).saturating_add(64)).unwrap_or(u64::MAX);
@@ -361,8 +372,18 @@ fn validate_partition_layout(
         )));
     }
     let sizes = files.iter().map(|file| file.size_bytes).collect::<Vec<_>>();
-    let total = sizes.iter().sum();
-    Ok((sizes, total))
+    let total = layout.levels.iter().map(|level| level.total_bytes).sum();
+    let l0_file_count = layout
+        .levels
+        .iter()
+        .find(|level| level.level == 0)
+        .map_or(0, |level| level.file_count);
+    let l0_bytes = layout
+        .levels
+        .iter()
+        .find(|level| level.level == 0)
+        .map_or(0, |level| level.total_bytes);
+    Ok((sizes, total, l0_file_count, l0_bytes))
 }
 
 #[allow(clippy::cast_precision_loss)]
@@ -411,7 +432,7 @@ fn run_worker(base_records: u64, path: &Path, partial_path: &Path) -> MidgeResul
     engine.compact_all()?;
     let compaction_seconds = compaction_started.elapsed().as_secs_f64();
     let metrics_after = engine.get_runtime_metrics()?;
-    let (output_sizes, post_compaction_sst_bytes) =
+    let (output_sizes, post_compaction_sst_bytes, remaining_l0_file_count, remaining_l0_bytes) =
         validate_partition_layout(&engine, cf.id(), target_sst_size, block_size)?;
     let digest_before_crash = digest_engine(&engine, cf.id())?;
     let expected_entries = base_records.saturating_mul(LOGICAL_ENTRIES_PER_BASE);
@@ -437,8 +458,11 @@ fn run_worker(base_records: u64, path: &Path, partial_path: &Path) -> MidgeResul
         post_compaction_sst_bytes,
         compaction_bytes_rewritten,
         write_amplification,
+        target_sst_size,
         output_count: output_sizes.len(),
         output_sizes,
+        remaining_l0_file_count,
+        remaining_l0_bytes,
         peak_rss_bytes,
         write_stalls_total: metrics_after.write_stalls_total,
         pending_compactions: metrics_after.pending_compactions,

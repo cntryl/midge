@@ -406,3 +406,4 @@ harness = false
 name = "tier4_bounded_compaction_qualification"
 path = "benches/tier4_bounded_compaction_qualification.rs"
 harness = false
+required-features = ["failpoints"]

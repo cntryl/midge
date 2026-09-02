@@ -948,6 +948,38 @@ mod tests {
     }
 
     #[test]
+    fn should_include_filter_metadata_when_partitioning_many_small_keys() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let mut input = factory.create()?;
+        for index in 0..50_000u64 {
+            let key = format!("structured-key-{index:020}");
+            input.add_with_meta(key.as_bytes(), Some(b"v"), index + 1, 0, None)?;
+        }
+        crate::sst::fs::finish_writer_to_path(input, &temp_dir.path().join("small-keys.sst"))?;
+        let mut plan = CompactionPlan::new(8, 0, 1).with_output_seq(53);
+        plan.target_sst_size = 64 * 1024;
+        plan.input_files.push("small-keys.sst".to_string());
+
+        // Act
+        let outputs = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
+
+        // Assert
+        assert!(outputs.len() > 1);
+        let allowance = u64::try_from(4096 + 16 * 1024).expect("allowance fits in u64");
+        for output in outputs {
+            let size = std::fs::metadata(temp_dir.path().join(output))?.len();
+            assert!(
+                size <= u64::try_from(plan.target_sst_size).unwrap_or(u64::MAX) + allowance,
+                "partition size {size} exceeded target plus block/metadata allowance"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn should_fragment_range_tombstone_at_compaction_partition_boundaries() -> MidgeResult<()> {
         // Arrange
         let temp_dir = tempdir()?;
