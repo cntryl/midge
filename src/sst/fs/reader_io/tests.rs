@@ -913,6 +913,28 @@ fn should_fail_raw_cursor_before_decoded_block_exceeds_compaction_pool() -> Midg
 }
 
 #[test]
+fn should_fail_compaction_open_before_sst_metadata_exceeds_pool() -> MidgeResult<()> {
+    // Arrange
+    let temp_dir = tempfile::tempdir()?;
+    write_unique_key_sst(&temp_dir, "budgeted-metadata.sst")?;
+    let path = temp_dir.path().join("budgeted-metadata.sst");
+    let factory =
+        crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::RealFs::new(temp_dir.path())?), 4096);
+    let budget = crate::common::resource_budget::ResourceBudget::new(64);
+
+    // Act
+    let result = factory.open_for_compaction(std::path::Path::new("budgeted-metadata.sst"), budget);
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::ResourceLimit(_))));
+    assert!(
+        path.is_file(),
+        "metadata admission must retain the input SST"
+    );
+    Ok(())
+}
+
+#[test]
 fn should_get_state_at_return_newest_visible_version_across_many_trie_blocks() -> MidgeResult<()> {
     // Arrange
     let temp_dir = tempfile::tempdir()?;

@@ -569,21 +569,45 @@ impl EventLoop {
         cf_id: crate::types::ColumnFamilyId,
         level: u32,
         sst_name: &str,
+        budget: &crate::common::resource_budget::ResourceBudget,
     ) -> crate::common::MidgeResult<crate::runtime::FileMeta> {
         let path = self.state.sst_dir.join(sst_name);
-        let summary = crate::sst::fs::SstFileIo::summarize_with_real_fs(&path)?;
+        let summary = crate::sst::fs::SstFileIo::summarize_with_real_fs_for_compaction(
+            &path,
+            budget.clone(),
+        )?;
 
         Ok(crate::runtime::FileMeta {
             name: sst_name.to_string(),
             level,
             size_bytes: summary.size_bytes,
-            content_crc32c: Some(crc32c::crc32c(&std::fs::read(&path)?)),
+            content_crc32c: Some(Self::checksummed_file_crc(&path, budget)?),
             cf_id,
             smallest_key: Some(summary.smallest_key),
             largest_key: Some(summary.largest_key),
             smallest_seq: Some(summary.smallest_seq),
             largest_seq: Some(summary.largest_seq),
         })
+    }
+
+    fn checksummed_file_crc(
+        path: &std::path::Path,
+        budget: &crate::common::resource_budget::ResourceBudget,
+    ) -> crate::common::MidgeResult<u32> {
+        use std::io::Read;
+
+        const CRC_BUFFER_SIZE: usize = 64 * 1024;
+        let _reservation = budget.reserve(CRC_BUFFER_SIZE, "SST checksum buffer")?;
+        let mut file = std::fs::File::open(path)?;
+        let mut buffer = vec![0u8; CRC_BUFFER_SIZE].into_boxed_slice();
+        let mut crc = 0u32;
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                return Ok(crc);
+            }
+            crc = crc32c::crc32c_append(crc, &buffer[..read]);
+        }
     }
 
     fn assign_compaction_output_sequence(
@@ -757,6 +781,7 @@ impl EventLoop {
     fn mirror_ssts_to_authoritative_cloud(
         &self,
         sst_names: &[String],
+        budget: &crate::common::resource_budget::ResourceBudget,
     ) -> crate::common::MidgeResult<()> {
         let Some(hybrid) = self.hybrid_storage.as_ref() else {
             return Ok(());
@@ -764,11 +789,34 @@ impl EventLoop {
 
         for sst_name in sst_names {
             let path = self.state.sst_dir.join(sst_name);
-            let data = std::fs::read(&path)?;
+            let (data, _reservation) = Self::read_file_with_budget(&path, budget)?;
             hybrid.write_sst_object(sst_name, data)?;
         }
 
         Ok(())
+    }
+
+    fn read_file_with_budget(
+        path: &std::path::Path,
+        budget: &crate::common::resource_budget::ResourceBudget,
+    ) -> crate::common::MidgeResult<(Vec<u8>, crate::common::resource_budget::ResourceReservation)>
+    {
+        let file_size = std::fs::metadata(path)?.len();
+        let retained_bytes = usize::try_from(file_size).map_err(|_| {
+            crate::common::MidgeError::ResourceLimit(format!(
+                "compaction output '{}' exceeds addressable memory",
+                path.display()
+            ))
+        })?;
+        let reservation = budget.reserve(retained_bytes, "cloud SST upload buffer")?;
+        let bytes = std::fs::read(path)?;
+        if bytes.len() != retained_bytes {
+            return Err(crate::common::MidgeError::Corruption(format!(
+                "compaction output '{}' changed size before cloud upload",
+                path.display()
+            )));
+        }
+        Ok((bytes, reservation))
     }
 
     fn cloud_metadata_timeout(

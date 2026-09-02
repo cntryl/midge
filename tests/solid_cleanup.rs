@@ -728,6 +728,28 @@ fn should_limit_streaming_sst_persistence_to_compaction_or_fs_layers() {
 }
 
 #[test]
+fn should_keep_compaction_publication_validation_streaming() {
+    // Arrange
+    let event_loop = read_source("src/runtime/event_loop/mod.rs");
+    let publication = read_source("src/runtime/event_loop/compaction.rs");
+    let reader = read_source("src/sst/fs/reader_io/mod.rs");
+    let writer = read_source("src/sst/fs/factory_io.rs");
+
+    // Act
+    let materializes_crc_input = event_loop.contains("crc32c::crc32c(&std::fs::read");
+    let streaming_summary_is_used = reader.contains("into_streaming_summary()");
+
+    // Assert
+    assert!(!materializes_crc_input);
+    assert!(event_loop.contains("checksummed_file_crc"));
+    assert!(event_loop.contains("budget.reserve(CRC_BUFFER_SIZE, \"SST checksum buffer\")"));
+    assert!(event_loop.contains("read_file_with_budget"));
+    assert!(publication.contains("mirror_ssts_to_authoritative_cloud(output_ssts, budget)"));
+    assert!(streaming_summary_is_used);
+    assert!(writer.contains("writer.streaming = Some(StreamingState::new"));
+}
+
+#[test]
 fn should_show_benchmark_support_outside_core_architecture_diagram() {
     // Arrange
     let diagrams = read_source("docs/development/architecture-diagrams.md");

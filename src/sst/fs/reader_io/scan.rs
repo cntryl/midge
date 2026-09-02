@@ -317,4 +317,17 @@ impl crate::sst::SstStateReader for SstFileIo {
     fn range_tombstones(&self) -> Vec<crate::sst::types::RangeTombstone> {
         self.range_tombstones.clone()
     }
+
+    fn range_tombstone_memory_usage(&self) -> usize {
+        self.range_tombstones.iter().fold(
+            self.range_tombstones
+                .len()
+                .saturating_mul(std::mem::size_of::<crate::sst::types::RangeTombstone>()),
+            |total, tombstone| {
+                total
+                    .saturating_add(tombstone.start.capacity())
+                    .saturating_add(tombstone.end.capacity())
+            },
+        )
+    }
 }

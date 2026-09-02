@@ -55,7 +55,7 @@ pub fn execute_compaction(
         plan.cf_id,
         plan.target_level,
         plan.output_seq,
-        plan.target_sst_size,
+        bounded_partition_target_size(plan.target_sst_size, plan.compaction_memory_limit),
         inputs,
         &budget,
         executor::TombstoneGcPolicy {
@@ -65,6 +65,13 @@ pub fn execute_compaction(
         },
         abort_check,
     )
+}
+
+fn bounded_partition_target_size(configured_target: usize, compaction_pool: usize) -> usize {
+    // Publication currently hands one complete partition to the cloud adapter.
+    // Keep the ordinary rollover point below that hard reserve while leaving
+    // half the pool for the final block, metadata, and an indivisible key.
+    configured_target.min((compaction_pool / 2).max(1))
 }
 
 /// Construct the output filename for a completed compaction.
@@ -87,6 +94,20 @@ mod tests {
     use super::*;
     use crate::sst::traits::SstFactory;
     use tempfile::tempdir;
+
+    #[test]
+    fn should_bound_partition_target_below_compaction_upload_reserve() {
+        // Arrange
+        let configured_target = 512 * 1024 * 1024;
+        let compaction_pool = 256 * 1024 * 1024;
+
+        // Act
+        let target = bounded_partition_target_size(configured_target, compaction_pool);
+
+        // Assert
+        assert_eq!(target, 128 * 1024 * 1024);
+        assert_eq!(bounded_partition_target_size(4096, compaction_pool), 4096);
+    }
 
     // ============================================================================
     // Tests for output_filename invariant: stable, zero-padded naming
@@ -1028,6 +1049,36 @@ mod tests {
     }
 
     #[test]
+    fn should_stream_tombstone_only_compaction_output() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let mut input = factory.create()?;
+        input.add_range_tombstone(b"a", b"z", 17)?;
+        crate::sst::fs::finish_writer_to_path(
+            input,
+            &temp_dir.path().join("tombstone-only-input.sst"),
+        )?;
+        let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(54);
+        plan.input_files
+            .push("tombstone-only-input.sst".to_string());
+
+        // Act
+        let outputs = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
+
+        // Assert
+        assert_eq!(outputs.len(), 1);
+        let reader = factory.open(Path::new(&outputs[0]))?;
+        assert_eq!(reader.range_tombstones().len(), 1);
+        assert_eq!(
+            reader.range_tombstones()[0],
+            crate::sst::types::RangeTombstone::new(b"a".to_vec(), b"z".to_vec(), 17)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn should_never_split_equal_user_keys_across_compaction_partitions() -> MidgeResult<()> {
         // Arrange
         let temp_dir = tempdir()?;
@@ -1244,7 +1295,7 @@ mod tests {
         for input_index in 0..4u64 {
             let name = format!("resource-input-{input_index}.sst");
             let mut writer = factory.create()?;
-            for key_index in 0..96u64 {
+            for key_index in 0..384u64 {
                 let key = format!("{input_index}-key-{key_index:04}");
                 logical_input_bytes = logical_input_bytes
                     .saturating_add(key.len())
@@ -1260,9 +1311,9 @@ mod tests {
             crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join(&name))?;
             input_names.push(name);
         }
-        let pool_limit = 128 * 1024;
+        let pool_limit = 128usize * 1024;
         let target_sst_size = 4096;
-        assert!(logical_input_bytes > pool_limit);
+        assert!(logical_input_bytes > pool_limit.saturating_mul(4));
         assert!(logical_input_bytes > target_sst_size);
         let budget = crate::common::resource_budget::ResourceBudget::new(pool_limit);
         let inputs =

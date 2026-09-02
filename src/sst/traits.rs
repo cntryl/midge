@@ -197,6 +197,12 @@ pub trait SstStateReader: Send + Sync {
     fn range_tombstones(&self) -> Vec<super::types::RangeTombstone> {
         Vec::new()
     }
+
+    /// Return the retained bytes required to clone this SST's range tombstones.
+    /// Budgeted compaction reserves this amount before requesting the clone.
+    fn range_tombstone_memory_usage(&self) -> usize {
+        0
+    }
 }
 
 /// Combined reader contract used by the SST factory.
@@ -312,6 +318,23 @@ pub trait SstFactory: Send + Sync {
         _budget: crate::common::resource_budget::ResourceBudget,
     ) -> MidgeResult<Box<dyn DynSstWriter>> {
         self.create()
+    }
+
+    /// Open a reader whose retained metadata is charged to compaction.
+    ///
+    /// Compatibility factories may use the ordinary reader path. Production
+    /// filesystem factories override this method and reserve before metadata
+    /// block reads and decoding.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the SST cannot be opened within the supplied budget.
+    fn open_for_compaction(
+        &self,
+        path: &Path,
+        _budget: crate::common::resource_budget::ResourceBudget,
+    ) -> MidgeResult<Box<dyn SstReaderExt>> {
+        self.open(path)
     }
 
     /// Open an existing SST file for reading

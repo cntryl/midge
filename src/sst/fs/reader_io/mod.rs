@@ -68,6 +68,8 @@ pub struct SstFileIo {
     largest_key: Option<Vec<u8>>,
     range_tombstone_handle: Option<BlockHandle>,
     range_tombstones: Vec<RangeTombstone>,
+    metadata_budget: Option<crate::common::resource_budget::ResourceBudget>,
+    metadata_reservations: Vec<crate::common::resource_budget::ResourceReservation>,
 }
 
 enum BlockEntryCursor {
@@ -129,7 +131,6 @@ struct SstRawVersionScan {
     previous_key: Vec<u8>,
     budget: Option<crate::common::resource_budget::ResourceBudget>,
     _bounds_reservation: Option<crate::common::resource_budget::ResourceReservation>,
-    metadata_reservation: Option<crate::common::resource_budget::ResourceReservation>,
     block_reservation: Option<crate::common::resource_budget::ResourceReservation>,
     decoder_reservation: Option<crate::common::resource_budget::ResourceReservation>,
     yield_reservation: Option<crate::common::resource_budget::ResourceReservation>,
@@ -179,7 +180,6 @@ impl SstRawVersionScan {
             previous_key: Vec::new(),
             budget,
             _bounds_reservation: bounds_reservation,
-            metadata_reservation: None,
             block_reservation: None,
             decoder_reservation: None,
             yield_reservation: None,
@@ -204,34 +204,6 @@ impl SstRawVersionScan {
             self.lifecycle = SstScanLifecycle::Exhausted;
             return Ok(());
         }
-        let index_bytes = index.iter().fold(
-            index
-                .len()
-                .saturating_mul(std::mem::size_of::<(Vec<u8>, BlockHandle)>()),
-            |total, (key, _)| total.saturating_add(key.capacity()),
-        );
-        let tombstone_bytes = self.reader.range_tombstones.iter().fold(
-            self.reader
-                .range_tombstones
-                .len()
-                .saturating_mul(std::mem::size_of::<RangeTombstone>()),
-            |total, tombstone| {
-                total
-                    .saturating_add(tombstone.start.capacity())
-                    .saturating_add(tombstone.end.capacity())
-            },
-        );
-        self.metadata_reservation = self
-            .budget
-            .as_ref()
-            .map(|budget| {
-                budget.reserve(
-                    index_bytes.saturating_add(tombstone_bytes),
-                    "SST index and range tombstones",
-                )
-            })
-            .transpose()?;
-
         self.first_block = self
             .start
             .as_deref()
@@ -383,7 +355,7 @@ impl SstRawVersionScan {
             let mut key = Vec::with_capacity(key_len);
             key.extend_from_slice(&self.previous_key[..shared_len]);
             key.extend_from_slice(entry.key_delta);
-            self.previous_key.clone_from(&key);
+            self.previous_key = key.clone();
             self.decoder_reservation = decoder_reservation;
             self.block_offset = next_offset;
             if self
@@ -702,6 +674,8 @@ impl SstFileIo {
             largest_key: None,
             range_tombstone_handle: None,
             range_tombstones: Vec::new(),
+            metadata_budget: None,
+            metadata_reservations: Vec::new(),
         }
     }
 
@@ -712,6 +686,18 @@ impl SstFileIo {
     /// Returns an error when the SST footer, metadata, or backing file cannot be read.
     pub fn open(path_str: &str, fs: Arc<dyn Fs>) -> MidgeResult<Self> {
         let mut reader = Self::new(path_str, fs);
+        reader.load_metadata()?;
+        Ok(reader)
+    }
+
+    /// Open an SST while charging all eagerly retained metadata to `budget`.
+    pub(crate) fn open_for_compaction(
+        path_str: &str,
+        fs: Arc<dyn Fs>,
+        budget: crate::common::resource_budget::ResourceBudget,
+    ) -> MidgeResult<Self> {
+        let mut reader = Self::new(path_str, fs);
+        reader.metadata_budget = Some(budget);
         reader.load_metadata()?;
         Ok(reader)
     }
@@ -740,7 +726,23 @@ impl SstFileIo {
     ///
     /// Returns an error when the SST cannot be opened or summarized.
     pub fn summarize_with_real_fs(path: &std::path::Path) -> MidgeResult<SstFileSummary> {
-        Self::open_with_real_fs(path)?.summary()
+        Self::open_with_real_fs(path)?.into_streaming_summary()
+    }
+
+    /// Stream a summary while charging reader metadata and decoded blocks to
+    /// the compaction publication budget.
+    pub(crate) fn summarize_with_real_fs_for_compaction(
+        path: &std::path::Path,
+        budget: crate::common::resource_budget::ResourceBudget,
+    ) -> MidgeResult<SstFileSummary> {
+        let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let fs = Arc::new(crate::io::RealFs::new(parent)?);
+        let path_str = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("")
+            .to_string();
+        Self::open_for_compaction(&path_str, fs, budget)?.into_streaming_summary()
     }
 
     /// Enable block bloom filter for this reader
@@ -756,12 +758,14 @@ impl SstFileIo {
     ///
     /// Returns an error when the block bloom handle cannot be read or decoded.
     pub fn load_block_bloom(&mut self) -> MidgeResult<()> {
-        if let Some(ref footer) = self.footer {
-            if let Some(block_bloom_handle) = footer.block_bloom_handle {
-                let bloom_data = self.read_block(&block_bloom_handle)?;
-                let block_bloom = BlockBloomFilter::deserialize(&bloom_data)?;
-                self.block_bloom_filter = Some(block_bloom);
-            }
+        if let Some(block_bloom_handle) = self
+            .footer
+            .as_ref()
+            .and_then(|footer| footer.block_bloom_handle)
+        {
+            let bloom_data = self.read_metadata_block(&block_bloom_handle, "SST block bloom")?;
+            let block_bloom = BlockBloomFilter::deserialize(&bloom_data)?;
+            self.block_bloom_filter = Some(block_bloom);
         }
         Ok(())
     }
@@ -903,6 +907,73 @@ impl SstFileIo {
                     "SST '{}' contains no publishable sequence bounds",
                     self.path.0.as_str()
                 ))
+            })?,
+        })
+    }
+
+    fn into_streaming_summary(self) -> MidgeResult<SstFileSummary> {
+        use crate::sst::traits::SstStateReader;
+
+        let size_bytes = self.fs.metadata(&self.path)?.len;
+        let mut smallest_key: Option<Vec<u8>> = None;
+        let mut largest_key: Option<Vec<u8>> = None;
+        let mut smallest_seq: Option<u64> = None;
+        let mut largest_seq: Option<u64> = None;
+
+        for tombstone in &self.range_tombstones {
+            if smallest_key
+                .as_ref()
+                .is_none_or(|current| tombstone.start.as_slice() < current.as_slice())
+            {
+                smallest_key = Some(tombstone.start.clone());
+            }
+            if largest_key
+                .as_ref()
+                .is_none_or(|current| tombstone.end.as_slice() > current.as_slice())
+            {
+                largest_key = Some(tombstone.end.clone());
+            }
+            smallest_seq =
+                Some(smallest_seq.map_or(tombstone.seq, |current| current.min(tombstone.seq)));
+            largest_seq =
+                Some(largest_seq.map_or(tombstone.seq, |current| current.max(tombstone.seq)));
+        }
+
+        let cursor_budget = self.metadata_budget.clone();
+        let mut cursor =
+            Box::new(self).raw_version_cursor_with_budget(None, None, cursor_budget)?;
+        for version in &mut cursor {
+            let version = version?;
+            if smallest_key
+                .as_ref()
+                .is_none_or(|current| version.key.as_slice() < current.as_slice())
+            {
+                smallest_key = Some(version.key.clone());
+            }
+            if largest_key
+                .as_ref()
+                .is_none_or(|current| version.key.as_slice() > current.as_slice())
+            {
+                largest_key = Some(version.key);
+            }
+            smallest_seq =
+                Some(smallest_seq.map_or(version.seq, |current| current.min(version.seq)));
+            largest_seq = Some(largest_seq.map_or(version.seq, |current| current.max(version.seq)));
+        }
+
+        Ok(SstFileSummary {
+            size_bytes,
+            smallest_key: smallest_key.ok_or_else(|| {
+                MidgeError::Corruption("SST contains no publishable entries".into())
+            })?,
+            largest_key: largest_key.ok_or_else(|| {
+                MidgeError::Corruption("SST contains no publishable entries".into())
+            })?,
+            smallest_seq: smallest_seq.ok_or_else(|| {
+                MidgeError::Corruption("SST contains no publishable sequence bounds".into())
+            })?,
+            largest_seq: largest_seq.ok_or_else(|| {
+                MidgeError::Corruption("SST contains no publishable sequence bounds".into())
             })?,
         })
     }

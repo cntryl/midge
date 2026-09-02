@@ -2152,6 +2152,48 @@ fn should_reject_out_of_order_compaction_output_set_before_publication(
 }
 
 #[test]
+fn should_reject_cloud_partition_read_before_exceeding_compaction_pool(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let temp_dir = tempfile::tempdir()?;
+    let path = temp_dir.path().join("oversized-partition.sst");
+    std::fs::write(&path, vec![0u8; 128])?;
+    let budget = crate::common::resource_budget::ResourceBudget::new(64);
+
+    // Act
+    let result = EventLoop::read_file_with_budget(&path, &budget);
+
+    // Assert
+    assert!(matches!(
+        result,
+        Err(crate::common::MidgeError::ResourceLimit(_))
+    ));
+    assert!(path.is_file());
+    Ok(())
+}
+
+#[test]
+fn should_reject_sst_checksum_buffer_before_exceeding_compaction_pool(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let temp_dir = tempfile::tempdir()?;
+    let path = temp_dir.path().join("checksum-input.sst");
+    std::fs::write(&path, [1u8; 128])?;
+    let budget = crate::common::resource_budget::ResourceBudget::new(64);
+
+    // Act
+    let result = EventLoop::checksummed_file_crc(&path, &budget);
+
+    // Assert
+    assert!(matches!(
+        result,
+        Err(crate::common::MidgeError::ResourceLimit(_))
+    ));
+    assert!(path.is_file());
+    Ok(())
+}
+
+#[test]
 fn should_count_late_response_given_inline_route_when_caller_already_gave_up() {
     // Arrange: an inline caller registers a response channel and then stops
     // waiting, mirroring a transaction commit that hit its response timeout.

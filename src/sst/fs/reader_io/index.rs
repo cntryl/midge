@@ -22,6 +22,13 @@ impl SstFileIo {
             || self.read_block(&footer.index_handle),
             |file| self.read_block_from(file, &footer.index_handle),
         )?;
+        self.decode_index_entries(&index_data)
+    }
+
+    pub(super) fn decode_index_entries(
+        &self,
+        index_data: &[u8],
+    ) -> MidgeResult<Vec<(Vec<u8>, BlockHandle)>> {
         let mut result: Vec<(Vec<u8>, BlockHandle)> = Vec::new();
         let mut offset = 0;
 

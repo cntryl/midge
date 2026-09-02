@@ -271,8 +271,16 @@ impl CompactionCoordinator {
             );
         }
 
-        let added = match Self::build_output_metadata(event_loop, cf_id, target_level, output_ssts)
-        {
+        let publication_budget = crate::common::resource_budget::ResourceBudget::new(
+            event_loop.compaction_actor.compaction_memory_limit(),
+        );
+        let added = match Self::build_output_metadata(
+            event_loop,
+            cf_id,
+            target_level,
+            output_ssts,
+            &publication_budget,
+        ) {
             Ok(added) => added,
             Err(error) => {
                 event_loop.gc_actor.delete_ssts(
@@ -284,9 +292,14 @@ impl CompactionCoordinator {
             }
         };
 
-        if let Err(error) =
-            Self::publish_compaction_manifest(event_loop, input_ssts, output_ssts, cf_id, &added)
-        {
+        if let Err(error) = Self::publish_compaction_manifest(
+            event_loop,
+            input_ssts,
+            output_ssts,
+            cf_id,
+            &added,
+            &publication_budget,
+        ) {
             return Self::respond_publish_failure(event_loop, request_id, &error);
         }
 
@@ -308,6 +321,7 @@ impl CompactionCoordinator {
         cf_id: crate::types::ColumnFamilyId,
         target_level: u32,
         output_ssts: &[String],
+        budget: &crate::common::resource_budget::ResourceBudget,
     ) -> Result<Vec<crate::runtime::FileMeta>, crate::common::MidgeError> {
         if output_ssts.windows(2).any(|names| names[0] >= names[1]) {
             return Err(crate::common::MidgeError::Corruption(
@@ -342,7 +356,7 @@ impl CompactionCoordinator {
 
         let metadata: Vec<_> = output_ssts
             .iter()
-            .map(|name| event_loop.build_sst_file_meta(cf_id, target_level, name))
+            .map(|name| event_loop.build_sst_file_meta(cf_id, target_level, name, budget))
             .collect::<Result<_, _>>()?;
         for pair in metadata.windows(2) {
             if let (Some(left_largest), Some(right_smallest)) =
@@ -365,6 +379,7 @@ impl CompactionCoordinator {
         output_ssts: &[String],
         cf_id: crate::types::ColumnFamilyId,
         added: &[crate::runtime::FileMeta],
+        budget: &crate::common::resource_budget::ResourceBudget,
     ) -> Result<(), crate::common::MidgeError> {
         // Persist the rollback/cleanup obligation before remote upload. If
         // intent persistence fails, no untracked cloud object is created; if
@@ -387,7 +402,7 @@ impl CompactionCoordinator {
                 event_loop.hybrid_storage.clone(),
             );
         }
-        event_loop.mirror_ssts_to_authoritative_cloud(output_ssts)?;
+        event_loop.mirror_ssts_to_authoritative_cloud(output_ssts, budget)?;
 
         crate::failpoints::fail_point!(
             "slice7::after_compaction_output_durable_before_manifest_publish"

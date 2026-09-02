@@ -126,6 +126,7 @@ struct VersionMergeIterator {
     inputs: Vec<VersionMergeInput>,
     heap: BinaryHeap<VersionHeapItem>,
     budget: crate::common::resource_budget::ResourceBudget,
+    _container_reservation: crate::common::resource_budget::ResourceReservation,
 }
 
 impl VersionMergeIterator {
@@ -133,6 +134,12 @@ impl VersionMergeIterator {
         mut cursors: Vec<RawSstVersionCursor>,
         budget: crate::common::resource_budget::ResourceBudget,
     ) -> MidgeResult<Self> {
+        let container_bytes = cursors.len().saturating_mul(
+            std::mem::size_of::<VersionMergeInput>()
+                .saturating_add(std::mem::size_of::<VersionHeapItem>()),
+        );
+        let container_reservation =
+            budget.reserve(container_bytes, "merge cursor and heap containers")?;
         let mut inputs = Vec::with_capacity(cursors.len());
         let mut heap = BinaryHeap::new();
 
@@ -156,6 +163,7 @@ impl VersionMergeIterator {
             inputs,
             heap,
             budget,
+            _container_reservation: container_reservation,
         })
     }
 
@@ -239,6 +247,7 @@ fn collect_reader_input(
 pub(crate) struct CompactionStreamInputs {
     cursors: Vec<RawSstVersionCursor>,
     range_tombstones: Vec<RangeTombstone>,
+    _cursor_reservation: crate::common::resource_budget::ResourceReservation,
     _range_tombstone_reservations: Vec<crate::common::resource_budget::ResourceReservation>,
 }
 
@@ -250,6 +259,12 @@ pub(crate) fn collect_compaction_stream_inputs(
     budget: &crate::common::resource_budget::ResourceBudget,
     abort_check: Option<&dyn Fn() -> bool>,
 ) -> MidgeResult<CompactionStreamInputs> {
+    let cursor_bytes = input_files.len().saturating_mul(
+        std::mem::size_of::<RawSstVersionCursor>().saturating_add(std::mem::size_of::<
+            crate::common::resource_budget::ResourceReservation,
+        >()),
+    );
+    let cursor_reservation = budget.reserve(cursor_bytes, "raw cursor containers")?;
     let mut cursors = Vec::with_capacity(input_files.len());
     let mut range_tombstones = Vec::new();
     let mut range_tombstone_reservations = Vec::new();
@@ -267,20 +282,11 @@ pub(crate) fn collect_compaction_stream_inputs(
 
         let path = Path::new(filename);
 
-        let reader = sst_factory.open(path)?;
-        let input_range_tombstones = reader.range_tombstones();
-        let tombstone_bytes = input_range_tombstones.iter().fold(
-            input_range_tombstones
-                .len()
-                .saturating_mul(std::mem::size_of::<RangeTombstone>()),
-            |total, tombstone| {
-                total
-                    .saturating_add(tombstone.start.capacity())
-                    .saturating_add(tombstone.end.capacity())
-            },
-        );
+        let reader = sst_factory.open_for_compaction(path, budget.clone())?;
+        let tombstone_bytes = reader.range_tombstone_memory_usage();
         range_tombstone_reservations
             .push(budget.reserve(tombstone_bytes, "range tombstone metadata")?);
+        let input_range_tombstones = reader.range_tombstones();
         if !input_range_tombstones.is_empty() {
             tracing::debug!(
                 file = %filename,
@@ -295,6 +301,7 @@ pub(crate) fn collect_compaction_stream_inputs(
     Ok(CompactionStreamInputs {
         cursors,
         range_tombstones: normalize_range_tombstones(range_tombstones),
+        _cursor_reservation: cursor_reservation,
         _range_tombstone_reservations: range_tombstone_reservations,
     })
 }
@@ -427,11 +434,15 @@ pub(crate) fn write_partitioned_compaction_outputs(
     let CompactionStreamInputs {
         cursors,
         range_tombstones,
+        _cursor_reservation,
         _range_tombstone_reservations,
     } = inputs;
     let mut writer = sst_factory.create_for_compaction(budget.clone())?;
     let mut last_key: Option<(Vec<u8>, crate::common::resource_budget::ResourceReservation)> = None;
-    let mut partition_lower_bound: Option<Vec<u8>> = None;
+    let mut partition_lower_bound: Option<(
+        Vec<u8>,
+        crate::common::resource_budget::ResourceReservation,
+    )> = None;
     let mut partition_point_count = 0usize;
     let mut partition_ordinal = 0u32;
     let mut output_names = Vec::new();
@@ -493,12 +504,16 @@ pub(crate) fn write_partitioned_compaction_outputs(
         }
 
         if partition_point_count > 0 && writer.estimated_size_bytes() >= target_sst_size.max(1) {
+            let boundary_reservation =
+                budget.reserve(version.key.len(), "output partition boundary")?;
             let boundary = version.key.clone();
             if let Some((name, path)) = finish_partition(
                 writer,
                 partition_point_count,
                 &retained_range_tombstones,
-                partition_lower_bound.as_deref(),
+                partition_lower_bound
+                    .as_ref()
+                    .map(|(key, _reservation)| key.as_slice()),
                 Some(&boundary),
                 PartitionIdentity {
                     cf_id,
@@ -518,7 +533,7 @@ pub(crate) fn write_partitioned_compaction_outputs(
                     "compaction partition ordinal space exhausted".to_string(),
                 )
             })?;
-            partition_lower_bound = Some(boundary);
+            partition_lower_bound = Some((boundary, boundary_reservation));
             writer = sst_factory.create_for_compaction(budget.clone())?;
             partition_point_count = 0;
         }
@@ -538,7 +553,9 @@ pub(crate) fn write_partitioned_compaction_outputs(
         writer,
         partition_point_count,
         &retained_range_tombstones,
-        partition_lower_bound.as_deref(),
+        partition_lower_bound
+            .as_ref()
+            .map(|(key, _reservation)| key.as_slice()),
         None,
         PartitionIdentity {
             cf_id,

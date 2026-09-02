@@ -57,9 +57,21 @@ impl FsSstFactoryIo {
     ///
     /// Returns an error if the file cannot be opened or parsed as an SST reader.
     pub fn open(&self, path: &Path) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+        self.open_internal(path, None)
+    }
+
+    fn open_internal(
+        &self,
+        path: &Path,
+        budget: Option<crate::common::resource_budget::ResourceBudget>,
+    ) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
         let path_str = path.to_str().unwrap_or("").to_string();
         let start = std::time::Instant::now();
-        let reader = super::SstFileIo::open(&path_str, Arc::clone(&self.fs))?;
+        let reader = if let Some(budget) = budget {
+            super::SstFileIo::open_for_compaction(&path_str, Arc::clone(&self.fs), budget)?
+        } else {
+            super::SstFileIo::open(&path_str, Arc::clone(&self.fs))?
+        };
         let elapsed = start.elapsed();
         // Try to gather file size for diagnostics (best-effort)
         let size = self
@@ -958,16 +970,26 @@ impl SstFactory for FsSstFactoryIo {
         &self,
         budget: crate::common::resource_budget::ResourceBudget,
     ) -> MidgeResult<Box<dyn DynSstWriter>> {
-        Ok(Box::new(InMemorySstWriter::new_with_budget(
+        let mut writer = InMemorySstWriter::new_with_budget(
             self.compression_policy.clone(),
             self.block_size,
-            Some(budget),
-        )))
+            Some(budget.clone()),
+        );
+        writer.streaming = Some(StreamingState::new(Some(budget))?);
+        Ok(Box::new(writer))
     }
 
     /// Open an existing SST file
     fn open(&self, path: &Path) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
         FsSstFactoryIo::open(self, path)
+    }
+
+    fn open_for_compaction(
+        &self,
+        path: &Path,
+        budget: crate::common::resource_budget::ResourceBudget,
+    ) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+        self.open_internal(path, Some(budget))
     }
 }
 
