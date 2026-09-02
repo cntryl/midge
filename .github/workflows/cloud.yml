@@ -41,7 +41,7 @@ jobs:
         run: cargo test --lib --features sqrzl-tests storage::providers::qualification -- --ignored --test-threads=1
 
       - name: Provider engine qualification
-        run: cargo test --test cloud_provider_engine_qualification --features sqrzl-tests -- --ignored --test-threads=1
+        run: cargo test --test cloud_provider_engine_qualification --features sqrzl-tests,failpoints -- --ignored --test-threads=1
 
       - name: Full test suite against Sqrzl emulator
         run: cargo test --workspace --all-features

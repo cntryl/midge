@@ -335,6 +335,36 @@ fn should_require_explicit_sqrzl_selection_without_silent_skip() {
 }
 
 #[test]
+fn should_isolate_failpoint_sqrzl_qualification_from_ordinary_test_runs() {
+    // Arrange
+    let qualification = fs::read_to_string("tests/cloud_provider_engine_qualification.rs")
+        .expect("read provider qualification tests");
+    let cloud_workflow =
+        fs::read_to_string(".github/workflows/cloud.yml").expect("read cloud workflow");
+    let publish_workflow =
+        fs::read_to_string(".github/workflows/publish.yml").expect("read publish workflow");
+    let ignore_marker =
+        "#[ignore = \"requires Sqrzl; run the scheduled/manual Cloud Qualification workflow\"]";
+    let selected_command = "cargo test --test cloud_provider_engine_qualification --features \
+                            sqrzl-tests,failpoints -- --ignored --test-threads=1";
+
+    // Act
+    let recovery_test_is_ignored = qualification.contains(&format!(
+        "{ignore_marker}\nfn \
+         should_recover_partitioned_compaction_from_sqrzl_s3_after_local_cache_loss"
+    ));
+    let partial_upload_test_is_ignored = qualification.contains(&format!(
+        "{ignore_marker}\nfn should_rollback_partition_set_after_partial_sqrzl_compaction_upload"
+    ));
+
+    // Assert
+    assert!(recovery_test_is_ignored);
+    assert!(partial_upload_test_is_ignored);
+    assert!(cloud_workflow.contains(selected_command));
+    assert!(publish_workflow.contains(selected_command));
+}
+
+#[test]
 fn should_document_testing_review_contracts() {
     // Arrange
     let guide = fs::read_to_string("docs/development/testing.md").expect("read testing guide");

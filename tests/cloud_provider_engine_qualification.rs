@@ -135,6 +135,354 @@ fn should_route_three_location_topology_through_sqrzl() {
 }
 
 #[test]
+#[cfg(feature = "failpoints")]
+#[ignore = "requires Sqrzl; run the scheduled/manual Cloud Qualification workflow"]
+fn should_recover_partitioned_compaction_from_sqrzl_s3_after_local_cache_loss() {
+    // Arrange
+    let _failpoint_guard = sqrzl_compaction_failpoint_test_lock();
+    let label = "sqrzl-partitioned-compaction";
+    require_sqrzl(label);
+    let provider = CloudProviderConfig::sqrzl_s3("midge-sqrzl-partitioned-compaction");
+    ensure_sqrzl_namespace(&provider)
+        .unwrap_or_else(|error| panic!("{label}: failed to prepare provider namespace: {error}"));
+
+    // Act
+    let result = partitioned_compaction_round_trip_over_sqrzl(label, &provider);
+
+    // Assert
+    result.expect("partitioned compaction survives Sqrzl-backed cache-loss recovery");
+}
+
+#[test]
+#[cfg(feature = "failpoints")]
+#[ignore = "requires Sqrzl; run the scheduled/manual Cloud Qualification workflow"]
+fn should_rollback_partition_set_after_partial_sqrzl_compaction_upload() {
+    // Arrange
+    let _failpoint_guard = sqrzl_compaction_failpoint_test_lock();
+    let label = "sqrzl-partial-mirror-compaction";
+    require_sqrzl(label);
+    let provider = CloudProviderConfig::sqrzl_s3("midge-sqrzl-partial-mirror-compaction");
+    ensure_sqrzl_namespace(&provider)
+        .unwrap_or_else(|error| panic!("{label}: failed to prepare provider namespace: {error}"));
+    let database_prefix = format!("engine/{label}/{}/", uuid::Uuid::new_v4());
+    let cache_path =
+        std::env::temp_dir().join(format!("midge-provider-engine-{}", uuid::Uuid::new_v4()));
+    let _ = std::fs::remove_dir_all(&cache_path);
+    let open_engine = || {
+        Engine::open(
+            OpenOptions::cloud(
+                cache_path.clone(),
+                CloudStorageLocation::new(provider.clone(), database_prefix.clone()),
+            )
+            .memory_budget(MemoryBudget::Bytes(8 * 1024 * 1024))
+            .background_compaction(false)
+            .target_sst_size_for_testing(4 * 1024)
+            .build()
+            .expect("build Sqrzl compaction options"),
+        )
+        .expect("open Sqrzl-backed engine")
+    };
+    let mut engine = open_engine();
+    let cf = default_cf(&engine);
+    for batch in 0..4u8 {
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin compaction seed");
+        tx.put(
+            format!("sqrzl-partial-mirror-{batch}").into_bytes(),
+            vec![batch; 512],
+            None,
+        )
+        .expect("put compaction seed");
+        tx.commit(WriteOptions::cloud_strict())
+            .expect("commit compaction seed");
+        engine.flush_cf(&cf).expect("force SST upload");
+    }
+    let pre_failure_layout = engine
+        .get_storage_layout()
+        .expect("pre-failure storage layout");
+    let scenario = fail::FailScenario::setup();
+    fail::cfg("midge::cloud::inject_fail_sst_upload", "1*off->return")
+        .expect("fail the second partition upload");
+
+    // Act: a compaction that would produce multiple output partitions has its
+    // second partition's remote upload fail mid-flight.
+    let compaction_result = engine.compact_all();
+    fail::remove("midge::cloud::inject_fail_sst_upload");
+    scenario.teardown();
+
+    // Assert: no partial replacement set became manifest-authoritative, even
+    // though the compaction attempt observed a partial remote mirror.
+    assert!(compaction_result.is_ok());
+    let failed_layout = engine
+        .get_storage_layout()
+        .expect("post-failure storage layout");
+    assert!(
+        failed_layout
+            .levels
+            .iter()
+            .all(|level| level.level == 0 || level.file_count == 0),
+        "no compacted output should be manifest-authoritative after a partial \
+         remote mirror failure: {failed_layout:?}"
+    );
+    engine
+        .shutdown(Duration::from_secs(10))
+        .expect("shutdown after partial-mirror failure");
+
+    // A Sqrzl-backed reopen after local cache loss proves the remote store
+    // itself was never left with a partially mirrored replacement set as
+    // authoritative: recovery must land back on the pre-compaction layout.
+    std::fs::remove_dir_all(&cache_path).expect("delete local cache");
+    let mut reopened = open_engine();
+    let reopened_cf = default_cf(&reopened);
+    for batch in 0..4u8 {
+        let key = format!("sqrzl-partial-mirror-{batch}");
+        let read_tx = reopened
+            .begin_tx(reopened_cf.id(), TransactionMode::ReadOnly)
+            .expect("begin read tx");
+        assert_eq!(
+            read_tx.get(key.as_bytes()).expect("read value"),
+            Some(Bytes::from(vec![batch; 512]))
+        );
+    }
+    let reopened_layout = reopened
+        .get_storage_layout()
+        .expect("reopened storage layout");
+    assert_eq!(
+        reopened_layout
+            .levels
+            .iter()
+            .filter(|level| level.level > 0)
+            .map(|level| level.file_count)
+            .sum::<usize>(),
+        pre_failure_layout
+            .levels
+            .iter()
+            .filter(|level| level.level > 0)
+            .map(|level| level.file_count)
+            .sum::<usize>(),
+        "recovered layout must match the pre-compaction, pre-failure layout"
+    );
+    reopened
+        .shutdown(Duration::from_secs(10))
+        .expect("shutdown recovered engine");
+    let _ = std::fs::remove_dir_all(&cache_path);
+}
+
+#[cfg(feature = "failpoints")]
+const SQRZL_PARTITIONED_BATCHES: u32 = 4;
+#[cfg(feature = "failpoints")]
+const SQRZL_PARTITIONED_KEYS_PER_BATCH: u32 = 48;
+#[cfg(feature = "failpoints")]
+const SQRZL_PARTITIONED_TARGET_SST_SIZE: usize = 4 * 1024;
+
+#[cfg(feature = "failpoints")]
+static SQRZL_COMPACTION_FAILPOINT_TEST_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
+    std::sync::OnceLock::new();
+
+#[cfg(feature = "failpoints")]
+fn sqrzl_compaction_failpoint_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    SQRZL_COMPACTION_FAILPOINT_TEST_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(feature = "failpoints")]
+fn sqrzl_partitioned_compaction_indexes() -> std::ops::Range<u32> {
+    0..SQRZL_PARTITIONED_BATCHES * SQRZL_PARTITIONED_KEYS_PER_BATCH
+}
+
+#[test]
+#[cfg(feature = "failpoints")]
+fn should_serialize_sqrzl_compaction_failpoint_scope() {
+    // Arrange
+    let first_guard = sqrzl_compaction_failpoint_test_lock();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        started_tx.send(()).expect("signal lock attempt");
+        let _second_guard = sqrzl_compaction_failpoint_test_lock();
+        acquired_tx.send(()).expect("signal lock acquisition");
+    });
+    started_rx.recv().expect("waiter started");
+
+    // Act
+    let acquisition_while_held = acquired_rx.recv_timeout(Duration::from_millis(50));
+    drop(first_guard);
+    let acquisition_after_release = acquired_rx.recv_timeout(Duration::from_secs(1));
+    waiter.join().expect("lock waiter exits cleanly");
+
+    // Assert
+    assert!(matches!(
+        acquisition_while_held,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
+    assert!(acquisition_after_release.is_ok());
+}
+
+#[test]
+#[cfg(feature = "failpoints")]
+fn should_enumerate_every_seeded_partition_key_for_recovery_validation() {
+    // Arrange
+    let expected_count = SQRZL_PARTITIONED_BATCHES * SQRZL_PARTITIONED_KEYS_PER_BATCH;
+
+    // Act
+    let indexes: Vec<_> = sqrzl_partitioned_compaction_indexes().collect();
+
+    // Assert
+    assert_eq!(
+        indexes.len(),
+        usize::try_from(expected_count).expect("seeded key count fits usize")
+    );
+    assert_eq!(indexes.first(), Some(&0));
+    assert_eq!(indexes.last(), Some(&(expected_count - 1)));
+    assert!(indexes.windows(2).all(|pair| pair[1] == pair[0] + 1));
+}
+
+#[cfg(feature = "failpoints")]
+fn partitioned_compaction_round_trip_over_sqrzl(
+    label: &str,
+    provider: &CloudProviderConfig,
+) -> Result<(), String> {
+    let database_prefix = format!("engine/{label}/{}/", uuid::Uuid::new_v4());
+    let cache_path =
+        std::env::temp_dir().join(format!("midge-provider-engine-{}", uuid::Uuid::new_v4()));
+    let _ = std::fs::remove_dir_all(&cache_path);
+    let open_engine = || {
+        Engine::open(
+            OpenOptions::cloud(
+                cache_path.clone(),
+                CloudStorageLocation::new(provider.clone(), database_prefix.clone()),
+            )
+            .memory_budget(MemoryBudget::Bytes(8 * 1024 * 1024))
+            .background_compaction(false)
+            .target_sst_size_for_testing(SQRZL_PARTITIONED_TARGET_SST_SIZE)
+            .build()
+            .map_err(|error| format!("{label}: build Sqrzl compaction options: {error}"))?,
+        )
+        .map_err(|error| format!("{label}: open Sqrzl-backed engine: {error}"))
+    };
+
+    let mut engine = open_engine()?;
+    let cf = default_cf(&engine);
+    seed_sqrzl_partitioned_compaction_data(label, &mut engine, &cf)?;
+    engine
+        .compact_all()
+        .map_err(|error| format!("{label}: compact_all: {error}"))?;
+    assert_sqrzl_partitioned_layout(label, &engine, cf.id(), "before recovery")?;
+
+    engine
+        .shutdown(Duration::from_secs(10))
+        .map_err(|error| format!("{label}: shutdown before provider recovery: {error}"))?;
+    std::fs::remove_dir_all(&cache_path)
+        .map_err(|error| format!("{label}: delete local cache: {error}"))?;
+
+    let mut reopened = open_engine()?;
+    let reopened_cf = default_cf(&reopened);
+    assert_sqrzl_partitioned_reads(label, &reopened, &reopened_cf)?;
+    assert_sqrzl_partitioned_layout(label, &reopened, reopened_cf.id(), "after recovery")?;
+
+    reopened
+        .shutdown(Duration::from_secs(10))
+        .map_err(|error| format!("{label}: shutdown recovered engine: {error}"))?;
+    let _ = std::fs::remove_dir_all(&cache_path);
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+fn seed_sqrzl_partitioned_compaction_data(
+    label: &str,
+    engine: &mut Engine,
+    cf: &ColumnFamilyHandle,
+) -> Result<(), String> {
+    for batch in 0..SQRZL_PARTITIONED_BATCHES {
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .map_err(|error| format!("{label}: begin write tx: {error}"))?;
+        for offset in 0..SQRZL_PARTITIONED_KEYS_PER_BATCH {
+            let index = batch * SQRZL_PARTITIONED_KEYS_PER_BATCH + offset;
+            tx.put(
+                format!("sqrzl-partitioned-{index:04}").into_bytes(),
+                sqrzl_partitioned_compaction_value(index),
+                None,
+            )
+            .map_err(|error| format!("{label}: put: {error}"))?;
+        }
+        tx.commit(WriteOptions::cloud_strict())
+            .map_err(|error| format!("{label}: cloud-strict commit: {error}"))?;
+        engine
+            .flush_cf(cf)
+            .map_err(|error| format!("{label}: force SST upload: {error}"))?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+fn assert_sqrzl_partitioned_reads(
+    label: &str,
+    engine: &Engine,
+    cf: &ColumnFamilyHandle,
+) -> Result<(), String> {
+    let read = engine
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+        .map_err(|error| format!("{label}: begin read tx: {error}"))?;
+    for index in sqrzl_partitioned_compaction_indexes() {
+        let key = format!("sqrzl-partitioned-{index:04}");
+        let value = read
+            .get(key.as_bytes())
+            .map_err(|error| format!("{label}: read {key}: {error}"))?;
+        if value.as_deref() != Some(sqrzl_partitioned_compaction_value(index).as_slice()) {
+            return Err(format!(
+                "{label}: unexpected value for {key} after recovery"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+fn assert_sqrzl_partitioned_layout(
+    label: &str,
+    engine: &Engine,
+    cf_id: cntryl_midge::ColumnFamilyId,
+    when: &str,
+) -> Result<(), String> {
+    let layout = engine
+        .get_storage_layout()
+        .map_err(|error| format!("{label}: storage layout {when}: {error}"))?;
+    let output_names: Vec<_> = layout
+        .levels
+        .iter()
+        .flat_map(|level| level.files.iter())
+        .filter(|file| file.cf_id == cf_id && file.level > 0)
+        .map(|file| file.name.as_str())
+        .collect();
+    if output_names.len() <= 1 {
+        return Err(format!(
+            "{label}: small target must produce multiple manifest outputs {when}: {output_names:?}"
+        ));
+    }
+    let unique_names: std::collections::HashSet<_> = output_names.iter().copied().collect();
+    if unique_names.len() != output_names.len() {
+        return Err(format!(
+            "{label}: duplicate output partition names {when}: {output_names:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+fn sqrzl_partitioned_compaction_value(index: u32) -> Vec<u8> {
+    (0..512)
+        .map(|offset| {
+            u8::try_from((index.wrapping_mul(31) + offset * 17) % 251)
+                .expect("generated byte fits u8")
+        })
+        .collect()
+}
+
+#[test]
 fn should_recover_engine_from_real_s3_after_local_cache_loss_if_configured() {
     // Arrange
     let Some(provider) = configured_real_s3_provider() else {
