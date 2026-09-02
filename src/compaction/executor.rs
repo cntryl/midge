@@ -72,7 +72,7 @@ impl RetainedVersion {
         budget: &crate::common::resource_budget::ResourceBudget,
     ) -> MidgeResult<Self> {
         let retained_bytes = std::mem::size_of::<CompactionVersion>()
-            .saturating_add(version.key.capacity())
+            .saturating_add(version.key.capacity().saturating_mul(2))
             .saturating_add(version.value.as_ref().map_or(0, Vec::capacity));
         let reservation = budget.reserve(retained_bytes, "merge head")?;
         Ok(Self {
@@ -299,24 +299,143 @@ pub(crate) fn collect_compaction_stream_inputs(
     })
 }
 
-/// Merge, normalize, deduplicate, and write compaction versions without
-/// materializing a second deduplicated result vector.
-pub(crate) fn write_merged_compaction_output_to_sst(
+struct OutputSetCleanup {
+    paths: Vec<std::path::PathBuf>,
+    armed: bool,
+}
+
+impl OutputSetCleanup {
+    fn new() -> Self {
+        Self {
+            paths: Vec::new(),
+            armed: true,
+        }
+    }
+
+    fn record(&mut self, path: std::path::PathBuf) {
+        self.paths.push(path);
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for OutputSetCleanup {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        for path in &self.paths {
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => tracing::warn!(
+                    file = %path.display(),
+                    %error,
+                    "retaining non-authoritative compaction residue after cleanup failure"
+                ),
+            }
+        }
+    }
+}
+
+fn add_partition_range_tombstones(
+    writer: &mut dyn crate::sst::traits::DynSstWriter,
+    tombstones: &[&RangeTombstone],
+    lower_bound: Option<&[u8]>,
+    upper_bound: Option<&[u8]>,
+    abort_check: Option<&dyn Fn() -> bool>,
+) -> MidgeResult<usize> {
+    let mut added = 0usize;
+    for (index, tombstone) in tombstones.iter().enumerate() {
+        if index.is_multiple_of(1024) {
+            ensure_compaction_not_aborted(abort_check)?;
+        }
+        let start = lower_bound.map_or(tombstone.start.as_slice(), |lower| {
+            tombstone.start.as_slice().max(lower)
+        });
+        let end = upper_bound.map_or(tombstone.end.as_slice(), |upper| {
+            tombstone.end.as_slice().min(upper)
+        });
+        if start >= end {
+            continue;
+        }
+        writer.add_range_tombstone(start, end, tombstone.seq)?;
+        added = added.saturating_add(1);
+    }
+    Ok(added)
+}
+
+#[derive(Clone, Copy)]
+struct PartitionIdentity {
+    cf_id: u32,
+    target_level: u32,
+    generation: u64,
+    ordinal: u32,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_partition(
+    mut writer: Box<dyn crate::sst::traits::DynSstWriter>,
+    point_count: usize,
+    retained_range_tombstones: &[&RangeTombstone],
+    lower_bound: Option<&[u8]>,
+    upper_bound: Option<&[u8]>,
+    identity: PartitionIdentity,
+    output_dir: &Path,
+    abort_check: Option<&dyn Fn() -> bool>,
+) -> MidgeResult<Option<(String, std::path::PathBuf)>> {
+    ensure_compaction_not_aborted(abort_check)?;
+    let tombstone_count = add_partition_range_tombstones(
+        writer.as_mut(),
+        retained_range_tombstones,
+        lower_bound,
+        upper_bound,
+        abort_check,
+    )?;
+    if point_count == 0 && tombstone_count == 0 {
+        return Ok(None);
+    }
+    ensure_compaction_not_aborted(abort_check)?;
+    let name = crate::sst::compaction_file_name(
+        identity.cf_id,
+        identity.target_level,
+        identity.generation,
+        identity.ordinal,
+    );
+    let path = output_dir.join(&name);
+    writer.finish_to_path(&path)?;
+    Ok(Some((name, path)))
+}
+
+/// Merge, normalize, deduplicate, and write target-sized compaction partitions
+/// without materializing a second deduplicated result vector.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(crate) fn write_partitioned_compaction_outputs(
     sst_factory: &dyn SstFactory,
-    output_filename: &str,
+    output_dir: &Path,
+    cf_id: u32,
+    target_level: u32,
+    generation: u64,
+    target_sst_size: usize,
     inputs: CompactionStreamInputs,
     budget: &crate::common::resource_budget::ResourceBudget,
     tombstone_gc: TombstoneGcPolicy,
     abort_check: Option<&dyn Fn() -> bool>,
-) -> MidgeResult<bool> {
+) -> MidgeResult<Vec<String>> {
     let CompactionStreamInputs {
         cursors,
         range_tombstones,
         _range_tombstone_reservations,
     } = inputs;
-    let mut writer = sst_factory.create()?;
-    let mut last_key: Option<Vec<u8>> = None;
-    let mut written = 0usize;
+    let mut writer = sst_factory.create_for_compaction(budget.clone())?;
+    let mut last_key: Option<(Vec<u8>, crate::common::resource_budget::ResourceReservation)> = None;
+    let mut partition_lower_bound: Option<Vec<u8>> = None;
+    let mut partition_point_count = 0usize;
+    let mut partition_ordinal = 0u32;
+    let mut output_names = Vec::new();
+    let mut cleanup = OutputSetCleanup::new();
     let (obsolete_range_tombstones, retained_range_tombstones): (Vec<_>, Vec<_>) =
         range_tombstones.iter().partition(|tombstone| {
             tombstone_gc.range_eligible
@@ -351,10 +470,14 @@ pub(crate) fn write_merged_compaction_output_to_sst(
             }
         }
 
-        if last_key.as_deref() == Some(version.key.as_slice()) {
+        if last_key
+            .as_ref()
+            .is_some_and(|(key, _reservation)| key.as_slice() == version.key.as_slice())
+        {
             continue;
         }
-        last_key = Some(version.key.clone());
+        let new_last_key_reservation = budget.reserve(version.key.len(), "last merged user key")?;
+        last_key = Some((version.key.clone(), new_last_key_reservation));
 
         if obsolete_range_tombstones
             .iter()
@@ -369,6 +492,37 @@ pub(crate) fn write_merged_compaction_output_to_sst(
             continue;
         }
 
+        if partition_point_count > 0 && writer.estimated_size_bytes() >= target_sst_size.max(1) {
+            let boundary = version.key.clone();
+            if let Some((name, path)) = finish_partition(
+                writer,
+                partition_point_count,
+                &retained_range_tombstones,
+                partition_lower_bound.as_deref(),
+                Some(&boundary),
+                PartitionIdentity {
+                    cf_id,
+                    target_level,
+                    generation,
+                    ordinal: partition_ordinal,
+                },
+                output_dir,
+                abort_check,
+            )? {
+                cleanup.record(path);
+                output_names.push(name);
+            }
+            ensure_compaction_not_aborted(abort_check)?;
+            partition_ordinal = partition_ordinal.checked_add(1).ok_or_else(|| {
+                crate::common::MidgeError::ResourceLimit(
+                    "compaction partition ordinal space exhausted".to_string(),
+                )
+            })?;
+            partition_lower_bound = Some(boundary);
+            writer = sst_factory.create_for_compaction(budget.clone())?;
+            partition_point_count = 0;
+        }
+
         writer.add_sorted_with_meta(
             &version.key,
             version.value.as_deref(),
@@ -376,40 +530,32 @@ pub(crate) fn write_merged_compaction_output_to_sst(
             u8::from(version.is_tombstone) * 2,
             version.expiration,
         )?;
-        written = written.saturating_add(1);
-    }
-
-    for (index, tombstone) in retained_range_tombstones.iter().enumerate() {
-        if index % 1024 == 0 {
-            ensure_compaction_not_aborted(abort_check)?;
-        }
-        writer.add_range_tombstone(&tombstone.start, &tombstone.end, tombstone.seq)?;
+        partition_point_count = partition_point_count.saturating_add(1);
     }
 
     ensure_compaction_not_aborted(abort_check)?;
-
-    if written == 0 && retained_range_tombstones.is_empty() {
-        return Ok(false);
+    if let Some((name, path)) = finish_partition(
+        writer,
+        partition_point_count,
+        &retained_range_tombstones,
+        partition_lower_bound.as_deref(),
+        None,
+        PartitionIdentity {
+            cf_id,
+            target_level,
+            generation,
+            ordinal: partition_ordinal,
+        },
+        output_dir,
+        abort_check,
+    )? {
+        cleanup.record(path);
+        output_names.push(name);
     }
-
-    let output_path = Path::new(output_filename);
-    crate::sst::fs::finish_writer_to_path(writer, output_path)?;
-
-    // Cancellation can race with finalization. Once an output exists, it is
-    // still only staged: remove it before reporting the abort so a later
-    // compaction cannot mistake it for a publishable replacement.
-    if abort_check.is_some_and(|check| check()) {
-        match std::fs::remove_file(output_path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(crate::common::MidgeError::Io(error)),
-        }
-        return Err(crate::common::MidgeError::Aborted(
-            "compaction aborted due to ingest epoch change".to_string(),
-        ));
-    }
-
-    Ok(true)
+    ensure_compaction_not_aborted(abort_check)?;
+    drop(last_key);
+    cleanup.disarm();
+    Ok(output_names)
 }
 
 #[cfg(test)]

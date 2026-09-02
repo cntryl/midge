@@ -5,8 +5,12 @@ pub mod strategy;
 pub(crate) use config::OpenCompactionConfig;
 pub use strategy::{CompactionPlan, Compactor, LeveledCompactionConfig};
 
-use crate::common::{MidgeError, MidgeResult};
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use crate::common::MidgeError;
+use crate::common::MidgeResult;
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 
 /// Executes a compaction plan by merging per-SST streams directly into one
 /// output SST file. This function performs:
@@ -20,7 +24,7 @@ use std::path::{Path, PathBuf};
 ///
 /// **Important**: `output_dir` must be the CF-specific directory (e.g., `cf_00/`),
 /// not the DB root. Output filenames use canonical SST names:
-/// `{cf_id:06}_{level:02}_{sequence:020}.sst`.
+/// `{cf_id:06}_{level:02}_{generation:020}_{partition:010}.sst`.
 pub fn execute_compaction(
     plan: &CompactionPlan,
     sst_factory: &dyn crate::sst::SstFactory,
@@ -44,14 +48,14 @@ pub fn execute_compaction(
         abort_check,
     )?;
 
-    // --- 2. Prepare output file path ----------------------------------------
-    let output_file = output_filename(plan, output_dir);
-    let output_file_str = output_file.to_str().ok_or(MidgeError::InvalidPath)?;
-
-    // --- 3. K-way merge, deduplicate, and write directly to the output -----
-    let output_written = executor::write_merged_compaction_output_to_sst(
+    // --- 2. K-way merge, deduplicate, and write partitioned outputs --------
+    executor::write_partitioned_compaction_outputs(
         sst_factory,
-        output_file_str,
+        output_dir,
+        plan.cf_id,
+        plan.target_level,
+        plan.output_seq,
+        plan.target_sst_size,
         inputs,
         &budget,
         executor::TombstoneGcPolicy {
@@ -60,17 +64,7 @@ pub fn execute_compaction(
             range_eligible: plan.range_tombstone_gc_eligible,
         },
         abort_check,
-    )?;
-
-    if !output_written {
-        return Ok(Vec::new());
-    }
-
-    Ok(vec![output_file
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("output.sst")
-        .to_owned()])
+    )
 }
 
 /// Construct the output filename for a completed compaction.
@@ -78,11 +72,13 @@ pub fn execute_compaction(
 ///
 /// File names encode CF, target level, and creation sequence with fixed-width
 /// numeric fields so plain directory/object-store listings sort predictably.
-fn output_filename(plan: &CompactionPlan, output_dir: &Path) -> PathBuf {
-    output_dir.join(crate::sst::file_name(
+#[cfg(test)]
+fn output_filename(plan: &CompactionPlan, partition: u32, output_dir: &Path) -> PathBuf {
+    output_dir.join(crate::sst::compaction_file_name(
         plan.cf_id,
         plan.target_level,
         plan.output_seq,
+        partition,
     ))
 }
 
@@ -103,12 +99,12 @@ mod tests {
         let cf_dir = Path::new("cf_00");
 
         // Act
-        let filename = output_filename(&plan, cf_dir);
+        let filename = output_filename(&plan, 0, cf_dir);
 
         // Assert: should be fixed-width and lex-sortable
         assert_eq!(
             filename,
-            PathBuf::from("cf_00/000000_01_00000000000000000042.sst")
+            PathBuf::from("cf_00/000000_01_00000000000000000042_0000000000.sst")
         );
     }
 
@@ -118,13 +114,13 @@ mod tests {
         let plan = CompactionPlan::new(7, 0, 2).with_output_seq(42);
         let output_dir = Path::new("sst");
 
-        let filename = output_filename(&plan, output_dir);
+        let filename = output_filename(&plan, 0, output_dir);
 
         // Act
         // Assert
         assert_eq!(
             filename,
-            PathBuf::from("sst/000007_02_00000000000000000042.sst")
+            PathBuf::from("sst/000007_02_00000000000000000042_0000000000.sst")
         );
     }
 
@@ -135,12 +131,12 @@ mod tests {
         let cf_dir = Path::new("data/cf_00");
 
         // Act
-        let filename = output_filename(&plan, cf_dir);
+        let filename = output_filename(&plan, 0, cf_dir);
 
         // Assert: directory structure preserved
         assert_eq!(
             filename,
-            PathBuf::from("data/cf_00/000000_01_00000000000000000001.sst")
+            PathBuf::from("data/cf_00/000000_01_00000000000000000001_0000000000.sst")
         );
     }
 
@@ -151,12 +147,12 @@ mod tests {
         let cf_dir = Path::new("cf_01");
 
         // Act
-        let filename = output_filename(&plan, cf_dir);
+        let filename = output_filename(&plan, 0, cf_dir);
 
         // Assert: large numbers formatted correctly
         assert_eq!(
             filename,
-            PathBuf::from("cf_01/000000_01_00000000000999999999.sst")
+            PathBuf::from("cf_01/000000_01_00000000000999999999_0000000000.sst")
         );
     }
 
@@ -169,9 +165,9 @@ mod tests {
         let cf_dir = Path::new("cf_00");
 
         // Act
-        let filename_low = output_filename(&plan_low, cf_dir);
-        let filename_mid = output_filename(&plan_mid, cf_dir);
-        let filename_high = output_filename(&plan_high, cf_dir);
+        let filename_low = output_filename(&plan_low, 0, cf_dir);
+        let filename_mid = output_filename(&plan_mid, 0, cf_dir);
+        let filename_high = output_filename(&plan_high, 0, cf_dir);
 
         // Assert: filenames should sort correctly lexicographically
         let mut filenames = vec![
@@ -194,9 +190,9 @@ mod tests {
         filenames.sort();
 
         let expected = vec![
-            "000000_01_00000000000000000001.sst",
-            "000000_01_00000000000000000010.sst",
-            "000000_01_00000000000000000100.sst",
+            "000000_01_00000000000000000001_0000000000.sst",
+            "000000_01_00000000000000000010_0000000000.sst",
+            "000000_01_00000000000000000100_0000000000.sst",
         ];
         assert_eq!(filenames, expected);
     }
@@ -208,12 +204,12 @@ mod tests {
         let cf_dir = Path::new("cf_00");
 
         // Act
-        let filename = output_filename(&plan, cf_dir);
+        let filename = output_filename(&plan, 0, cf_dir);
 
         // Assert
         assert_eq!(
             filename,
-            PathBuf::from("cf_00/000000_01_00000000000000000000.sst")
+            PathBuf::from("cf_00/000000_01_00000000000000000000_0000000000.sst")
         );
     }
 
@@ -240,7 +236,9 @@ mod tests {
         let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let plan = CompactionPlan::new(0, 0, 1).with_output_seq(40);
-        let output_path = temp_dir.path().join(crate::sst::file_name(0, 1, 40));
+        let output_path = temp_dir
+            .path()
+            .join(crate::sst::compaction_file_name(0, 1, 40, 0));
 
         // Act
         let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -393,7 +391,7 @@ mod tests {
         let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
 
         // Assert
-        let output_name = crate::sst::file_name(0, 1, 42);
+        let output_name = crate::sst::compaction_file_name(0, 1, 42, 0);
         assert_eq!(output_names, vec![output_name.clone()]);
 
         let reader = factory.open(std::path::Path::new(&output_name))?;
@@ -434,7 +432,7 @@ mod tests {
         let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
 
         // Assert
-        let output_name = crate::sst::file_name(0, 1, 43);
+        let output_name = crate::sst::compaction_file_name(0, 1, 43, 0);
         assert_eq!(output_names, vec![output_name.clone()]);
 
         let reader = factory.open(std::path::Path::new(&output_name))?;
@@ -720,7 +718,7 @@ mod tests {
         assert!(matches!(error, MidgeError::Corruption(_)));
         assert!(!temp_dir
             .path()
-            .join(crate::sst::file_name(0, 1, 48))
+            .join(crate::sst::compaction_file_name(0, 1, 48, 0))
             .exists());
         Ok(())
     }
@@ -751,7 +749,7 @@ mod tests {
         assert_eq!(std::fs::read(&input_path)?, input_bytes);
         assert!(!temp_dir
             .path()
-            .join(crate::sst::file_name(0, 1, 44))
+            .join(crate::sst::compaction_file_name(0, 1, 44, 0))
             .exists());
         Ok(())
     }
@@ -792,7 +790,7 @@ mod tests {
         assert!(
             !temp_dir
                 .path()
-                .join(crate::sst::file_name(0, 1, 45))
+                .join(crate::sst::compaction_file_name(0, 1, 45, 0))
                 .exists(),
             "aborted output must not survive for a later manifest publication"
         );
@@ -890,6 +888,375 @@ mod tests {
         assert_eq!(outputs.len(), 1);
         let reader = factory.open(Path::new(&outputs[0]))?;
         assert_eq!(reader.get(b"key")?.as_deref(), Some(b"value".as_slice()));
+        Ok(())
+    }
+
+    #[test]
+    fn should_partition_compaction_output_at_soft_target_between_user_keys() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let mut input = factory.create()?;
+        let value = vec![b'v'; 512];
+        for index in 0..96u64 {
+            let key = format!("key-{index:04}");
+            input.add_with_meta(key.as_bytes(), Some(&value), index + 1, 0, None)?;
+        }
+        crate::sst::fs::finish_writer_to_path(input, &temp_dir.path().join("large-input.sst"))?;
+        let mut plan = CompactionPlan::new(7, 0, 1).with_output_seq(52);
+        plan.target_sst_size = 4096;
+        plan.input_files.push("large-input.sst".to_string());
+
+        // Act
+        let outputs = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
+
+        // Assert
+        assert!(
+            outputs.len() >= 4,
+            "input larger than three targets must partition"
+        );
+        let mut observed_keys = Vec::new();
+        for (partition, output) in outputs.iter().enumerate() {
+            assert_eq!(
+                output,
+                &crate::sst::compaction_file_name(
+                    7,
+                    1,
+                    52,
+                    u32::try_from(partition).expect("partition ordinal fits")
+                )
+            );
+            let size = std::fs::metadata(temp_dir.path().join(output))?.len();
+            let allowance =
+                u64::try_from(value.len() + 4096 + 16 * 1024).expect("allowance fits in u64");
+            assert!(
+                size <= u64::try_from(plan.target_sst_size).unwrap_or(u64::MAX) + allowance,
+                "partition {partition} size {size} exceeded target plus entry/block/metadata allowance"
+            );
+            observed_keys.extend(
+                factory
+                    .open(Path::new(output))?
+                    .scan_range_raw_state(None, None)?
+                    .into_iter()
+                    .map(|(key, _)| key.to_vec()),
+            );
+        }
+        assert_eq!(observed_keys.len(), 96);
+        assert!(observed_keys.windows(2).all(|pair| pair[0] < pair[1]));
+        Ok(())
+    }
+
+    #[test]
+    fn should_fragment_range_tombstone_at_compaction_partition_boundaries() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let mut input = factory.create()?;
+        let value = vec![b'v'; 512];
+        for index in 0..96u64 {
+            let key = format!("key-{index:04}");
+            input.add_with_meta(key.as_bytes(), Some(&value), index + 1, 0, None)?;
+        }
+        input.add_range_tombstone(b"key-0010", b"key-0080", 200)?;
+        crate::sst::fs::finish_writer_to_path(input, &temp_dir.path().join("range-input.sst"))?;
+        let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(53);
+        plan.target_sst_size = 4096;
+        plan.input_files.push("range-input.sst".to_string());
+
+        // Act
+        let outputs = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
+        let mut fragments = outputs
+            .iter()
+            .flat_map(|output| {
+                factory
+                    .open(Path::new(output))
+                    .expect("open partition")
+                    .range_tombstones()
+            })
+            .collect::<Vec<_>>();
+        fragments.sort_by(|left, right| left.start.cmp(&right.start));
+
+        // Assert
+        assert!(fragments.len() > 1);
+        assert_eq!(
+            fragments.first().map(|item| item.start.as_slice()),
+            Some(b"key-0010".as_slice())
+        );
+        assert_eq!(
+            fragments.last().map(|item| item.end.as_slice()),
+            Some(b"key-0080".as_slice())
+        );
+        assert!(fragments
+            .windows(2)
+            .all(|pair| pair[0].end == pair[1].start));
+        assert!(fragments.iter().all(|fragment| fragment.seq == 200));
+        Ok(())
+    }
+
+    #[test]
+    fn should_never_split_equal_user_keys_across_compaction_partitions() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let mut input = factory.create()?;
+        let large_value = vec![b'x'; 8 * 1024];
+        input.add_with_meta(b"a", Some(&large_value), 1, 0, None)?;
+        for sequence in 2..=33 {
+            input.add_with_meta(
+                b"same",
+                Some(format!("same-{sequence:02}").as_bytes()),
+                sequence,
+                0,
+                None,
+            )?;
+        }
+        input.add_with_meta(b"z", Some(&large_value), 34, 0, None)?;
+        crate::sst::fs::finish_writer_to_path(input, &temp_dir.path().join("same-key.sst"))?;
+        let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(55);
+        plan.target_sst_size = 4096;
+        plan.input_files.push("same-key.sst".to_string());
+
+        // Act
+        let outputs = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
+        let keys_by_partition: Vec<Vec<Vec<u8>>> = outputs
+            .iter()
+            .map(|output| {
+                factory
+                    .open(Path::new(output))
+                    .expect("open partition")
+                    .scan_range_raw_state(None, None)
+                    .expect("scan partition")
+                    .into_iter()
+                    .map(|(key, _)| key.to_vec())
+                    .collect()
+            })
+            .collect();
+
+        // Assert
+        assert!(outputs.len() >= 2);
+        assert_eq!(
+            keys_by_partition
+                .iter()
+                .filter(|keys| keys.iter().any(|key| key == b"same"))
+                .count(),
+            1
+        );
+        let same_state = outputs
+            .iter()
+            .find_map(|output| {
+                factory
+                    .open(Path::new(output))
+                    .expect("open partition")
+                    .get_state(b"same")
+                    .ok()
+                    .filter(|state| !matches!(state, crate::sst::types::KeyState::Absent))
+            })
+            .expect("latest same-key version");
+        assert!(matches!(
+            same_state,
+            crate::sst::types::KeyState::Value(value, 33, None, 0)
+                if value.as_ref() == b"same-33"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn should_remove_every_completed_partition_when_cancelled_during_rollover() -> MidgeResult<()> {
+        // Arrange
+        struct CountingWriter {
+            inner: Box<dyn crate::sst::traits::DynSstWriter>,
+            finalized: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        impl crate::sst::traits::DynSstWriter for CountingWriter {
+            fn estimated_size_bytes(&self) -> usize {
+                self.inner.estimated_size_bytes()
+            }
+
+            fn add(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()> {
+                self.inner.add(key, value)
+            }
+
+            fn add_with_meta(
+                &mut self,
+                key: &[u8],
+                value: Option<&[u8]>,
+                seq: u64,
+                op_type: u8,
+                expiration: Option<u64>,
+            ) -> MidgeResult<()> {
+                self.inner
+                    .add_with_meta(key, value, seq, op_type, expiration)
+            }
+
+            fn add_sorted_with_meta(
+                &mut self,
+                key: &[u8],
+                value: Option<&[u8]>,
+                seq: u64,
+                op_type: u8,
+                expiration: Option<u64>,
+            ) -> MidgeResult<()> {
+                self.inner
+                    .add_sorted_with_meta(key, value, seq, op_type, expiration)
+            }
+
+            fn add_range_tombstone(
+                &mut self,
+                start: &[u8],
+                end: &[u8],
+                seq: u64,
+            ) -> MidgeResult<()> {
+                self.inner.add_range_tombstone(start, end, seq)
+            }
+
+            fn finish_to_path(self: Box<Self>, path: &Path) -> MidgeResult<()> {
+                let Self { inner, finalized } = *self;
+                inner.finish_to_path(path)?;
+                finalized.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }
+
+            fn finish_bytes(self: Box<Self>) -> MidgeResult<Vec<u8>> {
+                self.inner.finish_bytes()
+            }
+        }
+
+        struct CountingFactory {
+            inner: crate::sst::FsSstFactoryIo,
+            finalized: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        impl crate::sst::traits::SstFactory for CountingFactory {
+            fn create(&self) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
+                Ok(Box::new(CountingWriter {
+                    inner: self.inner.create()?,
+                    finalized: std::sync::Arc::clone(&self.finalized),
+                }))
+            }
+
+            fn create_for_compaction(
+                &self,
+                budget: crate::common::resource_budget::ResourceBudget,
+            ) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
+                Ok(Box::new(CountingWriter {
+                    inner: self.inner.create_for_compaction(budget)?,
+                    finalized: std::sync::Arc::clone(&self.finalized),
+                }))
+            }
+
+            fn open(&self, path: &Path) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+                self.inner.open(path)
+            }
+        }
+
+        let temp_dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let base_factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let mut input = base_factory.create()?;
+        let value = vec![b'v'; 512];
+        for index in 0..96u64 {
+            input.add_with_meta(
+                format!("key-{index:04}").as_bytes(),
+                Some(&value),
+                index + 1,
+                0,
+                None,
+            )?;
+        }
+        let input_path = temp_dir.path().join("cancel-input.sst");
+        crate::sst::fs::finish_writer_to_path(input, &input_path)?;
+        let input_bytes = std::fs::read(&input_path)?;
+        let finalized = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let factory = CountingFactory {
+            inner: base_factory,
+            finalized: std::sync::Arc::clone(&finalized),
+        };
+        let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(56);
+        plan.target_sst_size = 4096;
+        plan.input_files.push("cancel-input.sst".to_string());
+        let abort = || finalized.load(std::sync::atomic::Ordering::SeqCst) > 0;
+
+        // Act
+        let error = execute_compaction(&plan, &factory, temp_dir.path(), Some(&abort))
+            .expect_err("cancellation after first rollover must reject the output set");
+
+        // Assert
+        assert!(matches!(error, MidgeError::Aborted(_)));
+        assert_eq!(finalized.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(std::fs::read(&input_path)?, input_bytes);
+        assert!(
+            (0..4).all(|partition| !temp_dir
+                .path()
+                .join(crate::sst::compaction_file_name(0, 1, 56, partition))
+                .exists()),
+            "cancelled output set must leave no authoritative-looking partition"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn should_keep_recorded_compaction_bytes_within_pool_for_aggregate_inputs_larger_than_pool(
+    ) -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let value = vec![b'x'; 512];
+        let mut input_names = Vec::new();
+        let mut logical_input_bytes = 0usize;
+        for input_index in 0..4u64 {
+            let name = format!("resource-input-{input_index}.sst");
+            let mut writer = factory.create()?;
+            for key_index in 0..96u64 {
+                let key = format!("{input_index}-key-{key_index:04}");
+                logical_input_bytes = logical_input_bytes
+                    .saturating_add(key.len())
+                    .saturating_add(value.len());
+                writer.add_with_meta(
+                    key.as_bytes(),
+                    Some(&value),
+                    input_index.saturating_mul(1000).saturating_add(key_index),
+                    0,
+                    None,
+                )?;
+            }
+            crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join(&name))?;
+            input_names.push(name);
+        }
+        let pool_limit = 128 * 1024;
+        let target_sst_size = 4096;
+        assert!(logical_input_bytes > pool_limit);
+        assert!(logical_input_bytes > target_sst_size);
+        let budget = crate::common::resource_budget::ResourceBudget::new(pool_limit);
+        let inputs =
+            executor::collect_compaction_stream_inputs(&factory, &input_names, &budget, None)?;
+
+        // Act
+        let outputs = executor::write_partitioned_compaction_outputs(
+            &factory,
+            temp_dir.path(),
+            0,
+            1,
+            54,
+            target_sst_size,
+            inputs,
+            &budget,
+            executor::TombstoneGcPolicy {
+                snapshot_horizon: None,
+                point_eligible: false,
+                range_eligible: false,
+            },
+            None,
+        )?;
+
+        // Assert
+        assert!(outputs.len() > 1);
+        assert!(budget.peak() <= pool_limit);
         Ok(())
     }
 }

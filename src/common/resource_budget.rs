@@ -18,6 +18,7 @@ pub struct ResourceBudget {
 }
 
 impl ResourceBudget {
+    #[must_use]
     pub fn new(limit: usize) -> Self {
         Self {
             inner: Arc::new(ResourceBudgetInner {
@@ -64,6 +65,7 @@ impl ResourceBudget {
         }
     }
 
+    #[must_use]
     pub fn limit(&self) -> usize {
         self.inner.limit
     }

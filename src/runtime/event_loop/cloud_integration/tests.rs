@@ -3154,15 +3154,15 @@ fn should_publish_control_intent_before_remote_compaction_sst() -> crate::common
     el.state.set_compaction_enabled(false);
     let input_sst = "ordered-control-input.sst";
     add_valid_manifest_sst_for_test(&mut el, input_sst, 10);
-    let output_sst = "ordered-control-output.sst";
+    let output_sst = crate::sst::compaction_file_name(0, 1, 11, 0);
     let output_bytes = valid_sst_bytes_for_test(b"ordered", b"value", 11);
-    write_test_file(el.state.sst_dir.join(output_sst), &output_bytes);
+    write_test_file(el.state.sst_dir.join(&output_sst), &output_bytes);
 
     let saw_compaction_intent = Arc::new(AtomicBool::new(false));
     let remote_existed_at_intent_publish = Arc::new(AtomicBool::new(false));
     let metadata_backend = Arc::new(ObserveIntentBeforeRemoteSstBackend {
         inner: Arc::new(crate::storage::cloud::MockCloudBackend::new()),
-        remote_sst_path: remote_sst_path_for_test(&el, output_sst),
+        remote_sst_path: remote_sst_path_for_test(&el, &output_sst),
         saw_compaction_intent: Arc::clone(&saw_compaction_intent),
         remote_existed_at_intent_publish: Arc::clone(&remote_existed_at_intent_publish),
     });
@@ -3181,7 +3181,7 @@ fn should_publish_control_intent_before_remote_compaction_sst() -> crate::common
         RuntimeMsg::CompactionComplete {
             request_id,
             input_ssts: vec![input_sst.to_string()],
-            output_ssts: vec![output_sst.to_string()],
+            output_ssts: vec![output_sst.clone()],
             cf_id: 0,
             target_level: 1,
             succeeded: true,
@@ -3216,9 +3216,9 @@ fn should_mirror_cleared_compaction_intent_after_cloud_sst_publish(
     let input_sst = "compaction-input.sst";
     add_valid_manifest_sst_for_test(&mut el, input_sst, 10);
 
-    let output_sst = "compaction-output.sst";
+    let output_sst = crate::sst::compaction_file_name(0, 1, 10, 0);
     let output_bytes = valid_sst_bytes_for_test(b"prune-candidate", b"value", 10);
-    write_test_file(el.state.sst_dir.join(output_sst), &output_bytes);
+    write_test_file(el.state.sst_dir.join(&output_sst), &output_bytes);
 
     let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
         Arc::new(crate::storage::cloud::MockCloudBackend::new()),
@@ -3237,7 +3237,7 @@ fn should_mirror_cleared_compaction_intent_after_cloud_sst_publish(
         RuntimeMsg::CompactionComplete {
             request_id,
             input_ssts: vec![input_sst.to_string()],
-            output_ssts: vec![output_sst.to_string()],
+            output_ssts: vec![output_sst.clone()],
             cf_id: 0,
             target_level: 1,
             succeeded: true,
@@ -3279,9 +3279,9 @@ fn should_unblock_compaction_waiters_when_cleared_compaction_intent_mirror_fails
     let input_sst = "mirror-fail-input.sst";
     add_valid_manifest_sst_for_test(&mut el, input_sst, 10);
 
-    let output_sst = "mirror-fail-output.sst";
+    let output_sst = crate::sst::compaction_file_name(0, 1, 10, 0);
     let output_bytes = valid_sst_bytes_for_test(b"prune-candidate", b"value", 10);
-    write_test_file(el.state.sst_dir.join(output_sst), &output_bytes);
+    write_test_file(el.state.sst_dir.join(&output_sst), &output_bytes);
 
     let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let failing_backend = Arc::new(FailThirdIntentPutBackend::new(metadata_backend));
@@ -3308,7 +3308,7 @@ fn should_unblock_compaction_waiters_when_cleared_compaction_intent_mirror_fails
         RuntimeMsg::CompactionComplete {
             request_id: completion_request_id,
             input_ssts: vec![input_sst.to_string()],
-            output_ssts: vec![output_sst.to_string()],
+            output_ssts: vec![output_sst.clone()],
             cf_id: 0,
             target_level: 1,
             succeeded: true,
@@ -3384,9 +3384,9 @@ fn should_delete_obsolete_cloud_sst_objects_after_compaction() -> crate::common:
         "test setup should create the obsolete provider SST object"
     );
 
-    let output_sst = "cloud-gc-output.sst";
+    let output_sst = crate::sst::compaction_file_name(0, 1, 11, 0);
     let output_bytes = valid_sst_bytes_for_test(b"obsolete", b"new-value", 11);
-    write_test_file(el.state.sst_dir.join(output_sst), &output_bytes);
+    write_test_file(el.state.sst_dir.join(&output_sst), &output_bytes);
 
     el.compaction_actor
         .prepare_for_completion_test(&mut el.state, &[input_sst.to_string()])?;
@@ -3399,7 +3399,7 @@ fn should_delete_obsolete_cloud_sst_objects_after_compaction() -> crate::common:
         RuntimeMsg::CompactionComplete {
             request_id,
             input_ssts: vec![input_sst.to_string()],
-            output_ssts: vec![output_sst.to_string()],
+            output_ssts: vec![output_sst.clone()],
             cf_id: 0,
             target_level: 1,
             succeeded: true,
@@ -3431,7 +3431,7 @@ fn should_delete_obsolete_cloud_sst_objects_after_compaction() -> crate::common:
         "obsolete input SST should be removed from the cloud provider namespace"
     );
     assert!(
-        remote_sst_path_for_test(&el, output_sst).exists(),
+        remote_sst_path_for_test(&el, &output_sst).exists(),
         "compaction output SST should remain in the cloud provider namespace"
     );
 

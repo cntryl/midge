@@ -129,7 +129,7 @@ struct SstRawVersionScan {
     previous_key: Vec<u8>,
     budget: Option<crate::common::resource_budget::ResourceBudget>,
     _bounds_reservation: Option<crate::common::resource_budget::ResourceReservation>,
-    _metadata_reservation: Option<crate::common::resource_budget::ResourceReservation>,
+    metadata_reservation: Option<crate::common::resource_budget::ResourceReservation>,
     block_reservation: Option<crate::common::resource_budget::ResourceReservation>,
     decoder_reservation: Option<crate::common::resource_budget::ResourceReservation>,
     yield_reservation: Option<crate::common::resource_budget::ResourceReservation>,
@@ -179,7 +179,7 @@ impl SstRawVersionScan {
             previous_key: Vec::new(),
             budget,
             _bounds_reservation: bounds_reservation,
-            _metadata_reservation: None,
+            metadata_reservation: None,
             block_reservation: None,
             decoder_reservation: None,
             yield_reservation: None,
@@ -221,7 +221,7 @@ impl SstRawVersionScan {
                     .saturating_add(tombstone.end.capacity())
             },
         );
-        self._metadata_reservation = self
+        self.metadata_reservation = self
             .budget
             .as_ref()
             .map(|budget| {

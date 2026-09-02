@@ -1413,14 +1413,14 @@ fn should_preserve_compacted_input_state_when_compaction_output_hits_no_space() 
 }
 
 #[test]
-fn should_publish_single_output_when_retrying_compaction_after_failed_manifest_restart() {
+fn should_publish_partitioned_outputs_when_retrying_compaction_after_failed_manifest_restart() {
     // Arrange
     let _guard = failpoint_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
-    let engine = open_local_engine(db_path);
+    let engine = open_local_engine_with_target(db_path, 128);
     let cf = default_cf(&engine);
 
     seed_compaction_batches(&engine, &cf, "cmp-recover", 4, 25);
@@ -1458,7 +1458,7 @@ fn should_publish_single_output_when_retrying_compaction_after_failed_manifest_r
 
     shutdown_engine(engine);
 
-    let reopened = open_local_engine(db_path);
+    let reopened = open_local_engine_with_target(db_path, 128);
     let reopened_cf = default_cf(&reopened);
 
     assert_compaction_batches_visible(&reopened, &reopened_cf, "cmp-recover", 4, 25);
@@ -1480,21 +1480,21 @@ fn should_publish_single_output_when_retrying_compaction_after_failed_manifest_r
             .map(|level| level.file_count)
             .sum::<usize>(),
         initial_sst_count,
-        "rollback must retain every authoritative input and remove only the orphan output"
+        "rollback must retain every authoritative input and remove the orphan output set"
     );
 
     reopened
         .compact_all()
         .expect("retry compaction after rollback recovery");
     let retried_layout = reopened.get_storage_layout().expect("retried layout");
-    assert_eq!(
+    assert!(
         retried_layout
             .levels
             .iter()
             .find(|level| level.level == 1)
-            .map_or(0, |level| level.file_count),
-        1,
-        "successful retry must publish exactly one replacement output"
+            .map_or(0, |level| level.file_count)
+            > 1,
+        "successful retry must atomically publish the complete partitioned replacement set"
     );
     assert!(
         retried_layout
@@ -1507,20 +1507,20 @@ fn should_publish_single_output_when_retrying_compaction_after_failed_manifest_r
     );
     shutdown_engine(reopened);
 
-    let final_reopen = open_local_engine(db_path);
+    let final_reopen = open_local_engine_with_target(db_path, 128);
     let final_cf = default_cf(&final_reopen);
     assert_compaction_batches_visible(&final_reopen, &final_cf, "cmp-recover", 4, 25);
     let final_layout = final_reopen
         .get_storage_layout()
         .expect("final recovered layout");
-    assert_eq!(
+    assert!(
         final_layout
             .levels
             .iter()
             .find(|level| level.level == 1)
-            .map_or(0, |level| level.file_count),
-        1,
-        "restart must not resurrect the failed output beside the retry output"
+            .map_or(0, |level| level.file_count)
+            > 1,
+        "restart must preserve only the complete successful partition set"
     );
 }
 
@@ -1532,7 +1532,7 @@ fn should_delete_untracked_compaction_output_on_reopen_when_intent_save_fails() 
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
-    let engine = open_local_engine(db_path);
+    let engine = open_local_engine_with_target(db_path, 128);
     let cf = default_cf(&engine);
     for batch in 0..6 {
         let mut tx = engine
@@ -1572,7 +1572,7 @@ fn should_delete_untracked_compaction_output_on_reopen_when_intent_save_fails() 
     scenario.teardown();
     shutdown_engine(engine);
 
-    let reopened = open_local_engine(db_path);
+    let reopened = open_local_engine_with_target(db_path, 128);
     let metrics = reopened
         .get_runtime_metrics()
         .expect("reopened runtime metrics");
@@ -1599,7 +1599,7 @@ fn should_fence_followup_compaction_when_phase_save_fails_after_authority_switch
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
-    let engine = open_local_engine(db_path);
+    let engine = open_local_engine_with_target(db_path, 128);
     let cf = default_cf(&engine);
     for batch in 0..6 {
         for index in 0..25 {
@@ -1643,10 +1643,18 @@ fn should_fence_followup_compaction_when_phase_save_fails_after_authority_switch
         live_layout
             .levels
             .iter()
-            .any(|level| level.level > 0 && level.file_count > 0),
-        "durable manifest batch must remain authoritative"
+            .any(|level| level.level > 0 && level.file_count > 1),
+        "durable manifest batch must make every partition authoritative"
     );
-    assert!(live_manifest_sst_count < initial_sst_count);
+    assert!(
+        live_layout
+            .levels
+            .iter()
+            .find(|level| level.level == 0)
+            .map_or(0, |level| level.file_count)
+            < initial_sst_count,
+        "authority switch must remove the selected input batch"
+    );
     assert_eq!(
         count_sst_files(db_path),
         live_manifest_sst_count,
@@ -1658,7 +1666,7 @@ fn should_fence_followup_compaction_when_phase_save_fails_after_authority_switch
     assert!(matches!(followup, Err(MidgeError::Fenced(_))));
     shutdown_engine(engine);
 
-    let reopened = open_local_engine(db_path);
+    let reopened = open_local_engine_with_target(db_path, 128);
     let reopened_cf = default_cf(&reopened);
     for batch in 0..6 {
         for index in 0..25 {
@@ -1675,8 +1683,8 @@ fn should_fence_followup_compaction_when_phase_save_fails_after_authority_switch
         recovered_layout
             .levels
             .iter()
-            .any(|level| level.level > 0 && level.file_count > 0),
-        "intent replay must preserve the journal-authoritative compaction"
+            .any(|level| level.level > 0 && level.file_count > 1),
+        "intent replay must preserve the complete journal-authoritative partition set"
     );
     assert_eq!(count_sst_files(db_path), live_manifest_sst_count);
 }
@@ -1689,7 +1697,7 @@ fn should_fence_followup_compaction_when_intent_clear_save_fails() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
-    let engine = open_local_engine(db_path);
+    let engine = open_local_engine_with_target(db_path, 64);
     let cf = default_cf(&engine);
     for batch in 0..4 {
         let key = format!("clear-save-{batch}");
@@ -1713,6 +1721,16 @@ fn should_fence_followup_compaction_when_intent_clear_save_fails() {
     engine
         .compact_all()
         .expect("authoritative compaction completes in degraded state");
+    let live_layout = engine
+        .get_storage_layout()
+        .expect("live partitioned layout");
+    assert!(
+        live_layout
+            .levels
+            .iter()
+            .any(|level| level.level > 0 && level.file_count > 1),
+        "intent-clear failure fixture must publish multiple outputs"
+    );
     fail::remove("midge::compaction::inject_no_space_on_intent_clear");
     scenario.teardown();
     let followup = engine.compact_all();
@@ -1720,7 +1738,7 @@ fn should_fence_followup_compaction_when_intent_clear_save_fails() {
     // Assert
     assert!(matches!(followup, Err(MidgeError::Fenced(_))));
     shutdown_engine(engine);
-    let reopened = open_local_engine(db_path);
+    let reopened = open_local_engine_with_target(db_path, 64);
     let reopened_cf = default_cf(&reopened);
     for batch in 0..4 {
         let key = format!("clear-save-{batch}");
@@ -1803,6 +1821,7 @@ fn should_remove_remote_compaction_orphan_on_reopen_when_manifest_batch_fails() 
         Engine::open(
             OpenOptions::cloud_simulated(db_path, "test-bucket", "compaction-cleanup")
                 .background_compaction(false)
+                .target_sst_size_for_testing(64)
                 .build()
                 .expect("build simulated cloud options"),
         )
@@ -1837,10 +1856,9 @@ fn should_remove_remote_compaction_orphan_on_reopen_when_manifest_batch_fails() 
         .expect("compact_all returns after manifest batch failure");
     fail::remove("midge::manifest::inject_no_space_on_compaction_batch_edit");
     scenario.teardown();
-    assert_eq!(
-        count_sst_files(&cloud_root),
-        initial_remote_count + 1,
-        "failed publication should leave one tracked remote cleanup candidate"
+    assert!(
+        count_sst_files(&cloud_root) > initial_remote_count + 1,
+        "failed publication should leave the complete tracked remote partition set"
     );
     shutdown_engine(engine);
     let reopened = open_cloud();
@@ -1851,6 +1869,85 @@ fn should_remove_remote_compaction_orphan_on_reopen_when_manifest_batch_fails() 
     for batch in 0..4 {
         let key = format!("remote-orphan-{batch}");
         assert_visible(&reopened, &reopened_cf, key.as_bytes(), b"value");
+    }
+}
+
+#[test]
+fn should_rollback_partition_set_after_partial_remote_compaction_upload() {
+    // Arrange
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path();
+    let open_cloud = || {
+        Engine::open(
+            OpenOptions::cloud_simulated(db_path, "test-bucket", "partial-mirror")
+                .background_compaction(false)
+                .target_sst_size_for_testing(64)
+                .build()
+                .expect("build simulated cloud options"),
+        )
+        .expect("open simulated cloud engine")
+    };
+    let engine = open_cloud();
+    let cf = default_cf(&engine);
+    for batch in 0..4 {
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin compaction seed");
+        tx.put(
+            format!("partial-mirror-{batch}").into_bytes(),
+            vec![u8::try_from(batch).expect("batch fits u8"); 512],
+            None,
+        )
+        .expect("put compaction seed");
+        tx.commit(WriteOptions::cloud_async())
+            .expect("commit compaction seed");
+        engine.flush_cf(&cf).expect("flush compaction seed");
+    }
+    let cloud_root = db_path.join("cloud_store");
+    let initial_local = sst_file_names(db_path);
+    let initial_remote = sst_file_names(&cloud_root);
+    assert_eq!(initial_local.len(), 4);
+    assert_eq!(initial_remote.len(), 4);
+    let scenario = fail::FailScenario::setup();
+    fail::cfg("midge::cloud::inject_fail_sst_upload", "1*off->return")
+        .expect("fail the second partition upload");
+
+    // Act
+    engine
+        .compact_all()
+        .expect("compact_all returns after partial remote mirror failure");
+    fail::remove("midge::cloud::inject_fail_sst_upload");
+    scenario.teardown();
+
+    // Assert: the intent tracks the complete output set, but only partition
+    // zero reached remote storage and no output became manifest-authoritative.
+    let failed_local = sst_file_names(db_path);
+    let failed_remote = sst_file_names(&cloud_root);
+    assert!(failed_local.difference(&initial_local).count() > 1);
+    assert_eq!(failed_remote.difference(&initial_remote).count(), 1);
+    assert!(engine
+        .get_storage_layout()
+        .expect("failed live layout")
+        .levels
+        .iter()
+        .all(|level| level.level == 0 || level.file_count == 0));
+    shutdown_engine(engine);
+
+    let reopened = open_cloud();
+    assert_eq!(sst_file_names(db_path), initial_local);
+    assert_eq!(sst_file_names(&cloud_root), initial_remote);
+    let reopened_cf = default_cf(&reopened);
+    for batch in 0..4 {
+        let key = format!("partial-mirror-{batch}");
+        assert_visible(
+            &reopened,
+            &reopened_cf,
+            key.as_bytes(),
+            &vec![u8::try_from(batch).expect("batch fits u8"); 512],
+        );
     }
 }
 
@@ -2010,6 +2107,7 @@ fn should_not_upload_remote_compaction_output_when_intent_save_fails() {
     let engine = Engine::open(
         OpenOptions::cloud_simulated(db_path, "test-bucket", "intent-before-upload")
             .background_compaction(false)
+            .target_sst_size_for_testing(64)
             .build()
             .expect("build simulated cloud options"),
     )
@@ -2162,6 +2260,17 @@ fn open_local_engine(db_path: &Path) -> Engine {
             .expect("build options"),
     )
     .expect("open engine")
+}
+
+fn open_local_engine_with_target(db_path: &Path, target_sst_size: usize) -> Engine {
+    Engine::open(
+        OpenOptions::local(db_path)
+            .background_compaction(false)
+            .target_sst_size_for_testing(target_sst_size)
+            .build()
+            .expect("build small-target options"),
+    )
+    .expect("open small-target engine")
 }
 
 fn shutdown_engine(mut engine: Engine) {

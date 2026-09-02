@@ -206,6 +206,13 @@ impl<T> SstReaderExt for T where T: SstReader + SstStateReader {}
 
 /// Object-safe SST writer for polymorphic use
 pub trait DynSstWriter: Send {
+    /// Best-effort retained/encoded size used for soft compaction rollover.
+    /// Implementations that cannot estimate return zero and therefore retain
+    /// the compatibility single-output behavior.
+    fn estimated_size_bytes(&self) -> usize {
+        0
+    }
+
     /// Add a simple key-value entry
     ///
     /// # Errors
@@ -296,6 +303,16 @@ pub trait SstFactory: Send + Sync {
     ///
     /// Returns an error when the writer cannot be created.
     fn create(&self) -> MidgeResult<Box<dyn DynSstWriter>>;
+
+    /// Create a writer for a budgeted compaction operation.
+    ///
+    /// The default preserves compatibility for non-filesystem factories.
+    fn create_for_compaction(
+        &self,
+        _budget: crate::common::resource_budget::ResourceBudget,
+    ) -> MidgeResult<Box<dyn DynSstWriter>> {
+        self.create()
+    }
 
     /// Open an existing SST file for reading
     ///

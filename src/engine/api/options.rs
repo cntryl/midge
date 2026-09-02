@@ -322,6 +322,11 @@ impl OpenOptions {
         self.compaction.memory_pool_size
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_compaction_target_sst_size_for_test(&mut self, bytes: usize) {
+        self.compaction.target_sst_size = bytes.max(1);
+    }
+
     /// Return the block-cache allocation.
     #[must_use]
     pub fn block_cache_size(&self) -> usize {
@@ -530,6 +535,18 @@ impl OpenOptionsBuilder {
         self
     }
 
+    /// Override the internal compaction output target for deterministic fault tests.
+    ///
+    /// This is intentionally available only with the non-production `failpoints`
+    /// feature and is not a supported tuning surface.
+    #[cfg(feature = "failpoints")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn target_sst_size_for_testing(mut self, bytes: usize) -> Self {
+        self.compaction.target_sst_size = bytes.max(1);
+        self
+    }
+
     /// Set the recovery policy.
     #[must_use]
     pub fn recovery_policy(mut self, policy: RecoveryPolicy) -> Self {
@@ -672,11 +689,7 @@ impl OpenOptionsBuilder {
             (Goal::Throughput, WorkloadProfile::RangeScan) => 128 * 1024,
             (Goal::Throughput, _) => 64 * 1024,
         };
-        let target_sst_size = match self.goal {
-            Goal::Latency => 128 * 1024 * 1024,
-            Goal::Throughput => 512 * 1024 * 1024,
-            Goal::Economy => 256 * 1024 * 1024,
-        };
+        let target_sst_size = self.derive_target_sst_size();
         let wal_buffer_size = match self.goal {
             Goal::Latency => 128 * 1024,
             Goal::Throughput => 1024 * 1024,
@@ -809,6 +822,17 @@ impl OpenOptionsBuilder {
             ))),
             Some(bytes) => Ok(bytes),
             None => Ok(desired_memtable.min(max_memtable_size).max(1)),
+        }
+    }
+
+    fn derive_target_sst_size(&self) -> usize {
+        if self.compaction.target_sst_size != 0 {
+            return self.compaction.target_sst_size;
+        }
+        match self.goal {
+            Goal::Latency => 128 * 1024 * 1024,
+            Goal::Throughput => 512 * 1024 * 1024,
+            Goal::Economy => 256 * 1024 * 1024,
         }
     }
 
