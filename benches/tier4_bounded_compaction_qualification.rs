@@ -182,6 +182,7 @@ fn options(path: &Path) -> MidgeResult<OpenOptions> {
         .workload(WorkloadProfile::WriteHeavy)
         .memory_budget(MemoryBudget::Bytes(4 * 1024 * 1024 * 1024))
         .with_memtable_size_limit(256 * 1024 * 1024)
+        .runtime_response_timeout(Duration::from_hours(4))
         .lease_ttl(Duration::from_secs(2))
         .lease_clock_skew_tolerance(Duration::ZERO)
         .background_compaction(false)
