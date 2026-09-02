@@ -123,6 +123,13 @@ pub struct FileMeta {
     pub smallest_seq: Option<u64>,
     #[serde(default)]
     pub largest_seq: Option<u64>,
+    /// Whether the persisted key bounds include every point key and range
+    /// tombstone endpoint in this SST.
+    ///
+    /// Older manifests omit this additive field and are therefore treated as
+    /// untrusted until a maintenance pass verifies the SST contents.
+    #[serde(default)]
+    pub key_bounds_complete: bool,
     #[serde(default)]
     pub sublevel: u32,
     /// Read counter for compaction prioritization (not persisted)
@@ -471,6 +478,26 @@ mod tests {
         // Assert
         assert_eq!(manifest.files.len(), 1);
         assert_eq!(manifest.files[0].name, sst_name);
+    }
+
+    #[test]
+    fn should_treat_missing_key_bounds_completeness_as_untrusted() {
+        // Arrange
+        let json = r#"{
+            "name":"legacy.sst",
+            "level":1,
+            "size_bytes":10,
+            "cf_id":0,
+            "sst_seq":1,
+            "smallest_key":[97],
+            "largest_key":[122]
+        }"#;
+
+        // Act
+        let file: FileMeta = serde_json::from_str(json).expect("deserialize legacy metadata");
+
+        // Assert
+        assert!(!file.key_bounds_complete);
     }
 
     #[test]

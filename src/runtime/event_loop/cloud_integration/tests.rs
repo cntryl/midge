@@ -1481,6 +1481,7 @@ fn add_valid_manifest_sst_for_test(
         largest_key: Some(b"prune-candidate".to_vec()),
         smallest_seq: Some(max_sequence),
         largest_seq: Some(max_sequence),
+        key_bounds_complete: true,
         ..Default::default()
     });
     write_test_file(remote_sst_path_for_test(el, sst_name), &bytes);
@@ -3090,6 +3091,7 @@ fn should_prune_remote_wal_when_flush_intent_clear_is_mirrored() -> crate::commo
         largest_key: Some(b"prune-candidate".to_vec()),
         smallest_seq: Some(max_sequence),
         largest_seq: Some(max_sequence),
+        key_bounds_complete: true,
     };
 
     let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());

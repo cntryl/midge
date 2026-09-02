@@ -288,6 +288,7 @@ mod tests {
                 largest_key: None,
                 smallest_seq: None,
                 largest_seq: None,
+                key_bounds_complete: false,
             },
         }];
 

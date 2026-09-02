@@ -612,6 +612,7 @@ fn test_manifest_l0_file_meta(name: &str, largest_seq: u64) -> crate::metadata::
         largest_key: Some(format!("key-{largest_seq:04}").into_bytes()),
         smallest_seq: Some(largest_seq),
         largest_seq: Some(largest_seq),
+        key_bounds_complete: true,
         ..Default::default()
     }
 }
@@ -635,6 +636,7 @@ fn write_runtime_l0_sst_for_test(
         largest_key: Some(key.into_bytes()),
         smallest_seq: Some(largest_seq),
         largest_seq: Some(largest_seq),
+        key_bounds_complete: true,
     }
 }
 

@@ -56,6 +56,7 @@ use super::durability::DurabilityCoordinator;
 use super::read_resources::ReadResources;
 use super::read_snapshot::ReadSnapshot;
 use super::snapshot_cache::{CfSnapshotData, PublishedSnapshot, SnapshotCache};
+use super::sst_read_view::SstReadViewCache;
 use super::state::RuntimeState;
 use super::{ResponseRouter, RuntimeMsg, RuntimeResponse};
 use crate::runtime::actors::flush::FlushWorkerResult;
@@ -162,6 +163,8 @@ pub struct EventLoop {
     pub(super) snapshot_cache: Option<Arc<SnapshotCache>>,
     /// Shared SST readers and block cache used by runtime read snapshots.
     pub(super) read_resources: Option<Arc<ReadResources>>,
+    /// Immutable per-CF SST indexes, rebuilt only after manifest mutations.
+    sst_read_views: RefCell<SstReadViewCache>,
 
     /// Shared flag from the lease heartbeat. When `false`, the event loop
     /// rejects new write operations with `MidgeError::Fenced`.
@@ -334,6 +337,7 @@ impl EventLoop {
             write_stall_waiter_queues: HashMap::new(),
             snapshot_cache: None,
             read_resources,
+            sst_read_views: RefCell::new(SstReadViewCache::new()),
             lease_healthy: config.lease_healthy.clone(),
             ddl_authority_ambiguous: false,
             compaction_publication_degraded: false,
@@ -516,14 +520,10 @@ impl EventLoop {
 
         let mut cf_snapshots = std::collections::HashMap::new();
         for (&cf_id, cf_state) in &self.state.column_families {
-            let cf_files: Vec<_> = self
-                .state
-                .manifest
-                .files
-                .iter()
-                .filter(|f| f.cf_id == cf_id)
-                .cloned()
-                .collect();
+            let sst_view = self
+                .sst_read_views
+                .borrow_mut()
+                .view_for(&self.state.manifest, cf_id);
             let sst_path_prefix = self
                 .state
                 .sst_dir
@@ -533,10 +533,11 @@ impl EventLoop {
             cf_snapshots.insert(
                 cf_id,
                 CfSnapshotData {
-                    snapshot: Arc::new(ReadSnapshot::new_with_resources(
+                    snapshot: Arc::new(ReadSnapshot::new_with_view_resources(
+                        cf_id,
                         cf_state.memtable.clone(),
                         cf_state.immutable_memtables.clone(),
-                        cf_files,
+                        sst_view,
                         Arc::clone(&self.state.fs),
                         sst_path_prefix,
                         self.state.is_memory_mode(),
@@ -554,14 +555,15 @@ impl EventLoop {
 
         if let Some(read_resources) = &self.read_resources {
             let live_names = self
-                .state
-                .manifest
-                .files
-                .iter()
-                .map(|file| file.name.clone())
-                .collect();
+                .sst_read_views
+                .borrow_mut()
+                .live_names(&self.state.manifest);
             read_resources.prune_to_live_ssts(&live_names);
         }
+    }
+
+    fn invalidate_sst_read_views(&self) {
+        self.sst_read_views.borrow_mut().invalidate();
     }
 
     fn build_sst_file_meta(
@@ -587,6 +589,7 @@ impl EventLoop {
             largest_key: Some(summary.largest_key),
             smallest_seq: Some(summary.smallest_seq),
             largest_seq: Some(summary.largest_seq),
+            key_bounds_complete: true,
         })
     }
 
@@ -748,6 +751,19 @@ impl EventLoop {
 
         self.next_background_compaction_check =
             Instant::now() + BACKGROUND_COMPACTION_CHECK_INTERVAL;
+        match self.backfill_one_legacy_sst_bounds() {
+            Ok(true) => {
+                // Continue migrating one file per event-loop turn without
+                // making one maintenance invocation proportional to catalog
+                // size.
+                self.next_background_compaction_check =
+                    Instant::now() + STARTUP_CLOUD_MAINTENANCE_DELAY;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(%error, "SST key-bound backfill maintenance failed; retaining conservative read fallback");
+            }
+        }
         if self.state.compaction_enabled()
             && !self
                 .state
@@ -1121,6 +1137,7 @@ impl EventLoop {
         };
         if !self.state.manifest_has_file(sst_name) {
             self.manifest_actor.add_sst(&mut self.state, file_meta)?;
+            self.invalidate_sst_read_views();
         }
         self.state.transition_flush_publication_intent(
             sst_name,

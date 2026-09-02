@@ -36,6 +36,7 @@ impl GcCoordinator {
             let reclaimed = event_loop.gc_actor.take_manifest_reclamation();
             // Stop new transactions from capturing the reclaimed generation
             // before GC samples the pins held by older snapshots.
+            event_loop.invalidate_sst_read_views();
             event_loop.publish_snapshot();
             event_loop.gc_actor.delete_ssts(
                 &mut event_loop.state,

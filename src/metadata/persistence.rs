@@ -1024,6 +1024,7 @@ mod tests {
             largest_key: Some(vec![7, 8, 9]),
             smallest_seq: Some(10),
             largest_seq: Some(20),
+            key_bounds_complete: true,
             sublevel: 0,
             read_count: std::sync::Arc::default(),
         });

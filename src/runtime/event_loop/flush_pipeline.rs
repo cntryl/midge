@@ -421,8 +421,10 @@ impl EventLoop {
             largest_key: delta.file_meta.largest_key.clone(),
             smallest_seq: delta.file_meta.smallest_seq,
             largest_seq: delta.file_meta.largest_seq,
+            key_bounds_complete: delta.file_meta.key_bounds_complete,
             ..Default::default()
         });
+        self.invalidate_sst_read_views();
         self.state.manifest.last_persisted_sequence = self
             .state
             .manifest
@@ -963,6 +965,7 @@ mod tests {
                 largest_key: Some(b"key".to_vec()),
                 smallest_seq: Some(1),
                 largest_seq: Some(1),
+                key_bounds_complete: true,
             },
             next_sst_seq: 2,
             cloud_metadata_published: false,
@@ -1141,6 +1144,7 @@ mod tests {
                         largest_key: Some(b"key".to_vec()),
                         smallest_seq: Some(1),
                         largest_seq: Some(1),
+                        key_bounds_complete: true,
                     },
                     next_sst_seq: 2,
                     cloud_metadata_published: false,

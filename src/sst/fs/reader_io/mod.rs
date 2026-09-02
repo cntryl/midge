@@ -729,6 +729,11 @@ impl SstFileIo {
         Self::open_with_real_fs(path)?.into_streaming_summary()
     }
 
+    /// Stream a summary through the caller's filesystem abstraction.
+    pub(crate) fn summarize_with_fs(path: &str, fs: Arc<dyn Fs>) -> MidgeResult<SstFileSummary> {
+        Self::open(path, fs)?.into_streaming_summary()
+    }
+
     /// Stream a summary while charging reader metadata and decoded blocks to
     /// the compaction publication budget.
     pub(crate) fn summarize_with_real_fs_for_compaction(

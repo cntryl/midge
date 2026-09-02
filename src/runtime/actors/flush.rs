@@ -376,6 +376,7 @@ impl FlushActor {
             largest_key: Some(largest_key),
             smallest_seq: Some(smallest_seq),
             largest_seq: Some(largest_seq),
+            key_bounds_complete: true,
         })
     }
 
@@ -619,6 +620,7 @@ fn runtime_to_manifest_meta(file: &crate::runtime::FileMeta) -> crate::metadata:
         largest_key: file.largest_key.clone(),
         smallest_seq: file.smallest_seq,
         largest_seq: file.largest_seq,
+        key_bounds_complete: file.key_bounds_complete,
         ..Default::default()
     }
 }
@@ -633,6 +635,7 @@ fn same_manifest_file(left: &crate::metadata::FileMeta, right: &crate::metadata:
         && left.largest_key == right.largest_key
         && left.smallest_seq == right.smallest_seq
         && left.largest_seq == right.largest_seq
+        && left.key_bounds_complete == right.key_bounds_complete
 }
 
 fn mirror_control_metadata(

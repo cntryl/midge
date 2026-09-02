@@ -517,6 +517,7 @@ mod tests {
             largest_key,
             smallest_seq: None,
             largest_seq: None,
+            key_bounds_complete: false,
             sublevel: 0,
             read_count: std::sync::Arc::default(),
         }

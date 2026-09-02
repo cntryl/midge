@@ -55,6 +55,7 @@ impl ManifestActor {
                 largest_key: file_meta.largest_key.clone(),
                 smallest_seq: file_meta.smallest_seq,
                 largest_seq: file_meta.largest_seq,
+                key_bounds_complete: file_meta.key_bounds_complete,
                 ..Default::default()
             });
             crate::failpoints::fail_point!(
@@ -78,6 +79,7 @@ impl ManifestActor {
             largest_key: file_meta.largest_key,
             smallest_seq: file_meta.smallest_seq,
             largest_seq: file_meta.largest_seq,
+            key_bounds_complete: file_meta.key_bounds_complete,
             ..Default::default()
         };
 
@@ -118,6 +120,7 @@ impl ManifestActor {
                     largest_key: f.largest_key.clone(),
                     smallest_seq: f.smallest_seq,
                     largest_seq: f.largest_seq,
+                    key_bounds_complete: f.key_bounds_complete,
                     ..Default::default()
                 },
             ));
@@ -148,6 +151,7 @@ impl ManifestActor {
                 largest_key: file_meta.largest_key.clone(),
                 smallest_seq: file_meta.smallest_seq,
                 largest_seq: file_meta.largest_seq,
+                key_bounds_complete: file_meta.key_bounds_complete,
                 ..Default::default()
             };
             state.manifest.add_file(manifest_meta);
@@ -263,6 +267,7 @@ mod tests {
             largest_key: None,
             smallest_seq: None,
             largest_seq: None,
+            key_bounds_complete: false,
         }
     }
 
@@ -327,6 +332,7 @@ mod tests {
             largest_key: None,
             smallest_seq: None,
             largest_seq: None,
+            key_bounds_complete: false,
         };
 
         let mut state = crate::runtime::state::RuntimeState::new(tmp.path().to_path_buf(), false);
@@ -364,6 +370,7 @@ mod tests {
             largest_key: None,
             smallest_seq: None,
             largest_seq: None,
+            key_bounds_complete: false,
         };
 
         let mut state = crate::runtime::state::RuntimeState::new(tmp.path().to_path_buf(), false);
@@ -409,6 +416,7 @@ mod tests {
             largest_key: Some(b"a".to_vec()),
             smallest_seq: Some(10),
             largest_seq: Some(10),
+            key_bounds_complete: true,
         };
 
         assert_eq!(

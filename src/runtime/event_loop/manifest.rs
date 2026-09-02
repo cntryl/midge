@@ -148,6 +148,7 @@ impl ManifestCoordinator {
             |cf_id| RuntimeResponse::ColumnFamilyCreated { request_id, cf_id },
         );
         if should_publish {
+            event_loop.invalidate_sst_read_views();
             event_loop.publish_snapshot();
         }
         event_loop.respond(request_id, resp);
@@ -258,6 +259,7 @@ impl ManifestCoordinator {
         deadline: &crate::common::OperationDeadline,
     ) {
         Self::cancel_column_family_pending_work(event_loop, cf_id);
+        event_loop.invalidate_sst_read_views();
         event_loop.publish_snapshot();
         let _ = event_loop.retry_gc_within(deadline);
 
