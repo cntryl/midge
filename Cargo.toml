@@ -401,3 +401,8 @@ harness = false
 name = "tier4_system_recovery_throughput"
 path = "benches/tier4_system_recovery_throughput.rs"
 harness = false
+
+[[bench]]
+name = "tier4_bounded_compaction_qualification"
+path = "benches/tier4_bounded_compaction_qualification.rs"
+harness = false
