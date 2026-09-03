@@ -59,4 +59,6 @@ pub use runtime_worker::Runtime;
 pub(crate) use runtime_worker::RUNTIME_QUEUE_CAPACITY;
 
 #[cfg(test)]
+mod cardinality_proof_tests;
+#[cfg(test)]
 mod tests;

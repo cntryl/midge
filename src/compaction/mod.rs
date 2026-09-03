@@ -1428,6 +1428,34 @@ mod tests {
     }
 
     #[test]
+    fn should_keep_compaction_work_bounded_across_ten_thousand_targets() -> MidgeResult<()> {
+        // Arrange
+        let fs = std::sync::Arc::new(crate::io::MockFs::new());
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let source_names = vec!["source-level-file.sst".to_string()];
+        let target_names = (0..10_000)
+            .map(|index| format!("target-level-{index:05}.sst"))
+            .collect::<Vec<_>>();
+        let pool_limit = crate::compaction::DEFAULT_COMPACTION_MEMORY_LIMIT;
+        let budget = crate::common::resource_budget::ResourceBudget::new(pool_limit);
+
+        // Act
+        let streams = executor::collect_compaction_stream_inputs(
+            &factory,
+            &source_names,
+            &target_names,
+            1,
+            &budget,
+            None,
+        )?;
+
+        // Assert
+        assert_eq!(streams.merge_head_count(), 2);
+        assert!(budget.peak() <= pool_limit);
+        Ok(())
+    }
+
+    #[test]
     fn should_drain_equal_key_history_across_adjacent_target_files() -> MidgeResult<()> {
         // Arrange
         let temp_dir = tempdir()?;

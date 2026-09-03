@@ -2,6 +2,8 @@
 
 use crate::metadata::{FileMeta, Manifest};
 use std::collections::{BTreeMap, HashMap, HashSet};
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -26,6 +28,23 @@ pub(crate) struct RangeCandidates {
     pub(crate) levels: Vec<LevelRangeCandidates>,
 }
 
+#[cfg(test)]
+impl RangeCandidates {
+    /// Maximum number of SST-backed cursors retained by `SnapshotScan` for
+    /// this candidate set. Fallback files are materialized one at a time and
+    /// therefore do not add a cursor per file.
+    pub(crate) fn active_sst_cursor_count(&self) -> usize {
+        self.l0.len().saturating_add(self.levels.len())
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ReadViewWork {
+    pub(crate) metadata_comparisons: usize,
+    pub(crate) candidate_readers_opened: usize,
+}
+
 /// Immutable per-column-family SST catalog optimized for read selection.
 ///
 /// L0 is kept in newest-first order. Complete-bound files in L1+ are kept in
@@ -38,6 +57,10 @@ pub(crate) struct SstReadView {
     l0: Vec<Arc<FileMeta>>,
     levels: BTreeMap<u32, LevelReadView>,
     pinned_sst_names: Arc<HashSet<String>>,
+    #[cfg(test)]
+    metadata_comparisons: AtomicUsize,
+    #[cfg(test)]
+    candidate_readers_opened: AtomicUsize,
 }
 
 impl SstReadView {
@@ -84,7 +107,16 @@ impl SstReadView {
             l0,
             levels,
             pinned_sst_names: Arc::new(pinned_sst_names),
+            #[cfg(test)]
+            metadata_comparisons: AtomicUsize::new(0),
+            #[cfg(test)]
+            candidate_readers_opened: AtomicUsize::new(0),
         }
+    }
+
+    #[cfg(test)]
+    fn record_metadata_comparison(&self) {
+        self.metadata_comparisons.fetch_add(1, Ordering::Relaxed);
     }
 
     fn build_level(level: u32, files: Vec<Arc<FileMeta>>) -> LevelReadView {
@@ -146,24 +178,33 @@ impl SstReadView {
 
         for level in self.levels.values() {
             let first = level.ordered.partition_point(|file| {
+                #[cfg(test)]
+                self.record_metadata_comparison();
                 file.largest_key.as_deref().expect("indexed largest bound") < key
             });
             candidates.extend(
                 level.ordered[first..]
                     .iter()
                     .take_while(|file| {
+                        #[cfg(test)]
+                        self.record_metadata_comparison();
                         file.smallest_key
                             .as_deref()
                             .expect("indexed smallest bound")
                             <= key
                     })
                     .filter(|file| {
+                        #[cfg(test)]
+                        self.record_metadata_comparison();
                         file.largest_key.as_deref().expect("indexed largest bound") >= key
                     })
                     .cloned(),
             );
             candidates.extend(level.fallback.iter().cloned());
         }
+        #[cfg(test)]
+        self.candidate_readers_opened
+            .fetch_add(candidates.len(), Ordering::Relaxed);
         candidates
     }
 
@@ -178,11 +219,15 @@ impl SstReadView {
             .map(|(&_level_number, level)| {
                 let first = start.map_or(0, |start_key| {
                     level.ordered.partition_point(|file| {
+                        #[cfg(test)]
+                        self.record_metadata_comparison();
                         file.largest_key.as_deref().expect("indexed largest bound") < start_key
                     })
                 });
                 let last = end.map_or(level.ordered.len(), |end_key| {
                     level.ordered.partition_point(|file| {
+                        #[cfg(test)]
+                        self.record_metadata_comparison();
                         file.smallest_key
                             .as_deref()
                             .expect("indexed smallest bound")
@@ -216,6 +261,20 @@ impl SstReadView {
     }
 
     #[cfg(test)]
+    pub(crate) fn reset_test_work(&self) {
+        self.metadata_comparisons.store(0, Ordering::Relaxed);
+        self.candidate_readers_opened.store(0, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_work(&self) -> ReadViewWork {
+        ReadViewWork {
+            metadata_comparisons: self.metadata_comparisons.load(Ordering::Relaxed),
+            candidate_readers_opened: self.candidate_readers_opened.load(Ordering::Relaxed),
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn is_level_quarantined(&self, level: u32) -> bool {
         self.levels.get(&level).is_some_and(|view| {
             view.ordered.is_empty()
@@ -231,6 +290,8 @@ pub(crate) struct SstReadViewCache {
     dirty: bool,
     views: HashMap<crate::types::ColumnFamilyId, Arc<SstReadView>>,
     live_names: Arc<HashSet<String>>,
+    #[cfg(test)]
+    file_meta_clones: usize,
 }
 
 impl Default for SstReadViewCache {
@@ -245,6 +306,8 @@ impl SstReadViewCache {
             dirty: true,
             views: HashMap::new(),
             live_names: Arc::new(HashSet::new()),
+            #[cfg(test)]
+            file_meta_clones: 0,
         }
     }
 
@@ -258,6 +321,10 @@ impl SstReadViewCache {
             let mut live_names = HashSet::with_capacity(manifest.files.len());
             for file in &manifest.files {
                 live_names.insert(file.name.clone());
+                #[cfg(test)]
+                {
+                    self.file_meta_clones = self.file_meta_clones.saturating_add(1);
+                }
                 grouped
                     .entry(file.cf_id)
                     .or_default()
@@ -289,11 +356,23 @@ impl SstReadViewCache {
         self.refresh_if_dirty(manifest);
         Arc::clone(&self.live_names)
     }
+
+    #[cfg(test)]
+    pub(crate) fn reset_file_meta_clone_count(&mut self) {
+        self.file_meta_clones = 0;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn file_meta_clone_count(&self) -> usize {
+        self.file_meta_clones
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SYNTHETIC_LOWER_LEVELS: usize = 3;
 
     fn complete_file(level: u32, index: usize) -> FileMeta {
         let start = u64::try_from(index).expect("test index").to_be_bytes();
@@ -307,6 +386,26 @@ mod tests {
             largest_key: Some(end.to_vec()),
             key_bounds_complete: true,
             ..Default::default()
+        }
+    }
+
+    fn synthetic_manifest(interval_count: usize, hard_l0_ceiling: usize) -> Manifest {
+        let mut manifest = Manifest::default();
+        manifest.files.extend((0..interval_count).map(|index| {
+            let level = u32::try_from(index % SYNTHETIC_LOWER_LEVELS + 1).expect("synthetic level");
+            complete_file(level, index / SYNTHETIC_LOWER_LEVELS)
+        }));
+        manifest
+            .files
+            .extend((0..hard_l0_ceiling).map(|index| complete_file(0, index)));
+        manifest
+    }
+
+    fn ceil_log2(value: usize) -> usize {
+        if value <= 1 {
+            0
+        } else {
+            usize::try_from(usize::BITS - (value - 1).leading_zeros()).expect("log2 fits usize")
         }
     }
 
@@ -379,5 +478,75 @@ mod tests {
         // Assert
         assert!(Arc::ptr_eq(&first, &second));
         assert!(!Arc::ptr_eq(&second, &third));
+    }
+
+    #[test]
+    fn should_prove_read_work_bounds_across_synthetic_manifest_cardinalities() {
+        let hard_l0_ceiling =
+            crate::runtime::RuntimeState::new("/tmp/midge-read-view-proof".into(), true)
+                .l0_hard_ceiling();
+        for interval_count in [1, 1_000, 100_000, 1_000_000] {
+            // Arrange
+            let manifest = synthetic_manifest(interval_count, hard_l0_ceiling);
+            let mut cache = SstReadViewCache::new();
+            let published_view = cache.view_for(&manifest, 7);
+            assert_eq!(
+                cache.file_meta_clone_count(),
+                interval_count + hard_l0_ceiling
+            );
+            cache.reset_file_meta_clone_count();
+            let query_index = interval_count
+                .checked_div(SYNTHETIC_LOWER_LEVELS)
+                .unwrap_or(0)
+                .saturating_sub(1)
+                / 2;
+            let query_key = u64::try_from(query_index)
+                .expect("synthetic query index")
+                .to_be_bytes();
+
+            // Act
+            let first_snapshot_view = cache.view_for(&manifest, 7);
+            let second_snapshot_view = cache.view_for(&manifest, 7);
+            first_snapshot_view.reset_test_work();
+            let point_candidates = first_snapshot_view.point_candidates(&query_key);
+            let point_work = first_snapshot_view.test_work();
+            first_snapshot_view.reset_test_work();
+            let range_candidates = first_snapshot_view.range_candidates(None, None);
+
+            // Assert
+            assert!(Arc::ptr_eq(&published_view, &first_snapshot_view));
+            assert!(Arc::ptr_eq(&first_snapshot_view, &second_snapshot_view));
+            assert_eq!(
+                cache.file_meta_clone_count(),
+                0,
+                "snapshot capture cloned FileMeta at {interval_count} intervals"
+            );
+            assert_eq!(
+                first_snapshot_view.file_count(),
+                interval_count + hard_l0_ceiling
+            );
+            let configured_levels = SYNTHETIC_LOWER_LEVELS + 1;
+            let point_reader_bound = hard_l0_ceiling + 2 * configured_levels.saturating_sub(1);
+            assert_eq!(point_work.candidate_readers_opened, point_candidates.len());
+            assert!(
+                point_work.candidate_readers_opened <= point_reader_bound,
+                "point read selected {} readers above bound {point_reader_bound} at {interval_count} intervals",
+                point_work.candidate_readers_opened
+            );
+            let largest_level = interval_count.div_ceil(SYNTHETIC_LOWER_LEVELS);
+            let populated_levels = interval_count.min(SYNTHETIC_LOWER_LEVELS);
+            let comparison_bound = populated_levels * (ceil_log2(largest_level).saturating_add(6));
+            assert!(
+                point_work.metadata_comparisons <= comparison_bound,
+                "point read used {} comparisons above logarithmic bound {comparison_bound} at {interval_count} intervals",
+                point_work.metadata_comparisons
+            );
+            let range_cursor_bound = hard_l0_ceiling + configured_levels.saturating_sub(1);
+            assert!(
+                range_candidates.active_sst_cursor_count() <= range_cursor_bound,
+                "range retained {} SST cursors above bound {range_cursor_bound} at {interval_count} intervals",
+                range_candidates.active_sst_cursor_count()
+            );
+        }
     }
 }
