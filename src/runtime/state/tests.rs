@@ -967,6 +967,193 @@ fn should_roll_back_output_durable_compaction_when_manifest_is_still_prepublicat
     assert!(!state.sst_dir.join(&output_name).exists());
 }
 
+#[derive(Debug, Clone, Copy)]
+enum CompactionPublicationCrashPoint {
+    OutputDurability,
+    IntentDurability,
+    PartialMirror,
+    CompleteMirror,
+    ManifestSwitch,
+    SnapshotPublication,
+    InputGc,
+    IntentClear,
+}
+
+impl CompactionPublicationCrashPoint {
+    const ALL: [Self; 8] = [
+        Self::OutputDurability,
+        Self::IntentDurability,
+        Self::PartialMirror,
+        Self::CompleteMirror,
+        Self::ManifestSwitch,
+        Self::SnapshotPublication,
+        Self::InputGc,
+        Self::IntentClear,
+    ];
+
+    fn manifest_published(self) -> bool {
+        matches!(
+            self,
+            Self::ManifestSwitch | Self::SnapshotPublication | Self::InputGc | Self::IntentClear
+        )
+    }
+
+    fn intent_phase(self) -> Option<PublicationPhase> {
+        match self {
+            Self::OutputDurability | Self::IntentClear => None,
+            Self::IntentDurability | Self::PartialMirror | Self::CompleteMirror => {
+                Some(PublicationPhase::OutputDurable)
+            }
+            Self::ManifestSwitch => Some(PublicationPhase::OutputDurable),
+            Self::SnapshotPublication | Self::InputGc => Some(PublicationPhase::ManifestPublished),
+        }
+    }
+
+    fn mirrored_output_count(self) -> usize {
+        match self {
+            Self::OutputDurability | Self::IntentDurability => 0,
+            Self::PartialMirror => 1,
+            Self::CompleteMirror
+            | Self::ManifestSwitch
+            | Self::SnapshotPublication
+            | Self::InputGc
+            | Self::IntentClear => 2,
+        }
+    }
+
+    fn inputs_garbage_collected(self) -> bool {
+        matches!(self, Self::InputGc | Self::IntentClear)
+    }
+}
+
+fn persist_proof_mirror(
+    state: &RuntimeState,
+    mirror_dir: &std::path::Path,
+    outputs: &[crate::runtime::FileMeta],
+    output_count: usize,
+) -> HashSet<String> {
+    std::fs::create_dir_all(mirror_dir).expect("create proof mirror directory");
+    for output in outputs.iter().take(output_count) {
+        std::fs::copy(
+            state.sst_dir.join(&output.name),
+            mirror_dir.join(&output.name),
+        )
+        .expect("persist proof mirrored output");
+    }
+    std::fs::read_dir(mirror_dir)
+        .expect("read proof mirror directory")
+        .map(|entry| {
+            entry
+                .expect("read proof mirror entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect()
+}
+
+#[test]
+fn should_replay_every_compaction_publication_crash_point_to_complete_authority() {
+    for crash_point in CompactionPublicationCrashPoint::ALL {
+        // Arrange
+        let temp_dir = tempfile::tempdir().expect("create publication crash directory");
+        let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
+        let input_names = [
+            crate::sst::file_name(0, 0, 1),
+            crate::sst::file_name(0, 0, 2),
+        ];
+        let output_names = [
+            crate::sst::compaction_file_name(0, 1, 3, 0),
+            crate::sst::compaction_file_name(0, 1, 3, 1),
+        ];
+        let inputs = [
+            write_valid_sst_for_recovery_test(&state, &input_names[0], 0, b"a", 1),
+            write_valid_sst_for_recovery_test(&state, &input_names[1], 0, b"z", 2),
+        ];
+        let outputs = [
+            write_valid_sst_for_recovery_test(&state, &output_names[0], 1, b"a", 3),
+            write_valid_sst_for_recovery_test(&state, &output_names[1], 1, b"z", 3),
+        ];
+        let old_authority = inputs
+            .iter()
+            .map(|file| file.name.clone())
+            .collect::<HashSet<_>>();
+        let new_authority = outputs
+            .iter()
+            .map(|file| file.name.clone())
+            .collect::<HashSet<_>>();
+        state.manifest.files = if crash_point.manifest_published() {
+            outputs
+                .iter()
+                .map(manifest_meta_for_recovery_test)
+                .collect()
+        } else {
+            inputs.iter().map(manifest_meta_for_recovery_test).collect()
+        };
+        crate::metadata::ManifestPersistence::save(temp_dir.path(), &state.manifest)
+            .expect("persist crash-point manifest");
+        if let Some(phase) = crash_point.intent_phase() {
+            state
+                .append_intent(crate::runtime::IntentLogEntry::CompactionPublish {
+                    phase,
+                    cf_id: 0,
+                    removed: input_names.to_vec(),
+                    added: outputs.to_vec(),
+                })
+                .expect("persist crash-point intent");
+        }
+        if crash_point.inputs_garbage_collected() {
+            for input_name in &input_names {
+                std::fs::remove_file(state.sst_dir.join(input_name))
+                    .expect("remove garbage-collected proof input");
+            }
+        }
+        let mirror_dir = temp_dir.path().join("proof-cloud-mirror");
+        let mirrored_output_count = crash_point.mirrored_output_count();
+        let mirrored_names =
+            persist_proof_mirror(&state, &mirror_dir, &outputs, mirrored_output_count);
+        assert_eq!(mirrored_names.len(), mirrored_output_count);
+        assert!(mirrored_names.is_subset(&new_authority));
+        drop(state);
+
+        // Act
+        let mut reopened = RuntimeState::try_new(
+            temp_dir.path().to_path_buf(),
+            false,
+            crate::config::RecoveryPolicy::Strict,
+        )
+        .expect("reopen crash-point state");
+        reopened
+            .replay_intent_log()
+            .expect("replay crash-point intent");
+        let recovered_authority = reopened
+            .manifest
+            .files
+            .iter()
+            .map(|file| file.name.clone())
+            .collect::<HashSet<_>>();
+
+        // Assert
+        let expected = if crash_point.manifest_published() {
+            &new_authority
+        } else {
+            &old_authority
+        };
+        assert_eq!(
+            &recovered_authority, expected,
+            "partial authority recovered after {crash_point:?}"
+        );
+        assert!(recovered_authority == old_authority || recovered_authority == new_authority);
+        assert_eq!(
+            std::fs::read_dir(&mirror_dir)
+                .expect("re-read proof mirror directory")
+                .count(),
+            mirrored_output_count,
+            "object mirroring alone changed authority at {crash_point:?}"
+        );
+    }
+}
+
 #[test]
 fn should_retain_inputs_for_output_durable_remove_only_compaction_after_crash() {
     // Arrange
