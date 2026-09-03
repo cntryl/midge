@@ -361,8 +361,8 @@ fn should_cleanup_input_ssts_after_compaction_manifest_publishes() {
         engine.flush_cf(&cf).expect("flush batch");
     }
 
-    // Act: Compact twice, verifying cleanup between rounds
-    // Round 1: Merges 5 L0 files â†’ 1 L1 file, deletes input L0s
+    // Act: Compact twice, verifying cleanup between rounds.
+    // Round 1 walks bounded batches until all five L0 inputs are replaced.
     engine.compact_all().expect("first compaction");
 
     // Add new batch (creates new L0)
@@ -378,8 +378,8 @@ fn should_cleanup_input_ssts_after_compaction_manifest_publishes() {
         .expect("commit new batch");
     engine.flush_cf(&cf).expect("flush new batch");
 
-    // Round 2: If old L0 files still existed, they'd be compacted with new L0
-    // But since they were deleted, only new L0 + L1 are compacted
+    // Round 2 merges the new L0 with any overlapping L1 output. If the old L0
+    // files still existed, they would incorrectly re-enter this work.
     engine.compact_all().expect("second compaction");
 
     // Assert: All data (500 old + 100 new) is queryable

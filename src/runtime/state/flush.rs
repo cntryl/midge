@@ -186,6 +186,66 @@ impl RuntimeState {
         self.total_memtable_bytes >= self.memtable_flush_threshold.saturating_mul(2)
     }
 
+    /// Maximum number of published or reserved L0 generations for one column
+    /// family. The extra slot is the active memtable generation.
+    pub(crate) fn l0_hard_ceiling(&self) -> usize {
+        self.l0_compaction_trigger
+            .saturating_add(self.max_immutable_memtables)
+            .saturating_add(1)
+    }
+
+    /// Published L0 files plus every in-memory generation that can still
+    /// publish one L0 file. `max` is conservative if test or recovery state is
+    /// temporarily between the paired immutable indexes.
+    pub(crate) fn l0_slot_usage(&self, cf_id: crate::types::ColumnFamilyId) -> usize {
+        let published = self
+            .manifest
+            .files
+            .iter()
+            .filter(|file| file.cf_id == cf_id && file.level == 0)
+            .count();
+        let Some(cf) = self.column_families.get(&cf_id) else {
+            return published;
+        };
+        let immutable = cf.immutable_memtables.len().max(cf.immutable_flushes.len());
+        published
+            .saturating_add(immutable)
+            .saturating_add(usize::from(cf.memtable.size_bytes() > 0))
+    }
+
+    pub(crate) fn has_critical_l0_debt(&self, cf_id: crate::types::ColumnFamilyId) -> bool {
+        self.l0_slot_usage(cf_id) >= self.l0_hard_ceiling()
+    }
+
+    pub(crate) fn is_above_l0_hard_ceiling(&self, cf_id: crate::types::ColumnFamilyId) -> bool {
+        self.l0_slot_usage(cf_id) > self.l0_hard_ceiling()
+    }
+
+    pub(crate) fn is_any_cf_above_l0_hard_ceiling(&self) -> bool {
+        self.column_families
+            .keys()
+            .any(|cf_id| self.is_above_l0_hard_ceiling(*cf_id))
+    }
+
+    /// Return true when admitting another transaction would require an L0 slot
+    /// that does not exist. A below-threshold active memtable may continue to
+    /// consume its already-reserved slot; the transaction that crosses the
+    /// flush threshold is accepted, then the next transaction stalls.
+    pub(crate) fn l0_write_slot_unavailable(&self, cf_id: crate::types::ColumnFamilyId) -> bool {
+        let usage = self.l0_slot_usage(cf_id);
+        let ceiling = self.l0_hard_ceiling();
+        if usage < ceiling {
+            return false;
+        }
+        if usage > ceiling {
+            return true;
+        }
+        self.column_families.get(&cf_id).is_none_or(|cf| {
+            cf.memtable.size_bytes() == 0
+                || cf.memtable.size_bytes() >= self.memtable_flush_trigger_bytes()
+        })
+    }
+
     pub(crate) fn recompute_total_memtable_bytes(&mut self) {
         self.total_memtable_bytes = self
             .column_families
@@ -209,6 +269,9 @@ impl RuntimeState {
         if self.write_pressure.stalled {
             return true;
         }
+        if self.l0_write_slot_unavailable(cf_id) {
+            return true;
+        }
         if self.is_immutable_memtable_queue_full(cf_id) {
             return true;
         }
@@ -219,9 +282,9 @@ impl RuntimeState {
         if self.write_pressure.stalled || self.is_total_memtable_hard_limit_exceeded() {
             return true;
         }
-        self.column_families
-            .keys()
-            .any(|cf_id| self.is_immutable_memtable_queue_full(*cf_id))
+        self.column_families.keys().any(|cf_id| {
+            self.l0_write_slot_unavailable(*cf_id) || self.is_immutable_memtable_queue_full(*cf_id)
+        })
     }
 
     /// Compatibility wrapper for write-admission callsites.

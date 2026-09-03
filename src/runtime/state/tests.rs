@@ -364,6 +364,73 @@ fn should_hard_stall_when_immutable_memtable_queue_is_full() {
 }
 
 #[test]
+fn should_derive_hard_l0_ceiling_from_capacity() {
+    // Arrange
+    let mut state = RuntimeState::new(isolated_test_db_path(), false);
+    state.l0_compaction_trigger = 3;
+    state.max_immutable_memtables = 2;
+    state
+        .manifest
+        .files
+        .extend((0..4).map(|index| crate::metadata::FileMeta {
+            name: format!("l0-{index}.sst"),
+            level: 0,
+            cf_id: 0,
+            ..Default::default()
+        }));
+    let immutable = Arc::new(SkipListMemtable::new());
+    state
+        .get_cf_mut(0)
+        .expect("default cf")
+        .immutable_memtables
+        .push(immutable);
+
+    // Act
+    let ceiling = state.l0_hard_ceiling();
+    let usage = state.l0_slot_usage(0);
+
+    // Assert
+    assert_eq!(ceiling, 6);
+    assert_eq!(usage, 5);
+    assert!(!state.has_critical_l0_debt(0));
+}
+
+#[test]
+fn should_stall_next_write_after_active_generation_reserves_last_l0_slot() {
+    // Arrange
+    let mut state = RuntimeState::new(isolated_test_db_path(), false);
+    state.l0_compaction_trigger = 1;
+    state.max_immutable_memtables = 1;
+    state.memtable_flush_threshold = 1;
+    state
+        .manifest
+        .files
+        .extend((0..2).map(|index| crate::metadata::FileMeta {
+            name: format!("l0-{index}.sst"),
+            level: 0,
+            cf_id: 0,
+            ..Default::default()
+        }));
+    assert_eq!(state.l0_hard_ceiling(), 3);
+    assert!(!state.l0_write_slot_unavailable(0));
+    state
+        .get_cf(0)
+        .expect("default cf")
+        .memtable
+        .put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)
+        .expect("reserve active L0 generation");
+
+    // Act
+    let usage = state.l0_slot_usage(0);
+
+    // Assert
+    assert_eq!(usage, state.l0_hard_ceiling());
+    assert!(state.l0_write_slot_unavailable(0));
+    assert!(state.should_hard_stall_writes(0));
+    assert!(state.has_any_hard_write_stall());
+}
+
+#[test]
 fn should_hard_stall_when_total_memtable_memory_exceeds_limit() {
     // Arrange
     let mut state = RuntimeState::new(isolated_test_db_path(), false);

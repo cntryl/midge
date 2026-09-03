@@ -1518,3 +1518,72 @@ fn should_report_stall_hint_for_transaction_actual_column_family() -> MidgeResul
     }
     Ok(())
 }
+
+#[test]
+fn should_stall_before_wal_when_transaction_would_exceed_hard_l0_ceiling() -> MidgeResult<()> {
+    // Arrange
+    let mut fixture = EventLoopFixture::batched()?;
+    fixture.event_loop.state.l0_compaction_trigger = 1;
+    fixture.event_loop.state.max_immutable_memtables = 1;
+    fixture.event_loop.state.memtable_flush_threshold = 1;
+    fixture
+        .event_loop
+        .state
+        .manifest
+        .files
+        .extend((0..2).map(|index| crate::metadata::FileMeta {
+            name: format!("l0-{index}.sst"),
+            level: 0,
+            cf_id: 0,
+            ..Default::default()
+        }));
+    let first_rx = fixture.register(902);
+    let second_rx = fixture.register(903);
+    let (_tx, empty_rx) = crossbeam::channel::unbounded();
+    fixture.event_loop.apply_transaction_with_coalescing(
+        &empty_rx,
+        txn_request(
+            902,
+            vec![put_op(0, b"fills-last-slot", b"value")],
+            Some(DurabilityPolicy::Batched),
+        ),
+        1,
+    );
+    assert!(matches!(
+        recv_response(&first_rx),
+        RuntimeResponse::TransactionApplied { .. }
+    ));
+    let sequence_after_first = fixture.event_loop.state.sequence;
+    let wal_appends_after_first = fixture.event_loop.wal_actor.append_calls();
+    assert_eq!(
+        fixture.event_loop.state.l0_slot_usage(0),
+        fixture.event_loop.state.l0_hard_ceiling()
+    );
+
+    // Act
+    fixture.event_loop.apply_transaction_with_coalescing(
+        &empty_rx,
+        txn_request(
+            903,
+            vec![put_op(0, b"must-stall", b"value")],
+            Some(DurabilityPolicy::Batched),
+        ),
+        1,
+    );
+
+    // Assert
+    assert!(matches!(
+        recv_response(&second_rx),
+        RuntimeResponse::Error {
+            error: MidgeError::WriteStall(_),
+            ..
+        }
+    ));
+    assert_eq!(fixture.event_loop.state.sequence, sequence_after_first);
+    assert_eq!(
+        fixture.event_loop.wal_actor.append_calls(),
+        wal_appends_after_first,
+        "a stalled transaction must not mutate the WAL"
+    );
+    Ok(())
+}

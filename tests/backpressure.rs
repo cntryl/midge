@@ -132,6 +132,71 @@ fn should_auto_flush_when_explicit_flush_threshold_is_lower_than_size_limit() {
 }
 
 #[test]
+fn should_bound_published_l0_when_background_compaction_is_disabled() {
+    // Arrange
+    let temp_dir = TempDir::new().expect("temp dir");
+    let options = OpenOptions::local(temp_dir.path())
+        .background_compaction(false)
+        .build()
+        .expect("build options");
+    // The immutable queue limit is internal and fixed at ten; the final slot
+    // is reserved for the active memtable generation.
+    let hard_ceiling = options.l0_compaction_trigger() + 10 + 1;
+    let engine = Engine::open(options).expect("open engine");
+    let cf = engine
+        .create_column_family("bounded-l0")
+        .expect("create cf");
+    let mut accepted = 0_usize;
+    let mut stall = None;
+
+    // Act
+    for generation in 0..hard_ceiling + 2 {
+        let result = commit_buffered_put(
+            &engine,
+            cf.id(),
+            format!("generation-{generation:02}").into_bytes(),
+            b"value".to_vec(),
+        );
+        match result {
+            Ok(()) => {
+                accepted += 1;
+                engine.flush_cf(&cf).expect("flush reserved L0 generation");
+            }
+            Err(MidgeError::WriteStall(message)) => {
+                stall = Some(message);
+                break;
+            }
+            Err(error) => panic!("unexpected write result: {error}"),
+        }
+    }
+
+    // Assert
+    assert_eq!(accepted, hard_ceiling);
+    assert!(stall.is_some(), "the first unreserved write must stall");
+    let layout = engine.get_storage_layout().expect("stalled layout");
+    let l0_files = layout
+        .levels
+        .iter()
+        .find(|level| level.level == 0)
+        .map_or(0, |level| level.file_count);
+    assert_eq!(l0_files, hard_ceiling);
+
+    engine.compact_all().expect("manual compaction clears debt");
+    let drained_layout = engine.get_storage_layout().expect("drained layout");
+    assert_eq!(
+        drained_layout
+            .levels
+            .iter()
+            .find(|level| level.level == 0)
+            .map_or(0, |level| level.file_count),
+        0,
+        "compact_all must not return while L0 debt remains"
+    );
+    commit_buffered_put(&engine, cf.id(), b"after-drain".to_vec(), b"value".to_vec())
+        .expect("write admission resumes after every pressure source clears");
+}
+
+#[test]
 fn should_return_write_stall_when_memory_budget_exceeded() {
     // Arrange
     // Memory mode doesn't have meaningful backpressure (everything stays in memory)
@@ -423,14 +488,15 @@ fn should_handle_concurrent_writes_with_consistent_backpressure() {
             per_thread.push((writes, stalls));
         }
 
-        // Backpressure is "consistent" only if it clears again after the
-        // concurrent burst instead of leaving the runtime permanently
-        // stalled for later writers. Memory mode has no meaningful
-        // backpressure (everything stays resident), so there is nothing to
-        // clear there.
+        // Background compaction is disabled by this shared fixture. Drain the
+        // bounded L0 debt explicitly, then require every pressure predicate to
+        // clear. Memory mode has no persistent storage debt.
         let stall_cleared = if mode == "memory" {
             true
         } else {
+            engine
+                .compact_all()
+                .expect("manual compaction clears concurrent-burst debt");
             engine
                 .wait_for_write_stall_clear(cf.id(), Duration::from_secs(5))
                 .expect("wait for stall clear after concurrent burst")

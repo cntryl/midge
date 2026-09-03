@@ -46,6 +46,11 @@ fn should_handle_small_memory_budget_without_unexpected_errors() {
         }
 
         engine.flush_cf(&cf).expect("final flush");
+        if !mode.eq("memory") {
+            engine
+                .compact_all()
+                .expect("clear L0 debt after sustained memory pressure");
+        }
         let metrics = engine.get_runtime_metrics().expect("runtime metrics");
 
         // Assert
@@ -60,7 +65,7 @@ fn should_handle_small_memory_budget_without_unexpected_errors() {
             assert_ne!(
                 metrics.health,
                 EngineHealth::WriteStalled,
-                "Engine should not remain write-stalled after final flush in mode {mode}"
+                "Engine should not remain write-stalled after compaction clears debt in mode {mode}"
             );
         }
     });

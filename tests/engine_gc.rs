@@ -82,8 +82,8 @@ fn should_collect_orphaned_sst_files_after_compaction() {
             .filter(|input_name| db_path.join("sst").join(input_name).exists())
             .count();
         assert_eq!(
-            retained_input_count, 1,
-            "the configured three-file batch must reclaim exactly three physical inputs"
+            retained_input_count, 0,
+            "compact_all must reclaim every physical L0 input across bounded batches"
         );
         assert!(
             input_names

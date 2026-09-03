@@ -365,7 +365,12 @@ fn should_not_starve_foreground_writes_given_background_spill_activity() {
     for_each_storage_mode(durable_storage_modes(), |mode, opts| {
         // Arrange
         let mut opts = opts;
-        opts = opts.memory_budget(64 * 1024); // small budget forces real spill activity
+        // A small budget forces real spill activity.
+        opts = opts.memory_budget(64 * 1024);
+        // This is a sustained-ingest progress test. With the hard L0 ceiling,
+        // background compaction must be enabled so admitted generations can
+        // retire and make room for later foreground writes.
+        opts.enable_compaction = true;
 
         let engine = std::sync::Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("test").expect("create cf");

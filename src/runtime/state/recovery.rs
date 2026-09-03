@@ -23,8 +23,17 @@ impl RuntimeState {
             .filter_map(|file| file.largest_seq.or(file.smallest_seq))
             .max()
             .unwrap_or(0);
-
         manifest.last_persisted_sequence.max(file_max_sequence)
+    }
+
+    pub(super) fn manifest_compaction_output_generation_floor(manifest: &Manifest) -> u64 {
+        manifest
+            .files
+            .iter()
+            .filter_map(|file| crate::sst::parse_compaction_file_name(&file.name))
+            .map(|(_, _, generation, _)| generation)
+            .max()
+            .unwrap_or(0)
     }
 
     /// Create new runtime state with the given database path.
@@ -84,12 +93,16 @@ impl RuntimeState {
                     })
             })
             .fold(0_usize, usize::saturating_add);
+        let recovered_compaction_output_generation =
+            Self::manifest_compaction_output_generation_floor(&manifest)
+                .max(wal_recovery.recovered_sequence);
 
         let mut state = Self {
             db_path,
             wal_dir,
             sst_dir,
             sequence: wal_recovery.recovered_sequence,
+            compaction_output_generation: recovered_compaction_output_generation,
             next_txn_id: 0,
             pending_txn_min_seq: None,
             pending_txn_start_time: None,
@@ -132,6 +145,8 @@ impl RuntimeState {
             cloud_eventual_flush_segment_gap: crate::runtime::CloudRuntimePolicy::default()
                 .eventual_flush_segment_gap,
             max_immutable_memtables: 10, // Hard limit on immutable memtable queue
+            l0_compaction_trigger: crate::compaction::LeveledCompactionConfig::default()
+                .l0_file_count_threshold,
             next_flush_id: 1,
             writer_epoch: 0,
             flush_metrics: super::FlushRuntimeMetrics::default(),

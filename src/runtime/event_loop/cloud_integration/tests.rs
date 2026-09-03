@@ -3333,12 +3333,20 @@ fn should_unblock_compaction_waiters_when_cleared_compaction_intent_mirror_fails
         }
         other => panic!("expected mirror failure response, got {other:?}"),
     }
-    assert!(matches!(
-        waiter_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("pending compaction waiter response"),
-        RuntimeResponse::Ok { .. }
-    ));
+    match waiter_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("pending compaction waiter response")
+    {
+        RuntimeResponse::Error { error, .. } => {
+            assert!(
+                error
+                    .to_string()
+                    .contains("failed to mirror cleared compaction publication intent"),
+                "unexpected pending compaction waiter error: {error}"
+            );
+        }
+        other => panic!("expected mirror failure response, got {other:?}"),
+    }
     assert_eq!(
         el.state
             .active_compactions

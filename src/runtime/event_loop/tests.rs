@@ -20,6 +20,34 @@ fn should_dispatch_compact_all_before_background_cloud_progress() {
 }
 
 #[test]
+fn should_wait_for_active_compaction_before_declaring_debt_clear() -> crate::common::MidgeResult<()>
+{
+    // Arrange
+    let mut event_loop = create_test_event_loop()?;
+    event_loop
+        .compaction_actor
+        .prepare_for_completion_test(&mut event_loop.state, &["active-input.sst".to_string()])?;
+    let request_id = 93;
+    let response = event_loop.router.register(request_id, "CompactAll");
+
+    // Act
+    super::compaction::CompactionCoordinator::compact_all(&mut event_loop, request_id);
+
+    // Assert
+    assert!(response.try_recv().is_err());
+    assert_eq!(
+        event_loop
+            .state
+            .pending_compaction_waits
+            .lock()
+            .get(&request_id)
+            .map(String::as_str),
+        Some("CompactAll")
+    );
+    Ok(())
+}
+
+#[test]
 fn should_drain_flush_completion_after_non_mutating_request() -> crate::common::MidgeResult<()> {
     // Arrange
     let mut event_loop = create_test_local_event_loop()?;
@@ -797,6 +825,42 @@ fn should_schedule_compaction_from_existing_l0_files_during_startup_maintenance(
 }
 
 #[test]
+fn should_schedule_recovery_compaction_above_hard_l0_ceiling_when_background_disabled() {
+    // Arrange
+    let mut event_loop = create_test_local_event_loop().expect("create local event loop");
+    let (worker_tx, _worker_rx) = crossbeam::channel::unbounded();
+    event_loop.worker_msg_tx = Some(worker_tx);
+    event_loop.state.set_compaction_enabled(false);
+    event_loop.state.l0_compaction_trigger = 2;
+    event_loop.state.max_immutable_memtables = 0;
+    event_loop.compaction_actor.set_l0_file_count_threshold(2);
+    assert_eq!(event_loop.state.l0_hard_ceiling(), 3);
+    for sequence in 1..=4 {
+        let name = format!("over-ceiling-{sequence}.sst");
+        let _ = write_runtime_l0_sst_for_test(&event_loop, &name, sequence);
+        event_loop
+            .state
+            .manifest
+            .files
+            .push(test_manifest_l0_file_meta(&name, sequence));
+    }
+
+    // Act
+    event_loop.schedule_background_compaction_on_startup();
+
+    // Assert
+    assert_eq!(
+        event_loop
+            .state
+            .active_compactions
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "startup must pay down an over-ceiling recovered layout even when ordinary background work is disabled"
+    );
+    assert!(!event_loop.state.compaction.compacting_ssts.is_empty());
+}
+
+#[test]
 fn should_not_schedule_auto_compaction_when_compaction_disabled() -> crate::common::MidgeResult<()>
 {
     // Arrange
@@ -943,6 +1007,10 @@ fn should_apply_l0_compaction_trigger_from_runtime_config() {
         event_loop.compaction_actor.l0_file_count_threshold(),
         2,
         "runtime config should update the compaction actor L0 file-count trigger"
+    );
+    assert_eq!(
+        event_loop.state.l0_compaction_trigger, 2,
+        "runtime config should update the admission ceiling from the same trigger"
     );
 }
 
@@ -1350,7 +1418,9 @@ fn should_assign_compaction_output_sequence_when_plan_has_zero() {
     event_loop.state.sequence = 41;
     let plan = crate::compaction::CompactionPlan::new(3, 0, 1);
 
-    let assigned = event_loop.assign_compaction_output_sequence(plan);
+    let assigned = event_loop
+        .assign_compaction_output_sequence(plan)
+        .expect("assign output sequence");
 
     // Act
     // Assert
@@ -1368,7 +1438,9 @@ fn should_preserve_existing_compaction_output_sequence() {
     event_loop.state.sequence = 41;
     let plan = crate::compaction::CompactionPlan::new(3, 0, 1).with_output_seq(99);
 
-    let assigned = event_loop.assign_compaction_output_sequence(plan);
+    let assigned = event_loop
+        .assign_compaction_output_sequence(plan)
+        .expect("preserve output sequence");
 
     // Act
     // Assert
@@ -1377,6 +1449,35 @@ fn should_preserve_existing_compaction_output_sequence() {
         event_loop.state.sequence, 41,
         "preassigned compaction output sequences must not consume another sequence"
     );
+}
+
+#[test]
+fn should_advance_compaction_output_sequence_past_recovered_manifest_name() {
+    // Arrange
+    let mut event_loop = create_test_event_loop().expect("create event loop");
+    event_loop.state.sequence = 408;
+    event_loop
+        .state
+        .manifest
+        .files
+        .push(crate::metadata::FileMeta {
+            name: crate::sst::compaction_file_name(0, 1, 409, 0),
+            level: 1,
+            cf_id: 0,
+            ..Default::default()
+        });
+    event_loop.state.restore_sequence_floor_from_manifest();
+    assert_eq!(event_loop.state.manifest.last_persisted_sequence, 0);
+    let plan = crate::compaction::CompactionPlan::new(0, 0, 1);
+
+    // Act
+    let assigned = event_loop
+        .assign_compaction_output_sequence(plan)
+        .expect("assign collision-free output sequence");
+
+    // Assert
+    assert_eq!(assigned.output_seq, 410);
+    assert_eq!(event_loop.state.sequence, 410);
 }
 
 mod compaction_scheduling {
@@ -2194,6 +2295,15 @@ fn should_reject_compaction_when_target_span_changes_before_publication(
         .prepare_for_completion_test(&mut event_loop.state, &captured_inputs)?;
     let request_id = 8_160;
     let response_rx = event_loop.router.register(request_id, "TestRequest");
+    let compact_all_request_id = 8_163;
+    let compact_all_rx = event_loop
+        .router
+        .register(compact_all_request_id, "CompactAll");
+    event_loop
+        .state
+        .pending_compaction_waits
+        .lock()
+        .insert(compact_all_request_id, "CompactAll".to_string());
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
 
     // Act
@@ -2220,11 +2330,89 @@ fn should_reject_compaction_when_target_span_changes_before_publication(
         ),
         other => panic!("expected rejected output set, got {other:?}"),
     }
+    assert!(matches!(
+        compact_all_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("compact_all publication failure response"),
+        RuntimeResponse::Error {
+            error: crate::common::MidgeError::Fenced(message),
+            ..
+        } if message.contains("target-level span changed")
+    ));
     assert!(event_loop.state.manifest_has_file(&source_name));
     assert!(event_loop.state.manifest_has_file(&selected_target));
     assert!(event_loop.state.manifest_has_file(&concurrent_target));
     assert!(!event_loop.state.manifest_has_file(&output_name));
     assert!(event_loop.state.intent_log.is_empty());
+    Ok(())
+}
+
+#[test]
+fn should_return_exact_compaction_failure_to_compact_all_waiter() -> crate::common::MidgeResult<()>
+{
+    // Arrange
+    let mut event_loop = create_test_local_event_loop()?;
+    let input_name = crate::sst::file_name(0, 0, 1);
+    event_loop
+        .state
+        .manifest
+        .files
+        .push(crate::metadata::FileMeta {
+            name: input_name.clone(),
+            level: 0,
+            cf_id: 0,
+            smallest_key: Some(b"a".to_vec()),
+            largest_key: Some(b"z".to_vec()),
+            ..Default::default()
+        });
+    event_loop
+        .compaction_actor
+        .prepare_for_completion_test(&mut event_loop.state, std::slice::from_ref(&input_name))?;
+    let compact_all_request_id = 8_161;
+    let response_rx = event_loop
+        .router
+        .register(compact_all_request_id, "CompactAll");
+    event_loop
+        .state
+        .pending_compaction_waits
+        .lock()
+        .insert(compact_all_request_id, "CompactAll".to_string());
+    event_loop.compaction_actor.set_worker_error_for_test(
+        crate::common::MidgeError::ResourceLimit("compaction pool exhausted".to_string()),
+    );
+    let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
+
+    // Act
+    event_loop.handle_runtime_msg(
+        RuntimeMsg::CompactionComplete {
+            request_id: 8_162,
+            input_ssts: vec![input_name.clone()],
+            output_ssts: Vec::new(),
+            cf_id: 0,
+            target_level: 1,
+            succeeded: false,
+        },
+        &msg_rx,
+    );
+
+    // Assert
+    assert!(matches!(
+        response_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("compact_all failure response"),
+        RuntimeResponse::Error {
+            error: crate::common::MidgeError::ResourceLimit(message),
+            ..
+        } if message == "compaction pool exhausted"
+    ));
+    assert!(event_loop.state.manifest_has_file(&input_name));
+    assert_eq!(
+        event_loop
+            .state
+            .active_compactions
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
     Ok(())
 }
 

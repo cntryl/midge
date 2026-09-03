@@ -2,7 +2,7 @@
 
 use cntryl_midge::{
     Bytes, CloudProviderConfig, CloudStorageLocation, CloudStorageTopology, ColumnFamilyHandle,
-    Engine, MemoryBudget, OpenOptions, TransactionMode, WriteOptions,
+    Engine, MemoryBudget, MidgeError, OpenOptions, TransactionMode, WriteOptions,
 };
 use std::fmt::Write as _;
 use std::net::{SocketAddr, TcpStream};
@@ -205,15 +205,13 @@ fn should_rollback_partition_set_after_partial_sqrzl_compaction_upload() {
     fail::cfg("midge::cloud::inject_fail_sst_upload", "1*off->return")
         .expect("fail the second partition upload");
 
-    // Act: a compaction that would produce multiple output partitions has its
-    // second partition's remote upload fail mid-flight.
+    // Act: fail the second output partition's remote upload.
     let compaction_result = engine.compact_all();
     fail::remove("midge::cloud::inject_fail_sst_upload");
     scenario.teardown();
 
-    // Assert: no partial replacement set became manifest-authoritative, even
-    // though the compaction attempt observed a partial remote mirror.
-    assert!(compaction_result.is_ok());
+    // Assert: surface the exact error and retain the old authority.
+    assert_exact_sst_upload_failure(compaction_result);
     let failed_layout = engine
         .get_storage_layout()
         .expect("post-failure storage layout");
@@ -229,9 +227,8 @@ fn should_rollback_partition_set_after_partial_sqrzl_compaction_upload() {
         .shutdown(Duration::from_secs(10))
         .expect("shutdown after partial-mirror failure");
 
-    // A Sqrzl-backed reopen after local cache loss proves the remote store
-    // itself was never left with a partially mirrored replacement set as
-    // authoritative: recovery must land back on the pre-compaction layout.
+    // Cache-loss recovery must land on the pre-compaction remote authority,
+    // never a partially mirrored replacement set.
     std::fs::remove_dir_all(&cache_path).expect("delete local cache");
     let mut reopened = open_engine();
     let reopened_cf = default_cf(&reopened);
@@ -286,6 +283,13 @@ fn sqrzl_compaction_failpoint_test_lock() -> std::sync::MutexGuard<'static, ()> 
         .get_or_init(|| std::sync::Mutex::new(()))
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(feature = "failpoints")]
+fn assert_exact_sst_upload_failure(result: Result<(), MidgeError>) {
+    let error = result.expect_err("partial mirror must fail compact_all");
+    assert!(matches!(error, MidgeError::Internal(message)
+        if message == "failpoint: cloud SST upload failed"));
 }
 
 #[cfg(feature = "failpoints")]
