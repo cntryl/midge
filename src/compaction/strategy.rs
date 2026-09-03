@@ -14,7 +14,15 @@ use crate::metadata::FileMeta;
 /// A compaction plan describing which SSTs to read and which level to promote into.
 #[derive(Debug, Clone)]
 pub struct CompactionPlan {
+    /// Complete manifest replacement set. This remains the vector persisted in
+    /// compaction intent and manifest edits.
     pub input_files: Vec<String>,
+    /// Source-level files selected by the picker. L0 files are independent
+    /// merge streams; inner-level files are consumed by one chained cursor.
+    pub source_files: Vec<String>,
+    /// Complete, key-ordered overlap span in the target level. Execution walks
+    /// this span with one chained cursor instead of one merge head per file.
+    pub target_files: Vec<String>,
     pub source_level: u32,
     pub target_level: u32,
     pub cf_id: u32,
@@ -43,6 +51,8 @@ impl CompactionPlan {
     pub fn new(cf_id: u32, source_level: u32, target_level: u32) -> Self {
         Self {
             input_files: Vec::new(),
+            source_files: Vec::new(),
+            target_files: Vec::new(),
             source_level,
             target_level,
             cf_id,
@@ -89,9 +99,8 @@ impl CompactionPlan {
 pub struct LeveledCompactionConfig {
     pub l0_compaction_threshold: u64,
     pub l0_file_count_threshold: usize,
-    /// Hard safety bound for the complete source-plus-target overlap closure.
-    /// Planning fails closed instead of truncating target overlaps, because a
-    /// partial closure can publish overlapping files or resurrect old values.
+    /// Hard safety bound for simultaneously active source merge streams. The
+    /// complete target overlap span is walked sequentially and is not capped.
     pub max_compaction_input_files: usize,
     pub level_multiplier: u64,
     pub l1_target_size: u64,
@@ -258,13 +267,16 @@ impl Compactor {
         l0_batch.push(oldest);
         l0_batch.extend(l0_sorted.into_iter().take(batch_size.saturating_sub(1)));
 
-        let (input_files, _, _) =
-            self.bounded_overlap_closure(&mut l0_batch, &levels[1], cf_id, 0, 1)?;
+        let (source_files, target_files) =
+            self.complete_overlap_span(&l0_batch, &levels[1], cf_id, 0, 1)?;
+        let input_files = combined_input_files(&source_files, &target_files);
         let (point_tombstone_gc_eligible, range_tombstone_gc_eligible) =
             Self::tombstone_gc_eligibility(levels, &input_files)?;
 
         Ok(Some(CompactionPlan {
             input_files,
+            source_files,
+            target_files,
             source_level: 0,
             target_level: 1,
             cf_id,
@@ -298,18 +310,21 @@ impl Compactor {
                 .then_with(|| left.name.cmp(&right.name))
         });
         source_files.truncate(self.config.l0_file_count_threshold.max(1));
-        let (input_files, _, _) = self.bounded_overlap_closure(
-            &mut source_files,
+        let (source_files, target_files) = self.complete_overlap_span(
+            &source_files,
             &levels[level + 1],
             cf_id,
             u32::try_from(level).expect("level index fits in u32"),
             u32::try_from(level + 1).expect("level index fits in u32"),
         )?;
+        let input_files = combined_input_files(&source_files, &target_files);
         let (point_tombstone_gc_eligible, range_tombstone_gc_eligible) =
             Self::tombstone_gc_eligibility(levels, &input_files)?;
 
         Ok(Some(CompactionPlan {
             input_files,
+            source_files,
+            target_files,
             source_level: u32::try_from(level).expect("level index fits in u32"),
             target_level: u32::try_from(level + 1).expect("level index fits in u32"),
             cf_id,
@@ -362,51 +377,134 @@ impl Compactor {
         Ok((point_tombstone_gc_eligible, range_tombstone_gc_eligible))
     }
 
-    fn validate_input_fan_in(
+    fn validate_source_fan_in(
         &self,
-        input_files: &[String],
+        source_files: &[String],
         cf_id: u32,
         source_level: u32,
         target_level: u32,
     ) -> MidgeResult<()> {
         let limit = self.config.max_compaction_input_files.max(1);
-        if input_files.len() > limit {
+        let active_streams = if source_level == 0 {
+            source_files.len()
+        } else {
+            usize::from(!source_files.is_empty())
+        };
+        if active_streams > limit {
             return Err(MidgeError::ResourceLimit(format!(
-                "compaction L{source_level}->L{target_level} for column family {cf_id} requires {} source/overlap inputs, exceeding the configured safety limit {limit}; refusing to truncate the target overlap closure",
-                input_files.len()
+                "compaction L{source_level}->L{target_level} for column family {cf_id} requires {active_streams} simultaneous source streams, exceeding the configured safety limit {limit}",
             )));
         }
         Ok(())
     }
 
-    fn bounded_overlap_closure(
+    fn complete_overlap_span(
         &self,
-        source_files: &mut Vec<&FileMeta>,
+        source_files: &[&FileMeta],
         target_files: &[&FileMeta],
         cf_id: u32,
         source_level: u32,
         target_level: u32,
-    ) -> MidgeResult<(Vec<String>, Vec<u8>, Vec<u8>)> {
-        loop {
-            let (min_key, max_key) = smallest_and_largest(source_files.as_slice())?;
-            let mut input_files = source_files
-                .iter()
-                .map(|file| file.name.clone())
-                .collect::<Vec<_>>();
-            input_files.extend(overlap_with_range(target_files, &min_key, &max_key)?);
-            dedupe_sort(&mut input_files);
+    ) -> MidgeResult<(Vec<String>, Vec<String>)> {
+        let (min_key, max_key) = smallest_and_largest(source_files)?;
+        let mut source_names = source_files
+            .iter()
+            .map(|file| file.name.clone())
+            .collect::<Vec<_>>();
+        source_names.dedup();
+        self.validate_source_fan_in(&source_names, cf_id, source_level, target_level)?;
 
-            match self.validate_input_fan_in(&input_files, cf_id, source_level, target_level) {
-                Ok(()) => return Ok((input_files, min_key, max_key)),
-                Err(MidgeError::ResourceLimit(_)) if source_files.len() > 1 => {
-                    // Decompose the source range and recompute the *complete*
-                    // target closure. Target files are never truncated.
-                    source_files.pop();
-                }
-                Err(error) => return Err(error),
+        let mut ordered_targets = target_files.to_vec();
+        ordered_targets.sort_by(|left, right| {
+            left.smallest_key
+                .cmp(&right.smallest_key)
+                .then_with(|| left.largest_key.cmp(&right.largest_key))
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        let first_overlap = ordered_targets.iter().position(|file| {
+            file.smallest_key.as_deref().is_some_and(|smallest| {
+                smallest <= max_key.as_slice()
+                    && file
+                        .largest_key
+                        .as_deref()
+                        .is_some_and(|largest| largest >= min_key.as_slice())
+            })
+        });
+        let Some(mut first) = first_overlap else {
+            return Ok((source_names, Vec::new()));
+        };
+        let mut last = ordered_targets
+            .iter()
+            .rposition(|file| {
+                file.smallest_key.as_deref().is_some_and(|smallest| {
+                    smallest <= max_key.as_slice()
+                        && file
+                            .largest_key
+                            .as_deref()
+                            .is_some_and(|largest| largest >= min_key.as_slice())
+                })
+            })
+            .expect("first target overlap has a last overlap");
+        let mut closure_min = min_key;
+        let mut closure_max = max_key;
+        for file in &ordered_targets[first..=last] {
+            if let Some(smallest) = &file.smallest_key {
+                closure_min = closure_min.min(smallest.clone());
+            }
+            if let Some(largest) = &file.largest_key {
+                closure_max = closure_max.max(largest.clone());
             }
         }
+        loop {
+            let previous_overlaps = first.checked_sub(1).is_some_and(|index| {
+                ordered_targets[index]
+                    .largest_key
+                    .as_deref()
+                    .is_some_and(|largest| largest >= closure_min.as_slice())
+            });
+            if previous_overlaps {
+                first -= 1;
+                if let Some(smallest) = &ordered_targets[first].smallest_key {
+                    closure_min = closure_min.min(smallest.clone());
+                }
+                if let Some(largest) = &ordered_targets[first].largest_key {
+                    closure_max = closure_max.max(largest.clone());
+                }
+                continue;
+            }
+            let next_overlaps = ordered_targets
+                .get(last.saturating_add(1))
+                .is_some_and(|file| {
+                    file.smallest_key
+                        .as_deref()
+                        .is_some_and(|smallest| smallest <= closure_max.as_slice())
+                });
+            if next_overlaps {
+                last += 1;
+                if let Some(largest) = &ordered_targets[last].largest_key {
+                    closure_max = closure_max.max(largest.clone());
+                }
+                if let Some(smallest) = &ordered_targets[last].smallest_key {
+                    closure_min = closure_min.min(smallest.clone());
+                }
+                continue;
+            }
+            break;
+        }
+        let target_names = ordered_targets[first..=last]
+            .iter()
+            .map(|file| file.name.clone())
+            .collect();
+        Ok((source_names, target_names))
     }
+}
+
+fn combined_input_files(source_files: &[String], target_files: &[String]) -> Vec<String> {
+    let mut inputs = Vec::with_capacity(source_files.len().saturating_add(target_files.len()));
+    inputs.extend_from_slice(source_files);
+    inputs.extend_from_slice(target_files);
+    dedupe_sort(&mut inputs);
+    inputs
 }
 
 /// Extract smallest and largest user keys across a slice of `FileMeta`.
@@ -440,37 +538,6 @@ fn smallest_and_largest(files: &[&FileMeta]) -> MidgeResult<(Vec<u8>, Vec<u8>)> 
         .max()
         .ok_or_else(|| MidgeError::Internal("compaction range has no input files".to_string()))?;
     Ok((smallest, largest))
-}
-
-/// Return names of files whose key-ranges overlap [`min_key`, `max_key`].
-fn overlap_with_range(
-    files: &[&FileMeta],
-    min_key: &[u8],
-    max_key: &[u8],
-) -> MidgeResult<Vec<String>> {
-    files
-        .iter()
-        .map(|f| {
-            let fs = f.smallest_key.as_ref().ok_or_else(|| {
-                MidgeError::Corruption(format!(
-                    "SST '{}' is missing its smallest-key metadata",
-                    f.name
-                ))
-            })?;
-            let fl = f.largest_key.as_ref().ok_or_else(|| {
-                MidgeError::Corruption(format!(
-                    "SST '{}' is missing its largest-key metadata",
-                    f.name
-                ))
-            })?;
-            if fs.as_slice() <= max_key && fl.as_slice() >= min_key {
-                Ok(Some(f.name.clone()))
-            } else {
-                Ok(None)
-            }
-        })
-        .filter_map(std::result::Result::transpose)
-        .collect()
 }
 
 fn file_age_key(file: &FileMeta) -> (u64, &str) {
@@ -1331,7 +1398,7 @@ mod tests {
     }
 
     #[test]
-    fn should_shrink_source_range_to_fit_complete_target_overlap_within_safety_limit() {
+    fn should_keep_bounded_source_range_independent_of_complete_target_span() {
         // Arrange
         let compactor = Compactor::with_config(LeveledCompactionConfig {
             l1_target_size: 1,
@@ -1366,20 +1433,13 @@ mod tests {
             .expect("decomposed inner-level plan");
 
         // Assert
-        assert_eq!(
-            plan.input_files,
-            vec![
-                "source-0.sst".to_string(),
-                "source-1.sst".to_string(),
-                "target-0.sst".to_string(),
-                "target-1.sst".to_string(),
-            ]
-        );
-        assert!(plan.input_files.len() <= compactor.config.max_compaction_input_files);
+        assert_eq!(plan.source_files.len(), 4);
+        assert_eq!(plan.target_files.len(), 4);
+        assert_eq!(plan.input_files.len(), 8);
     }
 
     #[test]
-    fn should_fail_closed_when_complete_target_overlap_exceeds_input_safety_limit() {
+    fn should_plan_complete_target_overlap_beyond_source_stream_limit() {
         // Arrange
         let compactor = Compactor::with_config(LeveledCompactionConfig {
             l1_target_size: 1,
@@ -1407,13 +1467,105 @@ mod tests {
         }
 
         // Act
-        let error = compactor
+        let plan = compactor
             .pick_compaction(&files, 0)
-            .expect_err("complete overlap closure exceeds finite fan-in budget");
+            .expect("plan complete overlap")
+            .expect("eligible plan");
 
         // Assert
-        assert!(matches!(error, MidgeError::ResourceLimit(_)));
-        assert!(error.to_string().contains("refusing to truncate"));
+        assert_eq!(plan.source_files, vec!["broad-source.sst".to_string()]);
+        assert_eq!(plan.target_files.len(), 8);
+        assert_eq!(plan.input_files.len(), 9);
+    }
+
+    #[test]
+    fn should_close_target_span_across_equal_adjacent_boundaries() {
+        // Arrange
+        let compactor = Compactor::with_config(LeveledCompactionConfig {
+            l1_target_size: 1,
+            ..LeveledCompactionConfig::default()
+        });
+        let files = vec![
+            make_file(
+                "source.sst",
+                0,
+                1,
+                2,
+                Some(b"b".to_vec()),
+                Some(b"c".to_vec()),
+            ),
+            make_file(
+                "target-left.sst",
+                0,
+                2,
+                1,
+                Some(b"a".to_vec()),
+                Some(b"m".to_vec()),
+            ),
+            make_file(
+                "target-right.sst",
+                0,
+                2,
+                1,
+                Some(b"m".to_vec()),
+                Some(b"z".to_vec()),
+            ),
+        ];
+
+        // Act
+        let plan = compactor
+            .pick_compaction(&files, 0)
+            .expect("plan equality closure")
+            .expect("eligible plan");
+
+        // Assert
+        assert_eq!(
+            plan.target_files,
+            vec![
+                "target-left.sst".to_string(),
+                "target-right.sst".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn should_plan_ten_thousand_target_files_with_one_source_stream() {
+        // Arrange
+        let compactor = Compactor::with_config(LeveledCompactionConfig {
+            l1_target_size: 1,
+            max_compaction_input_files: 1,
+            ..LeveledCompactionConfig::default()
+        });
+        let mut files = vec![make_file(
+            "broad-source.sst",
+            0,
+            1,
+            2,
+            Some(vec![0; 4]),
+            Some(vec![u8::MAX; 4]),
+        )];
+        for index in 0..10_000_u32 {
+            let key = index.to_be_bytes().to_vec();
+            files.push(make_file(
+                &format!("target-{index:05}.sst"),
+                0,
+                2,
+                1,
+                Some(key.clone()),
+                Some(key),
+            ));
+        }
+
+        // Act
+        let plan = compactor
+            .pick_compaction(&files, 0)
+            .expect("plan cardinality-independent overlap")
+            .expect("eligible plan");
+
+        // Assert
+        assert_eq!(plan.source_files.len(), 1);
+        assert_eq!(plan.target_files.len(), 10_000);
+        assert_eq!(plan.input_files.len(), 10_001);
     }
 
     #[test]

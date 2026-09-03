@@ -40,11 +40,25 @@ pub fn execute_compaction(
         return Ok(Vec::new());
     }
 
-    // --- 1. Open one lazy raw-version cursor per input SST ------------------
+    // --- 1. Open bounded source streams and chained level spans ------------
     let budget = crate::common::resource_budget::ResourceBudget::new(plan.compaction_memory_limit);
+    let (source_files, target_files, source_level) =
+        if plan.source_files.is_empty() && plan.target_files.is_empty() {
+            // Compatibility for focused executor tests and explicitly constructed
+            // internal plans: treat the legacy combined vector as source streams.
+            (plan.input_files.as_slice(), &[][..], 0)
+        } else {
+            (
+                plan.source_files.as_slice(),
+                plan.target_files.as_slice(),
+                plan.source_level,
+            )
+        };
     let inputs = executor::collect_compaction_stream_inputs(
         sst_factory,
-        &plan.input_files,
+        source_files,
+        target_files,
+        source_level,
         &budget,
         abort_check,
     )?;
@@ -1358,6 +1372,193 @@ mod tests {
     }
 
     #[test]
+    fn should_compact_sixty_five_target_files_with_two_merge_heads() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let source_name = "source.sst".to_string();
+        let mut source = factory.create()?;
+        source.add_with_meta(b"key-032", Some(b"new-source"), 1000, 0, None)?;
+        crate::sst::fs::finish_writer_to_path(source, &temp_dir.path().join(&source_name))?;
+        let mut target_names = Vec::new();
+        for index in 0..65u64 {
+            let name = format!("target-{index:03}.sst");
+            let mut writer = factory.create()?;
+            writer.add_with_meta(
+                format!("key-{index:03}").as_bytes(),
+                Some(b"target"),
+                index + 1,
+                0,
+                None,
+            )?;
+            crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join(&name))?;
+            target_names.push(name);
+        }
+        let mut plan = CompactionPlan::new(0, 1, 2).with_output_seq(57);
+        plan.source_files.push(source_name);
+        plan.target_files.clone_from(&target_names);
+        plan.input_files.extend(plan.source_files.clone());
+        plan.input_files.extend(target_names);
+        let budget =
+            crate::common::resource_budget::ResourceBudget::new(plan.compaction_memory_limit);
+        let streams = executor::collect_compaction_stream_inputs(
+            &factory,
+            &plan.source_files,
+            &plan.target_files,
+            plan.source_level,
+            &budget,
+            None,
+        )?;
+
+        // Act
+        assert_eq!(streams.merge_head_count(), 2);
+        drop(streams);
+        let outputs = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
+
+        // Assert
+        assert!(!outputs.is_empty());
+        let reader = factory.open(Path::new(&outputs[0]))?;
+        assert!(matches!(
+            reader.get_state(b"key-032")?,
+            crate::sst::types::KeyState::Value(value, 1000, _, _)
+                if value.as_ref() == b"new-source"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn should_drain_equal_key_history_across_adjacent_target_files() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        for (name, sequence, value) in [
+            ("source.sst", 3, b"source".as_slice()),
+            ("target-left.sst", 1, b"old".as_slice()),
+            ("target-right.sst", 5, b"newest".as_slice()),
+        ] {
+            let mut writer = factory.create()?;
+            writer.add_with_meta(b"boundary", Some(value), sequence, 0, None)?;
+            crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join(name))?;
+        }
+        let mut plan = CompactionPlan::new(0, 1, 2).with_output_seq(58);
+        plan.source_files.push("source.sst".to_string());
+        plan.target_files.extend([
+            "target-left.sst".to_string(),
+            "target-right.sst".to_string(),
+        ]);
+        plan.input_files.extend(plan.source_files.clone());
+        plan.input_files.extend(plan.target_files.clone());
+
+        // Act
+        let outputs = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
+
+        // Assert
+        let reader = factory.open(Path::new(&outputs[0]))?;
+        assert!(matches!(
+            reader.get_state(b"boundary")?,
+            crate::sst::types::KeyState::Value(value, 5, _, _)
+                if value.as_ref() == b"newest"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn should_abort_safely_at_each_target_file_transition() -> MidgeResult<()> {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        struct TransitionFactory<'a> {
+            inner: &'a dyn crate::sst::SstFactory,
+            opened: AtomicUsize,
+            cancel_after_open: usize,
+            cancelled: std::sync::Arc<AtomicBool>,
+        }
+
+        impl crate::sst::SstFactory for TransitionFactory<'_> {
+            fn create(&self) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
+                self.inner.create()
+            }
+
+            fn create_for_compaction(
+                &self,
+                budget: crate::common::resource_budget::ResourceBudget,
+            ) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
+                self.inner.create_for_compaction(budget)
+            }
+
+            fn open(&self, path: &Path) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+                self.inner.open(path)
+            }
+
+            fn open_for_compaction(
+                &self,
+                path: &Path,
+                budget: crate::common::resource_budget::ResourceBudget,
+            ) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
+                let reader = self.inner.open_for_compaction(path, budget)?;
+                let opened = self.opened.fetch_add(1, Ordering::SeqCst) + 1;
+                if opened >= self.cancel_after_open {
+                    self.cancelled.store(true, Ordering::SeqCst);
+                }
+                Ok(reader)
+            }
+        }
+
+        // Arrange
+        let temp_dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let base_factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let source_name = "transition-source.sst".to_string();
+        let mut source = base_factory.create()?;
+        source.add_with_meta(b"key-04", Some(b"source"), 100, 0, None)?;
+        crate::sst::fs::finish_writer_to_path(source, &temp_dir.path().join(&source_name))?;
+        let mut target_names = Vec::new();
+        for index in 0..8u64 {
+            let name = format!("transition-target-{index:02}.sst");
+            let mut writer = base_factory.create()?;
+            writer.add_with_meta(
+                format!("key-{index:02}").as_bytes(),
+                Some(b"target"),
+                index + 1,
+                0,
+                None,
+            )?;
+            crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join(&name))?;
+            target_names.push(name);
+        }
+
+        // Act: source opens first; each threshold then cancels before entering
+        // the following target file.
+        for completed_targets in 1..target_names.len() {
+            let cancelled = std::sync::Arc::new(AtomicBool::new(false));
+            let factory = TransitionFactory {
+                inner: &base_factory,
+                opened: AtomicUsize::new(0),
+                cancel_after_open: completed_targets + 1,
+                cancelled: std::sync::Arc::clone(&cancelled),
+            };
+            let mut plan = CompactionPlan::new(0, 1, 2)
+                .with_output_seq(100 + u64::try_from(completed_targets).expect("small index"));
+            plan.source_files.push(source_name.clone());
+            plan.target_files.clone_from(&target_names);
+            plan.input_files.extend(plan.source_files.clone());
+            plan.input_files.extend(plan.target_files.clone());
+            let abort = || cancelled.load(Ordering::SeqCst);
+            let error = execute_compaction(&plan, &factory, temp_dir.path(), Some(&abort))
+                .expect_err("transition cancellation must abort compaction");
+
+            // Assert
+            assert!(matches!(error, MidgeError::Aborted(_)));
+            assert!(plan
+                .input_files
+                .iter()
+                .all(|name| temp_dir.path().join(name).exists()));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn should_keep_recorded_compaction_bytes_within_pool_for_aggregate_inputs_larger_than_pool(
     ) -> MidgeResult<()> {
         // Arrange
@@ -1391,8 +1592,14 @@ mod tests {
         assert!(logical_input_bytes > pool_limit.saturating_mul(4));
         assert!(logical_input_bytes > target_sst_size);
         let budget = crate::common::resource_budget::ResourceBudget::new(pool_limit);
-        let inputs =
-            executor::collect_compaction_stream_inputs(&factory, &input_names, &budget, None)?;
+        let inputs = executor::collect_compaction_stream_inputs(
+            &factory,
+            &input_names,
+            &[],
+            0,
+            &budget,
+            None,
+        )?;
 
         // Act
         let outputs = executor::write_partitioned_compaction_outputs(

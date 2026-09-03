@@ -62,6 +62,8 @@ impl CompactionCoordinator {
         }
 
         let cplan = crate::compaction::CompactionPlan {
+            source_files: plan.input_files.clone(),
+            target_files: Vec::new(),
             input_files: plan.input_files,
             source_level: plan.source_level,
             target_level: plan.target_level,
@@ -292,6 +294,17 @@ impl CompactionCoordinator {
             }
         };
 
+        if let Err(error) =
+            Self::validate_captured_target_span(event_loop, input_ssts, cf_id, target_level)
+        {
+            event_loop.gc_actor.delete_ssts(
+                &mut event_loop.state,
+                output_ssts,
+                event_loop.hybrid_storage.clone(),
+            );
+            return Self::respond_publish_failure(event_loop, request_id, &error);
+        }
+
         if let Err(error) = Self::publish_compaction_manifest(
             event_loop,
             input_ssts,
@@ -314,6 +327,78 @@ impl CompactionCoordinator {
             output_ssts,
             reservation,
         )
+    }
+
+    fn validate_captured_target_span(
+        event_loop: &EventLoop,
+        input_ssts: &[String],
+        cf_id: crate::types::ColumnFamilyId,
+        target_level: u32,
+    ) -> Result<(), crate::common::MidgeError> {
+        let selected: std::collections::HashSet<_> =
+            input_ssts.iter().map(String::as_str).collect();
+        let selected_files = event_loop
+            .state
+            .manifest
+            .files
+            .iter()
+            .filter(|file| selected.contains(file.name.as_str()))
+            .collect::<Vec<_>>();
+        if selected_files.len() != selected.len() {
+            return Err(crate::common::MidgeError::Fenced(
+                "compaction input authority changed before publication".to_string(),
+            ));
+        }
+        let min_key = selected_files
+            .iter()
+            .filter_map(|file| file.smallest_key.as_ref())
+            .min()
+            .ok_or_else(|| {
+                crate::common::MidgeError::Corruption(
+                    "compaction inputs have no smallest-key bound".to_string(),
+                )
+            })?;
+        let max_key = selected_files
+            .iter()
+            .filter_map(|file| file.largest_key.as_ref())
+            .max()
+            .ok_or_else(|| {
+                crate::common::MidgeError::Corruption(
+                    "compaction inputs have no largest-key bound".to_string(),
+                )
+            })?;
+        let mut captured_target = selected_files
+            .iter()
+            .filter(|file| file.cf_id == cf_id && file.level == target_level)
+            .map(|file| file.name.as_str())
+            .collect::<Vec<_>>();
+        captured_target.sort_unstable();
+        let mut live_target = event_loop
+            .state
+            .manifest
+            .files
+            .iter()
+            .filter(|file| {
+                file.cf_id == cf_id
+                    && file.level == target_level
+                    && file
+                        .smallest_key
+                        .as_ref()
+                        .zip(file.largest_key.as_ref())
+                        .is_some_and(|(smallest, largest)| {
+                            smallest.as_slice() <= max_key.as_slice()
+                                && largest.as_slice() >= min_key.as_slice()
+                        })
+            })
+            .map(|file| file.name.as_str())
+            .collect::<Vec<_>>();
+        live_target.sort_unstable();
+        if live_target != captured_target {
+            return Err(crate::common::MidgeError::Fenced(
+                "compaction target-level span changed before publication".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     fn build_output_metadata(
