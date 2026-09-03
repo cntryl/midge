@@ -77,6 +77,25 @@ impl EventLoop {
                 .is_some_and(|storage| storage.is_wal_upload_stalled())
     }
 
+    pub(super) fn ensure_l0_write_admission(
+        &self,
+        cf_ids: &[crate::types::ColumnFamilyId],
+    ) -> Result<(), MidgeError> {
+        for cf_id in cf_ids {
+            if self.state.l0_write_slot_unavailable(*cf_id) {
+                if let Some(telemetry) = crate::telemetry::Telemetry::global() {
+                    telemetry.metrics().record_write_stall_compaction();
+                }
+                return Err(MidgeError::WriteStall(format!(
+                    "column family {cf_id} has no free L0 slot ({}/{})",
+                    self.state.l0_slot_usage(*cf_id),
+                    self.state.l0_hard_ceiling()
+                )));
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn wake_write_stall_waiters(&mut self) {
         // Avoid borrowing issues by snapshotting keys.
         let cf_ids: Vec<crate::types::ColumnFamilyId> =
@@ -546,6 +565,9 @@ impl EventLoop {
 
         let request_id = request.request_id;
         let touched_cfs = Self::transaction_cf_ids(&request.ops);
+        if let Err(error) = self.ensure_l0_write_admission(&touched_cfs) {
+            return PrepareOutcome::Error { request_id, error };
+        }
         staged_touches.record_ops(&request.ops);
         let result = self.wal_actor.prepare_transaction_append(
             &mut self.state,
@@ -579,6 +601,10 @@ impl EventLoop {
             conflict_policy,
         } = request;
         let touched_cfs = Self::transaction_cf_ids(&ops);
+        if let Err(error) = self.ensure_l0_write_admission(&touched_cfs) {
+            self.finish_drained_write(request_id, Err(error));
+            return;
+        }
         let result = self
             .wal_actor
             .append_transaction(

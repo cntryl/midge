@@ -178,6 +178,9 @@ pub struct EventLoop {
     /// consume that output and make restart recovery ambiguous, so compaction
     /// remains fenced until reopen replays the durable intent.
     compaction_publication_degraded: bool,
+    /// Terminal publication error for the just-completed compaction. This is
+    /// forwarded to a pending `compact_all()` waiter after authority handling.
+    last_compaction_publication_error: Option<crate::common::MidgeError>,
     writer_epoch: u64,
     /// Response budget a caller is given for one runtime request. Cloud work
     /// performed on a caller's behalf shares this budget rather than restarting
@@ -243,7 +246,7 @@ impl EventLoop {
         let memory_mode = state.is_memory_mode();
         let initial_segment_id = state.wal.current_segment_id;
         let recovered_cloud_wal = RecoveredCloudWalConfig::from(&config);
-        state.install_ttl_clock(Arc::clone(&config.ttl_clock));
+        Self::apply_runtime_state_config(&mut state, &config);
 
         let (sst_factory, read_resources) =
             Self::initialize_sst_resources(&state, &sst_dir, memory_mode, &config)?;
@@ -281,10 +284,6 @@ impl EventLoop {
         } else {
             wal_actor.current_flush_generation()
         };
-
-        state.cloud_eventual_flush_segment_gap =
-            config.cloud_runtime_policy.eventual_flush_segment_gap;
-        state.set_compaction_enabled(config.background_compaction);
 
         let mut gc_actor = GcActor::new();
         gc_actor.set_retry_notifier(worker_msg_tx.clone());
@@ -341,6 +340,7 @@ impl EventLoop {
             lease_healthy: config.lease_healthy.clone(),
             ddl_authority_ambiguous: false,
             compaction_publication_degraded: false,
+            last_compaction_publication_error: None,
             writer_epoch: config.writer_epoch,
             runtime_response_timeout: config.runtime_response_timeout,
             leader_store: config.leader_store.clone(),
@@ -353,6 +353,14 @@ impl EventLoop {
         event_loop.initialize_recovered_cloud_wal(&recovered_cloud_wal)?;
 
         Ok(event_loop)
+    }
+
+    fn apply_runtime_state_config(state: &mut RuntimeState, config: &super::RuntimeConfig) {
+        state.install_ttl_clock(Arc::clone(&config.ttl_clock));
+        state.cloud_eventual_flush_segment_gap =
+            config.cloud_runtime_policy.eventual_flush_segment_gap;
+        state.set_compaction_enabled(config.background_compaction);
+        state.l0_compaction_trigger = config.l0_compaction_trigger.max(1);
     }
 
     fn initialize_recovered_cloud_wal(
@@ -616,18 +624,18 @@ impl EventLoop {
     fn assign_compaction_output_sequence(
         &mut self,
         mut plan: crate::compaction::CompactionPlan,
-    ) -> crate::compaction::CompactionPlan {
+    ) -> crate::common::MidgeResult<crate::compaction::CompactionPlan> {
         if plan.output_seq == 0 {
-            plan.output_seq = self.state.next_sequence();
+            plan.output_seq = self.state.next_compaction_output_generation()?;
         }
-        plan
+        Ok(plan)
     }
 
     fn prepare_compaction_plan_for_launch(
         &mut self,
         plan: crate::compaction::CompactionPlan,
     ) -> crate::common::MidgeResult<crate::compaction::CompactionPlan> {
-        let mut plan = self.assign_compaction_output_sequence(plan);
+        let mut plan = self.assign_compaction_output_sequence(plan)?;
         plan.snapshot_horizon = self.state.oldest_active_snapshot_sequence();
         plan.target_sst_size = self.compaction_actor.target_sst_size();
         plan.compaction_memory_limit = self.compaction_actor.compaction_memory_limit();
@@ -783,10 +791,27 @@ impl EventLoop {
 
     pub(super) fn schedule_background_compaction_on_startup(&mut self) {
         self.next_background_compaction_check = Instant::now() + STARTUP_CLOUD_MAINTENANCE_DELAY;
-        if self.state.compaction_enabled() {
-            match self.schedule_one_background_compaction_if_needed("runtime startup") {
+        let recovery_debt = self.state.is_any_cf_above_l0_hard_ceiling();
+        if self.state.compaction_enabled() || recovery_debt {
+            let planned = if recovery_debt && !self.state.compaction_enabled() {
+                self.compaction_actor
+                    .check_manual_compaction(&self.state)
+                    .and_then(|plan| {
+                        let Some(plan) = plan else {
+                            return Ok(false);
+                        };
+                        self.launch_compaction(plan)?;
+                        Ok(true)
+                    })
+            } else {
+                self.schedule_one_background_compaction_if_needed("runtime startup")
+            };
+            match planned {
                 Ok(true) => {
-                    tracing::debug!("Scheduled background compaction during runtime startup");
+                    tracing::debug!(
+                        recovery_debt,
+                        "Scheduled background compaction during runtime startup"
+                    );
                 }
                 Ok(false) => {}
                 Err(error) => tracing::warn!(%error, "Startup background compaction check failed"),

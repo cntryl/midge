@@ -63,10 +63,8 @@ fn should_collect_orphaned_cloud_objects_after_compaction() {
     let cf = engine.create_column_family("test").expect("create cf");
 
     // Write the same overlapping key range across four separate flushes.
-    // The default L0 leveled-compaction trigger is a *file count* threshold
-    // (4 files) — two non-overlapping SSTs never actually trigger a merge
-    // (compact_all() would be a silent no-op), so both the batch count and
-    // the key overlap matter here to force a real L0 -> L1 merge.
+    // Use four files so the fixture exceeds the derived default L0 trigger;
+    // the overlapping keys make every bounded pass a genuine L0 -> L1 merge.
     for batch in 0..4 {
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -91,11 +89,8 @@ fn should_collect_orphaned_cloud_objects_after_compaction() {
         "expected all four flushed SSTs to be mirrored to cloud storage, got {before_objects:?}"
     );
 
-    // Act: Compact. The leveled-compaction picker always keeps the L0 batch
-    // bounded by the file-count threshold, so it does not necessarily
-    // consume every L0 file in one pass — what matters for this test is
-    // that whichever inputs *were* compacted get their cloud objects
-    // collected, and a new compacted output object appears.
+    // Act: Compact. Each merge batch stays bounded, while compact_all walks
+    // every batch until the logical L0 debt is clear.
     engine.compact_all().expect("compact_all");
 
     // The cloud delete of orphaned inputs runs on a background worker, so
@@ -217,20 +212,18 @@ fn should_handle_gc_when_cloud_delete_fails() {
     // Arrange: real simulated cloud backend.
     let temp_dir = tempfile::tempdir().expect("temp dir");
     let db_path = temp_dir.path();
-    let engine = Engine::open(
-        OpenOptions::cloud_simulated(db_path, "test-bucket", "gc-delete-fail")
-            .background_compaction(false)
-            .build()
-            .expect("build simulated cloud options"),
-    )
-    .expect("open simulated cloud engine");
+    let options = OpenOptions::cloud_simulated(db_path, "test-bucket", "gc-delete-fail")
+        .background_compaction(false)
+        .build()
+        .expect("build simulated cloud options");
+    let l0_batch_size = options.l0_compaction_trigger();
+    let engine = Engine::open(options).expect("open simulated cloud engine");
     let cf = engine.create_column_family("test").expect("create cf");
 
-    // Write the same overlapping key range across four separate flushes so
-    // compact_all() actually triggers a real L0 -> L1 merge (the default L0
-    // trigger is a file-count threshold of 4; see the sibling orphan-GC
-    // test for the same reasoning).
-    for batch in 0..4 {
+    // Write exactly one configured L0 batch. This isolates the delete failure
+    // after publication without requiring a second upload while the simulated
+    // bucket is deliberately read-only.
+    for batch in 0..l0_batch_size {
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin_tx");
@@ -250,8 +243,8 @@ fn should_handle_gc_when_cloud_delete_fails() {
     let cloud_sst_dir = db_path.join("cloud_store").join("sst");
     let before_objects = sst_object_names(&cloud_sst_dir);
     assert!(
-        before_objects.len() >= 4,
-        "expected all four flushed SSTs to be mirrored to cloud storage, got {before_objects:?}"
+        before_objects.len() >= l0_batch_size,
+        "expected one configured L0 batch to be mirrored to cloud storage, got {before_objects:?}"
     );
 
     // Arm a failpoint at the exact boundary between compaction's manifest
@@ -269,7 +262,7 @@ fn should_handle_gc_when_cloud_delete_fails() {
     })
     .expect("configure cloud delete outage failpoint");
 
-    // Act: compaction should orphan the two input SSTs and try (and fail)
+    // Act: compaction should orphan the selected input SSTs and try (and fail)
     // to delete them from the now-read-only cloud bucket.
     let compact_result = engine.compact_all();
 

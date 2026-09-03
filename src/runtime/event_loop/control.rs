@@ -175,6 +175,8 @@ impl EventLoop {
             self.state.set_compaction_enabled(ec);
         }
         if let Some(trigger) = update.l0_compaction_trigger {
+            let trigger = trigger.max(1);
+            self.state.l0_compaction_trigger = trigger;
             self.compaction_actor.set_l0_file_count_threshold(trigger);
         }
 

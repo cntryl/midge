@@ -38,6 +38,9 @@ pub struct CompactionActor {
     worker_cancel: Arc<AtomicBool>,
     /// Active background worker, joined before runtime shutdown completes.
     worker_handle: Option<JoinHandle<Vec<String>>>,
+    /// Exact terminal worker error transferred out-of-band so the public
+    /// runtime message shape remains unchanged.
+    worker_error: Arc<std::sync::Mutex<Option<MidgeError>>>,
 }
 
 impl CompactionActor {
@@ -61,6 +64,7 @@ impl CompactionActor {
             active_input_ssts: Vec::new(),
             worker_cancel: Arc::new(AtomicBool::new(false)),
             worker_handle: None,
+            worker_error: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -144,6 +148,71 @@ impl CompactionActor {
             "Compaction check"
         );
 
+        let cf_ids = self.round_robin_cf_ids(state);
+
+        // Critical L0 debt always wins the global worker, but rotates across
+        // affected families so one hot tenant cannot monopolize recovery.
+        for cf_id in &cf_ids {
+            if state.has_critical_l0_debt(*cf_id) {
+                if let Some(plan) =
+                    self.compactor
+                        .pick_l0_compaction(&state.manifest.files, *cf_id, true)?
+                {
+                    return Ok(Some(self.decorate_plan(state, plan)));
+                }
+            }
+        }
+
+        // Once no family is critical, pay down the deepest overfull level
+        // before creating more downstream debt from ordinary L0 work.
+        let mut deepest_plan: Option<crate::compaction::CompactionPlan> = None;
+        for cf_id in &cf_ids {
+            let candidate = self
+                .compactor
+                .pick_deepest_inner_compaction(&state.manifest.files, *cf_id)?;
+            if candidate.as_ref().is_some_and(|plan| {
+                deepest_plan
+                    .as_ref()
+                    .is_none_or(|current| plan.source_level > current.source_level)
+            }) {
+                deepest_plan = candidate;
+            }
+        }
+        if let Some(plan) = deepest_plan {
+            return Ok(Some(self.decorate_plan(state, plan)));
+        }
+
+        // Manual compaction drains every L0 generation. Background work keeps
+        // the configured soft threshold but is still pre-empted by critical
+        // debt above.
+        let force_l0 = !respect_background_enabled;
+        for cf_id in &cf_ids {
+            if let Some(plan) =
+                self.compactor
+                    .pick_l0_compaction(&state.manifest.files, *cf_id, force_l0)?
+            {
+                return Ok(Some(self.decorate_plan(state, plan)));
+            }
+        }
+
+        if !respect_background_enabled {
+            for cf_id in cf_ids {
+                if self
+                    .compactor
+                    .compaction_debt_is_clear(&state.manifest.files, cf_id)?
+                {
+                    continue;
+                }
+                return Err(MidgeError::Internal(format!(
+                    "compaction debt remains for column family {cf_id}, but no valid plan exists"
+                )));
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn round_robin_cf_ids(&self, state: &RuntimeState) -> Vec<crate::types::ColumnFamilyId> {
         let mut cf_ids: Vec<u32> = state.column_families.keys().copied().collect();
         cf_ids.sort_unstable();
         if let Some(last_scheduled) = self.last_scheduled_cf {
@@ -153,21 +222,19 @@ impl CompactionActor {
                 .unwrap_or(0);
             cf_ids.rotate_left(next_index);
         }
+        cf_ids
+    }
 
-        for cf_id in cf_ids {
-            if let Some(mut plan) = self
-                .compactor
-                .pick_compaction(&state.manifest.files, cf_id)?
-            {
-                plan.snapshot_horizon = state.oldest_active_snapshot_sequence();
-                plan.target_sst_size = self.target_sst_size;
-                plan.compaction_memory_limit = self.compaction_memory_limit;
-                self.last_scheduled_cf = Some(cf_id);
-                return Ok(Some(plan));
-            }
-        }
-
-        Ok(None)
+    fn decorate_plan(
+        &mut self,
+        state: &RuntimeState,
+        mut plan: crate::compaction::CompactionPlan,
+    ) -> crate::compaction::CompactionPlan {
+        plan.snapshot_horizon = state.oldest_active_snapshot_sequence();
+        plan.target_sst_size = self.target_sst_size;
+        plan.compaction_memory_limit = self.compaction_memory_limit;
+        self.last_scheduled_cf = Some(plan.cf_id);
+        plan
     }
 
     /// Execute a compaction plan
@@ -400,6 +467,8 @@ impl CompactionActor {
         let epoch = std::sync::Arc::clone(&state.ingest_epoch);
         self.worker_cancel.store(false, Ordering::Release);
         let worker_cancel = Arc::clone(&self.worker_cancel);
+        let worker_error = Arc::clone(&self.worker_error);
+        store_compaction_worker_error(&worker_error, None);
         let job_id = next_request_id()?;
 
         let worker = std::thread::Builder::new()
@@ -418,8 +487,8 @@ impl CompactionActor {
                     Some(&abort_check),
                 );
 
-                let (output_ssts, succeeded) = match result {
-                    Ok(v) => (v, true),
+                let (output_ssts, error) = match result {
+                    Ok(v) => (v, None),
                     Err(e) => {
                         if matches!(e, MidgeError::Aborted(_)) {
                             let new_epoch = epoch.load(std::sync::atomic::Ordering::SeqCst);
@@ -442,14 +511,14 @@ impl CompactionActor {
                                 "compaction worker aborted or failed"
                             );
                         }
-                        (Vec::new(), false)
+                        (Vec::new(), Some(e))
                     }
                 };
 
-                (output_ssts, succeeded)
+                (output_ssts, error)
             }));
 
-            let (output_ssts, succeeded) = match result {
+            let (output_ssts, error) = match result {
                 Ok(result) => result,
                 Err(panic_info) => {
                     tracing::error!(
@@ -459,9 +528,11 @@ impl CompactionActor {
                         panic_info = ?panic_info,
                         "compaction worker thread panicked; returning empty output to unblock event loop"
                     );
-                    (Vec::new(), false)
+                    (Vec::new(), Some(compaction_worker_panic_error()))
                 }
             };
+            let succeeded = error.is_none();
+            store_compaction_worker_error(&worker_error, error.as_ref());
 
             let Ok(request_id) = next_request_id() else {
                 tracing::error!(
@@ -495,6 +566,34 @@ impl CompactionActor {
 
         Ok(Vec::new())
     }
+
+    pub(crate) fn take_worker_error(&mut self) -> Option<MidgeError> {
+        self.worker_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_worker_error_for_test(&mut self, error: MidgeError) {
+        *self
+            .worker_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
+    }
+}
+
+fn compaction_worker_panic_error() -> MidgeError {
+    MidgeError::Internal("compaction worker panicked".to_string())
+}
+
+fn store_compaction_worker_error(
+    slot: &std::sync::Mutex<Option<MidgeError>>,
+    error: Option<&MidgeError>,
+) {
+    *slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = error.map(MidgeError::replay);
 }
 
 impl Clone for CompactionActor {
@@ -510,6 +609,7 @@ impl Clone for CompactionActor {
             active_input_ssts: self.active_input_ssts.clone(),
             worker_cancel: Arc::clone(&self.worker_cancel),
             worker_handle: None,
+            worker_error: Arc::clone(&self.worker_error),
         }
     }
 }
@@ -618,6 +718,25 @@ mod tests {
             name: name.to_string(),
             level: 0,
             size_bytes: 1,
+            cf_id,
+            smallest_key: Some(smallest_key.to_vec()),
+            largest_key: Some(largest_key.to_vec()),
+            ..Default::default()
+        }
+    }
+
+    fn make_level_file(
+        name: &str,
+        cf_id: u32,
+        level: u32,
+        size_bytes: u64,
+        smallest_key: &[u8],
+        largest_key: &[u8],
+    ) -> crate::metadata::FileMeta {
+        crate::metadata::FileMeta {
+            name: name.to_string(),
+            level,
+            size_bytes,
             cf_id,
             smallest_key: Some(smallest_key.to_vec()),
             largest_key: Some(largest_key.to_vec()),
@@ -869,6 +988,115 @@ mod tests {
         assert_eq!(first_plan.cf_id, first_cf);
         assert_eq!(second_plan.cf_id, second_cf);
         assert_eq!(wrapped_plan.cf_id, first_cf);
+    }
+
+    #[test]
+    fn should_prioritize_critical_l0_round_robin_across_column_families() {
+        // Arrange
+        let config = LeveledCompactionConfig {
+            l0_file_count_threshold: 2,
+            l1_target_size: 1,
+            ..LeveledCompactionConfig::default()
+        };
+        let mut actor = create_test_compaction_actor_with_config(config);
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
+        state.set_compaction_enabled(true);
+        state.l0_compaction_trigger = 2;
+        state.max_immutable_memtables = 0;
+        let first_cf = state.create_cf("first".to_string()).expect("create first");
+        let second_cf = state
+            .create_cf("second".to_string())
+            .expect("create second");
+        for (cf_id, prefix) in [(first_cf, "first"), (second_cf, "second")] {
+            state.manifest.files.extend((0..3).map(|index| {
+                make_l0_file(
+                    &format!("{prefix}-l0-{index}.sst"),
+                    cf_id,
+                    &[u8::try_from(index).expect("fixture key")],
+                    &[u8::try_from(index).expect("fixture key")],
+                )
+            }));
+        }
+        state
+            .manifest
+            .files
+            .push(make_level_file("deep-overfull.sst", 0, 1, 2, b"a", b"z"));
+
+        // Act
+        let first = actor
+            .check_compaction(&state)
+            .expect("first planning")
+            .expect("first critical plan");
+        actor.compaction_running = true;
+        let _ = actor.handle_complete(&mut state, &first.input_files, &[]);
+        let second = actor
+            .check_compaction(&state)
+            .expect("second planning")
+            .expect("second critical plan");
+
+        // Assert
+        assert_eq!(first.cf_id, first_cf);
+        assert_eq!(second.cf_id, second_cf);
+        assert_eq!(first.source_level, 0);
+        assert_eq!(second.source_level, 0);
+    }
+
+    #[test]
+    fn should_pick_deepest_overfull_inner_level_before_soft_l0() {
+        // Arrange
+        let config = LeveledCompactionConfig {
+            l0_file_count_threshold: 2,
+            l1_target_size: 1,
+            level_multiplier: 1,
+            max_levels: 5,
+            ..LeveledCompactionConfig::default()
+        };
+        let mut actor = create_test_compaction_actor_with_config(config);
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
+        state.set_compaction_enabled(true);
+        state.l0_compaction_trigger = 2;
+        state.max_immutable_memtables = 10;
+        state.manifest.files.extend([
+            make_l0_file("l0-a.sst", 0, b"a", b"b"),
+            make_l0_file("l0-b.sst", 0, b"c", b"d"),
+            make_level_file("l1-overfull.sst", 0, 1, 2, b"e", b"f"),
+            make_level_file("l3-overfull.sst", 0, 3, 2, b"g", b"h"),
+        ]);
+
+        // Act
+        let plan = actor
+            .check_compaction(&state)
+            .expect("compaction planning")
+            .expect("deep debt plan");
+
+        // Assert
+        assert_eq!(plan.source_level, 3);
+        assert_eq!(plan.target_level, 4);
+    }
+
+    #[test]
+    fn should_force_soft_l0_work_during_manual_debt_drain() {
+        // Arrange
+        let mut actor = create_test_compaction_actor();
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
+        state
+            .manifest
+            .files
+            .push(make_l0_file("one-soft-l0.sst", 0, b"a", b"z"));
+        assert!(actor
+            .check_compaction(&state)
+            .expect("background planning")
+            .is_none());
+
+        // Act
+        let plan = actor
+            .check_manual_compaction(&state)
+            .expect("manual planning")
+            .expect("manual L0 plan");
+
+        // Assert
+        assert_eq!(plan.source_files, vec!["one-soft-l0.sst".to_string()]);
+        assert_eq!(plan.source_level, 0);
     }
 
     #[test]

@@ -137,57 +137,102 @@ impl Compactor {
     /// Check if compaction should be triggered based on read amplification.
     ///
     /// Pick compaction using leveled strategy:
-    ///   1. Check L0 → L1 first.
-    ///   2. Check L1+ levels for size-overflow.
+    ///   1. Check the deepest overfull L1+ level.
+    ///   2. Check ordinary soft-L0 work.
     ///
     /// NOTE: This picker is deterministic for a given metadata snapshot.
+    #[cfg(test)]
     pub fn pick_compaction(
         &self,
         files: &[FileMeta],
         cf_id: u32,
     ) -> MidgeResult<Option<CompactionPlan>> {
-        // Only look at this CF's files
-        let cf_files: Vec<&FileMeta> = files.iter().filter(|f| f.cf_id == cf_id).collect();
-        if cf_files.is_empty() {
+        self.pick_deepest_inner_compaction(files, cf_id)?
+            .map_or_else(
+                || self.pick_l0_compaction(files, cf_id, false),
+                |plan| Ok(Some(plan)),
+            )
+    }
+
+    pub(crate) fn pick_l0_compaction(
+        &self,
+        files: &[FileMeta],
+        cf_id: u32,
+        force: bool,
+    ) -> MidgeResult<Option<CompactionPlan>> {
+        let Some(levels) = self.validated_levels(files, cf_id)? else {
+            return Ok(None);
+        };
+        let l0_size: u64 = levels[0].iter().map(|file| file.size_bytes).sum();
+        let eligible = force
+            || l0_size > self.config.l0_compaction_threshold
+            || levels[0].len() >= self.config.l0_file_count_threshold;
+        if !eligible {
             return Ok(None);
         }
-        self.validate_file_metadata(&cf_files, cf_id)?;
+        self.plan_zero_level(&levels, cf_id)
+    }
 
-        // Group files by level
-        let mut levels: Vec<Vec<&FileMeta>> = vec![Vec::new(); self.config.max_levels];
-        for file in cf_files {
-            let lv = file.level as usize;
-            if lv < self.config.max_levels {
-                levels[lv].push(file);
-            }
-        }
-
-        // ---------------------------
-        // 1. L0 → L1 (special case)
-        // ---------------------------
-        let l0_size: u64 = levels[0].iter().map(|f| f.size_bytes).sum();
-        let l0_count = levels[0].len();
-
-        if l0_size > self.config.l0_compaction_threshold
-            || l0_count >= self.config.l0_file_count_threshold
-        {
-            return self.plan_zero_level(&levels, cf_id);
-        }
-
-        // ---------------------------
-        // 2. L1..Ln leveled compaction
-        // ---------------------------
-        for level in 1..self.config.max_levels - 1 {
-            let level_size: u64 = levels[level].iter().map(|f| f.size_bytes).sum();
+    pub(crate) fn pick_deepest_inner_compaction(
+        &self,
+        files: &[FileMeta],
+        cf_id: u32,
+    ) -> MidgeResult<Option<CompactionPlan>> {
+        let Some(levels) = self.validated_levels(files, cf_id)? else {
+            return Ok(None);
+        };
+        for level in (1..self.config.max_levels.saturating_sub(1)).rev() {
+            let level_size: u64 = levels[level].iter().map(|file| file.size_bytes).sum();
             let target_size =
                 self.level_target_size(u32::try_from(level).expect("level index fits in u32"));
-
             if level_size > target_size {
                 return self.plan_inner_level(&levels, cf_id, level);
             }
         }
-
         Ok(None)
+    }
+
+    /// Report whether the manifest's logical compaction debt is clear.
+    ///
+    /// Every L0 key interval carries one level of mandatory debt. An inner
+    /// level carries debt only while its complete byte set is overfull. A
+    /// successful plan moves at least one source interval to a strictly deeper
+    /// level (or deletes it), and no plan moves an interval upward. With finite
+    /// levels and no new admissions, repeated successful plans therefore
+    /// exhaust this debt.
+    pub(crate) fn compaction_debt_is_clear(
+        &self,
+        files: &[FileMeta],
+        cf_id: u32,
+    ) -> MidgeResult<bool> {
+        let Some(levels) = self.validated_levels(files, cf_id)? else {
+            return Ok(true);
+        };
+        if !levels[0].is_empty() {
+            return Ok(false);
+        }
+        Ok(!(1..self.config.max_levels.saturating_sub(1)).any(|level| {
+            let level_size: u64 = levels[level].iter().map(|file| file.size_bytes).sum();
+            level_size
+                > self.level_target_size(u32::try_from(level).expect("level index fits in u32"))
+        }))
+    }
+
+    fn validated_levels<'a>(
+        &self,
+        files: &'a [FileMeta],
+        cf_id: u32,
+    ) -> MidgeResult<Option<Vec<Vec<&'a FileMeta>>>> {
+        let cf_files: Vec<&FileMeta> = files.iter().filter(|file| file.cf_id == cf_id).collect();
+        if cf_files.is_empty() {
+            return Ok(None);
+        }
+        self.validate_file_metadata(&cf_files, cf_id)?;
+        let mut levels = vec![Vec::new(); self.config.max_levels];
+        for file in cf_files {
+            levels[file.level as usize].push(file);
+        }
+        Ok(Some(levels))
     }
 
     fn validate_file_metadata(&self, files: &[&FileMeta], cf_id: u32) -> MidgeResult<()> {
@@ -822,7 +867,7 @@ mod tests {
     }
 
     #[test]
-    fn should_prioritize_l0_compaction_over_inner_levels() {
+    fn should_prioritize_deepest_overfull_level_over_ordinary_l0() {
         // Arrange
         let compactor = Compactor::new();
         let l0_threshold = compactor.config.l0_compaction_threshold;
@@ -851,7 +896,7 @@ mod tests {
                 "l1_file1.sst",
                 0,
                 1,
-                l1_target / 2 + 1,
+                l1_target + 1,
                 Some(b"a".to_vec()),
                 Some(b"z".to_vec()),
             ),
@@ -862,9 +907,9 @@ mod tests {
             .pick_compaction(&files, 0)
             .expect("compaction planning");
 
-        // Assert: L0 compaction should be picked first
+        // Assert: downstream debt should be paid before ordinary L0 work
         assert!(plan.is_some());
-        assert_eq!(plan.unwrap().source_level, 0);
+        assert_eq!(plan.unwrap().source_level, 1);
     }
 
     #[test]
@@ -898,6 +943,62 @@ mod tests {
 
         // Assert: no compaction triggered
         assert!(plan.is_none());
+    }
+
+    #[test]
+    fn should_report_debt_clear_only_without_l0_or_overfull_inner_levels() {
+        // Arrange
+        let compactor = Compactor::with_config(LeveledCompactionConfig {
+            l1_target_size: 10,
+            level_multiplier: 10,
+            max_levels: 4,
+            ..LeveledCompactionConfig::default()
+        });
+        let soft_inner = vec![make_file(
+            "soft-l1.sst",
+            0,
+            1,
+            10,
+            Some(b"a".to_vec()),
+            Some(b"b".to_vec()),
+        )];
+        let l0 = vec![make_file(
+            "l0.sst",
+            0,
+            0,
+            1,
+            Some(b"a".to_vec()),
+            Some(b"b".to_vec()),
+        )];
+        let overfull = vec![make_file(
+            "overfull-l2.sst",
+            0,
+            2,
+            101,
+            Some(b"a".to_vec()),
+            Some(b"b".to_vec()),
+        )];
+        let bottom = vec![make_file(
+            "bottom.sst",
+            0,
+            3,
+            u64::MAX,
+            Some(b"a".to_vec()),
+            Some(b"b".to_vec()),
+        )];
+
+        // Act
+        // Assert
+        assert!(compactor
+            .compaction_debt_is_clear(&soft_inner, 0)
+            .expect("soft inner debt"));
+        assert!(!compactor.compaction_debt_is_clear(&l0, 0).expect("L0 debt"));
+        assert!(!compactor
+            .compaction_debt_is_clear(&overfull, 0)
+            .expect("overfull inner debt"));
+        assert!(compactor
+            .compaction_debt_is_clear(&bottom, 0)
+            .expect("bottom-level debt"));
     }
 
     // ============================================================================
@@ -1550,7 +1651,7 @@ mod tests {
                 &format!("target-{index:05}.sst"),
                 0,
                 2,
-                1,
+                0,
                 Some(key.clone()),
                 Some(key),
             ));

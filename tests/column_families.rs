@@ -807,12 +807,12 @@ fn should_isolate_compaction_given_per_cf_data_when_compacting() {
             .find(|level| level.level == 1)
             .map_or(0, |level| level.file_count);
         assert_eq!(
-            l0_after, 2,
-            "each family retains only the one L0 file outside its configured three-file batch"
+            l0_after, 0,
+            "compact_all must drain residual L0 debt in every column family"
         );
         assert_eq!(
-            l1_after, 2,
-            "each column family must publish its own L1 output in mode {mode}"
+            l1_after, 4,
+            "each column family must publish isolated outputs for its configured batch and residual file in mode {mode}"
         );
         let tx_read1 = engine
             .begin_tx(cf1.id(), cntryl_midge::TransactionMode::ReadOnly)

@@ -1385,7 +1385,7 @@ fn should_preserve_compacted_input_state_when_compaction_output_hits_no_space() 
         .expect("configure compaction output no-space failpoint");
     engine
         .compact_all()
-        .expect("compact_all returns after failure");
+        .expect_err("compact_all must report the compaction output failure");
     assert_eq!(
         engine
             .get_runtime_metrics()
@@ -1448,7 +1448,7 @@ fn should_publish_partitioned_outputs_when_retrying_compaction_after_failed_mani
     .expect("configure manifest batch append no-space failpoint");
     engine
         .compact_all()
-        .expect("compact_all returns after manifest batch failure");
+        .expect_err("compact_all must report the manifest batch failure");
     fail::remove("midge::manifest::inject_no_space_on_compaction_batch_edit");
     scenario.teardown();
     let live_retry = engine.compact_all();
@@ -1556,7 +1556,7 @@ fn should_delete_untracked_compaction_output_on_reopen_when_intent_save_fails() 
     // Act
     engine
         .compact_all()
-        .expect("compact_all returns after intent persistence failure");
+        .expect_err("compact_all must report the intent persistence failure");
 
     // Assert: execution produced an output, but no intent or manifest entry
     // owns it, so startup cleanup must remove exactly that residue.
@@ -1627,7 +1627,7 @@ fn should_fence_followup_compaction_when_phase_save_fails_after_authority_switch
     // Act
     engine
         .compact_all()
-        .expect("compact_all returns after phase-save failure");
+        .expect_err("compact_all must report the phase-save failure");
 
     // Assert: the batch journal already made the output authoritative. The
     // live engine must not roll that decision back or retain obsolete local
@@ -1720,7 +1720,7 @@ fn should_fence_followup_compaction_when_intent_clear_save_fails() {
     // Act
     engine
         .compact_all()
-        .expect("authoritative compaction completes in degraded state");
+        .expect_err("compact_all must report the intent-clear failure");
     let live_layout = engine
         .get_storage_layout()
         .expect("live partitioned layout");
@@ -1781,7 +1781,7 @@ fn should_fence_followup_compaction_when_manifest_sync_result_is_ambiguous() {
     // Act
     engine
         .compact_all()
-        .expect("compact_all returns after required sync failure");
+        .expect_err("compact_all must report the required sync failure");
     fail::remove("midge::manifest::inject_required_sync_failure");
     scenario.teardown();
     let fenced_retry = engine.compact_all();
@@ -1853,7 +1853,7 @@ fn should_remove_remote_compaction_orphan_on_reopen_when_manifest_batch_fails() 
     // Act
     engine
         .compact_all()
-        .expect("compact_all returns after manifest batch failure");
+        .expect_err("compact_all must report the manifest batch failure");
     fail::remove("midge::manifest::inject_no_space_on_compaction_batch_edit");
     scenario.teardown();
     assert!(
@@ -1918,7 +1918,7 @@ fn should_rollback_partition_set_after_partial_remote_compaction_upload() {
     // Act
     engine
         .compact_all()
-        .expect("compact_all returns after partial remote mirror failure");
+        .expect_err("compact_all must report the partial remote mirror failure");
     fail::remove("midge::cloud::inject_fail_sst_upload");
     scenario.teardown();
 
@@ -1988,7 +1988,7 @@ fn should_retain_replaced_remote_compaction_orphan_when_cleanup_proof_is_stale()
     .expect("configure manifest batch append failure");
     engine
         .compact_all()
-        .expect("compact_all returns after manifest batch failure");
+        .expect_err("compact_all must report the manifest batch failure");
     fail::remove("midge::manifest::inject_no_space_on_compaction_batch_edit");
     let orphan_names = sst_file_names(&cloud_root)
         .difference(&initial_remote_files)
@@ -2066,7 +2066,7 @@ fn should_remove_remote_compaction_orphan_when_column_family_is_dropped_before_r
     // prepublication.
     engine
         .compact_all()
-        .expect("compact_all returns after manifest batch failure");
+        .expect_err("compact_all must report the manifest batch failure");
     fail::remove("midge::manifest::inject_no_space_on_compaction_batch_edit");
     scenario.teardown();
     let failed_remote_files = sst_file_names(&cloud_root);
@@ -2137,7 +2137,7 @@ fn should_not_upload_remote_compaction_output_when_intent_save_fails() {
     // Act
     engine
         .compact_all()
-        .expect("compact_all returns after intent persistence failure");
+        .expect_err("compact_all must report the intent persistence failure");
     fail::remove("midge::intent::inject_no_space_on_save");
     scenario.teardown();
 
@@ -2191,7 +2191,9 @@ fn should_recover_compaction_from_manifest_checkpoint_save_failure_after_batch_j
         "return",
     )
     .expect("configure manifest checkpoint no-space failpoint");
-    engine.compact_all().expect("compact_all returns");
+    engine
+        .compact_all()
+        .expect_err("compact_all must report the checkpoint save failure");
     assert_eq!(
         engine
             .get_runtime_metrics()

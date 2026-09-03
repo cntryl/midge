@@ -2,7 +2,10 @@
 
 use bytes::Bytes;
 use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
-use std::sync::{Arc, Barrier};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Barrier,
+};
 
 #[test]
 fn should_publish_replacement_snapshot_before_obsolete_sst_deletion() {
@@ -41,9 +44,13 @@ fn should_publish_replacement_snapshot_before_obsolete_sst_deletion() {
     let allow_compaction_to_finish = Arc::new(Barrier::new(2));
     let callback_gc_reached = Arc::clone(&gc_reached);
     let callback_allow_finish = Arc::clone(&allow_compaction_to_finish);
+    let paused_once = Arc::new(AtomicBool::new(false));
+    let callback_paused_once = Arc::clone(&paused_once);
     fail::cfg_callback("midge::compaction::after_input_sst_gc", move || {
-        callback_gc_reached.wait();
-        callback_allow_finish.wait();
+        if !callback_paused_once.swap(true, Ordering::AcqRel) {
+            callback_gc_reached.wait();
+            callback_allow_finish.wait();
+        }
     })
     .expect("configure post-GC pause");
 

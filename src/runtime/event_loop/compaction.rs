@@ -141,6 +141,20 @@ impl CompactionCoordinator {
             return HandleOutcome::Continue;
         }
 
+        if event_loop
+            .state
+            .active_compactions
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0
+        {
+            event_loop
+                .state
+                .pending_compaction_waits
+                .lock()
+                .insert(request_id, "CompactAll".to_string());
+            return HandleOutcome::Continue;
+        }
+
         let mut scheduled = 0usize;
         loop {
             let plan = match event_loop
@@ -159,7 +173,7 @@ impl CompactionCoordinator {
                 Ok(()) => scheduled += 1,
                 Err(error) => {
                     event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
-                    break;
+                    return HandleOutcome::Continue;
                 }
             }
         }
@@ -187,14 +201,17 @@ impl CompactionCoordinator {
             succeeded,
         } = request;
         let mut allow_emergent_followup = false;
+        let mut completion_error = None;
 
         let reservation = event_loop.compaction_actor.handle_complete(
             &mut event_loop.state,
             &input_ssts,
             &output_ssts,
         );
+        let worker_error = event_loop.compaction_actor.take_worker_error();
 
         if succeeded {
+            event_loop.last_compaction_publication_error = None;
             let published = Self::publish_success(
                 event_loop,
                 request_id,
@@ -229,6 +246,9 @@ impl CompactionCoordinator {
                     hybrid.compaction_aborted_with_token(token);
                 }
             }
+            if !published {
+                completion_error = event_loop.last_compaction_publication_error.take();
+            }
         } else {
             if let Some(telemetry) = crate::telemetry::Telemetry::global() {
                 telemetry.metrics().record_compaction_failure();
@@ -238,14 +258,25 @@ impl CompactionCoordinator {
                 output_count = output_ssts.len(),
                 "compaction worker failed or aborted; leaving manifest unchanged"
             );
+            let error = worker_error.unwrap_or_else(|| {
+                crate::common::MidgeError::Internal(
+                    "compaction worker failed without an error".to_string(),
+                )
+            });
+            completion_error = Some(error.replay());
             if let (Some(hybrid), Some(token)) = (&event_loop.hybrid_storage, reservation) {
                 hybrid.compaction_aborted_with_token(token);
             }
-            event_loop.respond(request_id, RuntimeResponse::Ok { request_id });
+            event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
         }
 
-        Self::complete_pending_waits(event_loop, allow_emergent_followup);
+        Self::complete_pending_waits(
+            event_loop,
+            allow_emergent_followup,
+            completion_error.as_ref(),
+        );
         event_loop.drain_auto_flush_memtables();
+        event_loop.wake_write_stall_waiters();
         HandleOutcome::Continue
     }
 
@@ -605,13 +636,15 @@ impl CompactionCoordinator {
             Self::clear_published_compaction_intent(event_loop, input_ssts, output_ssts)
         {
             event_loop.publish_snapshot();
+            let response_error = crate::common::MidgeError::Internal(format!(
+                "failed to mirror cleared compaction publication intent: {error}"
+            ));
+            event_loop.last_compaction_publication_error = Some(response_error.replay());
             event_loop.respond(
                 request_id,
                 RuntimeResponse::Error {
                     request_id,
-                    error: crate::common::MidgeError::Internal(format!(
-                        "failed to mirror cleared compaction publication intent: {error}"
-                    )),
+                    error: response_error,
                 },
             );
             event_loop.compaction_publication_degraded = true;
@@ -674,6 +707,7 @@ impl CompactionCoordinator {
         error: &crate::common::MidgeError,
     ) -> bool {
         Self::record_compaction_failure(event_loop);
+        event_loop.last_compaction_publication_error = Some(error.replay());
         tracing::error!(error = ?error, "failed to apply compaction to manifest");
         event_loop.respond(
             request_id,
@@ -687,12 +721,21 @@ impl CompactionCoordinator {
         false
     }
 
-    fn complete_pending_waits(event_loop: &mut EventLoop, allow_emergent_followup: bool) {
+    fn complete_pending_waits(
+        event_loop: &mut EventLoop,
+        allow_emergent_followup: bool,
+        completion_error: Option<&crate::common::MidgeError>,
+    ) {
         let active = event_loop
             .state
             .active_compactions
             .load(std::sync::atomic::Ordering::SeqCst);
         if active != 0 {
+            return;
+        }
+
+        if let Some(error) = completion_error {
+            Self::fail_pending_compaction_waits(event_loop, error);
             return;
         }
 
@@ -711,22 +754,19 @@ impl CompactionCoordinator {
                     Ok(None) => break,
                     Err(error) => {
                         Self::record_compaction_failure(event_loop);
-                        let mut pending = event_loop.state.pending_compaction_waits.lock();
-                        for (request_id, _) in pending.drain() {
-                            event_loop.router.complete(RuntimeResponse::Error {
-                                request_id,
-                                error: crate::common::MidgeError::Corruption(error.to_string()),
-                            });
-                        }
+                        Self::fail_pending_compaction_waits(event_loop, &error);
                         return;
                     }
                 };
-                if event_loop.launch_compaction(plan).is_ok() {
-                    emergent_scheduled = true;
-                    continue;
+                match event_loop.launch_compaction(plan) {
+                    Ok(()) => {
+                        emergent_scheduled = true;
+                    }
+                    Err(error) => {
+                        Self::fail_pending_compaction_waits(event_loop, &error);
+                        return;
+                    }
                 }
-
-                break;
             }
         }
 
@@ -752,6 +792,24 @@ impl CompactionCoordinator {
                 "emergent compactions scheduled; {} requests still waiting",
                 pending.len()
             );
+        }
+    }
+
+    fn fail_pending_compaction_waits(event_loop: &EventLoop, error: &crate::common::MidgeError) {
+        let mut pending = event_loop.state.pending_compaction_waits.lock();
+        for (request_id, condition) in pending.drain() {
+            let response = if condition.starts_with("BeginIngest(") {
+                // BeginIngest deliberately cancels the active worker. Once it
+                // has drained, the barrier is established even though that
+                // compaction itself terminated with `Aborted`.
+                RuntimeResponse::Ok { request_id }
+            } else {
+                RuntimeResponse::Error {
+                    request_id,
+                    error: error.replay(),
+                }
+            };
+            event_loop.router.complete(response);
         }
     }
 

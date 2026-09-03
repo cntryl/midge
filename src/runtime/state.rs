@@ -222,6 +222,9 @@ pub struct RuntimeState {
     // === Sequence Numbers ===
     /// Global monotonic sequence number
     pub sequence: u64,
+    /// Highest compaction output generation observed or allocated. This is
+    /// recovered from canonical output names without advancing WAL authority.
+    pub(crate) compaction_output_generation: u64,
     /// Next transaction ID
     pub next_txn_id: u64,
     /// Minimum sequence of a pending transaction apply (for read atomicity)
@@ -275,6 +278,10 @@ pub struct RuntimeState {
     pub total_memtable_bytes: usize,
     /// Maximum number of immutable memtables per CF before write stall
     pub max_immutable_memtables: usize,
+    /// Soft L0 file-count trigger used to derive the internal hard admission
+    /// ceiling. Kept in runtime state so WAL admission and compaction planning
+    /// observe one value.
+    pub(crate) l0_compaction_trigger: usize,
     /// Next process-local flush identity. Flush identities are stable for the
     /// lifetime of an immutable and are never inferred from SST sequence state.
     pub(crate) next_flush_id: u64,
@@ -734,9 +741,20 @@ impl RuntimeState {
 
     /// Allocate the next sequence number. Saturates at `u64::MAX` to avoid wrap;
     /// after that, duplicate sequence numbers would occur (documented limitation).
+    #[cfg(test)]
     pub fn next_sequence(&mut self) -> u64 {
         self.sequence = self.sequence.saturating_add(1);
         self.sequence
+    }
+
+    pub(crate) fn next_compaction_output_generation(&mut self) -> MidgeResult<u64> {
+        let current = self.compaction_output_generation.max(self.sequence);
+        let next = current.checked_add(1).ok_or_else(|| {
+            MidgeError::ResourceLimit("compaction output sequence exhausted".to_string())
+        })?;
+        self.compaction_output_generation = next;
+        self.sequence = next;
+        Ok(next)
     }
 
     pub fn restore_sequence_floor_from_manifest(&mut self) {
@@ -753,6 +771,10 @@ impl RuntimeState {
         if self.wal.cloud_durable_seq < sequence_floor {
             self.wal.cloud_durable_seq = sequence_floor;
         }
+        self.compaction_output_generation =
+            self.compaction_output_generation.max(self.sequence).max(
+                Self::manifest_compaction_output_generation_floor(&self.manifest),
+            );
     }
 
     /// Reset the cloud durability frontier to bytes proven durable by the

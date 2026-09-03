@@ -148,7 +148,7 @@ fn should_keep_compacted_data_visible_when_compaction_crashes_before_publish() {
     .expect("configure compaction publish failpoint");
     engine
         .compact_all()
-        .expect("compaction returns after failure");
+        .expect_err("compact_all must report the injected publication failure");
     fail::remove("midge::manifest::inject_no_space_on_compaction_batch_edit");
     scenario.teardown();
     engine

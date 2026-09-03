@@ -63,6 +63,10 @@ impl WalCoordinator {
                 return HandleOutcome::Continue;
             }
         };
+        if let Err(error) = event_loop.ensure_l0_write_admission(&touched_cfs) {
+            event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
+            return HandleOutcome::Continue;
+        }
         match event_loop.wal_actor.append_spilled_transaction(
             &mut event_loop.state,
             &source,
@@ -159,6 +163,10 @@ impl WalCoordinator {
                 MAX_COALESCED_TRANSACTIONS_AFTER_WAKE,
             );
         } else {
+            if let Err(error) = event_loop.ensure_l0_write_admission(&touched_cfs) {
+                event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
+                return HandleOutcome::Continue;
+            }
             match event_loop.wal_actor.append_transaction(
                 &mut event_loop.state,
                 crate::runtime::actors::wal::TransactionAppendParams {
@@ -235,6 +243,10 @@ impl WalCoordinator {
         if !Self::accept_write(event_loop, request_id) {
             return HandleOutcome::Continue;
         }
+        if let Err(error) = event_loop.ensure_l0_write_admission(&[cf_id]) {
+            event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
+            return HandleOutcome::Continue;
+        }
 
         let result = event_loop.wal_actor.append(
             &mut event_loop.state,
@@ -279,6 +291,10 @@ impl WalCoordinator {
         durability_policy: Option<DurabilityPolicy>,
     ) -> HandleOutcome {
         if !Self::accept_write(event_loop, request_id) {
+            return HandleOutcome::Continue;
+        }
+        if let Err(error) = event_loop.ensure_l0_write_admission(&[cf_id]) {
+            event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
             return HandleOutcome::Continue;
         }
 
