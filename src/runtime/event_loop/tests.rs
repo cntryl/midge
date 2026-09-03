@@ -2154,6 +2154,81 @@ fn should_reject_out_of_order_compaction_output_set_before_publication(
 }
 
 #[test]
+fn should_reject_compaction_when_target_span_changes_before_publication(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut event_loop = create_test_local_event_loop()?;
+    let source_name = crate::sst::file_name(0, 0, 1);
+    let selected_target = crate::sst::file_name(0, 1, 2);
+    let concurrent_target = crate::sst::file_name(0, 1, 3);
+    for (name, level, key, smallest, largest, sequence) in [
+        (&source_name, 0, b'm', b'a', b'z', 1_u64),
+        (&selected_target, 1, b'b', b'a', b'm', 2_u64),
+        (&concurrent_target, 1, b'y', b'n', b'z', 3_u64),
+    ] {
+        let bytes = valid_sst_bytes_for_event_loop_test(&[key], b"value", sequence);
+        std::fs::write(event_loop.state.sst_dir.join(name), &bytes)?;
+        event_loop
+            .state
+            .manifest
+            .files
+            .push(crate::metadata::FileMeta {
+                name: name.clone(),
+                level,
+                size_bytes: u64::try_from(bytes.len()).expect("input length fits u64"),
+                content_crc32c: Some(crc32c::crc32c(&bytes)),
+                cf_id: 0,
+                smallest_key: Some(vec![smallest]),
+                largest_key: Some(vec![largest]),
+                smallest_seq: Some(sequence),
+                largest_seq: Some(sequence),
+                ..Default::default()
+            });
+    }
+    let output_name = crate::sst::compaction_file_name(0, 1, 4, 0);
+    let output_bytes = valid_sst_bytes_for_event_loop_test(b"m", b"replacement", 4);
+    std::fs::write(event_loop.state.sst_dir.join(&output_name), output_bytes)?;
+    let captured_inputs = vec![source_name.clone(), selected_target.clone()];
+    event_loop
+        .compaction_actor
+        .prepare_for_completion_test(&mut event_loop.state, &captured_inputs)?;
+    let request_id = 8_160;
+    let response_rx = event_loop.router.register(request_id, "TestRequest");
+    let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
+
+    // Act
+    event_loop.handle_runtime_msg(
+        RuntimeMsg::CompactionComplete {
+            request_id,
+            input_ssts: captured_inputs,
+            output_ssts: vec![output_name.clone()],
+            cf_id: 0,
+            target_level: 1,
+            succeeded: true,
+        },
+        &msg_rx,
+    );
+
+    // Assert
+    match response_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("changed-span completion response")
+    {
+        RuntimeResponse::Error { error, .. } => assert!(
+            error.to_string().contains("target-level span changed"),
+            "unexpected validation error: {error}"
+        ),
+        other => panic!("expected rejected output set, got {other:?}"),
+    }
+    assert!(event_loop.state.manifest_has_file(&source_name));
+    assert!(event_loop.state.manifest_has_file(&selected_target));
+    assert!(event_loop.state.manifest_has_file(&concurrent_target));
+    assert!(!event_loop.state.manifest_has_file(&output_name));
+    assert!(event_loop.state.intent_log.is_empty());
+    Ok(())
+}
+
+#[test]
 fn should_reject_cloud_partition_read_before_exceeding_compaction_pool(
 ) -> crate::common::MidgeResult<()> {
     // Arrange
