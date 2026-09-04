@@ -1,5 +1,36 @@
 use super::*;
 
+#[test]
+fn should_reject_oversized_range_before_staging_or_spilling() -> MidgeResult<()> {
+    // Arrange
+    let dir = tempfile::tempdir()?;
+    let limit = crate::sst::compression::MAX_DECOMPRESSED_BLOCK_SIZE;
+    for (start_len, end_len) in [(limit, 1), (1, limit), (limit / 2, limit / 2)] {
+        let pool = Arc::new(TransactionMemoryPool::new(1024));
+        let mut writes = TransactionWriteSet::new(pool.clone(), dir.path(), false, 1);
+        writes.push(put(b"safe", b"value"))?;
+        let reserved = pool.resident.load(Ordering::Acquire);
+        // Act
+        let result = writes.push(TransactionOp::DeleteRange {
+            cf_id: 0,
+            start_key: Bytes::from(vec![b'a'; start_len]),
+            end_key: Bytes::from(vec![b'z'; end_len]),
+        });
+        // Assert
+        assert!(
+            matches!(result, Err(MidgeError::ResourceLimit(_))),
+            "oversized range was admitted: {result:?}"
+        );
+        assert_eq!(writes.next_ordinal, 1);
+        assert!(!writes.has_spills());
+        assert_eq!(pool.resident.load(Ordering::Acquire), reserved);
+        assert!(
+            matches!(writes.latest_for_key(b"safe")?, Some(IntentLookup::Present(value)) if value.as_ref() == b"value")
+        );
+    }
+    Ok(())
+}
+
 fn put(key: &[u8], value: &[u8]) -> TransactionOp {
     TransactionOp::Put {
         cf_id: 0,

@@ -63,3 +63,6 @@ pub(crate) fn persist_sst_stream_to_path(source: &mut dyn Read, path: &Path) -> 
 
     Ok(())
 }
+
+#[cfg(test)]
+mod regression_tests;

@@ -163,7 +163,7 @@ impl SstFileIo {
             .find_block(key)
             .or_else(|| trie.seek_next(key))
             .and_then(|block_index| usize::try_from(block_index).ok())
-            .map_or(last_index, |block_index| block_index.min(last_index));
+            .filter(|block_index| *block_index <= last_index)?;
         Some((block_index.saturating_sub(1), block_index))
     }
 

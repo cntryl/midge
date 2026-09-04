@@ -529,6 +529,9 @@ impl OpenOptionsBuilder {
     }
 
     /// Enable or disable automatic background compaction scheduling.
+    /// Critical L0 pressure still triggers compaction to restore write admission,
+    /// including while the engine is running. Ingest mode retains its explicit
+    /// prohibition on concurrent compaction.
     #[must_use]
     pub fn background_compaction(mut self, enabled: bool) -> Self {
         self.compaction.set_background_enabled(enabled);

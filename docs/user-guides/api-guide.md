@@ -22,6 +22,35 @@ options before opening. Public builder controls include `goal`,
 `recovery_policy`, `storage_io_timeout`, `runtime_response_timeout`,
 `on_lease_loss`, `lease_clock_skew_tolerance`, and `ttl_clock`.
 
+## Entry size admission
+
+`Transaction::put`, `insert`, and point `delete` reject entries whose full key,
+value, and SST V4 entry header exceed 64 MiB, returning `MidgeError::ResourceLimit`
+before adding the operation to the transaction or spilling it to disk. A rejected
+operation leaves previously staged operations intact. The check uses the full key
+because any entry can start a block after flush or compaction.
+
+The header occupies 26 bytes, or 34 bytes for keys longer than 65,535 bytes; TTL
+presence does not change its size. For a three-byte key, the maximum value size
+is therefore 67,108,835 bytes. Memory/admission budgets can impose smaller limits.
+The admission ceiling applies regardless of the selected compression policy.
+`delete_range` applies point-key limits to both endpoints and limits their
+combined encoded range block to 64 MiB, including its 20-byte header. Rejection
+also leaves previously staged operations intact.
+
+Readable legacy uncompressed entries larger than this admission ceiling remain
+readable and compactable when the compaction memory budget can hold their working
+buffers. Compaction writes oversized blocks uncompressed, even when compression
+is configured. This preserves SST V4 compatibility without relaxing compressed
+decoder limits or repairing previously written oversized compressed blocks.
+
+Disabling `background_compaction` suppresses ordinary automatic work. Reaching
+the hard L0 admission ceiling still schedules pressure-recovery compaction during
+live maintenance and after flush publication, as well as at startup. Writes can
+temporarily return `WriteStall` until publication frees capacity. Ingest mode
+continues to prohibit concurrent compaction, and storage errors can still prevent
+progress.
+
 ## Runtime response deadlines
 
 Every Engine operation that submits a `RuntimeMsg` and waits for its response is

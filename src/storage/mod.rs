@@ -135,7 +135,27 @@ pub enum CloudUploadFailureKind {
     Timeout,
 }
 
+/// Select exactly the identity used by conditional mutations. GCS JSON
+/// metadata and media responses may expose different `ETags` for one generation.
+pub(crate) fn conditional_object_identity<'a>(
+    etag: &'a str,
+    generation: Option<&'a str>,
+) -> Option<(&'static str, &'a str)> {
+    if let Some(generation) = generation.map(str::trim).filter(|value| !value.is_empty()) {
+        return Some(("x-goog-if-generation-match", generation));
+    }
+    let etag = etag.trim();
+    (!etag.is_empty()).then_some(("If-Match", etag))
+}
+
 impl StorageObjectMetadata {
+    pub(crate) fn same_version(&self, other: &Self) -> bool {
+        let identity = conditional_object_identity(&self.etag, self.generation.as_deref());
+        self.size == other.size
+            && identity.is_some()
+            && identity == conditional_object_identity(&other.etag, other.generation.as_deref())
+    }
+
     pub fn content_crc(size: u64, data: &[u8]) -> Self {
         Self {
             size,
@@ -249,6 +269,10 @@ pub(crate) fn storage_error_is_timeout(error: &str) -> bool {
     error.trim_start().starts_with(STORAGE_TIMEOUT_PREFIX)
 }
 
+/// One read response binds the body and provider identity to the same version.
+pub type MetadataReadCallback =
+    std::sync::mpsc::Sender<Result<(Vec<u8>, StorageObjectMetadata), String>>;
+
 /// NEW async-compatible storage backend trait.
 ///
 /// CRITICAL DESIGN:
@@ -266,6 +290,19 @@ pub(crate) fn storage_error_is_timeout(error: &str) -> bool {
 pub trait StorageBackend: Send + Sync + 'static {
     /// Submit a read operation. Returns immediately.
     fn submit_read(&self, key: &str, callback: StorageCallback);
+
+    /// Read bytes and identity from one version. Unsupported backends fail closed;
+    /// synthesizing this response from independent GET and HEAD calls is unsafe.
+    fn submit_read_with_metadata(
+        &self,
+        _key: &str,
+        _timeout: std::time::Duration,
+        callback: MetadataReadCallback,
+    ) {
+        let _ = callback.send(Err(
+            "storage backend does not support metadata-bearing reads".to_string(),
+        ));
+    }
 
     /// Submit a read whose callback adapter must not wait longer than
     /// `timeout`. Backends whose submission path is already non-blocking may
@@ -380,5 +417,64 @@ pub trait StorageBackend: Send + Sync + 'static {
         callback: StorageCallback,
     ) {
         self.submit_head(key, callback);
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::StorageObjectMetadata;
+
+    #[test]
+    fn should_match_generation_when_media_and_metadata_etags_differ() {
+        // Arrange
+        let head = StorageObjectMetadata {
+            size: 3,
+            etag: "json-etag".to_string(),
+            generation: Some("42".to_string()),
+        };
+        let mut get = head.clone();
+        get.etag = "media-etag".to_string();
+
+        // Act
+        let same = head.same_version(&get);
+        get.generation = Some("43".to_string());
+        let replaced = head.same_version(&get);
+        get.generation = None;
+        let missing_generation = head.same_version(&get);
+
+        // Assert
+        assert!(same);
+        assert!(!replaced);
+        assert!(!missing_generation);
+    }
+
+    #[test]
+    fn should_require_matching_object_version_when_revalidating_proof() {
+        // Arrange
+        let expected = StorageObjectMetadata {
+            size: 3,
+            etag: "identity".to_string(),
+            generation: None,
+        };
+        let mut resized = expected.clone();
+        resized.size = 4;
+        let mut replaced = expected.clone();
+        replaced.etag = "replacement".to_string();
+        let missing = StorageObjectMetadata {
+            size: 3,
+            etag: String::new(),
+            generation: None,
+        };
+
+        // Act
+        let results = [
+            expected.same_version(&expected),
+            expected.same_version(&resized),
+            expected.same_version(&replaced),
+            missing.same_version(&missing),
+        ];
+
+        // Assert
+        assert_eq!(results, [true, false, false, false]);
     }
 }

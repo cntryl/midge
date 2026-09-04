@@ -94,7 +94,8 @@ impl SstFileIo {
     pub(super) fn merge_newer_state(best_state: &mut KeyState, candidate: KeyState) {
         let candidate_sequence = Self::state_sequence(&candidate);
         let best_sequence = Self::state_sequence(best_state);
-        if candidate_sequence > best_sequence
+        if matches!(best_state, KeyState::Absent)
+            || candidate_sequence > best_sequence
             || (candidate_sequence == best_sequence
                 && matches!(&candidate, KeyState::Tombstone(_))
                 && !matches!(best_state, KeyState::Tombstone(_)))
@@ -112,7 +113,6 @@ impl SstFileIo {
         let mut offset = 0usize;
         let mut reconstructed_key = Vec::new();
         let mut best_state = KeyState::Absent;
-        let mut best_sequence = 0u64;
 
         while offset < block_data.len() {
             let (entry, next_offset) =
@@ -133,15 +133,7 @@ impl SstFileIo {
                 std::cmp::Ordering::Equal => {
                     if snapshot_seq == u64::MAX || entry.sequence <= snapshot_seq {
                         let candidate = Self::state_from_entry_view(block_data, entry);
-                        let candidate_sequence = Self::state_sequence(&candidate);
-                        if candidate_sequence > best_sequence
-                            || (candidate_sequence == best_sequence
-                                && matches!(&candidate, KeyState::Tombstone(_))
-                                && !matches!(&best_state, KeyState::Tombstone(_)))
-                        {
-                            best_sequence = candidate_sequence;
-                            best_state = candidate;
-                        }
+                        Self::merge_newer_state(&mut best_state, candidate);
                     }
                 }
             }

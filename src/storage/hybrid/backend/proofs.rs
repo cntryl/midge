@@ -11,7 +11,7 @@ use crate::storage::StorageObjectMetadata;
 ///
 /// Format-aware validation belongs to the runtime. Storage only establishes
 /// that the bytes it returned still match the provider identity observed by
-/// `HEAD`.
+/// the metadata-bearing GET. Subsequent HEAD checks reject observed changes.
 #[derive(Clone, Debug)]
 pub(crate) struct RemoteObjectProof {
     pub(super) key: String,
@@ -105,26 +105,13 @@ impl HybridStorage {
         key: &str,
         callback_timeout: Duration,
     ) -> Result<RemoteObjectProof, String> {
-        let before = Self::head_object_from_backend_blocking(backend, key, callback_timeout)?;
-        let bytes = Self::read_object_from_backend_blocking(backend, key, callback_timeout)?;
-        let after = Self::head_object_from_backend_blocking(backend, key, callback_timeout)?;
-        if before != after {
-            return Err(format!(
-                "object '{key}' identity changed during read: before {before:?}, after {after:?}"
-            ));
-        }
-        if after.size != bytes.len() as u64 {
-            return Err(format!(
-                "object '{key}' size changed during read: bytes={}, metadata={} ",
-                bytes.len(),
-                after.size
-            ));
-        }
-        Ok(RemoteObjectProof {
-            key: key.to_string(),
-            bytes,
-            metadata: after,
-        })
+        Self::stable_object_proof_from_backend_within(
+            backend,
+            key,
+            callback_timeout,
+            &OperationDeadline::unbounded(),
+        )
+        .map_err(|error| error.to_string())
     }
 
     pub(super) fn stable_object_proof_from_backend_within(
@@ -144,8 +131,20 @@ impl HybridStorage {
 
         let read_timeout =
             Self::deadline_timeout(key, "GET during object proof", callback_timeout, deadline)?;
-        let bytes = Self::read_object_from_backend_blocking(backend, key, read_timeout)
+        let (tx, rx) = mpsc::channel();
+        backend.submit_read_with_metadata(key, read_timeout, tx);
+        let (bytes, metadata) = rx
+            .recv_timeout(read_timeout)
+            .map_err(|error| match error {
+                mpsc::RecvTimeoutError::Timeout => crate::common::MidgeError::Timeout(format!(
+                    "metadata-bearing GET timed out for '{key}'"
+                )),
+                mpsc::RecvTimeoutError::Disconnected => crate::common::MidgeError::Internal(
+                    format!("metadata-bearing GET callback closed for '{key}'"),
+                ),
+            })?
             .map_err(|error| Self::proof_round_trip_error(key, "GET", error, deadline))?;
+        crate::storage::cloud::validate_object_proof(key, &bytes, &metadata)?;
 
         let after_timeout = Self::deadline_timeout(
             key,
@@ -156,22 +155,15 @@ impl HybridStorage {
         let after = Self::head_object_from_backend_blocking(backend, key, after_timeout)
             .map_err(|error| Self::proof_round_trip_error(key, "final HEAD", error, deadline))?;
 
-        if before != after {
+        if !before.same_version(&metadata) || !metadata.same_version(&after) {
             return Err(crate::common::MidgeError::Internal(format!(
-                "object '{key}' identity changed during read: before {before:?}, after {after:?}"
-            )));
-        }
-        if after.size != bytes.len() as u64 {
-            return Err(crate::common::MidgeError::Internal(format!(
-                "object '{key}' size changed during read: bytes={}, metadata={} ",
-                bytes.len(),
-                after.size
+                "object '{key}' identity changed during read: before {before:?}, GET {metadata:?}, after {after:?}"
             )));
         }
         Ok(RemoteObjectProof {
             key: key.to_string(),
             bytes,
-            metadata: after,
+            metadata,
         })
     }
 
@@ -417,7 +409,7 @@ impl HybridStorage {
                     proof.key
                 )));
             }
-            if actual.metadata != proof.metadata {
+            if !actual.metadata.same_version(&proof.metadata) {
                 return Err(crate::common::MidgeError::Internal(format!(
                     "guarded object '{}' identity changed before conditional delete: expected {:?}, actual {:?}",
                     proof.key, proof.metadata, actual.metadata
@@ -436,7 +428,7 @@ impl HybridStorage {
             .map_err(|error| {
             Self::proof_round_trip_error(&proof.key, "guarded object HEAD", error, deadline)
         })?;
-        if actual == proof.metadata {
+        if actual.same_version(&proof.metadata) {
             return Ok(());
         }
         Err(crate::common::MidgeError::Internal(format!(

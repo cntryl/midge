@@ -445,6 +445,25 @@ impl RangeTombstone {
     }
 }
 
+/// Apply point-key admission limits to both endpoints and bound the complete
+/// singleton range block (count, two lengths, sequence, and endpoint bytes).
+pub(crate) fn validate_range_tombstone_size(
+    start_len: usize,
+    end_len: usize,
+) -> crate::common::MidgeResult<()> {
+    crate::sst::encoding::validate_entry_size(start_len, 0)?;
+    crate::sst::encoding::validate_entry_size(end_len, 0)?;
+    let encoded_len = start_len
+        .checked_add(end_len)
+        .and_then(|size| size.checked_add(20));
+    if encoded_len.is_none_or(|size| size > crate::sst::compression::MAX_DECOMPRESSED_BLOCK_SIZE) {
+        return Err(crate::common::MidgeError::ResourceLimit(
+            "SST range tombstone exceeds the 64 MiB decoded block limit".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[must_use]
 pub fn encode_range_tombstones(tombstones: &[RangeTombstone]) -> Vec<u8> {
     let mut buf = Vec::new();

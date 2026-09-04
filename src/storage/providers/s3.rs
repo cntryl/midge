@@ -1305,7 +1305,7 @@ fn object_metadata_from_s3_response(
     known_size: Option<u64>,
 ) -> CloudOutcome<ObjectMetadata> {
     let size = match known_size {
-        Some(size) => size,
+        Some(_) => crate::storage::cloud::executor::validate_get_response_length(response)?,
         None => response
             .headers
             .iter()
@@ -1580,6 +1580,18 @@ fn decode_xml_entities(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn should_validate_get_length_when_building_object_identity() {
+        // Arrange
+        let identity_headers = &[("etag", "identity")];
+        // Act
+        // Assert
+        crate::storage::providers::test_support::assert_get_metadata_length_contract(
+            identity_headers,
+            |response| object_metadata_from_s3_response(response, Some(3)),
+        );
+    }
+
     use super::*;
     use crate::storage::providers::test_support::{
         receive_list_result, spawn_recording_http_server, spawn_recording_http_server_with_status,

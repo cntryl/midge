@@ -217,14 +217,10 @@ impl RuntimeState {
         self.l0_slot_usage(cf_id) >= self.l0_hard_ceiling()
     }
 
-    pub(crate) fn is_above_l0_hard_ceiling(&self, cf_id: crate::types::ColumnFamilyId) -> bool {
-        self.l0_slot_usage(cf_id) > self.l0_hard_ceiling()
-    }
-
-    pub(crate) fn is_any_cf_above_l0_hard_ceiling(&self) -> bool {
+    pub(crate) fn has_any_critical_l0_debt(&self) -> bool {
         self.column_families
             .keys()
-            .any(|cf_id| self.is_above_l0_hard_ceiling(*cf_id))
+            .any(|cf_id| self.has_critical_l0_debt(*cf_id))
     }
 
     /// Return true when admitting another transaction would require an L0 slot

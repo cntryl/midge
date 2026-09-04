@@ -72,6 +72,48 @@ pub(crate) mod test_support {
     use std::thread::JoinHandle;
     use std::time::Duration;
 
+    pub(crate) fn assert_get_metadata_length_contract(
+        identity_headers: &[(&str, &str)],
+        parse: impl Fn(
+            &crate::storage::cloud::executor::CloudResponse,
+        ) -> CloudOutcome<crate::storage::cloud::ObjectMetadata>,
+    ) {
+        use crate::storage::cloud::{executor::CloudResponse, CloudError};
+        // Arrange
+        for length in [
+            Some("2"),
+            Some("4"),
+            Some("invalid"),
+            Some("-1"),
+            Some("3"),
+            None,
+        ] {
+            let mut headers = identity_headers
+                .iter()
+                .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+                .collect::<Vec<_>>();
+            if let Some(length) = length {
+                headers.push(("content-length".into(), length.into()));
+            }
+            let response = CloudResponse {
+                status: 200,
+                headers,
+                body: b"abc".to_vec(),
+            };
+            // Act
+            let result = parse(&response);
+            // Assert
+            if matches!(length, None | Some("3")) {
+                assert_eq!(result.expect("valid or chunked GET length").size, 3);
+            } else {
+                assert!(
+                    matches!(result, Err(CloudError::Protocol(_))),
+                    "accepted length {length:?}: {result:?}"
+                );
+            }
+        }
+    }
+
     pub(crate) struct ScriptedHttpServer {
         pub(crate) endpoint: String,
         handle: Option<JoinHandle<usize>>,

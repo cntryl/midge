@@ -1469,38 +1469,7 @@ impl ListOmittingCloudBackend {
 }
 
 impl crate::storage::cloud::CloudBackend for ListOmittingCloudBackend {
-    fn submit_put(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        callback: crate::storage::cloud::CloudCallback,
-    ) {
-        self.inner.submit_put(key, data, headers, callback);
-    }
-
-    fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        self.inner.submit_get(key, callback);
-    }
-
-    fn submit_get_range(
-        &self,
-        key: &str,
-        start: u64,
-        end: Option<u64>,
-        callback: crate::storage::cloud::CloudCallback,
-    ) {
-        self.inner.submit_get_range(key, start, end, callback);
-    }
-
-    fn submit_delete(
-        &self,
-        key: &str,
-        headers: Vec<(String, String)>,
-        callback: crate::storage::cloud::CloudCallback,
-    ) {
-        self.inner.submit_delete(key, headers, callback);
-    }
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_with_metadata, submit_put, submit_get, submit_get_range, submit_delete);
 
     fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
         if prefix.ends_with(&self.omitted_prefix) {
@@ -1524,9 +1493,7 @@ impl crate::storage::cloud::CloudBackend for ListOmittingCloudBackend {
         self.inner.submit_list(prefix, callback);
     }
 
-    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        self.inner.submit_head(key, callback);
-    }
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
 }
 
 fn test_sst_bytes_with_key_value(key: &[u8], value: &[u8]) -> Vec<u8> {

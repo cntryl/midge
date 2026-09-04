@@ -1,8 +1,8 @@
 //! Tier 4 - Engine Compression Policy Comparison
 //!
 //! Fixed-work local workloads compare the actual policies derived from
-//! `Goal::{Latency, Throughput, Economy}`. Each workload performs four
-//! explicit flushes, a completed compaction, and a clean shutdown. Phase
+//! `Goal::{Latency, Throughput, Economy}`. Each workload performs sixteen
+//! explicit flushes, compaction after every four flushes, and a clean shutdown. Phase
 //! timings and the final SST footprint are recorded separately.
 
 use cntryl_midge::{
@@ -17,6 +17,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 const FLUSHES: usize = 16;
+const FLUSHES_PER_COMPACTION: usize = 4;
 const RECORDS_PER_FLUSH: usize = 512;
 const VALUE_SIZE: usize = 16 * 1024;
 const LOGICAL_BYTES: usize = FLUSHES * RECORDS_PER_FLUSH * VALUE_SIZE;
@@ -185,7 +186,12 @@ fn execute_workload(shape: RecordShape, goal: Goal) -> WorkloadOutcome {
 
     let mut ingest = Duration::ZERO;
     let mut flush_compaction = Duration::ZERO;
-    for batch in records.as_chunks::<RECORDS_PER_FLUSH>().0 {
+    for (batch_index, batch) in records
+        .as_chunks::<RECORDS_PER_FLUSH>()
+        .0
+        .iter()
+        .enumerate()
+    {
         let ingest_started = Instant::now();
         let mut transaction = engine
             .begin_tx(column_family.id(), TransactionMode::ReadWrite)
@@ -204,6 +210,13 @@ fn execute_workload(shape: RecordShape, goal: Goal) -> WorkloadOutcome {
         engine
             .flush_cf(&column_family)
             .expect("flush compression-policy benchmark batch");
+        // Use the same bounded maintenance cadence for every policy. Waiting
+        // until all sixteen flushes exhausts the latency policy's L0 slots.
+        if (batch_index + 1) % FLUSHES_PER_COMPACTION == 0 {
+            engine
+                .compact_all()
+                .expect("compact compression-policy benchmark flush group");
+        }
         flush_compaction += flush_started.elapsed();
     }
 
@@ -234,6 +247,8 @@ fn run_workload(ctx: &mut StressContext, shape: RecordShape, goal: Goal) {
     ctx.parameter("record_count", FLUSHES * RECORDS_PER_FLUSH);
     ctx.parameter("record_value_bytes", VALUE_SIZE);
     ctx.parameter("flush_count", FLUSHES);
+    ctx.parameter("flushes_per_compaction", FLUSHES_PER_COMPACTION);
+    ctx.parameter("background_compaction", false);
     ctx.parameter("logical_bytes", LOGICAL_BYTES);
     assert!(
         outcome.final_sst_bytes > 0,

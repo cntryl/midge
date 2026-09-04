@@ -1552,7 +1552,7 @@ fn parse_gcs_media_object_metadata(
     response: &CloudResponse,
     mode: GcsBackendMode,
 ) -> CloudOutcome<ObjectMetadata> {
-    let size = u64::try_from(response.body.len()).unwrap_or(u64::MAX);
+    let size = crate::storage::cloud::executor::validate_get_response_length(response)?;
     let etag = required_gcs_metadata_header(response, "etag", "ETag")?;
     let generation = required_gcs_generation(response, mode)?;
     Ok(ObjectMetadata::with_generation(size, etag, generation))
@@ -1861,6 +1861,18 @@ impl CloudSigner for Goog1HmacSigner {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn should_validate_get_length_when_building_object_identity() {
+        // Arrange
+        let identity_headers = &[("etag", "identity"), ("x-goog-generation", "42")];
+        // Act
+        // Assert
+        crate::storage::providers::test_support::assert_get_metadata_length_contract(
+            identity_headers,
+            |response| parse_gcs_media_object_metadata(response, GcsBackendMode::Json),
+        );
+    }
+
     use super::*;
     use crate::storage::providers::test_support::{
         receive_list_result, spawn_recording_http_server, spawn_recording_http_server_with_status,

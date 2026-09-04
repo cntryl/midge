@@ -199,31 +199,22 @@ impl TrieReader {
     }
 
     fn collect_subtree(&self, node_index: usize, result: &mut Vec<u32>) {
-        self.collect_subtree_bounded(node_index, result, 0);
-    }
-
-    /// Collect subtree with depth limit to prevent stack exhaustion
-    fn collect_subtree_bounded(&self, node_index: usize, result: &mut Vec<u32>, depth: u32) {
-        // Safety: limit recursion depth to 256 to prevent stack exhaustion
-        if depth > 256 {
-            // Corrupted trie with excessive depth, stop traversal
-            return;
-        }
-
-        if node_index >= self.nodes.len() {
-            return;
-        }
-
-        let node = &self.nodes[node_index];
-
-        // Add this node's block if it's a leaf
-        if let Some(block_id) = node.block_id {
-            result.push(block_id);
-        }
-
-        // Recursively collect children
-        for edge in &node.children {
-            self.collect_subtree_bounded(edge.child_index as usize, result, depth + 1);
+        // The graph was validated at open. Iteration preserves traversal order
+        // without imposing a key-depth limit on valid writer-generated tries.
+        let mut stack = vec![node_index];
+        while let Some(index) = stack.pop() {
+            let Some(node) = self.nodes.get(index) else {
+                continue;
+            };
+            if let Some(block_id) = node.block_id {
+                result.push(block_id);
+            }
+            stack.extend(
+                node.children
+                    .iter()
+                    .rev()
+                    .map(|edge| edge.child_index as usize),
+            );
         }
     }
 
@@ -329,28 +320,14 @@ impl TrieReader {
 
     /// Find the leftmost (smallest key) leaf in the subtree rooted at `node_index`.
     fn leftmost_leaf(&self, node_index: usize) -> Option<u32> {
-        self.leftmost_leaf_bounded(node_index, 0)
-    }
-
-    /// Leftmost leaf with depth limit to prevent stack exhaustion.
-    fn leftmost_leaf_bounded(&self, node_index: usize, depth: u32) -> Option<u32> {
-        if depth > 256 || node_index >= self.nodes.len() {
-            return None;
+        let mut current = node_index;
+        loop {
+            let node = self.nodes.get(current)?;
+            if let Some(block_id) = node.block_id {
+                return Some(block_id);
+            }
+            current = node.children.first()?.child_index as usize;
         }
-
-        let node = &self.nodes[node_index];
-
-        // If this node is a leaf, it's the leftmost
-        if let Some(block_id) = node.block_id {
-            return Some(block_id);
-        }
-
-        // Otherwise, recurse into the first (smallest) child
-        if let Some(edge) = node.children.first() {
-            return self.leftmost_leaf_bounded(edge.child_index as usize, depth + 1);
-        }
-
-        None
     }
 
     /// Backtrack through the ancestor stack to find the next successor subtree.
@@ -397,6 +374,22 @@ mod tests {
     use crate::sst::trie::encoding::encode_trie;
     use crate::sst::trie::node::{TrieEdge, TrieNode};
     use crate::sst::trie::TrieBuilder;
+
+    #[test]
+    fn should_skip_missing_subtree_node_without_panicking() {
+        // Arrange: exercise the defensive traversal guard independently of
+        // open-time graph validation, which rejects malformed persisted tries.
+        let reader = TrieReader {
+            nodes: vec![TrieNode::new(0, Vec::new(), Some(7))],
+            root_index: 0,
+        };
+        let mut result = Vec::new();
+        // Act
+        reader.collect_subtree(usize::MAX, &mut result);
+        reader.collect_subtree(0, &mut result);
+        // Assert
+        assert_eq!(result, vec![7]);
+    }
 
     #[test]
     fn should_reject_cyclic_trie_before_lookup() {

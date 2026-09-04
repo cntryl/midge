@@ -33,6 +33,15 @@ Removed codec identifiers and malformed or unknown identifiers fail with
 corruption or compatibility errors. The reader never retries such bytes as an
 uncompressed block.
 
+New writes enforce a 64 MiB encoded-entry admission ceiling, including key and
+header bytes, and validate range-tombstone endpoints before staging. This does
+not change SST V4. Historical V4 raw blocks larger than that ceiling remain
+readable and can be rewritten by budgeted compaction; their output stays raw
+even if compression is configured. Compaction still requires enough memory for
+its reserved working buffers. Oversized compressed blocks remain corruption
+errors under the existing decoded-size limit. See the
+[PR #278 compatibility regressions](evidence/pr278-review-fixes.md).
+
 ## Required Rules For 1.0
 
 - every persistent format must carry an explicit version identifier or versioned decoding path

@@ -63,6 +63,28 @@ pub fn validate_entry_key_delta_len(key_delta: &[u8]) -> MidgeResult<()> {
     Ok(())
 }
 
+/// Validate the worst-case entry size at a block restart, before admission.
+/// Prefix compression cannot be relied on: flush and compaction may put any
+/// entry first in a block. TTL bytes are already included in the V4 header.
+pub(crate) fn validate_entry_size(key_len: usize, value_len: usize) -> MidgeResult<()> {
+    let _ = checked_v4_lengths(key_len, value_len)?;
+    let header = V4_BASE_HEADER_LEN
+        + if key_len > MAX_INLINE_ENTRY_KEY_DELTA_LEN {
+            V4_EXTENDED_LENGTH_LEN
+        } else {
+            0
+        };
+    let size = header
+        .checked_add(key_len)
+        .and_then(|size| size.checked_add(value_len));
+    if size.is_none_or(|size| size > crate::sst::compression::MAX_DECOMPRESSED_BLOCK_SIZE) {
+        return Err(MidgeError::ResourceLimit(format!(
+            "SST entry with {key_len} key bytes and {value_len} value bytes exceeds the 64 MiB decoded block limit"
+        )));
+    }
+    Ok(())
+}
+
 /// Entry type for SST entries
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -358,6 +380,41 @@ fn checked_v4_lengths(key_len: usize, value_len: usize) -> MidgeResult<(u32, u32
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn should_bound_range_admission_by_complete_encoded_size() {
+        use crate::sst::types::validate_range_tombstone_size;
+        // Arrange
+        let limit = crate::sst::compression::MAX_DECOMPRESSED_BLOCK_SIZE;
+        let half = limit / 2;
+        // Act
+        let accepted = validate_range_tombstone_size(half, half - 20);
+        let rejected = validate_range_tombstone_size(half, half - 19);
+        let oversized_end = validate_range_tombstone_size(0, limit - 33);
+        // Assert
+        assert!(accepted.is_ok());
+        assert!(matches!(rejected, Err(MidgeError::ResourceLimit(_))));
+        assert!(matches!(oversized_end, Err(MidgeError::ResourceLimit(_))));
+        assert!(validate_range_tombstone_size(usize::MAX, 1).is_err());
+    }
+
+    #[test]
+    fn should_admit_only_entries_within_decoded_limit_including_extended_headers() {
+        // Arrange
+        let limit = crate::sst::compression::MAX_DECOMPRESSED_BLOCK_SIZE;
+        for key_len in [0, 3, 65_535, 65_536] {
+            let header = if key_len > 65_535 { 34 } else { 26 };
+            let value_len = limit - header - key_len;
+            // Act
+            let accepted = validate_entry_size(key_len, value_len);
+            let rejected = validate_entry_size(key_len, value_len + 1);
+            // Assert
+            assert!(accepted.is_ok());
+            assert!(matches!(rejected, Err(MidgeError::ResourceLimit(_))));
+        }
+        assert!(validate_entry_size(usize::MAX, 1).is_err());
+        assert!(validate_entry_size(1, usize::MAX).is_err());
+    }
 
     #[test]
     fn should_round_trip_maximum_expiration_value_given_explicit_sst_ttl_presence() {

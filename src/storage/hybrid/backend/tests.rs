@@ -962,40 +962,7 @@ impl CloudBackend for WinningInitialCatalogCasBackend {
         self.inner.submit_put(key, data, headers, callback);
     }
 
-    fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        self.inner.submit_get(key, callback);
-    }
-
-    fn submit_get_with_metadata(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        self.inner.submit_get_with_metadata(key, callback);
-    }
-
-    fn submit_get_range(
-        &self,
-        key: &str,
-        start: u64,
-        end: Option<u64>,
-        callback: crate::storage::cloud::CloudCallback,
-    ) {
-        self.inner.submit_get_range(key, start, end, callback);
-    }
-
-    fn submit_delete(
-        &self,
-        key: &str,
-        headers: Vec<(String, String)>,
-        callback: crate::storage::cloud::CloudCallback,
-    ) {
-        self.inner.submit_delete(key, headers, callback);
-    }
-
-    fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
-        self.inner.submit_list(prefix, callback);
-    }
-
-    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        self.inner.submit_head(key, callback);
-    }
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_delete, submit_list, submit_head);
 }
 
 impl PausingCatalogCasBackend {
@@ -1045,40 +1012,7 @@ impl CloudBackend for PausingCatalogCasBackend {
         self.inner.submit_put(key, data, headers, callback);
     }
 
-    fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        self.inner.submit_get(key, callback);
-    }
-
-    fn submit_get_with_metadata(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        self.inner.submit_get_with_metadata(key, callback);
-    }
-
-    fn submit_get_range(
-        &self,
-        key: &str,
-        start: u64,
-        end: Option<u64>,
-        callback: crate::storage::cloud::CloudCallback,
-    ) {
-        self.inner.submit_get_range(key, start, end, callback);
-    }
-
-    fn submit_delete(
-        &self,
-        key: &str,
-        headers: Vec<(String, String)>,
-        callback: crate::storage::cloud::CloudCallback,
-    ) {
-        self.inner.submit_delete(key, headers, callback);
-    }
-
-    fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
-        self.inner.submit_list(prefix, callback);
-    }
-
-    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        self.inner.submit_head(key, callback);
-    }
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_delete, submit_list, submit_head);
 }
 
 #[test]
@@ -1323,6 +1257,7 @@ struct BudgetConsumingProofBackend {
     first_head_delay: Duration,
     head_calls: AtomicUsize,
     retained_callbacks: Mutex<Vec<StorageCallback>>,
+    retained_metadata_callbacks: Mutex<Vec<crate::storage::MetadataReadCallback>>,
 }
 
 struct BudgetConsumingSstPublicationBackend {
@@ -1398,6 +1333,7 @@ impl BudgetConsumingProofBackend {
             first_head_delay,
             head_calls: AtomicUsize::new(0),
             retained_callbacks: Mutex::new(Vec::new()),
+            retained_metadata_callbacks: Mutex::new(Vec::new()),
         }
     }
 
@@ -1407,6 +1343,15 @@ impl BudgetConsumingProofBackend {
 }
 
 impl StorageBackend for BudgetConsumingProofBackend {
+    fn submit_read_with_metadata(
+        &self,
+        _key: &str,
+        _timeout: Duration,
+        callback: crate::storage::MetadataReadCallback,
+    ) {
+        self.retained_metadata_callbacks.lock().push(callback);
+    }
+
     fn submit_read(&self, _key: &str, callback: StorageCallback) {
         self.retain_callback(callback);
     }
@@ -1478,6 +1423,24 @@ impl RacingReadDeleteBackend {
 }
 
 impl StorageBackend for RacingReadDeleteBackend {
+    fn submit_read_with_metadata(
+        &self,
+        _key: &str,
+        _timeout: Duration,
+        callback: crate::storage::MetadataReadCallback,
+    ) {
+        let snapshot = self.object.lock().clone();
+        self.read_started.wait();
+        self.release_read.wait();
+        let result = snapshot
+            .map(|bytes| {
+                let metadata = Self::metadata(&bytes);
+                (bytes, metadata)
+            })
+            .ok_or_else(|| "object not found".to_string());
+        let _ = callback.send(result);
+    }
+
     fn submit_read(&self, key: &str, callback: StorageCallback) {
         let key = key.to_string();
         let snapshot = self.object.lock().clone();
