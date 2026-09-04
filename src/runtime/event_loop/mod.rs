@@ -681,6 +681,13 @@ impl EventLoop {
         &mut self,
         operation: &str,
     ) -> crate::common::MidgeResult<bool> {
+        // Disabling ordinary background work must not permanently wedge L0
+        // admission. Use the same authority, ingest, and worker gates for
+        // pressure recovery at startup, after flush, and during live maintenance.
+        let background_enabled = self.state.compaction_enabled();
+        if !background_enabled && !self.state.has_any_critical_l0_debt() {
+            return Ok(false);
+        }
         if self.ddl_authority_ambiguous {
             return Err(crate::common::MidgeError::Fenced(
                 "DDL authority is ambiguous; refusing compaction until reconciliation".into(),
@@ -719,7 +726,11 @@ impl EventLoop {
             ));
         }
 
-        let planned = self.compaction_actor.check_compaction(&self.state);
+        let planned = if background_enabled {
+            self.compaction_actor.check_compaction(&self.state)
+        } else {
+            self.compaction_actor.check_manual_compaction(&self.state)
+        };
         let Some(plan) = planned.inspect_err(|_| self.state.mark_persistence_anomaly())? else {
             return Ok(false);
         };
@@ -729,10 +740,6 @@ impl EventLoop {
     }
 
     fn schedule_compaction_after_flush_publication(&mut self, sst_name: &str) {
-        if !self.state.compaction_enabled() {
-            return;
-        }
-
         match self.schedule_one_background_compaction_if_needed("flush publication") {
             Ok(true) => tracing::debug!(
                 sst_name,
@@ -772,11 +779,10 @@ impl EventLoop {
                 tracing::warn!(%error, "SST key-bound backfill maintenance failed; retaining conservative read fallback");
             }
         }
-        if self.state.compaction_enabled()
-            && !self
-                .state
-                .ingest_active
-                .load(std::sync::atomic::Ordering::Acquire)
+        if !self
+            .state
+            .ingest_active
+            .load(std::sync::atomic::Ordering::Acquire)
         {
             match self.schedule_one_background_compaction_if_needed("periodic maintenance") {
                 Ok(true) => tracing::debug!("Scheduled background compaction during maintenance"),
@@ -791,31 +797,10 @@ impl EventLoop {
 
     pub(super) fn schedule_background_compaction_on_startup(&mut self) {
         self.next_background_compaction_check = Instant::now() + STARTUP_CLOUD_MAINTENANCE_DELAY;
-        let recovery_debt = self.state.is_any_cf_above_l0_hard_ceiling();
-        if self.state.compaction_enabled() || recovery_debt {
-            let planned = if recovery_debt && !self.state.compaction_enabled() {
-                self.compaction_actor
-                    .check_manual_compaction(&self.state)
-                    .and_then(|plan| {
-                        let Some(plan) = plan else {
-                            return Ok(false);
-                        };
-                        self.launch_compaction(plan)?;
-                        Ok(true)
-                    })
-            } else {
-                self.schedule_one_background_compaction_if_needed("runtime startup")
-            };
-            match planned {
-                Ok(true) => {
-                    tracing::debug!(
-                        recovery_debt,
-                        "Scheduled background compaction during runtime startup"
-                    );
-                }
-                Ok(false) => {}
-                Err(error) => tracing::warn!(%error, "Startup background compaction check failed"),
-            }
+        match self.schedule_one_background_compaction_if_needed("runtime startup") {
+            Ok(true) => tracing::debug!("Scheduled compaction during runtime startup"),
+            Ok(false) => {}
+            Err(error) => tracing::warn!(%error, "Startup background compaction check failed"),
         }
     }
 

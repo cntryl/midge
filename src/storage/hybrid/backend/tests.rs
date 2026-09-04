@@ -962,40 +962,7 @@ impl CloudBackend for WinningInitialCatalogCasBackend {
         self.inner.submit_put(key, data, headers, callback);
     }
 
-    fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        self.inner.submit_get(key, callback);
-    }
-
-    fn submit_get_with_metadata(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        self.inner.submit_get_with_metadata(key, callback);
-    }
-
-    fn submit_get_range(
-        &self,
-        key: &str,
-        start: u64,
-        end: Option<u64>,
-        callback: crate::storage::cloud::CloudCallback,
-    ) {
-        self.inner.submit_get_range(key, start, end, callback);
-    }
-
-    fn submit_delete(
-        &self,
-        key: &str,
-        headers: Vec<(String, String)>,
-        callback: crate::storage::cloud::CloudCallback,
-    ) {
-        self.inner.submit_delete(key, headers, callback);
-    }
-
-    fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
-        self.inner.submit_list(prefix, callback);
-    }
-
-    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        self.inner.submit_head(key, callback);
-    }
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_delete, submit_list, submit_head);
 }
 
 impl PausingCatalogCasBackend {
@@ -1045,40 +1012,7 @@ impl CloudBackend for PausingCatalogCasBackend {
         self.inner.submit_put(key, data, headers, callback);
     }
 
-    fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        self.inner.submit_get(key, callback);
-    }
-
-    fn submit_get_with_metadata(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        self.inner.submit_get_with_metadata(key, callback);
-    }
-
-    fn submit_get_range(
-        &self,
-        key: &str,
-        start: u64,
-        end: Option<u64>,
-        callback: crate::storage::cloud::CloudCallback,
-    ) {
-        self.inner.submit_get_range(key, start, end, callback);
-    }
-
-    fn submit_delete(
-        &self,
-        key: &str,
-        headers: Vec<(String, String)>,
-        callback: crate::storage::cloud::CloudCallback,
-    ) {
-        self.inner.submit_delete(key, headers, callback);
-    }
-
-    fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
-        self.inner.submit_list(prefix, callback);
-    }
-
-    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        self.inner.submit_head(key, callback);
-    }
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_delete, submit_list, submit_head);
 }
 
 #[test]

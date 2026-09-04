@@ -172,7 +172,11 @@ impl TransactionWriteSet {
             TransactionOp::Delete { key, .. } => {
                 crate::sst::encoding::validate_entry_size(key.len(), 0)?;
             }
-            TransactionOp::DeleteRange { .. } => {}
+            TransactionOp::DeleteRange {
+                start_key, end_key, ..
+            } => {
+                crate::sst::types::validate_range_tombstone_size(start_key.len(), end_key.len())?;
+            }
         }
         let ordinal_op = OrdinalOp {
             ordinal: self.next_ordinal,

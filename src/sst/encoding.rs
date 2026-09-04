@@ -382,6 +382,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn should_bound_range_admission_by_complete_encoded_size() {
+        use crate::sst::types::validate_range_tombstone_size;
+        // Arrange
+        let limit = crate::sst::compression::MAX_DECOMPRESSED_BLOCK_SIZE;
+        let half = limit / 2;
+        // Act
+        let accepted = validate_range_tombstone_size(half, half - 20);
+        let rejected = validate_range_tombstone_size(half, half - 19);
+        let oversized_end = validate_range_tombstone_size(0, limit - 33);
+        // Assert
+        assert!(accepted.is_ok());
+        assert!(matches!(rejected, Err(MidgeError::ResourceLimit(_))));
+        assert!(matches!(oversized_end, Err(MidgeError::ResourceLimit(_))));
+        assert!(validate_range_tombstone_size(usize::MAX, 1).is_err());
+    }
+
+    #[test]
     fn should_admit_only_entries_within_decoded_limit_including_extended_headers() {
         // Arrange
         let limit = crate::sst::compression::MAX_DECOMPRESSED_BLOCK_SIZE;

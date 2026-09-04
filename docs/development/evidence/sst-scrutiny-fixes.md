@@ -19,6 +19,11 @@ keys, and a full key at a block restart. TTL uses the same fixed header. No SST
 format or reader ceiling is changed. This does not repair previously emitted
 SSTs containing oversized compressed entries.
 
+The [PR #278 review follow-up](pr278-review-fixes.md) preserves readable legacy
+oversized raw entries during budgeted compaction, extends admission to range
+tombstones, and documents live L0 pressure recovery when background compaction
+is disabled. Its evidence supplements the initial results recorded below.
+
 Trie node graph validation remains in place, including cycle and unreachable-node
 rejection. Iteration removes the artificial traversal depth limit without making
 invalid graphs acceptable. The sequence-zero fix preserves tombstone precedence

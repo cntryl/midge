@@ -861,6 +861,128 @@ fn should_schedule_recovery_compaction_above_hard_l0_ceiling_when_background_dis
 }
 
 #[test]
+fn should_schedule_live_compaction_at_hard_l0_ceiling_when_background_disabled() {
+    // Arrange
+    let mut event_loop = create_test_local_event_loop().expect("create local event loop");
+    let (worker_tx, worker_rx) = crossbeam::channel::unbounded();
+    event_loop.worker_msg_tx = Some(worker_tx);
+    event_loop.state.set_compaction_enabled(false);
+    event_loop.state.l0_compaction_trigger = 2;
+    event_loop.state.max_immutable_memtables = 0;
+    event_loop.compaction_actor.set_l0_file_count_threshold(2);
+    for sequence in 1..=3 {
+        let name = format!("live-ceiling-{sequence}.sst");
+        let _ = write_runtime_l0_sst_for_test(&event_loop, &name, sequence);
+        event_loop
+            .state
+            .manifest
+            .files
+            .push(test_manifest_l0_file_meta(&name, sequence));
+    }
+    assert!(event_loop.state.l0_write_slot_unavailable(0));
+    event_loop.next_background_compaction_check = std::time::Instant::now();
+    // Act
+    event_loop.run_background_compaction_maintenance_if_due();
+    for _ in 0..16 {
+        let completion = worker_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("pressure compaction must complete");
+        assert!(matches!(
+            completion,
+            RuntimeMsg::CompactionComplete {
+                succeeded: true,
+                ..
+            }
+        ));
+        event_loop.process_one(completion, &worker_rx);
+        if event_loop
+            .state
+            .active_compactions
+            .load(std::sync::atomic::Ordering::SeqCst)
+            == 0
+        {
+            break;
+        }
+    }
+    // Assert
+    assert_eq!(
+        event_loop
+            .state
+            .active_compactions
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert!(
+        !event_loop.state.l0_write_slot_unavailable(0),
+        "live publication must restore admission without reopening"
+    );
+    assert_eq!(
+        event_loop
+            .state
+            .manifest
+            .files
+            .iter()
+            .filter(|file| file.level == 0)
+            .count(),
+        0
+    );
+    assert!(
+        !event_loop.state.compaction_enabled(),
+        "pressure recovery must preserve the configured background policy"
+    );
+}
+
+#[test]
+fn should_preserve_compaction_gates_when_recovering_live_l0_pressure() {
+    // Arrange
+    for gate in ["ingest", "ddl", "publication", "unsettled"] {
+        let mut event_loop = create_test_local_event_loop().expect("create local event loop");
+        event_loop.state.set_compaction_enabled(false);
+        event_loop.state.l0_compaction_trigger = 2;
+        event_loop.state.max_immutable_memtables = 0;
+        event_loop.compaction_actor.set_l0_file_count_threshold(2);
+        event_loop
+            .state
+            .manifest
+            .files
+            .extend((1..=3).map(|sequence| {
+                test_manifest_l0_file_meta(&format!("gated-{sequence}.sst"), sequence)
+            }));
+        match gate {
+            "ingest" => event_loop.state.ingest_active.store(true, Ordering::SeqCst),
+            "ddl" => event_loop.ddl_authority_ambiguous = true,
+            "publication" => event_loop.publication_gate.active = true,
+            _ => event_loop.compaction_publication_degraded = true,
+        }
+        // Act
+        let result =
+            event_loop.schedule_one_background_compaction_if_needed("pressure gate regression");
+        // Assert
+        let guarded = match (&result, gate) {
+            (Err(crate::MidgeError::Internal(message)), "ingest") => {
+                message.contains("during ingest mode")
+            }
+            (Err(crate::MidgeError::Fenced(message)), "ddl") => {
+                message.contains("DDL authority is ambiguous")
+            }
+            (Err(crate::MidgeError::Busy(message)), "publication") => {
+                message.contains("manifest publication is already in progress")
+            }
+            (Err(crate::MidgeError::Fenced(message)), "unsettled") => {
+                message.contains("compaction publication is unsettled")
+            }
+            _ => false,
+        };
+        assert!(guarded, "pressure recovery bypassed {gate}: {result:?}");
+        assert_eq!(
+            event_loop.state.active_compactions.load(Ordering::SeqCst),
+            0
+        );
+        assert_eq!(event_loop.state.manifest.files.len(), 3);
+    }
+}
+
+#[test]
 fn should_not_schedule_auto_compaction_when_compaction_disabled() -> crate::common::MidgeResult<()>
 {
     // Arrange

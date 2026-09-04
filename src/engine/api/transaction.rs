@@ -495,6 +495,8 @@ impl Transaction {
     ///
     /// Returns `MidgeError::InvalidArgument` when called on a read-only transaction
     /// or when `start_key > end_key`.
+    /// Returns `MidgeError::ResourceLimit` before staging when either endpoint
+    /// exceeds point-key admission limits or the encoded range exceeds 64 MiB.
     pub fn delete_range(&mut self, start_key: Vec<u8>, end_key: Vec<u8>) -> MidgeResult<()> {
         if self.is_read_only() {
             return Err(MidgeError::InvalidArgument(

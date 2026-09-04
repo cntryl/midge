@@ -20,7 +20,10 @@ optimizing through a false invariant.
 
 The L0 bound assumes writes use the current admission path. A database opened
 with historical state already above the ceiling remains readable, stalls new
-writes, and schedules recovery compaction. Storage operations must continue to
+writes, and schedules recovery compaction. Reaching the ceiling during live
+operation also schedules pressure-recovery compaction, even with ordinary
+background compaction disabled. Startup, flush publication, and periodic
+maintenance use the same authority and ingest gates. Storage operations must continue to
 succeed, and admitted write rate must stop or remain below compaction service
 rate, for the progress guarantee to apply.
 

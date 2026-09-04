@@ -96,6 +96,9 @@ struct InMemorySstWriter {
     streaming: Option<StreamingState>,
     budget: Option<crate::common::resource_budget::ResourceBudget>,
     range_tombstone_reservations: Vec<crate::common::resource_budget::ResourceReservation>,
+    /// Only budgeted compaction writers may rewrite existing entries beyond
+    /// new-write admission limits. Oversized output blocks stay uncompressed.
+    preserve_legacy_entries: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -176,7 +179,33 @@ impl InMemorySstWriter {
             streaming: None,
             budget,
             range_tombstone_reservations: Vec::new(),
+            preserve_legacy_entries: false,
         }
+    }
+
+    fn clamp_block_size(block_size: usize) -> usize {
+        block_size.clamp(
+            4 * 1024,
+            crate::sst::compression::MAX_DECOMPRESSED_BLOCK_SIZE,
+        )
+    }
+
+    fn encode_readable_block(
+        bytes: &[u8],
+        policy: &CompressionPolicy,
+    ) -> MidgeResult<bytes::Bytes> {
+        use crate::sst::compression::{
+            compress_block_with_trailer, CompressionAlgo, MAX_DECOMPRESSED_BLOCK_SIZE,
+        };
+        // Legacy raw blocks can exceed the compressed decoder's ceiling. Keep
+        // rewrites and large metadata blocks raw so every emitted block remains
+        // readable without relaxing compressed-input validation.
+        let policy = if bytes.len() > MAX_DECOMPRESSED_BLOCK_SIZE {
+            &CompressionPolicy::Fixed(CompressionAlgo::None)
+        } else {
+            policy
+        };
+        compress_block_with_trailer(bytes, policy)
     }
 
     fn append_block(
@@ -184,9 +213,7 @@ impl InMemorySstWriter {
         block_bytes: &[u8],
         compression_policy: &CompressionPolicy,
     ) -> MidgeResult<BlockHandle> {
-        use crate::sst::compression;
-
-        let compressed = compression::compress_block_with_trailer(block_bytes, compression_policy)?;
+        let compressed = Self::encode_readable_block(block_bytes, compression_policy)?;
         let offset = u64::try_from(file_bytes.len()).map_err(|_| {
             crate::common::MidgeError::ResourceLimit(
                 "SST output offset exceeds the supported range".to_string(),
@@ -204,9 +231,7 @@ impl InMemorySstWriter {
         block_bytes: &[u8],
         compression_policy: &CompressionPolicy,
     ) -> MidgeResult<BlockHandle> {
-        use crate::sst::compression;
-
-        let compressed = compression::compress_block_with_trailer(block_bytes, compression_policy)?;
+        let compressed = Self::encode_readable_block(block_bytes, compression_policy)?;
         let (payload_len, size) = Self::checked_block_payload_len(compressed.len())?;
         let handle = BlockHandle::new(*offset, size);
         file.write_all(&payload_len.to_le_bytes())
@@ -412,10 +437,7 @@ impl InMemorySstWriter {
         state.key_profiler.add_key(&entry.key);
         Self::update_key_bounds(&mut state.smallest_key, &mut state.largest_key, &entry.key);
 
-        let target_block_size = block_size.clamp(
-            4 * 1024,
-            crate::sst::compression::MAX_DECOMPRESSED_BLOCK_SIZE,
-        );
+        let target_block_size = Self::clamp_block_size(block_size);
         let mut encoded = Self::encode_pending_entry(&state.previous_key, &entry)?;
         if !state.current_block.is_empty()
             && state.current_block.len().saturating_add(encoded.len()) > target_block_size
@@ -440,10 +462,7 @@ impl InMemorySstWriter {
     }
 
     fn finalize_data_blocks(&self, entries: Vec<PendingEntry>) -> MidgeResult<FinalizedDataBlocks> {
-        let target_block_size = self.block_size.clamp(
-            4 * 1024,
-            crate::sst::compression::MAX_DECOMPRESSED_BLOCK_SIZE,
-        );
+        let target_block_size = Self::clamp_block_size(self.block_size);
         let mut file_bytes = Vec::new();
         let mut block_index_entries = Vec::new();
         let mut key_profiler = KeyStructureProfiler::new();
@@ -793,7 +812,9 @@ impl DynSstWriter for InMemorySstWriter {
         op_type: u8,
         expiration: Option<u64>,
     ) -> MidgeResult<()> {
-        crate::sst::encoding::validate_entry_size(key.len(), value.map_or(0, <[u8]>::len))?;
+        if !self.preserve_legacy_entries {
+            crate::sst::encoding::validate_entry_size(key.len(), value.map_or(0, <[u8]>::len))?;
+        }
         if self.streaming.is_some() {
             return Err(crate::common::MidgeError::InvalidArgument(
                 "cannot append unordered entries after sorted SST streaming has started"
@@ -818,7 +839,9 @@ impl DynSstWriter for InMemorySstWriter {
         op_type: u8,
         expiration: Option<u64>,
     ) -> MidgeResult<()> {
-        crate::sst::encoding::validate_entry_size(key.len(), value.map_or(0, <[u8]>::len))?;
+        if !self.preserve_legacy_entries {
+            crate::sst::encoding::validate_entry_size(key.len(), value.map_or(0, <[u8]>::len))?;
+        }
         if !self.entries.is_empty() {
             return Err(crate::common::MidgeError::InvalidArgument(
                 "cannot start sorted SST streaming after unordered entries were added".to_string(),
@@ -858,6 +881,9 @@ impl DynSstWriter for InMemorySstWriter {
     }
 
     fn add_range_tombstone(&mut self, start: &[u8], end: &[u8], seq: u64) -> MidgeResult<()> {
+        if !self.preserve_legacy_entries {
+            crate::sst::types::validate_range_tombstone_size(start.len(), end.len())?;
+        }
         let retained_bytes = std::mem::size_of::<RangeTombstone>()
             .saturating_add(start.len())
             .saturating_add(end.len());
@@ -888,6 +914,7 @@ impl DynSstWriter for InMemorySstWriter {
             streaming,
             budget: _,
             range_tombstone_reservations: _range_tombstone_reservations,
+            preserve_legacy_entries: _,
         } = *self;
         debug_assert!(entries.is_empty());
         let scratch = Self::finish_streaming(
@@ -908,6 +935,7 @@ impl DynSstWriter for InMemorySstWriter {
             streaming,
             budget,
             range_tombstone_reservations: _range_tombstone_reservations,
+            preserve_legacy_entries,
         } = *self;
 
         if let Some(streaming) = streaming {
@@ -929,6 +957,7 @@ impl DynSstWriter for InMemorySstWriter {
             streaming: None,
             budget,
             range_tombstone_reservations: Vec::new(),
+            preserve_legacy_entries,
         };
 
         let entries = Self::sort_entries(entries);
@@ -984,6 +1013,7 @@ impl SstFactory for FsSstFactoryIo {
             Some(budget.clone()),
         );
         writer.streaming = Some(StreamingState::new(Some(budget))?);
+        writer.preserve_legacy_entries = true;
         Ok(Box::new(writer))
     }
 
@@ -1004,6 +1034,76 @@ impl SstFactory for FsSstFactoryIo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn should_release_compaction_reservations_when_legacy_entry_exceeds_budget() -> MidgeResult<()>
+    {
+        // Arrange
+        let factory = FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
+        let budget = crate::common::resource_budget::ResourceBudget::new(1024 * 1024);
+        let mut writer = factory.create_for_compaction(budget.clone())?;
+        let legacy_value = vec![b'v'; crate::sst::compression::MAX_DECOMPRESSED_BLOCK_SIZE];
+        // Act
+        let result = writer.add_sorted_with_meta(b"legacy", Some(&legacy_value), 7, 0, None);
+        drop(writer);
+        // Assert
+        assert!(
+            matches!(result, Err(crate::MidgeError::ResourceLimit(message)) if message.contains("SST current block entry"))
+        );
+        assert!(budget
+            .reserve(budget.limit(), "released writer budget")
+            .is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn should_compact_legacy_oversized_uncompressed_entry_without_losing_readability(
+    ) -> MidgeResult<()> {
+        use crate::sst::compression::{CompressionAlgo, MAX_DECOMPRESSED_BLOCK_SIZE};
+        // Arrange: reproduce the pre-admission writer's on-disk bytes directly.
+        let dir = tempfile::tempdir()?;
+        let fs = Arc::new(crate::io::RealFs::new(dir.path())?);
+        let value = vec![b'v'; MAX_DECOMPRESSED_BLOCK_SIZE];
+        let mut legacy =
+            InMemorySstWriter::new(CompressionPolicy::Fixed(CompressionAlgo::None), 4096);
+        legacy.entries.push(PendingEntry {
+            key: b"legacy".to_vec(),
+            value: Some(value.clone()),
+            sequence: 7,
+            op_type: 0,
+            expiration: Some(u64::MAX),
+        });
+        crate::sst::fs::finish_writer_to_path(Box::new(legacy), &dir.path().join("legacy.sst"))?;
+        for algo in [
+            CompressionAlgo::None,
+            CompressionAlgo::Lz4,
+            CompressionAlgo::Zstd3,
+        ] {
+            let factory = FsSstFactoryIo::new(fs.clone(), 4096)
+                .with_compression_policy(CompressionPolicy::Fixed(algo));
+            assert_eq!(
+                factory
+                    .open(Path::new("legacy.sst"))?
+                    .get(b"legacy")?
+                    .as_deref(),
+                Some(value.as_slice())
+            );
+            let mut plan = crate::compaction::CompactionPlan::new(0, 0, 1).with_output_seq(42);
+            plan.compaction_memory_limit = 1024 * 1024 * 1024;
+            plan.input_files.push("legacy.sst".to_string());
+            // Act
+            let outputs = crate::compaction::execute_compaction(&plan, &factory, dir.path(), None)?;
+            let reader = factory.open(Path::new(&outputs[0]))?;
+            // Assert
+            assert_eq!(reader.get(b"legacy")?.as_deref(), Some(value.as_slice()));
+            assert!(matches!(
+                reader.get_state(b"legacy")?,
+                crate::sst::types::KeyState::Value(_, 7, Some(u64::MAX), _)
+            ));
+            assert!(dir.path().join("legacy.sst").exists());
+        }
+        Ok(())
+    }
 
     #[test]
     fn should_reject_unrepresentable_compressed_block_length_before_prefix_encoding() {

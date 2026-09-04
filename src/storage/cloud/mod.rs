@@ -24,6 +24,10 @@
 //! - No futures in the engine: all async work happens in `CloudExecutor` embedded tokio runtime
 
 mod config;
+#[cfg(test)]
+mod test_support;
+#[cfg(test)]
+pub(crate) use test_support::forward_cloud_backend;
 #[cfg(any(
     feature = "cloud-aws",
     feature = "cloud-azure",
@@ -705,7 +709,9 @@ pub(crate) fn validate_object_proof(
             metadata.size
         )));
     }
-    if object_match_precondition_headers(&metadata.etag, metadata.generation.as_deref()).is_none() {
+    if crate::storage::conditional_object_identity(&metadata.etag, metadata.generation.as_deref())
+        .is_none()
+    {
         return Err(crate::common::MidgeError::Internal(format!(
             "cloud object '{key}' is missing an identity token"
         )));
@@ -1720,15 +1726,7 @@ mod tests {
     }
 
     impl CloudBackend for ReplacingGetBackend {
-        fn submit_put(
-            &self,
-            key: &str,
-            data: Vec<u8>,
-            headers: Vec<(String, String)>,
-            callback: CloudCallback,
-        ) {
-            self.inner.submit_put(key, data, headers, callback);
-        }
+        crate::storage::cloud::forward_cloud_backend!(inner; submit_put);
 
         fn submit_get(&self, key: &str, callback: CloudCallback) {
             self.inner.submit_get(key, callback);
@@ -1742,28 +1740,7 @@ mod tests {
             self.inner.submit_put(key, b"new".to_vec(), Vec::new(), tx);
         }
 
-        fn submit_head(&self, key: &str, callback: CloudCallback) {
-            self.inner.submit_head(key, callback);
-        }
-
-        fn submit_get_range(
-            &self,
-            key: &str,
-            start: u64,
-            end: Option<u64>,
-            callback: CloudCallback,
-        ) {
-            self.inner.submit_get_range(key, start, end, callback);
-        }
-
-        fn submit_delete(
-            &self,
-            key: &str,
-            headers: Vec<(String, String)>,
-            callback: CloudCallback,
-        ) {
-            self.inner.submit_delete(key, headers, callback);
-        }
+        crate::storage::cloud::forward_cloud_backend!(inner; submit_head, submit_get_range, submit_delete);
     }
 
     fn replacing_get_storage() -> CloudStorage {

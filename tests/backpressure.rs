@@ -147,14 +147,19 @@ fn should_bound_published_l0_when_background_compaction_is_disabled() {
         .create_column_family("bounded-l0")
         .expect("create cf");
     let mut accepted = 0_usize;
-    let mut stall = None;
+    let mut attempts = 0_usize;
 
     // Act
-    for generation in 0..hard_ceiling + 2 {
+    while accepted < hard_ceiling * 2 {
+        attempts += 1;
+        assert!(
+            attempts <= hard_ceiling * 8,
+            "L0 recovery must make progress"
+        );
         let result = commit_buffered_put(
             &engine,
             cf.id(),
-            format!("generation-{generation:02}").into_bytes(),
+            format!("generation-{accepted:02}").into_bytes(),
             b"value".to_vec(),
         );
         match result {
@@ -162,25 +167,30 @@ fn should_bound_published_l0_when_background_compaction_is_disabled() {
                 accepted += 1;
                 engine.flush_cf(&cf).expect("flush reserved L0 generation");
             }
-            Err(MidgeError::WriteStall(message)) => {
-                stall = Some(message);
-                break;
+            Err(MidgeError::WriteStall(_)) => {
+                assert!(
+                    engine
+                        .wait_for_write_stall_clear(cf.id(), Duration::from_secs(10))
+                        .expect("wait for live L0 recovery"),
+                    "critical L0 pressure must clear without manual compaction"
+                );
             }
             Err(error) => panic!("unexpected write result: {error}"),
         }
+        let layout = engine.get_storage_layout().expect("live layout");
+        let l0_files = layout
+            .levels
+            .iter()
+            .find(|level| level.level == 0)
+            .map_or(0, |level| level.file_count);
+        assert!(
+            l0_files <= hard_ceiling,
+            "published L0 exceeded its ceiling"
+        );
     }
 
     // Assert
-    assert_eq!(accepted, hard_ceiling);
-    assert!(stall.is_some(), "the first unreserved write must stall");
-    let layout = engine.get_storage_layout().expect("stalled layout");
-    let l0_files = layout
-        .levels
-        .iter()
-        .find(|level| level.level == 0)
-        .map_or(0, |level| level.file_count);
-    assert_eq!(l0_files, hard_ceiling);
-
+    assert_eq!(accepted, hard_ceiling * 2);
     engine.compact_all().expect("manual compaction clears debt");
     let drained_layout = engine.get_storage_layout().expect("drained layout");
     assert_eq!(

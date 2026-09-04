@@ -203,7 +203,9 @@ impl TrieReader {
         // without imposing a key-depth limit on valid writer-generated tries.
         let mut stack = vec![node_index];
         while let Some(index) = stack.pop() {
-            let node = &self.nodes[index];
+            let Some(node) = self.nodes.get(index) else {
+                continue;
+            };
             if let Some(block_id) = node.block_id {
                 result.push(block_id);
             }
@@ -372,6 +374,22 @@ mod tests {
     use crate::sst::trie::encoding::encode_trie;
     use crate::sst::trie::node::{TrieEdge, TrieNode};
     use crate::sst::trie::TrieBuilder;
+
+    #[test]
+    fn should_skip_missing_subtree_node_without_panicking() {
+        // Arrange: exercise the defensive traversal guard independently of
+        // open-time graph validation, which rejects malformed persisted tries.
+        let reader = TrieReader {
+            nodes: vec![TrieNode::new(0, Vec::new(), Some(7))],
+            root_index: 0,
+        };
+        let mut result = Vec::new();
+        // Act
+        reader.collect_subtree(usize::MAX, &mut result);
+        reader.collect_subtree(0, &mut result);
+        // Assert
+        assert_eq!(result, vec![7]);
+    }
 
     #[test]
     fn should_reject_cyclic_trie_before_lookup() {

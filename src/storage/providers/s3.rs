@@ -1581,28 +1581,15 @@ fn decode_xml_entities(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn should_reject_invalid_get_length_when_building_object_identity() {
+    fn should_validate_get_length_when_building_object_identity() {
         // Arrange
-        for length in ["2", "4", "invalid"] {
-            let response = CloudResponse {
-                status: 200,
-                headers: vec![
-                    ("content-length".to_string(), length.to_string()),
-                    ("etag".to_string(), "identity".to_string()),
-                    ("x-goog-generation".to_string(), "42".to_string()),
-                ],
-                body: b"abc".to_vec(),
-            };
-
-            // Act
-            let result = object_metadata_from_s3_response(&response, Some(3));
-
-            // Assert
-            assert!(
-                matches!(result, Err(CloudError::Protocol(_))),
-                "accepted length {length}: {result:?}"
-            );
-        }
+        let identity_headers = &[("etag", "identity")];
+        // Act
+        // Assert
+        crate::storage::providers::test_support::assert_get_metadata_length_contract(
+            identity_headers,
+            |response| object_metadata_from_s3_response(response, Some(3)),
+        );
     }
 
     use super::*;

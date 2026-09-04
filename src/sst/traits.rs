@@ -312,6 +312,10 @@ pub trait SstFactory: Send + Sync {
 
     /// Create a writer for a budgeted compaction operation.
     ///
+    /// Filesystem writers preserve readable legacy raw entries that exceed the
+    /// admission limit for new writes. Such blocks remain uncompressed; entry
+    /// buffers and compression workspaces still require budget reservations.
+    ///
     /// The default preserves compatibility for non-filesystem factories.
     fn create_for_compaction(
         &self,
