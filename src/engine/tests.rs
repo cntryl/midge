@@ -666,7 +666,7 @@ fn should_preserve_partitioned_compaction_across_simulated_cloud_reopen() -> Mid
             // deadline test. Windows hosted runners can execute it alongside
             // the intentionally large compaction resource proof, so retain a
             // bounded but explicit allowance for that filesystem contention.
-            .runtime_response_timeout(Duration::from_secs(180))
+            .runtime_response_timeout(Duration::from_mins(3))
             .build()
     });
 
