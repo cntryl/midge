@@ -16,13 +16,16 @@
 //!   should_<behavior>_given_<context>_when_<condition>
 
 mod common;
-#[cfg(unix)]
+#[cfg(feature = "failpoints")]
 use cntryl_midge::EngineHealth;
 use cntryl_midge::{Engine, MidgeError, OpenOptions, TransactionMode, WriteOptions};
 use common::*;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+
+#[cfg(feature = "failpoints")]
+const CLOUD_OUTAGE_CHILD_ENV: &str = "MIDGE_HYBRID_CLOUD_OUTAGE_CHILD";
 
 /// Count files nested anywhere under `root`, used to prove that the
 /// filesystem-backed simulated cloud/local stores actually received or lost
@@ -54,25 +57,6 @@ fn incompressible_value(len: usize, seed: u8) -> Vec<u8> {
                 .to_le_bytes()[0]
         })
         .collect()
-}
-
-/// Recursively apply a permission mode to every directory under (and
-/// including) `root`. Unix directory-write checks are per-directory, so
-/// blocking writes anywhere under a simulated cloud bucket (not just its
-/// top-level directory) requires chmod'ing every subdirectory that already
-/// exists, such as the WAL directory created at engine-open time.
-#[cfg(unix)]
-fn set_dir_permissions_recursive(root: &std::path::Path, mode: u32) {
-    use std::os::unix::fs::PermissionsExt;
-    if let Ok(entries) = std::fs::read_dir(root) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                set_dir_permissions_recursive(&path, mode);
-            }
-        }
-    }
-    let _ = std::fs::set_permissions(root, std::fs::Permissions::from_mode(mode));
 }
 
 // ============================================================================
@@ -509,15 +493,34 @@ fn should_persist_eviction_state_across_restart() {
 }
 
 #[test]
-#[cfg(unix)]
+#[cfg(feature = "failpoints")]
 fn should_handle_cloud_unavailable_during_eviction() {
-    // "local" storage mode has no cloud tier and no upload to fail, so the
-    // scenario this test names was never exercised. The simulated cloud
-    // backend is itself just a filesystem directory (see
-    // `storage::test_support::build_cloud_backed_filesystem_simulation`), so
-    // a real outage can be reproduced by making that directory unwritable
-    // right before the flush/eviction pipeline tries to upload to it -
-    // without inventing any new production fault-injection API.
+    // Failpoints are process-global. Run the injection in an exact-test child
+    // so parallel tests in this binary cannot observe the simulated outage.
+    if std::env::var_os(CLOUD_OUTAGE_CHILD_ENV).is_none() {
+        let output = std::process::Command::new(
+            std::env::current_exe().expect("locate hybrid storage test executable"),
+        )
+        .arg("--exact")
+        .arg("should_handle_cloud_unavailable_during_eviction")
+        .arg("--nocapture")
+        .arg("--test-threads=1")
+        .env(CLOUD_OUTAGE_CHILD_ENV, "1")
+        .output()
+        .expect("run isolated cloud outage child");
+        assert!(
+            output.status.success(),
+            "isolated cloud outage child failed: status={} stdout={} stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    // "local" storage mode has no cloud tier and no upload to fail. Exercise
+    // the simulated-cloud provider boundary directly so the outage remains
+    // deterministic even when this test runs as root in the Docker image.
     let temp_dir = test_temp_dir();
     let budget_bytes = 256 * 1024; // small budget forces eviction attempts
     let opts = OpenOptions::cloud_simulated(temp_dir.path(), "test-bucket", "test-prefix")
@@ -539,35 +542,31 @@ fn should_handle_cloud_unavailable_during_eviction() {
     }
     tx.commit(WriteOptions::cloud_async()).expect("commit");
 
-    // Simulate a cloud outage: make every directory under the simulated
-    // cloud bucket unwritable before eviction tries to upload into it. This
-    // has to be recursive (not just the top-level bucket dir) because the
-    // WAL subdirectory already exists with its own write permission.
-    let cloud_store_dir = temp_dir.path().join("cloud_store");
-    std::fs::create_dir_all(&cloud_store_dir).expect("cloud store dir exists");
-    let files_before_outage_attempt = count_files_recursive(&cloud_store_dir);
-    set_dir_permissions_recursive(&cloud_store_dir, 0o500);
+    let cloud_sst_dir = temp_dir.path().join("cloud_store").join("sst");
+    let files_before_outage_attempt = count_files_recursive(&cloud_sst_dir);
+    let scenario = fail::FailScenario::setup();
+    fail::cfg("midge::cloud::inject_fail_sst_upload", "return")
+        .expect("configure cloud SST upload outage");
 
-    // Act: Flush with cloud "down" (uploads should fail, not panic)
-    let flush_result = engine.flush_cf(&cf);
-    thread::sleep(Duration::from_millis(200));
+    // Act: Flush with the remote SST provider unavailable.
+    let flush_error = engine
+        .flush_cf(&cf)
+        .expect_err("cloud outage should fail the SST upload");
+    let files_after_outage_attempt = count_files_recursive(&cloud_sst_dir);
 
-    // Restore the bucket so later ops (and temp-dir cleanup) can proceed.
-    set_dir_permissions_recursive(&cloud_store_dir, 0o755);
+    fail::remove("midge::cloud::inject_fail_sst_upload");
+    scenario.teardown();
 
-    // Assert: the outage genuinely blocked the upload (no new object landed
-    // in the bucket while it was read-only) rather than trivially succeeding.
-    assert_eq!(
-        count_files_recursive(&cloud_store_dir),
-        files_before_outage_attempt,
-        "expected no objects to be written to the cloud store while it was unwritable"
+    // Assert: the provider boundary genuinely rejected the upload and no new
+    // SST object landed in cloud storage.
+    assert!(
+        matches!(&flush_error, MidgeError::Internal(message) if message.contains("cloud SST upload failed")),
+        "unexpected cloud upload error: {flush_error:?}"
     );
-    if let Err(err) = &flush_result {
-        assert!(
-            !matches!(err, MidgeError::Internal(msg) if msg.contains("panic")),
-            "flush surfaced an internal panic-shaped error during the outage: {err:?}"
-        );
-    }
+    assert_eq!(
+        files_after_outage_attempt, files_before_outage_attempt,
+        "expected no SST objects to be written while the provider was unavailable"
+    );
 
     // Assert: Engine still operational and data stayed available locally.
     let tx = engine
@@ -598,7 +597,7 @@ fn should_handle_cloud_unavailable_during_eviction() {
     );
 
     eprintln!(
-        "âœ“ Handled cloud unavailability gracefully; {accessible} keys still accessible, flush_result={flush_result:?}"
+        "âœ“ Handled cloud unavailability gracefully; {accessible} keys still accessible, flush_error={flush_error:?}"
     );
 }
 
