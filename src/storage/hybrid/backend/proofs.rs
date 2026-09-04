@@ -155,7 +155,7 @@ impl HybridStorage {
         let after = Self::head_object_from_backend_blocking(backend, key, after_timeout)
             .map_err(|error| Self::proof_round_trip_error(key, "final HEAD", error, deadline))?;
 
-        if before != metadata || metadata != after {
+        if !before.same_version(&metadata) || !metadata.same_version(&after) {
             return Err(crate::common::MidgeError::Internal(format!(
                 "object '{key}' identity changed during read: before {before:?}, GET {metadata:?}, after {after:?}"
             )));
@@ -409,7 +409,7 @@ impl HybridStorage {
                     proof.key
                 )));
             }
-            if actual.metadata != proof.metadata {
+            if !actual.metadata.same_version(&proof.metadata) {
                 return Err(crate::common::MidgeError::Internal(format!(
                     "guarded object '{}' identity changed before conditional delete: expected {:?}, actual {:?}",
                     proof.key, proof.metadata, actual.metadata
@@ -428,7 +428,7 @@ impl HybridStorage {
             .map_err(|error| {
             Self::proof_round_trip_error(&proof.key, "guarded object HEAD", error, deadline)
         })?;
-        if actual == proof.metadata {
+        if actual.same_version(&proof.metadata) {
             return Ok(());
         }
         Err(crate::common::MidgeError::Internal(format!(

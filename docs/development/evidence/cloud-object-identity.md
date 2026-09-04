@@ -91,6 +91,22 @@ bytes survive, and distinguishes missing objects from transport failures.
 The required Sqrzl image is:
 `ghcr.io/sqrzl/sqrzl-emulator@sha256:876e017f850e53f3f4172cae459982cfe9435584fcb8e4640120b2e5fabfc624`.
 
+## GCS qualification correction
+
+The first hosted and local engine qualification runs both passed 6/7 and failed
+GCS JSON recovery. HEAD returned the JSON metadata ETag while GET returned the
+media ETag for the **same generation**. Comparing all metadata fields rejected a
+valid object. This is distinct from the original mixed-version defect.
+
+Identity selection now has one shared implementation for comparisons and
+conditional headers: use generation when available, otherwise ETag. Comparisons
+still require matching lengths and reject absent or mismatched identities.
+Generation-aware comparison is used both during proof construction and during
+guarded deletion revalidation. Added unit cases cover differing ETags at one
+generation, changed or missing generations, changed length, changed ETag, and
+missing identity. The full engine qualification must pass before this correction
+is considered qualified.
+
 ## Performance and remaining acceptance
 
 No before/after throughput, p50/p99, RSS, disk, or transfer-buffer benchmark has

@@ -328,15 +328,8 @@ pub(crate) fn object_match_precondition_headers(
     etag: &str,
     generation: Option<&str>,
 ) -> Option<Vec<(String, String)>> {
-    if let Some(generation) = generation.filter(|value| !value.trim().is_empty()) {
-        return Some(vec![(
-            "x-goog-if-generation-match".to_string(),
-            generation.trim().to_string(),
-        )]);
-    }
-
-    let etag = etag.trim();
-    (!etag.is_empty()).then(|| vec![("If-Match".to_string(), etag.to_string())])
+    crate::storage::conditional_object_identity(etag, generation)
+        .map(|(header, value)| vec![(header.to_string(), value.to_string())])
 }
 
 /// Non-blocking cloud backend interface used by the engine.
