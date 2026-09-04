@@ -199,6 +199,34 @@ fn create_file_new_with_parents(full_path: &Path, data: &[u8]) -> StorageOutcome
 }
 
 impl StorageBackend for FileSystem {
+    fn submit_read_with_metadata(
+        &self,
+        key: &str,
+        timeout: std::time::Duration,
+        callback: crate::storage::MetadataReadCallback,
+    ) {
+        let result = (|| {
+            if timeout.is_zero() {
+                return Err(crate::storage::storage_timeout_error(
+                    "metadata read has no remaining budget",
+                ));
+            }
+            let path = self.full_path(key)?;
+            let _lock = mutation_lock(&path);
+            let _process_lock = self.acquire_process_lock(&path)?;
+            let bytes = fs::read(&path).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    format!("not found: read {}: {error}", path.display())
+                } else {
+                    format!("read {}: {error}", path.display())
+                }
+            })?;
+            let metadata = StorageObjectMetadata::content_crc(bytes.len() as u64, &bytes);
+            Ok((bytes, metadata))
+        })();
+        let _ = callback.send(result);
+    }
+
     fn submit_read(&self, key: &str, callback: StorageCallback) {
         let full_path = match self.full_path(key) {
             Ok(path) => path,

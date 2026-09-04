@@ -1469,6 +1469,10 @@ impl ListOmittingCloudBackend {
 }
 
 impl crate::storage::cloud::CloudBackend for ListOmittingCloudBackend {
+    fn submit_get_with_metadata(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        self.inner.submit_get_with_metadata(key, callback);
+    }
+
     fn submit_put(
         &self,
         key: &str,

@@ -249,6 +249,10 @@ pub(crate) fn storage_error_is_timeout(error: &str) -> bool {
     error.trim_start().starts_with(STORAGE_TIMEOUT_PREFIX)
 }
 
+/// One read response binds the body and provider identity to the same version.
+pub type MetadataReadCallback =
+    std::sync::mpsc::Sender<Result<(Vec<u8>, StorageObjectMetadata), String>>;
+
 /// NEW async-compatible storage backend trait.
 ///
 /// CRITICAL DESIGN:
@@ -266,6 +270,19 @@ pub(crate) fn storage_error_is_timeout(error: &str) -> bool {
 pub trait StorageBackend: Send + Sync + 'static {
     /// Submit a read operation. Returns immediately.
     fn submit_read(&self, key: &str, callback: StorageCallback);
+
+    /// Read bytes and identity from one version. Unsupported backends fail closed;
+    /// synthesizing this response from independent GET and HEAD calls is unsafe.
+    fn submit_read_with_metadata(
+        &self,
+        _key: &str,
+        _timeout: std::time::Duration,
+        callback: MetadataReadCallback,
+    ) {
+        let _ = callback.send(Err(
+            "storage backend does not support metadata-bearing reads".to_string(),
+        ));
+    }
 
     /// Submit a read whose callback adapter must not wait longer than
     /// `timeout`. Backends whose submission path is already non-blocking may

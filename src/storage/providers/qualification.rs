@@ -172,6 +172,8 @@ fn run_provider_contract_body(label: &str, provider: &CloudProviderConfig) {
         b"updated"
     );
 
+    verify_metadata_proof_conditions(&backend, &conditional_key, &missing_key);
+
     assert!(
         get(&backend, &missing_key).is_err(),
         "missing object GET should fail"
@@ -181,6 +183,52 @@ fn run_provider_contract_body(label: &str, provider: &CloudProviderConfig) {
     assert!(
         get(&backend, &key).is_err(),
         "deleted object should be missing"
+    );
+}
+
+fn verify_metadata_proof_conditions(
+    backend: &CloudStorage,
+    conditional_key: &str,
+    missing_key: &str,
+) {
+    let original_proof =
+        crate::storage::cloud::blocking_cloud_object_proof(backend, conditional_key)
+            .expect("metadata-bearing proof")
+            .expect("conditional object exists");
+    assert_eq!(original_proof.bytes, b"updated");
+    let stale_headers = crate::storage::cloud::object_match_precondition_headers(
+        &original_proof.metadata.etag,
+        original_proof.metadata.generation.as_deref(),
+    )
+    .expect("GET identity supports conditions");
+    put(backend, conditional_key, b"changed".to_vec(), vec![]).expect("same-length replacement");
+    // A same-length replacement must invalidate both mutation forms, while
+    // the proof continues to describe precisely the bytes originally read.
+    assert!(put(
+        backend,
+        conditional_key,
+        b"invalid".to_vec(),
+        stale_headers.clone()
+    )
+    .is_err());
+    let (tx, rx) = std::sync::mpsc::channel();
+    backend.submit_delete_with_headers(conditional_key, stale_headers, tx);
+    assert!(matches!(
+        rx.recv_timeout(Duration::from_secs(10))
+            .expect("stale delete callback"),
+        CloudEvent::Delete {
+            result: Err(crate::storage::cloud::CloudError::PreconditionFailed(_)),
+            ..
+        }
+    ));
+    assert_eq!(
+        get(backend, conditional_key).expect("replacement survives"),
+        b"changed"
+    );
+    assert!(
+        crate::storage::cloud::blocking_cloud_object_proof(backend, missing_key)
+            .expect("missing proof is not a transport failure")
+            .is_none()
     );
 }
 

@@ -543,6 +543,7 @@ impl CloudBackend for MockCloudBackend {
     }
 
     fn submit_get_with_metadata(&self, key: &str, callback: CloudCallback) {
+        self.downloads.lock().push(key.to_string());
         let _guard = self.mutation_lock.lock();
         let data = self.storage.lock().get(key).cloned();
         let generation = self.gens.lock().get(key).copied();
@@ -697,6 +698,28 @@ pub(crate) fn storage_object_metadata(metadata: ObjectMetadata) -> StorageObject
     }
 }
 
+/// Validate observations from one metadata-bearing read. Never pair a body
+/// with identity from a separate HEAD, even when both lengths agree.
+pub(crate) fn validate_object_proof(
+    key: &str,
+    bytes: &[u8],
+    metadata: &StorageObjectMetadata,
+) -> crate::common::MidgeResult<()> {
+    if metadata.size != u64::try_from(bytes.len()).unwrap_or(u64::MAX) {
+        return Err(crate::common::MidgeError::Internal(format!(
+            "cloud object '{key}' length mismatch: read={}, metadata={}",
+            bytes.len(),
+            metadata.size
+        )));
+    }
+    if object_match_precondition_headers(&metadata.etag, metadata.generation.as_deref()).is_none() {
+        return Err(crate::common::MidgeError::Internal(format!(
+            "cloud object '{key}' is missing an identity token"
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn blocking_cloud_object_proof(
     cloud: &CloudStorage,
     key: &str,
@@ -718,17 +741,17 @@ pub(crate) fn blocking_cloud_object_proof_within(
             ))
         })?;
     let (get_tx, get_rx) = std::sync::mpsc::channel();
-    cloud.submit_get(key, get_tx);
-    let bytes = match get_rx.recv_timeout(get_timeout) {
-        Ok(CloudEvent::Get {
-            result: CloudOutcome::Ok(bytes),
+    cloud.submit_get_with_metadata(key, get_tx);
+    let (bytes, metadata) = match get_rx.recv_timeout(get_timeout) {
+        Ok(CloudEvent::GetWithMetadata {
+            result: CloudOutcome::Ok((bytes, metadata)),
             ..
-        }) => bytes,
-        Ok(CloudEvent::Get {
+        }) => (bytes, storage_object_metadata(metadata)),
+        Ok(CloudEvent::GetWithMetadata {
             result: CloudOutcome::Err(error),
             ..
         }) if is_not_found_error(&error) => return Ok(None),
-        Ok(CloudEvent::Get {
+        Ok(CloudEvent::GetWithMetadata {
             result: CloudOutcome::Err(error),
             ..
         }) => {
@@ -755,54 +778,7 @@ pub(crate) fn blocking_cloud_object_proof_within(
         }
     };
 
-    let head_timeout = deadline
-        .clamp_nonzero(cloud.callback_timeout())
-        .ok_or_else(|| {
-            crate::common::MidgeError::Timeout(format!(
-                "operation deadline exhausted before cloud object HEAD for '{key}'"
-            ))
-        })?;
-    let (head_tx, head_rx) = std::sync::mpsc::channel();
-    cloud.submit_head(key, head_tx);
-    let metadata = match head_rx.recv_timeout(head_timeout) {
-        Ok(CloudEvent::Head {
-            result: CloudOutcome::Ok(metadata),
-            ..
-        }) => storage_object_metadata(metadata),
-        Ok(CloudEvent::Head {
-            result: CloudOutcome::Err(error),
-            ..
-        }) => {
-            return Err(contextualize_operation_error(
-                &error,
-                format_args!("cloud object '{key}' identity is unreadable after GET"),
-                deadline,
-            ))
-        }
-        Ok(other) => {
-            return Err(crate::common::MidgeError::Internal(format!(
-                "unexpected cloud object HEAD response for '{key}': {other:?}"
-            )))
-        }
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            return Err(crate::common::MidgeError::Timeout(format!(
-                "cloud object HEAD exceeded the operation deadline for '{key}'"
-            )))
-        }
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-            return Err(crate::common::MidgeError::Internal(format!(
-                "cloud object HEAD callback closed for '{key}'"
-            )))
-        }
-    };
-
-    let bytes_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    if metadata.size != bytes_len {
-        return Err(crate::common::MidgeError::Internal(format!(
-            "cloud object '{key}' changed during validation: read={bytes_len}, head={}",
-            metadata.size
-        )));
-    }
+    validate_object_proof(key, &bytes, &metadata)?;
 
     Ok(Some(CloudObjectProof { bytes, metadata }))
 }
@@ -954,6 +930,28 @@ fn usize_to_u64(value: usize) -> u64 {
 }
 
 impl StorageBackend for CloudStorage {
+    fn submit_read_with_metadata(
+        &self,
+        key: &str,
+        timeout: std::time::Duration,
+        callback: crate::storage::MetadataReadCallback,
+    ) {
+        let deadline = crate::common::OperationDeadline::from_budget(timeout);
+        let result = blocking_cloud_object_proof_within(self, key, &deadline)
+            .map_err(|error| match error {
+                crate::common::MidgeError::Timeout(message) => {
+                    crate::storage::storage_timeout_error(message)
+                }
+                other => other.to_string(),
+            })
+            .and_then(|proof| {
+                proof
+                    .map(|proof| (proof.bytes, proof.metadata))
+                    .ok_or_else(|| format!("not found: cloud object '{key}'"))
+            });
+        let _ = callback.send(result);
+    }
+
     fn submit_read(&self, key: &str, callback: StorageCallback) {
         self.submit_read_with_timeout(key, self.callback_timeout, callback);
     }
@@ -1367,6 +1365,17 @@ mod tests {
             });
         }
 
+        fn submit_get_with_metadata(&self, key: &str, callback: CloudCallback) {
+            let key = key.to_string();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                let _ = callback.send(CloudEvent::GetWithMetadata {
+                    key,
+                    result: Err(CloudError::NotFound("delayed miss".to_string())),
+                });
+            });
+        }
+
         fn submit_get_range(
             &self,
             key: &str,
@@ -1710,6 +1719,188 @@ mod tests {
                 panic!("expected CloudError::Protocol wrapping the source error, got {other:?}")
             }
         }
+    }
+
+    /// Replaces the object immediately after taking the GET response snapshot.
+    struct ReplacingGetBackend {
+        inner: MockCloudBackend,
+    }
+
+    impl CloudBackend for ReplacingGetBackend {
+        fn submit_put(
+            &self,
+            key: &str,
+            data: Vec<u8>,
+            headers: Vec<(String, String)>,
+            callback: CloudCallback,
+        ) {
+            self.inner.submit_put(key, data, headers, callback);
+        }
+
+        fn submit_get(&self, key: &str, callback: CloudCallback) {
+            self.inner.submit_get(key, callback);
+            let (tx, _rx) = mpsc::channel();
+            self.inner.submit_put(key, b"new".to_vec(), Vec::new(), tx);
+        }
+
+        fn submit_get_with_metadata(&self, key: &str, callback: CloudCallback) {
+            self.inner.submit_get_with_metadata(key, callback);
+            let (tx, _rx) = mpsc::channel();
+            self.inner.submit_put(key, b"new".to_vec(), Vec::new(), tx);
+        }
+
+        fn submit_head(&self, key: &str, callback: CloudCallback) {
+            self.inner.submit_head(key, callback);
+        }
+
+        fn submit_get_range(
+            &self,
+            key: &str,
+            start: u64,
+            end: Option<u64>,
+            callback: CloudCallback,
+        ) {
+            self.inner.submit_get_range(key, start, end, callback);
+        }
+
+        fn submit_delete(
+            &self,
+            key: &str,
+            headers: Vec<(String, String)>,
+            callback: CloudCallback,
+        ) {
+            self.inner.submit_delete(key, headers, callback);
+        }
+    }
+
+    fn replacing_get_storage() -> CloudStorage {
+        let backend = Arc::new(ReplacingGetBackend {
+            inner: MockCloudBackend::new(),
+        });
+        let storage = CloudStorage::new(backend, "tenant".to_string());
+        let (tx, rx) = mpsc::channel();
+        storage.submit_put("object", b"old".to_vec(), Vec::new(), tx);
+        assert!(matches!(
+            rx.recv().unwrap(),
+            CloudEvent::Put { result: Ok(()), .. }
+        ));
+        storage
+    }
+
+    #[test]
+    fn should_bind_proof_to_get_version_when_same_length_replacement_follows_get() {
+        // Arrange
+        let storage = replacing_get_storage();
+        let (tx, rx) = mpsc::channel();
+        storage.submit_head("object", tx);
+        let CloudEvent::Head {
+            result: Ok(original),
+            ..
+        } = rx.recv().unwrap()
+        else {
+            panic!("initial object must exist");
+        };
+
+        // Act
+        let proof = blocking_cloud_object_proof(&storage, "object")
+            .unwrap()
+            .unwrap();
+
+        // Assert
+        assert_eq!(proof.bytes, b"old");
+        assert_eq!(proof.metadata.etag, original.etag);
+    }
+
+    #[test]
+    fn should_reject_stale_proof_mutations_when_same_length_replacement_follows_get() {
+        // Arrange
+        let storage = replacing_get_storage();
+        let proof = blocking_cloud_object_proof(&storage, "object")
+            .unwrap()
+            .unwrap();
+        let headers = object_match_precondition_headers(
+            &proof.metadata.etag,
+            proof.metadata.generation.as_deref(),
+        )
+        .unwrap();
+
+        // Act
+        let (tx, rx) = mpsc::channel();
+        storage.submit_put("object", b"bad".to_vec(), headers.clone(), tx);
+        let write = rx.recv().unwrap();
+        let (tx, rx) = mpsc::channel();
+        storage.submit_delete_with_headers("object", headers, tx);
+        let delete = rx.recv().unwrap();
+
+        // Assert
+        assert!(matches!(
+            write,
+            CloudEvent::Put {
+                result: Err(CloudError::PreconditionFailed(_)),
+                ..
+            }
+        ));
+        assert!(matches!(
+            delete,
+            CloudEvent::Delete {
+                result: Err(CloudError::PreconditionFailed(_)),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn should_reject_proof_when_response_has_missing_identity_or_incorrect_length() {
+        // Arrange
+        let body = b"abc";
+        let cases = [
+            StorageObjectMetadata {
+                size: 3,
+                etag: " ".to_string(),
+                generation: None,
+            },
+            StorageObjectMetadata {
+                size: 3,
+                etag: String::new(),
+                generation: Some(" ".to_string()),
+            },
+            StorageObjectMetadata {
+                size: 2,
+                etag: "identity".to_string(),
+                generation: None,
+            },
+            StorageObjectMetadata {
+                size: 4,
+                etag: "identity".to_string(),
+                generation: None,
+            },
+        ];
+
+        // Act
+        let results: Vec<_> = cases
+            .iter()
+            .map(|metadata| validate_object_proof("object", body, metadata))
+            .collect();
+
+        // Assert
+        assert!(results.iter().all(Result::is_err));
+    }
+
+    #[test]
+    fn should_fail_closed_when_backend_lacks_metadata_bearing_get() {
+        // Arrange
+        let backend = Arc::new(ConditionalPutOnlyBackend::default());
+        let storage = CloudStorage::new(backend.clone(), "tenant".to_string());
+
+        // Act
+        let result = blocking_cloud_object_proof(&storage, "object");
+
+        // Assert
+        assert!(result
+            .unwrap_err()
+            .contains("does not support metadata-bearing GET"));
+        assert_eq!(backend.gets.load(Ordering::SeqCst), 0);
+        assert_eq!(backend.heads.load(Ordering::SeqCst), 0);
     }
 
     // =========== ObjectMetadata Tests ===========

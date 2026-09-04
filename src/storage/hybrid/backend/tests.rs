@@ -1323,6 +1323,7 @@ struct BudgetConsumingProofBackend {
     first_head_delay: Duration,
     head_calls: AtomicUsize,
     retained_callbacks: Mutex<Vec<StorageCallback>>,
+    retained_metadata_callbacks: Mutex<Vec<crate::storage::MetadataReadCallback>>,
 }
 
 struct BudgetConsumingSstPublicationBackend {
@@ -1398,6 +1399,7 @@ impl BudgetConsumingProofBackend {
             first_head_delay,
             head_calls: AtomicUsize::new(0),
             retained_callbacks: Mutex::new(Vec::new()),
+            retained_metadata_callbacks: Mutex::new(Vec::new()),
         }
     }
 
@@ -1407,6 +1409,15 @@ impl BudgetConsumingProofBackend {
 }
 
 impl StorageBackend for BudgetConsumingProofBackend {
+    fn submit_read_with_metadata(
+        &self,
+        _key: &str,
+        _timeout: Duration,
+        callback: crate::storage::MetadataReadCallback,
+    ) {
+        self.retained_metadata_callbacks.lock().push(callback);
+    }
+
     fn submit_read(&self, _key: &str, callback: StorageCallback) {
         self.retain_callback(callback);
     }
@@ -1478,6 +1489,24 @@ impl RacingReadDeleteBackend {
 }
 
 impl StorageBackend for RacingReadDeleteBackend {
+    fn submit_read_with_metadata(
+        &self,
+        _key: &str,
+        _timeout: Duration,
+        callback: crate::storage::MetadataReadCallback,
+    ) {
+        let snapshot = self.object.lock().clone();
+        self.read_started.wait();
+        self.release_read.wait();
+        let result = snapshot
+            .map(|bytes| {
+                let metadata = Self::metadata(&bytes);
+                (bytes, metadata)
+            })
+            .ok_or_else(|| "object not found".to_string());
+        let _ = callback.send(result);
+    }
+
     fn submit_read(&self, key: &str, callback: StorageCallback) {
         let key = key.to_string();
         let snapshot = self.object.lock().clone();

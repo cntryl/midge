@@ -1305,7 +1305,7 @@ fn object_metadata_from_s3_response(
     known_size: Option<u64>,
 ) -> CloudOutcome<ObjectMetadata> {
     let size = match known_size {
-        Some(size) => size,
+        Some(_) => crate::storage::cloud::executor::validate_get_response_length(response)?,
         None => response
             .headers
             .iter()
@@ -1580,6 +1580,31 @@ fn decode_xml_entities(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn should_reject_invalid_get_length_when_building_object_identity() {
+        // Arrange
+        for length in ["2", "4", "invalid"] {
+            let response = CloudResponse {
+                status: 200,
+                headers: vec![
+                    ("content-length".to_string(), length.to_string()),
+                    ("etag".to_string(), "identity".to_string()),
+                    ("x-goog-generation".to_string(), "42".to_string()),
+                ],
+                body: b"abc".to_vec(),
+            };
+
+            // Act
+            let result = object_metadata_from_s3_response(&response, Some(3));
+
+            // Assert
+            assert!(
+                matches!(result, Err(CloudError::Protocol(_))),
+                "accepted length {length}: {result:?}"
+            );
+        }
+    }
+
     use super::*;
     use crate::storage::providers::test_support::{
         receive_list_result, spawn_recording_http_server, spawn_recording_http_server_with_status,

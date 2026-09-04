@@ -92,6 +92,28 @@ pub struct CloudResponse {
     pub body: Vec<u8>,
 }
 
+/// Verify every declared length against the body from the same GET response.
+/// Chunked responses may omit Content-Length; conflicting or malformed values
+/// must never be replaced with a synthesized length.
+pub(crate) fn validate_get_response_length(response: &CloudResponse) -> super::CloudOutcome<u64> {
+    let actual = u64::try_from(response.body.len()).unwrap_or(u64::MAX);
+    for (_, value) in response
+        .headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+    {
+        let declared = value.trim().parse::<u64>().map_err(|error| {
+            super::CloudError::Protocol(format!("GET response has invalid Content-Length: {error}"))
+        })?;
+        if declared != actual {
+            return Err(super::CloudError::Protocol(format!(
+                "GET response length mismatch: Content-Length={declared}, body={actual}"
+            )));
+        }
+    }
+    Ok(actual)
+}
+
 /// Signing abstraction used by different providers.
 pub trait CloudSigner: Send + Sync {
     fn sign(&self, request: &mut CloudRequest) -> MidgeResult<()>;
