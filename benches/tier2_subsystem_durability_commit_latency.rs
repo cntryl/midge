@@ -109,7 +109,8 @@ fn commit_rotation_value(engine: &Engine, cf_id: ColumnFamilyId, ordinal: usize,
 
 fn execute_rotation_run() -> RotationRunSample {
     let mut opts = stress_config::write_coordination_opts_for_mode("local");
-    opts.enable_compaction = false;
+    // Sustained rotation needs compaction to reclaim bounded L0 slots.
+    opts.enable_compaction = true;
     opts.memtable_size = ROTATION_MEMTABLE_BYTES;
     let engine = Engine::open(opts.to_open_options()).expect("open rotation benchmark engine");
     let cf = engine
@@ -333,7 +334,7 @@ fn set_rotation_parameters(ctx: &mut StressContext) {
     ctx.parameter("writers", 1);
     ctx.parameter("value_size_bytes", ROTATION_VALUE_SIZE);
     ctx.parameter("memtable_flush_threshold_bytes", ROTATION_MEMTABLE_BYTES);
-    ctx.parameter("background_compaction", false);
+    ctx.parameter("background_compaction", true);
     ctx.parameter("warmup_transactions_per_run", ROTATION_WARMUP_TRANSACTIONS);
     ctx.parameter(
         "measured_transactions_per_run",

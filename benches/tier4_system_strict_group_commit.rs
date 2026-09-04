@@ -188,7 +188,8 @@ fn execute_system_workload() -> SystemOutcome {
     let temp = tempfile::tempdir().expect("create strict system benchmark database");
     let options = OpenOptions::local(temp.path())
         .recovery_policy(RecoveryPolicy::Strict)
-        .background_compaction(false)
+        // Keep L0 draining throughout the sustained concurrent ingest.
+        .background_compaction(true)
         .with_memtable_size_limit(MEMTABLE_SIZE)
         .with_memtable_flush_threshold(MEMTABLE_SIZE)
         .build()
@@ -273,6 +274,7 @@ fn execute_system_workload() -> SystemOutcome {
 #[allow(clippy::cast_precision_loss)]
 fn tier4_complete_local_strict_group_commit(ctx: &mut StressContext) {
     let outcome = execute_system_workload();
+    ctx.parameter("background_compaction", true);
     ctx.parameter("writers", WRITERS);
     ctx.parameter("flush_count", FLUSH_WAVES);
     ctx.parameter("transactions", TOTAL_TRANSACTIONS);
