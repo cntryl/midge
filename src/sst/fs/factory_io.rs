@@ -412,7 +412,10 @@ impl InMemorySstWriter {
         state.key_profiler.add_key(&entry.key);
         Self::update_key_bounds(&mut state.smallest_key, &mut state.largest_key, &entry.key);
 
-        let target_block_size = block_size.max(4 * 1024);
+        let target_block_size = block_size.clamp(
+            4 * 1024,
+            crate::sst::compression::MAX_DECOMPRESSED_BLOCK_SIZE,
+        );
         let mut encoded = Self::encode_pending_entry(&state.previous_key, &entry)?;
         if !state.current_block.is_empty()
             && state.current_block.len().saturating_add(encoded.len()) > target_block_size
@@ -437,7 +440,10 @@ impl InMemorySstWriter {
     }
 
     fn finalize_data_blocks(&self, entries: Vec<PendingEntry>) -> MidgeResult<FinalizedDataBlocks> {
-        let target_block_size = self.block_size.max(4 * 1024);
+        let target_block_size = self.block_size.clamp(
+            4 * 1024,
+            crate::sst::compression::MAX_DECOMPRESSED_BLOCK_SIZE,
+        );
         let mut file_bytes = Vec::new();
         let mut block_index_entries = Vec::new();
         let mut key_profiler = KeyStructureProfiler::new();
@@ -787,6 +793,7 @@ impl DynSstWriter for InMemorySstWriter {
         op_type: u8,
         expiration: Option<u64>,
     ) -> MidgeResult<()> {
+        crate::sst::encoding::validate_entry_size(key.len(), value.map_or(0, <[u8]>::len))?;
         if self.streaming.is_some() {
             return Err(crate::common::MidgeError::InvalidArgument(
                 "cannot append unordered entries after sorted SST streaming has started"
@@ -811,6 +818,7 @@ impl DynSstWriter for InMemorySstWriter {
         op_type: u8,
         expiration: Option<u64>,
     ) -> MidgeResult<()> {
+        crate::sst::encoding::validate_entry_size(key.len(), value.map_or(0, <[u8]>::len))?;
         if !self.entries.is_empty() {
             return Err(crate::common::MidgeError::InvalidArgument(
                 "cannot start sorted SST streaming after unordered entries were added".to_string(),

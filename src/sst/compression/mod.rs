@@ -247,8 +247,7 @@ pub fn decompress_block(compressed: &[u8], algo: CompressionAlgo) -> MidgeResult
                         "Zstd frame content size unavailable: {err}"
                     )))
                 }
-            }
-            .max(MAX_BLOCK_SIZE);
+            };
             let decompressed =
                 zstd::bulk::decompress(compressed, max_decompressed_size).map_err(|e| {
                     crate::common::MidgeError::Corruption(format!("Zstd decompression failed: {e}"))
@@ -264,7 +263,7 @@ fn enforce_decompressed_size(size: usize, algorithm: &str) -> MidgeResult<usize>
             "{algorithm} declared output size {size} exceeds {MAX_DECOMPRESSED_BLOCK_SIZE} byte limit"
         )));
     }
-    Ok(size.max(MAX_BLOCK_SIZE))
+    Ok(size)
 }
 
 /// Compress block data and append a trailer (`[compressed_data][algo:u8][crc32c:u32 LE]`).

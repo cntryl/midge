@@ -22,6 +22,21 @@ options before opening. Public builder controls include `goal`,
 `recovery_policy`, `storage_io_timeout`, `runtime_response_timeout`,
 `on_lease_loss`, `lease_clock_skew_tolerance`, and `ttl_clock`.
 
+## Entry size admission
+
+`Transaction::put`, `insert`, and point `delete` reject entries whose full key,
+value, and SST V4 entry header exceed 64 MiB, returning `MidgeError::ResourceLimit`
+before adding the operation to the transaction or spilling it to disk. A rejected
+operation leaves previously staged operations intact. The check uses the full key
+because any entry can start a block after flush or compaction.
+
+The header occupies 26 bytes, or 34 bytes for keys longer than 65,535 bytes; TTL
+presence does not change its size. For a three-byte key, the maximum value size
+is therefore 67,108,835 bytes. Memory/admission budgets can impose smaller limits.
+The decoded-block ceiling applies regardless of the selected compression policy.
+This admission change does not change SST V4 bytes or repair previously written
+SSTs containing entries beyond the reader's decoded-block limit.
+
 ## Runtime response deadlines
 
 Every Engine operation that submits a `RuntimeMsg` and waits for its response is

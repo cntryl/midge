@@ -163,6 +163,17 @@ impl TransactionWriteSet {
     }
 
     pub(crate) fn push(&mut self, op: TransactionOp) -> MidgeResult<()> {
+        // Reject unflushable entries before allocating reservations or writing
+        // spill files, so failed admission leaves the transaction unchanged.
+        match &op {
+            TransactionOp::Put { key, value, .. } => {
+                crate::sst::encoding::validate_entry_size(key.len(), value.len())?;
+            }
+            TransactionOp::Delete { key, .. } => {
+                crate::sst::encoding::validate_entry_size(key.len(), 0)?;
+            }
+            TransactionOp::DeleteRange { .. } => {}
+        }
         let ordinal_op = OrdinalOp {
             ordinal: self.next_ordinal,
             op,

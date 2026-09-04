@@ -418,6 +418,8 @@ impl Transaction {
     /// # Errors
     ///
     /// Returns `MidgeError::InvalidArgument` when called on a read-only transaction.
+    /// Returns `MidgeError::ResourceLimit` if the key and value (including the V4
+    /// entry header) cannot fit in a 64 MiB decoded SST block.
     pub fn put(
         &mut self,
         key: Vec<u8>,
@@ -443,6 +445,8 @@ impl Transaction {
     /// # Errors
     ///
     /// Returns `MidgeError::InvalidArgument` when called on a read-only transaction.
+    /// Returns `MidgeError::ResourceLimit` if the key and value (including the V4
+    /// entry header) cannot fit in a 64 MiB decoded SST block.
     pub fn insert(
         &mut self,
         key: Vec<u8>,
@@ -468,6 +472,8 @@ impl Transaction {
     /// # Errors
     ///
     /// Returns `MidgeError::InvalidArgument` when called on a read-only transaction.
+    /// Returns `MidgeError::ResourceLimit` if the key and value (including the V4
+    /// entry header) cannot fit in a 64 MiB decoded SST block.
     pub fn delete(&mut self, key: Vec<u8>) -> MidgeResult<()> {
         if self.is_read_only() {
             return Err(MidgeError::InvalidArgument(
