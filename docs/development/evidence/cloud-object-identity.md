@@ -104,8 +104,25 @@ still require matching lengths and reject absent or mismatched identities.
 Generation-aware comparison is used both during proof construction and during
 guarded deletion revalidation. Added unit cases cover differing ETags at one
 generation, changed or missing generations, changed length, changed ETag, and
-missing identity. The full engine qualification must pass before this correction
-is considered qualified.
+missing identity. The corrected implementation passed all seven local pinned-Sqrzl engine tests
+with zero skips. The two focused identity-selection tests also passed. Hosted
+qualification is rerun on the corrected commit; consult PR #278 for final
+check status.
+
+## Follow-up local verification
+
+After the generation-aware correction:
+
+- `cargo fmt --check`: passed.
+- `cargo build --workspace`: passed.
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic`:
+  passed after correcting the documentation markup.
+- `cntryl-tools validate-tests`: passed, 2,650/2,650.
+- Pinned-Sqrzl engine qualification: 7/7 passed, zero skips.
+
+The current hosted results are attached to
+[PR #278](https://github.com/cntryl/midge/pull/278). The initial-review results
+above are historical snapshots, not claims that pending checks passed.
 
 ## Performance and remaining acceptance
 

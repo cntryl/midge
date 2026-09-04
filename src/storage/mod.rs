@@ -136,7 +136,7 @@ pub enum CloudUploadFailureKind {
 }
 
 /// Select exactly the identity used by conditional mutations. GCS JSON
-/// metadata and media responses may expose different ETags for one generation.
+/// metadata and media responses may expose different `ETags` for one generation.
 pub(crate) fn conditional_object_identity<'a>(
     etag: &'a str,
     generation: Option<&'a str>,
