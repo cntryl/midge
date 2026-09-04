@@ -6,8 +6,8 @@ use cntryl_midge::{
 };
 use common::*;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Barrier, Mutex, OnceLock};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 static BACKPRESSURE_STRESS_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -334,7 +334,7 @@ fn should_prevent_oom_by_rejecting_writes_when_budget_exceeded() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     // Act
-    let results = std::cell::RefCell::new(Vec::<(String, u64, usize, bool)>::new());
+    let results = std::cell::RefCell::new(Vec::<(String, u64, u64, usize, bool)>::new());
     for_each_storage_mode(&["local"], |mode, opts| {
         let mut opts = opts;
         opts = opts.memory_budget(512 * 1024); // 512KB instead of 2MB for faster backpressure trigger
@@ -350,60 +350,49 @@ fn should_prevent_oom_by_rejecting_writes_when_budget_exceeded() {
         let cf = engine.create_column_family("test").expect("create cf");
         let cf_id = cf.id();
 
-        let worker_count = 1;
-        let max_attempts_per_worker = 64;
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let barrier = Arc::new(Barrier::new(worker_count));
-        let mut handles = Vec::new();
+        let max_attempts = 64;
+        let write_options = buffered_write_options(mode);
+        let mut total_writes = 0;
+        let mut total_stalls = 0;
 
-        for worker_id in 0..worker_count {
-            let shutdown_clone = shutdown.clone();
-            let engine_clone = Arc::clone(&engine);
-            let barrier_clone = Arc::clone(&barrier);
-            let write_options = buffered_write_options(mode);
+        while total_writes + total_stalls < max_attempts {
+            let key = format!("key_{total_writes}");
+            let value = vec![0u8; 8192]; // 8KB for faster memory budget exhaustion
+            let mut txn = engine
+                .begin_tx(cf_id, TransactionMode::ReadWrite)
+                .expect("begin");
+            txn.put(key.as_bytes().to_vec(), value, None).expect("put");
 
-            handles.push(std::thread::spawn(move || {
-                let mut total_writes = 0;
-                let mut total_stalls = 0;
-
-                barrier_clone.wait();
-                while !shutdown_clone.load(Ordering::Relaxed) {
-                    let key = format!("worker_{worker_id}_key_{total_writes}");
-                    let value = vec![0u8; 8192]; // 8KB for faster memory budget exhaustion
-                    let mut txn = engine_clone
-                        .begin_tx(cf_id, TransactionMode::ReadWrite)
-                        .expect("begin");
-                    txn.put(key.as_bytes().to_vec(), value.clone(), None)
-                        .expect("put");
-
-                    match txn.commit(write_options) {
-                        Ok(()) => total_writes += 1,
-                        Err(MidgeError::WriteStall(_)) => {
-                            total_stalls += 1;
-                            std::thread::sleep(Duration::from_millis(10));
-                        }
-                        Err(e) => panic!("unexpected: {e:?}"),
-                    }
-
-                    if total_writes + total_stalls >= max_attempts_per_worker {
-                        break;
-                    }
+            match txn.commit(write_options) {
+                Ok(()) => total_writes += 1,
+                Err(MidgeError::WriteStall(_)) => {
+                    total_stalls += 1;
+                    std::thread::sleep(Duration::from_millis(10));
                 }
-
-                (total_writes, total_stalls)
-            }));
+                Err(e) => panic!("unexpected: {e:?}"),
+            }
         }
 
-        std::thread::sleep(Duration::from_secs(2));
-        shutdown.store(true, Ordering::Relaxed);
-        let total_stalls = handles
-            .into_iter()
-            .map(|handle| handle.join().expect("panic").1)
-            .sum();
+        // Natural flush publication is asynchronous. Wait for the actual acceptance
+        // condition instead of assuming a fixed sleep covers hosted-runner contention.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let metrics = loop {
+            let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+            if total_stalls > 0 || (metrics.sst_count > 0 && !metrics.write_stalled) {
+                break metrics;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "local pressure was not rejected or naturally flushed: writes={total_writes}, stalls={total_stalls}, ssts={}, write_stalled={}",
+                metrics.sst_count,
+                metrics.write_stalled
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
 
-        let metrics = engine.get_runtime_metrics().expect("runtime metrics");
         results.borrow_mut().push((
             mode.to_string(),
+            total_writes,
             total_stalls,
             metrics.sst_count,
             metrics.write_stalled,
@@ -411,11 +400,11 @@ fn should_prevent_oom_by_rejecting_writes_when_budget_exceeded() {
     });
 
     // Assert
-    for (mode, total_stalls, sst_count, write_stalled) in results.into_inner() {
+    for (mode, total_writes, total_stalls, sst_count, write_stalled) in results.into_inner() {
         assert_eq!(mode, "local");
         assert!(
             total_stalls > 0 || (sst_count > 0 && !write_stalled),
-            "Expected local mode to either reject writes under hard pressure or relieve pressure via natural flush"
+            "Expected local mode to either reject writes under hard pressure or relieve pressure via natural flush: writes={total_writes}, stalls={total_stalls}, ssts={sst_count}, write_stalled={write_stalled}"
         );
     }
 }

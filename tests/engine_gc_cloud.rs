@@ -189,20 +189,13 @@ fn should_not_collect_cloud_objects_referenced_by_manifest() {
 }
 
 /// Simulates a cloud provider outage that specifically affects deleting
-/// GC'd (orphaned) objects, without disturbing anything else, by chmod-ing
-/// the simulated cloud bucket read-only for the exact window between
-/// compaction's manifest publish and its orphan cleanup. This mirrors
-/// `should_handle_cloud_unavailable_during_eviction` in
-/// `tests/hybrid_storage.rs`, which uses the same "the simulated cloud
-/// backend is just a filesystem directory" trick for upload outages; here
-/// we pin the outage to the GC boundary using the existing
-/// `slice6::after_manifest_persist_before_sst_gc` failpoint so the prior
-/// (successful) upload of the compacted output isn't itself blocked.
+/// GC'd (orphaned) objects, without disturbing the output upload that must
+/// precede manifest publication. A provider-boundary failpoint keeps this
+/// deterministic even when the process has permission to delete read-only
+/// files, as root does inside the Docker qualification image.
 #[test]
-#[cfg(all(feature = "failpoints", unix))]
+#[cfg(feature = "failpoints")]
 fn should_handle_gc_when_cloud_delete_fails() {
-    use std::os::unix::fs::PermissionsExt;
-
     let _guard = failpoint_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -217,7 +210,7 @@ fn should_handle_gc_when_cloud_delete_fails() {
         .build()
         .expect("build simulated cloud options");
     let l0_batch_size = options.l0_compaction_trigger();
-    let engine = Engine::open(options).expect("open simulated cloud engine");
+    let mut engine = Engine::open(options).expect("open simulated cloud engine");
     let cf = engine.create_column_family("test").expect("create cf");
 
     // Write exactly one configured L0 batch. This isolates the delete failure
@@ -247,50 +240,21 @@ fn should_handle_gc_when_cloud_delete_fails() {
         "expected one configured L0 batch to be mirrored to cloud storage, got {before_objects:?}"
     );
 
-    // Arm a failpoint at the exact boundary between compaction's manifest
-    // publish (which already uploaded the compacted output) and its
-    // orphan-SST GC pass, and make the bucket read-only there so only the
-    // orphan delete fails.
+    // Arm only the remote SST delete boundary. The compacted output upload
+    // and manifest authority switch remain real simulated-cloud operations.
     let scenario = fail::FailScenario::setup();
-    let original_permissions = std::fs::metadata(&cloud_sst_dir)
-        .expect("stat cloud sst dir")
-        .permissions();
-    let outage_dir = cloud_sst_dir.clone();
-    fail::cfg_callback("slice6::after_manifest_persist_before_sst_gc", move || {
-        std::fs::set_permissions(&outage_dir, std::fs::Permissions::from_mode(0o500))
-            .expect("simulate cloud delete outage via read-only bucket");
-    })
-    .expect("configure cloud delete outage failpoint");
+    fail::cfg("midge::cloud::inject_fail_sst_delete", "return")
+        .expect("configure cloud delete outage failpoint");
 
     // Act: compaction should orphan the selected input SSTs and try (and fail)
-    // to delete them from the now-read-only cloud bucket.
+    // to delete them from cloud storage.
     let compact_result = engine.compact_all();
-
-    // Give the async cloud-delete worker time to attempt (and fail) the
-    // delete before we inspect the bucket.
-    thread::sleep(Duration::from_millis(300));
-
-    fail::remove("slice6::after_manifest_persist_before_sst_gc");
-    std::fs::set_permissions(&cloud_sst_dir, original_permissions)
-        .expect("restore cloud sst permissions");
-    scenario.teardown();
 
     // Assert: compaction tolerates the delete failure rather than
     // propagating it as an error.
     assert!(
         compact_result.is_ok(),
         "compact_all should tolerate a cloud delete failure: {compact_result:?}"
-    );
-
-    // Assert: the orphaned objects are still present in cloud storage
-    // because their delete genuinely failed and was retained for retry,
-    // not silently skipped or corrupted.
-    let after_objects = sst_object_names(&cloud_sst_dir);
-    let retained: Vec<_> = before_objects.intersection(&after_objects).collect();
-    assert!(
-        !retained.is_empty(),
-        "expected the orphaned cloud objects whose delete failed to remain \
-         in cloud storage for retry, got {after_objects:?}"
     );
 
     // Assert: engine remains fully functional; no data was lost.
@@ -304,6 +268,27 @@ fn should_handle_gc_when_cloud_delete_fails() {
             "data lost after cloud delete failure"
         );
     }
+    drop(tx);
+
+    // Shutdown joins every cloud-delete worker while the outage remains
+    // armed, so the filesystem observation cannot race an unattempted delete.
+    engine
+        .shutdown(Duration::from_secs(10))
+        .expect("shutdown after failed cloud delete");
+    let after_objects = sst_object_names(&cloud_sst_dir);
+    let retained: Vec<_> = before_objects.intersection(&after_objects).collect();
+
+    fail::remove("midge::cloud::inject_fail_sst_delete");
+    scenario.teardown();
+
+    // Assert: the orphaned objects are still present in cloud storage
+    // because their delete genuinely failed and was retained for retry,
+    // not silently skipped or corrupted.
+    assert!(
+        !retained.is_empty(),
+        "expected the orphaned cloud objects whose delete failed to remain \
+         in cloud storage for retry, got {after_objects:?}"
+    );
 
     eprintln!("✓ Engine gracefully handled cloud delete failure");
 }

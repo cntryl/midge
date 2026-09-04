@@ -662,6 +662,11 @@ fn should_preserve_partitioned_compaction_across_simulated_cloud_reopen() -> Mid
         OpenOptions::cloud_simulated(temp_dir.path(), "partitioned-bucket", "partitioned-prefix")
             .background_compaction(false)
             .with_memtable_size_limit(64 * 1024)
+            // This is a multi-output durability qualification, not a response
+            // deadline test. Windows hosted runners can execute it alongside
+            // the intentionally large compaction resource proof, so retain a
+            // bounded but explicit allowance for that filesystem contention.
+            .runtime_response_timeout(Duration::from_mins(3))
             .build()
     });
 

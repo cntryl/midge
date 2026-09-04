@@ -860,6 +860,9 @@ impl HybridPersistence for HybridStorage {
     }
 
     fn delete_sst_object_blocking(&self, sst_name: &str) -> MidgeResult<()> {
+        crate::failpoints::fail_point!("midge::cloud::inject_fail_sst_delete", |_| Err(
+            MidgeError::Internal("failpoint: cloud SST delete failed".to_string())
+        ));
         self.delete_immutable_object_blocking(&crate::sst::object_key(sst_name))
     }
 }
