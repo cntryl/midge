@@ -41,6 +41,16 @@ cloud-readback verification file before writing either. A failed publisher
 keeps its reservation across retries. Failed cleanup retains capacity charges,
 and startup accounts for any recovery scratch that could not be removed.
 
+Before WAL append, cloud transaction admission checks the complete operation
+set against a flush window of half the local disk budget, including both the
+encoded SST bound and its verification copy. Active generations are frozen
+before combining them with another transaction would exceed that window;
+automatic flush also starts when their charge reaches one quarter of the disk
+budget. An atomic transaction which cannot fit by itself returns `NoSpace`
+before WAL append. These conservative limits apply to values, point deletes,
+range tombstones, and spilled transactions; increasing the memory budget does
+not increase this disk allowance.
+
 Compaction streams remote inputs and drains each completed output partition to
 object storage before producing the next. Its staging reservation covers the
 scratch and finalized partition. An indivisible output which cannot fit is

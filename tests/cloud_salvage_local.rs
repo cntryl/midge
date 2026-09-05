@@ -7,7 +7,7 @@ use std::time::Duration;
 
 #[test]
 fn should_read_verified_local_sst_during_salvage_when_remote_object_is_missing_or_invalid() {
-    for invalid_remote in [false, true] {
+    for remote_failure in ["missing", "truncated", "same-size corruption"] {
         // Arrange
         let dir = tempfile::tempdir().expect("database directory");
         let options = OpenOptions::cloud_simulated(dir.path(), "bucket", "salvage-local")
@@ -33,10 +33,16 @@ fn should_read_verified_local_sst_during_salvage_when_remote_object_is_missing_o
             .expect("remote SST");
         let local = dir.path().join("sst").join(remote.file_name().unwrap());
         std::fs::copy(&remote, &local).expect("preserve valid local copy");
-        if invalid_remote {
-            std::fs::write(&remote, b"invalid remote object").expect("invalidate remote");
-        } else {
-            std::fs::remove_file(&remote).expect("remove remote");
+        match remote_failure {
+            "missing" => std::fs::remove_file(&remote).expect("remove remote"),
+            "truncated" => {
+                std::fs::write(&remote, b"invalid remote object").expect("invalidate remote");
+            }
+            _ => {
+                let mut bytes = std::fs::read(&remote).expect("read remote SST");
+                bytes[0] ^= 1;
+                std::fs::write(&remote, bytes).expect("corrupt remote without changing size");
+            }
         }
         let salvage_options = OpenOptions::cloud_simulated(dir.path(), "bucket", "salvage-local")
             .background_compaction(false)

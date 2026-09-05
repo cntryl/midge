@@ -67,6 +67,10 @@ impl WalCoordinator {
             event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
             return HandleOutcome::Continue;
         }
+        if let Err(error) = event_loop.prepare_cloud_spilled_transaction_memtables(&source) {
+            event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
+            return HandleOutcome::Continue;
+        }
         match event_loop.wal_actor.append_spilled_transaction(
             &mut event_loop.state,
             &source,
@@ -142,6 +146,11 @@ impl WalCoordinator {
         }
 
         if !Self::accept_write(event_loop, request_id) {
+            return HandleOutcome::Continue;
+        }
+
+        if let Err(error) = event_loop.prepare_cloud_transaction_memtables(&ops) {
+            event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
             return HandleOutcome::Continue;
         }
 

@@ -500,7 +500,7 @@ impl RuntimeStorageMaterialization {
 
 impl RuntimeRecoveryMaterialization {
     fn evict_resident_manifest_ssts(
-        materialized: &RuntimeStorageMaterialization,
+        materialized: &mut RuntimeStorageMaterialization,
     ) -> MidgeResult<()> {
         let Some(fs) = &materialized.runtime_config.sst_read_fs else {
             return Ok(());
@@ -508,6 +508,7 @@ impl RuntimeRecoveryMaterialization {
         let Some(storage) = &materialized.runtime_config.hybrid_storage else {
             return Ok(());
         };
+        let mut salvaged = Vec::new();
         for meta in &materialized.state.manifest.files {
             if materialized.state.salvaged_local_ssts.contains(&meta.name) {
                 continue;
@@ -524,7 +525,7 @@ impl RuntimeRecoveryMaterialization {
             // This migration path reads only objects which already have a
             // resident copy. An empty cache never triggers full SST validation.
             // Retain the local bytes unless the remote publication proof holds.
-            RuntimeState::validate_sst_fs_proof(
+            let validation = RuntimeState::validate_sst_fs_proof(
                 Arc::clone(fs),
                 &crate::runtime::FileMeta {
                     name: meta.name.clone(),
@@ -538,11 +539,30 @@ impl RuntimeRecoveryMaterialization {
                     largest_seq: meta.largest_seq,
                     key_bounds_complete: meta.key_bounds_complete,
                 },
-            )?;
+            );
+            if let Err(error) = validation {
+                if materialized.state.recovery_policy() == RecoveryPolicy::Salvage
+                    && CloudStartupRecovery::local_sst_file_matches_manifest(&path, meta)
+                {
+                    tracing::warn!(
+                        %error,
+                        sst_name = %meta.name,
+                        "retaining verified local SST during salvage after remote migration proof failed"
+                    );
+                    salvaged.push(meta.name.clone());
+                    continue;
+                }
+                return Err(error);
+            }
             if path.exists() {
                 std::fs::remove_file(path)?;
             }
             storage.evict_local_object_cache(&crate::sst::object_key(&meta.name))?;
+        }
+        if !salvaged.is_empty() {
+            materialized.state.salvaged_local_ssts.extend(salvaged);
+            materialized.state.mark_opened_in_salvage_mode();
+            materialized.state.mark_persistence_anomaly();
         }
         Ok(())
     }
@@ -622,20 +642,6 @@ impl RuntimeRecoveryMaterialization {
                 cloud_storage,
             )?;
         }
-        if !materialized.state.salvaged_local_ssts.is_empty() {
-            if let Some(storage) = &materialized.runtime_config.hybrid_storage {
-                let fs: Arc<dyn crate::io::Fs> = Arc::new(
-                    crate::storage::remote_sst::RemoteSstFs::new(
-                        Arc::clone(&materialized.state.fs),
-                        storage.remote_sst_backend(),
-                        storage.storage_io_timeout(),
-                    )
-                    .with_verified_local_overrides(materialized.state.salvaged_local_ssts.clone()),
-                );
-                materialized.runtime_config.sst_read_fs = Some(Arc::clone(&fs));
-                materialized.state.recovery_sst_fs = Some(fs);
-            }
-        }
         if let Some(metadata_storage) = materialized.cloud_metadata_storage_for_mirror.as_deref() {
             CloudStartupRecovery::mirror_cloud_metadata(
                 metadata_storage,
@@ -653,7 +659,21 @@ impl RuntimeRecoveryMaterialization {
         }
 
         materialized.state.cleanup_storage_residue();
-        Self::evict_resident_manifest_ssts(&materialized)?;
+        Self::evict_resident_manifest_ssts(&mut materialized)?;
+        if !materialized.state.salvaged_local_ssts.is_empty() {
+            if let Some(storage) = &materialized.runtime_config.hybrid_storage {
+                let fs: Arc<dyn crate::io::Fs> = Arc::new(
+                    crate::storage::remote_sst::RemoteSstFs::new(
+                        Arc::clone(&materialized.state.fs),
+                        storage.remote_sst_backend(),
+                        storage.storage_io_timeout(),
+                    )
+                    .with_verified_local_overrides(materialized.state.salvaged_local_ssts.clone()),
+                );
+                materialized.runtime_config.sst_read_fs = Some(Arc::clone(&fs));
+                materialized.state.recovery_sst_fs = Some(fs);
+            }
+        }
         if let Some(storage) = &materialized.runtime_config.hybrid_storage {
             storage.reconcile_local_disk_usage(
                 Self::local_directory_bytes(&materialized.state.sst_dir)?.saturating_add(

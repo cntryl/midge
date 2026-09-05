@@ -300,6 +300,98 @@ fn should_account_for_total_working_space_before_wal_hydration() -> MidgeResult<
 }
 
 #[test]
+fn should_include_legacy_wal_normalization_peak_before_downloading_recovery_segments(
+) -> MidgeResult<()> {
+    // Arrange
+    let db = tempfile::tempdir()?;
+    let backend = Arc::new(DelayedRecoveryBackend::new());
+    let catalog = recovery_catalog(&backend, 1);
+    let publication = catalog.segments.values().next().expect("publication");
+    let bytes = backend
+        .objects
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&DelayedRecoveryBackend::full_key(&publication.object_key))
+        .expect("published WAL")
+        .clone();
+    let legacy_path = db.path().join("wal/1.wal");
+    std::fs::create_dir_all(legacy_path.parent().expect("WAL directory"))?;
+    std::fs::write(&legacy_path, &bytes)?;
+    let cloud = crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".into());
+
+    // Act: two copies cover existing WAL plus replay, but normalization also
+    // writes a canonical local copy while both of those files still exist.
+    let result = CloudStartupRecovery::materialize_cloud_wal_recovery_dir_with_budget(
+        &cloud,
+        db.path(),
+        crate::config::RecoveryPolicy::Strict,
+        &catalog,
+        publication.size_bytes * 2,
+    );
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::NoSpace(_))));
+    assert_eq!(backend.maximum_in_flight(), 0);
+    assert!(!db.path().join("cloud_recovery").exists());
+    assert_eq!(std::fs::read(&legacy_path)?, bytes);
+    Ok(())
+}
+
+#[test]
+fn should_recover_legacy_local_wal_when_overlapping_normalization_copies_fit_budget(
+) -> MidgeResult<()> {
+    for published_remotely in [false, true] {
+        // Arrange
+        let db = tempfile::tempdir()?;
+        let backend = Arc::new(DelayedRecoveryBackend::new());
+        let mut catalog = recovery_catalog(&backend, 1);
+        let publication = catalog.segments.values().next().expect("publication");
+        let bytes = backend
+            .objects
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&DelayedRecoveryBackend::full_key(&publication.object_key))
+            .expect("published WAL")
+            .clone();
+        let size = publication.size_bytes;
+        if !published_remotely {
+            catalog.segments.clear();
+        }
+        let legacy_path = db.path().join("wal/1.wal");
+        std::fs::create_dir_all(legacy_path.parent().expect("WAL directory"))?;
+        std::fs::write(&legacy_path, &bytes)?;
+        let cloud = crate::storage::cloud::CloudStorage::new(backend, "midge".into());
+        let budget = size * if published_remotely { 3 } else { 2 };
+
+        // Act
+        let mut plan = CloudStartupRecovery::materialize_cloud_wal_recovery_dir_with_budget(
+            &cloud,
+            db.path(),
+            crate::config::RecoveryPolicy::Strict,
+            &catalog,
+            budget,
+        )?;
+        CloudStartupRecovery::merge_local_wal_into_recovery_dir(
+            db.path(),
+            &mut plan,
+            crate::config::RecoveryPolicy::Strict,
+        )?;
+
+        // Assert
+        let canonical_name = crate::wal::segment_file_name(1);
+        assert!(!legacy_path.exists());
+        assert_eq!(
+            std::fs::read(db.path().join("wal").join(&canonical_name))?,
+            bytes
+        );
+        assert_eq!(std::fs::read(plan.replay_dir.join(canonical_name))?, bytes);
+        assert_eq!(plan.remote_segments.contains_key(&1), published_remotely);
+        assert_eq!(plan.local_segments.contains_key(&1), !published_remotely);
+    }
+    Ok(())
+}
+
+#[test]
 fn should_count_non_wal_recovery_residue_before_downloading_new_wal_segments() -> MidgeResult<()> {
     // Arrange
     let db = tempfile::tempdir()?;

@@ -44,6 +44,28 @@ impl CloudStartupRecovery {
                     .with_deadline(deadline),
                 );
                 RuntimeState::validate_sst_fs_proof(pinned, file_meta)?;
+                // The intent proves this name is non-authoritative and the
+                // remote checksum proves its publication. Discard its local
+                // cache before deleting that remote proof, even if the cache
+                // is corrupt. A durable directory barrier prevents a crash
+                // from resurrecting corrupt local bytes after remote cleanup.
+                let local_path = crate::io::FsPath::new(key.clone());
+                match state.fs.remove_file(&local_path) {
+                    Ok(()) => state
+                        .fs
+                        .sync_dir(
+                            &crate::io::FsPath::new("sst"),
+                            crate::io::Durability::Durable,
+                        )
+                        .map_err(MidgeError::from)?,
+                    Err(crate::io::FsError::NotFound(_)) => {}
+                    Err(error) => {
+                        return Err(MidgeError::RecoveryFailed(format!(
+                            "failed to remove proven non-authoritative local compaction output '{}': {error}",
+                            file_meta.name
+                        )));
+                    }
+                }
                 storage
                     .delete_remote_object_by_identity_blocking_within(&key, &metadata, &deadline)
                     .map_err(|error| {
@@ -717,6 +739,7 @@ impl CloudStartupRecovery {
             .map(|(id, publication)| (*id, publication.size_bytes))
             .collect::<std::collections::BTreeMap<_, _>>();
         let mut active_bytes = 0_u64;
+        let mut normalization_bytes = 0_u64;
         match std::fs::read_dir(db_path.join("wal")) {
             Ok(entries) => {
                 for entry in entries {
@@ -732,6 +755,17 @@ impl CloudStartupRecovery {
                     if name == crate::wal::ACTIVE_FILE_NAME {
                         active_bytes = active_bytes.max(size);
                     } else if let Some(segment_id) = crate::wal::parse_segment_id(name) {
+                        if name != crate::wal::segment_file_name(segment_id)
+                            && catalog.segments.contains_key(&segment_id)
+                        {
+                            // Alias normalization stages a canonical local
+                            // copy while the original alias and downloaded
+                            // replay set still exist. Normalization is serial,
+                            // so reserve the largest possible extra copy. A
+                            // local-only segment's replay copy is not staged
+                            // yet and already covers its normalization peak.
+                            normalization_bytes = normalization_bytes.max(size);
+                        }
                         replay_sizes
                             .entry(segment_id)
                             .and_modify(|bytes| {
@@ -747,7 +781,7 @@ impl CloudStartupRecovery {
         let projected = replay_sizes
             .values()
             .copied()
-            .chain([active_bytes])
+            .chain([active_bytes, normalization_bytes])
             .try_fold(existing_bytes, |total, bytes| {
                 total.checked_add(bytes).ok_or_else(|| {
                     MidgeError::NoSpace("cloud WAL recovery disk requirement overflow".into())

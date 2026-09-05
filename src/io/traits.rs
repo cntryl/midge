@@ -441,6 +441,55 @@ impl From<FsError> for crate::common::MidgeError {
 mod tests {
     use super::*;
 
+    fn filesystem_error_coverage(error: &FsError) -> &'static str {
+        match error {
+            FsError::NotFound(_) => "missing SST and filesystem recovery tests",
+            FsError::AlreadyExists(_) => "immutable publication and create-new tests",
+            FsError::Corruption(_) => "SST integrity and conditional object-version tests",
+            FsError::Io(_) => "filesystem failure injection and retained-data tests",
+            FsError::Unavailable(_) => "backend availability and retry tests",
+            FsError::Timeout(_) => "filesystem timeout classification regression",
+            FsError::Unsupported(_) => "unsupported filesystem capability tests",
+        }
+    }
+
+    #[test]
+    fn should_cover_every_internal_filesystem_error_variant() {
+        // Arrange
+        let errors = [
+            FsError::NotFound(String::new()),
+            FsError::AlreadyExists(String::new()),
+            FsError::Corruption(String::new()),
+            FsError::Io(String::new()),
+            FsError::Unavailable(String::new()),
+            FsError::Timeout(String::new()),
+            FsError::Unsupported(String::new()),
+        ];
+
+        // Act
+        let notes = errors.each_ref().map(filesystem_error_coverage);
+        let unique = notes.iter().collect::<std::collections::HashSet<_>>();
+
+        // Assert
+        assert!(notes.iter().all(|note| !note.is_empty()));
+        assert_eq!(unique.len(), errors.len());
+    }
+
+    #[test]
+    fn should_preserve_timeout_classification_when_filesystem_operation_expires() {
+        // Arrange
+        let error = FsError::Timeout("remote SST range deadline expired".into());
+
+        // Act
+        let public_error = crate::common::MidgeError::from(error);
+
+        // Assert
+        assert!(
+            matches!(public_error, crate::common::MidgeError::Timeout(message)
+            if message == "remote SST range deadline expired")
+        );
+    }
+
     #[test]
     fn should_have_empty_capabilities() {
         let caps = FileCaps::empty();

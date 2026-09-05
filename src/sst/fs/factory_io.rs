@@ -786,7 +786,7 @@ impl DynSstWriter for InMemorySstWriter {
         start: &[u8],
         end: &[u8],
     ) -> Option<usize> {
-        Some(128usize.saturating_add(start.len().saturating_add(end.len()).saturating_mul(6)))
+        Some(crate::sst::size_bound::range_bytes(start.len(), end.len()))
     }
 
     fn encoded_size_upper_bound(&self) -> Option<usize> {
@@ -800,13 +800,13 @@ impl DynSstWriter for InMemorySstWriter {
                     .unwrap_or(usize::MAX),
             )
         });
-        let fixed = ranges.saturating_add(16 * 1024);
+        let fixed = ranges.saturating_add(crate::sst::size_bound::FIXED_SST_BYTES);
         let Some(streaming) = &self.streaming else {
             return Some(self.entries.iter().fold(fixed, |total, entry| {
-                total
-                    .saturating_add(256)
-                    .saturating_add(entry.key.len().saturating_mul(8))
-                    .saturating_add(entry.value.as_ref().map_or(0, Vec::len).saturating_mul(2))
+                total.saturating_add(crate::sst::size_bound::point_bytes(
+                    entry.key.len(),
+                    entry.value.as_ref().map_or(0, Vec::len),
+                ))
             }));
         };
         let index = streaming

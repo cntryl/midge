@@ -22,6 +22,7 @@ use crate::runtime::hybrid_persistence::HybridPersistence;
 #[cfg(test)]
 mod cloud;
 mod cloud_integration;
+mod cloud_memtable_admission;
 mod compaction;
 mod control;
 mod coordination;

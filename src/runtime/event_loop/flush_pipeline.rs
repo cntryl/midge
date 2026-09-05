@@ -734,7 +734,7 @@ impl EventLoop {
         if self.state.is_memory_mode() || self.shutting_down {
             return 0;
         }
-        let mut frozen_count = 0usize;
+        let mut frozen_count = self.freeze_cloud_memtables_near_staging_limit();
         let mut attempted_cfs = std::collections::HashSet::new();
         while let Some(candidate) = self
             .state

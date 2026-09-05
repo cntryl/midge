@@ -371,9 +371,7 @@ impl FlushActor {
             })?;
             // Final output and cloud readback verification can coexist. Admit
             // both before the first physical SST bytes are written.
-            let staging_bytes = u64::try_from(upper_bound)
-                .unwrap_or(u64::MAX)
-                .saturating_mul(2);
+            let staging_bytes = crate::sst::size_bound::flush_staging_bytes(upper_bound);
             task.reservation = Self::reserve_flush(
                 task.hybrid_storage.as_ref(),
                 task.identity.cf_id,
