@@ -129,12 +129,13 @@ recovery to finish independently of the steady-state L0 threshold.
 
 Full scans chain contiguous groups of strictly disjoint L0 intervals, retaining
 one active reader per group. Overlapping or uncertain files keep their existing
-source precedence and conservative reads. Scan metadata demand therefore follows
-the number of these groups, plus independently read uncertain files. A recovered
+source precedence and conservative reads. Retained SST reader metadata therefore
+follows the number of these groups, plus independently read uncertain files. A recovered
 backlog with many overlapping or uncertain intervals may still require
-maintenance before a scan fits its memory budget. This campaign's independently
-generated source keys exercise disjoint
-recovered intervals, rather than every possible overlap or tombstone history.
+maintenance before a scan fits its memory budget. Scans separately collect the
+selected range tombstones; that retained state grows with the selected tombstone
+history. This campaign's independently generated source keys exercise disjoint
+recovered intervals and do not establish a bound for aggregate tombstone state.
 
 Automatic persistent-engine memory allocation leaves a quarter of the memory
 remaining after transaction and compaction pools for SST reads before sizing
