@@ -4,6 +4,31 @@ use super::{mpsc, Arc, HybridStorage, StorageBackend, StorageEvent, StorageOutco
 use crate::common::{MidgeError, MidgeResult, OperationDeadline};
 
 impl HybridStorage {
+    /// A failed publisher can release staging only after its backend confirms
+    /// there is no secondary local copy. Unsupported metadata fails closed.
+    pub(crate) fn local_object_cache_is_absent(&self, key: &str) -> MidgeResult<bool> {
+        let (tx, rx) = mpsc::channel();
+        self.local.submit_range_head(key, self.callback_timeout, tx);
+        match rx.recv_timeout(self.callback_timeout) {
+            Ok(StorageEvent::HeadComplete {
+                key: actual,
+                result,
+            }) if actual == key => match result {
+                StorageOutcome::Ok(_) => Ok(false),
+                StorageOutcome::Err(error) if Self::storage_error_indicates_missing(&error) => {
+                    Ok(true)
+                }
+                StorageOutcome::Err(error) => Err(MidgeError::Internal(error)),
+            },
+            Ok(event) => Err(MidgeError::Internal(format!(
+                "unexpected local cache metadata response: {event:?}"
+            ))),
+            Err(error) => Err(MidgeError::Internal(format!(
+                "local cache absence proof failed: {error}"
+            ))),
+        }
+    }
+
     /// Publish immutable bytes to the remote backend and local cache. Retries
     /// succeed only when an existing object contains exactly the same bytes.
     pub(crate) fn publish_immutable_object_within(

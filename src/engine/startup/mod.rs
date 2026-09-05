@@ -17,6 +17,9 @@ pub(super) struct CloudSstRecoveryProof {
 mod assembly;
 mod cloud_recovery;
 mod storage;
+mod streaming_recovery;
+mod streaming_wal_fs;
+mod streaming_wal_plan;
 
 impl CloudSstRecoveryProof {
     #[cfg(test)]
@@ -77,9 +80,11 @@ struct RuntimeStorageMaterialization {
     cloud_root: Option<PathBuf>,
     cloud_storage_for_restore: Option<Arc<crate::storage::cloud::CloudStorage>>,
     cloud_metadata_storage_for_mirror: Option<Arc<crate::storage::cloud::CloudStorage>>,
+    streaming_wal: Option<streaming_recovery::CloudReplay>,
 }
 
 pub(in crate::engine) struct CloudWalRecoveryPlan {
+    #[cfg(test)]
     pub(in crate::engine) replay_dir: PathBuf,
     pub(in crate::engine) remote_segments:
         std::collections::BTreeMap<u64, crate::runtime::RecoveredCloudWalSegment>,

@@ -7,6 +7,11 @@ WAL, transaction spill, and flush/compaction staging; published SST data lives
 in object storage. This is an architectural requirement, not evidence of a
 completed terabyte-scale provider qualification.
 
+Midge serves the single-node reader/writer workloads of Fitz and Cassie. Cloud
+persistence does not imply separate reader replicas or an independently
+coordinated compactor. Lease checks still protect against an old owner or
+delayed publication after takeover.
+
 ## Startup and reads
 
 Startup loads the manifest and recovery metadata and checks remote SST
@@ -51,6 +56,11 @@ before WAL append. These conservative limits apply to values, point deletes,
 range tombstones, and spilled transactions; increasing the memory budget does
 not increase this disk allowance.
 
+Admission also reserves reusable flush capacity in the shared disk ledger.
+WAL, spill, and compaction cannot consume the last space needed to publish an
+accepted memtable. Pressure across many small column families starts flushes
+even when no individual family reaches its usual threshold.
+
 Compaction streams remote inputs and drains each completed output partition to
 object storage before producing the next. Its staging reservation covers the
 scratch and finalized partition. An indivisible output which cannot fit is
@@ -60,12 +70,26 @@ remote object; it never authorizes deletion of an input. The existing per-CF
 SST filename allocation counter is durably advanced and mirrored before the
 worker starts, preventing a replacement process from reusing an orphan name.
 
-WAL recovery currently stages the required replay set. It preflights that set
-and existing working files against the selected disk budget before downloading
-anything or replacing previous recovery scratch. A recovery backlog larger
-than the available working budget returns `NoSpace`; streaming one replay
-segment at a time is not implemented by this change. This limit concerns
-uncheckpointed recovery work, not the size of the remote SST database.
+Cloud WAL recovery reads catalog-authorized objects through bounded ranges;
+it does not copy the backlog to local disk. Even one WAL object may exceed the
+local budget. The catalog's size and complete-file checksum are verified by
+streaming before replay can publish a checkpoint. Local aliases are compared
+in chunks and renamed into place without making another copy.
+
+Replay uses configured memory allocations and available local disk to bound
+frame decoding, open transactions, and recovered memtables. Before the next
+atomic operation would exceed the working set, startup publishes recovered
+data through the normal lease-checked SST and manifest protocol, then releases
+that memory and evicts the published local SST. An indivisible transaction
+still needs enough working capacity; total cloud backlog has no corresponding
+size cap. Existing local residue continues to count against local capacity.
+
+Checkpoints never retire source WAL. An interrupted startup can replay again
+using the durable manifest, with exact SST coverage checks for values already
+published. Deletes and uncertain coverage are replayed conservatively. Input
+validation and epoch discovery require multiple streaming passes; recovery
+time and object-store traffic therefore grow with the backlog. Catalog and
+source identity metadata grow with the number of objects, not their contents.
 
 ## Integrity and recovery
 
@@ -89,8 +113,31 @@ WAL retirement preserves its exact coverage and integrity proof. Relevant SSTs
 may require a streamed complete-file checksum before a WAL can be retired;
 unrelated complete key ranges are excluded. This bounds buffers and local
 residency, but does not make all maintenance I/O proportional to point reads.
+Ephemeral-mode retirement decodes one WAL frame at a time with bounded
+read-ahead and uses the configured compaction memory allowance while compaction
+is idle. An object is not rejected merely because its total length exceeds
+that allowance. Oversized indivisible records, proof memory pressure, missing
+coverage, or an attempt deadline retain WAL authority for a later attempt.
+Exact key probes still require SST reads, so large-segment retirement latency
+needs separate provider qualification.
 Persisting provider identities alongside publication checksums would allow a
 separate optimization of that verification cost.
+
+The state transitions that permit release or deletion are:
+
+| Transition | Required proof |
+| --- | --- |
+| WAL admission to failed append | Release only when no write was queued or rollback was durably completed. |
+| Local WAL to cloud authority | Immutable object publication and the lease-fenced WAL catalog both succeed. |
+| Recovered memory to SST | SST upload, publication intent, manifest update, and control metadata publication complete before memory is released. |
+| SST publication to cache eviction | The remote object is durable and the manifest makes it authoritative. |
+| Compaction inputs to obsolete files | The complete replacement set is published before any authoritative input is deleted. |
+| Failed staging to available disk | Every possible output and scratch file is absent or remains explicitly charged. |
+| Cloud WAL to retired objects | Exact coverage, object identities, and metadata dependencies validate before catalog retirement and conditional deletion. |
+
+No global replay sequence alone proves that another column family's records
+were checkpointed. Recovery keeps transaction boundaries and verifies actual
+coverage before suppressing replayed values.
 
 ## Qualification
 

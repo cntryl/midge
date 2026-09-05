@@ -487,6 +487,8 @@ fn should_make_startup_recovery_phases_owned() {
         "src/engine/startup/cloud_recovery.rs",
         "src/engine/startup/storage.rs",
         "src/engine/startup/assembly.rs",
+        "src/engine/startup/streaming_recovery.rs",
+        "src/engine/startup/streaming_wal_plan.rs",
     ]
     .into_iter()
     .map(read_source)
@@ -498,6 +500,8 @@ fn should_make_startup_recovery_phases_owned() {
         "struct RuntimeRecoveryMaterialization",
         "struct StartedRuntime",
         "struct FacadeAssembly",
+        "struct CloudReplay",
+        "struct StreamingCloudWalRecovery",
     ];
     let forbidden_engine_owned_recovery_calls = [
         "Engine::hydrate_cloud_metadata",
@@ -519,7 +523,13 @@ fn should_make_startup_recovery_phases_owned() {
     assert!(startup.contains("StartedRuntime::start"));
     assert!(startup.contains("FacadeAssembly::assemble"));
     assert!(startup.contains("CloudStartupRecovery::hydrate_cloud_metadata"));
-    assert!(startup.contains("CloudStartupRecovery::materialize_cloud_wal_recovery_dir"));
+    assert!(startup.contains("StreamingCloudWalRecovery::build"));
+    assert!(startup.contains("replay_wal_with_checkpoint("));
+    assert!(
+        !read_source("src/engine/startup/storage.rs")
+            .contains("materialize_cloud_wal_recovery_dir"),
+        "shipping cloud startup must not materialize the complete WAL backlog"
+    );
     assert!(startup.contains("CloudStartupRecovery::cloud_recovery_sst_proofs_for_intent_replay"));
 
     for phase in required_phases {

@@ -266,11 +266,8 @@ impl WalActor {
         let writer = self.writer.as_mut().ok_or_else(|| {
             MidgeError::Internal("transaction WAL writer disappeared during append".to_string())
         })?;
-        if let Err(error) = writer.append_record(record) {
-            if matches!(error, MidgeError::NoSpace(_)) {
-                Self::record_no_space_event();
-            }
-            return Err(error);
+        if let Err(failure) = writer.append_record_accounted(record) {
+            return Err(self.settle_failed_wal_append(admitted, failure));
         }
         self.settle_wal_append(admitted, previous_position);
         Ok(())

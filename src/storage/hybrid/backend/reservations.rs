@@ -3,6 +3,17 @@
 use super::{actor, HybridStorage, HybridStorageBudgetSnapshot, StorageEvent};
 
 impl HybridStorage {
+    pub(crate) fn set_flush_headroom(&self, bytes: u64) -> crate::common::MidgeResult<()> {
+        self.budget_actor
+            .lock()
+            .set_flush_headroom(bytes)
+            .map_err(|_| {
+                crate::common::MidgeError::NoSpace(
+                    "ephemeral local disk cannot preserve flush staging for accepted cloud writes"
+                        .into(),
+                )
+            })
+    }
     pub(crate) fn reconcile_startup_scratch_residue(
         &self,
         bytes: u64,

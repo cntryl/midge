@@ -749,6 +749,14 @@ impl SstFileIo {
         Self::open(path, fs)?.into_streaming_summary()
     }
 
+    pub(crate) fn summarize_with_fs_for_compaction(
+        path: &str,
+        fs: Arc<dyn Fs>,
+        budget: crate::common::resource_budget::ResourceBudget,
+    ) -> MidgeResult<SstFileSummary> {
+        Self::open_for_compaction(path, fs, budget)?.into_streaming_summary()
+    }
+
     /// Stream a summary while charging reader metadata and decoded blocks to
     /// the compaction publication budget.
     pub(crate) fn summarize_with_real_fs_for_compaction(
@@ -931,12 +939,31 @@ impl SstFileIo {
         })
     }
 
+    fn replace_summary_key(
+        current: &mut Option<Vec<u8>>,
+        retained: &mut Option<crate::common::resource_budget::ResourceReservation>,
+        key: &[u8],
+        budget: Option<&crate::common::resource_budget::ResourceBudget>,
+    ) -> MidgeResult<()> {
+        // Old and replacement bounds coexist while cloning. Admit the new
+        // bytes before allocation, then release the superseded reservation.
+        let reservation = budget
+            .map(|budget| budget.reserve(key.len(), "SST summary key bound"))
+            .transpose()?;
+        *current = Some(key.to_vec());
+        *retained = reservation;
+        Ok(())
+    }
+
     fn into_streaming_summary(self) -> MidgeResult<SstFileSummary> {
         use crate::sst::traits::SstStateReader;
 
         let size_bytes = self.fs.metadata(&self.path)?.len;
         let mut smallest_key: Option<Vec<u8>> = None;
         let mut largest_key: Option<Vec<u8>> = None;
+        let mut smallest_key_reservation = None;
+        let mut largest_key_reservation = None;
+        let key_budget = self.metadata_budget.clone();
         let mut smallest_seq: Option<u64> = None;
         let mut largest_seq: Option<u64> = None;
 
@@ -945,13 +972,23 @@ impl SstFileIo {
                 .as_ref()
                 .is_none_or(|current| tombstone.start.as_slice() < current.as_slice())
             {
-                smallest_key = Some(tombstone.start.clone());
+                Self::replace_summary_key(
+                    &mut smallest_key,
+                    &mut smallest_key_reservation,
+                    &tombstone.start,
+                    key_budget.as_ref(),
+                )?;
             }
             if largest_key
                 .as_ref()
                 .is_none_or(|current| tombstone.end.as_slice() > current.as_slice())
             {
-                largest_key = Some(tombstone.end.clone());
+                Self::replace_summary_key(
+                    &mut largest_key,
+                    &mut largest_key_reservation,
+                    &tombstone.end,
+                    key_budget.as_ref(),
+                )?;
             }
             smallest_seq =
                 Some(smallest_seq.map_or(tombstone.seq, |current| current.min(tombstone.seq)));
@@ -968,13 +1005,23 @@ impl SstFileIo {
                 .as_ref()
                 .is_none_or(|current| version.key.as_slice() < current.as_slice())
             {
-                smallest_key = Some(version.key.clone());
+                Self::replace_summary_key(
+                    &mut smallest_key,
+                    &mut smallest_key_reservation,
+                    &version.key,
+                    key_budget.as_ref(),
+                )?;
             }
             if largest_key
                 .as_ref()
                 .is_none_or(|current| version.key.as_slice() > current.as_slice())
             {
-                largest_key = Some(version.key);
+                Self::replace_summary_key(
+                    &mut largest_key,
+                    &mut largest_key_reservation,
+                    &version.key,
+                    key_budget.as_ref(),
+                )?;
             }
             smallest_seq =
                 Some(smallest_seq.map_or(version.seq, |current| current.min(version.seq)));

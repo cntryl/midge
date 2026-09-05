@@ -12,6 +12,225 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 #[test]
+fn should_require_exact_raw_state_when_streaming_wal_retirement() {
+    use crate::wal::WalOpKind::{Delete, DeleteRange, Put};
+    for (wal_op, wal_expiration, sst_value, sst_expiration, covered) in [
+        (Put, None, Some(b"different".as_slice()), None, false),
+        (Put, Some(1), Some(b"v".as_slice()), Some(2), false),
+        (Put, Some(1), Some(b"v".as_slice()), Some(1), true),
+        (Put, None, None, None, false),
+        (Delete, None, None, None, true),
+        (DeleteRange, None, None, None, false),
+    ] {
+        // Arrange
+        let (_cloud, storage) = hybrid_with_mock_cloud();
+        storage.enable_ephemeral_sst_cache(64 * 1024);
+        let mut record = crate::wal::WalRecord::new(
+            wal_op,
+            Bytes::from_static(b"k"),
+            Some(Bytes::from_static(b"v")),
+            7,
+            1,
+        );
+        record.expiration = wal_expiration;
+        if wal_op != Put {
+            record.value = None;
+        }
+        if wal_op == DeleteRange {
+            record.range_end = Some(Bytes::from_static(b"z"));
+        }
+        let payload = crate::wal::encoding::encode(&record).expect("encode WAL");
+        let mut wal = Vec::new();
+        crate::wal::frame::append_frame(&mut wal, &payload).expect("frame WAL");
+        let key = write_authoritative_cloud_wal(&storage, 1, 7, wal);
+        let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
+        let mut writer = factory.create().expect("SST writer");
+        writer
+            .add_with_meta(
+                b"k",
+                sst_value,
+                7,
+                if sst_value.is_some() { 0 } else { 2 },
+                sst_expiration,
+            )
+            .expect("SST raw state");
+        let sst = writer.finish_bytes().expect("SST bytes");
+        let manifest = manifest_covering_wal("raw-state.sst", &sst, 7, Some(crc32c::crc32c(&sst)));
+        write_cloud_object(&storage, &crate::sst::object_key("raw-state.sst"), sst);
+
+        // Act
+        let result =
+            storage.prune_cloud_wal_segment(1, 7, CloudWalPruneGuard::new(manifest, None), 2);
+
+        // Assert
+        if covered {
+            result.expect("matching raw state retires WAL");
+            assert!(wait_for_wal_prune_result(&storage, 1).is_ok());
+        } else {
+            assert!(
+                result.is_err(),
+                "uncovered {wal_op:?} with TTL {wal_expiration:?} must retain WAL"
+            );
+            assert_cloud_object_exists(&storage, &key);
+        }
+    }
+}
+
+#[test]
+fn should_retain_newer_wal_authority_when_streamed_oldest_segment_is_uncovered() {
+    // Arrange
+    let (_cloud, storage) = hybrid_with_mock_cloud();
+    storage.enable_ephemeral_sst_cache(64 * 1024);
+    let record = crate::wal::WalRecord::new(
+        crate::wal::WalOpKind::Put,
+        Bytes::from_static(b"missing"),
+        Some(Bytes::from_static(b"v")),
+        1,
+        1,
+    );
+    let payload = crate::wal::encoding::encode(&record).expect("encode WAL");
+    let mut wal = Vec::new();
+    crate::wal::frame::append_frame(&mut wal, &payload).expect("frame WAL");
+    let first = write_authoritative_cloud_wal(&storage, 1, 1, wal);
+    let second = write_authoritative_cloud_wal(&storage, 2, 2, valid_wal_bytes(2));
+    let sst = valid_sst_bytes(b"k", b"v", 2);
+    let manifest = manifest_covering_wal("prefix.sst", &sst, 2, Some(crc32c::crc32c(&sst)));
+    write_cloud_object(&storage, &crate::sst::object_key("prefix.sst"), sst);
+
+    // Act
+    let results = storage
+        .prune_cloud_wal_segments_within(
+            &[(1, 1), (2, 2)],
+            CloudWalPruneGuard::new(manifest, None),
+            2,
+            &crate::common::OperationDeadline::unbounded(),
+        )
+        .expect("prune attempt");
+
+    // Assert
+    assert_eq!(results.len(), 2);
+    assert!(results.iter().all(|(_, result)| result.is_err()));
+    assert_cloud_object_exists(&storage, &first);
+    assert_cloud_object_exists(&storage, &second);
+    let proof = storage
+        .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
+        .expect("retained catalog");
+    let catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(proof.bytes())
+        .expect("decode catalog");
+    assert_eq!(catalog.segments.len(), 2);
+}
+
+#[test]
+fn should_retain_cloud_wal_authority_when_retirement_memory_is_exhausted() {
+    // Arrange
+    let (cloud, storage) = hybrid_with_mock_cloud();
+    storage.enable_ephemeral_sst_cache(64 * 1024);
+    let sequence = 8;
+    let key = write_authoritative_cloud_wal(&storage, 1, sequence, valid_wal_bytes(sequence));
+    cloud.clear_history();
+
+    // Act
+    let result = storage.prune_cloud_wal_segment(
+        1,
+        sequence,
+        CloudWalPruneGuard::default().with_memory_limit(128),
+        2,
+    );
+
+    // Assert
+    assert!(result
+        .expect_err("insufficient proof memory must retain WAL")
+        .to_ascii_lowercase()
+        .contains("resource limit"));
+    assert!(!cloud.get_downloads().iter().any(|key| Path::new(key)
+        .extension()
+        .is_some_and(|extension| extension == "wal")));
+    assert_cloud_object_exists(&storage, &key);
+    let proof = storage
+        .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
+        .expect("retained catalog");
+    let catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(proof.bytes())
+        .expect("decode catalog");
+    assert!(catalog.segments.contains_key(&1));
+}
+
+#[test]
+fn should_delete_range_verified_wal_with_filesystem_identity() {
+    // Arrange
+    let directory = tempfile::tempdir().expect("directory");
+    let local = Arc::new(
+        crate::storage::filesystem::FileSystem::new(directory.path().join("local"))
+            .expect("local store"),
+    );
+    let remote = Arc::new(
+        crate::storage::filesystem::FileSystem::new(directory.path().join("remote"))
+            .expect("remote store"),
+    );
+    let storage = HybridStorage::with_policy(
+        local,
+        remote,
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    );
+    storage.enable_ephemeral_sst_cache(64 * 1024);
+    storage
+        .fence_cloud_wal_catalog(2)
+        .expect("initialize catalog");
+    let sequence = 9;
+    let key = write_authoritative_cloud_wal(&storage, 1, sequence, valid_wal_bytes(sequence));
+    let name = "filesystem-prune.sst";
+    let sst = valid_sst_bytes(b"k", b"v", sequence);
+    let manifest = manifest_covering_wal(name, &sst, sequence, Some(crc32c::crc32c(&sst)));
+    write_cloud_object(&storage, &crate::sst::object_key(name), sst);
+
+    // Act
+    storage
+        .prune_cloud_wal_segment(1, sequence, CloudWalPruneGuard::new(manifest, None), 2)
+        .expect("retire WAL");
+
+    // Assert
+    assert!(wait_for_wal_prune_result(&storage, 1).is_ok());
+    assert_cloud_object_missing(&storage, &key);
+}
+
+#[test]
+fn should_retire_large_cloud_wal_without_whole_object_downloads() {
+    // Arrange
+    let (cloud, storage) = hybrid_with_mock_cloud();
+    storage.enable_ephemeral_sst_cache(64 * 1024);
+    let sequence = 400;
+    let wal = (1..=sequence).flat_map(valid_wal_bytes).collect::<Vec<_>>();
+    assert!(wal.len() > 16 * 1024);
+    write_authoritative_cloud_wal(&storage, 1, sequence, wal);
+    let name = "streamed-retirement.sst";
+    let sst = valid_sst_bytes(b"k", b"v", sequence);
+    let manifest = manifest_covering_wal(name, &sst, sequence, Some(crc32c::crc32c(&sst)));
+    write_cloud_object(&storage, &crate::sst::object_key(name), sst);
+    cloud.clear_history();
+
+    // Act
+    storage
+        .prune_cloud_wal_segment(
+            1,
+            sequence,
+            CloudWalPruneGuard::new(manifest, None).with_memory_limit(16 * 1024),
+            2,
+        )
+        .expect("covered WAL retirement");
+
+    // Assert
+    assert!(wait_for_wal_prune_result(&storage, 1).is_ok());
+    assert!(
+        !cloud
+            .get_downloads()
+            .iter()
+            .any(|key| std::path::Path::new(key)
+                .extension()
+                .is_some_and(|extension| extension == "wal")),
+        "retirement must never download the complete WAL backlog"
+    );
+}
+
+#[test]
 fn should_prune_wal_without_fetching_unrelated_ssts_when_local_cache_is_ephemeral() {
     // Arrange
     let (cloud, storage) = hybrid_with_mock_cloud();
@@ -867,6 +1086,7 @@ fn should_reject_guarded_delete_when_worker_capacity_is_exhausted() {
         limits,
     );
     let target = RemoteObjectProof {
+        range_identity: false,
         key: "objects/first".to_string(),
         bytes: vec![1],
         metadata: StorageObjectMetadata {
@@ -918,6 +1138,7 @@ fn should_bound_guarded_delete_batch_by_one_callback_budget() {
             (
                 request_id,
                 RemoteObjectProof {
+                    range_identity: false,
                     key: format!("wal/bounded-batch-{request_id}"),
                     bytes: vec![u8::try_from(request_id).expect("request id fits in u8")],
                     metadata: StorageObjectMetadata {
@@ -2269,6 +2490,7 @@ fn should_reject_reader_proof_when_guarded_prune_deletes_wal_during_download() {
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
     let target = RemoteObjectProof {
+        range_identity: false,
         key: key.clone(),
         bytes: bytes.clone(),
         metadata: RacingReadDeleteBackend::metadata(&bytes),
@@ -2398,10 +2620,24 @@ fn assert_wal_prune_rejects_manifest_crc_mismatch(ephemeral: bool) {
 #[cfg(feature = "failpoints")]
 #[test]
 fn should_not_prune_remote_wal_given_remote_sst_identity_change_when_gc_runs() {
+    assert_sst_identity_change_retains_wal(false);
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_preserve_wal_authority_when_streamed_sst_proof_identity_changes() {
+    assert_sst_identity_change_retains_wal(true);
+}
+
+#[cfg(feature = "failpoints")]
+fn assert_sst_identity_change_retains_wal(ephemeral: bool) {
     // Arrange
     let _test_guard = crate::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     let (mock_cloud, storage) = hybrid_with_mock_cloud();
+    if ephemeral {
+        storage.enable_ephemeral_sst_cache(1024 * 1024);
+    }
     let segment_id = 17;
     let max_sequence = 27;
     let wal_key = write_authoritative_cloud_wal(
@@ -3198,6 +3434,7 @@ fn should_not_submit_conditional_delete_given_expired_deadline() {
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     );
     let target = RemoteObjectProof {
+        range_identity: false,
         key: "wal/expired-delete".to_string(),
         bytes: vec![1],
         metadata: StorageObjectMetadata {

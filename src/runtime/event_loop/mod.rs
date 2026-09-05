@@ -217,6 +217,7 @@ impl EventLoop {
             };
             Arc::new(
                 crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)
+                    .with_compaction_scratch_directory(sst_dir.join(".flush-staging"))
                     .with_compression_policy(config.compression_policy.clone()),
             )
         };

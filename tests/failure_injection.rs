@@ -851,7 +851,9 @@ fn should_retry_frozen_memtable_when_cloud_sst_upload_recovers() {
         &cf,
         0..6,
         "cloud-retry",
-        WriteOptions::cloud_async(),
+        // Cloud acknowledgement retires each local WAL segment before the
+        // admission baseline, so later WAL settlement cannot change it.
+        WriteOptions::cloud_strict(),
     );
     let committed_before_flush = engine
         .get_runtime_metrics()
@@ -872,9 +874,22 @@ fn should_retry_frozen_memtable_when_cloud_sst_upload_recovers() {
         .get_runtime_metrics()
         .expect("failed flush metrics")
         .hybrid_total_committed_bytes;
+    let retained_output_bytes: u64 = sst_file_names(temp_dir.path())
+        .iter()
+        .map(|name| {
+            std::fs::metadata(temp_dir.path().join("sst").join(name))
+                .expect("retained flush output metadata")
+                .len()
+        })
+        .sum();
+    assert!(committed_before_flush > 0);
+    assert!(retained_output_bytes > 0);
+    // Building transfers prepaid flush headroom into the worker's reservation;
+    // a retained output keeps that charge without requiring a second admission.
     assert!(
-        committed_during_retry > committed_before_flush,
-        "retained flush output must keep its storage reservation until retry succeeds"
+        committed_during_retry >= committed_before_flush
+            && committed_during_retry >= retained_output_bytes,
+        "retained output must remain charged until retry succeeds: before={committed_before_flush}, retry={committed_during_retry}, retained={retained_output_bytes}"
     );
     fail::remove("midge::cloud::inject_fail_sst_upload");
     scenario.teardown();

@@ -1189,3 +1189,37 @@ fn should_reject_unreferenced_gap_between_v4_sst_blocks() {
     // Assert
     assert!(matches!(result, Err(MidgeError::Corruption(_))));
 }
+
+#[test]
+fn should_charge_summary_key_bounds_while_raw_cursor_advances() -> MidgeResult<()> {
+    // Arrange
+    let temp_dir = tempfile::tempdir()?;
+    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+    let factory = crate::sst::FsSstFactoryIo::new(fs.clone(), 4096);
+    let mut writer = factory.create()?;
+    for prefix in *b"amz" {
+        writer.add_with_meta(&vec![prefix; 8192], Some(b"value"), 1, 0, None)?;
+    }
+    crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join("summary-bounds.sst"))?;
+    let raw_budget = crate::common::resource_budget::ResourceBudget::new(16 * 1024 * 1024);
+    let raw_reader =
+        SstFileIo::open_for_compaction("summary-bounds.sst", fs.clone(), raw_budget.clone())?;
+    for version in
+        Box::new(raw_reader).raw_version_cursor_with_budget(None, None, Some(raw_budget.clone()))?
+    {
+        let _ = version?;
+    }
+    let summary_budget = crate::common::resource_budget::ResourceBudget::new(raw_budget.peak());
+
+    // Act
+    let result =
+        SstFileIo::summarize_with_fs_for_compaction("summary-bounds.sst", fs, summary_budget);
+
+    // Assert
+    assert!(
+        matches!(result, Err(MidgeError::ResourceLimit(_))),
+        "summary bounds must be charged in addition to the raw cursor"
+    );
+    assert!(temp_dir.path().join("summary-bounds.sst").is_file());
+    Ok(())
+}

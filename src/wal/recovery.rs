@@ -179,6 +179,7 @@ fn wal_prefix_failure(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn inspect_active_wal_bytes(
     data: &[u8],
 ) -> Result<VerifiedWalPrefix, WalPrefixInspectionFailure> {
@@ -1161,6 +1162,8 @@ fn apply_record<S: BuildHasher>(
 
     Ok(())
 }
+
+pub(crate) mod streaming;
 
 #[cfg(test)]
 mod tests;

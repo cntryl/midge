@@ -63,17 +63,12 @@ impl EventLoop {
         let current_segment_id = self.state.wal.current_segment_id;
         let sequence = self.state.sequence;
         let frozen = {
-            let cf = self.state.get_cf_mut(cf_id).ok_or_else(|| {
+            let cf = self.state.get_cf(cf_id).ok_or_else(|| {
                 crate::common::MidgeError::Internal(format!(
                     "column family {cf_id} disappeared during freeze"
                 ))
             })?;
-            let frozen = std::mem::replace(
-                &mut cf.memtable,
-                Arc::new(crate::sst::SkipListMemtable::new()),
-            );
-            cf.active_memtable_started_in_segment = current_segment_id;
-            frozen
+            Arc::clone(&cf.memtable)
         };
         let flush = self
             .state
@@ -83,6 +78,14 @@ impl EventLoop {
                     "flush identity space exhausted".to_string(),
                 )
             })?;
+        // Publish immutable ownership before replacing the active generation.
+        // Exhausted flush identities must leave accepted writes readable.
+        let cf = self
+            .state
+            .get_cf_mut(cf_id)
+            .expect("tracked flush family exists");
+        cf.memtable = Arc::new(crate::sst::SkipListMemtable::new());
+        cf.active_memtable_started_in_segment = current_segment_id;
         crate::failpoints::fail_point!("midge::flush_worker::after_freeze");
         self.publish_snapshot();
         Ok(Some(flush.flush_id))
@@ -447,6 +450,9 @@ impl EventLoop {
             self.state.total_memtable_bytes =
                 self.state.total_memtable_bytes.saturating_sub(removed_size);
         }
+        if let Err(error) = self.refresh_cloud_flush_headroom() {
+            tracing::warn!(%error, "flush staging headroom awaits output retirement");
+        }
         if let (Some(hybrid), Some(token)) = (&self.hybrid_storage, reservation) {
             hybrid.flush_completed_with_token(token, delta.file_meta.size_bytes);
         }
@@ -467,14 +473,60 @@ impl EventLoop {
         }
     }
 
-    fn settle_stale_publish_reservation(&self, completion: &FlushPublishCompletion) {
-        let (Some(hybrid), Some(token)) = (&self.hybrid_storage, completion.reservation) else {
+    fn settle_stale_publish_reservation(&mut self, completion: &FlushPublishCompletion) {
+        let (Some(hybrid), Some(token)) = (self.hybrid_storage.clone(), completion.reservation)
+        else {
             return;
         };
         // A stale failed publisher may have durable local output. Retain
         // its charge until recovery inspects the authoritative metadata.
         if let Ok(delta) = &completion.result {
             hybrid.flush_completed_with_token(token, delta.file_meta.size_bytes);
+            return;
+        }
+        let Some((_, flush)) = self
+            .state
+            .immutable_flush_by_id(completion.identity.flush_id)
+        else {
+            return;
+        };
+        let (Some(build), Some(name)) = (&flush.built, &flush.sst_name) else {
+            return;
+        };
+        if build.identity != completion.identity || build.reservation != Some(token) {
+            return;
+        }
+        let mut temporary = build.staging_path.as_os_str().to_os_string();
+        temporary.push(".tmp");
+        let paths = [
+            build.staging_path.clone(),
+            std::path::PathBuf::from(temporary),
+            self.state.sst_dir.join(name),
+        ];
+        let primary_absent = paths.iter().all(|path| {
+            matches!(std::fs::symlink_metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+        });
+        if !primary_absent
+            || !matches!(
+                hybrid.local_object_cache_is_absent(&crate::sst::object_key(name)),
+                Ok(true)
+            )
+        {
+            return;
+        }
+        // This completed worker owns no bytes. Clear only its exact token;
+        // another generation's retained or reusable reservation is untouched.
+        if let Err(error) = self.refresh_cloud_flush_headroom() {
+            tracing::warn!(%error, "flush staging headroom awaits failed publisher cleanup");
+        }
+        hybrid.flush_failed_with_token(token);
+        if let Some((_, flush)) = self
+            .state
+            .immutable_flush_by_id_mut(completion.identity.flush_id)
+        {
+            if let Some(build) = &mut flush.built {
+                build.reservation = None;
+            }
         }
     }
 
@@ -734,7 +786,13 @@ impl EventLoop {
         if self.state.is_memory_mode() || self.shutting_down {
             return 0;
         }
-        let mut frozen_count = self.freeze_cloud_memtables_near_staging_limit();
+        let mut frozen_count = match self.freeze_cloud_memtables_near_staging_limit() {
+            Ok(count) => count,
+            Err(error) => {
+                tracing::warn!(%error, "cloud staging pressure freeze deferred");
+                0
+            }
+        };
         let mut attempted_cfs = std::collections::HashSet::new();
         while let Some(candidate) = self
             .state
@@ -952,6 +1010,101 @@ mod tests {
         // Assert
         assert!(!should_continue);
         assert_eq!(hybrid.budget_snapshot().total_committed_bytes, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn should_release_fenced_failed_publish_admission_only_when_all_owned_outputs_are_absent(
+    ) -> crate::common::MidgeResult<()> {
+        for residue in [
+            "absent",
+            "staging",
+            "temporary",
+            "final",
+            "secondary",
+            "unknown owner",
+        ] {
+            // Arrange
+            let directory = tempfile::tempdir()?;
+            let (mut event_loop, hybrid) = event_loop_with_hybrid_storage(&directory)?;
+            hybrid.enable_ephemeral_sst_cache(256);
+            event_loop.state.sequence = 1;
+            event_loop
+                .state
+                .get_cf(0)
+                .expect("family")
+                .memtable
+                .put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)?;
+            let flush_id = event_loop.freeze_active_memtable(0)?.expect("frozen");
+            let identity = FlushIdentity {
+                flush_id,
+                writer_epoch: event_loop.writer_epoch,
+                cf_id: 0,
+                sequence: 1,
+            };
+            let token = hybrid
+                .reserve_for_flush_with_token(128)
+                .expect("flush admission");
+            let staging_path = directory.path().join("failed.sst");
+            let name = crate::sst::file_name(0, 0, 1);
+            let path = match residue {
+                "staging" => Some(staging_path.clone()),
+                "temporary" => Some(directory.path().join("failed.sst.tmp")),
+                "final" => Some(event_loop.state.sst_dir.join(&name)),
+                "secondary" => Some(directory.path().join("hybrid-local/sst").join(&name)),
+                _ => None,
+            };
+            if let Some(path) = path {
+                std::fs::create_dir_all(path.parent().unwrap())?;
+                std::fs::write(path, b"retained output")?;
+            }
+            let (_, flush) = event_loop
+                .state
+                .immutable_flush_by_id_mut(flush_id)
+                .expect("immutable");
+            flush.sst_name = Some(name.clone());
+            flush.built = Some(FlushBuildOutput {
+                identity,
+                staging_path,
+                reservation: Some(token),
+                file_meta: crate::runtime::FileMeta {
+                    name,
+                    level: 0,
+                    size_bytes: 128,
+                    content_crc32c: Some(1),
+                    cf_id: 0,
+                    smallest_key: Some(b"key".to_vec()),
+                    largest_key: Some(b"key".to_vec()),
+                    smallest_seq: Some(1),
+                    largest_seq: Some(1),
+                    key_bounds_complete: true,
+                },
+            });
+            if residue == "unknown owner" {
+                event_loop
+                    .state
+                    .get_cf_mut(0)
+                    .expect("family")
+                    .immutable_flushes
+                    .clear();
+            }
+            event_loop.writer_epoch += 1;
+            // Act
+            event_loop.handle_flush_publish_completion(FlushPublishCompletion {
+                identity,
+                reservation: Some(token),
+                publish_ns: 1,
+                result: Err(crate::common::MidgeError::Fenced(
+                    "publisher lost its lease".into(),
+                )),
+            });
+            // Assert
+            assert_eq!(
+                hybrid.budget_snapshot().total_committed_bytes,
+                if residue == "absent" { 0 } else { 128 },
+                "residue: {residue}"
+            );
+        }
         Ok(())
     }
 

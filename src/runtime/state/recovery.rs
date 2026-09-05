@@ -68,6 +68,31 @@ impl RuntimeState {
         recovery_wal_dir: Option<&PathBuf>,
         recovery_policy: crate::config::RecoveryPolicy,
     ) -> MidgeResult<Self> {
+        Self::initialize_recovery(
+            db_path,
+            memory_mode,
+            recovery_wal_dir,
+            recovery_policy,
+            true,
+        )
+    }
+
+    /// Load metadata before cloud WAL replay, whose working set is checkpointed
+    /// incrementally by startup after outstanding publication intents are repaired.
+    pub(crate) fn try_new_before_cloud_replay(
+        db_path: PathBuf,
+        recovery_policy: crate::config::RecoveryPolicy,
+    ) -> MidgeResult<Self> {
+        Self::initialize_recovery(db_path, false, None, recovery_policy, false)
+    }
+
+    fn initialize_recovery(
+        db_path: PathBuf,
+        memory_mode: bool,
+        recovery_wal_dir: Option<&PathBuf>,
+        recovery_policy: crate::config::RecoveryPolicy,
+        replay_wal: bool,
+    ) -> MidgeResult<Self> {
         let (wal_dir, sst_dir) = Self::ensure_directories(&db_path, memory_mode);
         let fs = Self::initialize_fs(&db_path, memory_mode)?;
         let RecoveryLoadState {
@@ -76,26 +101,20 @@ impl RuntimeState {
             intent_log,
         } = Self::load_recovery_state(&db_path, memory_mode, recovery_policy, &fs)?;
         let column_families = Self::bootstrap_column_families(&manifest);
-        let wal_recovery = Self::recover_wal_state(
-            memory_mode,
-            &wal_dir,
-            &sst_dir,
-            recovery_wal_dir,
-            recovery_policy,
-            &manifest,
-            column_families,
-        )?;
-        let recovered_memtable_bytes = wal_recovery
-            .column_families
-            .values()
-            .map(|cf| {
-                cf.immutable_memtables
-                    .iter()
-                    .fold(cf.memtable.size_bytes(), |total, memtable| {
-                        total.saturating_add(memtable.size_bytes())
-                    })
-            })
-            .fold(0_usize, usize::saturating_add);
+        let wal_recovery = if replay_wal {
+            Self::recover_wal_state(
+                memory_mode,
+                &wal_dir,
+                &sst_dir,
+                recovery_wal_dir,
+                recovery_policy,
+                &manifest,
+                column_families,
+            )?
+        } else {
+            Self::empty_wal_recovery(&manifest, column_families)
+        };
+        let recovered_memtable_bytes = Self::recovered_memtable_bytes(&wal_recovery);
         let recovered_compaction_output_generation =
             Self::manifest_compaction_output_generation_floor(&manifest)
                 .max(wal_recovery.recovered_sequence);
@@ -168,6 +187,34 @@ impl RuntimeState {
         };
         state.reinitialize_active_memtable_segment_tracking();
         Ok(state)
+    }
+
+    fn recovered_memtable_bytes(wal_recovery: &WalRecoveryState) -> usize {
+        wal_recovery
+            .column_families
+            .values()
+            .map(|cf| {
+                cf.immutable_memtables
+                    .iter()
+                    .fold(cf.memtable.size_bytes(), |total, memtable| {
+                        total.saturating_add(memtable.size_bytes())
+                    })
+            })
+            .fold(0_usize, usize::saturating_add)
+    }
+
+    fn empty_wal_recovery(
+        manifest: &Manifest,
+        column_families: HashMap<u32, ColumnFamilyState>,
+    ) -> WalRecoveryState {
+        WalRecoveryState {
+            column_families,
+            recovered_sequence: Self::manifest_visible_sequence_floor(manifest),
+            next_segment_id: 1,
+            records_replayed: 0,
+            bytes_replayed: 0,
+            opened_in_salvage_mode: false,
+        }
     }
 
     fn initialize_fs(db_path: &std::path::Path, memory_mode: bool) -> MidgeResult<Arc<dyn Fs>> {

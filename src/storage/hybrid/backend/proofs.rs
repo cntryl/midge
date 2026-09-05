@@ -17,9 +17,20 @@ pub(crate) struct RemoteObjectProof {
     pub(super) key: String,
     pub(super) bytes: Vec<u8>,
     pub(super) metadata: StorageObjectMetadata,
+    pub(super) range_identity: bool,
 }
 
 impl RemoteObjectProof {
+    /// The caller has validated content through reads pinned to this identity.
+    pub(crate) fn from_validated_ranges(key: String, metadata: StorageObjectMetadata) -> Self {
+        Self {
+            key,
+            bytes: Vec::new(),
+            metadata,
+            range_identity: true,
+        }
+    }
+
     pub(crate) fn bytes(&self) -> &[u8] {
         &self.bytes
     }
@@ -117,6 +128,10 @@ impl PruneWorkerRegistry {
 }
 
 impl HybridStorage {
+    pub(crate) fn remote_wal_backend(&self) -> Arc<dyn StorageBackend> {
+        Arc::clone(&self.wal_cloud)
+    }
+
     pub(crate) fn remote_sst_backend(&self) -> Arc<dyn StorageBackend> {
         Arc::clone(&self.cloud)
     }
@@ -137,9 +152,9 @@ impl HybridStorage {
     ) -> crate::common::MidgeResult<StorageObjectMetadata> {
         let timeout =
             Self::deadline_timeout(key, "range object HEAD", self.callback_timeout, deadline)?;
-        Self::head_range_object_from_backend(&self.cloud, key, timeout).map_err(|error| {
-            Self::proof_round_trip_error(key, "range object HEAD", error, deadline)
-        })
+        Self::head_range_object_from_backend(self.cloud_backend_for_key(key), key, timeout).map_err(
+            |error| Self::proof_round_trip_error(key, "range object HEAD", error, deadline),
+        )
     }
 
     pub(crate) fn remote_range_metadata_optional_within(
@@ -149,7 +164,7 @@ impl HybridStorage {
     ) -> crate::common::MidgeResult<Option<StorageObjectMetadata>> {
         let timeout =
             Self::deadline_timeout(key, "range object HEAD", self.callback_timeout, deadline)?;
-        match Self::head_range_object_from_backend(&self.cloud, key, timeout) {
+        match Self::head_range_object_from_backend(self.cloud_backend_for_key(key), key, timeout) {
             Ok(metadata) => Ok(Some(metadata)),
             Err(error) if Self::storage_error_indicates_missing(&error) => Ok(None),
             Err(error) => Err(Self::proof_round_trip_error(
@@ -260,6 +275,7 @@ impl HybridStorage {
             key: key.to_string(),
             bytes,
             metadata,
+            range_identity: false,
         })
     }
 
@@ -481,7 +497,12 @@ impl HybridStorage {
     /// guarded delete. The delete worker rechecks this identity immediately
     /// before issuing the conditional delete.
     pub(crate) fn remote_identity_guard(&self, proof: &RemoteObjectProof) -> GuardedObjectProof {
-        GuardedObjectProof::metadata_only(
+        let constructor = if proof.range_identity {
+            GuardedObjectProof::range_identity
+        } else {
+            GuardedObjectProof::metadata_only
+        };
+        constructor(
             Arc::clone(self.cloud_backend_for_key(&proof.key)),
             proof.key.clone(),
             proof.metadata.clone(),

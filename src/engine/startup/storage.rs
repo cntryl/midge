@@ -285,21 +285,27 @@ impl RuntimeStorageMaterialization {
             .fence_cloud_wal_catalog(startup_lease.writer_epoch)?;
         startup_lease.ensure_healthy("after cloud WAL catalog fencing")?;
 
-        let recovery_plan =
-            CloudStartupRecovery::materialize_simulated_cloud_wal_recovery_dir_with_budget(
-                &cloud.recovery_cloud_wal_dir,
-                &storage_path.db_path,
-                opts.recovery_policy(),
-                &wal_catalog,
-                opts.local_storage_budget_bytes(),
-            )?;
-
-        let mut state = RuntimeState::try_new_with_recovery_dir(
+        let limits = super::streaming_recovery::CloudReplay::limits(opts);
+        let wal_backend: Arc<dyn crate::storage::StorageBackend> = Arc::new(
+            crate::storage::filesystem::FileSystem::new(cloud.cloud_root.clone())?,
+        );
+        let streaming = super::streaming_wal_plan::StreamingCloudWalRecovery::build(
+            &storage_path.db_path,
+            &wal_backend,
+            &wal_catalog,
+            opts.recovery_policy(),
+            opts.storage_io_timeout(),
+            (opts.memory_budget_bytes() / 64)
+                .min(limits.max_frame_bytes)
+                .max(1),
+            limits,
+        )?;
+        let recovery_plan = streaming.plan;
+        let mut state = RuntimeState::try_new_before_cloud_replay(
             storage_path.db_path.clone(),
-            storage_path.memory_mode,
-            Some(&recovery_plan.replay_dir),
             opts.recovery_policy(),
         )?;
+        state.wal.current_segment_id = streaming.next_segment_id;
         if recovery_plan.opened_in_salvage_mode {
             state.mark_opened_in_salvage_mode();
             state.mark_persistence_anomaly();
@@ -340,6 +346,10 @@ impl RuntimeStorageMaterialization {
             cloud_root: Some(cloud.cloud_root.clone()),
             cloud_storage_for_restore: None,
             cloud_metadata_storage_for_mirror: None,
+            streaming_wal: Some(super::streaming_recovery::CloudReplay {
+                fs: streaming.fs,
+                limits,
+            }),
         })
     }
 
@@ -390,26 +400,24 @@ impl RuntimeStorageMaterialization {
             &storage_path.db_path,
             opts.recovery_policy(),
         )?;
-        let mut recovery_plan =
-            CloudStartupRecovery::materialize_cloud_wal_recovery_dir_with_budget(
-                &wal_storage,
-                &storage_path.db_path,
-                opts.recovery_policy(),
-                &wal_catalog,
-                opts.local_storage_budget_bytes(),
-            )?;
-        CloudStartupRecovery::merge_local_wal_into_recovery_dir(
+        let limits = super::streaming_recovery::CloudReplay::limits(opts);
+        let streaming = super::streaming_wal_plan::StreamingCloudWalRecovery::build(
             &storage_path.db_path,
-            &mut recovery_plan,
+            &(wal_storage.clone() as Arc<dyn crate::storage::StorageBackend>),
+            &wal_catalog,
             opts.recovery_policy(),
+            opts.storage_io_timeout(),
+            (opts.memory_budget_bytes() / 64)
+                .min(limits.max_frame_bytes)
+                .max(1),
+            limits,
         )?;
-
-        let mut state = RuntimeState::try_new_with_recovery_dir(
+        let recovery_plan = streaming.plan;
+        let mut state = RuntimeState::try_new_before_cloud_replay(
             storage_path.db_path.clone(),
-            storage_path.memory_mode,
-            Some(&recovery_plan.replay_dir),
             opts.recovery_policy(),
         )?;
+        state.wal.current_segment_id = streaming.next_segment_id;
         if recovery_plan.opened_in_salvage_mode {
             state.mark_opened_in_salvage_mode();
             state.mark_persistence_anomaly();
@@ -451,6 +459,10 @@ impl RuntimeStorageMaterialization {
             cloud_root: None,
             cloud_storage_for_restore: Some(sst_storage),
             cloud_metadata_storage_for_mirror: Some(metadata_storage),
+            streaming_wal: Some(super::streaming_recovery::CloudReplay {
+                fs: streaming.fs,
+                limits,
+            }),
         })
     }
 
@@ -494,6 +506,7 @@ impl RuntimeStorageMaterialization {
             cloud_root: None,
             cloud_storage_for_restore: None,
             cloud_metadata_storage_for_mirror: None,
+            streaming_wal: None,
         })
     }
 }
@@ -542,7 +555,7 @@ impl RuntimeRecoveryMaterialization {
             );
             if let Err(error) = validation {
                 if materialized.state.recovery_policy() == RecoveryPolicy::Salvage
-                    && CloudStartupRecovery::local_sst_file_matches_manifest(&path, meta)
+                    && CloudStartupRecovery::retain_verified_local_sst(&materialized.state, meta)?
                 {
                     tracing::warn!(
                         %error,
@@ -567,7 +580,7 @@ impl RuntimeRecoveryMaterialization {
         Ok(())
     }
 
-    fn local_directory_bytes(path: &Path) -> MidgeResult<u64> {
+    pub(super) fn local_directory_bytes(path: &Path) -> MidgeResult<u64> {
         let entries = match std::fs::read_dir(path) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
@@ -686,6 +699,9 @@ impl RuntimeRecoveryMaterialization {
             storage.reconcile_startup_scratch_residue(
                 materialized.state.retained_startup_scratch_bytes()?,
             )?;
+        }
+        if let Some(replay) = materialized.streaming_wal.take() {
+            replay.replay(&mut materialized)?;
         }
         let recovered_sequence = materialized.state.sequence;
         let recovered_cf_metas = materialized.state.manifest.column_families.clone();
