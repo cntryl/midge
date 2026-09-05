@@ -22,7 +22,7 @@ struct MaintenanceProgress {
     publications: u64,
 }
 
-struct WorkloadProgress {
+pub(super) struct WorkloadProgress {
     started: Instant,
     deadline: Instant,
     next_report: Instant,
@@ -148,7 +148,7 @@ impl Drop for StopReader {
     }
 }
 
-pub(super) fn exercise(engine: &Engine, campaign: &Campaign) {
+pub(super) fn exercise(engine: &Engine, campaign: &Campaign) -> WorkloadProgress {
     let cf = super::super::default_cf(engine);
     let reads = AtomicU64::new(0);
     let stopped = Arc::new(AtomicBool::new(false));
@@ -169,7 +169,7 @@ pub(super) fn exercise(engine: &Engine, campaign: &Campaign) {
                     .expect("flush mixed-workload generation");
             }
             if round % 4 == 3 {
-                engine.compact_all().expect("mixed-workload compaction");
+                compact_all(engine, &mut progress);
             }
         }
         verify(engine);
@@ -178,6 +178,38 @@ pub(super) fn exercise(engine: &Engine, campaign: &Campaign) {
         reads.load(Ordering::Relaxed) > 0,
         "foreground reads must progress during maintenance"
     );
+    progress
+}
+
+pub(super) fn compact_all(engine: &Engine, progress: &mut WorkloadProgress) {
+    progress.require_time("bulk compaction");
+    eprintln!("MIDGE_WORKLOAD_COMPACTION started");
+    std::thread::scope(|scope| {
+        let (completed, result) = std::sync::mpsc::sync_channel(1);
+        scope.spawn(move || {
+            let _ = completed.send(engine.compact_all());
+        });
+        loop {
+            progress.require_time("bulk compaction");
+            let wait = progress
+                .remaining(Instant::now())
+                .min(PROGRESS_REPORT_INTERVAL);
+            match result.recv_timeout(wait) {
+                Ok(result) => {
+                    result.expect("mixed-workload compaction");
+                    progress.require_time("bulk compaction");
+                    break;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    progress.report_wait(engine, "compact_all");
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!("compaction worker terminated without a result");
+                }
+            }
+        }
+    });
+    eprintln!("MIDGE_WORKLOAD_COMPACTION completed");
 }
 
 fn write_round(

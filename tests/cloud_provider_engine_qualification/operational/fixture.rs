@@ -63,6 +63,36 @@ fn number(name: &str, default: u64) -> u64 {
     })
 }
 
+#[test]
+fn should_apply_profile_timeout_to_long_running_engine_requests() {
+    // Arrange
+    let campaign = Campaign {
+        profile: Profile {
+            wal_bytes: 6 * 1024 * 1024,
+            local_bytes: 2 * 1024 * 1024,
+            memory_bytes: 32 * 1024 * 1024,
+            value_bytes: 8 * 1024,
+            segment_bytes: 32 * 1024 * 1024,
+            timeout_seconds: 3600,
+        },
+        cache: PathBuf::from("unused-qualification-cache"),
+        artifacts: PathBuf::new(),
+        bucket: "unused-qualification-bucket".into(),
+        prefix: "unused/".into(),
+        records: 0,
+        actual_wal_bytes: 0,
+    };
+
+    // Act
+    let options = campaign.options();
+
+    // Assert
+    assert_eq!(
+        options.runtime_response_timeout(),
+        Duration::from_secs(3600)
+    );
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct Campaign {
     pub profile: Profile,
@@ -128,7 +158,7 @@ impl Campaign {
 
     pub fn options(&self) -> OpenOptions {
         let target = (self.profile.local_bytes / 8).min(self.profile.memory_bytes as u64 / 16);
-        OpenOptions::cloud(
+        let builder = OpenOptions::cloud(
             self.cache.clone(),
             CloudStorageLocation::new(
                 CloudProviderConfig::sqrzl_s3(&self.bucket),
@@ -139,9 +169,16 @@ impl Campaign {
         .local_storage_budget(self.profile.local_bytes)
         .with_memtable_size_limit(usize::try_from(target).expect("memtable target"))
         .target_sst_size_for_testing(usize::try_from(target).expect("SST target"))
-        .lease_clock_skew_tolerance(Duration::ZERO)
-        .build()
-        .expect("campaign engine options")
+        .lease_clock_skew_tolerance(Duration::ZERO);
+        let options = builder.clone().build().expect("campaign engine options");
+        let timeout = Duration::from_secs(self.profile.timeout_seconds);
+        if timeout <= options.runtime_response_timeout() {
+            return options;
+        }
+        builder
+            .runtime_response_timeout(timeout)
+            .build()
+            .expect("campaign request timeout")
     }
 
     fn request(&self, method: &str, key: &str, body: &[u8]) -> Vec<u8> {

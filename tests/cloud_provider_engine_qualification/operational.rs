@@ -167,7 +167,7 @@ fn assert_complete_state(engine: &Engine, campaign: &Campaign, has_workload: boo
 }
 
 fn exercise_accepted_writes(engine: &Engine, campaign: &Campaign) {
-    workload::exercise(engine, campaign);
+    let mut progress = workload::exercise(engine, campaign);
     let cf = super::default_cf(engine);
     let mut tx = engine
         .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -182,7 +182,7 @@ fn exercise_accepted_writes(engine: &Engine, campaign: &Campaign) {
         .expect("accepted cloud write");
     engine.flush_cf(&cf).expect("flush accepted write");
     // Maintenance must also operate with inventory larger than the working disk.
-    engine.compact_all().expect("bounded cloud compaction");
+    workload::compact_all(engine, &mut progress);
     assert_complete_state(engine, campaign, true);
     assert_accepted_writes(engine);
 }

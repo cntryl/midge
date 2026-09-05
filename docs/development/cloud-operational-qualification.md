@@ -32,6 +32,13 @@ other recovery failures surface immediately. Expected pre-append write stalls
 and post-outage publication polling share one fixed workload deadline derived
 from `MIDGE_QUALIFICATION_TIMEOUT_SECONDS`. Progress does not reset that deadline;
 the child watchdog still bounds the complete phase, including recovery. While
+the campaign runs, its engine request timeout is extended to the configured
+profile timeout when that exceeds the engine default. Bulk `compact_all`
+requests share the fixed workload deadline and report maintenance metrics while
+waiting; a large legitimate compaction is not limited by the default API wait.
+The reporter cannot cancel a blocked scoped request; the external child
+watchdog bounds its join. Shipping defaults and provider I/O timeouts are
+unchanged. While
 waiting, five-second status reports show total SST count, completed maintenance,
 queues, local pressure, and the age of the last observed progress. An unchanged
 completion counter can mean a large compaction is still running; the reports
