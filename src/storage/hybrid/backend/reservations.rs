@@ -1,42 +1,66 @@
 //! Flush and compaction storage-budget reservations.
 
 use super::{actor, HybridStorage, HybridStorageBudgetSnapshot, StorageEvent};
+use crate::storage::hybrid::pressure::StorageAdmissionKind;
+
+impl HybridStorage {
+    fn observe_admission<T>(
+        &self,
+        kind: StorageAdmissionKind,
+        bytes: u64,
+        admit: impl FnOnce(&mut actor::StorageBudgetActor) -> Result<T, actor::ReservationResult>,
+    ) -> Result<T, actor::ReservationResult> {
+        let mut actor = self.budget_actor.lock();
+        let result = admit(&mut actor);
+        let free = actor.disk_state().free_bytes(actor.max_local_bytes());
+        actor.admission_pressure.observe(
+            kind,
+            bytes,
+            free,
+            result
+                .as_ref()
+                .map_or_else(|error| *error, |_| actor::ReservationResult::Ok),
+            std::time::Instant::now(),
+        );
+        result
+    }
+}
 
 impl HybridStorage {
     pub(crate) fn set_flush_headroom(&self, bytes: u64) -> crate::common::MidgeResult<()> {
-        self.budget_actor
-            .lock()
-            .set_flush_headroom(bytes)
-            .map_err(|_| {
-                crate::common::MidgeError::NoSpace(
-                    "ephemeral local disk cannot preserve flush staging for accepted cloud writes"
-                        .into(),
-                )
-            })
+        self.observe_admission(StorageAdmissionKind::FlushHeadroom, bytes, |actor| {
+            actor.set_flush_headroom(bytes)
+        })
+        .map_err(|_| {
+            crate::common::MidgeError::NoSpace(
+                "ephemeral local disk cannot preserve flush staging for accepted cloud writes"
+                    .into(),
+            )
+        })
     }
     pub(crate) fn reconcile_startup_scratch_residue(
         &self,
         bytes: u64,
     ) -> crate::common::MidgeResult<()> {
-        self.budget_actor
-            .lock()
-            .reconcile_startup_scratch_residue(bytes)
-            .map_err(|_| {
-                crate::common::MidgeError::NoSpace(
-                    "retained startup scratch exceeds ephemeral local disk budget".into(),
-                )
-            })
+        self.observe_admission(StorageAdmissionKind::StartupResidue, bytes, |actor| {
+            actor.reconcile_startup_scratch_residue(bytes)
+        })
+        .map_err(|_| {
+            crate::common::MidgeError::NoSpace(
+                "retained startup scratch exceeds ephemeral local disk budget".into(),
+            )
+        })
     }
 
     pub(crate) fn admit_local_scratch_bytes(&self, bytes: u64) -> crate::common::MidgeResult<()> {
-        self.budget_actor
-            .lock()
-            .admit_local_scratch_bytes(bytes)
-            .map_err(|_| {
-                crate::common::MidgeError::NoSpace(
-                    "ephemeral local disk budget cannot admit transaction spill".into(),
-                )
-            })
+        self.observe_admission(StorageAdmissionKind::TransactionSpill, bytes, |actor| {
+            actor.admit_local_scratch_bytes(bytes)
+        })
+        .map_err(|_| {
+            crate::common::MidgeError::NoSpace(
+                "ephemeral local disk budget cannot admit transaction spill".into(),
+            )
+        })
     }
 
     pub(crate) fn release_local_scratch_bytes(&self, bytes: u64) {
@@ -45,7 +69,9 @@ impl HybridStorage {
     }
 
     pub(crate) fn admit_local_wal_bytes(&self, bytes: u64) -> crate::common::MidgeResult<()> {
-        let result = self.budget_actor.lock().admit_local_wal_bytes(bytes);
+        let result = self.observe_admission(StorageAdmissionKind::Wal, bytes, |actor| {
+            actor.admit_local_wal_bytes(bytes)
+        });
         if let Err(result) = result {
             self.emit_reservation_result(result);
             return Err(crate::common::MidgeError::NoSpace(
@@ -97,9 +123,9 @@ impl HybridStorage {
         &self,
         est_size: u64,
     ) -> Result<actor::StorageReservationToken, actor::ReservationResult> {
-        let mut actor = self.budget_actor.lock();
-        let result = actor.reserve_for_flush_with_token(est_size);
-        drop(actor);
+        let result = self.observe_admission(StorageAdmissionKind::Flush, est_size, |actor| {
+            actor.reserve_for_flush_with_token(est_size)
+        });
 
         let reservation_result = match result {
             Ok(_) => actor::ReservationResult::Ok,
@@ -152,9 +178,9 @@ impl HybridStorage {
         &self,
         bytes: u64,
     ) -> Result<actor::StorageReservationToken, actor::ReservationResult> {
-        self.budget_actor
-            .lock()
-            .reserve_compaction_staging_with_token(bytes)
+        self.observe_admission(StorageAdmissionKind::Compaction, bytes, |actor| {
+            actor.reserve_compaction_staging_with_token(bytes)
+        })
     }
 
     /// Settle the exact compaction reservation after manifest publication.
@@ -193,7 +219,10 @@ impl HybridStorage {
             total_committed_bytes: disk_state.total_committed(),
             free_bytes: disk_state.free_bytes(max_local_bytes),
             usage_percent: disk_state.usage_percent(max_local_bytes),
-            pending_evictions: actor.pending_evictions().len(),
+            pending_evictions: actor.pending_eviction_count(),
+            usage: actor.usage_snapshot(),
+            blocked_admission: actor.admission_pressure.snapshot(std::time::Instant::now()),
+            admission_rejections_total: actor.admission_pressure.rejections_total,
         }
     }
 

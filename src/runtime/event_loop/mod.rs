@@ -22,6 +22,7 @@ use crate::runtime::hybrid_persistence::HybridPersistence;
 #[cfg(test)]
 mod cloud;
 mod cloud_integration;
+mod cloud_maintenance;
 mod cloud_memtable_admission;
 mod compaction;
 mod control;
@@ -100,6 +101,7 @@ impl From<&super::RuntimeConfig> for RecoveredCloudWalConfig {
     }
 }
 
+use crate::runtime::hybrid_persistence::CloudWalPruneProgress;
 use coordination::{CloudWalUploadTracker, ManifestPublicationGate, VerificationBarrier};
 
 /// Main synchronous event loop for the runtime.
@@ -127,6 +129,8 @@ pub struct EventLoop {
     pub(super) loop_debug_batch_total: u64,
     pub(super) cloud_wal: CloudWalUploadTracker,
     cloud_wal_prune_worker: Option<std::thread::JoinHandle<()>>,
+    cloud_wal_prune_progress: CloudWalPruneProgress,
+    cloud_maintenance: cloud_maintenance::CloudMaintenance,
     next_background_compaction_check: Instant,
 
     // Durability coordination (extracted to reduce EventLoop cognitive load)
@@ -215,6 +219,11 @@ impl EventLoop {
                 Some(fs) => Arc::clone(fs),
                 None => Arc::new(crate::io::RealFs::new(sst_dir)?),
             };
+            let fs = fs
+                .with_read_observer(
+                    Arc::clone(&state.diagnostics) as Arc<dyn crate::io::traits::ReadObserver>
+                )
+                .unwrap_or(fs);
             Arc::new(
                 crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)
                     .with_compaction_scratch_directory(sst_dir.join(".flush-staging"))
@@ -322,6 +331,8 @@ impl EventLoop {
             loop_debug_batch_total: 0,
             cloud_wal: CloudWalUploadTracker::new(config.recovered_cloud_wal_segments.clone()),
             cloud_wal_prune_worker: None,
+            cloud_wal_prune_progress: CloudWalPruneProgress::default(),
+            cloud_maintenance: cloud_maintenance::CloudMaintenance::default(),
             next_background_compaction_check: Instant::now() + BACKGROUND_COMPACTION_CHECK_INTERVAL,
             durability: DurabilityCoordinator::new(
                 initial_durability_key,
@@ -685,10 +696,11 @@ impl EventLoop {
         &mut self,
         plan: crate::compaction::CompactionPlan,
     ) -> crate::common::MidgeResult<crate::compaction::CompactionPlan> {
+        let memory_limit = self.available_compaction_memory()?;
         let mut plan = self.assign_compaction_output_sequence(plan)?;
         plan.snapshot_horizon = self.state.oldest_active_snapshot_sequence();
         plan.target_sst_size = self.compaction_actor.target_sst_size();
-        plan.compaction_memory_limit = self.compaction_actor.compaction_memory_limit();
+        plan.compaction_memory_limit = memory_limit;
 
         if plan.output_seq == 0 {
             return Err(crate::common::MidgeError::Internal(
@@ -697,6 +709,33 @@ impl EventLoop {
         }
 
         Ok(plan)
+    }
+
+    fn available_compaction_memory(&self) -> crate::common::MidgeResult<usize> {
+        if self.cloud_wal_prune_worker.is_some() || self.publication_gate.active {
+            return Err(crate::common::MidgeError::Busy(
+                "compaction memory is owned by an active publication turn".into(),
+            ));
+        }
+        let retained = self
+            .cloud_wal_prune_progress
+            .retained_bytes()
+            .ok_or_else(|| {
+                crate::common::MidgeError::Busy("WAL retirement proof is still active".into())
+            })?;
+        // Paused checksum/cursor proofs outlive their worker. Execution and
+        // publication share the remaining configured allowance without
+        // discarding the proof work that the next retirement turn will resume.
+        let available = self
+            .compaction_actor
+            .compaction_memory_limit()
+            .saturating_sub(retained);
+        if available == 0 {
+            return Err(crate::common::MidgeError::ResourceLimit(
+                "retained WAL retirement proofs leave no memory for compaction".into(),
+            ));
+        }
+        Ok(available)
     }
 
     fn launch_compaction(
@@ -731,11 +770,37 @@ impl EventLoop {
         &mut self,
         operation: &str,
     ) -> crate::common::MidgeResult<bool> {
+        if self.cloud_maintenance_enabled() && !self.cloud_maintenance.dispatching {
+            return Ok(self.schedule_cloud_maintenance()
+                == Some(cloud_maintenance::MaintenanceTask::Compaction));
+        }
+        let manual = self.cloud_maintenance_enabled()
+            && compaction::CompactionCoordinator::has_manual_compaction_waiters(self);
+        let result = self.schedule_background_compaction_plan(operation, manual);
+        if manual {
+            match &result {
+                Ok(false) => {
+                    compaction::CompactionCoordinator::complete_idle_compaction_waits(self, true);
+                }
+                Err(error) => {
+                    compaction::CompactionCoordinator::fail_pending_compaction_waits(self, error);
+                }
+                Ok(true) => {}
+            }
+        }
+        result
+    }
+
+    fn schedule_background_compaction_plan(
+        &mut self,
+        operation: &str,
+        manual: bool,
+    ) -> crate::common::MidgeResult<bool> {
         // Disabling ordinary background work must not permanently wedge L0
         // admission. Use the same authority, ingest, and worker gates for
         // pressure recovery at startup, after flush, and during live maintenance.
         let background_enabled = self.state.compaction_enabled();
-        if !background_enabled && !self.state.has_any_critical_l0_debt() {
+        if !background_enabled && !manual && !self.state.has_any_critical_l0_debt() {
             return Ok(false);
         }
         if self.ddl_authority_ambiguous {
@@ -776,7 +841,7 @@ impl EventLoop {
             ));
         }
 
-        let planned = if background_enabled {
+        let planned = if background_enabled && !manual {
             self.compaction_actor.check_compaction(&self.state)
         } else {
             self.compaction_actor.check_manual_compaction(&self.state)
@@ -1379,6 +1444,14 @@ impl EventLoop {
             return false;
         }
 
+        if self
+            .cloud_wal_prune_worker
+            .as_ref()
+            .is_some_and(std::thread::JoinHandle::is_finished)
+        {
+            return true;
+        }
+
         if !self.flush_worker_result_rx.is_empty() {
             return true;
         }
@@ -1433,6 +1506,12 @@ impl EventLoop {
             self.hybrid_storage.as_ref().and_then(|storage| {
                 (storage.pending_upload_count() > 0).then_some(HYBRID_STORAGE_POLL_INTERVAL)
             }),
+            // Terminal storage events can arrive before the prune thread
+            // exits. Keep observing the handle after its last event so the
+            // publication gate and queued manual requests cannot lose a wake.
+            self.cloud_wal_prune_worker
+                .as_ref()
+                .map(|_| HYBRID_STORAGE_POLL_INTERVAL),
             self.state.flush_retry_deadline_timeout(),
             self.flush_actor
                 .is_inflight()

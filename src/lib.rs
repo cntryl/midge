@@ -103,6 +103,11 @@ pub use config::{
     CloudValidationReport, EngineHealth, GcsApiStyle, GcsConfig, GcsCredentialSource,
     OciCredentialSource, OciObjectStorageConfig, S3CompatibleConfig, S3CredentialSource,
 };
+pub use storage::hybrid::{
+    backend::HybridStorageBudgetSnapshot,
+    pressure::{StorageAdmissionBlock, StorageAdmissionKind, StorageAdmissionReason},
+    state::LocalStorageUsage,
+};
 pub use types::{
     ReadAmpMetricsSnapshot, RecoveryMetricsSnapshot, RuntimeMetricsSnapshot, SnapshotPinSnapshot,
     StorageFileLayout, StorageLayoutLevel, StorageLayoutSnapshot, StorageVerificationReport,
@@ -149,7 +154,8 @@ pub fn init_benchmark_telemetry() -> MidgeResult<()> {
 
 // Low-level filesystem abstraction exports for advanced/testing use.
 pub use io::{
-    Durability as FsDurability, Fs, FsPath, OpenMode as FsOpenMode, OpenOptions as FsOpenOptions,
+    traits::ReadObserver, Durability as FsDurability, Fs, FsPath, OpenMode as FsOpenMode,
+    OpenOptions as FsOpenOptions,
 };
 
 #[cfg(test)]

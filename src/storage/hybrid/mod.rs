@@ -26,4 +26,5 @@
 pub mod actor;
 pub mod backend;
 pub mod policy;
+pub mod pressure;
 pub mod state;

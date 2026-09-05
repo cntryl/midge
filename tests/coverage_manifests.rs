@@ -4,9 +4,12 @@
 
 use cntryl_midge::sst::compression::{CompressionAlgo, CompressionPolicy};
 use cntryl_midge::{
-    AzureCredentialSource, DurabilityPolicy, GcsCredentialSource, RecoveryPolicy,
-    S3CredentialSource,
+    AzureCredentialSource, DurabilityPolicy, Engine, GcsCredentialSource,
+    HybridStorageBudgetSnapshot, LocalStorageUsage, MidgeError, OpenOptions, RecoveryPolicy,
+    S3CredentialSource, StorageAdmissionBlock, StorageAdmissionKind, StorageAdmissionReason,
+    TransactionMode,
 };
+use std::time::Duration;
 
 fn s3_coverage(source: &S3CredentialSource) -> &'static str {
     match source {
@@ -73,6 +76,110 @@ fn durability_coverage(policy: DurabilityPolicy) -> &'static str {
         DurabilityPolicy::CloudAsync => "cloud async recovery suites",
         DurabilityPolicy::CloudStrict => "cloud strict qualification suites",
     }
+}
+
+fn storage_admission_kind_coverage(kind: StorageAdmissionKind) -> &'static str {
+    match kind {
+        StorageAdmissionKind::Wal => "cloud WAL admission and rollback accounting tests",
+        StorageAdmissionKind::TransactionSpill => "public rejected-spill diagnostic snapshot",
+        StorageAdmissionKind::Flush => "flush admission and publication reservation tests",
+        StorageAdmissionKind::Compaction => "compaction admission and scratch cleanup tests",
+        StorageAdmissionKind::FlushHeadroom => "shared reusable flush headroom tests",
+        StorageAdmissionKind::StartupResidue => "startup residue reconciliation tests",
+    }
+}
+
+fn storage_admission_reason_coverage(reason: StorageAdmissionReason) -> &'static str {
+    match reason {
+        StorageAdmissionReason::LocalCapacity => "public oversized-spill admission rejection",
+        StorageAdmissionReason::CloudUpload => "cloud upload pressure and admission history tests",
+        StorageAdmissionReason::Compaction => "high-watermark compaction pressure tests",
+    }
+}
+
+#[test]
+fn should_keep_coverage_manifest_exhaustive_given_public_storage_admission_axes() {
+    // Arrange
+    let operations = [
+        StorageAdmissionKind::Wal,
+        StorageAdmissionKind::TransactionSpill,
+        StorageAdmissionKind::Flush,
+        StorageAdmissionKind::Compaction,
+        StorageAdmissionKind::FlushHeadroom,
+        StorageAdmissionKind::StartupResidue,
+    ];
+    let reasons = [
+        StorageAdmissionReason::LocalCapacity,
+        StorageAdmissionReason::CloudUpload,
+        StorageAdmissionReason::Compaction,
+    ];
+
+    // Act
+    let operations = operations.map(storage_admission_kind_coverage);
+    let reasons = reasons.map(storage_admission_reason_coverage);
+
+    // Assert
+    for axis in [&operations[..], &reasons[..]] {
+        assert!(axis.iter().all(|note| !note.is_empty()));
+        let unique: std::collections::HashSet<_> = axis.iter().collect();
+        assert_eq!(
+            unique.len(),
+            axis.len(),
+            "distinct coverage notes: {axis:?}"
+        );
+    }
+}
+
+#[test]
+fn should_expose_typed_storage_pressure_when_transaction_spill_exceeds_local_capacity() {
+    // Arrange
+    let directory = tempfile::tempdir().expect("database directory");
+    let local_budget = 1024 * 1024;
+    let options = OpenOptions::cloud_simulated(directory.path(), "bucket", "typed-metrics")
+        .local_storage_budget(local_budget)
+        .transaction_memory_pool_size(8 * 1024)
+        .background_compaction(false)
+        .build()
+        .expect("options");
+    let mut engine = Engine::open(options).expect("engine");
+    let cf = engine.create_column_family("data").expect("column family");
+    let mut transaction = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .expect("transaction");
+
+    // Act
+    let result = transaction.put(b"oversized".to_vec(), vec![1; 2 * 1024 * 1024], None);
+    let snapshot = engine.get_runtime_metrics().expect("runtime metrics");
+    let storage: HybridStorageBudgetSnapshot = snapshot.local_storage.expect("cloud disk budget");
+    let usage: LocalStorageUsage = storage.usage;
+    let pressure: StorageAdmissionBlock = storage.blocked_admission.expect("rejected admission");
+    drop(transaction);
+    engine.shutdown(Duration::from_secs(10)).expect("shutdown");
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::NoSpace(_))));
+    assert_eq!(pressure.operation, StorageAdmissionKind::TransactionSpill);
+    assert_eq!(pressure.reason, StorageAdmissionReason::LocalCapacity);
+    assert!(pressure.requested_bytes > pressure.free_bytes_at_rejection);
+    assert!(pressure.attempts > 0);
+    assert!(storage.admission_rejections_total >= pressure.attempts);
+    assert_eq!(storage.max_local_bytes, local_budget);
+    assert_eq!(
+        storage.total_committed_bytes,
+        usage.wal_bytes
+            + usage.transaction_spill_bytes
+            + usage.resident_sst_bytes
+            + usage.startup_residue_bytes
+            + usage.flush_staging_reserved_bytes
+            + usage.flush_headroom_reserved_bytes
+            + usage.compaction_staging_reserved_bytes
+            + usage.wal_headroom_reserved_bytes
+    );
+    assert_eq!(usage.transaction_spill_bytes, 0, "failed work owns no disk");
+    assert_eq!(
+        storage.free_bytes,
+        local_budget.saturating_sub(storage.total_committed_bytes)
+    );
 }
 
 #[test]

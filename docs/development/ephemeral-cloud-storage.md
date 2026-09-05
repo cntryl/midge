@@ -34,6 +34,13 @@ their reservations until released. A read that cannot fit its required
 metadata fails with a resource error. The remaining allowance holds data
 blocks. A scan cannot leave every previously visited SST reader resident.
 
+Reader admission deduplicates simultaneous opens of the same immutable SST.
+Independent SSTs can open concurrently within a small metadata-budget-derived
+owner limit. Provider I/O runs outside the coordination lock. Failed opens
+release ownership, wake their waiters with the same failure, and allow retry;
+an unwinding owner also releases its waiters. No additional reader process or
+background task queue is involved.
+
 ## Working disk and compaction
 
 Cloud mode exposes `OpenOptionsBuilder::local_storage_budget(bytes)`. WAL
@@ -60,6 +67,36 @@ Admission also reserves reusable flush capacity in the shared disk ledger.
 WAL, spill, and compaction cannot consume the last space needed to publish an
 accepted memtable. Pressure across many small column families starts flushes
 even when no individual family reaches its usual threshold.
+
+The existing runtime metrics expose a nested `local_storage` snapshot. It
+separates resident WAL, transaction spill, SST cache, startup residue, active
+flush staging, reusable flush headroom, compaction staging, and WAL reservations.
+The oldest admission class that has failed without subsequently succeeding
+includes its reason, requested bytes, free bytes at rejection, age, and attempt
+count. This is bounded diagnostic history, not a count of waiting callers.
+
+In ephemeral cloud mode, ready flush, compaction, and WAL retirement workers
+take turns at existing publication boundaries. A task waiting for its retry
+time does not hold a turn. One maintenance worker runs at a time, giving each
+task access to the shared workspace and trading build overlap for predictable
+progress. Immutable memtables retain their earliest known WAL segment until
+publication; unknown provenance conservatively prevents floor advancement.
+
+Explicit `compact_all` requests and their continuations use those same turns.
+Only a pending manual request forces compaction below ordinary background
+thresholds. An ingest barrier waits for active work to drain and cancels an
+unfinished manual request. Local and non-ephemeral modes retain worker overlap
+and direct manual continuation, with automatic work using background policy.
+
+Retirement proof work cooperatively yields after acknowledged progress so a
+large backlog cannot consume the full request timeout on every maintenance
+turn. The work slice does not shorten a provider request's timeout. Mandatory
+identity checks, one indivisible proof step, and final catalog publication
+remain subject to the existing outer deadline; the slice is not a hard bound
+on total turn latency. A yielded proof retains source WAL and resumes from
+validated process-local progress on a later turn. Its retained memory charge
+reduces the next compaction's execution and publication allowances within the
+existing budget.
 
 Compaction streams remote inputs and drains each completed output partition to
 object storage before producing the next. Its staging reservation covers the
@@ -120,6 +157,14 @@ that allowance. Oversized indivisible records, proof memory pressure, missing
 coverage, or an attempt deadline retain WAL authority for a later attempt.
 Exact key probes still require SST reads, so large-segment retirement latency
 needs separate provider qualification.
+Within one process, retirement keeps bounded checksum, frame, transaction
+operation, SST summary, and row-cursor progress across attempt deadlines.
+Before reuse it revalidates pinned identities and the authoritative oldest WAL
+entry. Only provably irrelevant appended SSTs preserve semantic coverage;
+overlapping, changed, removed, or uncertain inputs reset that coverage.
+Completed proof dependencies stay alive through the conditional catalog update
+and are reclaimed after retirement. Restart discards this optimization and
+revalidates from durable metadata; there is no new recovery format.
 Persisting provider identities alongside publication checksums would allow a
 separate optimization of that verification cost.
 
@@ -150,8 +195,16 @@ failed uploads. Final disk size alone is insufficient evidence of a bound.
 The filesystem cloud simulator retains control metadata locally. Its cold
 SST/WAL cache recovery tests preserve that metadata; they do not establish
 recovery after losing the entire local disk. Native cloud startup restores
-control metadata from object storage, and requires separate full-disk-loss
-qualification with a real provider.
+control metadata from object storage. The native S3 provider campaign against
+Sqrzl separately exercises complete local disk loss, a crash after a durable
+recovery checkpoint, and repeated fresh-process opens.
+
+See [the operational cloud campaign](cloud-operational-qualification.md) for
+configurable profiles, measured evidence, and the scope of each observation.
+Runtime remote-range counters measure actual SST range calls, returned bytes,
+failures, and elapsed time for reads and compaction. They exclude cache hits,
+HEAD requests, WAL recovery/retirement, and control metadata requests; they
+must not be interpreted as a total cloud API bill.
 
 Live qualification must separately measure a cold-cache open, random reads,
 scans, sustained writes/compaction, interrupted publication, and recovery on a

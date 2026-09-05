@@ -11,13 +11,16 @@ use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+mod admission;
+use admission::{OpenAdmission, OpenAttempt};
+
 pub(crate) struct ReadResources {
     sst_fs: Arc<dyn Fs>,
     sst_path_prefix: PathBuf,
     block_cache: Arc<BlockCache>,
     readers: Mutex<HashMap<ReaderCacheKey, CachedReader>>,
     metadata_budget: ResourceBudget,
-    reader_admission: Mutex<()>,
+    reader_admission: OpenAdmission,
     access_clock: std::sync::atomic::AtomicU64,
     diagnostics: Arc<crate::diagnostics::RuntimeDiagnostics>,
 }
@@ -57,6 +60,9 @@ impl ReadResources {
         block_cache_policy: CachePolicyType,
         diagnostics: Arc<crate::diagnostics::RuntimeDiagnostics>,
     ) -> Self {
+        let sst_fs = sst_fs
+            .with_read_observer(diagnostics.clone())
+            .unwrap_or(sst_fs);
         Self {
             sst_fs,
             sst_path_prefix,
@@ -68,7 +74,7 @@ impl ReadResources {
             )),
             readers: Mutex::new(HashMap::new()),
             metadata_budget: ResourceBudget::new(block_cache_size / 4),
-            reader_admission: Mutex::new(()),
+            reader_admission: OpenAdmission::new(block_cache_size / 4),
             access_clock: std::sync::atomic::AtomicU64::new(0),
             diagnostics,
         }
@@ -99,19 +105,45 @@ impl ReadResources {
             }
             return Ok(reader);
         }
-        // Serialize only cache misses. Hot readers do not wait for remote I/O.
-        let _admission = self
-            .reader_admission
-            .lock()
-            .map_err(|_| MidgeError::Internal("SST reader admission lock poisoned".into()))?;
-        if let Some(reader) = self.cached_reader(&cache_key)? {
-            return Ok(reader);
-        }
-        if record_metrics {
-            self.diagnostics.sst_metrics().record_reader_cache_miss();
-        }
+        let attempt = loop {
+            match self
+                .reader_admission
+                .begin(&cache_key, &self.metadata_budget)
+            {
+                Err(error @ MidgeError::ResourceLimit(_)) => {
+                    if !self.evict_idle_reader()? {
+                        return Err(error);
+                    }
+                }
+                result => break result?,
+            }
+        };
+        let owner = match attempt {
+            OpenAttempt::Owner(owner) => owner,
+            OpenAttempt::Shared(pending) => return pending.wait(),
+        };
+        // A completed owner may have populated the cache between the initial
+        // lookup and our admission. Keep that exact reader and avoid extra I/O.
+        let result = self.cached_reader(&cache_key).and_then(|cached| {
+            if let Some(reader) = cached {
+                Ok(reader)
+            } else {
+                if record_metrics {
+                    self.diagnostics.sst_metrics().record_reader_cache_miss();
+                }
+                self.open_reader(file_meta, cache_key)
+            }
+        });
+        owner.complete(&result);
+        result
+    }
 
-        let sst_path = self.sst_path_prefix.join(&name);
+    fn open_reader(
+        &self,
+        file_meta: &FileMeta,
+        cache_key: ReaderCacheKey,
+    ) -> MidgeResult<Arc<SstFileIo>> {
+        let sst_path = self.sst_path_prefix.join(&file_meta.name);
         let path_str = sst_path.to_string_lossy().to_string();
         let opened = loop {
             match SstFileIo::open_for_compaction(
@@ -121,18 +153,9 @@ impl ReadResources {
             ) {
                 Ok(reader) => break reader,
                 Err(error @ MidgeError::ResourceLimit(_)) => {
-                    let mut readers = self.readers.lock().map_err(|_| {
-                        MidgeError::Internal("SST reader cache lock poisoned".into())
-                    })?;
-                    let oldest = readers
-                        .iter()
-                        .filter(|(_, cached)| Arc::strong_count(&cached.reader) == 1)
-                        .min_by_key(|(_, cached)| cached.last_used)
-                        .map(|(key, _)| key.clone());
-                    let Some(oldest) = oldest else {
+                    if !self.evict_idle_reader()? {
                         return Err(error);
-                    };
-                    readers.remove(&oldest);
+                    }
                 }
                 Err(error) => return Err(error),
             }
@@ -145,7 +168,7 @@ impl ReadResources {
         }
         let reader = Arc::new(
             opened
-                .with_block_cache(Arc::clone(&self.block_cache), sst_id)
+                .with_block_cache(Arc::clone(&self.block_cache), cache_key.sst_id)
                 .with_read_path_diagnostics(Arc::clone(&self.diagnostics)),
         );
         let mut readers = self
@@ -162,6 +185,19 @@ impl ReadResources {
             },
         );
         Ok(reader)
+    }
+
+    fn evict_idle_reader(&self) -> MidgeResult<bool> {
+        let mut readers = self
+            .readers
+            .lock()
+            .map_err(|_| MidgeError::Internal("SST reader cache lock poisoned".into()))?;
+        let oldest = readers
+            .iter()
+            .filter(|(_, cached)| Arc::strong_count(&cached.reader) == 1)
+            .min_by_key(|(_, cached)| cached.last_used)
+            .map(|(key, _)| key.clone());
+        Ok(oldest.is_some_and(|oldest| readers.remove(&oldest).is_some()))
     }
 
     fn cached_reader(&self, key: &ReaderCacheKey) -> MidgeResult<Option<Arc<SstFileIo>>> {
@@ -220,11 +256,17 @@ impl ReadResources {
 }
 
 #[cfg(test)]
+mod concurrency_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::sst::traits::{SstFactory, SstStateReader};
 
-    fn write_test_sst(temp_dir: &tempfile::TempDir, name: &str) -> MidgeResult<FileMeta> {
+    pub(super) fn write_test_sst(
+        temp_dir: &tempfile::TempDir,
+        name: &str,
+    ) -> MidgeResult<FileMeta> {
         let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let mut writer = factory.create()?;

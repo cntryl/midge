@@ -90,6 +90,9 @@ impl EngineMetrics {
 
     /// Return an operator-facing runtime metrics and health snapshot.
     ///
+    /// Hybrid engines include local working-storage charges and admission
+    /// pressure in `local_storage`, plus observed remote range request costs.
+    ///
     /// # Errors
     ///
     /// Returns an error when the runtime cannot provide a snapshot.

@@ -644,6 +644,9 @@ impl std::iter::Iterator for SstStateScan {
     }
 }
 
+mod progress;
+pub(crate) use progress::{SstCursorPosition, SstSummaryProgress};
+
 mod index;
 mod io;
 mod scan;
@@ -749,6 +752,7 @@ impl SstFileIo {
         Self::open(path, fs)?.into_streaming_summary()
     }
 
+    #[cfg(test)]
     pub(crate) fn summarize_with_fs_for_compaction(
         path: &str,
         fs: Arc<dyn Fs>,

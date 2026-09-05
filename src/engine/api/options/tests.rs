@@ -1,6 +1,82 @@
 use super::*;
 
 #[test]
+fn should_reserve_read_capacity_when_automatic_memtables_reach_small_memory_budgets() {
+    // Arrange
+    for budget in [128 * 1024, 8 * 1024 * 1024, 32 * 1024 * 1024] {
+        // Act
+        let options = OpenOptions::local("unused-read-capacity-path")
+            .memory_budget(MemoryBudget::Bytes(budget))
+            .build()
+            .expect("bounded options");
+        let worker_pools =
+            options.transaction_memory_pool_size() + options.compaction_memory_pool_size();
+
+        // Assert
+        assert!(options.block_cache_size() >= (budget - worker_pools) / 4);
+        assert!(
+            worker_pools + options.memtable_size_limit() * 2 + options.block_cache_size() <= budget
+        );
+    }
+}
+
+#[test]
+fn should_preserve_automatic_memtable_capacity_when_storage_is_in_memory() {
+    // Arrange
+    let budget = 8 * 1024 * 1024;
+
+    // Act
+    let options = OpenOptions::in_memory()
+        .memory_budget(MemoryBudget::Bytes(budget))
+        .build()
+        .expect("in-memory options");
+    let available =
+        budget - options.transaction_memory_pool_size() - options.compaction_memory_pool_size();
+
+    // Assert
+    assert_eq!(options.memtable_size_limit(), available / 2);
+    assert_eq!(options.block_cache_size(), available % 2);
+}
+
+#[test]
+fn should_preserve_explicit_memtable_size_when_read_capacity_remains() {
+    // Arrange
+    let budget = 8 * 1024 * 1024;
+    let requested = 3 * 1024 * 1024;
+
+    // Act
+    let options = OpenOptions::local("unused-explicit-memory-path")
+        .memory_budget(MemoryBudget::Bytes(budget))
+        .with_memtable_size_limit(requested)
+        .build()
+        .expect("explicit memtables leave reader memory");
+
+    // Assert
+    assert_eq!(options.memtable_size_limit(), requested);
+    assert_eq!(options.memtable_flush_threshold(), requested);
+    assert!(options.block_cache_size() > 0);
+}
+
+#[test]
+fn should_reject_persistent_configuration_when_explicit_memtables_leave_no_read_capacity() {
+    // Arrange
+    let budget = 8 * 1024 * 1024;
+    let requested = (budget - 2 * (budget / 10)) / 2;
+
+    // Act
+    let result = OpenOptions::local("unused-empty-reader-pool-path")
+        .memory_budget(MemoryBudget::Bytes(budget))
+        .with_memtable_size_limit(requested)
+        .build();
+
+    // Assert
+    assert!(matches!(
+        result,
+        Err(MidgeError::ResourceLimit(message)) if message.contains("no capacity for SST reads")
+    ));
+}
+
+#[test]
 fn should_preserve_configured_cloud_local_storage_budget() {
     // Arrange
     let bytes = 20 * 1024 * 1024 * 1024;

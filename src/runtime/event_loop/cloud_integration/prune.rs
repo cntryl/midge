@@ -7,6 +7,9 @@ use crate::runtime::hybrid_persistence::{CloudWalPruneGuard, HybridPersistence};
 // workloads that publish many small WAL segments. Keep the batch bounded so a
 // maintenance worker cannot monopolize the publication gate indefinitely.
 const CLOUD_WAL_PRUNE_BATCH_SIZE: usize = 32;
+// Yield shared maintenance after acknowledged proof work. This is a scheduling
+// quantum, not a provider timeout: a started range keeps its normal hard budget.
+const CLOUD_WAL_PRUNE_WORK_QUANTUM: std::time::Duration = std::time::Duration::from_millis(100);
 
 fn run_cloud_wal_prune_preflight(
     storage: &crate::storage::HybridStorage,
@@ -21,13 +24,14 @@ fn run_cloud_wal_prune_preflight(
         let deadline = crate::common::OperationDeadline::from_budget(attempt_budget);
         match metadata_snapshot {
             Some(snapshot) => snapshot.verify_exact_then(&deadline, |manifest, metadata_guard| {
-                storage.prune_cloud_wal_segments_within(
-                    candidates,
-                    CloudWalPruneGuard::new(manifest, Some(metadata_guard))
-                        .with_memory_limit(local_guard.memory_limit()),
-                    writer_epoch,
-                    &deadline,
-                )
+                let guard = CloudWalPruneGuard::new(manifest, Some(metadata_guard))
+                    .with_memory_limit(local_guard.memory_limit())
+                    .with_progress(local_guard.progress());
+                let guard = match local_guard.work_quantum() {
+                    Some(quantum) => guard.with_work_quantum(quantum),
+                    None => guard,
+                };
+                storage.prune_cloud_wal_segments_within(candidates, guard, writer_epoch, &deadline)
             }),
             None => storage.prune_cloud_wal_segments_within(
                 candidates,
@@ -68,6 +72,10 @@ fn run_cloud_wal_prune_preflight(
 impl EventLoop {
     pub(crate) fn prune_cloud_wal_segments_covered_by_manifest(&mut self) {
         self.reap_cloud_wal_prune_worker();
+        if self.cloud_maintenance_enabled() && !self.cloud_maintenance.dispatching {
+            self.schedule_cloud_maintenance();
+            return;
+        }
         // Reaping may restore a control request that was deferred behind the
         // publication gate. Give the run loop a chance to dispatch it before
         // another maintenance prune reacquires the gate; otherwise a steady
@@ -112,7 +120,13 @@ impl EventLoop {
         // Filesystem-backed cloud simulation has no separate control store;
         // its event-loop manifest is the authority snapshot guarded below.
         let local_guard = CloudWalPruneGuard::new(self.state.manifest.clone(), None)
-            .with_memory_limit(self.compaction_actor.compaction_memory_limit());
+            .with_memory_limit(self.compaction_actor.compaction_memory_limit())
+            .with_progress(self.cloud_wal_prune_progress.clone());
+        let local_guard = if self.cloud_maintenance_enabled() {
+            local_guard.with_work_quantum(CLOUD_WAL_PRUNE_WORK_QUANTUM)
+        } else {
+            local_guard
+        };
         let writer_epoch = self.state.writer_epoch;
         // This callerless attempt has retry ownership, but shutdown must still
         // be able to join it within the cloud drain window. Starting the budget
@@ -197,7 +211,9 @@ impl EventLoop {
         {
             self.join_cloud_wal_prune_worker();
             self.restore_publication_deferred_message();
-            self.schedule_next_flush_worker();
+            if !self.cloud_maintenance_enabled() {
+                self.schedule_next_flush_worker();
+            }
         }
     }
 

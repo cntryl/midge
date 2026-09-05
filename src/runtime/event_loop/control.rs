@@ -114,6 +114,11 @@ impl EventLoop {
         snapshot.sst_bloom_rejects_total = read_path.bloom_rejects;
         snapshot.sst_bloom_checks_total = read_path.bloom_checks;
         snapshot.sst_data_blocks_read_total = read_path.data_blocks_read;
+        snapshot.remote_range_requests_total = read_path.remote_range_requests_total;
+        snapshot.remote_range_bytes_total = read_path.remote_range_bytes_total;
+        snapshot.remote_range_failures_total = read_path.remote_range_failures_total;
+        snapshot.remote_range_latency_ns_total = read_path.remote_range_latency_ns_total;
+        snapshot.remote_range_latency_ns_max = read_path.remote_range_latency_ns_max;
         if let Some(storage) = &self.hybrid_storage {
             let budget = storage.budget_snapshot();
             snapshot.hybrid_max_local_bytes = budget.max_local_bytes;
@@ -121,6 +126,7 @@ impl EventLoop {
             snapshot.hybrid_free_bytes = budget.free_bytes;
             snapshot.hybrid_usage_percent = budget.usage_percent;
             snapshot.hybrid_pending_evictions = budget.pending_evictions;
+            snapshot.local_storage = Some(budget);
         }
         self.respond(
             request_id,

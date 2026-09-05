@@ -260,11 +260,25 @@ impl SnapshotScan {
 
     fn add_l0_sources(
         &mut self,
-        files: Vec<Arc<FileMeta>>,
+        runs: Vec<Vec<Arc<FileMeta>>>,
         start: Option<&[u8]>,
         end: Option<&[u8]>,
     ) -> MidgeResult<()> {
-        for file_meta in files {
+        for mut files in runs {
+            if files.len() > 1 {
+                self.add_level_source(
+                    LevelRangeCandidates {
+                        ordered: files,
+                        fallback: Vec::new(),
+                    },
+                    start,
+                    end,
+                )?;
+                continue;
+            }
+            let Some(file_meta) = files.pop() else {
+                continue;
+            };
             file_meta.record_read();
             self.snapshot
                 .diagnostics
@@ -917,7 +931,7 @@ impl ReadSnapshot {
 
         if !self.memory_mode {
             let RangeCandidates { l0, levels } = self.sst_view.range_candidates(start_opt, end_opt);
-            let files = l0.into_iter().chain(
+            let files = l0.into_iter().flatten().chain(
                 levels
                     .into_iter()
                     .flat_map(|level| level.ordered.into_iter().chain(level.fallback)),
@@ -992,7 +1006,7 @@ impl ReadSnapshot {
 
         if !self.memory_mode {
             let RangeCandidates { l0, levels } = self.sst_view.range_candidates(start_opt, end_opt);
-            let files = l0.into_iter().chain(
+            let files = l0.into_iter().flatten().chain(
                 levels
                     .into_iter()
                     .flat_map(|level| level.ordered.into_iter().chain(level.fallback)),
@@ -1056,6 +1070,9 @@ impl std::fmt::Debug for ReadSnapshot {
             .finish_non_exhaustive()
     }
 }
+
+#[cfg(test)]
+mod l0_scan_tests;
 
 #[cfg(test)]
 mod tests {

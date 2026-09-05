@@ -967,8 +967,12 @@ fn should_schedule_live_compaction_at_hard_l0_ceiling_when_background_disabled()
             .iter()
             .filter(|file| file.level == 0)
             .count(),
-        0
+        1,
+        "pressure recovery must stop after restoring admission; disabled background work does not force a manual drain"
     );
+    assert!(!event_loop
+        .schedule_one_background_compaction_if_needed("restored local admission")
+        .expect("check ordinary background policy"));
     assert!(
         !event_loop.state.compaction_enabled(),
         "pressure recovery must preserve the configured background policy"

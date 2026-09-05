@@ -38,27 +38,46 @@ Let:
 - `H = l0_compaction_trigger + max_immutable_memtables_per_cf + 1`;
 - `L` be the configured number of levels, including L0;
 - `n_i` be the number of complete-bound SSTs in lower level `i`;
+- `R` be the number of contiguous L0 groups with strictly disjoint complete bounds;
+- `r_j` be the number of files in complete L0 group `j`;
+- `U` be the number of L0 files with uncertain bounds, each retained independently;
 - `S` be the number of selected L0 source files in one compaction.
 
 | Operation | Retained or opened SST work | Metadata selection work |
 | --- | --- | --- |
 | Snapshot capture | zero `FileMeta` clones; one `Arc<SstReadView>` clone | constant after a catalog publication |
-| Point read | at most `H + 2 * (L - 1)` candidate readers | `O(sum(log n_i))`, plus returned candidates |
-| Forward or reverse range scan | at most `H + (L - 1)` active SST cursors | `O(sum(log n_i) + intersecting files)` |
+| Point read | at most `H + 2 * (L - 1)` candidate readers | `O(H + sum(log n_i))`, plus returned candidates |
+| Forward or reverse range scan | at most `R + U + (L - 1)` active SST cursors; `R + U <= H` under steady-state admission | `O(R + U + sum(log r_j) + sum(log n_i) + selected files)` |
 | L0 compaction | at most `S + 1` merge heads | target span metadata is linear in overlap count |
 | Inner-level compaction | at most two merge heads | target span metadata is linear in overlap count |
 
-L0 files may overlap arbitrarily, so the read view orders them by recency and
-must consult each published file. Admission prevents valid post-migration state
-from growing that set beyond `H`. Complete L1+ files are ordered by full key
-coverage. Binary search finds a point or range boundary; equality at adjacent
+L0 files may overlap arbitrarily, so the read view checks their manifest bounds
+in recency order. A point read opens only files whose complete, valid bounds
+include the key, plus every file with incomplete, missing, or inverted bounds.
+Both endpoints are inclusive so range-tombstone coverage remains conservative.
+Admission bounds steady-state L0 by `H`; historical or recovered backlogs can
+exceed this count and remain readable. Selection then checks the actual L0
+count without imposing a startup limit. Complete L1+ files are ordered by full
+key coverage. Binary search finds a point or range boundary; equality at adjacent
 boundaries may conservatively select both neighbors.
 
-A range scan gives every selected L0 file its own cursor and uses one chained
-cursor for each lower level. The chained cursor opens one ordered file at a
-time in both directions. Work may still grow with the number of files and rows
-inside the requested range, but the scan does not retain one active cursor per
-lower-level SST.
+A range scan chains contiguous groups of complete, strictly disjoint L0 files
+and uses one chained cursor for each lower level. The immutable view constructs
+L0 groups in recency order, closing a group on overlapping, touching, or uncertain
+bounds. It sorts only within each disjoint group, preserving equal-sequence value
+precedence between sources in both directions. Unknown files remain independent.
+Each complete run is trimmed to the requested range using binary search; unknown
+files remain candidates regardless of advisory bounds. `R` counts these recency
+groups, which may exceed the minimum number of overlapping runs obtainable by
+reordering files.
+The chained cursor opens one ordered file at a time. Tombstones from every source
+are collected before emitting rows, including files containing only tombstones.
+
+A fully disjoint recovered L0 inventory needs one active SST cursor even when
+its reader metadata exceeds the cache pool. Overlapping groups and uncertain
+files still require independent cursors; a sufficiently large overlap backlog
+can reach the resource limit and require maintenance. This change adds no
+startup inventory cap. Scan work still grows with the files and rows read.
 
 Compaction represents source files and the complete target-level span
 separately. L0 retains one head per bounded selected source plus one chained
@@ -120,9 +139,20 @@ and replaying the production intent logic.
 the real immutable index at 1, 1,000, 100,000, and 1,000,000 complete lower-level
 intervals, plus the default hard L0 ceiling of 15. Test-only counters measure
 metadata comparisons, per-snapshot `FileMeta` clones, modeled candidate reader
-opens, and active SST cursor slots. The existing actual-reader regression also
-confirms that an equality-boundary point read opens two readers rather than an
-entire level.
+opens, and active SST cursor slots. Comparison accounting includes up to three
+comparisons for every complete L0 file. The fixed L0 bound in this synthetic
+profile does not constrain recovery backlog size. Actual-reader regressions
+confirm that an equality-boundary point read opens two lower-level readers and
+that a point in 128 disjoint L0 files opens only its matching reader with a
+16 KiB metadata pool smaller than the full inventory. Legacy L0 bounds still
+force reader checks.
+
+`should_scan_disjoint_l0_inventory_when_metadata_pool_cannot_hold_all_readers`
+scans 128 real L0 SSTs forward and backward with a 16 KiB metadata pool, retaining
+one SST source. Separate regressions check overlapping and legacy bounds,
+historical visibility, tombstone-only files, and equal-sequence source precedence.
+A narrow range in that inventory opens one reader; an uncertain extra SST is
+still checked in both directions.
 
 `should_keep_compaction_work_bounded_across_ten_thousand_targets` feeds a
 10,000-file target span to the real streaming input constructor and observes

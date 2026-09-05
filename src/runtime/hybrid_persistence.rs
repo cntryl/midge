@@ -17,6 +17,17 @@ use std::sync::Arc;
 
 mod streaming_prune;
 
+#[derive(Clone, Default)]
+pub(crate) struct CloudWalPruneProgress(Arc<parking_lot::Mutex<streaming_prune::Progress>>);
+
+impl CloudWalPruneProgress {
+    /// Sample after the proof worker has released its publication turn. An
+    /// unexpected active proof must defer compaction rather than block runtime.
+    pub(crate) fn retained_bytes(&self) -> Option<usize> {
+        self.0.try_lock().map(|progress| progress.retained_bytes())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct CloudMetadataPruneProof {
     pub(crate) key: String,
@@ -158,18 +169,42 @@ impl CloudMetadataPruneSnapshot {
 
 #[derive(Clone, Default)]
 pub(crate) struct CloudWalPruneGuard {
-    manifest: Manifest,
+    manifest: Arc<Manifest>,
     metadata: Option<CloudMetadataPruneGuard>,
     memory_limit: Option<usize>,
+    progress: CloudWalPruneProgress,
+    work_quantum: Option<std::time::Duration>,
 }
 
 impl CloudWalPruneGuard {
     pub(crate) fn new(manifest: Manifest, metadata: Option<CloudMetadataPruneGuard>) -> Self {
         Self {
-            manifest,
+            manifest: Arc::new(manifest),
             metadata,
             memory_limit: None,
+            progress: CloudWalPruneProgress::default(),
+            work_quantum: None,
         }
+    }
+
+    pub(crate) fn with_progress(mut self, progress: CloudWalPruneProgress) -> Self {
+        self.progress = progress;
+        self
+    }
+
+    pub(crate) fn progress(&self) -> CloudWalPruneProgress {
+        self.progress.clone()
+    }
+
+    /// Limit callerless proof work between successful resumable checkpoints.
+    /// Provider callbacks retain the enclosing operation's separate deadline.
+    pub(crate) fn with_work_quantum(mut self, quantum: std::time::Duration) -> Self {
+        self.work_quantum = Some(quantum);
+        self
+    }
+
+    pub(crate) fn work_quantum(&self) -> Option<std::time::Duration> {
+        self.work_quantum
     }
 
     pub(crate) fn with_memory_limit(mut self, memory_limit: usize) -> Self {
@@ -840,6 +875,7 @@ impl HybridPersistence for HybridStorage {
             deadline,
             &mut results,
         )?;
+        guard.progress.0.lock().after_retirement(&retired);
         schedule_retired_wal_deletes(self, retired);
         Ok(sorted_cloud_wal_prune_results(results))
     }

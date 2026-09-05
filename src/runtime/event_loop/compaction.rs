@@ -90,57 +90,18 @@ impl CompactionCoordinator {
     }
 
     pub(super) fn compact_all(event_loop: &mut EventLoop, request_id: u64) -> HandleOutcome {
-        if event_loop.compaction_publication_degraded {
-            event_loop.respond(
-                request_id,
-                RuntimeResponse::Error {
-                    request_id,
-                    error: crate::common::MidgeError::Fenced(
-                        "compaction publication is unsettled; refusing another compaction until recovery"
-                            .into(),
-                    ),
-                },
-            );
+        if let Err(error) = Self::validate_manual_compaction_request(event_loop) {
+            event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
             return HandleOutcome::Continue;
         }
-        if event_loop.ddl_authority_ambiguous {
-            event_loop.respond(
-                request_id,
-                RuntimeResponse::Error {
-                    request_id,
-                    error: crate::common::MidgeError::Fenced(
-                        "DDL authority is ambiguous; refusing compaction until reconciliation"
-                            .into(),
-                    ),
-                },
-            );
-            return HandleOutcome::Continue;
-        }
-        if event_loop
-            .state
-            .ingest_active
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
-            let epoch = event_loop
+
+        if event_loop.cloud_maintenance_enabled() {
+            event_loop
                 .state
-                .ingest_epoch
-                .load(std::sync::atomic::Ordering::SeqCst);
-            tracing::error!(
-                component = "compaction",
-                invariant = "no_compaction_during_ingest",
-                ingest_epoch = epoch,
-                "BUG: CompactAll called while ingest mode is active."
-            );
-            event_loop.respond(
-                request_id,
-                RuntimeResponse::Error {
-                    request_id,
-                    error: crate::common::MidgeError::Internal(
-                        "BUG: compact_all attempted during ingest mode - violated invariant"
-                            .to_string(),
-                    ),
-                },
-            );
+                .pending_compaction_waits
+                .lock()
+                .insert(request_id, "CompactAll".to_string());
+            event_loop.schedule_cloud_maintenance();
             return HandleOutcome::Continue;
         }
 
@@ -189,6 +150,42 @@ impl CompactionCoordinator {
         let mut pending = event_loop.state.pending_compaction_waits.lock();
         pending.insert(request_id, "CompactAll".to_string());
         HandleOutcome::Continue
+    }
+
+    fn validate_manual_compaction_request(
+        event_loop: &EventLoop,
+    ) -> crate::common::MidgeResult<()> {
+        if event_loop.compaction_publication_degraded {
+            return Err(crate::common::MidgeError::Fenced(
+                "compaction publication is unsettled; refusing another compaction until recovery"
+                    .into(),
+            ));
+        }
+        if event_loop.ddl_authority_ambiguous {
+            return Err(crate::common::MidgeError::Fenced(
+                "DDL authority is ambiguous; refusing compaction until reconciliation".into(),
+            ));
+        }
+        if event_loop
+            .state
+            .ingest_active
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            let epoch = event_loop
+                .state
+                .ingest_epoch
+                .load(std::sync::atomic::Ordering::SeqCst);
+            tracing::error!(
+                component = "compaction",
+                invariant = "no_compaction_during_ingest",
+                ingest_epoch = epoch,
+                "BUG: CompactAll called while ingest mode is active."
+            );
+            return Err(crate::common::MidgeError::Internal(
+                "BUG: compact_all attempted during ingest mode - violated invariant".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     pub(super) fn complete(
@@ -316,9 +313,11 @@ impl CompactionCoordinator {
             );
         }
 
-        let publication_budget = crate::common::resource_budget::ResourceBudget::new(
-            event_loop.compaction_actor.compaction_memory_limit(),
-        );
+        let memory_limit = match event_loop.available_compaction_memory() {
+            Ok(limit) => limit,
+            Err(error) => return Self::respond_publish_failure(event_loop, request_id, &error),
+        };
+        let publication_budget = crate::common::resource_budget::ResourceBudget::new(memory_limit);
         let added = match Self::build_output_metadata(
             event_loop,
             cf_id,
@@ -773,12 +772,37 @@ impl CompactionCoordinator {
             return;
         }
 
+        if event_loop
+            .state
+            .ingest_active
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            Self::fail_pending_compaction_waits(
+                event_loop,
+                &crate::common::MidgeError::Aborted(
+                    "manual compaction interrupted by ingestion barrier".into(),
+                ),
+            );
+            return;
+        }
+
+        if event_loop.cloud_maintenance_enabled() {
+            // BeginIngest waits for the active worker only. CompactAll keeps
+            // its obligation until a later fair compaction turn proves that
+            // no eligible manual plan remains.
+            Self::complete_idle_compaction_waits(event_loop, false);
+            return;
+        }
+
         let mut emergent_scheduled = false;
         // Publication-deferred work (notably CF drops) has already waited for
         // this authority switch. Let the run loop restore it before taking the
         // global compaction slot again, otherwise steady compaction debt can
         // starve destructive DDL indefinitely.
-        if allow_emergent_followup && event_loop.publication_gate.deferred_messages.is_empty() {
+        if allow_emergent_followup
+            && Self::has_manual_compaction_waiters(event_loop)
+            && event_loop.publication_gate.deferred_messages.is_empty()
+        {
             loop {
                 let plan = match event_loop
                     .compaction_actor
@@ -809,17 +833,7 @@ impl CompactionCoordinator {
             .active_compactions
             .load(std::sync::atomic::Ordering::SeqCst);
         if active_now == 0 {
-            let mut pending = event_loop.state.pending_compaction_waits.lock();
-            for (req_id, condition) in pending.drain() {
-                tracing::debug!(
-                    "responding to pending {:?} request (request_id={})",
-                    condition,
-                    req_id
-                );
-                event_loop
-                    .router
-                    .complete(RuntimeResponse::Ok { request_id: req_id });
-            }
+            Self::complete_idle_compaction_waits(event_loop, true);
         } else if emergent_scheduled {
             let pending = event_loop.state.pending_compaction_waits.lock();
             tracing::debug!(
@@ -829,7 +843,35 @@ impl CompactionCoordinator {
         }
     }
 
-    fn fail_pending_compaction_waits(event_loop: &EventLoop, error: &crate::common::MidgeError) {
+    pub(super) fn has_manual_compaction_waiters(event_loop: &EventLoop) -> bool {
+        event_loop
+            .state
+            .pending_compaction_waits
+            .lock()
+            .values()
+            .any(|condition| condition == "CompactAll")
+    }
+
+    pub(super) fn complete_idle_compaction_waits(event_loop: &EventLoop, include_manual: bool) {
+        let mut pending = event_loop.state.pending_compaction_waits.lock();
+        pending.retain(|request_id, condition| {
+            if condition == "CompactAll" && !include_manual {
+                return true;
+            }
+            event_loop.respond(
+                *request_id,
+                RuntimeResponse::Ok {
+                    request_id: *request_id,
+                },
+            );
+            false
+        });
+    }
+
+    pub(super) fn fail_pending_compaction_waits(
+        event_loop: &EventLoop,
+        error: &crate::common::MidgeError,
+    ) {
         let mut pending = event_loop.state.pending_compaction_waits.lock();
         for (request_id, condition) in pending.drain() {
             let response = if condition.starts_with("BeginIngest(") {

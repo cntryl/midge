@@ -19,6 +19,8 @@ jobs:
     timeout-minutes: 20
     env:
       CARGO_INCREMENTAL: 0
+      MIDGE_QUALIFICATION_ARTIFACT_DIR: ${{ github.workspace }}/target/cloud-qualification-evidence
+      MIDGE_QUALIFICATION_REVISION: ${{ github.sha }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -45,6 +47,14 @@ jobs:
 
       - name: Full test suite against Sqrzl emulator
         run: cargo test --workspace --all-features
+
+      - name: Preserve cloud qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cloud-qualification-${{ github.sha }}
+          path: target/cloud-qualification-evidence
+          if-no-files-found: ignore
 
       - name: Stop Sqrzl emulator
         if: always()

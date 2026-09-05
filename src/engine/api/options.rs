@@ -797,10 +797,20 @@ impl OpenOptionsBuilder {
                 "memory budget leaves no capacity for bounded compaction".to_string(),
             ));
         }
-        let max_memtable_size = total_memory
+        let read_and_memtable_bytes = total_memory
             .saturating_sub(transaction_memory_pool_size)
-            .saturating_sub(compaction_memory_pool_size)
-            / 2;
+            .saturating_sub(compaction_memory_pool_size);
+        // Persistent automatic memtables leave working memory for SST metadata and
+        // cached blocks, even when the total is smaller than the desired table
+        // size. Explicit table sizes retain their full available allowance.
+        let automatic_read_share = if self.explicit_memtable_size_limit.is_none()
+            && !matches!(self.storage, Storage::InMemory)
+        {
+            read_and_memtable_bytes / 4
+        } else {
+            0
+        };
+        let max_memtable_size = read_and_memtable_bytes.saturating_sub(automatic_read_share) / 2;
         if max_memtable_size == 0 {
             return Err(MidgeError::ResourceLimit(
                 "memory budget leaves no capacity for memtables".to_string(),
@@ -816,6 +826,12 @@ impl OpenOptionsBuilder {
             .saturating_sub(memtable_size_limit.saturating_mul(2));
         if self.goal == Goal::Economy {
             block_cache_size = block_cache_size.min(256 * 1024 * 1024);
+        }
+        if block_cache_size == 0 && !matches!(self.storage, Storage::InMemory) {
+            return Err(MidgeError::ResourceLimit(
+                "memory budget leaves no capacity for SST reads after the configured memtables and worker pools"
+                    .to_string(),
+            ));
         }
 
         Ok(DerivedMemoryPools {
