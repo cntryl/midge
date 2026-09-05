@@ -579,6 +579,7 @@ fn finish_partition(
     identity: PartitionIdentity,
     output_dir: &Path,
     abort_check: Option<&dyn Fn() -> bool>,
+    output_size_limit: Option<usize>,
 ) -> MidgeResult<Option<(String, std::path::PathBuf)>> {
     ensure_compaction_not_aborted(abort_check)?;
     let tombstone_count = add_partition_range_tombstones(
@@ -591,6 +592,7 @@ fn finish_partition(
     if point_count == 0 && tombstone_count == 0 {
         return Ok(None);
     }
+    ensure_output_fits_local_staging(writer.as_ref(), output_size_limit)?;
     ensure_compaction_not_aborted(abort_check)?;
     let name = crate::sst::compaction_file_name(
         identity.cf_id,
@@ -600,6 +602,14 @@ fn finish_partition(
     );
     let path = output_dir.join(&name);
     writer.finish_to_path(&path)?;
+    if output_size_limit.is_some_and(|limit| {
+        std::fs::metadata(&path).is_ok_and(|metadata| metadata.len() > limit as u64)
+    }) {
+        std::fs::remove_file(&path)?;
+        return Err(crate::common::MidgeError::ResourceLimit(
+            "encoded compaction partition exceeds its local staging limit".into(),
+        ));
+    }
     Ok(Some((name, path)))
 }
 
@@ -673,6 +683,69 @@ fn encoded_tombstone_upper_bound(tombstone: &RangeTombstone) -> usize {
         .saturating_add(tombstone.end.len())
 }
 
+fn ensure_output_fits_local_staging(
+    writer: &dyn crate::sst::traits::DynSstWriter,
+    limit: Option<usize>,
+) -> MidgeResult<()> {
+    if let Some(limit) = limit {
+        let encoded_bound = writer.encoded_size_upper_bound().ok_or_else(|| {
+            crate::common::MidgeError::ResourceLimit(
+                "compaction writer cannot bound its local output size".into(),
+            )
+        })?;
+        if encoded_bound > limit {
+            return Err(crate::common::MidgeError::ResourceLimit(format!(
+                "compaction partition requires {encoded_bound} encoded bytes, exceeding local staging limit {limit}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn prospective_partition_size<'a>(
+    writer: &dyn crate::sst::traits::DynSstWriter,
+    next_version: Option<&CompactionVersion>,
+    tombstones: impl Iterator<Item = &'a RangeTombstone>,
+    lower_bound: Option<&[u8]>,
+) -> MidgeResult<usize> {
+    let bound = match next_version {
+        Some(version) => writer
+            .encoded_size_upper_bound_after_sorted_entry(&version.key, version.value.as_deref()),
+        None => writer.encoded_size_upper_bound(),
+    }
+    .ok_or_else(|| {
+        crate::common::MidgeError::ResourceLimit(
+            "compaction writer cannot bound its next local output".into(),
+        )
+    })?;
+    Ok(bound.saturating_add(pending_tombstone_size(writer, tombstones, lower_bound)?))
+}
+
+fn pending_tombstone_size<'a>(
+    writer: &dyn crate::sst::traits::DynSstWriter,
+    tombstones: impl Iterator<Item = &'a RangeTombstone>,
+    lower_bound: Option<&[u8]>,
+) -> MidgeResult<usize> {
+    let mut bound = 0usize;
+    for tombstone in tombstones {
+        let start = lower_bound.map_or(tombstone.start.as_slice(), |lower| {
+            tombstone.start.as_slice().max(lower)
+        });
+        if start >= tombstone.end.as_slice() {
+            continue;
+        }
+        let growth = writer
+            .additional_range_tombstone_size_upper_bound(start, &tombstone.end)
+            .ok_or_else(|| {
+                crate::common::MidgeError::ResourceLimit(
+                    "compaction writer cannot bound pending range tombstones".into(),
+                )
+            })?;
+        bound = bound.saturating_add(growth);
+    }
+    Ok(bound)
+}
+
 /// Merge, normalize, deduplicate, and write target-sized compaction partitions
 /// without materializing a second deduplicated result vector.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -687,6 +760,8 @@ pub(crate) fn write_partitioned_compaction_outputs(
     budget: &crate::common::resource_budget::ResourceBudget,
     tombstone_gc: TombstoneGcPolicy,
     abort_check: Option<&dyn Fn() -> bool>,
+    output_sink: Option<&super::CompactionOutputSink<'_>>,
+    output_size_limit: Option<usize>,
 ) -> MidgeResult<Vec<String>> {
     let CompactionStreamInputs {
         cursors,
@@ -782,12 +857,42 @@ pub(crate) fn write_partitioned_compaction_outputs(
         let partition_tombstone_bytes = partition_tombstones.iter().fold(0usize, |total, item| {
             total.saturating_add(encoded_tombstone_upper_bound(&item.tombstone))
         });
-        let should_roll = selected_version.is_some()
+        let soft_roll = selected_version.is_some()
             && partition_point_count > 0
             && writer
                 .estimated_size_bytes()
                 .saturating_add(partition_tombstone_bytes)
                 >= target_sst_size.max(1);
+        let hard_roll = if let Some(limit) = output_size_limit {
+            let lower_bound = partition_lower_bound
+                .as_ref()
+                .map(|(key, _)| key.as_slice());
+            let mut bound = prospective_partition_size(
+                writer.as_ref(),
+                selected_version,
+                partition_tombstones.iter().map(|item| &item.tombstone),
+                lower_bound,
+            )?;
+            for tombstone in starts.clone() {
+                if range_tombstone_is_obsolete(tombstone, tombstone_gc)
+                    || partition_tombstones
+                        .iter()
+                        .any(|item| item.tombstone == *tombstone)
+                {
+                    continue;
+                }
+                let growth = pending_tombstone_size(
+                    writer.as_ref(),
+                    std::iter::once(tombstone),
+                    lower_bound,
+                )?;
+                bound = bound.saturating_add(growth);
+            }
+            (partition_point_count > 0 || !partition_tombstones.is_empty()) && bound > limit
+        } else {
+            false
+        };
+        let should_roll = soft_roll || hard_roll;
         if should_roll {
             let boundary_reservation =
                 budget.reserve(event_key.len(), "output partition boundary")?;
@@ -811,8 +916,12 @@ pub(crate) fn write_partitioned_compaction_outputs(
                 },
                 output_dir,
                 abort_check,
+                output_size_limit,
             )? {
-                cleanup.record(path);
+                cleanup.record(path.clone());
+                if let Some(sink) = output_sink {
+                    sink(&name, &path, budget)?;
+                }
                 output_names.push(name);
             }
             ensure_compaction_not_aborted(abort_check)?;
@@ -875,6 +984,23 @@ pub(crate) fn write_partitioned_compaction_outputs(
             )?;
             partition_point_count = partition_point_count.saturating_add(1);
         }
+        if let Some(limit) = output_size_limit
+            .filter(|_| partition_point_count > 0 || !partition_tombstones.is_empty())
+        {
+            let bound = prospective_partition_size(
+                writer.as_ref(),
+                None,
+                partition_tombstones.iter().map(|item| &item.tombstone),
+                partition_lower_bound
+                    .as_ref()
+                    .map(|(key, _)| key.as_slice()),
+            )?;
+            if bound > limit {
+                return Err(crate::common::MidgeError::ResourceLimit(format!(
+                    "indivisible compaction key group requires {bound} encoded bytes, exceeding local staging limit {limit}",
+                )));
+            }
+        }
     }
 
     ensure_compaction_not_aborted(abort_check)?;
@@ -898,8 +1024,12 @@ pub(crate) fn write_partitioned_compaction_outputs(
         },
         output_dir,
         abort_check,
+        output_size_limit,
     )? {
-        cleanup.record(path);
+        cleanup.record(path.clone());
+        if let Some(sink) = output_sink {
+            sink(&name, &path, budget)?;
+        }
         output_names.push(name);
     }
     ensure_compaction_not_aborted(abort_check)?;

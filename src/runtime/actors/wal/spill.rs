@@ -258,6 +258,11 @@ impl WalActor {
     }
 
     fn append_spilled_record(&mut self, record: &WalRecord) -> MidgeResult<()> {
+        let admitted = self.admit_wal_records(std::slice::from_ref(record))?;
+        let previous_position = self
+            .writer
+            .as_ref()
+            .map_or(0, |writer| writer.current_pos());
         let writer = self.writer.as_mut().ok_or_else(|| {
             MidgeError::Internal("transaction WAL writer disappeared during append".to_string())
         })?;
@@ -267,6 +272,7 @@ impl WalActor {
             }
             return Err(error);
         }
+        self.settle_wal_append(admitted, previous_position);
         Ok(())
     }
 

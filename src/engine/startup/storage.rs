@@ -265,6 +265,18 @@ impl RuntimeStorageMaterialization {
             &storage_path.db_path,
             opts.simulated_cloud_local_storage_budget_bytes(),
         )?;
+        cloud.hybrid_storage.enable_ephemeral_sst_cache(
+            opts.simulated_cloud_local_storage_budget_bytes()
+                .unwrap_or_else(|| opts.local_storage_budget_bytes()),
+        );
+        let sst_backend = Arc::new(crate::storage::filesystem::FileSystem::new(
+            cloud.cloud_root.clone(),
+        )?);
+        let sst_read_fs = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
+            Arc::new(crate::io::RealFs::new(&storage_path.db_path)?),
+            sst_backend,
+            opts.storage_io_timeout(),
+        ));
         CloudStartupRecovery::reject_simulated_cloud_wal_without_catalog(
             &cloud.recovery_cloud_wal_dir,
         )?;
@@ -273,12 +285,14 @@ impl RuntimeStorageMaterialization {
             .fence_cloud_wal_catalog(startup_lease.writer_epoch)?;
         startup_lease.ensure_healthy("after cloud WAL catalog fencing")?;
 
-        let recovery_plan = CloudStartupRecovery::materialize_simulated_cloud_wal_recovery_dir(
-            &cloud.recovery_cloud_wal_dir,
-            &storage_path.db_path,
-            opts.recovery_policy(),
-            &wal_catalog,
-        )?;
+        let recovery_plan =
+            CloudStartupRecovery::materialize_simulated_cloud_wal_recovery_dir_with_budget(
+                &cloud.recovery_cloud_wal_dir,
+                &storage_path.db_path,
+                opts.recovery_policy(),
+                &wal_catalog,
+                opts.local_storage_budget_bytes(),
+            )?;
 
         let mut state = RuntimeState::try_new_with_recovery_dir(
             storage_path.db_path.clone(),
@@ -299,6 +313,7 @@ impl RuntimeStorageMaterialization {
             shutdown_cloud_drain_timeout: opts.shutdown_cloud_drain_timeout(),
             cloud_runtime_policy,
             hybrid_storage: Some(cloud.hybrid_storage),
+            sst_read_fs: Some(sst_read_fs),
             hybrid_storage_events: Some(cloud.events),
             recovered_cloud_wal_segments: recovery_plan.remote_max_sequences(),
             recovered_cloud_wal_segment_epochs: recovery_plan.remote_writer_epochs(),
@@ -361,6 +376,12 @@ impl RuntimeStorageMaterialization {
                 opts.storage_io_timeout(),
             ),
         );
+        hybrid_storage.enable_ephemeral_sst_cache(opts.local_storage_budget_bytes());
+        let sst_read_fs = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
+            Arc::new(crate::io::RealFs::new(&storage_path.db_path)?),
+            sst_storage.clone(),
+            opts.storage_io_timeout(),
+        ));
         let wal_catalog = hybrid_storage.fence_cloud_wal_catalog(startup_lease.writer_epoch)?;
         startup_lease.ensure_healthy("after cloud WAL catalog fencing")?;
 
@@ -369,12 +390,14 @@ impl RuntimeStorageMaterialization {
             &storage_path.db_path,
             opts.recovery_policy(),
         )?;
-        let mut recovery_plan = CloudStartupRecovery::materialize_cloud_wal_recovery_dir(
-            &wal_storage,
-            &storage_path.db_path,
-            opts.recovery_policy(),
-            &wal_catalog,
-        )?;
+        let mut recovery_plan =
+            CloudStartupRecovery::materialize_cloud_wal_recovery_dir_with_budget(
+                &wal_storage,
+                &storage_path.db_path,
+                opts.recovery_policy(),
+                &wal_catalog,
+                opts.local_storage_budget_bytes(),
+            )?;
         CloudStartupRecovery::merge_local_wal_into_recovery_dir(
             &storage_path.db_path,
             &mut recovery_plan,
@@ -400,6 +423,7 @@ impl RuntimeStorageMaterialization {
             shutdown_cloud_drain_timeout: opts.shutdown_cloud_drain_timeout(),
             cloud_runtime_policy,
             hybrid_storage: Some(hybrid_storage),
+            sst_read_fs: Some(sst_read_fs),
             hybrid_storage_events: Some(rx),
             cloud_metadata_storage: Some(metadata_storage.clone()),
             recovered_cloud_wal_segments: recovery_plan.remote_max_sequences(),
@@ -475,11 +499,87 @@ impl RuntimeStorageMaterialization {
 }
 
 impl RuntimeRecoveryMaterialization {
+    fn evict_resident_manifest_ssts(
+        materialized: &RuntimeStorageMaterialization,
+    ) -> MidgeResult<()> {
+        let Some(fs) = &materialized.runtime_config.sst_read_fs else {
+            return Ok(());
+        };
+        let Some(storage) = &materialized.runtime_config.hybrid_storage else {
+            return Ok(());
+        };
+        for meta in &materialized.state.manifest.files {
+            if materialized.state.salvaged_local_ssts.contains(&meta.name) {
+                continue;
+            }
+            let path = materialized.state.sst_dir.join(&meta.name);
+            let secondary = materialized
+                .state
+                .db_path
+                .join("hybrid_local/sst")
+                .join(&meta.name);
+            if !path.exists() && !secondary.exists() {
+                continue;
+            }
+            // This migration path reads only objects which already have a
+            // resident copy. An empty cache never triggers full SST validation.
+            // Retain the local bytes unless the remote publication proof holds.
+            RuntimeState::validate_sst_fs_proof(
+                Arc::clone(fs),
+                &crate::runtime::FileMeta {
+                    name: meta.name.clone(),
+                    level: meta.level,
+                    size_bytes: meta.size_bytes,
+                    content_crc32c: meta.content_crc32c,
+                    cf_id: meta.cf_id,
+                    smallest_key: meta.smallest_key.clone(),
+                    largest_key: meta.largest_key.clone(),
+                    smallest_seq: meta.smallest_seq,
+                    largest_seq: meta.largest_seq,
+                    key_bounds_complete: meta.key_bounds_complete,
+                },
+            )?;
+            if path.exists() {
+                std::fs::remove_file(path)?;
+            }
+            storage.evict_local_object_cache(&crate::sst::object_key(&meta.name))?;
+        }
+        Ok(())
+    }
+
+    fn local_directory_bytes(path: &Path) -> MidgeResult<u64> {
+        let entries = match std::fs::read_dir(path) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => return Err(error.into()),
+        };
+        let mut total = 0_u64;
+        for entry in entries {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            let bytes = if kind.is_dir() {
+                Self::local_directory_bytes(&entry.path())?
+            } else if kind.is_file() {
+                entry.metadata()?.len()
+            } else {
+                0
+            };
+            total = total.checked_add(bytes).ok_or_else(|| {
+                crate::common::MidgeError::ResourceLimit("local storage accounting overflow".into())
+            })?;
+        }
+        Ok(total)
+    }
+
     pub(super) fn replay_and_repair(
         mut materialized: RuntimeStorageMaterialization,
         db_path: &Path,
         recovery_policy: RecoveryPolicy,
     ) -> MidgeResult<Self> {
+        materialized
+            .state
+            .recovery_sst_fs
+            .clone_from(&materialized.runtime_config.sst_read_fs);
         let remote_cleanup_candidates = materialized
             .state
             .non_authoritative_compaction_outputs_for_remote_cleanup()?;
@@ -522,6 +622,20 @@ impl RuntimeRecoveryMaterialization {
                 cloud_storage,
             )?;
         }
+        if !materialized.state.salvaged_local_ssts.is_empty() {
+            if let Some(storage) = &materialized.runtime_config.hybrid_storage {
+                let fs: Arc<dyn crate::io::Fs> = Arc::new(
+                    crate::storage::remote_sst::RemoteSstFs::new(
+                        Arc::clone(&materialized.state.fs),
+                        storage.remote_sst_backend(),
+                        storage.storage_io_timeout(),
+                    )
+                    .with_verified_local_overrides(materialized.state.salvaged_local_ssts.clone()),
+                );
+                materialized.runtime_config.sst_read_fs = Some(Arc::clone(&fs));
+                materialized.state.recovery_sst_fs = Some(fs);
+            }
+        }
         if let Some(metadata_storage) = materialized.cloud_metadata_storage_for_mirror.as_deref() {
             CloudStartupRecovery::mirror_cloud_metadata(
                 metadata_storage,
@@ -539,6 +653,20 @@ impl RuntimeRecoveryMaterialization {
         }
 
         materialized.state.cleanup_storage_residue();
+        Self::evict_resident_manifest_ssts(&materialized)?;
+        if let Some(storage) = &materialized.runtime_config.hybrid_storage {
+            storage.reconcile_local_disk_usage(
+                Self::local_directory_bytes(&materialized.state.sst_dir)?.saturating_add(
+                    Self::local_directory_bytes(&db_path.join("hybrid_local/sst"))?,
+                ),
+                Self::local_directory_bytes(&materialized.state.wal_dir)?.saturating_add(
+                    Self::local_directory_bytes(&db_path.join("hybrid_local/wal"))?,
+                ),
+            );
+            storage.reconcile_startup_scratch_residue(
+                materialized.state.retained_startup_scratch_bytes()?,
+            )?;
+        }
         let recovered_sequence = materialized.state.sequence;
         let recovered_cf_metas = materialized.state.manifest.column_families.clone();
 

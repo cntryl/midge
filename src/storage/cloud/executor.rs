@@ -19,6 +19,7 @@ pub struct CloudRequest {
     pub headers: Vec<(String, String)>,
     pub body: Option<Vec<u8>>,
     pub timeout: Option<Duration>,
+    response_limit: usize,
     retry_conditional_conflicts: bool,
 }
 
@@ -30,6 +31,7 @@ impl CloudRequest {
             headers: Vec::new(),
             body: None,
             timeout: None,
+            response_limit: MAX_CLOUD_RESPONSE_BYTES,
             retry_conditional_conflicts: false,
         }
     }
@@ -46,6 +48,12 @@ impl CloudRequest {
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
+        self
+    }
+
+    /// Bound successful range responses and even servers that ignore Range.
+    pub(crate) fn with_response_limit(mut self, limit: usize) -> Self {
+        self.response_limit = limit.min(MAX_CLOUD_RESPONSE_BYTES);
         self
     }
 
@@ -498,10 +506,11 @@ impl CloudExecutor {
                     .collect::<Vec<_>>();
 
                 if resp.content_length().is_some_and(|length| {
-                    length > u64::try_from(MAX_CLOUD_RESPONSE_BYTES).unwrap_or(u64::MAX)
+                    length > u64::try_from(request.response_limit).unwrap_or(u64::MAX)
                 }) {
                     return Err(RequestError::permanent(format!(
-                        "cloud response exceeds {MAX_CLOUD_RESPONSE_BYTES} byte limit"
+                        "cloud response exceeds {} byte limit",
+                        request.response_limit
                     )));
                 }
 
@@ -511,7 +520,7 @@ impl CloudExecutor {
                     .await
                     .map_err(|err| RequestError::from_reqwest(&err))?
                 {
-                    append_bounded_response_chunk(&mut body, &chunk, MAX_CLOUD_RESPONSE_BYTES)
+                    append_bounded_response_chunk(&mut body, &chunk, request.response_limit)
                         .map_err(RequestError::permanent)?;
                 }
 

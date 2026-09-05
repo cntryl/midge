@@ -29,6 +29,8 @@ pub enum FsError {
     Io(String),
     #[error("backend unavailable: {0}")]
     Unavailable(String),
+    #[error("timeout: {0}")]
+    Timeout(String),
     #[error("unsupported: {0}")]
     Unsupported(String),
 }
@@ -307,6 +309,16 @@ pub trait File: Send {
 
 /// Filesystem abstraction - agnostic of domain
 pub trait Fs: Send + Sync + 'static {
+    /// Pin an immutable read view when opening one SST requires several handles.
+    /// Remote implementations bind every later range to one object version.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the immutable object identity cannot be resolved.
+    fn immutable_read_view(&self, _path: &FsPath) -> FsResult<Option<std::sync::Arc<dyn Fs>>> {
+        Ok(None)
+    }
+
     /// Return a stable key for coordinating multi-call filesystem transactions.
     ///
     /// Handles that address the same logical filesystem root should return the
@@ -419,6 +431,7 @@ impl From<FsError> for crate::common::MidgeError {
                 }
             }
             FsError::Unavailable(msg) => crate::common::MidgeError::Internal(msg),
+            FsError::Timeout(msg) => crate::common::MidgeError::Timeout(msg),
             FsError::Unsupported(msg) => crate::common::MidgeError::NotSupported(msg),
         }
     }

@@ -401,7 +401,8 @@ impl Transaction {
                 &init.db_path,
                 init.memory_mode,
                 init.id,
-            ),
+            )
+            .with_storage_budget(runtime_handle.storage_budget.clone()),
             assertions: Vec::new(),
             assertion_bytes: 0,
             memory_pool: init.transaction_memory_pool,

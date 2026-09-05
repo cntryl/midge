@@ -868,13 +868,13 @@ fn should_retry_frozen_memtable_when_cloud_sst_upload_recovers() {
         error.to_string().contains("cloud SST upload failed"),
         "unexpected cloud upload error: {error}"
     );
-    assert_eq!(
-        engine
-            .get_runtime_metrics()
-            .expect("failed flush metrics")
-            .hybrid_total_committed_bytes,
-        committed_before_flush,
-        "failed cloud attempt must release its exact storage reservation"
+    let committed_during_retry = engine
+        .get_runtime_metrics()
+        .expect("failed flush metrics")
+        .hybrid_total_committed_bytes;
+    assert!(
+        committed_during_retry > committed_before_flush,
+        "retained flush output must keep its storage reservation until retry succeeds"
     );
     fail::remove("midge::cloud::inject_fail_sst_upload");
     scenario.teardown();
@@ -884,6 +884,13 @@ fn should_retry_frozen_memtable_when_cloud_sst_upload_recovers() {
 
     // Assert
     let layout = engine.get_storage_layout().expect("storage layout");
+    let settled = engine.get_runtime_metrics().expect("settled flush metrics");
+    assert!(
+        settled.hybrid_total_committed_bytes <= committed_before_flush,
+        "successful retry must settle the reservation and evict its published SST: before={committed_before_flush}, retry={committed_during_retry}, settled={}",
+        settled.hybrid_total_committed_bytes
+    );
+    assert!(sst_file_names(temp_dir.path()).is_empty());
     assert_eq!(
         layout
             .levels
@@ -1873,7 +1880,7 @@ fn should_remove_remote_compaction_orphan_on_reopen_when_manifest_batch_fails() 
 }
 
 #[test]
-fn should_rollback_partition_set_after_partial_remote_compaction_upload() {
+fn should_preserve_remote_inputs_after_partial_compaction_upload() {
     // Arrange
     let _guard = failpoint_test_lock()
         .lock()
@@ -1909,7 +1916,7 @@ fn should_rollback_partition_set_after_partial_remote_compaction_upload() {
     let cloud_root = db_path.join("cloud_store");
     let initial_local = sst_file_names(db_path);
     let initial_remote = sst_file_names(&cloud_root);
-    assert_eq!(initial_local.len(), 4);
+    assert!(initial_local.is_empty());
     assert_eq!(initial_remote.len(), 4);
     let scenario = fail::FailScenario::setup();
     fail::cfg("midge::cloud::inject_fail_sst_upload", "1*off->return")
@@ -1922,23 +1929,19 @@ fn should_rollback_partition_set_after_partial_remote_compaction_upload() {
     fail::remove("midge::cloud::inject_fail_sst_upload");
     scenario.teardown();
 
-    // Assert: the intent tracks the complete output set, but only partition
-    // zero reached remote storage and no output became manifest-authoritative.
-    let failed_local = sst_file_names(db_path);
+    // Assert: only partition zero reached remote storage. Without a complete
+    // output set, no output may become manifest-authoritative or retire inputs.
     let failed_remote = sst_file_names(&cloud_root);
-    assert!(failed_local.difference(&initial_local).count() > 1);
+    assert!(failed_remote.is_superset(&initial_remote));
     assert_eq!(failed_remote.difference(&initial_remote).count(), 1);
-    assert!(engine
-        .get_storage_layout()
-        .expect("failed live layout")
-        .levels
-        .iter()
-        .all(|level| level.level == 0 || level.file_count == 0));
+    assert_eq!(manifest_sst_file_names(&engine), initial_remote);
     shutdown_engine(engine);
+    discard_local_cloud_data_cache(db_path);
 
     let reopened = open_cloud();
     assert_eq!(sst_file_names(db_path), initial_local);
-    assert_eq!(sst_file_names(&cloud_root), initial_remote);
+    assert_eq!(manifest_sst_file_names(&reopened), initial_remote);
+    assert_eq!(sst_file_names(&cloud_root), failed_remote);
     let reopened_cf = default_cf(&reopened);
     for batch in 0..4 {
         let key = format!("partial-mirror-{batch}");
@@ -2097,21 +2100,19 @@ fn should_remove_remote_compaction_orphan_when_column_family_is_dropped_before_r
 }
 
 #[test]
-fn should_not_upload_remote_compaction_output_when_intent_save_fails() {
+fn should_recover_cloud_compaction_when_intent_save_fails() {
     // Arrange
     let _guard = failpoint_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp_dir = TempDir::new().expect("temp dir");
     let db_path = temp_dir.path();
-    let engine = Engine::open(
-        OpenOptions::cloud_simulated(db_path, "test-bucket", "intent-before-upload")
-            .background_compaction(false)
-            .target_sst_size_for_testing(64)
-            .build()
-            .expect("build simulated cloud options"),
-    )
-    .expect("open simulated cloud engine");
+    let options = OpenOptions::cloud_simulated(db_path, "test-bucket", "intent-before-upload")
+        .background_compaction(false)
+        .target_sst_size_for_testing(64)
+        .build()
+        .expect("build simulated cloud options");
+    let engine = Engine::open(options.clone()).expect("open simulated cloud engine");
     let cf = default_cf(&engine);
     for batch in 0..4 {
         let mut tx = engine
@@ -2128,25 +2129,56 @@ fn should_not_upload_remote_compaction_output_when_intent_save_fails() {
         engine.flush_cf(&cf).expect("flush compaction seed");
     }
     let cloud_root = db_path.join("cloud_store");
-    let initial_remote_count = count_sst_files(&cloud_root);
-    assert_eq!(initial_remote_count, 4);
+    let initial_remote = sst_file_names(&cloud_root);
+    assert_eq!(initial_remote.len(), 4);
     let scenario = fail::FailScenario::setup();
     fail::cfg("midge::intent::inject_no_space_on_save", "return")
         .expect("configure intent persistence failure");
 
     // Act
-    engine
+    let error = engine
         .compact_all()
         .expect_err("compact_all must report the intent persistence failure");
     fail::remove("midge::intent::inject_no_space_on_save");
     scenario.teardown();
 
     // Assert
-    assert_eq!(
-        count_sst_files(&cloud_root),
-        initial_remote_count,
-        "remote upload must not precede its durable cleanup obligation"
-    );
+    assert_no_space_like(&error);
+    let failed_remote = sst_file_names(&cloud_root);
+    assert!(failed_remote.is_superset(&initial_remote));
+    assert!(failed_remote.len() > initial_remote.len());
+    assert_eq!(manifest_sst_file_names(&engine), initial_remote);
+    let orphan_bytes: Vec<_> = failed_remote
+        .difference(&initial_remote)
+        .map(|name| {
+            let path = cloud_root.join("sst").join(name);
+            let bytes = std::fs::read(&path).expect("read uploaded orphan");
+            (path, bytes)
+        })
+        .collect();
+    shutdown_engine(engine);
+    discard_local_cloud_data_cache(db_path);
+    let reopened = Engine::open(options).expect("reopen with cold SST and WAL caches");
+    assert_eq!(manifest_sst_file_names(&reopened), initial_remote);
+    assert!(sst_file_names(db_path).is_empty());
+    reopened
+        .compact_all()
+        .expect("retry with a fresh generation");
+    let published = manifest_sst_file_names(&reopened);
+    assert!(!published.is_empty());
+    assert!(published.is_disjoint(&failed_remote));
+    for (path, bytes) in orphan_bytes {
+        assert_eq!(
+            std::fs::read(path).expect("untracked remote orphan retained"),
+            bytes,
+            "retry must not overwrite an orphan from the durably reserved earlier generation"
+        );
+    }
+    let reopened_cf = default_cf(&reopened);
+    for batch in 0..4 {
+        let key = format!("intent-first-{batch}");
+        assert_visible(&reopened, &reopened_cf, key.as_bytes(), b"value");
+    }
 }
 
 #[test]
@@ -2425,6 +2457,27 @@ fn assert_no_space_like(error: &MidgeError) {
 
 fn count_sst_files(db_path: &Path) -> usize {
     sst_file_names(db_path).len()
+}
+
+fn manifest_sst_file_names(engine: &Engine) -> std::collections::BTreeSet<String> {
+    engine
+        .get_storage_layout()
+        .expect("storage layout")
+        .levels
+        .into_iter()
+        .flat_map(|level| level.files.into_iter().map(|file| file.name))
+        .collect()
+}
+
+fn discard_local_cloud_data_cache(db_path: &Path) {
+    // The filesystem simulator keeps metadata authority local. Exercise loss
+    // of every data cache while preserving that simulator metadata contract.
+    for name in ["sst", "wal", "hybrid_local", "txn", "cloud_recovery"] {
+        let path = db_path.join(name);
+        if path.exists() {
+            std::fs::remove_dir_all(path).expect("discard local data cache");
+        }
+    }
 }
 
 fn sst_file_names(db_path: &Path) -> std::collections::BTreeSet<String> {

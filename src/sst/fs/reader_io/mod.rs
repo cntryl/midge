@@ -685,6 +685,9 @@ impl SstFileIo {
     ///
     /// Returns an error when the SST footer, metadata, or backing file cannot be read.
     pub fn open(path_str: &str, fs: Arc<dyn Fs>) -> MidgeResult<Self> {
+        let fs = fs
+            .immutable_read_view(&FsPath::new(path_str))?
+            .unwrap_or(fs);
         let mut reader = Self::new(path_str, fs);
         reader.load_metadata()?;
         Ok(reader)
@@ -696,10 +699,22 @@ impl SstFileIo {
         fs: Arc<dyn Fs>,
         budget: crate::common::resource_budget::ResourceBudget,
     ) -> MidgeResult<Self> {
+        let fs = fs
+            .immutable_read_view(&FsPath::new(path_str))?
+            .unwrap_or(fs);
         let mut reader = Self::new(path_str, fs);
+        reader.metadata_reservations.push(budget.reserve(
+            std::mem::size_of::<Self>().saturating_add(path_str.len()),
+            "SST reader",
+        )?);
         reader.metadata_budget = Some(budget);
         reader.load_metadata()?;
         Ok(reader)
+    }
+
+    pub(crate) fn file_size(&self) -> u64 {
+        self.block_region_end
+            .saturating_add(crate::sst::types::SST_FOOTER_SIZE as u64)
     }
 
     /// Open an SST file using `RealFs` (convenience method for single-file access)

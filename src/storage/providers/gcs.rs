@@ -1245,6 +1245,82 @@ impl CloudBackend for GcsBackend {
         self.executor.spawn_request(request, key, callback, mapper);
     }
 
+    fn submit_get_range_with_identity(
+        &self,
+        key: &str,
+        start: u64,
+        end: u64,
+        expected: crate::storage::StorageObjectMetadata,
+        timeout: std::time::Duration,
+        callback: CloudCallback,
+    ) {
+        let key = key.to_string();
+        let Some(conditions) = crate::storage::cloud::object_match_precondition_headers(
+            &expected.etag,
+            expected.generation.as_deref(),
+        ) else {
+            let _ = callback.send(CloudEvent::GetRange {
+                key,
+                start,
+                end: Some(end),
+                result: Err(CloudError::Protocol(
+                    "range request lacks object identity".into(),
+                )),
+            });
+            return;
+        };
+        if start >= end || end > expected.size {
+            let _ = callback.send(CloudEvent::GetRange {
+                key,
+                start,
+                end: Some(end),
+                result: Err(CloudError::Protocol("invalid object byte range".into())),
+            });
+            return;
+        }
+        let mode = self.mode;
+        let mut url = self.download_url(&key);
+        let mut request = Self::bodyless_request(mode, Method::GET, String::new());
+        for (name, value) in conditions {
+            if mode == GcsBackendMode::Json
+                && name.eq_ignore_ascii_case("x-goog-if-generation-match")
+            {
+                url = append_query_param(&url, "ifGenerationMatch", &value);
+            } else {
+                request = request.with_header(name, value);
+            }
+        }
+        request.url = url;
+        request = request
+            .with_header("Range", format!("bytes={start}-{}", end - 1))
+            .with_timeout(timeout)
+            .with_response_limit(usize::try_from(end - start).unwrap_or(usize::MAX));
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| {
+            let result = match result {
+                Ok(resp) if resp.status == 206 => {
+                    crate::storage::cloud::range::validate_range_response(
+                        &resp, start, end, &expected,
+                    )
+                    .map(|()| resp.body)
+                }
+                Ok(resp) => Err(gcs_response_error(
+                    &resp,
+                    "GCS conditional RANGE",
+                    mode,
+                    true,
+                )),
+                Err(error) => Err(CloudError::from_transport_error(error)),
+            };
+            CloudEvent::GetRange {
+                key: ctx,
+                start,
+                end: Some(end),
+                result,
+            }
+        };
+        self.executor.spawn_request(request, key, callback, mapper);
+    }
+
     fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
         let key = key.to_string();
         let mode = self.mode;
@@ -1861,6 +1937,49 @@ impl CloudSigner for Goog1HmacSigner {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn should_enforce_native_sst_range_contract() {
+        // Arrange
+        for status in [206, 200] {
+            let server = spawn_recording_http_server_with_status(
+                status,
+                vec![
+                    ("Content-Range".into(), "bytes 10-12/100".into()),
+                    ("ETag".into(), "\"version\"".into()),
+                    ("x-goog-generation".into(), "42".into()),
+                ],
+                vec![1, 2, 3],
+            );
+            let backend = recording_json_backend(server.endpoint.clone());
+            let expected = crate::storage::StorageObjectMetadata {
+                size: 100,
+                etag: "\"version\"".into(),
+                generation: Some("42".into()),
+            };
+            let (sender, receiver) = std::sync::mpsc::channel();
+            // Act
+            backend.submit_get_range_with_identity(
+                "sst/table.sst",
+                10,
+                13,
+                expected,
+                std::time::Duration::from_secs(5),
+                sender,
+            );
+            let event = receiver
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("range completion");
+            let request = server.finish();
+            // Assert
+            match event {
+                CloudEvent::GetRange { result, .. } => assert_eq!(result.is_ok(), status == 206),
+                other => panic!("unexpected range event: {other:?}"),
+            }
+            assert_eq!(request.header("range"), Some("bytes=10-12"));
+            assert!(request.target.contains("ifGenerationMatch=42"));
+        }
+    }
+
     #[test]
     fn should_validate_get_length_when_building_object_identity() {
         // Arrange

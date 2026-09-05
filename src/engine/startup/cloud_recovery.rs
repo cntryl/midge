@@ -22,38 +22,30 @@ impl CloudStartupRecovery {
         let mut cleaned = std::collections::BTreeSet::new();
         for file_meta in candidates {
             let key = crate::sst::object_key(&file_meta.name);
-            let proof = storage
-                .remote_object_proof_optional(&key)
+            let deadline =
+                crate::common::OperationDeadline::from_budget(storage.storage_io_timeout());
+            let metadata = storage
+                .remote_range_metadata_optional_within(&key, &deadline)
                 .map_err(|error| {
                     MidgeError::RecoveryFailed(format!(
                         "failed to prove remote compaction cleanup candidate '{}': {error}",
                         file_meta.name
                     ))
                 })?;
-            if let Some(proof) = proof {
-                Self::validate_sst_bytes_against_proof(
-                    &file_meta.name,
-                    proof.bytes(),
-                    Some(file_meta.size_bytes),
-                    file_meta.content_crc32c,
-                )?;
-
-                // Replay validates the local output before rolling it back. If
-                // the cache was lost, preserve that validation path by staging
-                // the exact proven remote bytes before deleting the remote
-                // orphan.
-                let local_path = state.sst_dir.join(&file_meta.name);
-                if !Self::local_sst_file_matches_proof(
-                    &local_path,
-                    &file_meta.name,
-                    Some(file_meta.size_bytes),
-                    file_meta.content_crc32c,
-                ) {
-                    Self::stage_sst_bytes(&state.fs, &file_meta.name, proof.bytes())?;
-                }
-
+            if let Some(metadata) = metadata {
+                let pinned = Arc::new(
+                    crate::storage::remote_sst::RemoteSstFs::for_object(
+                        Arc::clone(&state.fs),
+                        storage.remote_sst_backend(),
+                        key.clone(),
+                        metadata.clone(),
+                        storage.storage_io_timeout(),
+                    )
+                    .with_deadline(deadline),
+                );
+                RuntimeState::validate_sst_fs_proof(pinned, file_meta)?;
                 storage
-                    .delete_remote_object_guarded_blocking(proof)
+                    .delete_remote_object_by_identity_blocking_within(&key, &metadata, &deadline)
                     .map_err(|error| {
                         MidgeError::RecoveryFailed(format!(
                             "failed to conditionally delete remote compaction cleanup candidate '{}': {error}",
@@ -66,6 +58,9 @@ impl CloudStartupRecovery {
         Ok(cleaned)
     }
 
+    /// Validate the authoritative inventory without materializing the local cache.
+    /// SST metadata and data blocks are checked when a reader requests them;
+    /// ordinary startup must not scan or copy the object-store dataset.
     pub(super) fn ensure_local_sst_cache_from_cloud(
         state: &mut RuntimeState,
         cloud_root: &Path,
@@ -76,87 +71,19 @@ impl CloudStartupRecovery {
 
         for file in state.manifest.files.clone() {
             let remote_path = remote_sst_dir.join(&file.name);
-            let remote_valid = Self::local_sst_file_matches_manifest(&remote_path, &file);
-
-            if !remote_valid {
-                if state.recovery_policy() == RecoveryPolicy::Strict {
-                    return Err(MidgeError::RecoveryFailed(format!(
-                        "authoritative cloud SST '{}' is missing, corrupt, or size-mismatched",
+            let validation = std::fs::metadata(&remote_path)
+                .map_err(|error| {
+                    MidgeError::RecoveryFailed(format!(
+                        "authoritative cloud SST '{}' is unavailable: {error}",
                         file.name
-                    )));
-                }
-
-                state.mark_opened_in_salvage_mode();
-                state.mark_persistence_anomaly();
+                    ))
+                })
+                .and_then(|metadata| Self::validate_manifest_sst_size(&file, metadata.len()));
+            if Self::retain_manifest_sst_after_metadata_validation(state, &file, validation)? {
+                retained_files.push(file);
+            } else {
                 manifest_changed = true;
-                let local_path = state.sst_dir.join(&file.name);
-                let _ = std::fs::remove_file(&local_path);
-                tracing::warn!(
-                    sst_name = %file.name,
-                    "dropping manifest SST because authoritative cloud object is missing or corrupt"
-                );
-                continue;
             }
-
-            let local_path = state.sst_dir.join(&file.name);
-            let local_valid = Self::local_sst_file_matches_manifest(&local_path, &file);
-
-            if !local_valid {
-                if let Some(parent) = local_path.parent() {
-                    std::fs::create_dir_all(parent).map_err(|error| {
-                        MidgeError::RecoveryFailed(format!(
-                            "failed to create local SST cache directory '{}': {}",
-                            parent.display(),
-                            error
-                        ))
-                    })?;
-                }
-
-                if local_path.exists() {
-                    let _ = std::fs::remove_file(&local_path);
-                }
-
-                if let Err(error) = std::fs::copy(&remote_path, &local_path) {
-                    if state.recovery_policy() == RecoveryPolicy::Strict {
-                        return Err(MidgeError::RecoveryFailed(format!(
-                            "failed to restore local SST cache for '{}' from cloud: {}",
-                            file.name, error
-                        )));
-                    }
-
-                    state.mark_opened_in_salvage_mode();
-                    state.mark_persistence_anomaly();
-                    manifest_changed = true;
-                    tracing::warn!(
-                        sst_name = %file.name,
-                        error = %error,
-                        "dropping manifest SST because local cache restore from cloud failed"
-                    );
-                    continue;
-                }
-
-                if let Err(error) = crate::sst::fs::SstFileIo::open_with_real_fs(&local_path) {
-                    if state.recovery_policy() == RecoveryPolicy::Strict {
-                        return Err(MidgeError::RecoveryFailed(format!(
-                            "restored local SST cache for '{}' is invalid: {}",
-                            file.name, error
-                        )));
-                    }
-
-                    state.mark_opened_in_salvage_mode();
-                    state.mark_persistence_anomaly();
-                    manifest_changed = true;
-                    let _ = std::fs::remove_file(&local_path);
-                    tracing::warn!(
-                        sst_name = %file.name,
-                        error = %error,
-                        "dropping manifest SST because restored local cache is invalid"
-                    );
-                    continue;
-                }
-            }
-
-            retained_files.push(file);
         }
 
         if manifest_changed {
@@ -200,7 +127,7 @@ impl CloudStartupRecovery {
 
     pub(super) fn local_sst_file_matches_proof(
         path: &Path,
-        sst_name: &str,
+        _sst_name: &str,
         expected_size_bytes: Option<u64>,
         expected_crc32c: Option<u32>,
     ) -> bool {
@@ -215,23 +142,30 @@ impl CloudStartupRecovery {
             }
         }
 
-        if expected_crc32c.is_some() {
-            let Ok(data) = std::fs::read(path) else {
+        if let Some(expected) = expected_crc32c {
+            let Ok(mut file) = std::fs::File::open(path) else {
                 return false;
             };
-            if Self::validate_sst_bytes_against_proof(
-                sst_name,
-                &data,
-                expected_size_bytes,
-                expected_crc32c,
-            )
-            .is_err()
-            {
+            let mut checksum = 0_u32;
+            let mut buffer = vec![0_u8; 1024 * 1024];
+            loop {
+                let Ok(count) = std::io::Read::read(&mut file, &mut buffer) else {
+                    return false;
+                };
+                if count == 0 {
+                    break;
+                }
+                checksum = crc32c::crc32c_append(checksum, &buffer[..count]);
+            }
+            if checksum != expected {
                 return false;
             }
         }
 
-        crate::sst::fs::SstFileIo::open_with_real_fs(path).is_ok()
+        let Ok(reader) = crate::sst::fs::SstFileIo::open_with_real_fs(path) else {
+            return false;
+        };
+        expected_crc32c.is_some() || reader.verify_all_blocks().is_ok()
     }
 
     pub(super) fn local_sst_file_matches_manifest(
@@ -742,6 +676,127 @@ impl CloudStartupRecovery {
 
         Self::enforce_recovered_wal_epoch_order(&mut plan, recovery_policy)?;
         Ok(plan)
+    }
+
+    pub(in crate::engine) fn materialize_cloud_wal_recovery_dir_with_budget(
+        cloud: &crate::storage::cloud::CloudStorage,
+        db_path: &Path,
+        recovery_policy: RecoveryPolicy,
+        catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
+        max_local_bytes: u64,
+    ) -> MidgeResult<CloudWalRecoveryPlan> {
+        Self::validate_cloud_wal_recovery_disk_budget(db_path, catalog, max_local_bytes)?;
+        Self::materialize_cloud_wal_recovery_dir(cloud, db_path, recovery_policy, catalog)
+    }
+
+    pub(in crate::engine) fn materialize_simulated_cloud_wal_recovery_dir_with_budget(
+        cloud_wal_dir: &Path,
+        db_path: &Path,
+        recovery_policy: RecoveryPolicy,
+        catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
+        max_local_bytes: u64,
+    ) -> MidgeResult<CloudWalRecoveryPlan> {
+        Self::validate_cloud_wal_recovery_disk_budget(db_path, catalog, max_local_bytes)?;
+        Self::materialize_simulated_cloud_wal_recovery_dir(
+            cloud_wal_dir,
+            db_path,
+            recovery_policy,
+            catalog,
+        )
+    }
+
+    fn validate_cloud_wal_recovery_disk_budget(
+        db_path: &Path,
+        catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
+        max_local_bytes: u64,
+    ) -> MidgeResult<()> {
+        let existing_bytes = Self::local_working_file_bytes(db_path)?;
+        let mut replay_sizes = catalog
+            .segments
+            .iter()
+            .map(|(id, publication)| (*id, publication.size_bytes))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut active_bytes = 0_u64;
+        match std::fs::read_dir(db_path.join("wal")) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry?;
+                    if !entry.file_type()?.is_file() {
+                        continue;
+                    }
+                    let name = entry.file_name();
+                    let Some(name) = name.to_str() else {
+                        continue;
+                    };
+                    let size = entry.metadata()?.len();
+                    if name == crate::wal::ACTIVE_FILE_NAME {
+                        active_bytes = active_bytes.max(size);
+                    } else if let Some(segment_id) = crate::wal::parse_segment_id(name) {
+                        replay_sizes
+                            .entry(segment_id)
+                            .and_modify(|bytes| {
+                                *bytes = (*bytes).max(size);
+                            })
+                            .or_insert(size);
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        let projected = replay_sizes
+            .values()
+            .copied()
+            .chain([active_bytes])
+            .try_fold(existing_bytes, |total, bytes| {
+                total.checked_add(bytes).ok_or_else(|| {
+                    MidgeError::NoSpace("cloud WAL recovery disk requirement overflow".into())
+                })
+            })?;
+        if projected > max_local_bytes {
+            return Err(MidgeError::NoSpace(format!(
+                "cloud WAL recovery needs at most {projected} local bytes including existing working files, exceeding configured budget {max_local_bytes}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn local_working_file_bytes(db_path: &Path) -> MidgeResult<u64> {
+        let resettable_wal_staging = db_path.join("cloud_recovery/wal");
+        let mut directories = vec![db_path.to_path_buf()];
+        let mut bytes = 0_u64;
+        while let Some(directory) = directories.pop() {
+            let entries = match std::fs::read_dir(&directory) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            for entry in entries {
+                let entry = entry?;
+                if (directory == db_path && entry.file_name() == "cloud_store")
+                    || entry.path() == resettable_wal_staging
+                {
+                    // The simulator's cloud store is remote authority. Previous
+                    // WAL staging is removed after admission and before GETs.
+                    // Other recovery residue survives that reset and counts.
+                    continue;
+                }
+                let file_type = entry.file_type()?;
+                if file_type.is_dir() {
+                    directories.push(entry.path());
+                } else if file_type.is_file() {
+                    bytes = bytes.checked_add(entry.metadata()?.len()).ok_or_else(|| {
+                        MidgeError::NoSpace("local working-file byte accounting overflow".into())
+                    })?;
+                } else if file_type.is_symlink() {
+                    return Err(MidgeError::RecoveryFailed(format!(
+                        "cannot establish local disk budget through symbolic link '{}'",
+                        entry.path().display()
+                    )));
+                }
+            }
+        }
+        Ok(bytes)
     }
 
     pub(in crate::engine) fn materialize_simulated_cloud_wal_recovery_dir(
@@ -1502,16 +1557,28 @@ impl CloudStartupRecovery {
         Ok(())
     }
 
+    /// Validate cloud authority using object metadata only. The historical name
+    /// is retained for the startup boundary; this no longer populates a cache.
     pub(crate) fn ensure_local_sst_cache_from_cloud_storage(
         state: &mut RuntimeState,
         cloud: &crate::storage::cloud::CloudStorage,
     ) -> MidgeResult<()> {
-        let staging_fs = state.fs.clone();
         let mut retained_files = Vec::with_capacity(state.manifest.files.len());
         let mut manifest_changed = false;
 
         for file in state.manifest.files.clone() {
-            if Self::recover_manifest_sst_from_cloud(state, cloud, &staging_fs, &file)? {
+            let key = crate::sst::object_key(&file.name);
+            let validation = Self::blocking_cloud_head_optional(cloud, &key)
+                .and_then(|metadata| {
+                    metadata.ok_or_else(|| {
+                        MidgeError::RecoveryFailed(format!(
+                            "authoritative cloud SST '{}' is missing",
+                            file.name
+                        ))
+                    })
+                })
+                .and_then(|metadata| Self::validate_manifest_sst_size(&file, metadata.size));
+            if Self::retain_manifest_sst_after_metadata_validation(state, &file, validation)? {
                 retained_files.push(file);
             } else {
                 manifest_changed = true;
@@ -1528,11 +1595,65 @@ impl CloudStartupRecovery {
         Ok(())
     }
 
+    fn validate_manifest_sst_size(
+        file: &crate::metadata::FileMeta,
+        actual_size: u64,
+    ) -> MidgeResult<()> {
+        if actual_size != file.size_bytes {
+            return Err(MidgeError::RecoveryFailed(format!(
+                "authoritative cloud SST '{}' size {actual_size} does not match manifest {}",
+                file.name, file.size_bytes
+            )));
+        }
+        Ok(())
+    }
+
+    fn retain_manifest_sst_after_metadata_validation(
+        state: &mut RuntimeState,
+        file: &crate::metadata::FileMeta,
+        validation: MidgeResult<()>,
+    ) -> MidgeResult<bool> {
+        let Err(error) = validation else {
+            state.salvaged_local_ssts.remove(&file.name);
+            return Ok(true);
+        };
+        if state.recovery_policy() == RecoveryPolicy::Strict {
+            return Err(MidgeError::RecoveryFailed(format!(
+                "failed to validate authoritative cloud SST '{}': {error}",
+                file.name
+            )));
+        }
+        state.mark_opened_in_salvage_mode();
+        state.mark_persistence_anomaly();
+        // Salvage may retain a fully verified local copy when cloud authority
+        // is unavailable. This exceptional path is deliberately conservative;
+        // the normal inventory path never reads local or remote SST bodies.
+        let retain = Self::local_sst_file_matches_manifest(&state.sst_dir.join(&file.name), file);
+        if retain {
+            state.salvaged_local_ssts.insert(file.name.clone());
+        } else {
+            state.salvaged_local_ssts.remove(&file.name);
+        }
+        tracing::warn!(
+            %error,
+            sst_name = %file.name,
+            retained_local_copy = retain,
+            "authoritative cloud SST metadata validation failed during salvage"
+        );
+        Ok(retain)
+    }
+
     pub(crate) fn ensure_named_sst_cache_from_cloud_storage(
         state: &mut RuntimeState,
         cloud: &crate::storage::cloud::CloudStorage,
         sst_proofs: impl IntoIterator<Item = CloudSstRecoveryProof>,
     ) -> MidgeResult<()> {
+        if state.recovery_sst_fs.is_some() {
+            // Intent replay verifies only the publication outputs it needs
+            // through immutable, checksummed ranges. It must not stage the
+            // complete output set on the ephemeral disk first.
+            return Ok(());
+        }
         let staging_fs = state.fs.clone();
 
         for proof in sst_proofs {
@@ -1540,21 +1661,6 @@ impl CloudStartupRecovery {
         }
 
         Ok(())
-    }
-
-    fn recover_manifest_sst_from_cloud(
-        state: &mut RuntimeState,
-        cloud: &crate::storage::cloud::CloudStorage,
-        staging_fs: &Arc<dyn crate::io::traits::Fs>,
-        file: &crate::metadata::FileMeta,
-    ) -> MidgeResult<bool> {
-        let cloud_key = crate::sst::object_key(&file.name);
-        let local_path = state.sst_dir.join(&file.name);
-        if Self::local_sst_file_matches_manifest(&local_path, file) {
-            Self::validate_authoritative_manifest_sst(state, cloud, &cloud_key, file)?;
-            return Ok(true);
-        }
-        Self::restore_manifest_sst_from_cloud(state, cloud, staging_fs, &cloud_key, file)
     }
 
     fn recover_named_sst_from_cloud(
@@ -1585,127 +1691,6 @@ impl CloudStartupRecovery {
             &sst_name,
             proof,
         )
-    }
-
-    fn validate_authoritative_manifest_sst(
-        state: &mut RuntimeState,
-        cloud: &crate::storage::cloud::CloudStorage,
-        cloud_key: &str,
-        file: &crate::metadata::FileMeta,
-    ) -> MidgeResult<()> {
-        match Self::blocking_cloud_object_proof_optional(cloud, cloud_key) {
-            Ok(Some(proof)) => {
-                if let Err(error) = Self::validate_sst_bytes_against_proof(
-                    &file.name,
-                    &proof.bytes,
-                    Some(file.size_bytes),
-                    file.content_crc32c,
-                ) {
-                    if state.recovery_policy() == RecoveryPolicy::Strict {
-                        return Err(error);
-                    }
-                    state.mark_opened_in_salvage_mode();
-                    state.mark_persistence_anomaly();
-                    tracing::warn!(
-                        %error,
-                        sst_name = %file.name,
-                        cloud_size = proof.metadata.size,
-                        manifest_size = file.size_bytes,
-                        "retaining locally valid manifest SST during salvage despite invalid cloud object"
-                    );
-                }
-            }
-            Ok(None) => {
-                if state.recovery_policy() == RecoveryPolicy::Strict {
-                    return Err(MidgeError::RecoveryFailed(format!(
-                        "authoritative cloud SST '{}' is missing",
-                        file.name
-                    )));
-                }
-                state.mark_opened_in_salvage_mode();
-                state.mark_persistence_anomaly();
-                tracing::warn!(
-                    sst_name = %file.name,
-                    "retaining locally valid manifest SST during salvage despite missing cloud object"
-                );
-            }
-            Err(error) if state.recovery_policy() == RecoveryPolicy::Salvage => {
-                state.mark_opened_in_salvage_mode();
-                state.mark_persistence_anomaly();
-                tracing::warn!(%error, sst_name = %file.name, "retaining locally valid manifest SST during salvage despite remote validation failure");
-            }
-            Err(error) => {
-                return Err(MidgeError::RecoveryFailed(format!(
-                    "failed to validate cloud SST '{}': {}",
-                    file.name, error
-                )));
-            }
-        }
-        Ok(())
-    }
-
-    fn restore_manifest_sst_from_cloud(
-        state: &mut RuntimeState,
-        cloud: &crate::storage::cloud::CloudStorage,
-        staging_fs: &Arc<dyn crate::io::traits::Fs>,
-        cloud_key: &str,
-        file: &crate::metadata::FileMeta,
-    ) -> MidgeResult<bool> {
-        let local_path = state.sst_dir.join(&file.name);
-        let proof = match Self::blocking_cloud_object_proof_optional(cloud, cloud_key) {
-            Ok(Some(proof)) => proof,
-            Ok(None) => return Self::drop_manifest_sst_in_salvage(state, &file.name),
-            Err(error) if state.recovery_policy() == RecoveryPolicy::Salvage => {
-                tracing::warn!(%error, sst_name = %file.name, "dropping manifest SST during salvage restore");
-                return Self::drop_manifest_sst_in_salvage(state, &file.name);
-            }
-            Err(error) => {
-                return Err(MidgeError::RecoveryFailed(format!(
-                    "failed to restore cloud SST '{}': {}",
-                    file.name, error
-                )));
-            }
-        };
-
-        if let Err(error) = Self::validate_sst_bytes_against_proof(
-            &file.name,
-            &proof.bytes,
-            Some(file.size_bytes),
-            file.content_crc32c,
-        ) {
-            if state.recovery_policy() == RecoveryPolicy::Strict {
-                return Err(error);
-            }
-            state.mark_opened_in_salvage_mode();
-            state.mark_persistence_anomaly();
-            return Ok(false);
-        }
-
-        Self::stage_sst_bytes(staging_fs, &file.name, &proof.bytes)?;
-        if let Err(error) = crate::sst::fs::SstFileIo::open_with_real_fs(&local_path) {
-            if state.recovery_policy() == RecoveryPolicy::Strict {
-                return Err(MidgeError::RecoveryFailed(format!(
-                    "restored cloud SST '{}' is invalid: {}",
-                    file.name, error
-                )));
-            }
-            state.mark_opened_in_salvage_mode();
-            state.mark_persistence_anomaly();
-            let _ = std::fs::remove_file(&local_path);
-            return Ok(false);
-        }
-        Ok(true)
-    }
-
-    fn drop_manifest_sst_in_salvage(state: &mut RuntimeState, sst_name: &str) -> MidgeResult<bool> {
-        if state.recovery_policy() == RecoveryPolicy::Strict {
-            return Err(MidgeError::RecoveryFailed(format!(
-                "authoritative cloud SST '{sst_name}' is missing"
-            )));
-        }
-        state.mark_opened_in_salvage_mode();
-        state.mark_persistence_anomaly();
-        Ok(false)
     }
 
     fn validate_named_sst_against_cloud(
@@ -1840,12 +1825,6 @@ impl CloudStartupRecovery {
         state: &RuntimeState,
     ) -> Vec<CloudSstRecoveryProof> {
         let mut proofs = std::collections::BTreeMap::<String, CloudSstRecoveryProof>::new();
-        for file in &state.manifest.files {
-            proofs
-                .entry(file.name.clone())
-                .and_modify(|proof| proof.merge_from(&CloudSstRecoveryProof::from_manifest(file)))
-                .or_insert_with(|| CloudSstRecoveryProof::from_manifest(file));
-        }
         for intent in &state.intent_log {
             match intent {
                 crate::runtime::IntentLogEntry::FlushPublish { file_meta, .. }
@@ -1869,6 +1848,16 @@ impl CloudStartupRecovery {
                     }
                 }
                 _ => {}
+            }
+        }
+        // Only interrupted publication outputs need full proof validation for
+        // intent replay. Merge manifest proof fields for those same files;
+        // unrelated immutable SSTs stay remote and are opened on demand.
+        for file in &state.manifest.files {
+            if let Some(proof) = proofs.get_mut(&file.name) {
+                let mut manifest_proof = CloudSstRecoveryProof::from_manifest(file);
+                manifest_proof.merge_from(proof);
+                *proof = manifest_proof;
             }
         }
         proofs.into_values().collect()

@@ -18,7 +18,9 @@
 mod common;
 #[cfg(feature = "failpoints")]
 use cntryl_midge::EngineHealth;
-use cntryl_midge::{Engine, MidgeError, OpenOptions, TransactionMode, WriteOptions};
+#[cfg(feature = "failpoints")]
+use cntryl_midge::MidgeError;
+use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
 use common::*;
 use std::sync::Arc;
 use std::thread;
@@ -49,12 +51,13 @@ fn count_files_recursive(root: &std::path::Path) -> usize {
 /// A value that defeats SST compression, so its on-disk footprint tracks its
 /// logical size closely enough to reliably cross a storage budget.
 fn incompressible_value(len: usize, seed: u8) -> Vec<u8> {
+    let mut random = 0x9e37_79b9_u32 ^ u32::from(seed);
     (0..len)
-        .map(|i| {
-            i.wrapping_mul(2_654_435_761)
-                .wrapping_add(usize::from(seed))
-                .wrapping_shr(13)
-                .to_le_bytes()[0]
+        .map(|_| {
+            random ^= random << 13;
+            random ^= random >> 17;
+            random ^= random << 5;
+            random.to_le_bytes()[0]
         })
         .collect()
 }
@@ -137,82 +140,63 @@ fn should_trigger_eviction_at_high_watermark() {
 }
 
 #[test]
-fn should_block_writes_at_emergency_watermark() {
+fn should_keep_writes_running_when_published_ssts_exceed_local_budget() {
     // Arrange
-    // Note: "local" storage mode has no hybrid/cloud tier at all, so it never
-    // exercises `StorageBudgetActor::reserve_for_flush_with_token`. This test
-    // needs the real hybrid storage path, so it opens a cloud-simulated
-    // engine directly with a tiny local storage budget instead of looping
-    // over `for_each_storage_mode`.
     let temp_dir = test_temp_dir();
-    let budget_bytes = 256 * 1024; // 256KB local budget
+    let budget_bytes = 1024 * 1024;
     let opts = OpenOptions::cloud_simulated(temp_dir.path(), "test-bucket", "test-prefix")
-        .with_simulated_cloud_local_storage_budget(budget_bytes)
+        .local_storage_budget(budget_bytes)
+        .background_compaction(false)
         .build()
         .expect("build options");
     let engine = Engine::open(opts).expect("open cloud-simulated engine");
     let cf = engine.create_column_family("test").expect("create cf");
 
-    // 100KB values against a 256KB budget: a handful of explicit flushes must
-    // exceed the emergency watermark (98% used). The memtable is left at its
-    // default (large) size and every write is flushed immediately, so any
-    // stall observed here comes from `StorageBudgetActor` (the hybrid local
-    // storage budget), not from ordinary memtable backpressure. Values must
-    // be incompressible or the SST compression policy shrinks them to
-    // nothing and the budget is never actually approached.
-    let mut backpressure_error: Option<MidgeError> = None;
-
     // Act
-    for attempt in 0_u8..40 {
-        let large_value = incompressible_value(100 * 1024, attempt);
+    for attempt in 0_u8..12 {
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin_tx");
-        let key = format!("emergency_key_{attempt:02}");
-
-        if let Err(err) = tx.put(key.as_bytes().to_vec(), large_value.clone(), None) {
-            backpressure_error = Some(err);
-            break;
-        }
-        if let Err(err) = tx.commit(WriteOptions::cloud_async()) {
-            backpressure_error = Some(err);
-            break;
-        }
-        if let Err(err) = engine.flush_cf(&cf) {
-            backpressure_error = Some(err);
-            break;
-        }
+        tx.put(
+            format!("budget-key-{attempt:02}").into_bytes(),
+            incompressible_value(100 * 1024, attempt),
+            None,
+        )
+        .expect("put");
+        tx.commit(WriteOptions::cloud_strict())
+            .expect("cloud commit");
+        engine
+            .flush_cf(&cf)
+            .expect("flush and release published local SST");
     }
 
-    // Assert: the emergency/critical watermark actually fired through the
-    // real hybrid storage backpressure mechanism, not some unrelated
-    // failure. `StorageBudgetActor::reserve_for_flush_with_token` (see
-    // `src/runtime/actors/flush.rs`) is the only place these exact message
-    // fragments are produced, so matching on them (rather than just the
-    // error variant) proves this specific code path fired.
-    let error = backpressure_error
-        .expect("expected the storage budget watermark to eventually reject a write or flush");
-    let message = error.to_string();
-    assert!(
-        matches!(error, MidgeError::NoSpace(_) | MidgeError::WriteStall(_))
-            && (message.contains("waiting for cloud upload capacity")
-                || message.contains("waiting for compaction capacity")
-                || message.contains("has no durable capacity")),
-        "backpressure fired but not through the hybrid storage budget actor: {error:?}"
-    );
-
-    // Cross-check against the hybrid budget's own usage accounting (not
-    // dependent on global telemetry being enabled): the local store must
-    // actually have been under real pressure (>= the high watermark) when
-    // this fired, not some unrelated error.
+    // Assert
     let metrics = engine.get_runtime_metrics().expect("runtime metrics");
-    assert!(
-        metrics.hybrid_usage_percent >= 90,
-        "backpressure error was raised but hybrid local storage usage ({}%) never reached the high watermark",
-        metrics.hybrid_usage_percent
-    );
-
-    eprintln!("âœ“ Emergency watermark blocked writes via {error:?}");
+    assert!(metrics.hybrid_total_committed_bytes <= budget_bytes);
+    assert_eq!(count_files_recursive(&temp_dir.path().join("sst")), 0);
+    let remote_bytes: u64 = std::fs::read_dir(temp_dir.path().join("cloud_store/sst"))
+        .expect("remote SST directory")
+        .map(|entry| {
+            entry
+                .expect("remote SST")
+                .metadata()
+                .expect("SST metadata")
+                .len()
+        })
+        .sum();
+    assert!(remote_bytes > budget_bytes);
+    let tx = engine
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+        .expect("read transaction");
+    for attempt in 0_u8..12 {
+        let expected = incompressible_value(100 * 1024, attempt);
+        assert_eq!(
+            tx.get(format!("budget-key-{attempt:02}").as_bytes())
+                .expect("read")
+                .as_deref(),
+            Some(expected.as_slice())
+        );
+    }
 }
 
 #[test]
@@ -277,13 +261,9 @@ fn should_resume_writes_given_cloud_upload_completes_when_emergency_watermark_is
 }
 
 #[test]
-fn should_prefer_local_reads_before_eviction() {
+fn should_read_published_cloud_ssts_without_local_replica() {
     // Arrange
-    // "local" storage mode has no cloud tier, so it cannot distinguish a
-    // local read from a cloud fallback. Use the real hybrid storage path
-    // with a budget generous enough that nothing is ever evicted, then prove
-    // the reads were local via the eviction-queue metric and the on-disk
-    // local cache, not just "get() returned something".
+    // A large working budget still does not require a permanent SST replica.
     let temp_dir = test_temp_dir();
     let budget_bytes = 64 * 1024 * 1024; // comfortably above the data written
     let opts = OpenOptions::cloud_simulated(temp_dir.path(), "test-bucket", "test-prefix")
@@ -306,57 +286,43 @@ fn should_prefer_local_reads_before_eviction() {
     tx.commit(WriteOptions::cloud_async()).expect("commit");
     engine.flush_cf(&cf).expect("flush");
 
-    // Act: Read from cached SST (should be local, not cloud)
+    // Act: Read published SST blocks through the cloud-backed reader.
     let tx = engine
         .begin_tx(cf.id(), TransactionMode::ReadOnly)
         .expect("begin_tx");
 
-    let mut local_hits = 0;
+    let mut readable = 0;
     for i in 0..50 {
         let key = format!("local_pref_key_{i:04}");
         if tx
             .get(key.as_bytes())
-            .expect("read locally cached key")
+            .expect("read published key")
             .is_some()
         {
-            local_hits += 1;
+            readable += 1;
         }
     }
 
     // Assert: every read succeeded...
     assert_eq!(
-        local_hits, 50,
+        readable, 50,
         "expected every key to be readable while comfortably under budget"
     );
 
-    // ...and, crucially, nothing was queued for eviction to cloud, so those
-    // reads are provably local rather than a cloud round-trip.
-    let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+    assert_eq!(count_files_recursive(&temp_dir.path().join("sst")), 0);
     assert_eq!(
-        metrics.hybrid_pending_evictions, 0,
-        "no eviction should have been queued while comfortably under budget"
+        count_files_recursive(&temp_dir.path().join("hybrid_local/sst")),
+        0
     );
-
-    let hybrid_local_dir = temp_dir.path().join("hybrid_local");
-    assert!(
-        count_files_recursive(&hybrid_local_dir) > 0,
-        "expected flushed SST data to remain on local disk in {}",
-        hybrid_local_dir.display()
-    );
-
-    eprintln!("âœ“ Local read preference confirmed; {local_hits} cache hits, 0 pending evictions");
+    assert!(count_files_recursive(&temp_dir.path().join("cloud_store/sst")) > 0);
 }
 
 #[test]
 fn should_fetch_from_cloud_after_local_eviction() {
     // Arrange
-    // "local" storage mode never uploads anything, so it cannot exercise a
-    // cloud fetch. Use a tiny local budget against the real hybrid storage
-    // path so eviction genuinely happens, then prove it via the simulated
-    // cloud bucket's on-disk contents and the pending-eviction metric before
-    // trusting `get()` to return the right values.
+    // Verify published SSTs remain readable after their local staging files are removed.
     let temp_dir = test_temp_dir();
-    let budget_bytes = 256 * 1024; // small budget forces eviction under load
+    let budget_bytes = 8 * 1024 * 1024; // Fits this transaction and its WAL/flush staging.
     let opts = OpenOptions::cloud_simulated(temp_dir.path(), "test-bucket", "test-prefix")
         .with_simulated_cloud_local_storage_budget(budget_bytes)
         .build()
@@ -364,7 +330,7 @@ fn should_fetch_from_cloud_after_local_eviction() {
     let engine = Engine::open(opts).expect("open cloud-simulated engine");
     let cf = engine.create_column_family("test").expect("create cf");
 
-    // Write large batch (20 * 64KB = 1.28MB, well over the 256KB budget)
+    // Write a batch which fits admission; successful publication evicts its SST.
     let value = vec![b'V'; 64 * 1024];
 
     let mut tx = engine
@@ -376,29 +342,11 @@ fn should_fetch_from_cloud_after_local_eviction() {
             .expect("put");
     }
     tx.commit(WriteOptions::cloud_async()).expect("commit");
-    engine.flush_cf(&cf).ok(); // may itself hit backpressure once over budget; that's fine
+    engine.flush_cf(&cf).expect("publish and evict SST");
 
-    // Act: Wait for the eviction/upload pipeline to actually drain to cloud.
-    let cloud_store_dir = temp_dir.path().join("cloud_store");
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        let metrics = engine.get_runtime_metrics().expect("runtime metrics");
-        if metrics.hybrid_pending_evictions == 0 && count_files_recursive(&cloud_store_dir) > 0 {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "eviction never drained to the simulated cloud store; pending_evictions={}",
-            metrics.hybrid_pending_evictions
-        );
-        thread::sleep(Duration::from_millis(50));
-    }
-
-    // Assert: the simulated cloud bucket actually received uploaded objects.
-    assert!(
-        count_files_recursive(&cloud_store_dir) > 0,
-        "expected evicted SSTs to be uploaded into the simulated cloud store"
-    );
+    // Act / Assert: publication has completed, and only the cloud copy remains.
+    assert!(count_files_recursive(&temp_dir.path().join("cloud_store/sst")) > 0);
+    assert_eq!(count_files_recursive(&temp_dir.path().join("sst")), 0);
 
     // Now read evicted data (must trigger a cloud fetch to succeed)
     let tx = engine
@@ -522,7 +470,7 @@ fn should_handle_cloud_unavailable_during_eviction() {
     // the simulated-cloud provider boundary directly so the outage remains
     // deterministic even when this test runs as root in the Docker image.
     let temp_dir = test_temp_dir();
-    let budget_bytes = 256 * 1024; // small budget forces eviction attempts
+    let budget_bytes = 8 * 1024 * 1024; // Admit the flush so this test reaches the failed provider.
     let opts = OpenOptions::cloud_simulated(temp_dir.path(), "test-bucket", "test-prefix")
         .with_simulated_cloud_local_storage_budget(budget_bytes)
         .build()

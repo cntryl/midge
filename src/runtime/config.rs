@@ -68,6 +68,9 @@ pub struct RuntimeConfig {
     pub hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
     pub hybrid_storage_events: Option<crossbeam::channel::Receiver<crate::storage::StorageEvent>>,
     pub cloud_metadata_storage: Option<Arc<crate::storage::cloud::CloudStorage>>,
+    /// Immutable SST reads, including compaction inputs, may be backed by
+    /// version-pinned cloud range requests instead of resident local files.
+    pub(crate) sst_read_fs: Option<Arc<dyn crate::io::Fs>>,
     /// Remote WAL segments replayed during startup and still eligible for
     /// manifest-covered cleanup.
     pub recovered_cloud_wal_segments: BTreeMap<u64, u64>,
@@ -119,6 +122,7 @@ impl Default for RuntimeConfig {
             hybrid_storage: None,
             hybrid_storage_events: None,
             cloud_metadata_storage: None,
+            sst_read_fs: None,
             recovered_cloud_wal_segments: BTreeMap::new(),
             recovered_cloud_wal_segment_epochs: BTreeMap::new(),
             recovered_local_wal_segments: BTreeMap::new(),

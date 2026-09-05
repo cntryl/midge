@@ -417,7 +417,15 @@ impl OpenOptions {
     }
 
     pub(crate) fn simulated_cloud_local_storage_budget_bytes(&self) -> Option<u64> {
-        self.cloud.simulated_local_budget_bytes
+        self.cloud.local_storage_budget_bytes
+    }
+
+    /// Maximum local working storage for cloud persistence, in bytes.
+    #[must_use]
+    pub fn local_storage_budget_bytes(&self) -> u64 {
+        self.cloud.local_storage_budget_bytes.unwrap_or_else(|| {
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default().max_local_bytes
+        })
     }
 
     pub(crate) fn lease_loss_hook(&self) -> Option<std::sync::Arc<dyn Fn() + Send + Sync>> {
@@ -620,12 +628,20 @@ impl OpenOptionsBuilder {
         self
     }
 
-    /// Override the simulated-cloud local storage budget.
+    /// Set the local working-storage budget for cloud persistence. Published
+    /// cloud SSTs do not need a permanent local copy.
+    #[must_use]
+    pub fn local_storage_budget(mut self, bytes: u64) -> Self {
+        self.cloud.local_storage_budget_bytes = Some(bytes);
+        self
+    }
+
+    /// Override the cloud local storage budget for compatibility with older
+    /// simulation tests. Prefer [`Self::local_storage_budget`].
     #[doc(hidden)]
     #[must_use]
-    pub fn with_simulated_cloud_local_storage_budget(mut self, bytes: u64) -> Self {
-        self.cloud.simulated_local_budget_bytes = Some(bytes);
-        self
+    pub fn with_simulated_cloud_local_storage_budget(self, bytes: u64) -> Self {
+        self.local_storage_budget(bytes)
     }
 
     /// Build immutable options and derive every dependent value once.
@@ -638,6 +654,11 @@ impl OpenOptionsBuilder {
     /// providers' millisecond-granularity deadlines, and the enclosing runtime
     /// response timeout must be greater than the storage I/O timeout.
     pub fn build(self) -> MidgeResult<OpenOptions> {
+        if self.cloud.local_storage_budget_bytes == Some(0) {
+            return Err(MidgeError::InvalidArgument(
+                "local storage budget must be greater than zero".to_string(),
+            ));
+        }
         if let Storage::Cloud { topology, .. } = &self.storage {
             let report = topology.validate();
             if !report.is_valid {

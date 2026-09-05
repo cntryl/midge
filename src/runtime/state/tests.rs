@@ -1,8 +1,121 @@
 use super::*;
 use std::path::PathBuf;
 
+struct RecoveryRangeBudgetBackend {
+    inner: Arc<crate::storage::cloud::MockCloudBackend>,
+    ranges: std::sync::atomic::AtomicUsize,
+    max_range_bytes: std::sync::atomic::AtomicU64,
+}
+
+impl crate::storage::cloud::CloudBackend for RecoveryRangeBudgetBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_with_metadata, submit_put, submit_get, submit_delete, submit_list, submit_head);
+
+    fn submit_get_range(
+        &self,
+        key: &str,
+        start: u64,
+        end: Option<u64>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        self.inner.submit_get_range(key, start, end, callback);
+    }
+
+    fn submit_get_range_with_identity(
+        &self,
+        key: &str,
+        start: u64,
+        end: u64,
+        expected: crate::storage::StorageObjectMetadata,
+        timeout: std::time::Duration,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        self.ranges
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.max_range_bytes
+            .fetch_max(end - start, std::sync::atomic::Ordering::Relaxed);
+        self.inner
+            .submit_get_range_with_identity(key, start, end, expected, timeout, callback);
+    }
+}
+
 fn isolated_test_db_path() -> PathBuf {
     tempfile::tempdir().expect("temp dir").keep()
+}
+
+#[test]
+#[cfg(feature = "failpoints")]
+fn should_count_retained_recovery_files_when_startup_cleanup_fails() -> MidgeResult<()> {
+    // Arrange
+    let _test_guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    let dir = tempfile::tempdir()?;
+    let mut state = RuntimeState::new(dir.path().to_path_buf(), false);
+    let retained = dir.path().join("cloud_recovery/wal/retained.wal");
+    std::fs::create_dir_all(retained.parent().expect("WAL staging directory"))?;
+    std::fs::write(&retained, [0x5A; 257])?;
+    fail::cfg(
+        "midge::recovery::inject_root_staging_delete_failure",
+        "return",
+    )
+    .expect("configure cleanup failure");
+
+    // Act
+    state.cleanup_storage_residue();
+    let bytes = state.retained_startup_scratch_bytes()?;
+    fail::remove("midge::recovery::inject_root_staging_delete_failure");
+    scenario.teardown();
+
+    // Assert
+    assert!(retained.exists());
+    assert!(state.persistence_anomaly_detected());
+    assert_eq!(bytes, 257);
+    Ok(())
+}
+
+#[test]
+fn should_count_startup_scratch_residue_without_counting_sst_or_wal_staging_twice(
+) -> MidgeResult<()> {
+    // Arrange
+    let dir = tempfile::tempdir()?;
+    let state = RuntimeState::new(dir.path().to_path_buf(), false);
+    for (path, bytes) in [
+        ("txn/one.run", 17),
+        ("txn/one.ranges", 23),
+        ("cloud_recovery/wal/recovered.wal", 19),
+        ("manifest.tmp", 11),
+        ("sst/.flush-staging/output.sst", 200),
+        ("wal/current.wal", 100),
+        ("cloud_store/sst/remote.sst", 400),
+    ] {
+        let path = dir.path().join(path);
+        std::fs::create_dir_all(path.parent().expect("file directory"))?;
+        std::fs::write(path, vec![0x5A; bytes])?;
+    }
+
+    // Act
+    let bytes = state.retained_startup_scratch_bytes()?;
+
+    // Assert
+    assert_eq!(bytes, 70);
+    Ok(())
+}
+
+#[test]
+fn should_recover_compaction_generation_from_reserved_sst_namespace_without_published_outputs() {
+    // Arrange
+    let mut manifest = crate::metadata::Manifest::default();
+    manifest.next_sst_seqs.insert(0, 73);
+    manifest.next_sst_seqs.insert(1, 91);
+
+    // Act
+    let generation = RuntimeState::manifest_compaction_output_generation_floor(&manifest);
+
+    // Assert
+    assert!(manifest.files.is_empty());
+    assert_eq!(
+        generation, 91,
+        "recovery must not reuse names uploaded before manifest publication"
+    );
 }
 
 fn write_valid_sst_for_recovery_test(
@@ -50,6 +163,128 @@ fn manifest_meta_for_recovery_test(file: &crate::runtime::FileMeta) -> crate::me
         largest_seq: file.largest_seq,
         ..Default::default()
     }
+}
+
+#[test]
+fn should_replay_published_compaction_from_remote_ssts_without_local_staging() {
+    // Arrange
+    let local_dir = tempfile::tempdir().expect("local recovery directory");
+    let remote_dir = tempfile::tempdir().expect("remote recovery directory");
+    let mut state = RuntimeState::new(local_dir.path().to_path_buf(), false);
+    let remote_state = RuntimeState::new(remote_dir.path().to_path_buf(), false);
+    let input_name = crate::sst::file_name(0, 0, 1);
+    let input = write_valid_sst_for_recovery_test(&remote_state, &input_name, 0, b"a", 1);
+    let output_name = crate::sst::file_name(0, 1, 2);
+    let output = write_valid_sst_for_recovery_test(&remote_state, &output_name, 1, b"a", 1);
+    state
+        .manifest
+        .files
+        .push(manifest_meta_for_recovery_test(&input));
+    state
+        .intent_log
+        .push(crate::runtime::IntentLogEntry::CompactionPublish {
+            phase: PublicationPhase::ManifestPublished,
+            cf_id: 0,
+            removed: vec![input_name.clone()],
+            added: vec![output],
+        });
+    let remote = Arc::new(
+        crate::storage::filesystem::FileSystem::new(remote_dir.path())
+            .expect("remote object storage"),
+    );
+    state.recovery_sst_fs = Some(Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
+        Arc::clone(&state.fs),
+        remote,
+        std::time::Duration::from_secs(5),
+    )));
+
+    // Act
+    state
+        .replay_intent_log()
+        .expect("replay remote publication");
+
+    // Assert
+    assert!(!state.manifest_has_file(&input_name));
+    assert!(state.manifest_has_file(&output_name));
+    assert!(state.intent_log.is_empty());
+    assert!(!state.sst_dir.join(&output_name).exists());
+    assert!(remote_state.sst_dir.join(&input_name).exists());
+    assert!(remote_state.sst_dir.join(&output_name).exists());
+}
+
+#[test]
+fn should_reject_corrupt_remote_publication_with_bounded_checksum_ranges() {
+    // Arrange
+    let local_dir = tempfile::tempdir().expect("local recovery directory");
+    let mut state = RuntimeState::new(local_dir.path().to_path_buf(), false);
+    let backend = Arc::new(RecoveryRangeBudgetBackend {
+        inner: Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+        ranges: std::sync::atomic::AtomicUsize::new(0),
+        max_range_bytes: std::sync::atomic::AtomicU64::new(0),
+    });
+    let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
+        backend.clone(),
+        "midge".into(),
+    ));
+    let name = crate::sst::file_name(0, 0, 7);
+    let corrupt_bytes = vec![0x5A; 3 * 1024 * 1024 + 19];
+    let file_meta = crate::runtime::FileMeta {
+        name: name.clone(),
+        level: 0,
+        size_bytes: corrupt_bytes.len() as u64,
+        content_crc32c: Some(crc32c::crc32c(&corrupt_bytes) ^ 1),
+        cf_id: 0,
+        smallest_key: None,
+        largest_key: None,
+        smallest_seq: Some(7),
+        largest_seq: Some(7),
+        key_bounds_complete: false,
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    cloud.submit_put(
+        &crate::sst::object_key(&name),
+        corrupt_bytes,
+        Vec::new(),
+        tx,
+    );
+    assert!(matches!(
+        rx.recv().expect("upload"),
+        crate::storage::cloud::CloudEvent::Put {
+            result: crate::storage::cloud::CloudOutcome::Ok(()),
+            ..
+        }
+    ));
+    state
+        .intent_log
+        .push(crate::runtime::IntentLogEntry::SstAdded { file_meta });
+    state.recovery_sst_fs = Some(Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
+        Arc::clone(&state.fs),
+        cloud,
+        std::time::Duration::from_secs(5),
+    )));
+    backend.inner.clear_history();
+
+    // Act
+    let error = state
+        .replay_intent_log()
+        .expect_err("reject publication checksum mismatch");
+
+    // Assert
+    assert!(error.to_string().contains("checksum"), "{error}");
+    assert!(
+        backend.inner.get_downloads().is_empty(),
+        "no whole-object GET is allowed"
+    );
+    assert_eq!(backend.ranges.load(std::sync::atomic::Ordering::Relaxed), 4);
+    assert!(
+        backend
+            .max_range_bytes
+            .load(std::sync::atomic::Ordering::Relaxed)
+            <= 1024 * 1024
+    );
+    assert!(!state.manifest_has_file(&name));
+    assert_eq!(state.intent_log.len(), 1);
+    assert!(!state.sst_dir.join(name).exists());
 }
 
 #[test]

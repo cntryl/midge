@@ -229,12 +229,20 @@ impl EventLoop {
             .state
             .wal_dir
             .join(crate::wal::segment_file_name(segment_id));
+        let local_bytes = std::fs::metadata(&local_path)
+            .ok()
+            .map(|metadata| metadata.len());
         match std::fs::remove_file(&local_path) {
-            Ok(()) => tracing::debug!(
+            Ok(()) => {
+                if let (Some(storage), Some(bytes)) = (&self.hybrid_storage, local_bytes) {
+                    storage.release_local_wal_bytes(bytes);
+                }
+                tracing::debug!(
                 segment_id,
                 path = %local_path.display(),
                 "Removed cloud-durable local WAL segment"
-            ),
+                );
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
                 self.state.mark_persistence_anomaly();

@@ -11,6 +11,91 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+#[test]
+fn should_prune_wal_without_fetching_unrelated_ssts_when_local_cache_is_ephemeral() {
+    // Arrange
+    let (cloud, storage) = hybrid_with_mock_cloud();
+    storage.enable_ephemeral_sst_cache(1024 * 1024);
+    let sequence = 31;
+    write_authoritative_cloud_wal(&storage, 1, sequence, valid_wal_bytes(sequence));
+    let name = "relevant.sst";
+    let bytes = valid_sst_bytes(b"k", b"v", sequence);
+    let mut manifest = manifest_covering_wal(name, &bytes, sequence, Some(crc32c::crc32c(&bytes)));
+    write_cloud_object(&storage, &crate::sst::object_key(name), bytes);
+    manifest.files.push(crate::metadata::FileMeta {
+        name: "unrelated.sst".into(),
+        cf_id: 0,
+        smallest_key: Some(b"z".to_vec()),
+        largest_key: Some(b"zz".to_vec()),
+        key_bounds_complete: true,
+        ..Default::default()
+    });
+    cloud.clear_history();
+
+    // Act
+    storage
+        .prune_cloud_wal_segment(1, sequence, CloudWalPruneGuard::new(manifest, None), 2)
+        .expect("exactly covered WAL retirement");
+
+    // Assert
+    assert!(wait_for_wal_prune_result(&storage, 1).is_ok());
+    assert!(
+        !cloud.get_downloads().iter().any(|key| key.contains("sst/")),
+        "WAL cleanup must use bounded ranges, not whole SST downloads"
+    );
+}
+
+#[test]
+fn should_publish_sst_without_duplicate_local_copy_when_ephemeral_cache_is_enabled() {
+    // Arrange
+    let (_cloud, storage) = hybrid_with_mock_cloud();
+    storage.enable_ephemeral_sst_cache(20 * 1024 * 1024 * 1024);
+    let name = "ephemeral.sst";
+    let key = crate::sst::object_key(name);
+    let bytes = valid_sst_bytes(b"key", b"value", 1);
+
+    // Act
+    storage
+        .write_sst_object(name, bytes.clone())
+        .expect("remote publication");
+
+    // Assert
+    assert_eq!(read_cloud_object(&storage, &key), bytes);
+    let exists = HybridStorage::object_exists_in_backend_within(
+        &storage.local,
+        &key,
+        storage.callback_timeout,
+        &crate::common::OperationDeadline::unbounded(),
+    )
+    .expect("local cache existence check");
+    assert!(
+        !exists,
+        "remote publication must not duplicate the runtime SST staging file"
+    );
+}
+
+#[test]
+fn should_preserve_remote_sst_when_evicting_legacy_local_cache() {
+    // Arrange
+    let (_cloud, storage) = hybrid_with_mock_cloud();
+    let name = "legacy-local.sst";
+    let key = crate::sst::object_key(name);
+    let bytes = valid_sst_bytes(b"key", b"value", 1);
+    storage
+        .write_sst_object(name, bytes.clone())
+        .expect("publish both copies");
+    storage.enable_ephemeral_sst_cache(20 * 1024 * 1024 * 1024);
+
+    // Act
+    storage
+        .evict_local_object_cache(&key)
+        .expect("local cache eviction");
+
+    // Assert
+    assert_eq!(read_cloud_object(&storage, &key), bytes);
+    assert_eq!(read_hybrid_object(&storage, &key), bytes);
+}
+
 #[cfg(feature = "cloud-all")]
 #[derive(Clone, Copy)]
 enum ProviderErrorShape {
@@ -962,7 +1047,7 @@ impl CloudBackend for WinningInitialCatalogCasBackend {
         self.inner.submit_put(key, data, headers, callback);
     }
 
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_delete, submit_list, submit_head);
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity, submit_delete, submit_list, submit_head);
 }
 
 impl PausingCatalogCasBackend {
@@ -1012,7 +1097,7 @@ impl CloudBackend for PausingCatalogCasBackend {
         self.inner.submit_put(key, data, headers, callback);
     }
 
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_delete, submit_list, submit_head);
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity, submit_delete, submit_list, submit_head);
 }
 
 #[test]
@@ -2260,8 +2345,20 @@ fn should_not_prune_remote_wal_when_manifest_sst_disappears_after_initial_valida
 
 #[test]
 fn should_not_prune_remote_wal_given_manifest_validation_failure_when_gc_runs() {
+    assert_wal_prune_rejects_manifest_crc_mismatch(false);
+}
+
+#[test]
+fn should_keep_crc_proof_before_wal_retirement_when_reading_remote_sst_ranges() {
+    assert_wal_prune_rejects_manifest_crc_mismatch(true);
+}
+
+fn assert_wal_prune_rejects_manifest_crc_mismatch(ephemeral: bool) {
     // Arrange
     let (_mock_cloud, storage) = hybrid_with_mock_cloud();
+    if ephemeral {
+        storage.enable_ephemeral_sst_cache(1024 * 1024);
+    }
     let segment_id = 16;
     let max_sequence = 26;
     let wal_key = write_authoritative_cloud_wal(
@@ -3112,7 +3209,7 @@ fn should_not_submit_conditional_delete_given_expired_deadline() {
     let expired = crate::common::OperationDeadline::from_budget(Duration::ZERO);
 
     // Act
-    let result = storage.delete_remote_object_guarded_blocking_within(target, &expired);
+    let result = storage.delete_remote_object_guarded_blocking_within(&target, &expired);
 
     // Assert
     let error = result.expect_err("an exhausted budget must not submit a conditional delete");

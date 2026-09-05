@@ -63,6 +63,8 @@ impl Runtime {
             snapshot_cache,
             snapshot_pins,
             diagnostics: Arc::clone(&diagnostics),
+            storage_budget: None,
+            sst_read_fs: None,
             lifecycle: Arc::clone(&lifecycle),
             runtime_response_timeout,
         };
@@ -110,6 +112,8 @@ impl Runtime {
             snapshot_cache: snapshot_cache.clone(),
             snapshot_pins,
             diagnostics: Arc::clone(&self.diagnostics),
+            storage_budget: config.hybrid_storage.clone(),
+            sst_read_fs: config.sst_read_fs.clone(),
             lifecycle,
             runtime_response_timeout,
         };

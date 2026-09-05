@@ -1,6 +1,76 @@
 use super::*;
 
 #[test]
+fn should_reject_spill_before_creating_files_when_shared_disk_budget_is_exhausted(
+) -> MidgeResult<()> {
+    // Arrange
+    let dir = tempfile::tempdir()?;
+    let setup = crate::storage::test_support::build_cloud_backed_filesystem_simulation(
+        dir.path(),
+        Some(128),
+    )?;
+    setup.hybrid_storage.enable_ephemeral_sst_cache(128);
+    let mut writes = TransactionWriteSet::new(
+        Arc::new(TransactionMemoryPool::new(0)),
+        dir.path(),
+        false,
+        1,
+    )
+    .with_storage_budget(Some(Arc::clone(&setup.hybrid_storage)));
+
+    // Act
+    let result = writes.push(put(b"key", &[0x5A; 256]));
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::NoSpace(_))), "{result:?}");
+    assert!(writes.is_empty());
+    assert!(!dir.path().join("txn").exists());
+    assert_eq!(
+        setup.hybrid_storage.budget_snapshot().total_committed_bytes,
+        0
+    );
+    Ok(())
+}
+
+#[test]
+fn should_hold_spill_disk_charge_through_commit_source_until_files_are_removed() -> MidgeResult<()>
+{
+    // Arrange
+    let dir = tempfile::tempdir()?;
+    let setup = crate::storage::test_support::build_cloud_backed_filesystem_simulation(
+        dir.path(),
+        Some(4096),
+    )?;
+    setup.hybrid_storage.enable_ephemeral_sst_cache(4096);
+    let storage = &setup.hybrid_storage;
+    let mut writes = TransactionWriteSet::new(
+        Arc::new(TransactionMemoryPool::new(0)),
+        dir.path(),
+        false,
+        1,
+    )
+    .with_storage_budget(Some(Arc::clone(storage)));
+    writes.push(put(b"key", &[0x5A; 256]))?;
+    let charged = storage.budget_snapshot().total_committed_bytes;
+
+    // Act
+    let source = writes.take_source();
+    drop(writes);
+    let wal_admission = storage.admit_local_wal_bytes(4097 - charged);
+
+    // Assert
+    assert!(charged > 0);
+    assert_eq!(storage.budget_snapshot().total_committed_bytes, charged);
+    assert!(matches!(wal_admission, Err(MidgeError::NoSpace(_))));
+    assert_eq!(fs::read_dir(dir.path().join("txn"))?.count(), 2);
+    drop(source);
+    assert_eq!(fs::read_dir(dir.path().join("txn"))?.count(), 0);
+    assert_eq!(storage.budget_snapshot().total_committed_bytes, 0);
+    storage.admit_local_wal_bytes(4096)?;
+    Ok(())
+}
+
+#[test]
 fn should_reject_oversized_range_before_staging_or_spilling() -> MidgeResult<()> {
     // Arrange
     let dir = tempfile::tempdir()?;
@@ -28,6 +98,77 @@ fn should_reject_oversized_range_before_staging_or_spilling() -> MidgeResult<()>
             matches!(writes.latest_for_key(b"safe")?, Some(IntentLookup::Present(value)) if value.as_ref() == b"value")
         );
     }
+    Ok(())
+}
+
+#[test]
+fn should_cover_range_tree_endpoint_duplication_with_spill_disk_reservation() -> MidgeResult<()> {
+    // Arrange
+    let dir = tempfile::tempdir()?;
+    let setup = crate::storage::test_support::build_cloud_backed_filesystem_simulation(
+        dir.path(),
+        Some(1024 * 1024),
+    )?;
+    setup.hybrid_storage.enable_ephemeral_sst_cache(1024 * 1024);
+    let budget = SpillDiskBudget(Arc::clone(&setup.hybrid_storage));
+    let mut ops = (0_u64..64)
+        .map(|ordinal| OrdinalOp {
+            ordinal,
+            op: delete_range(
+                format!("a{ordinal:02}").as_bytes(),
+                if ordinal == 63 { &[b'z'; 4096] } else { b"m" },
+            ),
+        })
+        .collect::<Vec<_>>();
+
+    // Act
+    let run = write_run_with_budget(&dir.path().join("txn"), 1, 0, &mut ops, Some(&budget))?;
+    let bytes = fs::metadata(&run.path)?.len() + fs::metadata(&run.range_path)?.len();
+
+    // Assert
+    assert!(setup.hybrid_storage.budget_snapshot().total_committed_bytes >= bytes);
+    drop(run);
+    assert_eq!(
+        setup.hybrid_storage.budget_snapshot().total_committed_bytes,
+        0
+    );
+    Ok(())
+}
+
+#[test]
+fn should_retain_spill_disk_charge_when_run_cleanup_fails() -> MidgeResult<()> {
+    // Arrange
+    let dir = tempfile::tempdir()?;
+    let setup = crate::storage::test_support::build_cloud_backed_filesystem_simulation(
+        dir.path(),
+        Some(4096),
+    )?;
+    setup.hybrid_storage.enable_ephemeral_sst_cache(4096);
+    let mut writes = TransactionWriteSet::new(
+        Arc::new(TransactionMemoryPool::new(0)),
+        dir.path(),
+        false,
+        1,
+    )
+    .with_storage_budget(Some(Arc::clone(&setup.hybrid_storage)));
+    writes.push(put(b"key", b"value"))?;
+    let run_path = writes.runs[0].path.clone();
+    let charged = setup.hybrid_storage.budget_snapshot().total_committed_bytes;
+    fs::remove_file(&run_path)?;
+    fs::create_dir(&run_path)?;
+
+    // Act
+    drop(writes);
+
+    // Assert
+    assert!(
+        run_path.is_dir(),
+        "failed cleanup residue remains accounted for"
+    );
+    assert_eq!(
+        setup.hybrid_storage.budget_snapshot().total_committed_bytes,
+        charged
+    );
     Ok(())
 }
 

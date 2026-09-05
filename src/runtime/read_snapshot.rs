@@ -1174,10 +1174,11 @@ mod tests {
             let mut writer = factory.create()?;
             writer.add_with_meta(&key, Some(key.as_slice()), index + 1, 0, None)?;
             crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join(&name))?;
+            let size_bytes = std::fs::metadata(temp_dir.path().join(&name))?.len();
             files.push(FileMeta {
                 name,
                 level: 1,
-                size_bytes: 1,
+                size_bytes,
                 cf_id: 0,
                 sst_seq: index + 1,
                 smallest_key: Some(key.to_vec()),

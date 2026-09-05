@@ -103,11 +103,20 @@ impl StorageVerifier {
 }
 
 fn checksummed_file_crc(file: &dyn crate::io::File, file_len: u64) -> MidgeResult<u32> {
+    checksummed_file_crc_with_deadline(file, file_len, None)
+}
+
+fn checksummed_file_crc_with_deadline(
+    file: &dyn crate::io::File,
+    file_len: u64,
+    deadline: Option<&crate::common::OperationDeadline>,
+) -> MidgeResult<u32> {
     const VERIFY_CHUNK_BYTES: u64 = 1024 * 1024;
 
     let mut crc = 0u32;
     let mut offset = 0u64;
     while offset < file_len {
+        ensure_verification_deadline(deadline)?;
         let chunk_len = VERIFY_CHUNK_BYTES.min(file_len - offset);
         let chunk = file.read_at(offset, chunk_len)?;
         if u64::try_from(chunk.len()).unwrap_or(u64::MAX) != chunk_len {
@@ -125,13 +134,21 @@ fn checksummed_file_crc(file: &dyn crate::io::File, file_len: u64) -> MidgeResul
 fn verify_manifest_sst(
     fs: &Arc<dyn Fs>,
     file_meta: &crate::metadata::FileMeta,
+    deadline: Option<&crate::common::OperationDeadline>,
 ) -> MidgeResult<(u64, u64)> {
+    ensure_verification_deadline(deadline)?;
     let name = crate::sst::PersistedSstName::parse(&file_meta.name)?;
     let relative = name.join_under(Path::new("sst"));
     let path = relative.to_str().ok_or_else(|| {
         MidgeError::Corruption("persisted SST path is not valid UTF-8".to_string())
     })?;
     let fs_path = FsPath::new(path);
+    // The content checksum and block decoder must observe the same immutable
+    // object version even when they open separate range handles.
+    let pinned = fs
+        .immutable_read_view(&fs_path)?
+        .unwrap_or_else(|| Arc::clone(fs));
+    let fs = &pinned;
     let actual_len = fs.metadata(&fs_path)?.len;
     if actual_len != file_meta.size_bytes {
         return Err(MidgeError::Corruption(format!(
@@ -156,7 +173,11 @@ fn verify_manifest_sst(
             name.as_str()
         ))
     })?;
-    let actual_crc = checksummed_file_crc(file.as_ref(), actual_len)?;
+    let actual_crc = if deadline.is_some() {
+        checksummed_file_crc_with_deadline(file.as_ref(), actual_len, deadline)?
+    } else {
+        checksummed_file_crc(file.as_ref(), actual_len)?
+    };
     if actual_crc != expected_crc {
         return Err(MidgeError::Corruption(format!(
             "SST '{}' content CRC mismatch: manifest={expected_crc:08x}, actual={actual_crc:08x}",
@@ -170,13 +191,32 @@ fn verify_manifest_sst(
             name.as_str()
         ))
     })?;
-    let stats = reader.verify_all_blocks().map_err(|error| {
+    let verification = if deadline.is_some() {
+        reader.verify_all_blocks_until(deadline)
+    } else {
+        reader.verify_all_blocks()
+    };
+    let stats = verification.map_err(|error| {
+        if matches!(error, MidgeError::Timeout(_)) {
+            return error;
+        }
         MidgeError::Corruption(format!(
             "failed to verify every block in SST '{}': {error}",
             name.as_str()
         ))
     })?;
     Ok((stats.size_bytes, stats.data_blocks))
+}
+
+fn ensure_verification_deadline(
+    deadline: Option<&crate::common::OperationDeadline>,
+) -> MidgeResult<()> {
+    if deadline.is_some_and(crate::common::OperationDeadline::is_expired) {
+        return Err(MidgeError::Timeout(
+            "storage verification deadline expired".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn verification_stage_error(context: &str, error: MidgeError) -> MidgeError {
@@ -194,6 +234,15 @@ pub(super) fn verify_storage_path(
     db_path: &Path,
     runtime_health: Option<EngineHealth>,
 ) -> MidgeResult<StorageVerificationReport> {
+    verify_storage_path_with_sst_fs(db_path, runtime_health, None, None)
+}
+
+fn verify_storage_path_with_sst_fs(
+    db_path: &Path,
+    runtime_health: Option<EngineHealth>,
+    sst_fs: Option<&Arc<dyn Fs>>,
+    deadline: Option<&crate::common::OperationDeadline>,
+) -> MidgeResult<StorageVerificationReport> {
     crate::metadata::validate_format_marker(db_path)?;
 
     let fs: Arc<dyn Fs> =
@@ -208,7 +257,8 @@ pub(super) fn verify_storage_path(
     let mut sst_bytes_verified = 0u64;
     let mut data_blocks_verified = 0u64;
     for file_meta in &manifest.files {
-        let (sst_bytes, data_blocks) = verify_manifest_sst(&fs, file_meta)?;
+        let (sst_bytes, data_blocks) =
+            verify_manifest_sst(sst_fs.unwrap_or(&fs), file_meta, deadline)?;
         sst_bytes_verified = sst_bytes_verified.saturating_add(sst_bytes);
         data_blocks_verified = data_blocks_verified.saturating_add(data_blocks);
     }
@@ -372,6 +422,7 @@ pub(super) fn verify_storage_online(
     timeout: Duration,
 ) -> MidgeResult<StorageVerificationReport> {
     let started = Instant::now();
+    let sst_fs = runtime_handle.sst_read_fs.clone();
     let mut barrier = VerificationBarrierGuard::acquire(runtime_handle, timeout)?;
     let remaining = timeout.saturating_sub(started.elapsed());
     if remaining.is_zero() {
@@ -382,11 +433,17 @@ pub(super) fn verify_storage_online(
     }
 
     let (result_tx, result_rx) = crossbeam::channel::bounded(1);
+    let deadline = crate::common::OperationDeadline::from_budget(remaining);
     let worker = std::thread::Builder::new()
         .name("midge-storage-verification".to_string())
         .spawn(move || {
             crate::failpoints::fail_point!("midge::verification::after_barrier_acquired");
-            let mut result = verify_storage_path(&db_path, Some(runtime_health));
+            let mut result = verify_storage_path_with_sst_fs(
+                &db_path,
+                Some(runtime_health),
+                sst_fs.as_ref(),
+                Some(&deadline),
+            );
             if let Ok(report) = &mut result {
                 if cloud_mode {
                     report.authoritative = false;
@@ -583,6 +640,37 @@ mod tests {
         assert!(report.data_blocks_verified > 0);
         assert_eq!(report.wal_boundary, None);
         assert!(report.authoritative);
+    }
+
+    #[test]
+    fn should_verify_remote_sst_when_authoritative_file_is_absent_from_local_cache() {
+        // Arrange
+        let fixture = create_verification_fixture();
+        let remote = tempfile::tempdir().expect("remote store");
+        std::fs::create_dir_all(remote.path().join("sst")).expect("remote SST directory");
+        std::fs::rename(
+            &fixture.sst_path,
+            remote
+                .path()
+                .join("sst")
+                .join(fixture.sst_path.file_name().unwrap()),
+        )
+        .expect("move SST into cloud");
+        let local: Arc<dyn crate::io::Fs> =
+            Arc::new(crate::io::RealFs::open_existing(&fixture.db_path).unwrap());
+        let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
+            local,
+            Arc::new(crate::storage::filesystem::FileSystem::new(remote.path()).unwrap()),
+            std::time::Duration::from_secs(5),
+        ));
+        // Act
+        let report =
+            super::verify_storage_path_with_sst_fs(&fixture.db_path, None, Some(&fs), None)
+                .expect("verify cloud SST");
+        // Assert
+        assert_eq!(report.sst_files_verified, 1);
+        assert!(report.data_blocks_verified > 0);
+        assert!(!fixture.sst_path.exists());
     }
 
     #[test]

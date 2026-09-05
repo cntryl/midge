@@ -1,5 +1,32 @@
 use super::*;
 
+#[test]
+fn should_preserve_configured_cloud_local_storage_budget() {
+    // Arrange
+    let bytes = 20 * 1024 * 1024 * 1024;
+
+    // Act
+    let options = OpenOptions::in_memory()
+        .local_storage_budget(bytes)
+        .build()
+        .expect("options");
+
+    // Assert
+    assert_eq!(options.local_storage_budget_bytes(), bytes);
+}
+
+#[test]
+fn should_reject_zero_local_storage_budget() {
+    // Arrange
+    let builder = OpenOptions::in_memory().local_storage_budget(0);
+
+    // Act
+    let result = builder.build();
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::InvalidArgument(_))));
+}
+
 // ========== Goal Enum Tests ==========
 
 #[test]

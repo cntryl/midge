@@ -51,6 +51,9 @@ pub struct StorageBudgetActor {
     compaction_reservations: HashMap<StorageReservationToken, CompactionReservation>,
     /// Next opaque reservation identity.
     next_reservation_id: u64,
+    /// Cloud inputs can be absent locally; only confirmed local deletion
+    /// releases their resident bytes in ephemeral mode.
+    ephemeral_sst_cache: bool,
     /// Last reported watermark state
     last_watermark_state: WatermarkState,
 }
@@ -72,6 +75,7 @@ impl StorageBudgetActor {
             flush_reservations: HashMap::new(),
             compaction_reservations: HashMap::new(),
             next_reservation_id: 1,
+            ephemeral_sst_cache: false,
             last_watermark_state: WatermarkState::Normal,
         }
     }
@@ -80,6 +84,78 @@ impl StorageBudgetActor {
         let token = StorageReservationToken(self.next_reservation_id);
         self.next_reservation_id = self.next_reservation_id.wrapping_add(1).max(1);
         token
+    }
+
+    pub fn enable_ephemeral_sst_cache(&mut self, max_local_bytes: u64) {
+        self.policy.max_local_bytes = max_local_bytes;
+        self.ephemeral_sst_cache = true;
+        self.check_watermarks();
+    }
+
+    pub fn reconcile_local_disk_usage(&mut self, sst_bytes: u64, wal_bytes: u64) {
+        self.disk_state.sst_bytes = sst_bytes;
+        self.disk_state.wal_bytes = wal_bytes;
+        self.check_watermarks();
+    }
+
+    pub fn release_local_sst_bytes(&mut self, bytes: u64) {
+        self.disk_state.sst_bytes = self.disk_state.sst_bytes.saturating_sub(bytes);
+        self.check_watermarks();
+    }
+
+    pub(crate) fn reconcile_startup_scratch_residue(
+        &mut self,
+        bytes: u64,
+    ) -> Result<(), ReservationResult> {
+        if !self.ephemeral_sst_cache {
+            return Ok(());
+        }
+        self.disk_state.startup_residue_bytes = bytes;
+        self.check_watermarks();
+        if self.disk_state.total_committed() > self.policy.max_local_bytes {
+            return Err(ReservationResult::RejectNoSpace);
+        }
+        Ok(())
+    }
+
+    /// Reserve caller-owned transaction spill files before creating them.
+    pub(crate) fn admit_local_scratch_bytes(
+        &mut self,
+        bytes: u64,
+    ) -> Result<(), ReservationResult> {
+        if !self.ephemeral_sst_cache {
+            return Ok(());
+        }
+        if bytes > self.disk_state.free_bytes(self.policy.max_local_bytes) {
+            return Err(ReservationResult::RejectNoSpace);
+        }
+        self.disk_state.scratch_bytes = self.disk_state.scratch_bytes.saturating_add(bytes);
+        self.check_watermarks();
+        Ok(())
+    }
+
+    pub(crate) fn release_local_scratch_bytes(&mut self, bytes: u64) {
+        self.disk_state.scratch_bytes = self.disk_state.scratch_bytes.saturating_sub(bytes);
+        self.check_watermarks();
+    }
+
+    /// Charge WAL bytes before encoding or submitting their append. A rejected
+    /// append cannot consume local disk while cloud uploads are unavailable.
+    pub(crate) fn admit_local_wal_bytes(&mut self, bytes: u64) -> Result<(), ReservationResult> {
+        if !self.ephemeral_sst_cache {
+            return Ok(());
+        }
+        if bytes > self.disk_state.free_bytes(self.policy.max_local_bytes) {
+            return Err(ReservationResult::RejectNoSpace);
+        }
+        self.disk_state.wal_bytes = self.disk_state.wal_bytes.saturating_add(bytes);
+        self.check_watermarks();
+        Ok(())
+    }
+
+    pub(crate) fn release_local_wal_bytes(&mut self, bytes: u64) {
+        self.disk_state.wal_bytes = self.disk_state.wal_bytes.saturating_sub(bytes);
+        self.check_watermarks();
     }
 
     /// Reserve output space for one flush and return its operation token.
@@ -108,6 +184,12 @@ impl StorageBudgetActor {
                 tracing::info!("High watermark; waiting for compaction to free space");
                 return Err(ReservationResult::WaitForCompaction);
             }
+        }
+
+        // Admission must include this output even below the high watermark.
+        // Otherwise one large flush can overrun an almost-empty local disk.
+        if est_size > self.disk_state.free_bytes(self.policy.max_local_bytes) {
+            return Err(ReservationResult::RejectNoSpace);
         }
 
         // Reserve space for the new SST
@@ -152,6 +234,29 @@ impl StorageBudgetActor {
             .saturating_sub(reserved_size);
         self.check_watermarks();
         true
+    }
+
+    /// Reserve a fixed reusable compaction staging window. Remote input size
+    /// and total output count do not contribute to resident disk usage.
+    pub(crate) fn reserve_compaction_staging_with_token(
+        &mut self,
+        bytes: u64,
+    ) -> Result<StorageReservationToken, ReservationResult> {
+        if bytes > self.disk_state.free_bytes(self.policy.max_local_bytes) {
+            return Err(ReservationResult::RejectNoSpace);
+        }
+        let token = self.next_token();
+        self.disk_state.compaction_reserve =
+            self.disk_state.compaction_reserve.saturating_add(bytes);
+        self.compaction_reservations.insert(
+            token,
+            CompactionReservation {
+                input_bytes: 0,
+                estimated_output_bytes: bytes,
+            },
+        );
+        self.check_watermarks();
+        Ok(token)
     }
 
     /// Plan a compaction and return the reservation that must settle it.
@@ -202,7 +307,11 @@ impl StorageBudgetActor {
         self.disk_state.sst_bytes = self
             .disk_state
             .sst_bytes
-            .saturating_sub(reservation.input_bytes)
+            .saturating_sub(if self.ephemeral_sst_cache {
+                0
+            } else {
+                reservation.input_bytes
+            })
             .saturating_add(total_output);
         self.check_watermarks();
         tracing::info!(?token, output_bytes = total_output, "Compaction completed");
@@ -312,6 +421,126 @@ impl StorageBudgetActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn should_reconcile_retained_startup_residue_without_releasing_live_scratch() {
+        // Arrange
+        let mut actor = StorageBudgetActor::new(StorageBudgetPolicy::new(1_000));
+        actor.enable_ephemeral_sst_cache(1_000);
+        actor
+            .admit_local_scratch_bytes(200)
+            .expect("live spill admission");
+
+        // Act
+        actor
+            .reconcile_startup_scratch_residue(300)
+            .expect("initial residue");
+        actor
+            .reconcile_startup_scratch_residue(300)
+            .expect("repeated readback");
+
+        // Assert
+        assert_eq!(actor.disk_state().total_committed(), 500);
+        assert_eq!(
+            actor.reconcile_startup_scratch_residue(801),
+            Err(ReservationResult::RejectNoSpace)
+        );
+        assert_eq!(actor.disk_state().total_committed(), 1_001);
+        actor
+            .reconcile_startup_scratch_residue(0)
+            .expect("residue removed");
+        assert_eq!(actor.disk_state().total_committed(), 200);
+    }
+
+    #[test]
+    fn should_enforce_shared_local_capacity_when_multiple_workloads_reserve_space() {
+        // Arrange
+        let mut actor = StorageBudgetActor::new(StorageBudgetPolicy::new(1_000));
+        actor.enable_ephemeral_sst_cache(1_000);
+        actor.admit_local_wal_bytes(200).expect("WAL reservation");
+        actor
+            .admit_local_scratch_bytes(300)
+            .expect("spill reservation");
+
+        // Act
+        let denied = actor.reserve_compaction_staging_with_token(501);
+        let allowed = actor
+            .reserve_compaction_staging_with_token(500)
+            .expect("remaining staging window");
+
+        // Assert
+        assert_eq!(denied, Err(ReservationResult::RejectNoSpace));
+        assert_eq!(actor.disk_state().total_committed(), 1_000);
+        assert!(actor.admit_local_scratch_bytes(1).is_err());
+        assert!(actor.abort_compaction_for(allowed));
+        actor.release_local_scratch_bytes(300);
+        assert_eq!(actor.disk_state().total_committed(), 200);
+    }
+
+    #[test]
+    fn should_keep_resident_bytes_charged_when_compaction_inputs_are_cloud_only() {
+        // Arrange
+        let mut actor = StorageBudgetActor::new(StorageBudgetPolicy::new(1_000));
+        actor.enable_ephemeral_sst_cache(1_000);
+        actor.reconcile_local_disk_usage(100, 40);
+        let token = actor.plan_compaction_with_token(&[200]);
+
+        // Act
+        assert!(actor.complete_compaction_for(token, &[50]));
+
+        // Assert
+        assert_eq!(actor.disk_state().sst_bytes, 150);
+        assert_eq!(actor.disk_state().wal_bytes, 40);
+        actor.release_local_sst_bytes(50);
+        assert_eq!(actor.disk_state().total_committed(), 140);
+    }
+
+    #[test]
+    fn should_keep_reservations_charged_when_reconciling_physical_local_files() {
+        // Arrange
+        let mut actor = StorageBudgetActor::new(StorageBudgetPolicy::new(1_000));
+        let token = actor
+            .reserve_for_flush_with_token(100)
+            .expect("flush reservation");
+
+        // Act
+        actor.reconcile_local_disk_usage(200, 50);
+
+        // Assert
+        assert_eq!(actor.disk_state().total_committed(), 350);
+        assert!(actor.abort_flush_for(token));
+        assert_eq!(actor.disk_state().total_committed(), 250);
+    }
+
+    #[test]
+    fn should_reject_flush_when_projected_usage_exceeds_local_capacity() {
+        // Arrange
+        let mut actor = StorageBudgetActor::new(StorageBudgetPolicy::new(1_000));
+
+        // Act
+        let result = actor.reserve_for_flush_with_token(1_001);
+
+        // Assert
+        assert_eq!(result, Err(ReservationResult::RejectNoSpace));
+        assert_eq!(actor.disk_state().total_committed(), 0);
+    }
+
+    #[test]
+    fn should_preserve_existing_reservation_when_another_flush_would_exceed_capacity() {
+        // Arrange
+        let mut actor = StorageBudgetActor::new(StorageBudgetPolicy::new(1_000));
+        let first = actor
+            .reserve_for_flush_with_token(800)
+            .expect("first reservation");
+
+        // Act
+        let result = actor.reserve_for_flush_with_token(300);
+
+        // Assert
+        assert!(result.is_err());
+        assert_eq!(actor.disk_state().new_sst_reserve, 800);
+        assert!(actor.abort_flush_for(first));
+    }
 
     #[test]
     fn should_reserve_space_when_below_high_watermark() {

@@ -229,6 +229,110 @@ fn should_bound_parallel_cloud_wal_hydration_to_eight_requests() -> MidgeResult<
 }
 
 #[test]
+fn should_reject_cloud_wal_recovery_before_get_or_staging_when_catalog_exceeds_disk_budget(
+) -> MidgeResult<()> {
+    // Arrange
+    let db = tempfile::tempdir()?;
+    let backend = Arc::new(DelayedRecoveryBackend::new());
+    let catalog = recovery_catalog(&backend, 2);
+    let required = catalog
+        .segments
+        .values()
+        .map(|segment| segment.size_bytes)
+        .sum::<u64>();
+    let cloud = crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".into());
+
+    // Act
+    let result = CloudStartupRecovery::materialize_cloud_wal_recovery_dir_with_budget(
+        &cloud,
+        db.path(),
+        crate::config::RecoveryPolicy::Strict,
+        &catalog,
+        required - 1,
+    );
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::NoSpace(_))));
+    assert_eq!(backend.maximum_in_flight(), 0);
+    assert!(!db.path().join("cloud_recovery").exists());
+    Ok(())
+}
+
+#[test]
+fn should_account_for_total_working_space_before_wal_hydration() -> MidgeResult<()> {
+    // Arrange
+    let db = tempfile::tempdir()?;
+    let backend = Arc::new(DelayedRecoveryBackend::new());
+    let catalog = recovery_catalog(&backend, 1);
+    let publication = catalog.segments.values().next().expect("publication");
+    let local_path = db
+        .path()
+        .join("wal")
+        .join(crate::wal::cloud_segment_file_name(publication.segment_id));
+    std::fs::create_dir_all(local_path.parent().expect("WAL directory"))?;
+    std::fs::write(
+        &local_path,
+        vec![0x5A; usize::try_from(publication.size_bytes).expect("WAL size fits platform")],
+    )?;
+    let stale_recovery = db.path().join("cloud_recovery").join("sentinel");
+    std::fs::create_dir_all(stale_recovery.parent().expect("staging directory"))?;
+    std::fs::write(&stale_recovery, b"retain until admitted")?;
+    let cloud = crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".into());
+
+    // Act
+    let result = CloudStartupRecovery::materialize_cloud_wal_recovery_dir_with_budget(
+        &cloud,
+        db.path(),
+        crate::config::RecoveryPolicy::Strict,
+        &catalog,
+        publication.size_bytes * 2 - 1,
+    );
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::NoSpace(_))));
+    assert_eq!(backend.maximum_in_flight(), 0);
+    assert_eq!(
+        std::fs::metadata(&local_path)?.len(),
+        publication.size_bytes
+    );
+    assert_eq!(std::fs::read(stale_recovery)?, b"retain until admitted");
+    Ok(())
+}
+
+#[test]
+fn should_count_non_wal_recovery_residue_before_downloading_new_wal_segments() -> MidgeResult<()> {
+    // Arrange
+    let db = tempfile::tempdir()?;
+    let backend = Arc::new(DelayedRecoveryBackend::new());
+    let catalog = recovery_catalog(&backend, 1);
+    let required = catalog
+        .segments
+        .values()
+        .next()
+        .expect("publication")
+        .size_bytes;
+    let retained = db.path().join("cloud_recovery/retained.bin");
+    std::fs::create_dir_all(retained.parent().expect("staging directory"))?;
+    std::fs::write(&retained, [0x5A; 100])?;
+    let cloud = crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".into());
+
+    // Act
+    let result = CloudStartupRecovery::materialize_cloud_wal_recovery_dir_with_budget(
+        &cloud,
+        db.path(),
+        crate::config::RecoveryPolicy::Strict,
+        &catalog,
+        required + 99,
+    );
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::NoSpace(_))));
+    assert_eq!(backend.maximum_in_flight(), 0);
+    assert_eq!(std::fs::metadata(retained)?.len(), 100);
+    Ok(())
+}
+
+#[test]
 fn should_fail_strict_cloud_wal_hydration_when_publication_is_missing() -> MidgeResult<()> {
     // Arrange
     let db = tempfile::tempdir()?;

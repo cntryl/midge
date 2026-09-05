@@ -27,11 +27,26 @@ use std::path::PathBuf;
 /// **Important**: `output_dir` must be the CF-specific directory (e.g., `cf_00/`),
 /// not the DB root. Output filenames use canonical SST names:
 /// `{cf_id:06}_{level:02}_{generation:020}_{partition:010}.sst`.
+#[cfg(test)]
 pub fn execute_compaction(
     plan: &CompactionPlan,
     sst_factory: &dyn crate::sst::SstFactory,
     output_dir: &Path,
     abort_check: Option<&dyn Fn() -> bool>,
+) -> MidgeResult<Vec<String>> {
+    execute_compaction_with_output_sink(plan, sst_factory, output_dir, abort_check, None, None)
+}
+
+pub(crate) type CompactionOutputSink<'a> =
+    dyn Fn(&str, &Path, &crate::common::resource_budget::ResourceBudget) -> MidgeResult<()> + 'a;
+
+pub(crate) fn execute_compaction_with_output_sink(
+    plan: &CompactionPlan,
+    sst_factory: &dyn crate::sst::SstFactory,
+    output_dir: &Path,
+    abort_check: Option<&dyn Fn() -> bool>,
+    output_sink: Option<&CompactionOutputSink<'_>>,
+    output_size_limit: Option<usize>,
 ) -> MidgeResult<Vec<String>> {
     // An empty plan is a planner no-op and must not create an unreferenced
     // output. The executor separately rejects non-empty plans whose selected
@@ -79,6 +94,8 @@ pub fn execute_compaction(
             range_eligible: plan.range_tombstone_gc_eligible,
         },
         abort_check,
+        output_sink,
+        output_size_limit,
     )
 }
 
@@ -109,6 +126,187 @@ mod tests {
     use super::*;
     use crate::sst::traits::SstFactory;
     use tempfile::tempdir;
+
+    #[test]
+    fn should_roll_range_only_output_before_pending_metadata_exceeds_local_staging(
+    ) -> MidgeResult<()> {
+        // Arrange
+        let dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let mut writer = factory.create()?;
+        for index in 0..128_u8 {
+            let mut start = vec![b'a'; 64];
+            start[0] = index;
+            let mut end = start.clone();
+            end.push(b'z');
+            writer.add_range_tombstone(&start, &end, u64::from(index) + 1)?;
+        }
+        writer.finish_to_path(&dir.path().join("ranges.sst"))?;
+        let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(100);
+        plan.input_files.push("ranges.sst".into());
+        plan.target_sst_size = 128 * 1024;
+        let observed = std::cell::RefCell::new(Vec::new());
+        let sink =
+            |name: &str, path: &Path, _budget: &crate::common::resource_budget::ResourceBudget| {
+                let reader = factory.open(Path::new(name))?;
+                observed
+                    .borrow_mut()
+                    .extend(reader.range_tombstones().into_iter().map(|range| range.seq));
+                std::fs::remove_file(path)?;
+                Ok(())
+            };
+
+        // Act
+        let outputs = execute_compaction_with_output_sink(
+            &plan,
+            &factory,
+            dir.path(),
+            None,
+            Some(&sink),
+            Some(64 * 1024),
+        )?;
+
+        // Assert
+        assert!(outputs.len() > 1);
+        assert_eq!(*observed.borrow(), (1..=128_u64).collect::<Vec<_>>());
+        assert_eq!(std::fs::read_dir(dir.path())?.count(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn should_roll_before_next_key_when_individual_records_fit_local_staging() -> MidgeResult<()> {
+        // Arrange
+        let dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096).with_compression_policy(
+            crate::sst::compression::CompressionPolicy::Fixed(
+                crate::sst::compression::CompressionAlgo::None,
+            ),
+        );
+        let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(99);
+        plan.target_sst_size = 128 * 1024;
+        for index in 0..12_u8 {
+            let name = format!("input-{index}.sst");
+            let mut writer = factory.create()?;
+            writer.add_with_meta(&[index], Some(&vec![index; 96 * 1024]), 1, 0, None)?;
+            writer.finish_to_path(&dir.path().join(&name))?;
+            plan.input_files.push(name);
+        }
+        let observed = std::cell::RefCell::new(Vec::new());
+        let sink =
+            |name: &str, path: &Path, _budget: &crate::common::resource_budget::ResourceBudget| {
+                assert!(std::fs::metadata(path)?.len() <= 256 * 1024);
+                let reader = factory.open(Path::new(name))?;
+                let entries = reader.scan_range_raw_state(None, None)?;
+                observed
+                    .borrow_mut()
+                    .extend(entries.into_iter().map(|(key, _)| key[0]));
+                std::fs::remove_file(path)?;
+                Ok(())
+            };
+
+        // Act
+        let outputs = execute_compaction_with_output_sink(
+            &plan,
+            &factory,
+            dir.path(),
+            None,
+            Some(&sink),
+            Some(256 * 1024),
+        )?;
+
+        // Assert
+        assert_eq!(*observed.borrow(), (0..12_u8).collect::<Vec<_>>());
+        assert_eq!(outputs.len(), 12);
+        assert_eq!(
+            std::fs::read_dir(dir.path())?.count(),
+            12,
+            "only authoritative inputs remain"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn should_reject_indivisible_output_before_persisting_when_local_partition_limit_is_exceeded(
+    ) -> MidgeResult<()> {
+        // Arrange
+        let dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let mut writer = factory.create()?;
+        writer.add_with_meta(b"large", Some(&vec![b'v'; 128 * 1024]), 1, 0, None)?;
+        writer.finish_to_path(&dir.path().join("input.sst"))?;
+        let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(1);
+        plan.input_files.push("input.sst".into());
+
+        // Act
+        let result = execute_compaction_with_output_sink(
+            &plan,
+            &factory,
+            dir.path(),
+            None,
+            None,
+            Some(64 * 1024),
+        );
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::ResourceLimit(_))));
+        assert_eq!(
+            std::fs::read_dir(dir.path())?.count(),
+            1,
+            "only the authoritative input remains"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn should_drain_each_completed_partition_before_building_the_next_output() -> MidgeResult<()> {
+        // Arrange
+        let dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let mut writer = factory.create()?;
+        for index in 0..100u32 {
+            writer.add_with_meta(&index.to_be_bytes(), Some(&vec![b'v'; 1024]), 1, 0, None)?;
+        }
+        writer.finish_to_path(&dir.path().join("input.sst"))?;
+        let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(1);
+        plan.input_files.push("input.sst".into());
+        plan.target_sst_size = 4096;
+        let drained = std::cell::RefCell::new(Vec::new());
+        let sink =
+            |name: &str, path: &Path, _budget: &crate::common::resource_budget::ResourceBudget| {
+                for previous in drained.borrow().iter() {
+                    assert!(
+                        !dir.path().join(previous).exists(),
+                        "previous partitions must be gone before advancing"
+                    );
+                }
+                std::fs::remove_file(path)?;
+                drained.borrow_mut().push(name.to_string());
+                Ok(())
+            };
+
+        // Act
+        let outputs = execute_compaction_with_output_sink(
+            &plan,
+            &factory,
+            dir.path(),
+            None,
+            Some(&sink),
+            None,
+        )?;
+
+        // Assert
+        assert!(outputs.len() > 1);
+        assert_eq!(outputs, *drained.borrow());
+        assert!(
+            dir.path().join("input.sst").exists(),
+            "input authority remains untouched"
+        );
+        Ok(())
+    }
 
     #[test]
     fn should_bound_partition_target_below_compaction_upload_reserve() {
@@ -1644,6 +1842,8 @@ mod tests {
                 point_eligible: false,
                 range_eligible: false,
             },
+            None,
+            None,
             None,
         )?;
 

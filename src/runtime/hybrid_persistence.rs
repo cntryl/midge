@@ -494,6 +494,13 @@ pub(crate) trait HybridPersistence {
 
     fn write_sst_object(&self, sst_name: &str, data: Vec<u8>) -> MidgeResult<()>;
 
+    fn write_sst_object_with_proof(
+        &self,
+        sst_name: &str,
+        data: Vec<u8>,
+        deadline: &crate::common::OperationDeadline,
+    ) -> MidgeResult<GuardedObjectProof>;
+
     fn write_sst_object_within(
         &self,
         sst_name: &str,
@@ -767,14 +774,7 @@ impl HybridPersistence for HybridStorage {
             return Ok(sorted_cloud_wal_prune_results(results));
         }
 
-        let mut dependencies = Vec::with_capacity(
-            guard.manifest.files.len().saturating_add(
-                guard
-                    .metadata
-                    .as_ref()
-                    .map_or(0, |guard| guard.objects.len()),
-            ),
-        );
+        let mut dependencies = Vec::new();
         let (coverage, sst_dependencies) = validate_manifest_sst_coverage_within(
             self,
             &guard.manifest,
@@ -835,6 +835,16 @@ impl HybridPersistence for HybridStorage {
         data: Vec<u8>,
         deadline: &crate::common::OperationDeadline,
     ) -> MidgeResult<()> {
+        self.write_sst_object_with_proof(sst_name, data, deadline)
+            .map(|_| ())
+    }
+
+    fn write_sst_object_with_proof(
+        &self,
+        sst_name: &str,
+        data: Vec<u8>,
+        deadline: &crate::common::OperationDeadline,
+    ) -> MidgeResult<GuardedObjectProof> {
         let expected_size = data.len() as u64;
         let expected_crc = crc32c::crc32c(&data);
         validate_sst_object_bytes(sst_name, expected_size, None, None, &data)
@@ -856,7 +866,7 @@ impl HybridPersistence for HybridStorage {
             proof.bytes(),
         )
         .map_err(MidgeError::Internal)?;
-        Ok(())
+        Ok(self.remote_identity_guard(&proof))
     }
 
     fn delete_sst_object_blocking(&self, sst_name: &str) -> MidgeResult<()> {
@@ -1327,12 +1337,30 @@ fn validate_manifest_sst_coverage_within(
             vec![ExactCoverageState::default(); candidate.validated.data_records.len()]
         })
         .collect::<Vec<_>>();
-    let mut dependencies = Vec::with_capacity(manifest.files.len());
+    let mut dependencies = Vec::new();
 
     for file in &manifest.files {
-        let proof = validate_remote_sst_within(storage, file, deadline)?;
-        let reader =
-            open_sst_reader_from_bytes(&file.name, proof.bytes()).map_err(MidgeError::Internal)?;
+        let (reader, dependency) = if storage.ephemeral_sst_cache_enabled() {
+            // Complete bounds exclude unrelated objects without cloud I/O.
+            // Older manifests without complete bounds remain conservative.
+            if file.key_bounds_complete
+                && !candidates.iter().any(|candidate| {
+                    candidate
+                        .validated
+                        .data_records
+                        .iter()
+                        .any(|record| file_may_contain_record_key(file, record))
+                })
+            {
+                continue;
+            }
+            open_verified_remote_sst_ranges(storage, file, deadline)?
+        } else {
+            let proof = validate_remote_sst_within(storage, file, deadline)?;
+            let reader = open_sst_reader_from_bytes(&file.name, proof.bytes())
+                .map_err(MidgeError::Internal)?;
+            (reader, storage.remote_identity_guard(&proof))
+        };
 
         for (candidate, candidate_states) in candidates.iter().zip(&mut states) {
             for (record, state) in candidate
@@ -1362,7 +1390,7 @@ fn validate_manifest_sst_coverage_within(
             }
         }
 
-        dependencies.push(storage.remote_identity_guard(&proof));
+        dependencies.push(dependency);
     }
 
     let coverage = candidates
@@ -1373,6 +1401,75 @@ fn validate_manifest_sst_coverage_within(
         })
         .collect();
     Ok((coverage, dependencies))
+}
+
+/// Retain the manifest's full-content CRC gate without retaining or staging a
+/// whole object. Only SSTs relevant to this bounded WAL prune batch reach this
+/// path; a pinned object identity spans the CRC, summary, and exact key reads.
+fn open_verified_remote_sst_ranges(
+    storage: &HybridStorage,
+    file: &FileMeta,
+    deadline: &crate::common::OperationDeadline,
+) -> MidgeResult<(
+    Box<dyn crate::sst::traits::SstReaderExt>,
+    GuardedObjectProof,
+)> {
+    let key = crate::sst::object_key(&file.name);
+    let metadata = storage.remote_range_metadata_within(&key, deadline)?;
+    if file.size_bytes != 0 && file.size_bytes != metadata.size {
+        return Err(MidgeError::Corruption(format!(
+            "cloud SST '{}' size mismatch: manifest={}, object={}",
+            file.name, file.size_bytes, metadata.size
+        )));
+    }
+    let backend = storage.remote_sst_backend();
+    let fs: Arc<dyn crate::io::Fs> = Arc::new(
+        crate::storage::remote_sst::RemoteSstFs::for_object(
+            Arc::new(crate::io::MockFs::new()),
+            Arc::clone(&backend),
+            key.clone(),
+            metadata.clone(),
+            storage.storage_io_timeout(),
+        )
+        .with_deadline(*deadline),
+    );
+    if let Some(expected_crc) = file.content_crc32c {
+        let handle = fs.open(
+            &crate::io::FsPath::new(&file.name),
+            crate::io::OpenOptions {
+                mode: crate::io::OpenMode::ReadOnly,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        )?;
+        let mut offset = 0;
+        let mut crc = 0;
+        while offset < metadata.size {
+            let length = (metadata.size - offset).min(256 * 1024);
+            let bytes = handle.read_at(offset, length)?;
+            if bytes.len() as u64 != length {
+                return Err(MidgeError::Corruption(format!(
+                    "cloud SST '{}' CRC range was truncated",
+                    file.name
+                )));
+            }
+            crc = crc32c::crc32c_append(crc, &bytes);
+            offset += length;
+        }
+        if crc != expected_crc {
+            return Err(MidgeError::Corruption(format!(
+                "cloud SST '{}' content crc32c {crc:08x} does not match manifest {expected_crc:08x}",
+                file.name
+            )));
+        }
+    }
+    let summary = crate::sst::fs::SstFileIo::summarize_with_fs(&file.name, Arc::clone(&fs))?;
+    verify_sst_summary_matches_manifest(&file.name, &summary, file)
+        .map_err(MidgeError::Corruption)?;
+    let reader = crate::sst::fs::SstFileIo::open(&file.name, fs)?;
+    let dependency = GuardedObjectProof::range_identity(backend, key, metadata);
+    Ok((Box::new(reader), dependency))
 }
 
 fn open_sst_reader_from_bytes(

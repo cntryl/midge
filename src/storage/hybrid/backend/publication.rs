@@ -14,10 +14,24 @@ impl HybridStorage {
     ) -> MidgeResult<()> {
         let local_exists = self.ensure_local_immutable_retry_compatible(key, &data, deadline)?;
         self.ensure_remote_immutable_published(key, &data, deadline)?;
-        if !local_exists {
+        if !local_exists
+            && !self
+                .ephemeral_sst_cache
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
             self.write_local_immutable_cache(key, data, deadline)?;
         }
         Ok(())
+    }
+
+    /// Drop a disposable local object copy. Remote authority and remote
+    /// deletion are deliberately outside this operation.
+    pub(crate) fn evict_local_object_cache(&self, key: &str) -> MidgeResult<()> {
+        Self::delete_object_from_backend_blocking(&self.local, key, self.callback_timeout)
+            .map(|_| ())
+            .map_err(|error| {
+                MidgeError::Internal(format!("local object cache eviction failed: {error}"))
+            })
     }
 
     fn ensure_local_immutable_retry_compatible(

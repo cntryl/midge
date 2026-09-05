@@ -17,6 +17,13 @@ impl SstFileIo {
     /// verification must also validate the index, optional accelerators, and
     /// every data block so late corruption cannot hide behind intact metadata.
     pub(crate) fn verify_all_blocks(&self) -> MidgeResult<SstVerificationStats> {
+        self.verify_all_blocks_until(None)
+    }
+
+    pub(crate) fn verify_all_blocks_until(
+        &self,
+        deadline: Option<&crate::common::OperationDeadline>,
+    ) -> MidgeResult<SstVerificationStats> {
         let file_size = self.fs.metadata(&self.path)?.len;
         let footer = self
             .footer
@@ -41,6 +48,11 @@ impl SstFileIo {
         }
 
         for (_, handle) in &index {
+            if deadline.is_some_and(crate::common::OperationDeadline::is_expired) {
+                return Err(MidgeError::Timeout(
+                    "SST verification deadline expired".into(),
+                ));
+            }
             Self::validate_block_handle(*handle, self.block_region_end, "data")?;
             let block = self.read_block(handle)?;
             let _ = self.scan_block_entries_from_bytes(&block)?;

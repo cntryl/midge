@@ -264,8 +264,8 @@ fn should_prune_remote_wal_segment_after_cloud_sst_covers_it() {
         Some(Bytes::from_static(b"covered-by-sst"))
     );
     assert!(
-        !list_files_with_extension(&db_path.join("sst"), "sst").is_empty(),
-        "reopen should restore the covered value from cloud SST state"
+        list_files_with_extension(&db_path.join("sst"), "sst").is_empty(),
+        "reopen should read covered values without restoring full SST files"
     );
     shutdown_test_engine(reopened);
 }
@@ -789,7 +789,7 @@ fn expire_crashed_process_lease(db_path: &Path) {
 }
 
 #[test]
-fn should_restore_local_cache_given_authoritative_remote_sst_when_reopening_after_cache_loss() {
+fn should_read_authoritative_remote_sst_when_reopening_after_cache_loss() {
     // Arrange
     let _guard = failpoint_test_lock()
         .lock()
@@ -821,8 +821,8 @@ fn should_restore_local_cache_given_authoritative_remote_sst_when_reopening_afte
         Some(Bytes::from_static(b"sst-restore-value"))
     );
     assert!(
-        !list_files_with_extension(&db_path.join("sst"), "sst").is_empty(),
-        "reopen should restore local SST cache from the authoritative cloud object"
+        list_files_with_extension(&db_path.join("sst"), "sst").is_empty(),
+        "reads should leave the full SST in authoritative cloud storage"
     );
     shutdown_test_engine(reopened);
 }

@@ -68,6 +68,7 @@ pub(crate) mod cloud;
 pub(crate) mod filesystem;
 pub(crate) mod hybrid;
 pub(crate) mod providers;
+pub(crate) mod remote_sst;
 pub(crate) mod test_support;
 
 pub use hybrid::backend::HybridStorage;
@@ -273,6 +274,9 @@ pub(crate) fn storage_error_is_timeout(error: &str) -> bool {
 pub type MetadataReadCallback =
     std::sync::mpsc::Sender<Result<(Vec<u8>, StorageObjectMetadata), String>>;
 
+/// Completion of an exact, conditionally versioned object range.
+pub type RangeReadCallback = std::sync::mpsc::Sender<Result<Vec<u8>, String>>;
+
 /// NEW async-compatible storage backend trait.
 ///
 /// CRITICAL DESIGN:
@@ -288,6 +292,38 @@ pub type MetadataReadCallback =
 /// - No mutable references (works with Arc)
 /// - Ready for batching and pipelining
 pub trait StorageBackend: Send + Sync + 'static {
+    /// Return a version usable by exact range reads without reading the body.
+    /// Unsupported backends must not fall back to whole-object reads.
+    fn submit_range_head(
+        &self,
+        key: &str,
+        _timeout: std::time::Duration,
+        callback: StorageCallback,
+    ) {
+        let _ = callback.send(StorageEvent::HeadComplete {
+            key: key.to_string(),
+            result: StorageOutcome::Err(
+                "storage backend does not support range identity lookup".into(),
+            ),
+        });
+    }
+
+    /// Read precisely [start, end) from the expected immutable object version.
+    /// Implementations must reject unsupported conditions and short responses.
+    fn submit_read_range(
+        &self,
+        _key: &str,
+        _start: u64,
+        _end: u64,
+        _expected: StorageObjectMetadata,
+        _timeout: std::time::Duration,
+        callback: RangeReadCallback,
+    ) {
+        let _ = callback.send(Err(
+            "storage backend does not support conditional range reads".into(),
+        ));
+    }
+
     /// Submit a read operation. Returns immediately.
     fn submit_read(&self, key: &str, callback: StorageCallback);
 
