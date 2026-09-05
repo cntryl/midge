@@ -227,25 +227,29 @@ fn should_resume_writes_given_cloud_upload_completes_when_emergency_watermark_is
 
         // Resume writes after eviction
         let mut resume_writes = 0;
+        let mut last_error = None;
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        for i in 0..50 {
+        for i in 0_u64.. {
             let mut tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .expect("begin_tx");
             let key = format!("resume_key_{i:02}");
-            if tx
+            let result = tx
                 .put(key.as_bytes().to_vec(), medium_value.clone(), None)
-                .is_ok()
-                && tx.commit(buffered_write_options(mode)).is_ok()
-            {
-                resume_writes += 1;
+                .and_then(|()| tx.commit(buffered_write_options(mode)));
+            match result {
+                Ok(()) => resume_writes += 1,
+                Err(error @ cntryl_midge::MidgeError::WriteStall(_)) => {
+                    last_error = Some(error);
+                }
+                Err(error) => panic!("unexpected resume write failure in mode {mode}: {error:?}"),
             }
             if resume_writes >= 5 {
                 break;
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "writes did not resume before the flush queue drained in mode: {mode}"
+                "writes did not resume before the flush queue drained in mode: {mode}; successes={resume_writes}; last_error={last_error:?}"
             );
             thread::sleep(Duration::from_millis(25));
         }
@@ -253,7 +257,7 @@ fn should_resume_writes_given_cloud_upload_completes_when_emergency_watermark_is
         // Assert: Writes can resume after eviction
         assert!(
             resume_writes >= 5,
-            "writes did not resume after eviction in mode: {mode}"
+            "writes did not resume after eviction in mode: {mode}; successes={resume_writes}; last_error={last_error:?}"
         );
 
         eprintln!("âœ“ Writes resumed after eviction; {resume_writes} resume writes succeeded");
