@@ -2,6 +2,7 @@ use super::*;
 use crate::runtime::event_loop::compaction::CompactionCoordinator;
 
 mod quantum_tests;
+mod wake_tests;
 
 fn cloud_debt(
     files_per_cf: u64,

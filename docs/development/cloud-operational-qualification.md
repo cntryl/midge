@@ -8,7 +8,7 @@ a new persisted coordination protocol.
 ## Repeatable native-provider campaign
 
 The ignored integration test uses the native S3 provider against the pinned
-Sqrzl image in `docker-compose.yml`. It creates an acknowledged seed through
+Sqrzl image in `compose.yml`. It creates an acknowledged seed through
 the public API, then publishes a deterministic catalog-authorized WAL fixture
 in bounded objects. Fixture records have independent reproducible values and
 valid framing, epochs, lengths, and checksums. This produces a controlled

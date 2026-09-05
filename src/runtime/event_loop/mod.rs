@@ -1444,6 +1444,14 @@ impl EventLoop {
             return false;
         }
 
+        if self
+            .cloud_wal_prune_worker
+            .as_ref()
+            .is_some_and(std::thread::JoinHandle::is_finished)
+        {
+            return true;
+        }
+
         if !self.flush_worker_result_rx.is_empty() {
             return true;
         }
@@ -1498,6 +1506,12 @@ impl EventLoop {
             self.hybrid_storage.as_ref().and_then(|storage| {
                 (storage.pending_upload_count() > 0).then_some(HYBRID_STORAGE_POLL_INTERVAL)
             }),
+            // Terminal storage events can arrive before the prune thread
+            // exits. Keep observing the handle after its last event so the
+            // publication gate and queued manual requests cannot lose a wake.
+            self.cloud_wal_prune_worker
+                .as_ref()
+                .map(|_| HYBRID_STORAGE_POLL_INTERVAL),
             self.state.flush_retry_deadline_timeout(),
             self.flush_actor
                 .is_inflight()
