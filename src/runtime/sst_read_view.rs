@@ -174,7 +174,36 @@ impl SstReadView {
 
     pub(crate) fn point_candidates(&self, key: &[u8]) -> Vec<Arc<FileMeta>> {
         let mut candidates = Vec::with_capacity(self.l0.len() + self.levels.len() * 2);
-        candidates.extend(self.l0.iter().cloned());
+        candidates.extend(
+            self.l0
+                .iter()
+                .filter(|file| {
+                    if !file.key_bounds_complete {
+                        return true;
+                    }
+                    let Some((smallest, largest)) = file
+                        .smallest_key
+                        .as_deref()
+                        .zip(file.largest_key.as_deref())
+                    else {
+                        return true;
+                    };
+                    #[cfg(test)]
+                    self.record_metadata_comparison();
+                    if smallest > largest {
+                        return true;
+                    }
+                    #[cfg(test)]
+                    self.record_metadata_comparison();
+                    if key < smallest {
+                        return false;
+                    }
+                    #[cfg(test)]
+                    self.record_metadata_comparison();
+                    key <= largest
+                })
+                .cloned(),
+        );
 
         for level in self.levels.values() {
             let first = level.ordered.partition_point(|file| {
@@ -369,6 +398,9 @@ impl SstReadViewCache {
 }
 
 #[cfg(test)]
+mod l0_bounds_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -535,7 +567,10 @@ mod tests {
             );
             let largest_level = interval_count.div_ceil(SYNTHETIC_LOWER_LEVELS);
             let populated_levels = interval_count.min(SYNTHETIC_LOWER_LEVELS);
-            let comparison_bound = populated_levels * (ceil_log2(largest_level).saturating_add(6));
+            // Each complete L0 interval needs at most three comparisons:
+            // validate its ordering, then check both inclusive endpoints.
+            let comparison_bound = 3 * hard_l0_ceiling
+                + populated_levels * (ceil_log2(largest_level).saturating_add(6));
             assert!(
                 point_work.metadata_comparisons <= comparison_bound,
                 "point read used {} comparisons above logarithmic bound {comparison_bound} at {interval_count} intervals",

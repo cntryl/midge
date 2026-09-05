@@ -121,6 +121,8 @@ fn should_give_ready_compaction_a_turn_before_continuing_flushes() -> crate::com
     }
     let (worker_tx, worker_rx) = crossbeam::channel::unbounded();
     el.worker_msg_tx = Some(worker_tx);
+    // This test drives both worker channels explicitly at each turn boundary.
+    el.inline_flush_worker = false;
     queue_generation_for_maintenance_test(&mut el, 82)?;
     el.cloud_maintenance.next = super::super::cloud_maintenance::MaintenanceTask::Compaction;
 
@@ -142,10 +144,23 @@ fn should_give_ready_compaction_a_turn_before_continuing_flushes() -> crate::com
         !el.cloud_wal.acked_segments.contains_key(&81),
         "retirement receives the next turn after compaction"
     );
+    // Draining retirement completion releases its gate; the run loop gives
+    // maintenance its next scheduling opportunity in a separate step.
+    el.schedule_next_flush_worker();
     assert!(
-        el.flush_actor.is_inflight() || el.state.flush_metrics.publish_count > 0,
+        el.flush_actor.is_inflight(),
         "flush work resumes after the compaction and retirement turns"
     );
+    for phase in ["build", "publish"] {
+        let completion = el
+            .flush_worker_result_rx
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap_or_else(|error| panic!("resumed flush {phase}: {error}"));
+        el.handle_flush_worker_result(completion);
+    }
+    assert_eq!(el.state.flush_metrics.publish_count, 1);
+    assert!(!el.flush_actor.is_inflight());
+    assert!(el.state.get_cf(0).unwrap().immutable_memtables.is_empty());
     Ok(())
 }
 

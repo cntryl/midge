@@ -25,11 +25,33 @@ fn production_source(path: &Path) -> String {
         return String::new();
     }
     let source = std::fs::read_to_string(path).expect("read Rust source");
+    if source.trim_start().starts_with("#![cfg(test)]") {
+        return String::new();
+    }
     source
         .split("\n#[cfg(test)]\nmod tests")
         .next()
         .unwrap_or(&source)
         .to_string()
+}
+
+#[test]
+fn should_exclude_explicit_test_modules_from_production_dependency_checks() {
+    // Arrange
+    let directory = tempfile::tempdir().expect("source fixtures");
+    let test_module = directory.path().join("test_fixture.rs");
+    let production_module = directory.path().join("production.rs");
+    let import = "use crate::runtime::Runtime;\n";
+    std::fs::write(&test_module, format!("#![cfg(test)]\n{import}")).expect("test fixture");
+    std::fs::write(&production_module, import).expect("production fixture");
+
+    // Act
+    let test_source = production_source(&test_module);
+    let production = production_source(&production_module);
+
+    // Assert
+    assert!(test_source.is_empty());
+    assert!(production.contains("crate::runtime"));
 }
 
 fn prohibited_edges_under(relative: &str, forbidden: &[&str]) -> Vec<String> {

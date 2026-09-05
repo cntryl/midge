@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use super::*;
 use crate::metadata::Manifest;
 use crate::runtime::hybrid_persistence::CloudWalPruneProgress;

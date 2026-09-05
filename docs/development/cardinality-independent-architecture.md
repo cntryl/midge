@@ -43,15 +43,19 @@ Let:
 | Operation | Retained or opened SST work | Metadata selection work |
 | --- | --- | --- |
 | Snapshot capture | zero `FileMeta` clones; one `Arc<SstReadView>` clone | constant after a catalog publication |
-| Point read | at most `H + 2 * (L - 1)` candidate readers | `O(sum(log n_i))`, plus returned candidates |
+| Point read | at most `H + 2 * (L - 1)` candidate readers | `O(H + sum(log n_i))`, plus returned candidates |
 | Forward or reverse range scan | at most `H + (L - 1)` active SST cursors | `O(sum(log n_i) + intersecting files)` |
 | L0 compaction | at most `S + 1` merge heads | target span metadata is linear in overlap count |
 | Inner-level compaction | at most two merge heads | target span metadata is linear in overlap count |
 
-L0 files may overlap arbitrarily, so the read view orders them by recency and
-must consult each published file. Admission prevents valid post-migration state
-from growing that set beyond `H`. Complete L1+ files are ordered by full key
-coverage. Binary search finds a point or range boundary; equality at adjacent
+L0 files may overlap arbitrarily, so the read view checks their manifest bounds
+in recency order. A point read opens only files whose complete, valid bounds
+include the key, plus every file with incomplete, missing, or inverted bounds.
+Both endpoints are inclusive so range-tombstone coverage remains conservative.
+Admission bounds steady-state L0 by `H`; historical or recovered backlogs can
+exceed this count and remain readable. Selection then checks the actual L0
+count without imposing a startup limit. Complete L1+ files are ordered by full
+key coverage. Binary search finds a point or range boundary; equality at adjacent
 boundaries may conservatively select both neighbors.
 
 A range scan gives every selected L0 file its own cursor and uses one chained
@@ -120,9 +124,13 @@ and replaying the production intent logic.
 the real immutable index at 1, 1,000, 100,000, and 1,000,000 complete lower-level
 intervals, plus the default hard L0 ceiling of 15. Test-only counters measure
 metadata comparisons, per-snapshot `FileMeta` clones, modeled candidate reader
-opens, and active SST cursor slots. The existing actual-reader regression also
-confirms that an equality-boundary point read opens two readers rather than an
-entire level.
+opens, and active SST cursor slots. Comparison accounting includes up to three
+comparisons for every complete L0 file. The fixed L0 bound in this synthetic
+profile does not constrain recovery backlog size. Actual-reader regressions
+confirm that an equality-boundary point read opens two lower-level readers and
+that a point in 128 disjoint L0 files opens only its matching reader with a
+16 KiB metadata pool smaller than the full inventory. Legacy L0 bounds still
+force reader checks.
 
 `should_keep_compaction_work_bounded_across_ten_thousand_targets` feeds a
 10,000-file target span to the real streaming input constructor and observes

@@ -76,6 +76,7 @@ fn should_execute_cloud_recovery_phase_in_child() {
     let started = Instant::now();
     let mut engine = open_after_expired_owner(&campaign);
     let recovery_ms = started.elapsed().as_millis();
+    eprintln!("MIDGE_OPERATIONAL_PHASE {phase} opened in {recovery_ms} ms");
     assert_complete_state(&engine, &campaign, phase != "recovered");
     if phase == "recovered" {
         exercise_accepted_writes(&engine, &campaign);
@@ -123,6 +124,9 @@ fn assert_complete_state(engine: &Engine, campaign: &Campaign, has_workload: boo
             Some(fixture::value(index, campaign.profile.value_bytes).as_slice()),
             "recovered value {index}"
         );
+        if (index + 1).is_multiple_of(16_384) || index + 1 == campaign.records {
+            eprintln!("MIDGE_OPERATIONAL_VERIFIED {} point-read values", index + 1);
+        }
     }
     assert_eq!(
         tx.get(b"qualification-seed").expect("seed"),
@@ -146,6 +150,7 @@ fn assert_complete_state(engine: &Engine, campaign: &Campaign, has_workload: boo
         );
     }
     assert!(expected.next().is_none(), "missing recovered key");
+    eprintln!("MIDGE_OPERATIONAL_VERIFIED complete recovered keyset");
     assert!(
         !campaign.cache.join("cloud_recovery/wal").exists(),
         "no complete WAL staging"

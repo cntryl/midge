@@ -112,6 +112,21 @@ and resource observations and add provider-wide request/byte telemetry.
   report actual range I/O through a lower-layer observer contract; storage
   does not depend on runtime types.
 
+Recovered L0 inventory can exceed normal write-admission thresholds. Point
+reads check complete manifest key bounds before opening each candidate, retain
+newest-first ordering, and consult files with unknown or invalid bounds.
+This keeps unrelated cold tables from consuming the reader pool while allowing
+recovery to finish independently of the steady-state L0 threshold.
+
+Automatic persistent-engine memory allocation leaves a quarter of the memory
+remaining after transaction and compaction pools for SST reads before sizing
+the two memtable generations. This changes small-budget defaults within the
+configured total. Explicit memtable sizes remain unchanged when they leave
+read capacity; configurations leaving no SST read capacity fail during option
+construction. Cold-open bookkeeping shares one bounded coordination allowance,
+so longer object names reduce available concurrency instead of wasting fixed
+per-owner slices.
+
 Retirement progress is process-local. Manifest changes involving overlapping
 or uncertain coverage can require revalidation; frequent compaction churn may
 therefore increase cleanup cost. The optimization does not weaken exact

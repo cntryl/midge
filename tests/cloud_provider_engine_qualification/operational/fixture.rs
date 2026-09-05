@@ -206,6 +206,10 @@ impl Campaign {
             &bytes,
         );
         assert!(self.actual_wal_bytes > self.profile.local_bytes);
+        eprintln!(
+            "MIDGE_OPERATIONAL_FIXTURE {} WAL bytes, {} records",
+            self.actual_wal_bytes, self.records
+        );
     }
 }
 
