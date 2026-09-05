@@ -150,6 +150,16 @@ fn payload_capacity(record: &WalRecord) -> MidgeResult<usize> {
     Ok(capacity)
 }
 
+/// Conservative physical size before automatic value compression. Compression
+/// only shrinks VALUE; it can introduce one additional compression TLV.
+pub(crate) fn record_frame_size_bound(record: &WalRecord) -> MidgeResult<usize> {
+    let extra_compression_tag = usize::from(record.compression.is_none()) * (TLV_HEADER_LEN + 1);
+    crate::wal::frame::encoded_frame_len(add_capacity(
+        payload_capacity(record)?,
+        extra_compression_tag,
+    )?)
+}
+
 #[inline]
 fn push_tlv(buf: &mut Vec<u8>, tag: u8, val: &[u8]) -> MidgeResult<()> {
     let len = u32::try_from(val.len())

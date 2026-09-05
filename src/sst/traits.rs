@@ -219,6 +219,34 @@ pub trait DynSstWriter: Send {
         0
     }
 
+    /// Conservative final file size, including all data, indexes, filters,
+    /// tombstones and framing. Bounded local staging rejects writers that
+    /// cannot establish this bound before finalization.
+    fn encoded_size_upper_bound(&self) -> Option<usize> {
+        None
+    }
+
+    /// Bound after appending one sorted entry, without mutating the writer.
+    /// This must bound the subsequent `encoded_size_upper_bound`, allowing
+    /// callers to roll a partition before an otherwise splittable overflow.
+    fn encoded_size_upper_bound_after_sorted_entry(
+        &self,
+        _key: &[u8],
+        _value: Option<&[u8]>,
+    ) -> Option<usize> {
+        None
+    }
+
+    /// Incremental bound for a range tombstone held outside this writer.
+    /// Includes possible growth of the file's key-bound metadata.
+    fn additional_range_tombstone_size_upper_bound(
+        &self,
+        _start: &[u8],
+        _end: &[u8],
+    ) -> Option<usize> {
+        None
+    }
+
     /// Add a simple key-value entry
     ///
     /// # Errors

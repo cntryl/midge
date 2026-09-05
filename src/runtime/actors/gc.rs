@@ -450,14 +450,17 @@ impl GcActor {
                         continue;
                     }
 
+                    let resident_bytes = std::fs::metadata(&sst_path).ok().map(|metadata| metadata.len());
                     match std::fs::remove_file(&sst_path) {
                         Ok(()) => {
+                            storage.release_local_sst_bytes(resident_bytes.unwrap_or(0));
                             tracing::info!(
                                 sst_name,
                                 path = %sst_path.display(),
                                 "Deleted obsolete SST after cloud provider cleanup"
                             );
                         }
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
                         Err(error) => {
                             tracing::warn!(
                                 sst_name,

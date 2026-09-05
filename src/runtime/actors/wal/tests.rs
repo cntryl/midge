@@ -13,6 +13,146 @@ use std::sync::{Mutex, OnceLock};
 static FAILPOINT_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[test]
+fn should_reject_wal_append_before_disk_growth_when_ephemeral_budget_is_exhausted(
+) -> MidgeResult<()> {
+    // Arrange
+    let temp = tempfile::tempdir()?;
+    let setup = crate::storage::test_support::build_cloud_backed_filesystem_simulation(
+        temp.path(),
+        Some(1),
+    )?;
+    setup.hybrid_storage.enable_ephemeral_sst_cache(1);
+    let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
+    let mut actor = WalActor::new(
+        temp.path().join("wal"),
+        DurabilityPolicy::CloudAsync,
+        BatchConfig::default(),
+        false,
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    actor.set_storage_budget(setup.hybrid_storage.clone());
+    let prepared = prepare_put_transaction(
+        &mut actor,
+        &mut state,
+        1,
+        b"key",
+        b"value",
+        DurabilityPolicy::CloudAsync,
+    )?;
+    // Act
+    let result = actor.append_prepared_transactions(&mut state, vec![prepared]);
+    // Assert
+    assert!(matches!(result, Err(MidgeError::NoSpace(_))));
+    assert_eq!(
+        std::fs::metadata(temp.path().join("wal").join(crate::wal::ACTIVE_FILE_NAME))?.len(),
+        0
+    );
+    assert_eq!(
+        setup.hybrid_storage.budget_snapshot().total_committed_bytes,
+        0
+    );
+    Ok(())
+}
+
+#[test]
+fn should_charge_actual_wal_bytes_when_successful_append_compresses_payload() -> MidgeResult<()> {
+    // Arrange
+    let temp = tempfile::tempdir()?;
+    let setup = crate::storage::test_support::build_cloud_backed_filesystem_simulation(
+        temp.path(),
+        Some(8192),
+    )?;
+    setup.hybrid_storage.enable_ephemeral_sst_cache(8192);
+    let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
+    let mut actor = WalActor::new(
+        temp.path().join("wal"),
+        DurabilityPolicy::CloudAsync,
+        BatchConfig::default(),
+        false,
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    actor.set_storage_budget(setup.hybrid_storage.clone());
+    let prepared = actor.prepare_transaction_append(
+        &mut state,
+        TransactionAppendParams {
+            request_id: 1,
+            assertions: Vec::new(),
+            ops: vec![crate::runtime::TransactionOp::Put {
+                cf_id: 0,
+                key: Bytes::from_static(b"key"),
+                value: Bytes::from(vec![b'a'; 4096]),
+                ttl_seconds: None,
+                insert_only: false,
+            }],
+            durability_policy: Some(DurabilityPolicy::CloudAsync),
+            start_sequence: None,
+            conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+        },
+    )?;
+    // Act
+    actor.append_prepared_transactions(&mut state, vec![prepared])?;
+    let physical =
+        std::fs::metadata(temp.path().join("wal").join(crate::wal::ACTIVE_FILE_NAME))?.len();
+    // Assert
+    assert!(physical > 0 && physical < 4096);
+    assert_eq!(
+        setup.hybrid_storage.budget_snapshot().total_committed_bytes,
+        physical
+    );
+    Ok(())
+}
+
+#[test]
+fn should_check_transaction_assertions_against_remote_sst_when_local_cache_is_empty(
+) -> MidgeResult<()> {
+    use crate::sst::SstFactory;
+    // Arrange
+    let local = tempfile::tempdir()?;
+    let remote = tempfile::tempdir()?;
+    let mut state = RuntimeState::new(local.path().to_path_buf(), false);
+    let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
+    let mut writer = factory.create()?;
+    writer.add_with_meta(b"asserted", Some(b"value"), 9, 0, None)?;
+    let bytes = writer.finish_bytes()?;
+    let name = crate::sst::file_name(0, 0, 1);
+    std::fs::create_dir_all(remote.path().join("sst"))?;
+    std::fs::write(remote.path().join("sst").join(&name), &bytes)?;
+    state.manifest.files.push(crate::metadata::FileMeta {
+        name,
+        cf_id: 0,
+        size_bytes: bytes.len() as u64,
+        content_crc32c: Some(crc32c::crc32c(&bytes)),
+        smallest_key: Some(b"asserted".to_vec()),
+        largest_key: Some(b"asserted".to_vec()),
+        smallest_seq: Some(9),
+        largest_seq: Some(9),
+        ..Default::default()
+    });
+    state.recovery_sst_fs = Some(Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
+        Arc::clone(&state.fs),
+        Arc::new(crate::storage::filesystem::FileSystem::new(remote.path())?),
+        Duration::from_secs(5),
+    )));
+    // Act
+    let result = WalActor::ensure_no_assertion_conflicts(
+        &state,
+        &[crate::runtime::KeyAssertion {
+            cf_id: 0,
+            key: Bytes::from_static(b"asserted"),
+        }],
+        5,
+    );
+    // Assert
+    assert!(
+        matches!(result, Err(MidgeError::WriteConflict(_))),
+        "remote sequence must conflict: {result:?}"
+    );
+    Ok(())
+}
+
+#[test]
 fn should_assign_identical_expiration_given_multiple_ttl_puts_in_one_transaction() {
     // Arrange
     let ops = vec![
@@ -684,6 +824,11 @@ fn should_fail_all_prepared_transactions_when_batch_append_hits_no_space() -> Mi
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
+    let setup = crate::storage::test_support::build_cloud_backed_filesystem_simulation(
+        temp.path(),
+        Some(8192),
+    )?;
+    setup.hybrid_storage.enable_ephemeral_sst_cache(8192);
     let db_path = temp.path().to_path_buf();
     let wal_dir = db_path.join("wal");
     let mut state = RuntimeState::new(db_path, false);
@@ -695,6 +840,7 @@ fn should_fail_all_prepared_transactions_when_batch_append_hits_no_space() -> Mi
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
+    wal_actor.set_storage_budget(setup.hybrid_storage.clone());
 
     let first = prepare_put_transaction(
         &mut wal_actor,
@@ -738,6 +884,11 @@ fn should_fail_all_prepared_transactions_when_batch_append_hits_no_space() -> Mi
         assert_eq!(state.wal.pending_writes, 0);
         assert_eq!(wal_actor.pending_sync_count(), 0);
         assert_eq!(wal_actor.bytes_since_sync(), 0);
+        assert_eq!(
+            setup.hybrid_storage.budget_snapshot().total_committed_bytes,
+            0,
+            "a rejected append must not consume local disk admission"
+        );
         assert_eq!(state.pending_txn_min_seq, None);
         assert!(
             state

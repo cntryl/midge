@@ -1,5 +1,6 @@
 //! Shared immutable read resources for runtime snapshots.
 
+use crate::common::resource_budget::ResourceBudget;
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::Fs;
 use crate::metadata::FileMeta;
@@ -14,8 +15,16 @@ pub(crate) struct ReadResources {
     sst_fs: Arc<dyn Fs>,
     sst_path_prefix: PathBuf,
     block_cache: Arc<BlockCache>,
-    readers: Mutex<HashMap<ReaderCacheKey, Arc<SstFileIo>>>,
+    readers: Mutex<HashMap<ReaderCacheKey, CachedReader>>,
+    metadata_budget: ResourceBudget,
+    reader_admission: Mutex<()>,
+    access_clock: std::sync::atomic::AtomicU64,
     diagnostics: Arc<crate::diagnostics::RuntimeDiagnostics>,
+}
+
+struct CachedReader {
+    reader: Arc<SstFileIo>,
+    last_used: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -52,11 +61,15 @@ impl ReadResources {
             sst_fs,
             sst_path_prefix,
             block_cache: Arc::new(BlockCache::new(
-                u64::try_from(block_cache_size).unwrap_or(u64::MAX),
+                u64::try_from(block_cache_size.saturating_sub(block_cache_size / 4))
+                    .unwrap_or(u64::MAX),
                 16,
                 block_cache_policy,
             )),
             readers: Mutex::new(HashMap::new()),
+            metadata_budget: ResourceBudget::new(block_cache_size / 4),
+            reader_admission: Mutex::new(()),
+            access_clock: std::sync::atomic::AtomicU64::new(0),
             diagnostics,
         }
     }
@@ -80,16 +93,18 @@ impl ReadResources {
             name: name.clone(),
             sst_id,
         };
-        if let Some(reader) = self
-            .readers
-            .lock()
-            .map_err(|_| MidgeError::Internal("SST reader cache lock poisoned".into()))?
-            .get(&cache_key)
-            .cloned()
-        {
+        if let Some(reader) = self.cached_reader(&cache_key)? {
             if record_metrics {
                 self.diagnostics.sst_metrics().record_reader_cache_hit();
             }
+            return Ok(reader);
+        }
+        // Serialize only cache misses. Hot readers do not wait for remote I/O.
+        let _admission = self
+            .reader_admission
+            .lock()
+            .map_err(|_| MidgeError::Internal("SST reader admission lock poisoned".into()))?;
+        if let Some(reader) = self.cached_reader(&cache_key)? {
             return Ok(reader);
         }
         if record_metrics {
@@ -98,21 +113,72 @@ impl ReadResources {
 
         let sst_path = self.sst_path_prefix.join(&name);
         let path_str = sst_path.to_string_lossy().to_string();
+        let opened = loop {
+            match SstFileIo::open_for_compaction(
+                &path_str,
+                Arc::clone(&self.sst_fs),
+                self.metadata_budget.clone(),
+            ) {
+                Ok(reader) => break reader,
+                Err(error @ MidgeError::ResourceLimit(_)) => {
+                    let mut readers = self.readers.lock().map_err(|_| {
+                        MidgeError::Internal("SST reader cache lock poisoned".into())
+                    })?;
+                    let oldest = readers
+                        .iter()
+                        .filter(|(_, cached)| Arc::strong_count(&cached.reader) == 1)
+                        .min_by_key(|(_, cached)| cached.last_used)
+                        .map(|(key, _)| key.clone());
+                    let Some(oldest) = oldest else {
+                        return Err(error);
+                    };
+                    readers.remove(&oldest);
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        if file_meta.size_bytes != 0 && opened.file_size() != file_meta.size_bytes {
+            return Err(MidgeError::Corruption(format!(
+                "SST '{}' size differs from its manifest",
+                file_meta.name
+            )));
+        }
         let reader = Arc::new(
-            SstFileIo::open(&path_str, Arc::clone(&self.sst_fs))?
+            opened
                 .with_block_cache(Arc::clone(&self.block_cache), sst_id)
                 .with_read_path_diagnostics(Arc::clone(&self.diagnostics)),
         );
-
         let mut readers = self
             .readers
             .lock()
             .map_err(|_| MidgeError::Internal("SST reader cache lock poisoned".into()))?;
-        if let Some(existing) = readers.get(&cache_key).cloned() {
-            return Ok(existing);
-        }
-        readers.insert(cache_key, Arc::clone(&reader));
+        readers.insert(
+            cache_key,
+            CachedReader {
+                reader: Arc::clone(&reader),
+                last_used: self
+                    .access_clock
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            },
+        );
         Ok(reader)
+    }
+
+    fn cached_reader(&self, key: &ReaderCacheKey) -> MidgeResult<Option<Arc<SstFileIo>>> {
+        let mut readers = self
+            .readers
+            .lock()
+            .map_err(|_| MidgeError::Internal("SST reader cache lock poisoned".into()))?;
+        Ok(readers.get_mut(key).map(|cached| {
+            cached.last_used = self
+                .access_clock
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Arc::clone(&cached.reader)
+        }))
+    }
+
+    pub(crate) fn sst_fs(&self) -> Arc<dyn Fs> {
+        Arc::clone(&self.sst_fs)
     }
 
     pub(crate) fn prune_to_live_ssts(&self, live_names: &HashSet<String>) {
@@ -120,7 +186,7 @@ impl ReadResources {
             let stale_sst_ids: Vec<u64> = readers
                 .iter()
                 .filter_map(|(key, reader)| {
-                    (!live_names.contains(&key.name)).then_some(reader.sst_id())
+                    (!live_names.contains(&key.name)).then_some(reader.reader.sst_id())
                 })
                 .collect();
             readers.retain(|key, _reader| live_names.contains(&key.name));
@@ -176,6 +242,32 @@ mod tests {
             largest_seq: Some(7),
             ..Default::default()
         })
+    }
+
+    #[test]
+    fn should_evict_reader_metadata_when_live_inventory_exceeds_cache_budget() -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let resources = ReadResources::new(
+            Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+            PathBuf::new(),
+            64 * 1024,
+            CachePolicyType::Lru,
+        );
+
+        // Act
+        for id in 0..100 {
+            let meta = write_test_sst(&temp_dir, &format!("bounded-{id}.sst"))?;
+            let reader = resources.reader_for(&meta)?;
+            assert!(matches!(
+                reader.get_state_at(b"key", u64::MAX)?,
+                crate::sst::types::KeyState::Value(_, 7, None, 0)
+            ));
+        }
+
+        // Assert
+        assert!(resources.cached_reader_count() < 100);
+        Ok(())
     }
 
     #[test]

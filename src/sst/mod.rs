@@ -46,6 +46,7 @@ pub mod index;
 mod name;
 pub mod read_amp_metrics;
 pub(crate) mod read_path_metrics;
+pub(crate) mod size_bound;
 pub mod traits;
 pub mod trie;
 pub mod types;
@@ -148,6 +149,7 @@ pub struct SkipListMemtable {
     skiplist: Arc<SkipList>,
     seq_generator: std::sync::atomic::AtomicU64,
     size_bytes: std::sync::atomic::AtomicUsize,
+    encoded_size_bound: std::sync::atomic::AtomicUsize,
     range_tombstone_count: std::sync::atomic::AtomicUsize,
     range_tombstones: RwLock<Vec<crate::sst::types::RangeTombstone>>,
 }
@@ -159,6 +161,7 @@ impl SkipListMemtable {
             skiplist: Arc::new(SkipList::new()),
             seq_generator: std::sync::atomic::AtomicU64::new(1),
             size_bytes: std::sync::atomic::AtomicUsize::new(0),
+            encoded_size_bound: std::sync::atomic::AtomicUsize::new(size_bound::FIXED_SST_BYTES),
             range_tombstone_count: std::sync::atomic::AtomicUsize::new(0),
             range_tombstones: RwLock::new(Vec::new()),
         }
@@ -167,6 +170,19 @@ impl SkipListMemtable {
     #[must_use]
     pub(crate) fn contains_key_sequence(&self, key: &[u8], sequence: u64) -> bool {
         self.skiplist.contains_sequence(key, sequence)
+    }
+
+    pub(crate) fn encoded_size_upper_bound(&self) -> usize {
+        self.encoded_size_bound
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn add_encoded_size_bound(&self, bytes: usize) {
+        let _ = self.encoded_size_bound.fetch_update(
+            std::sync::atomic::Ordering::Release,
+            std::sync::atomic::Ordering::Relaxed,
+            |current| Some(current.saturating_add(bytes)),
+        );
     }
 
     fn next_seq(&self) -> u64 {
@@ -424,6 +440,7 @@ impl SkipListMemtable {
         expiration: Option<u64>,
     ) -> MidgeResult<()> {
         let size_delta = key.len() + value.len() + 16;
+        let encoded_delta = size_bound::point_bytes(key.len(), value.len());
         self.size_bytes
             .fetch_add(size_delta, std::sync::atomic::Ordering::Release);
         if !self
@@ -436,6 +453,7 @@ impl SkipListMemtable {
                 "duplicate memtable key/sequence pair at sequence {seq}"
             )));
         }
+        self.add_encoded_size_bound(encoded_delta);
         Ok(())
     }
 
@@ -473,6 +491,7 @@ impl SkipListMemtable {
     /// Returns an error when the underlying memtable cannot record the tombstone.
     pub fn delete_bytes_with_seq(&self, key: Bytes, seq: u64) -> MidgeResult<()> {
         let size_delta = key.len() + 16;
+        let encoded_delta = size_bound::point_bytes(key.len(), 0);
         self.size_bytes
             .fetch_add(size_delta, std::sync::atomic::Ordering::Release);
         if !self.skiplist.delete(key, seq) {
@@ -482,6 +501,7 @@ impl SkipListMemtable {
                 "duplicate memtable key/sequence pair at sequence {seq}"
             )));
         }
+        self.add_encoded_size_bound(encoded_delta);
         Ok(())
     }
 
@@ -513,6 +533,7 @@ impl SkipListMemtable {
         self.range_tombstone_count
             .fetch_add(1, std::sync::atomic::Ordering::Release);
         drop(range_tombstones);
+        self.add_encoded_size_bound(size_bound::range_bytes(start_key.len(), end_key.len()));
         // Keep the estimate bounded by the tombstone itself. The range marker,
         // rather than one point tombstone per currently resident key, is the
         // durable representation.
@@ -565,7 +586,10 @@ impl Memtable for SkipListMemtable {
     fn delete(&self, key: Vec<u8>) -> MidgeResult<()> {
         let seq = self.next_seq();
         let size_delta = key.len() + 16;
-        self.skiplist.delete(Bytes::from(key), seq);
+        let encoded_delta = size_bound::point_bytes(key.len(), 0);
+        if self.skiplist.delete(Bytes::from(key), seq) {
+            self.add_encoded_size_bound(encoded_delta);
+        }
         self.size_bytes
             .fetch_add(size_delta, std::sync::atomic::Ordering::Relaxed);
         Ok(())
@@ -601,6 +625,48 @@ mod tests {
     use crate::MidgeError;
     use bytes::Bytes;
     use std::sync::Arc;
+
+    #[test]
+    fn should_match_flush_writer_bound_when_memtable_contains_versions_and_range_tombstones() {
+        // Arrange
+        let memtable = SkipListMemtable::new();
+        memtable
+            .put_with_seq(b"key".to_vec(), vec![b'a'; 4096], 10, None)
+            .expect("first version");
+        memtable
+            .put_with_seq(b"key".to_vec(), vec![b'b'; 8192], 11, Some(200))
+            .expect("second version");
+        memtable
+            .delete_with_seq(b"removed".to_vec(), 12)
+            .expect("point tombstone");
+        memtable
+            .delete_range_with_seq(b"start", b"stop", 13)
+            .expect("range tombstone");
+        let before_duplicate = memtable.encoded_size_upper_bound();
+        let duplicate = memtable.put_with_seq(b"key".to_vec(), vec![b'c'; 16], 10, None);
+        let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
+        let mut writer = crate::sst::SstFactory::create(&factory).expect("writer");
+
+        // Act
+        for (key, value, sequence, expiration, op) in memtable.iter_all_with_meta(u64::MAX) {
+            writer
+                .add_with_meta(&key, value.as_deref(), sequence, op, expiration)
+                .expect("writer point");
+        }
+        for range in memtable.range_tombstones() {
+            writer
+                .add_range_tombstone(&range.start, &range.end, range.seq)
+                .expect("writer range");
+        }
+
+        // Assert
+        assert!(duplicate.is_err());
+        assert_eq!(memtable.encoded_size_upper_bound(), before_duplicate);
+        assert_eq!(
+            Some(memtable.encoded_size_upper_bound()),
+            writer.encoded_size_upper_bound()
+        );
+    }
 
     #[test]
     fn should_format_sst_names_in_lexicographic_sequence_order() {

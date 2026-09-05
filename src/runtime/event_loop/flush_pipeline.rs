@@ -116,7 +116,7 @@ impl EventLoop {
                 let reservation = match crate::runtime::actors::flush::FlushActor::reserve_flush(
                     self.hybrid_storage.as_ref(),
                     cf_id,
-                    build.file_meta.size_bytes,
+                    build.file_meta.size_bytes.saturating_mul(2),
                 ) {
                     Ok(reservation) => reservation,
                     Err(error) => {
@@ -136,18 +136,6 @@ impl EventLoop {
         let Some((cf_id, _)) = self.state.immutable_flush_by_id(flush.flush_id) else {
             return;
         };
-        let estimated_size = u64::try_from(flush.memtable.size_bytes()).unwrap_or(u64::MAX);
-        let reservation = match crate::runtime::actors::flush::FlushActor::reserve_flush(
-            self.hybrid_storage.as_ref(),
-            cf_id,
-            estimated_size,
-        ) {
-            Ok(reservation) => reservation,
-            Err(error) => {
-                self.fail_flush_pipeline(flush.flush_id, None, &error, false);
-                return;
-            }
-        };
         let identity = FlushIdentity {
             flush_id: flush.flush_id,
             writer_epoch: flush.writer_epoch,
@@ -162,9 +150,9 @@ impl EventLoop {
             identity,
             Arc::clone(&flush.memtable),
             staging_path,
-            reservation,
+            self.hybrid_storage.clone(),
         ) {
-            self.fail_flush_pipeline(flush.flush_id, reservation, &error, false);
+            self.fail_flush_pipeline(flush.flush_id, None, &error, false);
         }
     }
 
@@ -215,7 +203,7 @@ impl EventLoop {
         self.schedule_next_flush_worker();
     }
 
-    fn handle_flush_build_completion(&mut self, completion: FlushBuildCompletion) -> bool {
+    fn handle_flush_build_completion(&mut self, mut completion: FlushBuildCompletion) -> bool {
         self.state.flush_metrics.build_count =
             self.state.flush_metrics.build_count.saturating_add(1);
         self.state.flush_metrics.build_ns_total = self
@@ -234,6 +222,7 @@ impl EventLoop {
             .immutable_flush_by_id(completion.identity.flush_id)
             .is_some_and(|(_, flush)| Arc::ptr_eq(&flush.memtable, &completion.memtable));
         if !same_immutable {
+            Self::cleanup_failed_flush_build(&mut completion);
             let error = crate::common::MidgeError::Fenced(format!(
                 "flush {} build completion no longer owns its immutable",
                 completion.identity.flush_id
@@ -247,6 +236,7 @@ impl EventLoop {
             return false;
         }
         if let Err(error) = self.validate_flush_completion(completion.identity) {
+            Self::cleanup_failed_flush_build(&mut completion);
             self.fail_flush_pipeline(
                 completion.identity.flush_id,
                 completion.reservation,
@@ -254,6 +244,9 @@ impl EventLoop {
                 false,
             );
             return false;
+        }
+        if completion.result.is_err() {
+            Self::cleanup_failed_flush_build(&mut completion);
         }
         match completion.result {
             Ok(file_meta) => self.prepare_flush_publication(
@@ -270,6 +263,23 @@ impl EventLoop {
             ),
         }
         true
+    }
+
+    fn cleanup_failed_flush_build(completion: &mut FlushBuildCompletion) {
+        let mut temp = completion.staging_path.as_os_str().to_os_string();
+        temp.push(".tmp");
+        for path in [&completion.staging_path, &std::path::PathBuf::from(temp)] {
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    // Keep the admission charged until startup can reconcile
+                    // the residue. Failed deletion never returns capacity.
+                    tracing::warn!(?path, %error, "retaining failed flush disk reservation");
+                    completion.reservation = None;
+                }
+            }
+        }
     }
 
     fn prepare_flush_publication(
@@ -440,6 +450,9 @@ impl EventLoop {
         if let (Some(hybrid), Some(token)) = (&self.hybrid_storage, reservation) {
             hybrid.flush_completed_with_token(token, delta.file_meta.size_bytes);
         }
+        if delta.cloud_metadata_published {
+            self.evict_published_sst_cache(std::slice::from_ref(&delta.file_meta.name));
+        }
         self.flush_actor.finish_pipeline();
         self.publish_snapshot();
         self.refresh_write_stall_timing();
@@ -458,9 +471,10 @@ impl EventLoop {
         let (Some(hybrid), Some(token)) = (&self.hybrid_storage, completion.reservation) else {
             return;
         };
-        match &completion.result {
-            Ok(delta) => hybrid.flush_completed_with_token(token, delta.file_meta.size_bytes),
-            Err(_) => hybrid.flush_failed_with_token(token),
+        // A stale failed publisher may have durable local output. Retain
+        // its charge until recovery inspects the authoritative metadata.
+        if let Ok(delta) = &completion.result {
+            hybrid.flush_completed_with_token(token, delta.file_meta.size_bytes);
         }
     }
 
@@ -588,17 +602,20 @@ impl EventLoop {
             .state
             .immutable_flush_by_id(flush_id)
             .map(|(cf_id, flush)| (cf_id, flush.sequence));
-        // This token is process-local capacity accounting, not a durability
-        // mutation. Release it even after fencing while retaining all durable
-        // objects and the immutable for proof-based recovery or retry.
-        crate::runtime::actors::flush::FlushActor::release_reservation(
-            self.hybrid_storage.as_ref(),
-            reservation,
-        );
+        let mut retained = false;
         if let Some((_, flush)) = self.state.immutable_flush_by_id_mut(flush_id) {
             if let Some(build) = &mut flush.built {
-                build.reservation = None;
+                // The local output survives publication failure and retries
+                // reuse both its bytes and its original capacity admission.
+                build.reservation = build.reservation.or(reservation);
+                retained = true;
             }
+        }
+        if !retained {
+            crate::runtime::actors::flush::FlushActor::release_reservation(
+                self.hybrid_storage.as_ref(),
+                reservation,
+            );
         }
         self.flush_actor.finish_pipeline();
         if publication_phase {
@@ -717,7 +734,7 @@ impl EventLoop {
         if self.state.is_memory_mode() || self.shutting_down {
             return 0;
         }
-        let mut frozen_count = 0usize;
+        let mut frozen_count = self.freeze_cloud_memtables_near_staging_limit();
         let mut attempted_cfs = std::collections::HashSet::new();
         while let Some(candidate) = self
             .state
@@ -935,6 +952,126 @@ mod tests {
         // Assert
         assert!(!should_continue);
         assert_eq!(hybrid.budget_snapshot().total_committed_bytes, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn should_keep_flush_admission_for_retry_when_publication_fails_after_output_is_built(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let directory = tempfile::tempdir()?;
+        let (mut event_loop, hybrid) = event_loop_with_hybrid_storage(&directory)?;
+        hybrid.enable_ephemeral_sst_cache(256);
+        event_loop.state.sequence = 1;
+        event_loop
+            .state
+            .get_cf(0)
+            .expect("default CF")
+            .memtable
+            .put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)?;
+        let flush_id = event_loop
+            .freeze_active_memtable(0)?
+            .expect("freeze memtable");
+        let reservation = hybrid
+            .reserve_for_flush_with_token(256)
+            .expect("flush capacity");
+        let identity = FlushIdentity {
+            flush_id,
+            writer_epoch: event_loop.writer_epoch,
+            cf_id: 0,
+            sequence: 1,
+        };
+        let staging_path = directory.path().join("built.sst");
+        std::fs::write(&staging_path, [1_u8; 128])?;
+        let (_, flush) = event_loop
+            .state
+            .immutable_flush_by_id_mut(flush_id)
+            .expect("immutable");
+        flush.built = Some(FlushBuildOutput {
+            identity,
+            staging_path: staging_path.clone(),
+            reservation: Some(reservation),
+            file_meta: crate::runtime::FileMeta {
+                name: crate::sst::file_name(0, 0, 1),
+                level: 0,
+                size_bytes: 128,
+                content_crc32c: Some(1),
+                cf_id: 0,
+                smallest_key: Some(b"key".to_vec()),
+                largest_key: Some(b"key".to_vec()),
+                smallest_seq: Some(1),
+                largest_seq: Some(1),
+                key_bounds_complete: true,
+            },
+        });
+
+        // Act
+        event_loop.handle_flush_publish_completion(FlushPublishCompletion {
+            identity,
+            reservation: Some(reservation),
+            publish_ns: 1,
+            result: Err(crate::common::MidgeError::Timeout(
+                "cloud unavailable".into(),
+            )),
+        });
+
+        // Assert
+        assert!(staging_path.exists());
+        let (_, flush) = event_loop
+            .state
+            .immutable_flush_by_id(flush_id)
+            .expect("retained immutable");
+        assert_eq!(
+            flush.built.as_ref().expect("retry output").reservation,
+            Some(reservation)
+        );
+        assert_eq!(hybrid.budget_snapshot().total_committed_bytes, 256);
+        assert!(hybrid.reserve_for_flush_with_token(1).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn should_retain_flush_admission_when_failed_build_residue_cannot_be_removed(
+    ) -> crate::common::MidgeResult<()> {
+        for is_temp in [false, true] {
+            // Arrange
+            let directory = tempfile::tempdir()?;
+            let (mut event_loop, hybrid) = event_loop_with_hybrid_storage(&directory)?;
+            hybrid.enable_ephemeral_sst_cache(256);
+            let reservation = hybrid
+                .reserve_for_flush_with_token(256)
+                .expect("flush capacity");
+            let staging_path = directory.path().join("failed.sst");
+            let residue_path = if is_temp {
+                directory.path().join("failed.sst.tmp")
+            } else {
+                staging_path.clone()
+            };
+            // A nonempty directory reliably makes unlink fail without permissions or timing.
+            std::fs::create_dir(&residue_path)?;
+            std::fs::write(residue_path.join("retained-bytes"), [1_u8; 128])?;
+            let completion = FlushBuildCompletion {
+                identity: FlushIdentity {
+                    flush_id: 99,
+                    writer_epoch: 0,
+                    cf_id: 0,
+                    sequence: 1,
+                },
+                memtable: Arc::new(crate::sst::SkipListMemtable::new()),
+                staging_path,
+                reservation: Some(reservation),
+                build_ns: 1,
+                result: Err(crate::common::MidgeError::NoSpace("build failed".into())),
+            };
+
+            // Act
+            event_loop.handle_flush_build_completion(completion);
+
+            // Assert
+            assert!(residue_path.join("retained-bytes").exists());
+            assert_eq!(hybrid.budget_snapshot().total_committed_bytes, 256);
+            assert!(hybrid.reserve_for_flush_with_token(1).is_err());
+        }
         Ok(())
     }
 

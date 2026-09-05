@@ -32,6 +32,9 @@ impl RuntimeState {
             .iter()
             .filter_map(|file| crate::sst::parse_compaction_file_name(&file.name))
             .map(|(_, _, generation, _)| generation)
+            // The manifest counter reserves names before cloud output
+            // publication. An interrupted job can leave no visible SSTs.
+            .chain(manifest.next_sst_seqs.values().copied())
             .max()
             .unwrap_or(0)
     }
@@ -110,6 +113,8 @@ impl RuntimeState {
             column_families: wal_recovery.column_families,
             manifest,
             fs: fs.clone(),
+            recovery_sst_fs: None,
+            salvaged_local_ssts: std::collections::HashSet::new(),
             ttl_clock: Arc::new(crate::common::time::ObservedClock::default()),
             wal: WalState {
                 current_segment_id: wal_recovery.next_segment_id,
@@ -518,46 +523,83 @@ impl RuntimeState {
         Ok(false)
     }
 
+    /// Verify a complete SST publication proof through one immutable file view.
+    /// The checksum pass uses fixed-size ranges and never materializes a whole
+    /// output locally or in memory. Metadata is decoded through the same pinned
+    /// view so a replacement object cannot be mixed into one proof.
+    pub(crate) fn validate_sst_fs_proof(
+        fs: Arc<dyn Fs>,
+        file_meta: &crate::runtime::FileMeta,
+    ) -> MidgeResult<()> {
+        const CHECKSUM_CHUNK_BYTES: u64 = 1024 * 1024;
+        let path = crate::io::FsPath::new(crate::sst::object_key(&file_meta.name));
+        let pinned = fs.immutable_read_view(&path)?.unwrap_or(fs);
+        let file = pinned.open(
+            &path,
+            crate::io::OpenOptions {
+                mode: crate::io::OpenMode::ReadOnly,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        )?;
+        let size = file.len()?;
+        if file_meta.size_bytes != 0 && size != file_meta.size_bytes {
+            return Err(MidgeError::RecoveryFailed(format!(
+                "recovery intent SST '{}' size does not match its publication proof",
+                file_meta.name
+            )));
+        }
+        if let Some(expected_crc32c) = file_meta.content_crc32c {
+            let mut checksum = 0_u32;
+            let mut offset = 0_u64;
+            while offset < size {
+                let count = CHECKSUM_CHUNK_BYTES.min(size - offset);
+                let bytes = file.read_at(offset, count)?;
+                if u64::try_from(bytes.len()).ok() != Some(count) {
+                    return Err(MidgeError::RecoveryFailed(format!(
+                        "recovery intent SST '{}' returned a short checksum range",
+                        file_meta.name
+                    )));
+                }
+                checksum = crc32c::crc32c_append(checksum, &bytes);
+                offset += count;
+            }
+            if checksum != expected_crc32c {
+                return Err(MidgeError::RecoveryFailed(format!(
+                    "recovery intent SST '{}' checksum does not match its publication proof",
+                    file_meta.name
+                )));
+            }
+        }
+        drop(file);
+        crate::sst::fs::SstFileIo::open(&path.0, pinned)?;
+        Ok(())
+    }
+
     fn validate_recovered_sst(
         &mut self,
         file_meta: &crate::runtime::FileMeta,
     ) -> MidgeResult<bool> {
-        let sst_name = &file_meta.name;
-        let path = self.sst_dir.join(sst_name);
-        if !path.exists() {
-            return self.handle_recovery_issue(format!(
-                "recovery intent references missing SST '{sst_name}'"
-            ));
-        }
-
-        let bytes = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                return self.handle_recovery_issue(format!(
-                    "recovery intent could not read SST '{sst_name}': {error}"
-                ));
-            }
-        };
-        if file_meta.size_bytes != 0
-            && u64::try_from(bytes.len()).unwrap_or(u64::MAX) != file_meta.size_bytes
-        {
-            return self.handle_recovery_issue(format!(
-                "recovery intent SST '{sst_name}' size does not match its publication proof"
-            ));
-        }
-        if file_meta
-            .content_crc32c
-            .is_some_and(|expected| crc32c::crc32c(&bytes) != expected)
-        {
-            return self.handle_recovery_issue(format!(
-                "recovery intent SST '{sst_name}' checksum does not match its publication proof"
-            ));
-        }
-
-        match crate::sst::fs::SstFileIo::open_with_real_fs(&path) {
-            Ok(_) => Ok(true),
+        let fs = self.recovery_sst_fs.as_ref().unwrap_or(&self.fs).clone();
+        match Self::validate_sst_fs_proof(fs, file_meta) {
+            Ok(()) => Ok(true),
             Err(error) => self.handle_recovery_issue(format!(
-                "recovery intent references invalid SST '{sst_name}': {error}"
+                "recovery intent references missing or invalid SST '{}': {error}",
+                file_meta.name
+            )),
+        }
+    }
+
+    fn validate_local_recovered_sst(
+        &mut self,
+        file_meta: &crate::runtime::FileMeta,
+    ) -> MidgeResult<bool> {
+        match Self::validate_sst_fs_proof(Arc::clone(&self.fs), file_meta) {
+            Ok(()) => Ok(true),
+            Err(error) => self.handle_recovery_issue(format!(
+                "recovery intent references missing or invalid local SST '{}': {error}",
+                file_meta.name
             )),
         }
     }
@@ -600,7 +642,7 @@ impl RuntimeState {
             PublicationPhase::OutputDurable => {
                 let path = self.sst_dir.join(&file_meta.name);
                 if path.exists() {
-                    if !self.validate_recovered_sst(file_meta)? {
+                    if !self.validate_local_recovered_sst(file_meta)? {
                         return Ok(false);
                     }
                     self.delete_sst_if_exists(&file_meta.name)?;
@@ -651,7 +693,7 @@ impl RuntimeState {
                     if !path.exists() {
                         continue;
                     }
-                    if !self.validate_recovered_sst(file_meta)? {
+                    if !self.validate_local_recovered_sst(file_meta)? {
                         return Ok(false);
                     }
                     self.delete_sst_if_exists(&file_meta.name)?;
@@ -802,7 +844,7 @@ impl RuntimeState {
             {
                 continue;
             }
-            if !self.validate_recovered_sst(file_meta)? {
+            if !self.validate_local_recovered_sst(file_meta)? {
                 return Ok(());
             }
             self.delete_sst_if_exists(&file_meta.name)?;
@@ -825,7 +867,7 @@ impl RuntimeState {
             {
                 continue;
             }
-            if !self.validate_recovered_sst(file_meta)? {
+            if !self.validate_local_recovered_sst(file_meta)? {
                 return Ok(());
             }
             self.delete_sst_if_exists(&file_meta.name)?;

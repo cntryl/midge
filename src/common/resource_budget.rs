@@ -38,12 +38,12 @@ impl ResourceBudget {
         loop {
             let Some(next) = current.checked_add(bytes) else {
                 return Err(MidgeError::ResourceLimit(format!(
-                    "compaction {resource} reservation overflowed the byte counter"
+                    "{resource} reservation overflowed the byte counter"
                 )));
             };
             if next > self.inner.limit {
                 return Err(MidgeError::ResourceLimit(format!(
-                    "compaction {resource} requires {bytes} bytes with {current} of {} bytes already reserved",
+                    "{resource} requires {bytes} bytes with {current} of {} bytes already reserved",
                     self.inner.limit
                 )));
             }

@@ -37,6 +37,7 @@ pub(crate) struct GuardedObjectProof {
     key: String,
     pub(super) expected_bytes: Option<Vec<u8>>,
     metadata: StorageObjectMetadata,
+    range_identity: bool,
 }
 
 impl GuardedObjectProof {
@@ -50,6 +51,7 @@ impl GuardedObjectProof {
             key,
             expected_bytes: None,
             metadata,
+            range_identity: false,
         }
     }
 
@@ -64,6 +66,21 @@ impl GuardedObjectProof {
             key,
             expected_bytes: Some(expected_bytes),
             metadata,
+            range_identity: false,
+        }
+    }
+
+    pub(crate) fn range_identity(
+        backend: Arc<dyn StorageBackend>,
+        key: String,
+        metadata: StorageObjectMetadata,
+    ) -> Self {
+        Self {
+            backend,
+            key,
+            expected_bytes: None,
+            metadata,
+            range_identity: true,
         }
     }
 }
@@ -100,6 +117,85 @@ impl PruneWorkerRegistry {
 }
 
 impl HybridStorage {
+    pub(crate) fn remote_sst_backend(&self) -> Arc<dyn StorageBackend> {
+        Arc::clone(&self.cloud)
+    }
+
+    pub(crate) fn storage_io_timeout(&self) -> Duration {
+        self.callback_timeout
+    }
+
+    pub(crate) fn ephemeral_sst_cache_enabled(&self) -> bool {
+        self.ephemeral_sst_cache
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) fn remote_range_metadata_within(
+        &self,
+        key: &str,
+        deadline: &OperationDeadline,
+    ) -> crate::common::MidgeResult<StorageObjectMetadata> {
+        let timeout =
+            Self::deadline_timeout(key, "range object HEAD", self.callback_timeout, deadline)?;
+        Self::head_range_object_from_backend(&self.cloud, key, timeout).map_err(|error| {
+            Self::proof_round_trip_error(key, "range object HEAD", error, deadline)
+        })
+    }
+
+    pub(crate) fn remote_range_metadata_optional_within(
+        &self,
+        key: &str,
+        deadline: &OperationDeadline,
+    ) -> crate::common::MidgeResult<Option<StorageObjectMetadata>> {
+        let timeout =
+            Self::deadline_timeout(key, "range object HEAD", self.callback_timeout, deadline)?;
+        match Self::head_range_object_from_backend(&self.cloud, key, timeout) {
+            Ok(metadata) => Ok(Some(metadata)),
+            Err(error) if Self::storage_error_indicates_missing(&error) => Ok(None),
+            Err(error) => Err(Self::proof_round_trip_error(
+                key,
+                "range object HEAD",
+                error,
+                deadline,
+            )),
+        }
+    }
+
+    pub(crate) fn verify_remote_object_guards_within(
+        &self,
+        guards: &[GuardedObjectProof],
+        deadline: &OperationDeadline,
+    ) -> crate::common::MidgeResult<()> {
+        for guard in guards {
+            Self::verify_guarded_object_proof_within(guard, self.callback_timeout, deadline)?;
+        }
+        Ok(())
+    }
+
+    fn head_range_object_from_backend(
+        backend: &Arc<dyn StorageBackend>,
+        key: &str,
+        timeout: Duration,
+    ) -> Result<StorageObjectMetadata, String> {
+        let (tx, rx) = mpsc::channel();
+        backend.submit_range_head(key, timeout, tx);
+        match rx.recv_timeout(timeout) {
+            Ok(StorageEvent::HeadComplete {
+                result: StorageOutcome::Ok(metadata),
+                ..
+            }) => Ok(metadata),
+            Ok(StorageEvent::HeadComplete {
+                result: StorageOutcome::Err(error),
+                ..
+            }) => Err(error),
+            Ok(other) => Err(format!("unexpected range HEAD response: {other:?}")),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(crate::storage::storage_timeout_error(
+                "range HEAD timed out",
+            )),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err("range HEAD callback closed".into()),
+        }
+    }
+
     pub(super) fn stable_object_proof_from_backend(
         backend: &Arc<dyn StorageBackend>,
         key: &str,
@@ -236,6 +332,7 @@ impl HybridStorage {
 
     /// Return a stable proof when the remote key exists, or `None` for a
     /// provider-confirmed missing key.
+    #[cfg(test)]
     pub(crate) fn remote_object_proof_optional(
         &self,
         key: &str,
@@ -424,8 +521,12 @@ impl HybridStorage {
             callback_timeout,
             deadline,
         )?;
-        let actual = Self::head_object_from_backend_blocking(&proof.backend, &proof.key, timeout)
-            .map_err(|error| {
+        let actual = if proof.range_identity {
+            Self::head_range_object_from_backend(&proof.backend, &proof.key, timeout)
+        } else {
+            Self::head_object_from_backend_blocking(&proof.backend, &proof.key, timeout)
+        }
+        .map_err(|error| {
             Self::proof_round_trip_error(&proof.key, "guarded object HEAD", error, deadline)
         })?;
         if actual.same_version(&proof.metadata) {
@@ -636,31 +737,38 @@ impl HybridStorage {
     /// proof. Startup recovery uses this blocking form before the runtime
     /// event loop exists; a provider precondition failure is returned so the
     /// caller can retain the replacement object and fail closed.
-    pub(crate) fn delete_remote_object_guarded_blocking(
-        &self,
-        target: RemoteObjectProof,
-    ) -> Result<(), String> {
-        self.delete_remote_object_guarded_blocking_within(target, &OperationDeadline::unbounded())
-            .map_err(|error| error.to_string())
-    }
-
+    #[cfg(test)]
     pub(crate) fn delete_remote_object_guarded_blocking_within(
         &self,
-        target: RemoteObjectProof,
+        target: &RemoteObjectProof,
+        deadline: &OperationDeadline,
+    ) -> crate::common::MidgeResult<()> {
+        self.delete_remote_object_by_identity_blocking_within(
+            &target.key,
+            &target.metadata,
+            deadline,
+        )
+    }
+
+    /// Delete an object whose content has been validated through a pinned
+    /// range view. The provider precondition closes the read/delete race.
+    pub(crate) fn delete_remote_object_by_identity_blocking_within(
+        &self,
+        key: &str,
+        metadata: &StorageObjectMetadata,
         deadline: &OperationDeadline,
     ) -> crate::common::MidgeResult<()> {
         let delete_headers = crate::storage::cloud::object_match_precondition_headers(
-            &target.metadata.etag,
-            target.metadata.generation.as_deref(),
+            &metadata.etag,
+            metadata.generation.as_deref(),
         )
         .ok_or_else(|| {
             crate::common::MidgeError::Internal(format!(
-                "cannot conditionally delete remote object '{}' without an identity token",
-                target.key
+                "cannot conditionally delete remote object '{key}' without an identity token"
             ))
         })?;
-        let cloud = Arc::clone(self.cloud_backend_for_key(&target.key));
-        let target_key = target.key;
+        let cloud = Arc::clone(self.cloud_backend_for_key(key));
+        let target_key = key.to_string();
         let timeout = Self::deadline_timeout(
             &target_key,
             "conditional DELETE",

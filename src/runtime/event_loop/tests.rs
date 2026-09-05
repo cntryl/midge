@@ -197,6 +197,49 @@ pub(in crate::runtime::event_loop) fn create_test_local_event_loop(
 }
 
 #[test]
+fn should_require_cloud_filename_allocation_when_compacting_in_salvage_mode(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let directory = tempfile::tempdir()?;
+    let state = RuntimeState::try_new(
+        directory.path().to_path_buf(),
+        false,
+        crate::config::RecoveryPolicy::Salvage,
+    )?;
+    let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
+        Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+        String::new(),
+    ));
+    let local = Arc::new(crate::storage::filesystem::FileSystem::new(
+        directory.path().join("hybrid_local"),
+    )?);
+    let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
+        local,
+        cloud.clone(),
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    ));
+    let config = crate::runtime::RuntimeConfig {
+        hybrid_storage: Some(hybrid),
+        cloud_metadata_storage: Some(Arc::clone(&cloud)),
+        ..crate::runtime::RuntimeConfig::default()
+    };
+    let mut event_loop =
+        EventLoop::new(state, false, Arc::new(ResponseRouter::new()), config, None)?;
+    let _publication = cloud
+        .try_lock_metadata_publication()
+        .expect("hold metadata publication");
+
+    // Act
+    let result = event_loop
+        .assign_compaction_output_sequence(crate::compaction::CompactionPlan::new(0, 0, 1));
+
+    // Assert
+    assert!(matches!(result, Err(crate::common::MidgeError::Busy(_))));
+    assert!(event_loop.state.manifest.files.is_empty());
+    Ok(())
+}
+
+#[test]
 fn should_fail_every_held_request_when_shutdown_drain_restores_deferred_work() {
     // Arrange: this is the exact state produced when a flush completion pops
     // one deferred DDL request into `pending_msg` while shutdown is draining.

@@ -163,6 +163,42 @@ fn write_file_with_parents(full_path: &Path, data: Vec<u8>) -> StorageOutcome<()
     }
 }
 
+fn range_io_error(error: &std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        format!("not found: {error}")
+    } else {
+        error.to_string()
+    }
+}
+
+fn range_metadata(metadata: &fs::Metadata) -> Result<StorageObjectMetadata, String> {
+    if !metadata.is_file() {
+        return Err("range reads require an ordinary immutable file".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(StorageObjectMetadata {
+            size: metadata.len(),
+            etag: format!(
+                "fs:{}:{}:{}:{}:{}:{}",
+                metadata.dev(),
+                metadata.ino(),
+                metadata.mtime(),
+                metadata.mtime_nsec(),
+                metadata.ctime(),
+                metadata.ctime_nsec()
+            ),
+            generation: None,
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        Err("filesystem backend lacks stable range identity on this platform".into())
+    }
+}
+
 fn mutation_lock(full_path: &Path) -> parking_lot::MutexGuard<'static, ()> {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     full_path.hash(&mut hasher);
@@ -199,6 +235,81 @@ fn create_file_new_with_parents(full_path: &Path, data: &[u8]) -> StorageOutcome
 }
 
 impl StorageBackend for FileSystem {
+    fn submit_range_head(
+        &self,
+        key: &str,
+        timeout: std::time::Duration,
+        callback: StorageCallback,
+    ) {
+        let result = (|| {
+            if timeout.is_zero() {
+                return Err(crate::storage::storage_timeout_error(
+                    "range HEAD timed out",
+                ));
+            }
+            let path = self.full_path(key)?;
+            let _lock = mutation_lock(&path);
+            let _process_lock = self.acquire_process_lock(&path)?;
+            let metadata = fs::metadata(&path).map_err(|error| range_io_error(&error))?;
+            range_metadata(&metadata)
+        })();
+        let result = match result {
+            Ok(metadata) => StorageOutcome::Ok(metadata),
+            Err(error) => StorageOutcome::Err(error),
+        };
+        let _ = callback.send(StorageEvent::HeadComplete {
+            key: key.to_string(),
+            result,
+        });
+    }
+
+    fn submit_read_range(
+        &self,
+        key: &str,
+        start: u64,
+        end: u64,
+        expected: StorageObjectMetadata,
+        timeout: std::time::Duration,
+        callback: crate::storage::RangeReadCallback,
+    ) {
+        use std::io::{Read, Seek, SeekFrom};
+        let result = (|| {
+            if timeout.is_zero() {
+                return Err(crate::storage::storage_timeout_error(
+                    "range read timed out",
+                ));
+            }
+            if start >= end || end > expected.size {
+                return Err("invalid remote SST byte range".into());
+            }
+            let path = self.full_path(key)?;
+            let _lock = mutation_lock(&path);
+            let _process_lock = self.acquire_process_lock(&path)?;
+            let mut file = fs::File::open(&path).map_err(|error| range_io_error(&error))?;
+            let metadata =
+                range_metadata(&file.metadata().map_err(|error| range_io_error(&error))?)?;
+            if !metadata.same_version(&expected) {
+                return Err("precondition failed: remote SST version changed".into());
+            }
+            let len = usize::try_from(end - start).map_err(|error| error.to_string())?;
+            let mut bytes = Vec::new();
+            bytes
+                .try_reserve_exact(len)
+                .map_err(|error| error.to_string())?;
+            bytes.resize(len, 0);
+            file.seek(SeekFrom::Start(start))
+                .map_err(|error| range_io_error(&error))?;
+            file.read_exact(&mut bytes)
+                .map_err(|error| range_io_error(&error))?;
+            let after = range_metadata(&file.metadata().map_err(|error| range_io_error(&error))?)?;
+            if !after.same_version(&expected) {
+                return Err("precondition failed: remote SST changed during range read".into());
+            }
+            Ok(bytes)
+        })();
+        let _ = callback.send(result);
+    }
+
     fn submit_read_with_metadata(
         &self,
         key: &str,
@@ -442,9 +553,18 @@ impl StorageBackend for FileSystem {
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case("if-match"))
         {
-            match fs::read(&full_path) {
-                Ok(data) => {
-                    let current = StorageObjectMetadata::content_crc(data.len() as u64, &data).etag;
+            let identity = if expected.trim_matches('"').starts_with("fs:") {
+                fs::metadata(&full_path)
+                    .map_err(|error| error.to_string())
+                    .and_then(|metadata| range_metadata(&metadata))
+                    .map(|metadata| metadata.etag)
+            } else {
+                fs::read(&full_path)
+                    .map_err(|error| error.to_string())
+                    .map(|data| StorageObjectMetadata::content_crc(data.len() as u64, &data).etag)
+            };
+            match identity {
+                Ok(current) => {
                     if current == expected.trim_matches('"') {
                         match fs::remove_file(&full_path) {
                             Ok(()) => StorageOutcome::Ok(()),

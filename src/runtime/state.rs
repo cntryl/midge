@@ -245,6 +245,12 @@ pub struct RuntimeState {
 
     // Filesystem abstraction for all IO (never call std::fs directly)
     pub fs: std::sync::Arc<dyn Fs>,
+    /// Authoritative SST views used during cloud intent replay. Local SST
+    /// staging is disposable and is not a prerequisite for recovery.
+    pub(crate) recovery_sst_fs: Option<Arc<dyn Fs>>,
+    /// Locally verified recovery copies retained only when explicit salvage
+    /// cannot use the authoritative cloud object.
+    pub(crate) salvaged_local_ssts: HashSet<String>,
     /// Engine-scoped TTL clock with a process-local nondecreasing floor.
     pub(crate) ttl_clock: Arc<crate::common::time::ObservedClock>,
 
@@ -690,6 +696,7 @@ impl RuntimeState {
                 }
                 Err(FsError::NotFound(_)) => {}
                 Err(error) => {
+                    self.mark_persistence_anomaly();
                     tracing::warn!(
                         path = %path.0.as_str(),
                         error = %error,
@@ -701,12 +708,20 @@ impl RuntimeState {
 
         for dir_name in staging_dirs {
             let path = FsPath::new(dir_name);
-            match self.fs.remove_dir_all(&path) {
+            let result = if crate::failpoints::with_read_gate(|| {
+                crate::failpoints::is_active("midge::recovery::inject_root_staging_delete_failure")
+            }) {
+                Err(FsError::Io("injected root staging cleanup failure".into()))
+            } else {
+                self.fs.remove_dir_all(&path)
+            };
+            match result {
                 Ok(()) => {
                     tracing::info!(path = %path.0.as_str(), "deleted stale staging directory");
                 }
                 Err(FsError::NotFound(_)) => {}
                 Err(error) => {
+                    self.mark_persistence_anomaly();
                     tracing::warn!(
                         path = %path.0.as_str(),
                         error = %error,
@@ -715,6 +730,48 @@ impl RuntimeState {
                 }
             }
         }
+    }
+
+    /// Physical scratch left after startup cleanup. Nested SST/WAL staging
+    /// remains in their own resident-byte totals and must not be counted twice.
+    pub(crate) fn retained_startup_scratch_bytes(&self) -> MidgeResult<u64> {
+        if self.mode.memory_mode {
+            return Ok(0);
+        }
+        let root = FsPath::new("");
+        let mut directories = vec![root.clone()];
+        let mut bytes = 0_u64;
+        while let Some(directory) = directories.pop() {
+            for entry in self.fs.list_dir(&directory)? {
+                if directory == root {
+                    let is_scratch = if entry.is_dir {
+                        matches!(entry.name.as_str(), "cloud_recovery" | "txn")
+                    } else {
+                        std::path::Path::new(&entry.name)
+                            .extension()
+                            .is_some_and(|ext| ext.eq_ignore_ascii_case("tmp"))
+                    };
+                    if !is_scratch {
+                        continue;
+                    }
+                }
+                let path = if directory == root {
+                    FsPath::new(entry.name)
+                } else {
+                    FsPath::new(format!("{}/{}", directory.0, entry.name))
+                };
+                if entry.is_dir {
+                    directories.push(path);
+                } else {
+                    bytes = bytes
+                        .checked_add(self.fs.metadata(&path)?.len)
+                        .ok_or_else(|| {
+                            MidgeError::NoSpace("startup scratch byte accounting overflow".into())
+                        })?;
+                }
+            }
+        }
+        Ok(bytes)
     }
 
     fn ensure_directories(

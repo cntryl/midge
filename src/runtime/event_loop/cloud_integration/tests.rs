@@ -26,6 +26,34 @@ fn failpoint_test_lock() -> &'static Mutex<()> {
     FAILPOINT_TEST_LOCK.get_or_init(|| Mutex::new(()))
 }
 
+#[test]
+fn should_release_wal_disk_budget_only_after_local_segment_removal(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut event_loop = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::new(4096),
+    )?;
+    let storage = event_loop.hybrid_storage.as_ref().unwrap().clone();
+    storage.enable_ephemeral_sst_cache(4096);
+    let path = event_loop
+        .state
+        .wal_dir
+        .join(crate::wal::segment_file_name(77));
+    std::fs::create_dir_all(&path)?;
+    storage.admit_local_wal_bytes(100)?;
+    // Act
+    event_loop.remove_cloud_durable_local_wal_segment(77);
+    let after_failed_delete = storage.budget_snapshot().total_committed_bytes;
+    std::fs::remove_dir(&path)?;
+    std::fs::write(&path, vec![0; 100])?;
+    event_loop.remove_cloud_durable_local_wal_segment(77);
+    // Assert
+    assert_eq!(after_failed_delete, 100);
+    assert_eq!(storage.budget_snapshot().total_committed_bytes, 0);
+    assert!(!path.exists());
+    Ok(())
+}
+
 fn assertion_only_cloud_request(request_id: u64, start_sequence: u64) -> ApplyTransactionRequest {
     ApplyTransactionRequest {
         request_id,
@@ -311,7 +339,7 @@ impl crate::storage::cloud::CloudBackend for FailThirdIntentPutBackend {
         );
     }
 
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_range, submit_delete, submit_list, submit_head);
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_range, submit_get_range_with_identity, submit_delete, submit_list, submit_head);
 }
 
 struct ObserveIntentBeforeRemoteSstBackend {
@@ -349,7 +377,7 @@ impl crate::storage::cloud::CloudBackend for ObserveIntentBeforeRemoteSstBackend
         );
     }
 
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_range, submit_delete, submit_list, submit_head);
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_range, submit_get_range_with_identity, submit_delete, submit_list, submit_head);
 }
 
 struct BlockingDeleteStorageBackend {
@@ -1702,7 +1730,7 @@ impl crate::storage::cloud::CloudBackend for ProviderTimeoutMetadataBackend {
         });
     }
 
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_range, submit_delete, submit_list, submit_head);
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_range, submit_get_range_with_identity, submit_delete, submit_list, submit_head);
 }
 
 impl BudgetConsumingMetadataProofBackend {
@@ -1750,7 +1778,7 @@ impl crate::storage::cloud::CloudBackend for BudgetConsumingMetadataProofBackend
         }
     }
 
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_range, submit_delete, submit_list);
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_range, submit_get_range_with_identity, submit_delete, submit_list);
 
     fn submit_head(&self, _key: &str, callback: crate::storage::cloud::CloudCallback) {
         self.retained_callbacks
@@ -1820,7 +1848,7 @@ impl crate::storage::cloud::CloudBackend for BudgetConsumingMetadataBackend {
         }
     }
 
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_range, submit_delete, submit_list, submit_head);
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_range, submit_get_range_with_identity, submit_delete, submit_list, submit_head);
 }
 
 struct AdvanceManifestBeforeHeadBackend {
@@ -1840,7 +1868,7 @@ impl AdvanceManifestBeforeHeadBackend {
 }
 
 impl crate::storage::cloud::CloudBackend for AdvanceManifestBeforeHeadBackend {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_with_metadata, submit_put, submit_get, submit_get_range, submit_delete, submit_list);
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_with_metadata, submit_put, submit_get, submit_get_range, submit_get_range_with_identity, submit_delete, submit_list);
 
     fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
         if key.ends_with("metadata/manifest.json") && !self.advanced.swap(true, Ordering::SeqCst) {

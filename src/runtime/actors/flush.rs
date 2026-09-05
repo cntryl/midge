@@ -82,6 +82,7 @@ struct FlushBuildTask {
     memtable: Arc<crate::sst::SkipListMemtable>,
     staging_path: PathBuf,
     reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
+    hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
 }
 
 enum FlushWorkerTask {
@@ -143,7 +144,7 @@ impl FlushActor {
         identity: FlushIdentity,
         memtable: Arc<crate::sst::SkipListMemtable>,
         staging_path: PathBuf,
-        reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
+        hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
     ) -> MidgeResult<()> {
         if self.memory_mode {
             return Ok(());
@@ -157,7 +158,8 @@ impl FlushActor {
             identity,
             memtable,
             staging_path,
-            reservation,
+            reservation: None,
+            hybrid_storage,
         });
         self.task_tx
             .as_ref()
@@ -258,12 +260,11 @@ impl FlushActor {
     ) {
         while let Ok(task) = task_rx.recv() {
             match task {
-                FlushWorkerTask::Build(task) => {
-                    let fallback = task.clone();
+                FlushWorkerTask::Build(mut task) => {
                     let started = Instant::now();
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         crate::failpoints::fail_point!("midge::flush_worker::before_build");
-                        Self::write_memtable_to_staging(sst_factory, &task)
+                        Self::write_memtable_to_staging(sst_factory, &mut task)
                     }));
                     let build_ns = elapsed_ns(started);
                     let result = match result {
@@ -276,10 +277,10 @@ impl FlushActor {
                         }
                     };
                     let _ = completion_tx.send(FlushWorkerResult::Build(FlushBuildCompletion {
-                        identity: fallback.identity,
-                        memtable: fallback.memtable,
-                        staging_path: fallback.staging_path,
-                        reservation: fallback.reservation,
+                        identity: task.identity,
+                        memtable: task.memtable,
+                        staging_path: task.staging_path,
+                        reservation: task.reservation,
                         build_ns,
                         result,
                     }));
@@ -317,7 +318,7 @@ impl FlushActor {
 
     fn write_memtable_to_staging(
         sst_factory: &Arc<dyn crate::sst::SstFactory>,
-        task: &FlushBuildTask,
+        task: &mut FlushBuildTask,
     ) -> MidgeResult<crate::runtime::FileMeta> {
         if let Some(parent) = task.staging_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -363,6 +364,19 @@ impl FlushActor {
             smallest_seq = smallest_seq.min(tombstone.seq);
             largest_seq = largest_seq.max(tombstone.seq);
             writer.add_range_tombstone(&tombstone.start, &tombstone.end, tombstone.seq)?;
+        }
+        if task.hybrid_storage.is_some() {
+            let upper_bound = writer.encoded_size_upper_bound().ok_or_else(|| {
+                MidgeError::ResourceLimit("flush writer cannot bound encoded output size".into())
+            })?;
+            // Final output and cloud readback verification can coexist. Admit
+            // both before the first physical SST bytes are written.
+            let staging_bytes = crate::sst::size_bound::flush_staging_bytes(upper_bound);
+            task.reservation = Self::reserve_flush(
+                task.hybrid_storage.as_ref(),
+                task.identity.cf_id,
+                staging_bytes,
+            )?;
         }
         crate::sst::fs::finish_writer_to_path(writer, &task.staging_path)?;
         let bytes = std::fs::read(&task.staging_path)?;
@@ -831,18 +845,19 @@ mod tests {
         };
         let memtable = Arc::new(crate::sst::SkipListMemtable::new());
         memtable.put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)?;
-        let build_task = FlushBuildTask {
+        let mut build_task = FlushBuildTask {
             identity,
             memtable,
             staging_path: staging_path.clone(),
             reservation: None,
+            hybrid_storage: None,
         };
         let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new(&sst_dir)?);
         let sst_factory: Arc<dyn crate::sst::SstFactory> = Arc::new(
             crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)
                 .with_compression_policy(crate::sst::compression::CompressionPolicy::default()),
         );
-        let file_meta = FlushActor::write_memtable_to_staging(&sst_factory, &build_task)?;
+        let file_meta = FlushActor::write_memtable_to_staging(&sst_factory, &mut build_task)?;
 
         let local = Arc::new(crate::storage::filesystem::FileSystem::new(
             directory.path().join("local"),
@@ -892,6 +907,47 @@ mod tests {
             sst_backend,
             control_backend,
         })
+    }
+
+    #[test]
+    fn should_reject_flush_before_writing_sst_when_verification_staging_exceeds_disk_budget(
+    ) -> MidgeResult<()> {
+        // Arrange
+        let fixture = publication_fixture(usize::MAX)?;
+        let hybrid = fixture
+            .task
+            .hybrid_storage
+            .as_ref()
+            .expect("hybrid storage");
+        // The final SST itself fits; its concurrent readback copy does not.
+        hybrid.enable_ephemeral_sst_cache(fixture.task.build.file_meta.size_bytes);
+        let memtable = Arc::new(crate::sst::SkipListMemtable::new());
+        memtable.put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)?;
+        let staging_path = fixture.directory.path().join("admitted/flush-2.sst");
+        let mut task = FlushBuildTask {
+            identity: fixture.task.build.identity,
+            memtable,
+            staging_path: staging_path.clone(),
+            reservation: None,
+            hybrid_storage: Some(Arc::clone(hybrid)),
+        };
+        let fs = Arc::new(crate::io::RealFs::new(&fixture.task.sst_dir)?);
+        let factory: Arc<dyn crate::sst::SstFactory> =
+            Arc::new(crate::sst::FsSstFactoryIo::new(fs, 64 * 1024));
+
+        // Act
+        let result = FlushActor::write_memtable_to_staging(&factory, &mut task);
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::NoSpace(_))));
+        assert!(!staging_path.exists());
+        assert_eq!(
+            std::fs::read_dir(staging_path.parent().unwrap())?.count(),
+            0
+        );
+        assert!(task.reservation.is_none());
+        assert_eq!(hybrid.budget_snapshot().total_committed_bytes, 0);
+        Ok(())
     }
 
     #[test]

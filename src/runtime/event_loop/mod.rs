@@ -22,6 +22,7 @@ use crate::runtime::hybrid_persistence::HybridPersistence;
 #[cfg(test)]
 mod cloud;
 mod cloud_integration;
+mod cloud_memtable_admission;
 mod compaction;
 mod control;
 mod coordination;
@@ -210,7 +211,10 @@ impl EventLoop {
                     .with_compression_policy(config.compression_policy.clone()),
             )
         } else {
-            let fs = Arc::new(crate::io::RealFs::new(sst_dir)?);
+            let fs: Arc<dyn crate::io::Fs> = match &config.sst_read_fs {
+                Some(fs) => Arc::clone(fs),
+                None => Arc::new(crate::io::RealFs::new(sst_dir)?),
+            };
             Arc::new(
                 crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)
                     .with_compression_policy(config.compression_policy.clone()),
@@ -224,7 +228,10 @@ impl EventLoop {
                 .unwrap_or_else(|_| std::path::Path::new("sst"))
                 .to_path_buf();
             Some(Arc::new(ReadResources::new_with_diagnostics(
-                Arc::clone(&state.fs),
+                config
+                    .sst_read_fs
+                    .clone()
+                    .unwrap_or_else(|| Arc::clone(&state.fs)),
                 sst_path_prefix,
                 config.block_cache_size,
                 config.block_cache_policy,
@@ -430,6 +437,7 @@ impl EventLoop {
     }
 
     pub fn set_hybrid_storage(&mut self, storage: Arc<crate::storage::HybridStorage>) {
+        self.wal_actor.set_storage_budget(Arc::clone(&storage));
         self.hybrid_storage = Some(storage);
     }
 
@@ -581,6 +589,23 @@ impl EventLoop {
         sst_name: &str,
         budget: &crate::common::resource_budget::ResourceBudget,
     ) -> crate::common::MidgeResult<crate::runtime::FileMeta> {
+        if let Some((meta, proof)) = self.compaction_actor.prepared_remote_output(sst_name) {
+            if meta.cf_id != cf_id || meta.level != level || meta.name != sst_name {
+                return Err(crate::common::MidgeError::Corruption(
+                    "remote compaction output identity mismatch".into(),
+                ));
+            }
+            let storage = self.hybrid_storage.as_ref().ok_or_else(|| {
+                crate::common::MidgeError::Internal(
+                    "remote compaction output without cloud storage".into(),
+                )
+            })?;
+            storage.verify_remote_object_guards_within(
+                &[proof],
+                &crate::common::OperationDeadline::unbounded(),
+            )?;
+            return Ok(meta);
+        }
         let path = self.state.sst_dir.join(sst_name);
         let summary = crate::sst::fs::SstFileIo::summarize_with_real_fs_for_compaction(
             &path,
@@ -627,6 +652,30 @@ impl EventLoop {
     ) -> crate::common::MidgeResult<crate::compaction::CompactionPlan> {
         if plan.output_seq == 0 {
             plan.output_seq = self.state.next_compaction_output_generation()?;
+        }
+        if self.hybrid_storage.is_some() {
+            // Early remote output staging can leave harmless orphans after a
+            // crash. Persist the filename allocation before any such object
+            // is uploaded so a cold replacement never reuses its identity.
+            let next = plan.output_seq.checked_add(1).ok_or_else(|| {
+                crate::common::MidgeError::ResourceLimit("SST filename allocation exhausted".into())
+            })?;
+            let counter = self
+                .state
+                .manifest
+                .next_sst_seqs
+                .entry(plan.cf_id)
+                .or_insert(1);
+            *counter = (*counter).max(next);
+            crate::metadata::append_edit(
+                &self.state.db_path,
+                &crate::metadata::ManifestEdit::BumpNextSstSeq {
+                    cf_id: plan.cf_id,
+                    next_seq: *counter,
+                },
+            )?;
+            crate::runtime::actors::ManifestActor::persist(&self.state)?;
+            self.mirror_metadata_to_authoritative_cloud()?;
         }
         Ok(plan)
     }
@@ -814,12 +863,42 @@ impl EventLoop {
         };
 
         for sst_name in sst_names {
+            if let Some((_metadata, proof)) = self.compaction_actor.prepared_remote_output(sst_name)
+            {
+                hybrid.verify_remote_object_guards_within(
+                    &[proof],
+                    &crate::common::OperationDeadline::unbounded(),
+                )?;
+                continue;
+            }
             let path = self.state.sst_dir.join(sst_name);
             let (data, _reservation) = Self::read_file_with_budget(&path, budget)?;
             hybrid.write_sst_object(sst_name, data)?;
         }
 
         Ok(())
+    }
+
+    /// Local copies are disposable only after the remote manifest publication
+    /// has completed. Snapshot readers pin remote objects, not these files.
+    fn evict_published_sst_cache(&self, names: &[String]) {
+        let Some(storage) = &self.hybrid_storage else {
+            return;
+        };
+        for name in names {
+            let path = self.state.sst_dir.join(name);
+            let size = std::fs::metadata(&path).ok().map(|metadata| metadata.len());
+            match std::fs::remove_file(&path) {
+                Ok(()) => storage.release_local_sst_bytes(size.unwrap_or(0)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    tracing::warn!(%error, sst_name = name, "retaining local SST cache after failed eviction");
+                }
+            }
+            if let Err(error) = storage.evict_local_object_cache(&crate::sst::object_key(name)) {
+                tracing::warn!(%error, sst_name = name, "retaining secondary SST cache after failed eviction");
+            }
+        }
     }
 
     fn read_file_with_budget(

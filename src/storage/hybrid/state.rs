@@ -18,6 +18,10 @@ pub struct DiskState {
     pub new_sst_reserve: u64,
     /// Bytes reserved for WAL headroom
     pub wal_reserve: u64,
+    /// Caller-owned transaction spill files and their staging allowance.
+    pub scratch_bytes: u64,
+    /// Residue measured after startup cleanup, distinct from live spill owners.
+    pub startup_residue_bytes: u64,
 }
 
 impl DiskState {
@@ -28,16 +32,20 @@ impl DiskState {
             compaction_reserve: 0,
             new_sst_reserve: 0,
             wal_reserve: 0,
+            scratch_bytes: 0,
+            startup_residue_bytes: 0,
         }
     }
 
     /// Total reserved + used space
     pub fn total_committed(&self) -> u64 {
         self.wal_bytes
-            + self.sst_bytes
-            + self.compaction_reserve
-            + self.new_sst_reserve
-            + self.wal_reserve
+            .saturating_add(self.sst_bytes)
+            .saturating_add(self.compaction_reserve)
+            .saturating_add(self.new_sst_reserve)
+            .saturating_add(self.wal_reserve)
+            .saturating_add(self.scratch_bytes)
+            .saturating_add(self.startup_residue_bytes)
     }
 
     /// Available free space given a disk limit

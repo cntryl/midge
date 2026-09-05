@@ -102,6 +102,9 @@ pub struct HybridStorage {
     control_cloud: Arc<dyn StorageBackend>,
     /// Storage Budget Actor for disk management
     budget_actor: Arc<Mutex<actor::StorageBudgetActor>>,
+    /// Runtime SST files are disposable after remote publication. Avoid a
+    /// second full local copy in the raw object backend for these engines.
+    ephemeral_sst_cache: std::sync::atomic::AtomicBool,
     /// Pending WAL segment uploads (`CloudAsync` mode)
     upload_queue: Arc<Mutex<UploadQueue>>,
     /// Completed events ready for polling
@@ -283,6 +286,7 @@ impl HybridStorage {
             wal_cloud,
             control_cloud,
             budget_actor: Arc::new(Mutex::new(budget_actor)),
+            ephemeral_sst_cache: std::sync::atomic::AtomicBool::new(false),
             upload_queue,
             event_queue,
             external_event_tx,

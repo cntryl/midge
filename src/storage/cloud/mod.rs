@@ -24,6 +24,8 @@
 //! - No futures in the engine: all async work happens in `CloudExecutor` embedded tokio runtime
 
 mod config;
+#[cfg(feature = "cloud-common")]
+pub(crate) mod range;
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]
@@ -271,7 +273,6 @@ pub enum CloudEvent {
         key: String,
         result: CloudOutcome<(Vec<u8>, ObjectMetadata)>,
     },
-    #[cfg(any(test, feature = "cloud-common"))]
     GetRange {
         key: String,
         start: u64,
@@ -338,6 +339,26 @@ pub(crate) fn object_match_precondition_headers(
 
 /// Non-blocking cloud backend interface used by the engine.
 pub trait CloudBackend: Send + Sync + 'static {
+    /// Exact bounded read with an identity precondition; no whole-object fallback.
+    fn submit_get_range_with_identity(
+        &self,
+        key: &str,
+        start: u64,
+        end: u64,
+        _expected: StorageObjectMetadata,
+        _timeout: std::time::Duration,
+        callback: CloudCallback,
+    ) {
+        let _ = callback.send(CloudEvent::GetRange {
+            key: key.to_string(),
+            start,
+            end: Some(end),
+            result: Err(CloudError::Protocol(
+                "conditional range reads unsupported".into(),
+            )),
+        });
+    }
+
     /// Override the default deadline applied to provider HTTP requests.
     #[cfg(feature = "cloud-common")]
     fn set_request_timeout(&self, _timeout: std::time::Duration) {}
@@ -447,6 +468,48 @@ impl Default for MockCloudBackend {
 
 #[cfg(test)]
 impl CloudBackend for MockCloudBackend {
+    fn submit_get_range_with_identity(
+        &self,
+        key: &str,
+        start: u64,
+        end: u64,
+        expected: StorageObjectMetadata,
+        _timeout: std::time::Duration,
+        callback: CloudCallback,
+    ) {
+        let _guard = self.mutation_lock.lock();
+        let storage = self.storage.lock();
+        let result = (|| {
+            let data = storage
+                .get(key)
+                .ok_or_else(|| CloudError::NotFound(key.into()))?;
+            let generation = self.gens.lock().get(key).copied().unwrap_or_default();
+            let actual = StorageObjectMetadata {
+                size: data.len() as u64,
+                etag: format!("mock-gen-{generation}"),
+                generation: None,
+            };
+            if !actual.same_version(&expected) {
+                return Err(CloudError::PreconditionFailed(
+                    "remote SST version changed".into(),
+                ));
+            }
+            let start =
+                usize::try_from(start).map_err(|error| CloudError::Protocol(error.to_string()))?;
+            let end =
+                usize::try_from(end).map_err(|error| CloudError::Protocol(error.to_string()))?;
+            data.get(start..end)
+                .map(<[u8]>::to_vec)
+                .ok_or_else(|| CloudError::Protocol("range exceeds object".into()))
+        })();
+        let _ = callback.send(CloudEvent::GetRange {
+            key: key.into(),
+            start,
+            end: Some(end),
+            result,
+        });
+    }
+
     fn submit_put(
         &self,
         key: &str,
@@ -929,6 +992,65 @@ fn usize_to_u64(value: usize) -> u64 {
 }
 
 impl StorageBackend for CloudStorage {
+    fn submit_range_head(
+        &self,
+        key: &str,
+        timeout: std::time::Duration,
+        callback: StorageCallback,
+    ) {
+        self.submit_head_with_timeout(key, timeout, callback);
+    }
+
+    fn submit_read_range(
+        &self,
+        key: &str,
+        start: u64,
+        end: u64,
+        expected: StorageObjectMetadata,
+        timeout: std::time::Duration,
+        callback: crate::storage::RangeReadCallback,
+    ) {
+        if timeout.is_zero()
+            || start >= end
+            || end > expected.size
+            || !expected.same_version(&expected)
+        {
+            let _ = callback.send(Err("invalid conditional range request".into()));
+            return;
+        }
+        let full_key = self.full_path(key);
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.backend
+            .submit_get_range_with_identity(&full_key, start, end, expected, timeout, tx);
+        let result = match rx.recv_timeout(timeout) {
+            Ok(CloudEvent::GetRange {
+                key: returned,
+                start: actual_start,
+                end: actual_end,
+                result,
+            }) if returned == full_key && actual_start == start && actual_end == Some(end) => {
+                result
+                    .map_err(|error| {
+                        if error.is_timeout() {
+                            crate::storage::storage_timeout_error(error)
+                        } else {
+                            error.to_string()
+                        }
+                    })
+                    .and_then(|bytes| {
+                        if u64::try_from(bytes.len()).ok() == Some(end - start) {
+                            Ok(bytes)
+                        } else {
+                            Err("remote SST range response length mismatch".into())
+                        }
+                    })
+            }
+            Ok(event) => Err(format!("unexpected conditional range response: {event:?}")),
+            Err(error) => Err(crate::storage::storage_timeout_error(error)),
+        };
+        let _ = callback.send(result);
+    }
+
     fn submit_read_with_metadata(
         &self,
         key: &str,
@@ -1740,7 +1862,7 @@ mod tests {
             self.inner.submit_put(key, b"new".to_vec(), Vec::new(), tx);
         }
 
-        crate::storage::cloud::forward_cloud_backend!(inner; submit_head, submit_get_range, submit_delete);
+        crate::storage::cloud::forward_cloud_backend!(inner; submit_head, submit_get_range, submit_get_range_with_identity, submit_delete);
     }
 
     fn replacing_get_storage() -> CloudStorage {

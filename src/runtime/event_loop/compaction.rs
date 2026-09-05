@@ -243,7 +243,9 @@ impl CompactionCoordinator {
                     event_loop.compaction_publication_degraded = true;
                 }
                 if let (Some(hybrid), Some(token)) = (&event_loop.hybrid_storage, reservation) {
-                    hybrid.compaction_aborted_with_token(token);
+                    event_loop
+                        .compaction_actor
+                        .settle_failed_compaction_reservation(&event_loop.state, hybrid, token);
                 }
             }
             if !published {
@@ -265,7 +267,11 @@ impl CompactionCoordinator {
             });
             completion_error = Some(error.replay());
             if let (Some(hybrid), Some(token)) = (&event_loop.hybrid_storage, reservation) {
-                hybrid.compaction_aborted_with_token(token);
+                if !matches!(error, crate::common::MidgeError::Io(_)) {
+                    event_loop
+                        .compaction_actor
+                        .settle_failed_compaction_reservation(&event_loop.state, hybrid, token);
+                }
             }
             event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
         }
@@ -652,6 +658,7 @@ impl CompactionCoordinator {
         }
 
         Self::record_compaction_metrics(event_loop, output_ssts);
+        event_loop.evict_published_sst_cache(output_ssts);
         event_loop.publish_snapshot();
         event_loop.respond(request_id, RuntimeResponse::Ok { request_id });
         true

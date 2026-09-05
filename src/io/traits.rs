@@ -29,6 +29,8 @@ pub enum FsError {
     Io(String),
     #[error("backend unavailable: {0}")]
     Unavailable(String),
+    #[error("timeout: {0}")]
+    Timeout(String),
     #[error("unsupported: {0}")]
     Unsupported(String),
 }
@@ -307,6 +309,16 @@ pub trait File: Send {
 
 /// Filesystem abstraction - agnostic of domain
 pub trait Fs: Send + Sync + 'static {
+    /// Pin an immutable read view when opening one SST requires several handles.
+    /// Remote implementations bind every later range to one object version.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the immutable object identity cannot be resolved.
+    fn immutable_read_view(&self, _path: &FsPath) -> FsResult<Option<std::sync::Arc<dyn Fs>>> {
+        Ok(None)
+    }
+
     /// Return a stable key for coordinating multi-call filesystem transactions.
     ///
     /// Handles that address the same logical filesystem root should return the
@@ -419,6 +431,7 @@ impl From<FsError> for crate::common::MidgeError {
                 }
             }
             FsError::Unavailable(msg) => crate::common::MidgeError::Internal(msg),
+            FsError::Timeout(msg) => crate::common::MidgeError::Timeout(msg),
             FsError::Unsupported(msg) => crate::common::MidgeError::NotSupported(msg),
         }
     }
@@ -427,6 +440,55 @@ impl From<FsError> for crate::common::MidgeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn filesystem_error_coverage(error: &FsError) -> &'static str {
+        match error {
+            FsError::NotFound(_) => "missing SST and filesystem recovery tests",
+            FsError::AlreadyExists(_) => "immutable publication and create-new tests",
+            FsError::Corruption(_) => "SST integrity and conditional object-version tests",
+            FsError::Io(_) => "filesystem failure injection and retained-data tests",
+            FsError::Unavailable(_) => "backend availability and retry tests",
+            FsError::Timeout(_) => "filesystem timeout classification regression",
+            FsError::Unsupported(_) => "unsupported filesystem capability tests",
+        }
+    }
+
+    #[test]
+    fn should_cover_every_internal_filesystem_error_variant() {
+        // Arrange
+        let errors = [
+            FsError::NotFound(String::new()),
+            FsError::AlreadyExists(String::new()),
+            FsError::Corruption(String::new()),
+            FsError::Io(String::new()),
+            FsError::Unavailable(String::new()),
+            FsError::Timeout(String::new()),
+            FsError::Unsupported(String::new()),
+        ];
+
+        // Act
+        let notes = errors.each_ref().map(filesystem_error_coverage);
+        let unique = notes.iter().collect::<std::collections::HashSet<_>>();
+
+        // Assert
+        assert!(notes.iter().all(|note| !note.is_empty()));
+        assert_eq!(unique.len(), errors.len());
+    }
+
+    #[test]
+    fn should_preserve_timeout_classification_when_filesystem_operation_expires() {
+        // Arrange
+        let error = FsError::Timeout("remote SST range deadline expired".into());
+
+        // Act
+        let public_error = crate::common::MidgeError::from(error);
+
+        // Assert
+        assert!(
+            matches!(public_error, crate::common::MidgeError::Timeout(message)
+            if message == "remote SST range deadline expired")
+        );
+    }
 
     #[test]
     fn should_have_empty_capabilities() {

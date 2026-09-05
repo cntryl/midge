@@ -481,7 +481,7 @@ impl WalActor {
             return Ok(());
         }
 
-        if let Some(writer) = &mut self.writer {
+        if self.writer.is_some() {
             crate::failpoints::fail_point!(
                 "midge::wal::inject_no_space_on_txn_append_batch",
                 Self::should_inject_txn_append_batch_no_space(prepared_transactions),
@@ -496,6 +496,15 @@ impl WalActor {
                 ))
             );
             crate::failpoints::fail_point!("midge::wal::txn_after_ops_append_before_commit");
+        }
+
+        let admitted = self.admit_wal_records(&records)?;
+        let previous_position = self
+            .writer
+            .as_ref()
+            .map_or(0, |writer| writer.current_pos());
+
+        if let Some(writer) = &mut self.writer {
             let append_start = Instant::now();
             if let Err(error) = writer.append_batch(&records) {
                 if matches!(error, MidgeError::NoSpace(_)) {
@@ -503,6 +512,7 @@ impl WalActor {
                 }
                 return Err(error);
             }
+            self.settle_wal_append(admitted, previous_position);
             self.finish_append_instrumentation(total_wal_bytes as u64, append_start.elapsed());
             if let Some(max_sequence) = records.iter().map(|record| record.seq).max() {
                 self.record_segment_sequence(max_sequence);

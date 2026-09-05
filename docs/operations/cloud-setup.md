@@ -45,7 +45,9 @@ let location = CloudStorageLocation::new(
     CloudProviderConfig::aws_s3("midge-data", "us-east-1"),
     "database-a",
 );
-let options = OpenOptions::cloud("/var/lib/midge-cache", location).build()?;
+let options = OpenOptions::cloud("/var/lib/midge-cache", location)
+    .local_storage_budget(20 * 1024 * 1024 * 1024)
+    .build()?;
 # Ok::<(), cntryl_midge::MidgeError>(())
 ```
 

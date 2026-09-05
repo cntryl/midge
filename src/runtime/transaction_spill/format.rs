@@ -1,7 +1,8 @@
 use super::range::{lookup_range_index, validate_range_index, write_range_index_file};
 use super::{
-    consider_lookup, op_primary_key_bytes, IntentLookup, OrdinalOp, SpillRun, TransactionOp,
-    MAX_FRAME_BYTES, RUN_HEADER_LEN, RUN_MAGIC, RUN_VERSION, SPARSE_INDEX_STRIDE,
+    consider_lookup, op_heap_bytes, op_primary_key_bytes, IntentLookup, OrdinalOp, SpillDiskBudget,
+    SpillDiskCharge, SpillRun, TransactionOp, MAX_FRAME_BYTES, RUN_HEADER_LEN, RUN_MAGIC,
+    RUN_VERSION, SPARSE_INDEX_STRIDE,
 };
 use crate::common::{MidgeError, MidgeResult};
 use bytes::Bytes;
@@ -9,17 +10,44 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
+#[cfg(test)]
 pub(super) fn write_run(
     spill_dir: &Path,
     txn_id: u64,
     run_number: usize,
     ops: &mut [OrdinalOp],
 ) -> MidgeResult<SpillRun> {
-    fs::create_dir_all(spill_dir)?;
+    write_run_with_budget(spill_dir, txn_id, run_number, ops, None)
+}
+
+pub(super) fn write_run_with_budget(
+    spill_dir: &Path,
+    txn_id: u64,
+    run_number: usize,
+    ops: &mut [OrdinalOp],
+    budget: Option<&SpillDiskBudget>,
+) -> MidgeResult<SpillRun> {
     let path = spill_dir.join(format!("{txn_id:016x}-{run_number:08x}.run"));
     let temp_path = path.with_extension("run.tmp");
     let range_path = path.with_extension("ranges");
     let range_temp_path = path.with_extension("ranges.tmp");
+    let disk_charge = budget
+        .map(|budget| {
+            let bytes = spill_size_bound(ops)?;
+            budget.0.admit_local_scratch_bytes(bytes)?;
+            Ok::<_, MidgeError>(std::sync::Arc::new(SpillDiskCharge {
+                budget: budget.clone(),
+                bytes,
+                paths: [
+                    path.clone(),
+                    temp_path.clone(),
+                    range_path.clone(),
+                    range_temp_path.clone(),
+                ],
+            }))
+        })
+        .transpose()?;
+    fs::create_dir_all(spill_dir)?;
     let result = write_run_file(&temp_path, ops)
         .and_then(|()| write_range_index_file(&range_temp_path, ops))
         .and_then(|()| {
@@ -40,7 +68,47 @@ pub(super) fn write_run(
         path,
         range_path,
         record_count: ops.len(),
+        _disk_charge: disk_charge,
     })
+}
+
+fn spill_size_bound(ops: &[OrdinalOp]) -> MidgeResult<u64> {
+    let largest_range_end = ops
+        .iter()
+        .filter_map(|entry| match &entry.op {
+            TransactionOp::DeleteRange { end_key, .. } => Some(end_key.len()),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+    let mut bytes = usize_to_u64(RUN_HEADER_LEN + super::RANGE_HEADER_LEN)?;
+    for entry in ops {
+        // Data frame, ordinal frame, and a sparse frame for every entry
+        // conservatively cover any key ordering selected by run sorting.
+        let mut fields = [
+            82,
+            op_heap_bytes(&entry.op),
+            entry.primary_key().len(),
+            0,
+            0,
+            0,
+            0,
+        ];
+        if let TransactionOp::DeleteRange {
+            start_key, end_key, ..
+        } = &entry.op
+        {
+            // Each tree node can inherit the largest endpoint from another
+            // range. Charge that bound as well as its own keys and table slot.
+            fields[3..].copy_from_slice(&[56, start_key.len(), end_key.len(), largest_range_end]);
+        }
+        for field in fields {
+            bytes = bytes.checked_add(usize_to_u64(field)?).ok_or_else(|| {
+                MidgeError::NoSpace("transaction spill disk reservation overflow".into())
+            })?;
+        }
+    }
+    Ok(bytes)
 }
 
 fn write_run_file(path: &Path, ops: &mut [OrdinalOp]) -> MidgeResult<()> {

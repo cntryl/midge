@@ -135,6 +135,7 @@ pub struct AppendParams {
 pub struct WalActor {
     /// WAL writer (owned by this actor)
     writer: Option<Box<dyn WalWriter>>,
+    storage_budget: Option<Arc<crate::storage::HybridStorage>>,
     /// Filesystem backend for WAL files (`io::Fs` abstraction)
     wal_fs: Option<Arc<dyn Fs>>,
     /// Buffered writes pending sync
@@ -250,6 +251,7 @@ impl WalActor {
 
         let actor = Self {
             writer,
+            storage_budget: None,
             wal_fs,
             pending_sync_count: 0,
             durability_policy,
@@ -282,6 +284,48 @@ impl WalActor {
 
     pub fn durability_policy(&self) -> DurabilityPolicy {
         self.durability_policy
+    }
+
+    pub(crate) fn set_storage_budget(&mut self, storage: Arc<crate::storage::HybridStorage>) {
+        self.storage_budget = Some(storage);
+    }
+
+    fn admit_wal_records(&self, records: &[WalRecord]) -> MidgeResult<u64> {
+        let Some(storage) = self
+            .storage_budget
+            .as_ref()
+            .filter(|_| self.writer.is_some())
+        else {
+            return Ok(0);
+        };
+        if !storage.ephemeral_sst_cache_enabled() {
+            return Ok(0);
+        }
+        let bytes = records.iter().try_fold(0_u64, |total, record| {
+            let frame = crate::wal::encoding::record_frame_size_bound(record)?;
+            total
+                .checked_add(u64::try_from(frame).unwrap_or(u64::MAX))
+                .ok_or_else(|| {
+                    crate::common::MidgeError::ResourceLimit("WAL batch size overflow".into())
+                })
+        })?;
+        storage.admit_local_wal_bytes(bytes)?;
+        Ok(bytes)
+    }
+
+    fn settle_wal_append(&self, admitted: u64, previous_position: u64) {
+        if admitted == 0 {
+            return;
+        }
+        let Some(storage) = &self.storage_budget else {
+            return;
+        };
+        let actual = self
+            .writer
+            .as_ref()
+            .map_or(previous_position, |writer| writer.current_pos())
+            .saturating_sub(previous_position);
+        storage.settle_local_wal_admission(admitted, actual);
     }
 
     /// Attach a leader store for epoch validation at sync boundaries, along
@@ -505,6 +549,15 @@ impl WalActor {
         let record_size = record.estimated_size();
 
         // ALWAYS append to local WAL first (FsWalWriter) EXCEPT for BestEffort mode
+        let admitted = if matches!(self.durability_policy, DurabilityPolicy::BestEffort) {
+            0
+        } else {
+            self.admit_wal_records(std::slice::from_ref(&record))?
+        };
+        let previous_position = self
+            .writer
+            .as_ref()
+            .map_or(0, |writer| writer.current_pos());
         if let Some(writer) = &mut self.writer {
             if !matches!(self.durability_policy, DurabilityPolicy::BestEffort) {
                 let a_start = Instant::now();
@@ -514,6 +567,7 @@ impl WalActor {
                     }
                     return Err(error);
                 }
+                self.settle_wal_append(admitted, previous_position);
                 self.finish_append_instrumentation(
                     record.estimated_size() as u64,
                     a_start.elapsed(),

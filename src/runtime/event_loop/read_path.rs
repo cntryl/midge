@@ -39,7 +39,10 @@ impl EventLoop {
         let path = path_prefix.join(&updated.name);
         let summary = crate::sst::fs::SstFileIo::summarize_with_fs(
             &path.to_string_lossy(),
-            std::sync::Arc::clone(&self.state.fs),
+            self.read_resources.as_ref().map_or_else(
+                || std::sync::Arc::clone(&self.state.fs),
+                |resources| resources.sst_fs(),
+            ),
         )?;
         updated.smallest_key = Some(summary.smallest_key);
         updated.largest_key = Some(summary.largest_key);

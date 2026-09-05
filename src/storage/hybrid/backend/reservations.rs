@@ -3,6 +3,85 @@
 use super::{actor, HybridStorage, HybridStorageBudgetSnapshot, StorageEvent};
 
 impl HybridStorage {
+    pub(crate) fn reconcile_startup_scratch_residue(
+        &self,
+        bytes: u64,
+    ) -> crate::common::MidgeResult<()> {
+        self.budget_actor
+            .lock()
+            .reconcile_startup_scratch_residue(bytes)
+            .map_err(|_| {
+                crate::common::MidgeError::NoSpace(
+                    "retained startup scratch exceeds ephemeral local disk budget".into(),
+                )
+            })
+    }
+
+    pub(crate) fn admit_local_scratch_bytes(&self, bytes: u64) -> crate::common::MidgeResult<()> {
+        self.budget_actor
+            .lock()
+            .admit_local_scratch_bytes(bytes)
+            .map_err(|_| {
+                crate::common::MidgeError::NoSpace(
+                    "ephemeral local disk budget cannot admit transaction spill".into(),
+                )
+            })
+    }
+
+    pub(crate) fn release_local_scratch_bytes(&self, bytes: u64) {
+        self.budget_actor.lock().release_local_scratch_bytes(bytes);
+        self.emit_reservation_result(actor::ReservationResult::Ok);
+    }
+
+    pub(crate) fn admit_local_wal_bytes(&self, bytes: u64) -> crate::common::MidgeResult<()> {
+        let result = self.budget_actor.lock().admit_local_wal_bytes(bytes);
+        if let Err(result) = result {
+            self.emit_reservation_result(result);
+            return Err(crate::common::MidgeError::NoSpace(
+                "ephemeral local disk budget cannot admit WAL append".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Called only after removing an acknowledged local WAL file.
+    pub(crate) fn release_local_wal_bytes(&self, bytes: u64) {
+        self.budget_actor.lock().release_local_wal_bytes(bytes);
+        self.emit_reservation_result(actor::ReservationResult::Ok);
+    }
+
+    /// Settle a successful append to its measured physical growth. This is
+    /// ordinary accounting and does not emit a backpressure event per write.
+    pub(crate) fn settle_local_wal_admission(&self, admitted: u64, actual: u64) {
+        self.budget_actor
+            .lock()
+            .release_local_wal_bytes(admitted.saturating_sub(actual));
+    }
+
+    /// Configure an engine whose reads can fetch missing SST blocks from
+    /// cloud storage. Call before starting runtime workers.
+    pub(crate) fn enable_ephemeral_sst_cache(&self, max_local_bytes: u64) {
+        self.budget_actor
+            .lock()
+            .enable_ephemeral_sst_cache(max_local_bytes);
+        self.ephemeral_sst_cache
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Reconcile physical files at startup or after a failed cleanup. Existing
+    /// operation reservations remain charged in addition to these bytes.
+    pub(crate) fn reconcile_local_disk_usage(&self, sst_bytes: u64, wal_bytes: u64) {
+        self.budget_actor
+            .lock()
+            .reconcile_local_disk_usage(sst_bytes, wal_bytes);
+    }
+
+    /// Release resident SST bytes only after the runtime confirms deletion.
+    pub(crate) fn release_local_sst_bytes(&self, bytes: u64) {
+        self.budget_actor.lock().release_local_sst_bytes(bytes);
+        self.emit_reservation_result(actor::ReservationResult::Ok);
+    }
+
     pub fn reserve_for_flush_with_token(
         &self,
         est_size: u64,
@@ -56,6 +135,15 @@ impl HybridStorage {
     ) -> actor::StorageReservationToken {
         let mut actor = self.budget_actor.lock();
         actor.plan_compaction_with_token(input_sizes)
+    }
+
+    pub(crate) fn reserve_compaction_staging_with_token(
+        &self,
+        bytes: u64,
+    ) -> Result<actor::StorageReservationToken, actor::ReservationResult> {
+        self.budget_actor
+            .lock()
+            .reserve_compaction_staging_with_token(bytes)
     }
 
     /// Settle the exact compaction reservation after manifest publication.

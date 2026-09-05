@@ -1,4 +1,6 @@
 //! Compile-enforced manifests for enum-shaped behavior axes.
+//! Internal `FsError` coverage lives in `src/io/traits.rs` unit tests because the
+//! filesystem module is intentionally private to library consumers.
 
 use cntryl_midge::sst::compression::{CompressionAlgo, CompressionPolicy};
 use cntryl_midge::{

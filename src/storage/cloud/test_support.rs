@@ -25,6 +25,13 @@ macro_rules! forward_cloud_backend {
             self.$inner.submit_get_range(key, start, end, callback);
         }
     };
+    (@method $inner:ident, submit_get_range_with_identity) => {
+        fn submit_get_range_with_identity(&self, key: &str, start: u64, end: u64,
+            expected: $crate::storage::StorageObjectMetadata, timeout: std::time::Duration,
+            callback: $crate::storage::cloud::CloudCallback) {
+            self.$inner.submit_get_range_with_identity(key, start, end, expected, timeout, callback);
+        }
+    };
     (@method $inner:ident, submit_delete) => {
         fn submit_delete(&self, key: &str, headers: Vec<(String, String)>, callback: $crate::storage::cloud::CloudCallback) {
             self.$inner.submit_delete(key, headers, callback);

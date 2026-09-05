@@ -219,7 +219,7 @@ fn should_restore_published_cloud_sst_when_cache_lost_after_child_abort() {
             .map(|level| level.file_count)
             .sum::<usize>()
             >= 1,
-        "reopen should restore the published SST cache from cloud"
+        "reopen should retain the published remote SST inventory"
     );
 
     for index in 0..17 {

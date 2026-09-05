@@ -17,9 +17,9 @@ mod scan;
 
 #[cfg(test)]
 use format::u64_to_usize;
-use format::{for_each_run_ordinal, lookup_run_key, remove_run, write_run};
+use format::{for_each_run_ordinal, lookup_run_key, remove_run, write_run_with_budget};
 #[cfg(test)]
-use format::{read_header, read_op_frame};
+use format::{read_header, read_op_frame, write_run};
 #[cfg(test)]
 use range::read_range_header;
 pub(crate) use scan::IntentKeyScan;
@@ -113,6 +113,42 @@ struct SpillRun {
     path: PathBuf,
     range_path: PathBuf,
     record_count: usize,
+    _disk_charge: Option<Arc<SpillDiskCharge>>,
+}
+
+#[derive(Clone)]
+struct SpillDiskBudget(Arc<crate::storage::HybridStorage>);
+
+impl std::fmt::Debug for SpillDiskBudget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpillDiskBudget").finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug)]
+struct SpillDiskCharge {
+    budget: SpillDiskBudget,
+    bytes: u64,
+    paths: [PathBuf; 4],
+}
+
+impl Drop for SpillDiskCharge {
+    fn drop(&mut self) {
+        let mut removed = true;
+        for path in &self.paths {
+            match fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    removed = false;
+                    tracing::warn!(path = %path.display(), %error, "retaining transaction spill disk charge after cleanup failure");
+                }
+            }
+        }
+        if removed {
+            self.budget.0.release_local_scratch_bytes(self.bytes);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -131,6 +167,7 @@ pub(crate) struct TransactionWriteSet {
     resident_bytes: usize,
     runs: Vec<SpillRun>,
     next_ordinal: u64,
+    disk_budget: Option<SpillDiskBudget>,
 }
 
 impl TransactionWriteSet {
@@ -149,7 +186,16 @@ impl TransactionWriteSet {
             resident_bytes: 0,
             runs: Vec::new(),
             next_ordinal: 0,
+            disk_budget: None,
         }
+    }
+
+    pub(crate) fn with_storage_budget(
+        mut self,
+        storage: Option<Arc<crate::storage::HybridStorage>>,
+    ) -> Self {
+        self.disk_budget = storage.map(SpillDiskBudget);
+        self
     }
 
     #[must_use]
@@ -198,11 +244,12 @@ impl TransactionWriteSet {
             self.admit_resident(ordinal_op, bytes);
         } else {
             let mut direct = vec![ordinal_op];
-            let run = write_run(
+            let run = write_run_with_budget(
                 &spill_dir,
                 self.txn_id,
                 self.runs.len(),
                 direct.as_mut_slice(),
+                self.disk_budget.as_ref(),
             )?;
             self.runs.push(run);
             self.next_ordinal = self.next_ordinal.saturating_add(1);
@@ -220,11 +267,12 @@ impl TransactionWriteSet {
         if self.resident.is_empty() {
             return Ok(());
         }
-        let run = write_run(
+        let run = write_run_with_budget(
             spill_dir,
             self.txn_id,
             self.runs.len(),
             self.resident.as_mut_slice(),
+            self.disk_budget.as_ref(),
         )?;
         self.runs.push(run);
         self.resident.clear();

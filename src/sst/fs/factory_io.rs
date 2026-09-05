@@ -765,6 +765,86 @@ impl InMemorySstWriter {
 }
 
 impl DynSstWriter for InMemorySstWriter {
+    fn encoded_size_upper_bound_after_sorted_entry(
+        &self,
+        key: &[u8],
+        value: Option<&[u8]>,
+    ) -> Option<usize> {
+        // A new block may add one index/trie boundary, filter framing and two
+        // key bounds. Its uncompressed data includes at most 32 framing bytes;
+        // doubling the payload also covers fixed-compressor expansion.
+        self.encoded_size_upper_bound().map(|bound| {
+            bound
+                .saturating_add(512)
+                .saturating_add(key.len().saturating_mul(12))
+                .saturating_add(value.map_or(0, <[u8]>::len).saturating_mul(2))
+        })
+    }
+
+    fn additional_range_tombstone_size_upper_bound(
+        &self,
+        start: &[u8],
+        end: &[u8],
+    ) -> Option<usize> {
+        Some(crate::sst::size_bound::range_bytes(start.len(), end.len()))
+    }
+
+    fn encoded_size_upper_bound(&self) -> Option<usize> {
+        // A trie has at most two nodes per boundary key; each node and edge
+        // uses fewer than 64 bytes of integer framing. Key payloads also
+        // appear in the block index and the two metadata bounds. The factors
+        // below allow their copies plus worst-case fixed-compressor growth.
+        let ranges = self.range_tombstones.iter().fold(0usize, |total, range| {
+            total.saturating_add(
+                self.additional_range_tombstone_size_upper_bound(&range.start, &range.end)
+                    .unwrap_or(usize::MAX),
+            )
+        });
+        let fixed = ranges.saturating_add(crate::sst::size_bound::FIXED_SST_BYTES);
+        let Some(streaming) = &self.streaming else {
+            return Some(self.entries.iter().fold(fixed, |total, entry| {
+                total.saturating_add(crate::sst::size_bound::point_bytes(
+                    entry.key.len(),
+                    entry.value.as_ref().map_or(0, Vec::len),
+                ))
+            }));
+        };
+        let index = streaming
+            .block_index_entries
+            .iter()
+            .fold(0usize, |total, (key, _)| {
+                total
+                    .saturating_add(256)
+                    .saturating_add(key.len().saturating_mul(8))
+            });
+        let current_index = streaming.current_first_key.as_ref().map_or(0, |key| {
+            256usize.saturating_add(key.len().saturating_mul(8))
+        });
+        let current_bloom =
+            BloomWriter::with_defaults(streaming.current_block_keys.len()).size_bytes();
+        let key_bounds = streaming
+            .smallest_key
+            .as_ref()
+            .map_or(0, Vec::len)
+            .saturating_add(streaming.largest_key.as_ref().map_or(0, Vec::len))
+            .saturating_mul(2);
+        Some(
+            fixed
+                .saturating_add(usize::try_from(streaming.offset).unwrap_or(usize::MAX))
+                .saturating_add(streaming.current_block.len().saturating_mul(2))
+                .saturating_add(index)
+                .saturating_add(current_index)
+                .saturating_add(key_bounds)
+                .saturating_add(
+                    streaming
+                        .block_bloom
+                        .size_bytes()
+                        .saturating_add(current_bloom)
+                        .saturating_mul(2),
+                ),
+        )
+    }
+
     fn estimated_size_bytes(&self) -> usize {
         if let Some(streaming) = &self.streaming {
             let persisted = usize::try_from(streaming.offset).unwrap_or(usize::MAX);
@@ -1118,6 +1198,118 @@ mod tests {
             result,
             Err(crate::common::MidgeError::ResourceLimit(_))
         ));
+    }
+
+    #[test]
+    fn should_bound_final_file_size_when_point_indexes_and_compression_are_present(
+    ) -> MidgeResult<()> {
+        // Arrange
+        use crate::sst::compression::CompressionAlgo;
+        for algorithm in [
+            CompressionAlgo::None,
+            CompressionAlgo::Lz4,
+            CompressionAlgo::Zstd3,
+        ] {
+            for streaming in [false, true] {
+                let factory = FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096)
+                    .with_compression_policy(CompressionPolicy::Fixed(algorithm));
+                let mut writer = factory.create()?;
+                for index in 0..256_u64 {
+                    let key = format!("structured-prefix-{index:020}");
+                    let value = vec![u8::try_from(index).expect("small fixture index"); 256];
+                    let predicted = writer
+                        .encoded_size_upper_bound_after_sorted_entry(key.as_bytes(), Some(&value))
+                        .expect("next entry bound");
+                    if streaming {
+                        writer.add_sorted_with_meta(
+                            key.as_bytes(),
+                            Some(&value),
+                            index,
+                            0,
+                            Some(u64::MAX),
+                        )?;
+                    } else {
+                        writer.add_with_meta(
+                            key.as_bytes(),
+                            Some(&value),
+                            index,
+                            0,
+                            Some(u64::MAX),
+                        )?;
+                    }
+                    assert!(
+                        predicted
+                            >= writer
+                                .encoded_size_upper_bound()
+                                .expect("current file bound")
+                    );
+                }
+
+                // Act
+                let bound = writer
+                    .encoded_size_upper_bound()
+                    .expect("filesystem writer bound");
+                let bytes = writer.finish_bytes()?;
+
+                // Assert
+                assert!(
+                    bound >= bytes.len(),
+                    "bound {bound} omitted {} encoded bytes",
+                    bytes.len()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn should_bound_encoded_output_when_range_tombstones_dominate_the_sst() -> MidgeResult<()> {
+        // Arrange
+        let fs = Arc::new(crate::io::MockFs::new());
+        let factory = FsSstFactoryIo::new(fs, 4096).with_compression_policy(
+            CompressionPolicy::Fixed(crate::sst::compression::CompressionAlgo::None),
+        );
+        for streaming in [false, true] {
+            let mut writer = factory.create()?;
+            if streaming {
+                writer.add_sorted_with_meta(b"point", Some(b"value"), 1, 0, None)?;
+            }
+            for index in 0..128_u32 {
+                let mut start = vec![b'a'; 512];
+                start[..4].copy_from_slice(&index.to_be_bytes());
+                let mut end = start.clone();
+                end.push(b'z');
+                let predicted = writer
+                    .encoded_size_upper_bound()
+                    .expect("current file bound")
+                    .saturating_add(
+                        writer
+                            .additional_range_tombstone_size_upper_bound(&start, &end)
+                            .expect("next range bound"),
+                    );
+                writer.add_range_tombstone(&start, &end, u64::from(index) + 1)?;
+                assert!(
+                    predicted
+                        >= writer
+                            .encoded_size_upper_bound()
+                            .expect("current file bound")
+                );
+            }
+
+            // Act
+            let bound = writer
+                .encoded_size_upper_bound()
+                .expect("filesystem writer bound");
+            let bytes = writer.finish_bytes()?;
+
+            // Assert
+            assert!(
+                bound >= bytes.len(),
+                "bound {bound} omitted {} encoded bytes",
+                bytes.len()
+            );
+        }
+        Ok(())
     }
 
     #[test]
