@@ -150,3 +150,13 @@ Retirement progress is process-local. Manifest changes involving overlapping
 or uncertain coverage can require revalidation; frequent compaction churn may
 therefore increase cleanup cost. The optimization does not weaken exact
 coverage checks or promise a durable resume cursor across process restarts.
+
+Cloud maintenance yields retirement proof work at acknowledged progress
+boundaries. Its cooperative work slice leaves provider timeouts intact and
+allows other ready maintenance to run before another proof turn. Mandatory
+identity preflight, an indivisible proof step, and final catalog publication
+still use the outer operation deadline, so the slice is not a hard total
+latency guarantee. Slow-provider regressions verify that work can advance
+even when a successful request takes longer than the slice.
+Retained proof memory is deducted from compaction execution and publication
+allowances so alternating workers cannot each claim the full maintenance pool.

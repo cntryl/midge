@@ -31,6 +31,7 @@ impl SstFileIo {
         end: Option<Vec<u8>>,
         progress: &mut SstCursorPosition,
         visitor: &mut dyn FnMut(RawSstVersion) -> MidgeResult<()>,
+        checkpoint: &mut dyn FnMut() -> MidgeResult<()>,
     ) -> MidgeResult<()> {
         if progress.complete {
             return Ok(());
@@ -58,6 +59,7 @@ impl SstFileIo {
             visitor(version)?;
             progress.block = Some(block);
             progress.offset = cursor.block_offset;
+            checkpoint()?;
         }
         progress.complete = true;
         Ok(())
@@ -68,6 +70,7 @@ impl SstFileIo {
         fs: Arc<dyn Fs>,
         budget: &ResourceBudget,
         progress: &'a mut SstSummaryProgress,
+        checkpoint: &mut dyn FnMut() -> MidgeResult<()>,
     ) -> MidgeResult<&'a SstFileSummary> {
         if !progress.cursor.complete {
             let reader = Self::open_for_compaction(path, fs, budget.clone())?;
@@ -78,6 +81,9 @@ impl SstFileIo {
                     progress.observe(size, &tombstone.end, tombstone.seq, budget)?;
                 }
                 progress.ranges_checked = true;
+                if !reader.range_tombstones.is_empty() {
+                    checkpoint()?;
+                }
             }
             // Keep the resume boundary unchanged until a whole version has
             // been incorporated, including both retained key reservations.
@@ -88,6 +94,7 @@ impl SstFileIo {
                 None,
                 &mut cursor,
                 &mut |version| progress.observe(size, &version.key, version.seq, budget),
+                checkpoint,
             );
             progress.cursor = cursor;
             result?;
@@ -173,6 +180,7 @@ mod tests {
                 observed.push(version.seq);
                 Ok(())
             },
+            &mut || Ok(()),
         );
         let reader = SstFileIo::open_for_compaction("resume.sst", fs, budget.clone())?;
         reader.visit_raw_versions_with_progress(
@@ -184,6 +192,7 @@ mod tests {
                 observed.push(version.seq);
                 Ok(())
             },
+            &mut || Ok(()),
         )?;
         // Assert
         assert!(matches!(first, Err(MidgeError::Timeout(_))));

@@ -7,6 +7,27 @@ use super::{
 };
 use crate::sst::fs::reader_io::{SstCursorPosition, SstSummaryProgress};
 
+/// A cooperative work target, separate from provider and shutdown deadlines.
+/// Call only after acknowledging a resumable unit so setup cannot consume
+/// every attempt without allowing any saved progress.
+#[derive(Clone, Copy)]
+pub(super) struct WorkQuantum(Option<crate::common::OperationDeadline>);
+
+impl WorkQuantum {
+    pub(super) fn new(duration: Option<std::time::Duration>) -> Self {
+        Self(duration.map(crate::common::OperationDeadline::from_budget))
+    }
+
+    pub(super) fn checkpoint(self) -> MidgeResult<()> {
+        if self.0.is_some_and(|deadline| deadline.is_expired()) {
+            return Err(MidgeError::Busy(
+                "cloud WAL proof yielded after acknowledged progress".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 pub(in crate::runtime::hybrid_persistence) struct Progress {
     pub(super) budget: ResourceBudget,
     pub(super) manifest: Option<Arc<Manifest>>,
@@ -66,6 +87,7 @@ impl CrcProgress {
         length: u64,
         expected: u32,
         window: usize,
+        checkpoint: &mut dyn FnMut() -> MidgeResult<()>,
     ) -> MidgeResult<()> {
         let file = fs.open(
             &FsPath::new(name),
@@ -86,6 +108,15 @@ impl CrcProgress {
             }
             self.checksum = crc32c::crc32c_append(self.checksum, &bytes);
             self.offset += count;
+            // A completed checksum is checked before yielding its final chunk.
+            // Resuming at EOF then performs no new work and can move forward.
+            if self.offset == length && self.checksum != expected {
+                return Err(MidgeError::Corruption(format!(
+                    "cloud object '{name}' crc32c {:08x} does not match published {expected:08x}",
+                    self.checksum
+                )));
+            }
+            checkpoint()?;
         }
         if self.checksum != expected {
             return Err(MidgeError::Corruption(format!(
@@ -110,6 +141,10 @@ pub(super) fn same_file(left: &FileMeta, right: &FileMeta) -> bool {
 }
 
 impl Progress {
+    pub(in crate::runtime::hybrid_persistence) fn retained_bytes(&self) -> usize {
+        self.budget.used()
+    }
+
     pub(super) fn prepare(
         &mut self,
         storage: &HybridStorage,

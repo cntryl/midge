@@ -151,12 +151,26 @@ fn attempt(
     progress: &CloudWalPruneProgress,
     sequence: u64,
 ) -> crate::MidgeResult<()> {
+    attempt_with_quantum(storage, manifest, progress, sequence, None)
+}
+
+fn attempt_with_quantum(
+    storage: &HybridStorage,
+    manifest: &Manifest,
+    progress: &CloudWalPruneProgress,
+    sequence: u64,
+    quantum: Option<Duration>,
+) -> crate::MidgeResult<()> {
+    let mut guard = CloudWalPruneGuard::new(manifest.clone(), None)
+        .with_memory_limit(256 * 1024)
+        .with_progress(progress.clone());
+    if let Some(quantum) = quantum {
+        guard = guard.with_work_quantum(quantum);
+    }
     storage.prune_cloud_wal_segment_within(
         1,
         sequence,
-        CloudWalPruneGuard::new(manifest.clone(), None)
-            .with_memory_limit(256 * 1024)
-            .with_progress(progress.clone()),
+        guard,
         2,
         &crate::common::OperationDeadline::from_budget(Duration::from_secs(1)),
     )
@@ -240,38 +254,40 @@ fn should_revalidate_from_start_when_process_local_proof_state_is_lost() {
 
 #[test]
 fn should_resume_legacy_sst_summary_across_timeouts_with_many_versions_of_one_key() {
-    // Arrange
-    let (_directory, backend, storage, _) = fixture(1);
-    let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
-    let mut writer = factory.create().expect("writer");
-    for sequence in (1..=100).rev() {
-        writer
-            .add_with_meta(b"k", Some(&vec![b'x'; 8192]), sequence, 0, None)
-            .expect("historical version");
-    }
-    let bytes = writer.finish_bytes().expect("historical SST");
-    let mut manifest = manifest_covering_wal("resumable.sst", &bytes, 100, None);
-    manifest.files[0].smallest_seq = Some(1);
-    write_cloud_object(&storage, &crate::sst::object_key("resumable.sst"), bytes);
-    let progress = CloudWalPruneProgress::default();
-    let mut retired = false;
-    // Act
-    for _attempt in 0..100 {
-        backend.allowance.store(16, Ordering::SeqCst);
-        if attempt(&storage, &manifest, &progress, 1).is_ok() {
-            retired = true;
-            break;
+    for quantum in [None, Some(Duration::ZERO)] {
+        // Arrange
+        let (_directory, backend, storage, _) = fixture(1);
+        let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
+        let mut writer = factory.create().expect("writer");
+        for sequence in (1..=100).rev() {
+            writer
+                .add_with_meta(b"k", Some(&vec![b'x'; 8192]), sequence, 0, None)
+                .expect("historical version");
         }
-        assert!(assert_wal_catalog_copies_match(&storage)
-            .segments
-            .contains_key(&1));
+        let bytes = writer.finish_bytes().expect("historical SST");
+        let mut manifest = manifest_covering_wal("resumable.sst", &bytes, 100, None);
+        manifest.files[0].smallest_seq = Some(1);
+        write_cloud_object(&storage, &crate::sst::object_key("resumable.sst"), bytes);
+        let progress = CloudWalPruneProgress::default();
+        let mut retired = false;
+        // Act
+        for _attempt in 0..400 {
+            backend.allowance.store(16, Ordering::SeqCst);
+            if attempt_with_quantum(&storage, &manifest, &progress, 1, quantum).is_ok() {
+                retired = true;
+                break;
+            }
+            assert!(assert_wal_catalog_copies_match(&storage)
+                .segments
+                .contains_key(&1));
+        }
+        // Assert
+        assert!(
+            retired,
+            "legacy summary and exact-version cursor must resume within their pinned SST"
+        );
+        assert!(wait_for_wal_prune_result(&storage, 1).is_ok());
     }
-    // Assert
-    assert!(
-        retired,
-        "legacy summary and exact-version cursor must resume within their pinned SST"
-    );
-    assert!(wait_for_wal_prune_result(&storage, 1).is_ok());
 }
 
 #[test]
@@ -313,67 +329,70 @@ fn should_finish_oldest_wal_proof_across_short_attempt_deadlines() {
 
 #[test]
 fn should_resume_cross_family_transaction_proof_without_retiring_partial_coverage() {
-    // Arrange
-    let (_directory, backend, storage, _) = fixture(0);
-    let mut records = Vec::new();
-    for sequence in 2..=41 {
+    for quantum in [None, Some(Duration::ZERO)] {
+        // Arrange
+        let (_directory, backend, storage, _) = fixture(0);
+        let mut records = Vec::new();
+        for sequence in 2..=41 {
+            let mut record = crate::wal::WalRecord::new(
+                crate::wal::WalOpKind::Put,
+                Bytes::from_static(b"k"),
+                Some(Bytes::from_static(b"v")),
+                sequence,
+                1,
+            );
+            record.cf_id = u32::try_from(sequence % 2).expect("family");
+            record.txn_id = Some(1);
+            records.push(record);
+        }
+        let payload =
+            crate::wal::encoding::encode_txn_batch_payload(1, 1, 42, 1, &records).expect("batch");
         let mut record = crate::wal::WalRecord::new(
-            crate::wal::WalOpKind::Put,
-            Bytes::from_static(b"k"),
-            Some(Bytes::from_static(b"v")),
-            sequence,
+            crate::wal::WalOpKind::TxnBatch,
+            Bytes::new(),
+            Some(payload),
+            42,
             1,
         );
-        record.cf_id = u32::try_from(sequence % 2).expect("family");
         record.txn_id = Some(1);
-        records.push(record);
-    }
-    let payload =
-        crate::wal::encoding::encode_txn_batch_payload(1, 1, 42, 1, &records).expect("batch");
-    let mut record = crate::wal::WalRecord::new(
-        crate::wal::WalOpKind::TxnBatch,
-        Bytes::new(),
-        Some(payload),
-        42,
-        1,
-    );
-    record.txn_id = Some(1);
-    let payload = crate::wal::encoding::encode(&record).expect("encode");
-    let mut wal = Vec::new();
-    crate::wal::frame::append_frame(&mut wal, &payload).expect("frame");
-    write_authoritative_cloud_wal(&storage, 1, 42, wal);
-    let mut manifest = Manifest::default();
-    for (name, family, sequence) in [("first.sst", 0, 40), ("second.sst", 1, 41)] {
-        let bytes = valid_sst_bytes(b"k", b"v", sequence);
-        let mut file = manifest_covering_wal(name, &bytes, sequence, Some(crc32c::crc32c(&bytes)))
-            .files
-            .remove(0);
-        file.cf_id = family;
-        manifest.files.push(file);
-        write_cloud_object(&storage, &crate::sst::object_key(name), bytes);
-    }
-    let progress = CloudWalPruneProgress::default();
-    let mut retired = false;
-    // Act
-    for _attempt in 0..100 {
-        backend.allowance.store(16, Ordering::SeqCst);
-        if attempt(&storage, &manifest, &progress, 42).is_ok() {
-            retired = true;
-            break;
+        let payload = crate::wal::encoding::encode(&record).expect("encode");
+        let mut wal = Vec::new();
+        crate::wal::frame::append_frame(&mut wal, &payload).expect("frame");
+        write_authoritative_cloud_wal(&storage, 1, 42, wal);
+        let mut manifest = Manifest::default();
+        for (name, family, sequence) in [("first.sst", 0, 40), ("second.sst", 1, 41)] {
+            let bytes = valid_sst_bytes(b"k", b"v", sequence);
+            let mut file =
+                manifest_covering_wal(name, &bytes, sequence, Some(crc32c::crc32c(&bytes)))
+                    .files
+                    .remove(0);
+            file.cf_id = family;
+            manifest.files.push(file);
+            write_cloud_object(&storage, &crate::sst::object_key(name), bytes);
         }
+        let progress = CloudWalPruneProgress::default();
+        let mut retired = false;
+        // Act
+        for _attempt in 0..400 {
+            backend.allowance.store(16, Ordering::SeqCst);
+            if attempt_with_quantum(&storage, &manifest, &progress, 42, quantum).is_ok() {
+                retired = true;
+                break;
+            }
+            assert!(
+                assert_wal_catalog_copies_match(&storage)
+                    .segments
+                    .contains_key(&1),
+                "batch must remain authoritative until both CFs and all operations are covered"
+            );
+        }
+        // Assert
         assert!(
-            assert_wal_catalog_copies_match(&storage)
-                .segments
-                .contains_key(&1),
-            "batch must remain authoritative until both CFs and all operations are covered"
+            retired,
+            "completed operations inside a large transaction must survive retries"
         );
+        assert!(wait_for_wal_prune_result(&storage, 1).is_ok());
     }
-    // Assert
-    assert!(
-        retired,
-        "completed operations inside a large transaction must survive retries"
-    );
-    assert!(wait_for_wal_prune_result(&storage, 1).is_ok());
 }
 
 #[test]
@@ -459,6 +478,61 @@ fn should_preserve_oldest_proof_progress_while_newer_ssts_are_appended() {
     assert!(
         retired,
         "newer flush publications must not discard already-proven older frame coverage"
+    );
+    assert!(wait_for_wal_prune_result(&storage, 1).is_ok());
+}
+
+#[test]
+fn should_yield_acknowledged_proof_work_without_shortening_slow_provider_calls() {
+    // Arrange: a zero work quantum deterministically allows one saved unit,
+    // while every successful provider read takes longer than that quantum.
+    let (_directory, backend, storage, manifest) = fixture(8);
+    backend.delay_micros.store(3_000, Ordering::SeqCst);
+    let progress = CloudWalPruneProgress::default();
+    let attempt = || {
+        storage.prune_cloud_wal_segment_within(
+            1,
+            8,
+            CloudWalPruneGuard::new(manifest.clone(), None)
+                .with_memory_limit(256 * 1024)
+                .with_progress(progress.clone())
+                .with_work_quantum(Duration::ZERO),
+            2,
+            &crate::common::OperationDeadline::from_budget(Duration::from_secs(1)),
+        )
+    };
+
+    // Act
+    let first = attempt();
+
+    // Assert: yielding retains authority and acknowledges the successful CRC
+    // range instead of turning the short work target into a provider timeout.
+    assert!(
+        matches!(first, Err(crate::MidgeError::Busy(_))),
+        "{first:?}"
+    );
+    assert_eq!(backend.reads.lock().len(), 1);
+    assert!(assert_wal_catalog_copies_match(&storage)
+        .segments
+        .contains_key(&1));
+    let mut retired = false;
+    for _ in 0..100 {
+        match attempt() {
+            Ok(()) => {
+                retired = true;
+                break;
+            }
+            Err(crate::MidgeError::Busy(_)) => {
+                assert!(assert_wal_catalog_copies_match(&storage)
+                    .segments
+                    .contains_key(&1));
+            }
+            Err(error) => panic!("cooperative work must preserve the provider budget: {error}"),
+        }
+    }
+    assert!(
+        retired,
+        "acknowledged CRC, summary, row and frame work must resume"
     );
     assert!(wait_for_wal_prune_result(&storage, 1).is_ok());
 }

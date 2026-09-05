@@ -7,6 +7,9 @@ use crate::runtime::hybrid_persistence::{CloudWalPruneGuard, HybridPersistence};
 // workloads that publish many small WAL segments. Keep the batch bounded so a
 // maintenance worker cannot monopolize the publication gate indefinitely.
 const CLOUD_WAL_PRUNE_BATCH_SIZE: usize = 32;
+// Yield shared maintenance after acknowledged proof work. This is a scheduling
+// quantum, not a provider timeout: a started range keeps its normal hard budget.
+const CLOUD_WAL_PRUNE_WORK_QUANTUM: std::time::Duration = std::time::Duration::from_millis(100);
 
 fn run_cloud_wal_prune_preflight(
     storage: &crate::storage::HybridStorage,
@@ -21,14 +24,14 @@ fn run_cloud_wal_prune_preflight(
         let deadline = crate::common::OperationDeadline::from_budget(attempt_budget);
         match metadata_snapshot {
             Some(snapshot) => snapshot.verify_exact_then(&deadline, |manifest, metadata_guard| {
-                storage.prune_cloud_wal_segments_within(
-                    candidates,
-                    CloudWalPruneGuard::new(manifest, Some(metadata_guard))
-                        .with_memory_limit(local_guard.memory_limit())
-                        .with_progress(local_guard.progress()),
-                    writer_epoch,
-                    &deadline,
-                )
+                let guard = CloudWalPruneGuard::new(manifest, Some(metadata_guard))
+                    .with_memory_limit(local_guard.memory_limit())
+                    .with_progress(local_guard.progress());
+                let guard = match local_guard.work_quantum() {
+                    Some(quantum) => guard.with_work_quantum(quantum),
+                    None => guard,
+                };
+                storage.prune_cloud_wal_segments_within(candidates, guard, writer_epoch, &deadline)
             }),
             None => storage.prune_cloud_wal_segments_within(
                 candidates,
@@ -119,6 +122,11 @@ impl EventLoop {
         let local_guard = CloudWalPruneGuard::new(self.state.manifest.clone(), None)
             .with_memory_limit(self.compaction_actor.compaction_memory_limit())
             .with_progress(self.cloud_wal_prune_progress.clone());
+        let local_guard = if self.cloud_maintenance_enabled() {
+            local_guard.with_work_quantum(CLOUD_WAL_PRUNE_WORK_QUANTUM)
+        } else {
+            local_guard
+        };
         let writer_epoch = self.state.writer_epoch;
         // This callerless attempt has retry ownership, but shutdown must still
         // be able to join it within the cloud drain window. Starting the budget

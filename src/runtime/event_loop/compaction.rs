@@ -313,9 +313,11 @@ impl CompactionCoordinator {
             );
         }
 
-        let publication_budget = crate::common::resource_budget::ResourceBudget::new(
-            event_loop.compaction_actor.compaction_memory_limit(),
-        );
+        let memory_limit = match event_loop.available_compaction_memory() {
+            Ok(limit) => limit,
+            Err(error) => return Self::respond_publish_failure(event_loop, request_id, &error),
+        };
+        let publication_budget = crate::common::resource_budget::ResourceBudget::new(memory_limit);
         let added = match Self::build_output_metadata(
             event_loop,
             cf_id,

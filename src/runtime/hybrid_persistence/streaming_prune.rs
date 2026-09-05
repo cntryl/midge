@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 mod progress;
 pub(super) use progress::Progress;
-use progress::{CrcProgress, RecordProgress, SegmentProgress, SstProgress};
+use progress::{CrcProgress, RecordProgress, SegmentProgress, SstProgress, WorkQuantum};
 
 pub(super) struct StreamedValidation {
     pub results: CloudWalPruneBatchResults,
@@ -33,6 +33,7 @@ struct Coverage<'a> {
     budget: ResourceBudget,
     progress: &'a mut Progress,
     window: usize,
+    work: WorkQuantum,
 }
 
 pub(super) fn validate(
@@ -44,6 +45,7 @@ pub(super) fn validate(
 ) -> MidgeResult<StreamedValidation> {
     let mut progress = guard.progress.0.lock();
     progress.prepare(storage, guard, catalog, deadline)?;
+    let work = WorkQuantum::new(guard.work_quantum());
     let budget = progress.budget.clone();
     let unit = budget.limit() / 8;
     let limits = StreamingReplayLimits {
@@ -62,6 +64,7 @@ pub(super) fn validate(
         budget,
         progress: &mut progress,
         window: unit.max(1),
+        work,
     };
     let mut output = StreamedValidation {
         results: Vec::new(),
@@ -226,6 +229,7 @@ fn validate_segment_progress(
         segment.metadata.size,
         entry.content_crc32c,
         coverage.window,
+        &mut || coverage.work.checkpoint(),
     )?;
     let path = FsPath::new(&entry.object_key);
     let file = fs.open(
@@ -247,22 +251,30 @@ fn validate_segment_progress(
         record,
         ..
     } = segment;
-    visit_sealed_wal_records_from(&file, &path, limits, prefix, &mut |frame| {
-        if !coverage.covers_frame(
-            frame,
-            limits.max_pending_txn_bytes,
-            operation,
-            record,
-            entry.segment_id,
-        )? {
-            return Err(MidgeError::Busy(
-                "WAL frame is not exactly covered by committed SSTs".into(),
-            ));
-        }
-        *operation = 0;
-        *record = RecordProgress::default();
-        Ok(())
-    })?;
+    let work = coverage.work;
+    visit_sealed_wal_records_from(
+        &file,
+        &path,
+        limits,
+        prefix,
+        &mut |frame| {
+            if !coverage.covers_frame(
+                frame,
+                limits.max_pending_txn_bytes,
+                operation,
+                record,
+                entry.segment_id,
+            )? {
+                return Err(MidgeError::Busy(
+                    "WAL frame is not exactly covered by committed SSTs".into(),
+                ));
+            }
+            *operation = 0;
+            *record = RecordProgress::default();
+            Ok(())
+        },
+        &mut || work.checkpoint(),
+    )?;
     if prefix.max_sequence != entry.max_sequence || prefix.writer_epoch != entry.writer_epoch {
         return Err(MidgeError::Corruption(format!(
             "cloud WAL segment {} contents differ from catalog sequence or epoch",
@@ -309,6 +321,7 @@ impl Coverage<'_> {
                 }
                 *operation = index + 1;
                 *progress = RecordProgress::default();
+                self.work.checkpoint()?;
             }
             Ok(true)
         } else if record.op.is_transaction_marker() {
@@ -383,11 +396,13 @@ impl Coverage<'_> {
                             }
                             Ok(())
                         },
+                        &mut || self.work.checkpoint(),
                     )?;
                 }
             }
             progress.file_index += 1;
             progress.cursor = crate::sst::fs::reader_io::SstCursorPosition::default();
+            self.work.checkpoint()?;
         }
         Ok(progress.state.exactly_covers(record))
     }
@@ -456,6 +471,7 @@ impl Coverage<'_> {
                 proof.metadata.size,
                 crc,
                 self.window,
+                &mut || self.work.checkpoint(),
             )?;
         }
         let summary = crate::sst::fs::SstFileIo::summarize_with_fs_progress(
@@ -463,6 +479,7 @@ impl Coverage<'_> {
             fs,
             &self.budget,
             &mut proof.summary,
+            &mut || self.work.checkpoint(),
         )?;
         verify_sst_summary_matches_manifest(&file.name, summary, file)
             .map_err(MidgeError::Corruption)?;

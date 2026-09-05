@@ -696,10 +696,11 @@ impl EventLoop {
         &mut self,
         plan: crate::compaction::CompactionPlan,
     ) -> crate::common::MidgeResult<crate::compaction::CompactionPlan> {
+        let memory_limit = self.available_compaction_memory()?;
         let mut plan = self.assign_compaction_output_sequence(plan)?;
         plan.snapshot_horizon = self.state.oldest_active_snapshot_sequence();
         plan.target_sst_size = self.compaction_actor.target_sst_size();
-        plan.compaction_memory_limit = self.compaction_actor.compaction_memory_limit();
+        plan.compaction_memory_limit = memory_limit;
 
         if plan.output_seq == 0 {
             return Err(crate::common::MidgeError::Internal(
@@ -708,6 +709,33 @@ impl EventLoop {
         }
 
         Ok(plan)
+    }
+
+    fn available_compaction_memory(&self) -> crate::common::MidgeResult<usize> {
+        if self.cloud_wal_prune_worker.is_some() || self.publication_gate.active {
+            return Err(crate::common::MidgeError::Busy(
+                "compaction memory is owned by an active publication turn".into(),
+            ));
+        }
+        let retained = self
+            .cloud_wal_prune_progress
+            .retained_bytes()
+            .ok_or_else(|| {
+                crate::common::MidgeError::Busy("WAL retirement proof is still active".into())
+            })?;
+        // Paused checksum/cursor proofs outlive their worker. Execution and
+        // publication share the remaining configured allowance without
+        // discarding the proof work that the next retirement turn will resume.
+        let available = self
+            .compaction_actor
+            .compaction_memory_limit()
+            .saturating_sub(retained);
+        if available == 0 {
+            return Err(crate::common::MidgeError::ResourceLimit(
+                "retained WAL retirement proofs leave no memory for compaction".into(),
+            ));
+        }
+        Ok(available)
     }
 
     fn launch_compaction(

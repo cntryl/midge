@@ -68,6 +68,7 @@ fn should_reclaim_completed_sst_proofs_when_many_disjoint_wal_segments_retire() 
         assert!(wait_for_wal_prune_result(&storage, segment).is_ok());
     }
     // Assert
+    assert_eq!(progress.retained_bytes(), Some(0));
     assert!(assert_wal_catalog_copies_match(&storage)
         .segments
         .is_empty());
@@ -124,6 +125,7 @@ fn should_retire_completed_batch_prefix_when_proof_memory_cannot_hold_all_candid
         batches += 1;
     }
     // Assert
+    assert_eq!(progress.retained_bytes(), Some(0));
     assert!(
         batches > 1,
         "fixture must exceed one batch's proof capacity"

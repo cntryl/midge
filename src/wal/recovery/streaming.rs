@@ -142,6 +142,7 @@ fn inspect_file(
         sealed,
         super::VerifiedWalPrefix::default(),
         visitor,
+        &mut || Ok(()),
     )
 }
 
@@ -151,8 +152,9 @@ pub(crate) fn visit_sealed_wal_records_from(
     limits: StreamingReplayLimits,
     progress: &mut super::VerifiedWalPrefix,
     visitor: &mut dyn FnMut(&WalRecord) -> MidgeResult<()>,
+    checkpoint: &mut dyn FnMut() -> MidgeResult<()>,
 ) -> MidgeResult<()> {
-    match inspect_file_from(file, path, limits, true, *progress, visitor) {
+    match inspect_file_from(file, path, limits, true, *progress, visitor, checkpoint) {
         Ok(prefix) => {
             *progress = prefix;
             if prefix.record_count == 0 {
@@ -174,6 +176,7 @@ fn inspect_file_from(
     sealed: bool,
     mut prefix: super::VerifiedWalPrefix,
     visitor: &mut dyn FnMut(&WalRecord) -> MidgeResult<()>,
+    checkpoint: &mut dyn FnMut() -> MidgeResult<()>,
 ) -> Result<super::VerifiedWalPrefix, super::WalPrefixInspectionFailure> {
     limits.validate().map_err(|error| {
         super::wal_prefix_failure(super::VerifiedWalPrefix::default(), error.into())
@@ -211,6 +214,7 @@ fn inspect_file_from(
                 )),
             )
         })?;
+        checkpoint().map_err(|error| super::wal_prefix_failure(prefix, error.into()))?;
     }
 }
 

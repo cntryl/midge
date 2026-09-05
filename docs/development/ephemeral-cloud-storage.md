@@ -88,6 +88,16 @@ thresholds. An ingest barrier waits for active work to drain and cancels an
 unfinished manual request. Local and non-ephemeral modes retain worker overlap
 and direct manual continuation, with automatic work using background policy.
 
+Retirement proof work cooperatively yields after acknowledged progress so a
+large backlog cannot consume the full request timeout on every maintenance
+turn. The work slice does not shorten a provider request's timeout. Mandatory
+identity checks, one indivisible proof step, and final catalog publication
+remain subject to the existing outer deadline; the slice is not a hard bound
+on total turn latency. A yielded proof retains source WAL and resumes from
+validated process-local progress on a later turn. Its retained memory charge
+reduces the next compaction's execution and publication allowances within the
+existing budget.
+
 Compaction streams remote inputs and drains each completed output partition to
 object storage before producing the next. Its staging reservation covers the
 scratch and finalized partition. An indivisible output which cannot fit is

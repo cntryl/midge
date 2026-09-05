@@ -70,6 +70,10 @@ impl ResourceBudget {
         self.inner.limit
     }
 
+    pub(crate) fn used(&self) -> usize {
+        self.inner.current.load(Ordering::Acquire)
+    }
+
     #[cfg(test)]
     pub(crate) fn peak(&self) -> usize {
         self.inner.peak.load(Ordering::Acquire)
@@ -95,6 +99,24 @@ impl Drop for ResourceReservation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn should_report_current_charge_until_the_last_shared_reservation_is_released() {
+        // Arrange
+        let budget = ResourceBudget::new(10);
+        let first = Arc::new(budget.reserve(7, "shared proof").unwrap());
+        let second = Arc::clone(&first);
+        assert_eq!(budget.used(), 7);
+
+        // Act
+        drop(first);
+        let shared_charge = budget.used();
+        drop(second);
+
+        // Assert
+        assert_eq!(shared_charge, 7);
+        assert_eq!(budget.used(), 0);
+    }
 
     #[test]
     fn should_reject_reservation_when_resource_budget_would_be_exceeded() {

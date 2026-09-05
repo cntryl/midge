@@ -1,8 +1,17 @@
 use super::*;
 use crate::runtime::event_loop::compaction::CompactionCoordinator;
 
+mod quantum_tests;
+
 fn cloud_debt(
     files_per_cf: u64,
+) -> crate::common::MidgeResult<(EventLoop, crossbeam::channel::Receiver<RuntimeMsg>, u32)> {
+    cloud_debt_with_wal_records(files_per_cf, 1)
+}
+
+fn cloud_debt_with_wal_records(
+    files_per_cf: u64,
+    wal_record_count: usize,
 ) -> crate::common::MidgeResult<(EventLoop, crossbeam::channel::Receiver<RuntimeMsg>, u32)> {
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
@@ -21,7 +30,14 @@ fn cloud_debt(
             .with_compaction_scratch_directory(el.state.sst_dir.join(".flush-staging")),
     ));
     let other = el.state.create_cf("remaining-debt".into())?;
-    seed_cloud_prune_candidate(&mut el, 81, 81);
+    let record = crate::wal::WalRecord::new(
+        crate::wal::WalOpKind::Put,
+        Bytes::from_static(b"prune-candidate"),
+        Some(Bytes::from_static(b"value")),
+        81,
+        el.state.writer_epoch,
+    );
+    seed_cloud_prune_candidate_with_records(&mut el, 81, 81, vec![record; wal_record_count]);
     el.state.wal.cloud_durable_seq = 81;
     for cf_id in [0, other] {
         el.state

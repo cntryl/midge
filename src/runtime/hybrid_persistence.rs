@@ -20,6 +20,14 @@ mod streaming_prune;
 #[derive(Clone, Default)]
 pub(crate) struct CloudWalPruneProgress(Arc<parking_lot::Mutex<streaming_prune::Progress>>);
 
+impl CloudWalPruneProgress {
+    /// Sample after the proof worker has released its publication turn. An
+    /// unexpected active proof must defer compaction rather than block runtime.
+    pub(crate) fn retained_bytes(&self) -> Option<usize> {
+        self.0.try_lock().map(|progress| progress.retained_bytes())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct CloudMetadataPruneProof {
     pub(crate) key: String,
@@ -165,6 +173,7 @@ pub(crate) struct CloudWalPruneGuard {
     metadata: Option<CloudMetadataPruneGuard>,
     memory_limit: Option<usize>,
     progress: CloudWalPruneProgress,
+    work_quantum: Option<std::time::Duration>,
 }
 
 impl CloudWalPruneGuard {
@@ -174,6 +183,7 @@ impl CloudWalPruneGuard {
             metadata,
             memory_limit: None,
             progress: CloudWalPruneProgress::default(),
+            work_quantum: None,
         }
     }
 
@@ -184,6 +194,17 @@ impl CloudWalPruneGuard {
 
     pub(crate) fn progress(&self) -> CloudWalPruneProgress {
         self.progress.clone()
+    }
+
+    /// Limit callerless proof work between successful resumable checkpoints.
+    /// Provider callbacks retain the enclosing operation's separate deadline.
+    pub(crate) fn with_work_quantum(mut self, quantum: std::time::Duration) -> Self {
+        self.work_quantum = Some(quantum);
+        self
+    }
+
+    pub(crate) fn work_quantum(&self) -> Option<std::time::Duration> {
+        self.work_quantum
     }
 
     pub(crate) fn with_memory_limit(mut self, memory_limit: usize) -> Self {
