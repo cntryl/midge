@@ -5,6 +5,22 @@
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// Non-overlapping charges in the local disk reservation ledger.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+pub struct LocalStorageUsage {
+    pub wal_bytes: u64,
+    pub transaction_spill_bytes: u64,
+    pub resident_sst_bytes: u64,
+    pub startup_residue_bytes: u64,
+    pub flush_staging_reserved_bytes: u64,
+    pub flush_headroom_reserved_bytes: u64,
+    pub compaction_staging_reserved_bytes: u64,
+    pub wal_headroom_reserved_bytes: u64,
+    /// Outstanding flush/compaction reservations, excluding reusable headroom.
+    /// Includes retained allowances whose scratch cleanup remains unverified.
+    pub reservations: usize,
+}
+
 /// Disk usage accounting
 #[derive(Debug, Clone)]
 pub struct DiskState {

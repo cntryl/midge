@@ -50,6 +50,9 @@ pub(crate) enum ImmutableFlushPhase {
 pub(crate) struct ImmutableFlush {
     pub flush_id: u64,
     pub writer_epoch: u64,
+    /// Earliest WAL segment that can contain this generation's records.
+    /// Missing provenance must veto retirement until the generation publishes.
+    pub first_wal_segment: Option<u64>,
     pub memtable: Arc<SkipListMemtable>,
     pub sst_name: Option<String>,
     pub sst_seq: Option<u64>,
@@ -513,6 +516,12 @@ impl RuntimeState {
             hybrid_free_bytes: 0,
             hybrid_usage_percent: 0,
             hybrid_pending_evictions: 0,
+            local_storage: None,
+            remote_range_requests_total: 0,
+            remote_range_bytes_total: 0,
+            remote_range_failures_total: 0,
+            remote_range_latency_ns_total: 0,
+            remote_range_latency_ns_max: 0,
             wal_recovery_records_replayed: self.wal_recovery_records_replayed,
             wal_recovery_bytes_replayed: self.wal_recovery_bytes_replayed,
             intent_log_replay_runs: self.intent_log_replay_runs,

@@ -24,7 +24,8 @@ fn run_cloud_wal_prune_preflight(
                 storage.prune_cloud_wal_segments_within(
                     candidates,
                     CloudWalPruneGuard::new(manifest, Some(metadata_guard))
-                        .with_memory_limit(local_guard.memory_limit()),
+                        .with_memory_limit(local_guard.memory_limit())
+                        .with_progress(local_guard.progress()),
                     writer_epoch,
                     &deadline,
                 )
@@ -68,6 +69,10 @@ fn run_cloud_wal_prune_preflight(
 impl EventLoop {
     pub(crate) fn prune_cloud_wal_segments_covered_by_manifest(&mut self) {
         self.reap_cloud_wal_prune_worker();
+        if self.cloud_maintenance_enabled() && !self.cloud_maintenance.dispatching {
+            self.schedule_cloud_maintenance();
+            return;
+        }
         // Reaping may restore a control request that was deferred behind the
         // publication gate. Give the run loop a chance to dispatch it before
         // another maintenance prune reacquires the gate; otherwise a steady
@@ -112,7 +117,8 @@ impl EventLoop {
         // Filesystem-backed cloud simulation has no separate control store;
         // its event-loop manifest is the authority snapshot guarded below.
         let local_guard = CloudWalPruneGuard::new(self.state.manifest.clone(), None)
-            .with_memory_limit(self.compaction_actor.compaction_memory_limit());
+            .with_memory_limit(self.compaction_actor.compaction_memory_limit())
+            .with_progress(self.cloud_wal_prune_progress.clone());
         let writer_epoch = self.state.writer_epoch;
         // This callerless attempt has retry ownership, but shutdown must still
         // be able to join it within the cloud drain window. Starting the budget
@@ -197,7 +203,9 @@ impl EventLoop {
         {
             self.join_cloud_wal_prune_worker();
             self.restore_publication_deferred_message();
-            self.schedule_next_flush_worker();
+            if !self.cloud_maintenance_enabled() {
+                self.schedule_next_flush_worker();
+            }
         }
     }
 

@@ -135,10 +135,49 @@ fn inspect_file(
     sealed: bool,
     visitor: &mut dyn FnMut(&WalRecord) -> MidgeResult<()>,
 ) -> Result<super::VerifiedWalPrefix, super::WalPrefixInspectionFailure> {
+    inspect_file_from(
+        file,
+        path,
+        limits,
+        sealed,
+        super::VerifiedWalPrefix::default(),
+        visitor,
+    )
+}
+
+pub(crate) fn visit_sealed_wal_records_from(
+    file: &dyn crate::io::File,
+    path: &FsPath,
+    limits: StreamingReplayLimits,
+    progress: &mut super::VerifiedWalPrefix,
+    visitor: &mut dyn FnMut(&WalRecord) -> MidgeResult<()>,
+) -> MidgeResult<()> {
+    match inspect_file_from(file, path, limits, true, *progress, visitor) {
+        Ok(prefix) => {
+            *progress = prefix;
+            if prefix.record_count == 0 {
+                return Err(MidgeError::Corruption("sealed WAL segment is empty".into()));
+            }
+            Ok(())
+        }
+        Err(failure) => {
+            *progress = failure.verified_prefix;
+            Err(failure.failure.into_error())
+        }
+    }
+}
+
+fn inspect_file_from(
+    file: &dyn crate::io::File,
+    path: &FsPath,
+    limits: StreamingReplayLimits,
+    sealed: bool,
+    mut prefix: super::VerifiedWalPrefix,
+    visitor: &mut dyn FnMut(&WalRecord) -> MidgeResult<()>,
+) -> Result<super::VerifiedWalPrefix, super::WalPrefixInspectionFailure> {
     limits.validate().map_err(|error| {
         super::wal_prefix_failure(super::VerifiedWalPrefix::default(), error.into())
     })?;
-    let mut prefix = super::VerifiedWalPrefix::default();
     let mut read_ns = 0;
     loop {
         let next =

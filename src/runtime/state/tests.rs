@@ -1833,3 +1833,103 @@ fn should_handle_multiple_column_families() {
     assert!(state.get_cf(cf2).is_some());
     assert!(state.get_cf(cf3).is_some());
 }
+
+#[test]
+fn should_protect_every_memtable_generation_when_computing_cloud_wal_floor() {
+    // Arrange
+    let mut state = RuntimeState::new(isolated_test_db_path(), false);
+    state.wal.current_segment_id = 20;
+    let secondary = state.create_cf("floor-secondary".into()).unwrap();
+    for (cf_id, segment) in [(0, 5), (secondary, 7)] {
+        let cf = state.get_cf_mut(cf_id).unwrap();
+        cf.active_memtable_started_in_segment = segment;
+        cf.memtable
+            .put_with_seq(b"key".to_vec(), b"value".to_vec(), segment, None)
+            .unwrap();
+    }
+    let frozen = state.get_cf(0).unwrap().memtable.clone();
+    let generation = state
+        .track_new_immutable_flush(0, frozen.clone(), 11)
+        .unwrap();
+    let cf = state.get_cf_mut(0).unwrap();
+    cf.memtable = Arc::new(SkipListMemtable::new());
+    cf.active_memtable_started_in_segment = 11;
+    cf.memtable
+        .put_with_seq(b"new".to_vec(), b"value".to_vec(), 12, None)
+        .unwrap();
+
+    // Act
+    let initial = state.cloud_wal_recovery_floor_segment();
+    let (_, queued) = state
+        .immutable_flush_by_id_mut(generation.flush_id)
+        .unwrap();
+    queued.phase = ImmutableFlushPhase::RetryPending;
+    queued.retry_at = Instant::now() + Duration::from_secs(60);
+    let retrying = state.cloud_wal_recovery_floor_segment();
+    state.complete_immutable_flush(0, &frozen).unwrap();
+    let after_publication = state.cloud_wal_recovery_floor_segment();
+
+    // Assert
+    assert_eq!(initial, Some(5));
+    assert_eq!(retrying, Some(5));
+    assert_eq!(after_publication, Some(7));
+}
+
+#[test]
+fn should_retain_all_wal_when_immutable_provenance_is_untracked() {
+    // Arrange
+    let mut state = RuntimeState::new(isolated_test_db_path(), false);
+    state.wal.current_segment_id = 20;
+    state
+        .get_cf_mut(0)
+        .unwrap()
+        .immutable_memtables
+        .push(Arc::new(SkipListMemtable::new()));
+
+    // Act
+    let floor = state.cloud_wal_recovery_floor_segment();
+
+    // Assert
+    assert_eq!(floor, None);
+}
+
+#[test]
+fn should_preserve_active_wal_floor_when_freeze_identity_is_exhausted() {
+    // Arrange
+    let mut state = RuntimeState::new(isolated_test_db_path(), false);
+    state.wal.current_segment_id = 20;
+    state.next_flush_id = u64::MAX;
+    let cf = state.get_cf_mut(0).unwrap();
+    cf.active_memtable_started_in_segment = 3;
+    cf.memtable
+        .put_with_seq(b"key".to_vec(), b"value".to_vec(), 5, None)
+        .unwrap();
+    let table = cf.memtable.clone();
+
+    // Act
+    let generation = state.track_new_immutable_flush(0, table, 5);
+
+    // Assert
+    assert!(generation.is_none());
+    assert_eq!(state.cloud_wal_recovery_floor_segment(), Some(3));
+    assert!(state.get_cf(0).unwrap().immutable_memtables.is_empty());
+}
+
+#[test]
+fn should_retain_all_wal_when_tracked_generation_provenance_is_unknown() {
+    // Arrange
+    let mut state = RuntimeState::new(isolated_test_db_path(), false);
+    let table = state.get_cf(0).unwrap().memtable.clone();
+    let flush = state.track_new_immutable_flush(0, table, 1).unwrap();
+    state
+        .immutable_flush_by_id_mut(flush.flush_id)
+        .unwrap()
+        .1
+        .first_wal_segment = None;
+
+    // Act
+    let floor = state.cloud_wal_recovery_floor_segment();
+
+    // Assert
+    assert_eq!(floor, None);
+}

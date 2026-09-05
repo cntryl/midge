@@ -60,6 +60,7 @@ pub struct StorageBudgetActor {
     ephemeral_sst_cache: bool,
     /// Last reported watermark state
     last_watermark_state: WatermarkState,
+    pub(super) admission_pressure: super::pressure::AdmissionPressure,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +84,30 @@ impl StorageBudgetActor {
             next_reservation_id: 1,
             ephemeral_sst_cache: false,
             last_watermark_state: WatermarkState::Normal,
+            admission_pressure: super::pressure::AdmissionPressure::default(),
+        }
+    }
+
+    pub(super) fn usage_snapshot(&self) -> super::state::LocalStorageUsage {
+        let headroom = self
+            .flush_headroom
+            .and_then(|token| self.flush_reservations.get(&token))
+            .copied()
+            .unwrap_or(0);
+        super::state::LocalStorageUsage {
+            wal_bytes: self.disk_state.wal_bytes,
+            transaction_spill_bytes: self.disk_state.scratch_bytes,
+            resident_sst_bytes: self.disk_state.sst_bytes,
+            startup_residue_bytes: self.disk_state.startup_residue_bytes,
+            flush_staging_reserved_bytes: self.disk_state.new_sst_reserve.saturating_sub(headroom),
+            flush_headroom_reserved_bytes: headroom,
+            compaction_staging_reserved_bytes: self.disk_state.compaction_reserve,
+            wal_headroom_reserved_bytes: self.disk_state.wal_reserve,
+            reservations: self
+                .flush_reservations
+                .len()
+                .saturating_sub(usize::from(self.flush_headroom.is_some()))
+                .saturating_add(self.compaction_reservations.len()),
         }
     }
 
@@ -501,7 +526,12 @@ impl StorageBudgetActor {
         self.policy.max_local_bytes
     }
 
+    pub(super) fn pending_eviction_count(&self) -> usize {
+        self.pending_evictions.len()
+    }
+
     /// Get pending eviction queue
+    #[cfg(test)]
     pub fn pending_evictions(&self) -> Vec<(u64, u64)> {
         self.pending_evictions.iter().copied().collect()
     }

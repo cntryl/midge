@@ -20,6 +20,8 @@ impl RuntimeState {
         let flush = ImmutableFlush {
             flush_id,
             writer_epoch: self.writer_epoch,
+            first_wal_segment: Some(cf_state.active_memtable_started_in_segment)
+                .filter(|segment| *segment > 0 && *segment <= self.wal.current_segment_id),
             memtable,
             sst_name: None,
             sst_seq: None,
@@ -370,22 +372,35 @@ impl RuntimeState {
     }
 
     pub(crate) fn cloud_wal_recovery_floor_segment(&self) -> Option<u64> {
-        if self
-            .column_families
-            .values()
-            .any(|cf_state| !cf_state.immutable_memtables.is_empty())
-        {
+        let mut floor = self.wal.current_segment_id;
+        if floor == 0 {
             return None;
         }
-
-        let oldest_active_segment = self
-            .column_families
-            .values()
-            .filter(|cf_state| cf_state.memtable.size_bytes() > 0)
-            .map(|cf_state| cf_state.active_memtable_started_in_segment)
-            .min();
-
-        Some(oldest_active_segment.unwrap_or(self.wal.current_segment_id))
+        for cf in self.column_families.values() {
+            // Recovery/legacy callers may expose an immutable without tracked
+            // provenance. A partial or mismatched ledger cannot advance the floor.
+            if cf.immutable_memtables.len() != cf.immutable_flushes.len() {
+                return None;
+            }
+            for (table, flush) in cf.immutable_memtables.iter().zip(&cf.immutable_flushes) {
+                if !Arc::ptr_eq(table, &flush.memtable) {
+                    return None;
+                }
+                let first = flush.first_wal_segment?;
+                if first == 0 || first > self.wal.current_segment_id {
+                    return None;
+                }
+                floor = floor.min(first);
+            }
+            if cf.memtable.size_bytes() > 0 {
+                let started = cf.active_memtable_started_in_segment;
+                if started == 0 || started > self.wal.current_segment_id {
+                    return None;
+                }
+                floor = floor.min(started);
+            }
+        }
+        Some(floor)
     }
 
     #[cfg(test)]
@@ -466,10 +481,13 @@ impl RuntimeState {
     }
 
     pub(crate) fn reinitialize_active_memtable_segment_tracking(&mut self) {
-        let current_segment_id = self.wal.current_segment_id;
         for cf_state in self.column_families.values_mut() {
             if cf_state.memtable.size_bytes() > 0 {
-                cf_state.active_memtable_started_in_segment = current_segment_id;
+                // Replay reconstructs table contents without exact per-generation
+                // source provenance. The next writable segment cannot describe
+                // older recovered records, so retain every earlier segment until
+                // this generation is durably published.
+                cf_state.active_memtable_started_in_segment = 1;
             }
         }
     }

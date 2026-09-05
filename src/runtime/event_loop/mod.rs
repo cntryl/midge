@@ -22,6 +22,7 @@ use crate::runtime::hybrid_persistence::HybridPersistence;
 #[cfg(test)]
 mod cloud;
 mod cloud_integration;
+mod cloud_maintenance;
 mod cloud_memtable_admission;
 mod compaction;
 mod control;
@@ -100,6 +101,7 @@ impl From<&super::RuntimeConfig> for RecoveredCloudWalConfig {
     }
 }
 
+use crate::runtime::hybrid_persistence::CloudWalPruneProgress;
 use coordination::{CloudWalUploadTracker, ManifestPublicationGate, VerificationBarrier};
 
 /// Main synchronous event loop for the runtime.
@@ -127,6 +129,8 @@ pub struct EventLoop {
     pub(super) loop_debug_batch_total: u64,
     pub(super) cloud_wal: CloudWalUploadTracker,
     cloud_wal_prune_worker: Option<std::thread::JoinHandle<()>>,
+    cloud_wal_prune_progress: CloudWalPruneProgress,
+    cloud_maintenance: cloud_maintenance::CloudMaintenance,
     next_background_compaction_check: Instant,
 
     // Durability coordination (extracted to reduce EventLoop cognitive load)
@@ -215,6 +219,11 @@ impl EventLoop {
                 Some(fs) => Arc::clone(fs),
                 None => Arc::new(crate::io::RealFs::new(sst_dir)?),
             };
+            let fs = fs
+                .with_read_observer(
+                    Arc::clone(&state.diagnostics) as Arc<dyn crate::io::traits::ReadObserver>
+                )
+                .unwrap_or(fs);
             Arc::new(
                 crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)
                     .with_compaction_scratch_directory(sst_dir.join(".flush-staging"))
@@ -322,6 +331,8 @@ impl EventLoop {
             loop_debug_batch_total: 0,
             cloud_wal: CloudWalUploadTracker::new(config.recovered_cloud_wal_segments.clone()),
             cloud_wal_prune_worker: None,
+            cloud_wal_prune_progress: CloudWalPruneProgress::default(),
+            cloud_maintenance: cloud_maintenance::CloudMaintenance::default(),
             next_background_compaction_check: Instant::now() + BACKGROUND_COMPACTION_CHECK_INTERVAL,
             durability: DurabilityCoordinator::new(
                 initial_durability_key,
@@ -731,6 +742,10 @@ impl EventLoop {
         &mut self,
         operation: &str,
     ) -> crate::common::MidgeResult<bool> {
+        if self.cloud_maintenance_enabled() && !self.cloud_maintenance.dispatching {
+            return Ok(self.schedule_cloud_maintenance()
+                == Some(cloud_maintenance::MaintenanceTask::Compaction));
+        }
         // Disabling ordinary background work must not permanently wedge L0
         // admission. Use the same authority, ingest, and worker gates for
         // pressure recovery at startup, after flush, and during live maintenance.

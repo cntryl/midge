@@ -1,0 +1,330 @@
+//! Reusable, process-local proof work. Provider identities are the invalidation boundary.
+
+use super::{
+    Arc, BTreeMap, CloudWalPruneGuard, ExactCoverageState, FileMeta, Fs, FsPath, HybridStorage,
+    Manifest, MidgeError, MidgeResult, OpenMode, OpenOptions, PublishedWalSegment, ResourceBudget,
+    ResourceReservation, StorageObjectMetadata, ValidatedWalPruneCandidate, WalPublicationCatalog,
+};
+use crate::sst::fs::reader_io::{SstCursorPosition, SstSummaryProgress};
+
+pub(in crate::runtime::hybrid_persistence) struct Progress {
+    pub(super) budget: ResourceBudget,
+    pub(super) manifest: Option<Arc<Manifest>>,
+    pub(super) segment: Option<SegmentProgress>,
+    pub(super) ssts: BTreeMap<String, SstProgress>,
+}
+impl Default for Progress {
+    fn default() -> Self {
+        Self {
+            budget: ResourceBudget::new(0),
+            manifest: None,
+            segment: None,
+            ssts: BTreeMap::new(),
+        }
+    }
+}
+
+pub(super) struct SegmentProgress {
+    pub(super) entry: PublishedWalSegment,
+    pub(super) metadata: StorageObjectMetadata,
+    pub(super) crc: CrcProgress,
+    pub(super) prefix: crate::wal::recovery::VerifiedWalPrefix,
+    pub(super) operation: usize,
+    pub(super) record: RecordProgress,
+    pub(super) _reservation: ResourceReservation,
+}
+
+#[derive(Default)]
+pub(super) struct RecordProgress {
+    pub(super) file_index: usize,
+    pub(super) state: ExactCoverageState,
+    pub(super) held_value: Option<ResourceReservation>,
+    pub(super) cursor: SstCursorPosition,
+}
+
+pub(super) struct SstProgress {
+    pub(super) expected: FileMeta,
+    pub(super) metadata: StorageObjectMetadata,
+    pub(super) crc: CrcProgress,
+    pub(super) summary: SstSummaryProgress,
+    pub(super) complete: bool,
+    pub(super) last_used_segment: u64,
+    // Shared with a completed batch until catalog CAS and delete scheduling end.
+    pub(super) reservation: Arc<ResourceReservation>,
+}
+
+#[derive(Default)]
+pub(super) struct CrcProgress {
+    offset: u64,
+    checksum: u32,
+}
+impl CrcProgress {
+    pub(super) fn verify(
+        &mut self,
+        fs: &dyn Fs,
+        name: &str,
+        length: u64,
+        expected: u32,
+        window: usize,
+    ) -> MidgeResult<()> {
+        let file = fs.open(
+            &FsPath::new(name),
+            OpenOptions {
+                mode: OpenMode::ReadOnly,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        )?;
+        while self.offset < length {
+            let count = (length - self.offset).min(window as u64);
+            let bytes = file.read_at(self.offset, count)?;
+            if bytes.len() as u64 != count {
+                return Err(MidgeError::Corruption(format!(
+                    "cloud object '{name}' CRC range was truncated"
+                )));
+            }
+            self.checksum = crc32c::crc32c_append(self.checksum, &bytes);
+            self.offset += count;
+        }
+        if self.checksum != expected {
+            return Err(MidgeError::Corruption(format!(
+                "cloud object '{name}' crc32c {:08x} does not match published {expected:08x}",
+                self.checksum
+            )));
+        }
+        Ok(())
+    }
+}
+
+pub(super) fn same_file(left: &FileMeta, right: &FileMeta) -> bool {
+    left.name == right.name
+        && left.cf_id == right.cf_id
+        && left.size_bytes == right.size_bytes
+        && left.content_crc32c == right.content_crc32c
+        && left.smallest_key == right.smallest_key
+        && left.largest_key == right.largest_key
+        && left.smallest_seq == right.smallest_seq
+        && left.largest_seq == right.largest_seq
+        && left.key_bounds_complete == right.key_bounds_complete
+}
+
+impl Progress {
+    pub(super) fn prepare(
+        &mut self,
+        storage: &HybridStorage,
+        guard: &CloudWalPruneGuard,
+        catalog: &WalPublicationCatalog,
+        deadline: &crate::common::OperationDeadline,
+    ) -> MidgeResult<()> {
+        if self.budget.limit() != guard.memory_limit() {
+            *self = Self {
+                budget: ResourceBudget::new(guard.memory_limit()),
+                ..Self::default()
+            };
+        }
+        // Only the authoritative oldest segment can resume. A prior batch may
+        // have lost its CAS or been retired by another caller; do not let its
+        // unrelated proof cache consume the next segment's workspace.
+        if self.segment.as_ref().is_some_and(|segment| {
+            catalog.segments.first_key_value().map(|(_, entry)| entry) != Some(&segment.entry)
+        }) {
+            self.segment = None;
+            self.ssts.clear();
+        }
+        let manifest_changed = self.manifest.as_ref().is_none_or(|old| {
+            old.files.len() != guard.manifest.files.len()
+                || !old
+                    .files
+                    .iter()
+                    .zip(&guard.manifest.files)
+                    .all(|(left, right)| same_file(left, right))
+        });
+        if manifest_changed {
+            if !self.appended_files_preserve_coverage(&guard.manifest) {
+                self.reset_semantic_progress();
+            }
+            self.ssts.retain(|_, proof| {
+                guard
+                    .manifest
+                    .files
+                    .iter()
+                    .any(|file| same_file(&proof.expected, file))
+            });
+            self.manifest = Some(Arc::clone(&guard.manifest));
+        }
+        // A finished prefix may skip these SSTs entirely on this attempt. HEAD
+        // checks must therefore precede reuse, not just subsequent row reads.
+        let mut changed = Vec::new();
+        for (name, proof) in &self.ssts {
+            let actual =
+                storage.remote_range_metadata_within(&crate::sst::object_key(name), deadline)?;
+            if !actual.same_version(&proof.metadata) {
+                changed.push(name.clone());
+            }
+        }
+        if !changed.is_empty() {
+            self.reset_semantic_progress();
+            for name in changed {
+                self.ssts.remove(&name);
+            }
+        }
+        Ok(())
+    }
+
+    fn appended_files_preserve_coverage(&self, manifest: &Manifest) -> bool {
+        let (Some(previous), Some(segment)) = (&self.manifest, &self.segment) else {
+            return false;
+        };
+        if manifest.files.len() < previous.files.len()
+            || !previous
+                .files
+                .iter()
+                .zip(&manifest.files)
+                .all(|(left, right)| same_file(left, right))
+        {
+            return false;
+        }
+        manifest.files[previous.files.len()..].iter().all(|added| {
+            added.key_bounds_complete
+                && added.content_crc32c.is_some()
+                && added.smallest_key.is_some()
+                && added.largest_key.is_some()
+                && added
+                    .smallest_seq
+                    .is_some_and(|sequence| sequence > segment.entry.max_sequence)
+                && self.ssts.values().all(|proof| {
+                    if added.cf_id != proof.expected.cf_id {
+                        return true;
+                    }
+                    let (Some(minimum), Some(maximum), Some(summary)) = (
+                        &added.smallest_key,
+                        &added.largest_key,
+                        &proof.summary.summary,
+                    ) else {
+                        return false;
+                    };
+                    // A later equal-sequence conflicting value could invalidate
+                    // even newer coverage of an old WAL row. Only proven
+                    // disjoint additions preserve skipped frame semantics.
+                    proof.complete
+                        && (maximum < &summary.smallest_key || minimum > &summary.largest_key)
+                })
+        })
+    }
+
+    pub(in crate::runtime::hybrid_persistence) fn after_retirement(
+        &mut self,
+        retired: &[ValidatedWalPruneCandidate],
+    ) {
+        if retired.is_empty() {
+            return;
+        }
+        if self.segment.as_ref().is_some_and(|segment| {
+            retired
+                .iter()
+                .any(|candidate| candidate.entry == segment.entry)
+        }) {
+            self.segment = None;
+        }
+        // All batch dependencies remain available until the catalog CAS has
+        // succeeded. Then only an unfinished segment can still need them.
+        self.ssts.retain(|_, proof| {
+            self.segment
+                .as_ref()
+                .is_some_and(|segment| proof.last_used_segment == segment.entry.segment_id)
+        });
+    }
+
+    fn reset_semantic_progress(&mut self) {
+        if let Some(segment) = &mut self.segment {
+            segment.prefix = crate::wal::recovery::VerifiedWalPrefix::default();
+            segment.operation = 0;
+            segment.record = RecordProgress::default();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn old_coverage() -> (Progress, FileMeta) {
+        let budget = ResourceBudget::new(64 * 1024);
+        let file = FileMeta {
+            name: "old.sst".into(),
+            smallest_key: Some(b"k".to_vec()),
+            largest_key: Some(b"k".to_vec()),
+            smallest_seq: Some(10),
+            largest_seq: Some(10),
+            content_crc32c: Some(1),
+            key_bounds_complete: true,
+            ..FileMeta::default()
+        };
+        let mut summary = SstSummaryProgress::default();
+        summary.summary = Some(crate::sst::fs::SstFileSummary {
+            size_bytes: 1,
+            smallest_key: b"k".to_vec(),
+            largest_key: b"k".to_vec(),
+            smallest_seq: 10,
+            largest_seq: 10,
+        });
+        let proof = SstProgress {
+            expected: file.clone(),
+            metadata: StorageObjectMetadata::content_crc(4, b"test"),
+            crc: CrcProgress::default(),
+            summary,
+            complete: true,
+            last_used_segment: 1,
+            reservation: Arc::new(budget.reserve(1024, "test SST proof").expect("proof")),
+        };
+        let progress = Progress {
+            segment: Some(SegmentProgress {
+                entry: PublishedWalSegment::from_validated_bytes(1, 1, 1, b"test"),
+                metadata: StorageObjectMetadata::content_crc(4, b"test"),
+                crc: CrcProgress::default(),
+                prefix: crate::wal::recovery::VerifiedWalPrefix::default(),
+                operation: 0,
+                record: RecordProgress::default(),
+                _reservation: budget.reserve(1024, "test WAL proof").expect("proof"),
+            }),
+            manifest: Some(Arc::new(Manifest {
+                files: vec![file.clone()],
+                ..Manifest::default()
+            })),
+            ssts: BTreeMap::from([(file.name.clone(), proof)]),
+            budget,
+        };
+        (progress, file)
+    }
+
+    #[test]
+    fn should_invalidate_old_wal_coverage_when_appended_newer_states_can_conflict() {
+        // Arrange
+        let (progress, file) = old_coverage();
+        let mut manifest = Manifest {
+            files: vec![
+                file.clone(),
+                FileMeta {
+                    name: "new.sst".into(),
+                    ..file
+                },
+            ],
+            ..Manifest::default()
+        };
+        // Act
+        let overlapping = progress.appended_files_preserve_coverage(&manifest);
+        manifest.files[1].smallest_key = Some(b"z".to_vec());
+        manifest.files[1].largest_key = Some(b"z".to_vec());
+        let disjoint = progress.appended_files_preserve_coverage(&manifest);
+        manifest.files[1].key_bounds_complete = false;
+        let unknown = progress.appended_files_preserve_coverage(&manifest);
+        // Assert
+        assert!(
+            !overlapping,
+            "seq10 can conflict with old seq10 coverage of WAL seq1"
+        );
+        assert!(disjoint);
+        assert!(!unknown);
+    }
+}

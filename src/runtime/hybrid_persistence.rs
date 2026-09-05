@@ -17,6 +17,9 @@ use std::sync::Arc;
 
 mod streaming_prune;
 
+#[derive(Clone, Default)]
+pub(crate) struct CloudWalPruneProgress(Arc<parking_lot::Mutex<streaming_prune::Progress>>);
+
 #[derive(Clone, Debug)]
 pub(crate) struct CloudMetadataPruneProof {
     pub(crate) key: String,
@@ -158,18 +161,29 @@ impl CloudMetadataPruneSnapshot {
 
 #[derive(Clone, Default)]
 pub(crate) struct CloudWalPruneGuard {
-    manifest: Manifest,
+    manifest: Arc<Manifest>,
     metadata: Option<CloudMetadataPruneGuard>,
     memory_limit: Option<usize>,
+    progress: CloudWalPruneProgress,
 }
 
 impl CloudWalPruneGuard {
     pub(crate) fn new(manifest: Manifest, metadata: Option<CloudMetadataPruneGuard>) -> Self {
         Self {
-            manifest,
+            manifest: Arc::new(manifest),
             metadata,
             memory_limit: None,
+            progress: CloudWalPruneProgress::default(),
         }
+    }
+
+    pub(crate) fn with_progress(mut self, progress: CloudWalPruneProgress) -> Self {
+        self.progress = progress;
+        self
+    }
+
+    pub(crate) fn progress(&self) -> CloudWalPruneProgress {
+        self.progress.clone()
     }
 
     pub(crate) fn with_memory_limit(mut self, memory_limit: usize) -> Self {
@@ -840,6 +854,7 @@ impl HybridPersistence for HybridStorage {
             deadline,
             &mut results,
         )?;
+        guard.progress.0.lock().after_retirement(&retired);
         schedule_retired_wal_deletes(self, retired);
         Ok(sorted_cloud_wal_prune_results(results))
     }

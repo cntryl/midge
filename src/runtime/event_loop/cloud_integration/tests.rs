@@ -26,6 +26,208 @@ fn failpoint_test_lock() -> &'static Mutex<()> {
     FAILPOINT_TEST_LOCK.get_or_init(|| Mutex::new(()))
 }
 
+fn queue_generation_for_maintenance_test(
+    el: &mut EventLoop,
+    sequence: u64,
+) -> crate::common::MidgeResult<()> {
+    el.state.sequence = sequence;
+    let segment = el.state.wal.current_segment_id;
+    let cf = el.state.get_cf_mut(0).unwrap();
+    cf.active_memtable_started_in_segment = segment;
+    cf.memtable.put_with_seq(
+        format!("next-{sequence}").into_bytes(),
+        b"value".to_vec(),
+        sequence,
+        None,
+    )?;
+    el.freeze_active_memtable(0)?;
+    Ok(())
+}
+
+#[test]
+fn should_resume_retirement_when_cloud_recovers_under_continuous_flush_demand(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    el.hybrid_storage
+        .as_ref()
+        .unwrap()
+        .enable_ephemeral_sst_cache(64 * 1024 * 1024);
+    seed_cloud_prune_candidate(&mut el, 81, 81);
+    el.state.wal.cloud_durable_seq = 81;
+    let bytes = add_valid_manifest_sst_for_test(&mut el, "outage-covered.sst", 81);
+    std::fs::remove_file(remote_sst_path_for_test(&el, "outage-covered.sst"))?;
+    queue_generation_for_maintenance_test(&mut el, 82)?;
+    el.cloud_maintenance.next = super::super::cloud_maintenance::MaintenanceTask::WalRetirement;
+
+    // Act: one failed cloud proof gives the next ready flush its turn.
+    el.prune_cloud_wal_segments_covered_by_manifest();
+    drain_prune_completion_for_test(&mut el);
+    assert!(el.cloud_wal.acked_segments.contains_key(&81));
+    el.schedule_next_flush_worker();
+    assert!(
+        el.flush_actor.is_inflight(),
+        "a failing retirement attempt must not monopolize maintenance"
+    );
+    write_test_file(remote_sst_path_for_test(&el, "outage-covered.sst"), &bytes);
+    let built = el
+        .flush_worker_result_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("flush build");
+    el.handle_flush_worker_result(built);
+    queue_generation_for_maintenance_test(&mut el, 83)?;
+    let published = el
+        .flush_worker_result_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("flush publish");
+    el.handle_flush_worker_result(published);
+    drain_prune_completion_for_test(&mut el);
+
+    // Assert: an immutable remains ready throughout the second proof attempt.
+    assert!(!el.cloud_wal.acked_segments.contains_key(&81));
+    assert!(!remote_wal_path_for_test(&el, 81).exists());
+    assert!(el.state.has_due_immutable_flush());
+    assert_eq!(el.state.flush_metrics.publish_count, 1);
+    el.schedule_next_flush_worker();
+    assert!(
+        el.flush_actor.is_inflight(),
+        "flush progress resumes after retirement"
+    );
+    Ok(())
+}
+
+#[test]
+fn should_give_ready_compaction_a_turn_before_continuing_flushes() -> crate::common::MidgeResult<()>
+{
+    // Arrange
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    el.hybrid_storage
+        .as_ref()
+        .unwrap()
+        .enable_ephemeral_sst_cache(64 * 1024 * 1024);
+    seed_cloud_prune_candidate(&mut el, 81, 81);
+    el.state.wal.cloud_durable_seq = 81;
+    el.state.l0_compaction_trigger = 4;
+    el.state.set_compaction_enabled(true);
+    el.state.manifest.next_sst_seqs.insert(0, 5);
+    for number in 1..=4 {
+        let name = crate::sst::file_name(0, 0, number);
+        let bytes = add_valid_manifest_sst_for_test(&mut el, &name, 81);
+        write_test_file(el.state.sst_dir.join(&name), &bytes);
+    }
+    let (worker_tx, worker_rx) = crossbeam::channel::unbounded();
+    el.worker_msg_tx = Some(worker_tx);
+    queue_generation_for_maintenance_test(&mut el, 82)?;
+    el.cloud_maintenance.next = super::super::cloud_maintenance::MaintenanceTask::Compaction;
+
+    // Act
+    el.schedule_next_flush_worker();
+    let active = el.state.active_compactions.load(Ordering::Acquire);
+    assert_eq!(active, 1, "ready compaction must receive its turn");
+    let completion = worker_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("compaction completion");
+    let (_request_tx, request_rx) = crossbeam::channel::unbounded();
+    el.handle_runtime_msg(completion, &request_rx);
+    drain_prune_completion_for_test(&mut el);
+
+    // Assert
+    assert_eq!(active, 1);
+    assert!(el.state.manifest.files.iter().any(|file| file.level > 0));
+    assert!(
+        !el.cloud_wal.acked_segments.contains_key(&81),
+        "retirement receives the next turn after compaction"
+    );
+    assert!(
+        el.flush_actor.is_inflight() || el.state.flush_metrics.publish_count > 0,
+        "flush work resumes after the compaction and retirement turns"
+    );
+    Ok(())
+}
+
+#[test]
+fn should_expose_local_pressure_through_runtime_metrics() -> crate::common::MidgeResult<()> {
+    // Arrange
+    let el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::new(1000),
+    )?;
+    let storage = el.hybrid_storage.as_ref().unwrap();
+    storage.enable_ephemeral_sst_cache(1000);
+    storage.admit_local_wal_bytes(700)?;
+    assert!(storage.admit_local_scratch_bytes(400).is_err());
+    let request_id = 80_101;
+    let response = el.router.register(request_id, "pressure metrics");
+
+    // Act
+    el.handle_get_runtime_metrics(request_id);
+    let RuntimeResponse::RuntimeMetricsSnapshot { snapshot, .. } = response.recv().unwrap() else {
+        panic!("metrics response")
+    };
+
+    // Assert
+    let local = snapshot.local_storage.unwrap();
+    assert_eq!(local.usage.wal_bytes, 700);
+    assert_eq!(
+        local.total_committed_bytes,
+        snapshot.hybrid_total_committed_bytes
+    );
+    assert_eq!(
+        local.blocked_admission.unwrap().operation,
+        crate::storage::hybrid::pressure::StorageAdmissionKind::TransactionSpill
+    );
+    let json = serde_json::to_value(snapshot).unwrap();
+    assert_eq!(
+        json["local_storage"]["blocked_admission"]["operation"],
+        "transaction_spill"
+    );
+    Ok(())
+}
+
+#[test]
+fn should_schedule_wal_retirement_before_another_ready_flush() -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    el.hybrid_storage
+        .as_ref()
+        .unwrap()
+        .enable_ephemeral_sst_cache(64 * 1024 * 1024);
+    seed_cloud_prune_candidate(&mut el, 81, 81);
+    seed_cloud_prune_candidate(&mut el, 82, 82);
+    el.state.wal.cloud_durable_seq = 82;
+    add_valid_manifest_sst_for_test(&mut el, "covered.sst", 82);
+    el.state.sequence = 83;
+    let cf = el.state.get_cf_mut(0).unwrap();
+    cf.active_memtable_started_in_segment = 82;
+    cf.memtable
+        .put_with_seq(b"next".to_vec(), b"value".to_vec(), 83, None)?;
+    el.freeze_active_memtable(0)?;
+    el.cloud_maintenance.next = super::super::cloud_maintenance::MaintenanceTask::WalRetirement;
+
+    // Act
+    el.prune_cloud_wal_segments_covered_by_manifest();
+
+    // Assert
+    assert!(
+        el.cloud_wal_prune_worker.is_some(),
+        "queued flushes must yield when retirement owns the next ready turn"
+    );
+    assert!(!el.flush_actor.is_inflight());
+    drain_prune_completion_for_test(&mut el);
+    assert!(!el.cloud_wal.acked_segments.contains_key(&81));
+    assert!(
+        el.cloud_wal.acked_segments.contains_key(&82),
+        "the immutable generation's first segment remains authoritative"
+    );
+    assert!(remote_wal_path_for_test(&el, 82).exists());
+    Ok(())
+}
+
 #[test]
 fn should_release_wal_disk_budget_only_after_local_segment_removal(
 ) -> crate::common::MidgeResult<()> {

@@ -12,6 +12,49 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 #[test]
+fn should_explain_local_working_storage_when_cloud_uploads_resume() {
+    // Arrange
+    let (_cloud, storage) = hybrid_with_mock_cloud();
+    storage.enable_ephemeral_sst_cache(1000);
+    storage.reconcile_local_disk_usage(100, 200);
+    storage.reconcile_startup_scratch_residue(20).unwrap();
+    storage.admit_local_scratch_bytes(50).unwrap();
+    storage.set_flush_headroom(200).unwrap();
+    let flush = storage.reserve_for_flush_with_token(100).unwrap();
+    let compaction = storage.reserve_compaction_staging_with_token(80).unwrap();
+
+    // Act
+    assert!(storage.admit_local_wal_bytes(500).is_err());
+    let blocked = storage.budget_snapshot();
+    storage.release_local_wal_bytes(200);
+    storage.admit_local_wal_bytes(500).unwrap();
+    storage.flush_completed_with_token(flush, 40);
+    storage.release_local_sst_bytes(40);
+    storage.compaction_aborted_with_token(compaction);
+    storage.release_local_scratch_bytes(50);
+    let recovered = storage.budget_snapshot();
+
+    // Assert
+    assert_eq!(blocked.usage.wal_bytes, 200);
+    assert_eq!(blocked.usage.transaction_spill_bytes, 50);
+    assert_eq!(blocked.usage.resident_sst_bytes, 100);
+    assert_eq!(blocked.usage.startup_residue_bytes, 20);
+    assert_eq!(blocked.usage.flush_staging_reserved_bytes, 100);
+    assert_eq!(blocked.usage.flush_headroom_reserved_bytes, 100);
+    assert_eq!(blocked.usage.compaction_staging_reserved_bytes, 80);
+    assert_eq!(blocked.usage.reservations, 2);
+    assert_eq!(
+        blocked.blocked_admission.unwrap().operation,
+        super::super::pressure::StorageAdmissionKind::Wal
+    );
+    assert_eq!(blocked.admission_rejections_total, 1);
+    assert!(recovered.blocked_admission.is_none());
+    assert_eq!(recovered.usage.flush_headroom_reserved_bytes, 200);
+    assert_eq!(recovered.usage.reservations, 0);
+    assert_eq!(recovered.total_committed_bytes, 820);
+}
+
+#[test]
 fn should_require_exact_raw_state_when_streaming_wal_retirement() {
     use crate::wal::WalOpKind::{Delete, DeleteRange, Put};
     for (wal_op, wal_expiration, sst_value, sst_expiration, covered) in [
@@ -3597,3 +3640,6 @@ fn should_bound_sst_publication_with_shared_deadline_when_remote_preflight_consu
         "SST publication reused a fresh callback timeout: {elapsed:?}"
     );
 }
+
+mod resumable_prune;
+mod retirement_lifetime;

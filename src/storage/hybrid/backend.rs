@@ -73,13 +73,16 @@ pub struct UploadState {
     size_bytes: u64,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
 pub struct HybridStorageBudgetSnapshot {
     pub max_local_bytes: u64,
     pub total_committed_bytes: u64,
     pub free_bytes: u64,
     pub usage_percent: u32,
     pub pending_evictions: usize,
+    pub usage: super::state::LocalStorageUsage,
+    pub blocked_admission: Option<super::pressure::StorageAdmissionBlock>,
+    pub admission_rejections_total: u64,
 }
 
 /// Hybrid storage combining local filesystem and cloud backends

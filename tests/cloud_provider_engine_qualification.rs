@@ -20,6 +20,10 @@ const REAL_S3_ACCESS_KEY_ENV: &str = "MIDGE_REAL_S3_ACCESS_KEY";
 const REAL_S3_SECRET_KEY_ENV: &str = "MIDGE_REAL_S3_SECRET_KEY";
 const REAL_S3_PATH_STYLE_ENV: &str = "MIDGE_REAL_S3_PATH_STYLE";
 
+#[cfg(feature = "failpoints")]
+#[path = "cloud_provider_engine_qualification/operational.rs"]
+mod operational;
+
 #[test]
 fn should_join_azure_canonical_headers_directly_to_resource() {
     // Arrange
@@ -765,7 +769,11 @@ fn signed_s3_request(method: &str, path: &str, body: &[u8]) -> Result<Vec<u8>, S
         .bytes()
         .map_err(|error| error.to_string())?
         .to_vec();
-    if status.is_success() || status.as_u16() == 409 || status.as_u16() == 500 {
+    // Sqrzl can return a generic 500 when a namespace already exists. This
+    // setup exception must not mask a failed object or catalog publication.
+    let bucket_creation =
+        method == "PUT" && body.is_empty() && path.trim_start_matches('/').split('/').count() == 1;
+    if status.is_success() || (bucket_creation && matches!(status.as_u16(), 409 | 500)) {
         Ok(response_body)
     } else {
         Err(format!(

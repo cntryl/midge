@@ -9,10 +9,13 @@ use super::{
 };
 use crate::common::resource_budget::{ResourceBudget, ResourceReservation};
 use crate::io::{Fs, FsPath, OpenMode, OpenOptions};
-use crate::sst::traits::SstStateReader;
-use crate::wal::recovery::streaming::{visit_sealed_wal_records, StreamingReplayLimits};
+use crate::wal::recovery::streaming::{visit_sealed_wal_records_from, StreamingReplayLimits};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+
+mod progress;
+pub(super) use progress::Progress;
+use progress::{CrcProgress, RecordProgress, SegmentProgress, SstProgress};
 
 pub(super) struct StreamedValidation {
     pub results: CloudWalPruneBatchResults,
@@ -20,13 +23,7 @@ pub(super) struct StreamedValidation {
     pub coverage: Vec<bool>,
     pub dependencies: Vec<GuardedObjectProof>,
     // Keep proof storage charged through the catalog CAS and delete scheduling.
-    pub reservations: Vec<ResourceReservation>,
-}
-
-struct VerifiedSst {
-    metadata: StorageObjectMetadata,
-    dependency: GuardedObjectProof,
-    reservation: ResourceReservation,
+    pub reservations: Vec<Arc<ResourceReservation>>,
 }
 
 struct Coverage<'a> {
@@ -34,7 +31,7 @@ struct Coverage<'a> {
     manifest: &'a Manifest,
     deadline: &'a crate::common::OperationDeadline,
     budget: ResourceBudget,
-    verified: BTreeMap<usize, VerifiedSst>,
+    progress: &'a mut Progress,
     window: usize,
 }
 
@@ -45,7 +42,9 @@ pub(super) fn validate(
     guard: &CloudWalPruneGuard,
     deadline: &crate::common::OperationDeadline,
 ) -> MidgeResult<StreamedValidation> {
-    let budget = ResourceBudget::new(guard.memory_limit());
+    let mut progress = guard.progress.0.lock();
+    progress.prepare(storage, guard, catalog, deadline)?;
+    let budget = progress.budget.clone();
     let unit = budget.limit() / 8;
     let limits = StreamingReplayLimits {
         max_frame_bytes: unit,
@@ -61,7 +60,7 @@ pub(super) fn validate(
         manifest: &guard.manifest,
         deadline,
         budget,
-        verified: BTreeMap::new(),
+        progress: &mut progress,
         window: unit.max(1),
     };
     let mut output = StreamedValidation {
@@ -104,7 +103,7 @@ pub(super) fn validate(
                     },
                 });
                 output.coverage.push(covered);
-                output.reservations.push(reservation);
+                output.reservations.push(Arc::new(reservation));
                 if !covered {
                     blocked_by = Some(segment_id);
                 }
@@ -115,9 +114,16 @@ pub(super) fn validate(
             }
         }
     }
-    for verified in coverage.verified.into_values() {
-        output.dependencies.push(verified.dependency);
-        output.reservations.push(verified.reservation);
+    for (name, proof) in &coverage.progress.ssts {
+        if proof.complete {
+            let key = crate::sst::object_key(name);
+            output.reservations.push(Arc::clone(&proof.reservation));
+            output.dependencies.push(GuardedObjectProof::range_identity(
+                storage.remote_sst_backend(),
+                key,
+                proof.metadata.clone(),
+            ));
+        }
     }
     Ok(output)
 }
@@ -139,43 +145,6 @@ fn pinned_fs(
         )
         .with_deadline(*deadline),
     )
-}
-
-fn validate_crc(
-    fs: &dyn Fs,
-    name: &str,
-    length: u64,
-    expected: u32,
-    window: usize,
-) -> MidgeResult<()> {
-    let file = fs.open(
-        &FsPath::new(name),
-        OpenOptions {
-            mode: OpenMode::ReadOnly,
-            create: false,
-            create_new: false,
-            truncate: false,
-        },
-    )?;
-    let mut offset = 0;
-    let mut crc = 0;
-    while offset < length {
-        let count = (length - offset).min(window as u64);
-        let bytes = file.read_at(offset, count)?;
-        if bytes.len() as u64 != count {
-            return Err(MidgeError::Corruption(format!(
-                "cloud object '{name}' CRC range was truncated"
-            )));
-        }
-        crc = crc32c::crc32c_append(crc, &bytes);
-        offset += count;
-    }
-    if crc != expected {
-        return Err(MidgeError::Corruption(format!(
-            "cloud object '{name}' crc32c {crc:08x} does not match published {expected:08x}"
-        )));
-    }
-    Ok(())
 }
 
 fn proof_bytes(key: &str, metadata: &StorageObjectMetadata) -> usize {
@@ -207,21 +176,54 @@ fn validate_segment(
             entry.segment_id
         )));
     }
-    let reservation = coverage.budget.reserve(
-        proof_bytes(&entry.object_key, &metadata),
-        "WAL retirement target proof",
-    )?;
+    let previous = coverage.progress.segment.take();
+    let mut segment = match previous {
+        Some(progress) if progress.entry == *entry && progress.metadata.same_version(&metadata) => {
+            progress
+        }
+        _ => SegmentProgress {
+            entry: entry.clone(),
+            metadata: metadata.clone(),
+            crc: CrcProgress::default(),
+            prefix: crate::wal::recovery::VerifiedWalPrefix::default(),
+            operation: 0,
+            record: RecordProgress::default(),
+            _reservation: coverage.budget.reserve(
+                proof_bytes(&entry.object_key, &metadata),
+                "resumable WAL proof",
+            )?,
+        },
+    };
+    let result = validate_segment_progress(coverage, &mut segment, limits);
+    coverage.progress.segment = Some(segment);
+    result?;
+    Ok((
+        RemoteObjectProof::from_validated_ranges(entry.object_key.clone(), metadata.clone()),
+        true,
+        coverage.budget.reserve(
+            proof_bytes(&entry.object_key, &metadata),
+            "WAL retirement target proof",
+        )?,
+    ))
+}
+
+fn validate_segment_progress(
+    coverage: &mut Coverage<'_>,
+    segment: &mut SegmentProgress,
+    limits: StreamingReplayLimits,
+) -> MidgeResult<()> {
+    let entry = &segment.entry;
     let fs = pinned_fs(
         coverage.storage,
         coverage.storage.remote_wal_backend(),
         entry.object_key.clone(),
-        metadata.clone(),
+        segment.metadata.clone(),
         coverage.deadline,
     );
-    validate_crc(
+    segment.crc.verify(
         fs.as_ref(),
         &entry.object_key,
-        metadata.size,
+        segment.metadata.size,
         entry.content_crc32c,
         coverage.window,
     )?;
@@ -239,12 +241,26 @@ fn validate_segment(
         .budget
         .reserve(coverage.window, "WAL retirement read window")?;
     let file = crate::io::buffered_read::BufferedReadFile::new(file, coverage.window)?;
-    let mut covered = true;
-    let prefix = visit_sealed_wal_records(&file, &path, limits, &mut |record| {
-        // Continue validating all frames even when semantic coverage is absent.
-        if covered {
-            covered = coverage.covers_frame(record, limits.max_pending_txn_bytes)?;
+    let SegmentProgress {
+        prefix,
+        operation,
+        record,
+        ..
+    } = segment;
+    visit_sealed_wal_records_from(&file, &path, limits, prefix, &mut |frame| {
+        if !coverage.covers_frame(
+            frame,
+            limits.max_pending_txn_bytes,
+            operation,
+            record,
+            entry.segment_id,
+        )? {
+            return Err(MidgeError::Busy(
+                "WAL frame is not exactly covered by committed SSTs".into(),
+            ));
         }
+        *operation = 0;
+        *record = RecordProgress::default();
         Ok(())
     })?;
     if prefix.max_sequence != entry.max_sequence || prefix.writer_epoch != entry.writer_epoch {
@@ -253,11 +269,7 @@ fn validate_segment(
             entry.segment_id
         )));
     }
-    Ok((
-        RemoteObjectProof::from_validated_ranges(entry.object_key.clone(), metadata),
-        covered,
-        reservation,
-    ))
+    Ok(())
 }
 
 impl Coverage<'_> {
@@ -265,6 +277,9 @@ impl Coverage<'_> {
         &mut self,
         record: &crate::wal::WalRecord,
         max_decoded_bytes: usize,
+        operation: &mut usize,
+        progress: &mut RecordProgress,
+        segment_id: u64,
     ) -> MidgeResult<bool> {
         if record.op.is_transaction_batch() {
             let payload = record
@@ -276,142 +291,182 @@ impl Coverage<'_> {
                 payload,
                 max_decoded_bytes,
             )?;
-            for op in batch.records {
-                if !self.covers_record(&DataCoverageRecord {
-                    cf_id: op.cf_id,
-                    op: op.op,
-                    key: op.key.to_vec(),
-                    value: op.value.map(|value| value.to_vec()),
-                    expiration: op.expiration,
-                    range_end: op.range_end.map(|key| key.to_vec()),
-                    seq: op.seq,
-                })? {
+            for (index, op) in batch.records.into_iter().enumerate().skip(*operation) {
+                if !self.covers_record(
+                    &DataCoverageRecord {
+                        cf_id: op.cf_id,
+                        op: op.op,
+                        key: op.key.to_vec(),
+                        value: op.value.map(|value| value.to_vec()),
+                        expiration: op.expiration,
+                        range_end: op.range_end.map(|key| key.to_vec()),
+                        seq: op.seq,
+                    },
+                    progress,
+                    segment_id,
+                )? {
                     return Ok(false);
                 }
+                *operation = index + 1;
+                *progress = RecordProgress::default();
             }
             Ok(true)
         } else if record.op.is_transaction_marker() {
             Ok(true)
         } else {
-            self.covers_record(&DataCoverageRecord {
-                cf_id: record.cf_id,
-                op: record.op,
-                key: record.key.to_vec(),
-                value: record.value.as_ref().map(|value| value.to_vec()),
-                expiration: record.expiration,
-                range_end: record.range_end.as_ref().map(|key| key.to_vec()),
-                seq: record.seq,
-            })
+            self.covers_record(
+                &DataCoverageRecord {
+                    cf_id: record.cf_id,
+                    op: record.op,
+                    key: record.key.to_vec(),
+                    value: record.value.as_ref().map(|value| value.to_vec()),
+                    expiration: record.expiration,
+                    range_end: record.range_end.as_ref().map(|key| key.to_vec()),
+                    seq: record.seq,
+                },
+                progress,
+                segment_id,
+            )
         }
     }
 
-    fn covers_record(&mut self, record: &DataCoverageRecord) -> MidgeResult<bool> {
-        let mut state = ExactCoverageState::default();
-        let mut retained_state = None;
-        for (index, file) in self.manifest.files.iter().enumerate() {
-            if file.key_bounds_complete && !file_may_contain_record_key(file, record) {
-                continue;
-            }
-            let fs = self.verified_source(index, file)?;
-            if !file_may_contain_record_key(file, record) {
-                continue;
-            }
-            let reader = crate::sst::fs::SstFileIo::open_for_compaction(
-                &file.name,
-                fs,
-                self.budget.clone(),
-            )?;
-            let mut end = record.key.clone();
-            end.push(0);
-            let cursor = Box::new(reader).raw_version_cursor_with_budget(
-                Some(record.key.clone()),
-                Some(end),
-                Some(self.budget.clone()),
-            )?;
-            for version in cursor {
-                let version = version?;
-                if version.key != record.key {
-                    continue;
+    fn covers_record(
+        &mut self,
+        record: &DataCoverageRecord,
+        progress: &mut RecordProgress,
+        segment_id: u64,
+    ) -> MidgeResult<bool> {
+        while progress.file_index < self.manifest.files.len() {
+            let file = &self.manifest.files[progress.file_index];
+            if !file.key_bounds_complete || file_may_contain_record_key(file, record) {
+                let fs = self.verified_source(file, segment_id)?;
+                if file_may_contain_record_key(file, record) {
+                    let reader = crate::sst::fs::SstFileIo::open_for_compaction(
+                        &file.name,
+                        fs,
+                        self.budget.clone(),
+                    )?;
+                    let mut end = record.key.clone();
+                    end.push(0);
+                    reader.visit_raw_versions_with_progress(
+                        self.budget.clone(),
+                        Some(record.key.clone()),
+                        Some(end),
+                        &mut progress.cursor,
+                        &mut |version| {
+                            if version.key != record.key {
+                                return Ok(());
+                            }
+                            let held = self.budget.reserve(
+                                version.value.as_ref().map_or(0, Vec::len),
+                                "WAL exact coverage state",
+                            )?;
+                            let raw = if version.is_tombstone {
+                                crate::sst::types::KeyState::Tombstone(version.seq)
+                            } else {
+                                crate::sst::types::KeyState::Value(
+                                    bytes::Bytes::from(version.value.unwrap_or_default()),
+                                    version.seq,
+                                    version.expiration,
+                                    crate::wal::WalOpKind::Put.to_wire_format(),
+                                )
+                            };
+                            let retain = progress
+                                .state
+                                .state
+                                .as_ref()
+                                .and_then(exact_state_sequence)
+                                .is_none_or(|sequence| version.seq > sequence);
+                            progress.state.observe(raw);
+                            if retain {
+                                progress.held_value = Some(held);
+                            }
+                            Ok(())
+                        },
+                    )?;
                 }
-                let held = self.budget.reserve(
-                    version.value.as_ref().map_or(0, Vec::len),
-                    "WAL exact coverage state",
-                )?;
-                let raw = if version.is_tombstone {
-                    crate::sst::types::KeyState::Tombstone(version.seq)
-                } else {
-                    crate::sst::types::KeyState::Value(
-                        bytes::Bytes::from(version.value.unwrap_or_default()),
-                        version.seq,
-                        version.expiration,
-                        crate::wal::WalOpKind::Put.to_wire_format(),
-                    )
-                };
-                let should_retain = state
-                    .state
-                    .as_ref()
-                    .and_then(exact_state_sequence)
-                    .is_none_or(|seq| version.seq > seq);
-                state.observe(raw);
-                if should_retain {
-                    retained_state = Some(held);
-                }
             }
+            progress.file_index += 1;
+            progress.cursor = crate::sst::fs::reader_io::SstCursorPosition::default();
         }
-        let covered = state.exactly_covers(record);
-        drop(retained_state);
-        Ok(covered)
+        Ok(progress.state.exactly_covers(record))
     }
 
-    fn verified_source(&mut self, index: usize, file: &FileMeta) -> MidgeResult<Arc<dyn Fs>> {
+    fn verified_source(&mut self, file: &FileMeta, segment_id: u64) -> MidgeResult<Arc<dyn Fs>> {
         let key = crate::sst::object_key(&file.name);
-        let backend = self.storage.remote_sst_backend();
-        if let Some(verified) = self.verified.get(&index) {
-            return Ok(pinned_fs(
-                self.storage,
-                backend,
-                key,
-                verified.metadata.clone(),
-                self.deadline,
-            ));
-        }
-        let metadata = self
-            .storage
-            .remote_range_metadata_within(&key, self.deadline)?;
-        if file.size_bytes != 0 && file.size_bytes != metadata.size {
-            return Err(MidgeError::Corruption(format!(
-                "cloud SST '{}' size differs from manifest",
-                file.name
-            )));
-        }
-        let reservation = self
-            .budget
-            .reserve(proof_bytes(&key, &metadata), "WAL retirement SST proof")?;
+        let mut proof = if let Some(proof) = self.progress.ssts.remove(&file.name) {
+            proof
+        } else {
+            let metadata = self
+                .storage
+                .remote_range_metadata_within(&key, self.deadline)?;
+            if file.size_bytes != 0 && file.size_bytes != metadata.size {
+                return Err(MidgeError::Corruption(format!(
+                    "cloud SST '{}' size differs from manifest",
+                    file.name
+                )));
+            }
+            let bytes = proof_bytes(&key, &metadata)
+                .saturating_mul(2)
+                .saturating_add(file.smallest_key.as_ref().map_or(0, Vec::len))
+                .saturating_add(file.largest_key.as_ref().map_or(0, Vec::len));
+            SstProgress {
+                expected: file.clone(),
+                metadata,
+                crc: CrcProgress::default(),
+                summary: crate::sst::fs::reader_io::SstSummaryProgress::default(),
+                complete: false,
+                last_used_segment: segment_id,
+                // Admit both cached work and its publication dependency before
+                // proving a row. Exporting a completed batch must not discover
+                // an extra allocation that strands its already-covered prefix.
+                reservation: Arc::new(
+                    self.budget
+                        .reserve(bytes, "resumable SST proof and dependency")?,
+                ),
+            }
+        };
+        proof.last_used_segment = segment_id;
         let fs = pinned_fs(
             self.storage,
-            Arc::clone(&backend),
-            key.clone(),
-            metadata.clone(),
+            self.storage.remote_sst_backend(),
+            key,
+            proof.metadata.clone(),
             self.deadline,
         );
-        if let Some(crc) = file.content_crc32c {
-            validate_crc(fs.as_ref(), &file.name, metadata.size, crc, self.window)?;
-        }
-        let summary = crate::sst::fs::SstFileIo::summarize_with_fs_for_compaction(
-            &file.name,
-            Arc::clone(&fs),
-            self.budget.clone(),
-        )?;
-        verify_sst_summary_matches_manifest(&file.name, &summary, file)
-            .map_err(MidgeError::Corruption)?;
-        self.verified.insert(
-            index,
-            VerifiedSst {
-                dependency: GuardedObjectProof::range_identity(backend, key, metadata.clone()),
-                metadata,
-                reservation,
-            },
-        );
+        let result = self.validate_sst_progress(file, fs.clone(), &mut proof);
+        self.progress.ssts.insert(file.name.clone(), proof);
+        result?;
         Ok(fs)
+    }
+
+    fn validate_sst_progress(
+        &self,
+        file: &FileMeta,
+        fs: Arc<dyn Fs>,
+        proof: &mut SstProgress,
+    ) -> MidgeResult<()> {
+        if proof.complete {
+            return Ok(());
+        }
+        if let Some(crc) = file.content_crc32c {
+            proof.crc.verify(
+                fs.as_ref(),
+                &file.name,
+                proof.metadata.size,
+                crc,
+                self.window,
+            )?;
+        }
+        let summary = crate::sst::fs::SstFileIo::summarize_with_fs_progress(
+            &file.name,
+            fs,
+            &self.budget,
+            &mut proof.summary,
+        )?;
+        verify_sst_summary_matches_manifest(&file.name, summary, file)
+            .map_err(MidgeError::Corruption)?;
+        proof.complete = true;
+        Ok(())
     }
 }

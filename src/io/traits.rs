@@ -133,6 +133,18 @@ pub struct DirEntry {
     pub is_dir: bool,
 }
 
+/// Receives transport observations without coupling filesystems to runtime metrics.
+/// Local file reads and reads rejected before submission do not emit events.
+pub trait ReadObserver: Send + Sync {
+    fn remote_range_started(&self);
+    fn remote_range_completed(
+        &self,
+        returned_bytes: u64,
+        elapsed: std::time::Duration,
+        failed: bool,
+    );
+}
+
 /// Individual file handle with read/write operations
 pub trait File: Send {
     /// Read at specific offset
@@ -309,6 +321,15 @@ pub trait File: Send {
 
 /// Filesystem abstraction - agnostic of domain
 pub trait Fs: Send + Sync + 'static {
+    /// Return an equivalent view whose remote range reads report to this owner.
+    /// Implementations without remote I/O keep their existing view.
+    fn with_read_observer(
+        &self,
+        _observer: std::sync::Arc<dyn ReadObserver>,
+    ) -> Option<std::sync::Arc<dyn Fs>> {
+        None
+    }
+
     /// Pin an immutable read view when opening one SST requires several handles.
     /// Remote implementations bind every later range to one object version.
     ///

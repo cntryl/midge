@@ -16,14 +16,36 @@ pub(crate) struct RemoteSstFs {
     pinned: Option<Arc<RemoteSstFile>>,
     deadline: Option<crate::common::OperationDeadline>,
     verified_local_overrides: Arc<std::collections::HashSet<String>>,
+    observer: Option<Arc<dyn crate::io::traits::ReadObserver>>,
 }
 
+#[derive(Clone)]
 struct RemoteSstFile {
     cloud: Arc<dyn StorageBackend>,
     key: String,
     metadata: StorageObjectMetadata,
     timeout: Duration,
     deadline: Option<crate::common::OperationDeadline>,
+    observer: Option<Arc<dyn crate::io::traits::ReadObserver>>,
+}
+
+struct RangeObservation<'a> {
+    observer: Option<&'a dyn crate::io::traits::ReadObserver>,
+    started: std::time::Instant,
+    returned_bytes: u64,
+    failed: bool,
+}
+
+impl Drop for RangeObservation<'_> {
+    fn drop(&mut self) {
+        if let Some(observer) = self.observer {
+            observer.remote_range_completed(
+                self.returned_bytes,
+                self.started.elapsed(),
+                self.failed,
+            );
+        }
+    }
 }
 
 /// A salvage view addresses the exact local file verified during recovery, even
@@ -46,6 +68,7 @@ impl RemoteSstFs {
             pinned: None,
             deadline: None,
             verified_local_overrides: Arc::default(),
+            observer: None,
         }
     }
 
@@ -62,12 +85,14 @@ impl RemoteSstFs {
             timeout,
             deadline: None,
             verified_local_overrides: Arc::default(),
+            observer: None,
             pinned: Some(Arc::new(RemoteSstFile {
                 cloud,
                 key,
                 metadata,
                 timeout,
                 deadline: None,
+                observer: None,
             })),
         }
     }
@@ -143,6 +168,7 @@ impl RemoteSstFs {
             metadata,
             timeout: self.timeout,
             deadline: self.deadline,
+            observer: self.observer.clone(),
         }))
     }
 }
@@ -179,6 +205,15 @@ impl File for Arc<RemoteSstFile> {
             return Err(FsError::Timeout("remote SST range deadline expired".into()));
         }
         let (tx, rx) = std::sync::mpsc::channel();
+        let mut observation = RangeObservation {
+            observer: self.observer.as_deref(),
+            started: std::time::Instant::now(),
+            returned_bytes: 0,
+            failed: true,
+        };
+        if let Some(observer) = observation.observer {
+            observer.remote_range_started();
+        }
         self.cloud
             .submit_read_range(&self.key, offset, end, self.metadata.clone(), timeout, tx);
         let bytes = rx
@@ -192,11 +227,13 @@ impl File for Arc<RemoteSstFile> {
                 }
             })?
             .map_err(storage_error)?;
+        observation.returned_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         if u64::try_from(bytes.len()).ok() != Some(len) {
             return Err(FsError::Corruption(
                 "remote SST range response length mismatch".into(),
             ));
         }
+        observation.failed = false;
         Ok(Bytes::from(bytes))
     }
     fn write_at(&mut self, _offset: u64, _data: Bytes) -> FsResult<()> {
@@ -217,6 +254,26 @@ impl File for Arc<RemoteSstFile> {
 }
 
 impl Fs for RemoteSstFs {
+    fn with_read_observer(
+        &self,
+        observer: Arc<dyn crate::io::traits::ReadObserver>,
+    ) -> Option<Arc<dyn Fs>> {
+        Some(Arc::new(Self {
+            local: Arc::clone(&self.local),
+            cloud: Arc::clone(&self.cloud),
+            timeout: self.timeout,
+            deadline: self.deadline,
+            verified_local_overrides: Arc::clone(&self.verified_local_overrides),
+            pinned: self.pinned.as_ref().map(|file| {
+                Arc::new(RemoteSstFile {
+                    observer: Some(Arc::clone(&observer)),
+                    ..file.as_ref().clone()
+                })
+            }),
+            observer: Some(observer),
+        }))
+    }
+
     fn coordination_key(&self) -> u64 {
         self.local.coordination_key()
     }
@@ -241,6 +298,7 @@ impl Fs for RemoteSstFs {
             deadline: self.deadline,
             verified_local_overrides: Arc::clone(&self.verified_local_overrides),
             pinned: Some(self.remote_file(path)?),
+            observer: self.observer.clone(),
         })))
     }
     fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
@@ -354,6 +412,7 @@ mod tests {
     struct RecordingBackend {
         inner: super::super::filesystem::FileSystem,
         ranges: std::sync::Mutex<Vec<(u64, u64)>>,
+        next_range_failure: std::sync::atomic::AtomicU8,
     }
 
     impl StorageBackend for RecordingBackend {
@@ -390,8 +449,182 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push((start, end));
+            match self
+                .next_range_failure
+                .swap(0, std::sync::atomic::Ordering::SeqCst)
+            {
+                1 => {
+                    let _ = callback.send(Err("timeout: injected range timeout".into()));
+                    return;
+                }
+                2 => {
+                    let _ = callback.send(Ok(vec![0]));
+                    return;
+                }
+                3 => return,
+                _ => {}
+            }
             self.inner
                 .submit_read_range(key, start, end, expected, timeout, callback);
+        }
+    }
+
+    #[test]
+    fn should_record_actual_remote_ranges_in_the_owning_read_diagnostics(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let local = tempfile::tempdir()?;
+        let remote = tempfile::tempdir()?;
+        let cloud = Arc::new(RecordingBackend {
+            inner: super::super::filesystem::FileSystem::new(remote.path())?,
+            ranges: std::sync::Mutex::new(Vec::new()),
+            next_range_failure: std::sync::atomic::AtomicU8::new(0),
+        });
+        let local_fs = Arc::new(crate::io::RealFs::new(local.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(local_fs.clone(), 4096);
+        let mut writer = factory.create()?;
+        writer.add_with_meta(b"key", Some(b"value"), 9, 0, None)?;
+        let bytes = writer.finish_bytes()?;
+        let meta = crate::metadata::FileMeta {
+            name: "remote.sst".into(),
+            size_bytes: bytes.len() as u64,
+            ..Default::default()
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud.submit_write("sst/remote.sst", bytes, tx);
+        rx.recv().expect("remote write");
+        let diagnostics = Arc::new(crate::diagnostics::RuntimeDiagnostics::default());
+        let unrelated = crate::diagnostics::RuntimeDiagnostics::default();
+        let resources = crate::runtime::read_resources::ReadResources::new_with_diagnostics(
+            Arc::new(RemoteSstFs::new(
+                local_fs,
+                cloud.clone(),
+                Duration::from_secs(5),
+            )),
+            std::path::PathBuf::new(),
+            1024 * 1024,
+            crate::sst::cache::CachePolicyType::Lru,
+            diagnostics.clone(),
+        );
+        // Act
+        let reader = resources.reader_for(&meta)?;
+        reader.get_state_at(b"key", 9)?;
+        let cold = diagnostics.snapshot();
+        resources.reader_for(&meta)?.get_state_at(b"key", 9)?;
+        let warm = diagnostics.snapshot();
+        // Assert
+        let ranges = cloud
+            .ranges
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(ranges.len() > 1);
+        assert_eq!(cold.remote_range_requests_total, ranges.len() as u64);
+        assert_eq!(
+            cold.remote_range_bytes_total,
+            ranges.iter().map(|(start, end)| end - start).sum::<u64>()
+        );
+        assert!(cold.remote_range_latency_ns_total > 0);
+        assert!(cold.remote_range_latency_ns_max > 0);
+        assert_eq!(cold.remote_range_failures_total, 0);
+        assert_eq!(
+            warm.remote_range_requests_total,
+            cold.remote_range_requests_total
+        );
+        assert_eq!(warm.remote_range_bytes_total, cold.remote_range_bytes_total);
+        assert_eq!(unrelated.snapshot().remote_range_requests_total, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn should_count_failed_range_payloads_without_counting_unsubmitted_reads(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let local = tempfile::tempdir()?;
+        let remote = tempfile::tempdir()?;
+        std::fs::create_dir_all(remote.path().join("sst"))?;
+        std::fs::write(remote.path().join("sst/remote.sst"), b"abcdefgh")?;
+        let cloud = Arc::new(RecordingBackend {
+            inner: super::super::filesystem::FileSystem::new(remote.path())?,
+            ranges: std::sync::Mutex::new(Vec::new()),
+            next_range_failure: std::sync::atomic::AtomicU8::new(0),
+        });
+        let diagnostics = Arc::new(crate::diagnostics::RuntimeDiagnostics::default());
+        let fs = RemoteSstFs::new(
+            Arc::new(crate::io::RealFs::new(local.path())?),
+            cloud.clone(),
+            Duration::from_secs(5),
+        )
+        .with_read_observer(diagnostics.clone())
+        .expect("remote observation view");
+        let file = fs.open(&FsPath::new("remote.sst"), read_options())?;
+        // Act
+        assert_eq!(file.read_at(0, 3)?.as_ref(), b"abc");
+        assert!(file.read_at(0, 0)?.is_empty());
+        assert!(file.read_at(8, 1).is_err());
+        for failure in 1..=3 {
+            cloud
+                .next_range_failure
+                .store(failure, std::sync::atomic::Ordering::SeqCst);
+            assert!(file.read_at(0, 3).is_err());
+        }
+        let snapshot = diagnostics.snapshot();
+        // Assert
+        assert_eq!(snapshot.remote_range_requests_total, 4);
+        assert_eq!(snapshot.remote_range_bytes_total, 4);
+        assert_eq!(snapshot.remote_range_failures_total, 3);
+        assert!(snapshot.remote_range_latency_ns_max > 0);
+        assert!(snapshot.remote_range_latency_ns_total >= snapshot.remote_range_latency_ns_max);
+        assert_eq!(
+            cloud
+                .ranges
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            4
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn should_keep_observations_separate_when_reusing_a_pinned_remote_view(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let local = tempfile::tempdir()?;
+        let remote = tempfile::tempdir()?;
+        std::fs::create_dir_all(remote.path().join("sst"))?;
+        std::fs::write(remote.path().join("sst/remote.sst"), b"abcdefgh")?;
+        let fs = RemoteSstFs::new(
+            Arc::new(crate::io::RealFs::new(local.path())?),
+            Arc::new(super::super::filesystem::FileSystem::new(remote.path())?),
+            Duration::from_secs(5),
+        );
+        let path = FsPath::new("remote.sst");
+        let pinned = fs.immutable_read_view(&path)?.expect("pinned view");
+        let first = Arc::new(crate::diagnostics::RuntimeDiagnostics::default());
+        let second = Arc::new(crate::diagnostics::RuntimeDiagnostics::default());
+        let first_view = pinned
+            .with_read_observer(first.clone())
+            .expect("first observer");
+        let second_view = first_view
+            .with_read_observer(second.clone())
+            .expect("second observer");
+        // Act
+        first_view.open(&path, read_options())?.read_at(0, 3)?;
+        second_view.open(&path, read_options())?.read_at(3, 5)?;
+        // Assert
+        assert_eq!(first.snapshot().remote_range_requests_total, 1);
+        assert_eq!(first.snapshot().remote_range_bytes_total, 3);
+        assert_eq!(second.snapshot().remote_range_requests_total, 1);
+        assert_eq!(second.snapshot().remote_range_bytes_total, 5);
+        Ok(())
+    }
+
+    fn read_options() -> OpenOptions {
+        OpenOptions {
+            mode: OpenMode::ReadOnly,
+            create: false,
+            create_new: false,
+            truncate: false,
         }
     }
 
@@ -445,6 +678,7 @@ mod tests {
         let cloud = Arc::new(RecordingBackend {
             inner: super::super::filesystem::FileSystem::new(remote.path())?,
             ranges: std::sync::Mutex::new(Vec::new()),
+            next_range_failure: std::sync::atomic::AtomicU8::new(0),
         });
         let local_fs = Arc::new(crate::io::RealFs::new(local.path())?);
         let factory = crate::sst::FsSstFactoryIo::new(local_fs.clone(), 4096);

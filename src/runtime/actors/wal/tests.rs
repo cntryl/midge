@@ -1115,3 +1115,5 @@ fn should_fail_rotate_without_advancing_segment_when_rename_fails() -> MidgeResu
 }
 
 mod admission;
+
+mod floor;

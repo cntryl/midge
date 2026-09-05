@@ -14,9 +14,54 @@ pub(crate) struct SstReadMetrics {
     bloom_checks: AtomicU64,
     bloom_rejects: AtomicU64,
     range_tombstone_scans: AtomicU64,
+    remote_range_requests_total: AtomicU64,
+    remote_range_bytes_total: AtomicU64,
+    remote_range_failures_total: AtomicU64,
+    remote_range_latency_ns_total: AtomicU64,
+    remote_range_latency_ns_max: AtomicU64,
 }
 
 impl SstReadMetrics {
+    pub(crate) fn record_remote_range_started(&self) {
+        saturating_add(&self.remote_range_requests_total, 1);
+    }
+
+    pub(crate) fn record_remote_range_completed(
+        &self,
+        returned_bytes: u64,
+        elapsed: std::time::Duration,
+        failed: bool,
+    ) {
+        let nanos = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
+        saturating_add(&self.remote_range_bytes_total, returned_bytes);
+        saturating_add(&self.remote_range_latency_ns_total, nanos);
+        self.remote_range_latency_ns_max
+            .fetch_max(nanos, Ordering::Relaxed);
+        if failed {
+            saturating_add(&self.remote_range_failures_total, 1);
+        }
+    }
+
+    pub(crate) fn remote_range_requests_total(&self) -> u64 {
+        self.remote_range_requests_total.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn remote_range_bytes_total(&self) -> u64 {
+        self.remote_range_bytes_total.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn remote_range_failures_total(&self) -> u64 {
+        self.remote_range_failures_total.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn remote_range_latency_ns_total(&self) -> u64 {
+        self.remote_range_latency_ns_total.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn remote_range_latency_ns_max(&self) -> u64 {
+        self.remote_range_latency_ns_max.load(Ordering::Relaxed)
+    }
+
     pub(crate) fn reader_cache_hits(&self) -> u64 {
         self.reader_cache_hits.load(Ordering::Relaxed)
     }
@@ -98,4 +143,10 @@ impl SstReadMetrics {
     pub(crate) fn record_range_tombstone_scan(&self) {
         self.range_tombstone_scans.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+fn saturating_add(counter: &AtomicU64, value: u64) {
+    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_add(value))
+    });
 }

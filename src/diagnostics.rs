@@ -32,6 +32,11 @@ pub struct ReadPathDiagnosticsSnapshot {
     pub bloom_checks: u64,
     pub bloom_rejects: u64,
     pub range_tombstone_scans: u64,
+    pub remote_range_requests_total: u64,
+    pub remote_range_bytes_total: u64,
+    pub remote_range_failures_total: u64,
+    pub remote_range_latency_ns_total: u64,
+    pub remote_range_latency_ns_max: u64,
 }
 
 /// Read-path counters owned by one runtime.
@@ -72,6 +77,11 @@ impl RuntimeDiagnostics {
             bloom_checks: self.sst.bloom_checks(),
             bloom_rejects: self.sst.bloom_rejects(),
             range_tombstone_scans: self.sst.range_tombstone_scans(),
+            remote_range_requests_total: self.sst.remote_range_requests_total(),
+            remote_range_bytes_total: self.sst.remote_range_bytes_total(),
+            remote_range_failures_total: self.sst.remote_range_failures_total(),
+            remote_range_latency_ns_total: self.sst.remote_range_latency_ns_total(),
+            remote_range_latency_ns_max: self.sst.remote_range_latency_ns_max(),
         }
     }
 
@@ -109,6 +119,17 @@ impl RuntimeDiagnostics {
 }
 
 static LEGACY_RUNTIME_DIAGNOSTICS: OnceLock<Arc<RuntimeDiagnostics>> = OnceLock::new();
+
+impl crate::io::traits::ReadObserver for RuntimeDiagnostics {
+    fn remote_range_started(&self) {
+        self.sst.record_remote_range_started();
+    }
+
+    fn remote_range_completed(&self, returned_bytes: u64, elapsed: Duration, failed: bool) {
+        self.sst
+            .record_remote_range_completed(returned_bytes, elapsed, failed);
+    }
+}
 
 /// Diagnostics for direct standalone readers and the legacy global snapshot
 /// helper. Engines always receive an independent `RuntimeDiagnostics` value.

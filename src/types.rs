@@ -186,6 +186,20 @@ pub struct RuntimeMetricsSnapshot {
     pub hybrid_free_bytes: u64,
     pub hybrid_usage_percent: u32,
     pub hybrid_pending_evictions: usize,
+    /// Local disk charges and observed admission blocks; absent outside hybrid storage.
+    pub local_storage: Option<crate::storage::hybrid::backend::HybridStorageBudgetSnapshot>,
+    /// Submitted range requests from this engine's runtime SST readers.
+    /// Excludes HEAD requests, startup recovery, and WAL maintenance.
+    pub remote_range_requests_total: u64,
+    /// Provider payload bytes returned to runtime SST readers, including short
+    /// responses subsequently rejected during validation.
+    pub remote_range_bytes_total: u64,
+    /// Failed runtime SST range requests, including caller-observed timeouts.
+    pub remote_range_failures_total: u64,
+    /// Aggregate caller-observed runtime SST range latency in nanoseconds.
+    pub remote_range_latency_ns_total: u64,
+    /// Maximum caller-observed runtime SST range latency in nanoseconds.
+    pub remote_range_latency_ns_max: u64,
     pub wal_recovery_records_replayed: u64,
     pub wal_recovery_bytes_replayed: u64,
     pub intent_log_replay_runs: u64,

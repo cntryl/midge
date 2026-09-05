@@ -100,6 +100,13 @@ impl EventLoop {
     }
 
     fn schedule_next_flush_worker_with_shutdown(&mut self, allow_during_shutdown: bool) {
+        if !allow_during_shutdown
+            && self.cloud_maintenance_enabled()
+            && !self.cloud_maintenance.dispatching
+        {
+            self.schedule_cloud_maintenance();
+            return;
+        }
         if (self.shutting_down && !allow_during_shutdown)
             || self.state.is_memory_mode()
             || self.flush_actor.is_inflight()
