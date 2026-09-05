@@ -29,7 +29,13 @@ Each profile runs these phases in fresh child processes:
 The shipping lease duration remains in effect. An external child watchdog
 makes a hung recovery fail the campaign. Only `LeaseHeld` retries during open;
 other recovery failures surface immediately. Expected pre-append write stalls
-retry within a separate deadline.
+and post-outage publication polling share one fixed workload deadline derived
+from `MIDGE_QUALIFICATION_TIMEOUT_SECONDS`. Progress does not reset that deadline;
+the child watchdog still bounds the complete phase, including recovery. While
+waiting, five-second status reports show total SST count, completed maintenance,
+queues, local pressure, and the age of the last observed progress. An unchanged
+completion counter can mean a large compaction is still running; the reports
+do not claim per-block progress or replace the fixed timeout.
 
 Run the default two profiles (6 MiB WAL / 2 MiB local, then 12 MiB / 4 MiB):
 
@@ -77,7 +83,9 @@ recovery duration, observed peak local file bytes, process peak RSS, checkpoint
 count, and the existing runtime metrics. Recovery duration includes any lease
 takeover wait. RSS includes the process, runtime, and allocator, not just the
 engine's configured data allocations. An interrupted phase reports zero
-verified records because full-state verification has not run yet.
+verified records because full-state verification has not run yet. An additional
+`*-opened.json` report preserves recovery observations before query verification;
+it also reports zero verified records and `verification_complete: false`.
 
 Local file bytes are sampled every 5 ms and synchronously at publication and
 checkpoint failpoints. The sum covers reachable filenames' logical lengths;
@@ -117,6 +125,15 @@ reads check complete manifest key bounds before opening each candidate, retain
 newest-first ordering, and consult files with unknown or invalid bounds.
 This keeps unrelated cold tables from consuming the reader pool while allowing
 recovery to finish independently of the steady-state L0 threshold.
+
+Full scans chain contiguous groups of strictly disjoint L0 intervals, retaining
+one active reader per group. Overlapping or uncertain files keep their existing
+source precedence and conservative reads. Scan metadata demand therefore follows
+the number of these groups, plus independently read uncertain files. A recovered
+backlog with many overlapping or uncertain intervals may still require
+maintenance before a scan fits its memory budget. This campaign's independently
+generated source keys exercise disjoint
+recovered intervals, rather than every possible overlap or tombstone history.
 
 Automatic persistent-engine memory allocation leaves a quarter of the memory
 remaining after transaction and compaction pools for SST reads before sizing

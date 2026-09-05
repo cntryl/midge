@@ -70,7 +70,10 @@ impl Observation {
         let interrupt = phase == "interrupted";
         fail::cfg_callback("midge::recovery::after_checkpoint", move || {
             state.sample();
-            state.checkpoints.fetch_add(1, Ordering::Relaxed);
+            let checkpoints = state.checkpoints.fetch_add(1, Ordering::Relaxed) + 1;
+            if checkpoints == 1 || checkpoints.is_multiple_of(64) {
+                eprintln!("MIDGE_OPERATIONAL_CHECKPOINT {checkpoints}");
+            }
             if interrupt {
                 let mut report = report.clone();
                 report["peak_local_file_bytes"] = state.peak.load(Ordering::Relaxed).into();
@@ -86,6 +89,15 @@ impl Observation {
             }
         })
         .expect("checkpoint observation");
+    }
+
+    pub fn record_opened(&self, campaign: &Campaign, phase: &str, recovery_ms: u128) {
+        self.state.sample();
+        let stage = format!("{phase}-opened");
+        save(
+            &campaign.artifacts.join(format!("{stage}.json")),
+            &self.report(campaign, &stage, recovery_ms, None),
+        );
     }
 
     pub fn finish(
@@ -115,11 +127,13 @@ impl Observation {
         recovery_ms: u128,
         metrics: Option<&RuntimeMetricsSnapshot>,
     ) -> serde_json::Value {
+        let verified = matches!(phase, "recovered" | "verified");
         json!({
             "schema_version": 1, "provider": "Sqrzl S3 protocol", "phase": phase,
             "profile": campaign.profile, "cloud_wal_bytes": campaign.actual_wal_bytes,
             "source_records": campaign.records,
-            "verified_records": if phase == "interrupted" { 0 } else { campaign.records },
+            "verified_records": if verified { campaign.records } else { 0 },
+            "verification_complete": verified,
             "recovery_ms": if phase == "interrupted" { None } else { Some(recovery_ms) },
             "revision": std::env::var("MIDGE_QUALIFICATION_REVISION").ok(),
             "debug_assertions": cfg!(debug_assertions),

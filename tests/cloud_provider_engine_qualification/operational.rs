@@ -77,6 +77,7 @@ fn should_execute_cloud_recovery_phase_in_child() {
     let mut engine = open_after_expired_owner(&campaign);
     let recovery_ms = started.elapsed().as_millis();
     eprintln!("MIDGE_OPERATIONAL_PHASE {phase} opened in {recovery_ms} ms");
+    observation.record_opened(&campaign, &phase, recovery_ms);
     assert_complete_state(&engine, &campaign, phase != "recovered");
     if phase == "recovered" {
         exercise_accepted_writes(&engine, &campaign);

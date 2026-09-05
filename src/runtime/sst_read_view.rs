@@ -22,8 +22,9 @@ pub(crate) struct LevelRangeCandidates {
 
 /// SST candidates intersecting one range query.
 pub(crate) struct RangeCandidates {
-    /// L0 files remain independent because they may overlap arbitrarily.
-    pub(crate) l0: Vec<Arc<FileMeta>>,
+    /// Contiguous recency groups, ordered by key within each strictly disjoint
+    /// run. Unknown bounds remain singleton runs in their original position.
+    pub(crate) l0: Vec<Vec<Arc<FileMeta>>>,
     /// At most one ordered cursor is needed for each non-zero level.
     pub(crate) levels: Vec<LevelRangeCandidates>,
 }
@@ -55,6 +56,7 @@ pub(crate) struct ReadViewWork {
 #[derive(Debug)]
 pub(crate) struct SstReadView {
     l0: Vec<Arc<FileMeta>>,
+    l0_runs: Vec<Vec<Arc<FileMeta>>>,
     levels: BTreeMap<u32, LevelReadView>,
     pinned_sst_names: Arc<HashSet<String>>,
     #[cfg(test)]
@@ -102,9 +104,11 @@ impl SstReadView {
             .into_iter()
             .map(|(level, files)| (level, Self::build_level(level, files)))
             .collect();
+        let l0_runs = Self::build_l0_runs(&l0);
 
         Self {
             l0,
+            l0_runs,
             levels,
             pinned_sst_names: Arc::new(pinned_sst_names),
             #[cfg(test)]
@@ -170,6 +174,48 @@ impl SstReadView {
         }
 
         LevelReadView { ordered, fallback }
+    }
+
+    fn build_l0_runs(files: &[Arc<FileMeta>]) -> Vec<Vec<Arc<FileMeta>>> {
+        use std::ops::Bound::{Included, Unbounded};
+
+        let mut runs = Vec::new();
+        let mut ordered = BTreeMap::<&[u8], Arc<FileMeta>>::new();
+        for file in files {
+            let bounds = file
+                .smallest_key
+                .as_deref()
+                .zip(file.largest_key.as_deref())
+                .filter(|(smallest, largest)| file.key_bounds_complete && smallest <= largest);
+            let Some((smallest, largest)) = bounds else {
+                if !ordered.is_empty() {
+                    runs.push(std::mem::take(&mut ordered).into_values().collect());
+                }
+                runs.push(vec![Arc::clone(file)]);
+                continue;
+            };
+            let overlaps = ordered
+                .range::<[u8], _>((Unbounded, Included(smallest)))
+                .next_back()
+                .is_some_and(|(_, previous)| {
+                    previous.largest_key.as_deref().expect("complete L0 bound") >= smallest
+                })
+                || ordered
+                    .range::<[u8], _>((Included(smallest), Unbounded))
+                    .next()
+                    .is_some_and(|(next_start, _)| *next_start <= largest);
+            // Only contiguous recency groups may be reordered. An overlapping
+            // or equal endpoint closes the run, preserving source precedence
+            // for equal-sequence values in both scan directions.
+            if overlaps {
+                runs.push(std::mem::take(&mut ordered).into_values().collect());
+            }
+            ordered.insert(smallest, Arc::clone(file));
+        }
+        if !ordered.is_empty() {
+            runs.push(ordered.into_values().collect());
+        }
+        runs
     }
 
     pub(crate) fn point_candidates(&self, key: &[u8]) -> Vec<Arc<FileMeta>> {
@@ -242,43 +288,69 @@ impl SstReadView {
         start: Option<&[u8]>,
         end: Option<&[u8]>,
     ) -> RangeCandidates {
+        let ordered_range = |files: &[Arc<FileMeta>]| {
+            let first = start.map_or(0, |start_key| {
+                files.partition_point(|file| {
+                    #[cfg(test)]
+                    self.record_metadata_comparison();
+                    file.largest_key.as_deref().expect("indexed largest bound") < start_key
+                })
+            });
+            let last = end.map_or(files.len(), |end_key| {
+                files.partition_point(|file| {
+                    #[cfg(test)]
+                    self.record_metadata_comparison();
+                    file.smallest_key
+                        .as_deref()
+                        .expect("indexed smallest bound")
+                        < end_key
+                })
+            });
+            if first < last {
+                files[first..last].to_vec()
+            } else {
+                Vec::new()
+            }
+        };
+        let l0 = self
+            .l0_runs
+            .iter()
+            .map(|run| {
+                let uncertain = run.len() == 1
+                    && run.first().is_some_and(|file| {
+                        if !file.key_bounds_complete {
+                            return true;
+                        }
+                        let Some((smallest, largest)) = file
+                            .smallest_key
+                            .as_deref()
+                            .zip(file.largest_key.as_deref())
+                        else {
+                            return true;
+                        };
+                        #[cfg(test)]
+                        self.record_metadata_comparison();
+                        smallest > largest
+                    });
+                if uncertain {
+                    run.clone()
+                } else {
+                    ordered_range(run)
+                }
+            })
+            .filter(|run| !run.is_empty())
+            .collect();
         let levels = self
             .levels
-            .iter()
-            .map(|(&_level_number, level)| {
-                let first = start.map_or(0, |start_key| {
-                    level.ordered.partition_point(|file| {
-                        #[cfg(test)]
-                        self.record_metadata_comparison();
-                        file.largest_key.as_deref().expect("indexed largest bound") < start_key
-                    })
-                });
-                let last = end.map_or(level.ordered.len(), |end_key| {
-                    level.ordered.partition_point(|file| {
-                        #[cfg(test)]
-                        self.record_metadata_comparison();
-                        file.smallest_key
-                            .as_deref()
-                            .expect("indexed smallest bound")
-                            < end_key
-                    })
-                });
-                LevelRangeCandidates {
-                    ordered: if first < last {
-                        level.ordered[first..last].to_vec()
-                    } else {
-                        Vec::new()
-                    },
-                    fallback: level.fallback.clone(),
-                }
+            .values()
+            .map(|level| LevelRangeCandidates {
+                ordered: ordered_range(&level.ordered),
+                fallback: level.fallback.clone(),
             })
             .filter(|level| !level.ordered.is_empty() || !level.fallback.is_empty())
             .collect();
 
-        RangeCandidates {
-            l0: self.l0.clone(),
-            levels,
-        }
+        RangeCandidates { l0, levels }
     }
 
     pub(crate) fn pinned_sst_names(&self) -> Arc<HashSet<String>> {
@@ -544,6 +616,13 @@ mod tests {
             let point_work = first_snapshot_view.test_work();
             first_snapshot_view.reset_test_work();
             let range_candidates = first_snapshot_view.range_candidates(None, None);
+            first_snapshot_view.reset_test_work();
+            let range_end = u64::try_from(query_index + 1)
+                .expect("range end")
+                .to_be_bytes();
+            let _bounded_range =
+                first_snapshot_view.range_candidates(Some(&query_key), Some(&range_end));
+            let range_work = first_snapshot_view.test_work();
 
             // Assert
             assert!(Arc::ptr_eq(&published_view, &first_snapshot_view));
@@ -577,6 +656,13 @@ mod tests {
                 point_work.metadata_comparisons
             );
             let range_cursor_bound = hard_l0_ceiling + configured_levels.saturating_sub(1);
+            let range_comparison_bound =
+                3 * hard_l0_ceiling + 2 * populated_levels * (ceil_log2(largest_level) + 1);
+            assert!(
+                range_work.metadata_comparisons <= range_comparison_bound,
+                "range used {} comparisons above bound {range_comparison_bound}",
+                range_work.metadata_comparisons
+            );
             assert!(
                 range_candidates.active_sst_cursor_count() <= range_cursor_bound,
                 "range retained {} SST cursors above bound {range_cursor_bound} at {interval_count} intervals",
