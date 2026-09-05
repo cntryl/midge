@@ -322,7 +322,7 @@ fn should_fetch_from_cloud_after_local_eviction() {
     // Arrange
     // Verify published SSTs remain readable after their local staging files are removed.
     let temp_dir = test_temp_dir();
-    let budget_bytes = 8 * 1024 * 1024; // Fits this transaction and its WAL/flush staging.
+    let budget_bytes = 8 * 1024 * 1024; // Each transaction fits the 4 MiB flush window.
     let opts = OpenOptions::cloud_simulated(temp_dir.path(), "test-bucket", "test-prefix")
         .with_simulated_cloud_local_storage_budget(budget_bytes)
         .build()
@@ -330,18 +330,20 @@ fn should_fetch_from_cloud_after_local_eviction() {
     let engine = Engine::open(opts).expect("open cloud-simulated engine");
     let cf = engine.create_column_family("test").expect("create cf");
 
-    // Write a batch which fits admission; successful publication evicts its SST.
+    // Preserve all 20 values while keeping each atomic batch within admission.
     let value = vec![b'V'; 64 * 1024];
 
-    let mut tx = engine
-        .begin_tx(cf.id(), TransactionMode::ReadWrite)
-        .expect("begin_tx");
-    for i in 0..20 {
-        let key = format!("evict_fetch_key_{i:02}");
-        tx.put(key.as_bytes().to_vec(), value.clone(), None)
-            .expect("put");
+    for batch in 0..2 {
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin_tx");
+        for i in batch * 10..(batch + 1) * 10 {
+            let key = format!("evict_fetch_key_{i:02}");
+            tx.put(key.as_bytes().to_vec(), value.clone(), None)
+                .expect("put");
+        }
+        tx.commit(WriteOptions::cloud_async()).expect("commit");
     }
-    tx.commit(WriteOptions::cloud_async()).expect("commit");
     engine.flush_cf(&cf).expect("publish and evict SST");
 
     // Act / Assert: publication has completed, and only the cloud copy remains.
@@ -488,13 +490,14 @@ fn should_handle_cloud_unavailable_during_eviction() {
         tx.put(key.as_bytes().to_vec(), large_value.clone(), None)
             .expect("put");
     }
-    tx.commit(WriteOptions::cloud_async()).expect("commit");
-
     let cloud_sst_dir = temp_dir.path().join("cloud_store").join("sst");
     let files_before_outage_attempt = count_files_recursive(&cloud_sst_dir);
     let scenario = fail::FailScenario::setup();
     fail::cfg("midge::cloud::inject_fail_sst_upload", "return")
         .expect("configure cloud SST upload outage");
+    // Commit may trigger an automatic flush under this working-disk budget.
+    // Install the SST outage first so every publication attempt sees it.
+    tx.commit(WriteOptions::cloud_async()).expect("commit");
 
     // Act: Flush with the remote SST provider unavailable.
     let flush_error = engine
