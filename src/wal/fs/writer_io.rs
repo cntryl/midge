@@ -17,7 +17,7 @@
 use crate::common::MidgeResult;
 use crate::io::{Fs, FsPath};
 use crate::wal::encoding;
-use crate::wal::traits::WalWriter;
+use crate::wal::traits::{WalAppendError, WalWriter};
 use crate::wal::types::{WalPos, WalRecord};
 use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
@@ -171,22 +171,28 @@ impl FsWalWriterIo {
         None
     }
 
-    fn enqueue_encoded(&self, buf: Vec<u8>) -> MidgeResult<WalPos> {
-        self.enqueue_encoded_with_timeout(buf, self.io_timeout)
-    }
-
+    #[cfg(test)]
     fn enqueue_encoded_with_timeout(
         &self,
         buf: Vec<u8>,
         acknowledgement_timeout: Duration,
     ) -> MidgeResult<WalPos> {
+        self.enqueue_encoded_accounted(buf, acknowledgement_timeout)
+            .map_err(|failure| failure.error)
+    }
+
+    fn enqueue_encoded_accounted(
+        &self,
+        buf: Vec<u8>,
+        acknowledgement_timeout: Duration,
+    ) -> Result<WalPos, WalAppendError> {
         let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(1);
 
         // Enqueue with backpressure: if queue is full, wait for it to drain.
         let mut backoff_ms = 1u64;
         for attempt in 0..MAX_WAIT_ATTEMPTS {
             if let Some(err) = self.writer_failure() {
-                return Err(err);
+                return Err(WalAppendError::unchanged(err));
             }
 
             let mut q = self.queue.lock();
@@ -214,16 +220,18 @@ impl FsWalWriterIo {
                         drop(state);
                         self.sync_cond.notify_all();
                         self.queue_cond.notify_all();
-                        Err(crate::common::MidgeError::Timeout(message))
+                        Err(WalAppendError::unknown(crate::common::MidgeError::Timeout(
+                            message,
+                        )))
                     }
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                        Err(self.writer_failure().unwrap_or_else(|| {
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(
+                        WalAppendError::unknown(self.writer_failure().unwrap_or_else(|| {
                             crate::common::MidgeError::Internal(
                                 "WAL writer thread exited before append acknowledgement"
                                     .to_string(),
                             )
-                        }))
-                    }
+                        })),
+                    ),
                 };
             }
 
@@ -235,16 +243,18 @@ impl FsWalWriterIo {
         }
 
         if let Some(err) = self.writer_failure() {
-            return Err(err);
+            return Err(WalAppendError::unchanged(err));
         }
 
         let q = self.queue.lock();
-        Err(crate::common::MidgeError::WriteStall(format!(
-            "WAL queue full after {} attempts ({}/{} items, backoff exhausted)",
-            MAX_WAIT_ATTEMPTS,
-            q.len(),
-            super::writer_runner::MAX_QUEUE_DEPTH
-        )))
+        Err(WalAppendError::unchanged(
+            crate::common::MidgeError::WriteStall(format!(
+                "WAL queue full after {} attempts ({}/{} items, backoff exhausted)",
+                MAX_WAIT_ATTEMPTS,
+                q.len(),
+                super::writer_runner::MAX_QUEUE_DEPTH
+            )),
+        ))
     }
 
     fn error_from_message(message: String) -> crate::common::MidgeError {
@@ -307,31 +317,36 @@ impl FsWalWriterIo {
 
 impl WalWriter for FsWalWriterIo {
     fn append_record(&self, record: &WalRecord) -> MidgeResult<WalPos> {
-        // Encode and enqueue payload into queue. The method only returns after the
-        // writer thread has appended the bytes to the local WAL file.
+        self.append_record_accounted(record)
+            .map_err(|failure| failure.error)
+    }
+
+    fn append_record_accounted(&self, record: &WalRecord) -> Result<WalPos, WalAppendError> {
         let mut buf = self.take_buffer();
         buf.clear();
-        Self::encode_record_frame(record, &mut buf)?;
-        self.enqueue_encoded(buf)
+        Self::encode_record_frame(record, &mut buf).map_err(WalAppendError::unchanged)?;
+        self.enqueue_encoded_accounted(buf, self.io_timeout)
     }
 
     fn append_batch(&self, records: &[WalRecord]) -> MidgeResult<WalPos> {
+        self.append_batch_accounted(records)
+            .map_err(|failure| failure.error)
+    }
+
+    fn append_batch_accounted(&self, records: &[WalRecord]) -> Result<WalPos, WalAppendError> {
         if records.is_empty() {
             return Ok(self.current_pos());
         }
-
         let mut buf = self.take_buffer();
         buf.clear();
-
         let mut last_record_offset = 0u64;
         for (index, record) in records.iter().enumerate() {
             if index + 1 == records.len() {
                 last_record_offset = buf.len() as u64;
             }
-            Self::encode_record_frame(record, &mut buf)?;
+            Self::encode_record_frame(record, &mut buf).map_err(WalAppendError::unchanged)?;
         }
-
-        let batch_start = self.enqueue_encoded(buf)?;
+        let batch_start = self.enqueue_encoded_accounted(buf, self.io_timeout)?;
         Ok(batch_start.saturating_add(last_record_offset))
     }
 
@@ -638,6 +653,33 @@ mod tests {
             subsequent_result,
             Err(crate::common::MidgeError::Fenced(_))
         ));
+    }
+
+    #[test]
+    fn should_prove_subsequent_append_was_not_enqueued_after_ambiguous_timeout() {
+        // Arrange
+        let writer = writer_without_background_worker();
+
+        // Act
+        let timed_out = writer
+            .enqueue_encoded_accounted(vec![1, 2, 3], Duration::ZERO)
+            .expect_err("worker cannot acknowledge queued append");
+        let rejected = writer
+            .enqueue_encoded_accounted(vec![4], Duration::ZERO)
+            .expect_err("writer is fenced before enqueue");
+
+        // Assert
+        assert!(matches!(
+            timed_out.error,
+            crate::common::MidgeError::Timeout(_)
+        ));
+        assert!(!timed_out.unchanged, "timed-out bytes may still be written");
+        assert!(matches!(
+            rejected.error,
+            crate::common::MidgeError::Fenced(_)
+        ));
+        assert!(rejected.unchanged, "only the new admission can be released");
+        assert_eq!(writer.queue.lock().len(), 1);
     }
 
     #[test]

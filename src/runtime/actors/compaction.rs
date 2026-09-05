@@ -305,16 +305,29 @@ impl CompactionActor {
     ) {
         self.finish_active_bookkeeping(state, &plan.input_files);
         if let (Some(hybrid), Some(token)) = (sba, self.storage_reservation.take()) {
-            if hybrid.ephemeral_sst_cache_enabled() && matches!(error, Some(MidgeError::Io(_))) {
-                // A failing local device may also have retained anonymous
-                // writer scratch during unwinding. Preserve its allowance.
-                tracing::warn!(
-                    ?token,
-                    "retaining compaction staging allowance after local I/O failure"
-                );
-            } else {
-                self.settle_failed_compaction_reservation(state, hybrid, token);
-            }
+            self.settle_compaction_error_reservation(state, hybrid, token, error);
+        }
+    }
+
+    pub(crate) fn settle_compaction_error_reservation(
+        &self,
+        state: &RuntimeState,
+        hybrid: &crate::storage::HybridStorage,
+        token: crate::storage::hybrid::actor::StorageReservationToken,
+        error: Option<&MidgeError>,
+    ) {
+        if hybrid.ephemeral_sst_cache_enabled()
+            && error.is_some()
+            && !self.sst_factory.compaction_scratch_cleanup_verified()
+        {
+            // Error type cannot prove deletion: cancellation, resource limits
+            // and corrupt inputs can all follow partial scratch writes.
+            tracing::warn!(
+                ?token,
+                "retaining compaction staging allowance because scratch cleanup is unverified"
+            );
+        } else {
+            self.settle_failed_compaction_reservation(state, hybrid, token);
         }
     }
 
@@ -555,9 +568,19 @@ impl CompactionActor {
         state: &mut RuntimeState,
         input_ssts: &[String],
     ) -> MidgeResult<()> {
+        self.prepare_for_completion_with_storage_test(state, input_ssts, None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prepare_for_completion_with_storage_test(
+        &mut self,
+        state: &mut RuntimeState,
+        input_ssts: &[String],
+        storage: Option<&Arc<crate::storage::HybridStorage>>,
+    ) -> MidgeResult<()> {
         let mut plan = crate::compaction::CompactionPlan::new(0, 0, 1);
         plan.input_files = input_ssts.to_vec();
-        self.prepare_compaction(state, &plan, None)
+        self.prepare_compaction(state, &plan, storage)
     }
 
     fn run_sync_compaction(

@@ -13,7 +13,7 @@ fn run_cloud_wal_prune_preflight(
     candidates: &[(u64, u64)],
     candidate_ids: Vec<u64>,
     metadata_snapshot: Option<crate::runtime::hybrid_persistence::CloudMetadataPruneSnapshot>,
-    local_manifest: crate::metadata::Manifest,
+    local_guard: CloudWalPruneGuard,
     writer_epoch: u64,
     attempt_budget: std::time::Duration,
 ) {
@@ -23,14 +23,15 @@ fn run_cloud_wal_prune_preflight(
             Some(snapshot) => snapshot.verify_exact_then(&deadline, |manifest, metadata_guard| {
                 storage.prune_cloud_wal_segments_within(
                     candidates,
-                    CloudWalPruneGuard::new(manifest, Some(metadata_guard)),
+                    CloudWalPruneGuard::new(manifest, Some(metadata_guard))
+                        .with_memory_limit(local_guard.memory_limit()),
                     writer_epoch,
                     &deadline,
                 )
             }),
             None => storage.prune_cloud_wal_segments_within(
                 candidates,
-                CloudWalPruneGuard::new(local_manifest, None),
+                local_guard,
                 writer_epoch,
                 &deadline,
             ),
@@ -110,7 +111,8 @@ impl EventLoop {
         let metadata_snapshot = self.cloud_metadata_prune_snapshot_for_wal_cleanup();
         // Filesystem-backed cloud simulation has no separate control store;
         // its event-loop manifest is the authority snapshot guarded below.
-        let local_manifest = self.state.manifest.clone();
+        let local_guard = CloudWalPruneGuard::new(self.state.manifest.clone(), None)
+            .with_memory_limit(self.compaction_actor.compaction_memory_limit());
         let writer_epoch = self.state.writer_epoch;
         // This callerless attempt has retry ownership, but shutdown must still
         // be able to join it within the cloud drain window. Starting the budget
@@ -142,7 +144,7 @@ impl EventLoop {
                     &candidates,
                     worker_candidate_ids,
                     metadata_snapshot,
-                    local_manifest,
+                    local_guard,
                     writer_epoch,
                     attempt_budget,
                 );

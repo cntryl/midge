@@ -2,9 +2,36 @@
 //!
 //! Clean trait contracts for WAL implementations.
 
-use crate::common::MidgeResult;
+use crate::common::{MidgeError, MidgeResult};
 use crate::wal::types::{WalOpKind, WalPos, WalRecord};
 use std::time::Duration;
+
+/// Failed append with an operation-specific proof that no bytes remain.
+///
+/// An unchanged logical append position alone is insufficient: a failed write
+/// may leave a partial frame, or a timed-out worker may still be writing.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct WalAppendError {
+    pub error: MidgeError,
+    pub unchanged: bool,
+}
+
+impl WalAppendError {
+    pub(crate) fn unknown(error: MidgeError) -> Self {
+        Self {
+            error,
+            unchanged: false,
+        }
+    }
+
+    pub(crate) fn unchanged(error: MidgeError) -> Self {
+        Self {
+            error,
+            unchanged: true,
+        }
+    }
+}
 
 /// Writer contract for a WAL implementation.
 ///
@@ -17,6 +44,16 @@ pub trait WalWriter: Send + Sync {
     ///
     /// Returns an error when the record cannot be appended to the WAL.
     fn append_record(&self, record: &WalRecord) -> MidgeResult<WalPos>;
+
+    /// Append one record, retaining disk admission unless failure proves no growth.
+    ///
+    /// # Errors
+    ///
+    /// Returns the append error and whether its physical effects were rolled back.
+    #[doc(hidden)]
+    fn append_record_accounted(&self, record: &WalRecord) -> Result<WalPos, WalAppendError> {
+        self.append_record(record).map_err(WalAppendError::unknown)
+    }
 
     /// Append an operation with an explicit sequence number.
     ///
@@ -69,6 +106,16 @@ pub trait WalWriter: Send + Sync {
             last_pos = self.append_record(record)?;
         }
         Ok(last_pos)
+    }
+
+    /// Append a batch, retaining disk admission unless failure proves no growth.
+    ///
+    /// # Errors
+    ///
+    /// Returns the append error and whether its physical effects were rolled back.
+    #[doc(hidden)]
+    fn append_batch_accounted(&self, records: &[WalRecord]) -> Result<WalPos, WalAppendError> {
+        self.append_batch(records).map_err(WalAppendError::unknown)
     }
 
     /// Flush any buffered data to the underlying storage (but not necessarily

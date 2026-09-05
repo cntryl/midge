@@ -1,4 +1,5 @@
 use crate::io::{Durability, Fs, FsPath, FsResult};
+use crate::wal::traits::WalAppendError;
 use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
 use std::time::Instant;
@@ -19,16 +20,22 @@ pub struct SyncState {
 
 pub(crate) struct QueuedWrite {
     pub(crate) data: Vec<u8>,
-    pub(crate) ack: std::sync::mpsc::SyncSender<crate::common::MidgeResult<u64>>,
+    pub(crate) ack: std::sync::mpsc::SyncSender<Result<u64, WalAppendError>>,
 }
 
 impl QueuedWrite {
     pub(crate) fn new(
         data: Vec<u8>,
-        ack: std::sync::mpsc::SyncSender<crate::common::MidgeResult<u64>>,
+        ack: std::sync::mpsc::SyncSender<Result<u64, WalAppendError>>,
     ) -> Self {
         Self { data, ack }
     }
+}
+
+#[derive(Debug)]
+struct WriteFailure {
+    message: String,
+    unchanged: bool,
 }
 
 /// Maximum queue depth to prevent unbounded memory growth
@@ -112,7 +119,7 @@ impl WriterRunner {
                 let start_pos = match self.write_batch(&mut file_opt, &mut batch) {
                     Ok(start_pos) => start_pos,
                     Err(message) => {
-                        self.fail_writes(&batch, message);
+                        self.fail_writes(&batch, &message);
                         return;
                     }
                 };
@@ -169,7 +176,7 @@ impl WriterRunner {
         &'a self,
         file_opt: &mut Option<Box<dyn crate::io::File + 'a>>,
         batch: &mut [QueuedWrite],
-    ) -> Result<u64, String> {
+    ) -> Result<u64, WriteFailure> {
         let big_bytes = bytes::Bytes::from(Self::coalesce_batch(batch));
         let write_start = Instant::now();
         let start_pos = self.append_once(file_opt, big_bytes.clone())?;
@@ -205,12 +212,16 @@ impl WriterRunner {
         &'a self,
         file_opt: &mut Option<Box<dyn crate::io::File + 'a>>,
         big_bytes: bytes::Bytes,
-    ) -> Result<u64, String> {
+    ) -> Result<u64, WriteFailure> {
         let start_pos = self
             .config
             .current_pos
             .load(std::sync::atomic::Ordering::SeqCst);
-        self.ensure_file_handle(file_opt)?;
+        self.ensure_file_handle(file_opt)
+            .map_err(|message| WriteFailure {
+                message,
+                unchanged: true,
+            })?;
 
         if let Some(file) = file_opt.as_mut() {
             let write_result =
@@ -233,18 +244,27 @@ impl WriterRunner {
                         .truncate(start_pos)
                         .and_then(|()| file.sync(Durability::Durable))
                     {
-                        Ok(()) => Err(format!(
-                            "wal writer write_at failed: {write_error}; partial WAL append rolled back to {start_pos}"
-                        )),
-                        Err(rollback_error) => Err(format!(
-                            "wal writer write_at failed: {write_error}; partial WAL rollback to {start_pos} failed: {rollback_error}"
-                        )),
+                        Ok(()) => Err(WriteFailure {
+                            message: format!(
+                                "wal writer write_at failed: {write_error}; partial WAL append rolled back to {start_pos}"
+                            ),
+                            unchanged: true,
+                        }),
+                        Err(rollback_error) => Err(WriteFailure {
+                            message: format!(
+                                "wal writer write_at failed: {write_error}; partial WAL rollback to {start_pos} failed: {rollback_error}"
+                            ),
+                            unchanged: false,
+                        }),
                     }
                 }
             };
         }
 
-        Err("wal writer has no file handle".to_string())
+        Err(WriteFailure {
+            message: "wal writer has no file handle".to_string(),
+            unchanged: true,
+        })
     }
 
     fn ensure_file_handle<'a>(
@@ -377,14 +397,19 @@ impl WriterRunner {
         self.config.queue_cond.notify_all();
     }
 
-    fn fail_writes(&self, batch: &[QueuedWrite], message: String) {
+    fn fail_writes(&self, batch: &[QueuedWrite], failure: &WriteFailure) {
+        let mut state = self.config.sync_state.lock();
+        state.write_failed = true;
+        state.last_write_error = Some(failure.message.clone());
+        drop(state);
+        // Publish the terminal state before acknowledging any failed append.
+        // No further writes from this batch can occur after this proof is sent.
         for entry in batch {
-            let _ = entry.ack.send(Err(Self::error_from_message(&message)));
+            let _ = entry.ack.send(Err(WalAppendError {
+                error: Self::error_from_message(&failure.message),
+                unchanged: failure.unchanged,
+            }));
         }
-
-        let mut s = self.config.sync_state.lock();
-        s.write_failed = true;
-        s.last_write_error = Some(message);
         self.config.sync_cond.notify_all();
         self.config.queue_cond.notify_all();
     }
@@ -407,6 +432,78 @@ mod tests {
     use bytes::Bytes;
     use std::sync::atomic::{AtomicBool, AtomicU64};
     use std::time::Duration;
+
+    struct PartialWriteFile {
+        physical_bytes: Arc<AtomicU64>,
+        truncate_succeeds: bool,
+        sync_succeeds: bool,
+    }
+
+    impl crate::io::File for PartialWriteFile {
+        fn read_at(&self, _offset: u64, _len: u64) -> FsResult<Bytes> {
+            Ok(Bytes::new())
+        }
+        fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()> {
+            self.physical_bytes.store(
+                offset + data.len() as u64 / 2,
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            Err(FsError::Io("no space after partial write".into()))
+        }
+        fn truncate(&mut self, len: u64) -> FsResult<()> {
+            if !self.truncate_succeeds {
+                return Err(FsError::Io("truncate failed".into()));
+            }
+            self.physical_bytes
+                .store(len, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        fn append(&mut self, _data: Bytes) -> FsResult<u64> {
+            unreachable!("positional writer")
+        }
+        fn len(&self) -> FsResult<u64> {
+            Ok(self
+                .physical_bytes
+                .load(std::sync::atomic::Ordering::SeqCst))
+        }
+        fn sync(&mut self, _durability: Durability) -> FsResult<()> {
+            if self.sync_succeeds {
+                Ok(())
+            } else {
+                Err(FsError::Io("rollback sync failed".into()))
+            }
+        }
+        fn close(self: Box<Self>) -> FsResult<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn should_prove_unchanged_append_only_after_durable_rollback() {
+        for (truncate_succeeds, sync_succeeds) in [(true, true), (false, true), (true, false)] {
+            // Arrange
+            let physical_bytes = Arc::new(AtomicU64::new(0));
+            let runner = runner_with_sync_state(Arc::new(Mutex::new(SyncState::default())));
+            let mut file: Option<Box<dyn crate::io::File>> = Some(Box::new(PartialWriteFile {
+                physical_bytes: Arc::clone(&physical_bytes),
+                truncate_succeeds,
+                sync_succeeds,
+            }));
+
+            // Act
+            let failure = runner
+                .append_once(&mut file, Bytes::from_static(b"partial frame"))
+                .expect_err("injected partial append failure");
+
+            // Assert
+            assert_eq!(failure.unchanged, truncate_succeeds && sync_succeeds);
+            assert_eq!(
+                physical_bytes.load(std::sync::atomic::Ordering::SeqCst) == 0,
+                truncate_succeeds
+            );
+            assert!(failure.message.contains("partial"));
+        }
+    }
 
     struct FailingOpenFs;
 

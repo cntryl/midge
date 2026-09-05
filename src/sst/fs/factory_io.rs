@@ -25,6 +25,8 @@ pub struct FsSstFactoryIo {
     fs: Arc<dyn Fs>,
     block_size: usize,
     compression_policy: CompressionPolicy,
+    scratch_outstanding: Arc<std::sync::atomic::AtomicUsize>,
+    compaction_scratch_directory: Option<std::path::PathBuf>,
 }
 
 impl FsSstFactoryIo {
@@ -34,7 +36,17 @@ impl FsSstFactoryIo {
             fs,
             block_size,
             compression_policy: CompressionPolicy::default(),
+            scratch_outstanding: Arc::default(),
+            compaction_scratch_directory: None,
         }
+    }
+
+    pub(crate) fn with_compaction_scratch_directory(
+        mut self,
+        directory: std::path::PathBuf,
+    ) -> Self {
+        self.compaction_scratch_directory = Some(directory);
+        self
     }
 
     /// Create with custom block size
@@ -120,7 +132,7 @@ struct FinalizedDataBlocks {
 }
 
 struct StreamingState {
-    scratch: tempfile::NamedTempFile,
+    scratch: super::scratch::TrackedScratch,
     offset: u64,
     block_index_entries: Vec<(Vec<u8>, BlockHandle)>,
     key_profiler: KeyStructureProfiler,
@@ -140,8 +152,17 @@ struct StreamingState {
 
 impl StreamingState {
     fn new(budget: Option<crate::common::resource_budget::ResourceBudget>) -> MidgeResult<Self> {
+        Self::new_tracked(budget, Arc::default(), None)
+    }
+
+    fn new_tracked(
+        budget: Option<crate::common::resource_budget::ResourceBudget>,
+        outstanding: Arc<std::sync::atomic::AtomicUsize>,
+        directory: Option<&Path>,
+    ) -> MidgeResult<Self> {
         Ok(Self {
-            scratch: tempfile::NamedTempFile::new().map_err(crate::common::MidgeError::Io)?,
+            scratch: super::scratch::TrackedScratch::new(outstanding, directory)
+                .map_err(crate::common::MidgeError::Io)?,
             offset: 0,
             block_index_entries: Vec::new(),
             key_profiler: KeyStructureProfiler::new(),
@@ -683,7 +704,7 @@ impl InMemorySstWriter {
         mut state: StreamingState,
         range_tombstones: &[RangeTombstone],
         compression_policy: &CompressionPolicy,
-    ) -> MidgeResult<tempfile::NamedTempFile> {
+    ) -> MidgeResult<super::scratch::TrackedScratch> {
         Self::flush_streaming_current_block(&mut state, compression_policy)?;
 
         let index_bytes = state.block_index_entries.iter().fold(
@@ -1003,7 +1024,10 @@ impl DynSstWriter for InMemorySstWriter {
             &compression_policy,
         )?;
         let mut source = scratch.reopen().map_err(crate::common::MidgeError::Io)?;
-        crate::sst::fs::persist_sst_stream_to_path(&mut source, path)
+        let result = crate::sst::fs::persist_sst_stream_to_path(&mut source, path);
+        drop(source);
+        let cleanup = scratch.close().map_err(crate::common::MidgeError::Io);
+        result.and(cleanup)
     }
 
     fn finish_bytes(self: Box<Self>) -> MidgeResult<Vec<u8>> {
@@ -1026,6 +1050,8 @@ impl DynSstWriter for InMemorySstWriter {
             source
                 .read_to_end(&mut bytes)
                 .map_err(crate::common::MidgeError::Io)?;
+            drop(source);
+            scratch.close().map_err(crate::common::MidgeError::Io)?;
             return Ok(bytes);
         }
 
@@ -1075,6 +1101,11 @@ impl DynSstWriter for InMemorySstWriter {
 }
 
 impl SstFactory for FsSstFactoryIo {
+    fn compaction_scratch_cleanup_verified(&self) -> bool {
+        self.scratch_outstanding
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 0
+    }
     /// Create a new SST writer
     fn create(&self) -> MidgeResult<Box<dyn DynSstWriter>> {
         Ok(Box::new(InMemorySstWriter::new(
@@ -1092,7 +1123,11 @@ impl SstFactory for FsSstFactoryIo {
             self.block_size,
             Some(budget.clone()),
         );
-        writer.streaming = Some(StreamingState::new(Some(budget))?);
+        writer.streaming = Some(StreamingState::new_tracked(
+            Some(budget),
+            Arc::clone(&self.scratch_outstanding),
+            self.compaction_scratch_directory.as_deref(),
+        )?);
         writer.preserve_legacy_entries = true;
         Ok(Box::new(writer))
     }
@@ -1114,6 +1149,39 @@ impl SstFactory for FsSstFactoryIo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn should_track_compaction_scratch_in_recoverable_directory_until_confirmed_cleanup(
+    ) -> MidgeResult<()> {
+        for cleanup_fails in [false, true] {
+            // Arrange
+            let directory = tempfile::tempdir()?;
+            let scratch_directory = directory.path().join("sst/.flush-staging");
+            let factory = FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096)
+                .with_compaction_scratch_directory(scratch_directory.clone());
+            let writer = factory.create_for_compaction(
+                crate::common::resource_budget::ResourceBudget::new(1024 * 1024),
+            )?;
+            assert!(!factory.compaction_scratch_cleanup_verified());
+            let scratch_path = std::fs::read_dir(&scratch_directory)?
+                .next()
+                .expect("scratch file")?
+                .path();
+            if cleanup_fails {
+                std::fs::remove_file(&scratch_path)?;
+                std::fs::create_dir(&scratch_path)?;
+            }
+            // Act
+            drop(writer);
+            // Assert
+            assert_eq!(
+                factory.compaction_scratch_cleanup_verified(),
+                !cleanup_fails
+            );
+            assert_eq!(scratch_path.exists(), cleanup_fails);
+        }
+        Ok(())
+    }
 
     #[test]
     fn should_release_compaction_reservations_when_legacy_entry_exceeds_budget() -> MidgeResult<()>

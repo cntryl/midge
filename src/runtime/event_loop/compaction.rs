@@ -3,6 +3,9 @@ use super::{EventLoop, HandleOutcome};
 use crate::runtime::CompactionPlan;
 use crate::runtime::RuntimeResponse;
 
+#[cfg(test)]
+mod tests;
+
 pub(super) struct CompactionCoordinator;
 
 pub(super) struct CompactionCompleteRequest {
@@ -267,11 +270,14 @@ impl CompactionCoordinator {
             });
             completion_error = Some(error.replay());
             if let (Some(hybrid), Some(token)) = (&event_loop.hybrid_storage, reservation) {
-                if !matches!(error, crate::common::MidgeError::Io(_)) {
-                    event_loop
-                        .compaction_actor
-                        .settle_failed_compaction_reservation(&event_loop.state, hybrid, token);
-                }
+                event_loop
+                    .compaction_actor
+                    .settle_compaction_error_reservation(
+                        &event_loop.state,
+                        hybrid,
+                        token,
+                        Some(&error),
+                    );
             }
             event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
         }
@@ -577,15 +583,14 @@ impl CompactionCoordinator {
         event_loop.compaction_publication_degraded = true;
         event_loop.publish_snapshot();
         if let (Some(hybrid), Some(token)) = (&event_loop.hybrid_storage, reservation) {
-            let output_sizes: Vec<u64> = output_ssts
-                .iter()
-                .filter_map(|name| {
-                    std::fs::metadata(event_loop.state.sst_dir.join(name))
-                        .ok()
-                        .map(|metadata| metadata.len())
-                })
-                .collect();
-            hybrid.compaction_inputs_retained_with_token(token, &output_sizes);
+            match Self::resident_output_sizes(&event_loop.state.sst_dir, output_ssts) {
+                Ok(output_sizes) => {
+                    hybrid.compaction_inputs_retained_with_token(token, &output_sizes);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, ?token, "retaining compaction staging allowance because published output residency cannot be measured");
+                }
+            }
             tracing::warn!(
                 input_count = input_ssts.len(),
                 output_count = output_ssts.len(),
@@ -600,6 +605,29 @@ impl CompactionCoordinator {
                 .gc_actor
                 .delete_ssts(&mut event_loop.state, input_ssts, None);
         }
+    }
+
+    fn resident_output_sizes(
+        directory: &std::path::Path,
+        outputs: &[String],
+    ) -> crate::common::MidgeResult<Vec<u64>> {
+        outputs
+            .iter()
+            .map(|name| {
+                let path = directory.join(name);
+                match std::fs::metadata(&path) {
+                    Ok(metadata) if metadata.is_file() => Ok(metadata.len()),
+                    Ok(_) => Err(crate::common::MidgeError::Internal(format!(
+                        "published compaction output is not a regular file: {}",
+                        path.display()
+                    ))),
+                    // A remotely proved output can already have been evicted.
+                    // Other metadata errors cannot establish that disk is free.
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+                    Err(error) => Err(error.into()),
+                }
+            })
+            .collect()
     }
 
     fn finalize_published_compaction(
@@ -619,14 +647,13 @@ impl CompactionCoordinator {
 
         let hybrid_storage = event_loop.hybrid_storage.clone();
         if let (Some(hybrid), Some(token)) = (&hybrid_storage, reservation) {
-            let output_sizes: Vec<u64> = output_ssts
-                .iter()
-                .filter_map(|name| {
-                    std::fs::metadata(event_loop.state.sst_dir.join(name))
-                        .ok()
-                        .map(|metadata| metadata.len())
-                })
-                .collect();
+            let output_sizes =
+                match Self::resident_output_sizes(&event_loop.state.sst_dir, output_ssts) {
+                    Ok(sizes) => sizes,
+                    Err(error) => {
+                        return Self::respond_publish_failure(event_loop, request_id, &error)
+                    }
+                };
             hybrid.compaction_completed_with_token(token, &output_sizes);
         }
         event_loop

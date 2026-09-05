@@ -328,6 +328,22 @@ impl WalActor {
         storage.settle_local_wal_admission(admitted, actual);
     }
 
+    fn settle_failed_wal_append(
+        &self,
+        admitted: u64,
+        failure: crate::wal::traits::WalAppendError,
+    ) -> crate::common::MidgeError {
+        if failure.unchanged {
+            if let Some(storage) = &self.storage_budget {
+                storage.settle_local_wal_admission(admitted, 0);
+            }
+        }
+        if matches!(failure.error, crate::common::MidgeError::NoSpace(_)) {
+            Self::record_no_space_event();
+        }
+        failure.error
+    }
+
     /// Attach a leader store for epoch validation at sync boundaries, along
     /// with this writer's own holder identity.
     pub fn set_leader_store(

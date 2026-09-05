@@ -331,6 +331,12 @@ pub trait DynSstWriter: Send {
 
 /// Factory trait for creating SST writers and readers
 pub trait SstFactory: Send + Sync {
+    /// Whether every temporary file created by compaction writers has been
+    /// explicitly removed. Unknown cleanup retains ephemeral disk admission.
+    fn compaction_scratch_cleanup_verified(&self) -> bool {
+        false
+    }
+
     /// Create a new dynamic SST writer
     ///
     /// # Errors

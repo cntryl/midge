@@ -743,6 +743,27 @@ pub fn decode_txn_batch_payload(
     })
 }
 
+/// Validate decoded batch allocation before materializing its operation vector.
+pub(crate) fn decode_txn_batch_payload_bounded(
+    outer_record: &WalRecord,
+    payload: &[u8],
+    max_decoded_bytes: usize,
+) -> MidgeResult<DecodedTxnBatch> {
+    let (header, _) = decode_txn_batch_header(outer_record, payload)?;
+    let slots =
+        size_of::<TxnBatchRecord>().saturating_add(size_of::<WalRecord>().saturating_mul(2));
+    let bound = payload
+        .len()
+        .saturating_mul(2)
+        .saturating_add(header.op_count.saturating_mul(slots));
+    if bound > max_decoded_bytes {
+        return Err(MidgeError::ResourceLimit(format!(
+            "transaction batch decoded allocation bound {bound} exceeds {max_decoded_bytes}-byte replay limit"
+        )));
+    }
+    decode_txn_batch_payload(outer_record, payload)
+}
+
 fn decode_txn_batch_header<'a>(
     outer_record: &WalRecord,
     payload: &'a [u8],

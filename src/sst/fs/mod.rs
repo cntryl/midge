@@ -5,6 +5,7 @@
 
 pub mod factory_io;
 pub mod reader_io;
+mod scratch;
 
 use std::io::Read;
 use std::path::Path;

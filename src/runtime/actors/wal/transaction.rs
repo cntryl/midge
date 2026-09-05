@@ -506,11 +506,8 @@ impl WalActor {
 
         if let Some(writer) = &mut self.writer {
             let append_start = Instant::now();
-            if let Err(error) = writer.append_batch(&records) {
-                if matches!(error, MidgeError::NoSpace(_)) {
-                    Self::record_no_space_event();
-                }
-                return Err(error);
+            if let Err(failure) = writer.append_batch_accounted(&records) {
+                return Err(self.settle_failed_wal_append(admitted, failure));
             }
             self.settle_wal_append(admitted, previous_position);
             self.finish_append_instrumentation(total_wal_bytes as u64, append_start.elapsed());

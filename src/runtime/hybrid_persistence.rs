@@ -15,6 +15,8 @@ use std::io::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 
+mod streaming_prune;
+
 #[derive(Clone, Debug)]
 pub(crate) struct CloudMetadataPruneProof {
     pub(crate) key: String,
@@ -158,11 +160,26 @@ impl CloudMetadataPruneSnapshot {
 pub(crate) struct CloudWalPruneGuard {
     manifest: Manifest,
     metadata: Option<CloudMetadataPruneGuard>,
+    memory_limit: Option<usize>,
 }
 
 impl CloudWalPruneGuard {
     pub(crate) fn new(manifest: Manifest, metadata: Option<CloudMetadataPruneGuard>) -> Self {
-        Self { manifest, metadata }
+        Self {
+            manifest,
+            metadata,
+            memory_limit: None,
+        }
+    }
+
+    pub(crate) fn with_memory_limit(mut self, memory_limit: usize) -> Self {
+        self.memory_limit = Some(memory_limit);
+        self
+    }
+
+    pub(crate) fn memory_limit(&self) -> usize {
+        self.memory_limit
+            .unwrap_or(crate::compaction::DEFAULT_COMPACTION_MEMORY_LIMIT)
     }
 }
 
@@ -767,20 +784,27 @@ impl HybridPersistence for HybridStorage {
                 })
                 .collect());
         }
-        let (mut results, validated_candidates) =
-            validate_wal_prune_candidates_within(self, &ordered_candidates, &catalog, deadline);
-
-        if validated_candidates.is_empty() {
-            return Ok(sorted_cloud_wal_prune_results(results));
-        }
-
-        let mut dependencies = Vec::new();
-        let (coverage, sst_dependencies) = validate_manifest_sst_coverage_within(
-            self,
-            &guard.manifest,
-            &validated_candidates,
-            deadline,
-        )?;
+        let streaming_prune::StreamedValidation {
+            mut results,
+            candidates: validated_candidates,
+            coverage,
+            mut dependencies,
+            reservations: _proof_reservations,
+        } = if self.ephemeral_sst_cache_enabled() {
+            streaming_prune::validate(self, &ordered_candidates, &catalog, &guard, deadline)?
+        } else {
+            let (results, validated) =
+                validate_wal_prune_candidates_within(self, &ordered_candidates, &catalog, deadline);
+            let (coverage, dependencies) =
+                validate_manifest_sst_coverage_within(self, &guard.manifest, &validated, deadline)?;
+            streaming_prune::StreamedValidation {
+                results,
+                candidates: validated,
+                coverage,
+                dependencies,
+                reservations: Vec::new(),
+            }
+        };
         let covered_candidates =
             partition_exactly_covered_wal_candidates(validated_candidates, coverage, &mut results);
 
@@ -788,7 +812,6 @@ impl HybridPersistence for HybridStorage {
             return Ok(sorted_cloud_wal_prune_results(results));
         }
 
-        dependencies.extend(sst_dependencies);
         if let Some(metadata) = guard.metadata {
             dependencies.extend(metadata.objects);
         }

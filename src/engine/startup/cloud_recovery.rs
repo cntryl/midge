@@ -1,4 +1,6 @@
-use super::{CloudSstRecoveryProof, CloudStartupRecovery, CloudWalRecoveryPlan};
+#[cfg(test)]
+use super::CloudWalRecoveryPlan;
+use super::{CloudSstRecoveryProof, CloudStartupRecovery};
 use crate::common::{MidgeError, MidgeResult};
 use crate::config::RecoveryPolicy;
 use crate::io::Fs as _;
@@ -11,6 +13,7 @@ type LocalWalPaths = (
     Option<PathBuf>,
 );
 
+#[cfg(test)]
 const CLOUD_WAL_RECOVERY_MAX_IN_FLIGHT: usize = 8;
 
 impl CloudStartupRecovery {
@@ -599,6 +602,7 @@ impl CloudStartupRecovery {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(in crate::engine) fn materialize_cloud_wal_recovery_dir(
         cloud: &crate::storage::cloud::CloudStorage,
         db_path: &Path,
@@ -700,6 +704,7 @@ impl CloudStartupRecovery {
         Ok(plan)
     }
 
+    #[cfg(test)]
     pub(in crate::engine) fn materialize_cloud_wal_recovery_dir_with_budget(
         cloud: &crate::storage::cloud::CloudStorage,
         db_path: &Path,
@@ -711,22 +716,7 @@ impl CloudStartupRecovery {
         Self::materialize_cloud_wal_recovery_dir(cloud, db_path, recovery_policy, catalog)
     }
 
-    pub(in crate::engine) fn materialize_simulated_cloud_wal_recovery_dir_with_budget(
-        cloud_wal_dir: &Path,
-        db_path: &Path,
-        recovery_policy: RecoveryPolicy,
-        catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
-        max_local_bytes: u64,
-    ) -> MidgeResult<CloudWalRecoveryPlan> {
-        Self::validate_cloud_wal_recovery_disk_budget(db_path, catalog, max_local_bytes)?;
-        Self::materialize_simulated_cloud_wal_recovery_dir(
-            cloud_wal_dir,
-            db_path,
-            recovery_policy,
-            catalog,
-        )
-    }
-
+    #[cfg(test)]
     fn validate_cloud_wal_recovery_disk_budget(
         db_path: &Path,
         catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
@@ -795,6 +785,7 @@ impl CloudStartupRecovery {
         Ok(())
     }
 
+    #[cfg(test)]
     fn local_working_file_bytes(db_path: &Path) -> MidgeResult<u64> {
         let resettable_wal_staging = db_path.join("cloud_recovery/wal");
         let mut directories = vec![db_path.to_path_buf()];
@@ -833,6 +824,7 @@ impl CloudStartupRecovery {
         Ok(bytes)
     }
 
+    #[cfg(test)]
     pub(in crate::engine) fn materialize_simulated_cloud_wal_recovery_dir(
         cloud_wal_dir: &Path,
         db_path: &Path,
@@ -1025,7 +1017,7 @@ impl CloudStartupRecovery {
         ))
     }
 
-    fn collect_local_wal_paths(
+    pub(super) fn collect_local_wal_paths(
         local_wal_dir: &Path,
         recovery_policy: RecoveryPolicy,
         opened_in_salvage_mode: &mut bool,
@@ -1108,6 +1100,7 @@ impl CloudStartupRecovery {
         Ok(Some((segment_paths, active_path)))
     }
 
+    #[cfg(test)]
     pub(in crate::engine) fn merge_local_wal_into_recovery_dir(
         db_path: &Path,
         plan: &mut CloudWalRecoveryPlan,
@@ -1137,6 +1130,7 @@ impl CloudStartupRecovery {
         Self::enforce_recovered_wal_epoch_order(plan, recovery_policy)
     }
 
+    #[cfg(test)]
     fn enforce_recovered_wal_epoch_order(
         plan: &mut CloudWalRecoveryPlan,
         recovery_policy: RecoveryPolicy,
@@ -1219,6 +1213,7 @@ impl CloudStartupRecovery {
         Ok(())
     }
 
+    #[cfg(test)]
     fn merge_local_sealed_wal_segments(
         segment_paths: std::collections::BTreeMap<u64, Vec<PathBuf>>,
         local_wal_dir: &Path,
@@ -1324,6 +1319,7 @@ impl CloudStartupRecovery {
         Ok(())
     }
 
+    #[cfg(test)]
     fn canonicalize_local_wal_aliases(
         local_wal_dir: &Path,
         canonical_path: &Path,
@@ -1387,7 +1383,7 @@ impl CloudStartupRecovery {
         Ok(())
     }
 
-    fn quarantine_local_wal_alias(path: &Path) -> MidgeResult<()> {
+    pub(super) fn quarantine_local_wal_alias(path: &Path) -> MidgeResult<()> {
         let file_name = path
             .file_name()
             .and_then(|name| name.to_str())
@@ -1421,6 +1417,7 @@ impl CloudStartupRecovery {
         )))
     }
 
+    #[cfg(test)]
     fn validate_sealed_recovery_wal(
         key: &str,
         data: &[u8],
@@ -1443,6 +1440,7 @@ impl CloudStartupRecovery {
         }
     }
 
+    #[cfg(test)]
     fn merge_active_local_wal(
         active_path: &Path,
         staging_fs: &Arc<dyn crate::io::traits::Fs>,
@@ -1535,6 +1533,7 @@ impl CloudStartupRecovery {
         Ok(())
     }
 
+    #[cfg(test)]
     fn reset_cloud_wal_recovery_dir(db_path: &Path) -> MidgeResult<PathBuf> {
         let recovery_wal_dir = db_path.join("cloud_recovery").join("wal");
         if recovery_wal_dir.exists() {
@@ -1554,6 +1553,7 @@ impl CloudStartupRecovery {
         Ok(recovery_wal_dir)
     }
 
+    #[cfg(test)]
     pub(super) fn stage_recovery_wal_bytes(
         staging_fs: &Arc<dyn crate::io::traits::Fs>,
         file_name: &str,
@@ -1662,7 +1662,7 @@ impl CloudStartupRecovery {
         // Salvage may retain a fully verified local copy when cloud authority
         // is unavailable. This exceptional path is deliberately conservative;
         // the normal inventory path never reads local or remote SST bodies.
-        let retain = Self::local_sst_file_matches_manifest(&state.sst_dir.join(&file.name), file);
+        let retain = Self::retain_verified_local_sst(state, file)?;
         if retain {
             state.salvaged_local_ssts.insert(file.name.clone());
         } else {
@@ -1675,6 +1675,35 @@ impl CloudStartupRecovery {
             "authoritative cloud SST metadata validation failed during salvage"
         );
         Ok(retain)
+    }
+
+    pub(super) fn retain_verified_local_sst(
+        state: &RuntimeState,
+        file: &crate::metadata::FileMeta,
+    ) -> MidgeResult<bool> {
+        if Self::local_sst_file_matches_manifest(&state.sst_dir.join(&file.name), file) {
+            return Ok(true);
+        }
+        let secondary = state.db_path.join("hybrid_local/sst").join(&file.name);
+        if !Self::local_sst_file_matches_manifest(&secondary, file) {
+            return Ok(false);
+        }
+        // Move the verified secondary into the canonical read path without
+        // allocating another full SST. A failed rename preserves its source.
+        let fs = crate::io::RealFs::open_existing(&state.db_path)?;
+        fs.rename_atomic(
+            &crate::io::FsPath::new(format!("hybrid_local/sst/{}", file.name)),
+            &crate::io::FsPath::new(format!("sst/{}", file.name)),
+        )?;
+        fs.sync_dir(
+            &crate::io::FsPath::new("sst"),
+            crate::io::Durability::Durable,
+        )?;
+        fs.sync_dir(
+            &crate::io::FsPath::new("hybrid_local/sst"),
+            crate::io::Durability::Durable,
+        )?;
+        Ok(true)
     }
 
     pub(crate) fn ensure_named_sst_cache_from_cloud_storage(

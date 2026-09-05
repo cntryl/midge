@@ -24,6 +24,7 @@
 //!
 //! Higher layers (SST, WAL, storage) depend on this via trait objects:
 
+pub(crate) mod buffered_read;
 pub mod mock;
 pub mod real;
 pub mod staging;

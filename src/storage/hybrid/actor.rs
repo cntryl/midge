@@ -47,6 +47,10 @@ pub struct StorageBudgetActor {
     pending_evictions: VecDeque<(u64, u64)>, // (sst_id, size)
     /// Flush reservations indexed by their operation identity.
     flush_reservations: HashMap<StorageReservationToken, u64>,
+    /// Reusable staging capacity for the largest accepted, unbuilt generation.
+    /// This token shares the ordinary reservation ledger with active flushes.
+    flush_headroom: Option<StorageReservationToken>,
+    flush_headroom_target: u64,
     /// Compaction reservations indexed by their operation identity.
     compaction_reservations: HashMap<StorageReservationToken, CompactionReservation>,
     /// Next opaque reservation identity.
@@ -73,6 +77,8 @@ impl StorageBudgetActor {
             disk_state: DiskState::new(),
             pending_evictions: VecDeque::new(),
             flush_reservations: HashMap::new(),
+            flush_headroom: None,
+            flush_headroom_target: 0,
             compaction_reservations: HashMap::new(),
             next_reservation_id: 1,
             ephemeral_sst_cache: false,
@@ -100,6 +106,7 @@ impl StorageBudgetActor {
 
     pub fn release_local_sst_bytes(&mut self, bytes: u64) {
         self.disk_state.sst_bytes = self.disk_state.sst_bytes.saturating_sub(bytes);
+        self.replenish_flush_headroom();
         self.check_watermarks();
     }
 
@@ -126,6 +133,7 @@ impl StorageBudgetActor {
         if !self.ephemeral_sst_cache {
             return Ok(());
         }
+        self.resize_flush_headroom(self.flush_headroom_target)?;
         if bytes > self.disk_state.free_bytes(self.policy.max_local_bytes) {
             return Err(ReservationResult::RejectNoSpace);
         }
@@ -145,6 +153,7 @@ impl StorageBudgetActor {
         if !self.ephemeral_sst_cache {
             return Ok(());
         }
+        self.resize_flush_headroom(self.flush_headroom_target)?;
         if bytes > self.disk_state.free_bytes(self.policy.max_local_bytes) {
             return Err(ReservationResult::RejectNoSpace);
         }
@@ -155,7 +164,61 @@ impl StorageBudgetActor {
 
     pub(crate) fn release_local_wal_bytes(&mut self, bytes: u64) {
         self.disk_state.wal_bytes = self.disk_state.wal_bytes.saturating_sub(bytes);
+        self.replenish_flush_headroom();
         self.check_watermarks();
+    }
+
+    pub(crate) fn set_flush_headroom(&mut self, bytes: u64) -> Result<(), ReservationResult> {
+        if !self.ephemeral_sst_cache {
+            return Ok(());
+        }
+        self.resize_flush_headroom(bytes)?;
+        self.flush_headroom_target = bytes;
+        Ok(())
+    }
+
+    fn resize_flush_headroom(&mut self, target: u64) -> Result<(), ReservationResult> {
+        // A flush already holding the worker slot returns its reservation
+        // before the next generation is built, so that capacity is reusable.
+        let executing = self
+            .flush_reservations
+            .iter()
+            .filter(|(token, _)| Some(**token) != self.flush_headroom)
+            .map(|(_, bytes)| *bytes)
+            .max()
+            .unwrap_or(0);
+        let required = target.saturating_sub(executing);
+        let held = self
+            .flush_headroom
+            .and_then(|token| self.flush_reservations.get(&token))
+            .copied()
+            .unwrap_or(0);
+        if held == required {
+            return Ok(());
+        }
+        if required.saturating_sub(held) > self.disk_state.free_bytes(self.policy.max_local_bytes) {
+            return Err(ReservationResult::RejectNoSpace);
+        }
+        if let Some(token) = self.flush_headroom.take() {
+            self.flush_reservations.remove(&token);
+        }
+        self.disk_state.new_sst_reserve = self
+            .disk_state
+            .new_sst_reserve
+            .saturating_sub(held)
+            .saturating_add(required);
+        if required > 0 {
+            let token = self.next_token();
+            self.flush_reservations.insert(token, required);
+            self.flush_headroom = Some(token);
+        }
+        Ok(())
+    }
+
+    fn replenish_flush_headroom(&mut self) {
+        // A completed output can briefly coexist with the next allowance.
+        // Do not overbook disk while waiting for confirmed cache retirement.
+        let _ = self.resize_flush_headroom(self.flush_headroom_target);
     }
 
     /// Reserve output space for one flush and return its operation token.
@@ -163,6 +226,35 @@ impl StorageBudgetActor {
         &mut self,
         est_size: u64,
     ) -> Result<StorageReservationToken, ReservationResult> {
+        if self.ephemeral_sst_cache {
+            let held = self
+                .flush_headroom
+                .and_then(|token| self.flush_reservations.get(&token))
+                .copied()
+                .unwrap_or(0);
+            let transferred = held.min(est_size);
+            if est_size.saturating_sub(transferred)
+                > self.disk_state.free_bytes(self.policy.max_local_bytes)
+            {
+                return Err(ReservationResult::RejectNoSpace);
+            }
+            if let Some(token) = self.flush_headroom {
+                if held == transferred {
+                    self.flush_reservations.remove(&token);
+                    self.flush_headroom = None;
+                } else {
+                    self.flush_reservations.insert(token, held - transferred);
+                }
+            }
+            let token = self.next_token();
+            self.flush_reservations.insert(token, est_size);
+            self.disk_state.new_sst_reserve = self
+                .disk_state
+                .new_sst_reserve
+                .saturating_add(est_size - transferred);
+            self.check_watermarks();
+            return Ok(token);
+        }
         let usage_percent = self.disk_state.usage_percent(self.policy.max_local_bytes);
 
         // Emergency: reject all new writes
@@ -213,6 +305,7 @@ impl StorageBudgetActor {
             .new_sst_reserve
             .saturating_sub(reserved_size);
         self.disk_state.sst_bytes = self.disk_state.sst_bytes.saturating_add(actual_size);
+        self.replenish_flush_headroom();
         self.check_watermarks();
         tracing::info!(
             ?token,
@@ -232,6 +325,7 @@ impl StorageBudgetActor {
             .disk_state
             .new_sst_reserve
             .saturating_sub(reserved_size);
+        self.replenish_flush_headroom();
         self.check_watermarks();
         true
     }
@@ -242,6 +336,7 @@ impl StorageBudgetActor {
         &mut self,
         bytes: u64,
     ) -> Result<StorageReservationToken, ReservationResult> {
+        self.resize_flush_headroom(self.flush_headroom_target)?;
         if bytes > self.disk_state.free_bytes(self.policy.max_local_bytes) {
             return Err(ReservationResult::RejectNoSpace);
         }
@@ -420,6 +515,67 @@ impl StorageBudgetActor {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn should_reuse_flush_headroom_when_wal_consumes_remaining_disk_capacity() {
+        // Arrange
+        let mut actor = super::StorageBudgetActor::new(super::StorageBudgetPolicy::new(1000));
+        actor.enable_ephemeral_sst_cache(1000);
+        actor.set_flush_headroom(400).expect("pending generation");
+        actor.admit_local_wal_bytes(600).expect("WAL admission");
+        // Act
+        let token = actor
+            .reserve_for_flush_with_token(400)
+            .expect("prepaid flush at full capacity");
+        assert_eq!(actor.disk_state().total_committed(), 1000);
+        actor.complete_flush_for(token, 100);
+        // Assert
+        assert!(
+            actor.admit_local_wal_bytes(1).is_err(),
+            "publication must retain room for the next pending flush"
+        );
+        actor.release_local_sst_bytes(100);
+        let next = actor
+            .reserve_for_flush_with_token(400)
+            .expect("reuse retired staging");
+        assert_eq!(actor.disk_state().total_committed(), 1000);
+        actor.set_flush_headroom(0).expect("no pending generations");
+        actor.abort_flush_for(next);
+        assert_eq!(actor.disk_state().total_committed(), 600);
+    }
+
+    #[test]
+    fn should_share_dynamic_flush_headroom_when_compaction_and_wal_coexist() {
+        // Arrange
+        let mut actor = super::StorageBudgetActor::new(super::StorageBudgetPolicy::new(1000));
+        actor.enable_ephemeral_sst_cache(1000);
+        actor
+            .set_flush_headroom(100)
+            .expect("small pending generation");
+        let compaction = actor
+            .reserve_compaction_staging_with_token(700)
+            .expect("compaction");
+        // Act
+        actor
+            .admit_local_wal_bytes(150)
+            .expect("small WAL still fits beside compaction");
+        let flush = actor
+            .reserve_for_flush_with_token(100)
+            .expect("pending flush can always run");
+        // Assert
+        assert_eq!(actor.disk_state().total_committed(), 950);
+        assert!(
+            actor.set_flush_headroom(300).is_err(),
+            "oversized next generation cannot displace existing owners"
+        );
+        assert_eq!(actor.disk_state().total_committed(), 950);
+        actor
+            .set_flush_headroom(0)
+            .expect("drained pending generations");
+        actor.abort_flush_for(flush);
+        actor.abort_compaction_for(compaction);
+        assert_eq!(actor.disk_state().total_committed(), 150);
+    }
+
     use super::*;
 
     #[test]
