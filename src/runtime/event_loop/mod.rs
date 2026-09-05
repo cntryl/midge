@@ -746,11 +746,33 @@ impl EventLoop {
             return Ok(self.schedule_cloud_maintenance()
                 == Some(cloud_maintenance::MaintenanceTask::Compaction));
         }
+        let manual = self.cloud_maintenance_enabled()
+            && compaction::CompactionCoordinator::has_manual_compaction_waiters(self);
+        let result = self.schedule_background_compaction_plan(operation, manual);
+        if manual {
+            match &result {
+                Ok(false) => {
+                    compaction::CompactionCoordinator::complete_idle_compaction_waits(self, true);
+                }
+                Err(error) => {
+                    compaction::CompactionCoordinator::fail_pending_compaction_waits(self, error);
+                }
+                Ok(true) => {}
+            }
+        }
+        result
+    }
+
+    fn schedule_background_compaction_plan(
+        &mut self,
+        operation: &str,
+        manual: bool,
+    ) -> crate::common::MidgeResult<bool> {
         // Disabling ordinary background work must not permanently wedge L0
         // admission. Use the same authority, ingest, and worker gates for
         // pressure recovery at startup, after flush, and during live maintenance.
         let background_enabled = self.state.compaction_enabled();
-        if !background_enabled && !self.state.has_any_critical_l0_debt() {
+        if !background_enabled && !manual && !self.state.has_any_critical_l0_debt() {
             return Ok(false);
         }
         if self.ddl_authority_ambiguous {
@@ -791,7 +813,7 @@ impl EventLoop {
             ));
         }
 
-        let planned = if background_enabled {
+        let planned = if background_enabled && !manual {
             self.compaction_actor.check_compaction(&self.state)
         } else {
             self.compaction_actor.check_manual_compaction(&self.state)

@@ -61,6 +61,15 @@ impl EventLoop {
             .load(std::sync::atomic::Ordering::SeqCst);
 
         if active == 0 {
+            // A fair cloud turn can leave CompactAll queued behind a flush
+            // without an active compaction. No worker completion will arrive
+            // to cancel that interrupted obligation.
+            super::compaction::CompactionCoordinator::fail_pending_compaction_waits(
+                self,
+                &crate::common::MidgeError::Aborted(
+                    "manual compaction interrupted by ingestion barrier".into(),
+                ),
+            );
             tracing::info!(
                 component = "ingest",
                 invariant = "begin_ingest_barrier",

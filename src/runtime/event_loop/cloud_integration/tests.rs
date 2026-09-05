@@ -18,6 +18,8 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+mod maintenance_tests;
+
 #[cfg(feature = "failpoints")]
 static FAILPOINT_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 

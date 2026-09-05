@@ -35,7 +35,8 @@ the child watchdog still bounds the complete phase, including recovery. While
 waiting, five-second status reports show total SST count, completed maintenance,
 queues, local pressure, and the age of the last observed progress. An unchanged
 completion counter can mean a large compaction is still running; the reports
-do not claim per-block progress or replace the fixed timeout.
+also show flush-publication age separately so unrelated compaction cannot hide
+a waiting flush. They do not claim per-block progress or replace the fixed timeout.
 
 Run the default two profiles (6 MiB WAL / 2 MiB local, then 12 MiB / 4 MiB):
 

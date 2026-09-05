@@ -82,6 +82,12 @@ task access to the shared workspace and trading build overlap for predictable
 progress. Immutable memtables retain their earliest known WAL segment until
 publication; unknown provenance conservatively prevents floor advancement.
 
+Explicit `compact_all` requests and their continuations use those same turns.
+Only a pending manual request forces compaction below ordinary background
+thresholds. An ingest barrier waits for active work to drain and cancels an
+unfinished manual request. Local and non-ephemeral modes retain worker overlap
+and direct manual continuation, with automatic work using background policy.
+
 Compaction streams remote inputs and drains each completed output partition to
 object storage before producing the next. Its staging reservation covers the
 scratch and finalized partition. An indivisible output which cannot fit is

@@ -27,6 +27,7 @@ struct WorkloadProgress {
     deadline: Instant,
     next_report: Instant,
     changed_at: Instant,
+    flush_changed_at: Instant,
     last: Option<MaintenanceProgress>,
 }
 
@@ -37,6 +38,7 @@ impl WorkloadProgress {
             deadline: started + timeout,
             next_report: started,
             changed_at: started,
+            flush_changed_at: started,
             last: None,
         }
     }
@@ -57,6 +59,12 @@ impl WorkloadProgress {
     }
 
     fn observe(&mut self, progress: MaintenanceProgress, now: Instant) {
+        if self
+            .last
+            .is_none_or(|previous| previous.publications != progress.publications)
+        {
+            self.flush_changed_at = now;
+        }
         if self.last != Some(progress) {
             self.last = Some(progress);
             self.changed_at = now;
@@ -86,6 +94,7 @@ impl WorkloadProgress {
                 "elapsed_ms": now.duration_since(self.started).as_millis(),
                 "remaining_ms": self.remaining(now).as_millis(),
                 "observed_progress_age_ms": now.duration_since(self.changed_at).as_millis(),
+                "flush_publication_age_ms": now.duration_since(self.flush_changed_at).as_millis(),
                 "sst_count": metrics.sst_count,
                 "compactions_completed": metrics.compactions_run,
                 "compaction_bytes_rewritten": metrics.compaction_bytes_rewritten,
@@ -362,6 +371,11 @@ fn should_preserve_profile_timeout_when_maintenance_progress_changes() {
         Duration::ZERO
     );
     assert_eq!(progress.deadline, started + Duration::from_secs(120));
+    assert_eq!(
+        (started + Duration::from_secs(119)).duration_since(progress.flush_changed_at),
+        Duration::from_secs(58),
+        "unrelated compaction must not hide a waiting flush"
+    );
 }
 
 #[test]
