@@ -1864,7 +1864,7 @@ fn should_protect_every_memtable_generation_when_computing_cloud_wal_floor() {
         .immutable_flush_by_id_mut(generation.flush_id)
         .unwrap();
     queued.phase = ImmutableFlushPhase::RetryPending;
-    queued.retry_at = Instant::now() + Duration::from_secs(60);
+    queued.retry_at = Instant::now() + Duration::from_mins(1);
     let retrying = state.cloud_wal_recovery_floor_segment();
     state.complete_immutable_flush(0, &frozen).unwrap();
     let after_publication = state.cloud_wal_recovery_floor_segment();
