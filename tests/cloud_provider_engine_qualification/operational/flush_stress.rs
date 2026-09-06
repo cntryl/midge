@@ -82,6 +82,9 @@ pub(super) fn exercise(
     campaign: &Campaign,
     progress: &mut workload::WorkloadProgress,
 ) {
+    let before = engine
+        .get_runtime_metrics()
+        .expect("initial stress metrics");
     let families = seed(engine);
     let delayed = Arc::new(AtomicU64::new(0));
     let counter = Arc::clone(&delayed);
@@ -100,23 +103,9 @@ pub(super) fn exercise(
     std::thread::scope(|scope| {
         let _stop = Stop(Arc::clone(&stopped));
         scope.spawn(|| {
-            while !stopped.load(Ordering::Acquire) {
-                assert!(Instant::now() < deadline, "stress scan deadline");
-                let metrics = engine.get_runtime_metrics().expect("stress metrics");
-                if metrics.active_compactions > 0 && metrics.flush_inflight > 0 {
-                    overlap.fetch_add(1, Ordering::Relaxed);
-                }
-                for (family, cf) in families.iter().enumerate() {
-                    scan(
-                        engine,
-                        cf,
-                        u8::try_from(family).unwrap(),
-                        value_size(campaign),
-                    );
-                    scans.fetch_add(1, Ordering::Relaxed);
-                }
-                std::thread::sleep(Duration::from_millis(5));
-            }
+            observe(
+                engine, campaign, &families, &stopped, &scans, &overlap, deadline,
+            );
         });
         let maintenance = scope.spawn(|| {
             while acknowledged.load(Ordering::Acquire) < u64::from(FAMILIES) * 2 {
@@ -154,8 +143,15 @@ pub(super) fn exercise(
         maintenance.join().expect("concurrent stress compaction");
         workload::compact_all(engine, progress);
     });
+    let after = engine
+        .get_runtime_metrics()
+        .expect("completed stress metrics");
+    let flushes = after.flush_publish_count - before.flush_publish_count;
+    let compactions = after.compactions_run - before.compactions_run;
     let evidence = serde_json::json!({
         "families": FAMILIES,
+        "flush_publications": flushes,
+        "completed_compactions": compactions,
         "rounds": ROUNDS,
         "value_bytes": value_size(campaign),
         "acknowledged_transactions": acknowledged.load(Ordering::Relaxed),
@@ -175,13 +171,44 @@ pub(super) fn exercise(
     );
     assert!(scans.load(Ordering::Relaxed) > 0);
     assert!(delayed.load(Ordering::Relaxed) > 0);
-    if std::env::var_os("MIDGE_QUALIFICATION_CHILD_RUNNER").is_some() {
-        assert!(
-            overlap.load(Ordering::Relaxed) > 0,
-            "enforced profile must exercise simultaneous flush and compaction"
-        );
-    }
+    assert!(
+        flushes > 0 && compactions > 0,
+        "both maintenance paths must complete"
+    );
+    assert_eq!(
+        overlap.load(Ordering::Relaxed),
+        0,
+        "cloud maintenance must retain its serialized dispatch contract"
+    );
     verify(engine, campaign);
+}
+
+fn observe(
+    engine: &Engine,
+    campaign: &Campaign,
+    families: &[ColumnFamilyHandle],
+    stopped: &AtomicBool,
+    scans: &AtomicU64,
+    overlap: &AtomicU64,
+    deadline: Instant,
+) {
+    while !stopped.load(Ordering::Acquire) {
+        assert!(Instant::now() < deadline, "stress scan deadline");
+        let metrics = engine.get_runtime_metrics().expect("stress metrics");
+        if metrics.active_compactions > 0 && metrics.flush_inflight > 0 {
+            overlap.fetch_add(1, Ordering::Relaxed);
+        }
+        for (family, cf) in families.iter().enumerate() {
+            scan(
+                engine,
+                cf,
+                u8::try_from(family).unwrap(),
+                value_size(campaign),
+            );
+            scans.fetch_add(1, Ordering::Relaxed);
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 fn write(

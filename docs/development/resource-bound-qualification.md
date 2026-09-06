@@ -62,9 +62,11 @@ Four further families exercise simultaneous writers with incompressible values,
 eight overwrite rounds, point deletes and 64 older keys covered by dense range
 tombstones. The value size derives from the memtable target and engine budget
 (512 KiB reduced, 2 MiB full). The first 32 SST uploads are delayed by 100 ms.
-Concurrent scans validate complete values during maintenance; enforced profiles
-must observe flush and compaction in flight together. `flush-stress.json` records
-acknowledged transactions, scans, delayed uploads and overlap samples. Fresh
+Concurrent scans validate complete values during maintenance. The existing
+cloud scheduler serializes flush and compaction turns: qualification requires
+both to complete and rejects observed overlap. `flush-stress.json` records
+acknowledged transactions, scans, delayed uploads, completed maintenance counts
+and overlap samples. Fresh
 processes check every live value, every deleted key and the complete keyset after
 capacity restoration and repeated local-state loss.
 
