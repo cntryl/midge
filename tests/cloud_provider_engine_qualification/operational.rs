@@ -4,6 +4,8 @@
 mod clock;
 #[path = "operational/difficult.rs"]
 mod difficult;
+#[path = "operational/exhaustion.rs"]
+mod exhaustion;
 #[path = "operational/fixture.rs"]
 mod fixture;
 #[path = "operational/observe.rs"]
@@ -104,18 +106,7 @@ fn should_execute_cloud_recovery_phase_in_child() {
     // Act
     let started = Instant::now();
     if phase == "disk-exhausted" {
-        let Err(error) = Engine::open(campaign.options()) else {
-            panic!("engine unexpectedly opened on a deliberately full filesystem");
-        };
-        assert!(
-            error.to_string().contains("No space left on device"),
-            "unexpected exhaustion error: {error}"
-        );
-        std::fs::write(
-            campaign.artifacts.join("disk-exhausted-observed"),
-            error.to_string(),
-        )
-        .expect("exhaustion evidence");
+        exhaustion::exercise(open_after_expired_owner(&campaign), &campaign);
         return;
     }
     let mut engine = open_after_expired_owner(&campaign);
@@ -128,6 +119,7 @@ fn should_execute_cloud_recovery_phase_in_child() {
     } else {
         assert_accepted_writes(&engine);
         difficult::verify(&engine, &campaign);
+        exhaustion::verify(&engine, &campaign);
     }
     let metrics = engine.get_runtime_metrics().expect("runtime metrics");
     engine
@@ -212,6 +204,7 @@ fn assert_complete_state(engine: &Engine, campaign: &Campaign, has_workload: boo
 }
 
 fn exercise_accepted_writes(engine: &Engine, campaign: &Campaign) {
+    exhaustion::prepare(engine);
     let mut progress = workload::exercise(engine, campaign);
     difficult::exercise(engine, campaign, &mut progress);
     let cf = super::default_cf(engine);

@@ -72,18 +72,6 @@ def child() -> int:
     deadline = started + max(1, campaign["profile"]["timeout_seconds"] - 15)
     process = None
     try:
-        if phase == "disk-exhausted":
-            # Fill real allocated blocks outside the database directory. This is
-            # independent of engine admission and must produce kernel ENOSPC.
-            with filler.open("wb", buffering=0) as output:
-                block = bytes(1024 * 1024)
-                try:
-                    while True:
-                        output.write(block)
-                except OSError as error:
-                    if error.errno != errno.ENOSPC:
-                        raise
-            os.sync()
         process = subprocess.Popen(["docker", "start", "--attach", container])
         while process.poll() is None:
             if cgroup is None:
@@ -101,6 +89,16 @@ def child() -> int:
                     peak_memory = max(peak_memory, read_number(cgroup / "memory.peak"))
                 except (FileNotFoundError, OSError):
                     pass  # The kernel removes the cgroup when the child exits.
+            if phase == "disk-exhausted" and (artifacts / "ready-for-disk-exhaustion").exists():
+                with filler.open("ab", buffering=0) as output:
+                    block = bytes(1024 * 1024)
+                    try:
+                        while True:
+                            output.write(block)
+                    except OSError as error:
+                        if error.errno != errno.ENOSPC:
+                            raise
+                (artifacts / "disk-filled").touch()
             files = 0
             for path in Path(campaign["cache"]).rglob("*"):
                 try:
