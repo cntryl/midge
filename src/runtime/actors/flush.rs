@@ -105,10 +105,6 @@ pub struct FlushActor {
 }
 
 impl FlushActor {
-    pub(crate) fn memory_allowance(memtable_bytes: usize) -> usize {
-        memtable_bytes.saturating_mul(4).saturating_add(1024 * 1024)
-    }
-
     #[cfg(test)]
     pub fn new(
         sst_dir: &Path,
@@ -939,7 +935,9 @@ mod tests {
         );
         let injected = std::sync::Mutex::new(false);
         fail::cfg_callback("midge::flush_worker::after_scratch_creation", move || {
-            let mut injected = injected.lock().unwrap();
+            let mut injected = injected
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if *injected {
                 return;
             }

@@ -86,13 +86,12 @@ impl CloudReplay {
             known_cfs.contains(&record.cf_id) && !coverage.contains(record)
         };
         let (tx, rx) = crossbeam::channel::bounded(1);
-        let flush_memory = FlushActor::memory_allowance(materialized.state.memtable_size_limit);
         let mut actor = FlushActor::new_with_memory_limit(
             &materialized.state.sst_dir,
             false,
             materialized.runtime_config.compression_policy.clone(),
             tx,
-            flush_memory,
+            materialized.runtime_config.flush_memory_limit,
         )?;
         let mut memtables = HashMap::new();
         let mut names = names::Names::new(self.limits);

@@ -272,13 +272,12 @@ impl EventLoop {
             crossbeam::channel::unbounded::<FlushWorkerResult>();
 
         // Create actors - they handle memory_mode internally
-        let flush_memory = FlushActor::memory_allowance(state.memtable_size_limit);
         let flush_actor = FlushActor::new_with_memory_limit(
             &sst_dir,
             memory_mode,
             config.compression_policy.clone(),
             flush_completion_tx,
-            flush_memory,
+            config.flush_memory_limit,
         )?;
         let mut wal_actor = WalActor::new(
             wal_dir,

@@ -104,8 +104,12 @@ at the checkpoint boundary. Native crash tests and the enforced campaigns
 exercise success, cancellation and failure without changing persistent formats,
 public cache settings, or single-owner publication.
 
-The internal flush allowance is four times the existing memtable target plus
-1 MiB, with saturating arithmetic and checked admission. It is a scratch/copy
+The internal flush allowance is four times the greater of the configured
+memtable target and one eighth of the resolved engine memory budget, plus 1 MiB,
+with saturating arithmetic and checked admission. One eighth matches the
+existing replay memory ceiling; a small flush target therefore does not become
+an accidental maximum record size. Engine startup passes this resolved allowance
+to both replay and the runtime worker before post-start configuration updates. It is a scratch/copy
 allowance derived from admitted input, not a change to the engine pool setting
 or a promise that process memory equals that setting. Construction charges one
 key's version references, writer metadata, codec buffers and boundary keys;

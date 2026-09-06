@@ -15,7 +15,10 @@ impl CloudBackend for PendingPut {
         _headers: Vec<(String, String)>,
         callback: CloudCallback,
     ) {
-        *self.0.lock().unwrap() = Some((data, callback));
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((data, callback));
     }
 
     fn submit_get_range(
@@ -49,7 +52,13 @@ fn should_keep_upload_charged_when_callback_adapter_times_out_before_backend_com
     );
     let result = rx.recv().unwrap();
     let retained_after_timeout = budget.used();
-    drop(backend.0.lock().unwrap().take());
+    drop(
+        backend
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take(),
+    );
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while budget.used() != 0 && std::time::Instant::now() < deadline {
         std::thread::yield_now();

@@ -118,6 +118,15 @@ pub(super) fn exercise(
                 std::thread::sleep(Duration::from_millis(5));
             }
         });
+        let maintenance = scope.spawn(|| {
+            while acknowledged.load(Ordering::Acquire) < u64::from(FAMILIES) * 2 {
+                assert!(Instant::now() < deadline, "stress maintenance deadline");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            engine
+                .compact_all()
+                .expect("compaction while writers continue");
+        });
         let writers: Vec<_> = families
             .iter()
             .enumerate()
@@ -142,6 +151,7 @@ pub(super) fn exercise(
         for writer in writers {
             writer.join().expect("stress writer");
         }
+        maintenance.join().expect("concurrent stress compaction");
         workload::compact_all(engine, progress);
     });
     let evidence = serde_json::json!({

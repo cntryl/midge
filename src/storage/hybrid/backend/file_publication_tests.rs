@@ -71,11 +71,11 @@ impl CloudBackend for ChangingReadback {
 
 #[test]
 fn should_reject_admitted_publication_when_readback_bytes_or_identity_changes() -> MidgeResult<()> {
-    for replace_identity in [false, true] {
+    for (replace_identity, kib) in [(false, 32), (false, 130), (true, 32), (true, 130)] {
         // Arrange
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("source");
-        let bytes = vec![7; 130 * 1024];
+        let bytes = vec![7; kib * 1024];
         std::fs::write(&path, &bytes)?;
         let backend = Arc::new(ChangingReadback {
             inner: MockCloudBackend::new(),

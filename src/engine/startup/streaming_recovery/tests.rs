@@ -674,3 +674,50 @@ fn should_abandon_orphan_names_when_checkpoint_publication_is_interrupted() {
             .expect("shutdown recovered engine");
     }
 }
+
+#[test]
+fn should_flush_admitted_large_value_when_memtable_target_is_small() {
+    // Arrange
+    let directory = tempfile::tempdir().expect("large-value database");
+    let opts = OpenOptions::cloud_simulated(directory.path(), "bucket", "large-flush")
+        .memory_budget(crate::MemoryBudget::Bytes(32 * 1024 * 1024))
+        .local_storage_budget(16 * 1024 * 1024)
+        .with_memtable_size_limit(8 * 1024)
+        .storage_io_timeout(std::time::Duration::from_secs(1))
+        .runtime_response_timeout(std::time::Duration::from_secs(5))
+        .shutdown_cloud_drain_timeout_for_testing(std::time::Duration::from_secs(1))
+        .background_compaction(false)
+        .build()
+        .expect("small target with larger engine resources");
+    let mut engine = Engine::open(opts.clone()).expect("open");
+    let payload: Vec<_> = (0..256).flat_map(value).collect();
+    let cf = engine.get_column_family("default").expect("default family");
+    let mut tx = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .expect("write");
+    tx.put(b"large".to_vec(), payload.clone(), None)
+        .expect("large put");
+    tx.commit(crate::WriteOptions::cloud_strict())
+        .expect("cloud acknowledgment");
+
+    // Act
+    let result = engine.flush_cf(&cf);
+    let shutdown = engine.shutdown(std::time::Duration::from_secs(5));
+    drop(engine);
+
+    // Assert
+    result.expect("flush target is not a maximum legal record size");
+    shutdown.expect("shutdown");
+    let mut recovered = Engine::open(opts).expect("reopen");
+    let tx = recovered
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+        .expect("verify");
+    assert_eq!(
+        tx.get(b"large").expect("large value").as_deref(),
+        Some(payload.as_slice())
+    );
+    drop(tx);
+    recovered
+        .shutdown(std::time::Duration::from_secs(5))
+        .expect("close verifier");
+}

@@ -282,6 +282,16 @@ impl OpenOptions {
         self.derived_memory_budget
     }
 
+    // A flush target is not an atomic transaction limit. Match the existing
+    // replay memory ceiling as well, so a legal standalone replay generation
+    // can still be constructed when the configured flush target is small.
+    pub(crate) fn flush_memory_limit(&self) -> usize {
+        self.memtable_size_limit
+            .max(self.derived_memory_budget / 8)
+            .saturating_mul(4)
+            .saturating_add(1024 * 1024)
+    }
+
     /// Return the configured workload profile.
     #[must_use]
     pub fn workload(&self) -> WorkloadProfile {

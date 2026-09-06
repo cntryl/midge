@@ -339,6 +339,9 @@ pub(crate) fn object_match_precondition_headers(
 
 /// Non-blocking cloud backend interface used by the engine.
 pub trait CloudBackend: Send + Sync + 'static {
+    /// Carry admission through a bounded read until the backend finishes.
+    /// Implementations whose callback can precede payload release must override
+    /// this method and attach the reservation to the underlying operation.
     fn submit_get_range_with_reservation(
         &self,
         key: &str,
@@ -395,9 +398,9 @@ pub trait CloudBackend: Send + Sync + 'static {
     #[cfg(feature = "cloud-common")]
     fn set_request_timeout(&self, _timeout: std::time::Duration) {}
 
-    /// Submit a PUT request for `key` with optional HTTP headers. Implementations
-    /// MUST honor headers (e.g. `If-None-Match`, `If-Match`) when supported by the
-    /// provider to allow conditional writes.
+    /// Carry upload admission until the backend releases its payload. Native
+    /// providers can attach it to the transport; compatibility implementations
+    /// must signal completion only after their upload buffer is no longer used.
     fn submit_put_with_reservation(
         &self,
         key: &str,
@@ -423,6 +426,9 @@ pub trait CloudBackend: Send + Sync + 'static {
         }
     }
 
+    /// Submit a PUT request for `key` with optional HTTP headers. Implementations
+    /// MUST honor headers (e.g. `If-None-Match`, `If-Match`) when supported by the
+    /// provider to allow conditional writes.
     fn submit_put(
         &self,
         key: &str,
