@@ -30,6 +30,11 @@ fn working_bytes(path: &Path) -> u64 {
 #[test]
 fn should_flush_many_small_cloud_families_without_exhausting_shared_wal_staging() {
     // Arrange
+    tracing_subscriber::fmt()
+        .with_test_writer()
+        .with_max_level(tracing::Level::INFO)
+        .try_init()
+        .expect("install lease and persistence failure diagnostics");
     let directory = tempfile::tempdir().expect("database directory");
     let limit = 256 * 1024;
     let options = OpenOptions::cloud_simulated(directory.path(), "bucket", "many-small-families")
