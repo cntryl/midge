@@ -9,12 +9,23 @@ impl EventLoop {
     ) -> Option<CloudMetadataPruneSnapshot> {
         let cloud = self.cloud_metadata_storage.as_ref()?;
 
-        Some(CloudMetadataPruneSnapshot::new(
-            cloud.clone(),
-            self.state.db_path.clone(),
-            self.state.fs.clone(),
-            self.state.recovery_policy(),
-        ))
+        Some(
+            CloudMetadataPruneSnapshot::new(
+                cloud.clone(),
+                self.state.db_path.clone(),
+                self.state.fs.clone(),
+                self.state.recovery_policy(),
+                self.hybrid_storage
+                    .as_ref()
+                    .and_then(|storage| storage.maintenance_memory())
+                    .unwrap_or_else(|| {
+                        crate::common::resource_budget::ResourceBudget::new(
+                            self.compaction_actor.compaction_memory_limit(),
+                        )
+                    }),
+            )
+            .with_progress(self.cloud_wal_prune_progress.clone()),
+        )
     }
 
     #[cfg(test)]

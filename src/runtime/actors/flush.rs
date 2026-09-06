@@ -568,7 +568,7 @@ fn validate_final_sst(
     expected: &crate::runtime::FileMeta,
     budget: &crate::common::resource_budget::ResourceBudget,
 ) -> MidgeResult<()> {
-    let (actual_size, actual_crc) = build::file_identity(path)?;
+    let (actual_size, actual_crc) = crate::sst::fs::file_identity(path)?;
     if actual_size != expected.size_bytes || expected.content_crc32c != Some(actual_crc) {
         return Err(MidgeError::Corruption(format!(
             "staged SST identity changed at '{}': size {actual_size}, crc {actual_crc}",

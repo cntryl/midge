@@ -31,6 +31,8 @@ impl WorkQuantum {
 pub(in crate::runtime::hybrid_persistence) struct Progress {
     pub(super) budget: ResourceBudget,
     pub(super) manifest: Option<Arc<Manifest>>,
+    manifest_memory: Option<Arc<ResourceReservation>>,
+    metadata: Option<super::super::CloudMetadataPruneGuard>,
     pub(super) segment: Option<SegmentProgress>,
     pub(super) ssts: BTreeMap<String, SstProgress>,
 }
@@ -39,6 +41,8 @@ impl Default for Progress {
         Self {
             budget: ResourceBudget::new(0),
             manifest: None,
+            manifest_memory: None,
+            metadata: None,
             segment: None,
             ssts: BTreeMap::new(),
         }
@@ -128,7 +132,7 @@ impl CrcProgress {
     }
 }
 
-pub(super) fn same_file(left: &FileMeta, right: &FileMeta) -> bool {
+pub(in crate::runtime::hybrid_persistence) fn same_file(left: &FileMeta, right: &FileMeta) -> bool {
     left.name == right.name
         && left.cf_id == right.cf_id
         && left.size_bytes == right.size_bytes
@@ -141,6 +145,31 @@ pub(super) fn same_file(left: &FileMeta, right: &FileMeta) -> bool {
 }
 
 impl Progress {
+    pub(in crate::runtime::hybrid_persistence) fn retain_snapshot(
+        &mut self,
+        guard: &CloudWalPruneGuard,
+    ) {
+        self.manifest = Some(Arc::clone(&guard.manifest));
+        self.manifest_memory.clone_from(&guard.manifest_memory);
+        self.metadata.clone_from(&guard.metadata);
+    }
+
+    pub(in crate::runtime::hybrid_persistence) fn snapshot(
+        &self,
+        budget: &ResourceBudget,
+    ) -> Option<CloudWalPruneGuard> {
+        let memory = self.manifest_memory.as_ref()?;
+        if !memory.belongs_to(budget) {
+            return None;
+        }
+        Some(CloudWalPruneGuard {
+            manifest: Arc::clone(self.manifest.as_ref()?),
+            manifest_memory: Some(Arc::clone(memory)),
+            metadata: self.metadata.clone(),
+            ..CloudWalPruneGuard::default()
+        })
+    }
+
     pub(in crate::runtime::hybrid_persistence) fn retained_bytes(&self) -> usize {
         self.budget.used()
     }
@@ -152,9 +181,15 @@ impl Progress {
         catalog: &WalPublicationCatalog,
         deadline: &crate::common::OperationDeadline,
     ) -> MidgeResult<()> {
-        if self.budget.limit() != guard.memory_limit() {
+        if self.budget.limit()
+            != storage
+                .maintenance_memory()
+                .map_or(guard.memory_limit(), |budget| budget.limit())
+        {
             *self = Self {
-                budget: ResourceBudget::new(guard.memory_limit()),
+                budget: storage
+                    .maintenance_memory()
+                    .unwrap_or_else(|| ResourceBudget::new(guard.memory_limit())),
                 ..Self::default()
             };
         }
@@ -186,7 +221,7 @@ impl Progress {
                     .iter()
                     .any(|file| same_file(&proof.expected, file))
             });
-            self.manifest = Some(Arc::clone(&guard.manifest));
+            self.retain_snapshot(guard);
         }
         // A finished prefix may skip these SSTs entirely on this attempt. HEAD
         // checks must therefore precede reuse, not just subsequent row reads.
@@ -248,6 +283,14 @@ impl Progress {
         })
     }
 
+    pub(in crate::runtime::hybrid_persistence) fn discard_proofs(&mut self) {
+        self.segment = None;
+        self.ssts.clear();
+        self.manifest = None;
+        self.manifest_memory = None;
+        self.metadata = None;
+    }
+
     pub(in crate::runtime::hybrid_persistence) fn after_retirement(
         &mut self,
         retired: &[ValidatedWalPruneCandidate],
@@ -269,6 +312,11 @@ impl Progress {
                 .as_ref()
                 .is_some_and(|segment| proof.last_used_segment == segment.entry.segment_id)
         });
+        if self.segment.is_none() {
+            self.manifest = None;
+            self.manifest_memory = None;
+            self.metadata = None;
+        }
     }
 
     fn reset_semantic_progress(&mut self) {
@@ -323,6 +371,8 @@ mod tests {
                 record: RecordProgress::default(),
                 _reservation: budget.reserve(1024, "test WAL proof").expect("proof"),
             }),
+            manifest_memory: None,
+            metadata: None,
             manifest: Some(Arc::new(Manifest {
                 files: vec![file.clone()],
                 ..Manifest::default()
@@ -331,6 +381,112 @@ mod tests {
             budget,
         };
         (progress, file)
+    }
+
+    #[test]
+    fn should_reuse_manifest_admission_when_cleanup_resumes_without_new_acknowledgements() {
+        // Arrange
+        let budget = ResourceBudget::new(8192);
+        let manifest = Manifest::default();
+        let progress = crate::runtime::hybrid_persistence::CloudWalPruneProgress::default();
+        let guard =
+            CloudWalPruneGuard::admitted_local_snapshot(&manifest, &budget, &progress).unwrap();
+        assert!(budget.used() > budget.limit() / 2);
+        {
+            let mut retained = progress.0.lock();
+            retained.manifest = Some(Arc::clone(&guard.manifest));
+            retained.manifest_memory.clone_from(&guard.manifest_memory);
+        }
+        drop(guard);
+        let retained_bytes = budget.used();
+
+        // Act
+        let resumed = CloudWalPruneGuard::admitted_local_snapshot(&manifest, &budget, &progress);
+
+        // Assert
+        assert!(resumed.is_ok(), "a retained snapshot must fit on retry");
+        assert_eq!(budget.used(), retained_bytes);
+    }
+
+    #[test]
+    fn should_release_stale_snapshot_before_admitting_changed_manifest() {
+        // Arrange
+        let budget = ResourceBudget::new(12 * 1024);
+        let progress = crate::runtime::hybrid_persistence::CloudWalPruneProgress::default();
+        let mut manifest = Manifest::default();
+        let first =
+            CloudWalPruneGuard::admitted_local_snapshot(&manifest, &budget, &progress).unwrap();
+        progress.0.lock().retain_snapshot(&first);
+        drop(first);
+        manifest.files.push(FileMeta {
+            name: "replacement.sst".into(),
+            ..FileMeta::default()
+        });
+
+        // Act
+        let replacement =
+            CloudWalPruneGuard::admitted_local_snapshot(&manifest, &budget, &progress).unwrap();
+
+        // Assert
+        assert_eq!(replacement.manifest.files[0].name, "replacement.sst");
+        assert!(progress.0.lock().manifest.is_none());
+        drop(replacement);
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn should_not_reuse_snapshot_admission_from_another_pool() {
+        // Arrange
+        let budget = ResourceBudget::new(8192);
+        let replacement_budget = ResourceBudget::new(8192);
+        let progress = crate::runtime::hybrid_persistence::CloudWalPruneProgress::default();
+        let manifest = Manifest::default();
+        let first =
+            CloudWalPruneGuard::admitted_local_snapshot(&manifest, &budget, &progress).unwrap();
+        progress.0.lock().retain_snapshot(&first);
+        drop(first);
+
+        // Act
+        let replacement =
+            CloudWalPruneGuard::admitted_local_snapshot(&manifest, &replacement_budget, &progress)
+                .unwrap();
+
+        // Assert
+        assert_eq!(budget.used(), 0);
+        assert!(replacement_budget.used() > 0);
+        drop(replacement);
+        assert_eq!(replacement_budget.used(), 0);
+    }
+
+    #[test]
+    fn should_release_retained_manifest_charge_when_last_wal_proof_is_retired() {
+        // Arrange
+        let (mut progress, _) = old_coverage();
+        progress.manifest_memory = Some(Arc::new(
+            progress
+                .budget
+                .reserve(1024, "test retained manifest")
+                .unwrap(),
+        ));
+        let entry = progress.segment.as_ref().unwrap().entry.clone();
+        let candidate = ValidatedWalPruneCandidate {
+            segment_id: entry.segment_id,
+            validated: super::super::ValidatedWalObject {
+                proof: super::super::RemoteObjectProof::from_validated_ranges(
+                    entry.object_key.clone(),
+                    StorageObjectMetadata::content_crc(4, b"test"),
+                ),
+                data_records: Vec::new(),
+            },
+            entry,
+        };
+
+        // Act
+        progress.after_retirement(&[candidate]);
+
+        // Assert
+        assert!(progress.manifest.is_none());
+        assert_eq!(progress.budget.used(), 0);
     }
 
     #[test]

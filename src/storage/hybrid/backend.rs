@@ -30,6 +30,8 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+mod control_io;
+pub(crate) use control_io::ControlObject;
 mod file_publication;
 mod object_io;
 mod proofs;
@@ -134,6 +136,7 @@ pub struct HybridStorage {
     /// Serializes in-process WAL catalog publication and retirement updates.
     /// Provider compare-exchange remains the cross-process authority boundary.
     wal_catalog_mutation: Mutex<()>,
+    maintenance_memory: std::sync::OnceLock<crate::common::resource_budget::ResourceBudget>,
 
     /// Remote WAL prune workers are tracked so shutdown can join them before
     /// releasing the lease that fenced their conditional deletes.
@@ -299,11 +302,23 @@ impl HybridStorage {
             upload_worker_failed,
             upload_worker_handle,
             wal_catalog_mutation: Mutex::new(()),
+            maintenance_memory: std::sync::OnceLock::new(),
             prune_workers: Mutex::new(PruneWorkerRegistry::new(
                 limits.prune_workers,
                 limits.prune_requests,
             )),
         }
+    }
+
+    pub(crate) fn configure_maintenance_memory(&self, limit: usize) {
+        self.maintenance_memory
+            .get_or_init(|| crate::common::resource_budget::ResourceBudget::new(limit));
+    }
+
+    pub(crate) fn maintenance_memory(
+        &self,
+    ) -> Option<crate::common::resource_budget::ResourceBudget> {
+        self.maintenance_memory.get().cloned()
     }
 
     /// Acquire the in-process WAL catalog mutation lock within the caller's budget.

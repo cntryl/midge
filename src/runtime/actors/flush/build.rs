@@ -4,8 +4,6 @@ use super::{FlushActor, FlushBuildTask};
 use crate::common::resource_budget::{ResourceBudget, ResourceReservation};
 use crate::common::{MidgeError, MidgeResult};
 use crate::sst::SstFactory;
-use std::io::Read;
-use std::path::Path;
 
 #[derive(Default)]
 struct Bounds {
@@ -79,7 +77,7 @@ pub(super) fn write(
     };
     let (largest_key, _last_charge) = bounds.last.expect("first key implies last key");
     crate::sst::fs::finish_writer_to_path(writer, &task.staging_path)?;
-    let (size_bytes, checksum) = file_identity(&task.staging_path)?;
+    let (size_bytes, checksum) = crate::sst::fs::file_identity(&task.staging_path)?;
     Ok(crate::runtime::FileMeta {
         name: String::new(),
         level: 0,
@@ -92,22 +90,4 @@ pub(super) fn write(
         largest_seq: Some(largest_seq),
         key_bounds_complete: true,
     })
-}
-
-pub(super) fn file_identity(path: &Path) -> MidgeResult<(u64, u32)> {
-    let mut file = std::fs::File::open(path)?;
-    // Fixed stack space, independent of SST size; every byte remains covered.
-    let mut buffer = [0_u8; 8192];
-    let mut size = 0_u64;
-    let mut checksum = 0;
-    loop {
-        let count = file.read(&mut buffer)?;
-        if count == 0 {
-            return Ok((size, checksum));
-        }
-        size = size
-            .checked_add(count as u64)
-            .ok_or_else(|| MidgeError::ResourceLimit("SST size overflow".into()))?;
-        checksum = crc32c::crc32c_append(checksum, &buffer[..count]);
-    }
 }
