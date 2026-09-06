@@ -2145,15 +2145,19 @@ fn should_bound_create_metadata_mirror_by_runtime_response_deadline(
         elapsed < Duration::from_secs(1),
         "metadata mirror exceeded the caller's shared deadline: {elapsed:?}"
     );
-    assert!(matches!(
-        response_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("committed create response"),
-        RuntimeResponse::ColumnFamilyCreated {
-            request_id: 9_601,
-            ..
-        }
-    ));
+    let response = response_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("committed create response");
+    assert!(
+        matches!(
+            response,
+            RuntimeResponse::ColumnFamilyCreated {
+                request_id: 9_601,
+                ..
+            }
+        ),
+        "unexpected committed-create response: {response:?}"
+    );
     assert!(
         el.state.persistence_anomaly_detected(),
         "an incomplete auxiliary metadata mirror must degrade persistence health"

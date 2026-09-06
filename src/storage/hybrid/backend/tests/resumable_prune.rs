@@ -10,6 +10,7 @@ struct LimitedRanges {
     allowance: AtomicUsize,
     reads: Mutex<Vec<(String, u64)>>,
     delay_micros: AtomicUsize,
+    expire_after_next_wal_range: AtomicBool,
 }
 impl CloudBackend for LimitedRanges {
     crate::storage::cloud::forward_cloud_backend!(inner; submit_put, submit_get, submit_get_with_metadata, submit_get_range, submit_delete, submit_list, submit_head);
@@ -47,6 +48,16 @@ impl CloudBackend for LimitedRanges {
         self.reads.lock().push((key.into(), start));
         self.inner
             .submit_get_range_with_identity(key, start, end, expected, timeout, callback);
+        if key.starts_with("wal/")
+            && self
+                .expire_after_next_wal_range
+                .swap(false, Ordering::SeqCst)
+        {
+            // Return valid bytes, but finish this synchronous submission only
+            // after its shared deadline. The caller can acknowledge this CRC
+            // range; its next read must observe the real expired deadline.
+            std::thread::sleep(timeout);
+        }
     }
 }
 
@@ -67,6 +78,7 @@ fn fixture(
         allowance: AtomicUsize::new(usize::MAX),
         reads: Mutex::new(Vec::new()),
         delay_micros: AtomicUsize::new(0),
+        expire_after_next_wal_range: AtomicBool::new(false),
     });
     let cloud = Arc::new(CloudStorage::new(backend.clone(), String::new()));
     let storage = HybridStorage::with_policy(
@@ -292,39 +304,75 @@ fn should_resume_legacy_sst_summary_across_timeouts_with_many_versions_of_one_ke
 
 #[test]
 fn should_finish_oldest_wal_proof_across_short_attempt_deadlines() {
-    // Arrange
-    let (_directory, backend, storage, manifest) = fixture(40);
+    // Arrange: several WAL windows allow deadline interruption after known
+    // acknowledged ranges, without requiring a loaded runner to fit all
+    // metadata and cursor setup inside repeated twenty-millisecond attempts.
+    let records = 400;
+    let (_directory, backend, storage, manifest) = fixture(records);
     let progress = CloudWalPruneProgress::default();
-    backend.delay_micros.store(2_000, Ordering::SeqCst);
-    let mut attempts = 0;
-    let mut retired = false;
+    let mut resumed_offsets = Vec::new();
+
     // Act
-    for _attempt in 0..200 {
-        attempts += 1;
+    for _ in 0..2 {
+        backend.reads.lock().clear();
+        backend
+            .expire_after_next_wal_range
+            .store(true, Ordering::SeqCst);
         let guard = CloudWalPruneGuard::new(manifest.clone(), None)
             .with_memory_limit(256 * 1024)
             .with_progress(progress.clone());
-        if storage
-            .prune_cloud_wal_segment_within(
-                1,
-                40,
-                guard,
-                2,
-                &crate::common::OperationDeadline::from_budget(Duration::from_millis(20)),
-            )
-            .is_ok()
-        {
-            retired = true;
-            break;
-        }
+        let deadline = crate::common::OperationDeadline::from_budget(Duration::from_secs(1));
+        let result = storage.prune_cloud_wal_segment_within(1, records, guard, 2, &deadline);
+
+        // Assert: the interruption is a real deadline failure after a saved
+        // range, and the next interrupted attempt starts beyond that range.
+        assert!(
+            matches!(result, Err(crate::MidgeError::Timeout(_))),
+            "{result:?}"
+        );
+        assert!(deadline.is_expired());
+        assert!(!backend.expire_after_next_wal_range.load(Ordering::SeqCst));
+        let reads = backend.reads.lock();
+        assert_eq!(
+            reads.len(),
+            1,
+            "one range must be acknowledged before expiry"
+        );
+        resumed_offsets.push(reads[0].1);
+        drop(reads);
         assert!(assert_wal_catalog_copies_match(&storage)
             .segments
             .contains_key(&1));
     }
-    // Assert
-    assert!(attempts > 1);
-    assert!(retired, "short deadlines must accumulate proven progress");
+    assert_eq!(resumed_offsets[0], 0);
+    assert!(
+        resumed_offsets[1] > resumed_offsets[0],
+        "CRC progress must survive deadline expiry"
+    );
+    let mut retired = false;
+    for _ in 0..10 {
+        match attempt(&storage, &manifest, &progress, records) {
+            Ok(()) => {
+                retired = true;
+                break;
+            }
+            Err(crate::MidgeError::Timeout(_)) => {
+                assert!(assert_wal_catalog_copies_match(&storage)
+                    .segments
+                    .contains_key(&1));
+            }
+            Err(error) => panic!("unexpected proof failure after deadline interruption: {error}"),
+        }
+    }
+    assert!(
+        retired,
+        "the interrupted proof must finish once storage stops delaying"
+    );
     assert!(wait_for_wal_prune_result(&storage, 1).is_ok());
+    assert!(assert_wal_catalog_copies_match(&storage)
+        .segments
+        .is_empty());
+    assert_eq!(progress.retained_bytes(), Some(0));
 }
 
 #[test]

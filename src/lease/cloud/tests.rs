@@ -3,6 +3,9 @@ use crate::common::MidgeError;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[path = "tests/concurrent_renewal.rs"]
+mod concurrent_renewal;
+
 static TEMP_PATH_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn test_config() -> CloudLeaseConfig {

@@ -278,6 +278,8 @@ impl Fs for RealFs {
                 MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
             };
 
+            const ERROR_ACCESS_DENIED: i32 = 5;
+
             let from_wide: Vec<u16> = from_full
                 .as_os_str()
                 .encode_wide()
@@ -300,6 +302,15 @@ impl Fs for RealFs {
             };
             if result == 0 {
                 let error = io::Error::last_os_error();
+                if error.raw_os_error() == Some(ERROR_ACCESS_DENIED) {
+                    // Rust's Windows rename uses FileRenameInfoEx with POSIX
+                    // replacement semantics here: existing readers retain the
+                    // old file, while new opens see the replacement. Keep the
+                    // write-through fast path above for ordinary WAL sealing;
+                    // staged replacements also sync their parent directory.
+                    return fs::rename(&from_full, &to_full)
+                        .map_err(|error| io_err("rename", &to_full, &error));
+                }
                 return Err(io_err("rename", &to_full, &error));
             }
             Ok(())
@@ -745,6 +756,44 @@ mod tests {
             .map_err(|error| FsError::Io(error.to_string()))?;
         assert_eq!(contents, b"new");
         assert!(!temp.path().join("source.tmp").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn should_preserve_open_reader_when_atomically_replacing_target() -> FsResult<()> {
+        // Arrange
+        let temp = TempDir::new().map_err(|error| FsError::Io(error.to_string()))?;
+        let fs = RealFs::new(temp.path())?;
+        let target = FsPath::new("leader-記録");
+        std::fs::write(temp.path().join(&target.0), b"old leader")
+            .map_err(|error| FsError::Io(error.to_string()))?;
+        let reader = fs.open(
+            &target,
+            OpenOptions {
+                mode: OpenMode::ReadOnly,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        )?;
+        let original_len = reader.len()?;
+
+        // Act
+        for replacement in [b"new leader with longer contents".as_slice(), b"latest"] {
+            std::fs::write(temp.path().join("source.tmp"), replacement)
+                .map_err(|error| FsError::Io(error.to_string()))?;
+            fs.rename_atomic(&FsPath::new("source.tmp"), &target)?;
+
+            // Assert
+            assert_eq!(reader.len()?, original_len);
+            assert_eq!(reader.read_at(0, original_len)?.as_ref(), b"old leader");
+            assert_eq!(
+                std::fs::read(temp.path().join(&target.0))
+                    .map_err(|error| FsError::Io(error.to_string()))?,
+                replacement
+            );
+            assert!(!temp.path().join("source.tmp").exists());
+        }
         Ok(())
     }
 
