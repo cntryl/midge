@@ -120,7 +120,10 @@ impl Campaign {
         std::fs::create_dir_all(&artifacts).expect("artifacts directory");
         let mut campaign = Self {
             profile,
-            cache: directory.join("cache"),
+            cache: std::env::var_os("MIDGE_QUALIFICATION_CACHE_DIR").map_or_else(
+                || directory.join("cache"),
+                |path| PathBuf::from(path).join(&id),
+            ),
             artifacts,
             bucket: "midge-sqrzl-operational".to_string(),
             prefix: format!("operational/{id}/"),
@@ -175,6 +178,7 @@ impl Campaign {
                 self.prefix.clone(),
             ),
         )
+        .ttl_clock(super::clock::source())
         .memory_budget(MemoryBudget::Bytes(self.profile.memory_bytes))
         .local_storage_budget(self.profile.local_bytes)
         .with_memtable_size_limit(usize::try_from(target).expect("memtable target"))

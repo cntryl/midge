@@ -201,3 +201,13 @@ latency guarantee. Slow-provider regressions verify that work can advance
 even when a successful request takes longer than the slice.
 Retained proof memory is deducted from compaction execution and publication
 allowances so alternating workers cannot each claim the full maintenance pool.
+
+
+## Enforced Linux resource profiles
+
+The separate [resource-bound qualification runner](resource-bound-qualification.md)
+uses a finite disk-backed ext4 filesystem and a memory-limited engine container.
+It keeps Sqrzl, the controller, OS resource sampling and evidence outside those
+limits, and adds deterministic multi-family overwrite/tombstone/TTL workloads,
+external SIGKILL, and kernel disk exhaustion with an external acknowledgment
+ledger. These enforced profiles complement the native sampled campaign above.

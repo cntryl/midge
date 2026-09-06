@@ -21,10 +21,14 @@ struct State {
     peak: AtomicU64,
     checkpoints: AtomicU64,
     stopped: AtomicBool,
+    external_files: bool,
 }
 
 impl State {
     fn sample(&self) {
+        if self.external_files {
+            return;
+        }
         let bytes = file_bytes(&self.cache);
         self.peak.fetch_max(bytes, Ordering::Relaxed);
         assert!(
@@ -43,17 +47,20 @@ impl Observation {
             peak: AtomicU64::new(0),
             checkpoints: AtomicU64::new(0),
             stopped: AtomicBool::new(false),
+            external_files: std::env::var_os("MIDGE_RESOURCE_COLLECTOR_EXTERNAL").is_some(),
         });
         let sampler = Arc::clone(&state);
-        let worker = std::thread::spawn(move || {
-            while !sampler.stopped.load(Ordering::Acquire) {
-                sampler.sample();
-                std::thread::sleep(Duration::from_millis(5));
-            }
+        let worker = (!state.external_files).then(|| {
+            std::thread::spawn(move || {
+                while !sampler.stopped.load(Ordering::Acquire) {
+                    sampler.sample();
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            })
         });
         Self {
             state,
-            worker: Some(worker),
+            worker,
             telemetry: super::telemetry::Recorder::install(),
         }
     }
@@ -69,7 +76,8 @@ impl Observation {
         let state = Arc::clone(&self.state);
         let artifact = campaign.artifacts.clone();
         let report = self.report(campaign, phase, 0, None);
-        let interrupt = phase == "interrupted";
+        let interrupt = matches!(phase, "interrupted" | "terminated");
+        let terminate = phase == "terminated";
         let telemetry = self.telemetry.clone();
         fail::cfg_callback("midge::recovery::after_checkpoint", move || {
             state.sample();
@@ -84,12 +92,29 @@ impl Observation {
                 report["process_peak_rss_bytes"] = process_peak_rss_bytes().into();
                 report["costs"] =
                     serde_json::to_value(telemetry.snapshot()).expect("cost snapshot");
-                save(&artifact.join("interrupted.json"), &report);
+                save(
+                    &artifact.join(if terminate {
+                        "terminated.json"
+                    } else {
+                        "interrupted.json"
+                    }),
+                    &report,
+                );
                 std::fs::write(
                     artifact.join("checkpoint-reached"),
                     b"durable recovery checkpoint",
                 )
                 .expect("exact crash boundary");
+                if terminate {
+                    std::fs::write(
+                        artifact.join("terminate-at-checkpoint"),
+                        b"ready for SIGKILL",
+                    )
+                    .expect("termination boundary");
+                    loop {
+                        std::thread::park();
+                    }
+                }
                 std::process::exit(73);
             }
         })
@@ -113,11 +138,9 @@ impl Observation {
         metrics: Option<&RuntimeMetricsSnapshot>,
     ) {
         self.state.stopped.store(true, Ordering::Release);
-        self.worker
-            .take()
-            .expect("sampler")
-            .join()
-            .expect("disk sampler must not fail");
+        if let Some(worker) = self.worker.take() {
+            worker.join().expect("disk sampler must not fail");
+        }
         self.state.sample();
         save(
             &campaign.artifacts.join(format!("{phase}.json")),
@@ -132,7 +155,7 @@ impl Observation {
         recovery_ms: u128,
         metrics: Option<&RuntimeMetricsSnapshot>,
     ) -> serde_json::Value {
-        let verified = matches!(phase, "recovered" | "verified");
+        let verified = matches!(phase, "recovered" | "verified" | "restored");
         json!({
             "schema_version": 2, "provider": "Sqrzl S3 protocol", "phase": phase,
             "profile": campaign.profile, "cloud_wal_bytes": campaign.actual_wal_bytes,
@@ -143,6 +166,7 @@ impl Observation {
             "revision": std::env::var("MIDGE_QUALIFICATION_REVISION").ok(),
             "debug_assertions": cfg!(debug_assertions),
             "peak_local_file_bytes": self.state.peak.load(Ordering::Relaxed),
+            "file_bytes_observed_externally": self.state.external_files,
             "checkpoints": self.state.checkpoints.load(Ordering::Relaxed),
             "process_peak_rss_bytes": process_peak_rss_bytes(),
             "runtime_metrics": metrics,

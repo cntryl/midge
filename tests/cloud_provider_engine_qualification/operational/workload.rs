@@ -47,7 +47,7 @@ impl WorkloadProgress {
         self.deadline.saturating_duration_since(now)
     }
 
-    fn require_time(&self, stage: &str) {
+    pub(super) fn require_time(&self, stage: &str) {
         let now = Instant::now();
         assert!(
             !self.remaining(now).is_zero(),
@@ -116,7 +116,7 @@ impl WorkloadProgress {
         );
     }
 
-    fn report_wait(&mut self, engine: &Engine, stage: &str) {
+    pub(super) fn report_wait(&mut self, engine: &Engine, stage: &str) {
         let now = Instant::now();
         if now < self.next_report || self.remaining(now).is_zero() {
             return;

@@ -175,7 +175,7 @@ Cloud WAL coverage retains one pinned SST reader and one checksummed decoded
 block. The block is keyed by its handle within that immutable reader; it never
 uses the application's block cache. Compressed input, decoded output, decoder
 keys, verification windows, and retained comparison values share the recovery
-proof budget. Returned value slices retain their decoded-buffer reservation.
+proof budget. The verified-identity map also charges its entries and table-growth allowance to that budget; metadata exhaustion conservatively replays WAL. Checkpoints discard the map and release its charges. Returned value slices retain their decoded-buffer reservation.
 When coverage compares overlapping SSTs, it copies only the incumbent value
 under a separate charge so the previous block can be released before opening
 the next reader. Checkpoint construction starts after reader and block release.

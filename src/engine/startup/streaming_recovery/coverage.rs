@@ -11,7 +11,7 @@ pub(super) struct ReplayCoverage {
     fs: Arc<dyn Fs>,
     // Keep immutable identities and at most one budgeted reader. Release the
     // reader before verifying/opening a different file or building a checkpoint.
-    verified: RefCell<HashMap<String, Option<Arc<dyn Fs>>>>,
+    verified: RefCell<HashMap<String, VerifiedProof>>,
     reader: RefCell<Option<CachedReader>>,
     read_budget: crate::common::resource_budget::ResourceBudget,
     probes: Cell<u64>,
@@ -21,6 +21,21 @@ pub(super) struct ReplayCoverage {
     block_hits: Cell<u64>,
     block_misses: Cell<u64>,
     block_peak: Cell<usize>,
+}
+
+struct VerifiedProof {
+    fs: Option<Arc<dyn Fs>>,
+    _reservation: crate::common::resource_budget::ResourceReservation,
+}
+
+fn proof_metadata_bytes(name: &str) -> usize {
+    // Cover hash-table growth (including overlapping old/new tables), keys,
+    // and the immutable-view handle. Backend and allocator overhead remain
+    // visible in process-memory qualification rather than hidden by pool sizes.
+    std::mem::size_of::<(String, VerifiedProof)>()
+        .saturating_mul(4)
+        .saturating_add(name.len().saturating_mul(2))
+        .saturating_add(256)
 }
 
 struct CachedReader {
@@ -151,31 +166,47 @@ impl ReplayCoverage {
         self.release_cached(&mut cached);
         let path = FsPath::new(crate::sst::object_key(&file.name));
         let mut verified = self.verified.borrow_mut();
-        let fs = verified.entry(file.name.clone()).or_insert_with(|| {
-            let crc = file.content_crc32c?;
-            let pinned = self.fs.immutable_read_view(&path).ok()??;
-            let window = self
+        if !verified.contains_key(&file.name) {
+            let reservation = self
                 .read_budget
-                .limit()
-                .saturating_sub(self.read_budget.used())
-                .min(usize::try_from(file.size_bytes).unwrap_or(usize::MAX));
-            let _verification = self
-                .read_budget
-                .reserve(window, "recovery SST verification")
+                .reserve(
+                    proof_metadata_bytes(&file.name),
+                    "recovery immutable proof metadata",
+                )
                 .ok()?;
-            super::super::streaming_wal_fs::validate_wal_source(
-                pinned.as_ref(),
-                &path,
-                file.size_bytes,
-                crc,
-                window,
-            )
-            .ok()?;
-            self.verified_bytes
-                .set(self.verified_bytes.get().saturating_add(file.size_bytes));
-            Some(pinned)
-        });
-        let fs = fs.as_ref()?;
+            let fs = (|| {
+                let crc = file.content_crc32c?;
+                let pinned = self.fs.immutable_read_view(&path).ok()??;
+                let window = self
+                    .read_budget
+                    .limit()
+                    .saturating_sub(self.read_budget.used())
+                    .min(usize::try_from(file.size_bytes).unwrap_or(usize::MAX));
+                let _verification = self
+                    .read_budget
+                    .reserve(window, "recovery SST verification")
+                    .ok()?;
+                super::super::streaming_wal_fs::validate_wal_source(
+                    pinned.as_ref(),
+                    &path,
+                    file.size_bytes,
+                    crc,
+                    window,
+                )
+                .ok()?;
+                self.verified_bytes
+                    .set(self.verified_bytes.get().saturating_add(file.size_bytes));
+                Some(pinned)
+            })();
+            verified.insert(
+                file.name.clone(),
+                VerifiedProof {
+                    fs,
+                    _reservation: reservation,
+                },
+            );
+        }
+        let fs = verified.get(&file.name)?.fs.as_ref()?;
         let budget = self.read_budget.clone();
         self.reader_opens
             .set(self.reader_opens.get().saturating_add(1));
@@ -194,6 +225,7 @@ impl ReplayCoverage {
 
     pub(super) fn release_reader(&self) {
         self.release_cached(&mut self.reader.borrow_mut());
+        *self.verified.borrow_mut() = HashMap::new();
     }
 
     fn release_cached(&self, cached: &mut Option<CachedReader>) {
@@ -298,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn should_release_reader_reservations_when_recovery_yields_to_checkpoint() {
+    fn should_release_coverage_reservations_when_recovery_yields_to_checkpoint() {
         // Arrange
         let (_dir, coverage) = fixture(&[(Some(b"value"), 7, None)]);
         let record = put(7, None);
@@ -319,8 +351,8 @@ mod tests {
         assert!(covered_again);
         assert_eq!(
             coverage.verified_bytes.get(),
-            verified_bytes,
-            "reuse pinned full-object proof"
+            verified_bytes * 2,
+            "checkpoint release must discard charged proof metadata"
         );
         assert_eq!(coverage.reader_opens.get(), 2);
     }
@@ -336,7 +368,9 @@ mod tests {
         let (_dir, mut coverage) = fixture(&[(Some(b"value"), 7, None), (Some(b"value"), 7, None)]);
         // The incumbent comparison value remains live across SST readers;
         // its five bytes are charged separately from either decoded block.
-        let budget = one_reader_peak + b"value".len();
+        let budget = one_reader_peak
+            + b"value".len()
+            + proof_metadata_bytes(&coverage.manifest.files[1].name);
         coverage.read_budget = crate::common::resource_budget::ResourceBudget::new(budget);
 
         // Act
@@ -352,6 +386,27 @@ mod tests {
         assert_eq!(coverage.read_budget.used(), 0);
         assert!(coverage.read_budget.peak() <= budget);
         assert_eq!(coverage.reader_opens.get(), 20);
+    }
+
+    #[test]
+    fn should_replay_when_aggregate_proof_metadata_exhausts_shared_recovery_budget() {
+        // Arrange
+        let entries = vec![(Some(b"value".as_slice()), 7, None); 100];
+        let (_dir, mut coverage) = fixture(&entries);
+        coverage.read_budget = crate::common::resource_budget::ResourceBudget::new(8 * 1024);
+
+        // Act
+        let covered = coverage.contains(&put(7, None));
+        let retained = coverage.read_budget.used();
+        coverage.release_reader();
+
+        // Assert
+        assert!(
+            !covered,
+            "aggregate immutable proof metadata must share the configured budget"
+        );
+        assert!(retained <= 8 * 1024);
+        assert_eq!(coverage.read_budget.used(), 0);
     }
 
     type PersistedEntry<'a> = (Option<&'a [u8]>, u64, Option<u64>);
