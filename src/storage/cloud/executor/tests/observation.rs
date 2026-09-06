@@ -16,6 +16,68 @@ impl Write for Output {
 }
 
 #[test]
+fn should_record_cancelled_attempt_when_live_response_future_is_dropped() {
+    // Arrange
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}/object", listener.local_addr().unwrap());
+    let (ready, receiving) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        read_complete_http_request(&mut stream);
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\ndata\r\n")
+            .unwrap();
+        ready.send(()).unwrap();
+        let _ = released.recv_timeout(Duration::from_secs(5));
+    });
+    let request = CloudRequest::new(Method::GET, endpoint).with_timeout(Duration::from_secs(5));
+    let output = Output::default();
+    let writer = output.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .without_time()
+        .with_env_filter("off,midge::cloud_io=debug")
+        .with_writer(move || writer.clone())
+        .finish();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    // Act: cancel only after the server confirms an actual request was received.
+    tracing::subscriber::with_default(subscriber, || {
+        runtime.block_on(async {
+        let mut response = Box::pin(CloudExecutor::execute_request(Client::new(), request));
+        tokio::select! {
+            completed = &mut response => panic!("response must remain incomplete: {}", completed.is_ok()),
+            ready = receiving => ready.expect("live response"),
+        }
+        drop(response);
+    });
+    });
+    release.send(()).unwrap();
+    server.join().unwrap();
+    let log = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+
+    // Assert
+    assert_eq!(
+        log.lines()
+            .filter(|line| line.contains("midge::cloud_io"))
+            .count(),
+        1
+    );
+    assert!(
+        log.contains("cancelled=true"),
+        "incomplete attempts must remain visible: {log}"
+    );
+    assert!(
+        log.contains("transport_error=false"),
+        "cancellation is a distinct outcome"
+    );
+}
+
+#[test]
 fn should_observe_each_http_attempt_when_range_read_retries() {
     // Arrange
     let server =
