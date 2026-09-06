@@ -83,8 +83,11 @@ filesystem. Exhaustion must produce bounded backpressure or an explicit error.
 After restoring capacity, fresh processes verify every acknowledged write and
 allow only the one explicitly recorded uncertain operation, if it reached
 durability before its error. Another complete local-state loss follows. Final
-verification also requires zero outstanding storage reservations and reader
-pins after quiescence.
+verification waits for a live idle runtime snapshot before checking storage
+reservations and reader pins. Active compaction or flush charges are not leaks;
+once all observable maintenance work is idle, any remaining reservation or pin
+fails qualification. This bounded wait shares the phase deadline, and the child
+must still shut down successfully after the snapshot.
 
 ## Allocation audit
 

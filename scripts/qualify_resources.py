@@ -147,6 +147,11 @@ def child() -> int:
             report = json.loads((artifacts / f"{phase}.json").read_text())
             assert report["verification_complete"]
             metrics = report["runtime_metrics"]
+            assert all(metrics[field] == 0 for field in (
+                "active_compactions", "compacting_ssts", "pending_compactions",
+                "flush_inflight", "flush_queue_depth", "pending_cloud_uploads",
+                "wal_pending_writes", "hybrid_pending_evictions",
+            )), "resource leak check requires an idle runtime snapshot"
             assert metrics["local_storage"]["usage"]["reservations"] == 0, "storage reservation leak after quiescence"
             assert metrics["pinned_ssts"] == 0, "reader pin leak after verification"
         return code

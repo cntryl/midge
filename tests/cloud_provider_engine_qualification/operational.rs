@@ -12,6 +12,8 @@ mod fixture;
 mod flush_stress;
 #[path = "operational/observe.rs"]
 mod observe;
+#[path = "operational/quiescence.rs"]
+mod quiescence;
 #[path = "operational/telemetry.rs"]
 mod telemetry;
 #[path = "operational/workload.rs"]
@@ -124,7 +126,10 @@ fn should_execute_cloud_recovery_phase_in_child() {
         flush_stress::verify(&engine, &campaign);
         exhaustion::verify(&engine, &campaign);
     }
-    let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+    let metrics = quiescence::wait(
+        &engine,
+        started + Duration::from_secs(campaign.profile.timeout_seconds),
+    );
     engine
         .shutdown(Duration::from_secs(60))
         .expect("shutdown qualified engine");
