@@ -13,6 +13,14 @@ fn name(family: u8) -> String {
     format!("resource-family-{family}")
 }
 
+fn value_size(campaign: &Campaign) -> usize {
+    campaign
+        .profile
+        .value_bytes
+        .min(usize::try_from(campaign.profile.local_bytes / 1024).unwrap_or(usize::MAX))
+        .max(3)
+}
+
 fn value(family: u8, round: u8, key: u8, size: usize) -> Vec<u8> {
     let mut bytes = vec![family.wrapping_mul(13) ^ round.wrapping_mul(7) ^ key; size.max(3)];
     bytes[..3].copy_from_slice(&[family, round, key]);
@@ -58,7 +66,7 @@ pub(super) fn exercise(
                                 u8::try_from(family).unwrap(),
                                 round,
                                 key[0],
-                                campaign.profile.value_bytes
+                                value_size(campaign)
                             )
                         );
                         assert!(
@@ -83,7 +91,7 @@ pub(super) fn exercise(
                     for key in 0..KEYS {
                         tx.put(
                             vec![key],
-                            value(family, round, key, campaign.profile.value_bytes),
+                            value(family, round, key, value_size(campaign)),
                             (key == 31).then_some(0),
                         )
                         .expect("overwrite value or expiring value");
@@ -122,8 +130,7 @@ pub(super) fn verify(engine: &Engine, campaign: &Campaign) {
             .expect("verify resource snapshot");
         let live = |key: u8| key != 1 && !(16..24).contains(&key) && key != 31;
         for key in 0..KEYS {
-            let expected =
-                live(key).then(|| value(family, ROUNDS - 1, key, campaign.profile.value_bytes));
+            let expected = live(key).then(|| value(family, ROUNDS - 1, key, value_size(campaign)));
             assert_eq!(
                 tx.get(&[key]).expect("resource point read").as_deref(),
                 expected.as_deref()
