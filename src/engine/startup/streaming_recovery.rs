@@ -99,7 +99,10 @@ impl CloudReplay {
             policy,
             Some(&should_apply),
             self.limits,
-            &mut |tables, _stats| checkpoint(materialized, &mut actor, &rx, tables),
+            &mut |tables, _stats| {
+                coverage.release_reader();
+                checkpoint(materialized, &mut actor, &rx, tables)
+            },
         );
         let shutdown = actor.shutdown_and_join();
         let stats = replay_result?;

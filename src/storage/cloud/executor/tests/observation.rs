@@ -34,7 +34,7 @@ fn should_observe_each_http_attempt_when_range_read_retries() {
     let subscriber = tracing_subscriber::fmt()
         .with_ansi(false)
         .without_time()
-        .with_max_level(tracing::Level::INFO)
+        .with_env_filter("off,midge::cloud_io=debug")
         .with_writer(move || writer.clone())
         .finish();
     let runtime = tokio::runtime::Builder::new_current_thread()

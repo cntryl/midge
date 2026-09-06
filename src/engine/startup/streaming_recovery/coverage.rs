@@ -9,14 +9,20 @@ use std::sync::Arc;
 pub(super) struct ReplayCoverage {
     manifest: crate::metadata::Manifest,
     fs: Arc<dyn Fs>,
-    // Only immutable provider identities are retained. Readers and their
-    // metadata are released after each probe under a bounded allocation pool.
+    // Keep immutable identities and at most one budgeted reader. Release the
+    // reader before verifying/opening a different file or building a checkpoint.
     verified: RefCell<HashMap<String, Option<Arc<dyn Fs>>>>,
-    memory_bytes: usize,
+    reader: RefCell<Option<CachedReader>>,
+    read_budget: crate::common::resource_budget::ResourceBudget,
     probes: Cell<u64>,
     reader_opens: Cell<u64>,
     verified_bytes: Cell<u64>,
     elapsed_ns: Cell<u64>,
+}
+
+struct CachedReader {
+    name: String,
+    reader: Box<dyn crate::sst::traits::SstReaderExt>,
 }
 
 impl ReplayCoverage {
@@ -29,7 +35,8 @@ impl ReplayCoverage {
             manifest,
             fs,
             verified: RefCell::new(HashMap::new()),
-            memory_bytes,
+            reader: RefCell::new(None),
+            read_budget: crate::common::resource_budget::ResourceBudget::new(memory_bytes),
             probes: Cell::new(0),
             reader_opens: Cell::new(0),
             verified_bytes: Cell::new(0),
@@ -103,6 +110,13 @@ impl ReplayCoverage {
         file: &crate::metadata::FileMeta,
         key: &[u8],
     ) -> Option<crate::sst::types::KeyState> {
+        let mut cached = self.reader.borrow_mut();
+        if let Some(cached) = cached.as_ref().filter(|cached| cached.name == file.name) {
+            return cached.reader.get_state_at_with_time(key, u64::MAX, 0).ok();
+        }
+        // The old reader's reservations must be released before even the
+        // next full-object verification buffer is allocated.
+        cached.take();
         let path = FsPath::new(crate::sst::object_key(&file.name));
         let mut verified = self.verified.borrow_mut();
         let fs = verified.entry(file.name.clone()).or_insert_with(|| {
@@ -113,7 +127,7 @@ impl ReplayCoverage {
                 &path,
                 file.size_bytes,
                 crc,
-                self.memory_bytes,
+                self.read_budget.limit(),
             )
             .ok()?;
             self.verified_bytes
@@ -121,8 +135,8 @@ impl ReplayCoverage {
             Some(pinned)
         });
         let fs = fs.as_ref()?;
-        let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(fs), self.memory_bytes);
-        let budget = crate::common::resource_budget::ResourceBudget::new(self.memory_bytes);
+        let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(fs), self.read_budget.limit());
+        let budget = self.read_budget.clone();
         self.reader_opens
             .set(self.reader_opens.get().saturating_add(1));
         let reader = factory
@@ -131,7 +145,16 @@ impl ReplayCoverage {
         // Recovery compares persisted expiration metadata. A forward wall-clock
         // jump must not turn an unrelated expired value into tombstone proof.
         // Expiration zero remains conservatively replayed at equal sequence.
-        reader.get_state_at_with_time(key, u64::MAX, 0).ok()
+        let result = reader.get_state_at_with_time(key, u64::MAX, 0).ok();
+        *cached = Some(CachedReader {
+            name: file.name.clone(),
+            reader,
+        });
+        result
+    }
+
+    pub(super) fn release_reader(&self) {
+        self.reader.borrow_mut().take();
     }
 }
 
@@ -218,6 +241,60 @@ mod tests {
             subsequent <= 100,
             "metadata must stay resident: {subsequent} ranges for 100 probes"
         );
+    }
+
+    #[test]
+    fn should_release_reader_reservations_when_recovery_yields_to_checkpoint() {
+        // Arrange
+        let (_dir, coverage) = fixture(&[(Some(b"value"), 7, None)]);
+        let record = put(7, None);
+        assert!(coverage.contains(&record));
+        assert!(coverage.read_budget.used() > 0);
+        let verified_bytes = coverage.verified_bytes.get();
+
+        // Act
+        coverage.release_reader();
+        let checkpoint_charge = coverage.read_budget.used();
+        let covered_again = coverage.contains(&record);
+
+        // Assert
+        assert_eq!(
+            checkpoint_charge, 0,
+            "checkpoint must have no retained reader charge"
+        );
+        assert!(covered_again);
+        assert_eq!(
+            coverage.verified_bytes.get(),
+            verified_bytes,
+            "reuse pinned full-object proof"
+        );
+        assert_eq!(coverage.reader_opens.get(), 2);
+    }
+
+    #[test]
+    fn should_release_previous_reader_when_overlapping_ssts_share_one_reader_budget() {
+        // Arrange
+        let (_single_dir, single) = fixture(&[(Some(b"value"), 7, None)]);
+        let record = put(7, None);
+        assert!(single.contains(&record));
+        let one_reader_peak = single.read_budget.peak();
+        assert!(one_reader_peak > 0);
+        let (_dir, mut coverage) = fixture(&[(Some(b"value"), 7, None), (Some(b"value"), 7, None)]);
+        coverage.read_budget = crate::common::resource_budget::ResourceBudget::new(one_reader_peak);
+
+        // Act
+        for _ in 0..10 {
+            assert!(
+                coverage.contains(&record),
+                "each overlapping SST must fit sequentially"
+            );
+        }
+        coverage.release_reader();
+
+        // Assert
+        assert_eq!(coverage.read_budget.used(), 0);
+        assert!(coverage.read_budget.peak() <= one_reader_peak);
+        assert_eq!(coverage.reader_opens.get(), 20);
     }
 
     type PersistedEntry<'a> = (Option<&'a [u8]>, u64, Option<u64>);
@@ -357,7 +434,7 @@ mod tests {
     fn should_retain_wal_when_exact_sst_proof_cannot_fit_recovery_memory_budget() {
         // Arrange
         let (_dir, mut coverage) = fixture(&[(Some(b"value"), 7, None)]);
-        coverage.memory_bytes = 32;
+        coverage.read_budget = crate::common::resource_budget::ResourceBudget::new(32);
         let record = put(7, None);
         // Act
         let covered = coverage.contains(&record);

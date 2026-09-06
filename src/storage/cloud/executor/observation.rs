@@ -34,7 +34,7 @@ impl Attempt {
 
 impl Drop for Attempt {
     fn drop(&mut self) {
-        tracing::info!(
+        tracing::debug!(
             target: "midge::cloud_io",
             method = self.method.as_str(),
             range = self.range,

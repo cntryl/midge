@@ -109,6 +109,40 @@ provider requests. They exclude HEAD calls, startup WAL replay, WAL retirement,
 and control metadata. Separate counting-provider regressions check exact
 remote request accounting and independent-engine isolation.
 
+Schema version 2 also records `costs` in each child report. `costs.http` groups
+HTTP attempts by method, separating ranged GETs. These process-wide totals
+include all native-provider executors in the child: lease operations, metadata,
+WAL, SST, background maintenance, retry attempts, and listing pages. The
+`*-opened.json` snapshot is taken before query verification, so its totals
+isolate the recovery interval from the later workload. Fixture preparation in
+the parent process is excluded. These totals are not per-engine metrics for a
+process containing multiple engines.
+
+`request_body_bytes` counts body bytes offered to each HTTP attempt, not bytes
+acknowledged by the server. `response_body_bytes` counts consumed body chunks,
+including partial/error responses; headers, TLS overhead, and unread bytes are
+excluded. `http_errors` counts status codes at least 400, including expected
+not-found responses. Transport errors and cancelled attempts have separate
+counts. A deadline cancelling a live attempt still produces its observation.
+The opt-in `midge::cloud_io` tracing target emits these observations at DEBUG,
+without object keys, URLs, headers, credentials, or payload contents.
+
+`costs.recovery_phases` aggregates the `midge::recovery` tracing target. Phase
+times are inclusive: `coverage` and `recovery_checkpoint` are part of
+`wal_replay`, which is part of `replay_and_repair` and `open`. Do not sum nested
+phase durations. Failed lease-acquisition/open attempts are included, while
+the campaign's sleep between acquisition attempts is only in `recovery_ms`.
+Coverage also reports probe count, reader-open attempts, and successfully
+verified SST bytes. A hard process exit can leave a phase incomplete, so the
+interrupted report contains only observations emitted before that exit.
+
+Coverage retains at most one SST reader using its existing byte budget. It
+releases the reader before checking a different SST and before checkpoint
+construction. Full-object verification remains bound to an immutable read
+view, and each data probe retains conditional identity and block validation.
+This reduces repeated metadata reads without persisting a new proof format or
+expanding the cache with the SST inventory.
+
 Sqrzl is the self-contained native-provider qualification environment described
 in [the cloud qualification policy](cloud-qualification-policy.md). Its
 results do not establish AWS latency, S3 request cost, or a production recovery
