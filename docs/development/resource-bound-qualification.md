@@ -19,7 +19,10 @@ The host trust store is mounted read-only for the native provider HTTP client.
 
 Dispatch `cloud.yml` with `resource_profile=reduced` (the default) or `full`.
 The profiles are qualification fixtures, not supported production maxima.
-All limits remain independent CLI arguments on the runner.
+All limits remain independent CLI arguments on the runner. Hosted evidence is
+stored and uploaded from a directory unique to the workflow run and attempt,
+so restored build caches cannot mix older campaigns into the current artifact.
+Each phase also identifies the qualified revision.
 
 | Setting | Reduced | Full |
 | --- | ---: | ---: |
