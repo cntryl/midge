@@ -6,7 +6,10 @@ struct Output(Arc<Mutex<Vec<u8>>>);
 
 impl Write for Output {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend_from_slice(bytes);
         Ok(bytes.len())
     }
 
@@ -58,7 +61,14 @@ fn should_record_cancelled_attempt_when_live_response_future_is_dropped() {
     });
     release.send(()).unwrap();
     server.join().unwrap();
-    let log = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+    let log = String::from_utf8(
+        output
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone(),
+    )
+    .unwrap();
 
     // Assert
     assert_eq!(
@@ -110,7 +120,14 @@ fn should_observe_each_http_attempt_when_range_read_retries() {
     })
     .expect("successful retry");
     let attempts = server.finish();
-    let log = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+    let log = String::from_utf8(
+        output
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone(),
+    )
+    .unwrap();
     let events: Vec<_> = log
         .lines()
         .filter(|line| line.contains("midge::cloud_io"))

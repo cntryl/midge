@@ -55,7 +55,10 @@ impl<S: tracing::Subscriber> Layer<S> for Recorder {
     ) {
         let mut fields = Fields::default();
         event.record(&mut fields);
-        let mut snapshot = self.0.lock().expect("qualification telemetry");
+        let mut snapshot = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let totals = if event.metadata().target() == "midge::cloud_io" {
             let method = if fields.range {
                 format!("{}_range", fields.method)
@@ -96,7 +99,7 @@ impl Recorder {
     pub fn snapshot(&self) -> Snapshot {
         self.0
             .lock()
-            .expect("qualification telemetry snapshot")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 }
