@@ -12,6 +12,7 @@ use std::time::Duration;
 pub(super) struct Observation {
     state: Arc<State>,
     worker: Option<JoinHandle<()>>,
+    telemetry: super::telemetry::Recorder,
 }
 
 struct State {
@@ -53,6 +54,7 @@ impl Observation {
         Self {
             state,
             worker: Some(worker),
+            telemetry: super::telemetry::Recorder::install(),
         }
     }
 
@@ -68,6 +70,7 @@ impl Observation {
         let artifact = campaign.artifacts.clone();
         let report = self.report(campaign, phase, 0, None);
         let interrupt = phase == "interrupted";
+        let telemetry = self.telemetry.clone();
         fail::cfg_callback("midge::recovery::after_checkpoint", move || {
             state.sample();
             let checkpoints = state.checkpoints.fetch_add(1, Ordering::Relaxed) + 1;
@@ -79,6 +82,8 @@ impl Observation {
                 report["peak_local_file_bytes"] = state.peak.load(Ordering::Relaxed).into();
                 report["checkpoints"] = state.checkpoints.load(Ordering::Relaxed).into();
                 report["process_peak_rss_bytes"] = process_peak_rss_bytes().into();
+                report["costs"] =
+                    serde_json::to_value(telemetry.snapshot()).expect("cost snapshot");
                 save(&artifact.join("interrupted.json"), &report);
                 std::fs::write(
                     artifact.join("checkpoint-reached"),
@@ -129,7 +134,7 @@ impl Observation {
     ) -> serde_json::Value {
         let verified = matches!(phase, "recovered" | "verified");
         json!({
-            "schema_version": 1, "provider": "Sqrzl S3 protocol", "phase": phase,
+            "schema_version": 2, "provider": "Sqrzl S3 protocol", "phase": phase,
             "profile": campaign.profile, "cloud_wal_bytes": campaign.actual_wal_bytes,
             "source_records": campaign.records,
             "verified_records": if verified { campaign.records } else { 0 },
@@ -141,6 +146,7 @@ impl Observation {
             "checkpoints": self.state.checkpoints.load(Ordering::Relaxed),
             "process_peak_rss_bytes": process_peak_rss_bytes(),
             "runtime_metrics": metrics,
+            "costs": self.telemetry.snapshot(),
         })
     }
 }

@@ -2,7 +2,7 @@
 
 use crate::io::{Fs, FsPath};
 use crate::sst::SstFactory;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -13,6 +13,10 @@ pub(super) struct ReplayCoverage {
     // metadata are released after each probe under a bounded allocation pool.
     verified: RefCell<HashMap<String, Option<Arc<dyn Fs>>>>,
     memory_bytes: usize,
+    probes: Cell<u64>,
+    reader_opens: Cell<u64>,
+    verified_bytes: Cell<u64>,
+    elapsed_ns: Cell<u64>,
 }
 
 impl ReplayCoverage {
@@ -26,10 +30,26 @@ impl ReplayCoverage {
             fs,
             verified: RefCell::new(HashMap::new()),
             memory_bytes,
+            probes: Cell::new(0),
+            reader_opens: Cell::new(0),
+            verified_bytes: Cell::new(0),
+            elapsed_ns: Cell::new(0),
         }
     }
 
     pub(super) fn contains(&self, record: &crate::wal::WalRecord) -> bool {
+        let started = std::time::Instant::now();
+        self.probes.set(self.probes.get().saturating_add(1));
+        let result = self.contains_record(record);
+        self.elapsed_ns.set(
+            self.elapsed_ns
+                .get()
+                .saturating_add(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)),
+        );
+        result
+    }
+
+    fn contains_record(&self, record: &crate::wal::WalRecord) -> bool {
         use crate::sst::types::KeyState;
         use crate::wal::types::WalOpRole;
         // Keep the existing conservative rule: tombstones are always replayed.
@@ -96,11 +116,15 @@ impl ReplayCoverage {
                 self.memory_bytes,
             )
             .ok()?;
+            self.verified_bytes
+                .set(self.verified_bytes.get().saturating_add(file.size_bytes));
             Some(pinned)
         });
         let fs = fs.as_ref()?;
         let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(fs), self.memory_bytes);
         let budget = crate::common::resource_budget::ResourceBudget::new(self.memory_bytes);
+        self.reader_opens
+            .set(self.reader_opens.get().saturating_add(1));
         let reader = factory
             .open_for_compaction(std::path::Path::new(&path.0), budget)
             .ok()?;
@@ -108,6 +132,15 @@ impl ReplayCoverage {
         // jump must not turn an unrelated expired value into tombstone proof.
         // Expiration zero remains conservatively replayed at equal sequence.
         reader.get_state_at_with_time(key, u64::MAX, 0).ok()
+    }
+}
+
+impl Drop for ReplayCoverage {
+    fn drop(&mut self) {
+        tracing::info!(target: "midge::recovery", phase = "coverage",
+            probes = self.probes.get(), reader_opens = self.reader_opens.get(),
+            verified_sst_bytes = self.verified_bytes.get(), elapsed_ns = self.elapsed_ns.get(),
+            "recovery coverage work completed");
     }
 }
 
@@ -142,6 +175,50 @@ mod tests {
     use super::*;
     use crate::wal::{WalOpKind, WalRecord};
     use bytes::Bytes;
+
+    #[derive(Default)]
+    struct RangeCounter(std::sync::atomic::AtomicUsize);
+
+    impl crate::io::traits::ReadObserver for RangeCounter {
+        fn remote_range_started(&self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        fn remote_range_completed(
+            &self,
+            _bytes: u64,
+            _elapsed: std::time::Duration,
+            _failed: bool,
+        ) {
+        }
+    }
+
+    #[test]
+    fn should_reuse_bounded_reader_when_repeated_records_probe_same_sst() {
+        // Arrange
+        let (_dir, mut coverage) = fixture(&[(Some(b"value"), 7, None)]);
+        let counter = Arc::new(RangeCounter::default());
+        coverage.fs = coverage
+            .fs
+            .with_read_observer(counter.clone())
+            .expect("observed reads");
+        let record = put(7, None);
+        assert!(coverage.contains(&record));
+        let initial = counter.0.load(std::sync::atomic::Ordering::Relaxed);
+
+        // Act
+        for _ in 0..100 {
+            assert!(coverage.contains(&record));
+        }
+        let subsequent = counter.0.load(std::sync::atomic::Ordering::Relaxed) - initial;
+
+        // Assert
+        assert!(initial > 0, "must exercise real remote range reads");
+        assert!(
+            subsequent <= 100,
+            "metadata must stay resident: {subsequent} ranges for 100 probes"
+        );
+    }
 
     type PersistedEntry<'a> = (Option<&'a [u8]>, u64, Option<u64>);
 

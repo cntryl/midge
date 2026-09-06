@@ -20,6 +20,7 @@ mod storage;
 mod streaming_recovery;
 mod streaming_wal_fs;
 mod streaming_wal_plan;
+mod timing;
 
 impl CloudSstRecoveryProof {
     #[cfg(test)]

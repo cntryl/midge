@@ -289,17 +289,17 @@ impl RuntimeStorageMaterialization {
         let wal_backend: Arc<dyn crate::storage::StorageBackend> = Arc::new(
             crate::storage::filesystem::FileSystem::new(cloud.cloud_root.clone())?,
         );
-        let streaming = super::streaming_wal_plan::StreamingCloudWalRecovery::build(
-            &storage_path.db_path,
-            &wal_backend,
-            &wal_catalog,
-            opts.recovery_policy(),
-            opts.storage_io_timeout(),
-            (opts.memory_budget_bytes() / 64)
-                .min(limits.max_frame_bytes)
-                .max(1),
-            limits,
-        )?;
+        let streaming = super::timing::measure("wal_plan", || {
+            super::streaming_wal_plan::StreamingCloudWalRecovery::build(
+                &storage_path.db_path,
+                &wal_backend,
+                &wal_catalog,
+                opts.recovery_policy(),
+                opts.storage_io_timeout(),
+                super::streaming_recovery::CloudReplay::read_window(opts, limits),
+                limits,
+            )
+        })?;
         let recovery_plan = streaming.plan;
         let mut state = RuntimeState::try_new_before_cloud_replay(
             storage_path.db_path.clone(),
@@ -401,17 +401,17 @@ impl RuntimeStorageMaterialization {
             opts.recovery_policy(),
         )?;
         let limits = super::streaming_recovery::CloudReplay::limits(opts);
-        let streaming = super::streaming_wal_plan::StreamingCloudWalRecovery::build(
-            &storage_path.db_path,
-            &(wal_storage.clone() as Arc<dyn crate::storage::StorageBackend>),
-            &wal_catalog,
-            opts.recovery_policy(),
-            opts.storage_io_timeout(),
-            (opts.memory_budget_bytes() / 64)
-                .min(limits.max_frame_bytes)
-                .max(1),
-            limits,
-        )?;
+        let streaming = super::timing::measure("wal_plan", || {
+            super::streaming_wal_plan::StreamingCloudWalRecovery::build(
+                &storage_path.db_path,
+                &(wal_storage.clone() as Arc<dyn crate::storage::StorageBackend>),
+                &wal_catalog,
+                opts.recovery_policy(),
+                opts.storage_io_timeout(),
+                super::streaming_recovery::CloudReplay::read_window(opts, limits),
+                limits,
+            )
+        })?;
         let recovery_plan = streaming.plan;
         let mut state = RuntimeState::try_new_before_cloud_replay(
             storage_path.db_path.clone(),
@@ -701,7 +701,7 @@ impl RuntimeRecoveryMaterialization {
             )?;
         }
         if let Some(replay) = materialized.streaming_wal.take() {
-            replay.replay(&mut materialized)?;
+            super::timing::measure("wal_replay", || replay.replay(&mut materialized))?;
         }
         let recovered_sequence = materialized.state.sequence;
         let recovered_cf_metas = materialized.state.manifest.column_families.clone();

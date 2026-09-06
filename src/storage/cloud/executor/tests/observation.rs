@@ -1,0 +1,74 @@
+use super::*;
+use std::sync::Mutex;
+
+#[derive(Clone, Default)]
+struct Output(Arc<Mutex<Vec<u8>>>);
+
+impl Write for Output {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn should_observe_each_http_attempt_when_range_read_retries() {
+    // Arrange
+    let server =
+        crate::storage::providers::test_support::spawn_scripted_http_response_server(vec![
+            (503, "text/plain".into(), "retry".into()),
+            (206, "text/plain".into(), "value".into()),
+        ]);
+    let request = CloudRequest::new(
+        Method::GET,
+        format!("{}/private-key?secret=hidden", server.endpoint),
+    )
+    .with_header("Range", "bytes=0-4")
+    .with_timeout(Duration::from_secs(5));
+    let output = Output::default();
+    let writer = output.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .without_time()
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(move || writer.clone())
+        .finish();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    // Act
+    let response = tracing::subscriber::with_default(subscriber, || {
+        runtime.block_on(CloudExecutor::execute_request(Client::new(), request))
+    })
+    .expect("successful retry");
+    let attempts = server.finish();
+    let log = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+    let events: Vec<_> = log
+        .lines()
+        .filter(|line| line.contains("midge::cloud_io"))
+        .collect();
+
+    // Assert
+    assert_eq!(response.body, b"value");
+    assert_eq!(attempts, 2);
+    assert_eq!(
+        events.len(),
+        attempts,
+        "every HTTP attempt must be counted: {log}"
+    );
+    assert!(events[0].contains("status=503"));
+    assert!(events[1].contains("status=206"));
+    for event in events {
+        assert!(event.contains("response_body_bytes=5"));
+        assert!(event.contains("range=true"));
+        assert!(event.contains("cancelled=false"));
+    }
+    assert!(!log.contains("private-key"));
+    assert!(!log.contains("secret=hidden"));
+}
