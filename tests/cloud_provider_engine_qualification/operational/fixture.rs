@@ -178,6 +178,7 @@ impl Campaign {
                 self.prefix.clone(),
             ),
         )
+        .ttl_clock(super::clock::source())
         .memory_budget(MemoryBudget::Bytes(self.profile.memory_bytes))
         .local_storage_budget(self.profile.local_bytes)
         .with_memtable_size_limit(usize::try_from(target).expect("memtable target"))

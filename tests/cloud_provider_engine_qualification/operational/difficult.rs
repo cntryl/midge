@@ -92,7 +92,7 @@ pub(super) fn exercise(
                         tx.put(
                             vec![key],
                             value(family, round, key, value_size(campaign)),
-                            (key == 31).then_some(0),
+                            (key == 31).then_some(1),
                         )
                         .expect("overwrite value or expiring value");
                     }
@@ -117,6 +117,7 @@ pub(super) fn exercise(
         }
     });
     assert!(scans.load(Ordering::Relaxed) > 0);
+    super::clock::expire_values();
     verify(engine, campaign);
 }
 

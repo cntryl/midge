@@ -1,5 +1,7 @@
 //! Resource-ratio qualification through the native S3 provider, in child processes.
 
+#[path = "operational/clock.rs"]
+mod clock;
 #[path = "operational/difficult.rs"]
 mod difficult;
 #[path = "operational/fixture.rs"]
