@@ -23,6 +23,8 @@ pub struct CloudRequest {
     pub timeout: Option<Duration>,
     response_limit: usize,
     retry_conditional_conflicts: bool,
+    reservation: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
+    shared_body: Option<bytes::Bytes>,
 }
 
 impl CloudRequest {
@@ -35,6 +37,8 @@ impl CloudRequest {
             timeout: None,
             response_limit: MAX_CLOUD_RESPONSE_BYTES,
             retry_conditional_conflicts: false,
+            reservation: None,
+            shared_body: None,
         }
     }
 
@@ -45,6 +49,26 @@ impl CloudRequest {
 
     pub fn with_body(mut self, body: Vec<u8>) -> Self {
         self.body = Some(body);
+        self
+    }
+
+    pub(crate) fn with_reservation(
+        mut self,
+        reservation: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
+    ) -> Self {
+        self.reservation = reservation;
+        self
+    }
+
+    fn share_admitted_body(mut self) -> Self {
+        if let Some(reservation) = &self.reservation {
+            if let Some(body) = self.body.take() {
+                self.shared_body = Some(bytes::Bytes::from_owner(ReservedBody {
+                    bytes: body,
+                    _reservation: Arc::clone(reservation),
+                }));
+            }
+        }
         self
     }
 
@@ -92,6 +116,17 @@ impl CloudRequest {
                 || name.eq_ignore_ascii_case("if-none-match")
                 || name.eq_ignore_ascii_case("x-goog-if-generation-match")
         }) || self.url.contains("ifGenerationMatch=")
+    }
+}
+
+struct ReservedBody {
+    bytes: Vec<u8>,
+    _reservation: Arc<crate::common::resource_budget::ResourceReservation>,
+}
+
+impl AsRef<[u8]> for ReservedBody {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
     }
 }
 
@@ -351,7 +386,9 @@ impl CloudExecutor {
         let timeout = request.timeout;
         Self::ensure_deadline_active(timeout, deadline)?;
         let operation = async move {
-            let request = Self::sign_request_async(signer, request).await?;
+            let request = Self::sign_request_async(signer, request)
+                .await?
+                .share_admitted_body();
             Self::ensure_deadline_active(timeout, deadline)?;
             Self::execute_request_with_retries(client, request, deadline).await
         };
@@ -496,7 +533,9 @@ impl CloudExecutor {
             for (k, v) in &request.headers {
                 builder = builder.header(k, v);
             }
-            if let Some(body) = request.body {
+            if let Some(body) = request.shared_body {
+                builder = builder.body(body);
+            } else if let Some(body) = request.body {
                 builder = builder.body(body);
             }
 
@@ -630,6 +669,53 @@ mod tests {
     use std::time::{Duration, Instant};
 
     struct SlowFailingSigner;
+    #[test]
+    fn should_keep_upload_memory_charged_until_transport_body_slices_are_released() {
+        // Arrange
+        let budget = crate::common::resource_budget::ResourceBudget::new(1024);
+        let reservation = Arc::new(budget.reserve(1024, "transport payload").unwrap());
+        let body = bytes::Bytes::from_owner(super::ReservedBody {
+            bytes: vec![7; 1024],
+            _reservation: reservation,
+        });
+        let transport_slice = body.slice(128..256);
+
+        // Act
+        drop(body);
+        let retained = budget.used();
+        drop(transport_slice);
+
+        // Assert
+        assert_eq!(retained, 1024);
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn should_share_admitted_payload_across_retries_without_copying_or_releasing_it() {
+        // Arrange
+        let budget = crate::common::resource_budget::ResourceBudget::new(4096);
+        let reservation = Arc::new(budget.reserve(4096, "retry payload").unwrap());
+        let bytes = vec![7; 4096];
+        let pointer = bytes.as_ptr();
+        let request = CloudRequest::new(Method::PUT, "http://unused/object".into())
+            .with_body(bytes)
+            .with_reservation(Some(reservation))
+            .share_admitted_body();
+
+        // Act
+        let retry = request.clone();
+        let body = retry.shared_body.as_ref().unwrap();
+        let same_allocation = body.as_ptr() == pointer;
+        drop(request);
+        let held = budget.used();
+        drop(retry);
+
+        // Assert
+        assert!(same_allocation);
+        assert_eq!(held, 4096);
+        assert_eq!(budget.used(), 0);
+    }
+
     struct SlowSuccessfulSigner;
     struct CountingSlowSuccessfulSigner {
         calls: Arc<AtomicUsize>,

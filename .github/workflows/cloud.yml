@@ -25,7 +25,7 @@ jobs:
     timeout-minutes: 20
     env:
       CARGO_INCREMENTAL: 0
-      MIDGE_QUALIFICATION_ARTIFACT_DIR: ${{ github.workspace }}/target/cloud-qualification-evidence
+      MIDGE_QUALIFICATION_ARTIFACT_DIR: ${{ github.workspace }}/target/cloud-qualification-evidence/${{ github.run_id }}-${{ github.run_attempt }}
       MIDGE_QUALIFICATION_REVISION: ${{ github.sha }}
     steps:
       - name: Checkout repository
@@ -59,7 +59,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: cloud-qualification-${{ github.sha }}
-          path: target/cloud-qualification-evidence
+          path: target/cloud-qualification-evidence/${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: ignore
 
       - name: Stop Sqrzl emulator
@@ -94,16 +94,16 @@ jobs:
         run: |
           qualification_binary=$(python3 -c 'import json; print(next(v["executable"] for line in open("target/resource-build.json") if (v := json.loads(line)).get("executable") and v.get("target", {}).get("name") == "cloud_provider_engine_qualification"))')
           if [ "$RESOURCE_PROFILE" = full ]; then
-            sudo --preserve-env=MIDGE_QUALIFICATION_REVISION python3 scripts/qualify_resources.py --binary "$qualification_binary" --artifacts "$GITHUB_WORKSPACE/target/resource-qualification-evidence" --disk-bytes 2147483648 --engine-bytes 268435456 --process-bytes 1073741824 --wal-bytes 5368709120 --value-bytes 32768 --timeout 7200
+            sudo --preserve-env=MIDGE_QUALIFICATION_REVISION python3 scripts/qualify_resources.py --binary "$qualification_binary" --artifacts "$GITHUB_WORKSPACE/target/resource-qualification-evidence/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --disk-bytes 2147483648 --engine-bytes 268435456 --process-bytes 1073741824 --wal-bytes 5368709120 --value-bytes 32768 --timeout 7200
           else
-            sudo --preserve-env=MIDGE_QUALIFICATION_REVISION python3 scripts/qualify_resources.py --binary "$qualification_binary" --artifacts "$GITHUB_WORKSPACE/target/resource-qualification-evidence"
+            sudo --preserve-env=MIDGE_QUALIFICATION_REVISION python3 scripts/qualify_resources.py --binary "$qualification_binary" --artifacts "$GITHUB_WORKSPACE/target/resource-qualification-evidence/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           fi
       - name: Preserve resource evidence
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: resource-qualification-${{ github.sha }}
-          path: target/resource-qualification-evidence
+          path: target/resource-qualification-evidence/${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: error
       - name: Stop external Sqrzl
         if: always()

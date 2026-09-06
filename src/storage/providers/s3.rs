@@ -1053,6 +1053,17 @@ impl CloudBackend for S3Backend {
         headers: Vec<(String, String)>,
         callback: CloudCallback,
     ) {
+        self.submit_put_with_reservation(key, data, headers, None, callback);
+    }
+
+    fn submit_put_with_reservation(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        reservation: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
+        callback: CloudCallback,
+    ) {
         let key = key.to_string();
         let url = self.object_url(&key);
         let content_length = data.len();
@@ -1061,6 +1072,7 @@ impl CloudBackend for S3Backend {
         });
         let mut request = CloudRequest::new(Method::PUT, url)
             .with_body(data)
+            .with_reservation(reservation)
             .with_header("Content-Length", content_length.to_string());
         if conditional_mutation {
             request = request.with_conditional_conflict_retries();
@@ -1160,6 +1172,20 @@ impl CloudBackend for S3Backend {
         timeout: std::time::Duration,
         callback: CloudCallback,
     ) {
+        self.submit_get_range_with_reservation(key, start..end, expected, timeout, None, callback);
+    }
+
+    fn submit_get_range_with_reservation(
+        &self,
+        key: &str,
+        range: std::ops::Range<u64>,
+        expected: crate::storage::StorageObjectMetadata,
+        timeout: std::time::Duration,
+        reservation: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
+        callback: CloudCallback,
+    ) {
+        let start = range.start;
+        let end = range.end;
         let key = key.to_string();
         let Some(conditions) = crate::storage::cloud::object_match_precondition_headers(
             &expected.etag,
@@ -1184,7 +1210,8 @@ impl CloudBackend for S3Backend {
             });
             return;
         }
-        let mut request = CloudRequest::new(Method::GET, self.object_url(&key));
+        let mut request =
+            CloudRequest::new(Method::GET, self.object_url(&key)).with_reservation(reservation);
         for (name, value) in conditions {
             request = request.with_header(name, value);
         }

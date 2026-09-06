@@ -12,7 +12,8 @@ pub(crate) fn range_bytes(start_len: usize, end_len: usize) -> usize {
     128usize.saturating_add(start_len.saturating_add(end_len).saturating_mul(6))
 }
 
-/// A completed SST coexists with its cloud verification file.
+/// Streaming scratch can coexist with a completed SST; legacy publishers
+/// may instead retain a verification copy alongside that output.
 pub(crate) fn flush_staging_bytes(encoded_bytes: usize) -> u64 {
     u64::try_from(encoded_bytes)
         .unwrap_or(u64::MAX)

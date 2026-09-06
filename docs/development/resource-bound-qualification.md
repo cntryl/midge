@@ -19,7 +19,10 @@ The host trust store is mounted read-only for the native provider HTTP client.
 
 Dispatch `cloud.yml` with `resource_profile=reduced` (the default) or `full`.
 The profiles are qualification fixtures, not supported production maxima.
-All limits remain independent CLI arguments on the runner.
+All limits remain independent CLI arguments on the runner. Hosted evidence is
+stored and uploaded from a directory unique to the workflow run and attempt,
+so restored build caches cannot mix older campaigns into the current artifact.
+Each phase also identifies the qualified revision.
 
 | Setting | Reduced | Full |
 | --- | ---: | ---: |
@@ -58,6 +61,18 @@ values or mixed generations within one family snapshot. Atomic generation
 values scale with the profile's disk window rather than exceeding the smallest
 profile's indivisible-transaction admission limit.
 
+Four further families exercise simultaneous writers with incompressible values,
+eight overwrite rounds, point deletes and 64 older keys covered by dense range
+tombstones. The value size derives from the memtable target and engine budget
+(512 KiB reduced, 2 MiB full). The first 32 SST uploads are delayed by 100 ms.
+Concurrent scans validate complete values during maintenance. The existing
+cloud scheduler serializes flush and compaction turns: qualification requires
+both to complete and rejects observed overlap. `flush-stress.json` records
+acknowledged transactions, scans, delayed uploads, completed maintenance counts
+and overlap samples. Fresh
+processes check every live value, every deleted key and the complete keyset after
+capacity restoration and repeated local-state loss.
+
 The runner interrupts recovery at a durable checkpoint, removes local state,
 then separately sends SIGKILL to another child at a checkpoint. It verifies
 all fixture records after fresh-process recovery. After acknowledged workloads,
@@ -68,8 +83,11 @@ filesystem. Exhaustion must produce bounded backpressure or an explicit error.
 After restoring capacity, fresh processes verify every acknowledged write and
 allow only the one explicitly recorded uncertain operation, if it reached
 durability before its error. Another complete local-state loss follows. Final
-verification also requires zero outstanding storage reservations and reader
-pins after quiescence.
+verification waits for a live idle runtime snapshot before checking storage
+reservations and reader pins. Active compaction or flush charges are not leaks;
+once all observable maintenance work is idle, any remaining reservation or pin
+fails qualification. This bounded wait shares the phase deadline, and the child
+must still shut down successfully after the snapshot.
 
 ## Allocation audit
 
@@ -83,7 +101,7 @@ continue to constrain their respective buffers; their settings are unchanged.
 | Recovery proof readers | Reader metadata, compressed/decoded blocks, decoder keys, comparison values and verification windows share one proof budget. Verified-identity map entries now reserve a table-growth allowance too. Exhaustion replays WAL; checkpoints drop readers and the map. |
 | Tombstone metadata | Budgeted SST readers/writers retain metadata charges; memtable tombstones contribute to encoded admission bounds. The difficult workload verifies retention and reclamation semantics through compaction and recovery. |
 | WAL replay | Frame, pending-transaction and checkpoint bounds derive from configured recovery limits. Remote inventory is streamed and remains independent of local capacity. |
-| Flush | One serialized worker owns temporary construction/publication buffers; disk staging is admitted before output. Heap copies and codec workspace are included in the separately enforced process limit rather than represented as application cache capacity. |
+| Flush | One serialized worker shares an internal allowance across streaming construction, final metadata validation, upload and bounded identity-pinned readback. Disk admission precedes scratch creation; unconfirmed scratch cleanup retains its token and blocks further builds. Timed-out uploads retain heap charges until underlying ownership ends. |
 | Compaction | Shared execution budgets cover reader/writer/cursor working sets; storage tokens cover staging. Completion, cancellation and failed publication retain authoritative inputs and release temporary reservations. |
 | Transaction spill | Transaction thresholds control spill, database-local files participate in disk admission, and owner cleanup releases temporary files. Cloud-acknowledged records remain recoverable after spill cleanup or process loss. |
 
@@ -93,3 +111,20 @@ the corrected implementation declines proof and releases every coverage charge
 at the checkpoint boundary. Native crash tests and the enforced campaigns
 exercise success, cancellation and failure without changing persistent formats,
 public cache settings, or single-owner publication.
+
+The internal flush allowance is four times the greater of the configured
+memtable target and one eighth of the resolved engine memory budget, plus 1 MiB,
+with saturating arithmetic and checked admission. One eighth matches the
+existing replay memory ceiling; a small flush target therefore does not become
+an accidental maximum record size. Engine startup passes this resolved allowance
+to both replay and the runtime worker before post-start configuration updates. It is a scratch/copy
+allowance derived from admitted input, not a change to the engine pool setting
+or a promise that process memory equals that setting. Construction charges one
+key's version references, writer metadata, codec buffers and boundary keys;
+epoch pins are dropped before scratch I/O. Upload charges the source allocation
+and conservative provider copy workspace before reading the file. Native upload
+retries share an immutable transport body, and completion adapters separately
+charge their thread stacks. Identity-pinned readback uses 64 KiB windows; no
+second verification SST is created outside the database filesystem. Both cache
+modes keep conditional creation and the existing lease, intent and manifest
+publication barriers. Admission failure retains recoverable data.

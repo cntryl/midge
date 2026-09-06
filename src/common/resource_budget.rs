@@ -87,6 +87,16 @@ pub struct ResourceReservation {
     bytes: usize,
 }
 
+impl ResourceReservation {
+    pub(crate) fn reserve_related(
+        &self,
+        bytes: usize,
+        resource: &'static str,
+    ) -> MidgeResult<Self> {
+        self.budget.reserve(bytes, resource)
+    }
+}
+
 impl Drop for ResourceReservation {
     fn drop(&mut self) {
         self.budget

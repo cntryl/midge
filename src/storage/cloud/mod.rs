@@ -339,6 +339,41 @@ pub(crate) fn object_match_precondition_headers(
 
 /// Non-blocking cloud backend interface used by the engine.
 pub trait CloudBackend: Send + Sync + 'static {
+    /// Carry admission through a bounded read until the backend finishes.
+    /// Implementations whose callback can precede payload release must override
+    /// this method and attach the reservation to the underlying operation.
+    fn submit_get_range_with_reservation(
+        &self,
+        key: &str,
+        range: std::ops::Range<u64>,
+        expected: StorageObjectMetadata,
+        timeout: std::time::Duration,
+        reservation: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
+        callback: CloudCallback,
+    ) {
+        let start = range.start;
+        let end = range.end;
+        let Some(reservation) = reservation else {
+            self.submit_get_range_with_identity(key, start, end, expected, timeout, callback);
+            return;
+        };
+        match crate::storage::retained_callback::retain(callback.clone(), reservation) {
+            Ok(retained) => {
+                self.submit_get_range_with_identity(key, start, end, expected, timeout, retained);
+            }
+            Err(error) => {
+                let _ = callback.send(CloudEvent::GetRange {
+                    key: key.to_string(),
+                    start,
+                    end: Some(end),
+                    result: Err(CloudError::Protocol(format!(
+                        "retain range completion: {error}"
+                    ))),
+                });
+            }
+        }
+    }
+
     /// Exact bounded read with an identity precondition; no whole-object fallback.
     fn submit_get_range_with_identity(
         &self,
@@ -362,6 +397,34 @@ pub trait CloudBackend: Send + Sync + 'static {
     /// Override the default deadline applied to provider HTTP requests.
     #[cfg(feature = "cloud-common")]
     fn set_request_timeout(&self, _timeout: std::time::Duration) {}
+
+    /// Carry upload admission until the backend releases its payload. Native
+    /// providers can attach it to the transport; compatibility implementations
+    /// must signal completion only after their upload buffer is no longer used.
+    fn submit_put_with_reservation(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        reservation: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
+        callback: CloudCallback,
+    ) {
+        let Some(reservation) = reservation else {
+            self.submit_put(key, data, headers, callback);
+            return;
+        };
+        match crate::storage::retained_callback::retain(callback.clone(), reservation) {
+            Ok(retained) => self.submit_put(key, data, headers, retained),
+            Err(error) => {
+                let _ = callback.send(CloudEvent::Put {
+                    key: key.to_string(),
+                    result: Err(CloudError::Protocol(format!(
+                        "retain upload completion: {error}"
+                    ))),
+                });
+            }
+        }
+    }
 
     /// Submit a PUT request for `key` with optional HTTP headers. Implementations
     /// MUST honor headers (e.g. `If-None-Match`, `If-Match`) when supported by the
@@ -998,7 +1061,38 @@ impl StorageBackend for CloudStorage {
         timeout: std::time::Duration,
         callback: StorageCallback,
     ) {
-        self.submit_head_with_timeout(key, timeout, callback);
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.submit_head_with_timeout(key, timeout, tx);
+        let result = match rx.recv_timeout(timeout) {
+            Ok(StorageEvent::HeadComplete {
+                key: actual,
+                result,
+            }) if actual == self.full_path(key)
+                || (actual == key && matches!(result, StorageOutcome::Err(_))) =>
+            {
+                result
+            }
+            Ok(event) => {
+                StorageOutcome::Err(format!("range HEAD returned a different object: {event:?}"))
+            }
+            Err(error) => StorageOutcome::Err(crate::storage::storage_timeout_error(error)),
+        };
+        let _ = callback.send(StorageEvent::HeadComplete {
+            key: key.to_string(),
+            result,
+        });
+    }
+
+    fn submit_read_range_with_reservation(
+        &self,
+        key: &str,
+        range: std::ops::Range<u64>,
+        expected: StorageObjectMetadata,
+        timeout: std::time::Duration,
+        reservation: Arc<crate::common::resource_budget::ResourceReservation>,
+        callback: crate::storage::RangeReadCallback,
+    ) {
+        self.read_range_admitted(key, range, expected, timeout, Some(reservation), &callback);
     }
 
     fn submit_read_range(
@@ -1010,45 +1104,7 @@ impl StorageBackend for CloudStorage {
         timeout: std::time::Duration,
         callback: crate::storage::RangeReadCallback,
     ) {
-        if timeout.is_zero()
-            || start >= end
-            || end > expected.size
-            || !expected.same_version(&expected)
-        {
-            let _ = callback.send(Err("invalid conditional range request".into()));
-            return;
-        }
-        let full_key = self.full_path(key);
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.backend
-            .submit_get_range_with_identity(&full_key, start, end, expected, timeout, tx);
-        let result = match rx.recv_timeout(timeout) {
-            Ok(CloudEvent::GetRange {
-                key: returned,
-                start: actual_start,
-                end: actual_end,
-                result,
-            }) if returned == full_key && actual_start == start && actual_end == Some(end) => {
-                result
-                    .map_err(|error| {
-                        if error.is_timeout() {
-                            crate::storage::storage_timeout_error(error)
-                        } else {
-                            error.to_string()
-                        }
-                    })
-                    .and_then(|bytes| {
-                        if u64::try_from(bytes.len()).ok() == Some(end - start) {
-                            Ok(bytes)
-                        } else {
-                            Err("remote SST range response length mismatch".into())
-                        }
-                    })
-            }
-            Ok(event) => Err(format!("unexpected conditional range response: {event:?}")),
-            Err(error) => Err(crate::storage::storage_timeout_error(error)),
-        };
-        let _ = callback.send(result);
+        self.read_range_admitted(key, start..end, expected, timeout, None, &callback);
     }
 
     fn submit_read_with_metadata(
@@ -1143,6 +1199,18 @@ impl StorageBackend for CloudStorage {
         );
     }
 
+    fn submit_write_with_reservation(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        timeout: std::time::Duration,
+        reservation: Arc<crate::common::resource_budget::ResourceReservation>,
+        callback: StorageCallback,
+    ) {
+        self.write_admitted(key, data, headers, timeout, Some(reservation), &callback);
+    }
+
     fn submit_write_with_headers_and_timeout(
         &self,
         key: &str,
@@ -1151,38 +1219,7 @@ impl StorageBackend for CloudStorage {
         timeout: std::time::Duration,
         callback: StorageCallback,
     ) {
-        if timeout.is_zero() {
-            let _ = callback.send(StorageEvent::WriteComplete {
-                key: key.to_string(),
-                result: StorageOutcome::Err(crate::storage::storage_timeout_error(
-                    "cloud PUT refused because no callback budget remained",
-                )),
-            });
-            return;
-        }
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.submit_put(key, data, headers, tx);
-        let event = match rx.recv_timeout(timeout) {
-            Ok(CloudEvent::Put { key, result }) => StorageEvent::WriteComplete {
-                key,
-                result: cloud_to_storage_outcome(result),
-            },
-            Ok(other) => StorageEvent::WriteComplete {
-                key: key.to_string(),
-                result: StorageOutcome::Err(format!("unexpected cloud PUT response: {other:?}")),
-            },
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => StorageEvent::WriteComplete {
-                key: key.to_string(),
-                result: StorageOutcome::Err(crate::storage::storage_timeout_error(
-                    "cloud PUT callback timed out",
-                )),
-            },
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => StorageEvent::WriteComplete {
-                key: key.to_string(),
-                result: StorageOutcome::Err("cloud PUT callback closed".to_string()),
-            },
-        };
-        let _ = callback.send(event);
+        self.write_admitted(key, data, headers, timeout, None, &callback);
     }
 
     fn submit_delete(&self, key: &str, callback: StorageCallback) {
@@ -1355,6 +1392,11 @@ impl StorageBackend for CloudStorage {
         let _ = callback.send(event);
     }
 }
+
+mod admitted;
+
+#[cfg(test)]
+mod retained_tests;
 
 #[cfg(test)]
 mod tests {

@@ -757,6 +757,87 @@ impl SkipList {
         out
     }
 
+    /// Visit a frozen table one key at a time. Drop the epoch pin before
+    /// invoking I/O so a slow flush cannot hold back unrelated reclamation.
+    pub(crate) fn visit_versions(
+        &self,
+        budget: &crate::common::resource_budget::ResourceBudget,
+        mut visit: impl FnMut(
+            &[u8],
+            Option<&[u8]>,
+            u64,
+            Option<u64>,
+            u8,
+        ) -> crate::common::MidgeResult<()>,
+    ) -> crate::common::MidgeResult<()> {
+        let mut next_key: Option<Bytes> = None;
+        loop {
+            let (entries, following, _charge) = {
+                let guard = &epoch::pin();
+                let current = if let Some(key) = &next_key {
+                    let mut predecessors = [Shared::null(); MAX_LEVEL];
+                    let mut successors = [Shared::null(); MAX_LEVEL];
+                    self.find(key, guard, &mut predecessors, &mut successors);
+                    successors[0]
+                } else {
+                    self.head.forward[0].load(AO::Acquire, guard)
+                };
+                // SAFETY: All nodes and versions are acquired under this pin;
+                // only owned Bytes references cross the callback boundary.
+                let Some(node) = (unsafe { current.as_ref() }) else {
+                    return Ok(());
+                };
+                let mut count = 0_usize;
+                let mut version = node.versions_head.load(AO::Acquire, guard);
+                // SAFETY: The version chain remains protected by the same pin.
+                while let Some(value) = unsafe { version.as_ref() } {
+                    count = count.saturating_add(1);
+                    version = value.next.load(AO::Relaxed, guard);
+                }
+                let charge = budget.reserve(
+                    count.saturating_mul(std::mem::size_of::<SkipListEntryWithExp>()),
+                    "flush version references",
+                )?;
+                let mut entries = Vec::with_capacity(count);
+                version = node.versions_head.load(AO::Acquire, guard);
+                // SAFETY: As above; the frozen table cannot gain new versions.
+                while let Some(value) = unsafe { version.as_ref() } {
+                    if entries.len() == count {
+                        return Err(crate::common::MidgeError::Internal(
+                            "flush table changed while frozen".into(),
+                        ));
+                    }
+                    entries.push((
+                        node.key.clone(),
+                        value.val.clone(),
+                        value.seq,
+                        value.val.is_none(),
+                        value.exp,
+                        value.op,
+                    ));
+                    version = value.next.load(AO::Relaxed, guard);
+                }
+                // SAFETY: The next key is cloned while its node is pinned.
+                let following = unsafe { node.forward[0].load(AO::Acquire, guard).as_ref() }
+                    .map(|next| next.key.clone());
+                (entries, following, charge)
+            };
+            for (key, value, sequence, _, expiration, operation) in entries {
+                visit(
+                    &key,
+                    value.as_deref(),
+                    sequence,
+                    expiration,
+                    operation.as_u8(),
+                )?;
+            }
+            let Some(following) = following else {
+                return Ok(());
+            };
+            next_key = Some(following);
+        }
+    }
+
     /// Drain all entries with metadata and expiration (logical snapshot).
     ///
     /// This does *not* physically clear the skiplist; instead it walks all
@@ -943,6 +1024,63 @@ mod tests {
     use proptest::prelude::*;
     use std::sync::{Arc, Barrier};
     use std::thread;
+
+    #[test]
+    fn should_preserve_version_metadata_when_visiting_a_frozen_table() {
+        // Arrange
+        let list = SkipList::new();
+        list.upsert_exp(
+            Bytes::from_static(b"a"),
+            Some(Bytes::from_static(b"old")),
+            1,
+            Some(99),
+            OpType::Put,
+        );
+        list.upsert_exp(Bytes::from_static(b"a"), None, 2, None, OpType::Delete);
+        list.upsert_exp(
+            Bytes::from_static(b"b"),
+            Some(Bytes::from_static(b"new")),
+            3,
+            Some(100),
+            OpType::Put,
+        );
+        let budget = crate::common::resource_budget::ResourceBudget::new(4096);
+        let mut actual = Vec::new();
+
+        // Act
+        list.visit_versions(&budget, |key, value, seq, exp, op| {
+            assert!(!epoch::is_pinned(), "flush I/O must not pin reclamation");
+            actual.push((key.to_vec(), value.map(<[u8]>::to_vec), seq, exp, op));
+            Ok(())
+        })
+        .unwrap();
+        let failed = list.visit_versions(&budget, |_, _, _, _, _| {
+            Err(crate::common::MidgeError::Internal("cancel visitor".into()))
+        });
+        let exhausted = crate::common::resource_budget::ResourceBudget::new(std::mem::size_of::<
+            SkipListEntryWithExp,
+        >());
+        let rejected = list.visit_versions(&exhausted, |_, _, _, _, _| {
+            panic!("hot-key references exceed allowance")
+        });
+
+        // Assert
+        assert_eq!(
+            actual,
+            vec![
+                (b"a".to_vec(), None, 2, None, 2),
+                (b"a".to_vec(), Some(b"old".to_vec()), 1, Some(99), 0),
+                (b"b".to_vec(), Some(b"new".to_vec()), 3, Some(100), 0),
+            ]
+        );
+        assert!(failed.is_err());
+        assert!(matches!(
+            rejected,
+            Err(crate::common::MidgeError::ResourceLimit(_))
+        ));
+        assert_eq!(budget.used(), 0);
+        assert_eq!(exhausted.used(), 0);
+    }
 
     #[test]
     fn should_reclaim_version_chain_when_node_loses_level_zero_splice_race() {

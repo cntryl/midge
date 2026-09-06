@@ -5,7 +5,7 @@
 //! returns deltas for the runtime to validate and install.
 
 use crate::common::{MidgeError, MidgeResult};
-use crate::runtime::hybrid_persistence::HybridPersistence;
+use crate::sst::SstFactory;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -13,6 +13,11 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 
 const FLUSH_WORKER_CHANNEL_CAPACITY: usize = 1;
+#[cfg(test)]
+const DEFAULT_FLUSH_MEMORY_BYTES: usize = 256 * 1024 * 1024;
+
+#[path = "flush/build.rs"]
+mod build;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FlushIdentity {
@@ -100,11 +105,28 @@ pub struct FlushActor {
 }
 
 impl FlushActor {
+    #[cfg(test)]
     pub fn new(
         sst_dir: &Path,
         memory_mode: bool,
         compression_policy: crate::sst::compression::CompressionPolicy,
         completion_tx: crossbeam::channel::Sender<FlushWorkerResult>,
+    ) -> MidgeResult<Self> {
+        Self::new_with_memory_limit(
+            sst_dir,
+            memory_mode,
+            compression_policy,
+            completion_tx,
+            DEFAULT_FLUSH_MEMORY_BYTES,
+        )
+    }
+
+    pub(crate) fn new_with_memory_limit(
+        sst_dir: &Path,
+        memory_mode: bool,
+        compression_policy: crate::sst::compression::CompressionPolicy,
+        completion_tx: crossbeam::channel::Sender<FlushWorkerResult>,
+        memory_bytes: usize,
     ) -> MidgeResult<Self> {
         if memory_mode {
             return Ok(Self {
@@ -116,15 +138,17 @@ impl FlushActor {
         }
 
         let fs = Arc::new(crate::io::RealFs::new(sst_dir)?);
-        let sst_factory: Arc<dyn crate::sst::SstFactory> = Arc::new(
+        let sst_factory = Arc::new(
             crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)
-                .with_compression_policy(compression_policy),
+                .with_compression_policy(compression_policy)
+                .with_compaction_scratch_directory(sst_dir.join(".flush-staging")),
         );
         let (task_tx, task_rx) =
             crossbeam::channel::bounded::<FlushWorkerTask>(FLUSH_WORKER_CHANNEL_CAPACITY);
+        let budget = crate::common::resource_budget::ResourceBudget::new(memory_bytes);
         let worker_handle = std::thread::Builder::new()
             .name("midge-flush".to_string())
-            .spawn(move || Self::worker_loop(&task_rx, &completion_tx, &sst_factory))
+            .spawn(move || Self::worker_loop(&task_rx, &completion_tx, &sst_factory, &budget))
             .map_err(|error| MidgeError::Internal(format!("spawn flush worker: {error}")))?;
 
         Ok(Self {
@@ -256,7 +280,8 @@ impl FlushActor {
     fn worker_loop(
         task_rx: &crossbeam::channel::Receiver<FlushWorkerTask>,
         completion_tx: &crossbeam::channel::Sender<FlushWorkerResult>,
-        sst_factory: &Arc<dyn crate::sst::SstFactory>,
+        sst_factory: &Arc<crate::sst::FsSstFactoryIo>,
+        budget: &crate::common::resource_budget::ResourceBudget,
     ) {
         while let Ok(task) = task_rx.recv() {
             match task {
@@ -264,7 +289,7 @@ impl FlushActor {
                     let started = Instant::now();
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         crate::failpoints::fail_point!("midge::flush_worker::before_build");
-                        Self::write_memtable_to_staging(sst_factory, &mut task)
+                        build::write(sst_factory, &mut task, budget)
                     }));
                     let build_ns = elapsed_ns(started);
                     let result = match result {
@@ -276,6 +301,12 @@ impl FlushActor {
                             ))
                         }
                     };
+                    if !sst_factory.compaction_scratch_cleanup_verified() {
+                        // A failed scratch unlink must not return disk capacity.
+                        // The hybrid ledger retains this token until startup
+                        // reconciles physical residue; block later builds too.
+                        task.reservation = None;
+                    }
                     let _ = completion_tx.send(FlushWorkerResult::Build(FlushBuildCompletion {
                         identity: task.identity,
                         memtable: task.memtable,
@@ -291,7 +322,7 @@ impl FlushActor {
                     let started = Instant::now();
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         crate::failpoints::fail_point!("midge::flush_worker::before_publication");
-                        Self::publish(&task)
+                        Self::publish_with_budget(&task, budget)
                     }));
                     let publish_ns = elapsed_ns(started);
                     let result = match result {
@@ -316,96 +347,38 @@ impl FlushActor {
         }
     }
 
+    #[cfg(test)]
     fn write_memtable_to_staging(
-        sst_factory: &Arc<dyn crate::sst::SstFactory>,
+        factory: &Arc<crate::sst::FsSstFactoryIo>,
         task: &mut FlushBuildTask,
     ) -> MidgeResult<crate::runtime::FileMeta> {
-        if let Some(parent) = task.staging_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let mut writer = sst_factory.create()?;
-        let entries = task.memtable.iter_all_with_meta(u64::MAX);
-        let range_tombstones = task.memtable.range_tombstones();
-        if entries.is_empty() && range_tombstones.is_empty() {
-            return Err(MidgeError::Corruption(
-                "attempted to flush an empty immutable memtable".to_string(),
-            ));
-        }
-
-        let smallest_key = entries
-            .iter()
-            .map(|(key, _, _, _, _)| key.clone())
-            .chain(
-                range_tombstones
-                    .iter()
-                    .flat_map(|tombstone| [tombstone.start.clone(), tombstone.end.clone()]),
-            )
-            .min()
-            .ok_or_else(|| MidgeError::Corruption("flush has no smallest key".to_string()))?;
-        let largest_key = entries
-            .iter()
-            .map(|(key, _, _, _, _)| key.clone())
-            .chain(
-                range_tombstones
-                    .iter()
-                    .flat_map(|tombstone| [tombstone.start.clone(), tombstone.end.clone()]),
-            )
-            .max()
-            .ok_or_else(|| MidgeError::Corruption("flush has no largest key".to_string()))?;
-
-        let mut smallest_seq = u64::MAX;
-        let mut largest_seq = 0_u64;
-        for (key, value, sequence, expiration, op_type) in entries {
-            smallest_seq = smallest_seq.min(sequence);
-            largest_seq = largest_seq.max(sequence);
-            writer.add_with_meta(&key, value.as_deref(), sequence, op_type, expiration)?;
-        }
-        for tombstone in &range_tombstones {
-            smallest_seq = smallest_seq.min(tombstone.seq);
-            largest_seq = largest_seq.max(tombstone.seq);
-            writer.add_range_tombstone(&tombstone.start, &tombstone.end, tombstone.seq)?;
-        }
-        if task.hybrid_storage.is_some() {
-            let upper_bound = writer.encoded_size_upper_bound().ok_or_else(|| {
-                MidgeError::ResourceLimit("flush writer cannot bound encoded output size".into())
-            })?;
-            // Final output and cloud readback verification can coexist. Admit
-            // both before the first physical SST bytes are written.
-            let staging_bytes = crate::sst::size_bound::flush_staging_bytes(upper_bound);
-            task.reservation = Self::reserve_flush(
-                task.hybrid_storage.as_ref(),
-                task.identity.cf_id,
-                staging_bytes,
-            )?;
-        }
-        crate::sst::fs::finish_writer_to_path(writer, &task.staging_path)?;
-        let bytes = std::fs::read(&task.staging_path)?;
-        Ok(crate::runtime::FileMeta {
-            name: String::new(),
-            level: 0,
-            size_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-            content_crc32c: Some(crc32c::crc32c(&bytes)),
-            cf_id: task.identity.cf_id,
-            smallest_key: Some(smallest_key),
-            largest_key: Some(largest_key),
-            smallest_seq: Some(smallest_seq),
-            largest_seq: Some(largest_seq),
-            key_bounds_complete: true,
-        })
+        build::write(
+            factory,
+            task,
+            &crate::common::resource_budget::ResourceBudget::new(DEFAULT_FLUSH_MEMORY_BYTES),
+        )
     }
 
+    #[cfg(test)]
     fn publish(task: &FlushPublishTask) -> MidgeResult<FlushPublicationDelta> {
+        Self::publish_with_budget(
+            task,
+            &crate::common::resource_budget::ResourceBudget::new(DEFAULT_FLUSH_MEMORY_BYTES),
+        )
+    }
+
+    fn publish_with_budget(
+        task: &FlushPublishTask,
+        budget: &crate::common::resource_budget::ResourceBudget,
+    ) -> MidgeResult<FlushPublicationDelta> {
         validate_task_lease(task)?;
         let final_path = task.sst_dir.join(&task.sst_name);
-        finalize_staged_sst(task, &final_path)?;
+        finalize_staged_sst(task, &final_path, budget)?;
         crate::failpoints::fail_point!("midge::flush_worker::after_sst_finalization");
         crate::failpoints::fail_point!("midge::flush::after_sst_write_before_publish");
 
         validate_task_lease(task)?;
-        if let Some(hybrid) = &task.hybrid_storage {
-            let bytes = std::fs::read(&final_path)?;
-            hybrid.write_sst_object(&task.sst_name, bytes)?;
-        }
+        upload(task, &final_path, budget)?;
         crate::failpoints::fail_point!("midge::flush_worker::after_cloud_sst_upload");
 
         let mut file_meta = task.build.file_meta.clone();
@@ -504,6 +477,26 @@ impl FlushActor {
     }
 }
 
+fn upload(
+    task: &FlushPublishTask,
+    final_path: &Path,
+    budget: &crate::common::resource_budget::ResourceBudget,
+) -> MidgeResult<()> {
+    if let Some(hybrid) = &task.hybrid_storage {
+        hybrid.publish_immutable_file(
+            &crate::sst::object_key(&task.sst_name),
+            final_path,
+            task.build.file_meta.size_bytes,
+            task.build
+                .file_meta
+                .content_crc32c
+                .ok_or_else(|| MidgeError::Corruption("flush output lacks checksum".into()))?,
+            budget,
+        )?;
+    }
+    Ok(())
+}
+
 fn elapsed_ns(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
@@ -528,13 +521,17 @@ fn validate_task_lease(task: &FlushPublishTask) -> MidgeResult<()> {
     Ok(())
 }
 
-fn finalize_staged_sst(task: &FlushPublishTask, final_path: &Path) -> MidgeResult<()> {
+fn finalize_staged_sst(
+    task: &FlushPublishTask,
+    final_path: &Path,
+    budget: &crate::common::resource_budget::ResourceBudget,
+) -> MidgeResult<()> {
     if !final_path.exists() {
         let parent = final_path.parent().ok_or(MidgeError::InvalidPath)?;
         std::fs::create_dir_all(parent)?;
         std::fs::rename(&task.build.staging_path, final_path)?;
     }
-    validate_final_sst(final_path, &task.build.file_meta)?;
+    validate_final_sst(final_path, &task.build.file_meta, budget)?;
     task.fs.sync_dir(
         &crate::io::FsPath::new("sst"),
         crate::io::Durability::Durable,
@@ -566,17 +563,25 @@ fn cleanup_non_authoritative_staging(task: &FlushPublishTask) {
     }
 }
 
-fn validate_final_sst(path: &Path, expected: &crate::runtime::FileMeta) -> MidgeResult<()> {
-    let bytes = std::fs::read(path)?;
-    let actual_size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    let actual_crc = crc32c::crc32c(&bytes);
+fn validate_final_sst(
+    path: &Path,
+    expected: &crate::runtime::FileMeta,
+    budget: &crate::common::resource_budget::ResourceBudget,
+) -> MidgeResult<()> {
+    let (actual_size, actual_crc) = build::file_identity(path)?;
     if actual_size != expected.size_bytes || expected.content_crc32c != Some(actual_crc) {
         return Err(MidgeError::Corruption(format!(
             "staged SST identity changed at '{}': size {actual_size}, crc {actual_crc}",
             path.display()
         )));
     }
-    crate::sst::fs::SstFileIo::open_with_real_fs(path).map(|_| ())
+    let parent = path.parent().ok_or(MidgeError::InvalidPath)?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(MidgeError::InvalidPath)?;
+    let fs = Arc::new(crate::io::RealFs::new(parent)?);
+    crate::sst::fs::SstFileIo::open_for_compaction(name, fs, budget.clone()).map(|_| ())
 }
 
 fn load_manifest(task: &FlushPublishTask) -> MidgeResult<crate::metadata::Manifest> {
@@ -860,7 +865,7 @@ mod tests {
             hybrid_storage: None,
         };
         let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new(&sst_dir)?);
-        let sst_factory: Arc<dyn crate::sst::SstFactory> = Arc::new(
+        let sst_factory = Arc::new(
             crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)
                 .with_compression_policy(crate::sst::compression::CompressionPolicy::default()),
         );
@@ -916,6 +921,175 @@ mod tests {
         })
     }
 
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn should_retain_disk_admission_when_scratch_unlink_fails() -> MidgeResult<()> {
+        // Arrange
+        let _test_guard = crate::failpoints::test_failpoint_guard();
+        let scenario = fail::FailScenario::setup();
+        let fixture = publication_fixture(usize::MAX)?;
+        let scratch = fixture.directory.path().join("failed-scratch");
+        let factory = Arc::new(
+            crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096)
+                .with_compaction_scratch_directory(scratch.clone()),
+        );
+        let injected = std::sync::Mutex::new(false);
+        fail::cfg_callback("midge::flush_worker::after_scratch_creation", move || {
+            let mut injected = injected
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if *injected {
+                return;
+            }
+            let Ok(mut files) = std::fs::read_dir(&scratch) else {
+                return;
+            };
+            let Some(Ok(file)) = files.next() else {
+                return;
+            };
+            let file = file.path();
+            std::fs::remove_file(&file).unwrap();
+            std::fs::create_dir(&file).unwrap();
+            *injected = true;
+        })
+        .unwrap();
+        let memtable = Arc::new(crate::sst::SkipListMemtable::new());
+        memtable.put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)?;
+        let task = FlushBuildTask {
+            identity: fixture.task.build.identity,
+            memtable,
+            staging_path: fixture.directory.path().join("output.sst"),
+            reservation: None,
+            hybrid_storage: fixture.task.hybrid_storage.clone(),
+        };
+        let (tx, rx) = crossbeam::channel::unbounded();
+        let (completed, results) = crossbeam::channel::unbounded();
+        tx.send(FlushWorkerTask::Build(task.clone())).unwrap();
+        tx.send(FlushWorkerTask::Build(task)).unwrap();
+        tx.send(FlushWorkerTask::Shutdown).unwrap();
+        let budget = crate::common::resource_budget::ResourceBudget::new(1024 * 1024);
+
+        // Act
+        FlushActor::worker_loop(&rx, &completed, &factory, &budget);
+        let first = results.recv().unwrap();
+        let second = results.recv().unwrap();
+
+        // Assert
+        let FlushWorkerResult::Build(first) = first else {
+            panic!("build result")
+        };
+        let FlushWorkerResult::Build(second) = second else {
+            panic!("build result")
+        };
+        assert!(first.result.is_err());
+        assert!(
+            first.reservation.is_none(),
+            "unconfirmed residue must retain its ledger token"
+        );
+        assert!(matches!(second.result, Err(MidgeError::ResourceLimit(_))));
+        assert!(!factory.compaction_scratch_cleanup_verified());
+        assert!(
+            fixture
+                .task
+                .hybrid_storage
+                .as_ref()
+                .unwrap()
+                .budget_snapshot()
+                .total_committed_bytes
+                > 0
+        );
+        assert_eq!(budget.used(), 0);
+        scenario.teardown();
+        Ok(())
+    }
+
+    #[test]
+    fn should_reject_conflicting_remote_bytes_without_publishing_flush_metadata() -> MidgeResult<()>
+    {
+        // Arrange
+        use crate::storage::cloud::CloudBackend;
+        let fixture = publication_fixture(usize::MAX)?;
+        let bytes = std::fs::read(&fixture.task.build.staging_path)?;
+        let mut corrupted = bytes.clone();
+        let middle = corrupted.len() / 2;
+        corrupted[middle] ^= 1;
+        let (tx, rx) = std::sync::mpsc::channel();
+        fixture.sst_backend.submit_put(
+            &crate::sst::object_key(&fixture.task.sst_name),
+            corrupted,
+            Vec::new(),
+            tx,
+        );
+        rx.recv().unwrap();
+        fixture.sst_backend.clear_history();
+        let budget = crate::common::resource_budget::ResourceBudget::new(1024 * 1024);
+
+        // Act
+        let result = FlushActor::publish_with_budget(&fixture.task, &budget);
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::Corruption(_))));
+        assert!(fixture.sst_backend.get_uploads().is_empty());
+        assert!(fixture.control_backend.get_uploads().is_empty());
+        assert_eq!(
+            std::fs::read(fixture.task.sst_dir.join(&fixture.task.sst_name))?,
+            bytes
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn should_retain_flush_output_when_upload_memory_cannot_be_admitted() -> MidgeResult<()> {
+        // Arrange
+        let fixture = publication_fixture(usize::MAX)?;
+        fixture
+            .task
+            .hybrid_storage
+            .as_ref()
+            .unwrap()
+            .enable_ephemeral_sst_cache(1024 * 1024);
+        let budget = crate::common::resource_budget::ResourceBudget::new(128 * 1024);
+
+        // Act
+        let result = FlushActor::publish_with_budget(&fixture.task, &budget);
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::ResourceLimit(_))));
+        assert!(fixture.task.sst_dir.join(&fixture.task.sst_name).exists());
+        assert!(fixture.sst_backend.get_uploads().is_empty());
+        assert!(fixture.control_backend.get_uploads().is_empty());
+        assert_eq!(budget.used(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn should_publish_ephemeral_flush_with_bounded_identity_readback() -> MidgeResult<()> {
+        // Arrange
+        let fixture = publication_fixture(usize::MAX)?;
+        fixture
+            .task
+            .hybrid_storage
+            .as_ref()
+            .unwrap()
+            .enable_ephemeral_sst_cache(1024 * 1024);
+        let budget = crate::common::resource_budget::ResourceBudget::new(1024 * 1024);
+
+        // Act
+        let result = FlushActor::publish_with_budget(&fixture.task, &budget)?;
+
+        // Assert
+        assert!(result.cloud_metadata_published);
+        assert_eq!(fixture.sst_backend.get_uploads().len(), 1);
+        // A compatibility adapter may still be unwinding its completion. The
+        // reservation must eventually return after all callbacks have finished.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while budget.used() != 0 && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(budget.used(), 0);
+        Ok(())
+    }
+
     #[test]
     fn should_preserve_reserved_names_when_publishing_an_earlier_sst() -> MidgeResult<()> {
         // Arrange
@@ -963,7 +1137,7 @@ mod tests {
             hybrid_storage: Some(Arc::clone(hybrid)),
         };
         let fs = Arc::new(crate::io::RealFs::new(&fixture.task.sst_dir)?);
-        let factory: Arc<dyn crate::sst::SstFactory> =
+        let factory: Arc<crate::sst::FsSstFactoryIo> =
             Arc::new(crate::sst::FsSstFactoryIo::new(fs, 64 * 1024));
 
         // Act
@@ -991,10 +1165,18 @@ mod tests {
         let final_path = fixture.task.sst_dir.join(&fixture.task.sst_name);
 
         // Act
-        let error = finalize_staged_sst(&fixture.task, &final_path)
-            .expect_err("directory durability failure must fail SST finalization");
+        let error = finalize_staged_sst(
+            &fixture.task,
+            &final_path,
+            &crate::common::resource_budget::ResourceBudget::new(DEFAULT_FLUSH_MEMORY_BYTES),
+        )
+        .expect_err("directory durability failure must fail SST finalization");
         sync_fs.set_sync_dir_failure(false);
-        finalize_staged_sst(&fixture.task, &final_path)?;
+        finalize_staged_sst(
+            &fixture.task,
+            &final_path,
+            &crate::common::resource_budget::ResourceBudget::new(DEFAULT_FLUSH_MEMORY_BYTES),
+        )?;
 
         // Assert
         assert!(matches!(error, MidgeError::Internal(_)));

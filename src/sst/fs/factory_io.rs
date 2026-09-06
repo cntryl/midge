@@ -30,6 +30,22 @@ pub struct FsSstFactoryIo {
 }
 
 impl FsSstFactoryIo {
+    pub(crate) fn create_for_flush(
+        &self,
+        budget: crate::common::resource_budget::ResourceBudget,
+    ) -> MidgeResult<Box<dyn DynSstWriter>> {
+        let mut writer = InMemorySstWriter::new_with_budget(
+            self.compression_policy.clone(),
+            self.block_size,
+            Some(budget.clone()),
+        );
+        writer.streaming = Some(StreamingState::new_tracked(
+            Some(budget),
+            Arc::clone(&self.scratch_outstanding),
+            self.compaction_scratch_directory.as_deref(),
+        )?);
+        Ok(Box::new(writer))
+    }
     /// Create a new factory with a custom filesystem implementation
     pub fn new(fs: Arc<dyn Fs>, block_size: usize) -> Self {
         Self {
@@ -1149,6 +1165,70 @@ impl SstFactory for FsSstFactoryIo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn should_stream_flush_larger_than_its_shared_buffer_allowance() -> MidgeResult<()> {
+        // Arrange
+        let directory = tempfile::tempdir()?;
+        let factory = FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 64 * 1024)
+            .with_compaction_scratch_directory(directory.path().to_path_buf())
+            .with_compression_policy(CompressionPolicy::Fixed(
+                crate::sst::compression::CompressionAlgo::None,
+            ));
+        let budget = crate::common::resource_budget::ResourceBudget::new(1024 * 1024);
+        let mut writer = factory.create_for_flush(budget.clone())?;
+        let value = vec![7; 16 * 1024];
+        let output = directory.path().join("large.sst");
+
+        // Act
+        for sequence in 0_u64..1024 {
+            writer.add_sorted_with_meta(
+                &sequence.to_be_bytes(),
+                Some(&value),
+                sequence,
+                0,
+                None,
+            )?;
+        }
+        crate::sst::fs::finish_writer_to_path(writer, &output)?;
+
+        // Assert
+        assert!(std::fs::metadata(&output)?.len() > 16 * 1024 * 1024);
+        assert!(budget.peak() > 0 && budget.peak() <= budget.limit());
+        assert_eq!(budget.used(), 0);
+        assert!(factory.compaction_scratch_cleanup_verified());
+        let reader = super::super::SstFileIo::open_with_real_fs(&output)?;
+        for sequence in 0_u64..1024 {
+            assert_eq!(
+                crate::sst::SstReader::get(&reader, &sequence.to_be_bytes())?.as_deref(),
+                Some(value.as_slice())
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn should_reject_flush_entry_when_shared_writer_memory_is_exhausted() -> MidgeResult<()> {
+        // Arrange
+        let directory = tempfile::tempdir()?;
+        let factory = FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096)
+            .with_compaction_scratch_directory(directory.path().to_path_buf());
+        let budget = crate::common::resource_budget::ResourceBudget::new(0);
+        let mut writer = factory.create_for_flush(budget.clone())?;
+
+        // Act
+        let result = writer.add_sorted_with_meta(b"key", Some(b"value"), 1, 0, None);
+        drop(writer);
+
+        // Assert
+        assert!(matches!(
+            result,
+            Err(crate::common::MidgeError::ResourceLimit(_))
+        ));
+        assert_eq!(budget.used(), 0);
+        assert!(factory.compaction_scratch_cleanup_verified());
+        Ok(())
+    }
 
     #[test]
     fn should_track_compaction_scratch_in_recoverable_directory_until_confirmed_cleanup(
