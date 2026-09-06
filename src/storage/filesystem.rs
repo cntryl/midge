@@ -23,6 +23,11 @@ use std::os::fd::AsRawFd;
 use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
 
+#[cfg(test)]
+mod range_identity_tests;
+#[cfg(windows)]
+mod windows;
+
 const CONDITIONAL_LOCK_STRIPES: usize = 64;
 static MUTATION_LOCKS: LazyLock<Vec<parking_lot::Mutex<()>>> = LazyLock::new(|| {
     (0..CONDITIONAL_LOCK_STRIPES)
@@ -47,7 +52,19 @@ impl Drop for ProcessMutationLock {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+struct ProcessMutationLock {
+    file: std::fs::File,
+}
+
+#[cfg(windows)]
+impl Drop for ProcessMutationLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 struct ProcessMutationLock;
 
 /// Filesystem-based storage backend
@@ -138,7 +155,27 @@ impl FileSystem {
             Ok(ProcessMutationLock { file })
         }
 
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            let lock_dir = self.base_path.join(".midge-locks");
+            fs::create_dir_all(&lock_dir).map_err(|error| {
+                format!("create lock directory {}: {error}", lock_dir.display())
+            })?;
+            let identity = full_path.to_string_lossy();
+            let lock_name = format!("{:08x}.lock", crc32c::crc32c(identity.as_bytes()));
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(lock_dir.join(lock_name))
+                .map_err(|error| format!("open conditional mutation lock: {error}"))?;
+            file.lock()
+                .map_err(|error| format!("acquire conditional mutation lock: {error}"))?;
+            Ok(ProcessMutationLock { file })
+        }
+
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = full_path;
             let lock_dir = self.base_path.join(".midge-locks");
@@ -171,6 +208,7 @@ fn range_io_error(error: &std::io::Error) -> String {
     }
 }
 
+#[cfg(not(windows))]
 fn range_metadata(metadata: &fs::Metadata) -> Result<StorageObjectMetadata, String> {
     if !metadata.is_file() {
         return Err("range reads require an ordinary immutable file".into());
@@ -196,6 +234,29 @@ fn range_metadata(metadata: &fs::Metadata) -> Result<StorageObjectMetadata, Stri
     {
         let _ = metadata;
         Err("filesystem backend lacks stable range identity on this platform".into())
+    }
+}
+
+fn range_file_metadata(file: &fs::File) -> Result<StorageObjectMetadata, String> {
+    #[cfg(windows)]
+    {
+        windows::range_metadata(file)
+    }
+    #[cfg(not(windows))]
+    {
+        range_metadata(&file.metadata().map_err(|error| range_io_error(&error))?)
+    }
+}
+
+fn range_path_metadata(path: &Path) -> Result<StorageObjectMetadata, String> {
+    #[cfg(windows)]
+    {
+        let file = fs::File::open(path).map_err(|error| range_io_error(&error))?;
+        range_file_metadata(&file)
+    }
+    #[cfg(not(windows))]
+    {
+        range_metadata(&fs::metadata(path).map_err(|error| range_io_error(&error))?)
     }
 }
 
@@ -250,8 +311,7 @@ impl StorageBackend for FileSystem {
             let path = self.full_path(key)?;
             let _lock = mutation_lock(&path);
             let _process_lock = self.acquire_process_lock(&path)?;
-            let metadata = fs::metadata(&path).map_err(|error| range_io_error(&error))?;
-            range_metadata(&metadata)
+            range_path_metadata(&path)
         })();
         let result = match result {
             Ok(metadata) => StorageOutcome::Ok(metadata),
@@ -286,8 +346,7 @@ impl StorageBackend for FileSystem {
             let _lock = mutation_lock(&path);
             let _process_lock = self.acquire_process_lock(&path)?;
             let mut file = fs::File::open(&path).map_err(|error| range_io_error(&error))?;
-            let metadata =
-                range_metadata(&file.metadata().map_err(|error| range_io_error(&error))?)?;
+            let metadata = range_file_metadata(&file)?;
             if !metadata.same_version(&expected) {
                 return Err("precondition failed: remote SST version changed".into());
             }
@@ -301,7 +360,7 @@ impl StorageBackend for FileSystem {
                 .map_err(|error| range_io_error(&error))?;
             file.read_exact(&mut bytes)
                 .map_err(|error| range_io_error(&error))?;
-            let after = range_metadata(&file.metadata().map_err(|error| range_io_error(&error))?)?;
+            let after = range_file_metadata(&file)?;
             if !after.same_version(&expected) {
                 return Err("precondition failed: remote SST changed during range read".into());
             }
@@ -554,10 +613,7 @@ impl StorageBackend for FileSystem {
             .find(|(name, _)| name.eq_ignore_ascii_case("if-match"))
         {
             let identity = if expected.trim_matches('"').starts_with("fs:") {
-                fs::metadata(&full_path)
-                    .map_err(|error| error.to_string())
-                    .and_then(|metadata| range_metadata(&metadata))
-                    .map(|metadata| metadata.etag)
+                range_path_metadata(&full_path).map(|metadata| metadata.etag)
             } else {
                 fs::read(&full_path)
                     .map_err(|error| error.to_string())
