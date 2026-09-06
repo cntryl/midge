@@ -1,5 +1,7 @@
 //! Resource-ratio qualification through the native S3 provider, in child processes.
 
+#[path = "operational/difficult.rs"]
+mod difficult;
 #[path = "operational/fixture.rs"]
 mod fixture;
 #[path = "operational/observe.rs"]
@@ -41,7 +43,15 @@ fn should_recover_cloud_backlog_after_complete_local_disk_loss() {
         run_child(&campaign, &config, "interrupted", 73);
         assert!(campaign.artifacts.join("checkpoint-reached").exists());
         std::fs::remove_dir_all(&campaign.cache).expect("lose interrupted recovery disk");
+        if std::env::var_os("MIDGE_QUALIFICATION_CHILD_RUNNER").is_some() {
+            run_child(&campaign, &config, "terminated", 137);
+            std::fs::remove_dir_all(&campaign.cache).expect("lose externally terminated disk");
+        }
         run_child(&campaign, &config, "recovered", 0);
+        if std::env::var_os("MIDGE_QUALIFICATION_CHILD_RUNNER").is_some() {
+            run_child(&campaign, &config, "disk-exhausted", 0);
+            run_child(&campaign, &config, "restored", 0);
+        }
         std::fs::remove_dir_all(&campaign.cache).expect("lose recovered working disk");
         run_child(&campaign, &config, "verified", 0);
 
@@ -91,6 +101,21 @@ fn should_execute_cloud_recovery_phase_in_child() {
 
     // Act
     let started = Instant::now();
+    if phase == "disk-exhausted" {
+        let Err(error) = Engine::open(campaign.options()) else {
+            panic!("engine unexpectedly opened on a deliberately full filesystem");
+        };
+        assert!(
+            error.to_string().contains("No space left on device"),
+            "unexpected exhaustion error: {error}"
+        );
+        std::fs::write(
+            campaign.artifacts.join("disk-exhausted-observed"),
+            error.to_string(),
+        )
+        .expect("exhaustion evidence");
+        return;
+    }
     let mut engine = open_after_expired_owner(&campaign);
     let recovery_ms = started.elapsed().as_millis();
     eprintln!("MIDGE_OPERATIONAL_PHASE {phase} opened in {recovery_ms} ms");
@@ -100,6 +125,7 @@ fn should_execute_cloud_recovery_phase_in_child() {
         exercise_accepted_writes(&engine, &campaign);
     } else {
         assert_accepted_writes(&engine);
+        difficult::verify(&engine, &campaign);
     }
     let metrics = engine.get_runtime_metrics().expect("runtime metrics");
     engine
@@ -185,6 +211,7 @@ fn assert_complete_state(engine: &Engine, campaign: &Campaign, has_workload: boo
 
 fn exercise_accepted_writes(engine: &Engine, campaign: &Campaign) {
     let mut progress = workload::exercise(engine, campaign);
+    difficult::exercise(engine, campaign, &mut progress);
     let cf = super::default_cf(engine);
     let mut tx = engine
         .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -220,7 +247,15 @@ fn assert_accepted_writes(engine: &Engine) {
 fn run_child(campaign: &Campaign, config: &Path, phase: &str, expected_code: i32) {
     let log = campaign.artifacts.join(format!("{phase}.log"));
     let output = std::fs::File::create(&log).expect("child log");
-    let mut child = Command::new(std::env::current_exe().expect("test binary"))
+    let executable = std::env::current_exe().expect("test binary");
+    let mut command = if let Some(runner) = std::env::var_os("MIDGE_QUALIFICATION_CHILD_RUNNER") {
+        let mut command = Command::new(runner);
+        command.arg("--child").arg(&executable);
+        command
+    } else {
+        Command::new(executable)
+    };
+    let mut child = command
         .args(["--exact", CHILD_TEST, "--ignored", "--nocapture"])
         .env(CHILD_ENV, config)
         .env(PHASE_ENV, phase)

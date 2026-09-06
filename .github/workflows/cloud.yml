@@ -2,6 +2,12 @@ name: Cloud Qualification
 
 on:
   workflow_dispatch:
+    inputs:
+      resource_profile:
+        description: Finite-filesystem and process-memory qualification profile
+        type: choice
+        options: [reduced, full]
+        default: reduced
   schedule:
     - cron: "47 2 * * *"
 
@@ -57,5 +63,48 @@ jobs:
           if-no-files-found: ignore
 
       - name: Stop Sqrzl emulator
+        if: always()
+        run: docker compose down -v
+
+  resources:
+    name: Bounded resources (${{ inputs.resource_profile || 'reduced' }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CARGO_INCREMENTAL: 0
+      MIDGE_QUALIFICATION_REVISION: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Update Rust toolchain
+        run: rustup update stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: resource-qualification
+      - name: Start external Sqrzl
+        run: docker compose up -d sqrzl
+      - name: Wait for Sqrzl health
+        run: curl --fail --retry 30 --retry-delay 1 --retry-all-errors http://127.0.0.1:9001/healthz
+      - name: Build qualification controller and engine child
+        run: |
+          mkdir -p target
+          cargo test --release --test cloud_provider_engine_qualification --features sqrzl-tests,failpoints --no-run --message-format=json > target/resource-build.json
+      - name: Enforce filesystem and process limits
+        env:
+          RESOURCE_PROFILE: ${{ inputs.resource_profile || 'reduced' }}
+        run: |
+          qualification_binary=$(python3 -c 'import json; print(next(v["executable"] for line in open("target/resource-build.json") if (v := json.loads(line)).get("executable")))')
+          if [ "$RESOURCE_PROFILE" = full ]; then
+            sudo --preserve-env=MIDGE_QUALIFICATION_REVISION python3 scripts/qualify_resources.py --binary "$qualification_binary" --artifacts "$GITHUB_WORKSPACE/target/resource-qualification-evidence" --disk-bytes 2147483648 --engine-bytes 268435456 --process-bytes 1073741824 --wal-bytes 5368709120 --value-bytes 32768 --timeout 7200
+          else
+            sudo --preserve-env=MIDGE_QUALIFICATION_REVISION python3 scripts/qualify_resources.py --binary "$qualification_binary" --artifacts "$GITHUB_WORKSPACE/target/resource-qualification-evidence"
+          fi
+      - name: Preserve resource evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: resource-qualification-${{ github.sha }}
+          path: target/resource-qualification-evidence
+          if-no-files-found: error
+      - name: Stop external Sqrzl
         if: always()
         run: docker compose down -v

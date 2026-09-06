@@ -69,7 +69,8 @@ impl Observation {
         let state = Arc::clone(&self.state);
         let artifact = campaign.artifacts.clone();
         let report = self.report(campaign, phase, 0, None);
-        let interrupt = phase == "interrupted";
+        let interrupt = matches!(phase, "interrupted" | "terminated");
+        let terminate = phase == "terminated";
         let telemetry = self.telemetry.clone();
         fail::cfg_callback("midge::recovery::after_checkpoint", move || {
             state.sample();
@@ -84,12 +85,29 @@ impl Observation {
                 report["process_peak_rss_bytes"] = process_peak_rss_bytes().into();
                 report["costs"] =
                     serde_json::to_value(telemetry.snapshot()).expect("cost snapshot");
-                save(&artifact.join("interrupted.json"), &report);
+                save(
+                    &artifact.join(if terminate {
+                        "terminated.json"
+                    } else {
+                        "interrupted.json"
+                    }),
+                    &report,
+                );
                 std::fs::write(
                     artifact.join("checkpoint-reached"),
                     b"durable recovery checkpoint",
                 )
                 .expect("exact crash boundary");
+                if terminate {
+                    std::fs::write(
+                        artifact.join("terminate-at-checkpoint"),
+                        b"ready for SIGKILL",
+                    )
+                    .expect("termination boundary");
+                    loop {
+                        std::thread::park();
+                    }
+                }
                 std::process::exit(73);
             }
         })
@@ -132,7 +150,7 @@ impl Observation {
         recovery_ms: u128,
         metrics: Option<&RuntimeMetricsSnapshot>,
     ) -> serde_json::Value {
-        let verified = matches!(phase, "recovered" | "verified");
+        let verified = matches!(phase, "recovered" | "verified" | "restored");
         json!({
             "schema_version": 2, "provider": "Sqrzl S3 protocol", "phase": phase,
             "profile": campaign.profile, "cloud_wal_bytes": campaign.actual_wal_bytes,
