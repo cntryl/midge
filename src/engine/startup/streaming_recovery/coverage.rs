@@ -1,7 +1,7 @@
 //! Preserve exact manifest coverage without retaining complete SST bytes.
 
 use crate::io::{Fs, FsPath};
-use crate::sst::SstFactory;
+use crate::sst::SstStateReader;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,11 +18,14 @@ pub(super) struct ReplayCoverage {
     reader_opens: Cell<u64>,
     verified_bytes: Cell<u64>,
     elapsed_ns: Cell<u64>,
+    block_hits: Cell<u64>,
+    block_misses: Cell<u64>,
+    block_peak: Cell<usize>,
 }
 
 struct CachedReader {
     name: String,
-    reader: Box<dyn crate::sst::traits::SstReaderExt>,
+    reader: crate::sst::fs::SstFileIo,
 }
 
 impl ReplayCoverage {
@@ -41,6 +44,9 @@ impl ReplayCoverage {
             reader_opens: Cell::new(0),
             verified_bytes: Cell::new(0),
             elapsed_ns: Cell::new(0),
+            block_hits: Cell::new(0),
+            block_misses: Cell::new(0),
+            block_peak: Cell::new(0),
         }
     }
 
@@ -64,6 +70,7 @@ impl ReplayCoverage {
             return false;
         }
         let mut highest: Option<KeyState> = None;
+        let mut highest_reservation = None;
         let mut ambiguous = false;
         for file in self
             .manifest
@@ -83,7 +90,30 @@ impl ReplayCoverage {
                     ambiguous |= highest.as_ref() != Some(&observed);
                 }
                 _ => {
+                    // Do not let the winning value pin an entire decoded block
+                    // while the next SST reader is constructed.
+                    let (observed, reservation) = match observed {
+                        KeyState::Value(value, sequence, expiration, operation) => {
+                            let Ok(reservation) = self
+                                .read_budget
+                                .reserve(value.len(), "recovery coverage value")
+                            else {
+                                return false;
+                            };
+                            (
+                                KeyState::Value(
+                                    bytes::Bytes::copy_from_slice(&value),
+                                    sequence,
+                                    expiration,
+                                    operation,
+                                ),
+                                Some(reservation),
+                            )
+                        }
+                        other => (other, None),
+                    };
                     highest = Some(observed);
+                    highest_reservation = reservation;
                     ambiguous = false;
                 }
             }
@@ -91,7 +121,7 @@ impl ReplayCoverage {
         if ambiguous {
             return false;
         }
-        match highest {
+        let covered = match highest {
             Some(KeyState::Value(value, sequence, expiration, operation)) => {
                 sequence > record.seq
                     || sequence == record.seq
@@ -102,7 +132,9 @@ impl ReplayCoverage {
             }
             Some(KeyState::Tombstone(sequence)) => sequence > record.seq,
             Some(KeyState::Absent) | None => false,
-        }
+        };
+        drop(highest_reservation);
+        covered
     }
 
     fn file_state(
@@ -116,18 +148,27 @@ impl ReplayCoverage {
         }
         // The old reader's reservations must be released before even the
         // next full-object verification buffer is allocated.
-        cached.take();
+        self.release_cached(&mut cached);
         let path = FsPath::new(crate::sst::object_key(&file.name));
         let mut verified = self.verified.borrow_mut();
         let fs = verified.entry(file.name.clone()).or_insert_with(|| {
             let crc = file.content_crc32c?;
             let pinned = self.fs.immutable_read_view(&path).ok()??;
+            let window = self
+                .read_budget
+                .limit()
+                .saturating_sub(self.read_budget.used())
+                .min(usize::try_from(file.size_bytes).unwrap_or(usize::MAX));
+            let _verification = self
+                .read_budget
+                .reserve(window, "recovery SST verification")
+                .ok()?;
             super::super::streaming_wal_fs::validate_wal_source(
                 pinned.as_ref(),
                 &path,
                 file.size_bytes,
                 crc,
-                self.read_budget.limit(),
+                window,
             )
             .ok()?;
             self.verified_bytes
@@ -135,13 +176,11 @@ impl ReplayCoverage {
             Some(pinned)
         });
         let fs = fs.as_ref()?;
-        let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(fs), self.read_budget.limit());
         let budget = self.read_budget.clone();
         self.reader_opens
             .set(self.reader_opens.get().saturating_add(1));
-        let reader = factory
-            .open_for_compaction(std::path::Path::new(&path.0), budget)
-            .ok()?;
+        let reader =
+            crate::sst::fs::SstFileIo::open_for_recovery(&path.0, Arc::clone(fs), budget).ok()?;
         // Recovery compares persisted expiration metadata. A forward wall-clock
         // jump must not turn an unrelated expired value into tombstone proof.
         // Expiration zero remains conservatively replayed at equal sequence.
@@ -154,15 +193,29 @@ impl ReplayCoverage {
     }
 
     pub(super) fn release_reader(&self) {
-        self.reader.borrow_mut().take();
+        self.release_cached(&mut self.reader.borrow_mut());
+    }
+
+    fn release_cached(&self, cached: &mut Option<CachedReader>) {
+        if let Some(cached) = cached.take() {
+            let (hits, misses, peak) = cached.reader.recovery_block_stats();
+            self.block_hits
+                .set(self.block_hits.get().saturating_add(hits));
+            self.block_misses
+                .set(self.block_misses.get().saturating_add(misses));
+            self.block_peak.set(self.block_peak.get().max(peak));
+        }
     }
 }
 
 impl Drop for ReplayCoverage {
     fn drop(&mut self) {
+        self.release_reader();
         tracing::info!(target: "midge::recovery", phase = "coverage",
             probes = self.probes.get(), reader_opens = self.reader_opens.get(),
             verified_sst_bytes = self.verified_bytes.get(), elapsed_ns = self.elapsed_ns.get(),
+            block_hits = self.block_hits.get(), block_misses = self.block_misses.get(),
+            retained_block_bytes_peak = self.block_peak.get() as u64,
             "recovery coverage work completed");
     }
 }
@@ -196,6 +249,7 @@ fn candidate(file: &crate::metadata::FileMeta, record: &crate::wal::WalRecord) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sst::SstFactory;
     use crate::wal::{WalOpKind, WalRecord};
     use bytes::Bytes;
 
@@ -238,8 +292,8 @@ mod tests {
         // Assert
         assert!(initial > 0, "must exercise real remote range reads");
         assert!(
-            subsequent <= 100,
-            "metadata must stay resident: {subsequent} ranges for 100 probes"
+            subsequent == 0,
+            "validated data block must stay resident: {subsequent} ranges for 100 probes"
         );
     }
 
@@ -280,7 +334,10 @@ mod tests {
         let one_reader_peak = single.read_budget.peak();
         assert!(one_reader_peak > 0);
         let (_dir, mut coverage) = fixture(&[(Some(b"value"), 7, None), (Some(b"value"), 7, None)]);
-        coverage.read_budget = crate::common::resource_budget::ResourceBudget::new(one_reader_peak);
+        // The incumbent comparison value remains live across SST readers;
+        // its five bytes are charged separately from either decoded block.
+        let budget = one_reader_peak + b"value".len();
+        coverage.read_budget = crate::common::resource_budget::ResourceBudget::new(budget);
 
         // Act
         for _ in 0..10 {
@@ -293,7 +350,7 @@ mod tests {
 
         // Assert
         assert_eq!(coverage.read_budget.used(), 0);
-        assert!(coverage.read_budget.peak() <= one_reader_peak);
+        assert!(coverage.read_budget.peak() <= budget);
         assert_eq!(coverage.reader_opens.get(), 20);
     }
 
@@ -443,7 +500,7 @@ mod tests {
     }
 
     #[test]
-    fn should_retain_wal_when_pinned_sst_identity_changes_after_first_proof() {
+    fn should_retain_wal_when_pinned_sst_identity_changes_before_block_reload() {
         // Arrange
         let (dir, coverage) = fixture(&[(Some(b"value"), 7, None)]);
         let record = put(7, None);
@@ -456,8 +513,14 @@ mod tests {
         bytes[0] ^= 1;
         std::fs::write(path, bytes).expect("replace immutable object");
         // Act
+        let cached = coverage.contains(&record);
+        coverage.release_reader();
         let covered = coverage.contains(&record);
         // Assert
+        assert!(
+            cached,
+            "validated bytes remain tied to the original immutable identity"
+        );
         assert!(
             !covered,
             "cached identity cannot prove replacement contents"

@@ -70,6 +70,7 @@ pub struct SstFileIo {
     range_tombstones: Vec<RangeTombstone>,
     metadata_budget: Option<crate::common::resource_budget::ResourceBudget>,
     metadata_reservations: Vec<crate::common::resource_budget::ResourceReservation>,
+    recovery_block: Option<std::sync::Mutex<recovery::RecoveryBlock>>,
 }
 
 enum BlockEntryCursor {
@@ -649,6 +650,7 @@ pub(crate) use progress::{SstCursorPosition, SstSummaryProgress};
 
 mod index;
 mod io;
+mod recovery;
 mod scan;
 mod state;
 
@@ -679,6 +681,7 @@ impl SstFileIo {
             range_tombstones: Vec::new(),
             metadata_budget: None,
             metadata_reservations: Vec::new(),
+            recovery_block: None,
         }
     }
 

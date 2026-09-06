@@ -420,7 +420,14 @@ impl FlushActor {
         let next_sst_seq = task
             .sst_seq
             .checked_add(1)
-            .ok_or_else(|| MidgeError::ResourceLimit("SST sequence space exhausted".to_string()))?;
+            .ok_or_else(|| MidgeError::ResourceLimit("SST sequence space exhausted".to_string()))?
+            .max(
+                manifest
+                    .next_sst_seqs
+                    .get(&task.build.identity.cf_id)
+                    .copied()
+                    .unwrap_or(1),
+            );
         match manifest
             .files
             .iter()
@@ -907,6 +914,30 @@ mod tests {
             sst_backend,
             control_backend,
         })
+    }
+
+    #[test]
+    fn should_preserve_reserved_names_when_publishing_an_earlier_sst() -> MidgeResult<()> {
+        // Arrange
+        let fixture = publication_fixture(usize::MAX)?;
+        let mut manifest = crate::metadata::Manifest::default();
+        manifest.next_sst_seqs.insert(0, 100);
+        crate::metadata::ManifestPersistence::save_snapshot_and_truncate_journal(
+            &fixture.task.db_path,
+            &manifest,
+        )
+        .map_err(MidgeError::Internal)?;
+
+        // Act
+        let delta = FlushActor::publish(&fixture.task)?;
+        let persisted = crate::metadata::ManifestPersistence::load(&fixture.task.db_path)
+            .map_err(MidgeError::Internal)?;
+
+        // Assert
+        assert_eq!(delta.next_sst_seq, 100);
+        assert_eq!(persisted.next_sst_seqs[&0], 100);
+        assert_eq!(persisted.files.len(), 1);
+        Ok(())
     }
 
     #[test]

@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 mod coverage;
+mod names;
 #[cfg(test)]
 mod tests;
 
@@ -92,6 +93,7 @@ impl CloudReplay {
             tx,
         )?;
         let mut memtables = HashMap::new();
+        let mut names = names::Names::new(self.limits);
         let replay_result = replay_wal_with_checkpoint(
             self.fs.as_ref(),
             &FsPath::new("wal"),
@@ -101,7 +103,7 @@ impl CloudReplay {
             self.limits,
             &mut |tables, _stats| {
                 coverage.release_reader();
-                checkpoint(materialized, &mut actor, &rx, tables)
+                checkpoint(materialized, &mut actor, &rx, tables, &mut names)
             },
         );
         let shutdown = actor.shutdown_and_join();
@@ -155,6 +157,7 @@ fn checkpoint(
     actor: &mut FlushActor,
     rx: &crossbeam::channel::Receiver<FlushWorkerResult>,
     tables: &mut HashMap<u32, Arc<SkipListMemtable>>,
+    names: &mut names::Names,
 ) -> MidgeResult<()> {
     let mut families: Vec<_> = tables.keys().copied().collect();
     families.sort_unstable();
@@ -165,7 +168,7 @@ fn checkpoint(
             continue;
         }
         super::timing::measure("recovery_checkpoint", || {
-            checkpoint_family(materialized, actor, rx, cf_id, table)
+            checkpoint_family(materialized, actor, rx, cf_id, table, names)
         })?;
         // Release replay memory only after the existing publication protocol
         // has made the new SST authoritative. Remote WAL remains retained.
@@ -180,8 +183,13 @@ fn checkpoint_family(
     rx: &crossbeam::channel::Receiver<FlushWorkerResult>,
     cf_id: u32,
     table: Arc<SkipListMemtable>,
+    names: &mut names::Names,
 ) -> MidgeResult<()> {
-    let sst_seq = reserve_sst_sequence(materialized, cf_id)?;
+    let sst_seq = super::timing::measure("recovery_checkpoint_reservation", || {
+        names.take(cf_id, |count| {
+            reserve_sst_sequence(materialized, cf_id, count)
+        })
+    })?;
     let state = &mut materialized.state;
     let config = &materialized.runtime_config;
     let identity = FlushIdentity {
@@ -197,51 +205,59 @@ fn checkpoint_family(
         "recovery-{}-{}.tmp",
         config.writer_epoch, identity.flush_id
     ));
-    actor.submit_build(identity, table, staging_path, config.hybrid_storage.clone())?;
-    let FlushWorkerResult::Build(completion) = rx
-        .recv()
-        .map_err(|error| MidgeError::Internal(format!("recovery flush build: {error}")))?
-    else {
-        return Err(MidgeError::Internal(
-            "unexpected recovery publication completion".into(),
-        ));
-    };
+    let completion = super::timing::measure("recovery_checkpoint_construction", || {
+        actor.submit_build(identity, table, staging_path, config.hybrid_storage.clone())?;
+        let FlushWorkerResult::Build(completion) = rx
+            .recv()
+            .map_err(|error| MidgeError::Internal(format!("recovery flush build: {error}")))?
+        else {
+            return Err(MidgeError::Internal(
+                "unexpected recovery publication completion".into(),
+            ));
+        };
+        Ok(completion)
+    })?;
     let file_meta = completion.result?;
     let identity = FlushIdentity {
         sequence: file_meta.largest_seq.unwrap_or(0),
         ..identity
     };
     let name = crate::sst::file_name(cf_id, 0, sst_seq);
-    actor.submit_publish(FlushPublishTask {
-        build: FlushBuildOutput {
-            identity,
-            staging_path: completion.staging_path,
-            file_meta,
-            reservation: completion.reservation,
-        },
-        sst_name: name.clone(),
-        sst_seq,
-        db_path: state.db_path.clone(),
-        sst_dir: state.sst_dir.clone(),
-        fs: Arc::clone(&state.fs),
-        recovery_policy: state.recovery_policy(),
-        hybrid_storage: config.hybrid_storage.clone(),
-        cloud_metadata_storage: config.cloud_metadata_storage.clone(),
-        lease_healthy: config.lease_healthy.clone(),
-        leader_store: config.leader_store.clone(),
-        leader_holder_id: config.leader_holder_id.clone(),
+    let completion = super::timing::measure("recovery_checkpoint_publication", || {
+        actor.submit_publish(FlushPublishTask {
+            build: FlushBuildOutput {
+                identity,
+                staging_path: completion.staging_path,
+                file_meta,
+                reservation: completion.reservation,
+            },
+            sst_name: name.clone(),
+            sst_seq,
+            db_path: state.db_path.clone(),
+            sst_dir: state.sst_dir.clone(),
+            fs: Arc::clone(&state.fs),
+            recovery_policy: state.recovery_policy(),
+            hybrid_storage: config.hybrid_storage.clone(),
+            cloud_metadata_storage: config.cloud_metadata_storage.clone(),
+            lease_healthy: config.lease_healthy.clone(),
+            leader_store: config.leader_store.clone(),
+            leader_holder_id: config.leader_holder_id.clone(),
+        })?;
+        let FlushWorkerResult::Publish(completion) = rx
+            .recv()
+            .map_err(|error| MidgeError::Internal(format!("recovery flush publish: {error}")))?
+        else {
+            return Err(MidgeError::Internal(
+                "unexpected recovery build completion".into(),
+            ));
+        };
+        Ok(completion)
     })?;
-    let FlushWorkerResult::Publish(completion) = rx
-        .recv()
-        .map_err(|error| MidgeError::Internal(format!("recovery flush publish: {error}")))?
-    else {
-        return Err(MidgeError::Internal(
-            "unexpected recovery build completion".into(),
-        ));
-    };
     let delta = completion.result?;
     actor.finish_pipeline();
-    install_checkpoint_output(materialized, &delta, completion.reservation)?;
+    super::timing::measure("recovery_checkpoint_installation", || {
+        install_checkpoint_output(materialized, &delta, completion.reservation)
+    })?;
     crate::failpoints::fail_point!("midge::recovery::after_checkpoint");
     Ok(())
 }
@@ -249,7 +265,8 @@ fn checkpoint_family(
 fn reserve_sst_sequence(
     materialized: &mut RuntimeStorageMaterialization,
     cf_id: u32,
-) -> MidgeResult<u64> {
+    count: u64,
+) -> MidgeResult<std::ops::Range<u64>> {
     validate_lease(&materialized.runtime_config)?;
     let state = &mut materialized.state;
     let config = &materialized.runtime_config;
@@ -259,12 +276,13 @@ fn reserve_sst_sequence(
         .get(&cf_id)
         .copied()
         .unwrap_or(1);
-    let next_seq = sst_seq.checked_add(1).ok_or_else(|| {
+    let next_seq = sst_seq.checked_add(count).ok_or_else(|| {
         MidgeError::ResourceLimit("SST sequence space exhausted during recovery".into())
     })?;
     // Reserve the immutable object name durably before any upload. A restart
     // must never reuse an orphan's name for a different replay partition.
     state.manifest.next_sst_seqs.insert(cf_id, next_seq);
+    crate::failpoints::fail_point!("midge::recovery::before_name_reservation");
     crate::metadata::ManifestPersistence::save_snapshot_and_truncate_journal(
         &state.db_path,
         &state.manifest,
@@ -279,7 +297,10 @@ fn reserve_sst_sequence(
         )?;
         validate_lease(config)?;
     }
-    Ok(sst_seq)
+    crate::failpoints::fail_point!("midge::recovery::after_name_reservation");
+    tracing::info!(target: "midge::recovery", phase = "name_reservation", reserved_names = count,
+        "recovery SST names reserved durably");
+    Ok(sst_seq..next_seq)
 }
 
 fn install_checkpoint_output(

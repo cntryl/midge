@@ -112,6 +112,7 @@ impl SstFileIo {
     ) -> MidgeResult<KeyState> {
         let mut offset = 0usize;
         let mut reconstructed_key = Vec::new();
+        let mut key_reservation = None;
         let mut best_state = KeyState::Absent;
 
         while offset < block_data.len() {
@@ -124,6 +125,22 @@ impl SstFileIo {
                 ));
             }
 
+            let key_len = shared_len
+                .checked_add(entry.key_delta.len())
+                .ok_or_else(|| {
+                    MidgeError::Corruption("SST reconstructed key length overflow".into())
+                })?;
+            if self.recovery_block.is_some() && key_len > reconstructed_key.capacity() {
+                let reservation = self
+                    .metadata_budget
+                    .as_ref()
+                    .map(|budget| budget.reserve(key_len, "recovery decoder key"))
+                    .transpose()?;
+                let mut replacement = Vec::with_capacity(key_len);
+                replacement.extend_from_slice(&reconstructed_key[..shared_len]);
+                reconstructed_key = replacement;
+                key_reservation = reservation;
+            }
             reconstructed_key.truncate(shared_len);
             reconstructed_key.extend_from_slice(entry.key_delta);
 
@@ -141,6 +158,8 @@ impl SstFileIo {
             offset = next_offset;
         }
 
+        drop(reconstructed_key);
+        drop(key_reservation);
         Ok(best_state)
     }
 
