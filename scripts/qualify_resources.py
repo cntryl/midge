@@ -52,7 +52,7 @@ def child() -> int:
                "--network", "host", "--memory", str(limit), "--memory-swap", str(limit),
                "--pids-limit", "256", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
                "--read-only", "--tmpfs", "/tmp:rw,nosuid,nodev,size=16777216"]
-    for path, readonly in [(binary, True), (config.parent, True), (artifacts, False), (mount, False)]:
+    for path, readonly in [(binary, True), (config.parent, True), (artifacts, False), (mount, False), (Path("/etc/ssl/certs"), True)]:
         command += ["--mount", f"type=bind,source={path},target={path}" + (",readonly" if readonly else "")]
     for key in ["MIDGE_OPERATIONAL_CHILD_CONFIG", "MIDGE_OPERATIONAL_CHILD_PHASE", "MIDGE_QUALIFICATION_REVISION"]:
         if key in os.environ:
