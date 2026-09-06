@@ -30,6 +30,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+mod file_publication;
 mod object_io;
 mod proofs;
 mod publication;

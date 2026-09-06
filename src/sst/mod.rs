@@ -204,6 +204,24 @@ impl SkipListMemtable {
         crate::common::time::is_expired_at(expiration, now_millis)
     }
 
+    pub(crate) fn visit_frozen_versions(
+        &self,
+        budget: &crate::common::resource_budget::ResourceBudget,
+        visit: impl FnMut(&[u8], Option<&[u8]>, u64, Option<u64>, u8) -> MidgeResult<()>,
+    ) -> MidgeResult<()> {
+        self.skiplist.visit_versions(budget, visit)
+    }
+
+    pub(crate) fn visit_frozen_ranges(
+        &self,
+        mut visit: impl FnMut(&crate::sst::types::RangeTombstone) -> MidgeResult<()>,
+    ) -> MidgeResult<()> {
+        for range in self.range_tombstones.read().iter() {
+            visit(range)?;
+        }
+        Ok(())
+    }
+
     /// Iterate over all entries in the memtable.
     ///
     /// Returns every version in sorted key order and newest-first sequence

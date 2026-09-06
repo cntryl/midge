@@ -58,6 +58,16 @@ values or mixed generations within one family snapshot. Atomic generation
 values scale with the profile's disk window rather than exceeding the smallest
 profile's indivisible-transaction admission limit.
 
+Four further families exercise simultaneous writers with incompressible values,
+eight overwrite rounds, point deletes and 64 older keys covered by dense range
+tombstones. The value size derives from the memtable target and engine budget
+(512 KiB reduced, 2 MiB full). The first 32 SST uploads are delayed by 100 ms.
+Concurrent scans validate complete values during maintenance; enforced profiles
+must observe flush and compaction in flight together. `flush-stress.json` records
+acknowledged transactions, scans, delayed uploads and overlap samples. Fresh
+processes check every live value, every deleted key and the complete keyset after
+capacity restoration and repeated local-state loss.
+
 The runner interrupts recovery at a durable checkpoint, removes local state,
 then separately sends SIGKILL to another child at a checkpoint. It verifies
 all fixture records after fresh-process recovery. After acknowledged workloads,
@@ -83,7 +93,7 @@ continue to constrain their respective buffers; their settings are unchanged.
 | Recovery proof readers | Reader metadata, compressed/decoded blocks, decoder keys, comparison values and verification windows share one proof budget. Verified-identity map entries now reserve a table-growth allowance too. Exhaustion replays WAL; checkpoints drop readers and the map. |
 | Tombstone metadata | Budgeted SST readers/writers retain metadata charges; memtable tombstones contribute to encoded admission bounds. The difficult workload verifies retention and reclamation semantics through compaction and recovery. |
 | WAL replay | Frame, pending-transaction and checkpoint bounds derive from configured recovery limits. Remote inventory is streamed and remains independent of local capacity. |
-| Flush | One serialized worker owns temporary construction/publication buffers; disk staging is admitted before output. Heap copies and codec workspace are included in the separately enforced process limit rather than represented as application cache capacity. |
+| Flush | One serialized worker shares an internal allowance across streaming construction, final metadata validation, upload and bounded identity-pinned readback. Disk admission precedes scratch creation; unconfirmed scratch cleanup retains its token and blocks further builds. Timed-out uploads retain heap charges until underlying ownership ends. |
 | Compaction | Shared execution budgets cover reader/writer/cursor working sets; storage tokens cover staging. Completion, cancellation and failed publication retain authoritative inputs and release temporary reservations. |
 | Transaction spill | Transaction thresholds control spill, database-local files participate in disk admission, and owner cleanup releases temporary files. Cloud-acknowledged records remain recoverable after spill cleanup or process loss. |
 
@@ -93,3 +103,16 @@ the corrected implementation declines proof and releases every coverage charge
 at the checkpoint boundary. Native crash tests and the enforced campaigns
 exercise success, cancellation and failure without changing persistent formats,
 public cache settings, or single-owner publication.
+
+The internal flush allowance is four times the existing memtable target plus
+1 MiB, with saturating arithmetic and checked admission. It is a scratch/copy
+allowance derived from admitted input, not a change to the engine pool setting
+or a promise that process memory equals that setting. Construction charges one
+key's version references, writer metadata, codec buffers and boundary keys;
+epoch pins are dropped before scratch I/O. Upload charges the source allocation
+and conservative provider copy workspace before reading the file. Native upload
+retries share an immutable transport body, and completion adapters separately
+charge their thread stacks. Identity-pinned readback uses 64 KiB windows; no
+second verification SST is created outside the database filesystem. Both cache
+modes keep conditional creation and the existing lease, intent and manifest
+publication barriers. Admission failure retains recoverable data.

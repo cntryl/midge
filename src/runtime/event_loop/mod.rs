@@ -272,11 +272,13 @@ impl EventLoop {
             crossbeam::channel::unbounded::<FlushWorkerResult>();
 
         // Create actors - they handle memory_mode internally
-        let flush_actor = FlushActor::new(
+        let flush_memory = FlushActor::memory_allowance(state.memtable_size_limit);
+        let flush_actor = FlushActor::new_with_memory_limit(
             &sst_dir,
             memory_mode,
             config.compression_policy.clone(),
             flush_completion_tx,
+            flush_memory,
         )?;
         let mut wal_actor = WalActor::new(
             wal_dir,
@@ -308,15 +310,7 @@ impl EventLoop {
         let mut event_loop = Self {
             state,
             flush_actor,
-            compaction_actor: {
-                let compaction_config = crate::compaction::LeveledCompactionConfig {
-                    l0_file_count_threshold: config.l0_compaction_trigger.max(1),
-                    ..Default::default()
-                };
-                let mut actor = CompactionActor::new_with_config(sst_factory, compaction_config);
-                actor.set_execution_limits(config.target_sst_size, config.compaction_memory_limit);
-                actor
-            },
+            compaction_actor: Self::create_compaction_actor(sst_factory, &config),
             wal_actor,
             #[cfg(test)]
             cloud_actor: CloudActor::new(),
@@ -372,6 +366,19 @@ impl EventLoop {
         event_loop.initialize_recovered_cloud_wal(&recovered_cloud_wal)?;
 
         Ok(event_loop)
+    }
+
+    fn create_compaction_actor(
+        sst_factory: Arc<dyn crate::sst::SstFactory>,
+        config: &super::RuntimeConfig,
+    ) -> CompactionActor {
+        let compaction_config = crate::compaction::LeveledCompactionConfig {
+            l0_file_count_threshold: config.l0_compaction_trigger.max(1),
+            ..Default::default()
+        };
+        let mut actor = CompactionActor::new_with_config(sst_factory, compaction_config);
+        actor.set_execution_limits(config.target_sst_size, config.compaction_memory_limit);
+        actor
     }
 
     fn apply_runtime_state_config(state: &mut RuntimeState, config: &super::RuntimeConfig) {

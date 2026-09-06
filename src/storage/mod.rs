@@ -69,6 +69,7 @@ pub(crate) mod filesystem;
 pub(crate) mod hybrid;
 pub(crate) mod providers;
 pub(crate) mod remote_sst;
+pub(crate) mod retained_callback;
 pub(crate) mod test_support;
 
 pub use hybrid::backend::HybridStorage;
@@ -292,6 +293,49 @@ pub type RangeReadCallback = std::sync::mpsc::Sender<Result<Vec<u8>, String>>;
 /// - No mutable references (works with Arc)
 /// - Ready for batching and pipelining
 pub trait StorageBackend: Send + Sync + 'static {
+    /// Keep a publication allowance alive until backend completion. Async
+    /// adapters must override this if their ordinary callback can time out
+    /// before the underlying upload has released its payload.
+    fn submit_write_with_reservation(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        timeout: std::time::Duration,
+        reservation: std::sync::Arc<crate::common::resource_budget::ResourceReservation>,
+        callback: StorageCallback,
+    ) {
+        match retained_callback::retain(callback.clone(), reservation) {
+            Ok(retained) => {
+                self.submit_write_with_headers_and_timeout(key, data, headers, timeout, retained);
+            }
+            Err(error) => {
+                let _ = callback.send(StorageEvent::WriteComplete {
+                    key: key.to_string(),
+                    result: StorageOutcome::Err(format!("retain upload completion: {error}")),
+                });
+            }
+        }
+    }
+    fn submit_read_range_with_reservation(
+        &self,
+        key: &str,
+        range: std::ops::Range<u64>,
+        expected: StorageObjectMetadata,
+        timeout: std::time::Duration,
+        reservation: std::sync::Arc<crate::common::resource_budget::ResourceReservation>,
+        callback: RangeReadCallback,
+    ) {
+        let start = range.start;
+        let end = range.end;
+        match retained_callback::retain(callback.clone(), reservation) {
+            Ok(retained) => self.submit_read_range(key, start, end, expected, timeout, retained),
+            Err(error) => {
+                let _ = callback.send(Err(format!("retain range completion: {error}")));
+            }
+        }
+    }
+
     /// Return a version usable by exact range reads without reading the body.
     /// Unsupported backends must not fall back to whole-object reads.
     fn submit_range_head(
