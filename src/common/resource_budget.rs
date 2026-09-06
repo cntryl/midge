@@ -11,6 +11,23 @@ struct ResourceBudgetInner {
     peak: AtomicUsize,
 }
 
+/// Measure serialized output without allocating a staging buffer.
+#[derive(Default)]
+pub(crate) struct ByteCounter(pub(crate) usize);
+
+impl std::io::Write for ByteCounter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self
+            .0
+            .checked_add(bytes.len())
+            .ok_or_else(|| std::io::Error::other("serialized length overflow"))?;
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Cloneable byte budget with RAII reservations.
 #[derive(Debug, Clone)]
 pub struct ResourceBudget {
@@ -88,6 +105,10 @@ pub struct ResourceReservation {
 }
 
 impl ResourceReservation {
+    pub(crate) fn belongs_to(&self, budget: &ResourceBudget) -> bool {
+        Arc::ptr_eq(&self.budget.inner, &budget.inner)
+    }
+
     pub(crate) fn reserve_related(
         &self,
         bytes: usize,

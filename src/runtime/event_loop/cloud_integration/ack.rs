@@ -127,6 +127,35 @@ impl EventLoop {
         }
     }
 
+    fn defer_cloud_ack_for_memory(
+        &mut self,
+        segment_id: u64,
+        max_sequence: u64,
+        error: &crate::common::MidgeError,
+        deadline: &OperationDeadline,
+    ) -> bool {
+        if matches!(error, crate::common::MidgeError::ResourceLimit(_))
+            && !deadline.is_expired()
+            && self
+                .hybrid_storage
+                .as_ref()
+                .and_then(|storage| storage.maintenance_memory())
+                .is_some_and(|budget| budget.used() > 0)
+        {
+            // Shared maintenance pressure is backpressure, not a failed
+            // accepted write. Keep its waiter and sealed local WAL while
+            // the existing upload backlog owns a bounded retry.
+            self.cloud_wal_prune_progress.discard_idle_proofs();
+            self.cloud_wal
+                .upload_backlog
+                .insert(segment_id, max_sequence);
+            self.cloud_wal.defer_upload_retry();
+            tracing::debug!(segment_id, %error, "deferring WAL catalog publication for shared memory");
+            return true;
+        }
+        false
+    }
+
     fn handle_storage_event_cloud_ack(
         &mut self,
         segment_id: u64,
@@ -151,6 +180,9 @@ impl EventLoop {
         if let Err(error) =
             self.verify_remote_wal_segment_before_ack(segment_id, max_sequence, &deadline)
         {
+            if self.defer_cloud_ack_for_memory(segment_id, max_sequence, &error, &deadline) {
+                return;
+            }
             self.handle_cloud_upload_failure(
                 segment_id,
                 &Self::cloud_ack_error("cloud WAL readback validation failed", error),

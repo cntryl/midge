@@ -17,8 +17,6 @@
 //! - `cloud_integration` — `CloudAsync` WAL flush, cloud ack/fail handling
 //! - `write_batch` — group commit write draining, backpressure / write stall
 
-use crate::runtime::hybrid_persistence::HybridPersistence;
-
 #[cfg(test)]
 mod cloud;
 mod cloud_integration;
@@ -360,6 +358,7 @@ impl EventLoop {
         };
 
         if let Some(storage) = config.hybrid_storage {
+            storage.configure_maintenance_memory(config.compaction_memory_limit);
             event_loop.set_hybrid_storage(storage);
         }
         event_loop.initialize_recovered_cloud_wal(&recovered_cloud_wal)?;
@@ -455,6 +454,7 @@ impl EventLoop {
     }
 
     pub fn set_hybrid_storage(&mut self, storage: Arc<crate::storage::HybridStorage>) {
+        storage.configure_maintenance_memory(self.compaction_actor.compaction_memory_limit());
         self.wal_actor.set_storage_budget(Arc::clone(&storage));
         self.hybrid_storage = Some(storage);
     }
@@ -944,8 +944,18 @@ impl EventLoop {
                 continue;
             }
             let path = self.state.sst_dir.join(sst_name);
-            let (data, _reservation) = Self::read_file_with_budget(&path, budget)?;
-            hybrid.write_sst_object(sst_name, data)?;
+            crate::sst::fs::SstFileIo::summarize_with_real_fs_for_compaction(
+                &path,
+                budget.clone(),
+            )?;
+            let (size, checksum) = crate::sst::fs::file_identity(&path)?;
+            hybrid.publish_immutable_file(
+                &crate::sst::object_key(sst_name),
+                &path,
+                size,
+                checksum,
+                budget,
+            )?;
         }
 
         Ok(())
@@ -971,29 +981,6 @@ impl EventLoop {
                 tracing::warn!(%error, sst_name = name, "retaining secondary SST cache after failed eviction");
             }
         }
-    }
-
-    fn read_file_with_budget(
-        path: &std::path::Path,
-        budget: &crate::common::resource_budget::ResourceBudget,
-    ) -> crate::common::MidgeResult<(Vec<u8>, crate::common::resource_budget::ResourceReservation)>
-    {
-        let file_size = std::fs::metadata(path)?.len();
-        let retained_bytes = usize::try_from(file_size).map_err(|_| {
-            crate::common::MidgeError::ResourceLimit(format!(
-                "compaction output '{}' exceeds addressable memory",
-                path.display()
-            ))
-        })?;
-        let reservation = budget.reserve(retained_bytes, "cloud SST upload buffer")?;
-        let bytes = std::fs::read(path)?;
-        if bytes.len() != retained_bytes {
-            return Err(crate::common::MidgeError::Corruption(format!(
-                "compaction output '{}' changed size before cloud upload",
-                path.display()
-            )));
-        }
-        Ok((bytes, reservation))
     }
 
     fn cloud_metadata_timeout(

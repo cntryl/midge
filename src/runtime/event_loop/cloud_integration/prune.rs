@@ -70,6 +70,28 @@ fn run_cloud_wal_prune_preflight(
 }
 
 impl EventLoop {
+    fn local_wal_prune_guard(
+        &self,
+        storage: &crate::storage::HybridStorage,
+        remote_snapshot: bool,
+    ) -> crate::common::MidgeResult<CloudWalPruneGuard> {
+        let guard = if remote_snapshot {
+            CloudWalPruneGuard::default()
+        } else {
+            let budget = storage
+                .maintenance_memory()
+                .expect("runtime maintenance budget");
+            CloudWalPruneGuard::admitted_local_snapshot(
+                &self.state.manifest,
+                &budget,
+                &self.cloud_wal_prune_progress,
+            )?
+        };
+        Ok(guard
+            .with_memory_limit(self.compaction_actor.compaction_memory_limit())
+            .with_progress(self.cloud_wal_prune_progress.clone()))
+    }
+
     pub(crate) fn prune_cloud_wal_segments_covered_by_manifest(&mut self) {
         self.reap_cloud_wal_prune_worker();
         if self.cloud_maintenance_enabled() && !self.cloud_maintenance.dispatching {
@@ -107,6 +129,7 @@ impl EventLoop {
         let Some(storage) = self.hybrid_storage.clone() else {
             return;
         };
+        storage.configure_maintenance_memory(self.compaction_actor.compaction_memory_limit());
         let Some(recovery_floor_segment) = self.state.cloud_wal_recovery_floor_segment() else {
             return;
         };
@@ -119,9 +142,13 @@ impl EventLoop {
         let metadata_snapshot = self.cloud_metadata_prune_snapshot_for_wal_cleanup();
         // Filesystem-backed cloud simulation has no separate control store;
         // its event-loop manifest is the authority snapshot guarded below.
-        let local_guard = CloudWalPruneGuard::new(self.state.manifest.clone(), None)
-            .with_memory_limit(self.compaction_actor.compaction_memory_limit())
-            .with_progress(self.cloud_wal_prune_progress.clone());
+        let local_guard = match self.local_wal_prune_guard(&storage, metadata_snapshot.is_some()) {
+            Ok(guard) => guard,
+            Err(error) => {
+                tracing::debug!(%error, "deferring WAL cleanup manifest admission");
+                return;
+            }
+        };
         let local_guard = if self.cloud_maintenance_enabled() {
             local_guard.with_work_quantum(CLOUD_WAL_PRUNE_WORK_QUANTUM)
         } else {

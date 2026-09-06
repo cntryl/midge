@@ -40,8 +40,39 @@ pub fn execute_compaction(
 pub(crate) type CompactionOutputSink<'a> =
     dyn Fn(&str, &Path, &crate::common::resource_budget::ResourceBudget) -> MidgeResult<()> + 'a;
 
+#[cfg(test)]
 pub(crate) fn execute_compaction_with_output_sink(
     plan: &CompactionPlan,
+    sst_factory: &dyn crate::sst::SstFactory,
+    output_dir: &Path,
+    abort_check: Option<&dyn Fn() -> bool>,
+    output_sink: Option<&CompactionOutputSink<'_>>,
+    output_size_limit: Option<usize>,
+) -> MidgeResult<Vec<String>> {
+    execute_compaction_at_target(
+        plan,
+        CompactionResources {
+            target_sst_size: plan.target_sst_size,
+            budget: crate::common::resource_budget::ResourceBudget::new(
+                plan.compaction_memory_limit,
+            ),
+        },
+        sst_factory,
+        output_dir,
+        abort_check,
+        output_sink,
+        output_size_limit,
+    )
+}
+
+pub(crate) struct CompactionResources {
+    pub(crate) target_sst_size: usize,
+    pub(crate) budget: crate::common::resource_budget::ResourceBudget,
+}
+
+pub(crate) fn execute_compaction_at_target(
+    plan: &CompactionPlan,
+    resources: CompactionResources,
     sst_factory: &dyn crate::sst::SstFactory,
     output_dir: &Path,
     abort_check: Option<&dyn Fn() -> bool>,
@@ -56,7 +87,8 @@ pub(crate) fn execute_compaction_with_output_sink(
     }
 
     // --- 1. Open bounded source streams and chained level spans ------------
-    let budget = crate::common::resource_budget::ResourceBudget::new(plan.compaction_memory_limit);
+    let budget = resources.budget;
+    let target_sst_size = resources.target_sst_size;
     let (source_files, target_files, source_level) =
         if plan.source_files.is_empty() && plan.target_files.is_empty() {
             // Compatibility for focused executor tests and explicitly constructed
@@ -85,7 +117,7 @@ pub(crate) fn execute_compaction_with_output_sink(
         plan.cf_id,
         plan.target_level,
         plan.output_seq,
-        bounded_partition_target_size(plan.target_sst_size, plan.compaction_memory_limit),
+        bounded_partition_target_size(target_sst_size, plan.compaction_memory_limit),
         inputs,
         &budget,
         executor::TombstoneGcPolicy {
@@ -100,9 +132,9 @@ pub(crate) fn execute_compaction_with_output_sink(
 }
 
 fn bounded_partition_target_size(configured_target: usize, compaction_pool: usize) -> usize {
-    // Publication currently hands one complete partition to the cloud adapter.
-    // Keep the ordinary rollover point below that hard reserve while leaving
-    // half the pool for the final block, metadata, and an indivisible key.
+    // Keep the ordinary writer target below the pool while leaving room for
+    // the final block, metadata and an indivisible key. The runtime selects
+    // any stricter target required by its publication policy.
     configured_target.min((compaction_pool / 2).max(1))
 }
 
@@ -265,7 +297,11 @@ mod tests {
         // Arrange
         let dir = tempdir()?;
         let fs = std::sync::Arc::new(crate::io::RealFs::new(dir.path())?);
-        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096).with_compression_policy(
+            crate::sst::compression::CompressionPolicy::Fixed(
+                crate::sst::compression::CompressionAlgo::None,
+            ),
+        );
         let mut writer = factory.create()?;
         for index in 0..100u32 {
             writer.add_with_meta(&index.to_be_bytes(), Some(&vec![b'v'; 1024]), 1, 0, None)?;
@@ -273,7 +309,8 @@ mod tests {
         writer.finish_to_path(&dir.path().join("input.sst"))?;
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(1);
         plan.input_files.push("input.sst".into());
-        plan.target_sst_size = 4096;
+        plan.target_sst_size = 32 * 1024;
+        plan.compaction_memory_limit = 128 * 1024;
         let drained = std::cell::RefCell::new(Vec::new());
         let sink =
             |name: &str, path: &Path, _budget: &crate::common::resource_budget::ResourceBudget| {
@@ -299,7 +336,7 @@ mod tests {
         )?;
 
         // Assert
-        assert!(outputs.len() > 1);
+        assert!(outputs.len() > 1 && outputs.len() < 100, "a non-cloud sink must preserve configured rollover instead of emitting one SST per key; outputs={}", outputs.len());
         assert_eq!(outputs, *drained.borrow());
         assert!(
             dir.path().join("input.sst").exists(),

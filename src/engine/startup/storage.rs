@@ -280,6 +280,9 @@ impl RuntimeStorageMaterialization {
         CloudStartupRecovery::reject_simulated_cloud_wal_without_catalog(
             &cloud.recovery_cloud_wal_dir,
         )?;
+        cloud
+            .hybrid_storage
+            .configure_maintenance_memory(opts.compaction_memory_pool_size());
         let wal_catalog = cloud
             .hybrid_storage
             .fence_cloud_wal_catalog(startup_lease.writer_epoch)?;
@@ -354,19 +357,16 @@ impl RuntimeStorageMaterialization {
         })
     }
 
-    fn materialize_cloud(
+    fn build_hybrid_storage(
         opts: &OpenOptions,
         storage_path: &StartupStoragePath,
-        startup_lease: &StartupLease,
-        cloud_runtime_policy: crate::runtime::CloudRuntimePolicy,
-        topology: &crate::config::CloudStorageTopology,
-    ) -> MidgeResult<Self> {
-        let stores = Self::build_cloud_class_stores(opts, topology)?;
-        let wal_storage = stores.wal;
-        let sst_storage = stores.sst;
-        let metadata_storage = stores.metadata;
-
-        CloudStartupRecovery::reject_cloud_wal_without_catalog(&wal_storage)?;
+        wal_storage: &Arc<crate::storage::cloud::CloudStorage>,
+        sst_storage: &Arc<crate::storage::cloud::CloudStorage>,
+        metadata_storage: &Arc<crate::storage::cloud::CloudStorage>,
+    ) -> MidgeResult<(
+        Arc<crate::storage::HybridStorage>,
+        crossbeam::channel::Receiver<crate::storage::StorageEvent>,
+    )> {
         let local_backend = Arc::new(crate::storage::filesystem::FileSystem::new(
             storage_path.db_path.join("hybrid_local"),
         )?);
@@ -388,6 +388,30 @@ impl RuntimeStorageMaterialization {
             ),
         );
         hybrid_storage.enable_ephemeral_sst_cache(opts.local_storage_budget_bytes());
+        hybrid_storage.configure_maintenance_memory(opts.compaction_memory_pool_size());
+        Ok((hybrid_storage, rx))
+    }
+
+    fn materialize_cloud(
+        opts: &OpenOptions,
+        storage_path: &StartupStoragePath,
+        startup_lease: &StartupLease,
+        cloud_runtime_policy: crate::runtime::CloudRuntimePolicy,
+        topology: &crate::config::CloudStorageTopology,
+    ) -> MidgeResult<Self> {
+        let stores = Self::build_cloud_class_stores(opts, topology)?;
+        let wal_storage = stores.wal;
+        let sst_storage = stores.sst;
+        let metadata_storage = stores.metadata;
+
+        CloudStartupRecovery::reject_cloud_wal_without_catalog(&wal_storage)?;
+        let (hybrid_storage, rx) = Self::build_hybrid_storage(
+            opts,
+            storage_path,
+            &wal_storage,
+            &sst_storage,
+            &metadata_storage,
+        )?;
         let sst_read_fs = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
             Arc::new(crate::io::RealFs::new(&storage_path.db_path)?),
             sst_storage.clone(),
