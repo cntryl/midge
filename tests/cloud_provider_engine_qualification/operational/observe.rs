@@ -21,10 +21,14 @@ struct State {
     peak: AtomicU64,
     checkpoints: AtomicU64,
     stopped: AtomicBool,
+    external_files: bool,
 }
 
 impl State {
     fn sample(&self) {
+        if self.external_files {
+            return;
+        }
         let bytes = file_bytes(&self.cache);
         self.peak.fetch_max(bytes, Ordering::Relaxed);
         assert!(
@@ -43,17 +47,20 @@ impl Observation {
             peak: AtomicU64::new(0),
             checkpoints: AtomicU64::new(0),
             stopped: AtomicBool::new(false),
+            external_files: std::env::var_os("MIDGE_RESOURCE_COLLECTOR_EXTERNAL").is_some(),
         });
         let sampler = Arc::clone(&state);
-        let worker = std::thread::spawn(move || {
-            while !sampler.stopped.load(Ordering::Acquire) {
-                sampler.sample();
-                std::thread::sleep(Duration::from_millis(5));
-            }
+        let worker = (!state.external_files).then(|| {
+            std::thread::spawn(move || {
+                while !sampler.stopped.load(Ordering::Acquire) {
+                    sampler.sample();
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            })
         });
         Self {
             state,
-            worker: Some(worker),
+            worker,
             telemetry: super::telemetry::Recorder::install(),
         }
     }
@@ -131,11 +138,9 @@ impl Observation {
         metrics: Option<&RuntimeMetricsSnapshot>,
     ) {
         self.state.stopped.store(true, Ordering::Release);
-        self.worker
-            .take()
-            .expect("sampler")
-            .join()
-            .expect("disk sampler must not fail");
+        if let Some(worker) = self.worker.take() {
+            worker.join().expect("disk sampler must not fail");
+        }
         self.state.sample();
         save(
             &campaign.artifacts.join(format!("{phase}.json")),
@@ -161,6 +166,7 @@ impl Observation {
             "revision": std::env::var("MIDGE_QUALIFICATION_REVISION").ok(),
             "debug_assertions": cfg!(debug_assertions),
             "peak_local_file_bytes": self.state.peak.load(Ordering::Relaxed),
+            "file_bytes_observed_externally": self.state.external_files,
             "checkpoints": self.state.checkpoints.load(Ordering::Relaxed),
             "process_peak_rss_bytes": process_peak_rss_bytes(),
             "runtime_metrics": metrics,

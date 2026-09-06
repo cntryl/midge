@@ -59,9 +59,11 @@ def child() -> int:
             command += ["--env", f"{key}={os.environ[key]}"]
     ready = artifacts / f"{phase}-runner-ready"
     ready.unlink(missing_ok=True)
+    command += ["--env", "MIDGE_RESOURCE_COLLECTOR_EXTERNAL=1"]
     command += [image, "/bin/sh", "-c", 'while [ ! -e "$1" ]; do sleep 0.02; done; shift; exec "$@"', "midge-child", str(ready), str(binary), *sys.argv[3:]]
     container = run(*command, capture_output=True).stdout.strip()
     peak_memory = 0
+    peak_files = 0
     minimum_available = os.statvfs(mount).f_bavail * os.statvfs(mount).f_frsize
     cgroup = None
     sampled_limit = None
@@ -99,6 +101,14 @@ def child() -> int:
                     peak_memory = max(peak_memory, read_number(cgroup / "memory.peak"))
                 except (FileNotFoundError, OSError):
                     pass  # The kernel removes the cgroup when the child exits.
+            files = 0
+            for path in Path(campaign["cache"]).rglob("*"):
+                try:
+                    if path.is_file():
+                        files += path.stat().st_size
+                except FileNotFoundError:
+                    pass
+            peak_files = max(peak_files, files)
             stat = os.statvfs(mount)
             minimum_available = min(minimum_available, stat.f_bavail * stat.f_frsize)
             if phase == "terminated" and (artifacts / "terminate-at-checkpoint").exists() and not killed:
@@ -110,6 +120,12 @@ def child() -> int:
             time.sleep(0.02)
         state = inspect(container)
         code = state["State"]["ExitCode"]
+        report_path = artifacts / f"{phase}.json"
+        if report_path.exists():
+            report = json.loads(report_path.read_text())
+            assert report["file_bytes_observed_externally"]
+            report["peak_local_file_bytes"] = peak_files
+            save(report_path, report)
         save(artifacts / f"{phase}-resources.json", {
             "engine_pool_bytes": campaign["profile"]["memory_bytes"],
             "process_cgroup_limit_bytes": limit,
@@ -123,6 +139,7 @@ def child() -> int:
             "exit_code": code,
             "elapsed_seconds": time.monotonic() - started,
             "collector_outside_child_limits": True,
+            "observed_peak_local_file_bytes": peak_files,
         })
         assert not state["State"]["OOMKilled"], f"{phase} exceeded its process memory limit"
         assert sampled_limit == limit and peak_memory > 0, "missing cgroup enforcement evidence"
