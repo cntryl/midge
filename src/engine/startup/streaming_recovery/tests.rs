@@ -685,7 +685,6 @@ fn should_flush_admitted_large_value_when_memtable_target_is_small() {
         .with_memtable_size_limit(8 * 1024)
         .storage_io_timeout(std::time::Duration::from_secs(1))
         .runtime_response_timeout(std::time::Duration::from_secs(5))
-        .shutdown_cloud_drain_timeout_for_testing(std::time::Duration::from_secs(1))
         .background_compaction(false)
         .build()
         .expect("small target with larger engine resources");
