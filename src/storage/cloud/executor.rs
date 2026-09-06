@@ -7,6 +7,8 @@ use std::sync::{
 };
 use std::time::Duration;
 
+mod observation;
+
 const MAX_TRANSIENT_RETRIES: u32 = 3;
 const TRANSIENT_BACKOFF_BASE_MS: u64 = 50;
 pub(crate) const MAX_CLOUD_RESPONSE_BYTES: usize = 1024 * 1024 * 1024;
@@ -485,53 +487,64 @@ impl CloudExecutor {
         client: Client,
         request: CloudRequest,
     ) -> Result<CloudResponse, RequestError> {
-        let mut builder = client.request(request.method.clone(), &request.url);
-        if let Some(timeout) = request.timeout {
-            builder = builder.timeout(timeout);
-        }
-        for (k, v) in &request.headers {
-            builder = builder.header(k, v);
-        }
-        if let Some(body) = request.body {
-            builder = builder.body(body);
-        }
-
-        match builder.send().await {
-            Ok(mut resp) => {
-                let status = resp.status().as_u16();
-                let headers = resp
-                    .headers()
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-                    .collect::<Vec<_>>();
-
-                if resp.content_length().is_some_and(|length| {
-                    length > u64::try_from(request.response_limit).unwrap_or(u64::MAX)
-                }) {
-                    return Err(RequestError::permanent(format!(
-                        "cloud response exceeds {} byte limit",
-                        request.response_limit
-                    )));
-                }
-
-                let mut body = Vec::new();
-                while let Some(chunk) = resp
-                    .chunk()
-                    .await
-                    .map_err(|err| RequestError::from_reqwest(&err))?
-                {
-                    append_bounded_response_chunk(&mut body, &chunk, request.response_limit)
-                        .map_err(RequestError::permanent)?;
-                }
-
-                Ok(CloudResponse {
-                    status,
-                    headers,
-                    body,
-                })
+        let mut observation = observation::Attempt::new(&request);
+        let result = async {
+            let mut builder = client.request(request.method.clone(), &request.url);
+            if let Some(timeout) = request.timeout {
+                builder = builder.timeout(timeout);
             }
-            Err(err) => Err(RequestError::from_reqwest(&err)),
+            for (k, v) in &request.headers {
+                builder = builder.header(k, v);
+            }
+            if let Some(body) = request.body {
+                builder = builder.body(body);
+            }
+
+            match builder.send().await {
+                Ok(mut resp) => {
+                    let status = resp.status().as_u16();
+                    observation.status = status;
+                    let headers = resp
+                        .headers()
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+                        .collect::<Vec<_>>();
+
+                    if resp.content_length().is_some_and(|length| {
+                        length > u64::try_from(request.response_limit).unwrap_or(u64::MAX)
+                    }) {
+                        return Err(RequestError::permanent(format!(
+                            "cloud response exceeds {} byte limit",
+                            request.response_limit
+                        )));
+                    }
+
+                    let mut body = Vec::new();
+                    while let Some(chunk) = resp
+                        .chunk()
+                        .await
+                        .map_err(|err| RequestError::from_reqwest(&err))?
+                    {
+                        observation.response_body_bytes = observation
+                            .response_body_bytes
+                            .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+                        append_bounded_response_chunk(&mut body, &chunk, request.response_limit)
+                            .map_err(RequestError::permanent)?;
+                    }
+
+                    Ok(CloudResponse {
+                        status,
+                        headers,
+                        body,
+                    })
+                }
+                Err(err) => Err(RequestError::from_reqwest(&err)),
+            }
         }
+        .await;
+        observation.transport_error = result.is_err();
+        observation.cancelled = false;
+        result
     }
 }
 
@@ -603,6 +616,7 @@ impl Drop for CloudExecutor {
 
 #[cfg(test)]
 mod tests {
+    mod observation;
     use super::{append_bounded_response_chunk, CloudExecutor, CloudRequest, CloudSigner};
     use crate::common::{MidgeError, MidgeResult};
     use crate::storage::cloud::{CloudError, CloudEvent, CloudOutcome};

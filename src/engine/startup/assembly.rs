@@ -104,24 +104,33 @@ impl EngineStartup {
     }
 
     pub(crate) fn open(opts: &OpenOptions) -> MidgeResult<Engine> {
+        super::timing::measure("open", || Self::open_profiled(opts))
+    }
+
+    fn open_profiled(opts: &OpenOptions) -> MidgeResult<Engine> {
         let start = std::time::Instant::now();
         Self::trace_open(opts);
         let storage_path = StartupStoragePath::resolve(opts.storage());
         storage_path.prepare();
 
-        let startup_lease = StartupLease::acquire(opts)?;
+        let startup_lease =
+            super::timing::measure("lease_acquisition", || StartupLease::acquire(opts))?;
         if !storage_path.memory_mode {
             crate::runtime::transaction_spill::cleanup_orphaned_runs(&storage_path.db_path)?;
         }
-        let materialized =
-            RuntimeStorageMaterialization::materialize(opts, &storage_path, &startup_lease)?;
-        let recovered = RuntimeRecoveryMaterialization::replay_and_repair(
-            materialized,
-            &storage_path.db_path,
-            opts.recovery_policy(),
-        )?;
+        let materialized = super::timing::measure("storage_materialization", || {
+            RuntimeStorageMaterialization::materialize(opts, &storage_path, &startup_lease)
+        })?;
+        let recovered = super::timing::measure("replay_and_repair", || {
+            RuntimeRecoveryMaterialization::replay_and_repair(
+                materialized,
+                &storage_path.db_path,
+                opts.recovery_policy(),
+            )
+        })?;
         startup_lease.ensure_healthy("before runtime creation")?;
-        let started = StartedRuntime::start(opts, recovered)?;
+        let started =
+            super::timing::measure("runtime_start", || StartedRuntime::start(opts, recovered))?;
 
         FacadeAssembly::assemble(opts, storage_path, startup_lease, started, start)
     }

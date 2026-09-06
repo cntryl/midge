@@ -21,6 +21,15 @@ pub(super) struct CloudReplay {
 }
 
 impl CloudReplay {
+    pub(super) fn read_window(
+        opts: &super::super::OpenOptions,
+        limits: StreamingReplayLimits,
+    ) -> usize {
+        (opts.memory_budget_bytes() / 64)
+            .min(limits.max_frame_bytes)
+            .max(1)
+    }
+
     pub(super) fn limits(opts: &super::super::OpenOptions) -> StreamingReplayLimits {
         let disk_window =
             usize::try_from(opts.local_storage_budget_bytes() / 2).unwrap_or(usize::MAX);
@@ -90,7 +99,10 @@ impl CloudReplay {
             policy,
             Some(&should_apply),
             self.limits,
-            &mut |tables, _stats| checkpoint(materialized, &mut actor, &rx, tables),
+            &mut |tables, _stats| {
+                coverage.release_reader();
+                checkpoint(materialized, &mut actor, &rx, tables)
+            },
         );
         let shutdown = actor.shutdown_and_join();
         let stats = replay_result?;
@@ -152,7 +164,9 @@ fn checkpoint(
             tables.remove(&cf_id);
             continue;
         }
-        checkpoint_family(materialized, actor, rx, cf_id, table)?;
+        super::timing::measure("recovery_checkpoint", || {
+            checkpoint_family(materialized, actor, rx, cf_id, table)
+        })?;
         // Release replay memory only after the existing publication protocol
         // has made the new SST authoritative. Remote WAL remains retained.
         tables.remove(&cf_id);

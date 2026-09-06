@@ -4,6 +4,8 @@
 mod fixture;
 #[path = "operational/observe.rs"]
 mod observe;
+#[path = "operational/telemetry.rs"]
+mod telemetry;
 #[path = "operational/workload.rs"]
 mod workload;
 
@@ -52,6 +54,21 @@ fn should_recover_cloud_backlog_after_complete_local_disk_loss() {
                 report["peak_local_file_bytes"].as_u64().expect("peak")
                     <= campaign.profile.local_bytes
             );
+            if phase != "interrupted" {
+                assert!(
+                    report["costs"]["http"]["GET_range"]["count"]
+                        .as_u64()
+                        .expect("range attempts")
+                        > 0
+                );
+                assert_eq!(report["costs"]["recovery_phases"]["wal_replay"]["count"], 1);
+                assert!(
+                    report["costs"]["recovery_phases"]["coverage"]["probes"]
+                        .as_u64()
+                        .expect("coverage probes")
+                        > 0
+                );
+            }
             println!("MIDGE_OPERATIONAL_EVIDENCE {report}");
         }
     }
