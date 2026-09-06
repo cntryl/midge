@@ -92,7 +92,7 @@ jobs:
         env:
           RESOURCE_PROFILE: ${{ inputs.resource_profile || 'reduced' }}
         run: |
-          qualification_binary=$(python3 -c 'import json; print(next(v["executable"] for line in open("target/resource-build.json") if (v := json.loads(line)).get("executable")))')
+          qualification_binary=$(python3 -c 'import json; print(next(v["executable"] for line in open("target/resource-build.json") if (v := json.loads(line)).get("executable") and v.get("target", {}).get("name") == "cloud_provider_engine_qualification")))')
           if [ "$RESOURCE_PROFILE" = full ]; then
             sudo --preserve-env=MIDGE_QUALIFICATION_REVISION python3 scripts/qualify_resources.py --binary "$qualification_binary" --artifacts "$GITHUB_WORKSPACE/target/resource-qualification-evidence" --disk-bytes 2147483648 --engine-bytes 268435456 --process-bytes 1073741824 --wal-bytes 5368709120 --value-bytes 32768 --timeout 7200
           else
