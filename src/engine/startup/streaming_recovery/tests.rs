@@ -145,7 +145,9 @@ fn should_exit_after_durable_recovery_checkpoint_in_child() {
     let peak_marker = path.join("checkpoint-working-peak");
     let checkpoint_path = path.clone();
     let checkpoint_peak = peak.clone();
-    fail::cfg_callback("midge::recovery::after_checkpoint", move || {
+    let crash_point = std::env::var("MIDGE_RECOVERY_CRASH_POINT")
+        .unwrap_or_else(|_| "midge::recovery::after_checkpoint".into());
+    fail::cfg_callback(&crash_point, move || {
         record_working_peak(&checkpoint_path, budget, &checkpoint_peak);
         if !observe_only {
             std::fs::write(
@@ -589,4 +591,86 @@ fn should_recover_accepted_spilled_transaction_above_configured_spill_threshold(
     recovered
         .shutdown(std::time::Duration::from_secs(30))
         .expect("shutdown recovered writer");
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_abandon_orphan_names_when_checkpoint_publication_is_interrupted() {
+    for crash_point in [
+        "midge::recovery::before_name_reservation",
+        "midge::recovery::after_name_reservation",
+        "midge::flush_worker::after_sst_finalization",
+        "midge::flush_worker::after_cloud_sst_upload",
+        "midge::flush_worker::before_manifest_persist",
+        "midge::flush_worker::after_control_metadata_publication",
+        "midge::recovery::after_checkpoint",
+    ] {
+        // Arrange
+        let dir = tempfile::tempdir().expect("crash directory");
+        let budget = 512 * 1024;
+        let opts = options(dir.path(), budget);
+        let mut engine = Engine::open(opts.clone()).expect("initialize metadata");
+        engine
+            .shutdown(std::time::Duration::from_secs(10))
+            .expect("shutdown seed");
+        drop(engine);
+        publish_wal(dir.path(), 384);
+
+        // Act
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--exact", "engine::startup::streaming_recovery::tests::should_exit_after_durable_recovery_checkpoint_in_child", "--nocapture"])
+            .env("MIDGE_RECOVERY_CHECKPOINT_CHILD", dir.path())
+            .env("MIDGE_RECOVERY_CHECKPOINT_BUDGET", budget.to_string())
+            .env("MIDGE_RECOVERY_CRASH_POINT", crash_point)
+            .output().expect("crash child");
+        assert_child_output(&output, 73);
+        let before =
+            crate::metadata::ManifestPersistence::load(dir.path()).expect("crashed manifest");
+        let cloud_ssts = dir.path().join("cloud_store/sst");
+        let orphan_names: Vec<_> = std::fs::read_dir(&cloud_ssts)
+            .into_iter()
+            .flatten()
+            .map(|entry| {
+                entry
+                    .expect("cloud SST")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|name| !before.files.iter().any(|file| &file.name == name))
+            .collect();
+        expire_child_lease(dir.path());
+        let mut recovered = Engine::open(opts).expect("resume interrupted recovery");
+
+        // Assert
+        let after =
+            crate::metadata::ManifestPersistence::load(dir.path()).expect("recovered manifest");
+        assert!(
+            after.next_sst_seqs.get(&0) >= before.next_sst_seqs.get(&0),
+            "{crash_point}"
+        );
+        for orphan in orphan_names {
+            assert!(
+                !after.files.iter().any(|file| file.name == orphan),
+                "orphan name reused after {crash_point}: {orphan}"
+            );
+        }
+        {
+            let tx = recovered
+                .begin_tx(0, TransactionMode::ReadOnly)
+                .expect("verify transaction");
+            for sequence in 1_u64..=384 {
+                assert_eq!(
+                    tx.get(&sequence.to_be_bytes())
+                        .expect("recovered value")
+                        .as_deref(),
+                    Some(value(sequence).as_slice()),
+                    "{crash_point}: {sequence}"
+                );
+            }
+        }
+        recovered
+            .shutdown(std::time::Duration::from_secs(30))
+            .expect("shutdown recovered engine");
+    }
 }

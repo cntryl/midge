@@ -251,6 +251,9 @@ impl SstFileIo {
         handle: &BlockHandle,
         file: Option<&dyn File>,
     ) -> MidgeResult<bytes::Bytes> {
+        if let Some(cache) = &self.recovery_block {
+            return self.read_recovery_block(cache, handle);
+        }
         let cache_key = CacheKey::for_data(self.sst_id, handle.offset);
         let read_metrics = self.diagnostics.sst_metrics();
 

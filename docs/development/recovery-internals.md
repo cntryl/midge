@@ -168,3 +168,36 @@ The recovery counters exposed by `Engine::get_recovery_metrics()` should confirm
 - [architecture.md](architecture.md)
 - [storage-invariants.md](storage-invariants.md)
 - [testing.md](testing.md)
+
+## Recovery read reuse and SST name reservations
+
+Cloud WAL coverage retains one pinned SST reader and one checksummed decoded
+block. The block is keyed by its handle within that immutable reader; it never
+uses the application's block cache. Compressed input, decoded output, decoder
+keys, verification windows, and retained comparison values share the recovery
+proof budget. Returned value slices retain their decoded-buffer reservation.
+When coverage compares overlapping SSTs, it copies only the incumbent value
+under a separate charge so the previous block can be released before opening
+the next reader. Checkpoint construction starts after reader and block release.
+A proof that does not fit, or an actual read that fails, preserves WAL replay.
+A cache hit uses already validated bytes from the pinned identity; after
+replacement or eviction, new reads must satisfy that original identity again.
+
+Each participating column family consumes a replay-local contiguous name range.
+Its length is `max(1, max_memtable_encoded_bytes /
+max(1, target_memtable_encoded_bytes))`. Recovery persists and mirrors the
+exclusive high-water mark before consuming a name. Restart discards unused
+names; checked addition rejects sequence exhaustion before an upload. Flush
+publication preserves the maximum reserved sequence in its journal and snapshot.
+Every checkpoint still uses the existing lease, intent, SST upload, manifest,
+and cloud metadata barriers, with serialized publication and installation.
+
+The `midge::recovery` tracing target reports coverage block hits, misses and
+retained-byte peak, durable `name_reservation` publications, and separate
+`recovery_checkpoint_reservation`, `recovery_checkpoint_construction`,
+`recovery_checkpoint_publication`, and `recovery_checkpoint_installation` times.
+The operational qualification collector also records provider requests and
+transferred bytes. `MIDGE_QUALIFICATION_MEMTABLE_BYTES` optionally sets a
+qualification-only memtable target and records it in the profile. Use the same
+value on both builds when comparing reservations: the original 128 MiB profile
+has a range length of one; a 1 MiB target exercises amortized reservations.

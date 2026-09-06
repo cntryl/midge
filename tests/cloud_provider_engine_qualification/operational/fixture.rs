@@ -19,6 +19,8 @@ pub(super) struct Profile {
     pub value_bytes: usize,
     pub segment_bytes: usize,
     pub timeout_seconds: u64,
+    #[serde(default)]
+    pub memtable_bytes: Option<usize>,
 }
 
 impl Profile {
@@ -40,6 +42,9 @@ impl Profile {
             ))
             .expect("segment size"),
             timeout_seconds: number("MIDGE_QUALIFICATION_TIMEOUT_SECONDS", 300),
+            memtable_bytes: std::env::var("MIDGE_QUALIFICATION_MEMTABLE_BYTES")
+                .ok()
+                .map(|value| value.parse().expect("memtable target")),
         };
         assert!(
             profile.wal_bytes > profile.local_bytes,
@@ -74,6 +79,7 @@ fn should_apply_profile_timeout_to_long_running_engine_requests() {
             value_bytes: 8 * 1024,
             segment_bytes: 32 * 1024 * 1024,
             timeout_seconds: 3600,
+            memtable_bytes: None,
         },
         cache: PathBuf::from("unused-qualification-cache"),
         artifacts: PathBuf::new(),
@@ -158,6 +164,10 @@ impl Campaign {
 
     pub fn options(&self) -> OpenOptions {
         let target = (self.profile.local_bytes / 8).min(self.profile.memory_bytes as u64 / 16);
+        let target = self
+            .profile
+            .memtable_bytes
+            .map_or(target, |bytes| bytes as u64);
         let builder = OpenOptions::cloud(
             self.cache.clone(),
             CloudStorageLocation::new(
