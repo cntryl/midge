@@ -67,7 +67,7 @@ mod engine;
 
 // Errors
 pub use cloud_layout::CloudObjectLayout;
-pub use common::{MidgeError, MidgeResult};
+pub use common::{MidgeError, MidgeResult, Severity};
 
 #[cfg(feature = "cloud-common")]
 pub(crate) mod cloud_preflight_backend {

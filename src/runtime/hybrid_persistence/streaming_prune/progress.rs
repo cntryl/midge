@@ -181,15 +181,29 @@ impl Progress {
         catalog: &WalPublicationCatalog,
         deadline: &crate::common::OperationDeadline,
     ) -> MidgeResult<()> {
-        if self.budget.limit()
-            != storage
-                .maintenance_memory()
-                .map_or(guard.memory_limit(), |budget| budget.limit())
-        {
+        // The caller's guard caps this retirement turn; the shared maintenance
+        // pool caps the engine. Honour both by admitting through a child of the
+        // shared pool: work too large for the guard is rejected outright, and
+        // whatever is admitted still occupies the shared total.
+        //
+        // Comparing by pool identity rather than by `limit()` matters — an
+        // unrelated pool that happens to share a limit would otherwise survive
+        // here and charge admissions nobody else can see.
+        // Keep the existing workspace only when it is still the right shape:
+        // the guard's limit, carved from the pool currently in force. Testing
+        // containment rather than equality is what lets a resumed turn keep its
+        // proof cache instead of rebuilding it every call.
+        let shared = storage.maintenance_memory();
+        let retained_workspace_is_current = self.budget.limit() == guard.memory_limit()
+            && shared
+                .as_ref()
+                .is_none_or(|shared| self.budget.is_within(shared));
+        if !retained_workspace_is_current {
             *self = Self {
-                budget: storage
-                    .maintenance_memory()
-                    .unwrap_or_else(|| ResourceBudget::new(guard.memory_limit())),
+                budget: shared.map_or_else(
+                    || ResourceBudget::new(guard.memory_limit()),
+                    |shared| shared.child(guard.memory_limit()),
+                ),
                 ..Self::default()
             };
         }

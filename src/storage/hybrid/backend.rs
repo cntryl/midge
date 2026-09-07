@@ -310,9 +310,13 @@ impl HybridStorage {
         }
     }
 
-    pub(crate) fn configure_maintenance_memory(&self, limit: usize) {
+    pub(crate) fn configure_maintenance_memory(
+        &self,
+        limit: usize,
+    ) -> crate::common::resource_budget::ResourceBudget {
         self.maintenance_memory
-            .get_or_init(|| crate::common::resource_budget::ResourceBudget::new(limit));
+            .get_or_init(|| crate::common::resource_budget::ResourceBudget::new(limit))
+            .clone()
     }
 
     pub(crate) fn maintenance_memory(

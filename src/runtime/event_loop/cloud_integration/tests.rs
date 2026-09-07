@@ -641,60 +641,14 @@ impl PostRetirementDependencyChangeBackend {
 }
 
 impl crate::storage::StorageBackend for PostRetirementDependencyChangeBackend {
-    fn submit_range_head(
-        &self,
-        key: &str,
-        timeout: Duration,
-        callback: crate::storage::StorageCallback,
-    ) {
-        crate::storage::StorageBackend::submit_range_head(
-            self.inner.as_ref(),
-            key,
-            timeout,
-            callback,
-        );
-    }
-    fn submit_read_range(
-        &self,
-        key: &str,
-        start: u64,
-        end: u64,
-        expected: crate::storage::StorageObjectMetadata,
-        timeout: Duration,
-        callback: crate::storage::RangeReadCallback,
-    ) {
-        crate::storage::StorageBackend::submit_read_range(
-            self.inner.as_ref(),
-            key,
-            start,
-            end,
-            expected,
-            timeout,
-            callback,
-        );
-    }
-
-    fn submit_read_with_metadata(
-        &self,
-        key: &str,
-        timeout: Duration,
-        callback: crate::storage::MetadataReadCallback,
-    ) {
-        crate::storage::StorageBackend::submit_read_with_metadata(
-            self.inner.as_ref(),
-            key,
-            timeout,
-            callback,
-        );
-    }
-
-    fn submit_read(&self, key: &str, callback: crate::storage::StorageCallback) {
-        crate::storage::StorageBackend::submit_read(self.inner.as_ref(), key, callback);
-    }
-
-    fn submit_write(&self, key: &str, data: Vec<u8>, callback: crate::storage::StorageCallback) {
-        crate::storage::StorageBackend::submit_write(self.inner.as_ref(), key, data, callback);
-    }
+    crate::storage::forward_storage_backend!(
+        inner;
+        submit_range_head,
+        submit_read_range,
+        submit_read_with_metadata,
+        submit_read,
+        submit_write,
+    );
 
     fn submit_write_with_headers(
         &self,
@@ -715,27 +669,12 @@ impl crate::storage::StorageBackend for PostRetirementDependencyChangeBackend {
         );
     }
 
-    fn submit_delete(&self, key: &str, callback: crate::storage::StorageCallback) {
-        crate::storage::StorageBackend::submit_delete(self.inner.as_ref(), key, callback);
-    }
-
-    fn submit_delete_with_headers(
-        &self,
-        key: &str,
-        headers: Vec<(String, String)>,
-        callback: crate::storage::StorageCallback,
-    ) {
-        crate::storage::StorageBackend::submit_delete_with_headers(
-            self.inner.as_ref(),
-            key,
-            headers,
-            callback,
-        );
-    }
-
-    fn submit_list(&self, prefix: &str, callback: crate::storage::StorageCallback) {
-        crate::storage::StorageBackend::submit_list(self.inner.as_ref(), prefix, callback);
-    }
+    crate::storage::forward_storage_backend!(
+        inner;
+        submit_delete,
+        submit_delete_with_headers,
+        submit_list,
+    );
 
     fn submit_head(&self, key: &str, callback: crate::storage::StorageCallback) {
         if self.catalog_retired.load(Ordering::SeqCst) && key.starts_with("sst/") {
@@ -865,85 +804,17 @@ impl crate::storage::StorageBackend for ArmedDelayedHeadStorageBackend {
             callback,
         );
     }
-    fn submit_read_range(
-        &self,
-        key: &str,
-        start: u64,
-        end: u64,
-        expected: crate::storage::StorageObjectMetadata,
-        timeout: Duration,
-        callback: crate::storage::RangeReadCallback,
-    ) {
-        crate::storage::StorageBackend::submit_read_range(
-            self.inner.as_ref(),
-            key,
-            start,
-            end,
-            expected,
-            timeout,
-            callback,
-        );
-    }
-
-    fn submit_read_with_metadata(
-        &self,
-        key: &str,
-        timeout: Duration,
-        callback: crate::storage::MetadataReadCallback,
-    ) {
-        crate::storage::StorageBackend::submit_read_with_metadata(
-            self.inner.as_ref(),
-            key,
-            timeout,
-            callback,
-        );
-    }
-
-    fn submit_read(&self, key: &str, callback: crate::storage::StorageCallback) {
-        crate::storage::StorageBackend::submit_read(self.inner.as_ref(), key, callback);
-    }
-
-    fn submit_write(&self, key: &str, data: Vec<u8>, callback: crate::storage::StorageCallback) {
-        crate::storage::StorageBackend::submit_write(self.inner.as_ref(), key, data, callback);
-    }
-
-    fn submit_write_with_headers(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        callback: crate::storage::StorageCallback,
-    ) {
-        crate::storage::StorageBackend::submit_write_with_headers(
-            self.inner.as_ref(),
-            key,
-            data,
-            headers,
-            callback,
-        );
-    }
-
-    fn submit_delete(&self, key: &str, callback: crate::storage::StorageCallback) {
-        crate::storage::StorageBackend::submit_delete(self.inner.as_ref(), key, callback);
-    }
-
-    fn submit_delete_with_headers(
-        &self,
-        key: &str,
-        headers: Vec<(String, String)>,
-        callback: crate::storage::StorageCallback,
-    ) {
-        crate::storage::StorageBackend::submit_delete_with_headers(
-            self.inner.as_ref(),
-            key,
-            headers,
-            callback,
-        );
-    }
-
-    fn submit_list(&self, prefix: &str, callback: crate::storage::StorageCallback) {
-        crate::storage::StorageBackend::submit_list(self.inner.as_ref(), prefix, callback);
-    }
+    crate::storage::forward_storage_backend!(
+        inner;
+        submit_read_range,
+        submit_read_with_metadata,
+        submit_read,
+        submit_write,
+        submit_write_with_headers,
+        submit_delete,
+        submit_delete_with_headers,
+        submit_list,
+    );
 
     fn submit_head(&self, key: &str, callback: crate::storage::StorageCallback) {
         if self.delay_next_head.swap(false, Ordering::SeqCst) {
@@ -961,60 +832,14 @@ impl crate::storage::StorageBackend for ArmedDelayedHeadStorageBackend {
 }
 
 impl crate::storage::StorageBackend for CommitThenBlockCatalogCasCallbackBackend {
-    fn submit_range_head(
-        &self,
-        key: &str,
-        timeout: Duration,
-        callback: crate::storage::StorageCallback,
-    ) {
-        crate::storage::StorageBackend::submit_range_head(
-            self.inner.as_ref(),
-            key,
-            timeout,
-            callback,
-        );
-    }
-    fn submit_read_range(
-        &self,
-        key: &str,
-        start: u64,
-        end: u64,
-        expected: crate::storage::StorageObjectMetadata,
-        timeout: Duration,
-        callback: crate::storage::RangeReadCallback,
-    ) {
-        crate::storage::StorageBackend::submit_read_range(
-            self.inner.as_ref(),
-            key,
-            start,
-            end,
-            expected,
-            timeout,
-            callback,
-        );
-    }
-
-    fn submit_read_with_metadata(
-        &self,
-        key: &str,
-        timeout: Duration,
-        callback: crate::storage::MetadataReadCallback,
-    ) {
-        crate::storage::StorageBackend::submit_read_with_metadata(
-            self.inner.as_ref(),
-            key,
-            timeout,
-            callback,
-        );
-    }
-
-    fn submit_read(&self, key: &str, callback: crate::storage::StorageCallback) {
-        crate::storage::StorageBackend::submit_read(self.inner.as_ref(), key, callback);
-    }
-
-    fn submit_write(&self, key: &str, data: Vec<u8>, callback: crate::storage::StorageCallback) {
-        crate::storage::StorageBackend::submit_write(self.inner.as_ref(), key, data, callback);
-    }
+    crate::storage::forward_storage_backend!(
+        inner;
+        submit_range_head,
+        submit_read_range,
+        submit_read_with_metadata,
+        submit_read,
+        submit_write,
+    );
 
     fn submit_write_with_headers(
         &self,
@@ -1063,88 +888,24 @@ impl crate::storage::StorageBackend for CommitThenBlockCatalogCasCallbackBackend
         );
     }
 
-    fn submit_delete(&self, key: &str, callback: crate::storage::StorageCallback) {
-        crate::storage::StorageBackend::submit_delete(self.inner.as_ref(), key, callback);
-    }
-
-    fn submit_delete_with_headers(
-        &self,
-        key: &str,
-        headers: Vec<(String, String)>,
-        callback: crate::storage::StorageCallback,
-    ) {
-        crate::storage::StorageBackend::submit_delete_with_headers(
-            self.inner.as_ref(),
-            key,
-            headers,
-            callback,
-        );
-    }
-
-    fn submit_list(&self, prefix: &str, callback: crate::storage::StorageCallback) {
-        crate::storage::StorageBackend::submit_list(self.inner.as_ref(), prefix, callback);
-    }
-
-    fn submit_head(&self, key: &str, callback: crate::storage::StorageCallback) {
-        crate::storage::StorageBackend::submit_head(self.inner.as_ref(), key, callback);
-    }
+    crate::storage::forward_storage_backend!(
+        inner;
+        submit_delete,
+        submit_delete_with_headers,
+        submit_list,
+        submit_head,
+    );
 }
 
 impl crate::storage::StorageBackend for BudgetConsumingDdlBackend {
-    fn submit_range_head(
-        &self,
-        key: &str,
-        timeout: Duration,
-        callback: crate::storage::StorageCallback,
-    ) {
-        crate::storage::StorageBackend::submit_range_head(
-            self.inner.as_ref(),
-            key,
-            timeout,
-            callback,
-        );
-    }
-    fn submit_read_range(
-        &self,
-        key: &str,
-        start: u64,
-        end: u64,
-        expected: crate::storage::StorageObjectMetadata,
-        timeout: Duration,
-        callback: crate::storage::RangeReadCallback,
-    ) {
-        crate::storage::StorageBackend::submit_read_range(
-            self.inner.as_ref(),
-            key,
-            start,
-            end,
-            expected,
-            timeout,
-            callback,
-        );
-    }
-
-    fn submit_read_with_metadata(
-        &self,
-        key: &str,
-        timeout: Duration,
-        callback: crate::storage::MetadataReadCallback,
-    ) {
-        crate::storage::StorageBackend::submit_read_with_metadata(
-            self.inner.as_ref(),
-            key,
-            timeout,
-            callback,
-        );
-    }
-
-    fn submit_read(&self, key: &str, callback: crate::storage::StorageCallback) {
-        crate::storage::StorageBackend::submit_read(self.inner.as_ref(), key, callback);
-    }
-
-    fn submit_write(&self, key: &str, data: Vec<u8>, callback: crate::storage::StorageCallback) {
-        crate::storage::StorageBackend::submit_write(self.inner.as_ref(), key, data, callback);
-    }
+    crate::storage::forward_storage_backend!(
+        inner;
+        submit_range_head,
+        submit_read_range,
+        submit_read_with_metadata,
+        submit_read,
+        submit_write,
+    );
 
     fn submit_write_with_headers(
         &self,
@@ -1201,27 +962,12 @@ impl crate::storage::StorageBackend for BudgetConsumingDdlBackend {
         self.submit_write_with_headers(key, data, headers, callback);
     }
 
-    fn submit_delete(&self, key: &str, callback: crate::storage::StorageCallback) {
-        crate::storage::StorageBackend::submit_delete(self.inner.as_ref(), key, callback);
-    }
-
-    fn submit_delete_with_headers(
-        &self,
-        key: &str,
-        headers: Vec<(String, String)>,
-        callback: crate::storage::StorageCallback,
-    ) {
-        crate::storage::StorageBackend::submit_delete_with_headers(
-            self.inner.as_ref(),
-            key,
-            headers,
-            callback,
-        );
-    }
-
-    fn submit_list(&self, prefix: &str, callback: crate::storage::StorageCallback) {
-        crate::storage::StorageBackend::submit_list(self.inner.as_ref(), prefix, callback);
-    }
+    crate::storage::forward_storage_backend!(
+        inner;
+        submit_delete,
+        submit_delete_with_headers,
+        submit_list,
+    );
 
     fn submit_head(&self, key: &str, callback: crate::storage::StorageCallback) {
         if key == crate::runtime::ddl::REMOTE_DDL_REGISTRY_KEY
@@ -1240,76 +986,15 @@ impl crate::storage::StorageBackend for BudgetConsumingDdlBackend {
 }
 
 impl crate::storage::StorageBackend for DelayedCommitDdlBackend {
-    fn submit_range_head(
-        &self,
-        key: &str,
-        timeout: Duration,
-        callback: crate::storage::StorageCallback,
-    ) {
-        crate::storage::StorageBackend::submit_range_head(
-            self.inner.as_ref(),
-            key,
-            timeout,
-            callback,
-        );
-    }
-    fn submit_read_range(
-        &self,
-        key: &str,
-        start: u64,
-        end: u64,
-        expected: crate::storage::StorageObjectMetadata,
-        timeout: Duration,
-        callback: crate::storage::RangeReadCallback,
-    ) {
-        crate::storage::StorageBackend::submit_read_range(
-            self.inner.as_ref(),
-            key,
-            start,
-            end,
-            expected,
-            timeout,
-            callback,
-        );
-    }
-
-    fn submit_read_with_metadata(
-        &self,
-        key: &str,
-        timeout: Duration,
-        callback: crate::storage::MetadataReadCallback,
-    ) {
-        crate::storage::StorageBackend::submit_read_with_metadata(
-            self.inner.as_ref(),
-            key,
-            timeout,
-            callback,
-        );
-    }
-
-    fn submit_read(&self, key: &str, callback: crate::storage::StorageCallback) {
-        crate::storage::StorageBackend::submit_read(self.inner.as_ref(), key, callback);
-    }
-
-    fn submit_write(&self, key: &str, data: Vec<u8>, callback: crate::storage::StorageCallback) {
-        crate::storage::StorageBackend::submit_write(self.inner.as_ref(), key, data, callback);
-    }
-
-    fn submit_write_with_headers(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        callback: crate::storage::StorageCallback,
-    ) {
-        crate::storage::StorageBackend::submit_write_with_headers(
-            self.inner.as_ref(),
-            key,
-            data,
-            headers,
-            callback,
-        );
-    }
+    crate::storage::forward_storage_backend!(
+        inner;
+        submit_range_head,
+        submit_read_range,
+        submit_read_with_metadata,
+        submit_read,
+        submit_write,
+        submit_write_with_headers,
+    );
 
     fn submit_write_with_headers_and_timeout(
         &self,
@@ -1362,31 +1047,13 @@ impl crate::storage::StorageBackend for DelayedCommitDdlBackend {
         );
     }
 
-    fn submit_delete(&self, key: &str, callback: crate::storage::StorageCallback) {
-        crate::storage::StorageBackend::submit_delete(self.inner.as_ref(), key, callback);
-    }
-
-    fn submit_delete_with_headers(
-        &self,
-        key: &str,
-        headers: Vec<(String, String)>,
-        callback: crate::storage::StorageCallback,
-    ) {
-        crate::storage::StorageBackend::submit_delete_with_headers(
-            self.inner.as_ref(),
-            key,
-            headers,
-            callback,
-        );
-    }
-
-    fn submit_list(&self, prefix: &str, callback: crate::storage::StorageCallback) {
-        crate::storage::StorageBackend::submit_list(self.inner.as_ref(), prefix, callback);
-    }
-
-    fn submit_head(&self, key: &str, callback: crate::storage::StorageCallback) {
-        crate::storage::StorageBackend::submit_head(self.inner.as_ref(), key, callback);
-    }
+    crate::storage::forward_storage_backend!(
+        inner;
+        submit_delete,
+        submit_delete_with_headers,
+        submit_list,
+        submit_head,
+    );
 }
 
 impl BlockingDeleteStorageBackend {
@@ -1420,76 +1087,15 @@ impl BlockingDeleteStorageBackend {
 }
 
 impl crate::storage::StorageBackend for BlockingDeleteStorageBackend {
-    fn submit_range_head(
-        &self,
-        key: &str,
-        timeout: Duration,
-        callback: crate::storage::StorageCallback,
-    ) {
-        crate::storage::StorageBackend::submit_range_head(
-            self.inner.as_ref(),
-            key,
-            timeout,
-            callback,
-        );
-    }
-    fn submit_read_range(
-        &self,
-        key: &str,
-        start: u64,
-        end: u64,
-        expected: crate::storage::StorageObjectMetadata,
-        timeout: Duration,
-        callback: crate::storage::RangeReadCallback,
-    ) {
-        crate::storage::StorageBackend::submit_read_range(
-            self.inner.as_ref(),
-            key,
-            start,
-            end,
-            expected,
-            timeout,
-            callback,
-        );
-    }
-
-    fn submit_read_with_metadata(
-        &self,
-        key: &str,
-        timeout: Duration,
-        callback: crate::storage::MetadataReadCallback,
-    ) {
-        crate::storage::StorageBackend::submit_read_with_metadata(
-            self.inner.as_ref(),
-            key,
-            timeout,
-            callback,
-        );
-    }
-
-    fn submit_read(&self, key: &str, callback: crate::storage::StorageCallback) {
-        crate::storage::StorageBackend::submit_read(self.inner.as_ref(), key, callback);
-    }
-
-    fn submit_write(&self, key: &str, data: Vec<u8>, callback: crate::storage::StorageCallback) {
-        crate::storage::StorageBackend::submit_write(self.inner.as_ref(), key, data, callback);
-    }
-
-    fn submit_write_with_headers(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        callback: crate::storage::StorageCallback,
-    ) {
-        crate::storage::StorageBackend::submit_write_with_headers(
-            self.inner.as_ref(),
-            key,
-            data,
-            headers,
-            callback,
-        );
-    }
+    crate::storage::forward_storage_backend!(
+        inner;
+        submit_range_head,
+        submit_read_range,
+        submit_read_with_metadata,
+        submit_read,
+        submit_write,
+        submit_write_with_headers,
+    );
 
     fn submit_delete(&self, key: &str, callback: crate::storage::StorageCallback) {
         self.block_matching_delete(key);
@@ -1511,13 +1117,11 @@ impl crate::storage::StorageBackend for BlockingDeleteStorageBackend {
         );
     }
 
-    fn submit_list(&self, prefix: &str, callback: crate::storage::StorageCallback) {
-        crate::storage::StorageBackend::submit_list(self.inner.as_ref(), prefix, callback);
-    }
-
-    fn submit_head(&self, key: &str, callback: crate::storage::StorageCallback) {
-        crate::storage::StorageBackend::submit_head(self.inner.as_ref(), key, callback);
-    }
+    crate::storage::forward_storage_backend!(
+        inner;
+        submit_list,
+        submit_head,
+    );
 }
 
 struct FailOnceDeleteStorageBackend {
@@ -1548,76 +1152,15 @@ impl FailOnceDeleteStorageBackend {
 }
 
 impl crate::storage::StorageBackend for FailOnceDeleteStorageBackend {
-    fn submit_range_head(
-        &self,
-        key: &str,
-        timeout: Duration,
-        callback: crate::storage::StorageCallback,
-    ) {
-        crate::storage::StorageBackend::submit_range_head(
-            self.inner.as_ref(),
-            key,
-            timeout,
-            callback,
-        );
-    }
-    fn submit_read_range(
-        &self,
-        key: &str,
-        start: u64,
-        end: u64,
-        expected: crate::storage::StorageObjectMetadata,
-        timeout: Duration,
-        callback: crate::storage::RangeReadCallback,
-    ) {
-        crate::storage::StorageBackend::submit_read_range(
-            self.inner.as_ref(),
-            key,
-            start,
-            end,
-            expected,
-            timeout,
-            callback,
-        );
-    }
-
-    fn submit_read_with_metadata(
-        &self,
-        key: &str,
-        timeout: Duration,
-        callback: crate::storage::MetadataReadCallback,
-    ) {
-        crate::storage::StorageBackend::submit_read_with_metadata(
-            self.inner.as_ref(),
-            key,
-            timeout,
-            callback,
-        );
-    }
-
-    fn submit_read(&self, key: &str, callback: crate::storage::StorageCallback) {
-        crate::storage::StorageBackend::submit_read(self.inner.as_ref(), key, callback);
-    }
-
-    fn submit_write(&self, key: &str, data: Vec<u8>, callback: crate::storage::StorageCallback) {
-        crate::storage::StorageBackend::submit_write(self.inner.as_ref(), key, data, callback);
-    }
-
-    fn submit_write_with_headers(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        callback: crate::storage::StorageCallback,
-    ) {
-        crate::storage::StorageBackend::submit_write_with_headers(
-            self.inner.as_ref(),
-            key,
-            data,
-            headers,
-            callback,
-        );
-    }
+    crate::storage::forward_storage_backend!(
+        inner;
+        submit_range_head,
+        submit_read_range,
+        submit_read_with_metadata,
+        submit_read,
+        submit_write,
+        submit_write_with_headers,
+    );
 
     fn submit_delete(&self, key: &str, callback: crate::storage::StorageCallback) {
         if self.should_fail_delete(key) {
@@ -1657,13 +1200,7 @@ impl crate::storage::StorageBackend for FailOnceDeleteStorageBackend {
         );
     }
 
-    fn submit_list(&self, prefix: &str, callback: crate::storage::StorageCallback) {
-        crate::storage::StorageBackend::submit_list(self.inner.as_ref(), prefix, callback);
-    }
-
-    fn submit_head(&self, key: &str, callback: crate::storage::StorageCallback) {
-        crate::storage::StorageBackend::submit_head(self.inner.as_ref(), key, callback);
-    }
+    crate::storage::forward_storage_backend!(inner; submit_list, submit_head);
 }
 
 fn seal_segment_for_test(el: &mut EventLoop) -> crate::common::MidgeResult<(u64, u64)> {
@@ -8153,6 +7690,18 @@ fn should_defer_metadata_cleanup_before_provider_reads_when_shared_budget_is_exh
 #[test]
 fn should_preserve_cloud_waiter_when_catalog_admission_is_temporarily_blocked(
 ) -> crate::common::MidgeResult<()> {
+    assert_cloud_waiter_survives_admission_pressure(0)
+}
+
+#[test]
+fn should_preserve_cloud_waiter_when_completion_adapter_admission_is_temporarily_blocked(
+) -> crate::common::MidgeResult<()> {
+    assert_cloud_waiter_survives_admission_pressure(32 * 1024)
+}
+
+fn assert_cloud_waiter_survives_admission_pressure(
+    free_bytes: usize,
+) -> crate::common::MidgeResult<()> {
     // Arrange
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
@@ -8183,7 +7732,10 @@ fn should_preserve_cloud_waiter_when_catalog_admission_is_temporarily_blocked(
         .maintenance_memory()
         .unwrap();
     let held = budget.reserve(
-        budget.limit().saturating_sub(budget.used()),
+        budget
+            .limit()
+            .saturating_sub(budget.used())
+            .saturating_sub(free_bytes),
         "active compaction fixture",
     )?;
 

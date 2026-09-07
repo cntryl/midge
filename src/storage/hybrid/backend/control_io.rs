@@ -81,7 +81,7 @@ impl HybridStorage {
             let range = rx
                 .recv_timeout(timeout)
                 .map_err(|error| MidgeError::Timeout(format!("control range: {error}")))?
-                .map_err(control_error)?;
+                .map_err(|error| control_error_with_reservation(error, &memory))?;
             if range.len() != end - start {
                 return Err(MidgeError::Corruption(
                     "control range has incorrect length".into(),
@@ -127,7 +127,14 @@ impl HybridStorage {
         let timeout = Self::deadline_timeout(key, "control CAS", self.callback_timeout, deadline)?;
         let (tx, rx) = mpsc::channel();
         self.cloud_backend_for_key(key)
-            .submit_write_with_reservation(key, bytes.to_vec(), headers, timeout, memory, tx);
+            .submit_write_with_reservation(
+                key,
+                bytes.to_vec(),
+                headers,
+                timeout,
+                Arc::clone(&memory),
+                tx,
+            );
         match rx.recv_timeout(timeout) {
             Ok(StorageEvent::WriteComplete {
                 result: StorageOutcome::Ok(()),
@@ -148,7 +155,7 @@ impl HybridStorage {
             Ok(StorageEvent::WriteComplete {
                 result: StorageOutcome::Err(error),
                 ..
-            }) => return Err(control_error(error)),
+            }) => return Err(control_error_with_reservation(error, &memory)),
             Ok(event) => {
                 return Err(MidgeError::Internal(format!(
                     "control CAS failed: {event:?}"
@@ -156,6 +163,7 @@ impl HybridStorage {
             }
             Err(error) => return Err(MidgeError::Timeout(format!("control CAS: {error}"))),
         }
+        drop(memory);
         let proof = self
             .read_control_object(key, budget, deadline)?
             .ok_or_else(|| MidgeError::Corruption("control CAS readback is missing".into()))?;
@@ -166,6 +174,12 @@ impl HybridStorage {
         }
         Ok(proof)
     }
+}
+
+fn control_error_with_reservation(error: String, memory: &ResourceReservation) -> MidgeError {
+    let classified = control_error(error);
+    memory.restore_related_contention();
+    classified
 }
 
 fn control_error(error: String) -> MidgeError {

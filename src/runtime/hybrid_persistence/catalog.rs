@@ -50,9 +50,11 @@ impl AdmittedCatalog {
 }
 
 pub(super) fn catalog_budget(storage: &HybridStorage) -> ResourceBudget {
+    // Startup normally installs the configured limit before catalog fencing.
+    // Standalone callers also need one shared pool, even before runtime setup.
     storage
-        .maintenance_memory()
-        .unwrap_or_else(|| ResourceBudget::new(crate::compaction::DEFAULT_COMPACTION_MEMORY_LIMIT))
+        .configure_maintenance_memory(crate::compaction::DEFAULT_COMPACTION_MEMORY_LIMIT)
+        .with_contention_errors()
 }
 
 struct AdmittedEncoding {
@@ -231,6 +233,28 @@ mod tests {
         CloudStorage, HybridPersistence, PublishedWalSegment,
     };
     use std::sync::Arc;
+
+    #[test]
+    fn should_share_catalog_budget_when_maintenance_is_not_yet_configured() {
+        // Arrange
+        let directory = tempfile::tempdir().unwrap();
+        let local =
+            Arc::new(crate::storage::filesystem::FileSystem::new(directory.path()).unwrap());
+        let storage = HybridStorage::with_policy(
+            local.clone(),
+            local,
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        );
+        let first = catalog_budget(&storage);
+        let _held = first.reserve(4096, "retained catalog").unwrap();
+
+        // Act
+        let second = catalog_budget(&storage);
+
+        // Assert
+        assert_eq!(second.used(), 4096);
+        assert_eq!(storage.maintenance_memory().unwrap().used(), 4096);
+    }
 
     #[test]
     fn should_retain_catalog_decode_charge_until_authority_is_dropped() {

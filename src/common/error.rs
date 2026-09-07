@@ -112,6 +112,70 @@ impl fmt::Display for MidgeError {
 
 impl std::error::Error for MidgeError {}
 
+/// How a failure should be acted on, as opposed to what produced it.
+///
+/// This is the single classification authority. Callers must ask the error
+/// rather than re-deriving policy with `matches!`, so that adding a
+/// `MidgeError` variant is a compile error here instead of a silent
+/// misclassification at ~37 call sites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    /// The caller asked for something invalid. Retrying is pointless.
+    Caller,
+    /// An environmental failure that may succeed on a later attempt.
+    Transient,
+    /// A bounded resource is temporarily full. Retry after release, and do
+    /// not report as a defect.
+    Backpressure,
+    /// This writer no longer holds, or never held, durable authority.
+    Fenced,
+    /// An engine invariant was violated. Durable data may still be intact, so
+    /// this is a defect to report rather than a reason to stop accepting writes.
+    Defect,
+    /// Durable state cannot be trusted. The engine must stop, not retry.
+    Fatal,
+}
+
+impl MidgeError {
+    /// Classify this failure for retry, backpressure, fencing, or halt.
+    ///
+    /// Exhaustive by construction: a new variant will not compile until it
+    /// is classified here.
+    #[must_use]
+    pub fn severity(&self) -> Severity {
+        match self {
+            Self::NotFound
+            | Self::InvalidArgument(_)
+            | Self::NotSupported(_)
+            | Self::InvalidPath
+            | Self::MemoryModeViolation(_)
+            | Self::WriteConflict(_) => Severity::Caller,
+
+            Self::Io(_) | Self::LeaseHeld(_) | Self::LeaseUnavailable(_) | Self::Aborted(_) => {
+                Severity::Transient
+            }
+
+            Self::NoSpace(_) | Self::WriteStall(_) | Self::Busy(_) | Self::Timeout(_) => {
+                Severity::Backpressure
+            }
+
+            Self::Fenced(_) | Self::LeaseEpochExhausted | Self::LeaseIndeterminate(_) => {
+                Severity::Fenced
+            }
+
+            // ResourceLimit also represents exhausted identity spaces,
+            // address-space overflow, and invalid configured capacities. It
+            // therefore cannot be globally classified as retryable pressure.
+            // Temporary contention is tracked internally by ResourceBudget.
+            Self::Internal(_) | Self::ResourceLimit(_) => Severity::Defect,
+
+            Self::Corruption(_) | Self::RecoveryFailed(_) | Self::CompatibilityError(_) => {
+                Severity::Fatal
+            }
+        }
+    }
+}
+
 impl MidgeError {
     /// Reconstruct this error for terminal-state replay without erasing its
     /// public variant or message.
@@ -158,5 +222,71 @@ impl From<io::Error> for MidgeError {
         } else {
             MidgeError::Io(err)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MidgeError, Severity};
+
+    #[test]
+    fn should_classify_as_backpressure_when_error_is_transient_admission_pressure() {
+        // Arrange: the pool-pressure family the runtime must retry rather than
+        // surface as a defect.
+        let errors = [
+            MidgeError::Busy("publication turn".into()),
+            MidgeError::WriteStall("memtable full".into()),
+        ];
+
+        // Act
+        for error in errors {
+            let severity = error.severity();
+
+            // Assert
+            assert_eq!(
+                severity,
+                Severity::Backpressure,
+                "{error} must classify as backpressure"
+            );
+        }
+    }
+
+    #[test]
+    fn should_classify_as_fatal_when_error_indicates_unrecoverable_data_loss() {
+        // Arrange
+        let errors = [
+            MidgeError::Corruption("bad crc".into()),
+            MidgeError::RecoveryFailed("torn manifest".into()),
+        ];
+
+        // Act
+        let severities = errors.map(|error| error.severity());
+
+        // Assert
+        assert_eq!(severities, [Severity::Fatal, Severity::Fatal]);
+    }
+
+    #[test]
+    fn should_classify_as_fenced_when_writer_lost_authority() {
+        // Arrange
+        let error = MidgeError::Fenced("stale epoch".into());
+
+        // Act
+        let severity = error.severity();
+
+        // Assert
+        assert_eq!(severity, Severity::Fenced);
+    }
+
+    #[test]
+    fn should_classify_resource_limit_as_non_retryable_when_limit_may_be_permanent() {
+        // Arrange
+        let error = MidgeError::ResourceLimit("identity space exhausted".into());
+
+        // Act
+        let severity = error.severity();
+
+        // Assert
+        assert_eq!(severity, Severity::Defect);
     }
 }
