@@ -1397,6 +1397,7 @@ impl EventLoop {
             RuntimeResponse::StorageVerificationBarrier {
                 request_id,
                 token: request_id,
+                health: self.state.health(),
             },
         );
         HandleOutcome::Continue
@@ -1690,15 +1691,46 @@ impl EventLoop {
         }
     }
 
+    fn run_actionable_pass(
+        &mut self,
+        msg_rx: &Receiver<RuntimeMsg>,
+        max_drain_writes: usize,
+    ) -> Option<HandleOutcome> {
+        if !self.has_actionable_work() {
+            return None;
+        }
+        match msg_rx.try_recv() {
+            Ok(msg) => return Some(self.process_wake_msg(msg, msg_rx, max_drain_writes)),
+            Err(TryRecvError::Disconnected) => return Some(HandleOutcome::Break),
+            Err(TryRecvError::Empty) => {}
+        }
+        if let Some(storage_rx) = &self.hybrid_storage_events {
+            if let Ok(event) = storage_rx.try_recv() {
+                self.handle_storage_event(event);
+                return Some(HandleOutcome::Continue);
+            }
+        }
+        self.progress_pass(msg_rx);
+        std::thread::sleep(Duration::from_micros(50));
+        Some(HandleOutcome::Continue)
+    }
+
     /// Main event loop — runs until Shutdown message or channel close.
-    pub fn run(&mut self, msg_rx: &Receiver<RuntimeMsg>) {
+    pub fn run(&mut self, msg_rx: &Receiver<RuntimeMsg>, worker_msg_rx: &Receiver<RuntimeMsg>) {
         // Bound write coalescing by a fairness quantum. Thousands of local
         // writes are cheap, but the same wake on cloud durability can consume
         // an entire control-request deadline before yielding.
         const MAX_DRAIN_WRITES_ON_WAKE: usize = 64;
-        const ACTIONABLE_IDLE_BACKOFF: Duration = Duration::from_micros(50);
 
         loop {
+            if let Ok(message) = worker_msg_rx.try_recv() {
+                if dispatch::RuntimeDispatcher::handle(self, message, msg_rx)
+                    == HandleOutcome::Break
+                {
+                    break;
+                }
+                continue;
+            }
             self.restore_verification_deferred_message();
             self.restore_publication_deferred_message();
             if let Some(pending) = self.pending_msg.take() {
@@ -1709,31 +1741,10 @@ impl EventLoop {
                 continue;
             }
 
-            if self.has_actionable_work() {
-                match msg_rx.try_recv() {
-                    Ok(msg) => {
-                        let outcome = self.process_wake_msg(msg, msg_rx, MAX_DRAIN_WRITES_ON_WAKE);
-                        if outcome == HandleOutcome::Break {
-                            break;
-                        }
-                        continue;
-                    }
-                    Err(TryRecvError::Disconnected) => break,
-                    Err(TryRecvError::Empty) => {}
+            if let Some(outcome) = self.run_actionable_pass(msg_rx, MAX_DRAIN_WRITES_ON_WAKE) {
+                if outcome == HandleOutcome::Break {
+                    break;
                 }
-
-                if let Some(storage_rx) = &self.hybrid_storage_events {
-                    match storage_rx.try_recv() {
-                        Ok(event) => {
-                            self.handle_storage_event(event);
-                            continue;
-                        }
-                        Err(TryRecvError::Disconnected | TryRecvError::Empty) => {}
-                    }
-                }
-
-                self.progress_pass(msg_rx);
-                std::thread::sleep(ACTIONABLE_IDLE_BACKOFF);
                 continue;
             }
 
@@ -1744,6 +1755,7 @@ impl EventLoop {
             let msg = if let Some(storage_rx) = selectable_storage_rx {
                 if let Some(timeout) = idle_timeout {
                     crossbeam::channel::select! {
+                        recv(worker_msg_rx) -> msg => msg.ok(),
                         recv(msg_rx) -> msg => msg.ok(),
                         recv(storage_rx) -> ev => {
                             match ev {
@@ -1763,6 +1775,7 @@ impl EventLoop {
                     }
                 } else {
                     crossbeam::channel::select! {
+                        recv(worker_msg_rx) -> msg => msg.ok(),
                         recv(msg_rx) -> msg => msg.ok(),
                         recv(storage_rx) -> ev => {
                             match ev {
@@ -1778,16 +1791,19 @@ impl EventLoop {
                     }
                 }
             } else if let Some(timeout) = idle_timeout {
-                match msg_rx.recv_timeout(timeout) {
-                    Ok(msg) => Some(msg),
-                    Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
+                crossbeam::channel::select! {
+                    recv(worker_msg_rx) -> msg => msg.ok(),
+                    recv(msg_rx) -> msg => msg.ok(),
+                    default(timeout) => {
                         self.progress_pass(msg_rx);
                         continue;
                     }
-                    Err(crossbeam::channel::RecvTimeoutError::Disconnected) => None,
                 }
             } else {
-                msg_rx.recv().ok()
+                crossbeam::channel::select! {
+                    recv(worker_msg_rx) -> msg => msg.ok(),
+                    recv(msg_rx) -> msg => msg.ok(),
+                }
             };
 
             let Some(msg) = msg else {

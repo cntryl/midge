@@ -773,7 +773,7 @@ impl CompactionActor {
             return;
         };
         if tx
-            .send(RuntimeMsg::CompactionComplete {
+            .try_send(RuntimeMsg::CompactionComplete {
                 request_id,
                 input_ssts,
                 output_ssts: output_ssts.to_vec(),
@@ -911,6 +911,33 @@ impl Drop for CompactionActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn should_not_block_worker_when_completion_queue_is_full() {
+        // Arrange
+        let (tx, rx) = crossbeam::channel::bounded(1);
+        tx.send(RuntimeMsg::RetryGc).expect("fill completion queue");
+        let plan = crate::compaction::CompactionPlan::new(0, 0, 1);
+        let (completed_tx, completed_rx) = std::sync::mpsc::sync_channel(1);
+
+        // Act
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                CompactionActor::notify_worker_completion(&tx, &plan, Vec::new(), &[], false, 7);
+                completed_tx.send(()).expect("report worker completion");
+            });
+
+            // Assert
+            assert!(
+                completed_rx
+                    .recv_timeout(std::time::Duration::from_millis(100))
+                    .is_ok(),
+                "a saturated runtime queue must not strand the compaction worker"
+            );
+            drop(rx);
+            worker.join().expect("join notification worker");
+        });
+    }
 
     #[test]
     fn should_keep_failed_output_bytes_charged_when_compaction_residue_remains() -> MidgeResult<()>

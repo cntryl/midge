@@ -126,7 +126,7 @@ impl WalActor {
             conflict_policy,
         )?;
         let effective_durability = durability_policy.unwrap_or(self.durability_policy);
-        let sequence_plan = Self::allocate_transaction_sequences(state, ops.len());
+        let sequence_plan = Self::allocate_transaction_sequences(state, ops.len())?;
         let (apply_ops, wal_batch) =
             self.build_transaction_wal_batch(state, ops, &sequence_plan, effective_durability)?;
 
@@ -320,22 +320,31 @@ impl WalActor {
     pub(super) fn allocate_transaction_sequences(
         state: &mut RuntimeState,
         ops_count: usize,
-    ) -> TxnSequencePlan {
+    ) -> MidgeResult<TxnSequencePlan> {
         debug_assert!(
             ops_count > 0,
             "append_transaction requires at least one operation"
         );
-        let ops_count_u64 = u64::try_from(ops_count).unwrap_or(u64::MAX);
-        let begin_seq = state.sequence + 1;
-        let first_op_seq = begin_seq + 1;
-        let commit_seq = begin_seq + 1 + ops_count_u64;
+        let ops_count_u64 = u64::try_from(ops_count).map_err(|_| {
+            MidgeError::ResourceLimit("transaction operation count exceeds sequence space".into())
+        })?;
+        let begin_seq = state.sequence.checked_add(1).ok_or_else(|| {
+            MidgeError::ResourceLimit("transaction sequence space exhausted".into())
+        })?;
+        let first_op_seq = begin_seq.checked_add(1).ok_or_else(|| {
+            MidgeError::ResourceLimit("transaction sequence space exhausted".into())
+        })?;
+        let commit_seq = first_op_seq.checked_add(ops_count_u64).ok_or_else(|| {
+            MidgeError::ResourceLimit("transaction sequence space exhausted".into())
+        })?;
+        let txn_id = state.next_txn_id()?;
         state.sequence = commit_seq;
-        TxnSequencePlan {
-            txn_id: state.next_txn_id(),
+        Ok(TxnSequencePlan {
+            txn_id,
             begin_seq,
             first_op_seq,
             commit_seq,
-        }
+        })
     }
 
     fn build_transaction_wal_batch(

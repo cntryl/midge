@@ -940,15 +940,29 @@ fn should_increment_transaction_ids_monotonically() {
     let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
 
     // Act
-    let txn1 = state.next_txn_id();
-    let txn2 = state.next_txn_id();
-    let txn3 = state.next_txn_id();
+    let txn1 = state.next_txn_id().expect("first transaction ID");
+    let txn2 = state.next_txn_id().expect("second transaction ID");
+    let txn3 = state.next_txn_id().expect("third transaction ID");
 
     // Assert
     assert_eq!(txn1, 1);
     assert_eq!(txn2, 2);
     assert_eq!(txn3, 3);
     assert!(txn1 < txn2 && txn2 < txn3);
+}
+
+#[test]
+fn should_reject_transaction_id_exhaustion_without_reusing_identity() {
+    // Arrange
+    let mut state = RuntimeState::new("/tmp/test_midge_txn_id_exhaustion".into(), true);
+    state.next_txn_id = u64::MAX;
+
+    // Act
+    let result = state.next_txn_id();
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::ResourceLimit(_))));
+    assert_eq!(state.next_txn_id, u64::MAX);
 }
 
 #[test]

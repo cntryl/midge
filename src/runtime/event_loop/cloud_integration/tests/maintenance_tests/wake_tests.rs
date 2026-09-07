@@ -44,7 +44,8 @@ fn should_complete_manual_waiter_when_prune_event_precedes_worker_exit(
     // Act: the worker exits without another event or user request. Only the
     // runtime's own wake policy can finish the queued manual obligation.
     let runtime = std::thread::spawn(move || {
-        el.run(&request_rx);
+        let (_worker_tx, worker_rx) = crossbeam::channel::unbounded();
+        el.run(&request_rx, &worker_rx);
         el
     });
     release_worker.send(()).unwrap();

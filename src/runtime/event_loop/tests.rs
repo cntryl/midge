@@ -1359,6 +1359,27 @@ fn should_defer_layout_completion_until_verification_barrier_releases() {
 }
 
 #[test]
+fn should_capture_runtime_health_at_verification_barrier_acquisition() {
+    // Arrange
+    let mut event_loop = create_test_event_loop().expect("create memory event loop");
+    event_loop.state.mark_persistence_anomaly();
+    let request_id = 104;
+    let response = event_loop.router.register(request_id, "TestRequest");
+
+    // Act
+    event_loop.begin_storage_verification(request_id);
+
+    // Assert
+    assert!(matches!(
+        response.recv_timeout(Duration::from_secs(1)),
+        Ok(RuntimeResponse::StorageVerificationBarrier {
+            health: crate::config::EngineHealth::Degraded,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn should_reject_storage_verification_while_flush_publication_is_active() {
     // Arrange
     let mut event_loop = create_test_local_event_loop().expect("create local event loop");
