@@ -38,41 +38,11 @@ impl StorageVerifier {
         self.runtime_handle.ensure_open()?;
         Self::validate_online_request(self.memory_mode, timeout)?;
 
-        let started = Instant::now();
-        let health_request_id = crate::runtime::next_request_id()?;
-        let runtime_health = match self.runtime_handle.send_and_wait_timeout(
-            crate::runtime::RuntimeMsg::GetRuntimeMetrics {
-                request_id: health_request_id,
-            },
-            timeout,
-        )? {
-            Some(crate::runtime::RuntimeResponse::RuntimeMetricsSnapshot { snapshot, .. }) => {
-                snapshot.health
-            }
-            Some(crate::runtime::RuntimeResponse::Error { error, .. }) => return Err(error),
-            Some(other) => {
-                return Err(MidgeError::Internal(format!(
-                    "unexpected runtime-health response before verification: {other:?}"
-                )))
-            }
-            None => {
-                return Err(MidgeError::Timeout(
-                    "runtime health capture exceeded the verification deadline".to_string(),
-                ))
-            }
-        };
-        let remaining = timeout.saturating_sub(started.elapsed());
-        if remaining.is_zero() {
-            return Err(MidgeError::Timeout(
-                "online storage verification deadline elapsed during health capture".to_string(),
-            ));
-        }
         verify_storage_online(
             &self.runtime_handle,
             self.db_path.clone(),
-            runtime_health,
             self.cloud_mode,
-            remaining,
+            timeout,
         )
     }
 
@@ -309,6 +279,7 @@ fn verify_storage_path_with_sst_fs(
 struct VerificationBarrierGuard {
     runtime_handle: crate::runtime::RuntimeHandle,
     token: u64,
+    health: EngineHealth,
     released: bool,
 }
 
@@ -317,6 +288,7 @@ impl VerificationBarrierGuard {
         Self {
             runtime_handle: runtime_handle.clone(),
             token,
+            health: EngineHealth::Healthy,
             released: false,
         }
     }
@@ -352,10 +324,13 @@ impl VerificationBarrierGuard {
             };
             match response {
                 Some(crate::runtime::RuntimeResponse::StorageVerificationBarrier {
-                    token, ..
+                    token,
+                    health,
+                    ..
                 }) => {
                     debug_assert_eq!(token, request_id);
                     pending_barrier.token = token;
+                    pending_barrier.health = health;
                     return Ok(pending_barrier);
                 }
                 Some(crate::runtime::RuntimeResponse::Error {
@@ -417,13 +392,13 @@ impl Drop for VerificationBarrierGuard {
 pub(super) fn verify_storage_online(
     runtime_handle: &crate::runtime::RuntimeHandle,
     db_path: std::path::PathBuf,
-    runtime_health: EngineHealth,
     cloud_mode: bool,
     timeout: Duration,
 ) -> MidgeResult<StorageVerificationReport> {
     let started = Instant::now();
     let sst_fs = runtime_handle.sst_read_fs.clone();
     let mut barrier = VerificationBarrierGuard::acquire(runtime_handle, timeout)?;
+    let runtime_health = barrier.health;
     let remaining = timeout.saturating_sub(started.elapsed());
     if remaining.is_zero() {
         // Dropping schedules Closing-safe cleanup without extending the caller's deadline.

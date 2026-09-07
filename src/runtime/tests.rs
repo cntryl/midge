@@ -674,6 +674,23 @@ fn should_start_from_nonzero() {
     assert!(id > 0);
 }
 
+#[test]
+fn should_remain_exhausted_without_reusing_request_ids_after_wrap_boundary() {
+    // Arrange
+    let counter = std::sync::atomic::AtomicU64::new(u64::MAX);
+
+    // Act
+    let final_id = super::protocol::allocate_request_id(&counter);
+    let first_exhausted = super::protocol::allocate_request_id(&counter);
+    let still_exhausted = super::protocol::allocate_request_id(&counter);
+
+    // Assert
+    assert_eq!(final_id.expect("allocate final request ID"), u64::MAX);
+    assert!(first_exhausted.is_err());
+    assert!(still_exhausted.is_err());
+    assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 0);
+}
+
 // =========== RuntimeMsg Tests ===========
 
 #[test]

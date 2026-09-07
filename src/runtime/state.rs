@@ -983,9 +983,12 @@ impl RuntimeState {
     }
 
     /// Get the next transaction ID
-    pub fn next_txn_id(&mut self) -> u64 {
-        self.next_txn_id += 1;
-        self.next_txn_id
+    pub fn next_txn_id(&mut self) -> MidgeResult<u64> {
+        let next = self.next_txn_id.checked_add(1).ok_or_else(|| {
+            MidgeError::ResourceLimit("transaction ID space exhausted".to_string())
+        })?;
+        self.next_txn_id = next;
+        Ok(next)
     }
 
     /// Clear pending transaction barrier and record duration metrics (Phase 3)

@@ -14,14 +14,19 @@ static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Allocate a new, globally unique request ID.
 pub(crate) fn next_request_id() -> MidgeResult<u64> {
-    let id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
-    if id == 0 {
-        NEXT_REQUEST_ID.store(1, Ordering::Relaxed);
-        return Err(MidgeError::Internal(
-            "request ID space exhausted (u64 wrap)".into(),
-        ));
-    }
-    Ok(id)
+    allocate_request_id(&NEXT_REQUEST_ID)
+}
+
+pub(super) fn allocate_request_id(counter: &AtomicU64) -> MidgeResult<u64> {
+    counter
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            if current == 0 {
+                None
+            } else {
+                Some(current.checked_add(1).unwrap_or(0))
+            }
+        })
+        .map_err(|_| MidgeError::Internal("request ID space exhausted (u64 wrap)".into()))
 }
 
 use serde::{Deserialize, Serialize};
@@ -749,6 +754,7 @@ pub enum RuntimeResponse {
     StorageVerificationBarrier {
         request_id: u64,
         token: u64,
+        health: crate::config::EngineHealth,
     },
 
     /// Current authoritative runtime sequence.

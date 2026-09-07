@@ -189,6 +189,38 @@ fn should_assign_identical_expiration_given_multiple_ttl_puts_in_one_transaction
     assert_eq!(expirations, vec![Some(53_000), Some(53_000)]);
 }
 
+#[test]
+fn should_reject_transaction_without_mutation_when_sequence_space_is_exhausted() -> MidgeResult<()>
+{
+    // Arrange
+    let mut state = RuntimeState::new("/tmp/test_midge_sequence_exhaustion".into(), true);
+    state.sequence = u64::MAX - 1;
+    let mut actor = WalActor::new(
+        state.wal_dir.clone(),
+        DurabilityPolicy::BestEffort,
+        BatchConfig::default(),
+        true,
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+
+    // Act
+    let result = prepare_put_transaction(
+        &mut actor,
+        &mut state,
+        99,
+        b"overflow",
+        b"value",
+        DurabilityPolicy::BestEffort,
+    );
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::ResourceLimit(_))));
+    assert_eq!(state.sequence, u64::MAX - 1);
+    assert_eq!(state.next_txn_id, 0);
+    Ok(())
+}
+
 #[cfg(feature = "failpoints")]
 fn failpoint_test_lock() -> &'static Mutex<()> {
     FAILPOINT_TEST_LOCK.get_or_init(|| Mutex::new(()))

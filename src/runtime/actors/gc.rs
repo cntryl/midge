@@ -496,7 +496,7 @@ impl GcActor {
         };
 
         if let (true, Some(notifier)) = (inserted, retry_notifier) {
-            let _ = notifier.send(RuntimeMsg::RetryGc);
+            let _ = notifier.try_send(RuntimeMsg::RetryGc);
         }
     }
 }
@@ -516,6 +516,35 @@ impl Drop for GcActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn should_not_block_worker_when_retry_notification_queue_is_full() {
+        // Arrange
+        let failed = parking_lot::Mutex::new(VecDeque::new());
+        let (notifier, receiver) = crossbeam::channel::bounded(1);
+        notifier
+            .send(RuntimeMsg::RetryGc)
+            .expect("fill notifier queue");
+        let (completed_tx, completed_rx) = std::sync::mpsc::sync_channel(1);
+
+        // Act
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                GcActor::queue_worker_failed_delete(&failed, Some(&notifier), "orphan.sst".into());
+                completed_tx.send(()).expect("report worker completion");
+            });
+
+            // Assert
+            assert!(
+                completed_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .is_ok(),
+                "a saturated runtime queue must not strand the GC worker"
+            );
+            drop(receiver);
+            worker.join().expect("join notification worker");
+        });
+    }
 
     #[test]
     fn should_initialize_gc_actor_with_no_last_run() {

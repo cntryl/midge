@@ -118,7 +118,7 @@ impl Runtime {
             runtime_response_timeout,
         };
 
-        let msg_tx_for_loop = self.msg_tx.clone();
+        let (worker_msg_tx, worker_msg_rx) = channel::unbounded();
         let msg_rx =
             std::mem::replace(&mut self.msg_rx, channel::bounded(RUNTIME_QUEUE_CAPACITY).1);
         let router_for_thread = router.clone();
@@ -126,7 +126,7 @@ impl Runtime {
         let event_loop_handle = thread::Builder::new()
             .name("midge-runtime".to_string())
             .spawn(move || {
-                match EventLoop::new(state, trace_enabled, router, config, Some(msg_tx_for_loop)) {
+                match EventLoop::new(state, trace_enabled, router, config, Some(worker_msg_tx)) {
                     Ok(mut event_loop) => {
                         // Share the snapshot cache with the event loop
                         event_loop.set_snapshot_cache(snapshot_cache);
@@ -136,7 +136,7 @@ impl Runtime {
                         let _ = init_tx.send(Ok(()));
                         let run_result =
                             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                event_loop.run(&msg_rx);
+                                event_loop.run(&msg_rx, &worker_msg_rx);
                             }));
                         if run_result.is_err() {
                             tracing::error!("Runtime event loop panicked");
