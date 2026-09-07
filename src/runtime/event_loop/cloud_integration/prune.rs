@@ -70,6 +70,44 @@ fn run_cloud_wal_prune_preflight(
 }
 
 impl EventLoop {
+    fn local_wal_prune_guard(
+        &self,
+        storage: &crate::storage::HybridStorage,
+        remote_snapshot: bool,
+    ) -> crate::common::MidgeResult<CloudWalPruneGuard> {
+        let guard = if remote_snapshot {
+            CloudWalPruneGuard::default()
+        } else {
+            let budget = storage.maintenance_memory().ok_or_else(|| {
+                crate::common::MidgeError::Internal(
+                    "local WAL cleanup requires configured maintenance memory".into(),
+                )
+            })?;
+            CloudWalPruneGuard::admitted_local_snapshot(
+                &self.state.manifest,
+                &budget,
+                &self.cloud_wal_prune_progress,
+            )?
+        };
+        Ok(guard
+            .with_memory_limit(self.compaction_actor.compaction_memory_limit())
+            .with_progress(self.cloud_wal_prune_progress.clone()))
+    }
+
+    fn cloud_wal_prune_guards(
+        &self,
+        storage: &crate::storage::HybridStorage,
+    ) -> crate::common::MidgeResult<(
+        Option<crate::runtime::hybrid_persistence::CloudMetadataPruneSnapshot>,
+        CloudWalPruneGuard,
+    )> {
+        let metadata_snapshot = self.cloud_metadata_prune_snapshot_for_wal_cleanup()?;
+        // Filesystem-backed cloud simulation has no separate control store;
+        // its event-loop manifest is the authority snapshot guarded below.
+        let local_guard = self.local_wal_prune_guard(storage, metadata_snapshot.is_some())?;
+        Ok((metadata_snapshot, local_guard))
+    }
+
     pub(crate) fn prune_cloud_wal_segments_covered_by_manifest(&mut self) {
         self.reap_cloud_wal_prune_worker();
         if self.cloud_maintenance_enabled() && !self.cloud_maintenance.dispatching {
@@ -107,6 +145,7 @@ impl EventLoop {
         let Some(storage) = self.hybrid_storage.clone() else {
             return;
         };
+        storage.configure_maintenance_memory(self.compaction_actor.compaction_memory_limit());
         let Some(recovery_floor_segment) = self.state.cloud_wal_recovery_floor_segment() else {
             return;
         };
@@ -116,12 +155,13 @@ impl EventLoop {
         if candidates.is_empty() {
             return;
         }
-        let metadata_snapshot = self.cloud_metadata_prune_snapshot_for_wal_cleanup();
-        // Filesystem-backed cloud simulation has no separate control store;
-        // its event-loop manifest is the authority snapshot guarded below.
-        let local_guard = CloudWalPruneGuard::new(self.state.manifest.clone(), None)
-            .with_memory_limit(self.compaction_actor.compaction_memory_limit())
-            .with_progress(self.cloud_wal_prune_progress.clone());
+        let (metadata_snapshot, local_guard) = match self.cloud_wal_prune_guards(&storage) {
+            Ok(guards) => guards,
+            Err(error) => {
+                tracing::debug!(%error, "deferring WAL cleanup admission");
+                return;
+            }
+        };
         let local_guard = if self.cloud_maintenance_enabled() {
             local_guard.with_work_quantum(CLOUD_WAL_PRUNE_WORK_QUANTUM)
         } else {
@@ -272,5 +312,31 @@ impl EventLoop {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::runtime::event_loop::tests::create_test_event_loop;
+
+    #[test]
+    fn should_return_error_when_local_prune_budget_is_unconfigured() {
+        // Arrange
+        let el = create_test_event_loop().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let local = std::sync::Arc::new(
+            crate::storage::filesystem::FileSystem::new(directory.path()).unwrap(),
+        );
+        let storage = crate::storage::HybridStorage::with_policy(
+            local.clone(),
+            local,
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        );
+
+        // Act
+        let result = el.local_wal_prune_guard(&storage, false);
+
+        // Assert
+        assert!(result.is_err());
     }
 }

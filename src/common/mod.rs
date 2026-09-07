@@ -9,5 +9,5 @@ pub mod time;
 pub mod tlv;
 
 pub use deadline::OperationDeadline;
-pub use error::{MidgeError, MidgeResult};
+pub use error::{MidgeError, MidgeResult, Severity};
 pub use singleflight::KeyedGroupCommit;

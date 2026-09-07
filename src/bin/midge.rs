@@ -1,4 +1,4 @@
-use cntryl_midge::{Engine, EngineHealth, MidgeError, StorageVerificationReport};
+use cntryl_midge::{Engine, EngineHealth, MidgeError, Severity, StorageVerificationReport};
 use serde::Serialize;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -38,7 +38,7 @@ struct ParseFailure {
     format: OutputFormat,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum ErrorKind {
     Usage,
@@ -271,38 +271,27 @@ fn validate_optional_readable_file(path: &Path) -> Result<(), String> {
     }
 }
 
+/// Map a verification failure onto the process contract.
+///
+/// Classification is delegated to `MidgeError::severity()` so that a new error
+/// variant is classified in exactly one place. Backpressure reports as
+/// `EXIT_DEGRADED` rather than `EXIT_INTERNAL`: a full pool or an exhausted
+/// deadline is an operational condition to retry, not a defect to file.
 fn outcome_for_verification_error(error: &MidgeError, format: OutputFormat) -> CliOutcome {
     let message = error.to_string();
-    match error {
-        MidgeError::Corruption(_)
-        | MidgeError::RecoveryFailed(_)
-        | MidgeError::CompatibilityError(_) => {
-            CliOutcome::error(EXIT_CORRUPTION, format, ErrorKind::Corruption, message)
-        }
-        MidgeError::Io(_)
-        | MidgeError::NotFound
-        | MidgeError::InvalidPath
-        | MidgeError::LeaseHeld(_)
-        | MidgeError::LeaseUnavailable(_)
-        | MidgeError::LeaseIndeterminate(_) => {
-            CliOutcome::error(EXIT_STORAGE, format, ErrorKind::Storage, message)
-        }
-        MidgeError::Internal(_)
-        | MidgeError::InvalidArgument(_)
-        | MidgeError::NotSupported(_)
-        | MidgeError::NoSpace(_)
-        | MidgeError::WriteStall(_)
-        | MidgeError::MemoryModeViolation(_)
-        | MidgeError::Fenced(_)
-        | MidgeError::LeaseEpochExhausted
-        | MidgeError::WriteConflict(_)
-        | MidgeError::Aborted(_)
-        | MidgeError::Busy(_)
-        | MidgeError::Timeout(_)
-        | MidgeError::ResourceLimit(_) => {
-            CliOutcome::error(EXIT_INTERNAL, format, ErrorKind::Internal, message)
-        }
+    if matches!(error, MidgeError::NotFound | MidgeError::InvalidPath) {
+        return CliOutcome::error(EXIT_STORAGE, format, ErrorKind::Storage, message);
     }
+    let (exit_code, kind) = match error.severity() {
+        Severity::Caller => (EXIT_USAGE, ErrorKind::Usage),
+        // A lost lease is an authority change, and transient faults are
+        // environmental; both are storage-domain conditions.
+        Severity::Transient | Severity::Fenced => (EXIT_STORAGE, ErrorKind::Storage),
+        Severity::Backpressure => (EXIT_DEGRADED, ErrorKind::Storage),
+        Severity::Defect => (EXIT_INTERNAL, ErrorKind::Internal),
+        Severity::Fatal => (EXIT_CORRUPTION, ErrorKind::Corruption),
+    };
+    CliOutcome::error(exit_code, format, kind, message)
 }
 
 /// Stable public process contract for successful verification reports.
@@ -339,5 +328,88 @@ mod tests {
         // Assert
         assert_eq!(error.format, OutputFormat::Json);
         assert!(error.message.contains("unknown flag '--bad'"));
+    }
+
+    #[test]
+    fn should_report_degraded_when_verification_fails_from_transient_backpressure() {
+        // Arrange: pool pressure and deadline exhaustion are operational
+        // conditions, not defects. Reporting them as EXIT_INTERNAL tells an
+        // operator to file a bug for what is really a retry.
+        let errors = [
+            MidgeError::Busy("publication turn is active".into()),
+            MidgeError::Timeout("deadline exhausted".into()),
+            MidgeError::WriteStall("memtable full".into()),
+            MidgeError::NoSpace("device full".into()),
+        ];
+
+        for error in errors {
+            // Act
+            let outcome = outcome_for_verification_error(&error, OutputFormat::Plain);
+
+            // Assert
+            assert_eq!(
+                outcome.exit_code, EXIT_DEGRADED,
+                "{error} must report as degraded, not as an internal defect"
+            );
+        }
+    }
+
+    #[test]
+    fn should_report_internal_when_verification_hits_a_permanent_resource_limit() {
+        // Arrange
+        let error = MidgeError::ResourceLimit("identity space exhausted".into());
+
+        // Act
+        let outcome = outcome_for_verification_error(&error, OutputFormat::Plain);
+
+        // Assert
+        assert_eq!(outcome.exit_code, EXIT_INTERNAL);
+    }
+
+    #[test]
+    fn should_report_storage_when_required_verification_data_is_missing() {
+        // Arrange
+        let error = MidgeError::NotFound;
+
+        // Act
+        let outcome = outcome_for_verification_error(&error, OutputFormat::Plain);
+
+        // Assert
+        assert_eq!(outcome.exit_code, EXIT_STORAGE);
+        assert!(matches!(
+            outcome.payload,
+            OutcomePayload::Error(ErrorOutput {
+                error_kind: ErrorKind::Storage,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn should_report_storage_when_verification_fails_because_writer_was_fenced() {
+        // Arrange: losing leadership is an authority change, not a defect.
+        let error = MidgeError::Fenced("another leader took over".into());
+
+        // Act
+        let outcome = outcome_for_verification_error(&error, OutputFormat::Plain);
+
+        // Assert
+        assert_eq!(outcome.exit_code, EXIT_STORAGE);
+    }
+
+    #[test]
+    fn should_still_report_corruption_when_verification_finds_unrecoverable_state() {
+        // Arrange: the existing contract for data-integrity failures must not move.
+        for error in [
+            MidgeError::Corruption("bad crc".into()),
+            MidgeError::RecoveryFailed("torn manifest".into()),
+            MidgeError::CompatibilityError("newer format".into()),
+        ] {
+            // Act
+            let outcome = outcome_for_verification_error(&error, OutputFormat::Plain);
+
+            // Assert
+            assert_eq!(outcome.exit_code, EXIT_CORRUPTION, "{error}");
+        }
     }
 }

@@ -16,6 +16,7 @@ impl HybridStorage {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn read_object_from_backend_blocking(
         backend: &Arc<dyn StorageBackend>,
         key: &str,
@@ -51,6 +52,7 @@ impl HybridStorage {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn read_object_from_backend_within(
         backend: &Arc<dyn StorageBackend>,
         key: &str,
@@ -124,6 +126,7 @@ impl HybridStorage {
         crate::storage::storage_error_is_timeout(error)
     }
 
+    #[cfg(test)]
     pub(super) fn object_exists_in_backend_within(
         backend: &Arc<dyn StorageBackend>,
         key: &str,

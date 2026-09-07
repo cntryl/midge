@@ -512,10 +512,15 @@ impl StorageBackend for FileSystem {
             }
         };
         let outcome = if let Some(expected) = if_match {
-            match fs::read(&full_path) {
-                Ok(existing) => {
-                    let current =
-                        StorageObjectMetadata::content_crc(existing.len() as u64, &existing).etag;
+            let identity = if expected.starts_with("fs:") {
+                range_path_metadata(&full_path).map(|metadata| metadata.etag)
+            } else {
+                fs::read(&full_path)
+                    .map_err(|error| error.to_string())
+                    .map(|data| StorageObjectMetadata::content_crc(data.len() as u64, &data).etag)
+            };
+            match identity {
+                Ok(current) => {
                     if current == expected {
                         write_file_with_parents(&full_path, data)
                     } else {

@@ -23,6 +23,15 @@ impl CloudBackend for LimitedRanges {
         timeout: Duration,
         callback: CloudCallback,
     ) {
+        // This fixture budgets resumable WAL/SST proof work. Control-object
+        // ranges have their own admission and timeout regressions.
+        if key == crate::wal::cloud_catalog::OBJECT_KEY
+            || key == crate::wal::cloud_catalog::MIRROR_OBJECT_KEY
+        {
+            self.inner
+                .submit_get_range_with_identity(key, start, end, expected, timeout, callback);
+            return;
+        }
         let delay = Duration::from_micros(self.delay_micros.load(Ordering::SeqCst) as u64);
         if !delay.is_zero() {
             std::thread::sleep(delay.min(timeout));
@@ -583,4 +592,120 @@ fn should_yield_acknowledged_proof_work_without_shortening_slow_provider_calls()
         "acknowledged CRC, summary, row and frame work must resume"
     );
     assert!(wait_for_wal_prune_result(&storage, 1).is_ok());
+}
+
+fn finish_with_retained_manifest_admission(remote_metadata: bool) {
+    // Arrange
+    let (directory, backend, storage, mut manifest) = fixture(80);
+    manifest.next_sst_seqs = (0..10_000).map(|id| (id, 1)).collect();
+    let progress = CloudWalPruneProgress::default();
+    let metadata_path = directory.path().join("metadata");
+    std::fs::create_dir_all(&metadata_path).unwrap();
+    crate::metadata::ManifestPersistence::save(&metadata_path, &manifest).unwrap();
+    let encoded_bytes: usize = crate::storage::cloud::CLOUD_METADATA_FILES
+        .iter()
+        .filter_map(|name| std::fs::metadata(metadata_path.join(name)).ok())
+        .map(|metadata| usize::try_from(metadata.len()).unwrap())
+        .sum();
+    let mut count = crate::common::resource_budget::ByteCounter::default();
+    serde_json::to_writer(&mut count, &manifest).unwrap();
+    let charge = if remote_metadata {
+        encoded_bytes
+    } else {
+        count.0
+    } * 16
+        + 4096;
+    let limit = charge + 512 * 1024;
+    assert!(charge > limit / 2);
+    storage.configure_maintenance_memory(limit);
+    let budget = storage.maintenance_memory().unwrap();
+    let metadata_cloud = Arc::new(CloudStorage::new(
+        Arc::new(MockCloudBackend::new()),
+        String::new(),
+    ));
+    for name in crate::storage::cloud::CLOUD_METADATA_FILES {
+        if let Ok(bytes) = std::fs::read(metadata_path.join(name)) {
+            let (tx, rx) = std::sync::mpsc::channel();
+            metadata_cloud.submit_put(
+                &crate::storage::cloud::cloud_metadata_key(name),
+                bytes,
+                Vec::new(),
+                tx,
+            );
+            assert!(matches!(
+                rx.recv().unwrap(),
+                CloudEvent::Put { result: Ok(()), .. }
+            ));
+        }
+    }
+    let snapshot = crate::runtime::hybrid_persistence::CloudMetadataPruneSnapshot::new(
+        metadata_cloud,
+        metadata_path.clone(),
+        Arc::new(crate::io::real::RealFs::new(&metadata_path).unwrap()),
+        crate::config::RecoveryPolicy::default(),
+        budget.clone(),
+    )
+    .with_progress(progress.clone());
+    let mut attempts = 0;
+    let mut retired = false;
+
+    // Act
+    for _ in 0..100 {
+        attempts += 1;
+        backend.allowance.store(16, Ordering::SeqCst);
+        let deadline = crate::common::OperationDeadline::from_budget(Duration::from_secs(1));
+        let prune = |guard: CloudWalPruneGuard| {
+            storage.prune_cloud_wal_segment_within(
+                1,
+                80,
+                guard
+                    .with_memory_limit(limit)
+                    .with_progress(progress.clone()),
+                2,
+                &deadline,
+            )
+        };
+        let result = if remote_metadata {
+            snapshot.verify_exact_then(&deadline, |manifest, metadata| {
+                prune(CloudWalPruneGuard::new(manifest, Some(metadata)))
+            })
+        } else {
+            CloudWalPruneGuard::admitted_local_snapshot(&manifest, &budget, &progress)
+                .and_then(prune)
+        };
+        if result.is_ok() {
+            retired = true;
+            break;
+        }
+        assert!(
+            !matches!(result, Err(crate::MidgeError::ResourceLimit(_))),
+            "{result:?}"
+        );
+    }
+
+    // Assert
+    assert!(attempts > 1, "regression must exercise retained proof work");
+    assert!(
+        retired,
+        "cleanup must finish without any new WAL acknowledgements"
+    );
+    assert!(wait_for_wal_prune_result(&storage, 1).is_ok());
+    assert!(!assert_wal_catalog_copies_match(&storage)
+        .segments
+        .contains_key(&1));
+    assert_eq!(
+        budget.used(),
+        0,
+        "retirement must release every retained reservation"
+    );
+}
+
+#[test]
+fn should_finish_local_cleanup_when_retained_manifest_exceeds_half_the_pool() {
+    finish_with_retained_manifest_admission(false);
+}
+
+#[test]
+fn should_finish_remote_cleanup_when_retained_manifest_exceeds_half_the_pool() {
+    finish_with_retained_manifest_admission(true);
 }

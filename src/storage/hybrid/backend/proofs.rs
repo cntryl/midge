@@ -52,6 +52,13 @@ pub(crate) struct GuardedObjectProof {
 }
 
 impl GuardedObjectProof {
+    pub(crate) fn same_identity(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.backend, &other.backend)
+            && self.key == other.key
+            && self.range_identity == other.range_identity
+            && self.metadata.same_version(&other.metadata)
+    }
+
     pub(crate) fn metadata_only(
         backend: Arc<dyn StorageBackend>,
         key: String,
@@ -66,6 +73,7 @@ impl GuardedObjectProof {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn exact(
         backend: Arc<dyn StorageBackend>,
         key: String,

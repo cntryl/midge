@@ -94,6 +94,7 @@ impl WalPublicationCatalog {
         Ok(catalog)
     }
 
+    #[cfg(test)]
     pub(crate) fn encode(&self) -> Result<Vec<u8>, String> {
         self.validate()?;
         serde_json::to_vec_pretty(self)
@@ -162,7 +163,7 @@ impl WalPublicationCatalog {
         ))
     }
 
-    fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<(), String> {
         if self.format_version != FORMAT_VERSION {
             return Err(format!(
                 "unsupported cloud WAL publication catalog format version {}; expected {FORMAT_VERSION}",

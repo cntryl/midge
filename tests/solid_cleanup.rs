@@ -742,6 +742,7 @@ fn should_keep_compaction_publication_validation_streaming() {
     // Arrange
     let event_loop = read_source("src/runtime/event_loop/mod.rs");
     let publication = read_source("src/runtime/event_loop/compaction.rs");
+    let admitted = read_source("src/storage/hybrid/backend/file_publication.rs");
     let reader = read_source("src/sst/fs/reader_io/mod.rs");
     let writer = read_source("src/sst/fs/factory_io.rs");
 
@@ -753,7 +754,10 @@ fn should_keep_compaction_publication_validation_streaming() {
     assert!(!materializes_crc_input);
     assert!(event_loop.contains("checksummed_file_crc"));
     assert!(event_loop.contains("budget.reserve(CRC_BUFFER_SIZE, \"SST checksum buffer\")"));
-    assert!(event_loop.contains("read_file_with_budget"));
+    assert!(!event_loop.contains("read_file_with_budget"));
+    assert!(event_loop.contains("publish_immutable_file("));
+    assert!(admitted.contains("submit_write_with_reservation("));
+    assert!(admitted.contains("submit_read_range_with_reservation("));
     assert!(publication.contains("mirror_ssts_to_authoritative_cloud(output_ssts, budget)"));
     assert!(streaming_summary_is_used);
     assert!(writer.contains("writer.streaming = Some(StreamingState::new"));

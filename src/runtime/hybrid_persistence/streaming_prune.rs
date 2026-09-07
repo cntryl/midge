@@ -13,7 +13,7 @@ use crate::wal::recovery::streaming::{visit_sealed_wal_records_from, StreamingRe
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-mod progress;
+pub(super) mod progress;
 pub(super) use progress::Progress;
 use progress::{CrcProgress, RecordProgress, SegmentProgress, SstProgress, WorkQuantum};
 
@@ -47,7 +47,10 @@ pub(super) fn validate(
     progress.prepare(storage, guard, catalog, deadline)?;
     let work = WorkQuantum::new(guard.work_quantum());
     let budget = progress.budget.clone();
-    let unit = budget.limit() / 8;
+    // Retained manifest/catalog/proof ownership already occupies this shared
+    // pool. Size transient parsing from the remaining allowance so a snapshot
+    // larger than half the pool can still make bounded progress.
+    let unit = budget.limit().saturating_sub(budget.used()) / 8;
     let limits = StreamingReplayLimits {
         max_frame_bytes: unit,
         max_pending_txn_bytes: unit,

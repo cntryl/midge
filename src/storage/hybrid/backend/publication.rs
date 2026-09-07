@@ -1,7 +1,11 @@
 //! Immutable SST publication and retry compatibility.
 
-use super::{mpsc, Arc, HybridStorage, StorageBackend, StorageEvent, StorageOutcome};
-use crate::common::{MidgeError, MidgeResult, OperationDeadline};
+use super::{mpsc, HybridStorage, StorageEvent, StorageOutcome};
+#[cfg(test)]
+use super::{Arc, StorageBackend};
+#[cfg(test)]
+use crate::common::OperationDeadline;
+use crate::common::{MidgeError, MidgeResult};
 
 impl HybridStorage {
     /// A failed publisher can release staging only after its backend confirms
@@ -29,8 +33,11 @@ impl HybridStorage {
         }
     }
 
+    /// Legacy byte-oriented fixture publication; runtime SST publishers use
+    /// `publish_immutable_file` with shared admission and bounded readback.
     /// Publish immutable bytes to the remote backend and local cache. Retries
     /// succeed only when an existing object contains exactly the same bytes.
+    #[cfg(test)]
     pub(crate) fn publish_immutable_object_within(
         &self,
         key: &str,
@@ -59,6 +66,7 @@ impl HybridStorage {
             })
     }
 
+    #[cfg(test)]
     fn ensure_local_immutable_retry_compatible(
         &self,
         key: &str,
@@ -90,6 +98,7 @@ impl HybridStorage {
         Ok(true)
     }
 
+    #[cfg(test)]
     fn ensure_remote_immutable_published(
         &self,
         key: &str,
@@ -168,6 +177,7 @@ impl HybridStorage {
         }
     }
 
+    #[cfg(test)]
     fn ensure_backend_object_matches(
         backend: &Arc<dyn StorageBackend>,
         key: &str,
@@ -196,6 +206,7 @@ impl HybridStorage {
         )))
     }
 
+    #[cfg(test)]
     fn write_local_immutable_cache(
         &self,
         key: &str,
@@ -245,6 +256,7 @@ impl HybridStorage {
         }
     }
 
+    #[cfg(test)]
     fn publication_error(context: &str, error: MidgeError) -> MidgeError {
         match error {
             MidgeError::Timeout(message) => MidgeError::Timeout(format!("{context}: {message}")),

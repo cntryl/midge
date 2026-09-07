@@ -100,9 +100,10 @@ continue to constrain their respective buffers; their settings are unchanged.
 | Application SST readers | `ReadResources` shares a metadata budget across readers and evicts idle entries; active reader ownership retains reservations. |
 | Recovery proof readers | Reader metadata, compressed/decoded blocks, decoder keys, comparison values and verification windows share one proof budget. Verified-identity map entries now reserve a table-growth allowance too. Exhaustion replays WAL; checkpoints drop readers and the map. |
 | Tombstone metadata | Budgeted SST readers/writers retain metadata charges; memtable tombstones contribute to encoded admission bounds. The difficult workload verifies retention and reclamation semantics through compaction and recovery. |
+| WAL catalog and cleanup metadata | Runtime configures one maintenance budget shared with compaction and retained WAL proofs. Control reads admit bodies before pinned ranges; decoded catalogs, serialization, provider copies and metadata snapshots retain charges through their owners. Transient contention keeps accepted WAL and its waiter in the existing retry queue. Completed retirement releases its manifest snapshot. |
 | WAL replay | Frame, pending-transaction and checkpoint bounds derive from configured recovery limits. Remote inventory is streamed and remains independent of local capacity. |
 | Flush | One serialized worker shares an internal allowance across streaming construction, final metadata validation, upload and bounded identity-pinned readback. Disk admission precedes scratch creation; unconfirmed scratch cleanup retains its token and blocks further builds. Timed-out uploads retain heap charges until underlying ownership ends. |
-| Compaction | Shared execution budgets cover reader/writer/cursor working sets; storage tokens cover staging. Completion, cancellation and failed publication retain authoritative inputs and release temporary reservations. |
+| Compaction | Shared execution budgets cover readers, writers, cursors and admitted file publication. Remote partition targets leave space for upload copies and live merge state; actual admission remains checked. Both cache modes prepare identity guards in the worker before single-owner installation. Timed-out providers retain their memory charges; failed publication retains authoritative inputs. |
 | Transaction spill | Transaction thresholds control spill, database-local files participate in disk admission, and owner cleanup releases temporary files. Cloud-acknowledged records remain recoverable after spill cleanup or process loss. |
 
 The new regression fills the recovery proof metadata budget with overlapping
@@ -128,3 +129,42 @@ charge their thread stacks. Identity-pinned readback uses 64 KiB windows; no
 second verification SST is created outside the database filesystem. Both cache
 modes keep conditional creation and the existing lease, intent and manifest
 publication barriers. Admission failure retains recoverable data.
+
+Flush and compaction share immutable-file publication. A publication attempt uses
+one storage timeout across its sequential HEAD, conditional PUT and 64 KiB
+identity-pinned readback operations. The returned guard binds the verified remote
+identity; compaction revalidates it before installing replacements. Persistent
+cache mode retains local output, while ephemeral mode removes it only after
+successful publication. Format validation streams through the SST layer and CRC
+calculation uses fixed stack space; neither path needs an external temporary SST.
+
+Remote compaction rollover derives from the existing pool after subtracting the
+fixed publication workspace, leaving half the remaining space for live merge
+state and indivisible keys. The target is soft: oversized keys are never split,
+and checked admission can still reject a partition while keeping input authority.
+
+### Catalog and cleanup admission
+
+Catalog decoding reserves a conservative envelope before materializing its tree.
+Serialization first counts the unchanged JSON representation without allocating a
+buffer, then reserves the exact encoded length. Conditional publication retains
+provider workspace through late completion and verifies its readback with pinned
+ranges. Filesystem CAS accepts the same version identity as its range reader,
+under the existing process and mutation locks.
+
+Cleanup admits manifest decoding and compares local metadata against bounded
+remote ranges while holding the publication lock. After exact comparison, only
+provider identity guards and the admitted decoded manifest remain. Retries reuse
+that manifest and its reservation after exact metadata revalidation. Changed
+metadata releases stale proof ownership before replacement admission. Local
+simulation likewise reuses unchanged SST coverage. WAL parsing sizes its transient
+workspace from the remaining shared allowance, so retained metadata larger than
+half the pool can still make progress. The final WAL retirement releases the
+cached manifest; memory pressure may discard idle proof work and recompute it
+conservatively.
+
+These changes add no catalog-entry limit or persistent format. A catalog that
+cannot fit even without competing maintenance returns a resource error; it is
+not silently truncated. Temporary competition with compaction retains cloud
+waiters and sealed WAL for bounded retry. This admission work does not establish
+an arbitrary-inventory streaming catalog format or OS process-limit qualification.

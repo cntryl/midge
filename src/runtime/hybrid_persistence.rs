@@ -15,12 +15,23 @@ use std::io::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 
+mod catalog;
+mod metadata_snapshot;
+pub(crate) use metadata_snapshot::CloudMetadataPruneSnapshot;
 mod streaming_prune;
+use crate::storage::hybrid::backend::ControlObject;
+use catalog::{commit_catalog_within, load_and_repair_catalog_within, AdmittedCatalog};
 
 #[derive(Clone, Default)]
 pub(crate) struct CloudWalPruneProgress(Arc<parking_lot::Mutex<streaming_prune::Progress>>);
 
 impl CloudWalPruneProgress {
+    pub(crate) fn discard_idle_proofs(&self) {
+        if let Some(mut progress) = self.0.try_lock() {
+            progress.discard_proofs();
+        }
+    }
+
     /// Sample after the proof worker has released its publication turn. An
     /// unexpected active proof must defer compaction rather than block runtime.
     pub(crate) fn retained_bytes(&self) -> Option<usize> {
@@ -28,6 +39,7 @@ impl CloudWalPruneProgress {
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug)]
 pub(crate) struct CloudMetadataPruneProof {
     pub(crate) key: String,
@@ -38,9 +50,11 @@ pub(crate) struct CloudMetadataPruneProof {
 #[derive(Clone)]
 pub(crate) struct CloudMetadataPruneGuard {
     objects: Vec<GuardedObjectProof>,
+    memory: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
 }
 
 impl CloudMetadataPruneGuard {
+    #[cfg(test)]
     pub(crate) fn new(cloud: Arc<CloudStorage>, objects: Vec<CloudMetadataPruneProof>) -> Self {
         let backend: Arc<dyn StorageBackend> = cloud;
         let objects = objects
@@ -54,116 +68,10 @@ impl CloudMetadataPruneGuard {
                 )
             })
             .collect();
-        Self { objects }
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct CloudMetadataPruneSnapshot {
-    cloud: Arc<CloudStorage>,
-    db_path: std::path::PathBuf,
-    fs: Arc<dyn crate::io::traits::Fs>,
-    recovery_policy: crate::config::RecoveryPolicy,
-}
-
-impl CloudMetadataPruneSnapshot {
-    pub(crate) fn new(
-        cloud: Arc<CloudStorage>,
-        db_path: std::path::PathBuf,
-        fs: Arc<dyn crate::io::traits::Fs>,
-        recovery_policy: crate::config::RecoveryPolicy,
-    ) -> Self {
         Self {
-            cloud,
-            db_path,
-            fs,
-            recovery_policy,
+            objects,
+            memory: None,
         }
-    }
-
-    /// Verify an exact, read-only metadata snapshot and keep cloud metadata
-    /// publication serialized through the authority-changing operation.
-    ///
-    /// Cleanup must never repair cloud metadata from a captured snapshot: an
-    /// intent or DDL edit can change without advancing the manifest sequence,
-    /// so writing stale bytes here could roll authoritative metadata backward.
-    /// A mismatch is a safe cleanup deferral. Holding the publication lock
-    /// through `operation` prevents a verified snapshot from changing before
-    /// the WAL catalog compare-exchange retires recovery authority.
-    pub(crate) fn verify_exact_then<T>(
-        &self,
-        deadline: &crate::common::OperationDeadline,
-        operation: impl FnOnce(Manifest, CloudMetadataPruneGuard) -> MidgeResult<T>,
-    ) -> MidgeResult<T> {
-        let _publication_guard = self.cloud.lock_metadata_publication();
-
-        let mut proofs = Vec::with_capacity(crate::storage::cloud::CLOUD_METADATA_FILES.len());
-        let mut has_manifest_base = false;
-        for file_name in crate::storage::cloud::CLOUD_METADATA_FILES {
-            let local_path = self.db_path.join(file_name);
-            let local_bytes = match std::fs::read(&local_path) {
-                Ok(bytes) => Some(bytes),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                Err(error) => {
-                    return Err(MidgeError::Io(std::io::Error::new(
-                        error.kind(),
-                        format!(
-                            "local metadata '{}' is unreadable during WAL cleanup: {error}",
-                            local_path.display()
-                        ),
-                    )))
-                }
-            };
-            let key = crate::storage::cloud::cloud_metadata_key(file_name);
-            let proof = crate::storage::cloud::blocking_cloud_object_proof_within(
-                &self.cloud,
-                &key,
-                deadline,
-            )?;
-
-            let (local_bytes, proof) = match (local_bytes, proof) {
-                (Some(local_bytes), Some(proof)) => (local_bytes, proof),
-                (None, None) => continue,
-                (Some(_), None) => {
-                    return Err(MidgeError::Internal(format!(
-                        "cloud metadata '{key}' is missing"
-                    )))
-                }
-                (None, Some(_)) => {
-                    return Err(MidgeError::Internal(format!(
-                        "cloud metadata '{key}' exists without committed local metadata"
-                    )))
-                }
-            };
-
-            if proof.bytes != local_bytes {
-                return Err(MidgeError::Internal(format!(
-                    "cloud metadata '{key}' does not match the captured committed metadata"
-                )));
-            }
-            if matches!(*file_name, "manifest.snapshot.json" | "manifest.json") {
-                has_manifest_base = true;
-            }
-            proofs.push(CloudMetadataPruneProof {
-                key,
-                expected_bytes: local_bytes,
-                remote: proof.metadata,
-            });
-        }
-
-        if !has_manifest_base {
-            return Err(MidgeError::Internal(
-                "no committed cloud manifest base is available to guard WAL cleanup".to_string(),
-            ));
-        }
-
-        let manifest = crate::metadata::ManifestPersistence::load_with_fs_and_policy(
-            &self.fs,
-            self.recovery_policy,
-        )
-        .map_err(MidgeError::Internal)?;
-        let guard = CloudMetadataPruneGuard::new(Arc::clone(&self.cloud), proofs);
-        operation(manifest, guard)
     }
 }
 
@@ -171,20 +79,61 @@ impl CloudMetadataPruneSnapshot {
 pub(crate) struct CloudWalPruneGuard {
     manifest: Arc<Manifest>,
     metadata: Option<CloudMetadataPruneGuard>,
+    manifest_memory: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
     memory_limit: Option<usize>,
     progress: CloudWalPruneProgress,
     work_quantum: Option<std::time::Duration>,
 }
 
 impl CloudWalPruneGuard {
-    pub(crate) fn new(manifest: Manifest, metadata: Option<CloudMetadataPruneGuard>) -> Self {
+    pub(crate) fn new(
+        manifest: impl Into<Arc<Manifest>>,
+        metadata: Option<CloudMetadataPruneGuard>,
+    ) -> Self {
         Self {
-            manifest: Arc::new(manifest),
+            manifest: manifest.into(),
+            manifest_memory: metadata
+                .as_ref()
+                .and_then(|metadata| metadata.memory.clone()),
             metadata,
             memory_limit: None,
             progress: CloudWalPruneProgress::default(),
             work_quantum: None,
         }
+    }
+
+    pub(crate) fn admitted_local_snapshot(
+        manifest: &Manifest,
+        budget: &crate::common::resource_budget::ResourceBudget,
+        progress: &CloudWalPruneProgress,
+    ) -> MidgeResult<Self> {
+        if let Some(cached) = progress.0.lock().snapshot(budget) {
+            // Local simulation uses only SST coverage from this snapshot.
+            if cached.metadata.is_none()
+                && cached.manifest.files.len() == manifest.files.len()
+                && cached
+                    .manifest
+                    .files
+                    .iter()
+                    .zip(&manifest.files)
+                    .all(|(old, new)| streaming_prune::progress::same_file(old, new))
+            {
+                return Ok(cached);
+            }
+        }
+        // A changed authority cannot reuse semantic work. Release its snapshot
+        // before admitting the replacement, including under tight budgets.
+        progress.discard_idle_proofs();
+        let mut count = crate::common::resource_budget::ByteCounter::default();
+        serde_json::to_writer(&mut count, manifest)
+            .map_err(|error| MidgeError::Internal(error.to_string()))?;
+        let memory = Arc::new(budget.reserve(
+            count.0.saturating_mul(16).saturating_add(4096),
+            "WAL cleanup manifest clone",
+        )?);
+        let mut guard = Self::new(manifest.clone(), None);
+        guard.manifest_memory = Some(memory);
+        Ok(guard)
     }
 
     pub(crate) fn with_progress(mut self, progress: CloudWalPruneProgress) -> Self {
@@ -468,11 +417,6 @@ fn retire_covered_wal_catalog_prefix_within(
     Ok(retired)
 }
 
-struct CatalogAuthority {
-    primary: RemoteObjectProof,
-    catalog: WalPublicationCatalog,
-}
-
 /// Runtime-owned format operations layered over raw hybrid object I/O.
 pub(crate) trait HybridPersistence {
     fn enqueue_wal_segment(
@@ -482,7 +426,7 @@ pub(crate) trait HybridPersistence {
         max_sequence: u64,
     ) -> MidgeResult<String>;
 
-    fn fence_cloud_wal_catalog(&self, writer_epoch: u64) -> MidgeResult<WalPublicationCatalog>;
+    fn fence_cloud_wal_catalog(&self, writer_epoch: u64) -> MidgeResult<AdmittedCatalog>;
 
     #[cfg(test)]
     fn verify_remote_wal_segment(
@@ -544,8 +488,10 @@ pub(crate) trait HybridPersistence {
         deadline: &crate::common::OperationDeadline,
     ) -> MidgeResult<CloudWalPruneBatchResults>;
 
+    #[cfg(test)]
     fn write_sst_object(&self, sst_name: &str, data: Vec<u8>) -> MidgeResult<()>;
 
+    #[cfg(test)]
     fn write_sst_object_with_proof(
         &self,
         sst_name: &str,
@@ -553,6 +499,7 @@ pub(crate) trait HybridPersistence {
         deadline: &crate::common::OperationDeadline,
     ) -> MidgeResult<GuardedObjectProof>;
 
+    #[cfg(test)]
     fn write_sst_object_within(
         &self,
         sst_name: &str,
@@ -586,16 +533,13 @@ impl HybridPersistence for HybridStorage {
         Ok(object_key)
     }
 
-    fn fence_cloud_wal_catalog(&self, writer_epoch: u64) -> MidgeResult<WalPublicationCatalog> {
+    fn fence_cloud_wal_catalog(&self, writer_epoch: u64) -> MidgeResult<AdmittedCatalog> {
         let deadline = crate::common::OperationDeadline::unbounded();
         let existing = load_and_repair_catalog_within(self, &deadline)?;
         let (mut catalog, expected) = if let Some(authority) = existing {
             (authority.catalog, Some(authority.primary))
         } else {
-            (
-                WalPublicationCatalog::empty(writer_epoch).map_err(MidgeError::Internal)?,
-                None,
-            )
+            (AdmittedCatalog::empty(self, writer_epoch)?, None)
         };
 
         let changed = if expected.is_some() {
@@ -880,6 +824,7 @@ impl HybridPersistence for HybridStorage {
         Ok(sorted_cloud_wal_prune_results(results))
     }
 
+    #[cfg(test)]
     fn write_sst_object(&self, sst_name: &str, data: Vec<u8>) -> MidgeResult<()> {
         self.write_sst_object_within(
             sst_name,
@@ -888,6 +833,7 @@ impl HybridPersistence for HybridStorage {
         )
     }
 
+    #[cfg(test)]
     fn write_sst_object_within(
         &self,
         sst_name: &str,
@@ -898,6 +844,7 @@ impl HybridPersistence for HybridStorage {
             .map(|_| ())
     }
 
+    #[cfg(test)]
     fn write_sst_object_with_proof(
         &self,
         sst_name: &str,
@@ -940,7 +887,7 @@ impl HybridPersistence for HybridStorage {
 fn authoritative_wal_entry(
     storage: &HybridStorage,
     segment_id: u64,
-) -> Result<(RemoteObjectProof, PublishedWalSegment), String> {
+) -> Result<(ControlObject, PublishedWalSegment), String> {
     authoritative_wal_entry_within(
         storage,
         segment_id,
@@ -954,7 +901,7 @@ fn authoritative_wal_entry_within(
     storage: &HybridStorage,
     segment_id: u64,
     deadline: &crate::common::OperationDeadline,
-) -> MidgeResult<(RemoteObjectProof, PublishedWalSegment)> {
+) -> MidgeResult<(ControlObject, PublishedWalSegment)> {
     let (proof, catalog) = authoritative_wal_catalog_within(storage, deadline)?;
     let entry = catalog.segments.get(&segment_id).cloned().ok_or_else(|| {
         MidgeError::Internal(format!(
@@ -967,150 +914,13 @@ fn authoritative_wal_entry_within(
 fn authoritative_wal_catalog_within(
     storage: &HybridStorage,
     deadline: &crate::common::OperationDeadline,
-) -> MidgeResult<(RemoteObjectProof, WalPublicationCatalog)> {
+) -> MidgeResult<(ControlObject, AdmittedCatalog)> {
     let _catalog_mutation =
         storage.lock_wal_catalog_mutation_within(deadline, "cloud WAL catalog read")?;
     let authority = load_and_repair_catalog_within(storage, deadline)?.ok_or_else(|| {
         MidgeError::Internal("cloud WAL publication catalog is missing".to_string())
     })?;
     Ok((authority.primary, authority.catalog))
-}
-
-fn load_and_repair_catalog_within(
-    storage: &HybridStorage,
-    deadline: &crate::common::OperationDeadline,
-) -> MidgeResult<Option<CatalogAuthority>> {
-    let primary = storage
-        .remote_object_proof_optional_within(crate::wal::cloud_catalog::OBJECT_KEY, deadline)
-        .map_err(|error| {
-            contextualize_cloud_error(error, "cloud WAL publication catalog unavailable")
-        })?;
-
-    if let Some(primary) = primary {
-        match WalPublicationCatalog::decode(primary.bytes()) {
-            Ok(catalog) => {
-                sync_catalog_copy_within(
-                    storage,
-                    crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
-                    primary.bytes(),
-                    deadline,
-                )?;
-                return Ok(Some(CatalogAuthority { primary, catalog }));
-            }
-            Err(primary_error) => {
-                let mirror = storage
-                    .remote_object_proof_optional_within(
-                        crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
-                        deadline,
-                    )
-                    .map_err(|error| {
-                        contextualize_cloud_error(
-                            error,
-                            "cloud WAL publication catalog mirror unavailable",
-                        )
-                    })?
-                    .ok_or_else(|| {
-                        MidgeError::Corruption(format!(
-                            "primary cloud WAL publication catalog is invalid and no mirror exists: {primary_error}"
-                        ))
-                    })?;
-                let catalog = WalPublicationCatalog::decode(mirror.bytes()).map_err(|mirror_error| {
-                    MidgeError::Corruption(format!(
-                        "both cloud WAL publication catalogs are invalid; primary: {primary_error}; mirror: {mirror_error}"
-                    ))
-                })?;
-                tracing::warn!(
-                    error = %primary_error,
-                    "repairing invalid cloud WAL publication catalog from validated mirror"
-                );
-                let repaired = sync_catalog_copy_within(
-                    storage,
-                    crate::wal::cloud_catalog::OBJECT_KEY,
-                    mirror.bytes(),
-                    deadline,
-                )?;
-                return Ok(Some(CatalogAuthority {
-                    primary: repaired,
-                    catalog,
-                }));
-            }
-        }
-    }
-
-    let Some(mirror) = storage
-        .remote_object_proof_optional_within(crate::wal::cloud_catalog::MIRROR_OBJECT_KEY, deadline)
-        .map_err(|error| {
-            contextualize_cloud_error(error, "cloud WAL publication catalog mirror unavailable")
-        })?
-    else {
-        return Ok(None);
-    };
-    let catalog = WalPublicationCatalog::decode(mirror.bytes()).map_err(|error| {
-        MidgeError::Corruption(format!(
-            "primary cloud WAL publication catalog is missing and its mirror is invalid: {error}"
-        ))
-    })?;
-    tracing::warn!("restoring missing cloud WAL publication catalog from validated mirror");
-    let repaired = sync_catalog_copy_within(
-        storage,
-        crate::wal::cloud_catalog::OBJECT_KEY,
-        mirror.bytes(),
-        deadline,
-    )?;
-    Ok(Some(CatalogAuthority {
-        primary: repaired,
-        catalog,
-    }))
-}
-
-fn commit_catalog_within(
-    storage: &HybridStorage,
-    expected_primary: Option<&RemoteObjectProof>,
-    catalog: &WalPublicationCatalog,
-    deadline: &crate::common::OperationDeadline,
-) -> MidgeResult<CatalogAuthority> {
-    let bytes = catalog.encode().map_err(MidgeError::Internal)?;
-
-    let primary = storage.compare_exchange_remote_object_within(
-        crate::wal::cloud_catalog::OBJECT_KEY,
-        expected_primary.map(RemoteObjectProof::metadata),
-        bytes.clone(),
-        deadline,
-    )?;
-    sync_catalog_copy_within(
-        storage,
-        crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
-        &bytes,
-        deadline,
-    )?;
-    Ok(CatalogAuthority {
-        primary,
-        catalog: catalog.clone(),
-    })
-}
-
-fn sync_catalog_copy_within(
-    storage: &HybridStorage,
-    key: &str,
-    bytes: &[u8],
-    deadline: &crate::common::OperationDeadline,
-) -> MidgeResult<RemoteObjectProof> {
-    let existing = storage
-        .remote_object_proof_optional_within(key, deadline)
-        .map_err(|error| contextualize_cloud_error(error, "cloud WAL catalog copy unavailable"))?;
-    if let Some(existing) = existing.as_ref() {
-        if existing.bytes() == bytes {
-            return Ok(existing.clone());
-        }
-    }
-    storage
-        .compare_exchange_remote_object_within(
-            key,
-            existing.as_ref().map(RemoteObjectProof::metadata),
-            bytes.to_vec(),
-            deadline,
-        )
-        .map_err(|error| contextualize_cloud_error(error, "cloud WAL catalog copy update failed"))
 }
 
 fn validate_remote_wal(
@@ -1137,6 +947,9 @@ fn validate_remote_wal(
 fn contextualize_cloud_error(error: MidgeError, context: &str) -> MidgeError {
     match error {
         MidgeError::Timeout(message) => MidgeError::Timeout(format!("{context}: {message}")),
+        MidgeError::ResourceLimit(message) => {
+            MidgeError::ResourceLimit(format!("{context}: {message}"))
+        }
         other => MidgeError::Internal(format!("{context}: {other}")),
     }
 }

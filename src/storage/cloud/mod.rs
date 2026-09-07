@@ -495,6 +495,7 @@ pub struct MockCloudBackend {
     mutation_lock: Arc<Mutex<()>>,
     uploads: Arc<Mutex<Vec<(String, u64)>>>,
     downloads: Arc<Mutex<Vec<String>>>,
+    range_downloads: Arc<Mutex<Vec<String>>>,
 }
 #[cfg(test)]
 impl MockCloudBackend {
@@ -505,6 +506,7 @@ impl MockCloudBackend {
             mutation_lock: Arc::new(Mutex::new(())),
             uploads: Arc::new(Mutex::new(Vec::new())),
             downloads: Arc::new(Mutex::new(Vec::new())),
+            range_downloads: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -516,9 +518,14 @@ impl MockCloudBackend {
         self.downloads.lock().clone()
     }
 
+    pub fn get_range_downloads(&self) -> Vec<String> {
+        self.range_downloads.lock().clone()
+    }
+
     pub fn clear_history(&self) {
         self.uploads.lock().clear();
         self.downloads.lock().clear();
+        self.range_downloads.lock().clear();
     }
 }
 
@@ -540,6 +547,7 @@ impl CloudBackend for MockCloudBackend {
         _timeout: std::time::Duration,
         callback: CloudCallback,
     ) {
+        self.range_downloads.lock().push(key.to_string());
         let _guard = self.mutation_lock.lock();
         let storage = self.storage.lock();
         let result = (|| {
@@ -944,6 +952,13 @@ impl CloudStorage {
 
     pub(crate) fn try_lock_metadata_publication(&self) -> Option<MutexGuard<'_, ()>> {
         self.metadata_publication_lock.try_lock()
+    }
+
+    pub(crate) fn lock_metadata_publication_for(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Option<MutexGuard<'_, ()>> {
+        self.metadata_publication_lock.try_lock_for(timeout)
     }
 
     pub(crate) fn lock_metadata_publication(&self) -> MutexGuard<'_, ()> {

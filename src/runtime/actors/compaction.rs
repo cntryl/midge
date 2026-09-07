@@ -8,12 +8,15 @@
 use super::super::state::RuntimeState;
 use crate::common::{MidgeError, MidgeResult};
 use crate::compaction::{Compactor, LeveledCompactionConfig};
-use crate::runtime::hybrid_persistence::HybridPersistence;
 use crate::runtime::{next_request_id, RuntimeMsg};
 use crate::sst::SstFactory;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
+
+#[cfg(test)]
+#[path = "compaction/publication_tests.rs"]
+mod publication_tests;
 
 type PreparedRemoteOutputs = Arc<
     parking_lot::Mutex<
@@ -618,7 +621,7 @@ impl CompactionActor {
                     path: &std::path::Path,
                     budget: &crate::common::resource_budget::ResourceBudget| {
             Self::prepare_remote_partition(
-                storage.expect("ephemeral storage"),
+                storage.expect("cloud storage"),
                 prepared,
                 plan.cf_id,
                 plan.target_level,
@@ -627,11 +630,26 @@ impl CompactionActor {
                 budget,
             )
         };
-        let output_sink = storage
-            .filter(|hybrid| hybrid.ephemeral_sst_cache_enabled())
-            .map(|_| &sink as &crate::compaction::CompactionOutputSink<'_>);
-        crate::compaction::execute_compaction_with_output_sink(
+        let output_sink = storage.map(|_| &sink as &crate::compaction::CompactionOutputSink<'_>);
+        let target = storage.map_or(plan.target_sst_size, |_| {
+            plan.target_sst_size.min(
+                crate::storage::HybridStorage::immutable_file_partition_target(
+                    plan.compaction_memory_limit,
+                ),
+            )
+        });
+        crate::compaction::execute_compaction_at_target(
             plan,
+            crate::compaction::CompactionResources {
+                target_sst_size: target,
+                budget: storage
+                    .and_then(|storage| storage.maintenance_memory())
+                    .unwrap_or_else(|| {
+                        crate::common::resource_budget::ResourceBudget::new(
+                            plan.compaction_memory_limit,
+                        )
+                    }),
+            },
             factory,
             output_dir,
             abort_check,
@@ -802,21 +820,18 @@ impl CompactionActor {
     ) -> MidgeResult<()> {
         let summary =
             crate::sst::fs::SstFileIo::summarize_with_real_fs_for_compaction(path, budget.clone())?;
-        let bytes_len = usize::try_from(summary.size_bytes).map_err(|_| {
-            MidgeError::ResourceLimit("compaction partition exceeds addressable memory".into())
-        })?;
-        let _reservation = budget.reserve(bytes_len, "remote compaction partition upload")?;
-        let bytes = std::fs::read(path)?;
-        if bytes.len() != bytes_len {
+        let (size, crc) = crate::sst::fs::file_identity(path)?;
+        if size != summary.size_bytes {
             return Err(MidgeError::Corruption(
                 "compaction partition changed before upload".into(),
             ));
         }
-        let crc = crc32c::crc32c(&bytes);
-        let proof = hybrid.write_sst_object_with_proof(
-            name,
-            bytes,
-            &crate::common::OperationDeadline::unbounded(),
+        let proof = hybrid.publish_immutable_file(
+            &crate::sst::object_key(name),
+            path,
+            size,
+            crc,
+            budget,
         )?;
         let metadata = crate::runtime::FileMeta {
             name: name.to_string(),
@@ -832,7 +847,9 @@ impl CompactionActor {
         };
         // Input authority has not changed. An interrupted job may leak this
         // immutable remote object, but it cannot lose a committed input.
-        std::fs::remove_file(path)?;
+        if hybrid.ephemeral_sst_cache_enabled() {
+            std::fs::remove_file(path)?;
+        }
         prepared.lock().insert(name.to_string(), (metadata, proof));
         crate::failpoints::fail_point!("midge::compaction::after_remote_partition_evicted", |_| {
             Err(MidgeError::Internal(

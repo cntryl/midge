@@ -2594,8 +2594,19 @@ fn should_reject_cloud_partition_read_before_exceeding_compaction_pool(
     std::fs::write(&path, vec![0u8; 128])?;
     let budget = crate::common::resource_budget::ResourceBudget::new(64);
 
+    let hybrid = crate::storage::HybridStorage::with_policy(
+        Arc::new(crate::storage::filesystem::FileSystem::new(
+            temp_dir.path().join("local"),
+        )?),
+        Arc::new(crate::storage::filesystem::FileSystem::new(
+            temp_dir.path().join("cloud"),
+        )?),
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    );
+
     // Act
-    let result = EventLoop::read_file_with_budget(&path, &budget);
+    let result =
+        hybrid.publish_immutable_file("sst/oversized-partition.sst", &path, 128, 0, &budget);
 
     // Assert
     assert!(matches!(

@@ -127,6 +127,40 @@ impl EventLoop {
         }
     }
 
+    fn defer_cloud_ack_for_memory(
+        &mut self,
+        segment_id: u64,
+        max_sequence: u64,
+        error: &crate::common::MidgeError,
+        deadline: &OperationDeadline,
+    ) -> bool {
+        let contention = self
+            .hybrid_storage
+            .as_ref()
+            .and_then(|storage| storage.maintenance_memory())
+            .and_then(|budget| budget.take_contention(error));
+        if !deadline.is_expired()
+            && contention.is_some_and(|contention| {
+                self.hybrid_storage
+                    .as_ref()
+                    .and_then(|storage| storage.maintenance_memory())
+                    .is_some_and(|budget| contention.is_blocked_by(&budget))
+            })
+        {
+            // Shared maintenance pressure is backpressure, not a failed
+            // accepted write. Keep its waiter and sealed local WAL while
+            // the existing upload backlog owns a bounded retry.
+            self.cloud_wal_prune_progress.discard_idle_proofs();
+            self.cloud_wal
+                .upload_backlog
+                .insert(segment_id, max_sequence);
+            self.cloud_wal.defer_upload_retry();
+            tracing::debug!(segment_id, %error, "deferring WAL catalog publication for shared memory");
+            return true;
+        }
+        false
+    }
+
     fn handle_storage_event_cloud_ack(
         &mut self,
         segment_id: u64,
@@ -151,6 +185,9 @@ impl EventLoop {
         if let Err(error) =
             self.verify_remote_wal_segment_before_ack(segment_id, max_sequence, &deadline)
         {
+            if self.defer_cloud_ack_for_memory(segment_id, max_sequence, &error, &deadline) {
+                return;
+            }
             self.handle_cloud_upload_failure(
                 segment_id,
                 &Self::cloud_ack_error("cloud WAL readback validation failed", error),
@@ -420,5 +457,119 @@ impl EventLoop {
         // Keep all inflight segments. A later ACK may already be buffered, but
         // it cannot advance the frontier until this failed segment is retried
         // successfully.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::MidgeError;
+    use crate::runtime::event_loop::tests::create_test_cloud_event_loop;
+
+    #[test]
+    fn should_reject_unrelated_resource_failure_when_shared_budget_is_in_use() {
+        // Arrange
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )
+        .unwrap();
+        let budget = el
+            .hybrid_storage
+            .as_ref()
+            .unwrap()
+            .maintenance_memory()
+            .unwrap();
+        let _held = budget.reserve(1, "unrelated retained memory").unwrap();
+        let error = MidgeError::ResourceLimit("identity space exhausted".into());
+
+        // Act
+        let deferred = el.defer_cloud_ack_for_memory(1, 1, &error, &OperationDeadline::unbounded());
+
+        // Assert
+        assert!(!deferred);
+        assert!(el.cloud_wal.upload_backlog.is_empty());
+    }
+
+    #[test]
+    fn should_reject_oversized_reservation_when_shared_budget_is_in_use() {
+        // Arrange
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )
+        .unwrap();
+        let budget = el
+            .hybrid_storage
+            .as_ref()
+            .unwrap()
+            .maintenance_memory()
+            .unwrap();
+        let _held = budget.reserve(1, "retained memory").unwrap();
+        let error = budget
+            .reserve(budget.limit() + 1, "oversized catalog")
+            .unwrap_err();
+
+        // Act
+        let deferred = el.defer_cloud_ack_for_memory(1, 1, &error, &OperationDeadline::unbounded());
+
+        // Assert
+        assert!(!deferred);
+        assert!(el.cloud_wal.upload_backlog.is_empty());
+    }
+
+    #[test]
+    fn should_reject_contention_when_it_belongs_to_another_budget() {
+        // Arrange
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )
+        .unwrap();
+        let shared = el
+            .hybrid_storage
+            .as_ref()
+            .unwrap()
+            .maintenance_memory()
+            .unwrap();
+        let _shared_held = shared
+            .reserve(shared.limit(), "shared maintenance")
+            .unwrap();
+        let other =
+            crate::common::resource_budget::ResourceBudget::new(10).with_contention_errors();
+        let _other_held = other.reserve(10, "other pool").unwrap();
+        let error = other.reserve(1, "other request").unwrap_err();
+
+        // Act
+        let deferred = el.defer_cloud_ack_for_memory(1, 1, &error, &OperationDeadline::unbounded());
+
+        // Assert
+        assert!(!deferred);
+        assert!(el.cloud_wal.upload_backlog.is_empty());
+    }
+
+    #[test]
+    fn should_reject_contention_when_ack_deadline_has_expired() {
+        // Arrange
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )
+        .unwrap();
+        let budget = el
+            .hybrid_storage
+            .as_ref()
+            .unwrap()
+            .maintenance_memory()
+            .unwrap()
+            .with_contention_errors();
+        let _held = budget
+            .reserve(budget.limit(), "active maintenance")
+            .unwrap();
+        let error = budget.reserve(1, "catalog request").unwrap_err();
+        let deadline = OperationDeadline::from_budget(std::time::Duration::ZERO);
+
+        // Act
+        let deferred = el.defer_cloud_ack_for_memory(1, 1, &error, &deadline);
+
+        // Assert
+        assert!(!deferred);
+        assert!(el.cloud_wal.upload_backlog.is_empty());
     }
 }

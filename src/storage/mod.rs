@@ -71,6 +71,8 @@ pub(crate) mod providers;
 pub(crate) mod remote_sst;
 pub(crate) mod retained_callback;
 pub(crate) mod test_support;
+#[cfg(test)]
+pub(crate) use test_support::forward_storage_backend;
 
 pub use hybrid::backend::HybridStorage;
 
