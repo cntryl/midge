@@ -414,8 +414,8 @@ impl FlushActor {
                 )))
             }
             None => {
-                crate::metadata::append_edit_batch(
-                    &task.db_path,
+                crate::metadata::journal::append_edit_batch_with_fs(
+                    &task.fs,
                     &[
                         crate::metadata::ManifestEdit::BumpNextSstSeq {
                             cf_id: task.build.identity.cf_id,
@@ -443,9 +443,8 @@ impl FlushActor {
         validate_task_lease(task)?;
         clear_manifest_published_intent(task, &task.sst_name)?;
         let persistence_anomaly =
-            match crate::metadata::ManifestPersistence::save_snapshot_and_truncate_journal(
-                &task.db_path,
-                &manifest,
+            match crate::metadata::ManifestPersistence::save_snapshot_and_truncate_journal_with_fs(
+                &task.fs, &manifest,
             ) {
                 Ok(()) => false,
                 Err(error) if task.cloud_metadata_storage.is_none() => {
@@ -526,10 +525,11 @@ fn finalize_staged_sst(
     final_path: &Path,
     budget: &crate::common::resource_budget::ResourceBudget,
 ) -> MidgeResult<()> {
-    if !final_path.exists() {
-        let parent = final_path.parent().ok_or(MidgeError::InvalidPath)?;
-        std::fs::create_dir_all(parent)?;
-        std::fs::rename(&task.build.staging_path, final_path)?;
+    let final_fs_path = db_relative_fs_path(task, final_path)?;
+    if !task.fs.exists(&final_fs_path)? {
+        task.fs.create_dir_all(&crate::io::FsPath::new("sst"))?;
+        let staging_fs_path = db_relative_fs_path(task, &task.build.staging_path)?;
+        task.fs.rename_atomic(&staging_fs_path, &final_fs_path)?;
     }
     validate_final_sst(final_path, &task.build.file_meta, budget)?;
     task.fs.sync_dir(
@@ -540,6 +540,14 @@ fn finalize_staged_sst(
     Ok(())
 }
 
+fn db_relative_fs_path(task: &FlushPublishTask, path: &Path) -> MidgeResult<crate::io::FsPath> {
+    let relative = path
+        .strip_prefix(&task.db_path)
+        .map_err(|_| MidgeError::InvalidPath)?;
+    let relative = relative.to_str().ok_or(MidgeError::InvalidPath)?;
+    Ok(crate::io::FsPath::new(relative))
+}
+
 fn cleanup_non_authoritative_staging(task: &FlushPublishTask) {
     let Some(staging_dir) = task.build.staging_path.parent() else {
         return;
@@ -547,19 +555,16 @@ fn cleanup_non_authoritative_staging(task: &FlushPublishTask) {
     if staging_dir.file_name().and_then(|name| name.to_str()) != Some(".flush-staging") {
         return;
     }
-    match std::fs::remove_file(&task.build.staging_path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+    let Ok(staging_path) = db_relative_fs_path(task, &task.build.staging_path) else {
+        tracing::warn!(
+            path = %task.build.staging_path.display(),
+            "retaining flush staging file outside the injected filesystem root"
+        );
+        return;
+    };
+    match task.fs.remove_file(&staging_path) {
+        Ok(()) | Err(crate::io::FsError::NotFound(_)) => {}
         Err(error) => tracing::warn!(%error, "retaining non-authoritative flush staging file"),
-    }
-    match std::fs::remove_dir(staging_dir) {
-        Ok(()) => {}
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
-            ) => {}
-        Err(error) => tracing::warn!(%error, "retaining flush staging directory"),
     }
 }
 
@@ -585,18 +590,12 @@ fn validate_final_sst(
 }
 
 fn load_manifest(task: &FlushPublishTask) -> MidgeResult<crate::metadata::Manifest> {
-    let real = crate::io::RealFs::new(&task.db_path)
-        .map_err(|error| MidgeError::Internal(format!("open manifest filesystem: {error:?}")))?;
-    let fs: Arc<dyn crate::io::Fs> = Arc::new(real);
-    crate::metadata::ManifestPersistence::load_with_fs_and_policy(&fs, task.recovery_policy)
+    crate::metadata::ManifestPersistence::load_with_fs_and_policy(&task.fs, task.recovery_policy)
         .map_err(MidgeError::Internal)
 }
 
 fn load_intents(task: &FlushPublishTask) -> MidgeResult<Vec<crate::runtime::IntentLogEntry>> {
-    let real = crate::io::RealFs::new(&task.db_path)
-        .map_err(|error| MidgeError::Internal(format!("open intent filesystem: {error:?}")))?;
-    let fs: Arc<dyn crate::io::Fs> = Arc::new(real);
-    crate::runtime::IntentPersistence::load_with_fs_and_policy(&fs, task.recovery_policy)
+    crate::runtime::IntentPersistence::load_with_fs_and_policy(&task.fs, task.recovery_policy)
         .map_err(MidgeError::Internal)
 }
 
@@ -620,7 +619,8 @@ fn persist_output_durable_intent(
         sequence: task.build.identity.sequence,
         file_meta: file_meta.clone(),
     });
-    crate::runtime::IntentPersistence::save(&task.db_path, &intents).map_err(MidgeError::Internal)
+    crate::runtime::IntentPersistence::save_with_fs(&task.fs, &intents)
+        .map_err(MidgeError::Internal)
 }
 
 fn clear_manifest_published_intent(task: &FlushPublishTask, sst_name: &str) -> MidgeResult<()> {
@@ -632,7 +632,8 @@ fn clear_manifest_published_intent(task: &FlushPublishTask, sst_name: &str) -> M
                 if file_meta.name == sst_name
         )
     });
-    crate::runtime::IntentPersistence::save(&task.db_path, &intents).map_err(MidgeError::Internal)
+    crate::runtime::IntentPersistence::save_with_fs(&task.fs, &intents)
+        .map_err(MidgeError::Internal)
 }
 
 fn runtime_to_manifest_meta(file: &crate::runtime::FileMeta) -> crate::metadata::FileMeta {
@@ -671,12 +672,21 @@ fn mirror_control_metadata(
 ) -> MidgeResult<()> {
     let _publication_guard = cloud.lock_metadata_publication();
     for file_name in crate::storage::cloud::CLOUD_METADATA_FILES {
-        let path = task.db_path.join(file_name);
-        if !path.exists() {
+        let path = crate::io::FsPath::new(*file_name);
+        if !task.fs.exists(&path)? {
             continue;
         }
         validate_task_lease(task)?;
-        let data = std::fs::read(path)?;
+        let file = task.fs.open(
+            &path,
+            crate::io::OpenOptions {
+                mode: crate::io::OpenMode::ReadOnly,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        )?;
+        let data = file.read_at(0, file.len()?)?.to_vec();
         let key = crate::storage::cloud::cloud_metadata_key(file_name);
         conditional_metadata_put(cloud, file_name, &key, data, local_manifest_sequence)?;
     }
@@ -803,6 +813,103 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    struct PublicationTestFs {
+        inner: crate::io::RealFs,
+        fail_rename: bool,
+        fail_sync: AtomicBool,
+        sync_dir_calls: parking_lot::Mutex<Vec<(crate::io::FsPath, crate::io::Durability)>>,
+    }
+
+    impl PublicationTestFs {
+        fn set_sync_dir_failure(&self, fail: bool) {
+            self.fail_sync.store(fail, Ordering::Relaxed);
+        }
+
+        fn sync_dir_calls(&self) -> Vec<(crate::io::FsPath, crate::io::Durability)> {
+            self.sync_dir_calls.lock().clone()
+        }
+    }
+
+    impl crate::io::Fs for PublicationTestFs {
+        fn coordination_key(&self) -> u64 {
+            crate::io::Fs::coordination_key(&self.inner)
+        }
+
+        fn open(
+            &self,
+            path: &crate::io::FsPath,
+            options: crate::io::OpenOptions,
+        ) -> crate::io::FsResult<Box<dyn crate::io::File + '_>> {
+            crate::io::Fs::open(&self.inner, path, options)
+        }
+
+        fn open_persistent_handle(
+            &self,
+            path: &crate::io::FsPath,
+            options: crate::io::OpenOptions,
+        ) -> crate::io::FsResult<Box<dyn crate::io::File>> {
+            crate::io::Fs::open_persistent_handle(&self.inner, path, options)
+        }
+
+        fn remove_file(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+            crate::io::Fs::remove_file(&self.inner, path)
+        }
+
+        fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
+            crate::io::Fs::exists(&self.inner, path)
+        }
+
+        fn metadata(
+            &self,
+            path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<crate::io::traits::Metadata> {
+            crate::io::Fs::metadata(&self.inner, path)
+        }
+
+        fn create_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+            crate::io::Fs::create_dir_all(&self.inner, path)
+        }
+
+        fn list_dir(
+            &self,
+            path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
+            crate::io::Fs::list_dir(&self.inner, path)
+        }
+
+        fn remove_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+            crate::io::Fs::remove_dir_all(&self.inner, path)
+        }
+
+        fn sync_dir(
+            &self,
+            path: &crate::io::FsPath,
+            durability: crate::io::Durability,
+        ) -> crate::io::FsResult<()> {
+            self.sync_dir_calls.lock().push((path.clone(), durability));
+            if self.fail_sync.load(Ordering::Relaxed) {
+                return Err(crate::io::FsError::Unavailable(
+                    "injected directory sync failure".to_string(),
+                ));
+            }
+            crate::io::Fs::sync_dir(&self.inner, path, durability)
+        }
+
+        fn rename_atomic(
+            &self,
+            from: &crate::io::FsPath,
+            to: &crate::io::FsPath,
+        ) -> crate::io::FsResult<()> {
+            if self.fail_rename {
+                Err(crate::io::FsError::Unavailable(format!(
+                    "injected rename failure from {from} to {to}"
+                )))
+            } else {
+                crate::io::Fs::rename_atomic(&self.inner, from, to)
+            }
+        }
+    }
+
     struct ScriptedLeaderStore {
         expected_epoch: u64,
         fail_at_validation: usize,
@@ -894,6 +1001,7 @@ mod tests {
             fail_at_validation,
             validations: AtomicUsize::new(0),
         });
+        let publication_fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new(&db_path)?);
         let task = FlushPublishTask {
             build: FlushBuildOutput {
                 identity,
@@ -905,7 +1013,7 @@ mod tests {
             sst_seq: 1,
             db_path,
             sst_dir,
-            fs: Arc::new(crate::io::MockFs::new()),
+            fs: publication_fs,
             recovery_policy: crate::config::RecoveryPolicy::Strict,
             hybrid_storage: Some(hybrid),
             cloud_metadata_storage: Some(control_cloud),
@@ -1159,7 +1267,12 @@ mod tests {
     fn should_retry_sst_directory_sync_when_prior_finalize_barrier_failed() -> MidgeResult<()> {
         // Arrange
         let mut fixture = publication_fixture(usize::MAX)?;
-        let sync_fs = Arc::new(crate::io::MockFs::new());
+        let sync_fs = Arc::new(PublicationTestFs {
+            inner: crate::io::RealFs::new(&fixture.task.db_path)?,
+            fail_rename: false,
+            fail_sync: AtomicBool::new(false),
+            sync_dir_calls: parking_lot::Mutex::new(Vec::new()),
+        });
         sync_fs.set_sync_dir_failure(true);
         fixture.task.fs = sync_fs.clone();
         let final_path = fixture.task.sst_dir.join(&fixture.task.sst_name);
@@ -1198,6 +1311,33 @@ mod tests {
             ],
             "retry must re-establish the directory durability barrier"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_publish_sst_when_injected_filesystem_rejects_atomic_rename() -> MidgeResult<()> {
+        // Arrange
+        let mut fixture = publication_fixture(usize::MAX)?;
+        fixture.task.fs = Arc::new(PublicationTestFs {
+            inner: crate::io::RealFs::new(&fixture.task.db_path)?,
+            fail_rename: true,
+            fail_sync: AtomicBool::new(false),
+            sync_dir_calls: parking_lot::Mutex::new(Vec::new()),
+        });
+        let final_path = fixture.task.sst_dir.join(&fixture.task.sst_name);
+
+        // Act
+        let error = finalize_staged_sst(
+            &fixture.task,
+            &final_path,
+            &crate::common::resource_budget::ResourceBudget::new(DEFAULT_FLUSH_MEMORY_BYTES),
+        )
+        .expect_err("injected filesystem must own the atomic publication rename");
+
+        // Assert
+        assert!(matches!(error, MidgeError::Internal(_)));
+        assert!(fixture.task.build.staging_path.exists());
+        assert!(!final_path.exists());
         Ok(())
     }
 
