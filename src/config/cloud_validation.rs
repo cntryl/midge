@@ -235,7 +235,9 @@ fn validate_s3(
             "S3-compatible region must be a transport-safe signing component",
         );
     }
-    endpoint(out, provider, roles, &config.endpoint);
+    if let Some(value) = provider.endpoint() {
+        endpoint(out, provider, roles, value);
+    }
     validate_s3_credentials(out, provider, roles, &config.credentials, false);
 }
 
@@ -269,7 +271,7 @@ fn validate_oci(
             "OCI namespace and region must be safe DNS components",
         );
     }
-    if let Some(value) = &config.endpoint {
+    if let Some(value) = provider.endpoint() {
         endpoint(out, provider, roles, value);
     }
     validate_s3_credentials(out, provider, roles, &config.credentials, false);
@@ -306,7 +308,7 @@ fn validate_azure(
     if !valid_azure_container(&config.container) {
         fail(out, provider, roles, "Azure container must be 3-63 lowercase letters, digits, or nonconsecutive interior hyphens");
     }
-    if let Some(value) = &config.endpoint {
+    if let Some(value) = provider.endpoint() {
         if azure_identity_credentials(&config.credential) {
             azure_identity_endpoint(out, provider, roles, value);
         } else {
@@ -331,7 +333,7 @@ fn validate_gcs(
             "GCS bucket violates published length, character, IP-address, or reserved-name rules",
         );
     }
-    if let Some(value) = &config.endpoint {
+    if let Some(value) = provider.endpoint() {
         endpoint(out, provider, roles, value);
     }
     validate_gcs_credentials(out, provider, roles, &config.credential);

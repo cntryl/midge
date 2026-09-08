@@ -395,14 +395,7 @@ fn validate_cloud_provider_config(provider: &CloudProviderConfig) -> MidgeResult
         ));
     }
 
-    let endpoint = match provider {
-        CloudProviderConfig::S3Compatible(config) => Some(config.endpoint.as_str()),
-        CloudProviderConfig::AzureBlob(config) => config.endpoint.as_deref(),
-        CloudProviderConfig::Gcs(config) => config.endpoint.as_deref(),
-        CloudProviderConfig::AwsS3(_) | CloudProviderConfig::OciObjectStorage(_) => None,
-    };
-
-    if let Some(endpoint) = endpoint {
+    if let Some(endpoint) = provider.endpoint() {
         let parsed = url::Url::parse(endpoint).map_err(|error| {
             crate::common::MidgeError::InvalidArgument(format!(
                 "cloud endpoint must be an absolute HTTP(S) URL: {error}"
@@ -590,6 +583,14 @@ mod validation_tests {
         // Arrange
         let providers = [
             CloudProviderConfig::s3_compatible_static("bucket", "not a URL", "access", "secret"),
+            CloudProviderConfig::oci_object_storage(
+                "namespace",
+                "bucket",
+                "us-phoenix-1",
+                S3CredentialSource::access_key("access", "secret"),
+            )
+            .with_endpoint("https://user:secret@objectstorage.example.test")
+            .expect("OCI supports endpoint overrides"),
             CloudProviderConfig::azure_blob("account", "container")
                 .with_azure_credentials(AzureCredentialSource::shared_key("YQ=="))
                 .expect("Azure credential override should match")

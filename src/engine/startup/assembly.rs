@@ -1,6 +1,6 @@
 use super::super::{lease_state::LeaseState, ColumnFamilyHandle, Engine, OpenOptions};
 use super::{
-    provider_endpoint, provider_kind, redact_endpoint_metadata, EngineStartup, FacadeAssembly,
+    provider_kind, redact_endpoint_metadata, EngineStartup, FacadeAssembly,
     RuntimeRecoveryMaterialization, RuntimeStorageMaterialization, StartedRuntime, StartupLease,
     StartupStoragePath,
 };
@@ -138,7 +138,7 @@ impl EngineStartup {
     pub(super) fn trace_open(opts: &OpenOptions) {
         if let Storage::Cloud { topology, .. } = opts.storage() {
             if topology.wal() == topology.sst() && topology.wal() == topology.control() {
-                let endpoint = provider_endpoint(topology.wal().provider()).map_or_else(
+                let endpoint = topology.wal().provider().endpoint().map_or_else(
                     || "<provider-default>".to_string(),
                     redact_endpoint_metadata,
                 );
@@ -151,15 +151,15 @@ impl EngineStartup {
                 );
                 return;
             }
-            let wal_endpoint = provider_endpoint(topology.wal().provider()).map_or_else(
+            let wal_endpoint = topology.wal().provider().endpoint().map_or_else(
                 || "<provider-default>".to_string(),
                 redact_endpoint_metadata,
             );
-            let sst_endpoint = provider_endpoint(topology.sst().provider()).map_or_else(
+            let sst_endpoint = topology.sst().provider().endpoint().map_or_else(
                 || "<provider-default>".to_string(),
                 redact_endpoint_metadata,
             );
-            let control_endpoint = provider_endpoint(topology.control().provider()).map_or_else(
+            let control_endpoint = topology.control().provider().endpoint().map_or_else(
                 || "<provider-default>".to_string(),
                 redact_endpoint_metadata,
             );
