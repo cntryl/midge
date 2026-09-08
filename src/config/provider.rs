@@ -745,6 +745,17 @@ impl fmt::Debug for CloudProviderConfig {
 }
 
 impl CloudProviderConfig {
+    /// Return the explicitly configured service endpoint, when present.
+    pub(crate) fn endpoint(&self) -> Option<&str> {
+        match self {
+            Self::AwsS3(_) => None,
+            Self::S3Compatible(config) => Some(config.endpoint()),
+            Self::OciObjectStorage(config) => config.endpoint_override(),
+            Self::AzureBlob(config) => config.endpoint(),
+            Self::Gcs(config) => config.endpoint(),
+        }
+    }
+
     /// Create AWS S3 config using Midge's lean AWS default credential chain.
     pub fn aws_s3(bucket: impl Into<String>, region: impl Into<String>) -> Self {
         AwsS3Config::new(bucket, region).into()
