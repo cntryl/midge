@@ -186,20 +186,6 @@ pub struct EventLoop {
     runtime_response_timeout: std::time::Duration,
 }
 
-impl std::ops::Deref for EventLoop {
-    type Target = fencing::RuntimeFence;
-
-    fn deref(&self) -> &Self::Target {
-        &self.fencing
-    }
-}
-
-impl std::ops::DerefMut for EventLoop {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.fencing
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum HandleOutcome {
     Continue,
@@ -728,7 +714,7 @@ impl EventLoop {
         if !background_enabled && !manual && !self.state.has_any_critical_l0_debt() {
             return Ok(false);
         }
-        if self.ddl_authority_ambiguous {
+        if self.fencing.ddl_authority_ambiguous {
             return Err(crate::common::MidgeError::Fenced(
                 "DDL authority is ambiguous; refusing compaction until reconciliation".into(),
             ));

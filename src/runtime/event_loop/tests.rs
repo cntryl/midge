@@ -997,7 +997,7 @@ fn should_preserve_compaction_gates_when_recovering_live_l0_pressure() {
             }));
         match gate {
             "ingest" => event_loop.state.ingest_active.store(true, Ordering::SeqCst),
-            "ddl" => event_loop.ddl_authority_ambiguous = true,
+            "ddl" => event_loop.fencing.ddl_authority_ambiguous = true,
             "publication" => event_loop.publication_gate.active = true,
             _ => event_loop.compaction_publication_degraded = true,
         }

@@ -728,7 +728,7 @@ impl EventLoop {
             );
         if must_fence {
             self.state.mark_persistence_anomaly();
-            if let Some(healthy) = &self.lease_healthy {
+            if let Some(healthy) = &self.fencing.lease_healthy {
                 healthy.store(false, std::sync::atomic::Ordering::Release);
             }
             tracing::error!(

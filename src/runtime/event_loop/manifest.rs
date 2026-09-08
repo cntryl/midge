@@ -84,13 +84,13 @@ impl ManifestCoordinator {
             return HandleOutcome::Continue;
         }
 
-        if event_loop.ddl_authority_ambiguous {
+        if event_loop.fencing.ddl_authority_ambiguous {
             match crate::runtime::ddl::reconcile_prepared_within(
                 &mut event_loop.state,
                 event_loop.hybrid_storage.as_ref(),
                 &deadline,
             ) {
-                Ok(()) => event_loop.ddl_authority_ambiguous = false,
+                Ok(()) => event_loop.fencing.ddl_authority_ambiguous = false,
                 Err(error) => {
                     event_loop.respond(
                         request_id,
@@ -125,7 +125,7 @@ impl ManifestCoordinator {
                     &edit,
                     &deadline,
                 )?;
-                event_loop.ddl_authority_ambiguous = false;
+                event_loop.fencing.ddl_authority_ambiguous = false;
                 cf_id
             };
 
@@ -194,14 +194,14 @@ impl ManifestCoordinator {
             return HandleOutcome::Continue;
         }
 
-        if event_loop.ddl_authority_ambiguous {
+        if event_loop.fencing.ddl_authority_ambiguous {
             match crate::runtime::ddl::reconcile_prepared_within(
                 &mut event_loop.state,
                 event_loop.hybrid_storage.as_ref(),
                 &deadline,
             ) {
                 Ok(()) => {
-                    event_loop.ddl_authority_ambiguous = false;
+                    event_loop.fencing.ddl_authority_ambiguous = false;
                     let drop_committed = event_loop
                         .state
                         .manifest
@@ -240,7 +240,7 @@ impl ManifestCoordinator {
                     &edit,
                     &deadline,
                 )?;
-                event_loop.ddl_authority_ambiguous = false;
+                event_loop.fencing.ddl_authority_ambiguous = false;
                 Ok(())
             });
         if let Err(error) = result {
@@ -284,7 +284,7 @@ impl ManifestCoordinator {
             crate::common::MidgeError::Fenced(message)
                 if message.contains("DDL authority is ambiguous")
         ) {
-            event_loop.ddl_authority_ambiguous = true;
+            event_loop.fencing.ddl_authority_ambiguous = true;
             event_loop.state.mark_persistence_anomaly();
             event_loop.publish_snapshot();
         }

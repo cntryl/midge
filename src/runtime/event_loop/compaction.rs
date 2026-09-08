@@ -161,7 +161,7 @@ impl CompactionCoordinator {
                     .into(),
             ));
         }
-        if event_loop.ddl_authority_ambiguous {
+        if event_loop.fencing.ddl_authority_ambiguous {
             return Err(crate::common::MidgeError::Fenced(
                 "DDL authority is ambiguous; refusing compaction until reconciliation".into(),
             ));

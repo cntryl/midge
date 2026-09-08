@@ -1217,7 +1217,7 @@ fn should_fail_all_event_loop_strict_transactions_when_shared_sync_fails() -> Mi
     let scenario = fail::FailScenario::setup();
     let mut fixture = EventLoopFixture::with_policy(DurabilityPolicy::Strict)?;
     let lease_healthy = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    fixture.event_loop.lease_healthy = Some(Arc::clone(&lease_healthy));
+    fixture.event_loop.fencing.lease_healthy = Some(Arc::clone(&lease_healthy));
     let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
     let first_rx = fixture.register(65);
     let second_rx = fixture.register(66);
