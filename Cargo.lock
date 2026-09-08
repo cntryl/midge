@@ -226,7 +226,6 @@ dependencies = [
  "crc32c",
  "crc32fast",
  "crossbeam",
- "crossbeam-epoch",
  "dashmap",
  "fail",
  "hdrhistogram",

@@ -907,9 +907,13 @@ fn should_recover_committed_transactions_given_wal_replay_when_restart() {
 #[test]
 fn should_support_best_effort_during_bulk_load_phase_when_followed_by_flush() {
     const BULK_COUNT: usize = 1000;
+    const BULK_MEMTABLE_BYTES: usize = 256 * 1024;
 
-    for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+    for_each_storage_mode(&all_storage_modes_new(), |mode, mut opts| {
         // Arrange: Initialize engine and column family
+        // Keep this fixture's explicit flush authoritative now that memtable
+        // limits conservatively include skiplist node and version overhead.
+        opts.memtable_size = BULK_MEMTABLE_BYTES;
         let engine = Arc::new(open_with_mode(&opts, mode));
         let cf = engine.create_column_family("bulk_test").expect("create cf");
         let best_effort_opts = WriteOptions::best_effort();

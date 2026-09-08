@@ -582,6 +582,8 @@ fn should_run_diagnostic_pr_probe_without_internal_gate_obligation() {
     assert_eq!(diagnostic_profile_count, 2);
     assert!(!guard_workflow.contains("--profile release --workload \"$WORKLOAD\""));
     assert!(guard_workflow.contains("--max-regression 0.15"));
+    assert!(!guard_workflow.contains("cp Cargo.lock ../midge-bench-base/Cargo.lock"));
+    assert!(guard_workflow.contains("--manifest-path ../midge-bench-base/Cargo.toml"));
 }
 
 #[test]
