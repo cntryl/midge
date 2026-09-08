@@ -355,7 +355,7 @@ impl Engine {
         cloud: &crate::storage::cloud::CloudStorage,
         key: &str,
     ) -> MidgeResult<Vec<u8>> {
-        startup::CloudStartupRecovery::blocking_cloud_get(cloud, key)
+        startup::cloud_io::BlockingCloudIo::new(cloud).get(key)
     }
 
     #[cfg(test)]
@@ -364,7 +364,7 @@ impl Engine {
         key: &str,
         data: Vec<u8>,
     ) -> MidgeResult<()> {
-        startup::CloudStartupRecovery::blocking_cloud_put(cloud, key, data)
+        startup::cloud_io::BlockingCloudIo::new(cloud).put(key, data)
     }
 
     #[cfg(test)]

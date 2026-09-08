@@ -5,16 +5,16 @@ use crate::storage::cloud::{CloudEvent, CloudOutcome, CloudStorage, ObjectMetada
 ///
 /// Recovery policy remains in `CloudStartupRecovery`; this type owns only the
 /// callback protocol, timeout, and response-shape validation.
-pub(super) struct BlockingCloudIo<'a> {
+pub(in crate::engine) struct BlockingCloudIo<'a> {
     cloud: &'a CloudStorage,
 }
 
 impl<'a> BlockingCloudIo<'a> {
-    pub(super) fn new(cloud: &'a CloudStorage) -> Self {
+    pub(in crate::engine) fn new(cloud: &'a CloudStorage) -> Self {
         Self { cloud }
     }
 
-    pub(super) fn list(&self, prefix: &str) -> MidgeResult<Vec<String>> {
+    pub(in crate::engine) fn list(&self, prefix: &str) -> MidgeResult<Vec<String>> {
         let (tx, rx) = std::sync::mpsc::channel();
         self.cloud.submit_list(prefix, tx);
         match rx.recv_timeout(self.cloud.callback_timeout()) {
@@ -39,7 +39,7 @@ impl<'a> BlockingCloudIo<'a> {
         }
     }
 
-    pub(super) fn get_optional(&self, key: &str) -> MidgeResult<Option<Vec<u8>>> {
+    pub(in crate::engine) fn get_optional(&self, key: &str) -> MidgeResult<Option<Vec<u8>>> {
         let (tx, rx) = std::sync::mpsc::channel();
         self.cloud.submit_get(key, tx);
         match rx.recv_timeout(self.cloud.callback_timeout()) {
@@ -61,7 +61,10 @@ impl<'a> BlockingCloudIo<'a> {
         }
     }
 
-    pub(super) fn head_optional(&self, key: &str) -> MidgeResult<Option<ObjectMetadata>> {
+    pub(in crate::engine) fn head_optional(
+        &self,
+        key: &str,
+    ) -> MidgeResult<Option<ObjectMetadata>> {
         let (tx, rx) = std::sync::mpsc::channel();
         self.cloud.submit_head(key, tx);
         match rx.recv_timeout(self.cloud.callback_timeout()) {
@@ -83,7 +86,7 @@ impl<'a> BlockingCloudIo<'a> {
         }
     }
 
-    pub(super) fn put_with_headers(
+    pub(in crate::engine) fn put_with_headers(
         &self,
         key: &str,
         data: Vec<u8>,
@@ -105,5 +108,23 @@ impl<'a> BlockingCloudIo<'a> {
                 "cloud put '{key}' timed out or failed: {error}"
             ))),
         }
+    }
+
+    #[cfg(test)]
+    pub(in crate::engine) fn get(&self, key: &str) -> MidgeResult<Vec<u8>> {
+        self.get_optional(key)?.ok_or(MidgeError::NotFound)
+    }
+
+    #[cfg(test)]
+    pub(in crate::engine) fn put(&self, key: &str, data: Vec<u8>) -> MidgeResult<()> {
+        self.put_with_headers(key, data, Vec::new())
+    }
+
+    pub(super) fn object_proof_optional(
+        &self,
+        key: &str,
+    ) -> MidgeResult<Option<crate::storage::cloud::CloudObjectProof>> {
+        crate::storage::cloud::blocking_cloud_object_proof(self.cloud, key)
+            .map_err(MidgeError::Internal)
     }
 }
