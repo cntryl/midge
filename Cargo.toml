@@ -27,7 +27,6 @@ path = "src/lib.rs"
 # Concurrency & Synchronization
 arc-swap = "1.9"
 crossbeam = "0.8"
-crossbeam-epoch = "0.9"
 dashmap = "6.2"
 fail = { version = "0.5", features = ["failpoints"], optional = true }
 parking_lot = "0.12"

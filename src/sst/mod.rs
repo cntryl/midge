@@ -457,16 +457,11 @@ impl SkipListMemtable {
         seq: u64,
         expiration: Option<u64>,
     ) -> MidgeResult<()> {
-        let size_delta = key.len() + value.len() + 16;
         let encoded_delta = size_bound::point_bytes(key.len(), value.len());
-        self.size_bytes
-            .fetch_add(size_delta, std::sync::atomic::Ordering::Release);
         if !self
             .skiplist
             .upsert_exp(key, Some(value), seq, expiration, OpType::Put)
         {
-            self.size_bytes
-                .fetch_sub(size_delta, std::sync::atomic::Ordering::Release);
             return Err(MidgeError::Corruption(format!(
                 "duplicate memtable key/sequence pair at sequence {seq}"
             )));
@@ -508,13 +503,8 @@ impl SkipListMemtable {
     ///
     /// Returns an error when the underlying memtable cannot record the tombstone.
     pub fn delete_bytes_with_seq(&self, key: Bytes, seq: u64) -> MidgeResult<()> {
-        let size_delta = key.len() + 16;
         let encoded_delta = size_bound::point_bytes(key.len(), 0);
-        self.size_bytes
-            .fetch_add(size_delta, std::sync::atomic::Ordering::Release);
         if !self.skiplist.delete(key, seq) {
-            self.size_bytes
-                .fetch_sub(size_delta, std::sync::atomic::Ordering::Release);
             return Err(MidgeError::Corruption(format!(
                 "duplicate memtable key/sequence pair at sequence {seq}"
             )));
@@ -539,15 +529,22 @@ impl SkipListMemtable {
             return Ok(());
         }
 
-        let size_delta = start_key.len() + end_key.len() + 24;
-        self.size_bytes
-            .fetch_add(size_delta, std::sync::atomic::Ordering::Release);
         let mut range_tombstones = self.range_tombstones.write();
+        let old_capacity = range_tombstones.capacity();
         range_tombstones.push(crate::sst::types::RangeTombstone::new(
             start_key.to_vec(),
             end_key.to_vec(),
             seq,
         ));
+        let capacity_bytes = range_tombstones
+            .capacity()
+            .saturating_sub(old_capacity)
+            .saturating_mul(std::mem::size_of::<crate::sst::types::RangeTombstone>());
+        let size_delta = capacity_bytes
+            .saturating_add(start_key.len())
+            .saturating_add(end_key.len());
+        self.size_bytes
+            .fetch_add(size_delta, std::sync::atomic::Ordering::Relaxed);
         self.range_tombstone_count
             .fetch_add(1, std::sync::atomic::Ordering::Release);
         drop(range_tombstones);
@@ -603,18 +600,17 @@ impl Memtable for SkipListMemtable {
 
     fn delete(&self, key: Vec<u8>) -> MidgeResult<()> {
         let seq = self.next_seq();
-        let size_delta = key.len() + 16;
         let encoded_delta = size_bound::point_bytes(key.len(), 0);
         if self.skiplist.delete(Bytes::from(key), seq) {
             self.add_encoded_size_bound(encoded_delta);
         }
-        self.size_bytes
-            .fetch_add(size_delta, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
     fn size_bytes(&self) -> usize {
-        self.size_bytes.load(std::sync::atomic::Ordering::Relaxed)
+        self.skiplist
+            .retained_bytes()
+            .saturating_add(self.size_bytes.load(std::sync::atomic::Ordering::Relaxed))
     }
 }
 
@@ -836,19 +832,16 @@ mod tests {
             .expect("range delete");
 
         // Assert
-        assert_eq!(after_put, 3 + 5 + 16);
+        assert!(after_put > 3 + 5);
         assert!(matches!(duplicate, Err(MidgeError::Corruption(_))));
-        assert_eq!(
-            memtable.size_bytes(),
-            (3 + 5 + 16) + (4 + 16) + (1 + 1 + 24)
-        );
+        assert!(memtable.size_bytes() > after_put + 4 + 1 + 1);
     }
 
     #[test]
     fn should_grow_accounted_bytes_given_repeated_versions_of_same_key() {
         // Arrange
         let memtable = SkipListMemtable::new();
-        let delta = 3 + 1 + 16;
+        let mut previous = 0;
 
         // Act
         for sequence in 1..=3 {
@@ -860,14 +853,13 @@ mod tests {
                     None,
                 )
                 .expect("version put");
-            assert_eq!(
-                memtable.size_bytes(),
-                delta * usize::try_from(sequence).expect("test sequence fits usize")
-            );
+            let current = memtable.size_bytes();
+            assert!(current > previous);
+            previous = current;
         }
 
         // Assert
-        assert_eq!(memtable.size_bytes(), delta * 3);
+        assert!(memtable.size_bytes() > 3 * (3 + 1));
     }
 
     #[test]
