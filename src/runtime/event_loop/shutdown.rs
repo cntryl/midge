@@ -104,8 +104,12 @@ impl EventLoop {
         // Stop compaction only after the final checkpoint has settled. Its
         // worker owns staged SST output and must finish while this lease epoch
         // is still valid.
+        let compaction_storage = self.hybrid_storage.as_ref().map(|storage| {
+            std::sync::Arc::clone(storage)
+                as std::sync::Arc<dyn crate::runtime::actors::compaction::CompactionStorage>
+        });
         self.compaction_actor
-            .cancel_and_join_worker(&mut self.state, self.hybrid_storage.as_ref());
+            .cancel_and_join_worker(&mut self.state, compaction_storage.as_ref());
 
         // GC and remote WAL-prune workers can mutate local/cloud storage.
         // Join them before the event loop exits; Engine releases its lease

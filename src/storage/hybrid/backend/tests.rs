@@ -324,7 +324,7 @@ fn should_publish_sst_without_duplicate_local_copy_when_ephemeral_cache_is_enabl
     // Assert
     assert_eq!(read_cloud_object(&storage, &key), bytes);
     let exists = HybridStorage::object_exists_in_backend_within(
-        &storage.local,
+        &storage.stores.local,
         &key,
         storage.callback_timeout,
         &crate::common::OperationDeadline::unbounded(),
@@ -1910,7 +1910,7 @@ impl StorageBackend for NeverCompletesBackend {
 
 fn write_cloud_object(storage: &HybridStorage, key: &str, data: Vec<u8>) {
     let (tx, rx) = std::sync::mpsc::channel();
-    storage.cloud.submit_write(key, data, tx);
+    storage.stores.sst.submit_write(key, data, tx);
     match rx.recv_timeout(Duration::from_secs(1)) {
         Ok(StorageEvent::WriteComplete {
             result: StorageOutcome::Ok(()),
@@ -1922,7 +1922,7 @@ fn write_cloud_object(storage: &HybridStorage, key: &str, data: Vec<u8>) {
 
 fn write_local_object(storage: &HybridStorage, key: &str, data: Vec<u8>) {
     let (tx, rx) = std::sync::mpsc::channel();
-    storage.local.submit_write(key, data, tx);
+    storage.stores.local.submit_write(key, data, tx);
     match rx.recv_timeout(Duration::from_secs(1)) {
         Ok(StorageEvent::WriteComplete {
             result: StorageOutcome::Ok(()),
@@ -1934,7 +1934,7 @@ fn write_local_object(storage: &HybridStorage, key: &str, data: Vec<u8>) {
 
 fn read_local_object(storage: &HybridStorage, key: &str) -> Vec<u8> {
     let (tx, rx) = std::sync::mpsc::channel();
-    storage.local.submit_read(key, tx);
+    storage.stores.local.submit_read(key, tx);
     match rx.recv_timeout(Duration::from_secs(1)) {
         Ok(StorageEvent::ReadComplete {
             result: StorageOutcome::Ok(data),
@@ -1946,7 +1946,7 @@ fn read_local_object(storage: &HybridStorage, key: &str) -> Vec<u8> {
 
 fn read_cloud_object(storage: &HybridStorage, key: &str) -> Vec<u8> {
     let (tx, rx) = std::sync::mpsc::channel();
-    storage.cloud.submit_read(key, tx);
+    storage.stores.sst.submit_read(key, tx);
     match rx.recv_timeout(Duration::from_secs(1)) {
         Ok(StorageEvent::ReadComplete {
             result: StorageOutcome::Ok(data),
@@ -1970,7 +1970,7 @@ fn read_hybrid_object(storage: &HybridStorage, key: &str) -> Vec<u8> {
 
 fn delete_cloud_object(storage: &HybridStorage, key: &str) {
     let (tx, rx) = std::sync::mpsc::channel();
-    storage.cloud.submit_delete(key, tx);
+    storage.stores.sst.submit_delete(key, tx);
     match rx.recv_timeout(Duration::from_secs(1)) {
         Ok(StorageEvent::DeleteComplete {
             result: StorageOutcome::Ok(()),
@@ -2010,7 +2010,7 @@ fn head_cloud_metadata_object(cloud: &CloudStorage, key: &str) -> StorageObjectM
 
 fn assert_cloud_object_exists(storage: &HybridStorage, key: &str) {
     let (tx, rx) = std::sync::mpsc::channel();
-    storage.cloud.submit_head(key, tx);
+    storage.stores.sst.submit_head(key, tx);
     match rx.recv_timeout(Duration::from_secs(1)) {
         Ok(StorageEvent::HeadComplete {
             result: StorageOutcome::Ok(_),
@@ -2022,7 +2022,7 @@ fn assert_cloud_object_exists(storage: &HybridStorage, key: &str) {
 
 fn assert_cloud_object_missing(storage: &HybridStorage, key: &str) {
     let (tx, rx) = std::sync::mpsc::channel();
-    storage.cloud.submit_head(key, tx);
+    storage.stores.sst.submit_head(key, tx);
     match rx.recv_timeout(Duration::from_secs(1)) {
         Ok(StorageEvent::HeadComplete {
             result: StorageOutcome::Err(_),

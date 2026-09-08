@@ -31,12 +31,18 @@ fn should_retain_failed_compaction_admission_when_anonymous_scratch_cleanup_is_u
         // Arrange
         let directory = tempfile::tempdir()?;
         let (mut event_loop, hybrid) = event_loop_with_storage(&directory, true)?;
+        let compaction_storage: Arc<dyn crate::runtime::actors::compaction::CompactionStorage> =
+            hybrid.clone();
         event_loop.compaction_actor = crate::runtime::actors::compaction::CompactionActor::new(
             Arc::new(UnknownScratchFactory),
         );
         event_loop
             .compaction_actor
-            .prepare_for_completion_with_storage_test(&mut event_loop.state, &[], Some(&hybrid))?;
+            .prepare_for_completion_with_storage_test(
+                &mut event_loop.state,
+                &[],
+                Some(&compaction_storage),
+            )?;
         event_loop.compaction_actor.set_worker_error_for_test(error);
         // Act
         CompactionCoordinator::complete(
@@ -156,6 +162,8 @@ fn should_settle_async_compaction_failure_according_to_owned_scratch() -> MidgeR
             // Arrange
             let directory = tempfile::tempdir()?;
             let (mut event_loop, hybrid) = event_loop_with_storage(&directory, ephemeral)?;
+            let compaction_storage: Arc<dyn crate::runtime::actors::compaction::CompactionStorage> =
+                hybrid.clone();
             let input = crate::sst::file_name(0, 0, 1);
             event_loop
                 .state
@@ -172,7 +180,7 @@ fn should_settle_async_compaction_failure_according_to_owned_scratch() -> MidgeR
                 .prepare_for_completion_with_storage_test(
                     &mut event_loop.state,
                     std::slice::from_ref(&input),
-                    Some(&hybrid),
+                    Some(&compaction_storage),
                 )?;
             let error = if io_failure {
                 MidgeError::Io(std::io::Error::other("failed local writer"))

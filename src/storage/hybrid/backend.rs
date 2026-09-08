@@ -97,15 +97,16 @@ pub struct HybridStorageBudgetSnapshot {
 /// - Tracks pending WAL segment uploads
 /// - Emits `CloudAck` when cloud confirms durability
 /// - Handles retries and failure reporting
-pub struct HybridStorage {
-    /// Local storage backend (usually filesystem)
+struct ObjectStores {
     local: Arc<dyn StorageBackend>,
-    /// Immutable SST storage backend.
-    cloud: Arc<dyn StorageBackend>,
-    /// Sealed WAL storage backend.
-    wal_cloud: Arc<dyn StorageBackend>,
-    /// Mutable lease/metadata/DDL storage backend.
-    control_cloud: Arc<dyn StorageBackend>,
+    sst: Arc<dyn StorageBackend>,
+    wal: Arc<dyn StorageBackend>,
+    control: Arc<dyn StorageBackend>,
+}
+
+pub struct HybridStorage {
+    /// Format-neutral object-store routing, separate from admission and worker ownership.
+    stores: ObjectStores,
     /// Storage Budget Actor for disk management
     budget_actor: Arc<Mutex<actor::StorageBudgetActor>>,
     /// Runtime SST files are disposable after remote publication. Avoid a
@@ -288,10 +289,12 @@ impl HybridStorage {
         );
 
         Self {
-            local,
-            cloud,
-            wal_cloud,
-            control_cloud,
+            stores: ObjectStores {
+                local,
+                sst: cloud,
+                wal: wal_cloud,
+                control: control_cloud,
+            },
             budget_actor: Arc::new(Mutex::new(budget_actor)),
             ephemeral_sst_cache: std::sync::atomic::AtomicBool::new(false),
             upload_queue,
