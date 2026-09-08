@@ -12,7 +12,9 @@ impl HybridStorage {
     /// there is no secondary local copy. Unsupported metadata fails closed.
     pub(crate) fn local_object_cache_is_absent(&self, key: &str) -> MidgeResult<bool> {
         let (tx, rx) = mpsc::channel();
-        self.local.submit_range_head(key, self.callback_timeout, tx);
+        self.stores
+            .local
+            .submit_range_head(key, self.callback_timeout, tx);
         match rx.recv_timeout(self.callback_timeout) {
             Ok(StorageEvent::HeadComplete {
                 key: actual,
@@ -59,7 +61,7 @@ impl HybridStorage {
     /// Drop a disposable local object copy. Remote authority and remote
     /// deletion are deliberately outside this operation.
     pub(crate) fn evict_local_object_cache(&self, key: &str) -> MidgeResult<()> {
-        Self::delete_object_from_backend_blocking(&self.local, key, self.callback_timeout)
+        Self::delete_object_from_backend_blocking(&self.stores.local, key, self.callback_timeout)
             .map(|_| ())
             .map_err(|error| {
                 MidgeError::Internal(format!("local object cache eviction failed: {error}"))
@@ -74,7 +76,7 @@ impl HybridStorage {
         deadline: &OperationDeadline,
     ) -> MidgeResult<bool> {
         let exists = Self::object_exists_in_backend_within(
-            &self.local,
+            &self.stores.local,
             key,
             self.callback_timeout,
             deadline,
@@ -85,7 +87,7 @@ impl HybridStorage {
         }
 
         let existing = Self::read_object_from_backend_within(
-            &self.local,
+            &self.stores.local,
             key,
             self.callback_timeout,
             deadline,
@@ -106,14 +108,14 @@ impl HybridStorage {
         deadline: &OperationDeadline,
     ) -> MidgeResult<()> {
         let exists = Self::object_exists_in_backend_within(
-            &self.cloud,
+            &self.stores.sst,
             key,
             self.callback_timeout,
             deadline,
         )?;
         if exists {
             return Self::ensure_backend_object_matches(
-                &self.cloud,
+                &self.stores.sst,
                 key,
                 data,
                 None,
@@ -137,7 +139,8 @@ impl HybridStorage {
             self.callback_timeout,
             deadline,
         )?;
-        self.cloud
+        self.stores
+            .sst
             .submit_write_with_headers_and_timeout(key, upload, headers, timeout, tx);
         let event = rx.recv_timeout(timeout).map_err(|error| match error {
             mpsc::RecvTimeoutError::Timeout => {
@@ -163,7 +166,7 @@ impl HybridStorage {
                     )));
                 }
                 Self::ensure_backend_object_matches(
-                    &self.cloud,
+                    &self.stores.sst,
                     key,
                     data,
                     Some(&error),
@@ -221,7 +224,8 @@ impl HybridStorage {
             self.callback_timeout,
             deadline,
         )?;
-        self.local
+        self.stores
+            .local
             .submit_write_with_headers_and_timeout(key, data, headers, timeout, tx);
         let event = rx.recv_timeout(timeout).map_err(|error| match error {
             mpsc::RecvTimeoutError::Timeout => {
@@ -270,7 +274,11 @@ impl HybridStorage {
         &self,
         key: &str,
     ) -> crate::common::MidgeResult<()> {
-        match Self::delete_object_from_backend_blocking(&self.cloud, key, self.callback_timeout) {
+        match Self::delete_object_from_backend_blocking(
+            &self.stores.sst,
+            key,
+            self.callback_timeout,
+        ) {
             Ok(true) => {
                 tracing::info!(key, "deleted obsolete remote immutable object");
             }
@@ -286,7 +294,11 @@ impl HybridStorage {
 
         // This runs inside the tracked GC worker that owns this deletion.
         // Avoid a detached local-cache delete that could outlive the lease.
-        match Self::delete_object_from_backend_blocking(&self.local, key, self.callback_timeout) {
+        match Self::delete_object_from_backend_blocking(
+            &self.stores.local,
+            key,
+            self.callback_timeout,
+        ) {
             Ok(true) => {
                 tracing::debug!(key, "deleted obsolete local immutable cache object");
             }

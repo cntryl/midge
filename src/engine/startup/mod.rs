@@ -15,6 +15,7 @@ pub(super) struct CloudSstRecoveryProof {
 }
 
 mod assembly;
+mod cloud_io;
 mod cloud_recovery;
 mod storage;
 mod streaming_recovery;

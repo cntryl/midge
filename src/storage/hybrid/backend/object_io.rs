@@ -8,11 +8,11 @@ use super::{
 impl HybridStorage {
     pub(super) fn cloud_backend_for_key(&self, key: &str) -> &Arc<dyn StorageBackend> {
         if key.starts_with(crate::cloud_layout::CloudObjectLayout::WAL_PREFIX) {
-            &self.wal_cloud
+            &self.stores.wal
         } else if key.starts_with(crate::cloud_layout::CloudObjectLayout::SST_PREFIX) {
-            &self.cloud
+            &self.stores.sst
         } else {
-            &self.control_cloud
+            &self.stores.control
         }
     }
 
@@ -216,7 +216,7 @@ impl StorageBackend for HybridStorage {
         // OBJECT STORAGE ONLY - reads SSTs, metadata, etc.
         // Try local first, fall back to cloud
 
-        let local_clone = Arc::clone(&self.local);
+        let local_clone = Arc::clone(&self.stores.local);
         let cloud_clone = Arc::clone(self.cloud_backend_for_key(key));
         let key = key.to_string();
 
@@ -274,7 +274,7 @@ impl StorageBackend for HybridStorage {
         // OBJECT STORAGE ONLY - NOT for WAL durability
         // WAL durability uses enqueue_wal_segment() instead
 
-        let local_clone = Arc::clone(&self.local);
+        let local_clone = Arc::clone(&self.stores.local);
         let cloud_clone = Arc::clone(self.cloud_backend_for_key(key));
         let data_clone = data.clone();
 
@@ -348,7 +348,7 @@ impl StorageBackend for HybridStorage {
         // OBJECT STORAGE ONLY - deletes SSTs, metadata, etc.
         // Delete from both local and cloud
 
-        let local_clone = Arc::clone(&self.local);
+        let local_clone = Arc::clone(&self.stores.local);
         let cloud_clone = Arc::clone(self.cloud_backend_for_key(key));
         let key = key.to_string();
 
@@ -387,7 +387,7 @@ impl StorageBackend for HybridStorage {
         // OBJECT STORAGE ONLY - lists SSTs, metadata, etc.
         // Merge results from both local and cloud
 
-        let local_clone = Arc::clone(&self.local);
+        let local_clone = Arc::clone(&self.stores.local);
         let cloud_clone = Arc::clone(self.cloud_backend_for_key(prefix));
         let prefix = prefix.to_string();
 

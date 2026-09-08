@@ -27,12 +27,14 @@ mod control;
 mod coordination;
 mod dispatch;
 mod durability_sync;
+mod fencing;
 mod flush;
 mod flush_pipeline;
 mod gc;
 mod ingest;
 mod manifest;
 mod read_path;
+mod resources;
 mod shutdown;
 mod snapshot;
 mod verification;
@@ -60,8 +62,6 @@ use super::sst_read_view::SstReadViewCache;
 use super::state::RuntimeState;
 use super::{ResponseRouter, RuntimeMsg, RuntimeResponse};
 use crate::runtime::actors::flush::FlushWorkerResult;
-
-type SstRuntimeResources = (Arc<dyn crate::sst::SstFactory>, Option<Arc<ReadResources>>);
 
 struct RecoveredCloudWalConfig {
     remote_segments: BTreeMap<u64, crate::runtime::RecoveredCloudWalSegment>,
@@ -171,11 +171,7 @@ pub struct EventLoop {
 
     /// Shared flag from the lease heartbeat. When `false`, the event loop
     /// rejects new write operations with `MidgeError::Fenced`.
-    lease_healthy: Option<Arc<std::sync::atomic::AtomicBool>>,
-    /// A remote DDL CAS may have committed even when its response and the
-    /// authority re-read both fail. Fence writes/publication until the durable
-    /// prepare can be reconciled instead of accepting work into a stale CF.
-    ddl_authority_ambiguous: bool,
+    fencing: fencing::RuntimeFence,
     /// A compaction manifest authority switch completed, but its publication
     /// intent could not be advanced or settled. Further compaction could
     /// consume that output and make restart recovery ambiguous, so compaction
@@ -184,13 +180,24 @@ pub struct EventLoop {
     /// Terminal publication error for the just-completed compaction. This is
     /// forwarded to a pending `compact_all()` waiter after authority handling.
     last_compaction_publication_error: Option<crate::common::MidgeError>,
-    writer_epoch: u64,
     /// Response budget a caller is given for one runtime request. Cloud work
     /// performed on a caller's behalf shares this budget rather than restarting
     /// a fresh `storage_io_timeout` per round trip.
     runtime_response_timeout: std::time::Duration,
-    leader_store: Option<Arc<dyn crate::lease::LeaderStore>>,
-    leader_holder_id: Option<String>,
+}
+
+impl std::ops::Deref for EventLoop {
+    type Target = fencing::RuntimeFence;
+
+    fn deref(&self) -> &Self::Target {
+        &self.fencing
+    }
+}
+
+impl std::ops::DerefMut for EventLoop {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.fencing
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,55 +207,6 @@ pub(super) enum HandleOutcome {
 }
 
 impl EventLoop {
-    fn initialize_sst_resources(
-        state: &RuntimeState,
-        sst_dir: &std::path::Path,
-        memory_mode: bool,
-        config: &super::RuntimeConfig,
-    ) -> crate::common::MidgeResult<SstRuntimeResources> {
-        let sst_factory: Arc<dyn crate::sst::SstFactory> = if memory_mode {
-            let fs = Arc::new(crate::io::MockFs::new());
-            Arc::new(
-                crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)
-                    .with_compression_policy(config.compression_policy.clone()),
-            )
-        } else {
-            let fs: Arc<dyn crate::io::Fs> = match &config.sst_read_fs {
-                Some(fs) => Arc::clone(fs),
-                None => Arc::new(crate::io::RealFs::new(sst_dir)?),
-            };
-            let fs = fs
-                .with_read_observer(
-                    Arc::clone(&state.diagnostics) as Arc<dyn crate::io::traits::ReadObserver>
-                )
-                .unwrap_or(fs);
-            Arc::new(
-                crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)
-                    .with_compaction_scratch_directory(sst_dir.join(".flush-staging"))
-                    .with_compression_policy(config.compression_policy.clone()),
-            )
-        };
-        let read_resources = if memory_mode {
-            None
-        } else {
-            let sst_path_prefix = sst_dir
-                .strip_prefix(&state.db_path)
-                .unwrap_or_else(|_| std::path::Path::new("sst"))
-                .to_path_buf();
-            Some(Arc::new(ReadResources::new_with_diagnostics(
-                config
-                    .sst_read_fs
-                    .clone()
-                    .unwrap_or_else(|| Arc::clone(&state.fs)),
-                sst_path_prefix,
-                config.block_cache_size,
-                config.block_cache_policy,
-                Arc::clone(&state.diagnostics),
-            )))
-        };
-        Ok((sst_factory, read_resources))
-    }
-
     pub(crate) fn new(
         mut state: RuntimeState,
         trace_enabled: bool,
@@ -263,8 +221,9 @@ impl EventLoop {
         let recovered_cloud_wal = RecoveredCloudWalConfig::from(&config);
         Self::apply_runtime_state_config(&mut state, &config);
 
-        let (sst_factory, read_resources) =
-            Self::initialize_sst_resources(&state, &sst_dir, memory_mode, &config)?;
+        let resources = resources::assemble_sst_resources(&state, &sst_dir, memory_mode, &config)?;
+        let sst_factory = resources.factory;
+        let read_resources = resources.reads;
         state.writer_epoch = config.writer_epoch;
         let (flush_completion_tx, flush_worker_result_rx) =
             crossbeam::channel::unbounded::<FlushWorkerResult>();
@@ -347,14 +306,16 @@ impl EventLoop {
             snapshot_cache: None,
             read_resources,
             sst_read_views: RefCell::new(SstReadViewCache::new()),
-            lease_healthy: config.lease_healthy.clone(),
-            ddl_authority_ambiguous: false,
+            fencing: fencing::RuntimeFence {
+                lease_healthy: config.lease_healthy.clone(),
+                ddl_authority_ambiguous: false,
+                writer_epoch: config.writer_epoch,
+                leader_store: config.leader_store.clone(),
+                leader_holder_id: config.leader_holder_id.clone(),
+            },
             compaction_publication_degraded: false,
             last_compaction_publication_error: None,
-            writer_epoch: config.writer_epoch,
             runtime_response_timeout: config.runtime_response_timeout,
-            leader_store: config.leader_store.clone(),
-            leader_holder_id: config.leader_holder_id.clone(),
         };
 
         if let Some(storage) = config.hybrid_storage {
@@ -461,59 +422,14 @@ impl EventLoop {
 
     /// Returns an error if the lease has been lost (heartbeat detected failure).
     fn check_lease_health(&self) -> crate::common::MidgeResult<()> {
-        if self.ddl_authority_ambiguous {
-            return Err(crate::common::MidgeError::Fenced(
-                "DDL authority is ambiguous; refusing writes until prepared DDL is reconciled"
-                    .into(),
-            ));
-        }
-        if let Some(healthy) = &self.lease_healthy {
-            if !healthy.load(std::sync::atomic::Ordering::Acquire) {
-                return Err(crate::common::MidgeError::Fenced(
-                    "lease heartbeat reports unhealthy — refusing writes".into(),
-                ));
-            }
-        }
-        Ok(())
+        self.fencing.check_health()
     }
 
     fn validate_runtime_writer_lease_within(
         &self,
         deadline: &crate::common::OperationDeadline,
     ) -> crate::common::MidgeResult<()> {
-        self.check_lease_health()?;
-        if deadline.is_expired() {
-            return Err(crate::common::MidgeError::Timeout(
-                "operation deadline exhausted before writer lease validation".to_string(),
-            ));
-        }
-        let Some(store) = &self.leader_store else {
-            return Ok(());
-        };
-        let holder_id = self.leader_holder_id.as_deref().unwrap_or_default();
-        let result = if deadline.is_bounded() {
-            store.validate_epoch_with_timeout(holder_id, self.writer_epoch, deadline.remaining())
-        } else {
-            store.validate_epoch(holder_id, self.writer_epoch)
-        };
-        result.map_err(|error| {
-            let error = if deadline.is_bounded()
-                && (deadline.is_expired() || error.to_string().contains("timed out"))
-            {
-                crate::common::MidgeError::Timeout(format!(
-                    "writer lease validation exceeded the operation deadline: {error}"
-                ))
-            } else {
-                crate::common::MidgeError::Fenced(error.to_string())
-            };
-            if matches!(error, crate::common::MidgeError::Fenced(_)) {
-                if let Some(healthy) = &self.lease_healthy {
-                    healthy.store(false, std::sync::atomic::Ordering::Release);
-                }
-                tracing::error!(%error, "writer lease validation failed; runtime fenced");
-            }
-            error
-        })
+        self.fencing.validate_within(deadline)
     }
 
     /// Deadline for a routed request that began waiting in `RuntimeHandle`.
@@ -761,11 +677,14 @@ impl EventLoop {
         }
         let plan = self.prepare_compaction_plan_for_launch(plan)?;
 
+        let compaction_storage = self.hybrid_storage.as_ref().map(|storage| {
+            Arc::clone(storage) as Arc<dyn super::actors::compaction::CompactionStorage>
+        });
         self.compaction_actor
             .run_compaction(
                 &mut self.state,
                 &plan,
-                self.hybrid_storage.as_ref(),
+                compaction_storage.as_ref(),
                 self.worker_msg_tx.clone(),
             )
             .map(|_| ())

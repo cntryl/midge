@@ -137,11 +137,11 @@ impl PruneWorkerRegistry {
 
 impl HybridStorage {
     pub(crate) fn remote_wal_backend(&self) -> Arc<dyn StorageBackend> {
-        Arc::clone(&self.wal_cloud)
+        Arc::clone(&self.stores.wal)
     }
 
     pub(crate) fn remote_sst_backend(&self) -> Arc<dyn StorageBackend> {
-        Arc::clone(&self.cloud)
+        Arc::clone(&self.stores.sst)
     }
 
     pub(crate) fn storage_io_timeout(&self) -> Duration {

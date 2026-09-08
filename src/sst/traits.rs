@@ -212,6 +212,27 @@ impl<T> SstReaderExt for T where T: SstReader + SstStateReader {}
 
 /// Object-safe SST writer for polymorphic use
 pub trait DynSstWriter: Send {
+    /// Whether this writer preserves sequence numbers, operation kinds, TTLs,
+    /// and point tombstones supplied through `add_with_meta`.
+    ///
+    /// The default keeps source compatibility for simple third-party writers,
+    /// but durability paths must call `require_versioned_entries` before use.
+    fn preserves_versioned_entries(&self) -> bool {
+        false
+    }
+
+    /// Reject a compatibility-only writer before a durability path can
+    /// silently discard persisted metadata or deletes.
+    fn require_versioned_entries(&self) -> MidgeResult<()> {
+        if self.preserves_versioned_entries() {
+            Ok(())
+        } else {
+            Err(crate::common::MidgeError::NotSupported(
+                "SST writer does not preserve versioned entries".to_string(),
+            ))
+        }
+    }
+
     /// Best-effort retained/encoded size used for soft compaction rollover.
     /// Implementations that cannot estimate return zero and therefore retain
     /// the compatibility single-output behavior.
@@ -725,6 +746,22 @@ mod tests {
 
         // Assert
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn should_reject_compatibility_writer_when_versioned_entries_are_required() {
+        // Arrange
+        let writer: Box<dyn DynSstWriter> = Box::new(MockSstWriter::new());
+
+        // Act
+        let result = writer.require_versioned_entries();
+
+        // Assert
+        assert!(matches!(
+            result,
+            Err(crate::common::MidgeError::NotSupported(message))
+                if message.contains("does not preserve versioned entries")
+        ));
     }
 
     #[test]

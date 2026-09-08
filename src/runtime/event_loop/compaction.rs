@@ -245,7 +245,11 @@ impl CompactionCoordinator {
                 if let (Some(hybrid), Some(token)) = (&event_loop.hybrid_storage, reservation) {
                     event_loop
                         .compaction_actor
-                        .settle_failed_compaction_reservation(&event_loop.state, hybrid, token);
+                        .settle_failed_compaction_reservation(
+                            &event_loop.state,
+                            hybrid.as_ref(),
+                            token,
+                        );
                 }
             }
             if !published {
@@ -271,7 +275,7 @@ impl CompactionCoordinator {
                     .compaction_actor
                     .settle_compaction_error_reservation(
                         &event_loop.state,
-                        hybrid,
+                        hybrid.as_ref(),
                         token,
                         Some(&error),
                     );

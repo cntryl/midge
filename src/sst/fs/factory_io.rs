@@ -802,6 +802,10 @@ impl InMemorySstWriter {
 }
 
 impl DynSstWriter for InMemorySstWriter {
+    fn preserves_versioned_entries(&self) -> bool {
+        true
+    }
+
     fn encoded_size_upper_bound_after_sorted_entry(
         &self,
         key: &[u8],

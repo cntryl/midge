@@ -768,6 +768,7 @@ pub(crate) fn write_partitioned_compaction_outputs(
         _cursor_reservation,
     } = inputs;
     let mut writer = sst_factory.create_for_compaction(budget.clone())?;
+    writer.require_versioned_entries()?;
     let mut partition_lower_bound: Option<(
         Vec<u8>,
         crate::common::resource_budget::ResourceReservation,
@@ -932,6 +933,7 @@ pub(crate) fn write_partitioned_compaction_outputs(
             })?;
             partition_lower_bound = Some((event_key.clone(), boundary_reservation));
             writer = sst_factory.create_for_compaction(budget.clone())?;
+            writer.require_versioned_entries()?;
             partition_point_count = 0;
             partition_tombstones.clear();
             for active in &active_tombstones {

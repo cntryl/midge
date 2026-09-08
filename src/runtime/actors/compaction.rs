@@ -30,6 +30,93 @@ type PreparedRemoteOutputs = Arc<
     >,
 >;
 
+/// Storage capabilities required by compaction. Keeping this contract beside
+/// the consumer prevents the actor from depending on the complete hybrid
+/// storage coordinator.
+pub(crate) trait CompactionStorage: Send + Sync {
+    fn ephemeral_sst_cache_enabled(&self) -> bool;
+    fn max_local_bytes(&self) -> u64;
+    fn reserve_staging(
+        &self,
+        bytes: u64,
+    ) -> Result<
+        crate::storage::hybrid::actor::StorageReservationToken,
+        crate::storage::hybrid::actor::ReservationResult,
+    >;
+    fn plan(&self, input_sizes: &[u64]) -> crate::storage::hybrid::actor::StorageReservationToken;
+    fn retain_inputs(
+        &self,
+        token: crate::storage::hybrid::actor::StorageReservationToken,
+        output_sizes: &[u64],
+    );
+    fn abort(&self, token: crate::storage::hybrid::actor::StorageReservationToken);
+    fn maintenance_memory(&self) -> Option<crate::common::resource_budget::ResourceBudget>;
+    fn immutable_file_partition_target(&self, pool: usize) -> usize;
+    fn publish_immutable_file(
+        &self,
+        key: &str,
+        path: &std::path::Path,
+        size: u64,
+        checksum: u32,
+        budget: &crate::common::resource_budget::ResourceBudget,
+    ) -> MidgeResult<crate::storage::hybrid::backend::GuardedObjectProof>;
+}
+
+impl CompactionStorage for crate::storage::HybridStorage {
+    fn ephemeral_sst_cache_enabled(&self) -> bool {
+        self.ephemeral_sst_cache_enabled()
+    }
+
+    fn max_local_bytes(&self) -> u64 {
+        self.budget_snapshot().max_local_bytes
+    }
+
+    fn reserve_staging(
+        &self,
+        bytes: u64,
+    ) -> Result<
+        crate::storage::hybrid::actor::StorageReservationToken,
+        crate::storage::hybrid::actor::ReservationResult,
+    > {
+        self.reserve_compaction_staging_with_token(bytes)
+    }
+
+    fn plan(&self, input_sizes: &[u64]) -> crate::storage::hybrid::actor::StorageReservationToken {
+        self.compaction_planned_with_token(input_sizes)
+    }
+
+    fn retain_inputs(
+        &self,
+        token: crate::storage::hybrid::actor::StorageReservationToken,
+        output_sizes: &[u64],
+    ) {
+        self.compaction_inputs_retained_with_token(token, output_sizes);
+    }
+
+    fn abort(&self, token: crate::storage::hybrid::actor::StorageReservationToken) {
+        self.compaction_aborted_with_token(token);
+    }
+
+    fn maintenance_memory(&self) -> Option<crate::common::resource_budget::ResourceBudget> {
+        self.maintenance_memory()
+    }
+
+    fn immutable_file_partition_target(&self, pool: usize) -> usize {
+        Self::immutable_file_partition_target(pool)
+    }
+
+    fn publish_immutable_file(
+        &self,
+        key: &str,
+        path: &std::path::Path,
+        size: u64,
+        checksum: u32,
+        budget: &crate::common::resource_budget::ResourceBudget,
+    ) -> MidgeResult<crate::storage::hybrid::backend::GuardedObjectProof> {
+        self.publish_immutable_file(key, path, size, checksum, budget)
+    }
+}
+
 /// Actor handling SST compaction
 pub struct CompactionActor {
     /// Whether a compaction is currently running
@@ -269,13 +356,12 @@ impl CompactionActor {
         &mut self,
         state: &mut RuntimeState,
         plan: &crate::compaction::CompactionPlan,
-        sba: Option<&std::sync::Arc<crate::storage::HybridStorage>>,
+        sba: Option<&Arc<dyn CompactionStorage>>,
         worker_msg_tx: Option<crossbeam::channel::Sender<RuntimeMsg>>,
     ) -> MidgeResult<Vec<String>> {
         let mut plan = plan.clone();
         if let Some(hybrid) = sba.filter(|hybrid| hybrid.ephemeral_sst_cache_enabled()) {
-            let target_limit =
-                usize::try_from(hybrid.budget_snapshot().max_local_bytes / 8).unwrap_or(usize::MAX);
+            let target_limit = usize::try_from(hybrid.max_local_bytes() / 8).unwrap_or(usize::MAX);
             if target_limit == 0 {
                 return Err(MidgeError::ResourceLimit(
                     "local storage budget cannot hold a compaction partition".into(),
@@ -303,19 +389,19 @@ impl CompactionActor {
         &mut self,
         state: &mut RuntimeState,
         plan: &crate::compaction::CompactionPlan,
-        sba: Option<&std::sync::Arc<crate::storage::HybridStorage>>,
+        sba: Option<&Arc<dyn CompactionStorage>>,
         error: Option<&MidgeError>,
     ) {
         self.finish_active_bookkeeping(state, &plan.input_files);
         if let (Some(hybrid), Some(token)) = (sba, self.storage_reservation.take()) {
-            self.settle_compaction_error_reservation(state, hybrid, token, error);
+            self.settle_compaction_error_reservation(state, hybrid.as_ref(), token, error);
         }
     }
 
     pub(crate) fn settle_compaction_error_reservation(
         &self,
         state: &RuntimeState,
-        hybrid: &crate::storage::HybridStorage,
+        hybrid: &dyn CompactionStorage,
         token: crate::storage::hybrid::actor::StorageReservationToken,
         error: Option<&MidgeError>,
     ) {
@@ -337,15 +423,15 @@ impl CompactionActor {
     pub(crate) fn settle_failed_compaction_reservation(
         &self,
         state: &RuntimeState,
-        hybrid: &crate::storage::HybridStorage,
+        hybrid: &dyn CompactionStorage,
         token: crate::storage::hybrid::actor::StorageReservationToken,
     ) {
         if !hybrid.ephemeral_sst_cache_enabled() {
-            hybrid.compaction_aborted_with_token(token);
+            hybrid.abort(token);
             return;
         }
         match self.retained_output_bytes(&state.sst_dir) {
-            Ok(bytes) => hybrid.compaction_inputs_retained_with_token(token, &[bytes]),
+            Ok(bytes) => hybrid.retain_inputs(token, &[bytes]),
             Err(error) => {
                 // An unreadable directory cannot prove cleanup. Leaving the
                 // token charged is a safe capacity leak until startup readback.
@@ -418,7 +504,7 @@ impl CompactionActor {
     pub fn cancel_and_join_worker(
         &mut self,
         state: &mut RuntimeState,
-        sba: Option<&std::sync::Arc<crate::storage::HybridStorage>>,
+        sba: Option<&Arc<dyn CompactionStorage>>,
     ) {
         self.worker_cancel.store(true, Ordering::Release);
         let staged_outputs = self.join_worker();
@@ -451,7 +537,7 @@ impl CompactionActor {
                     "retaining canceled compaction staging allowance after cleanup failure"
                 );
             } else {
-                self.settle_failed_compaction_reservation(state, hybrid, token);
+                self.settle_failed_compaction_reservation(state, hybrid.as_ref(), token);
             }
         }
     }
@@ -502,7 +588,7 @@ impl CompactionActor {
         &mut self,
         state: &mut RuntimeState,
         plan: &crate::compaction::CompactionPlan,
-        sba: Option<&std::sync::Arc<crate::storage::HybridStorage>>,
+        sba: Option<&Arc<dyn CompactionStorage>>,
     ) -> MidgeResult<()> {
         if self.compaction_running {
             return Err(crate::common::MidgeError::WriteStall(
@@ -515,9 +601,7 @@ impl CompactionActor {
             if let Some(hybrid) = sba.filter(|hybrid| hybrid.ephemeral_sst_cache_enabled()) {
                 Some(
                     hybrid
-                        .reserve_compaction_staging_with_token(
-                            hybrid.budget_snapshot().max_local_bytes / 2,
-                        )
+                        .reserve_staging(hybrid.max_local_bytes() / 2)
                         .map_err(|pressure| {
                             MidgeError::WriteStall(format!(
                                 "local compaction staging budget unavailable: {pressure:?}"
@@ -546,8 +630,7 @@ impl CompactionActor {
             .collect();
 
         if self.storage_reservation.is_none() {
-            self.storage_reservation =
-                sba.map(|hybrid| hybrid.compaction_planned_with_token(&input_sizes));
+            self.storage_reservation = sba.map(|hybrid| hybrid.plan(&input_sizes));
         }
 
         tracing::info!(
@@ -579,7 +662,7 @@ impl CompactionActor {
         &mut self,
         state: &mut RuntimeState,
         input_ssts: &[String],
-        storage: Option<&Arc<crate::storage::HybridStorage>>,
+        storage: Option<&Arc<dyn CompactionStorage>>,
     ) -> MidgeResult<()> {
         let mut plan = crate::compaction::CompactionPlan::new(0, 0, 1);
         plan.input_files = input_ssts.to_vec();
@@ -590,7 +673,7 @@ impl CompactionActor {
         &mut self,
         state: &RuntimeState,
         plan: &crate::compaction::CompactionPlan,
-        sba: Option<&std::sync::Arc<crate::storage::HybridStorage>>,
+        sba: Option<&Arc<dyn CompactionStorage>>,
     ) -> MidgeResult<Vec<String>> {
         let output_ssts = Self::execute_with_storage(
             plan,
@@ -614,14 +697,14 @@ impl CompactionActor {
         factory: &dyn SstFactory,
         output_dir: &std::path::Path,
         abort_check: Option<&dyn Fn() -> bool>,
-        storage: Option<&Arc<crate::storage::HybridStorage>>,
+        storage: Option<&Arc<dyn CompactionStorage>>,
         prepared: &PreparedRemoteOutputs,
     ) -> MidgeResult<Vec<String>> {
         let sink = |name: &str,
                     path: &std::path::Path,
                     budget: &crate::common::resource_budget::ResourceBudget| {
             Self::prepare_remote_partition(
-                storage.expect("cloud storage"),
+                storage.expect("cloud storage").as_ref(),
                 prepared,
                 plan.cf_id,
                 plan.target_level,
@@ -631,12 +714,9 @@ impl CompactionActor {
             )
         };
         let output_sink = storage.map(|_| &sink as &crate::compaction::CompactionOutputSink<'_>);
-        let target = storage.map_or(plan.target_sst_size, |_| {
-            plan.target_sst_size.min(
-                crate::storage::HybridStorage::immutable_file_partition_target(
-                    plan.compaction_memory_limit,
-                ),
-            )
+        let target = storage.map_or(plan.target_sst_size, |storage| {
+            plan.target_sst_size
+                .min(storage.immutable_file_partition_target(plan.compaction_memory_limit))
         });
         crate::compaction::execute_compaction_at_target(
             plan,
@@ -656,10 +736,7 @@ impl CompactionActor {
             output_sink,
             storage
                 .filter(|hybrid| hybrid.ephemeral_sst_cache_enabled())
-                .map(|hybrid| {
-                    usize::try_from(hybrid.budget_snapshot().max_local_bytes / 4)
-                        .unwrap_or(usize::MAX)
-                }),
+                .map(|hybrid| usize::try_from(hybrid.max_local_bytes() / 4).unwrap_or(usize::MAX)),
         )
     }
 
@@ -668,7 +745,7 @@ impl CompactionActor {
         state: &RuntimeState,
         tx: crossbeam::channel::Sender<RuntimeMsg>,
         plan: &crate::compaction::CompactionPlan,
-        hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
+        hybrid_storage: Option<Arc<dyn CompactionStorage>>,
     ) -> MidgeResult<Vec<String>> {
         let sst_factory = Arc::clone(&self.sst_factory);
         let sst_dir = state.sst_dir.clone();
@@ -810,7 +887,7 @@ impl CompactionActor {
 
     #[allow(clippy::too_many_arguments)]
     fn prepare_remote_partition(
-        hybrid: &crate::storage::HybridStorage,
+        hybrid: &dyn CompactionStorage,
         prepared: &PreparedRemoteOutputs,
         cf_id: u32,
         level: u32,
@@ -881,26 +958,6 @@ fn store_compaction_worker_error(
         .unwrap_or_else(std::sync::PoisonError::into_inner) = error.map(MidgeError::replay);
 }
 
-impl Clone for CompactionActor {
-    fn clone(&self) -> Self {
-        Self {
-            compaction_running: self.compaction_running,
-            sst_factory: Arc::clone(&self.sst_factory),
-            compactor: Compactor::with_config(self.compactor.config.clone()),
-            target_sst_size: self.target_sst_size,
-            compaction_memory_limit: self.compaction_memory_limit,
-            last_scheduled_cf: self.last_scheduled_cf,
-            storage_reservation: self.storage_reservation,
-            active_input_ssts: self.active_input_ssts.clone(),
-            active_output_generation: self.active_output_generation,
-            worker_cancel: Arc::clone(&self.worker_cancel),
-            worker_handle: None,
-            worker_error: Arc::clone(&self.worker_error),
-            prepared_remote_outputs: Arc::clone(&self.prepared_remote_outputs),
-        }
-    }
-}
-
 impl Drop for CompactionActor {
     fn drop(&mut self) {
         self.worker_cancel.store(true, Ordering::Release);
@@ -959,15 +1016,16 @@ mod tests {
             crate::storage::hybrid::policy::StorageBudgetPolicy::new(1_000),
         ));
         hybrid.enable_ephemeral_sst_cache(1_000);
+        let compaction_storage: Arc<dyn CompactionStorage> = hybrid.clone();
         let plan = crate::compaction::CompactionPlan::new(0, 0, 1).with_output_seq(42);
-        actor.prepare_compaction(&mut state, &plan, Some(&hybrid))?;
+        actor.prepare_compaction(&mut state, &plan, Some(&compaction_storage))?;
         let residue = state
             .sst_dir
             .join(crate::sst::compaction_file_name(0, 1, 42, 0));
         std::fs::write(&residue, [0_u8; 300])?;
 
         // Act
-        actor.abort_compaction(&mut state, &plan, Some(&hybrid), None);
+        actor.abort_compaction(&mut state, &plan, Some(&compaction_storage), None);
 
         // Assert
         assert!(residue.exists());
@@ -1006,6 +1064,10 @@ mod tests {
     }
 
     impl crate::sst::traits::DynSstWriter for BlockingFinalizeWriter {
+        fn preserves_versioned_entries(&self) -> bool {
+            self.inner.preserves_versioned_entries()
+        }
+
         fn add(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()> {
             self.inner.add(key, value)
         }
@@ -1501,6 +1563,7 @@ mod tests {
             cancel_probe: Arc::clone(&cancel_probe),
         });
         let mut actor = CompactionActor::new(factory);
+        let compaction_storage: Arc<dyn CompactionStorage> = hybrid.clone();
         *cancel_probe
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
@@ -1509,7 +1572,12 @@ mod tests {
         plan.input_files.push(input_name.clone());
         let (completion_tx, completion_rx) = crossbeam::channel::unbounded();
         actor
-            .run_compaction(&mut state, &plan, Some(&hybrid), Some(completion_tx))
+            .run_compaction(
+                &mut state,
+                &plan,
+                Some(&compaction_storage),
+                Some(completion_tx),
+            )
             .expect("launch actual async compaction");
         assert_eq!(state.active_compactions.load(Ordering::SeqCst), 1);
         assert!(hybrid.budget_snapshot().total_committed_bytes > 0);
@@ -1518,8 +1586,8 @@ mod tests {
             .expect("real compaction worker must reach output finalization");
 
         // Act
-        actor.cancel_and_join_worker(&mut state, Some(&hybrid));
-        actor.cancel_and_join_worker(&mut state, Some(&hybrid));
+        actor.cancel_and_join_worker(&mut state, Some(&compaction_storage));
+        actor.cancel_and_join_worker(&mut state, Some(&compaction_storage));
 
         // Assert
         assert!(matches!(

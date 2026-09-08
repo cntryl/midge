@@ -186,6 +186,7 @@ fn should_roll_over_remote_compaction_outputs_to_leave_room_for_upload_workspace
         plan.compaction_memory_limit = 1024 * 1024;
         plan.target_sst_size = 1024 * 1024;
         let prepared = PreparedRemoteOutputs::default();
+        let compaction_storage: Arc<dyn CompactionStorage> = hybrid.clone();
 
         // Act
         let outputs = CompactionActor::execute_with_storage(
@@ -193,7 +194,7 @@ fn should_roll_over_remote_compaction_outputs_to_leave_room_for_upload_workspace
             &factory,
             directory.path(),
             None,
-            Some(&hybrid),
+            Some(&compaction_storage),
             &prepared,
         )?;
 
