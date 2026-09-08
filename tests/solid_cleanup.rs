@@ -219,6 +219,23 @@ fn should_remove_eviction_actor_wrapper_provider_modules() {
 }
 
 #[test]
+fn should_keep_blocking_cloud_protocol_out_of_recovery_namespace() {
+    // Arrange
+    let recovery = read_source("src/engine/startup/cloud_recovery.rs");
+    let adapter = read_source("src/engine/startup/cloud_io.rs");
+
+    // Act
+    let recovery_defines_adapter_methods = recovery.contains("fn blocking_cloud_");
+
+    // Assert
+    assert!(
+        !recovery_defines_adapter_methods,
+        "CloudStartupRecovery should consume BlockingCloudIo directly"
+    );
+    assert!(adapter.contains("struct BlockingCloudIo"));
+}
+
+#[test]
 fn should_remove_legacy_manifest_sst_list_from_current_model() {
     // Arrange
     let manifest = production_source("src/metadata/manifest.rs");

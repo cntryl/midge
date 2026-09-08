@@ -1,3 +1,4 @@
+use super::cloud_io::BlockingCloudIo;
 #[cfg(test)]
 use super::CloudWalRecoveryPlan;
 use super::{CloudSstRecoveryProof, CloudStartupRecovery};
@@ -205,75 +206,6 @@ impl CloudStartupRecovery {
         )
     }
 
-    pub(super) fn blocking_cloud_list(
-        cloud: &crate::storage::cloud::CloudStorage,
-        prefix: &str,
-    ) -> MidgeResult<Vec<String>> {
-        super::cloud_io::BlockingCloudIo::new(cloud).list(prefix)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn blocking_cloud_get(
-        cloud: &crate::storage::cloud::CloudStorage,
-        key: &str,
-    ) -> MidgeResult<Vec<u8>> {
-        let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_get(key, tx);
-        match rx.recv_timeout(cloud.callback_timeout()) {
-            Ok(crate::storage::cloud::CloudEvent::Get { result, .. }) => match result {
-                crate::storage::cloud::CloudOutcome::Ok(data) => Ok(data),
-                crate::storage::cloud::CloudOutcome::Err(error) => {
-                    Err(MidgeError::Internal(format!("cloud get '{key}': {error}")))
-                }
-            },
-            Ok(other) => Err(MidgeError::Internal(format!(
-                "unexpected cloud get response for '{key}': {other:?}"
-            ))),
-            Err(error) => Err(MidgeError::Internal(format!(
-                "cloud get '{key}' timed out or failed: {error}"
-            ))),
-        }
-    }
-
-    pub(super) fn blocking_cloud_get_optional(
-        cloud: &crate::storage::cloud::CloudStorage,
-        key: &str,
-    ) -> MidgeResult<Option<Vec<u8>>> {
-        super::cloud_io::BlockingCloudIo::new(cloud).get_optional(key)
-    }
-
-    pub(super) fn blocking_cloud_head_optional(
-        cloud: &crate::storage::cloud::CloudStorage,
-        key: &str,
-    ) -> MidgeResult<Option<crate::storage::cloud::ObjectMetadata>> {
-        super::cloud_io::BlockingCloudIo::new(cloud).head_optional(key)
-    }
-
-    pub(super) fn blocking_cloud_object_proof_optional(
-        cloud: &crate::storage::cloud::CloudStorage,
-        key: &str,
-    ) -> MidgeResult<Option<crate::storage::cloud::CloudObjectProof>> {
-        crate::storage::cloud::blocking_cloud_object_proof(cloud, key).map_err(MidgeError::Internal)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn blocking_cloud_put(
-        cloud: &crate::storage::cloud::CloudStorage,
-        key: &str,
-        data: Vec<u8>,
-    ) -> MidgeResult<()> {
-        Self::blocking_cloud_put_with_headers(cloud, key, data, vec![])
-    }
-
-    pub(super) fn blocking_cloud_put_with_headers(
-        cloud: &crate::storage::cloud::CloudStorage,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-    ) -> MidgeResult<()> {
-        super::cloud_io::BlockingCloudIo::new(cloud).put_with_headers(key, data, headers)
-    }
-
     pub(super) fn remote_manifest_sequence_from_metadata(
         file_name: &str,
         data: &[u8],
@@ -307,7 +239,7 @@ impl CloudStartupRecovery {
     ) -> MidgeResult<()> {
         for file_name in ["manifest.snapshot.json", "manifest.json"] {
             let key = crate::storage::cloud::cloud_metadata_key(file_name);
-            let Some(data) = Self::blocking_cloud_get_optional(cloud, &key)? else {
+            let Some(data) = BlockingCloudIo::new(cloud).get_optional(&key)? else {
                 continue;
             };
             let Some(remote_sequence) =
@@ -332,7 +264,8 @@ impl CloudStartupRecovery {
         data: Vec<u8>,
         local_manifest_sequence: u64,
     ) -> MidgeResult<()> {
-        let headers = match Self::blocking_cloud_head_optional(cloud, key)? {
+        let io = BlockingCloudIo::new(cloud);
+        let headers = match io.head_optional(key)? {
             Some(metadata) => {
                 let headers = crate::storage::cloud::object_match_precondition_headers(
                     &metadata.etag,
@@ -343,7 +276,7 @@ impl CloudStartupRecovery {
                         "cloud metadata '{key}' cannot be conditionally updated without an identity token"
                     ))
                 })?;
-                let current = Self::blocking_cloud_get_optional(cloud, key)?.ok_or_else(|| {
+                let current = io.get_optional(key)?.ok_or_else(|| {
                     MidgeError::Internal(format!(
                         "cloud metadata '{key}' disappeared after HEAD precondition"
                     ))
@@ -365,7 +298,7 @@ impl CloudStartupRecovery {
             None => vec![("If-None-Match".to_string(), "*".to_string())],
         };
 
-        Self::blocking_cloud_put_with_headers(cloud, key, data, headers)
+        io.put_with_headers(key, data, headers)
     }
 
     pub(super) fn recovery_staging_fs(
@@ -392,7 +325,7 @@ impl CloudStartupRecovery {
 
         for file_name in crate::storage::cloud::CLOUD_METADATA_FILES {
             let key = crate::storage::cloud::cloud_metadata_key(file_name);
-            let data = match Self::blocking_cloud_get_optional(cloud, &key) {
+            let data = match BlockingCloudIo::new(cloud).get_optional(&key) {
                 Ok(Some(data)) => data,
                 Ok(None) => continue,
                 Err(error) if recovery_policy == RecoveryPolicy::Salvage => {
@@ -829,21 +762,21 @@ impl CloudStartupRecovery {
     pub(in crate::engine) fn reject_cloud_wal_without_catalog(
         cloud: &crate::storage::cloud::CloudStorage,
     ) -> MidgeResult<()> {
-        if Self::blocking_cloud_head_optional(cloud, crate::wal::cloud_catalog::OBJECT_KEY)?
+        let io = BlockingCloudIo::new(cloud);
+        if io
+            .head_optional(crate::wal::cloud_catalog::OBJECT_KEY)?
             .is_some()
-            || Self::blocking_cloud_head_optional(
-                cloud,
-                crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
-            )?
-            .is_some()
+            || io
+                .head_optional(crate::wal::cloud_catalog::MIRROR_OBJECT_KEY)?
+                .is_some()
         {
             return Ok(());
         }
-        let untracked =
-            Self::blocking_cloud_list(cloud, crate::cloud_layout::CloudObjectLayout::WAL_PREFIX)?
-                .into_iter()
-                .map(|key| cloud.strip_namespace(&key).to_string())
-                .find(|key| crate::wal::parse_segment_id(key).is_some());
+        let untracked = io
+            .list(crate::cloud_layout::CloudObjectLayout::WAL_PREFIX)?
+            .into_iter()
+            .map(|key| cloud.strip_namespace(&key).to_string())
+            .find(|key| crate::wal::parse_segment_id(key).is_some());
         if let Some(key) = untracked {
             return Err(Self::cloud_wal_without_catalog_error(&key));
         }
@@ -1526,7 +1459,8 @@ impl CloudStartupRecovery {
 
         for file in state.manifest.files.clone() {
             let key = crate::sst::object_key(&file.name);
-            let validation = Self::blocking_cloud_head_optional(cloud, &key)
+            let validation = BlockingCloudIo::new(cloud)
+                .head_optional(&key)
                 .and_then(|metadata| {
                     metadata.ok_or_else(|| {
                         MidgeError::RecoveryFailed(format!(
@@ -1687,7 +1621,7 @@ impl CloudStartupRecovery {
         sst_name: &str,
         proof: &CloudSstRecoveryProof,
     ) -> MidgeResult<()> {
-        match Self::blocking_cloud_object_proof_optional(cloud, cloud_key) {
+        match BlockingCloudIo::new(cloud).object_proof_optional(cloud_key) {
             Ok(Some(cloud_proof)) => {
                 if let Err(error) = Self::validate_sst_bytes_against_proof(
                     sst_name,
@@ -1727,7 +1661,7 @@ impl CloudStartupRecovery {
         sst_name: &str,
         proof: &CloudSstRecoveryProof,
     ) -> MidgeResult<()> {
-        let cloud_proof = match Self::blocking_cloud_object_proof_optional(cloud, cloud_key) {
+        let cloud_proof = match BlockingCloudIo::new(cloud).object_proof_optional(cloud_key) {
             Ok(Some(proof)) => proof,
             Ok(None) => return Self::note_missing_named_sst(state, sst_name),
             Err(error) if state.recovery_policy() == RecoveryPolicy::Salvage => {
