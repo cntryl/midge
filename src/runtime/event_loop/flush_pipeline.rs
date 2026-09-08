@@ -189,9 +189,9 @@ impl EventLoop {
             recovery_policy: self.state.recovery_policy(),
             hybrid_storage: self.hybrid_storage.clone(),
             cloud_metadata_storage: self.cloud_metadata_storage.clone(),
-            lease_healthy: self.lease_healthy.clone(),
-            leader_store: self.leader_store.clone(),
-            leader_holder_id: self.leader_holder_id.clone(),
+            lease_healthy: self.fencing.lease_healthy.clone(),
+            leader_store: self.fencing.leader_store.clone(),
+            leader_holder_id: self.fencing.leader_holder_id.clone(),
         };
         if let Err(error) = self.flush_actor.submit_publish(task) {
             self.publication_gate.active = false;
@@ -380,16 +380,16 @@ impl EventLoop {
 
     fn validate_flush_completion(&self, identity: FlushIdentity) -> crate::common::MidgeResult<()> {
         self.check_lease_health()?;
-        if identity.writer_epoch != self.writer_epoch {
+        if identity.writer_epoch != self.fencing.writer_epoch {
             return Err(crate::common::MidgeError::Fenced(format!(
                 "flush {} epoch {} does not match runtime epoch {}",
-                identity.flush_id, identity.writer_epoch, self.writer_epoch
+                identity.flush_id, identity.writer_epoch, self.fencing.writer_epoch
             )));
         }
-        if let Some(store) = &self.leader_store {
+        if let Some(store) = &self.fencing.leader_store {
             store
                 .validate_epoch(
-                    self.leader_holder_id.as_deref().unwrap_or_default(),
+                    self.fencing.leader_holder_id.as_deref().unwrap_or_default(),
                     identity.writer_epoch,
                 )
                 .map_err(|error| crate::common::MidgeError::Fenced(error.to_string()))?;
@@ -639,11 +639,11 @@ impl EventLoop {
 
     fn validate_runtime_lease_for_wal_prune(&self) -> crate::common::MidgeResult<()> {
         self.check_lease_health()?;
-        if let Some(store) = &self.leader_store {
+        if let Some(store) = &self.fencing.leader_store {
             store
                 .validate_epoch(
-                    self.leader_holder_id.as_deref().unwrap_or_default(),
-                    self.writer_epoch,
+                    self.fencing.leader_holder_id.as_deref().unwrap_or_default(),
+                    self.fencing.writer_epoch,
                 )
                 .map_err(|error| crate::common::MidgeError::Fenced(error.to_string()))?;
         }
@@ -1045,7 +1045,7 @@ mod tests {
             let flush_id = event_loop.freeze_active_memtable(0)?.expect("frozen");
             let identity = FlushIdentity {
                 flush_id,
-                writer_epoch: event_loop.writer_epoch,
+                writer_epoch: event_loop.fencing.writer_epoch,
                 cf_id: 0,
                 sequence: 1,
             };
@@ -1095,7 +1095,7 @@ mod tests {
                     .immutable_flushes
                     .clear();
             }
-            event_loop.writer_epoch += 1;
+            event_loop.fencing.writer_epoch += 1;
             // Act
             event_loop.handle_flush_publish_completion(FlushPublishCompletion {
                 identity,
@@ -1137,7 +1137,7 @@ mod tests {
             .expect("flush capacity");
         let identity = FlushIdentity {
             flush_id,
-            writer_epoch: event_loop.writer_epoch,
+            writer_epoch: event_loop.fencing.writer_epoch,
             cf_id: 0,
             sequence: 1,
         };

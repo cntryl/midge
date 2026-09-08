@@ -15,7 +15,7 @@ impl FlushCoordinator {
         request_id: u64,
         cf_id: crate::types::ColumnFamilyId,
     ) -> HandleOutcome {
-        if event_loop.ddl_authority_ambiguous {
+        if event_loop.fencing.ddl_authority_ambiguous {
             event_loop.respond(
                 request_id,
                 RuntimeResponse::Error {

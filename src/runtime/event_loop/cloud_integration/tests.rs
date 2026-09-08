@@ -2071,7 +2071,7 @@ fn should_keep_ddl_fenced_until_delayed_cas_commit_is_observed() -> crate::commo
             ..
         })
     ));
-    assert!(el.ddl_authority_ambiguous);
+    assert!(el.fencing.ddl_authority_ambiguous);
     assert!(el.state.db_path.join("ddl.prepare.json").exists());
 
     let blocked_request = 9_605;
@@ -2092,7 +2092,7 @@ fn should_keep_ddl_fenced_until_delayed_cas_commit_is_observed() -> crate::commo
             ..
         })
     ));
-    assert!(el.ddl_authority_ambiguous);
+    assert!(el.fencing.ddl_authority_ambiguous);
     assert!(el.state.db_path.join("ddl.prepare.json").exists());
 
     let commit_deadline = Instant::now() + Duration::from_secs(1);
@@ -2119,7 +2119,7 @@ fn should_keep_ddl_fenced_until_delayed_cas_commit_is_observed() -> crate::commo
         reconcile_response.recv_timeout(Duration::from_secs(1)),
         Ok(RuntimeResponse::ColumnFamilyCreated { .. })
     ));
-    assert!(!el.ddl_authority_ambiguous);
+    assert!(!el.fencing.ddl_authority_ambiguous);
     assert!(!el.state.db_path.join("ddl.prepare.json").exists());
     assert!(el
         .state
@@ -4952,7 +4952,7 @@ fn should_reject_cloud_ack_given_writer_fenced_after_upload_was_enqueued(
     let mut event_loop = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    event_loop.lease_healthy = Some(Arc::clone(&healthy));
+    event_loop.fencing.lease_healthy = Some(Arc::clone(&healthy));
     let (sequence, _) = event_loop.wal_actor.append(
         &mut event_loop.state,
         crate::runtime::actors::wal::AppendParams {
@@ -5951,7 +5951,7 @@ fn should_not_enqueue_cloud_wal_segment_given_lease_unhealthy_when_sealing(
             conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
         },
     )?;
-    event_loop.lease_healthy = Some(Arc::new(AtomicBool::new(false)));
+    event_loop.fencing.lease_healthy = Some(Arc::new(AtomicBool::new(false)));
     let segment_id = event_loop.state.wal.current_segment_id;
 
     // Act
@@ -6329,9 +6329,10 @@ fn should_reject_later_write_when_cloud_seal_cannot_find_leader_record(
     append_cloud_async_put(&mut event_loop)?;
     let lease_healthy = Arc::new(AtomicBool::new(true));
     let leader_store = Arc::new(RecoveringMissingLeaderStore::new("writer-1", 1));
-    event_loop.lease_healthy = Some(Arc::clone(&lease_healthy));
-    event_loop.leader_store = Some(Arc::clone(&leader_store) as Arc<dyn crate::lease::LeaderStore>);
-    event_loop.leader_holder_id = Some("writer-1".to_string());
+    event_loop.fencing.lease_healthy = Some(Arc::clone(&lease_healthy));
+    event_loop.fencing.leader_store =
+        Some(Arc::clone(&leader_store) as Arc<dyn crate::lease::LeaderStore>);
+    event_loop.fencing.leader_holder_id = Some("writer-1".to_string());
     let first_result = event_loop.seal_current_cloud_segment();
     let sequence_before = event_loop.state.sequence;
     let pending_writes_before = event_loop.state.wal.pending_writes;
@@ -6403,9 +6404,9 @@ fn should_validate_writer_lease_once_given_multi_segment_backlog_when_draining_u
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     let leader_store = std::sync::Arc::new(CountingLeaderStore::new("writer-1", 1));
-    el.leader_store =
+    el.fencing.leader_store =
         Some(std::sync::Arc::clone(&leader_store) as std::sync::Arc<dyn crate::lease::LeaderStore>);
-    el.leader_holder_id = Some("writer-1".to_string());
+    el.fencing.leader_holder_id = Some("writer-1".to_string());
 
     let mut sealed = Vec::new();
     for _ in 0..4 {
@@ -6478,8 +6479,8 @@ fn should_back_off_runtime_wal_admission_when_storage_queue_is_full(
         .upload_backlog
         .insert(second_segment, second_max_sequence);
     let leader_store = Arc::new(CountingLeaderStore::new("writer-1", 1));
-    el.leader_store = Some(Arc::clone(&leader_store) as Arc<dyn crate::lease::LeaderStore>);
-    el.leader_holder_id = Some("writer-1".to_string());
+    el.fencing.leader_store = Some(Arc::clone(&leader_store) as Arc<dyn crate::lease::LeaderStore>);
+    el.fencing.leader_holder_id = Some("writer-1".to_string());
 
     // Act: the first pass discovers capacity pressure; an immediate second
     // pass must respect runtime backoff instead of repeating lease and WAL I/O.
@@ -6820,9 +6821,9 @@ fn should_bound_strict_seal_lease_validation_given_request_deadline_is_exhausted
     )?;
     let sequence = append_cloud_async_put(&mut el)?;
     let leader_store = std::sync::Arc::new(CountingLeaderStore::new("writer-1", 1));
-    el.leader_store =
+    el.fencing.leader_store =
         Some(std::sync::Arc::clone(&leader_store) as std::sync::Arc<dyn crate::lease::LeaderStore>);
-    el.leader_holder_id = Some("writer-1".to_string());
+    el.fencing.leader_holder_id = Some("writer-1".to_string());
     el.runtime_response_timeout = Duration::ZERO;
     let request_id = 91_101;
     let response_rx = el.router.register(request_id, "SealWalForCloud");
@@ -6956,8 +6957,8 @@ fn should_back_off_failed_cloud_seal_while_normal_requests_make_progress(
         "writer-1",
         1,
     ));
-    el.leader_store = Some(Arc::clone(&leader_store) as Arc<dyn crate::lease::LeaderStore>);
-    el.leader_holder_id = Some("writer-1".to_string());
+    el.fencing.leader_store = Some(Arc::clone(&leader_store) as Arc<dyn crate::lease::LeaderStore>);
+    el.fencing.leader_holder_id = Some("writer-1".to_string());
     el.seal_current_cloud_segment()
         .expect_err("post-flush lease validation must fail");
     assert!(el.durability.cloud_seal_retry_needed());
@@ -7022,9 +7023,9 @@ fn should_requeue_publication_with_timeout_given_ack_deadline_expires_before_lea
     let sequence = append_cloud_async_put(&mut el)?;
     let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
     let leader_store = std::sync::Arc::new(CountingLeaderStore::new("writer-1", 1));
-    el.leader_store =
+    el.fencing.leader_store =
         Some(std::sync::Arc::clone(&leader_store) as std::sync::Arc<dyn crate::lease::LeaderStore>);
-    el.leader_holder_id = Some("writer-1".to_string());
+    el.fencing.leader_holder_id = Some("writer-1".to_string());
     el.runtime_response_timeout = Duration::ZERO;
     let request_id = 91_201;
     let response_rx = el.router.register(request_id, "SealWalForCloud");
@@ -7078,9 +7079,9 @@ fn should_requeue_known_wal_publication_when_sequence_range_is_inconsistent(
     let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
     el.state.wal.cloud_durable_seq = max_sequence;
     let leader_store = std::sync::Arc::new(CountingLeaderStore::new("different-writer", 1));
-    el.leader_store =
+    el.fencing.leader_store =
         Some(std::sync::Arc::clone(&leader_store) as std::sync::Arc<dyn crate::lease::LeaderStore>);
-    el.leader_holder_id = Some("writer-1".to_string());
+    el.fencing.leader_holder_id = Some("writer-1".to_string());
     let request_id = 91_202;
     let response_rx = el.router.register(request_id, "SealWalForCloud");
     el.durability
@@ -7344,12 +7345,12 @@ fn should_bound_final_cloud_wal_seal_by_shutdown_deadline() -> crate::common::Mi
     )?;
     append_cloud_async_put(&mut el)?;
     let active_segment = el.state.wal.current_segment_id;
-    el.leader_store = Some(Arc::new(DelayedLeaderStore::new(
+    el.fencing.leader_store = Some(Arc::new(DelayedLeaderStore::new(
         Duration::from_secs(1),
         "writer-1",
         1,
     )));
-    el.leader_holder_id = Some("writer-1".to_string());
+    el.fencing.leader_holder_id = Some("writer-1".to_string());
     el.shutdown_cloud_drain_timeout = Duration::from_millis(40);
     let request_id = 90_406;
     let response_rx = el.router.register(request_id, "Shutdown");
@@ -7401,12 +7402,12 @@ fn should_bound_runtime_owned_wal_admission_by_shutdown_deadline() -> crate::com
         failure_kind: crate::storage::CloudUploadFailureKind::Other,
     });
     std::thread::sleep(Duration::from_millis(25));
-    el.leader_store = Some(Arc::new(DelayedLeaderStore::new(
+    el.fencing.leader_store = Some(Arc::new(DelayedLeaderStore::new(
         Duration::from_secs(1),
         "writer-1",
         1,
     )));
-    el.leader_holder_id = Some("writer-1".to_string());
+    el.fencing.leader_holder_id = Some("writer-1".to_string());
     el.runtime_response_timeout = Duration::from_millis(500);
     el.shutdown_cloud_drain_timeout = Duration::from_millis(40);
     let request_id = 90_404;

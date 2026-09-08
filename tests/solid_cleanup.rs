@@ -863,6 +863,22 @@ fn should_keep_engine_backed_provider_qualification_out_of_storage_layer() {
 }
 
 #[test]
+fn should_keep_event_loop_fencing_access_explicit() {
+    // Arrange
+    let event_loop = read_source("src/runtime/event_loop/mod.rs");
+
+    // Act
+    let dereferences_fence =
+        event_loop.contains("Deref for EventLoop") || event_loop.contains("DerefMut for EventLoop");
+
+    // Assert
+    assert!(
+        !dereferences_fence,
+        "EventLoop owns many responsibilities and must access its RuntimeFence field explicitly"
+    );
+}
+
+#[test]
 fn should_enforce_tier3_system_benchmark_contract() {
     // Arrange
     let manifest = read_source("Cargo.toml");
