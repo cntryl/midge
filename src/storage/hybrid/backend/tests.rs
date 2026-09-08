@@ -3072,7 +3072,7 @@ fn should_emit_one_upload_terminal_event_when_wal_ack_logging_panics() {
     // Act
     HybridStorage::process_wal_upload_attempt(
         &upload,
-        &storage.wal_cloud,
+        &storage.stores.wal,
         &storage.event_queue,
         Some(&external_event_tx),
         storage.callback_timeout,
