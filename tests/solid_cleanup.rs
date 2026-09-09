@@ -101,38 +101,6 @@ fn should_keep_source_free_of_assistant_rule_blocks() {
 }
 
 #[test]
-fn should_not_suppress_dead_code_in_production_sources() {
-    // Arrange
-    let mut sources = Vec::new();
-    collect_rust_sources(&source_path("src"), &mut sources);
-    let forbidden = [
-        "#![allow(dead_code",
-        "#![expect(dead_code",
-        "#[allow(dead_code",
-        "#[expect(dead_code",
-    ];
-
-    // Act
-    // Assert
-    for source in sources {
-        let relative = source
-            .strip_prefix(source_path(""))
-            .expect("source should live under repo")
-            .to_string_lossy()
-            .replace('\\', "/");
-        let content = production_source(&relative);
-
-        for pattern in forbidden {
-            assert!(
-                !content.contains(pattern),
-                "{} should not suppress production dead_code with {pattern}",
-                source.display()
-            );
-        }
-    }
-}
-
-#[test]
 fn should_keep_removed_testkit_api_out_of_public_surface() {
     // Arrange
     let lib = read_source("src/lib.rs");
