@@ -98,28 +98,20 @@ impl EventLoop {
 
     pub(super) fn wake_write_stall_waiters(&mut self) {
         // Avoid borrowing issues by snapshotting keys.
-        let cf_ids: Vec<crate::types::ColumnFamilyId> =
-            self.write_stall_waiter_queues.keys().copied().collect();
+        let cf_ids: Vec<crate::types::ColumnFamilyId> = self.write_stall_waiters.column_families();
 
         for cf_id in cf_ids {
             if self.should_stall_writes(cf_id) {
                 continue;
             }
 
-            let Some(mut queue) = self.write_stall_waiter_queues.remove(&cf_id) else {
-                continue;
-            };
-
-            while let Some(wait_request_id) = queue.pop_front() {
-                // Only complete if still registered (not canceled/timeouts).
-                if self.write_stall_waiters.remove(&wait_request_id).is_some() {
-                    self.respond(
-                        wait_request_id,
-                        RuntimeResponse::Ok {
-                            request_id: wait_request_id,
-                        },
-                    );
-                }
+            for wait_request_id in self.write_stall_waiters.take_column_family(cf_id) {
+                self.respond(
+                    wait_request_id,
+                    RuntimeResponse::Ok {
+                        request_id: wait_request_id,
+                    },
+                );
             }
         }
     }

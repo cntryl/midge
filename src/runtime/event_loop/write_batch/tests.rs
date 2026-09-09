@@ -1452,12 +1452,18 @@ fn should_remove_cancelled_write_stall_waiter_from_all_indexes() -> MidgeResult<
     let mut fixture = EventLoopFixture::batched()?;
     fixture.event_loop.state.set_write_stalled(true);
     fixture.event_loop.handle_wait_for_write_stall_clear(900, 0);
-    assert_eq!(fixture.event_loop.write_stall_waiters.get(&900), Some(&0));
     assert_eq!(
         fixture
             .event_loop
-            .write_stall_waiter_queues
-            .get(&0)
+            .write_stall_waiters
+            .column_family_for(900),
+        Some(0)
+    );
+    assert_eq!(
+        fixture
+            .event_loop
+            .write_stall_waiters
+            .column_family_queue(0)
             .map(std::collections::VecDeque::len),
         Some(1)
     );
@@ -1468,12 +1474,12 @@ fn should_remove_cancelled_write_stall_waiter_from_all_indexes() -> MidgeResult<
         .handle_cancel_wait_for_write_stall_clear(900);
 
     // Assert
-    assert!(!fixture.event_loop.write_stall_waiters.contains_key(&900));
+    assert!(!fixture.event_loop.write_stall_waiters.contains(900));
     assert!(
         fixture
             .event_loop
-            .write_stall_waiter_queues
-            .get(&0)
+            .write_stall_waiters
+            .column_family_queue(0)
             .is_none_or(std::collections::VecDeque::is_empty),
         "cancellation must remove the request from both waiter indexes"
     );

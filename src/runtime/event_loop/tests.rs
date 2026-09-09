@@ -282,12 +282,7 @@ fn should_fail_every_held_request_when_shutdown_drain_restores_deferred_work() {
         .pending_compaction_waits
         .lock()
         .insert(8105, "CompactAll".to_string());
-    event_loop.write_stall_waiters.insert(8106, 0);
-    event_loop
-        .write_stall_waiter_queues
-        .entry(0)
-        .or_default()
-        .push_back(8106);
+    event_loop.write_stall_waiters.register(8106, 0);
     event_loop.durability.queue_waiter_for_key(
         0,
         crate::runtime::durability::DurabilityWaiter::CloudDurability { request_id: 8107 },
@@ -324,7 +319,6 @@ fn should_fail_every_held_request_when_shutdown_drain_restores_deferred_work() {
     assert!(event_loop.flush_barrier_waiters.is_empty());
     assert!(event_loop.state.pending_compaction_waits.lock().is_empty());
     assert!(event_loop.write_stall_waiters.is_empty());
-    assert!(event_loop.write_stall_waiter_queues.is_empty());
     assert!(!event_loop.durability.has_pending_waiters());
 }
 
@@ -589,12 +583,7 @@ fn should_cancel_column_family_waiters_after_drop_commits() {
     );
     event_loop
         .write_stall_waiters
-        .insert(stall_request_id, cf_id);
-    event_loop
-        .write_stall_waiter_queues
-        .entry(cf_id)
-        .or_default()
-        .push_back(stall_request_id);
+        .register(stall_request_id, cf_id);
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
 
     // Act
@@ -625,10 +614,11 @@ fn should_cancel_column_family_waiters_after_drop_commits() {
         ));
     }
     assert!(!event_loop.flush_barrier_waiters.contains_key(&cf_id));
-    assert!(!event_loop
+    assert!(!event_loop.write_stall_waiters.contains(stall_request_id));
+    assert!(event_loop
         .write_stall_waiters
-        .contains_key(&stall_request_id));
-    assert!(!event_loop.write_stall_waiter_queues.contains_key(&cf_id));
+        .column_family_queue(cf_id)
+        .is_none());
 }
 
 #[test]

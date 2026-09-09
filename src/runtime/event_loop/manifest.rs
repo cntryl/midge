@@ -320,14 +320,7 @@ impl ManifestCoordinator {
             }
         }
 
-        event_loop.write_stall_waiter_queues.remove(&cf_id);
-        let stalled_request_ids = event_loop
-            .write_stall_waiters
-            .iter()
-            .filter_map(|(request_id, waiter_cf)| (*waiter_cf == cf_id).then_some(*request_id))
-            .collect::<Vec<_>>();
-        for request_id in stalled_request_ids {
-            event_loop.write_stall_waiters.remove(&request_id);
+        for request_id in event_loop.write_stall_waiters.take_column_family(cf_id) {
             event_loop.respond(
                 request_id,
                 RuntimeResponse::Error {
