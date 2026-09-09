@@ -11,13 +11,13 @@ cargo test
 Run a specific integration file:
 
 ```bash
-cargo test --test durability_recovery
+cargo test --test durability -- durability_recovery
 ```
 
 Run the trust-critical smoke suite:
 
 ```bash
-cargo test --test external_adopter_smoke --features failpoints
+cargo test --test fault_injection --features failpoints -- --test-threads=1 external_adopter_smoke
 ```
 
 Validate naming and AAA structure:
@@ -32,7 +32,7 @@ Run the repository and packaging qualification gates:
 cargo test --workspace --all-features --doc
 cargo check --example documented_quick_start --all-features
 cargo machete
-cargo test --test repository_gates
+cargo test --test governance -- repository_gates
 cargo package --locked
 docker build --file Dockerfile.tests --tag midge-tests:local .
 ```
@@ -109,12 +109,12 @@ Use this matrix when updating guarantees or reviewing whether Midge is safe enou
 Before inviting external evaluators, run at least:
 
 ```bash
-cargo test --test external_adopter_smoke
-cargo test --test durability_wal
-cargo test --test failure_injection --features failpoints
-cargo test --test chaos_compaction --features failpoints
-cargo test --test engine_iterators
-cargo test --test compatibility_fixtures
+cargo test --test fault_injection --features failpoints -- --test-threads=1 external_adopter_smoke
+cargo test --test durability -- durability_wal
+cargo test --test fault_injection --features failpoints -- --test-threads=1 failure_injection
+cargo test --test fault_injection --features failpoints -- --test-threads=1 chaos_compaction
+cargo test --test engine_api -- engine_iterators
+cargo test --test storage_layer -- compatibility_fixtures
 ```
 
 This is the minimum “safe enough to try” gate for local-disk evaluation.

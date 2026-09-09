@@ -156,45 +156,9 @@ cloud_integration = ["cloud-all"]
 # Deterministic injection suites are compiled only when the non-production
 # `failpoints` feature is selected explicitly.
 [[test]]
-name = "failure_injection"
-path = "tests/failure_injection.rs"
+name = "fault_injection"
+path = "tests/fault_injection.rs"
 required-features = ["failpoints"]
-
-[[test]]
-name = "transaction_crash_boundaries"
-path = "tests/transaction_crash_boundaries.rs"
-required-features = ["failpoints"]
-
-[[test]]
-name = "chaos_real"
-path = "tests/chaos_real.rs"
-required-features = ["failpoints"]
-
-[[test]]
-name = "chaos_intent_log"
-path = "tests/chaos_intent_log.rs"
-required-features = ["failpoints"]
-
-[[test]]
-name = "chaos_compaction"
-path = "tests/chaos_compaction.rs"
-required-features = ["failpoints"]
-
-[[test]]
-name = "background_flush_pipeline"
-path = "tests/background_flush_pipeline.rs"
-required-features = ["failpoints"]
-
-[[test]]
-name = "shutdown_orchestration"
-path = "tests/shutdown_orchestration.rs"
-required-features = ["failpoints"]
-
-[[test]]
-name = "compaction_snapshot_publication"
-path = "tests/compaction_snapshot_publication.rs"
-required-features = ["failpoints"]
-
 
 # =============================================================================
 # Benchmarks — Active Targets

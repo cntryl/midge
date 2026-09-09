@@ -80,7 +80,7 @@ jobs:
           test -f CHANGELOG.md
 
       - name: Validate repository and benchmark contracts
-        run: cargo test --test repository_gates
+        run: cargo test --test governance -- repository_gates
 
       - name: Check production module sizes
         run: cntryl-tools check-module-sizes --config .cntryl/repository.toml

@@ -89,7 +89,10 @@ jobs:
         run: curl --fail --retry 30 --retry-delay 1 --retry-all-errors http://127.0.0.1:9001/healthz
 
       - name: Full test suite
-        run: cargo test --workspace --all-features
+        run: cargo test --workspace --features telemetry,telemetry-otlp,cloud-common,cloud-aws,sqrzl-tests,cloud-azure,cloud-gcp,cloud-oci,cloud-all,cloud_integration
+
+      - name: Fault injection suite (serial; failpoints are process-global)
+        run: cargo test --test fault_injection --all-features -- --test-threads=1
 
       - name: Sqrzl provider qualification
         run: cargo test --lib --features sqrzl-tests storage::providers::qualification -- --ignored --test-threads=1
@@ -98,22 +101,22 @@ jobs:
         run: cargo test --test cloud_provider_engine_qualification --features sqrzl-tests,failpoints -- --ignored --test-threads=1
 
       - name: Trust-critical smoke suite
-        run: cargo test --test external_adopter_smoke --features failpoints
+        run: cargo test --test fault_injection --features failpoints -- --test-threads=1 external_adopter_smoke
 
       - name: Recovery correctness suite
-        run: cargo test --test durability_wal
+        run: cargo test --test durability -- durability_wal
 
       - name: Failure injection suite
-        run: cargo test --test failure_injection --features failpoints
+        run: cargo test --test fault_injection --features failpoints -- --test-threads=1 failure_injection
 
       - name: Compaction crash suite
-        run: cargo test --test chaos_compaction --features failpoints
+        run: cargo test --test fault_injection --features failpoints -- --test-threads=1 chaos_compaction
 
       - name: Iterator correctness suite
-        run: cargo test --test engine_iterators
+        run: cargo test --test engine_api -- engine_iterators
 
       - name: Compatibility suite
-        run: cargo test --test compatibility_fixtures
+        run: cargo test --test storage_layer -- compatibility_fixtures
 
       - name: Validate test conventions
         run: cntryl-tools validate-tests
