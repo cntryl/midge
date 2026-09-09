@@ -217,7 +217,7 @@ impl DurabilityCoordinator {
     pub fn drain_all_waiters(&self) -> Vec<DurabilityWaiter> {
         self.waiters
             .as_ref()
-            .map(super::super::common::singleflight::KeyedGroupCommit::drain_all)
+            .map(super::super::common::KeyedGroupCommit::drain_all)
             .unwrap_or_default()
     }
 
