@@ -109,9 +109,9 @@ mod tests {
             .unwrap()
             .maintenance_memory()
             .unwrap();
-        let _held = budget
-            .reserve(budget.limit(), "active maintenance")
-            .unwrap();
+        let remaining = budget.limit().saturating_sub(budget.used());
+        assert!(remaining > 0, "test requires available maintenance memory");
+        let _held = budget.reserve(remaining, "active maintenance").unwrap();
         let snapshot = el
             .cloud_metadata_prune_snapshot_for_wal_cleanup()
             .unwrap()
