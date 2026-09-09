@@ -212,7 +212,35 @@ impl HybridStorage {
 }
 
 impl StorageBackend for HybridStorage {
-    fn submit_read(&self, key: &str, callback: StorageCallback) {
+    fn submit_range_head(&self, key: &str, timeout: Duration, callback: StorageCallback) {
+        self.cloud_backend_for_key(key)
+            .submit_range_head(key, timeout, callback);
+    }
+
+    fn submit_read_range(
+        &self,
+        key: &str,
+        start: u64,
+        end: u64,
+        expected: crate::storage::StorageObjectMetadata,
+        timeout: Duration,
+        callback: crate::storage::RangeReadCallback,
+    ) {
+        self.cloud_backend_for_key(key)
+            .submit_read_range(key, start, end, expected, timeout, callback);
+    }
+
+    fn submit_read_with_metadata(
+        &self,
+        key: &str,
+        timeout: Duration,
+        callback: crate::storage::MetadataReadCallback,
+    ) {
+        self.cloud_backend_for_key(key)
+            .submit_read_with_metadata(key, timeout, callback);
+    }
+
+    fn submit_read_with_timeout(&self, key: &str, timeout: Duration, callback: StorageCallback) {
         // OBJECT STORAGE ONLY - reads SSTs, metadata, etc.
         // Try local first, fall back to cloud
 
@@ -223,7 +251,7 @@ impl StorageBackend for HybridStorage {
         let (tx, rx) = std::sync::mpsc::channel();
         local_clone.submit_read(&key, tx);
 
-        match rx.recv_timeout(self.callback_timeout) {
+        match rx.recv_timeout(timeout) {
             Ok(StorageEvent::ReadComplete {
                 key: k,
                 result: StorageOutcome::Ok(data),
@@ -241,7 +269,7 @@ impl StorageBackend for HybridStorage {
                 // Local miss, try cloud
                 let (tx_cloud, rx_cloud) = std::sync::mpsc::channel();
                 cloud_clone.submit_read(&k, tx_cloud);
-                match rx_cloud.recv_timeout(self.callback_timeout) {
+                match rx_cloud.recv_timeout(timeout) {
                     Ok(event) => {
                         let _ = callback.send(event);
                     }
@@ -268,6 +296,10 @@ impl StorageBackend for HybridStorage {
                 });
             }
         }
+    }
+
+    fn submit_read(&self, key: &str, callback: StorageCallback) {
+        self.submit_read_with_timeout(key, self.callback_timeout, callback);
     }
 
     fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback) {
@@ -344,6 +376,29 @@ impl StorageBackend for HybridStorage {
         }
     }
 
+    fn submit_write_with_headers(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: StorageCallback,
+    ) {
+        self.cloud_backend_for_key(key)
+            .submit_write_with_headers(key, data, headers, callback);
+    }
+
+    fn submit_write_with_headers_and_timeout(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        timeout: Duration,
+        callback: StorageCallback,
+    ) {
+        self.cloud_backend_for_key(key)
+            .submit_write_with_headers_and_timeout(key, data, headers, timeout, callback);
+    }
+
     fn submit_delete(&self, key: &str, callback: StorageCallback) {
         // OBJECT STORAGE ONLY - deletes SSTs, metadata, etc.
         // Delete from both local and cloud
@@ -382,23 +437,27 @@ impl StorageBackend for HybridStorage {
         });
     }
 
-    #[cfg(test)]
-    fn submit_list(&self, prefix: &str, callback: StorageCallback) {
-        // OBJECT STORAGE ONLY - lists SSTs, metadata, etc.
-        // Merge results from both local and cloud
+    fn submit_delete_with_headers(
+        &self,
+        key: &str,
+        headers: Vec<(String, String)>,
+        callback: StorageCallback,
+    ) {
+        self.cloud_backend_for_key(key)
+            .submit_delete_with_headers(key, headers, callback);
+    }
 
+    fn submit_list(&self, prefix: &str, callback: StorageCallback) {
         let local_clone = Arc::clone(&self.stores.local);
         let cloud_clone = Arc::clone(self.cloud_backend_for_key(prefix));
         let prefix = prefix.to_string();
 
         let (tx_local, rx_local) = std::sync::mpsc::channel();
         local_clone.submit_list(&prefix, tx_local);
-
         let (tx_cloud, rx_cloud) = std::sync::mpsc::channel();
         cloud_clone.submit_list(&prefix, tx_cloud);
 
         let mut results = Vec::new();
-
         if let Ok(StorageEvent::ListComplete {
             result: StorageOutcome::Ok(local_items),
             ..
@@ -406,25 +465,27 @@ impl StorageBackend for HybridStorage {
         {
             results.extend(local_items);
         }
-
         if let Ok(StorageEvent::ListComplete {
             result: StorageOutcome::Ok(cloud_items),
             ..
         }) = rx_cloud.recv_timeout(self.callback_timeout)
         {
-            for item in cloud_items {
-                if !results.contains(&item) {
-                    results.push(item);
-                }
-            }
+            results.extend(cloud_items);
         }
-
         results.sort();
         results.dedup();
-
         let _ = callback.send(StorageEvent::ListComplete {
-            prefix: prefix.clone(),
+            prefix,
             result: StorageOutcome::Ok(results),
         });
+    }
+
+    fn submit_head(&self, key: &str, callback: StorageCallback) {
+        self.cloud_backend_for_key(key).submit_head(key, callback);
+    }
+
+    fn submit_head_with_timeout(&self, key: &str, timeout: Duration, callback: StorageCallback) {
+        self.cloud_backend_for_key(key)
+            .submit_head_with_timeout(key, timeout, callback);
     }
 }

@@ -1312,7 +1312,6 @@ impl StorageBackend for CloudStorage {
         let _ = callback.send(event);
     }
 
-    #[cfg(test)]
     fn submit_list(&self, prefix: &str, callback: StorageCallback) {
         if self.callback_timeout.is_zero() {
             let _ = callback.send(StorageEvent::ListComplete {

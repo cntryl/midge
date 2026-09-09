@@ -655,7 +655,31 @@ impl StorageBackend for FileSystem {
         });
     }
 
-    #[cfg(test)]
+    fn submit_head(&self, key: &str, callback: StorageCallback) {
+        let result = self
+            .full_path(key)
+            .and_then(|path| {
+                let _lock = mutation_lock(&path);
+                let _process_lock = self.acquire_process_lock(&path)?;
+                let bytes = fs::read(&path).map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        format!("not found: read {}: {error}", path.display())
+                    } else {
+                        format!("read {}: {error}", path.display())
+                    }
+                })?;
+                Ok(StorageObjectMetadata::content_crc(
+                    bytes.len() as u64,
+                    &bytes,
+                ))
+            })
+            .map_or_else(StorageOutcome::Err, StorageOutcome::Ok);
+        let _ = callback.send(StorageEvent::HeadComplete {
+            key: key.to_string(),
+            result,
+        });
+    }
+
     fn submit_list(&self, prefix: &str, callback: StorageCallback) {
         let full = match self.full_path(prefix) {
             Ok(path) => path,

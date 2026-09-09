@@ -176,6 +176,10 @@ impl StorageObjectMetadata {
 #[derive(Debug, Clone)]
 pub enum StorageEvent {
     /// Read operation completed
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "retained for complete object-I/O implementations")
+    )]
     ReadComplete {
         key: String,
         result: StorageOutcome<Vec<u8>>,
@@ -191,7 +195,10 @@ pub enum StorageEvent {
         result: StorageOutcome<()>,
     },
     /// List operation completed
-    #[cfg(test)]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "retained for complete object-I/O implementations")
+    )]
     ListComplete {
         prefix: String,
         result: StorageOutcome<Vec<String>>,
@@ -280,18 +287,17 @@ pub type MetadataReadCallback =
 /// Completion of an exact, conditionally versioned object range.
 pub type RangeReadCallback = std::sync::mpsc::Sender<Result<Vec<u8>, String>>;
 
-/// NEW async-compatible storage backend trait.
+/// Version-aware object I/O required by engine persistence paths.
 ///
 /// CRITICAL DESIGN:
-/// - All operations return immediately (non-blocking)
-/// - Real I/O happens asynchronously (in thread pools or tokio tasks)
+/// - Local implementations may complete inline.
+/// - Cloud callback adapters bound every internal wait by the supplied timeout.
 /// - Results are reported back via `StorageCallback`
 /// - Same trait for both filesystem and cloud backends
 ///
 /// This allows:
 /// - Synchronous engine with async I/O workers
 /// - Deterministic runtime (events consumed in event loop)
-/// - Unified hybrid storage (same interface for local + cloud)
 /// - No mutable references (works with Arc)
 /// - Ready for batching and pipelining
 pub trait StorageBackend: Send + Sync + 'static {
@@ -340,22 +346,31 @@ pub trait StorageBackend: Send + Sync + 'static {
 
     /// Return a version usable by exact range reads without reading the body.
     /// Unsupported backends must not fall back to whole-object reads.
+    #[cfg(not(test))]
+    fn submit_range_head(&self, key: &str, timeout: std::time::Duration, callback: StorageCallback);
+    #[cfg(test)]
     fn submit_range_head(
         &self,
-        key: &str,
+        _key: &str,
         _timeout: std::time::Duration,
-        callback: StorageCallback,
+        _callback: StorageCallback,
     ) {
-        let _ = callback.send(StorageEvent::HeadComplete {
-            key: key.to_string(),
-            result: StorageOutcome::Err(
-                "storage backend does not support range identity lookup".into(),
-            ),
-        });
+        panic!("test backend received undeclared range HEAD capability");
     }
 
     /// Read precisely [start, end) from the expected immutable object version.
     /// Implementations must reject unsupported conditions and short responses.
+    #[cfg(not(test))]
+    fn submit_read_range(
+        &self,
+        key: &str,
+        start: u64,
+        end: u64,
+        expected: StorageObjectMetadata,
+        timeout: std::time::Duration,
+        callback: RangeReadCallback,
+    );
+    #[cfg(test)]
     fn submit_read_range(
         &self,
         _key: &str,
@@ -363,32 +378,44 @@ pub trait StorageBackend: Send + Sync + 'static {
         _end: u64,
         _expected: StorageObjectMetadata,
         _timeout: std::time::Duration,
-        callback: RangeReadCallback,
+        _callback: RangeReadCallback,
     ) {
-        let _ = callback.send(Err(
-            "storage backend does not support conditional range reads".into(),
-        ));
+        panic!("test backend received undeclared range-read capability");
     }
 
     /// Submit a read operation. Returns immediately.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "implemented by complete object-I/O backends")
+    )]
     fn submit_read(&self, key: &str, callback: StorageCallback);
 
     /// Read bytes and identity from one version. Unsupported backends fail closed;
     /// synthesizing this response from independent GET and HEAD calls is unsafe.
+    #[cfg(not(test))]
+    fn submit_read_with_metadata(
+        &self,
+        key: &str,
+        timeout: std::time::Duration,
+        callback: MetadataReadCallback,
+    );
+    #[cfg(test)]
     fn submit_read_with_metadata(
         &self,
         _key: &str,
         _timeout: std::time::Duration,
-        callback: MetadataReadCallback,
+        _callback: MetadataReadCallback,
     ) {
-        let _ = callback.send(Err(
-            "storage backend does not support metadata-bearing reads".to_string(),
-        ));
+        panic!("test backend received undeclared metadata-read capability");
     }
 
     /// Submit a read whose callback adapter must not wait longer than
     /// `timeout`. Backends whose submission path is already non-blocking may
     /// retain this default; blocking adapters must override it.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "implemented by complete object-I/O backends")
+    )]
     fn submit_read_with_timeout(
         &self,
         key: &str,
@@ -403,24 +430,23 @@ pub trait StorageBackend: Send + Sync + 'static {
 
     /// Submit a conditional write operation. Backends that cannot enforce the
     /// supplied preconditions must fail closed rather than writing.
+    #[cfg(not(test))]
     fn submit_write_with_headers(
         &self,
         key: &str,
         data: Vec<u8>,
         headers: Vec<(String, String)>,
         callback: StorageCallback,
+    );
+    #[cfg(test)]
+    fn submit_write_with_headers(
+        &self,
+        _key: &str,
+        _data: Vec<u8>,
+        _headers: Vec<(String, String)>,
+        _callback: StorageCallback,
     ) {
-        if headers.is_empty() {
-            self.submit_write(key, data, callback);
-            return;
-        }
-
-        let _ = callback.send(StorageEvent::WriteComplete {
-            key: key.to_string(),
-            result: StorageOutcome::Err(
-                "conditional write is not supported by this storage backend".to_string(),
-            ),
-        });
+        panic!("test backend received undeclared conditional-write capability");
     }
 
     /// Submit a conditional write with a bounded callback-adapter wait.
@@ -440,55 +466,36 @@ pub trait StorageBackend: Send + Sync + 'static {
 
     /// Submit a conditional delete operation. Backends that cannot enforce the
     /// supplied preconditions must fail closed rather than deleting.
+    #[cfg(not(test))]
     fn submit_delete_with_headers(
         &self,
         key: &str,
         headers: Vec<(String, String)>,
         callback: StorageCallback,
+    );
+    #[cfg(test)]
+    fn submit_delete_with_headers(
+        &self,
+        _key: &str,
+        _headers: Vec<(String, String)>,
+        _callback: StorageCallback,
     ) {
-        if headers.is_empty() {
-            self.submit_delete(key, callback);
-            return;
-        }
-
-        let _ = callback.send(StorageEvent::DeleteComplete {
-            key: key.to_string(),
-            result: StorageOutcome::Err(
-                "conditional delete is not supported by this storage backend".to_string(),
-            ),
-        });
+        panic!("test backend received undeclared conditional-delete capability");
     }
 
-    /// Submit a prefix list operation. Returns immediately.
-    #[cfg(test)]
+    /// Submit a prefix list operation.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "implemented by complete object-I/O backends")
+    )]
     fn submit_list(&self, prefix: &str, callback: StorageCallback);
 
-    /// Submit an object metadata lookup. Implementations with native HEAD
-    /// support should override this. The fallback reads the object and returns
-    /// a content fingerprint, which is conservative but may be more expensive.
-    fn submit_head(&self, key: &str, callback: StorageCallback) {
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.submit_read(key, tx);
-        let result = match rx.recv() {
-            Ok(StorageEvent::ReadComplete {
-                result: StorageOutcome::Ok(data),
-                ..
-            }) => StorageOutcome::Ok(StorageObjectMetadata::content_crc(data.len() as u64, &data)),
-            Ok(StorageEvent::ReadComplete {
-                result: StorageOutcome::Err(error),
-                ..
-            }) => StorageOutcome::Err(error),
-            Ok(other) => StorageOutcome::Err(format!(
-                "unexpected storage HEAD fallback response for '{key}': {other:?}"
-            )),
-            Err(error) => StorageOutcome::Err(format!(
-                "storage HEAD fallback channel closed for '{key}': {error}"
-            )),
-        };
-        let _ = callback.send(StorageEvent::HeadComplete {
-            key: key.to_string(),
-            result,
-        });
+    /// Submit an object metadata lookup.
+    #[cfg(not(test))]
+    fn submit_head(&self, key: &str, callback: StorageCallback);
+    #[cfg(test)]
+    fn submit_head(&self, _key: &str, _callback: StorageCallback) {
+        panic!("test backend received undeclared HEAD capability");
     }
 
     /// Submit an object metadata lookup with a bounded callback-adapter wait.

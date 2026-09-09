@@ -416,6 +416,14 @@ mod tests {
     }
 
     impl StorageBackend for RecordingBackend {
+        crate::storage::forward_storage_backend!(
+            inner;
+            submit_read_with_metadata,
+            submit_write_with_headers,
+            submit_delete_with_headers,
+            submit_head,
+        );
+
         fn submit_read(&self, _key: &str, _callback: super::super::StorageCallback) {
             panic!("whole SST read is forbidden");
         }

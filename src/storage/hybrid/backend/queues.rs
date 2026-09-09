@@ -179,7 +179,6 @@ impl BoundedEventQueue {
                         StorageOutcome::Err(error) => error.len(),
                     }
             }
-            #[cfg(test)]
             StorageEvent::ListComplete { prefix, result } => {
                 prefix.len()
                     + match result {
@@ -194,12 +193,12 @@ impl BoundedEventQueue {
                         StorageOutcome::Err(error) => error.len(),
                     }
             }
-            StorageEvent::CloudFail { error, .. } => error.len(),
+            StorageEvent::CloudFail { error, .. }
+            | StorageEvent::CloudWalPruneAttemptFailed { error, .. } => error.len(),
             StorageEvent::CloudWalPruneComplete { result, .. } => match result {
                 StorageOutcome::Ok(()) => 0,
                 StorageOutcome::Err(error) => error.len(),
             },
-            StorageEvent::CloudWalPruneAttemptFailed { error, .. } => error.len(),
             StorageEvent::CloudAck { .. }
             | StorageEvent::BackpressureOn
             | StorageEvent::BackpressureOff => 0,

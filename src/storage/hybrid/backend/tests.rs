@@ -12,6 +12,36 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 #[test]
+fn should_expose_versioned_object_capabilities_through_hybrid_storage() {
+    // Arrange
+    let (_cloud, storage) = hybrid_with_mock_cloud();
+    let key = "sst/capability.sst";
+    write_cloud_object(&storage, key, b"versioned".to_vec());
+    let backend: &dyn StorageBackend = &storage;
+    let (head_tx, head_rx) = std::sync::mpsc::channel();
+
+    // Act
+    backend.submit_head(key, head_tx);
+    let head = head_rx.recv_timeout(Duration::from_secs(1));
+    let (metadata_tx, metadata_rx) = std::sync::mpsc::channel();
+    backend.submit_read_with_metadata(key, Duration::from_secs(1), metadata_tx);
+    let with_metadata = metadata_rx.recv_timeout(Duration::from_secs(1));
+
+    // Assert
+    assert!(matches!(
+        head,
+        Ok(StorageEvent::HeadComplete {
+            result: StorageOutcome::Ok(_),
+            ..
+        })
+    ));
+    assert!(matches!(
+        with_metadata,
+        Ok(Ok((bytes, _))) if bytes == b"versioned"
+    ));
+}
+
+#[test]
 fn should_explain_local_working_storage_when_cloud_uploads_resume() {
     // Arrange
     let (_cloud, storage) = hybrid_with_mock_cloud();
