@@ -41,14 +41,7 @@ impl WalActor {
                 self.apply_strict_transaction_group_durability(state, last_sequence)?;
             }
             DurabilityPolicy::Batched => {
-                state.pending_txn_min_seq = Some(
-                    state
-                        .pending_txn_min_seq
-                        .map_or(begin_seq, |pending| pending.min(begin_seq)),
-                );
-                if state.pending_txn_start_time.is_none() {
-                    state.pending_txn_start_time = Some(Instant::now());
-                }
+                state.begin_pending_transaction(begin_seq);
                 if let Some(telemetry) = crate::telemetry::Telemetry::global() {
                     telemetry.metrics().record_pending_txn_started();
                 }

@@ -4,8 +4,8 @@ use super::{
     Arc, CloudState, ColumnFamilyState, CompactionConfig, CompactionState, Fs, HashMap,
     IntentLogEntry, Manifest, Memtable, MidgeError, MidgeResult, PathBuf, PublicationPhase,
     RecoveryLoadState, RecoveryStatus, RuntimeDiagnostics, RuntimeMode, RuntimePersistence,
-    RuntimeState, SkipListMemtable, SnapshotPinRegistry, SnapshotState, WalRecoveryState, WalState,
-    WritePressureState,
+    RuntimeState, SkipListMemtable, SnapshotPinRegistry, SnapshotState, TransactionCoordination,
+    WalRecoveryState, WalState, WritePressureState,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,10 +126,12 @@ impl RuntimeState {
             sst_dir,
             sequence: wal_recovery.recovered_sequence,
             compaction_output_generation: recovered_compaction_output_generation,
-            next_txn_id: 0,
-            pending_txn_min_seq: None,
-            pending_txn_start_time: None,
-            sequence_idempotency_cache: HashMap::new(),
+            transaction: TransactionCoordination {
+                next_id: 0,
+                pending_min_sequence: None,
+                pending_started_at: None,
+                idempotency_cache: HashMap::new(),
+            },
             column_families: wal_recovery.column_families,
             manifest,
             fs: fs.clone(),

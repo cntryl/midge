@@ -214,7 +214,7 @@ fn should_reject_transaction_without_mutation_when_sequence_space_is_exhausted()
     // Assert
     assert!(matches!(result, Err(MidgeError::ResourceLimit(_))));
     assert_eq!(state.sequence, u64::MAX - 1);
-    assert_eq!(state.next_txn_id, 0);
+    assert_eq!(state.transaction_id_cursor_for_test(), 0);
     Ok(())
 }
 
@@ -508,7 +508,7 @@ fn should_append_multiple_prepared_transactions_with_one_physical_call() -> Midg
     assert_eq!(wal_actor.append_calls(), 1);
     assert_eq!(state.wal.pending_writes, 2);
     assert_eq!(wal_actor.pending_sync_count(), 2);
-    assert!(state.pending_txn_min_seq.is_some());
+    assert!(state.pending_transaction_min_sequence().is_some());
 
     let cf_state = state.get_cf(0).expect("cf exists");
     let entries = cf_state.memtable.iter_all(u64::MAX);
@@ -918,7 +918,7 @@ fn should_fail_all_prepared_transactions_when_batch_append_hits_no_space() -> Mi
             0,
             "a rejected append must not consume local disk admission"
         );
-        assert_eq!(state.pending_txn_min_seq, None);
+        assert_eq!(state.pending_transaction_min_sequence(), None);
         assert!(
             state
                 .get_cf(0)

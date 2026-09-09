@@ -529,10 +529,8 @@ impl WalActor {
         // If this request_id has already been confirmed as durable, we can
         // short-circuit and return the previously-allocated sequence without
         // writing another WAL record or queuing another pending cloud write.
-        if let Some((_first, _cnt, confirmed_at)) =
-            state.sequence_idempotency_cache.get(&request_id)
-        {
-            if *confirmed_at > 0 {
+        if let Some((_first, _cnt, confirmed_at)) = state.idempotency_entry(request_id) {
+            if confirmed_at > 0 {
                 tracing::debug!(
                     request_id = request_id,
                     sequence = sequence,
@@ -650,10 +648,8 @@ impl WalActor {
         let sequence = first_seq;
 
         // Check for idempotent retry that's already confirmed
-        if let Some((_first, _cnt, confirmed_at)) =
-            state.sequence_idempotency_cache.get(&request_id)
-        {
-            if *confirmed_at > 0 {
+        if let Some((_first, _cnt, confirmed_at)) = state.idempotency_entry(request_id) {
+            if confirmed_at > 0 {
                 tracing::debug!(
                     request_id = request_id,
                     sequence = sequence,

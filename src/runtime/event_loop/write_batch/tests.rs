@@ -397,7 +397,10 @@ fn should_coalesce_independent_buffered_transactions_into_one_wal_append() -> Mi
     assert_eq!(fixture.event_loop.wal_actor.append_calls(), 1);
     assert_eq!(fixture.event_loop.state.wal.pending_writes, 3);
     assert_eq!(fixture.event_loop.wal_actor.pending_sync_count(), 3);
-    assert_eq!(fixture.event_loop.state.pending_txn_min_seq, Some(1));
+    assert_eq!(
+        fixture.event_loop.state.pending_transaction_min_sequence(),
+        Some(1)
+    );
 
     assert_eq!(expect_transaction_applied(&first_rx, 10), (3, 1));
     assert_eq!(expect_transaction_applied(&second_rx, 11), (6, 1));
@@ -1108,7 +1111,10 @@ fn should_fail_all_event_loop_buffered_transactions_when_append_hits_no_space() 
         assert_eq!(fixture.event_loop.state.wal.pending_writes, 0);
         assert_eq!(fixture.event_loop.wal_actor.pending_sync_count(), 0);
         assert_eq!(fixture.event_loop.wal_actor.bytes_since_sync(), 0);
-        assert_eq!(fixture.event_loop.state.pending_txn_min_seq, None);
+        assert_eq!(
+            fixture.event_loop.state.pending_transaction_min_sequence(),
+            None
+        );
         assert!(fixture
             .event_loop
             .state

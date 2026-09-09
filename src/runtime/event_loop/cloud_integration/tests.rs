@@ -476,8 +476,7 @@ fn should_retain_cloud_retry_state_given_storage_owned_upload_failure(
         .queue_waiter_for_key(segment_id, DurabilityWaiter::CloudDurability { request_id });
     event_loop
         .state
-        .sequence_idempotency_cache
-        .insert(request_id, (max_sequence, 1, 0));
+        .cache_sequences_for_test(request_id, (max_sequence, 1, 0));
 
     // Act
     event_loop.handle_storage_event(crate::storage::StorageEvent::CloudFail {
@@ -502,10 +501,7 @@ fn should_retain_cloud_retry_state_given_storage_owned_upload_failure(
         event_loop.durability.cloud_segment_max_sequence(segment_id),
         Some(max_sequence)
     );
-    assert!(event_loop
-        .state
-        .sequence_idempotency_cache
-        .contains_key(&request_id));
+    assert!(event_loop.state.idempotency_entry(request_id).is_some());
     assert!(!event_loop.state.persistence_anomaly_detected());
     Ok(())
 }
@@ -5385,12 +5381,10 @@ fn should_cloud_async_ack_confirm_idempotent_request() -> crate::common::MidgeRe
 
     // Assert: After handling, the idempotency entry for request_id should be confirmed at cloud frontier
     assert!(
-        el.state
-            .sequence_idempotency_cache
-            .contains_key(&request_id),
+        el.state.idempotency_entry(request_id).is_some(),
         "idempotency entry missing"
     );
-    if let Some(entry) = el.state.sequence_idempotency_cache.get(&request_id) {
+    if let Some(entry) = el.state.idempotency_entry(request_id) {
         assert!(entry.2 >= el.state.wal.cloud_durable_seq);
     }
 
@@ -5446,12 +5440,10 @@ fn should_cloud_async_retry_after_ack_return_same_sequence_without_queueing(
 
     // After handling, the idempotency entry for request_id should be confirmed at cloud frontier
     assert!(
-        el.state
-            .sequence_idempotency_cache
-            .contains_key(&request_id),
+        el.state.idempotency_entry(request_id).is_some(),
         "idempotency entry missing"
     );
-    if let Some(entry) = el.state.sequence_idempotency_cache.get(&request_id) {
+    if let Some(entry) = el.state.idempotency_entry(request_id) {
         assert!(entry.2 >= el.state.wal.cloud_durable_seq);
     }
 
@@ -6758,11 +6750,9 @@ fn should_preserve_earlier_waiter_when_later_segment_upload_fails() -> crate::co
         },
     );
     el.state
-        .sequence_idempotency_cache
-        .insert(first_request_id, (first_max_sequence, 1, 0));
+        .cache_sequences_for_test(first_request_id, (first_max_sequence, 1, 0));
     el.state
-        .sequence_idempotency_cache
-        .insert(second_request_id, (second_max_sequence, 1, 0));
+        .cache_sequences_for_test(second_request_id, (second_max_sequence, 1, 0));
 
     // Act: storage reports the later upload failure before the first
     // acknowledgement arrives.
@@ -6787,15 +6777,11 @@ fn should_preserve_earlier_waiter_when_later_segment_upload_fails() -> crate::co
         Err(crossbeam::channel::TryRecvError::Empty)
     ));
     assert!(
-        el.state
-            .sequence_idempotency_cache
-            .contains_key(&first_request_id),
+        el.state.idempotency_entry(first_request_id).is_some(),
         "later upload failure must preserve the earlier request's retry identity"
     );
     assert!(
-        el.state
-            .sequence_idempotency_cache
-            .contains_key(&second_request_id),
+        el.state.idempotency_entry(second_request_id).is_some(),
         "the requeued segment must preserve its request identity while publication remains owned"
     );
 
