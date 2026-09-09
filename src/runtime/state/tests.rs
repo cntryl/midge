@@ -826,10 +826,24 @@ fn should_create_runtime_state_in_memory_mode() {
 
     // Assert
     assert!(state.is_memory_mode());
+    assert!(!state.compaction_enabled());
     assert_eq!(state.sequence, 0);
     assert_eq!(state.next_txn_id, 0);
     assert!(state.column_families.contains_key(&0)); // Default CF
     assert_eq!(state.column_families.len(), 1);
+}
+
+#[test]
+fn should_enable_persistence_capabilities_in_durable_mode() {
+    // Arrange
+    let directory = tempfile::tempdir().expect("temp dir");
+
+    // Act
+    let state = RuntimeState::new(directory.path().to_path_buf(), false);
+
+    // Assert
+    assert!(!state.is_memory_mode());
+    assert!(state.compaction_enabled());
 }
 
 #[test]
