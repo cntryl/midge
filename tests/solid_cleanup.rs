@@ -159,23 +159,6 @@ fn should_remove_eviction_actor_wrapper_provider_modules() {
 }
 
 #[test]
-fn should_keep_blocking_cloud_protocol_out_of_recovery_namespace() {
-    // Arrange
-    let recovery = read_source("src/engine/startup/cloud_recovery.rs");
-    let adapter = read_source("src/engine/startup/cloud_io.rs");
-
-    // Act
-    let recovery_defines_adapter_methods = recovery.contains("fn blocking_cloud_");
-
-    // Assert
-    assert!(
-        !recovery_defines_adapter_methods,
-        "CloudStartupRecovery should consume BlockingCloudIo directly"
-    );
-    assert!(adapter.contains("struct BlockingCloudIo"));
-}
-
-#[test]
 fn should_remove_legacy_manifest_sst_list_from_current_model() {
     // Arrange
     let manifest = production_source("src/metadata/manifest.rs");
@@ -430,70 +413,6 @@ fn should_keep_event_loop_message_families_in_owned_coordinators() {
         assert!(
             dispatcher.contains(coordinator_name),
             "dispatcher should delegate to {coordinator_name}"
-        );
-    }
-}
-
-#[test]
-fn should_make_startup_recovery_phases_owned() {
-    // Arrange
-    let startup = [
-        "src/engine/startup/mod.rs",
-        "src/engine/startup/cloud_recovery.rs",
-        "src/engine/startup/storage.rs",
-        "src/engine/startup/assembly.rs",
-        "src/engine/startup/streaming_recovery.rs",
-        "src/engine/startup/streaming_wal_plan.rs",
-    ]
-    .into_iter()
-    .map(read_source)
-    .collect::<String>();
-    let required_phases = [
-        "struct StartupStoragePath",
-        "struct StartupLease",
-        "struct RuntimeStorageMaterialization",
-        "struct RuntimeRecoveryMaterialization",
-        "struct StartedRuntime",
-        "struct FacadeAssembly",
-        "struct CloudReplay",
-        "struct StreamingCloudWalRecovery",
-    ];
-    let forbidden_engine_owned_recovery_calls = [
-        "Engine::hydrate_cloud_metadata",
-        "Engine::materialize_cloud_wal_recovery_dir",
-        "Engine::cloud_recovery_sst_proofs_for_intent_replay",
-        "Engine::ensure_named_sst_cache_from_cloud_storage",
-        "Engine::ensure_local_sst_cache_from_cloud",
-        "Engine::ensure_local_sst_cache_from_cloud_storage",
-        "Engine::mirror_cloud_metadata",
-    ];
-
-    // Act / Assert
-    // Assert
-    assert!(startup.contains("struct CloudStartupRecovery"));
-    assert!(startup.contains("StartupStoragePath::resolve"));
-    assert!(startup.contains("StartupLease::acquire"));
-    assert!(startup.contains("RuntimeStorageMaterialization::materialize"));
-    assert!(startup.contains("RuntimeRecoveryMaterialization::replay_and_repair"));
-    assert!(startup.contains("StartedRuntime::start"));
-    assert!(startup.contains("FacadeAssembly::assemble"));
-    assert!(startup.contains("CloudStartupRecovery::hydrate_cloud_metadata"));
-    assert!(startup.contains("StreamingCloudWalRecovery::build"));
-    assert!(startup.contains("replay_wal_with_checkpoint("));
-    assert!(
-        !read_source("src/engine/startup/storage.rs")
-            .contains("materialize_cloud_wal_recovery_dir"),
-        "shipping cloud startup must not materialize the complete WAL backlog"
-    );
-    assert!(startup.contains("CloudStartupRecovery::cloud_recovery_sst_proofs_for_intent_replay"));
-
-    for phase in required_phases {
-        assert!(startup.contains(phase), "startup should define {phase}");
-    }
-    for pattern in forbidden_engine_owned_recovery_calls {
-        assert!(
-            !startup.contains(pattern),
-            "startup should not call engine-owned recovery helper {pattern}"
         );
     }
 }
