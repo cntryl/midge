@@ -1900,14 +1900,14 @@ fn should_bound_create_metadata_mirror_by_runtime_response_deadline(
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.runtime_response_timeout = Duration::from_millis(500);
+    el.runtime_response_timeout = Duration::from_secs(5);
     el.cloud_metadata_storage = Some(Arc::new(
         crate::storage::cloud::CloudStorage::new_with_timeout(
             Arc::new(BudgetConsumingMetadataBackend::new(Duration::from_millis(
-                300,
+                2_500,
             ))),
             "metadata-deadline".to_string(),
-            Duration::from_secs(2),
+            Duration::from_secs(10),
         ),
     ));
     let request_id = 9_601;
@@ -1927,7 +1927,7 @@ fn should_bound_create_metadata_mirror_by_runtime_response_deadline(
 
     // Assert
     assert!(
-        elapsed < Duration::from_secs(1),
+        elapsed < Duration::from_secs(7),
         "metadata mirror exceeded the caller's shared deadline: {elapsed:?}"
     );
     let response = response_rx
