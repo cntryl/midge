@@ -93,7 +93,7 @@ fn run_workload_f(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
     run_workload_f_warmup(&engine, cf.id(), clients, initial_keys);
 
     // Flush to ensure warmup data is durable before measured phase
-    engine.flush_cf(&cf).unwrap();
+    ycsb::flush_after_phase(engine.as_ref(), &cf).expect("flush warmup phase");
     let perf_start = ycsb::capture_runtime_perf_snapshot(engine.as_ref());
 
     // Phase 3: Measured (duration-based; multi-client)

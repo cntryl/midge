@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const WRITE_COORDINATION_MEMTABLE_SIZE_BYTES: usize = 128 * 1024 * 1024;
+const DEFAULT_HYBRID_LOCAL_STORAGE_BUDGET_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Storage mode configuration for the engine.
 #[derive(Clone)]
@@ -312,7 +313,11 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
                 .ok()
                 .and_then(|value| value.parse::<u64>().ok())
                 .filter(|value| *value > 0)
-                .unwrap_or(8 * 1024 * 1024);
+                // Hybrid admission reserves half the local budget for flush
+                // staging. Keep the default window large enough for the
+                // conservative retained-memory charge of a full Tier-4 load
+                // transaction while still exercising bounded local storage.
+                .unwrap_or(DEFAULT_HYBRID_LOCAL_STORAGE_BUDGET_BYTES);
             MidgeOptions {
                 storage_mode: StorageMode::CloudBacked {
                     local_cache_path: test_dir,

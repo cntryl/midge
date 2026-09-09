@@ -186,7 +186,7 @@ fn run_workload_a_with_distribution(
     run_workload_a_warmup(&engine, clients, initial_keys, distribution);
 
     // Flush to ensure warmup data is durable before measured phase
-    engine.flush_cf(&cf).unwrap();
+    ycsb::flush_after_phase(engine.as_ref(), &cf).expect("flush warmup phase");
     let perf_start = ycsb::capture_runtime_perf_snapshot(engine.as_ref());
 
     // Phase 3: Measured (duration-based; multi-client)

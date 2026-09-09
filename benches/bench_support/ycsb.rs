@@ -28,6 +28,7 @@ pub const TIER4_MEMTABLE_SIZE_BYTES: usize = 4 * 1024 * 1024;
 pub const TIER4_MEMORY_MEMTABLE_SIZE_BYTES: usize = 512 * 1024 * 1024;
 
 const EXPORTED_LATENCY_QUANTILES: usize = 256;
+const RUNTIME_METRICS_RETRY_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug, Default)]
 pub struct MultiClientRunStats {
@@ -453,8 +454,7 @@ pub fn open_tier4_engine(mut opts: MidgeOptions) -> Engine {
 ///
 /// Panics if runtime metrics cannot be captured.
 pub fn capture_runtime_perf_snapshot(engine: &Engine) -> RuntimePerfSnapshot {
-    let metrics = engine
-        .get_runtime_metrics()
+    let metrics = retry_transient_runtime_request(|| engine.get_runtime_metrics())
         .expect("capture runtime performance snapshot");
     let read_path = engine.read_path_diagnostics_snapshot_for_benchmarks();
     RuntimePerfSnapshot {
@@ -499,8 +499,7 @@ pub fn capture_runtime_perf_snapshot(engine: &Engine) -> RuntimePerfSnapshot {
 ///
 /// Panics if runtime metrics cannot be captured.
 pub fn runtime_perf_report(engine: &Engine, start: RuntimePerfSnapshot) -> RuntimePerfReport {
-    let end = engine
-        .get_runtime_metrics()
+    let end = retry_transient_runtime_request(|| engine.get_runtime_metrics())
         .expect("capture runtime performance report");
     let read_path = engine.read_path_diagnostics_snapshot_for_benchmarks();
     RuntimePerfReport {
@@ -598,6 +597,23 @@ pub fn runtime_perf_report(engine: &Engine, start: RuntimePerfSnapshot) -> Runti
         range_tombstone_scans: read_path
             .range_tombstone_scans
             .saturating_sub(start.range_tombstone_scans),
+    }
+}
+
+fn retry_transient_runtime_request<T>(
+    mut request: impl FnMut() -> MidgeResult<T>,
+) -> MidgeResult<T> {
+    let deadline = Instant::now() + RUNTIME_METRICS_RETRY_TIMEOUT;
+    loop {
+        match request() {
+            Err(MidgeError::WriteStall(_)) if Instant::now() < deadline => {
+                // Metrics share the bounded runtime request queue with normal
+                // operations. Let the runtime drain a saturated queue without
+                // treating an observation-only request as a workload failure.
+                thread::yield_now();
+            }
+            result => return result,
+        }
     }
 }
 
@@ -726,10 +742,21 @@ pub fn load_initial_dataset(engine: &Engine, cf: &ColumnFamilyHandle, initial_ke
         });
     }
 
-    engine.flush_cf(cf).expect("load phase flush");
+    flush_after_phase(engine, cf).expect("load phase flush");
     if trace {
         eprintln!("[midge][ycsb] load complete");
     }
+}
+
+/// Flush a completed setup or warm-up phase, waiting through ordinary
+/// immutable-queue backpressure.
+///
+/// # Errors
+/// Returns any non-`WriteStall` engine error, or an error encountered while
+/// waiting for the column family's write stall to clear.
+pub fn flush_after_phase(engine: &Engine, cf: &ColumnFamilyHandle) -> MidgeResult<()> {
+    let stop = AtomicBool::new(false);
+    retry_write_stall(engine, cf.id(), &stop, || engine.flush_cf(cf))
 }
 
 /// Run a duration-based loop, returning `(operations, bytes)`.
