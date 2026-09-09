@@ -3,8 +3,8 @@
 use super::{
     Arc, CloudState, ColumnFamilyState, CompactionConfig, CompactionState, Fs, HashMap,
     IntentLogEntry, Manifest, Memtable, MidgeError, MidgeResult, PathBuf, PublicationPhase,
-    RecoveryLoadState, RecoveryStatus, RuntimeDiagnostics, RuntimeMode, RuntimeState,
-    SkipListMemtable, SnapshotPinRegistry, SnapshotState, WalRecoveryState, WalState,
+    RecoveryLoadState, RecoveryStatus, RuntimeDiagnostics, RuntimeMode, RuntimePersistence,
+    RuntimeState, SkipListMemtable, SnapshotPinRegistry, SnapshotState, WalRecoveryState, WalState,
     WritePressureState,
 };
 
@@ -93,17 +93,18 @@ impl RuntimeState {
         recovery_policy: crate::config::RecoveryPolicy,
         replay_wal: bool,
     ) -> MidgeResult<Self> {
-        let (wal_dir, sst_dir) = Self::ensure_directories(&db_path, memory_mode);
-        let fs = Self::initialize_fs(&db_path, memory_mode)?;
+        let persistence = RuntimePersistence::from_memory_mode(memory_mode);
+        let (wal_dir, sst_dir) = Self::ensure_directories(&db_path, persistence.is_memory());
+        let fs = Self::initialize_fs(&db_path, persistence.is_memory())?;
         let RecoveryLoadState {
             opened_in_salvage_mode,
             manifest,
             intent_log,
-        } = Self::load_recovery_state(&db_path, memory_mode, recovery_policy, &fs)?;
+        } = Self::load_recovery_state(&db_path, persistence.is_memory(), recovery_policy, &fs)?;
         let column_families = Self::bootstrap_column_families(&manifest);
         let wal_recovery = if replay_wal {
             Self::recover_wal_state(
-                memory_mode,
+                persistence.is_memory(),
                 &wal_dir,
                 &sst_dir,
                 recovery_wal_dir,
@@ -153,7 +154,7 @@ impl RuntimeState {
             mode: RuntimeMode {
                 #[cfg(test)]
                 read_only: false,
-                memory_mode,
+                persistence,
             },
             recovery: RecoveryStatus {
                 policy: recovery_policy,
@@ -162,7 +163,7 @@ impl RuntimeState {
                 persistence_anomaly_detected: false,
             },
             compaction_config: CompactionConfig {
-                enabled: !memory_mode,
+                enabled: persistence.compaction_enabled(),
             },
             intent_log,
             memtable_flush_threshold: 64 * 1024 * 1024, // 64MB

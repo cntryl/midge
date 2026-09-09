@@ -301,7 +301,7 @@ impl RuntimeState {
     }
 
     pub fn is_memory_mode(&self) -> bool {
-        self.mode.memory_mode
+        self.mode.persistence.is_memory()
     }
 
     pub fn recovery_policy(&self) -> crate::config::RecoveryPolicy {

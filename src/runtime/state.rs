@@ -172,10 +172,34 @@ pub(crate) struct FlushCandidate {
     pub reason: FlushReason,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimePersistence {
+    Memory,
+    Durable,
+}
+
+impl RuntimePersistence {
+    const fn from_memory_mode(memory_mode: bool) -> Self {
+        if memory_mode {
+            Self::Memory
+        } else {
+            Self::Durable
+        }
+    }
+
+    const fn is_memory(self) -> bool {
+        matches!(self, Self::Memory)
+    }
+
+    const fn compaction_enabled(self) -> bool {
+        matches!(self, Self::Durable)
+    }
+}
+
 pub struct RuntimeMode {
     #[cfg(test)]
     pub read_only: bool,
-    pub memory_mode: bool,
+    persistence: RuntimePersistence,
 }
 
 pub struct RecoveryStatus {
@@ -744,7 +768,7 @@ impl RuntimeState {
     /// Physical scratch left after startup cleanup. Nested SST/WAL staging
     /// remains in their own resident-byte totals and must not be counted twice.
     pub(crate) fn retained_startup_scratch_bytes(&self) -> MidgeResult<u64> {
-        if self.mode.memory_mode {
+        if self.mode.persistence.is_memory() {
             return Ok(0);
         }
         let root = FsPath::new("");
