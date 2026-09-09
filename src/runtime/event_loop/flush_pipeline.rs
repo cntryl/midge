@@ -232,7 +232,7 @@ impl EventLoop {
             .immutable_flush_by_id(completion.identity.flush_id)
             .is_some_and(|(_, flush)| Arc::ptr_eq(&flush.memtable, &completion.memtable));
         if !same_immutable {
-            Self::cleanup_failed_flush_build(&mut completion);
+            self.cleanup_failed_flush_build(&mut completion);
             let error = crate::common::MidgeError::Fenced(format!(
                 "flush {} build completion no longer owns its immutable",
                 completion.identity.flush_id
@@ -246,7 +246,7 @@ impl EventLoop {
             return false;
         }
         if let Err(error) = self.validate_flush_completion(completion.identity) {
-            Self::cleanup_failed_flush_build(&mut completion);
+            self.cleanup_failed_flush_build(&mut completion);
             self.fail_flush_pipeline(
                 completion.identity.flush_id,
                 completion.reservation,
@@ -256,7 +256,7 @@ impl EventLoop {
             return false;
         }
         if completion.result.is_err() {
-            Self::cleanup_failed_flush_build(&mut completion);
+            self.cleanup_failed_flush_build(&mut completion);
         }
         match completion.result {
             Ok(file_meta) => self.prepare_flush_publication(
@@ -275,13 +275,20 @@ impl EventLoop {
         true
     }
 
-    fn cleanup_failed_flush_build(completion: &mut FlushBuildCompletion) {
+    fn cleanup_failed_flush_build(&self, completion: &mut FlushBuildCompletion) {
         let mut temp = completion.staging_path.as_os_str().to_os_string();
         temp.push(".tmp");
         for path in [&completion.staging_path, &std::path::PathBuf::from(temp)] {
-            match std::fs::remove_file(path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            let Ok(path) = self.runtime_fs_path(path) else {
+                tracing::warn!(
+                    ?path,
+                    "retaining failed flush outside the runtime filesystem"
+                );
+                completion.reservation = None;
+                continue;
+            };
+            match self.state.fs.remove_file(&path) {
+                Ok(()) | Err(crate::io::FsError::NotFound(_)) => {}
                 Err(error) => {
                     // Keep the admission charged until startup can reconcile
                     // the residue. Failed deletion never returns capacity.
@@ -290,6 +297,19 @@ impl EventLoop {
                 }
             }
         }
+    }
+
+    fn runtime_fs_path(
+        &self,
+        path: &std::path::Path,
+    ) -> crate::common::MidgeResult<crate::io::FsPath> {
+        let relative = path
+            .strip_prefix(&self.state.db_path)
+            .map_err(|_| crate::common::MidgeError::InvalidPath)?;
+        let relative = relative
+            .to_str()
+            .ok_or(crate::common::MidgeError::InvalidPath)?;
+        Ok(crate::io::FsPath::new(relative))
     }
 
     fn prepare_flush_publication(
@@ -511,7 +531,9 @@ impl EventLoop {
             self.state.sst_dir.join(name),
         ];
         let primary_absent = paths.iter().all(|path| {
-            matches!(std::fs::symlink_metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+            self.runtime_fs_path(path)
+                .and_then(|path| self.state.fs.exists(&path).map_err(Into::into))
+                .is_ok_and(|exists| !exists)
         });
         if !primary_absent
             || !matches!(
@@ -556,12 +578,19 @@ impl EventLoop {
             return;
         }
 
-        let mut sealed_segments = match std::fs::read_dir(&self.state.wal_dir) {
+        let wal_dir = crate::io::FsPath::new("wal");
+        let mut sealed_segments = match self.state.fs.list_dir(&wal_dir) {
             Ok(entries) => entries
-                .flatten()
+                .into_iter()
+                .filter(|entry| !entry.is_dir)
                 .filter_map(|entry| {
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    crate::wal::parse_segment_id(&name).map(|segment_id| (segment_id, entry.path()))
+                    let name = std::path::Path::new(&entry.name)
+                        .file_name()?
+                        .to_str()?
+                        .to_string();
+                    crate::wal::parse_segment_id(&name).map(|segment_id| {
+                        (segment_id, crate::io::FsPath::new(format!("wal/{name}")))
+                    })
                 })
                 .filter(|(segment_id, _)| *segment_id < self.state.wal.current_segment_id)
                 .collect::<Vec<_>>(),
@@ -578,7 +607,7 @@ impl EventLoop {
                 tracing::warn!(segment_id, %error, "stopped local WAL pruning after lease validation failed");
                 return;
             }
-            let bytes = match std::fs::read(&path) {
+            let bytes = match self.read_runtime_file(&path) {
                 Ok(bytes) => bytes,
                 Err(error) => {
                     self.state.mark_persistence_anomaly();
@@ -587,16 +616,15 @@ impl EventLoop {
                 }
             };
             if bytes.is_empty() {
-                if let Err(error) = std::fs::remove_file(&path) {
-                    if error.kind() != std::io::ErrorKind::NotFound {
+                if let Err(error) = self.state.fs.remove_file(&path) {
+                    if !matches!(error, crate::io::FsError::NotFound(_)) {
                         self.state.mark_persistence_anomaly();
                         tracing::warn!(segment_id, %error, "failed to remove empty local WAL segment");
                     }
                 }
                 continue;
             }
-            let key = path.to_string_lossy();
-            let readback = match crate::wal::cloud_segment::inspect_bytes(&key, &bytes) {
+            let readback = match crate::wal::cloud_segment::inspect_bytes(&path.0, &bytes) {
                 Ok(readback) => readback,
                 Err(error) => {
                     self.state.mark_persistence_anomaly();
@@ -607,9 +635,9 @@ impl EventLoop {
             if !self.local_wal_records_exactly_covered(&readback.data_records) {
                 continue;
             }
-            match std::fs::remove_file(&path) {
+            match self.state.fs.remove_file(&path) {
                 Ok(()) => tracing::debug!(segment_id, "removed exactly covered local WAL segment"),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(crate::io::FsError::NotFound(_)) => {}
                 Err(error) => {
                     self.state.mark_persistence_anomaly();
                     tracing::warn!(segment_id, %error, "failed to remove exactly covered local WAL segment");
@@ -624,6 +652,20 @@ impl EventLoop {
             self.state.mark_persistence_anomaly();
             tracing::warn!(%error, "failed to sync local WAL directory after pruning");
         }
+    }
+
+    fn read_runtime_file(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bytes::Bytes> {
+        let length = self.state.fs.metadata(path)?.len;
+        let file = self.state.fs.open(
+            path,
+            crate::io::OpenOptions {
+                mode: crate::io::OpenMode::ReadOnly,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        )?;
+        file.read_at(0, length)
     }
 
     fn local_wal_records_exactly_covered(
@@ -1021,6 +1063,51 @@ mod tests {
     }
 
     #[test]
+    fn should_remove_failed_flush_output_from_injected_filesystem() -> crate::common::MidgeResult<()>
+    {
+        // Arrange
+        let directory = tempfile::tempdir()?;
+        let (mut event_loop, hybrid) = event_loop_with_hybrid_storage(&directory)?;
+        let injected_fs = Arc::new(crate::io::MockFs::new());
+        let mut staged = crate::io::Fs::open(
+            injected_fs.as_ref(),
+            &crate::io::FsPath::new("orphan.sst"),
+            crate::io::OpenOptions {
+                mode: crate::io::OpenMode::ReadWrite,
+                create: true,
+                create_new: false,
+                truncate: true,
+            },
+        )?;
+        staged.write_at(0, bytes::Bytes::from_static(b"orphan"))?;
+        event_loop.state.fs = injected_fs.clone();
+        let reservation = hybrid
+            .reserve_for_flush_with_token(256)
+            .expect("reserve flush storage");
+        let completion = FlushBuildCompletion {
+            identity: FlushIdentity {
+                flush_id: 99,
+                writer_epoch: 0,
+                cf_id: 0,
+                sequence: 1,
+            },
+            memtable: Arc::new(crate::sst::SkipListMemtable::new()),
+            staging_path: directory.path().join("orphan.sst"),
+            reservation: Some(reservation),
+            build_ns: 1,
+            result: Err(crate::common::MidgeError::Fenced("orphan".to_string())),
+        };
+
+        // Act
+        event_loop.handle_flush_build_completion(completion);
+
+        // Assert
+        assert_eq!(injected_fs.get_file("orphan.sst"), None);
+        assert_eq!(hybrid.budget_snapshot().total_committed_bytes, 0);
+        Ok(())
+    }
+
+    #[test]
     fn should_release_fenced_failed_publish_admission_only_when_all_owned_outputs_are_absent(
     ) -> crate::common::MidgeResult<()> {
         for residue in [
@@ -1285,6 +1372,16 @@ mod tests {
         let mut state =
             crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
         let sync_fs = Arc::new(crate::io::MockFs::new());
+        crate::io::Fs::open(
+            sync_fs.as_ref(),
+            &crate::io::FsPath::new(format!("wal/{}", crate::wal::ACTIVE_FILE_NAME)),
+            crate::io::OpenOptions {
+                mode: crate::io::OpenMode::ReadWrite,
+                create: true,
+                create_new: false,
+                truncate: false,
+            },
+        )?;
         sync_fs.set_sync_dir_failure(true);
         state.fs = sync_fs.clone();
         let router = Arc::new(crate::runtime::ResponseRouter::new());
