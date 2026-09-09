@@ -828,7 +828,7 @@ fn should_create_runtime_state_in_memory_mode() {
     assert!(state.is_memory_mode());
     assert!(!state.compaction_enabled());
     assert_eq!(state.sequence, 0);
-    assert_eq!(state.next_txn_id, 0);
+    assert_eq!(state.transaction_id_cursor_for_test(), 0);
     assert!(state.column_families.contains_key(&0)); // Default CF
     assert_eq!(state.column_families.len(), 1);
 }
@@ -969,14 +969,14 @@ fn should_increment_transaction_ids_monotonically() {
 fn should_reject_transaction_id_exhaustion_without_reusing_identity() {
     // Arrange
     let mut state = RuntimeState::new("/tmp/test_midge_txn_id_exhaustion".into(), true);
-    state.next_txn_id = u64::MAX;
+    state.set_transaction_id_cursor_for_test(u64::MAX);
 
     // Act
     let result = state.next_txn_id();
 
     // Assert
     assert!(matches!(result, Err(MidgeError::ResourceLimit(_))));
-    assert_eq!(state.next_txn_id, u64::MAX);
+    assert_eq!(state.transaction_id_cursor_for_test(), u64::MAX);
 }
 
 #[test]

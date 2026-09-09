@@ -135,7 +135,7 @@ impl EventLoop {
         // === Phase 0 Guardrail #3: Transaction atomicity barrier ===
         // If a transaction is pending commit (Batched mode), block reads at sequences
         // >= pending_txn_min_seq to prevent seeing partial transaction state.
-        if let Some(pending_min) = self.state.pending_txn_min_seq {
+        if let Some(pending_min) = self.state.pending_transaction_min_sequence() {
             if sequence >= pending_min {
                 // Defer this read until transaction completes
                 self.durability.queue_waiter(DurabilityWaiter::Read {
@@ -181,7 +181,7 @@ impl EventLoop {
         // === Phase 0 Guardrail #3: Transaction atomicity barrier ===
         // If a transaction is pending commit (Batched mode), block scans at sequences
         // >= pending_txn_min_seq to prevent seeing partial transaction state.
-        if let Some(pending_min) = self.state.pending_txn_min_seq {
+        if let Some(pending_min) = self.state.pending_transaction_min_sequence() {
             if sequence >= pending_min {
                 // Defer this scan until transaction completes
                 self.durability.queue_waiter(DurabilityWaiter::RangeScan {
