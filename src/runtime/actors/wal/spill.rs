@@ -1,5 +1,5 @@
 // Responsibilities for this WAL actor slice stay within the actor namespace.
-use super::super::cloud_write_queue::TransactionApplyOp;
+use super::TransactionApplyOp;
 use super::{TxnSequencePlan, WalActor};
 use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::state::RuntimeState;

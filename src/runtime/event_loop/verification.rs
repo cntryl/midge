@@ -77,7 +77,6 @@ impl EventLoop {
             #[cfg(test)]
             message @ (RuntimeMsg::FlushComplete { .. }
             | RuntimeMsg::WalSyncComplete { .. }
-            | RuntimeMsg::CloudUploadComplete { .. }
             | RuntimeMsg::DeleteObsoleteSsts { .. }
             | RuntimeMsg::ManifestAddSst { .. }
             | RuntimeMsg::ManifestCompactionComplete { .. }) => {
@@ -110,8 +109,6 @@ impl EventLoop {
             message @ (RuntimeMsg::WalAppend { .. }
             | RuntimeMsg::WalAppendDeleteRange { .. }
             | RuntimeMsg::WalRotate { .. }
-            | RuntimeMsg::CloudUploadSst { .. }
-            | RuntimeMsg::CloudUploadWal { .. }
             | RuntimeMsg::CheckGc { .. }
             | RuntimeMsg::RunCompaction { .. }
             | RuntimeMsg::BeginIngest { .. }

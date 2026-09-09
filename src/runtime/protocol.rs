@@ -291,17 +291,6 @@ pub enum RuntimeMsg {
     #[cfg(test)]
     WalSyncComplete { request_id: u64, segment_id: u64 },
 
-    // === Cloud Actor ===
-    /// Upload SST to cloud.
-    #[cfg(test)]
-    CloudUploadSst { request_id: u64, sst_name: String },
-    /// Upload WAL segment to cloud.
-    #[cfg(test)]
-    CloudUploadWal { request_id: u64, segment_id: u64 },
-    /// Cloud upload completed.
-    #[cfg(test)]
-    CloudUploadComplete { request_id: u64, resource: String },
-
     // === GC Actor ===
     /// Check for garbage collection opportunities.
     #[cfg(test)]
@@ -553,9 +542,6 @@ impl RuntimeMsg {
             | RuntimeMsg::WalAppendDeleteRange { request_id, .. }
             | RuntimeMsg::WalRotate { request_id }
             | RuntimeMsg::WalSyncComplete { request_id, .. }
-            | RuntimeMsg::CloudUploadSst { request_id, .. }
-            | RuntimeMsg::CloudUploadWal { request_id, .. }
-            | RuntimeMsg::CloudUploadComplete { request_id, .. }
             | RuntimeMsg::CheckGc { request_id }
             | RuntimeMsg::DeleteObsoleteSsts { request_id, .. }
             | RuntimeMsg::ManifestAddSst { request_id, .. }
@@ -618,12 +604,6 @@ impl RuntimeMsg {
             RuntimeMsg::WalRotate { .. } => "WalRotate",
             #[cfg(test)]
             RuntimeMsg::WalSyncComplete { .. } => "WalSyncComplete",
-            #[cfg(test)]
-            RuntimeMsg::CloudUploadSst { .. } => "CloudUploadSst",
-            #[cfg(test)]
-            RuntimeMsg::CloudUploadWal { .. } => "CloudUploadWal",
-            #[cfg(test)]
-            RuntimeMsg::CloudUploadComplete { .. } => "CloudUploadComplete",
             #[cfg(test)]
             RuntimeMsg::CheckGc { .. } => "CheckGc",
             #[cfg(test)]
