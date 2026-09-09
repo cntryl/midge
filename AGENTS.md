@@ -8,7 +8,7 @@ Midge is a Rust embedded LSM key-value engine. Core code lives under `src/`, wit
 
 - `cargo build --workspace`: compile the crate and workspace targets.
 - `cargo test`: run unit and integration tests.
-- `cargo test --test cloud_persistence_hardening -- --nocapture`: run a focused integration suite.
+- `cargo test --test cloud_core -- cloud_persistence_hardening --nocapture`: run a focused integration suite.
 - `cargo fmt --check`: verify Rust formatting.
 - `cargo fmt`: apply standard Rust formatting.
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic`: enforce zero-warning lint policy.

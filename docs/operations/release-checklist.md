@@ -12,15 +12,15 @@ Use this checklist before publishing a release candidate or stable release.
 - [ ] `cargo test --workspace --all-features --doc`
 - [ ] `cargo check --example documented_quick_start --all-features`
 - [ ] `cargo machete`
-- [ ] `cargo test --test repository_gates`
+- [ ] `cargo test --test governance -- repository_gates`
 - [ ] `cargo package --locked`
 - [ ] `docker build --file Dockerfile.tests --tag midge-tests:release .`
-- [ ] `cargo test --test external_adopter_smoke --features failpoints`
-- [ ] `cargo test --test durability_wal`
-- [ ] `cargo test --test failure_injection --features failpoints`
-- [ ] `cargo test --test chaos_compaction --features failpoints`
-- [ ] `cargo test --test engine_iterators`
-- [ ] `cargo test --test compatibility_fixtures`
+- [ ] `cargo test --test fault_injection --features failpoints -- --test-threads=1 external_adopter_smoke`
+- [ ] `cargo test --test durability -- durability_wal`
+- [ ] `cargo test --test fault_injection --features failpoints -- --test-threads=1 failure_injection`
+- [ ] `cargo test --test fault_injection --features failpoints -- --test-threads=1 chaos_compaction`
+- [ ] `cargo test --test engine_api -- engine_iterators`
+- [ ] `cargo test --test storage_layer -- compatibility_fixtures`
 - [ ] `cntryl-tools validate-tests`
 - [ ] default `cargo tree --edges normal` and `cargo check --release` exclude `fail`
 - [ ] Sqrzl `/healthz` responds successfully
