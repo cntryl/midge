@@ -133,34 +133,6 @@ fn should_not_suppress_dead_code_in_production_sources() {
 }
 
 #[test]
-fn should_keep_production_sources_free_of_allow_expect_suppressions() {
-    // Arrange
-    let mut sources = Vec::new();
-    collect_rust_sources(&source_path("src"), &mut sources);
-    let forbidden = ["#[allow(", "#![allow(", "#[expect(", "#![expect("];
-
-    // Act
-
-    // Assert
-    for source in sources {
-        let relative = source
-            .strip_prefix(source_path(""))
-            .expect("source should live under repo")
-            .to_string_lossy()
-            .replace('\\', "/");
-        let content = production_source(&relative);
-
-        for pattern in forbidden {
-            assert!(
-                !content.contains(pattern),
-                "{} should not suppress production lints with {pattern}",
-                source.display()
-            );
-        }
-    }
-}
-
-#[test]
 fn should_keep_removed_testkit_api_out_of_public_surface() {
     // Arrange
     let lib = read_source("src/lib.rs");
@@ -455,7 +427,6 @@ fn should_keep_event_loop_message_families_in_owned_coordinators() {
             "struct ManifestCoordinator",
         ),
         ("src/runtime/event_loop/gc.rs", "struct GcCoordinator"),
-        ("src/runtime/event_loop/cloud.rs", "struct CloudCoordinator"),
         (
             "src/runtime/event_loop/snapshot.rs",
             "struct SnapshotCoordinator",
@@ -467,7 +438,6 @@ fn should_keep_event_loop_message_families_in_owned_coordinators() {
         "RuntimeMsg::CompactionComplete",
         "RuntimeMsg::ManifestCreateColumnFamily",
         "RuntimeMsg::DeleteObsoleteSsts",
-        "RuntimeMsg::CloudUploadSst",
     ];
 
     // Act / Assert

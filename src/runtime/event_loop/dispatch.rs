@@ -1,6 +1,4 @@
 #[cfg(test)]
-use super::cloud::CloudCoordinator;
-#[cfg(test)]
 use super::gc::GcCoordinator;
 #[cfg(test)]
 use super::wal::AppendRequest;
@@ -142,13 +140,6 @@ enum CompactionRoute {
 }
 
 #[cfg(test)]
-enum CloudRoute {
-    Sst { request_id: u64, sst_name: String },
-    Wal { request_id: u64, segment_id: u64 },
-    Complete { request_id: u64, resource: String },
-}
-
-#[cfg(test)]
 enum GcRoute {
     DeleteObsoleteSsts {
         request_id: u64,
@@ -284,12 +275,6 @@ impl RuntimeDispatcher {
             RuntimeMsg::FlushComplete { .. } => Self::handle_flush_message(event_loop, &msg),
             #[cfg(test)]
             RuntimeMsg::RunCompaction { .. } => Self::handle_compaction_message(event_loop, msg),
-            #[cfg(test)]
-            RuntimeMsg::CloudUploadSst { .. } => Self::handle_cloud_message(event_loop, msg),
-            #[cfg(test)]
-            RuntimeMsg::CloudUploadWal { .. } => Self::handle_cloud_message(event_loop, msg),
-            #[cfg(test)]
-            RuntimeMsg::CloudUploadComplete { .. } => Self::handle_cloud_message(event_loop, msg),
             #[cfg(test)]
             RuntimeMsg::DeleteObsoleteSsts { .. } => Self::handle_gc_message(event_loop, msg),
             #[cfg(test)]
@@ -626,46 +611,6 @@ impl RuntimeDispatcher {
     }
 
     #[cfg(test)]
-    fn handle_cloud_message(event_loop: &mut EventLoop, msg: RuntimeMsg) -> HandleOutcome {
-        match msg {
-            #[cfg(test)]
-            RuntimeMsg::CloudUploadSst {
-                request_id,
-                sst_name,
-            } => Self::dispatch_cloud(
-                event_loop,
-                CloudRoute::Sst {
-                    request_id,
-                    sst_name,
-                },
-            ),
-            #[cfg(test)]
-            RuntimeMsg::CloudUploadWal {
-                request_id,
-                segment_id,
-            } => Self::dispatch_cloud(
-                event_loop,
-                CloudRoute::Wal {
-                    request_id,
-                    segment_id,
-                },
-            ),
-            #[cfg(test)]
-            RuntimeMsg::CloudUploadComplete {
-                request_id,
-                resource,
-            } => Self::dispatch_cloud(
-                event_loop,
-                CloudRoute::Complete {
-                    request_id,
-                    resource,
-                },
-            ),
-            _ => unreachable!("non-cloud message routed to handle_cloud_message"),
-        }
-    }
-
-    #[cfg(test)]
     fn handle_gc_message(event_loop: &mut EventLoop, msg: RuntimeMsg) -> HandleOutcome {
         match msg {
             #[cfg(test)]
@@ -936,24 +881,6 @@ impl RuntimeDispatcher {
             CompactionRoute::Complete(request) => {
                 CompactionCoordinator::complete(event_loop, request)
             }
-        }
-    }
-
-    #[cfg(test)]
-    fn dispatch_cloud(event_loop: &mut EventLoop, route: CloudRoute) -> HandleOutcome {
-        match route {
-            CloudRoute::Sst {
-                request_id,
-                sst_name,
-            } => CloudCoordinator::upload_sst(event_loop, request_id, &sst_name),
-            CloudRoute::Wal {
-                request_id,
-                segment_id,
-            } => CloudCoordinator::upload_wal(event_loop, request_id, segment_id),
-            CloudRoute::Complete {
-                request_id,
-                resource,
-            } => CloudCoordinator::upload_complete(event_loop, request_id, &resource),
         }
     }
 

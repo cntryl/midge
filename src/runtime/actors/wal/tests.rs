@@ -179,10 +179,7 @@ fn should_assign_identical_expiration_given_multiple_ttl_puts_in_one_transaction
     let expirations = apply_ops
         .iter()
         .map(|op| match op {
-            crate::runtime::actors::cloud_write_queue::TransactionApplyOp::Put {
-                expiration,
-                ..
-            } => *expiration,
+            super::TransactionApplyOp::Put { expiration, .. } => *expiration,
             _ => None,
         })
         .collect::<Vec<_>>();

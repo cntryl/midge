@@ -17,8 +17,6 @@
 //! - `cloud_integration` — `CloudAsync` WAL flush, cloud ack/fail handling
 //! - `write_batch` — group commit write draining, backpressure / write stall
 
-#[cfg(test)]
-mod cloud;
 mod cloud_integration;
 mod cloud_maintenance;
 mod cloud_memtable_admission;
@@ -51,8 +49,6 @@ const BACKGROUND_COMPACTION_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const STARTUP_CLOUD_MAINTENANCE_DELAY: Duration = Duration::from_millis(100);
 const HYBRID_STORAGE_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
-#[cfg(test)]
-use super::actors::CloudActor;
 use super::actors::{CompactionActor, FlushActor, GcActor, ManifestActor, WalActor};
 use super::durability::DurabilityCoordinator;
 use super::read_resources::ReadResources;
@@ -113,8 +109,6 @@ pub struct EventLoop {
     pub(super) flush_actor: FlushActor,
     pub(super) compaction_actor: CompactionActor,
     pub(super) wal_actor: WalActor,
-    #[cfg(test)]
-    pub(super) cloud_actor: CloudActor,
     gc_actor: GcActor,
     manifest_actor: ManifestActor,
     pub(super) hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
@@ -254,8 +248,6 @@ impl EventLoop {
             flush_actor,
             compaction_actor: Self::create_compaction_actor(sst_factory, &config),
             wal_actor,
-            #[cfg(test)]
-            cloud_actor: CloudActor::new(),
             gc_actor,
             manifest_actor: ManifestActor::new(),
             hybrid_storage: None,

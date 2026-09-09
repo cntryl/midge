@@ -4,7 +4,7 @@
 //! - Appending records to WAL
 //! - Syncing WAL to disk
 //! - Rotating WAL segments
-//! - Coordinating with cloud actor for WAL uploads
+//! - Handing sealed WAL segments to hybrid storage for cloud upload
 //! - Tracking `local_durable_seq` and `cloud_durable_seq` frontiers
 //! - Managing pending requests waiting for cloud durability
 //!
@@ -26,13 +26,13 @@
 
 #[cfg(test)]
 use super::super::state::RuntimeState;
-use super::cloud_write_queue::TransactionApplyOp;
 use crate::common::MidgeResult;
 use crate::io::{Fs, RealFs};
 use crate::wal::policy::BatchConfig;
 use crate::wal::{DurabilityPolicy, FsWalFactoryIo, WalRecord, WalWriter};
 #[cfg(test)]
 use crate::{common::MidgeError, wal::WalOpKind};
+use apply_op::TransactionApplyOp;
 #[cfg(test)]
 use bytes::Bytes;
 use std::path::PathBuf;
@@ -176,11 +176,12 @@ pub struct WalActor {
     append_total: Duration,
 }
 
+mod apply_op;
 mod durability;
-mod memtable;
 mod rotation;
 mod spill;
 mod transaction;
+mod transaction_state;
 
 impl WalActor {
     #[cfg(test)]

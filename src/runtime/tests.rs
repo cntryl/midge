@@ -772,18 +772,6 @@ fn write_side_request_response_messages() -> Vec<RuntimeMsg> {
             request_id: 8,
             segment_id: 1,
         },
-        RuntimeMsg::CloudUploadSst {
-            request_id: 9,
-            sst_name: "remote.sst".to_string(),
-        },
-        RuntimeMsg::CloudUploadWal {
-            request_id: 10,
-            segment_id: 1,
-        },
-        RuntimeMsg::CloudUploadComplete {
-            request_id: 11,
-            resource: "wal/1".to_string(),
-        },
         RuntimeMsg::CheckGc { request_id: 12 },
         RuntimeMsg::DeleteObsoleteSsts {
             request_id: 13,

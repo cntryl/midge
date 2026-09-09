@@ -1,4 +1,4 @@
-//! Transaction operations prepared by the WAL actor for memtable application.
+//! Transaction operations prepared for publication after the WAL append.
 //!
 //! Cloud upload admission and backpressure live in the production
 //! `HybridStorage` upload queue. This module intentionally contains no shadow

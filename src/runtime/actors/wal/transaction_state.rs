@@ -1,6 +1,6 @@
-// Responsibilities for this WAL actor slice stay within the actor namespace.
-use super::super::cloud_write_queue::TransactionApplyOp;
-use super::WalActor;
+//! Transaction validation and in-memory state publication.
+
+use super::{TransactionApplyOp, WalActor};
 use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::state::RuntimeState;
 use crate::sst::Memtable;

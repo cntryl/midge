@@ -1884,11 +1884,6 @@ fn should_initialize_actors_with_expected_starting_state() {
         4,
         "CompactionActor must start with the default L0 file-count threshold"
     );
-    assert_eq!(
-        event_loop.cloud_actor.uploads_in_progress(),
-        0,
-        "CloudActor must start with no uploads in progress"
-    );
     assert!(
         event_loop.gc_actor.last_gc_run().is_none(),
         "GcActor must start with no recorded GC run"
