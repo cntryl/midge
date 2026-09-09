@@ -53,7 +53,7 @@ fn run_submit_and_wait(ctx: &mut StressContext, scenario: &'static str, waiters:
 
 #[stress(
     tier = 1,
-    metadata(component = "singleflight", scenario = "flush_waiters_1")
+    metadata(component = "keyed_group_commit", scenario = "flush_waiters_1")
 )]
 fn flush_waiters_1(ctx: &mut StressContext) {
     run_flush_waiters(ctx, "flush_waiters_1", 1);
@@ -61,7 +61,7 @@ fn flush_waiters_1(ctx: &mut StressContext) {
 
 #[stress(
     tier = 1,
-    metadata(component = "singleflight", scenario = "flush_waiters_4")
+    metadata(component = "keyed_group_commit", scenario = "flush_waiters_4")
 )]
 fn flush_waiters_4(ctx: &mut StressContext) {
     run_flush_waiters(ctx, "flush_waiters_4", 4);
@@ -69,7 +69,7 @@ fn flush_waiters_4(ctx: &mut StressContext) {
 
 #[stress(
     tier = 1,
-    metadata(component = "singleflight", scenario = "flush_waiters_16")
+    metadata(component = "keyed_group_commit", scenario = "flush_waiters_16")
 )]
 fn flush_waiters_16(ctx: &mut StressContext) {
     run_flush_waiters(ctx, "flush_waiters_16", 16);
@@ -77,7 +77,7 @@ fn flush_waiters_16(ctx: &mut StressContext) {
 
 #[stress(
     tier = 1,
-    metadata(component = "singleflight", scenario = "flush_waiters_64")
+    metadata(component = "keyed_group_commit", scenario = "flush_waiters_64")
 )]
 fn flush_waiters_64(ctx: &mut StressContext) {
     run_flush_waiters(ctx, "flush_waiters_64", 64);
@@ -85,7 +85,7 @@ fn flush_waiters_64(ctx: &mut StressContext) {
 
 #[stress(
     tier = 1,
-    metadata(component = "singleflight", scenario = "submit_and_wait_1")
+    metadata(component = "keyed_group_commit", scenario = "submit_and_wait_1")
 )]
 fn submit_and_wait_1(ctx: &mut StressContext) {
     run_submit_and_wait(ctx, "submit_and_wait_1", 1);
@@ -93,7 +93,7 @@ fn submit_and_wait_1(ctx: &mut StressContext) {
 
 #[stress(
     tier = 1,
-    metadata(component = "singleflight", scenario = "submit_and_wait_4")
+    metadata(component = "keyed_group_commit", scenario = "submit_and_wait_4")
 )]
 fn submit_and_wait_4(ctx: &mut StressContext) {
     run_submit_and_wait(ctx, "submit_and_wait_4", 4);
@@ -101,7 +101,7 @@ fn submit_and_wait_4(ctx: &mut StressContext) {
 
 #[stress(
     tier = 1,
-    metadata(component = "singleflight", scenario = "submit_and_wait_16")
+    metadata(component = "keyed_group_commit", scenario = "submit_and_wait_16")
 )]
 fn submit_and_wait_16(ctx: &mut StressContext) {
     run_submit_and_wait(ctx, "submit_and_wait_16", 16);
@@ -109,7 +109,7 @@ fn submit_and_wait_16(ctx: &mut StressContext) {
 
 #[stress(
     tier = 1,
-    metadata(component = "singleflight", scenario = "submit_and_wait_64")
+    metadata(component = "keyed_group_commit", scenario = "submit_and_wait_64")
 )]
 fn submit_and_wait_64(ctx: &mut StressContext) {
     run_submit_and_wait(ctx, "submit_and_wait_64", 64);

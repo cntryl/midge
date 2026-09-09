@@ -249,8 +249,8 @@ path = "benches/tier1_hotpath_tlv_encoding.rs"
 harness = false
 
 [[bench]]
-name = "tier1_hotpath_singleflight"
-path = "benches/tier1_hotpath_singleflight.rs"
+name = "tier1_hotpath_keyed_group_commit"
+path = "benches/tier1_hotpath_keyed_group_commit.rs"
 harness = false
 
 [[bench]]
