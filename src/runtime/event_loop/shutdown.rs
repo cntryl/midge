@@ -313,9 +313,7 @@ impl EventLoop {
             routed_request_ids.extend(pending.keys().copied());
             pending.clear();
         }
-        routed_request_ids.extend(self.write_stall_waiters.keys().copied());
-        self.write_stall_waiters.clear();
-        self.write_stall_waiter_queues.clear();
+        routed_request_ids.extend(self.write_stall_waiters.drain());
         let durability_waiters = self.durability.drain_all_waiters();
         routed_request_ids.extend(
             durability_waiters

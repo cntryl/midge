@@ -1,5 +1,5 @@
 use super::RuntimeMsg;
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 #[cfg(not(test))]
@@ -101,9 +101,97 @@ impl VerificationBarrier {
     }
 }
 
+/// Owns both indexes for requests waiting on per-column-family write pressure.
+#[derive(Default)]
+pub(crate) struct WriteStallWaiters {
+    by_request: HashMap<u64, crate::types::ColumnFamilyId>,
+    by_column_family: HashMap<crate::types::ColumnFamilyId, VecDeque<u64>>,
+}
+
+impl WriteStallWaiters {
+    pub(super) fn register(&mut self, request_id: u64, cf_id: crate::types::ColumnFamilyId) {
+        if let Some(previous_cf) = self.by_request.insert(request_id, cf_id) {
+            self.remove_from_queue(previous_cf, request_id);
+        }
+        self.by_column_family
+            .entry(cf_id)
+            .or_default()
+            .push_back(request_id);
+    }
+
+    pub(super) fn cancel(&mut self, request_id: u64) -> bool {
+        let Some(cf_id) = self.by_request.remove(&request_id) else {
+            return false;
+        };
+        self.remove_from_queue(cf_id, request_id);
+        true
+    }
+
+    pub(super) fn column_families(&self) -> Vec<crate::types::ColumnFamilyId> {
+        self.by_column_family.keys().copied().collect()
+    }
+
+    pub(super) fn take_column_family(&mut self, cf_id: crate::types::ColumnFamilyId) -> Vec<u64> {
+        self.by_column_family
+            .remove(&cf_id)
+            .into_iter()
+            .flatten()
+            .filter(|request_id| self.by_request.remove(request_id).is_some())
+            .collect()
+    }
+
+    pub(super) fn drain(&mut self) -> Vec<u64> {
+        self.by_column_family.clear();
+        self.by_request
+            .drain()
+            .map(|(request_id, _)| request_id)
+            .collect()
+    }
+
+    fn remove_from_queue(&mut self, cf_id: crate::types::ColumnFamilyId, request_id: u64) {
+        let remove_queue = if let Some(queue) = self.by_column_family.get_mut(&cf_id) {
+            queue.retain(|queued| *queued != request_id);
+            queue.is_empty()
+        } else {
+            false
+        };
+        if remove_queue {
+            self.by_column_family.remove(&cf_id);
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn contains(&self, request_id: u64) -> bool {
+        self.by_request.contains_key(&request_id)
+    }
+
+    #[cfg(test)]
+    pub(super) fn column_family_for(
+        &self,
+        request_id: u64,
+    ) -> Option<crate::types::ColumnFamilyId> {
+        self.by_request.get(&request_id).copied()
+    }
+
+    #[cfg(test)]
+    pub(super) fn column_family_queue(
+        &self,
+        cf_id: crate::types::ColumnFamilyId,
+    ) -> Option<&VecDeque<u64>> {
+        self.by_column_family.get(&cf_id)
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_empty(&self) -> bool {
+        self.by_request.is_empty() && self.by_column_family.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{CloudWalUploadTracker, ManifestPublicationGate, VerificationBarrier};
+    use super::{
+        CloudWalUploadTracker, ManifestPublicationGate, VerificationBarrier, WriteStallWaiters,
+    };
     use crate::runtime::RuntimeMsg;
     use std::collections::BTreeMap;
 
@@ -165,5 +253,19 @@ mod tests {
             Some(RuntimeMsg::ShutdownWithResponse { request_id: 9 })
         ));
         assert!(barrier.token.is_none());
+    }
+
+    #[test]
+    fn should_remove_write_stall_request_from_both_indexes_when_cancelled() {
+        // Arrange
+        let mut waiters = WriteStallWaiters::default();
+        waiters.register(7, 3);
+
+        // Act
+        let removed = waiters.cancel(7);
+
+        // Assert
+        assert!(removed);
+        assert!(waiters.is_empty());
     }
 }

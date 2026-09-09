@@ -41,7 +41,7 @@ mod write_batch;
 
 use crossbeam::channel::{Receiver, Sender, TryRecvError};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -96,7 +96,9 @@ impl From<&super::RuntimeConfig> for RecoveredCloudWalConfig {
 }
 
 use crate::runtime::hybrid_persistence::CloudWalPruneProgress;
-use coordination::{CloudWalUploadTracker, ManifestPublicationGate, VerificationBarrier};
+use coordination::{
+    CloudWalUploadTracker, ManifestPublicationGate, VerificationBarrier, WriteStallWaiters,
+};
 
 /// Main synchronous event loop for the runtime.
 ///
@@ -152,10 +154,7 @@ pub struct EventLoop {
     /// (compaction threads will use this to report completion).
     pub(super) worker_msg_tx: Option<crossbeam::channel::Sender<RuntimeMsg>>,
 
-    /// Waiters blocked on write stall clearing (`request_id` -> `cf_id`).
-    pub(super) write_stall_waiters: HashMap<u64, crate::types::ColumnFamilyId>,
-    /// FIFO queues of waiters per CF.
-    pub(super) write_stall_waiter_queues: HashMap<crate::types::ColumnFamilyId, VecDeque<u64>>,
+    pub(super) write_stall_waiters: WriteStallWaiters,
     /// Lock-free snapshot cache shared with Engine for read-path bypass.
     pub(super) snapshot_cache: Option<Arc<SnapshotCache>>,
     /// Shared SST readers and block cache used by runtime read snapshots.
@@ -279,8 +278,7 @@ impl EventLoop {
             shutdown_cloud_drain_timeout: config.shutdown_cloud_drain_timeout,
             worker_msg_tx,
 
-            write_stall_waiters: HashMap::new(),
-            write_stall_waiter_queues: HashMap::new(),
+            write_stall_waiters: WriteStallWaiters::default(),
             snapshot_cache: None,
             read_resources,
             sst_read_views: RefCell::new(SstReadViewCache::new()),
