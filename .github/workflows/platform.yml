@@ -43,4 +43,7 @@ jobs:
         run: cargo check --release
 
       - name: Test workspace
-        run: cargo test --workspace --all-features
+        run: cargo test --workspace --features telemetry,telemetry-otlp,cloud-common,cloud-aws,sqrzl-tests,cloud-azure,cloud-gcp,cloud-oci,cloud-all,cloud_integration
+
+      - name: Fault injection suite (serial; failpoints are process-global)
+        run: cargo test --test fault_injection --all-features -- --test-threads=1
