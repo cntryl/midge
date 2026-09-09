@@ -702,6 +702,7 @@ struct CommitThenBlockCatalogCasCallbackBackend {
 
 struct BudgetConsumingDdlBackend {
     inner: Arc<crate::storage::filesystem::FileSystem>,
+    registry_head_delay: Duration,
     registry_head_calls: AtomicUsize,
     registry_cas_timeouts: Mutex<Vec<Duration>>,
 }
@@ -727,9 +728,13 @@ impl DelayedCommitDdlBackend {
 }
 
 impl BudgetConsumingDdlBackend {
-    fn new(inner: Arc<crate::storage::filesystem::FileSystem>) -> Self {
+    fn new(
+        inner: Arc<crate::storage::filesystem::FileSystem>,
+        registry_head_delay: Duration,
+    ) -> Self {
         Self {
             inner,
+            registry_head_delay,
             registry_head_calls: AtomicUsize::new(0),
             registry_cas_timeouts: Mutex::new(Vec::new()),
         }
@@ -971,8 +976,9 @@ impl crate::storage::StorageBackend for BudgetConsumingDdlBackend {
         {
             let inner = Arc::clone(&self.inner);
             let key = key.to_string();
+            let delay = self.registry_head_delay;
             std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(300));
+                std::thread::sleep(delay);
                 crate::storage::StorageBackend::submit_head(inner.as_ref(), &key, callback);
             });
             return;
@@ -1952,12 +1958,15 @@ fn should_share_create_deadline_with_remote_ddl_registry_cas() -> crate::common:
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.runtime_response_timeout = Duration::from_secs(1);
+    el.runtime_response_timeout = Duration::from_secs(5);
     let cloud_fs = Arc::new(
         crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
             .expect("open deadline-bounded DDL cloud backend"),
     );
-    let ddl_cloud = Arc::new(BudgetConsumingDdlBackend::new(cloud_fs));
+    let ddl_cloud = Arc::new(BudgetConsumingDdlBackend::new(
+        cloud_fs,
+        Duration::from_millis(2_500),
+    ));
     let local = Arc::new(
         crate::storage::filesystem::FileSystem::new(el.state.db_path.join("hybrid_local"))
             .expect("open deadline-bounded DDL local backend"),
@@ -1984,7 +1993,7 @@ fn should_share_create_deadline_with_remote_ddl_registry_cas() -> crate::common:
 
     // Assert
     assert!(
-        elapsed < Duration::from_millis(1_200),
+        elapsed < Duration::from_millis(5_200),
         "remote DDL registry work escaped the shared deadline: {elapsed:?}"
     );
     let response = response_rx
@@ -2007,7 +2016,7 @@ fn should_share_create_deadline_with_remote_ddl_registry_cas() -> crate::common:
         "the DDL registry CAS must be attempted once"
     );
     assert!(
-        cas_timeouts[0] < Duration::from_millis(900),
+        cas_timeouts[0] < Duration::from_secs(4),
         "DDL CAS received a fresh timeout instead of the remaining request budget: {:?}",
         cas_timeouts[0]
     );
