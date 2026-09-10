@@ -9,8 +9,15 @@ Midge is currently in the 0.1 release line. Compatibility expectations for pre-1
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-10
+
 ### Changed
 
+- The derived compaction memory pool now uses 20% rather than 10% of the total
+  engine memory budget (still capped at 256 MiB). This keeps bounded remote SST
+  publication live under the default four-file merge fan-in; the total engine
+  budget is unchanged, so automatic memtable and read-cache capacity adjust
+  downward accordingly.
 - Strict WAL acknowledgement, remote DDL authority calls, and direct manifest mirroring now
   share a deadline derived from when the caller began waiting, instead of
   restarting a full `storage_io_timeout` on every round trip. Deployments on
@@ -52,6 +59,9 @@ Midge is currently in the 0.1 release line. Compatibility expectations for pre-1
 
 ### Fixed
 
+- Cloud compaction partitions now leave enough of the shared maintenance pool
+  for live merge inputs. Transient SST-upload failures no longer leave L0
+  recovery repeatedly failing publication until writers time out.
 - A response arriving after its caller gave up no longer blocks the event loop on
   the tombstone mutex that timing-out callers contend for.
 - Pending requests are now failed reliably when the event loop panics: the
@@ -183,10 +193,17 @@ Midge is currently in the 0.1 release line. Compatibility expectations for pre-1
 - Orphaned internal `SeqnoAllocActor` source file that was not compiled into the runtime actor module
 - Empty/redundant integration test files and duplicate engine initialization coverage
 
-## [0.1.0] - TBD
+### Rollback
 
-### Added
-- Initial pre-release version
+- This is the first published release. Rollback to an unpublished build has no
+  supported in-place compatibility contract; preserve a backup or export data
+  before changing binaries.
+
+### Known risks
+
+- Midge remains pre-1.0 and single-process. Production suitability is limited
+  to the capabilities and qualification conditions in the support matrix; API,
+  operational, and on-disk compatibility may change in a future 0.x minor release.
 
 [Unreleased]: https://github.com/cntryl/midge/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/cntryl/midge/releases/tag/v0.1.0

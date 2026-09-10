@@ -796,7 +796,12 @@ impl OpenOptionsBuilder {
             )));
         }
 
-        let desired_compaction_pool = (total_memory / 10).min(256 * 1024 * 1024);
+        // Compaction keeps several input blocks live while an immutable output
+        // partition is encoded, uploaded, and read back. Ten percent allowed
+        // the default four-file L0 fan-in to consume nearly the whole pool,
+        // leaving no room for the bounded publication envelope and causing
+        // permanent write stalls after transient cloud-upload failures.
+        let desired_compaction_pool = (total_memory / 5).min(256 * 1024 * 1024);
         let compaction_memory_pool_size = desired_compaction_pool.min(
             total_memory
                 .saturating_sub(transaction_memory_pool_size)
@@ -873,7 +878,7 @@ impl OpenOptionsBuilder {
                 "memtable size limit must be greater than zero".to_string(),
             )),
             Some(bytes) if bytes > max_memtable_size => Err(MidgeError::ResourceLimit(format!(
-                "two {bytes}-byte memtables plus transaction memory exceed the {total_memory}-byte budget"
+                "two {bytes}-byte memtables plus transaction and compaction memory exceed the {total_memory}-byte budget"
             ))),
             Some(bytes) => Ok(bytes),
             None => Ok(desired_memtable.min(max_memtable_size).max(1)),

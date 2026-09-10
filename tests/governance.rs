@@ -738,6 +738,8 @@ mod repository_gates {
         let required_commands = [
             "cargo install cargo-machete --version 0.9.2 --locked",
             "cargo machete",
+            "rustup run 1.97 cargo check --workspace --all-targets",
+            "rustup run 1.97 cargo clippy --workspace --all-targets --no-default-features -- -D warnings -D clippy::pedantic",
             "cargo test --workspace --all-features --doc",
             "cargo check --example documented_quick_start --all-features",
             "cargo package --locked",

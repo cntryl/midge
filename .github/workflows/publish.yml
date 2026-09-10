@@ -31,6 +31,9 @@ jobs:
       - name: Install stable Rust toolchain
         run: rustup update stable
 
+      - name: Install MSRV toolchain
+        run: rustup toolchain install 1.97 --profile minimal --component clippy
+
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
@@ -60,6 +63,11 @@ jobs:
 
       - name: Run Clippy checks
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic
+
+      - name: Verify MSRV and no-default feature surface
+        run: |
+          rustup run 1.97 cargo check --workspace --all-targets
+          rustup run 1.97 cargo clippy --workspace --all-targets --no-default-features -- -D warnings -D clippy::pedantic
 
       - name: Compile crate documentation
         run: cargo test --workspace --all-features --doc

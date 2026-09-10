@@ -42,7 +42,7 @@ fn should_preserve_automatic_memtable_capacity_when_storage_is_in_memory() {
 fn should_preserve_explicit_memtable_size_when_read_capacity_remains() {
     // Arrange
     let budget = 8 * 1024 * 1024;
-    let requested = 3 * 1024 * 1024;
+    let requested = 5 * 1024 * 1024 / 2;
 
     // Act
     let options = OpenOptions::local("unused-explicit-memory-path")
@@ -60,8 +60,8 @@ fn should_preserve_explicit_memtable_size_when_read_capacity_remains() {
 #[test]
 fn should_reject_persistent_configuration_when_explicit_memtables_leave_no_read_capacity() {
     // Arrange
-    let budget = 8 * 1024 * 1024;
-    let requested = (budget - 2 * (budget / 10)) / 2;
+    let budget = 8 * 1024 * 1024 + 1;
+    let requested = (budget - budget / 10 - budget / 5) / 2;
 
     // Act
     let result = OpenOptions::local("unused-empty-reader-pool-path")
@@ -449,7 +449,7 @@ fn should_deduct_bounded_compaction_pool_before_assigning_block_cache() {
         .expect("build bounded compaction pools");
 
     // Assert
-    assert_eq!(opts.compaction_memory_pool_size(), total / 10);
+    assert_eq!(opts.compaction_memory_pool_size(), total / 5);
     let accounted = opts
         .transaction_memory_pool_size()
         .saturating_add(opts.compaction_memory_pool_size())
@@ -540,7 +540,7 @@ fn should_reject_memory_budget_when_no_compaction_capacity_remains() {
     // Arrange
 
     // Act
-    let results = (3..10).map(|bytes| {
+    let results = (3..5).map(|bytes| {
         OpenOptions::in_memory()
             .memory_budget(MemoryBudget::Bytes(bytes))
             .build()

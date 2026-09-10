@@ -1,8 +1,10 @@
 #![cfg(all(feature = "cloud-all", feature = "sqrzl-tests"))]
 
+#[cfg(feature = "failpoints")]
+use cntryl_midge::MidgeError;
 use cntryl_midge::{
     Bytes, CloudProviderConfig, CloudStorageLocation, CloudStorageTopology, ColumnFamilyHandle,
-    Engine, MemoryBudget, MidgeError, OpenOptions, TransactionMode, WriteOptions,
+    Engine, MemoryBudget, OpenOptions, TransactionMode, WriteOptions,
 };
 use std::fmt::Write as _;
 use std::net::{SocketAddr, TcpStream};
