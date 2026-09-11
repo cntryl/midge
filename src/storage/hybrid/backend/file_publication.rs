@@ -30,10 +30,14 @@ impl PublicationAdmission {
 }
 
 impl HybridStorage {
-    /// Leave half of the variable workspace for live merge readers and one
-    /// indivisible key. Actual publication admission remains authoritative.
+    /// Leave three quarters of the variable workspace for live merge readers,
+    /// the current writer, and one indivisible key. Publication temporarily
+    /// needs four copies of the encoded partition, so using one quarter of the
+    /// remaining pool prevents a valid streaming compaction from repeatedly
+    /// failing when its input cursors retain more than half of the shared
+    /// maintenance budget.
     pub(crate) fn immutable_file_partition_target(pool: usize) -> usize {
-        (pool.saturating_sub(FIXED_WORKSPACE) / (COPY_FACTOR * 2)).max(1)
+        (pool.saturating_sub(FIXED_WORKSPACE) / (COPY_FACTOR * 4)).max(1)
     }
 
     pub(crate) fn publish_immutable_file(

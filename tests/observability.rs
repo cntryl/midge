@@ -839,7 +839,7 @@ mod config_api {
                 .saturating_mul(2)
                 .saturating_add(opts.block_cache_size())
                 .saturating_add(opts.transaction_memory_pool_size())
-                .saturating_add((budget / 10).min(256 * 1024 * 1024));
+                .saturating_add((budget / 5).min(256 * 1024 * 1024));
 
             // Assert
             assert!(
@@ -856,7 +856,7 @@ mod config_api {
     #[test]
     fn should_reject_tiny_budget_when_bounded_compaction_pool_cannot_fit() {
         // Arrange
-        let budgets = [3usize, 9];
+        let budgets = [1usize, 2, 3];
 
         for budget in budgets {
             // Act

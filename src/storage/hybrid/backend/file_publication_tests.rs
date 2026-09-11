@@ -7,6 +7,20 @@ use crate::storage::cloud::{
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+#[test]
+fn should_leave_three_quarters_of_maintenance_pool_for_live_compaction_inputs() {
+    // Arrange
+    let pool = 32 * 1024 * 1024;
+    let variable = pool - FIXED_WORKSPACE;
+
+    // Act
+    let partition = HybridStorage::immutable_file_partition_target(pool);
+
+    // Assert
+    assert_eq!(partition, variable / (COPY_FACTOR * 4));
+    assert!(partition * COPY_FACTOR <= variable / 4);
+}
+
 struct ChangingReadback {
     inner: MockCloudBackend,
     bytes: Vec<u8>,
