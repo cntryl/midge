@@ -265,8 +265,9 @@ dependencies = [
 
 [[package]]
 name = "cntryl-stress"
-version = "0.3.0"
-source = "git+https://github.com/cntryl/stress?branch=main#7078e18fb05f2f96f5c6c18caa26c112e56fb025"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "61338fa3caeb07817598b9c7080ba4d94e9961352467226633c707581f545b07"
 dependencies = [
  "cntryl-stress-macros",
  "fs2",
@@ -277,8 +278,9 @@ dependencies = [
 
 [[package]]
 name = "cntryl-stress-macros"
-version = "0.3.0"
-source = "git+https://github.com/cntryl/stress?branch=main#7078e18fb05f2f96f5c6c18caa26c112e56fb025"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "45db4ab25f10324731c7bc3b511e042260ba0d5220079f3c7e5857817eb1cdc1"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2183,7 +2185,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
