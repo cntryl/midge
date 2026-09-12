@@ -733,6 +733,110 @@ mod solid_cleanup {
     }
 
     #[test]
+    fn should_keep_wal_actor_sync_inside_paired_event_loop_operation() {
+        // Arrange
+        let mut sources = Vec::new();
+        collect_rust_sources(&source_path("src/runtime"), &mut sources);
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+
+        // Act
+        let call_sites = sources
+            .into_iter()
+            .flat_map(|path| {
+                let source = fs::read_to_string(&path).expect("runtime source should be readable");
+                let compact = source
+                    .chars()
+                    .filter(|character| !character.is_whitespace())
+                    .collect::<String>();
+                let relative = path
+                    .strip_prefix(manifest_dir)
+                    .expect("runtime source should be inside the crate")
+                    .display()
+                    .to_string();
+                let transition_calls = compact.matches(".wal_actor.begin_sync_transition(").count()
+                    + compact
+                        .matches(".wal_actor.commit_sync_transition(")
+                        .count();
+                std::iter::repeat_n(relative, transition_calls)
+            })
+            .collect::<Vec<_>>();
+        let durability_sync = read_source("src/runtime/event_loop/durability_sync.rs");
+        let paired_operation = durability_sync
+            .split("pub(super) fn sync_wal_generation")
+            .nth(1)
+            .and_then(|tail| tail.split("/// Sync batched WAL").next())
+            .expect("paired WAL generation operation should exist");
+        let compact_paired_operation = paired_operation
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+
+        // Assert
+        assert_eq!(
+            call_sites,
+            [
+                "src/runtime/event_loop/durability_sync.rs",
+                "src/runtime/event_loop/durability_sync.rs",
+                "src/runtime/event_loop/durability_sync.rs",
+            ],
+            "every raw actor sync transition call must remain inside the paired event-loop operation"
+        );
+        assert_eq!(
+            compact_paired_operation
+                .matches(".wal_actor.begin_sync_transition(")
+                .count(),
+            1,
+            "the paired operation must begin exactly one actor sync"
+        );
+        assert_eq!(
+            compact_paired_operation
+                .matches(".wal_actor.commit_sync_transition(")
+                .count(),
+            2,
+            "the paired operation must commit the receipt in cloud and local modes"
+        );
+    }
+
+    #[test]
+    fn should_keep_wal_actor_rotation_inside_paired_event_loop_operations() {
+        // Arrange
+        let mut sources = Vec::new();
+        collect_rust_sources(&source_path("src/runtime"), &mut sources);
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+
+        // Act
+        let mut call_sites = sources
+            .into_iter()
+            .flat_map(|path| {
+                let source = fs::read_to_string(&path).expect("runtime source should be readable");
+                let compact = source
+                    .chars()
+                    .filter(|character| !character.is_whitespace())
+                    .collect::<String>();
+                let relative = path
+                    .strip_prefix(manifest_dir)
+                    .expect("runtime source should be inside the crate")
+                    .display()
+                    .to_string();
+                let transition_calls = compact.matches(".wal_actor.rotate(").count();
+                std::iter::repeat_n(relative, transition_calls)
+            })
+            .collect::<Vec<_>>();
+        call_sites.sort();
+
+        // Assert
+        assert_eq!(
+            call_sites,
+            [
+                "src/runtime/event_loop/cloud_integration/sealing.rs",
+                "src/runtime/event_loop/wal_transition.rs",
+                "src/runtime/event_loop/wal_transition.rs",
+            ],
+            "every raw actor rotation must remain inside a paired event-loop transition"
+        );
+    }
+
+    #[test]
     fn should_not_document_removed_transaction_rollback_api() {
         // Arrange
         let mut docs = Vec::new();

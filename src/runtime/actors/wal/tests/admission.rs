@@ -148,7 +148,10 @@ fn should_release_wal_admission_when_failed_append_is_durably_rolled_back() -> M
             1,
             crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
         )?;
-        actor.writer = Some(FsWalFactoryIo::new(fs.clone()).create_writer("wal.log")?);
+        actor.install_filesystem_for_test(
+            fs.clone(),
+            FsWalFactoryIo::new(fs.clone()).create_writer("wal.log")?,
+        );
         actor.set_storage_budget(setup.hybrid_storage.clone());
         let seed = prepare_put_transaction(
             &mut actor,
@@ -235,7 +238,7 @@ fn should_retain_wal_admission_when_failed_append_has_no_rollback_proof() -> Mid
             1,
             crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
         )?;
-        actor.writer = Some(Box::new(UncertainAppendWriter { timeout }));
+        actor.replace_writer_for_test(Box::new(UncertainAppendWriter { timeout }));
         actor.set_storage_budget(setup.hybrid_storage.clone());
 
         // Act
@@ -247,7 +250,10 @@ fn should_retain_wal_admission_when_failed_append_has_no_rollback_proof() -> Mid
             result,
             Err(MidgeError::NoSpace(_) | MidgeError::Timeout(_))
         ));
-        assert_eq!(actor.writer.as_ref().expect("writer").current_pos(), 0);
+        assert!(
+            actor.is_fenced(),
+            "an ambiguous append failure must make writer loss explicit"
+        );
         assert!(setup.hybrid_storage.budget_snapshot().total_committed_bytes > 0,
             "unchanged logical position cannot release ambiguous bytes (spilled={spilled}, timeout={timeout})");
         assert!(state

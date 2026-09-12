@@ -1,7 +1,9 @@
 // Responsibilities for this WAL actor slice stay within the actor namespace.
-use super::WalActor;
+use super::{WalActor, WalSyncReceipt, WalTransitionOperation};
 use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::state::RuntimeState;
+use crate::runtime::wal_transition::{WalSealTicket, WalSyncTicket};
+use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
 use crate::wal::DurabilityPolicy;
 use std::time::{Duration, Instant};
 
@@ -57,14 +59,66 @@ impl WalActor {
         last_sequence: u64,
     ) -> MidgeResult<()> {
         crate::failpoints::fail_point!("midge::wal::txn_after_commit_append_before_sync");
-        self.sync_internal(state)?;
+        if let Err(error) = self.sync_internal(state) {
+            // The strict records are already on disk but not yet in memory.
+            // Continuing as `Open` would let the runtime view and the recovery
+            // view diverge, so even a failure before the fsync call fences.
+            if !self.is_fenced() {
+                self.fence_transition(
+                    state,
+                    format!("strict transaction sync failed after WAL append: {error}"),
+                );
+            }
+            return Err(error);
+        }
         state.wal.local_durable_seq = last_sequence;
         crate::failpoints::fail_point!("midge::wal::txn_after_sync_before_ack");
         Ok(())
     }
 
-    /// Internal sync helper - fsyncs the writer
+    /// Actor-internal durability barrier for strict transaction groups.
+    ///
+    /// This never touches the durability coordinator generation, so it needs
+    /// no protocol ticket: the records are made durable and the frontier moves,
+    /// but waiters keyed to the current generation stay pending until the
+    /// paired event-loop sync closes that generation.
     pub(super) fn sync_internal(&mut self, state: &mut RuntimeState) -> MidgeResult<()> {
+        let receipt = self.begin_sync_io(state)?;
+        self.commit_sync_io(state, receipt)
+    }
+
+    /// First half of the paired sync transition: fsync the writer.
+    ///
+    /// Requires a [`WalSyncTicket`], which only the transition protocol can
+    /// mint, so a frontier-advancing fsync cannot run outside the paired
+    /// event-loop operation. On return the actor is either `Open` (nothing
+    /// irreversible happened, retryable) or `Fenced`.
+    pub(crate) fn begin_sync_transition(
+        &mut self,
+        state: &mut RuntimeState,
+        _ticket: &WalSyncTicket,
+    ) -> MidgeResult<WalSyncReceipt> {
+        let result = self.begin_sync_io(state);
+        debug_assert!(
+            result.is_ok() || self.is_open() || self.is_fenced(),
+            "a failed WAL sync must settle in Open or Fenced"
+        );
+        result
+    }
+
+    /// Second half of the paired sync transition: publish the receipt.
+    pub(crate) fn commit_sync_transition(
+        &mut self,
+        state: &mut RuntimeState,
+        receipt: WalSyncReceipt,
+        _ticket: &WalSyncTicket,
+    ) -> MidgeResult<()> {
+        self.commit_sync_io(state, receipt)
+    }
+
+    fn begin_sync_io(&mut self, state: &mut RuntimeState) -> MidgeResult<WalSyncReceipt> {
+        self.ensure_filesystem_wal_available(state)?;
+
         // Epoch fencing check: verify our epoch is still current before making
         // data durable.  If a newer writer has taken over, we must stop.
         if let Some(store) = &self.leader_store {
@@ -74,21 +128,42 @@ impl WalActor {
             })?;
         }
 
-        if let Some(writer) = &mut self.writer {
-            crate::failpoints::fail_point!("midge::wal::inject_no_space_on_sync", |_| Err(
-                MidgeError::NoSpace(
-                    "wal writer fsync failed: failpoint: no space on WAL sync".to_string()
-                )
-            ));
+        self.begin_io_transition(WalTransitionOperation::Sync)?;
 
+        if let Err(error) = WalTransitionBoundary::BeforeFsync.check() {
+            self.finish_io_transition()?;
+            return Err(error);
+        }
+
+        if let Err(error) = Self::sync_failure_boundary() {
+            // An idle durability barrier has no uncommitted WAL-backed state,
+            // so a synchronous failure before the filesystem call is safe to
+            // retry. Once records are pending, the same failure is ambiguous:
+            // strict transactions have been appended but are not yet visible
+            // in memory, and continuing could make runtime and recovery views
+            // diverge.
+            if self.has_pending_data() {
+                self.fence_transition(state, error.to_string());
+            } else {
+                self.finish_io_transition()?;
+            }
+            return Err(error);
+        }
+
+        if self.writer().is_some() {
             // Bound the acknowledgement wait so a degraded storage device cannot
             // starve the event loop indefinitely.
             let start = Instant::now();
             let fsync_timeout = self.storage_io_timeout;
 
-            let sync_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                writer.sync_with_timeout(fsync_timeout)
-            }));
+            let sync_result = {
+                let writer = self.writer_mut().ok_or_else(|| {
+                    MidgeError::Fenced("WAL writer disappeared during fsync".to_string())
+                })?;
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    writer.sync_with_timeout(fsync_timeout)
+                }))
+            };
 
             let elapsed = start.elapsed();
 
@@ -101,6 +176,7 @@ impl WalActor {
                     if matches!(e, MidgeError::NoSpace(_)) {
                         Self::record_no_space_event();
                     }
+                    self.fence_transition(state, format!("WAL fsync failed: {e}"));
                     return Err(e);
                 }
                 Err(panic_info) => {
@@ -108,9 +184,10 @@ impl WalActor {
                         panic_info = ?panic_info,
                         "WAL fsync panic; returning error to unblock event loop"
                     );
-                    return Err(crate::common::MidgeError::Internal(
-                        "WAL fsync panicked".to_string(),
-                    ));
+                    let error =
+                        crate::common::MidgeError::Internal("WAL fsync panicked".to_string());
+                    self.fence_transition(state, error.to_string());
+                    return Err(error);
                 }
             }
 
@@ -138,11 +215,38 @@ impl WalActor {
                 );
             }
 
-            crate::failpoints::fail_point!("midge::wal::after_fsync_before_durable_frontier");
+            if let Err(error) = Self::after_fsync_boundary() {
+                self.fence_transition(state, error.to_string());
+                return Err(error);
+            }
+            if let Err(error) = WalTransitionBoundary::AfterFsync.check() {
+                self.fence_transition(state, error.to_string());
+                return Err(error);
+            }
         }
 
-        state.wal.last_synced_seq = state.sequence;
-        state.wal.local_durable_seq = state.sequence;
+        Ok(WalSyncReceipt {
+            durable_sequence: state.sequence,
+            pending_writes: state.wal.pending_writes,
+        })
+    }
+
+    fn commit_sync_io(&mut self, state: &mut RuntimeState, receipt: WalSyncReceipt) -> MidgeResult<()> {
+        if state.sequence != receipt.durable_sequence
+            || state.wal.pending_writes != receipt.pending_writes
+        {
+            let error = MidgeError::Fenced(
+                "WAL state changed while a sync receipt awaited commit".to_string(),
+            );
+            self.fence_transition(state, error.to_string());
+            return Err(error);
+        }
+        self.finish_io_transition().inspect_err(|error| {
+            state.mark_persistence_anomaly();
+            tracing::error!(%error, "WAL sync could not return to open state");
+        })?;
+        state.wal.last_synced_seq = receipt.durable_sequence;
+        state.wal.local_durable_seq = receipt.durable_sequence;
         state.wal.pending_writes = 0;
         self.pending_sync_count = 0;
         self.bytes_since_sync = 0;
@@ -150,28 +254,22 @@ impl WalActor {
         Ok(())
     }
 
-    /// Sync WAL to disk (public interface).
-    ///
-    /// Returns the sealed flush generation. In group commit modes (Batched/CloudAsync),
-    /// all pending writes at sync time are grouped under this generation.
-    pub fn sync(&mut self, state: &mut RuntimeState) -> MidgeResult<u64> {
-        let pending = state.wal.pending_writes;
-        let sealed_generation = self.flush_generation;
+    fn sync_failure_boundary() -> MidgeResult<()> {
+        crate::failpoints::fail_point!("midge::wal::inject_no_space_on_sync", |_| Err(
+            MidgeError::NoSpace(
+                "wal writer fsync failed: failpoint: no space on WAL sync".to_string()
+            )
+        ));
+        Ok(())
+    }
 
-        self.sync_internal(state)?;
-
-        // Advance to next generation for next batch
-        self.flush_generation += 1;
-
-        tracing::debug!(
-            pending_writes = pending,
-            synced_seq = state.wal.last_synced_seq,
-            local_durable = state.wal.local_durable_seq,
-            sealed_generation,
-            "WAL sync"
-        );
-
-        Ok(sealed_generation)
+    fn after_fsync_boundary() -> MidgeResult<()> {
+        crate::failpoints::fail_point!("midge::wal::after_fsync_before_durable_frontier", |_| Err(
+            MidgeError::Internal(
+                "failpoint: WAL fsync completed before logical commit".to_string()
+            )
+        ));
+        Ok(())
     }
 
     /// Flush WAL buffers without fsync.
@@ -180,8 +278,16 @@ impl WalActor {
     /// We avoid fsync on every write, but do a flush+fsync only when sealing
     /// a segment right before upload so the uploader reads a complete file.
     #[cfg(test)]
-    pub fn flush_for_cloud_upload(&mut self, state: &mut RuntimeState) -> MidgeResult<u64> {
-        self.flush_for_cloud_upload_within(state, &crate::common::OperationDeadline::unbounded())
+    pub fn flush_for_cloud_upload(
+        &mut self,
+        state: &mut RuntimeState,
+        ticket: &WalSealTicket,
+    ) -> MidgeResult<u64> {
+        self.flush_for_cloud_upload_within(
+            state,
+            &crate::common::OperationDeadline::unbounded(),
+            ticket,
+        )
     }
 
     /// Flush a cloud-staging WAL only when its complete configured I/O wait can
@@ -191,44 +297,67 @@ impl WalActor {
     /// write failure because completion is ambiguous. Refusing before it starts
     /// keeps a short caller budget from poisoning an otherwise healthy writer;
     /// the unchanged active segment can be retried by callerless maintenance.
+    ///
+    /// Requires a [`WalSealTicket`]: the flush leaves the actor in the
+    /// `CloudFlush` transition until the paired rotate or cancel, so it may
+    /// only run inside a protocol-owned seal.
     pub fn flush_for_cloud_upload_within(
         &mut self,
         state: &mut RuntimeState,
         deadline: &crate::common::OperationDeadline,
+        _ticket: &WalSealTicket,
     ) -> MidgeResult<u64> {
+        self.ensure_filesystem_wal_available(state)?;
         let pending = state.wal.pending_writes;
         let segment_max_sequence = self.segment_max_sequence;
 
-        if let Some(writer) = &mut self.writer {
+        self.begin_io_transition(WalTransitionOperation::CloudFlush)?;
+
+        if self.writer().is_some() {
             if deadline.is_bounded() && deadline.remaining() < self.storage_io_timeout {
+                self.finish_io_transition()?;
                 return Err(crate::common::MidgeError::Timeout(format!(
                     "insufficient operation budget for WAL flush: remaining={:?}, required={:?}",
                     deadline.remaining(),
                     self.storage_io_timeout
                 )));
             }
-            writer.flush()?;
+            let flush_result = self
+                .writer_mut()
+                .ok_or_else(|| MidgeError::Fenced("WAL writer disappeared during flush".into()))?
+                .flush();
+            if let Err(error) = flush_result {
+                self.fence_transition(state, format!("WAL flush failed: {error}"));
+                return Err(error);
+            }
             if let Some(t) = crate::telemetry::Telemetry::global() {
                 t.metrics().record_wal_flush();
             }
         }
 
-        // Treat everything appended so far as ready-to-ship.
-        state.wal.last_synced_seq = segment_max_sequence;
-        state.wal.local_durable_seq = segment_max_sequence;
-
         tracing::debug!(
             pending_writes = pending,
-            flushed_seq = state.wal.last_synced_seq,
+            flushed_seq = segment_max_sequence,
             "WAL flush (CloudAsync upload)"
         );
 
         Ok(segment_max_sequence)
     }
 
-    /// Clear buffered WAL accounting after a `CloudAsync` segment is successfully
-    /// sealed, rotated, and enqueued for upload.
-    pub fn complete_cloud_upload_seal(&mut self, state: &mut RuntimeState) {
+    /// Clear buffered WAL accounting after a `CloudAsync` segment is sealed and
+    /// owned by the upload backlog or inflight frontier.
+    ///
+    /// The rotation receipt is the proof of ownership transfer: it exists only
+    /// after `rotate` sealed the file, so accounting cannot be reset for a
+    /// segment that is still the active WAL.
+    pub(crate) fn complete_cloud_upload_seal(
+        &mut self,
+        state: &mut RuntimeState,
+        receipt: super::WalRotationReceipt,
+    ) {
+        let max_sequence = receipt.max_sequence;
+        state.wal.last_synced_seq = max_sequence;
+        state.wal.local_durable_seq = max_sequence;
         state.wal.pending_writes = 0;
         self.pending_sync_count = 0;
         self.bytes_since_sync = 0;

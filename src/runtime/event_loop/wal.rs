@@ -352,13 +352,13 @@ impl WalCoordinator {
 
     #[cfg(test)]
     pub(super) fn rotate(event_loop: &mut EventLoop, request_id: u64) -> HandleOutcome {
-        let result = event_loop.wal_actor.rotate(&mut event_loop.state);
+        let result = event_loop.rotate_local_wal_transition();
         let resp = result.map_or_else(
             |error| RuntimeResponse::Error {
                 request_id,
                 error: crate::common::MidgeError::Internal(error.to_string()),
             },
-            |()| RuntimeResponse::Ok { request_id },
+            |_| RuntimeResponse::Ok { request_id },
         );
         event_loop.respond(request_id, resp);
         HandleOutcome::Continue

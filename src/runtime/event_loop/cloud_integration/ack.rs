@@ -4,6 +4,7 @@ use super::super::durability_sync::CompletionSource;
 use super::super::EventLoop;
 use crate::common::OperationDeadline;
 use crate::runtime::hybrid_persistence::HybridPersistence;
+use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
 
 impl EventLoop {
     pub(crate) fn tick_hybrid_storage(&mut self) {
@@ -213,10 +214,18 @@ impl EventLoop {
         self.cloud_wal
             .acked_segments
             .insert(segment_id, max_sequence);
+        if let Err(error) = self.wal_transition.note_acknowledged(segment_id) {
+            if self.state.wal.cloud_durable_seq >= max_sequence {
+                tracing::debug!(segment_id, "ignored duplicate cloud WAL acknowledgement");
+                return;
+            }
+            self.handle_cloud_upload_failure(segment_id, &error, true);
+            return;
+        }
 
         let ready_segments = match self
             .durability
-            .take_contiguous_acked_cloud_segments(&self.cloud_wal.acked_segments)
+            .contiguous_acked_cloud_segments(&self.cloud_wal.acked_segments)
         {
             Ok(ready_segments) => ready_segments,
             Err(error) => {
@@ -240,6 +249,24 @@ impl EventLoop {
             return;
         };
 
+        self.commit_contiguous_cloud_ack(&ready_segments, durable_segment_id, durable_max_sequence);
+    }
+
+    fn commit_contiguous_cloud_ack(
+        &mut self,
+        ready_segments: &[(u64, u64)],
+        durable_segment_id: u64,
+        durable_max_sequence: u64,
+    ) {
+        if let Err(error) = self.wal_transition.begin_ack(durable_segment_id) {
+            self.fence_cloud_ack_transition(ready_segments, &error);
+            return;
+        }
+        if let Err(error) = WalTransitionBoundary::BeforeAccountingTransfer.check() {
+            self.fence_cloud_ack_transition(ready_segments, &error);
+            return;
+        }
+
         self.state.wal.cloud_durable_seq =
             self.state.wal.cloud_durable_seq.max(durable_max_sequence);
         tracing::debug!(
@@ -247,25 +274,75 @@ impl EventLoop {
             cloud_durable_seq = self.state.wal.cloud_durable_seq,
             "Cloud upload complete"
         );
+        if let Err(error) = WalTransitionBoundary::AfterAccountingTransfer.check() {
+            self.fence_cloud_ack_transition(ready_segments, &error);
+            return;
+        }
 
-        for (ready_segment_id, _) in &ready_segments {
-            self.remove_cloud_durable_local_wal_segment(*ready_segment_id);
+        if let Err(error) = WalTransitionBoundary::BeforeWaiterCompletion.check() {
+            self.fence_cloud_ack_transition(ready_segments, &error);
+            return;
+        }
+        for (seg_id, _) in ready_segments {
+            let waiters = self.durability.complete_waiters_at(*seg_id);
+            self.complete_durability_waiters(waiters, CompletionSource::CloudAck);
+            if let Err(error) = self.wal_transition.note_cloud_durable(*seg_id) {
+                self.fence_cloud_ack_transition(ready_segments, &error);
+                return;
+            }
+        }
+
+        if let Err(error) = self.wal_transition.finish_ack(durable_segment_id) {
+            self.fence_cloud_ack_transition(ready_segments, &error);
+            return;
         }
 
         for (seg_id, _) in ready_segments {
-            if let Some(enqueued_at) = self.durability.take_cloud_segment_timing(seg_id) {
+            if let Some(enqueued_at) = self.durability.retire_cloud_segment(*seg_id) {
                 if let Some(telemetry) = crate::telemetry::Telemetry::global() {
                     telemetry.metrics().record_cloud_async_wal_ack_latency_us(
                         Self::elapsed_micros_to_u64(enqueued_at.elapsed()),
                     );
                 }
             }
+        }
 
-            let waiters = self.durability.complete_waiters_at(seg_id);
-            self.complete_durability_waiters(waiters, CompletionSource::CloudAck);
+        for (ready_segment_id, _) in ready_segments {
+            if self.remove_cloud_durable_local_wal_segment(*ready_segment_id) {
+                if let Err(error) = self.wal_transition.retire_cloud_durable(*ready_segment_id) {
+                    self.state.mark_persistence_anomaly();
+                    self.wal_actor
+                        .fence_transition(&mut self.state, error.to_string());
+                    self.wal_transition
+                        .fence(error.to_string(), Some(*ready_segment_id));
+                    tracing::error!(%error, segment_id = *ready_segment_id, "cloud WAL obligation retirement fenced");
+                    return;
+                }
+            }
+        }
+        if let Err(error) = WalTransitionBoundary::AfterCommitBeforeReturn.check() {
+            self.state.mark_persistence_anomaly();
+            tracing::warn!(%error, "cloud WAL acknowledgement committed before injected return boundary");
         }
         self.prune_cloud_wal_segments_covered_by_manifest();
         self.drain_auto_flush_memtables();
+    }
+
+    fn fence_cloud_ack_transition(
+        &mut self,
+        ready_segments: &[(u64, u64)],
+        error: &crate::common::MidgeError,
+    ) {
+        let first_segment = ready_segments.first().map(|(segment_id, _)| *segment_id);
+        self.state.mark_persistence_anomaly();
+        self.wal_actor
+            .fence_transition(&mut self.state, error.to_string());
+        self.wal_transition.fence(error.to_string(), first_segment);
+        if let Some(first_segment) = first_segment {
+            let waiters = self.durability.drain_waiters_at_or_after(first_segment);
+            self.fail_durability_waiters(waiters, error);
+        }
+        tracing::error!(%error, ?first_segment, "cloud WAL acknowledgement transition fenced");
     }
 
     fn handle_storage_event_cloud_wal_prune_complete(
@@ -383,6 +460,13 @@ impl EventLoop {
         });
         self.state.mark_persistence_anomaly();
         self.cloud_wal.acked_segments.remove(&segment_id);
+        if let Err(registration_error) = self.wal_transition.note_requeued(segment_id) {
+            self.wal_actor
+                .fence_transition(&mut self.state, registration_error.to_string());
+            self.wal_transition
+                .fence(registration_error.to_string(), Some(segment_id));
+            tracing::error!(%registration_error, segment_id, "cloud WAL failure could not preserve transition ownership");
+        }
 
         // Keep the segment in the inflight frontier and preserve its request
         // identities. The accepted local WAL remains owned for callerless
@@ -421,38 +505,7 @@ impl EventLoop {
         // durability generation, but an earlier sealed generation can still
         // close independently when its acknowledgement arrives.
         let waiters = self.durability.drain_waiters_at_or_after(segment_id);
-        for w in waiters {
-            let request_id = match w {
-                super::super::super::durability::DurabilityWaiter::ConfirmWalAppend {
-                    request_id,
-                }
-                | super::super::super::durability::DurabilityWaiter::TransactionApply {
-                    request_id,
-                    ..
-                }
-                | super::super::super::durability::DurabilityWaiter::ConfirmTransactionApply {
-                    request_id,
-                }
-                | super::super::super::durability::DurabilityWaiter::CloudDurability {
-                    request_id,
-                } => request_id,
-                #[cfg(test)]
-                super::super::super::durability::DurabilityWaiter::WalAppend {
-                    request_id, ..
-                }
-                | super::super::super::durability::DurabilityWaiter::Read { request_id, .. }
-                | super::super::super::durability::DurabilityWaiter::RangeScan {
-                    request_id, ..
-                } => request_id,
-            };
-            self.respond(
-                request_id,
-                super::super::super::RuntimeResponse::Error {
-                    request_id,
-                    error: error.replay(),
-                },
-            );
-        }
+        self.fail_durability_waiters(waiters, error);
 
         // Keep all inflight segments. A later ACK may already be buffered, but
         // it cannot advance the frontier until this failed segment is retried

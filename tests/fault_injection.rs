@@ -5070,6 +5070,16 @@ mod transaction_crash_boundaries {
         value: b"buffered-after-empty-sync",
     };
 
+    const WRITER_LOSS_ACCEPTED_RECORD: ExpectedRecord = ExpectedRecord {
+        key: b"writer-loss-accepted",
+        value: b"durable-before-rotation",
+    };
+
+    const WRITER_LOSS_REJECTED_RECORD: ExpectedRecord = ExpectedRecord {
+        key: b"writer-loss-rejected",
+        value: b"must-not-survive",
+    };
+
     const ASSERTION_GUARDED_RECORD: ExpectedRecord = ExpectedRecord {
         key: b"assertion-guarded-commit",
         value: b"guarded-value",
@@ -5109,6 +5119,12 @@ mod transaction_crash_boundaries {
             "after_assertion_only_sync_ack" => child_abort_after_assertion_only_sync_ack(&db_path),
             "after_empty_sync_buffered_batch" => {
                 child_abort_after_empty_sync_buffered_batch(&db_path);
+            }
+            "after_rotation_writer_reopen_failure" => {
+                child_abort_after_rotation_writer_reopen_failure(&db_path);
+            }
+            "after_rotation_writer_install_before_commit" => {
+                child_abort_after_rotation_writer_install_before_commit(&db_path);
             }
             "assertion_guarded_after_sync_before_ack" => {
                 child_abort_assertion_guarded_after_sync_before_ack(&db_path);
@@ -5258,6 +5274,38 @@ mod transaction_crash_boundaries {
 
         // Assert
         assert_records_visible(&engine, &[EMPTY_SYNC_BUFFERED_RECORD]);
+    }
+
+    #[test]
+    fn should_recover_only_accepted_write_when_rotation_loses_replacement_writer() {
+        // Arrange
+        let temp_dir = TempDir::new().expect("temp dir");
+        let db_path = temp_dir.path();
+
+        // Act
+        run_child_expect_abort("after_rotation_writer_reopen_failure", db_path);
+        expire_crashed_process_lease(db_path);
+        let engine = open_local_engine(db_path);
+
+        // Assert
+        assert_records_visible(&engine, &[WRITER_LOSS_ACCEPTED_RECORD]);
+        assert_records_absent(&engine, &[WRITER_LOSS_REJECTED_RECORD]);
+    }
+
+    #[test]
+    fn should_recover_only_accepted_write_when_rotation_stops_after_writer_installation() {
+        // Arrange
+        let temp_dir = TempDir::new().expect("temp dir");
+        let db_path = temp_dir.path();
+
+        // Act
+        run_child_expect_abort("after_rotation_writer_install_before_commit", db_path);
+        expire_crashed_process_lease(db_path);
+        let engine = open_local_engine(db_path);
+
+        // Assert
+        assert_records_visible(&engine, &[WRITER_LOSS_ACCEPTED_RECORD]);
+        assert_records_absent(&engine, &[WRITER_LOSS_REJECTED_RECORD]);
     }
 
     #[test]
@@ -5429,6 +5477,86 @@ mod transaction_crash_boundaries {
             "after_empty_sync_buffered_batch",
             "manual::after_empty_sync_buffered_batch",
         );
+    }
+
+    fn child_abort_after_rotation_writer_reopen_failure(db_path: &Path) {
+        child_abort_after_rotation_transition_failure(
+            db_path,
+            "midge::wal::inject_fail_after_rename_before_writer_create",
+            "after_rotation_writer_reopen_failure",
+        );
+    }
+
+    fn child_abort_after_rotation_writer_install_before_commit(db_path: &Path) {
+        child_abort_after_rotation_transition_failure(
+            db_path,
+            "midge::wal::inject_fail_after_writer_create_before_commit",
+            "after_rotation_writer_install_before_commit",
+        );
+    }
+
+    fn child_abort_after_rotation_transition_failure(
+        db_path: &Path,
+        failpoint: &str,
+        trigger: &str,
+    ) {
+        let engine = open_local_engine(db_path);
+        let default_cf = default_cf(&engine);
+        commit_fixed_sync_transaction(&engine, &default_cf, &[WRITER_LOSS_ACCEPTED_RECORD]);
+        let sequence_before_failure = engine
+            .get_runtime_metrics()
+            .expect("read pre-rotation metrics")
+            .current_sequence;
+        let scenario = fail::FailScenario::setup();
+        fail::cfg(failpoint, "return").expect("configure replacement writer transition failure");
+
+        engine
+            .flush_cf(&default_cf)
+            .expect("SST flush should complete before background WAL rotation fails");
+        assert_eq!(
+            engine
+                .get_runtime_metrics()
+                .expect("read fenced runtime metrics")
+                .health,
+            EngineHealth::Degraded
+        );
+        fail::remove(failpoint);
+        scenario.teardown();
+
+        let mut rejected = engine
+            .begin_tx(default_cf.id(), TransactionMode::ReadWrite)
+            .expect("begin rejected transaction");
+        rejected
+            .put(
+                WRITER_LOSS_REJECTED_RECORD.key.to_vec(),
+                WRITER_LOSS_REJECTED_RECORD.value.to_vec(),
+                None,
+            )
+            .expect("stage rejected value");
+        assert!(matches!(
+            rejected.commit(WriteOptions::buffered()),
+            Err(cntryl_midge::MidgeError::Fenced(_))
+        ));
+        assert_eq!(
+            engine
+                .get_runtime_metrics()
+                .expect("read post-rejection metrics")
+                .current_sequence,
+            sequence_before_failure,
+            "fenced write must be rejected before sequence allocation"
+        );
+        let read = engine
+            .begin_tx(default_cf.id(), TransactionMode::ReadOnly)
+            .expect("begin child verification read");
+        assert_eq!(
+            read.get(WRITER_LOSS_REJECTED_RECORD.key)
+                .expect("read rejected key"),
+            None,
+            "fenced write must not mutate the live memtable"
+        );
+        drop(read);
+
+        crash::abort_at_trigger(trigger, "manual::after_rotation_transition_failure");
     }
 
     fn child_abort_assertion_guarded_after_sync_before_ack(db_path: &Path) {
@@ -5733,6 +5861,10 @@ mod transaction_crash_boundaries {
             "after_strict_conflict_abort" => "manual::after_strict_conflict_abort",
             "after_assertion_only_sync_ack" => "manual::after_assertion_only_sync_ack",
             "after_empty_sync_buffered_batch" => "manual::after_empty_sync_buffered_batch",
+            "after_rotation_writer_reopen_failure"
+            | "after_rotation_writer_install_before_commit" => {
+                "manual::after_rotation_transition_failure"
+            }
             "after_assertion_conflict_abort" => "manual::after_assertion_conflict_abort",
             other => panic!("unknown transaction crash trigger for scenario {other}"),
         }
@@ -5774,7 +5906,8 @@ mod cloud_crash_recovery {
 
     use crate::common::{crash, MidgeOptions, StorageMode};
     use cntryl_midge::{
-        CloudWritePolicy, Engine, RuntimeMetricsSnapshot, TransactionMode, WriteOptions,
+        CloudWritePolicy, Engine, EngineHealth, RuntimeMetricsSnapshot, TransactionMode,
+        WriteOptions,
     };
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -5802,6 +5935,10 @@ mod cloud_crash_recovery {
             "cloud_async_active_after_ack" => child_cloud_async_active_after_ack(&db_path),
             #[cfg(feature = "failpoints")]
             "cloud_async_local_wal_after_ack" => child_cloud_async_local_wal_after_ack(&db_path),
+            #[cfg(feature = "failpoints")]
+            "cloud_async_after_rotation_coordinator_drift" => {
+                child_cloud_async_after_rotation_coordinator_drift(&db_path);
+            }
             "buffered_eventual_flush_after_publish" => {
                 child_buffered_eventual_flush_after_publish(&db_path);
             }
@@ -5960,6 +6097,32 @@ mod cloud_crash_recovery {
         );
     }
 
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn should_resume_sealed_cloud_wal_when_child_aborts_after_coordinator_drift() {
+        // Arrange
+        let temp_dir = TempDir::new().expect("temp dir");
+        let db_path = temp_dir.path();
+
+        run_child_expect_abort("cloud_async_after_rotation_coordinator_drift", db_path);
+        expire_crashed_process_lease(db_path);
+
+        // Act
+        let reopened = open_cloud_engine(db_path, None);
+        let metrics = wait_for_metrics(&reopened, Duration::from_secs(10), |metrics| {
+            metrics.current_sequence >= 1
+                && metrics.wal_cloud_durable_seq >= metrics.current_sequence
+        });
+
+        // Assert
+        assert_value_visible(
+            &reopened,
+            b"cloud-async-drift-crash-key",
+            b"cloud-async-drift-crash-value",
+        );
+        assert_eq!(metrics.health, EngineHealth::Healthy);
+    }
+
     #[test]
     fn should_restore_published_cloud_sst_when_cache_lost_after_child_abort() {
         // Arrange
@@ -6043,6 +6206,34 @@ mod cloud_crash_recovery {
         });
 
         abort_after_marking_ready(db_path, "cloud_async_local_wal_after_ack");
+    }
+
+    #[cfg(feature = "failpoints")]
+    fn child_cloud_async_after_rotation_coordinator_drift(db_path: &Path) {
+        let _scenario = fail::FailScenario::setup();
+        fail::cfg(
+            "midge::cloud::inject_coordinator_drift_after_wal_rotation",
+            "return",
+        )
+        .expect("configure post-rotation coordinator drift");
+        let engine = open_cloud_engine(db_path, None);
+        commit_value(
+            &engine,
+            b"cloud-async-drift-crash-key",
+            b"cloud-async-drift-crash-value",
+            WriteOptions::cloud_async(),
+        );
+        let fenced = wait_for_metrics(&engine, Duration::from_secs(10), |metrics| {
+            metrics.wal_current_segment_id >= 2 && metrics.health == EngineHealth::Degraded
+        });
+        assert!(fenced.wal_local_durable_seq >= fenced.current_sequence);
+        assert_value_visible(
+            &engine,
+            b"cloud-async-drift-crash-key",
+            b"cloud-async-drift-crash-value",
+        );
+
+        abort_after_marking_ready(db_path, "cloud_async_after_rotation_coordinator_drift");
     }
 
     fn child_buffered_eventual_flush_after_publish(db_path: &Path) {
@@ -6215,6 +6406,9 @@ mod cloud_crash_recovery {
             "cloud_strict_after_ack" => "manual::cloud_strict_after_ack",
             "cloud_async_active_after_ack" => "manual::cloud_async_active_after_ack",
             "cloud_async_local_wal_after_ack" => "manual::cloud_async_local_wal_after_ack",
+            "cloud_async_after_rotation_coordinator_drift" => {
+                "manual::cloud_async_after_rotation_coordinator_drift"
+            }
             "buffered_eventual_flush_after_publish" => {
                 "manual::buffered_eventual_flush_after_publish"
             }

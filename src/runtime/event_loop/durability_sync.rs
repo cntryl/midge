@@ -8,6 +8,7 @@ use super::super::durability::DurabilityWaiter;
 use super::super::RuntimeMsg;
 use super::super::RuntimeResponse;
 use super::EventLoop;
+use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
 use crossbeam::channel::Receiver;
 
 /// Describes the source of a durability completion so the shared helper
@@ -196,32 +197,45 @@ impl EventLoop {
         }
     }
 
-    fn fail_durability_waiters_after_generation_drift(
+    pub(in crate::runtime::event_loop) fn fail_durability_waiters_after_generation_drift(
         &mut self,
         next_generation: u64,
         error: &crate::common::MidgeError,
     ) {
         self.state.mark_persistence_anomaly();
         let waiters = self.durability.drain_all_waiters_and_reset(next_generation);
+        self.fail_durability_waiters(waiters, error);
+    }
+
+    pub(in crate::runtime::event_loop) fn fail_durability_waiters(
+        &mut self,
+        waiters: Vec<DurabilityWaiter>,
+        error: &crate::common::MidgeError,
+    ) {
         for waiter in waiters {
-            let (request_id, clears_transaction_barrier) = match waiter {
-                DurabilityWaiter::TransactionApply { request_id, .. }
-                | DurabilityWaiter::ConfirmTransactionApply { request_id } => (request_id, true),
-                DurabilityWaiter::ConfirmWalAppend { request_id }
-                | DurabilityWaiter::CloudDurability { request_id } => (request_id, false),
+            let (request_id, clears_transaction_barrier, already_acknowledged) = match waiter {
+                DurabilityWaiter::TransactionApply { request_id, .. } => (request_id, true, false),
+                DurabilityWaiter::ConfirmTransactionApply { request_id } => {
+                    (request_id, true, true)
+                }
+                DurabilityWaiter::ConfirmWalAppend { request_id } => (request_id, false, true),
+                DurabilityWaiter::CloudDurability { request_id } => (request_id, false, false),
                 #[cfg(test)]
                 DurabilityWaiter::WalAppend { request_id, .. }
                 | DurabilityWaiter::Read { request_id, .. }
-                | DurabilityWaiter::RangeScan { request_id, .. } => (request_id, false),
+                | DurabilityWaiter::RangeScan { request_id, .. } => (request_id, false, false),
             };
             if clears_transaction_barrier {
                 self.state.clear_pending_transaction_barrier();
+            }
+            if already_acknowledged {
+                continue;
             }
             self.respond(
                 request_id,
                 RuntimeResponse::Error {
                     request_id,
-                    error: crate::common::MidgeError::Internal(error.to_string()),
+                    error: error.replay(),
                 },
             );
         }
@@ -230,34 +244,121 @@ impl EventLoop {
     /// Fsync the WAL and advance its local generation together with the
     /// generation-keyed durability coordinator.
     ///
-    /// `WalActor::sync` advances its flush generation only after a successful
-    /// fsync. Keeping the checked coordinator rotation and waiter completion in
-    /// this same event-loop operation prevents explicit barriers from advancing
-    /// only one side of the generation pair. `CloudAsync` coordination is keyed
-    /// by WAL segment instead, so a plain explicit fsync does not rotate or
-    /// complete its segment waiters here.
+    /// The actor remains non-operational after fsync until this method commits
+    /// both its sync receipt and the coordinator generation. No caller can
+    /// observe or bypass only half of the transition.
     pub(super) fn sync_wal_generation(
         &mut self,
         source: CompletionSource,
     ) -> crate::common::MidgeResult<()> {
-        let sealed_generation = self.wal_actor.sync(&mut self.state)?;
+        let sealed_generation = self.durability.current_key();
+        let next_generation = self.next_wal_generation(sealed_generation)?;
+        self.wal_transition.ensure_ready()?;
+        if self.wal_actor.is_cloud_async() && sealed_generation != self.state.wal.current_segment_id
+        {
+            let error = crate::common::MidgeError::Fenced(format!(
+                "cloud WAL generation drift: coordinator {sealed_generation}, active segment {}",
+                self.state.wal.current_segment_id
+            ));
+            self.wal_actor
+                .fence_transition(&mut self.state, error.to_string());
+            self.wal_transition.fence(error.to_string(), None);
+            return Err(error);
+        }
+        self.wal_transition.begin_sync(sealed_generation)?;
+        let receipt = match self.wal_actor.begin_sync_transition(&mut self.state) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                if self.wal_actor.is_fenced() {
+                    self.wal_transition.fence(error.to_string(), None);
+                    self.fail_durability_waiters_after_generation_drift(sealed_generation, &error);
+                } else {
+                    self.wal_transition.finish_sync(sealed_generation)?;
+                }
+                return Err(error);
+            }
+        };
         if self.wal_actor.is_cloud_async() {
-            return Ok(());
+            let result = self
+                .wal_actor
+                .commit_sync_transition(&mut self.state, receipt);
+            if let Err(error) = &result {
+                self.wal_transition.fence(error.to_string(), None);
+                self.fail_durability_waiters_after_generation_drift(sealed_generation, error);
+            } else if let Err(error) = self.wal_transition.finish_sync(sealed_generation) {
+                self.wal_actor
+                    .fence_transition(&mut self.state, error.to_string());
+                self.wal_transition.fence(error.to_string(), None);
+                return Err(error);
+            }
+            return result;
         }
 
-        let next_generation = sealed_generation + 1;
+        let next_generation = next_generation.expect("local generation preflighted");
+        if let Err(error) = WalTransitionBoundary::BeforeCoordinatorCommit.check() {
+            self.wal_actor
+                .fence_transition(&mut self.state, error.to_string());
+            self.wal_transition.fence(error.to_string(), None);
+            self.fail_durability_waiters_after_generation_drift(sealed_generation, &error);
+            return Err(error);
+        }
         if let Err(error) = self
             .durability
             .rotate_from_to(sealed_generation, next_generation)
         {
+            self.wal_actor
+                .fence_transition(&mut self.state, error.to_string());
+            self.wal_transition.fence(error.to_string(), None);
             tracing::error!(%error, "durability generation drift after WAL sync");
             self.fail_durability_waiters_after_generation_drift(next_generation, &error);
             return Err(error);
         }
+        if let Err(error) = WalTransitionBoundary::AfterCoordinatorCommit.check() {
+            self.wal_actor
+                .fence_transition(&mut self.state, error.to_string());
+            self.wal_transition.fence(error.to_string(), None);
+            self.fail_durability_waiters_after_generation_drift(next_generation, &error);
+            return Err(error);
+        }
 
+        if let Err(error) = self
+            .wal_actor
+            .commit_sync_transition(&mut self.state, receipt)
+        {
+            self.wal_actor
+                .fence_transition(&mut self.state, error.to_string());
+            self.wal_transition.fence(error.to_string(), None);
+            self.fail_durability_waiters_after_generation_drift(next_generation, &error);
+            return Err(error);
+        }
+
+        if let Err(error) = WalTransitionBoundary::BeforeWaiterCompletion.check() {
+            self.wal_actor
+                .fence_transition(&mut self.state, error.to_string());
+            self.wal_transition.fence(error.to_string(), None);
+            self.fail_durability_waiters_after_generation_drift(next_generation, &error);
+            return Err(error);
+        }
         let completed = self.durability.complete_waiters_at(sealed_generation);
         self.complete_durability_waiters(completed, source);
-        Ok(())
+        if let Err(error) = self.wal_transition.finish_sync(sealed_generation) {
+            self.wal_actor
+                .fence_transition(&mut self.state, error.to_string());
+            self.wal_transition.fence(error.to_string(), None);
+            return Err(error);
+        }
+        WalTransitionBoundary::AfterCommitBeforeReturn.check()
+    }
+
+    fn next_wal_generation(&self, current: u64) -> crate::common::MidgeResult<Option<u64>> {
+        if self.wal_actor.is_cloud_async() {
+            return Ok(None);
+        }
+        current.checked_add(1).map(Some).ok_or_else(|| {
+            crate::common::MidgeError::ResourceLimit(
+                "WAL durability generation space exhausted".to_string(),
+            )
+        })
     }
 
     /// Sync batched WAL if threshold exceeded or if there are pending writes.
@@ -422,7 +523,7 @@ mod tests {
     }
 
     #[test]
-    fn should_retain_group_commit_waiters_when_wal_fsync_panics() {
+    fn should_produce_single_terminal_failure_when_wal_fsync_panics() {
         // Arrange
         let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
             .expect("create event loop");
@@ -431,11 +532,12 @@ mod tests {
             .replace_writer_for_test(Box::new(PanickingSyncWriter(
                 std::sync::atomic::AtomicBool::new(true),
             )));
+        let response = event_loop.router.register(77, "CloudDurability");
         event_loop
             .durability
-            .queue_waiter(DurabilityWaiter::ConfirmTransactionApply { request_id: 77 });
+            .queue_waiter(DurabilityWaiter::CloudDurability { request_id: 77 });
         event_loop.state.wal.pending_writes = 1;
-        let generation = event_loop.wal_actor.current_flush_generation();
+        let generation = event_loop.durability.current_key();
 
         // Act
         let result = event_loop.sync_wal_generation(CompletionSource::WalSync);
@@ -445,17 +547,178 @@ mod tests {
             result,
             Err(crate::common::MidgeError::Internal(_))
         ));
-        assert_eq!(event_loop.wal_actor.current_flush_generation(), generation);
-        assert!(event_loop.durability.has_pending_waiters());
-        event_loop
-            .sync_wal_generation(CompletionSource::WalSync)
-            .expect("subsequent paired sync succeeds");
-        assert_eq!(
-            event_loop.wal_actor.current_flush_generation(),
-            generation + 1
-        );
+        assert_eq!(event_loop.durability.current_key(), generation);
         assert!(!event_loop.durability.has_pending_waiters());
-        assert_eq!(event_loop.durability.waiters_fanned_out(), 1);
+        assert!(event_loop.wal_actor.is_fenced());
+        assert!(event_loop.wal_transition.is_fenced());
+        assert!(event_loop.state.persistence_anomaly_detected());
+        assert!(matches!(
+            response.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(RuntimeResponse::Error {
+                request_id: 77,
+                error: crate::common::MidgeError::Internal(message),
+            }) if message.contains("WAL fsync panicked")
+        ));
+        assert!(
+            response.try_recv().is_err(),
+            "waiter must terminate exactly once"
+        );
+        assert!(matches!(
+            event_loop
+                .sync_wal_generation(CompletionSource::WalSync)
+                .expect_err("fenced WAL must reject a later sync"),
+            crate::common::MidgeError::Fenced(_)
+        ));
+    }
+
+    #[cfg(feature = "failpoints")]
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn should_resolve_every_local_sync_boundary_without_partial_operational_state() {
+        // Arrange
+        let _test_guard = crate::failpoints::test_failpoint_guard();
+        let scenario = fail::FailScenario::setup();
+        let cases = [
+            (
+                WalTransitionBoundary::BeforeFsync,
+                0,
+                0,
+                false,
+                false,
+                false,
+            ),
+            (WalTransitionBoundary::AfterFsync, 0, 0, true, true, false),
+            (
+                WalTransitionBoundary::BeforeCoordinatorCommit,
+                0,
+                0,
+                true,
+                true,
+                false,
+            ),
+            (
+                WalTransitionBoundary::AfterCoordinatorCommit,
+                1,
+                0,
+                true,
+                true,
+                false,
+            ),
+            (
+                WalTransitionBoundary::BeforeWaiterCompletion,
+                1,
+                9,
+                true,
+                true,
+                false,
+            ),
+            (
+                WalTransitionBoundary::AfterCommitBeforeReturn,
+                1,
+                9,
+                false,
+                false,
+                true,
+            ),
+        ];
+
+        for (boundary, expected_generation, expected_frontier, fenced, degraded, succeeded) in cases
+        {
+            let mut event_loop =
+                create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
+                    .expect("create event loop");
+            event_loop
+                .wal_actor
+                .replace_writer_for_test(Box::new(PanickingSyncWriter(
+                    std::sync::atomic::AtomicBool::new(false),
+                )));
+            event_loop.state.sequence = 9;
+            event_loop.state.wal.pending_writes = 1;
+            let request_id = 91_000 + expected_generation + expected_frontier;
+            let response = event_loop.router.register(request_id, "CloudDurability");
+            event_loop
+                .durability
+                .queue_waiter(DurabilityWaiter::CloudDurability { request_id });
+            fail::cfg(boundary.failpoint_name(), "return")
+                .expect("configure local WAL transition boundary");
+
+            // Act
+            let error = event_loop
+                .sync_wal_generation(CompletionSource::WalSync)
+                .expect_err("configured transition boundary must interrupt sync");
+            fail::remove(boundary.failpoint_name());
+
+            // Assert
+            assert!(matches!(error, crate::common::MidgeError::Internal(_)));
+            assert_eq!(event_loop.durability.current_key(), expected_generation);
+            assert_eq!(event_loop.state.wal.local_durable_seq, expected_frontier);
+            assert_eq!(event_loop.state.wal.last_synced_seq, expected_frontier);
+            assert_eq!(event_loop.wal_actor.is_fenced(), fenced);
+            assert_eq!(event_loop.wal_transition.is_fenced(), fenced);
+            assert_eq!(event_loop.state.persistence_anomaly_detected(), degraded);
+
+            if boundary == WalTransitionBoundary::BeforeFsync {
+                assert!(event_loop.durability.has_pending_waiters());
+                assert!(response.try_recv().is_err());
+                event_loop
+                    .sync_wal_generation(CompletionSource::WalSync)
+                    .expect("pre-fsync failure must be retryable");
+                assert!(matches!(
+                    response.recv_timeout(std::time::Duration::from_secs(1)),
+                    Ok(RuntimeResponse::Ok { request_id: actual }) if actual == request_id
+                ));
+            } else {
+                assert!(!event_loop.durability.has_pending_waiters());
+                let terminal = response
+                    .recv_timeout(std::time::Duration::from_secs(1))
+                    .expect("durability waiter terminal outcome");
+                if succeeded {
+                    assert!(matches!(
+                        terminal,
+                        RuntimeResponse::Ok { request_id: actual } if actual == request_id
+                    ));
+                } else {
+                    assert!(matches!(
+                        terminal,
+                        RuntimeResponse::Error { request_id: actual, .. }
+                            if actual == request_id
+                    ));
+                }
+            }
+            assert!(
+                response.try_recv().is_err(),
+                "waiter must terminate exactly once"
+            );
+        }
+
+        scenario.teardown();
+    }
+
+    #[test]
+    fn should_reject_exhausted_local_generation_before_fsync_or_state_change() {
+        // Arrange
+        let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
+            .expect("create event loop");
+        let _ = event_loop.durability.drain_all_waiters_and_reset(u64::MAX);
+        event_loop.state.sequence = 9;
+        event_loop.state.wal.pending_writes = 1;
+
+        // Act
+        let error = event_loop
+            .sync_wal_generation(CompletionSource::WalSync)
+            .expect_err("exhausted generation must reject sync");
+
+        // Assert
+        assert!(matches!(
+            error,
+            crate::common::MidgeError::ResourceLimit(message)
+                if message.contains("generation space exhausted")
+        ));
+        assert_eq!(event_loop.durability.current_key(), u64::MAX);
+        assert_eq!(event_loop.state.wal.local_durable_seq, 0);
+        assert_eq!(event_loop.state.wal.pending_writes, 1);
+        assert!(!event_loop.wal_actor.is_fenced());
+        assert!(!event_loop.wal_transition.is_fenced());
         assert!(!event_loop.state.persistence_anomaly_detected());
     }
 
@@ -483,12 +746,12 @@ mod tests {
         ));
         assert_eq!(event_loop.durability.waiters_fanned_out(), 1);
         assert!(!event_loop.durability.has_pending_waiters());
-        assert_eq!(event_loop.wal_actor.current_flush_generation(), 1);
+        assert_eq!(event_loop.durability.current_key(), 1);
         assert!(!event_loop.state.persistence_anomaly_detected());
     }
 
     #[test]
-    fn should_fail_waiter_without_repeating_drift_given_periodic_sync_generation_mismatch() {
+    fn should_advance_the_coordinator_as_the_single_local_generation_owner() {
         // Arrange
         let state = create_test_state();
         let router = Arc::new(ResponseRouter::new());
@@ -502,13 +765,6 @@ mod tests {
         };
         let mut event_loop =
             EventLoop::new(state, false, router, config, None).expect("create event loop");
-        assert_eq!(
-            event_loop
-                .wal_actor
-                .sync(&mut event_loop.state)
-                .expect("bypassed sync"),
-            0
-        );
         let first_request = 88;
         let first_response = event_loop.router.register(first_request, "TestRequest");
         event_loop
@@ -537,47 +793,15 @@ mod tests {
         let first = first_response
             .recv_timeout(std::time::Duration::from_secs(1))
             .expect("generation drift response");
-        let second_request = 89;
-        let second_response = event_loop.router.register(second_request, "TestRequest");
-        event_loop
-            .durability
-            .queue_waiter(DurabilityWaiter::CloudDurability {
-                request_id: second_request,
-            });
-        event_loop
-            .wal_actor
-            .append(
-                &mut event_loop.state,
-                crate::runtime::actors::wal::AppendParams {
-                    request_id: second_request,
-                    cf_id: 0,
-                    key: bytes::Bytes::from_static(b"drift-second"),
-                    value: Some(bytes::Bytes::from_static(b"value")),
-                    insert_only: false,
-                    ttl_seconds: None,
-                },
-            )
-            .expect("append second record");
-        event_loop.sync_batched_wal_if_needed(&msg_rx);
-        let second = second_response
-            .recv_timeout(std::time::Duration::from_secs(1))
-            .expect("post-reset completion response");
-
         // Assert
         assert!(matches!(
             first,
-            RuntimeResponse::Error {
-                request_id,
-                error: crate::common::MidgeError::Internal(message),
-            } if request_id == first_request && message.contains("durability generation drift")
-        ));
-        assert!(matches!(
-            second,
             RuntimeResponse::Ok {
                 request_id,
-            } if request_id == second_request
+            } if request_id == first_request
         ));
-        assert!(event_loop.state.persistence_anomaly_detected());
+        assert_eq!(event_loop.durability.current_key(), 1);
+        assert!(!event_loop.state.persistence_anomaly_detected());
         assert!(!event_loop.durability.has_pending_waiters());
     }
 

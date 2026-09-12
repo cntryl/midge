@@ -3,6 +3,7 @@ use super::TransactionApplyOp;
 use super::{TxnSequencePlan, WalActor};
 use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::state::RuntimeState;
+use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
 use crate::wal::DurabilityPolicy;
 use crate::wal::{types::WalOpRole, WalOpKind, WalRecord};
 use bytes::Bytes;
@@ -42,15 +43,25 @@ impl WalActor {
         )?;
 
         let effective_durability = durability_policy.unwrap_or(self.durability_policy);
+        self.ensure_write_durability_available(state, effective_durability)?;
         let sequence_plan = Self::allocate_transaction_sequences(state, source.len())?;
         let commit_time_millis = state.observed_time_millis();
-        let (wal_bytes, wal_records) = self.append_spilled_wal_records(
+        let (wal_bytes, wal_records) = match self.append_spilled_wal_records(
             request_id,
             source,
             &sequence_plan,
             effective_durability,
             commit_time_millis,
-        )?;
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                self.fence_transition(
+                    state,
+                    format!("spilled transaction WAL append failed: {error}"),
+                );
+                return Err(error);
+            }
+        };
         state.wal.pending_writes = state.wal.pending_writes.saturating_add(wal_records);
         self.pending_sync_count = self.pending_sync_count.saturating_add(wal_records);
         self.bytes_since_sync = self.bytes_since_sync.saturating_add(wal_bytes);
@@ -194,7 +205,7 @@ impl WalActor {
         effective_durability: DurabilityPolicy,
         commit_time_millis: u64,
     ) -> MidgeResult<(usize, usize)> {
-        if matches!(effective_durability, DurabilityPolicy::BestEffort) || self.writer.is_none() {
+        if matches!(effective_durability, DurabilityPolicy::BestEffort) {
             return Ok((0, 0));
         }
 
@@ -252,6 +263,7 @@ impl WalActor {
         self.append_spilled_record(&commit)?;
         self.finish_append_instrumentation(total_bytes as u64, append_started_at.elapsed());
         self.record_segment_sequence(sequence_plan.commit_seq);
+        WalTransitionBoundary::AfterAppendBeforeAccounting.check()?;
         crate::failpoints::fail_point!("midge::wal::spilled_after_append_batch_before_sync");
         tracing::trace!(request_id, "appended split transaction WAL frames");
         Ok((total_bytes, source.len().saturating_add(2)))
@@ -259,11 +271,8 @@ impl WalActor {
 
     fn append_spilled_record(&mut self, record: &WalRecord) -> MidgeResult<()> {
         let admitted = self.admit_wal_records(std::slice::from_ref(record))?;
-        let previous_position = self
-            .writer
-            .as_ref()
-            .map_or(0, |writer| writer.current_pos());
-        let writer = self.writer.as_mut().ok_or_else(|| {
+        let previous_position = self.writer().map_or(0, crate::wal::WalWriter::current_pos);
+        let writer = self.writer_mut().ok_or_else(|| {
             MidgeError::Internal("transaction WAL writer disappeared during append".to_string())
         })?;
         if let Err(failure) = writer.append_record_accounted(record) {

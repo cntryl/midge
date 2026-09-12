@@ -2,7 +2,15 @@
 
 use super::super::EventLoop;
 use crate::runtime::hybrid_persistence::HybridPersistence;
+use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
 use std::time::Instant;
+
+struct CloudSealPlan {
+    segment_id: u64,
+    next_segment_id: u64,
+    expected_max_sequence: u64,
+    bytes_buffered: u64,
+}
 
 impl EventLoop {
     pub(crate) fn seal_current_cloud_segment(
@@ -41,6 +49,90 @@ impl EventLoop {
         recovered_active: bool,
         deadline: &crate::common::OperationDeadline,
     ) -> crate::common::MidgeResult<Option<(u64, u64)>> {
+        let Some(plan) = self.prepare_cloud_seal(recovered_active, deadline)? else {
+            return Ok(None);
+        };
+        let CloudSealPlan {
+            segment_id,
+            next_segment_id,
+            expected_max_sequence,
+            bytes_buffered,
+        } = plan;
+        self.wal_transition
+            .begin_seal(segment_id, next_segment_id, expected_max_sequence)?;
+        let seal_start = Instant::now();
+        let max_sequence = match self
+            .wal_actor
+            .flush_for_cloud_upload_within(&mut self.state, deadline)
+        {
+            Ok(max_sequence) => max_sequence,
+            Err(error) => {
+                if self.wal_actor.is_fenced() {
+                    self.wal_transition.fence(error.to_string(), None);
+                } else {
+                    self.wal_transition.abandon_prepared_seal(segment_id);
+                }
+                return Err(error);
+            }
+        };
+        if max_sequence != expected_max_sequence {
+            let error = crate::common::MidgeError::Fenced(format!(
+                "cloud WAL accounting changed during seal: expected max sequence {expected_max_sequence}, flushed {max_sequence}"
+            ));
+            self.wal_actor
+                .fence_transition(&mut self.state, error.to_string());
+            self.wal_transition.fence(error.to_string(), None);
+            return Err(error);
+        }
+        if let Err(error) = Self::after_cloud_flush_boundary() {
+            return self.cancel_reversible_cloud_seal(segment_id, error);
+        }
+        // Revalidate after the potentially slow flush but before the active
+        // file is irreversibly rotated. A failure here leaves the same active
+        // segment intact for a later retry.
+        if let Err(error) = self.validate_runtime_writer_lease_within(deadline) {
+            return self.cancel_reversible_cloud_seal(segment_id, error);
+        }
+        let receipt = match self.wal_actor.rotate(&mut self.state) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                if self.wal_actor.is_fenced() {
+                    let sealed = self.wal_actor.fenced_sealed_segment();
+                    self.wal_transition.fence(error.to_string(), sealed);
+                } else {
+                    self.wal_transition.abandon_prepared_seal(segment_id);
+                }
+                tracing::error!(error = %error, "CloudAsync: WAL rotate failed");
+                return Err(error);
+            }
+        };
+        self.commit_rotated_cloud_seal(receipt, max_sequence)?;
+
+        // From this point on the sealed file is a tracked obligation. Even a
+        // lease or queue failure cannot make a later segment skip it.
+        crate::failpoints::fail_point!(
+            "midge::cloud::inject_fail_after_wal_rotate_before_enqueue",
+            |_| Err(crate::common::MidgeError::Internal(
+                "failpoint: cloud seal failed after WAL rotate before enqueue".to_string(),
+            ))
+        );
+        self.try_drain_cloud_wal_upload_backlog_within(deadline)?;
+
+        if let Some(telemetry) = crate::telemetry::Telemetry::global() {
+            telemetry.metrics().record_cloud_async_wal_segment_sealed(
+                bytes_buffered,
+                Self::elapsed_micros_to_u64(seal_start.elapsed()),
+            );
+        }
+
+        Ok(Some((segment_id, max_sequence)))
+    }
+
+    fn prepare_cloud_seal(
+        &mut self,
+        recovered_active: bool,
+        deadline: &crate::common::OperationDeadline,
+    ) -> crate::common::MidgeResult<Option<CloudSealPlan>> {
         if !self.wal_actor.is_cloud_async() {
             return Ok(None);
         }
@@ -61,6 +153,22 @@ impl EventLoop {
         self.validate_runtime_writer_lease_within(deadline)?;
 
         let segment_id = self.state.wal.current_segment_id;
+        let next_segment_id = segment_id.checked_add(1).ok_or_else(|| {
+            crate::common::MidgeError::ResourceLimit(
+                "WAL segment identity space exhausted".to_string(),
+            )
+        })?;
+        let expected_max_sequence = self.wal_actor.current_segment_max_sequence();
+        if self.durability.current_key() != segment_id {
+            let error = crate::common::MidgeError::Internal(format!(
+                "durability generation drift: expected current key {segment_id}"
+            ));
+            self.wal_actor
+                .fence_transition(&mut self.state, error.to_string());
+            self.wal_transition.fence(error.to_string(), None);
+            self.fail_durability_waiters_after_generation_drift(segment_id, &error);
+            return Err(error);
+        }
         let bytes_buffered = self.wal_actor.bytes_since_sync() as u64;
         let local_path = self
             .state
@@ -70,54 +178,123 @@ impl EventLoop {
         if !recovered_active {
             storage.ensure_wal_upload_capacity(existing_bytes.max(bytes_buffered))?;
         }
-        let seal_start = Instant::now();
-        let max_sequence = self
-            .wal_actor
-            .flush_for_cloud_upload_within(&mut self.state, deadline)?;
+        Ok(Some(CloudSealPlan {
+            segment_id,
+            next_segment_id,
+            expected_max_sequence,
+            bytes_buffered,
+        }))
+    }
+
+    fn commit_rotated_cloud_seal(
+        &mut self,
+        receipt: crate::runtime::actors::wal::WalRotationReceipt,
+        max_sequence: u64,
+    ) -> crate::common::MidgeResult<()> {
+        let result = self.try_commit_rotated_cloud_seal(receipt, max_sequence);
+        if let Err(error) = &result {
+            self.finish_failed_cloud_seal_transition(receipt, max_sequence, error);
+        }
+        result
+    }
+
+    fn try_commit_rotated_cloud_seal(
+        &mut self,
+        receipt: crate::runtime::actors::wal::WalRotationReceipt,
+        max_sequence: u64,
+    ) -> crate::common::MidgeResult<()> {
+        let segment_id = receipt.sealed_segment;
+        self.wal_transition.note_sealed(receipt)?;
+        WalTransitionBoundary::BeforeCoordinatorCommit.check()?;
+        #[cfg(feature = "failpoints")]
+        if crate::failpoints::is_active("midge::cloud::inject_coordinator_drift_after_wal_rotation")
+        {
+            let Some(drifted_generation) = receipt.next_segment.checked_add(100) else {
+                return Err(crate::common::MidgeError::ResourceLimit(
+                    "injected WAL coordinator generation overflow".to_string(),
+                ));
+            };
+            self.durability
+                .rotate_from_to(segment_id, drifted_generation)?;
+        }
+        self.durability
+            .rotate_from_to(segment_id, receipt.next_segment)?;
+        WalTransitionBoundary::AfterCoordinatorCommit.check()?;
+        WalTransitionBoundary::BeforeSegmentRegistration.check()?;
+        self.durability
+            .record_cloud_segment_inflight(segment_id, max_sequence);
+        self.cloud_wal
+            .upload_backlog
+            .insert(segment_id, max_sequence);
+        self.wal_transition.note_queued(segment_id)?;
+        WalTransitionBoundary::AfterSegmentRegistration.check()?;
+        WalTransitionBoundary::BeforeAccountingTransfer.check()?;
+        self.wal_actor
+            .complete_cloud_upload_seal(&mut self.state, max_sequence);
+        self.durability.record_cloud_flush();
+        self.durability.clear_cloud_seal_retry_needed();
+        WalTransitionBoundary::AfterAccountingTransfer.check()?;
+        self.wal_transition.finish_seal(receipt)
+    }
+
+    pub(in crate::runtime::event_loop) fn finish_failed_cloud_seal_transition(
+        &mut self,
+        receipt: crate::runtime::actors::wal::WalRotationReceipt,
+        max_sequence: u64,
+        error: &crate::common::MidgeError,
+    ) {
+        let segment_id = receipt.sealed_segment;
+        self.durability
+            .record_cloud_segment_inflight(segment_id, max_sequence);
+        self.cloud_wal
+            .upload_backlog
+            .insert(segment_id, max_sequence);
+        if let Err(registration_error) = self.wal_transition.note_queued(segment_id) {
+            tracing::error!(%registration_error, segment_id, "failed to retain sealed WAL transition obligation");
+        }
+        self.wal_actor
+            .complete_cloud_upload_seal(&mut self.state, max_sequence);
+        self.durability.record_cloud_flush();
+        self.durability.clear_cloud_seal_retry_needed();
+        self.state.mark_persistence_anomaly();
+        self.wal_actor
+            .fence_transition(&mut self.state, error.to_string());
+        self.wal_transition
+            .fence(error.to_string(), Some(segment_id));
+        self.fail_durability_waiters_after_generation_drift(receipt.next_segment, error);
+        tracing::error!(
+            %error,
+            segment_id,
+            next_segment_id = receipt.next_segment,
+            "CloudAsync WAL seal fenced after irreversible rotation"
+        );
+    }
+
+    fn cancel_reversible_cloud_seal(
+        &mut self,
+        segment_id: u64,
+        original_error: crate::common::MidgeError,
+    ) -> crate::common::MidgeResult<Option<(u64, u64)>> {
+        if let Err(cancel_error) = self.wal_actor.cancel_reversible_cloud_flush() {
+            self.wal_actor
+                .fence_transition(&mut self.state, cancel_error.to_string());
+            self.wal_transition
+                .fence(cancel_error.to_string(), Some(segment_id));
+            self.fail_durability_waiters_after_generation_drift(segment_id, &cancel_error);
+            return Err(cancel_error);
+        }
+        self.wal_transition.abandon_prepared_seal(segment_id);
+        Err(original_error)
+    }
+
+    fn after_cloud_flush_boundary() -> crate::common::MidgeResult<()> {
         crate::failpoints::fail_point!(
             "midge::cloud::inject_fail_after_wal_flush_before_rotate",
             |_| Err(crate::common::MidgeError::Internal(
                 "failpoint: cloud seal failed after WAL flush before rotate".to_string(),
             ))
         );
-        // Revalidate after the potentially slow flush but before the active
-        // file is irreversibly rotated. A failure here leaves the same active
-        // segment intact for a later retry.
-        self.validate_runtime_writer_lease_within(deadline)?;
-        if let Err(error) = self.wal_actor.rotate(&mut self.state) {
-            tracing::error!(error = %error, "CloudAsync: WAL rotate failed");
-            return Err(error);
-        }
-
-        self.durability
-            .rotate_from_to(segment_id, self.state.wal.current_segment_id)?;
-        self.durability
-            .record_cloud_segment_inflight(segment_id, max_sequence);
-        self.cloud_wal
-            .upload_backlog
-            .insert(segment_id, max_sequence);
-        self.wal_actor.complete_cloud_upload_seal(&mut self.state);
-        self.durability.record_cloud_flush();
-        self.durability.clear_cloud_seal_retry_needed();
-
-        // From this point on the sealed file is a tracked obligation. Even a
-        // lease or queue failure cannot make a later segment skip it.
-        crate::failpoints::fail_point!(
-            "midge::cloud::inject_fail_after_wal_rotate_before_enqueue",
-            |_| Err(crate::common::MidgeError::Internal(
-                "failpoint: cloud seal failed after WAL rotate before enqueue".to_string(),
-            ))
-        );
-        self.try_drain_cloud_wal_upload_backlog_within(deadline)?;
-
-        if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-            telemetry.metrics().record_cloud_async_wal_segment_sealed(
-                bytes_buffered,
-                Self::elapsed_micros_to_u64(seal_start.elapsed()),
-            );
-        }
-
-        Ok(Some((segment_id, max_sequence)))
+        Ok(())
     }
 
     fn try_drain_cloud_wal_upload_backlog_within(

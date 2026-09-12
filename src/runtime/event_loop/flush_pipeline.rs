@@ -572,7 +572,7 @@ impl EventLoop {
             tracing::warn!(%error, "retaining local WAL because buffered records could not be synced");
             return;
         }
-        if let Err(error) = self.wal_actor.rotate(&mut self.state) {
+        if let Err(error) = self.rotate_local_wal_transition() {
             self.state.mark_persistence_anomaly();
             tracing::warn!(%error, "retaining local WAL because the active segment could not be sealed");
             return;
@@ -1432,8 +1432,8 @@ mod tests {
                 ttl_seconds: None,
             },
         )?;
-        event_loop.wal_actor.sync(&mut event_loop.state)?;
-        event_loop.wal_actor.rotate(&mut event_loop.state)?;
+        event_loop.sync_local_wal_before_prune_rotation()?;
+        event_loop.rotate_local_wal_transition()?;
         event_loop.wal_actor.append(
             &mut event_loop.state,
             crate::runtime::actors::wal::AppendParams {

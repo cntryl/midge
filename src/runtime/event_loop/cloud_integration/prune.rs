@@ -278,9 +278,9 @@ impl EventLoop {
     pub(in crate::runtime::event_loop) fn remove_cloud_durable_local_wal_segment(
         &mut self,
         segment_id: u64,
-    ) {
+    ) -> bool {
         if self.state.is_memory_mode() {
-            return;
+            return true;
         }
 
         let local_path = self
@@ -292,6 +292,14 @@ impl EventLoop {
             .map(|metadata| metadata.len());
         match std::fs::remove_file(&local_path) {
             Ok(()) => {
+                if let Err(error) = self.state.fs.sync_dir(
+                    &crate::io::FsPath::new("wal"),
+                    crate::io::Durability::Durable,
+                ) {
+                    self.state.mark_persistence_anomaly();
+                    tracing::warn!(segment_id, %error, "local WAL deletion directory sync failed; retained ownership for restart reconciliation");
+                    return false;
+                }
                 if let (Some(storage), Some(bytes)) = (&self.hybrid_storage, local_bytes) {
                     storage.release_local_wal_bytes(bytes);
                 }
@@ -300,8 +308,9 @@ impl EventLoop {
                 path = %local_path.display(),
                 "Removed cloud-durable local WAL segment"
                 );
+                true
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
             Err(error) => {
                 self.state.mark_persistence_anomaly();
                 tracing::warn!(
@@ -310,6 +319,7 @@ impl EventLoop {
                     error = %error,
                     "Failed to remove cloud-durable local WAL segment; recovery remains safe but storage may leak"
                 );
+                false
             }
         }
     }

@@ -1225,16 +1225,8 @@ fn seal_segment_for_test(el: &mut EventLoop) -> crate::common::MidgeResult<(u64,
 fn seal_segment_without_remote_proof_for_test(
     el: &mut EventLoop,
 ) -> crate::common::MidgeResult<(u64, u64)> {
-    let seg_id = el.state.wal.current_segment_id;
-    let max_sequence = el.wal_actor.flush_for_cloud_upload(&mut el.state)?;
-    el.wal_actor.rotate(&mut el.state)?;
-    el.durability
-        .rotate_from_to(seg_id, el.state.wal.current_segment_id)?;
+    let (seg_id, max_sequence) = el.seal_cloud_wal_without_enqueue_for_test()?;
     copy_local_segment_to_remote_wal_for_test(el, seg_id);
-    el.wal_actor.complete_cloud_upload_seal(&mut el.state);
-    el.durability
-        .record_cloud_segment_inflight(seg_id, max_sequence);
-    el.durability.record_cloud_flush();
     Ok((seg_id, max_sequence))
 }
 
@@ -5838,6 +5830,261 @@ fn should_retain_upload_obligation_given_failure_after_cloud_wal_rotation(
         1
     );
     drop(scenario);
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_transfer_cloud_seal_to_backlog_when_coordinator_rotation_mismatches(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _test_guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    let mut event_loop = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let max_sequence = append_cloud_async_put(&mut event_loop)?;
+    let segment_id = event_loop.state.wal.current_segment_id;
+    let request_ids = [90_301_u64, 90_302];
+    let responses = request_ids.map(|request_id| {
+        let response = event_loop.router.register(request_id, "CloudDurability");
+        event_loop
+            .durability
+            .queue_waiter_for_key(segment_id, DurabilityWaiter::CloudDurability { request_id });
+        response
+    });
+    fail::cfg(
+        "midge::cloud::inject_coordinator_drift_after_wal_rotation",
+        "return",
+    )
+    .expect("configure coordinator drift after actor rotation");
+
+    // Act
+    let error = event_loop
+        .seal_current_cloud_segment()
+        .expect_err("coordinator mismatch must remain visible to the caller");
+
+    // Assert
+    assert!(matches!(
+        error,
+        crate::common::MidgeError::Internal(message)
+            if message.contains("durability generation drift")
+    ));
+    assert_eq!(event_loop.state.wal.current_segment_id, segment_id + 1);
+    assert_eq!(event_loop.state.wal.pending_writes, 0);
+    assert_eq!(event_loop.wal_actor.bytes_since_sync(), 0);
+    assert_eq!(
+        event_loop.cloud_wal.upload_backlog.get(&segment_id),
+        Some(&max_sequence),
+        "the sealed segment must transfer to runtime retry ownership"
+    );
+    assert_eq!(
+        event_loop.durability.cloud_segment_max_sequence(segment_id),
+        Some(max_sequence),
+        "the sealed segment must retain its inflight frontier gap"
+    );
+    assert!(event_loop.state.persistence_anomaly_detected());
+    assert!(event_loop.wal_actor.is_fenced());
+    assert!(event_loop.wal_transition.is_fenced());
+    assert!(!event_loop.durability.has_pending_waiters());
+    assert!(!event_loop.durability.cloud_seal_retry_needed());
+    for (request_id, response) in request_ids.into_iter().zip(responses) {
+        assert!(matches!(
+            response.recv_timeout(Duration::from_secs(1)),
+            Ok(RuntimeResponse::Error {
+                request_id: failed_request_id,
+                error: crate::common::MidgeError::Internal(message),
+            }) if failed_request_id == request_id
+                && message.contains("durability generation drift")
+        ));
+        assert!(
+            response.try_recv().is_err(),
+            "each affected waiter must fail exactly once"
+        );
+    }
+    assert_eq!(
+        event_loop.durability.current_key(),
+        segment_id + 1,
+        "coordinator must reset to the actor's replacement segment"
+    );
+    fail::remove("midge::cloud::inject_coordinator_drift_after_wal_rotation");
+    scenario.teardown();
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_retain_cloud_seal_ownership_at_every_cross_component_boundary(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _test_guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    let boundaries = [
+        crate::runtime::wal_transition_boundary::WalTransitionBoundary::BeforeCoordinatorCommit,
+        crate::runtime::wal_transition_boundary::WalTransitionBoundary::AfterCoordinatorCommit,
+        crate::runtime::wal_transition_boundary::WalTransitionBoundary::BeforeSegmentRegistration,
+        crate::runtime::wal_transition_boundary::WalTransitionBoundary::AfterSegmentRegistration,
+        crate::runtime::wal_transition_boundary::WalTransitionBoundary::BeforeAccountingTransfer,
+        crate::runtime::wal_transition_boundary::WalTransitionBoundary::AfterAccountingTransfer,
+    ];
+
+    for boundary in boundaries {
+        let mut event_loop = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        let max_sequence = append_cloud_async_put(&mut event_loop)?;
+        let segment_id = event_loop.state.wal.current_segment_id;
+        let request_id = 90_400 + segment_id;
+        let response = event_loop.router.register(request_id, "CloudDurability");
+        event_loop
+            .durability
+            .queue_waiter_for_key(segment_id, DurabilityWaiter::CloudDurability { request_id });
+        fail::cfg(boundary.failpoint_name(), "return")
+            .expect("configure cloud seal transition boundary");
+
+        // Act
+        let error = event_loop
+            .seal_current_cloud_segment()
+            .expect_err("configured boundary must interrupt cloud seal");
+        fail::remove(boundary.failpoint_name());
+
+        // Assert
+        assert!(matches!(error, crate::common::MidgeError::Internal(_)));
+        assert_eq!(event_loop.state.wal.current_segment_id, segment_id + 1);
+        assert_eq!(event_loop.durability.current_key(), segment_id + 1);
+        assert_eq!(event_loop.state.wal.pending_writes, 0);
+        assert_eq!(event_loop.state.wal.local_durable_seq, max_sequence);
+        assert_eq!(
+            event_loop.cloud_wal.upload_backlog.get(&segment_id),
+            Some(&max_sequence)
+        );
+        assert_eq!(
+            event_loop.durability.cloud_segment_max_sequence(segment_id),
+            Some(max_sequence)
+        );
+        assert!(event_loop.wal_transition.segment_is_tracked(segment_id));
+        assert!(event_loop.wal_actor.is_fenced());
+        assert!(event_loop.wal_transition.is_fenced());
+        assert!(event_loop.state.persistence_anomaly_detected());
+        assert!(!event_loop.durability.has_pending_waiters());
+        assert!(matches!(
+            response.recv_timeout(Duration::from_secs(1)),
+            Ok(RuntimeResponse::Error { request_id: actual, .. }) if actual == request_id
+        ));
+        assert!(
+            response.try_recv().is_err(),
+            "waiter must terminate exactly once"
+        );
+    }
+
+    scenario.teardown();
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_resolve_every_cloud_ack_boundary_without_losing_segment_ownership(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let _guard = failpoint_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _test_guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    let cases = [
+        (
+            crate::runtime::wal_transition_boundary::WalTransitionBoundary::BeforeAccountingTransfer,
+            0,
+            true,
+            false,
+        ),
+        (
+            crate::runtime::wal_transition_boundary::WalTransitionBoundary::AfterAccountingTransfer,
+            1,
+            true,
+            false,
+        ),
+        (
+            crate::runtime::wal_transition_boundary::WalTransitionBoundary::BeforeWaiterCompletion,
+            1,
+            true,
+            false,
+        ),
+        (
+            crate::runtime::wal_transition_boundary::WalTransitionBoundary::AfterCommitBeforeReturn,
+            1,
+            false,
+            true,
+        ),
+    ];
+
+    for (boundary, frontier_multiplier, fenced, succeeded) in cases {
+        let mut event_loop = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        append_cloud_async_put(&mut event_loop)?;
+        let (segment_id, max_sequence) = seal_segment_for_test(&mut event_loop)?;
+        let request_id = 90_500 + segment_id;
+        let response = event_loop.router.register(request_id, "CloudDurability");
+        event_loop
+            .durability
+            .queue_waiter_for_key(segment_id, DurabilityWaiter::CloudDurability { request_id });
+        fail::cfg(boundary.failpoint_name(), "return")
+            .expect("configure cloud acknowledgement boundary");
+
+        // Act
+        event_loop.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+            segment_id,
+            max_sequence,
+        });
+        fail::remove(boundary.failpoint_name());
+
+        // Assert
+        assert_eq!(
+            event_loop.state.wal.cloud_durable_seq,
+            max_sequence * frontier_multiplier
+        );
+        assert_eq!(event_loop.wal_actor.is_fenced(), fenced);
+        assert_eq!(event_loop.wal_transition.is_fenced(), fenced);
+        assert!(event_loop.state.persistence_anomaly_detected());
+        assert!(!event_loop.durability.has_pending_waiters());
+        assert_eq!(
+            event_loop.durability.cloud_segment_max_sequence(segment_id),
+            fenced.then_some(max_sequence),
+            "uncommitted acknowledgement must retain inflight ownership"
+        );
+        assert_eq!(
+            event_loop.wal_transition.segment_is_tracked(segment_id),
+            fenced,
+            "only a fully committed acknowledgement may retire the obligation"
+        );
+        let terminal = response
+            .recv_timeout(Duration::from_secs(1))
+            .expect("cloud durability terminal outcome");
+        if succeeded {
+            assert!(matches!(
+                terminal,
+                RuntimeResponse::Ok { request_id: actual } if actual == request_id
+            ));
+        } else {
+            assert!(matches!(
+                terminal,
+                RuntimeResponse::Error { request_id: actual, .. } if actual == request_id
+            ));
+        }
+        assert!(
+            response.try_recv().is_err(),
+            "waiter must terminate exactly once"
+        );
+    }
+
+    scenario.teardown();
     Ok(())
 }
 

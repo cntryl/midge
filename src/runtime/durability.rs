@@ -151,6 +151,14 @@ impl DurabilityCoordinator {
         }
     }
 
+    /// Current generation/segment key used for newly queued waiters.
+    #[must_use]
+    pub(crate) fn current_key(&self) -> u64 {
+        self.waiters
+            .as_ref()
+            .map_or(0, crate::common::KeyedGroupCommit::current_key)
+    }
+
     /// Request ids of the cloud-durability waiters queued at `key`.
     ///
     /// Read before the work runs so the event loop can derive one shared
@@ -275,8 +283,8 @@ impl DurabilityCoordinator {
 
     /// Get the contiguous acked `CloudAsync` segments starting at the oldest
     /// inflight segment. A later segment ack never makes earlier gaps durable.
-    pub fn take_contiguous_acked_cloud_segments(
-        &mut self,
+    pub fn contiguous_acked_cloud_segments(
+        &self,
         acked_segments: &BTreeMap<u64, u64>,
     ) -> Result<Vec<(u64, u64)>, String> {
         let mut inflight: Vec<(u64, u64)> = self
@@ -299,20 +307,32 @@ impl DurabilityCoordinator {
             ready.push((segment_id, expected_max_sequence));
         }
 
-        for (segment_id, _) in &ready {
-            self.inflight.remove(segment_id);
-        }
-
         Ok(ready)
     }
 
-    /// Get timing info for a `CloudAsync` segment (for telemetry).
-    pub fn take_cloud_segment_timing(&mut self, segment_id: u64) -> Option<Instant> {
+    /// Retire a cloud segment only after its frontier and waiter commit has
+    /// completed. Returns its enqueue time for latency telemetry.
+    pub fn retire_cloud_segment(&mut self, segment_id: u64) -> Option<Instant> {
         self.inflight
             .remove(&segment_id)
             .map(|info| info.enqueued_at)
     }
 
+    /// Backward-compatible test helper that performs the old peek-and-retire
+    /// operation atomically from the caller's perspective.
+    #[cfg(test)]
+    pub fn take_contiguous_acked_cloud_segments(
+        &mut self,
+        acked_segments: &BTreeMap<u64, u64>,
+    ) -> Result<Vec<(u64, u64)>, String> {
+        let ready = self.contiguous_acked_cloud_segments(acked_segments)?;
+        for (segment_id, _) in &ready {
+            self.inflight.remove(segment_id);
+        }
+        Ok(ready)
+    }
+
+    /// Get timing info for a `CloudAsync` segment (for telemetry).
     /// Return the expected maximum sequence for an inflight segment without
     /// removing it from the contiguous durability frontier.
     ///

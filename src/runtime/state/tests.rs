@@ -784,6 +784,37 @@ fn should_initialize_wal_state_with_defaults() {
     assert_eq!(wal.cloud_durable_seq, 0);
 }
 
+#[test]
+fn should_reject_recovery_when_wal_segment_identity_space_is_exhausted() -> MidgeResult<()> {
+    // Arrange
+    let dir = tempfile::tempdir()?;
+    drop(RuntimeState::try_new(
+        dir.path().to_path_buf(),
+        false,
+        crate::config::RecoveryPolicy::Strict,
+    )?);
+    let wal_dir = dir.path().join("wal");
+    std::fs::create_dir_all(&wal_dir)?;
+    std::fs::write(wal_dir.join(crate::wal::segment_file_name(u64::MAX)), [])?;
+
+    // Act
+    let result = RuntimeState::try_new(
+        dir.path().to_path_buf(),
+        false,
+        crate::config::RecoveryPolicy::Strict,
+    );
+
+    // Assert
+    match result {
+        Err(MidgeError::ResourceLimit(message)) => {
+            assert!(message.contains("segment identity space exhausted"));
+        }
+        Err(error) => panic!("unexpected recovery error: {error:?}"),
+        Ok(_) => panic!("recovery unexpectedly reused the exhausted WAL segment identity"),
+    }
+    Ok(())
+}
+
 // =========== CompactionState Tests ===========
 
 #[test]
