@@ -1,4 +1,5 @@
 use super::super::durability::DurabilityWaiter;
+use super::durability_sync::CompletionSource;
 use super::{EventLoop, HandleOutcome};
 use crate::runtime::{ConflictPolicy, KeyAssertion, RuntimeMsg, RuntimeResponse, TransactionOp};
 use crate::wal::DurabilityPolicy;
@@ -337,13 +338,13 @@ impl WalCoordinator {
     }
 
     pub(super) fn sync(event_loop: &mut EventLoop, request_id: u64) -> HandleOutcome {
-        let result = event_loop.wal_actor.sync(&mut event_loop.state);
+        let result = event_loop.sync_wal_generation(CompletionSource::SealedGeneration);
         let resp = result.map_or_else(
             |error| RuntimeResponse::Error {
                 request_id,
                 error: crate::common::MidgeError::Internal(error.to_string()),
             },
-            |_| RuntimeResponse::Ok { request_id },
+            |()| RuntimeResponse::Ok { request_id },
         );
         event_loop.respond(request_id, resp);
         HandleOutcome::Continue

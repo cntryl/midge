@@ -11,9 +11,9 @@ mod durability_sync_count {
     //! primitive has dedicated unit coverage, while its real cloud fanout path is exercised by the
     //! runtime `CloudAck` tests.
 
-    use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
+    use cntryl_midge::{Engine, EngineHealth, OpenOptions, TransactionMode, WriteOptions};
     use std::sync::{Arc, Barrier, Mutex, OnceLock};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     static SYNC_COUNT_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     static TELEMETRY_INIT: OnceLock<()> = OnceLock::new();
@@ -58,6 +58,23 @@ mod durability_sync_count {
             .get_runtime_metrics()
             .expect("read runtime metrics")
             .wal_append_count
+    }
+
+    fn wait_for_buffered_durability(engine: &Engine, minimum_sequence: u64) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let metrics = engine
+                .get_runtime_metrics()
+                .expect("read buffered durability metrics");
+            if metrics.wal_local_durable_seq >= minimum_sequence {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for the normal WAL batch sync: {metrics:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
@@ -157,6 +174,65 @@ mod durability_sync_count {
         engine
             .shutdown(Duration::from_secs(2))
             .expect("shutdown empty-sync engine");
+    }
+
+    #[test]
+    fn should_keep_buffered_generation_healthy_after_empty_sync_barrier() {
+        // Arrange
+        let _guard = sync_count_test_guard();
+        let (_temp_dir, mut engine, cf) = open_engine();
+        let before = engine
+            .get_runtime_metrics()
+            .expect("read baseline runtime metrics");
+        let empty = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin empty write transaction");
+
+        // Act
+        empty
+            .commit(WriteOptions::sync())
+            .expect("commit empty transaction synchronously");
+        let mut buffered = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin buffered transaction");
+        buffered
+            .put(
+                b"after-empty-sync".to_vec(),
+                b"durable-value".to_vec(),
+                None,
+            )
+            .expect("stage buffered value");
+        buffered
+            .commit(WriteOptions::buffered())
+            .expect("commit buffered value");
+        let committed = engine
+            .get_runtime_metrics()
+            .expect("read committed runtime metrics")
+            .current_sequence;
+        wait_for_buffered_durability(&engine, committed);
+        let after = engine
+            .get_runtime_metrics()
+            .expect("read synced runtime metrics");
+
+        // Assert
+        assert_eq!(after.wal_last_synced_seq, committed);
+        assert_eq!(after.wal_local_durable_seq, committed);
+        assert_eq!(
+            (
+                after.health,
+                after
+                    .durability_waiters_fanned_out_total
+                    .saturating_sub(before.durability_waiters_fanned_out_total),
+                after
+                    .late_runtime_responses_total
+                    .saturating_sub(before.late_runtime_responses_total),
+            ),
+            (EngineHealth::Healthy, 1, 0),
+            "the buffered commit waiter must complete exactly once without degrading health or emitting a late duplicate response"
+        );
+        engine
+            .shutdown(Duration::from_secs(2))
+            .expect("shutdown generation regression engine");
     }
 
     #[test]

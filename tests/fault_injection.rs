@@ -4949,7 +4949,9 @@ mod compaction_snapshot_publication {
 
 mod transaction_crash_boundaries {
     use bytes::Bytes;
-    use cntryl_midge::{ConflictPolicy, Engine, OpenOptions, TransactionMode, WriteOptions};
+    use cntryl_midge::{
+        ConflictPolicy, Engine, EngineHealth, OpenOptions, TransactionMode, WriteOptions,
+    };
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -5063,6 +5065,11 @@ mod transaction_crash_boundaries {
         value: b"buffered-before-assertion-sync",
     };
 
+    const EMPTY_SYNC_BUFFERED_RECORD: ExpectedRecord = ExpectedRecord {
+        key: b"empty-sync-then-buffered",
+        value: b"buffered-after-empty-sync",
+    };
+
     const ASSERTION_GUARDED_RECORD: ExpectedRecord = ExpectedRecord {
         key: b"assertion-guarded-commit",
         value: b"guarded-value",
@@ -5100,6 +5107,9 @@ mod transaction_crash_boundaries {
             "group_after_commit_ack" => child_abort_group_after_commit_ack(&db_path),
             "after_strict_conflict_abort" => child_abort_after_strict_conflict_abort(&db_path),
             "after_assertion_only_sync_ack" => child_abort_after_assertion_only_sync_ack(&db_path),
+            "after_empty_sync_buffered_batch" => {
+                child_abort_after_empty_sync_buffered_batch(&db_path);
+            }
             "assertion_guarded_after_sync_before_ack" => {
                 child_abort_assertion_guarded_after_sync_before_ack(&db_path);
             }
@@ -5236,6 +5246,21 @@ mod transaction_crash_boundaries {
     }
 
     #[test]
+    fn should_recover_buffered_write_when_process_aborts_after_empty_sync_barrier() {
+        // Arrange
+        let temp_dir = TempDir::new().expect("temp dir");
+        let db_path = temp_dir.path();
+
+        // Act
+        run_child_expect_abort("after_empty_sync_buffered_batch", db_path);
+        expire_crashed_process_lease(db_path);
+        let engine = open_local_engine(db_path);
+
+        // Assert
+        assert_records_visible(&engine, &[EMPTY_SYNC_BUFFERED_RECORD]);
+    }
+
+    #[test]
     fn should_recover_assertion_guarded_transaction_when_crashing_after_sync_before_ack() {
         // Arrange
         let temp_dir = TempDir::new().expect("temp dir");
@@ -5338,6 +5363,71 @@ mod transaction_crash_boundaries {
         crash::abort_at_trigger(
             "after_assertion_only_sync_ack",
             "manual::after_assertion_only_sync_ack",
+        );
+    }
+
+    fn child_abort_after_empty_sync_buffered_batch(db_path: &Path) {
+        let engine = open_local_engine(db_path);
+        let default_cf = default_cf(&engine);
+        let before = engine
+            .get_runtime_metrics()
+            .expect("read baseline runtime metrics");
+        let empty = engine
+            .begin_tx(default_cf.id(), TransactionMode::ReadWrite)
+            .expect("begin empty write transaction");
+        empty
+            .commit(WriteOptions::sync())
+            .expect("commit empty transaction synchronously");
+        let mut buffered = engine
+            .begin_tx(default_cf.id(), TransactionMode::ReadWrite)
+            .expect("begin buffered transaction");
+        buffered
+            .put(
+                EMPTY_SYNC_BUFFERED_RECORD.key.to_vec(),
+                EMPTY_SYNC_BUFFERED_RECORD.value.to_vec(),
+                None,
+            )
+            .expect("stage buffered value");
+        buffered
+            .commit(WriteOptions::buffered())
+            .expect("commit buffered value");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let metrics = engine
+                .get_runtime_metrics()
+                .expect("read buffered durability metrics");
+            if metrics.current_sequence > 0
+                && metrics.wal_local_durable_seq == metrics.current_sequence
+            {
+                assert_eq!(metrics.wal_last_synced_seq, metrics.current_sequence);
+                assert_eq!(metrics.health, EngineHealth::Healthy);
+                assert_eq!(
+                    metrics
+                        .durability_waiters_fanned_out_total
+                        .saturating_sub(before.durability_waiters_fanned_out_total),
+                    1,
+                    "buffered generation waiter must complete exactly once before abort"
+                );
+                assert_eq!(
+                    metrics
+                        .late_runtime_responses_total
+                        .saturating_sub(before.late_runtime_responses_total),
+                    0,
+                    "buffered generation bookkeeping must remain healthy before abort"
+                );
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for buffered generation durability: {metrics:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        crash::abort_at_trigger(
+            "after_empty_sync_buffered_batch",
+            "manual::after_empty_sync_buffered_batch",
         );
     }
 
@@ -5642,6 +5732,7 @@ mod transaction_crash_boundaries {
             "group_after_commit_ack" => "manual::group_after_commit_ack",
             "after_strict_conflict_abort" => "manual::after_strict_conflict_abort",
             "after_assertion_only_sync_ack" => "manual::after_assertion_only_sync_ack",
+            "after_empty_sync_buffered_batch" => "manual::after_empty_sync_buffered_batch",
             "after_assertion_conflict_abort" => "manual::after_assertion_conflict_abort",
             other => panic!("unknown transaction crash trigger for scenario {other}"),
         }
