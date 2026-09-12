@@ -231,7 +231,11 @@ impl WalActor {
         })
     }
 
-    fn commit_sync_io(&mut self, state: &mut RuntimeState, receipt: WalSyncReceipt) -> MidgeResult<()> {
+    fn commit_sync_io(
+        &mut self,
+        state: &mut RuntimeState,
+        receipt: WalSyncReceipt,
+    ) -> MidgeResult<()> {
         if state.sequence != receipt.durable_sequence
             || state.wal.pending_writes != receipt.pending_writes
         {

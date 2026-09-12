@@ -394,6 +394,13 @@ impl WalCoordinator {
             event_loop.respond(request_id, RuntimeResponse::Ok { request_id });
             return HandleOutcome::Continue;
         }
+        // A fenced runtime can no longer prove cloud durability for anything
+        // beyond the committed frontier. Refuse now instead of queueing a
+        // waiter whose only possible outcome is a later failure.
+        if let Err(error) = event_loop.wal_transition.ensure_ready() {
+            event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
+            return HandleOutcome::Continue;
+        }
 
         let mut inflight_segment = event_loop
             .durability

@@ -19,12 +19,20 @@ impl super::EventLoop {
     /// fenced protocol always implies a fenced actor and vice versa. A sealed
     /// segment that lost its runtime owner is recorded from either argument or
     /// the actor's own transition bookkeeping.
+    ///
+    /// Every queued durability waiter receives its single terminal failure
+    /// here. Once fenced, no later sync or acknowledgement can complete a
+    /// waiter (both refuse through `ensure_ready`), so failing them promptly
+    /// is the only outcome that avoids stranding them until shutdown.
     pub(super) fn fence_wal_transition(&mut self, error: &MidgeError, sealed_segment: Option<u64>) {
         let sealed_segment = sealed_segment.or_else(|| self.wal_actor.fenced_sealed_segment());
         self.wal_actor
             .fence_transition(&mut self.state, error.to_string());
         self.wal_transition.fence(error.to_string(), sealed_segment);
         self.state.mark_persistence_anomaly();
+        let generation = self.durability.current_key();
+        let waiters = self.durability.drain_all_waiters_and_reset(generation);
+        self.fail_durability_waiters(waiters, error);
     }
 
     /// Resolve a failed actor-side seal step.
@@ -39,7 +47,6 @@ impl super::EventLoop {
             // The actor records a sealed segment only once the rename happened,
             // so `None` here defers to its bookkeeping instead of guessing.
             self.fence_wal_transition(error, None);
-            drop(ticket);
         } else {
             self.wal_transition.abandon_prepared_seal(ticket);
         }
@@ -147,7 +154,11 @@ mod tests {
     use super::super::tests::create_test_state;
     use super::super::EventLoop;
     use crate::common::MidgeError;
+    use crate::io::{Fs, MockFs};
+    #[cfg(feature = "failpoints")]
+    use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
     use crate::runtime::{ResponseRouter, RuntimeConfig};
+    use crate::wal::{FsWalFactoryIo, ACTIVE_FILE_NAME};
     use std::sync::Arc;
 
     fn create_local_event_loop() -> EventLoop {
@@ -157,11 +168,18 @@ mod tests {
             wal_durability_policy: crate::wal::DurabilityPolicy::Batched,
             ..RuntimeConfig::default()
         };
-        EventLoop::new(state, false, router, config, None).expect("create event loop")
+        let mut event_loop =
+            EventLoop::new(state, false, router, config, None).expect("create event loop");
+        let fs: Arc<dyn Fs> = Arc::new(MockFs::new());
+        let writer = FsWalFactoryIo::new(Arc::clone(&fs))
+            .create_writer(ACTIVE_FILE_NAME)
+            .expect("create mock WAL writer");
+        event_loop.wal_actor.install_filesystem_for_test(fs, writer);
+        event_loop
     }
 
     #[test]
-    fn should_fence_actor_and_protocol_together_from_a_single_helper() {
+    fn should_fence_both_transition_views_from_a_single_helper() {
         // Arrange
         let mut event_loop = create_local_event_loop();
         let error = MidgeError::Internal("injected".to_string());
@@ -204,7 +222,7 @@ mod tests {
     }
 
     #[test]
-    fn should_advance_segment_and_retire_local_seal_when_rotation_commits() {
+    fn should_commit_local_rotation_as_one_protocol_transition() {
         // Arrange
         let mut event_loop = create_local_event_loop();
         let segment_id = event_loop.state.wal.current_segment_id;
@@ -227,11 +245,10 @@ mod tests {
 
     #[cfg(feature = "failpoints")]
     #[test]
-    fn should_keep_protocol_and_actor_consistent_at_every_local_rotation_boundary() {
+    fn should_keep_both_transition_views_consistent_at_every_local_rotation_boundary() {
         // Arrange
         let _test_guard = crate::failpoints::test_failpoint_guard();
         let scenario = fail::FailScenario::setup();
-        use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
 
         for boundary in WalTransitionBoundary::LOCAL_ROTATION_BOUNDARIES {
             let mut event_loop = create_local_event_loop();

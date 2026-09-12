@@ -58,55 +58,46 @@ impl EventLoop {
             expected_max_sequence,
             bytes_buffered,
         } = plan;
-        self.wal_transition
-            .begin_seal(segment_id, next_segment_id, expected_max_sequence)?;
+        let ticket =
+            self.wal_transition
+                .begin_seal(segment_id, next_segment_id, expected_max_sequence)?;
         let seal_start = Instant::now();
-        let max_sequence = match self
-            .wal_actor
-            .flush_for_cloud_upload_within(&mut self.state, deadline)
-        {
-            Ok(max_sequence) => max_sequence,
-            Err(error) => {
-                if self.wal_actor.is_fenced() {
-                    self.wal_transition.fence(error.to_string(), None);
-                } else {
-                    self.wal_transition.abandon_prepared_seal(segment_id);
+        let max_sequence =
+            match self
+                .wal_actor
+                .flush_for_cloud_upload_within(&mut self.state, deadline, &ticket)
+            {
+                Ok(max_sequence) => max_sequence,
+                Err(error) => {
+                    self.settle_failed_seal_step(ticket, &error);
+                    return Err(error);
                 }
-                return Err(error);
-            }
-        };
+            };
         if max_sequence != expected_max_sequence {
             let error = crate::common::MidgeError::Fenced(format!(
                 "cloud WAL accounting changed during seal: expected max sequence {expected_max_sequence}, flushed {max_sequence}"
             ));
-            self.wal_actor
-                .fence_transition(&mut self.state, error.to_string());
-            self.wal_transition.fence(error.to_string(), None);
+            self.fence_wal_transition(&error, None);
             return Err(error);
         }
         if let Err(error) = Self::after_cloud_flush_boundary() {
-            return self.cancel_reversible_cloud_seal(segment_id, error);
+            return self.cancel_reversible_cloud_seal(ticket, error);
         }
         // Revalidate after the potentially slow flush but before the active
         // file is irreversibly rotated. A failure here leaves the same active
         // segment intact for a later retry.
         if let Err(error) = self.validate_runtime_writer_lease_within(deadline) {
-            return self.cancel_reversible_cloud_seal(segment_id, error);
+            return self.cancel_reversible_cloud_seal(ticket, error);
         }
-        let receipt = match self.wal_actor.rotate(&mut self.state) {
+        let receipt = match self.wal_actor.rotate(&mut self.state, &ticket) {
             Ok(receipt) => receipt,
             Err(error) => {
-                if self.wal_actor.is_fenced() {
-                    let sealed = self.wal_actor.fenced_sealed_segment();
-                    self.wal_transition.fence(error.to_string(), sealed);
-                } else {
-                    self.wal_transition.abandon_prepared_seal(segment_id);
-                }
+                self.settle_failed_seal_step(ticket, &error);
                 tracing::error!(error = %error, "CloudAsync: WAL rotate failed");
                 return Err(error);
             }
         };
-        self.commit_rotated_cloud_seal(receipt, max_sequence)?;
+        self.commit_rotated_cloud_seal(ticket, receipt)?;
 
         // From this point on the sealed file is a tracked obligation. Even a
         // lease or queue failure cannot make a later segment skip it.
@@ -163,9 +154,7 @@ impl EventLoop {
             let error = crate::common::MidgeError::Internal(format!(
                 "durability generation drift: expected current key {segment_id}"
             ));
-            self.wal_actor
-                .fence_transition(&mut self.state, error.to_string());
-            self.wal_transition.fence(error.to_string(), None);
+            self.fence_wal_transition(&error, None);
             self.fail_durability_waiters_after_generation_drift(segment_id, &error);
             return Err(error);
         }
@@ -186,25 +175,36 @@ impl EventLoop {
         }))
     }
 
+    /// Register the rotation receipt with every component that observes it.
+    ///
+    /// The receipt proves the active file was renamed, so from here every
+    /// failure is post-irreversible and resolves through
+    /// `finish_failed_cloud_seal_transition`: the sealed segment keeps a
+    /// runtime owner, accounting is transferred, and the runtime fences.
     fn commit_rotated_cloud_seal(
         &mut self,
+        ticket: crate::runtime::wal_transition::WalSealTicket,
         receipt: crate::runtime::actors::wal::WalRotationReceipt,
-        max_sequence: u64,
     ) -> crate::common::MidgeResult<()> {
-        let result = self.try_commit_rotated_cloud_seal(receipt, max_sequence);
-        if let Err(error) = &result {
-            self.finish_failed_cloud_seal_transition(receipt, max_sequence, error);
+        if let Err(error) = self.try_commit_rotated_cloud_seal(&ticket, receipt) {
+            self.finish_failed_cloud_seal_transition(receipt, &error);
+            return Err(error);
         }
-        result
+        if let Err(error) = self.wal_transition.finish_seal(ticket, receipt) {
+            self.finish_failed_cloud_seal_transition(receipt, &error);
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn try_commit_rotated_cloud_seal(
         &mut self,
+        ticket: &crate::runtime::wal_transition::WalSealTicket,
         receipt: crate::runtime::actors::wal::WalRotationReceipt,
-        max_sequence: u64,
     ) -> crate::common::MidgeResult<()> {
         let segment_id = receipt.sealed_segment;
-        self.wal_transition.note_sealed(receipt)?;
+        let max_sequence = receipt.max_sequence;
+        self.wal_transition.note_sealed(ticket, receipt)?;
         WalTransitionBoundary::BeforeCoordinatorCommit.check()?;
         #[cfg(feature = "failpoints")]
         if crate::failpoints::is_active("midge::cloud::inject_coordinator_drift_after_wal_rotation")
@@ -230,20 +230,25 @@ impl EventLoop {
         WalTransitionBoundary::AfterSegmentRegistration.check()?;
         WalTransitionBoundary::BeforeAccountingTransfer.check()?;
         self.wal_actor
-            .complete_cloud_upload_seal(&mut self.state, max_sequence);
+            .complete_cloud_upload_seal(&mut self.state, receipt);
         self.durability.record_cloud_flush();
         self.durability.clear_cloud_seal_retry_needed();
-        WalTransitionBoundary::AfterAccountingTransfer.check()?;
-        self.wal_transition.finish_seal(receipt)
+        WalTransitionBoundary::AfterAccountingTransfer.check()
     }
 
+    /// Deterministic terminal state for a cloud seal that failed after the
+    /// active file was renamed.
+    ///
+    /// Idempotent: every step either overwrites with the same value or is a
+    /// no-op once applied, so it is safe whether the failure happened before
+    /// or after any individual registration step.
     pub(in crate::runtime::event_loop) fn finish_failed_cloud_seal_transition(
         &mut self,
         receipt: crate::runtime::actors::wal::WalRotationReceipt,
-        max_sequence: u64,
         error: &crate::common::MidgeError,
     ) {
         let segment_id = receipt.sealed_segment;
+        let max_sequence = receipt.max_sequence;
         self.durability
             .record_cloud_segment_inflight(segment_id, max_sequence);
         self.cloud_wal
@@ -253,14 +258,10 @@ impl EventLoop {
             tracing::error!(%registration_error, segment_id, "failed to retain sealed WAL transition obligation");
         }
         self.wal_actor
-            .complete_cloud_upload_seal(&mut self.state, max_sequence);
+            .complete_cloud_upload_seal(&mut self.state, receipt);
         self.durability.record_cloud_flush();
         self.durability.clear_cloud_seal_retry_needed();
-        self.state.mark_persistence_anomaly();
-        self.wal_actor
-            .fence_transition(&mut self.state, error.to_string());
-        self.wal_transition
-            .fence(error.to_string(), Some(segment_id));
+        self.fence_wal_transition(error, Some(segment_id));
         self.fail_durability_waiters_after_generation_drift(receipt.next_segment, error);
         tracing::error!(
             %error,
@@ -272,18 +273,16 @@ impl EventLoop {
 
     fn cancel_reversible_cloud_seal(
         &mut self,
-        segment_id: u64,
+        ticket: crate::runtime::wal_transition::WalSealTicket,
         original_error: crate::common::MidgeError,
     ) -> crate::common::MidgeResult<Option<(u64, u64)>> {
-        if let Err(cancel_error) = self.wal_actor.cancel_reversible_cloud_flush() {
-            self.wal_actor
-                .fence_transition(&mut self.state, cancel_error.to_string());
-            self.wal_transition
-                .fence(cancel_error.to_string(), Some(segment_id));
+        if let Err(cancel_error) = self.wal_actor.cancel_reversible_cloud_flush(&ticket) {
+            let segment_id = ticket.segment_id();
+            self.fence_wal_transition(&cancel_error, None);
             self.fail_durability_waiters_after_generation_drift(segment_id, &cancel_error);
             return Err(cancel_error);
         }
-        self.wal_transition.abandon_prepared_seal(segment_id);
+        self.wal_transition.abandon_prepared_seal(ticket);
         Err(original_error)
     }
 

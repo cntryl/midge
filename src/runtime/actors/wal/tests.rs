@@ -3,6 +3,7 @@ use crate::io::traits::{DirEntry, FsError, Metadata};
 use crate::io::{
     Durability as FsDurability, File, Fs, FsPath, FsResult, MockFs, OpenOptions as FsOpenOptions,
 };
+use crate::runtime::wal_transition::{WalSealTicket, WalSyncTicket};
 #[cfg(feature = "failpoints")]
 use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
 use crate::runtime::RuntimeState;
@@ -13,6 +14,17 @@ use std::sync::{Mutex, OnceLock};
 
 #[cfg(feature = "failpoints")]
 static FAILPOINT_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn seal_ticket_for_test(actor: &WalActor, state: &RuntimeState) -> WalSealTicket {
+    let segment_id = state.wal.current_segment_id;
+    WalSealTicket::for_test(
+        segment_id,
+        segment_id
+            .checked_add(1)
+            .expect("test segment has successor"),
+        actor.current_segment_max_sequence(),
+    )
+}
 
 #[test]
 fn should_reject_wal_append_before_disk_growth_when_ephemeral_budget_is_exhausted(
@@ -1171,9 +1183,10 @@ fn should_rotate_to_lex_sortable_wal_segment_name() -> MidgeResult<()> {
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
+    let ticket = seal_ticket_for_test(&wal_actor, &state);
 
     // Act
-    wal_actor.rotate(&mut state)?;
+    wal_actor.rotate(&mut state, &ticket)?;
 
     // Assert
     assert!(
@@ -1211,9 +1224,10 @@ fn should_fail_rotate_without_advancing_segment_when_rename_fails() -> MidgeResu
     )?;
     wal_actor.install_filesystem_for_test(fs, writer);
     wal_actor.segment_max_sequence = 42;
+    let ticket = seal_ticket_for_test(&wal_actor, &state);
 
     // Act
-    let result = wal_actor.rotate(&mut state);
+    let result = wal_actor.rotate(&mut state, &ticket);
 
     // Assert
     assert!(result.is_err());
@@ -1231,12 +1245,7 @@ fn should_leave_rotation_operational_or_fenced_at_every_filesystem_boundary() ->
     let _test_guard = crate::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
 
-    for boundary in [
-        WalTransitionBoundary::BeforeRename,
-        WalTransitionBoundary::AfterRename,
-        WalTransitionBoundary::BeforeWriterCreate,
-        WalTransitionBoundary::AfterWriterCreate,
-    ] {
+    for boundary in WalTransitionBoundary::LOCAL_ROTATION_BOUNDARIES {
         let temp = tempfile::tempdir()?;
         let db_path = temp.path().to_path_buf();
         let wal_dir = db_path.join("wal");
@@ -1250,11 +1259,12 @@ fn should_leave_rotation_operational_or_fenced_at_every_filesystem_boundary() ->
             crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
         )?;
         let segment_id = state.wal.current_segment_id;
+        let ticket = seal_ticket_for_test(&wal_actor, &state);
         fail::cfg(boundary.failpoint_name(), "return").expect("configure WAL rotation boundary");
 
         // Act
         let error = wal_actor
-            .rotate(&mut state)
+            .rotate(&mut state, &ticket)
             .expect_err("configured boundary must interrupt rotation");
         fail::remove(boundary.failpoint_name());
 
@@ -1267,7 +1277,7 @@ fn should_leave_rotation_operational_or_fenced_at_every_filesystem_boundary() ->
             assert!(!wal_dir
                 .join(crate::wal::segment_file_name(segment_id))
                 .exists());
-            wal_actor.rotate(&mut state)?;
+            wal_actor.rotate(&mut state, &ticket)?;
             assert_eq!(state.wal.current_segment_id, segment_id + 1);
         } else {
             assert!(wal_actor.is_fenced());
@@ -1276,7 +1286,7 @@ fn should_leave_rotation_operational_or_fenced_at_every_filesystem_boundary() ->
                 .join(crate::wal::segment_file_name(segment_id))
                 .exists());
             assert!(matches!(
-                wal_actor.rotate(&mut state),
+                wal_actor.rotate(&mut state, &ticket),
                 Err(MidgeError::Fenced(_))
             ));
         }
@@ -1402,10 +1412,11 @@ fn should_fence_rotation_before_overwriting_existing_sealed_segment() -> MidgeRe
     let segment_id = state.wal.current_segment_id;
     let sealed_path = wal_dir.join(crate::wal::segment_file_name(segment_id));
     std::fs::write(&sealed_path, b"existing-sealed-segment")?;
+    let ticket = seal_ticket_for_test(&wal_actor, &state);
 
     // Act
     let error = wal_actor
-        .rotate(&mut state)
+        .rotate(&mut state, &ticket)
         .expect_err("existing sealed segment must reject rotation");
 
     // Assert
@@ -1438,10 +1449,11 @@ fn should_fence_rotation_when_sealed_directory_sync_fails() -> MidgeResult<()> {
     )?;
     wal_actor.install_filesystem_for_test(fs, writer);
     mock.set_sync_dir_failure(true);
+    let ticket = seal_ticket_for_test(&wal_actor, &state);
 
     // Act
     let error = wal_actor
-        .rotate(&mut state)
+        .rotate(&mut state, &ticket)
         .expect_err("directory sync failure must interrupt rotation");
 
     // Assert
@@ -1483,7 +1495,8 @@ fn should_fence_filesystem_wal_when_replacement_writer_open_fails_after_rename()
         DurabilityPolicy::CloudAsync,
     )?;
     wal_actor.append_prepared_transactions(&mut state, vec![prepared])?;
-    wal_actor.flush_for_cloud_upload(&mut state)?;
+    let ticket = seal_ticket_for_test(&wal_actor, &state);
+    wal_actor.flush_for_cloud_upload(&mut state, &ticket)?;
     let durable_before = state.wal.local_durable_seq;
     let pending_before = state.wal.pending_writes;
     let entries_before = state
@@ -1495,7 +1508,7 @@ fn should_fence_filesystem_wal_when_replacement_writer_open_fails_after_rename()
 
     // Act
     let rotate_error = wal_actor
-        .rotate(&mut state)
+        .rotate(&mut state, &ticket)
         .expect_err("replacement writer open must fail after rename");
     let sequence_before_rejected = state.sequence;
     let rejected = wal_actor.append_transaction(
@@ -1515,14 +1528,15 @@ fn should_fence_filesystem_wal_when_replacement_writer_open_fails_after_rename()
             conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
         },
     );
+    let sync_ticket = WalSyncTicket::for_test(0);
     let sync_error = wal_actor
-        .begin_sync_transition(&mut state)
+        .begin_sync_transition(&mut state, &sync_ticket)
         .expect_err("fenced WAL must reject sync");
     let flush_error = wal_actor
-        .flush_for_cloud_upload(&mut state)
+        .flush_for_cloud_upload(&mut state, &ticket)
         .expect_err("fenced WAL must reject cloud flush");
     let second_rotate_error = wal_actor
-        .rotate(&mut state)
+        .rotate(&mut state, &ticket)
         .expect_err("fenced WAL must reject further rotation");
 
     // Assert

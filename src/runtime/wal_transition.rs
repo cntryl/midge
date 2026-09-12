@@ -58,11 +58,6 @@ pub(crate) struct WalSyncTicket {
 }
 
 impl WalSyncTicket {
-    #[must_use]
-    pub(crate) fn generation(&self) -> u64 {
-        self.generation
-    }
-
     #[cfg(test)]
     pub(crate) fn for_test(generation: u64) -> Self {
         Self { generation }
@@ -320,6 +315,7 @@ impl WalTransitionProtocol {
         }
     }
 
+    #[allow(clippy::needless_pass_by_value)] // Consuming the ticket closes the linear transition.
     pub(crate) fn finish_sync(&mut self, ticket: WalSyncTicket) -> MidgeResult<()> {
         match self.phase {
             WalLifecyclePhase::Syncing { generation } if generation == ticket.generation => {
@@ -333,6 +329,7 @@ impl WalTransitionProtocol {
         }
     }
 
+    #[allow(clippy::needless_pass_by_value)] // Consuming the ticket closes the linear transition.
     pub(crate) fn finish_seal(
         &mut self,
         ticket: WalSealTicket,
@@ -369,6 +366,7 @@ impl WalTransitionProtocol {
     /// side of a transition the protocol no longer tracks. The rollback is
     /// only honored while the obligation is still `Prepared`; once the actor
     /// reported a rename the obligation must survive into `Fenced`.
+    #[allow(clippy::needless_pass_by_value)] // A rolled-back ticket cannot be reused by its caller.
     pub(crate) fn abandon_prepared_seal(&mut self, ticket: WalSealTicket) {
         if self
             .segments
@@ -518,7 +516,7 @@ mod tests {
         let wrong_sync = protocol.finish_sync(WalSyncTicket::for_test(5));
         let overlapping_seal = protocol.begin_seal(4, 5, 12);
         protocol.finish_sync(sync)?;
-        let seal = protocol.begin_seal(4, 5, 12)?;
+        let _seal = protocol.begin_seal(4, 5, 12)?;
         let wrong_seal = protocol.finish_seal(WalSealTicket::for_test(4, 6, 12), receipt(4, 6, 12));
 
         // Assert
@@ -526,7 +524,6 @@ mod tests {
         assert!(matches!(overlapping_seal, Err(MidgeError::Fenced(_))));
         assert!(matches!(wrong_seal, Err(MidgeError::Fenced(_))));
         assert!(protocol.ensure_ready().is_err());
-        drop(seal);
         Ok(())
     }
 

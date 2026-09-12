@@ -23,10 +23,30 @@
 //! In `DurabilityPolicy::CloudAsync`, writes become visible after the local WAL
 //! append barrier succeeds and the memtable is updated. Cloud upload remains
 //! asynchronous unless the caller explicitly waits on the cloud durability frontier.
+//!
+//! TRANSITION INVARIANT (see `crate::runtime::wal_transition`):
+//! A durability transition (fsync, rotate, cloud seal, cloud ack) is committed
+//! only when the actor, the durability coordinator, runtime frontiers, sealed
+//! segment ownership, and durability waiters all moved together. The actor
+//! enforces its part with `WalIoState`:
+//!
+//! - durable work (any policy other than explicit `BestEffort`) is accepted only
+//!   in `Open`, before any sequence is allocated or memtable mutated;
+//! - every transition installs `Transitioning` before its first irreversible or
+//!   ambiguous I/O step and returns to `Open` only when it fully completed;
+//! - any failure after an irreversible step lands in `Fenced`, which rejects
+//!   durable work, degrades health, and records a sealed segment that needs
+//!   restart recovery. A transition never returns while still `Transitioning`;
+//! - the frontier-moving entry points (`begin_sync_transition`,
+//!   `commit_sync_transition`, `flush_for_cloud_upload_within`, `rotate`,
+//!   `complete_cloud_upload_seal`, `cancel_reversible_cloud_flush`) require a
+//!   protocol ticket or rotation receipt, so no caller can run half of a
+//!   paired transition.
 
 use super::super::state::RuntimeState;
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::{Fs, RealFs};
+use crate::runtime::wal_transition::WalSealTicket;
 use crate::wal::policy::BatchConfig;
 #[cfg(test)]
 use crate::wal::WalOpKind;
@@ -286,7 +306,8 @@ impl WalActor {
         }
     }
 
-    fn is_open(&self) -> bool {
+    /// Whether the actor can accept durable work right now.
+    pub(crate) fn is_open(&self) -> bool {
         matches!(self.io, WalIoState::Memory | WalIoState::Open { .. })
     }
 
@@ -302,7 +323,14 @@ impl WalActor {
         }
     }
 
-    pub(crate) fn cancel_reversible_cloud_flush(&mut self) -> MidgeResult<()> {
+    /// Roll back a `CloudFlush` transition that has not yet renamed anything.
+    ///
+    /// Requires the seal ticket of the transition being cancelled so the
+    /// rollback cannot be issued outside the protocol-owned seal.
+    pub(crate) fn cancel_reversible_cloud_flush(
+        &mut self,
+        _ticket: &WalSealTicket,
+    ) -> MidgeResult<()> {
         match self.io {
             WalIoState::Transitioning {
                 operation: WalTransitionOperation::CloudFlush,

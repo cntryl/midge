@@ -381,10 +381,11 @@ fn should_fail_all_generation_waiters_given_terminal_cloud_upload_error(
     )?;
     let direct_request = 43;
     let pending_request = 44;
+    let segment_id = event_loop.state.wal.current_segment_id;
     let direct_response = event_loop.router.register(direct_request, "TestRequest");
     let pending_response = event_loop.router.register(pending_request, "TestRequest");
     event_loop.durability.queue_waiter_for_key(
-        0,
+        segment_id,
         DurabilityWaiter::CloudDurability {
             request_id: direct_request,
         },
@@ -397,7 +398,7 @@ fn should_fail_all_generation_waiters_given_terminal_cloud_upload_error(
 
     // Act
     event_loop.handle_storage_event(crate::storage::StorageEvent::CloudFail {
-        segment_id: 0,
+        segment_id,
         error: "terminal upload failure".to_string(),
         terminal: true,
         failure_kind: crate::storage::CloudUploadFailureKind::Other,
@@ -432,14 +433,15 @@ fn should_preserve_timeout_variant_given_terminal_cloud_upload_timeout(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     let request_id = 46;
+    let segment_id = event_loop.state.wal.current_segment_id;
     let response = event_loop.router.register(request_id, "TestRequest");
     event_loop
         .durability
-        .queue_waiter_for_key(0, DurabilityWaiter::CloudDurability { request_id });
+        .queue_waiter_for_key(segment_id, DurabilityWaiter::CloudDurability { request_id });
 
     // Act
     event_loop.handle_storage_event(crate::storage::StorageEvent::CloudFail {
-        segment_id: 0,
+        segment_id,
         error: "cloud WAL upload callback timed out".to_string(),
         terminal: true,
         failure_kind: crate::storage::CloudUploadFailureKind::Timeout,

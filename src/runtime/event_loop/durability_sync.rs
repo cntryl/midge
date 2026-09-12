@@ -246,7 +246,15 @@ impl EventLoop {
     ///
     /// The actor remains non-operational after fsync until this method commits
     /// both its sync receipt and the coordinator generation. No caller can
-    /// observe or bypass only half of the transition.
+    /// observe or bypass only half of the transition: the actor's sync entry
+    /// points require the `WalSyncTicket` minted here.
+    ///
+    /// Failure outcomes:
+    /// - before fsync: nothing moved, the protocol returns to `Ready`, and the
+    ///   waiters stay queued for a retry;
+    /// - after fsync: the actor and protocol fence together, every waiter of
+    ///   the sealed generation fails exactly once, and the coordinator key is
+    ///   realigned to the generation the actor can still prove.
     pub(super) fn sync_wal_generation(
         &mut self,
         source: CompletionSource,
@@ -260,94 +268,92 @@ impl EventLoop {
                 "cloud WAL generation drift: coordinator {sealed_generation}, active segment {}",
                 self.state.wal.current_segment_id
             ));
-            self.wal_actor
-                .fence_transition(&mut self.state, error.to_string());
-            self.wal_transition.fence(error.to_string(), None);
+            self.fence_wal_transition(&error, None);
             return Err(error);
         }
-        self.wal_transition.begin_sync(sealed_generation)?;
-        let receipt = match self.wal_actor.begin_sync_transition(&mut self.state) {
+        let ticket = self.wal_transition.begin_sync(sealed_generation)?;
+        let receipt = match self
+            .wal_actor
+            .begin_sync_transition(&mut self.state, &ticket)
+        {
             Ok(receipt) => receipt,
             Err(error) => {
                 if self.wal_actor.is_fenced() {
-                    self.wal_transition.fence(error.to_string(), None);
-                    self.fail_durability_waiters_after_generation_drift(sealed_generation, &error);
-                } else {
-                    self.wal_transition.finish_sync(sealed_generation)?;
+                    self.fence_sync_transition(&error, sealed_generation);
+                } else if let Err(finish_error) = self.wal_transition.finish_sync(ticket) {
+                    self.fence_sync_transition(&finish_error, sealed_generation);
                 }
                 return Err(error);
             }
         };
         if self.wal_actor.is_cloud_async() {
-            let result = self
-                .wal_actor
-                .commit_sync_transition(&mut self.state, receipt);
-            if let Err(error) = &result {
-                self.wal_transition.fence(error.to_string(), None);
-                self.fail_durability_waiters_after_generation_drift(sealed_generation, error);
-            } else if let Err(error) = self.wal_transition.finish_sync(sealed_generation) {
+            if let Err(error) =
                 self.wal_actor
-                    .fence_transition(&mut self.state, error.to_string());
-                self.wal_transition.fence(error.to_string(), None);
+                    .commit_sync_transition(&mut self.state, receipt, &ticket)
+            {
+                self.fence_sync_transition(&error, sealed_generation);
                 return Err(error);
             }
-            return result;
+            if let Err(error) = self.wal_transition.finish_sync(ticket) {
+                self.fence_sync_transition(&error, sealed_generation);
+                return Err(error);
+            }
+            return Ok(());
         }
 
         let next_generation = next_generation.expect("local generation preflighted");
         if let Err(error) = WalTransitionBoundary::BeforeCoordinatorCommit.check() {
-            self.wal_actor
-                .fence_transition(&mut self.state, error.to_string());
-            self.wal_transition.fence(error.to_string(), None);
-            self.fail_durability_waiters_after_generation_drift(sealed_generation, &error);
+            self.fence_sync_transition(&error, sealed_generation);
             return Err(error);
         }
         if let Err(error) = self
             .durability
             .rotate_from_to(sealed_generation, next_generation)
         {
-            self.wal_actor
-                .fence_transition(&mut self.state, error.to_string());
-            self.wal_transition.fence(error.to_string(), None);
             tracing::error!(%error, "durability generation drift after WAL sync");
-            self.fail_durability_waiters_after_generation_drift(next_generation, &error);
+            self.fence_sync_transition(&error, next_generation);
             return Err(error);
         }
         if let Err(error) = WalTransitionBoundary::AfterCoordinatorCommit.check() {
-            self.wal_actor
-                .fence_transition(&mut self.state, error.to_string());
-            self.wal_transition.fence(error.to_string(), None);
-            self.fail_durability_waiters_after_generation_drift(next_generation, &error);
+            self.fence_sync_transition(&error, next_generation);
             return Err(error);
         }
 
         if let Err(error) = self
             .wal_actor
-            .commit_sync_transition(&mut self.state, receipt)
+            .commit_sync_transition(&mut self.state, receipt, &ticket)
         {
-            self.wal_actor
-                .fence_transition(&mut self.state, error.to_string());
-            self.wal_transition.fence(error.to_string(), None);
-            self.fail_durability_waiters_after_generation_drift(next_generation, &error);
+            self.fence_sync_transition(&error, next_generation);
             return Err(error);
         }
 
         if let Err(error) = WalTransitionBoundary::BeforeWaiterCompletion.check() {
-            self.wal_actor
-                .fence_transition(&mut self.state, error.to_string());
-            self.wal_transition.fence(error.to_string(), None);
-            self.fail_durability_waiters_after_generation_drift(next_generation, &error);
+            self.fence_sync_transition(&error, next_generation);
             return Err(error);
         }
         let completed = self.durability.complete_waiters_at(sealed_generation);
         self.complete_durability_waiters(completed, source);
-        if let Err(error) = self.wal_transition.finish_sync(sealed_generation) {
-            self.wal_actor
-                .fence_transition(&mut self.state, error.to_string());
-            self.wal_transition.fence(error.to_string(), None);
+        if let Err(error) = self.wal_transition.finish_sync(ticket) {
+            self.fence_sync_transition(&error, next_generation);
             return Err(error);
         }
         WalTransitionBoundary::AfterCommitBeforeReturn.check()
+    }
+
+    /// Terminal outcome for a sync that failed after an irreversible step:
+    /// fence both views, fail every queued waiter exactly once, and leave the
+    /// coordinator at the generation the actor can still prove.
+    fn fence_sync_transition(
+        &mut self,
+        error: &crate::common::MidgeError,
+        realigned_generation: u64,
+    ) {
+        self.fence_wal_transition(error, None);
+        if self.durability.current_key() != realigned_generation {
+            let _ = self
+                .durability
+                .drain_all_waiters_and_reset(realigned_generation);
+        }
     }
 
     fn next_wal_generation(&self, current: u64) -> crate::common::MidgeResult<Option<u64>> {
@@ -576,54 +582,57 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     fn should_resolve_every_local_sync_boundary_without_partial_operational_state() {
         // Arrange
+        struct Expected {
+            generation: u64,
+            frontier: u64,
+            fenced: bool,
+            succeeded: bool,
+        }
+        let expected = |boundary: WalTransitionBoundary| match boundary {
+            WalTransitionBoundary::BeforeFsync => Expected {
+                generation: 0,
+                frontier: 0,
+                fenced: false,
+                succeeded: false,
+            },
+            WalTransitionBoundary::AfterFsync | WalTransitionBoundary::BeforeCoordinatorCommit => {
+                Expected {
+                    generation: 0,
+                    frontier: 0,
+                    fenced: true,
+                    succeeded: false,
+                }
+            }
+            WalTransitionBoundary::AfterCoordinatorCommit => Expected {
+                generation: 1,
+                frontier: 0,
+                fenced: true,
+                succeeded: false,
+            },
+            WalTransitionBoundary::BeforeWaiterCompletion => Expected {
+                generation: 1,
+                frontier: 9,
+                fenced: true,
+                succeeded: false,
+            },
+            WalTransitionBoundary::AfterCommitBeforeReturn => Expected {
+                generation: 1,
+                frontier: 9,
+                fenced: false,
+                succeeded: true,
+            },
+            other => panic!("local sync matrix has no expectation for {other:?}"),
+        };
         let _test_guard = crate::failpoints::test_failpoint_guard();
         let scenario = fail::FailScenario::setup();
-        let cases = [
-            (
-                WalTransitionBoundary::BeforeFsync,
-                0,
-                0,
-                false,
-                false,
-                false,
-            ),
-            (WalTransitionBoundary::AfterFsync, 0, 0, true, true, false),
-            (
-                WalTransitionBoundary::BeforeCoordinatorCommit,
-                0,
-                0,
-                true,
-                true,
-                false,
-            ),
-            (
-                WalTransitionBoundary::AfterCoordinatorCommit,
-                1,
-                0,
-                true,
-                true,
-                false,
-            ),
-            (
-                WalTransitionBoundary::BeforeWaiterCompletion,
-                1,
-                9,
-                true,
-                true,
-                false,
-            ),
-            (
-                WalTransitionBoundary::AfterCommitBeforeReturn,
-                1,
-                9,
-                false,
-                false,
-                true,
-            ),
-        ];
 
-        for (boundary, expected_generation, expected_frontier, fenced, degraded, succeeded) in cases
-        {
+        for boundary in WalTransitionBoundary::LOCAL_SYNC_BOUNDARIES {
+            let Expected {
+                generation: expected_generation,
+                frontier: expected_frontier,
+                fenced,
+                succeeded,
+            } = expected(boundary);
             let mut event_loop =
                 create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
                     .expect("create event loop");
@@ -650,12 +659,34 @@ mod tests {
 
             // Assert
             assert!(matches!(error, crate::common::MidgeError::Internal(_)));
-            assert_eq!(event_loop.durability.current_key(), expected_generation);
-            assert_eq!(event_loop.state.wal.local_durable_seq, expected_frontier);
-            assert_eq!(event_loop.state.wal.last_synced_seq, expected_frontier);
-            assert_eq!(event_loop.wal_actor.is_fenced(), fenced);
-            assert_eq!(event_loop.wal_transition.is_fenced(), fenced);
-            assert_eq!(event_loop.state.persistence_anomaly_detected(), degraded);
+            assert_eq!(
+                event_loop.durability.current_key(),
+                expected_generation,
+                "{boundary:?}"
+            );
+            assert_eq!(
+                event_loop.state.wal.local_durable_seq, expected_frontier,
+                "{boundary:?}"
+            );
+            assert_eq!(
+                event_loop.state.wal.last_synced_seq, expected_frontier,
+                "{boundary:?}"
+            );
+            assert_eq!(event_loop.wal_actor.is_fenced(), fenced, "{boundary:?}");
+            assert_eq!(
+                event_loop.wal_transition.is_fenced(),
+                fenced,
+                "{boundary:?}"
+            );
+            assert_eq!(
+                event_loop.state.persistence_anomaly_detected(),
+                fenced,
+                "{boundary:?}"
+            );
+            assert!(
+                event_loop.wal_actor.is_open() || event_loop.wal_actor.is_fenced(),
+                "{boundary:?}: actor must never rest mid-transition"
+            );
 
             if boundary == WalTransitionBoundary::BeforeFsync {
                 assert!(event_loop.durability.has_pending_waiters());
@@ -682,6 +713,10 @@ mod tests {
                         terminal,
                         RuntimeResponse::Error { request_id: actual, .. }
                             if actual == request_id
+                    ));
+                    assert!(matches!(
+                        event_loop.sync_wal_generation(CompletionSource::WalSync),
+                        Err(crate::common::MidgeError::Fenced(_))
                     ));
                 }
             }

@@ -178,6 +178,25 @@ impl EventLoop {
                 .as_ref()
                 .copied()
                 .unwrap_or(self.wal_actor.durability_policy());
+            // The durability coordinator keys waiters by generation in local
+            // modes and by segment id in `CloudAsync`. Switching between the
+            // two at runtime would let the actor and coordinator disagree
+            // about what a generation means, so the cloud-ness of the policy
+            // is fixed for the life of the runtime.
+            let switches_cloud_mode = matches!(policy, crate::wal::DurabilityPolicy::CloudAsync)
+                != self.wal_actor.is_cloud_async();
+            if switches_cloud_mode {
+                self.respond(
+                    update.request_id,
+                    RuntimeResponse::Error {
+                        request_id: update.request_id,
+                        error: crate::common::MidgeError::InvalidArgument(format!(
+                            "cannot switch WAL durability policy to {policy:?} at runtime; cloud-backed and local modes key durability generations differently"
+                        )),
+                    },
+                );
+                return HandleOutcome::Continue;
+            }
             let batch_cfg = update
                 .wal_batch_config
                 .as_ref()

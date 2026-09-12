@@ -22,6 +22,57 @@ pub(crate) enum WalTransitionBoundary {
 }
 
 impl WalTransitionBoundary {
+    /// Boundaries exercised by the local paired sync matrix
+    /// (`event_loop::durability_sync`).
+    #[cfg(all(test, feature = "failpoints"))]
+    pub(crate) const LOCAL_SYNC_BOUNDARIES: [Self; 6] = [
+        Self::BeforeFsync,
+        Self::AfterFsync,
+        Self::BeforeCoordinatorCommit,
+        Self::AfterCoordinatorCommit,
+        Self::BeforeWaiterCompletion,
+        Self::AfterCommitBeforeReturn,
+    ];
+
+    /// Boundaries exercised by the local rotation matrices (actor and
+    /// event-loop level).
+    #[cfg(all(test, feature = "failpoints"))]
+    pub(crate) const LOCAL_ROTATION_BOUNDARIES: [Self; 4] = [
+        Self::BeforeRename,
+        Self::AfterRename,
+        Self::BeforeWriterCreate,
+        Self::AfterWriterCreate,
+    ];
+
+    /// Boundaries exercised by the durable append matrix.
+    #[cfg(all(test, feature = "failpoints"))]
+    pub(crate) const APPEND_BOUNDARIES: [Self; 1] = [Self::AfterAppendBeforeAccounting];
+
+    /// Boundaries exercised by the `CloudAsync` seal matrix
+    /// (`event_loop::cloud_integration::tests`).
+    #[cfg(all(test, feature = "failpoints"))]
+    pub(crate) const CLOUD_SEAL_BOUNDARIES: [Self; 10] = [
+        Self::BeforeRename,
+        Self::AfterRename,
+        Self::BeforeWriterCreate,
+        Self::AfterWriterCreate,
+        Self::BeforeCoordinatorCommit,
+        Self::AfterCoordinatorCommit,
+        Self::BeforeSegmentRegistration,
+        Self::AfterSegmentRegistration,
+        Self::BeforeAccountingTransfer,
+        Self::AfterAccountingTransfer,
+    ];
+
+    /// Boundaries exercised by the `CloudAsync` acknowledgement matrix.
+    #[cfg(all(test, feature = "failpoints"))]
+    pub(crate) const CLOUD_ACK_BOUNDARIES: [Self; 4] = [
+        Self::BeforeAccountingTransfer,
+        Self::AfterAccountingTransfer,
+        Self::BeforeWaiterCompletion,
+        Self::AfterCommitBeforeReturn,
+    ];
+
     #[cfg(test)]
     pub(crate) const ALL: [Self; 15] = [
         Self::BeforeFsync,
@@ -70,5 +121,59 @@ impl WalTransitionBoundary {
             )));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WalTransitionBoundary;
+
+    #[test]
+    fn should_enumerate_every_declared_wal_transition_boundary() {
+        // Arrange
+        let expected = 15;
+
+        // Act
+        let boundaries = WalTransitionBoundary::ALL;
+
+        // Assert
+        assert_eq!(boundaries.len(), expected);
+        let names = boundaries.map(WalTransitionBoundary::failpoint_name);
+        let unique = names.into_iter().collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(unique.len(), boundaries.len());
+        assert!(names
+            .into_iter()
+            .all(|name| name.starts_with("midge::wal_transition::")));
+    }
+
+    /// Every boundary must belong to at least one failure-injection matrix.
+    /// Adding a boundary to `ALL` without adding it to a matrix list fails
+    /// here, and each matrix iterates its list, so a new transition step
+    /// automatically receives failure-path coverage.
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn should_cover_every_wal_transition_boundary_with_a_failure_matrix() {
+        // Arrange
+        let covered = WalTransitionBoundary::LOCAL_SYNC_BOUNDARIES
+            .iter()
+            .chain(WalTransitionBoundary::LOCAL_ROTATION_BOUNDARIES.iter())
+            .chain(WalTransitionBoundary::APPEND_BOUNDARIES.iter())
+            .chain(WalTransitionBoundary::CLOUD_SEAL_BOUNDARIES.iter())
+            .chain(WalTransitionBoundary::CLOUD_ACK_BOUNDARIES.iter())
+            .map(|boundary| boundary.failpoint_name())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        // Act
+        let uncovered = WalTransitionBoundary::ALL
+            .iter()
+            .filter(|boundary| !covered.contains(boundary.failpoint_name()))
+            .copied()
+            .collect::<Vec<_>>();
+
+        // Assert
+        assert!(
+            uncovered.is_empty(),
+            "WAL transition boundaries without a failure matrix: {uncovered:?}"
+        );
     }
 }

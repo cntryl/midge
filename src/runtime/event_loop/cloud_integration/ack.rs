@@ -310,11 +310,7 @@ impl EventLoop {
         for (ready_segment_id, _) in ready_segments {
             if self.remove_cloud_durable_local_wal_segment(*ready_segment_id) {
                 if let Err(error) = self.wal_transition.retire_cloud_durable(*ready_segment_id) {
-                    self.state.mark_persistence_anomaly();
-                    self.wal_actor
-                        .fence_transition(&mut self.state, error.to_string());
-                    self.wal_transition
-                        .fence(error.to_string(), Some(*ready_segment_id));
+                    self.fence_wal_transition(&error, Some(*ready_segment_id));
                     tracing::error!(%error, segment_id = *ready_segment_id, "cloud WAL obligation retirement fenced");
                     return;
                 }
@@ -334,10 +330,7 @@ impl EventLoop {
         error: &crate::common::MidgeError,
     ) {
         let first_segment = ready_segments.first().map(|(segment_id, _)| *segment_id);
-        self.state.mark_persistence_anomaly();
-        self.wal_actor
-            .fence_transition(&mut self.state, error.to_string());
-        self.wal_transition.fence(error.to_string(), first_segment);
+        self.fence_wal_transition(error, first_segment);
         if let Some(first_segment) = first_segment {
             let waiters = self.durability.drain_waiters_at_or_after(first_segment);
             self.fail_durability_waiters(waiters, error);
@@ -455,17 +448,31 @@ impl EventLoop {
         error: &crate::common::MidgeError,
         requeue_publication: bool,
     ) {
+        if !self.wal_transition.owns_segment(segment_id)
+            && self
+                .durability
+                .cloud_segment_max_sequence(segment_id)
+                .is_none()
+            && segment_id < self.durability.current_key()
+        {
+            // The runtime no longer owns this segment: it was retired after
+            // cloud durability was proven. A late storage event must not
+            // mutate ownership, frontier, or waiter state it does not cover.
+            tracing::warn!(
+                segment_id,
+                %error,
+                "ignored cloud WAL failure for a segment the runtime no longer owns"
+            );
+            return;
+        }
         self.state.cloud.pending_uploads.retain(|item| {
             crate::wal::parse_segment_id(item).is_none_or(|pending| pending != segment_id)
         });
         self.state.mark_persistence_anomaly();
         self.cloud_wal.acked_segments.remove(&segment_id);
         if let Err(registration_error) = self.wal_transition.note_requeued(segment_id) {
-            self.wal_actor
-                .fence_transition(&mut self.state, registration_error.to_string());
-            self.wal_transition
-                .fence(registration_error.to_string(), Some(segment_id));
-            tracing::error!(%registration_error, segment_id, "cloud WAL failure could not preserve transition ownership");
+            self.fence_wal_transition(error, Some(segment_id));
+            tracing::error!(%registration_error, %error, segment_id, "cloud WAL failure could not preserve transition ownership");
         }
 
         // Keep the segment in the inflight frontier and preserve its request
