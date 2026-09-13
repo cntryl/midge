@@ -1,9 +1,22 @@
 # Migration guide
 
-Midge `0.1.0` is a 0.x crate. Treat upgrades as application migrations: read
+Midge is a 0.x crate. Treat upgrades as application migrations: read
 the release notes, inspect [format compatibility](../development/format-compatibility.md),
 run compatibility and recovery tests, and keep a verified application-level
 backup before changing binaries.
+
+## 0.1.0 to 0.1.1
+
+Version `0.1.1` is a durability-correctness patch with no public API or
+persisted-format change. Stop writers, complete `engine.shutdown(timeout)`,
+preserve the database directory and relevant cloud prefix, then replace the
+binary or crate version. Existing FORMAT 3, SST V4, manifest, and WAL data can
+be opened directly without conversion.
+
+Rollback from `0.1.1` to `0.1.0` is supported after a clean shutdown because
+both versions write the same persisted formats. Do not roll back a live or
+still-fenced process in place: stop it first and retain all WAL files so the
+selected binary can perform ordinary restart recovery.
 
 ## FORMAT 3 and SST V4
 

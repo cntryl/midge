@@ -9,6 +9,56 @@ Midge is currently in the 0.1 release line. Compatibility expectations for pre-1
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-13
+
+### Fixed
+
+- WAL fsync and rotation now use one explicit transition protocol across the
+  filesystem writer, durability coordinator, sequence frontiers, sealed-segment
+  ownership, accounting, health, and waiter completion. Assertion-only and
+  empty synchronous transactions can no longer advance only the actor's
+  generation and strand the following buffered batch.
+- A WAL whose active file was sealed but whose replacement writer could not be
+  installed now enters a deterministic fenced state. Subsequent durable writes
+  are rejected before sequence allocation or memtable mutation, the sealed
+  segment is retained, and restart recovery replays the accepted durable prefix.
+- CloudAsync sealing retains every successfully rotated segment in inflight and
+  upload-backlog ownership when coordinator or later bookkeeping fails. Pending
+  accounting is settled, affected waiters fail exactly once, and restart
+  recovery resumes the retained upload obligation.
+- WAL transition preflight failures restore the reversible actor state, local
+  disk admission failures before the first spilled WAL frame remain retryable,
+  and stale-writer authority failures fence further durable work.
+- Runtime configuration rejects local/cloud WAL policy switches before applying
+  any other requested fields, preserving the atomic update contract.
+
+### Changed
+
+- Development and stress qualification now consume the published
+  `cntryl-stress` crate instead of a repository-local path dependency. This does
+  not change the runtime dependency graph of `cntryl-midge`.
+
+### Upgrade and rollback
+
+- This patch does not change the public API, error variants, WAL records,
+  manifest data, SST format, or database format. After a clean shutdown,
+  existing `0.1.0` databases and cloud prefixes can be opened directly with
+  `0.1.1`.
+- Rollback to `0.1.0` is supported after a clean `0.1.1` shutdown because this
+  patch writes the same persisted formats. Preserve the database directory and
+  cloud prefix before changing binaries as required by the general migration
+  procedure.
+
+### Known risks
+
+- Midge intentionally sacrifices in-process write availability after an
+  ambiguous WAL transition. The actor reports degraded/fenced health and
+  requires restart recovery rather than risking an acknowledgement that the
+  surviving persistence state cannot prove.
+- A failure after durability is completely committed but before the operation
+  returns can still be reported as a false negative. Retrying must remain
+  idempotent; the implementation does not report success before durability.
+
 ## [0.1.0] - 2026-09-10
 
 ### Changed
@@ -205,5 +255,6 @@ Midge is currently in the 0.1 release line. Compatibility expectations for pre-1
   to the capabilities and qualification conditions in the support matrix; API,
   operational, and on-disk compatibility may change in a future 0.x minor release.
 
-[Unreleased]: https://github.com/cntryl/midge/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/cntryl/midge/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/cntryl/midge/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/cntryl/midge/releases/tag/v0.1.0
