@@ -330,11 +330,9 @@ impl EventLoop {
         error: &crate::common::MidgeError,
     ) {
         let first_segment = ready_segments.first().map(|(segment_id, _)| *segment_id);
+        // Fencing fails every queued waiter exactly once; nothing keyed at or
+        // after the uncommitted segments can complete without a restart.
         self.fence_wal_transition(error, first_segment);
-        if let Some(first_segment) = first_segment {
-            let waiters = self.durability.drain_waiters_at_or_after(first_segment);
-            self.fail_durability_waiters(waiters, error);
-        }
         tracing::error!(%error, ?first_segment, "cloud WAL acknowledgement transition fenced");
     }
 
@@ -453,11 +451,15 @@ impl EventLoop {
                 .durability
                 .cloud_segment_max_sequence(segment_id)
                 .is_none()
-            && segment_id < self.durability.current_key()
+            && self
+                .durability
+                .cloud_durability_request_ids_at(segment_id)
+                .is_empty()
         {
-            // The runtime no longer owns this segment: it was retired after
-            // cloud durability was proven. A late storage event must not
-            // mutate ownership, frontier, or waiter state it does not cover.
+            // The runtime no longer owns this segment and nobody is waiting
+            // on it: it was retired after cloud durability was proven. A late
+            // storage event must not mutate ownership, frontier, or waiter
+            // state it does not cover.
             tracing::warn!(
                 segment_id,
                 %error,
@@ -470,10 +472,6 @@ impl EventLoop {
         });
         self.state.mark_persistence_anomaly();
         self.cloud_wal.acked_segments.remove(&segment_id);
-        if let Err(registration_error) = self.wal_transition.note_requeued(segment_id) {
-            self.fence_wal_transition(error, Some(segment_id));
-            tracing::error!(%registration_error, %error, segment_id, "cloud WAL failure could not preserve transition ownership");
-        }
 
         // Keep the segment in the inflight frontier and preserve its request
         // identities. The accepted local WAL remains owned for callerless
@@ -483,6 +481,19 @@ impl EventLoop {
 
         // Let WAL actor handle its internal failure handling and drop pending writes.
         tracing::error!(segment_id, error = %error, "Cloud upload failed");
+
+        // A failure at this segment blocks its own and every later cloud
+        // durability generation, but an earlier sealed generation can still
+        // close independently when its acknowledgement arrives. Fail them
+        // with the causal storage error before any ownership repair below can
+        // fence with a less specific one.
+        let waiters = self.durability.drain_waiters_at_or_after(segment_id);
+        self.fail_durability_waiters(waiters, error);
+
+        if let Err(registration_error) = self.wal_transition.note_requeued(segment_id) {
+            self.fence_wal_transition(&registration_error, Some(segment_id));
+            tracing::error!(%registration_error, segment_id, "cloud WAL failure could not preserve transition ownership");
+        }
 
         if requeue_publication {
             if let Some(max_seq) = failed_max_sequence {
@@ -507,12 +518,6 @@ impl EventLoop {
                 );
             }
         }
-
-        // A failure at this segment blocks its own and every later cloud
-        // durability generation, but an earlier sealed generation can still
-        // close independently when its acknowledgement arrives.
-        let waiters = self.durability.drain_waiters_at_or_after(segment_id);
-        self.fail_durability_waiters(waiters, error);
 
         // Keep all inflight segments. A later ACK may already be buffered, but
         // it cannot advance the frontier until this failed segment is retried

@@ -122,10 +122,19 @@ impl WalActor {
         // Epoch fencing check: verify our epoch is still current before making
         // data durable.  If a newer writer has taken over, we must stop.
         if let Some(store) = &self.leader_store {
-            store.validate_epoch(&self.leader_holder_id, self.current_epoch).map_err(|e| {
-                tracing::error!(epoch = self.current_epoch, err = %e, "fenced at sync boundary");
-                e
-            })?;
+            if let Err(error) = store.validate_epoch(&self.leader_holder_id, self.current_epoch) {
+                let error = MidgeError::from(error);
+                tracing::error!(epoch = self.current_epoch, err = %error, "fenced at sync boundary");
+                // A failed authority proof is not a retryable pre-fsync I/O
+                // error: this writer may already be stale. Keep it from
+                // accepting more WAL-backed work while the event loop pairs
+                // this actor fence with the transition protocol and waiters.
+                self.fence_transition(
+                    state,
+                    format!("WAL writer authority validation failed: {error}"),
+                );
+                return Err(error);
+            }
         }
 
         self.begin_io_transition(WalTransitionOperation::Sync)?;
@@ -258,6 +267,9 @@ impl WalActor {
         Ok(())
     }
 
+    // The failpoint expands to an early return only with the `failpoints`
+    // feature; the Result is the production-shaped boundary contract.
+    #[allow(clippy::unnecessary_wraps)]
     fn sync_failure_boundary() -> MidgeResult<()> {
         crate::failpoints::fail_point!("midge::wal::inject_no_space_on_sync", |_| Err(
             MidgeError::NoSpace(
@@ -267,6 +279,9 @@ impl WalActor {
         Ok(())
     }
 
+    // The failpoint expands to an early return only with the `failpoints`
+    // feature; the Result is the production-shaped boundary contract.
+    #[allow(clippy::unnecessary_wraps)]
     fn after_fsync_boundary() -> MidgeResult<()> {
         crate::failpoints::fail_point!("midge::wal::after_fsync_before_durable_frontier", |_| Err(
             MidgeError::Internal(
@@ -359,7 +374,7 @@ impl WalActor {
         state: &mut RuntimeState,
         receipt: super::WalRotationReceipt,
     ) {
-        let max_sequence = receipt.max_sequence;
+        let max_sequence = receipt.max_sequence();
         state.wal.last_synced_seq = max_sequence;
         state.wal.local_durable_seq = max_sequence;
         state.wal.pending_writes = 0;

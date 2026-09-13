@@ -82,11 +82,10 @@ impl WalActor {
                 sealed_segment: old_segment,
                 next_segment,
                 max_sequence,
-                sealed_file_created: false,
             });
         };
 
-        let sealed_file_created = self.seal_active_segment(state, &fs, old_segment)?;
+        self.seal_active_segment(state, &fs, old_segment)?;
         self.install_replacement_writer_after_seal(state, &fs, old_segment)?;
         if let Err(error) = self.finish_io_transition() {
             self.fence_transition(
@@ -103,7 +102,6 @@ impl WalActor {
             sealed_segment: old_segment,
             next_segment,
             max_sequence,
-            sealed_file_created,
         })
     }
 
@@ -115,7 +113,23 @@ impl WalActor {
     ) -> MidgeResult<bool> {
         let old_path = FsPath::new(crate::wal::ACTIVE_FILE_NAME);
         let new_path = FsPath::new(crate::wal::segment_file_name(old_segment));
-        if fs.exists(&new_path).map_err(MidgeError::from)? {
+        self.begin_io_transition(WalTransitionOperation::Rotate)?;
+        let sealed_segment_exists = match fs.exists(&new_path) {
+            Ok(exists) => exists,
+            Err(error) => {
+                let error = MidgeError::from(error);
+                if let Err(rollback_error) = self.finish_io_transition() {
+                    self.fence_transition(
+                        state,
+                        format!(
+                            "WAL rotation preflight failed and the reversible transition could not be rolled back: {rollback_error}"
+                        ),
+                    );
+                }
+                return Err(error);
+            }
+        };
+        if sealed_segment_exists {
             let error = MidgeError::Fenced(format!(
                 "refusing to overwrite existing sealed WAL segment {old_segment}"
             ));
@@ -123,7 +137,6 @@ impl WalActor {
             return Err(error);
         }
 
-        self.begin_io_transition(WalTransitionOperation::Rotate)?;
         if let Err(error) = WalTransitionBoundary::BeforeRename.check() {
             self.finish_io_transition()?;
             return Err(error);
@@ -209,6 +222,14 @@ impl WalActor {
                     self.fence_transition(state, error.to_string());
                     return Err(error);
                 }
+                if let Err(error) = Self::after_writer_create_boundary() {
+                    self.fence_transition(state, error.to_string());
+                    return Err(error);
+                }
+                if let Err(error) = WalTransitionBoundary::AfterWriterCreate.check() {
+                    self.fence_transition(state, error.to_string());
+                    return Err(error);
+                }
                 if let Err(error) = fs.sync_dir(&FsPath::new("."), Durability::Durable) {
                     let error = MidgeError::from(error);
                     self.fence_transition(
@@ -230,11 +251,7 @@ impl WalActor {
             }
         }
 
-        if let Err(error) = Self::after_writer_create_boundary() {
-            self.fence_transition(state, error.to_string());
-            return Err(error);
-        }
-        if let Err(error) = WalTransitionBoundary::AfterWriterCreate.check() {
+        if let Err(error) = WalTransitionBoundary::AfterReplacementDirectorySync.check() {
             self.fence_transition(state, error.to_string());
             return Err(error);
         }
@@ -270,6 +287,9 @@ impl WalActor {
         }
     }
 
+    // The failpoint expands to an early return only with the `failpoints`
+    // feature; the Result is the production-shaped boundary contract.
+    #[allow(clippy::unnecessary_wraps)]
     fn before_rename_boundary() -> MidgeResult<()> {
         crate::failpoints::fail_point!("midge::wal::inject_fail_before_rename", |_| Err(
             MidgeError::Internal("failpoint: WAL rotation failed before rename".to_string(),)
@@ -277,6 +297,9 @@ impl WalActor {
         Ok(())
     }
 
+    // The failpoint expands to an early return only with the `failpoints`
+    // feature; the Result is the production-shaped boundary contract.
+    #[allow(clippy::unnecessary_wraps)]
     fn after_rename_boundary() -> MidgeResult<()> {
         crate::failpoints::fail_point!(
             "midge::wal::inject_fail_after_rename_before_writer_create",
@@ -287,6 +310,9 @@ impl WalActor {
         Ok(())
     }
 
+    // The failpoint expands to an early return only with the `failpoints`
+    // feature; the Result is the production-shaped boundary contract.
+    #[allow(clippy::unnecessary_wraps)]
     fn after_writer_create_boundary() -> MidgeResult<()> {
         crate::failpoints::fail_point!(
             "midge::wal::inject_fail_after_writer_create_before_commit",

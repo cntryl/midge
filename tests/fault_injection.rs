@@ -5939,6 +5939,10 @@ mod cloud_crash_recovery {
             "cloud_async_after_rotation_coordinator_drift" => {
                 child_cloud_async_after_rotation_coordinator_drift(&db_path);
             }
+            #[cfg(feature = "failpoints")]
+            "cloud_async_after_rename_writer_loss" => {
+                child_cloud_async_after_rename_writer_loss(&db_path);
+            }
             "buffered_eventual_flush_after_publish" => {
                 child_buffered_eventual_flush_after_publish(&db_path);
             }
@@ -6123,6 +6127,35 @@ mod cloud_crash_recovery {
         assert_eq!(metrics.health, EngineHealth::Healthy);
     }
 
+    /// The rename succeeded but the replacement writer never appeared, so the
+    /// sealed segment was never enqueued and the child fenced. Recovery must
+    /// find the orphaned sealed file, upload it, and reach the same frontier.
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn should_recover_orphaned_sealed_cloud_wal_when_child_aborts_after_writer_loss() {
+        // Arrange
+        let temp_dir = TempDir::new().expect("temp dir");
+        let db_path = temp_dir.path();
+
+        run_child_expect_abort("cloud_async_after_rename_writer_loss", db_path);
+        expire_crashed_process_lease(db_path);
+
+        // Act
+        let reopened = open_cloud_engine(db_path, None);
+        let metrics = wait_for_metrics(&reopened, Duration::from_secs(10), |metrics| {
+            metrics.current_sequence >= 1
+                && metrics.wal_cloud_durable_seq >= metrics.current_sequence
+        });
+
+        // Assert
+        assert_value_visible(
+            &reopened,
+            b"cloud-async-writer-loss-key",
+            b"cloud-async-writer-loss-value",
+        );
+        assert_eq!(metrics.health, EngineHealth::Healthy);
+    }
+
     #[test]
     fn should_restore_published_cloud_sst_when_cache_lost_after_child_abort() {
         // Arrange
@@ -6234,6 +6267,55 @@ mod cloud_crash_recovery {
         );
 
         abort_after_marking_ready(db_path, "cloud_async_after_rotation_coordinator_drift");
+    }
+
+    #[cfg(feature = "failpoints")]
+    fn child_cloud_async_after_rename_writer_loss(db_path: &Path) {
+        let _scenario = fail::FailScenario::setup();
+        fail::cfg(
+            "midge::wal::inject_fail_after_rename_before_writer_create",
+            "return",
+        )
+        .expect("configure replacement writer loss after rename");
+        let engine = open_cloud_engine(db_path, None);
+        commit_value(
+            &engine,
+            b"cloud-async-writer-loss-key",
+            b"cloud-async-writer-loss-value",
+            WriteOptions::cloud_async(),
+        );
+        let fenced = wait_for_metrics(&engine, Duration::from_secs(10), |metrics| {
+            metrics.health == EngineHealth::Degraded
+        });
+        assert_eq!(
+            fenced.wal_current_segment_id, 1,
+            "rotation must not advance the segment without a replacement writer"
+        );
+        assert!(
+            db_path
+                .join("wal")
+                .join(cntryl_midge::wal::segment_file_name(1))
+                .exists(),
+            "the sealed segment must survive on disk for restart recovery"
+        );
+        assert_value_visible(
+            &engine,
+            b"cloud-async-writer-loss-key",
+            b"cloud-async-writer-loss-value",
+        );
+        let cf = default_cf(&engine);
+        let mut rejected = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin rejected tx");
+        rejected
+            .put(b"rejected-after-fence".to_vec(), b"x".to_vec(), None)
+            .expect("stage rejected value");
+        assert!(matches!(
+            rejected.commit(WriteOptions::cloud_async()),
+            Err(cntryl_midge::MidgeError::Fenced(_))
+        ));
+
+        abort_after_marking_ready(db_path, "cloud_async_after_rename_writer_loss");
     }
 
     fn child_buffered_eventual_flush_after_publish(db_path: &Path) {
@@ -6408,6 +6490,9 @@ mod cloud_crash_recovery {
             "cloud_async_local_wal_after_ack" => "manual::cloud_async_local_wal_after_ack",
             "cloud_async_after_rotation_coordinator_drift" => {
                 "manual::cloud_async_after_rotation_coordinator_drift"
+            }
+            "cloud_async_after_rename_writer_loss" => {
+                "manual::cloud_async_after_rename_writer_loss"
             }
             "buffered_eventual_flush_after_publish" => {
                 "manual::buffered_eventual_flush_after_publish"

@@ -465,6 +465,29 @@ mod tests {
 
     struct PanickingSyncWriter(std::sync::atomic::AtomicBool);
 
+    struct StaleWriterLeaderStore;
+
+    impl crate::lease::LeaderStore for StaleWriterLeaderStore {
+        fn acquire_leadership(
+            &self,
+            _holder_id: &str,
+        ) -> Result<crate::lease::LeaderRecord, crate::lease::LeaseError> {
+            Err(crate::lease::LeaseError::Internal(
+                "test leader store does not acquire leadership".to_string(),
+            ))
+        }
+
+        fn read_current(
+            &self,
+        ) -> Result<Option<crate::lease::LeaderRecord>, crate::lease::LeaseError> {
+            Ok(Some(crate::lease::LeaderRecord {
+                epoch: 2,
+                holder_id: "new-writer".to_string(),
+                acquired_at: "test".to_string(),
+            }))
+        }
+    }
+
     impl crate::wal::WalWriter for PanickingSyncWriter {
         fn append_record(
             &self,
@@ -575,6 +598,92 @@ mod tests {
                 .expect_err("fenced WAL must reject a later sync"),
             crate::common::MidgeError::Fenced(_)
         ));
+    }
+
+    #[test]
+    fn should_fence_durable_work_when_sync_detects_stale_writer_authority(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let directory = tempfile::tempdir()?;
+        let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
+        let router = Arc::new(ResponseRouter::new());
+        let leader_store: Arc<dyn crate::lease::LeaderStore> = Arc::new(StaleWriterLeaderStore);
+        let config = RuntimeConfig {
+            wal_durability_policy: crate::wal::DurabilityPolicy::Batched,
+            writer_epoch: 1,
+            leader_store: Some(leader_store),
+            leader_holder_id: Some("old-writer".to_string()),
+            ..RuntimeConfig::default()
+        };
+        let mut event_loop = EventLoop::new(state, false, Arc::clone(&router), config, None)?;
+        event_loop.wal_actor.append_transaction(
+            &mut event_loop.state,
+            crate::runtime::actors::wal::TransactionAppendParams {
+                request_id: 78,
+                ops: vec![crate::runtime::TransactionOp::Put {
+                    cf_id: 0,
+                    key: bytes::Bytes::from_static(b"stale-writer"),
+                    value: bytes::Bytes::from_static(b"must-stop"),
+                    ttl_seconds: None,
+                    insert_only: false,
+                }],
+                assertions: Vec::new(),
+                durability_policy: Some(crate::wal::DurabilityPolicy::Batched),
+                start_sequence: None,
+                conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+            },
+        )?;
+        let request_id = 79;
+        let response = router.register(request_id, "CloudDurability");
+        event_loop
+            .durability
+            .queue_waiter(DurabilityWaiter::CloudDurability { request_id });
+
+        // Act
+        let error = event_loop
+            .sync_wal_generation(CompletionSource::WalSync)
+            .expect_err("stale writer authority must reject the sync");
+        let sequence_before_rejected = event_loop.state.sequence;
+        let rejected = event_loop.wal_actor.append_transaction(
+            &mut event_loop.state,
+            crate::runtime::actors::wal::TransactionAppendParams {
+                request_id: 80,
+                ops: vec![crate::runtime::TransactionOp::Put {
+                    cf_id: 0,
+                    key: bytes::Bytes::from_static(b"after-stale-writer"),
+                    value: bytes::Bytes::from_static(b"must-not-append"),
+                    ttl_seconds: None,
+                    insert_only: false,
+                }],
+                assertions: Vec::new(),
+                durability_policy: Some(crate::wal::DurabilityPolicy::Batched),
+                start_sequence: None,
+                conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+            },
+        );
+
+        // Assert
+        assert!(matches!(error, crate::common::MidgeError::Fenced(_)));
+        assert!(event_loop.wal_actor.is_fenced());
+        assert!(event_loop.wal_transition.is_fenced());
+        assert!(event_loop.state.persistence_anomaly_detected());
+        assert!(matches!(
+            rejected,
+            Err(crate::common::MidgeError::Fenced(_))
+        ));
+        assert_eq!(event_loop.state.sequence, sequence_before_rejected);
+        assert!(matches!(
+            response.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(RuntimeResponse::Error {
+                request_id: actual,
+                error: crate::common::MidgeError::Fenced(_),
+            }) if actual == request_id
+        ));
+        assert!(
+            response.try_recv().is_err(),
+            "waiter must fail exactly once"
+        );
+        Ok(())
     }
 
     #[cfg(feature = "failpoints")]

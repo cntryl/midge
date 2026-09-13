@@ -185,16 +185,41 @@ enum WalTransitionOperation {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct WalSyncReceipt {
-    pub(crate) durable_sequence: u64,
-    pub(crate) pending_writes: usize,
+    durable_sequence: u64,
+    pending_writes: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct WalRotationReceipt {
-    pub(crate) sealed_segment: u64,
-    pub(crate) next_segment: u64,
-    pub(crate) max_sequence: u64,
-    pub(crate) sealed_file_created: bool,
+    sealed_segment: u64,
+    next_segment: u64,
+    max_sequence: u64,
+}
+
+impl WalRotationReceipt {
+    #[must_use]
+    pub(crate) fn sealed_segment(self) -> u64 {
+        self.sealed_segment
+    }
+
+    #[must_use]
+    pub(crate) fn next_segment(self) -> u64 {
+        self.next_segment
+    }
+
+    #[must_use]
+    pub(crate) fn max_sequence(self) -> u64 {
+        self.max_sequence
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(sealed_segment: u64, next_segment: u64, max_sequence: u64) -> Self {
+        Self {
+            sealed_segment,
+            next_segment,
+            max_sequence,
+        }
+    }
 }
 
 /// Actor handling WAL operations

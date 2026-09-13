@@ -202,14 +202,14 @@ impl EventLoop {
         ticket: &crate::runtime::wal_transition::WalSealTicket,
         receipt: crate::runtime::actors::wal::WalRotationReceipt,
     ) -> crate::common::MidgeResult<()> {
-        let segment_id = receipt.sealed_segment;
-        let max_sequence = receipt.max_sequence;
+        let segment_id = receipt.sealed_segment();
+        let max_sequence = receipt.max_sequence();
         self.wal_transition.note_sealed(ticket, receipt)?;
         WalTransitionBoundary::BeforeCoordinatorCommit.check()?;
         #[cfg(feature = "failpoints")]
         if crate::failpoints::is_active("midge::cloud::inject_coordinator_drift_after_wal_rotation")
         {
-            let Some(drifted_generation) = receipt.next_segment.checked_add(100) else {
+            let Some(drifted_generation) = receipt.next_segment().checked_add(100) else {
                 return Err(crate::common::MidgeError::ResourceLimit(
                     "injected WAL coordinator generation overflow".to_string(),
                 ));
@@ -218,7 +218,7 @@ impl EventLoop {
                 .rotate_from_to(segment_id, drifted_generation)?;
         }
         self.durability
-            .rotate_from_to(segment_id, receipt.next_segment)?;
+            .rotate_from_to(segment_id, receipt.next_segment())?;
         WalTransitionBoundary::AfterCoordinatorCommit.check()?;
         WalTransitionBoundary::BeforeSegmentRegistration.check()?;
         self.durability
@@ -247,8 +247,8 @@ impl EventLoop {
         receipt: crate::runtime::actors::wal::WalRotationReceipt,
         error: &crate::common::MidgeError,
     ) {
-        let segment_id = receipt.sealed_segment;
-        let max_sequence = receipt.max_sequence;
+        let segment_id = receipt.sealed_segment();
+        let max_sequence = receipt.max_sequence();
         self.durability
             .record_cloud_segment_inflight(segment_id, max_sequence);
         self.cloud_wal
@@ -262,11 +262,11 @@ impl EventLoop {
         self.durability.record_cloud_flush();
         self.durability.clear_cloud_seal_retry_needed();
         self.fence_wal_transition(error, Some(segment_id));
-        self.fail_durability_waiters_after_generation_drift(receipt.next_segment, error);
+        self.fail_durability_waiters_after_generation_drift(receipt.next_segment(), error);
         tracing::error!(
             %error,
             segment_id,
-            next_segment_id = receipt.next_segment,
+            next_segment_id = receipt.next_segment(),
             "CloudAsync WAL seal fenced after irreversible rotation"
         );
     }
@@ -286,6 +286,9 @@ impl EventLoop {
         Err(original_error)
     }
 
+    // The failpoint expands to an early return only with the `failpoints`
+    // feature; the Result is the production-shaped boundary contract.
+    #[allow(clippy::unnecessary_wraps)]
     fn after_cloud_flush_boundary() -> crate::common::MidgeResult<()> {
         crate::failpoints::fail_point!(
             "midge::cloud::inject_fail_after_wal_flush_before_rotate",

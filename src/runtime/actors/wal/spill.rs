@@ -46,19 +46,23 @@ impl WalActor {
         self.ensure_write_durability_available(state, effective_durability)?;
         let sequence_plan = Self::allocate_transaction_sequences(state, source.len())?;
         let commit_time_millis = state.observed_time_millis();
+        let mut wal_may_have_changed = false;
         let (wal_bytes, wal_records) = match self.append_spilled_wal_records(
             request_id,
             source,
             &sequence_plan,
             effective_durability,
             commit_time_millis,
+            &mut wal_may_have_changed,
         ) {
             Ok(result) => result,
             Err(error) => {
-                self.fence_transition(
-                    state,
-                    format!("spilled transaction WAL append failed: {error}"),
-                );
+                if wal_may_have_changed {
+                    self.fence_transition(
+                        state,
+                        format!("spilled transaction WAL append failed: {error}"),
+                    );
+                }
                 return Err(error);
             }
         };
@@ -204,6 +208,7 @@ impl WalActor {
         sequence_plan: &TxnSequencePlan,
         effective_durability: DurabilityPolicy,
         commit_time_millis: u64,
+        wal_may_have_changed: &mut bool,
     ) -> MidgeResult<(usize, usize)> {
         if matches!(effective_durability, DurabilityPolicy::BestEffort) {
             return Ok((0, 0));
@@ -220,7 +225,7 @@ impl WalActor {
         begin.txn_id = Some(sequence_plan.txn_id);
         let mut total_bytes = begin.estimated_size();
         let append_started_at = Instant::now();
-        self.append_spilled_record(&begin)?;
+        self.append_spilled_record(&begin, wal_may_have_changed)?;
 
         let epoch = self.current_epoch;
         source.for_each(|ordinal, op| {
@@ -240,7 +245,7 @@ impl WalActor {
                 commit_time_millis,
             );
             total_bytes = total_bytes.saturating_add(record.estimated_size());
-            self.append_spilled_record(&record)
+            self.append_spilled_record(&record, wal_may_have_changed)
         })?;
 
         crate::failpoints::fail_point!("midge::wal::spilled_txn_after_ops_append_before_commit");
@@ -260,7 +265,7 @@ impl WalActor {
         );
         commit.txn_id = Some(sequence_plan.txn_id);
         total_bytes = total_bytes.saturating_add(commit.estimated_size());
-        self.append_spilled_record(&commit)?;
+        self.append_spilled_record(&commit, wal_may_have_changed)?;
         self.finish_append_instrumentation(total_bytes as u64, append_started_at.elapsed());
         self.record_segment_sequence(sequence_plan.commit_seq);
         WalTransitionBoundary::AfterAppendBeforeAccounting.check()?;
@@ -269,15 +274,26 @@ impl WalActor {
         Ok((total_bytes, source.len().saturating_add(2)))
     }
 
-    fn append_spilled_record(&mut self, record: &WalRecord) -> MidgeResult<()> {
+    fn append_spilled_record(
+        &mut self,
+        record: &WalRecord,
+        wal_may_have_changed: &mut bool,
+    ) -> MidgeResult<()> {
         let admitted = self.admit_wal_records(std::slice::from_ref(record))?;
         let previous_position = self.writer().map_or(0, crate::wal::WalWriter::current_pos);
-        let writer = self.writer_mut().ok_or_else(|| {
-            MidgeError::Internal("transaction WAL writer disappeared during append".to_string())
-        })?;
+        let Some(writer) = self.writer_mut() else {
+            if let Some(storage) = &self.storage_budget {
+                storage.settle_local_wal_admission(admitted, 0);
+            }
+            return Err(MidgeError::Internal(
+                "transaction WAL writer disappeared during append".to_string(),
+            ));
+        };
         if let Err(failure) = writer.append_record_accounted(record) {
+            *wal_may_have_changed |= !failure.unchanged;
             return Err(self.settle_failed_wal_append(admitted, failure));
         }
+        *wal_may_have_changed = true;
         self.settle_wal_append(admitted, previous_position);
         Ok(())
     }

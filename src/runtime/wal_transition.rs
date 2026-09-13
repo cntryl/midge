@@ -95,9 +95,9 @@ impl WalSealTicket {
 
     #[must_use]
     pub(crate) fn matches(&self, receipt: WalRotationReceipt) -> bool {
-        self.segment_id == receipt.sealed_segment
-            && self.next_segment_id == receipt.next_segment
-            && self.max_sequence == receipt.max_sequence
+        self.segment_id == receipt.sealed_segment()
+            && self.next_segment_id == receipt.next_segment()
+            && self.max_sequence == receipt.max_sequence()
     }
 
     #[cfg(test)]
@@ -479,12 +479,7 @@ mod tests {
     use super::*;
 
     fn receipt(sealed: u64, next: u64, max_sequence: u64) -> WalRotationReceipt {
-        WalRotationReceipt {
-            sealed_segment: sealed,
-            next_segment: next,
-            max_sequence,
-            sealed_file_created: true,
-        }
+        WalRotationReceipt::for_test(sealed, next, max_sequence)
     }
 
     #[test]

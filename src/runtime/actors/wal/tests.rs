@@ -431,6 +431,344 @@ impl Fs for ReopenFailingAfterRenameFs {
     }
 }
 
+/// Filesystem whose active WAL file vanishes before the rotation rename.
+struct MissingActiveSegmentFs {
+    inner: MockFs,
+}
+
+impl Fs for MissingActiveSegmentFs {
+    fn open(&self, path: &FsPath, opts: FsOpenOptions) -> FsResult<Box<dyn File + '_>> {
+        self.inner.open(path, opts)
+    }
+
+    fn open_persistent_handle(
+        &self,
+        path: &FsPath,
+        opts: FsOpenOptions,
+    ) -> FsResult<Box<dyn File>> {
+        self.inner.open_persistent_handle(path, opts)
+    }
+
+    fn remove_file(&self, path: &FsPath) -> FsResult<()> {
+        self.inner.remove_file(path)
+    }
+
+    fn exists(&self, path: &FsPath) -> FsResult<bool> {
+        self.inner.exists(path)
+    }
+
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+        self.inner.metadata(path)
+    }
+
+    fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
+        self.inner.create_dir_all(path)
+    }
+
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        self.inner.list_dir(path)
+    }
+
+    fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
+        self.inner.remove_dir_all(path)
+    }
+
+    fn sync_dir(&self, path: &FsPath, dur: FsDurability) -> FsResult<()> {
+        self.inner.sync_dir(path, dur)
+    }
+
+    fn rename_atomic(&self, from: &FsPath, _to: &FsPath) -> FsResult<()> {
+        Err(FsError::NotFound(from.0.clone()))
+    }
+}
+
+/// Filesystem that fails one sealed-segment existence preflight.
+struct RotationPreflightFailingOnceFs {
+    inner: MockFs,
+    fail_once: std::sync::atomic::AtomicBool,
+}
+
+impl Fs for RotationPreflightFailingOnceFs {
+    fn open(&self, path: &FsPath, opts: FsOpenOptions) -> FsResult<Box<dyn File + '_>> {
+        self.inner.open(path, opts)
+    }
+
+    fn open_persistent_handle(
+        &self,
+        path: &FsPath,
+        opts: FsOpenOptions,
+    ) -> FsResult<Box<dyn File>> {
+        self.inner.open_persistent_handle(path, opts)
+    }
+
+    fn remove_file(&self, path: &FsPath) -> FsResult<()> {
+        self.inner.remove_file(path)
+    }
+
+    fn exists(&self, path: &FsPath) -> FsResult<bool> {
+        if self
+            .fail_once
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(FsError::Io(
+                "injected sealed-segment preflight failure".to_string(),
+            ));
+        }
+        self.inner.exists(path)
+    }
+
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+        self.inner.metadata(path)
+    }
+
+    fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
+        self.inner.create_dir_all(path)
+    }
+
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        self.inner.list_dir(path)
+    }
+
+    fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
+        self.inner.remove_dir_all(path)
+    }
+
+    fn sync_dir(&self, path: &FsPath, dur: FsDurability) -> FsResult<()> {
+        self.inner.sync_dir(path, dur)
+    }
+
+    fn rename_atomic(&self, from: &FsPath, to: &FsPath) -> FsResult<()> {
+        self.inner.rename_atomic(from, to)
+    }
+}
+
+/// Writer whose fsync always fails after appends succeeded.
+struct FsyncFailingWriter {
+    inner: Box<dyn crate::wal::WalWriter>,
+}
+
+impl crate::wal::WalWriter for FsyncFailingWriter {
+    fn append_record(&self, record: &crate::wal::WalRecord) -> MidgeResult<u64> {
+        self.inner.append_record(record)
+    }
+
+    fn append_batch(&self, records: &[crate::wal::WalRecord]) -> MidgeResult<u64> {
+        self.inner.append_batch(records)
+    }
+
+    fn flush(&self) -> MidgeResult<()> {
+        self.inner.flush()
+    }
+
+    fn sync(&self) -> MidgeResult<()> {
+        Err(MidgeError::Io(std::io::Error::other(
+            "injected fsync failure",
+        )))
+    }
+
+    fn current_pos(&self) -> u64 {
+        self.inner.current_pos()
+    }
+
+    fn close(&self) -> MidgeResult<()> {
+        self.inner.close()
+    }
+}
+
+#[test]
+fn should_restore_open_actor_when_cloud_rotation_preflight_read_fails() -> MidgeResult<()> {
+    // Arrange
+    let fs: Arc<dyn Fs> = Arc::new(RotationPreflightFailingOnceFs {
+        inner: MockFs::new(),
+        fail_once: std::sync::atomic::AtomicBool::new(true),
+    });
+    let writer =
+        FsWalFactoryIo::new(Arc::clone(&fs)).create_writer(crate::wal::ACTIVE_FILE_NAME)?;
+    let temp = tempfile::tempdir()?;
+    let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
+    let mut wal_actor = WalActor::new(
+        temp.path().join("unused-wal"),
+        DurabilityPolicy::CloudAsync,
+        BatchConfig::default(),
+        true,
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    wal_actor.install_filesystem_for_test(fs, writer);
+    let prepared = prepare_put_transaction(
+        &mut wal_actor,
+        &mut state,
+        1,
+        b"preflight-retry",
+        b"value",
+        DurabilityPolicy::CloudAsync,
+    )?;
+    wal_actor.append_prepared_transactions(&mut state, vec![prepared])?;
+    let ticket = seal_ticket_for_test(&wal_actor, &state);
+    wal_actor.flush_for_cloud_upload(&mut state, &ticket)?;
+    let segment_id = state.wal.current_segment_id;
+
+    // Act
+    let error = wal_actor
+        .rotate(&mut state, &ticket)
+        .expect_err("injected existence preflight must fail");
+
+    // Assert
+    assert!(matches!(error, MidgeError::Io(_)));
+    assert!(wal_actor.is_open());
+    assert!(!wal_actor.is_fenced());
+    assert!(!state.persistence_anomaly_detected());
+    assert_eq!(state.wal.current_segment_id, segment_id);
+    wal_actor.flush_for_cloud_upload(&mut state, &ticket)?;
+    wal_actor.rotate(&mut state, &ticket)?;
+    assert_eq!(state.wal.current_segment_id, segment_id + 1);
+    Ok(())
+}
+
+#[test]
+fn should_fence_rotation_when_active_segment_is_missing_with_pending_records() -> MidgeResult<()> {
+    // Arrange
+    let mock = MockFs::new();
+    let fs: Arc<dyn Fs> = Arc::new(MissingActiveSegmentFs { inner: mock });
+    let writer =
+        FsWalFactoryIo::new(Arc::clone(&fs)).create_writer(crate::wal::ACTIVE_FILE_NAME)?;
+    let temp = tempfile::tempdir()?;
+    let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
+    state.wal.current_segment_id = 4;
+    let mut wal_actor = WalActor::new(
+        temp.path().join("unused-wal"),
+        DurabilityPolicy::Batched,
+        BatchConfig::default(),
+        true,
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    wal_actor.install_filesystem_for_test(fs, writer);
+    let prepared = prepare_put_transaction(
+        &mut wal_actor,
+        &mut state,
+        1,
+        b"pending-before-loss",
+        b"value",
+        DurabilityPolicy::Batched,
+    )?;
+    wal_actor.append_prepared_transactions(&mut state, vec![prepared])?;
+    assert!(wal_actor.has_pending_data());
+    let ticket = seal_ticket_for_test(&wal_actor, &state);
+
+    // Act
+    let error = wal_actor
+        .rotate(&mut state, &ticket)
+        .expect_err("missing active segment with pending records must not rotate");
+
+    // Assert
+    assert!(matches!(error, MidgeError::Fenced(message) if message.contains("disappeared")));
+    assert!(wal_actor.is_fenced());
+    assert!(state.persistence_anomaly_detected());
+    assert_eq!(state.wal.current_segment_id, 4);
+    assert_eq!(state.wal.local_durable_seq, 0);
+    assert!(matches!(
+        begin_sync_for_test(&mut wal_actor, &mut state),
+        Err(MidgeError::Fenced(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn should_fence_rotation_when_seal_ticket_disagrees_with_actor_state() -> MidgeResult<()> {
+    // Arrange
+    let temp = tempfile::tempdir()?;
+    let wal_dir = temp.path().join("wal");
+    let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
+    let mut wal_actor = WalActor::new(
+        wal_dir.clone(),
+        DurabilityPolicy::Strict,
+        BatchConfig::default(),
+        false,
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    let segment_id = state.wal.current_segment_id;
+    let mismatched_ticket = WalSealTicket::for_test(segment_id, segment_id + 1, 99);
+
+    // Act
+    let error = wal_actor
+        .rotate(&mut state, &mismatched_ticket)
+        .expect_err("ticket that disagrees with the actor must not rotate");
+
+    // Assert
+    assert!(matches!(error, MidgeError::Fenced(message) if message.contains("disagrees")));
+    assert!(wal_actor.is_fenced());
+    assert_eq!(state.wal.current_segment_id, segment_id);
+    assert!(wal_dir.join(crate::wal::ACTIVE_FILE_NAME).exists());
+    assert!(!wal_dir
+        .join(crate::wal::segment_file_name(segment_id))
+        .exists());
+    Ok(())
+}
+
+#[test]
+fn should_fence_strict_transaction_when_sync_fails_after_records_are_appended() -> MidgeResult<()> {
+    // Arrange
+    let temp = tempfile::tempdir()?;
+    let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
+    let mut wal_actor = WalActor::new(
+        temp.path().join("wal"),
+        DurabilityPolicy::Strict,
+        BatchConfig::default(),
+        false,
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    let fs: Arc<dyn Fs> = Arc::new(MockFs::new());
+    let inner = FsWalFactoryIo::new(Arc::clone(&fs)).create_writer(crate::wal::ACTIVE_FILE_NAME)?;
+    wal_actor.replace_writer_for_test(Box::new(FsyncFailingWriter { inner }));
+    let prepared = prepare_put_transaction(
+        &mut wal_actor,
+        &mut state,
+        1,
+        b"strict-unsynced",
+        b"must-not-be-visible",
+        DurabilityPolicy::Strict,
+    )?;
+
+    // Act
+    let Err(error) = wal_actor.append_prepared_transactions(&mut state, vec![prepared]) else {
+        panic!("strict transaction must fail when its fsync fails");
+    };
+    let sequence_after_failure = state.sequence;
+    let later = prepare_put_transaction(
+        &mut wal_actor,
+        &mut state,
+        2,
+        b"later-strict",
+        b"rejected",
+        DurabilityPolicy::Strict,
+    );
+
+    // Assert
+    assert!(matches!(error, MidgeError::Io(_)));
+    assert!(wal_actor.is_fenced());
+    assert!(state.persistence_anomaly_detected());
+    assert_eq!(state.wal.local_durable_seq, 0);
+    assert!(state
+        .get_cf(0)
+        .expect("default column family")
+        .memtable
+        .iter_all(u64::MAX)
+        .is_empty());
+    assert!(matches!(later, Err(MidgeError::Fenced(_))));
+    assert_eq!(state.sequence, sequence_after_failure);
+    Ok(())
+}
+
+fn begin_sync_for_test(
+    actor: &mut WalActor,
+    state: &mut RuntimeState,
+) -> MidgeResult<super::WalSyncReceipt> {
+    actor.begin_sync_transition(state, &WalSyncTicket::for_test(0))
+}
+
 #[test]
 fn should_apply_wal_sequence_to_memtable() -> MidgeResult<()> {
     // Arrange: start with a large sequence so memtable's local seq would differ

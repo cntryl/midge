@@ -11,6 +11,7 @@ pub(crate) enum WalTransitionBoundary {
     AfterRename,
     BeforeWriterCreate,
     AfterWriterCreate,
+    AfterReplacementDirectorySync,
     BeforeCoordinatorCommit,
     AfterCoordinatorCommit,
     BeforeSegmentRegistration,
@@ -37,11 +38,12 @@ impl WalTransitionBoundary {
     /// Boundaries exercised by the local rotation matrices (actor and
     /// event-loop level).
     #[cfg(all(test, feature = "failpoints"))]
-    pub(crate) const LOCAL_ROTATION_BOUNDARIES: [Self; 4] = [
+    pub(crate) const LOCAL_ROTATION_BOUNDARIES: [Self; 5] = [
         Self::BeforeRename,
         Self::AfterRename,
         Self::BeforeWriterCreate,
         Self::AfterWriterCreate,
+        Self::AfterReplacementDirectorySync,
     ];
 
     /// Boundaries exercised by the durable append matrix.
@@ -51,11 +53,12 @@ impl WalTransitionBoundary {
     /// Boundaries exercised by the `CloudAsync` seal matrix
     /// (`event_loop::cloud_integration::tests`).
     #[cfg(all(test, feature = "failpoints"))]
-    pub(crate) const CLOUD_SEAL_BOUNDARIES: [Self; 10] = [
+    pub(crate) const CLOUD_SEAL_BOUNDARIES: [Self; 11] = [
         Self::BeforeRename,
         Self::AfterRename,
         Self::BeforeWriterCreate,
         Self::AfterWriterCreate,
+        Self::AfterReplacementDirectorySync,
         Self::BeforeCoordinatorCommit,
         Self::AfterCoordinatorCommit,
         Self::BeforeSegmentRegistration,
@@ -74,7 +77,7 @@ impl WalTransitionBoundary {
     ];
 
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 15] = [
+    pub(crate) const ALL: [Self; 16] = [
         Self::BeforeFsync,
         Self::AfterFsync,
         Self::AfterAppendBeforeAccounting,
@@ -82,6 +85,7 @@ impl WalTransitionBoundary {
         Self::AfterRename,
         Self::BeforeWriterCreate,
         Self::AfterWriterCreate,
+        Self::AfterReplacementDirectorySync,
         Self::BeforeCoordinatorCommit,
         Self::AfterCoordinatorCommit,
         Self::BeforeSegmentRegistration,
@@ -103,6 +107,9 @@ impl WalTransitionBoundary {
             Self::AfterRename => "midge::wal_transition::after_rename",
             Self::BeforeWriterCreate => "midge::wal_transition::before_writer_create",
             Self::AfterWriterCreate => "midge::wal_transition::after_writer_create",
+            Self::AfterReplacementDirectorySync => {
+                "midge::wal_transition::after_replacement_directory_sync"
+            }
             Self::BeforeCoordinatorCommit => "midge::wal_transition::before_coordinator_commit",
             Self::AfterCoordinatorCommit => "midge::wal_transition::after_coordinator_commit",
             Self::BeforeSegmentRegistration => "midge::wal_transition::before_segment_registration",
@@ -131,7 +138,7 @@ mod tests {
     #[test]
     fn should_enumerate_every_declared_wal_transition_boundary() {
         // Arrange
-        let expected = 15;
+        let expected = 16;
 
         // Act
         let boundaries = WalTransitionBoundary::ALL;

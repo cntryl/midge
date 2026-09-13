@@ -233,7 +233,7 @@ mod tests {
             .expect("local rotation");
 
         // Assert
-        assert_eq!(receipt.sealed_segment, segment_id);
+        assert_eq!(receipt.sealed_segment(), segment_id);
         assert_eq!(event_loop.state.wal.current_segment_id, segment_id + 1);
         assert!(!event_loop.wal_transition.segment_is_tracked(segment_id));
         event_loop
