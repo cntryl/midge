@@ -1239,6 +1239,78 @@ fn should_reject_runtime_config_atomically_given_invalid_memtable_candidate() {
 }
 
 #[test]
+fn should_reject_runtime_config_atomically_given_cross_mode_wal_policy() {
+    // Arrange
+    let mut event_loop = create_test_local_event_loop().expect("create local event loop");
+    let request_id = 101;
+    let response_rx = event_loop.router.register(request_id, "TestRequest");
+    let (_tx, msg_rx) = crossbeam::channel::unbounded();
+    let original_size = event_loop.state.memtable_size_limit;
+    let original_threshold = event_loop.state.memtable_flush_threshold;
+    let original_compaction = event_loop.state.compaction_enabled();
+    let original_state_trigger = event_loop.state.l0_compaction_trigger;
+    let original_actor_trigger = event_loop.compaction_actor.l0_file_count_threshold();
+    let original_wal_policy = event_loop.wal_actor.durability_policy();
+    let original_batch_config = event_loop.wal_actor.batch_config();
+    let candidate_size = original_size.saturating_add(1024);
+    let candidate_threshold = original_threshold.saturating_add(1).min(candidate_size);
+
+    // Act
+    event_loop.handle_runtime_msg(
+        RuntimeMsg::SetRuntimeConfig {
+            request_id,
+            memtable_size_limit: Some(candidate_size),
+            memtable_flush_threshold: Some(candidate_threshold),
+            enable_compaction: Some(!original_compaction),
+            l0_compaction_trigger: Some(original_actor_trigger.saturating_add(1)),
+            wal_durability_policy: Some(crate::wal::DurabilityPolicy::CloudAsync),
+            wal_batch_config: Some(crate::wal::policy::BatchConfig {
+                max_delay_ms: original_batch_config.max_delay_ms.saturating_add(1),
+                max_bytes: original_batch_config.max_bytes.saturating_add(1),
+            }),
+        },
+        &msg_rx,
+    );
+
+    // Assert
+    assert!(matches!(
+        response_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("runtime config response"),
+        RuntimeResponse::Error {
+            error: crate::common::MidgeError::InvalidArgument(_),
+            ..
+        }
+    ));
+    assert_eq!(event_loop.state.memtable_size_limit, original_size);
+    assert_eq!(
+        event_loop.state.memtable_flush_threshold,
+        original_threshold
+    );
+    assert_eq!(event_loop.state.compaction_enabled(), original_compaction);
+    assert_eq!(
+        event_loop.state.l0_compaction_trigger,
+        original_state_trigger
+    );
+    assert_eq!(
+        event_loop.compaction_actor.l0_file_count_threshold(),
+        original_actor_trigger
+    );
+    assert_eq!(
+        event_loop.wal_actor.durability_policy(),
+        original_wal_policy
+    );
+    assert_eq!(
+        event_loop.wal_actor.batch_config().max_delay_ms,
+        original_batch_config.max_delay_ms
+    );
+    assert_eq!(
+        event_loop.wal_actor.batch_config().max_bytes,
+        original_batch_config.max_bytes
+    );
+}
+
+#[test]
 fn should_mark_persistence_anomaly_when_compaction_metadata_range_is_missing() {
     // Arrange
     let mut event_loop = create_test_local_event_loop().expect("create local event loop");

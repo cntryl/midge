@@ -1,4 +1,5 @@
 use super::super::durability::DurabilityWaiter;
+use super::durability_sync::CompletionSource;
 use super::{EventLoop, HandleOutcome};
 use crate::runtime::{ConflictPolicy, KeyAssertion, RuntimeMsg, RuntimeResponse, TransactionOp};
 use crate::wal::DurabilityPolicy;
@@ -337,13 +338,13 @@ impl WalCoordinator {
     }
 
     pub(super) fn sync(event_loop: &mut EventLoop, request_id: u64) -> HandleOutcome {
-        let result = event_loop.wal_actor.sync(&mut event_loop.state);
+        let result = event_loop.sync_wal_generation(CompletionSource::SealedGeneration);
         let resp = result.map_or_else(
             |error| RuntimeResponse::Error {
                 request_id,
                 error: crate::common::MidgeError::Internal(error.to_string()),
             },
-            |_| RuntimeResponse::Ok { request_id },
+            |()| RuntimeResponse::Ok { request_id },
         );
         event_loop.respond(request_id, resp);
         HandleOutcome::Continue
@@ -351,13 +352,13 @@ impl WalCoordinator {
 
     #[cfg(test)]
     pub(super) fn rotate(event_loop: &mut EventLoop, request_id: u64) -> HandleOutcome {
-        let result = event_loop.wal_actor.rotate(&mut event_loop.state);
+        let result = event_loop.rotate_local_wal_transition();
         let resp = result.map_or_else(
             |error| RuntimeResponse::Error {
                 request_id,
                 error: crate::common::MidgeError::Internal(error.to_string()),
             },
-            |()| RuntimeResponse::Ok { request_id },
+            |_| RuntimeResponse::Ok { request_id },
         );
         event_loop.respond(request_id, resp);
         HandleOutcome::Continue
@@ -391,6 +392,13 @@ impl WalCoordinator {
 
         if event_loop.state.wal.cloud_durable_seq >= sequence {
             event_loop.respond(request_id, RuntimeResponse::Ok { request_id });
+            return HandleOutcome::Continue;
+        }
+        // A fenced runtime can no longer prove cloud durability for anything
+        // beyond the committed frontier. Refuse now instead of queueing a
+        // waiter whose only possible outcome is a later failure.
+        if let Err(error) = event_loop.wal_transition.ensure_ready() {
+            event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
             return HandleOutcome::Continue;
         }
 

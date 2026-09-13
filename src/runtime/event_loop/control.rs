@@ -155,6 +155,31 @@ impl EventLoop {
             return HandleOutcome::Continue;
         }
 
+        let candidate_wal_policy = update
+            .wal_durability_policy
+            .unwrap_or(self.wal_actor.durability_policy());
+        // The durability coordinator keys waiters by generation in local
+        // modes and by segment id in `CloudAsync`. Switching between the two
+        // at runtime would let the actor and coordinator disagree about what
+        // a generation means. Reject the complete update before mutating any
+        // runtime field so `SetRuntimeConfig` remains atomic.
+        let switches_cloud_mode = matches!(
+            candidate_wal_policy,
+            crate::wal::DurabilityPolicy::CloudAsync
+        ) != self.wal_actor.is_cloud_async();
+        if switches_cloud_mode {
+            self.respond(
+                update.request_id,
+                RuntimeResponse::Error {
+                    request_id: update.request_id,
+                    error: crate::common::MidgeError::InvalidArgument(format!(
+                        "cannot switch WAL durability policy to {candidate_wal_policy:?} at runtime; cloud-backed and local modes key durability generations differently"
+                    )),
+                },
+            );
+            return HandleOutcome::Continue;
+        }
+
         if let Some(ms) = update.memtable_size_limit {
             self.state.memtable_size_limit = ms;
         }
@@ -173,17 +198,13 @@ impl EventLoop {
         self.wake_write_stall_waiters();
 
         if update.wal_durability_policy.is_some() || update.wal_batch_config.is_some() {
-            let policy = update
-                .wal_durability_policy
-                .as_ref()
-                .copied()
-                .unwrap_or(self.wal_actor.durability_policy());
             let batch_cfg = update
                 .wal_batch_config
                 .as_ref()
                 .copied()
                 .unwrap_or(self.wal_actor.batch_config());
-            self.wal_actor.set_durability(policy, batch_cfg);
+            self.wal_actor
+                .set_durability(candidate_wal_policy, batch_cfg);
         }
 
         self.respond(
@@ -220,5 +241,70 @@ impl EventLoop {
                 sequence: self.state.sequence,
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::{create_test_cloud_event_loop, create_test_local_event_loop};
+    use super::RuntimeConfigUpdate;
+    use crate::runtime::RuntimeResponse;
+
+    fn policy_update(request_id: u64, policy: crate::wal::DurabilityPolicy) -> RuntimeConfigUpdate {
+        RuntimeConfigUpdate {
+            request_id,
+            memtable_size_limit: None,
+            memtable_flush_threshold: None,
+            enable_compaction: None,
+            l0_compaction_trigger: None,
+            wal_durability_policy: Some(policy),
+            wal_batch_config: None,
+        }
+    }
+
+    #[test]
+    fn should_reject_cross_mode_wal_policy_switches_when_runtime_config_changes(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let mut local = create_test_local_event_loop()?;
+        let mut cloud = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        let local_response = local.router.register(1, "SetRuntimeConfig");
+        let cloud_response = cloud.router.register(2, "SetRuntimeConfig");
+        let same_mode_response = local.router.register(3, "SetRuntimeConfig");
+
+        // Act
+        local
+            .handle_set_runtime_config(&policy_update(1, crate::wal::DurabilityPolicy::CloudAsync));
+        cloud.handle_set_runtime_config(&policy_update(2, crate::wal::DurabilityPolicy::Batched));
+        local.handle_set_runtime_config(&policy_update(3, crate::wal::DurabilityPolicy::Strict));
+
+        // Assert
+        assert!(matches!(
+            local_response.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(RuntimeResponse::Error {
+                error: crate::common::MidgeError::InvalidArgument(_),
+                ..
+            })
+        ));
+        assert!(matches!(
+            cloud_response.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(RuntimeResponse::Error {
+                error: crate::common::MidgeError::InvalidArgument(_),
+                ..
+            })
+        ));
+        assert!(matches!(
+            same_mode_response.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(RuntimeResponse::Ok { request_id: 3 })
+        ));
+        assert!(!local.wal_actor.is_cloud_async());
+        assert!(cloud.wal_actor.is_cloud_async());
+        assert_eq!(
+            local.wal_actor.durability_policy(),
+            crate::wal::DurabilityPolicy::Strict
+        );
+        Ok(())
     }
 }

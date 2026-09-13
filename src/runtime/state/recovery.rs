@@ -383,7 +383,7 @@ impl RuntimeState {
         wal_recovery.recovered_sequence = wal_recovery
             .recovered_sequence
             .max(Self::manifest_visible_sequence_floor(manifest));
-        wal_recovery.next_segment_id = Self::recover_next_segment_id(memory_mode, replay_dir);
+        wal_recovery.next_segment_id = Self::recover_next_segment_id(memory_mode, replay_dir)?;
         Ok(wal_recovery)
     }
 
@@ -537,9 +537,12 @@ impl RuntimeState {
         }
     }
 
-    fn recover_next_segment_id(memory_mode: bool, replay_dir: &std::path::Path) -> u64 {
+    fn recover_next_segment_id(
+        memory_mode: bool,
+        replay_dir: &std::path::Path,
+    ) -> MidgeResult<u64> {
         if memory_mode || !replay_dir.exists() {
-            return 1;
+            return Ok(1);
         }
         let mut max_segment_id: u64 = 0;
         if let Ok(entries) = std::fs::read_dir(replay_dir) {
@@ -559,7 +562,10 @@ impl RuntimeState {
                 }
             }
         }
-        max_segment_id.saturating_add(1).max(1)
+        max_segment_id
+            .checked_add(1)
+            .map(|next| next.max(1))
+            .ok_or_else(|| MidgeError::ResourceLimit("WAL segment identity space exhausted".into()))
     }
 
     fn handle_recovery_issue(&mut self, message: String) -> MidgeResult<bool> {

@@ -23,15 +23,34 @@
 //! In `DurabilityPolicy::CloudAsync`, writes become visible after the local WAL
 //! append barrier succeeds and the memtable is updated. Cloud upload remains
 //! asynchronous unless the caller explicitly waits on the cloud durability frontier.
+//!
+//! TRANSITION INVARIANT (see `crate::runtime::wal_transition`):
+//! A durability transition (fsync, rotate, cloud seal, cloud ack) is committed
+//! only when the actor, the durability coordinator, runtime frontiers, sealed
+//! segment ownership, and durability waiters all moved together. The actor
+//! enforces its part with `WalIoState`:
+//!
+//! - durable work (any policy other than explicit `BestEffort`) is accepted only
+//!   in `Open`, before any sequence is allocated or memtable mutated;
+//! - every transition installs `Transitioning` before its first irreversible or
+//!   ambiguous I/O step and returns to `Open` only when it fully completed;
+//! - any failure after an irreversible step lands in `Fenced`, which rejects
+//!   durable work, degrades health, and records a sealed segment that needs
+//!   restart recovery. A transition never returns while still `Transitioning`;
+//! - the frontier-moving entry points (`begin_sync_transition`,
+//!   `commit_sync_transition`, `flush_for_cloud_upload_within`, `rotate`,
+//!   `complete_cloud_upload_seal`, `cancel_reversible_cloud_flush`) require a
+//!   protocol ticket or rotation receipt, so no caller can run half of a
+//!   paired transition.
 
-#[cfg(test)]
 use super::super::state::RuntimeState;
-use crate::common::MidgeResult;
+use crate::common::{MidgeError, MidgeResult};
 use crate::io::{Fs, RealFs};
+use crate::runtime::wal_transition::WalSealTicket;
 use crate::wal::policy::BatchConfig;
-use crate::wal::{DurabilityPolicy, FsWalFactoryIo, WalRecord, WalWriter};
 #[cfg(test)]
-use crate::{common::MidgeError, wal::WalOpKind};
+use crate::wal::WalOpKind;
+use crate::wal::{DurabilityPolicy, FsWalFactoryIo, WalRecord, WalWriter};
 use apply_op::TransactionApplyOp;
 #[cfg(test)]
 use bytes::Bytes;
@@ -131,13 +150,82 @@ pub struct AppendParams {
     pub ttl_seconds: Option<u64>,
 }
 
+/// Operational state of the filesystem WAL.
+///
+/// A filesystem-backed actor may accept durable work only in `Open`. Rotation
+/// and fsync install `Transitioning` before their first irreversible or
+/// potentially ambiguous I/O step. Any failure from that point is represented
+/// as `Fenced`; the actor cannot accidentally behave as though its old writer
+/// were still usable.
+enum WalIoState {
+    Memory,
+    Open {
+        fs: Arc<dyn Fs>,
+        writer: Box<dyn WalWriter>,
+    },
+    Transitioning {
+        fs: Arc<dyn Fs>,
+        writer: Option<Box<dyn WalWriter>>,
+        operation: WalTransitionOperation,
+        sealed_segment: Option<u64>,
+    },
+    Fenced {
+        fs: Arc<dyn Fs>,
+        reason: String,
+        sealed_segment: Option<u64>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WalTransitionOperation {
+    Sync,
+    CloudFlush,
+    Rotate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WalSyncReceipt {
+    durable_sequence: u64,
+    pending_writes: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WalRotationReceipt {
+    sealed_segment: u64,
+    next_segment: u64,
+    max_sequence: u64,
+}
+
+impl WalRotationReceipt {
+    #[must_use]
+    pub(crate) fn sealed_segment(self) -> u64 {
+        self.sealed_segment
+    }
+
+    #[must_use]
+    pub(crate) fn next_segment(self) -> u64 {
+        self.next_segment
+    }
+
+    #[must_use]
+    pub(crate) fn max_sequence(self) -> u64 {
+        self.max_sequence
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(sealed_segment: u64, next_segment: u64, max_sequence: u64) -> Self {
+        Self {
+            sealed_segment,
+            next_segment,
+            max_sequence,
+        }
+    }
+}
+
 /// Actor handling WAL operations
 pub struct WalActor {
-    /// WAL writer (owned by this actor)
-    writer: Option<Box<dyn WalWriter>>,
+    io: WalIoState,
     storage_budget: Option<Arc<crate::storage::HybridStorage>>,
-    /// Filesystem backend for WAL files (`io::Fs` abstraction)
-    wal_fs: Option<Arc<dyn Fs>>,
     /// Buffered writes pending sync
     pending_sync_count: usize,
     /// Durability policy (determines sync behavior)
@@ -146,9 +234,6 @@ pub struct WalActor {
     bytes_since_sync: usize,
     /// Highest sequence actually appended to the current WAL segment.
     segment_max_sequence: u64,
-    /// Flush generation for batched/local durability group commit
-    flush_generation: u64,
-
     /// Batch configuration governing `max_delay_ms` and `max_bytes`
     batch_config: BatchConfig,
     /// Last wall-clock time we performed a WAL fsync
@@ -186,7 +271,241 @@ mod transaction_state;
 impl WalActor {
     #[cfg(test)]
     pub(crate) fn replace_writer_for_test(&mut self, writer: Box<dyn WalWriter>) {
-        self.writer = Some(writer);
+        match &mut self.io {
+            WalIoState::Open {
+                writer: current, ..
+            } => *current = writer,
+            WalIoState::Memory => {
+                self.io = WalIoState::Open {
+                    fs: Arc::new(crate::io::MockFs::new()),
+                    writer,
+                };
+            }
+            WalIoState::Transitioning { .. } | WalIoState::Fenced { .. } => {
+                panic!("cannot replace a WAL writer while the actor is not open")
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_filesystem_for_test(
+        &mut self,
+        fs: Arc<dyn Fs>,
+        writer: Box<dyn WalWriter>,
+    ) {
+        self.io = WalIoState::Open { fs, writer };
+    }
+
+    fn writer(&self) -> Option<&dyn WalWriter> {
+        match &self.io {
+            WalIoState::Open { writer, .. }
+            | WalIoState::Transitioning {
+                writer: Some(writer),
+                ..
+            } => Some(writer.as_ref()),
+            WalIoState::Memory
+            | WalIoState::Transitioning { writer: None, .. }
+            | WalIoState::Fenced { .. } => None,
+        }
+    }
+
+    fn writer_mut(&mut self) -> Option<&mut (dyn WalWriter + '_)> {
+        match &mut self.io {
+            WalIoState::Open { writer, .. }
+            | WalIoState::Transitioning {
+                writer: Some(writer),
+                ..
+            } => Some(writer.as_mut()),
+            WalIoState::Memory
+            | WalIoState::Transitioning { writer: None, .. }
+            | WalIoState::Fenced { .. } => None,
+        }
+    }
+
+    fn filesystem(&self) -> Option<Arc<dyn Fs>> {
+        match &self.io {
+            WalIoState::Open { fs, .. }
+            | WalIoState::Transitioning { fs, .. }
+            | WalIoState::Fenced { fs, .. } => Some(Arc::clone(fs)),
+            WalIoState::Memory => None,
+        }
+    }
+
+    /// Whether the actor can accept durable work right now.
+    pub(crate) fn is_open(&self) -> bool {
+        matches!(self.io, WalIoState::Memory | WalIoState::Open { .. })
+    }
+
+    pub(crate) fn is_fenced(&self) -> bool {
+        matches!(self.io, WalIoState::Fenced { .. })
+    }
+
+    pub(crate) fn fenced_sealed_segment(&self) -> Option<u64> {
+        match self.io {
+            WalIoState::Transitioning { sealed_segment, .. }
+            | WalIoState::Fenced { sealed_segment, .. } => sealed_segment,
+            WalIoState::Memory | WalIoState::Open { .. } => None,
+        }
+    }
+
+    /// Roll back a `CloudFlush` transition that has not yet renamed anything.
+    ///
+    /// Requires the seal ticket of the transition being cancelled so the
+    /// rollback cannot be issued outside the protocol-owned seal.
+    pub(crate) fn cancel_reversible_cloud_flush(
+        &mut self,
+        _ticket: &WalSealTicket,
+    ) -> MidgeResult<()> {
+        match self.io {
+            WalIoState::Transitioning {
+                operation: WalTransitionOperation::CloudFlush,
+                sealed_segment: None,
+                ..
+            } => self.finish_io_transition(),
+            WalIoState::Memory | WalIoState::Open { .. } => Ok(()),
+            _ => Err(self.io_error().unwrap_or_else(|| {
+                MidgeError::Fenced("WAL cloud flush cannot be rolled back".to_string())
+            })),
+        }
+    }
+
+    fn begin_io_transition(&mut self, operation: WalTransitionOperation) -> MidgeResult<()> {
+        let previous = std::mem::replace(&mut self.io, WalIoState::Memory);
+        match previous {
+            WalIoState::Memory => {
+                self.io = WalIoState::Memory;
+                Ok(())
+            }
+            WalIoState::Open { fs, writer } => {
+                self.io = WalIoState::Transitioning {
+                    fs,
+                    writer: Some(writer),
+                    operation,
+                    sealed_segment: None,
+                };
+                Ok(())
+            }
+            WalIoState::Transitioning {
+                fs,
+                writer,
+                operation: WalTransitionOperation::CloudFlush,
+                sealed_segment: None,
+            } if operation == WalTransitionOperation::Rotate => {
+                self.io = WalIoState::Transitioning {
+                    fs,
+                    writer,
+                    operation,
+                    sealed_segment: None,
+                };
+                Ok(())
+            }
+            unavailable => {
+                self.io = unavailable;
+                Err(self.io_error().unwrap_or_else(|| {
+                    MidgeError::Fenced("WAL transition is unavailable".to_string())
+                }))
+            }
+        }
+    }
+
+    fn finish_io_transition(&mut self) -> MidgeResult<()> {
+        let previous = std::mem::replace(&mut self.io, WalIoState::Memory);
+        match previous {
+            WalIoState::Memory => Ok(()),
+            WalIoState::Transitioning {
+                fs,
+                writer: Some(writer),
+                ..
+            } => {
+                self.io = WalIoState::Open { fs, writer };
+                Ok(())
+            }
+            unavailable => {
+                self.io = unavailable;
+                Err(self.io_error().unwrap_or_else(|| {
+                    MidgeError::Fenced("WAL transition lost its writer".to_string())
+                }))
+            }
+        }
+    }
+
+    fn mark_transition_sealed(&mut self, segment_id: u64) {
+        if let WalIoState::Transitioning { sealed_segment, .. } = &mut self.io {
+            *sealed_segment = Some(segment_id);
+        }
+    }
+
+    fn take_transition_writer(&mut self) -> Option<Box<dyn WalWriter>> {
+        match &mut self.io {
+            WalIoState::Transitioning { writer, .. } => writer.take(),
+            WalIoState::Memory | WalIoState::Open { .. } | WalIoState::Fenced { .. } => None,
+        }
+    }
+
+    fn install_transition_writer(&mut self, writer: Box<dyn WalWriter>) -> MidgeResult<()> {
+        match &mut self.io {
+            WalIoState::Transitioning {
+                writer: current, ..
+            } => {
+                *current = Some(writer);
+                Ok(())
+            }
+            _ => Err(MidgeError::Fenced(
+                "replacement WAL writer arrived outside rotation transition".to_string(),
+            )),
+        }
+    }
+
+    fn io_error(&self) -> Option<MidgeError> {
+        match &self.io {
+            WalIoState::Memory | WalIoState::Open { .. } => None,
+            WalIoState::Transitioning {
+                operation,
+                sealed_segment,
+                ..
+            } => Some(MidgeError::Fenced(format!(
+                "WAL {operation:?} transition did not complete{}; restart is required",
+                sealed_segment.map_or_else(String::new, |segment| format!(
+                    " after sealing segment {segment}"
+                ))
+            ))),
+            WalIoState::Fenced {
+                reason,
+                sealed_segment,
+                ..
+            } => Some(MidgeError::Fenced(format!(
+                "{reason}{}",
+                sealed_segment.map_or_else(String::new, |segment| format!(
+                    "; sealed segment {segment} requires restart recovery"
+                ))
+            ))),
+        }
+    }
+
+    pub(crate) fn fence_transition(&mut self, state: &mut RuntimeState, reason: impl Into<String>) {
+        let reason = reason.into();
+        let previous = std::mem::replace(&mut self.io, WalIoState::Memory);
+        self.io = match previous {
+            WalIoState::Memory => WalIoState::Memory,
+            WalIoState::Open { fs, .. } => WalIoState::Fenced {
+                fs,
+                reason,
+                sealed_segment: None,
+            },
+            WalIoState::Transitioning {
+                fs, sealed_segment, ..
+            }
+            | WalIoState::Fenced {
+                fs, sealed_segment, ..
+            } => WalIoState::Fenced {
+                fs,
+                reason,
+                sealed_segment,
+            },
+        };
+        if !matches!(self.io, WalIoState::Memory) {
+            state.mark_persistence_anomaly();
+        }
     }
 
     fn duration_nanos_u64(duration: Duration) -> u64 {
@@ -241,24 +560,22 @@ impl WalActor {
         writer_epoch: u64,
         storage_io_timeout: Duration,
     ) -> MidgeResult<Self> {
-        let (wal_fs, writer) = if memory_mode {
-            (None, None)
+        let io = if memory_mode {
+            WalIoState::Memory
         } else {
             let fs: Arc<dyn Fs> = Arc::new(RealFs::new(wal_dir)?);
             let factory = FsWalFactoryIo::new(Arc::clone(&fs)).with_io_timeout(storage_io_timeout);
-            let writer = Some(factory.create_writer(crate::wal::ACTIVE_FILE_NAME)?);
-            (Some(fs), writer)
+            let writer = factory.create_writer(crate::wal::ACTIVE_FILE_NAME)?;
+            WalIoState::Open { fs, writer }
         };
 
         let actor = Self {
-            writer,
+            io,
             storage_budget: None,
-            wal_fs,
             pending_sync_count: 0,
             durability_policy,
             bytes_since_sync: 0,
             segment_max_sequence: 0,
-            flush_generation: 0,
             sync_calls: 0,
             sync_total: Duration::from_secs(0),
             append_calls: 0,
@@ -295,7 +612,7 @@ impl WalActor {
         let Some(storage) = self
             .storage_budget
             .as_ref()
-            .filter(|_| self.writer.is_some())
+            .filter(|_| self.writer().is_some())
         else {
             return Ok(0);
         };
@@ -322,9 +639,8 @@ impl WalActor {
             return;
         };
         let actual = self
-            .writer
-            .as_ref()
-            .map_or(previous_position, |writer| writer.current_pos())
+            .writer()
+            .map_or(previous_position, crate::wal::WalWriter::current_pos)
             .saturating_sub(previous_position);
         storage.settle_local_wal_admission(admitted, actual);
     }
@@ -375,6 +691,25 @@ impl WalActor {
         matches!(self.durability_policy, DurabilityPolicy::CloudAsync)
     }
 
+    fn ensure_filesystem_wal_available(&self, state: &mut RuntimeState) -> MidgeResult<()> {
+        if let Some(error) = self.io_error() {
+            state.mark_persistence_anomaly();
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn ensure_write_durability_available(
+        &self,
+        state: &mut RuntimeState,
+        durability_policy: DurabilityPolicy,
+    ) -> MidgeResult<()> {
+        if matches!(durability_policy, DurabilityPolicy::BestEffort) {
+            return Ok(());
+        }
+        self.ensure_filesystem_wal_available(state)
+    }
+
     pub(crate) fn can_coalesce_transaction_append(
         &self,
         durability_policy: Option<DurabilityPolicy>,
@@ -392,7 +727,7 @@ impl WalActor {
             effective_durability,
             DurabilityPolicy::Strict | DurabilityPolicy::Batched
         ) && !self.is_cloud_async()
-            && self.writer.is_some())
+            && self.writer().is_some())
         .then_some(effective_durability)
     }
 
@@ -400,13 +735,13 @@ impl WalActor {
         self.bytes_since_sync
     }
 
+    pub(crate) fn current_segment_max_sequence(&self) -> u64 {
+        self.segment_max_sequence
+    }
+
     #[cfg(test)]
     pub fn pending_sync_count(&self) -> usize {
         self.pending_sync_count
-    }
-
-    pub fn current_flush_generation(&self) -> u64 {
-        self.flush_generation
     }
 
     /// Number of times `sync_internal` has been called (for tests/diagnostics)
@@ -513,6 +848,8 @@ impl WalActor {
             ttl_seconds,
         } = params;
 
+        self.ensure_write_durability_available(state, self.durability_policy)?;
+
         // Enforce insert-only if requested by checking in-memory state
         if insert_only && Self::key_exists(state, cf_id, &key) {
             return Err(MidgeError::InvalidArgument(
@@ -569,17 +906,17 @@ impl WalActor {
         } else {
             self.admit_wal_records(std::slice::from_ref(&record))?
         };
-        let previous_position = self
-            .writer
-            .as_ref()
-            .map_or(0, |writer| writer.current_pos());
-        if let Some(writer) = &mut self.writer {
-            if !matches!(self.durability_policy, DurabilityPolicy::BestEffort) {
+        let previous_position = self.writer().map_or(0, crate::wal::WalWriter::current_pos);
+        let write_wal = !matches!(self.durability_policy, DurabilityPolicy::BestEffort);
+        if let Some(writer) = self.writer_mut() {
+            if write_wal {
                 let a_start = Instant::now();
-                if let Err(error) = writer.append_record(&record) {
+                let append_result = writer.append_record(&record);
+                if let Err(error) = append_result {
                     if matches!(error, MidgeError::NoSpace(_)) {
                         Self::record_no_space_event();
                     }
+                    self.fence_transition(state, format!("WAL append failed: {error}"));
                     return Err(error);
                 }
                 self.settle_wal_append(admitted, previous_position);
@@ -643,6 +980,9 @@ impl WalActor {
         end_key: Bytes,
         durability_policy: Option<DurabilityPolicy>,
     ) -> MidgeResult<(u64, bool)> {
+        let effective_durability = durability_policy.unwrap_or(self.durability_policy);
+        self.ensure_write_durability_available(state, effective_durability)?;
+
         // Allocate sequence idempotently
         let (first_seq, _count) = state.allocate_sequences_idempotent(request_id, 1);
         let sequence = first_seq;
@@ -674,12 +1014,11 @@ impl WalActor {
         };
 
         let record_size = record.estimated_size();
-        let effective_durability = durability_policy.unwrap_or(self.durability_policy);
         let skip_wal = matches!(effective_durability, DurabilityPolicy::BestEffort);
 
         // Append to local WAL unless the caller explicitly requested best effort.
         if !skip_wal {
-            if let Some(writer) = &mut self.writer {
+            if let Some(writer) = self.writer_mut() {
                 crate::failpoints::fail_point!(
                     "midge::wal::inject_no_space_on_delete_range_append",
                     |_| {
@@ -689,10 +1028,12 @@ impl WalActor {
                     }
                 );
                 let a_start = Instant::now();
-                if let Err(error) = writer.append_record(&record) {
+                let append_result = writer.append_record(&record);
+                if let Err(error) = append_result {
                     if matches!(error, MidgeError::NoSpace(_)) {
                         Self::record_no_space_event();
                     }
+                    self.fence_transition(state, format!("WAL append failed: {error}"));
                     return Err(error);
                 }
                 self.finish_append_instrumentation(

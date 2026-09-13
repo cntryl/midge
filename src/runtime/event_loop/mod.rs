@@ -37,6 +37,7 @@ mod shutdown;
 mod snapshot;
 mod verification;
 mod wal;
+mod wal_transition;
 mod write_batch;
 
 use crossbeam::channel::{Receiver, Sender, TryRecvError};
@@ -129,6 +130,7 @@ pub struct EventLoop {
 
     // Durability coordination (extracted to reduce EventLoop cognitive load)
     pub(super) durability: DurabilityCoordinator,
+    wal_transition: crate::runtime::wal_transition::WalTransitionProtocol,
 
     /// Per-request router (oneshot channels)
     pub(super) router: Arc<ResponseRouter>,
@@ -229,14 +231,14 @@ impl EventLoop {
             wal_actor.set_leader_store(store, config.leader_holder_id.clone().unwrap_or_default());
         }
 
-        // 🔑 CRITICAL: Use the correct key for durability_waiters based on mode
-        // - CloudAsync: key is segment_id (for rotate_to/complete calls)
-        // - Batched: key is flush_generation (returned from wal_actor.sync())
+        // CloudAsync waiters are keyed by segment id. Local waiters start at
+        // generation zero; the durability coordinator is the sole owner of
+        // that logical generation.
         let is_cloud_async = wal_actor.is_cloud_async();
         let initial_durability_key = if is_cloud_async {
             initial_segment_id
         } else {
-            wal_actor.current_flush_generation()
+            0
         };
 
         let mut gc_actor = GcActor::new();
@@ -266,6 +268,7 @@ impl EventLoop {
                 is_cloud_async,
                 config.cloud_runtime_policy.clone(),
             ),
+            wal_transition: crate::runtime::wal_transition::WalTransitionProtocol::new(),
             router,
             inline_responses: RefCell::new(HashMap::new()),
             pending_msg: None,
@@ -358,17 +361,26 @@ impl EventLoop {
         for (&segment_id, segment) in &recovered_segments {
             self.durability
                 .record_cloud_segment_inflight(segment_id, segment.max_sequence);
+            self.wal_transition.register_recovered(
+                segment_id,
+                segment.max_sequence,
+                remote_segments.contains_key(&segment_id),
+            );
         }
 
         let initially_durable = self
             .durability
-            .take_contiguous_acked_cloud_segments(&self.cloud_wal.acked_segments)
+            .contiguous_acked_cloud_segments(&self.cloud_wal.acked_segments)
             .map_err(crate::common::MidgeError::RecoveryFailed)?;
         if let Some((_, max_sequence)) = initially_durable.last() {
             self.state.wal.cloud_durable_seq = self.state.wal.cloud_durable_seq.max(*max_sequence);
         }
         for (segment_id, _) in initially_durable {
-            self.remove_cloud_durable_local_wal_segment(segment_id);
+            self.wal_transition.note_cloud_durable(segment_id)?;
+            self.durability.retire_cloud_segment(segment_id);
+            if self.remove_cloud_durable_local_wal_segment(segment_id) {
+                self.wal_transition.retire_cloud_durable(segment_id)?;
+            }
         }
 
         for (&segment_id, segment) in local_segments {

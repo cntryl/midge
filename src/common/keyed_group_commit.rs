@@ -39,6 +39,11 @@ where
         }
     }
 
+    /// Snapshot the key that new waiters join.
+    pub fn current_key(&self) -> K {
+        self.state.lock().current_key.clone()
+    }
+
     /// Join the current generation for the current key.
     pub fn join(&self, waiter: W) {
         let mut state = self.state.lock();

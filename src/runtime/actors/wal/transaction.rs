@@ -11,6 +11,7 @@ use super::{
 };
 use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::state::RuntimeState;
+use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
 use crate::wal::{DurabilityPolicy, WalOpKind, WalRecord};
 use bytes::Bytes;
 #[cfg(all(test, feature = "failpoints"))]
@@ -105,6 +106,9 @@ impl WalActor {
             ));
         }
 
+        let effective_durability = durability_policy.unwrap_or(self.durability_policy);
+        self.ensure_write_durability_available(state, effective_durability)?;
+
         for op in &ops {
             let cf_id = match op {
                 crate::runtime::TransactionOp::Put { cf_id, .. }
@@ -125,7 +129,6 @@ impl WalActor {
             start_sequence,
             conflict_policy,
         )?;
-        let effective_durability = durability_policy.unwrap_or(self.durability_policy);
         let sequence_plan = Self::allocate_transaction_sequences(state, ops.len())?;
         let (apply_ops, wal_batch) =
             self.build_transaction_wal_batch(state, ops, &sequence_plan, effective_durability)?;
@@ -146,6 +149,10 @@ impl WalActor {
     ) -> MidgeResult<Vec<TransactionAppendResult>> {
         if prepared_transactions.is_empty() {
             return Ok(Vec::new());
+        }
+
+        for prepared in &prepared_transactions {
+            self.ensure_write_durability_available(state, prepared.effective_durability)?;
         }
 
         let apply_ops = prepared_transactions
@@ -355,7 +362,7 @@ impl WalActor {
         effective_durability: DurabilityPolicy,
     ) -> MidgeResult<(Vec<TransactionApplyOp>, TxnWalBatch)> {
         let skip_wal = matches!(effective_durability, DurabilityPolicy::BestEffort);
-        let encode_wal = !skip_wal && self.writer.is_some();
+        let encode_wal = !skip_wal && self.writer().is_some();
         let apply_ops = Self::build_apply_ops(
             ops,
             sequence_plan.first_op_seq,
@@ -490,7 +497,7 @@ impl WalActor {
             return Ok(());
         }
 
-        if self.writer.is_some() {
+        if self.writer().is_some() {
             crate::failpoints::fail_point!(
                 "midge::wal::inject_no_space_on_txn_append_batch",
                 Self::should_inject_txn_append_batch_no_space(prepared_transactions),
@@ -508,20 +515,24 @@ impl WalActor {
         }
 
         let admitted = self.admit_wal_records(&records)?;
-        let previous_position = self
-            .writer
-            .as_ref()
-            .map_or(0, |writer| writer.current_pos());
+        let previous_position = self.writer().map_or(0, crate::wal::WalWriter::current_pos);
 
-        if let Some(writer) = &mut self.writer {
+        if let Some(writer) = self.writer_mut() {
             let append_start = Instant::now();
-            if let Err(failure) = writer.append_batch_accounted(&records) {
-                return Err(self.settle_failed_wal_append(admitted, failure));
+            let append_result = writer.append_batch_accounted(&records);
+            if let Err(failure) = append_result {
+                let error = self.settle_failed_wal_append(admitted, failure);
+                self.fence_transition(state, format!("WAL batch append failed: {error}"));
+                return Err(error);
             }
             self.settle_wal_append(admitted, previous_position);
             self.finish_append_instrumentation(total_wal_bytes as u64, append_start.elapsed());
             if let Some(max_sequence) = records.iter().map(|record| record.seq).max() {
                 self.record_segment_sequence(max_sequence);
+            }
+            if let Err(error) = WalTransitionBoundary::AfterAppendBeforeAccounting.check() {
+                self.fence_transition(state, error.to_string());
+                return Err(error);
             }
             crate::failpoints::fail_point!("midge::wal::after_append_batch_before_sync");
         }

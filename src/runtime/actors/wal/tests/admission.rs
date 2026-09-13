@@ -129,6 +129,96 @@ fn append_admission_test_transaction(
 }
 
 #[test]
+fn should_keep_spilled_append_retryable_when_wal_admission_fails_before_first_frame(
+) -> MidgeResult<()> {
+    // Arrange
+    let temp = tempfile::tempdir()?;
+    let setup = crate::storage::test_support::build_cloud_backed_filesystem_simulation(
+        temp.path(),
+        Some(1024),
+    )?;
+    setup.hybrid_storage.enable_ephemeral_sst_cache(1024);
+    let fs: Arc<dyn Fs> = Arc::new(MockFs::new());
+    let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
+    let mut actor = WalActor::new(
+        temp.path().join("unused-wal"),
+        DurabilityPolicy::CloudAsync,
+        BatchConfig::default(),
+        true,
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    actor.install_filesystem_for_test(
+        Arc::clone(&fs),
+        FsWalFactoryIo::new(fs).create_writer("wal.log")?,
+    );
+    actor.set_storage_budget(Arc::clone(&setup.hybrid_storage));
+    let pool = Arc::new(crate::runtime::transaction_spill::TransactionMemoryPool::new(8192));
+    let mut write_set =
+        crate::runtime::transaction_spill::TransactionWriteSet::new(pool, temp.path(), true, 1);
+    write_set.push(crate::runtime::TransactionOp::Put {
+        cf_id: 0,
+        key: Bytes::from_static(b"retryable-key"),
+        value: Bytes::from_static(b"value"),
+        ttl_seconds: None,
+        insert_only: false,
+    })?;
+    let source = write_set.take_source();
+    setup.hybrid_storage.admit_local_wal_bytes(1024)?;
+
+    // Act
+    let first_result = actor.append_spilled_transaction(
+        &mut state,
+        &source,
+        SpilledTransactionAppendParams {
+            request_id: 1,
+            assertions: Vec::new(),
+            durability_policy: Some(DurabilityPolicy::CloudAsync),
+            start_sequence: 0,
+            conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+        },
+    );
+
+    // Assert
+    assert!(matches!(first_result, Err(MidgeError::NoSpace(_))));
+    assert!(actor.is_open());
+    assert!(!actor.is_fenced());
+    assert!(!state.persistence_anomaly_detected());
+    assert_eq!(state.wal.pending_writes, 0);
+    assert!(state
+        .get_cf(0)
+        .expect("default CF")
+        .memtable
+        .iter_all(u64::MAX)
+        .is_empty());
+
+    setup.hybrid_storage.release_local_wal_bytes(1024);
+    actor.append_spilled_transaction(
+        &mut state,
+        &source,
+        SpilledTransactionAppendParams {
+            request_id: 2,
+            assertions: Vec::new(),
+            durability_policy: Some(DurabilityPolicy::CloudAsync),
+            start_sequence: 0,
+            conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+        },
+    )?;
+    assert!(actor.is_open());
+    assert_eq!(state.wal.pending_writes, 3);
+    assert_eq!(
+        state
+            .get_cf(0)
+            .expect("default CF")
+            .memtable
+            .iter_all(u64::MAX)
+            .len(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
 fn should_release_wal_admission_when_failed_append_is_durably_rolled_back() -> MidgeResult<()> {
     for spilled in [false, true] {
         // Arrange
@@ -148,7 +238,10 @@ fn should_release_wal_admission_when_failed_append_is_durably_rolled_back() -> M
             1,
             crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
         )?;
-        actor.writer = Some(FsWalFactoryIo::new(fs.clone()).create_writer("wal.log")?);
+        actor.install_filesystem_for_test(
+            fs.clone(),
+            FsWalFactoryIo::new(fs.clone()).create_writer("wal.log")?,
+        );
         actor.set_storage_budget(setup.hybrid_storage.clone());
         let seed = prepare_put_transaction(
             &mut actor,
@@ -235,7 +328,7 @@ fn should_retain_wal_admission_when_failed_append_has_no_rollback_proof() -> Mid
             1,
             crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
         )?;
-        actor.writer = Some(Box::new(UncertainAppendWriter { timeout }));
+        actor.replace_writer_for_test(Box::new(UncertainAppendWriter { timeout }));
         actor.set_storage_budget(setup.hybrid_storage.clone());
 
         // Act
@@ -247,7 +340,10 @@ fn should_retain_wal_admission_when_failed_append_has_no_rollback_proof() -> Mid
             result,
             Err(MidgeError::NoSpace(_) | MidgeError::Timeout(_))
         ));
-        assert_eq!(actor.writer.as_ref().expect("writer").current_pos(), 0);
+        assert!(
+            actor.is_fenced(),
+            "an ambiguous append failure must make writer loss explicit"
+        );
         assert!(setup.hybrid_storage.budget_snapshot().total_committed_bytes > 0,
             "unchanged logical position cannot release ambiguous bytes (spilled={spilled}, timeout={timeout})");
         assert!(state
