@@ -60,9 +60,12 @@ pub fn validate_format_marker(db_path: &Path) -> MidgeResult<u32> {
         }
     })?;
 
+    // The marker is matched verbatim (lsm-spec manifest.md §2): exactly the
+    // prefix, ASCII decimal digits, and one trailing newline.
     let version = contents
-        .trim()
         .strip_prefix(FORMAT_PREFIX)
+        .and_then(|rest| rest.strip_suffix('\n'))
+        .filter(|digits| !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
         .ok_or_else(|| {
             MidgeError::CompatibilityError(format!(
                 "invalid {} marker at '{}': expected '{}<version>'",
