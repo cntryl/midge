@@ -4385,6 +4385,127 @@ mod transaction_semantics_hardening {
         ));
     }
 
+    /// Seed `key` into a single flushed SST and return that SST's path and bytes.
+    fn seed_flushed_sst(
+        engine: &cntryl_midge::Engine,
+        cf: &cntryl_midge::ColumnFamilyHandle,
+        db_path: &std::path::Path,
+        key: &[u8],
+        value: &[u8],
+    ) -> (std::path::PathBuf, Vec<u8>) {
+        let mut seed = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin seed transaction");
+        seed.put(key.to_vec(), value.to_vec(), None)
+            .expect("put seed value");
+        seed.commit(WriteOptions::sync()).expect("commit seed");
+        engine.flush_cf(cf).expect("flush seed");
+
+        let sst_paths: Vec<_> = std::fs::read_dir(db_path.join("sst"))
+            .expect("read sst directory")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "sst"))
+            .collect();
+        assert_eq!(sst_paths.len(), 1, "seed must produce exactly one SST");
+        let original = std::fs::read(&sst_paths[0]).expect("read seed SST");
+        (sst_paths[0].clone(), original)
+    }
+
+    fn assert_insert_failed_closed(result: &Result<(), MidgeError>) {
+        assert!(
+            matches!(result, Err(MidgeError::Corruption(_) | MidgeError::Io(_))),
+            "insert over an unreadable SST must fail with a classified read error, got {result:?}"
+        );
+    }
+
+    fn assert_seed_value_survives(
+        engine: &cntryl_midge::Engine,
+        cf: &cntryl_midge::ColumnFamilyHandle,
+        key: &[u8],
+        value: &[u8],
+    ) {
+        let read = engine
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("begin verification transaction");
+        assert_eq!(
+            read.get(key).expect("read seed value").as_deref(),
+            Some(value),
+            "failed insert must not overwrite the existing key"
+        );
+    }
+
+    #[test]
+    fn should_fail_insert_commit_when_existence_check_cannot_read_sst() {
+        // Arrange
+        let temp_dir = tempfile::tempdir().expect("create database directory");
+        let engine = cntryl_midge::Engine::open(
+            cntryl_midge::OpenOptions::local(temp_dir.path())
+                .background_compaction(false)
+                .build()
+                .expect("build options"),
+        )
+        .expect("open engine");
+        let cf = engine
+            .create_column_family("unreadable")
+            .expect("create cf");
+        let (sst_path, original) =
+            seed_flushed_sst(&engine, &cf, temp_dir.path(), b"existing", b"original");
+        std::fs::write(&sst_path, vec![0xA5; original.len()]).expect("corrupt SST");
+
+        // Act
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin insert transaction");
+        tx.insert(b"existing".to_vec(), b"replacement".to_vec(), None)
+            .expect("queue insert");
+        let result = tx.commit(WriteOptions::sync());
+
+        // Assert
+        assert_insert_failed_closed(&result);
+        std::fs::write(&sst_path, &original).expect("restore SST");
+        assert_seed_value_survives(&engine, &cf, b"existing", b"original");
+    }
+
+    #[test]
+    fn should_fail_spilled_insert_commit_when_existence_check_cannot_read_sst() {
+        // Arrange
+        let temp_dir = tempfile::tempdir().expect("create database directory");
+        let engine = cntryl_midge::Engine::open(
+            cntryl_midge::OpenOptions::local(temp_dir.path())
+                .background_compaction(false)
+                .transaction_memory_pool_size(1_024)
+                .build()
+                .expect("build options"),
+        )
+        .expect("open engine");
+        let cf = engine
+            .create_column_family("unreadable-spill")
+            .expect("create cf");
+        let (sst_path, original) =
+            seed_flushed_sst(&engine, &cf, temp_dir.path(), b"existing", b"original");
+        std::fs::write(&sst_path, vec![0xA5; original.len()]).expect("corrupt SST");
+
+        // Act
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin insert transaction");
+        tx.insert(b"existing".to_vec(), vec![b'r'; 4_096], None)
+            .expect("queue spilled insert");
+        let spill_runs = std::fs::read_dir(temp_dir.path().join("txn"))
+            .expect("open transaction spill directory")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "run"))
+            .count();
+        let result = tx.commit(WriteOptions::sync());
+
+        // Assert
+        assert!(spill_runs > 0, "insert must be spilled before commit");
+        assert_insert_failed_closed(&result);
+        std::fs::write(&sst_path, &original).expect("restore SST");
+        assert_seed_value_survives(&engine, &cf, b"existing", b"original");
+    }
+
     #[test]
     fn should_apply_last_intent_given_duplicate_operations_on_same_key_when_committing() {
         // Arrange
