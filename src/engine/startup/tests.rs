@@ -784,3 +784,106 @@ fn should_return_fenced_given_lease_loss_after_startup_acquisition() -> MidgeRes
     assert!(matches!(result, Err(MidgeError::Fenced(_))));
     Ok(())
 }
+
+fn leader_record_epoch(db_path: &std::path::Path) -> u64 {
+    let record =
+        std::fs::read_to_string(db_path.join(".midge_leader")).expect("read leader record");
+    record
+        .lines()
+        .find_map(|line| line.strip_prefix("epoch: "))
+        .expect("leader record epoch")
+        .parse()
+        .expect("parse leader record epoch")
+}
+
+fn remove_if_present(path: &std::path::Path) {
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("remove {}: {error}", path.display()),
+    }
+}
+
+#[test]
+fn should_grant_epoch_above_wal_writer_epoch_when_leader_record_is_deleted() -> MidgeResult<()> {
+    // Arrange
+    let dir = tempfile::tempdir().expect("database directory");
+    let options = crate::OpenOptions::local(dir.path()).build()?;
+    let mut engine = crate::Engine::open(options.clone())?;
+    engine.shutdown(std::time::Duration::from_secs(10))?;
+    drop(engine);
+    let wal_epoch = 7;
+    {
+        let fs: std::sync::Arc<dyn crate::io::Fs> =
+            std::sync::Arc::new(crate::io::RealFs::new(dir.path().join("wal"))?);
+        let writer = crate::wal::fs::FsWalWriterIo::new(&crate::wal::segment_file_name(1_000), fs)?;
+        crate::wal::WalWriter::append_record(
+            &writer,
+            &crate::wal::WalRecord::new(
+                crate::wal::WalOpKind::Put,
+                bytes::Bytes::from_static(b"written-at-epoch-7"),
+                Some(bytes::Bytes::from_static(b"value")),
+                1_000,
+                wal_epoch,
+            ),
+        )?;
+        crate::wal::WalWriter::sync(&writer)?;
+    }
+    remove_if_present(&dir.path().join(".midge_leader"));
+
+    // Act
+    let mut reopened = crate::Engine::open(options)?;
+
+    // Assert
+    let granted_epoch = leader_record_epoch(dir.path());
+    assert!(
+        granted_epoch > wal_epoch,
+        "granted epoch {granted_epoch} must exceed WAL writer epoch {wal_epoch}"
+    );
+    reopened.shutdown(std::time::Duration::from_secs(10))?;
+    Ok(())
+}
+
+#[test]
+fn should_grant_epoch_above_catalog_fencing_epoch_when_cloud_lease_object_is_deleted(
+) -> MidgeResult<()> {
+    // Arrange
+    let dir = tempfile::tempdir().expect("database directory");
+    let options = crate::OpenOptions::cloud_simulated(dir.path(), "bucket", "epoch-floor")
+        .background_compaction(false)
+        .build()?;
+    let mut engine = crate::Engine::open(options.clone())?;
+    engine.shutdown(std::time::Duration::from_secs(10))?;
+    drop(engine);
+    let catalog_epoch = 9;
+    let catalog_path = dir
+        .path()
+        .join("cloud_store/wal/publication-catalog.v1.json");
+    let mut catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(
+        &std::fs::read(&catalog_path).expect("read catalog"),
+    )
+    .expect("decode catalog");
+    catalog.fencing_epoch = catalog_epoch;
+    let encoded = catalog.encode().expect("encode catalog");
+    std::fs::write(&catalog_path, &encoded).expect("write catalog");
+    std::fs::write(
+        dir.path()
+            .join("cloud_store/wal/publication-catalog.v1.mirror.json"),
+        &encoded,
+    )
+    .expect("write catalog mirror");
+    remove_if_present(&dir.path().join("midge_primary_lease.json"));
+    remove_if_present(&dir.path().join(".midge_leader"));
+
+    // Act
+    let mut reopened = crate::Engine::open(options)?;
+
+    // Assert
+    let granted_epoch = leader_record_epoch(dir.path());
+    assert!(
+        granted_epoch > catalog_epoch,
+        "granted epoch {granted_epoch} must exceed catalog fencing epoch {catalog_epoch}"
+    );
+    reopened.shutdown(std::time::Duration::from_secs(10))?;
+    Ok(())
+}

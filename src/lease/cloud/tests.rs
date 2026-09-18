@@ -1764,6 +1764,23 @@ fn should_detect_active_lease() {
     assert!(!expired);
 }
 
+#[test]
+fn should_grant_epoch_above_minimum_when_provider_lease_object_is_deleted() {
+    // Arrange
+    let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());
+    let lease = CloudStorageLease::new_provider_backed(test_config(), temp_cache_path(), cloud);
+    let catalog_fencing_epoch = 9;
+
+    // Act
+    let record = lease
+        .leader_store
+        .acquire_leadership_with_minimum_epoch(&lease.holder_id, catalog_fencing_epoch)
+        .expect("acquire with epoch floor");
+
+    // Assert
+    assert_eq!(record.epoch, catalog_fencing_epoch + 1);
+}
+
 fn lease_file_exists(cache_path: &std::path::Path) -> bool {
     cache_path.join(LEASE_OBJECT_KEY).exists()
 }
