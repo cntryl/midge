@@ -1660,4 +1660,74 @@ mod tests {
         ));
         Ok(())
     }
+
+    #[test]
+    fn should_reject_merge_and_unknown_op_types_when_adding_sst_entries() -> MidgeResult<()> {
+        // Arrange
+        let factory = FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
+
+        for op_type in [3_u8, 4, u8::MAX] {
+            let mut unsorted = factory.create()?;
+            let mut sorted = factory.create()?;
+
+            // Act
+            let unsorted_result = unsorted.add_with_meta(b"key", Some(b"value"), 1, op_type, None);
+            let sorted_result =
+                sorted.add_sorted_with_meta(b"key", Some(b"value"), 1, op_type, None);
+
+            // Assert
+            assert!(
+                matches!(
+                    unsorted_result,
+                    Err(crate::common::MidgeError::InvalidArgument(_))
+                ),
+                "unsorted writer must reject op_type {op_type}, got {unsorted_result:?}"
+            );
+            assert!(
+                matches!(
+                    sorted_result,
+                    Err(crate::common::MidgeError::InvalidArgument(_))
+                ),
+                "sorted writer must reject op_type {op_type}, got {sorted_result:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn should_accept_put_insert_and_delete_op_types_when_adding_sst_entries() -> MidgeResult<()> {
+        // Arrange
+        let factory = FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
+        let mut writer = factory.create()?;
+
+        // Act
+        writer.add_with_meta(b"a", Some(b"put"), 3, 0, None)?;
+        writer.add_with_meta(b"b", Some(b"insert"), 2, 1, None)?;
+        writer.add_with_meta(b"c", None, 1, 2, None)?;
+
+        // Assert
+        assert!(!writer.finish_bytes()?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_reject_merge_entry_when_encoding_pending_sst_entry() {
+        // Arrange
+        let entry = PendingEntry {
+            key: b"key".to_vec(),
+            value: Some(b"value".to_vec()),
+            sequence: 1,
+            op_type: 3,
+            expiration: None,
+        };
+
+        // Act
+        let result = InMemorySstWriter::encode_pending_entry(b"", &entry);
+
+        // Assert
+        assert!(
+            matches!(result, Err(crate::common::MidgeError::InvalidArgument(_))),
+            "encoder must never emit EntryType::Merge, got {result:?}"
+        );
+    }
 }
