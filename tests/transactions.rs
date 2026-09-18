@@ -6675,3 +6675,198 @@ mod runtime_transaction_coalescing {
         println!("OK: Ordering maintained across {num_sequential_ops} sequential operations");
     }
 }
+
+mod transaction_delete_range_window {
+    //! Range-Delete Conflict Window Tests
+    //!
+    //! The runtime keeps an in-memory list of recent range deletes capped at
+    //! 4096 entries (`MAX_RECENT_DELETE_RANGES`). These tests push a covering
+    //! range delete out of that list and check that point writes, range
+    //! deletes, assertions, and spilled commits still see it as a conflict,
+    //! whether the tombstone is in a memtable, flushed to an SST, or compacted.
+
+    use crate::common::*;
+    use cntryl_midge::{
+        ColumnFamilyHandle, ConflictPolicy, Engine, MidgeError, Transaction, TransactionMode,
+    };
+
+    /// One more than the recent range-delete list keeps, so the covering
+    /// delete is always evicted before the transaction commits.
+    const EVICTING_RANGE_DELETES: usize = 4097;
+
+    #[derive(Clone, Copy, Debug)]
+    enum TombstoneStage {
+        Memtable,
+        Flushed,
+        Compacted,
+    }
+
+    fn seed_guarded_key(engine: &Engine, cf: &ColumnFamilyHandle, mode: &str) {
+        let mut seed = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin seed tx");
+        seed.put(b"key-b".to_vec(), b"v1".to_vec(), None)
+            .expect("seed value");
+        seed.commit(buffered_write_options(mode))
+            .expect("seed commit");
+    }
+
+    /// Commits a range delete covering `key-b` (and overlapping `[key-c, key-d)`),
+    /// followed by enough disjoint range deletes to evict it from the recent list.
+    fn commit_covering_range_delete_then_evict_it(
+        engine: &Engine,
+        cf: &ColumnFamilyHandle,
+        mode: &str,
+    ) {
+        let mut concurrent = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin concurrent tx");
+        concurrent
+            .delete_range(b"key-a".to_vec(), b"key-z".to_vec())
+            .expect("covering range delete");
+        for i in 1..EVICTING_RANGE_DELETES {
+            concurrent
+                .delete_range(
+                    format!("zz-{i:05}").into_bytes(),
+                    format!("zz-{i:05}~").into_bytes(),
+                )
+                .expect("disjoint range delete");
+        }
+        concurrent
+            .commit(buffered_write_options(mode))
+            .expect("concurrent commit");
+    }
+
+    fn move_tombstone_to_stage(engine: &Engine, cf: &ColumnFamilyHandle, stage: TombstoneStage) {
+        match stage {
+            TombstoneStage::Memtable => {}
+            TombstoneStage::Flushed => engine.flush_cf(cf).expect("flush tombstones"),
+            TombstoneStage::Compacted => {
+                engine.flush_cf(cf).expect("flush tombstones");
+                engine.compact_all().expect("compact tombstones");
+            }
+        }
+    }
+
+    fn assert_commit_conflicts_after_eviction(
+        mode: &str,
+        opts: &MidgeOptions,
+        stage: TombstoneStage,
+        stage_tx: impl Fn(&mut Transaction),
+    ) {
+        // Arrange
+        let engine = open_with_mode(opts, mode);
+        let cf = engine
+            .create_column_family("delete-range-window")
+            .expect("create cf");
+        seed_guarded_key(&engine, &cf, mode);
+        if !matches!(stage, TombstoneStage::Memtable) {
+            engine.flush_cf(&cf).expect("flush seed value");
+        }
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin tx");
+        tx.set_conflict_policy(ConflictPolicy::AbortOnWriteConflict);
+        stage_tx(&mut tx);
+        commit_covering_range_delete_then_evict_it(&engine, &cf, mode);
+        move_tombstone_to_stage(&engine, &cf, stage);
+
+        // Act
+        let result = tx.commit(buffered_write_options(mode));
+
+        // Assert
+        assert!(
+            matches!(result, Err(MidgeError::WriteConflict(_))),
+            "expected WriteConflict after evicting the covering range delete (mode {mode}, stage {stage:?}), got: {result:?}"
+        );
+    }
+
+    fn stage_point_put(tx: &mut Transaction) {
+        tx.put(b"key-b".to_vec(), b"from-tx".to_vec(), None)
+            .expect("stage point put");
+    }
+
+    fn stage_range_delete(tx: &mut Transaction) {
+        tx.delete_range(b"key-c".to_vec(), b"key-d".to_vec())
+            .expect("stage range delete");
+    }
+
+    fn stage_assertion(tx: &mut Transaction) {
+        tx.assert_value(b"key-b".to_vec(), Some(b"v1".to_vec()))
+            .expect("register assertion");
+        tx.put(b"unrelated".to_vec(), b"value".to_vec(), None)
+            .expect("unrelated write so the commit is not assertion-only");
+    }
+
+    /// Room for thousands of range tombstones in one memtable, so the commit
+    /// under test reaches conflict validation instead of a write stall.
+    fn with_tombstone_headroom(opts: MidgeOptions) -> MidgeOptions {
+        MidgeOptions {
+            memtable_size: 32 * 1024 * 1024,
+            memory_budget: Some(512 * 1024 * 1024),
+            ..opts
+        }
+    }
+
+    /// Runs `test` once per storage mode and tombstone stage, each against a
+    /// fresh database. Memory mode has no SSTs, so it only runs `Memtable`.
+    fn for_each_stage(test: impl Fn(&str, &MidgeOptions, TombstoneStage)) {
+        for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+            test(
+                mode,
+                &with_tombstone_headroom(opts),
+                TombstoneStage::Memtable,
+            );
+            if mode == "memory" {
+                return;
+            }
+            for stage in [TombstoneStage::Flushed, TombstoneStage::Compacted] {
+                test(mode, &with_tombstone_headroom(opts_for_mode(mode)), stage);
+            }
+        });
+    }
+
+    #[test]
+    fn should_reject_point_write_given_covering_range_delete_evicted_from_recent_window() {
+        for_each_stage(|mode, opts, stage| {
+            assert_commit_conflicts_after_eviction(mode, opts, stage, stage_point_put);
+        });
+    }
+
+    #[test]
+    fn should_reject_range_delete_given_overlapping_range_delete_evicted_from_recent_window() {
+        for_each_stage(|mode, opts, stage| {
+            assert_commit_conflicts_after_eviction(mode, opts, stage, stage_range_delete);
+        });
+    }
+
+    #[test]
+    fn should_reject_assertion_given_covering_range_delete_evicted_from_recent_window() {
+        for_each_stage(|mode, opts, stage| {
+            assert_commit_conflicts_after_eviction(mode, opts, stage, stage_assertion);
+        });
+    }
+
+    #[test]
+    fn should_reject_spilled_commit_given_covering_range_delete_evicted_from_recent_window() {
+        for_each_storage_mode(durable_storage_modes(), |mode, _opts| {
+            // A small memory budget forces the transaction's write set to
+            // spill. The tombstones are flushed before commit so the evicting
+            // range deletes don't hold the budget and stall the commit.
+            for stage in [TombstoneStage::Flushed, TombstoneStage::Compacted] {
+                let opts = opts_for_mode(mode).memory_budget(256 * 1024);
+                assert_commit_conflicts_after_eviction(mode, &opts, stage, |tx| {
+                    stage_point_put(tx);
+                    for i in 0..200 {
+                        tx.put(
+                            format!("spill-key{i:04}").into_bytes(),
+                            format!("spill-value_{i:04}").into_bytes(),
+                            None,
+                        )
+                        .expect("spill put");
+                    }
+                });
+            }
+        });
+    }
+}
