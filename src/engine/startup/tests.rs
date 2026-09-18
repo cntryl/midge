@@ -689,7 +689,7 @@ fn should_apply_open_options_block_cache_policy_to_runtime_config() -> MidgeResu
         .build()?;
     let storage_path = StartupStoragePath::resolve(opts.storage());
     storage_path.prepare();
-    let startup_lease = StartupLease::acquire(&opts)?;
+    let startup_lease = StartupLease::acquire(&opts, 0)?;
 
     // Act
     let materialized =

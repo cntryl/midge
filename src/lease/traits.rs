@@ -327,6 +327,27 @@ pub trait PrimaryLease: Send + Sync {
     /// should call this method on the `Arc` (e.g. `lease.clone().try_acquire()`).
     fn try_acquire(self: std::sync::Arc<Self>) -> Result<LeaseGuard, LeaseError>;
 
+    /// Attempt to acquire the primary lease with an epoch strictly greater
+    /// than `minimum_epoch` (`format/lease.md` §4 step 4).
+    ///
+    /// Startup passes the highest writer epoch it can find in durable state,
+    /// so the granted epoch fences every record already written even when
+    /// the lease record itself was lost or restored from an older copy.
+    ///
+    /// The default implementation delegates to [`Self::try_acquire`] only for
+    /// a zero floor and fails closed otherwise.
+    fn try_acquire_with_minimum_epoch(
+        self: std::sync::Arc<Self>,
+        minimum_epoch: u64,
+    ) -> Result<LeaseGuard, LeaseError> {
+        if minimum_epoch == 0 {
+            return self.try_acquire();
+        }
+        Err(LeaseError::Internal(format!(
+            "lease cannot honor minimum epoch {minimum_epoch}"
+        )))
+    }
+
     /// Renew the lease (extend TTL).
     ///
     /// This must be called periodically (typically every `ttl / 2` or `ttl / 3`)
@@ -469,23 +490,23 @@ pub trait LeaderStore: Send + Sync {
     /// not itself close that gap; it only enables a caller who *has*
     /// out-of-band epoch knowledge to use it.
     ///
-    /// The default implementation ignores `minimum_epoch` and delegates to
-    /// [`Self::acquire_leadership`] — preserving today's behavior exactly
-    /// for any implementor that hasn't opted in by overriding this method.
-    /// `FsLeaderStore` overrides it to honor the floor.
+    /// Engine startup supplies the highest writer epoch recovered from its
+    /// WAL and, in cloud mode, the WAL publication catalog.
     ///
-    /// Not yet wired into engine startup — that requires reordering startup
-    /// so WAL recovery's `max_epoch_seen` can be threaded in as the floor,
-    /// tracked as separate follow-up work. Exercised directly by
-    /// `FsLeaderStore` tests today.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// The default implementation delegates to [`Self::acquire_leadership`]
+    /// only for a zero floor and fails closed otherwise, so a store that
+    /// cannot honor a floor never silently grants an epoch below it.
     fn acquire_leadership_with_minimum_epoch(
         &self,
         holder_id: &str,
         minimum_epoch: u64,
     ) -> Result<LeaderRecord, LeaseError> {
-        let _ = minimum_epoch;
-        self.acquire_leadership(holder_id)
+        if minimum_epoch == 0 {
+            return self.acquire_leadership(holder_id);
+        }
+        Err(LeaseError::Internal(format!(
+            "leader store cannot honor minimum epoch {minimum_epoch}"
+        )))
     }
 
     /// Read the current leader record from storage (non-locking).

@@ -104,6 +104,13 @@ impl FileSystemLease {
 
 impl PrimaryLease for FileSystemLease {
     fn try_acquire(self: Arc<Self>) -> Result<LeaseGuard, LeaseError> {
+        self.try_acquire_with_minimum_epoch(0)
+    }
+
+    fn try_acquire_with_minimum_epoch(
+        self: Arc<Self>,
+        minimum_epoch: u64,
+    ) -> Result<LeaseGuard, LeaseError> {
         if self.acquired.load(Ordering::Acquire) {
             return Err(LeaseError::AlreadyAcquired(
                 "lease already acquired by this instance".to_string(),
@@ -117,9 +124,11 @@ impl PrimaryLease for FileSystemLease {
         // contention) propagates verbatim — it must not be collapsed into a
         // single blanket variant here, or every distinction made below would
         // be silently discarded.
-        let record =
-            self.leader_store
-                .acquire_leadership_after_validation(&self.holder_id, |existing| {
+        let record = self
+            .leader_store
+            .acquire_leadership_after_validation_and_publish(
+                &self.holder_id,
+                |existing| {
                     let Some(existing) = existing else {
                         return Ok(());
                     };
@@ -170,7 +179,10 @@ impl PrimaryLease for FileSystemLease {
                         "taking over stale leader record (previous holder likely crashed)"
                     );
                     Ok(())
-                })?;
+                },
+                |_| Ok(()),
+                minimum_epoch,
+            )?;
 
         let epoch = record.epoch;
         self.validity
