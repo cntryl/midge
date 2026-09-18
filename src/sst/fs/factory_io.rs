@@ -1675,7 +1675,7 @@ mod tests {
     }
 
     #[test]
-    fn should_reject_merge_and_unknown_op_types_when_adding_sst_entries() -> MidgeResult<()> {
+    fn should_reject_unwritable_op_types_when_adding_sst_entries() -> MidgeResult<()> {
         // Arrange
         let factory = FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
 
@@ -1708,7 +1708,7 @@ mod tests {
     }
 
     #[test]
-    fn should_accept_put_insert_and_delete_op_types_when_adding_sst_entries() -> MidgeResult<()> {
+    fn should_accept_writable_op_types_when_adding_sst_entries() -> MidgeResult<()> {
         // Arrange
         let factory = FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
         let mut writer = factory.create()?;
