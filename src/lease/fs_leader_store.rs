@@ -127,14 +127,22 @@ impl FsLeaderStore {
                 },
             ) {
                 Ok(mut lock_file) => {
-                    lock_file
+                    let initialized = lock_file
                         .write_at(0, bytes::Bytes::from(payload.clone()))
-                        .map_err(|error| {
-                            LeaseError::IoError(format!(
-                                "failed to initialize leader lock: {error}"
-                            ))
-                        })?;
-                    let _ = lock_file.sync(Durability::Durable);
+                        .and_then(|()| lock_file.sync(Durability::Durable));
+                    drop(lock_file);
+                    if let Err(error) = initialized {
+                        // create_new succeeded, so this process owns the file
+                        // and no one else can depend on it. Leaving it would
+                        // block every later lease mutation until an operator
+                        // removed it by hand.
+                        if let Err(remove_error) = self.fs.remove_file(&lock_path) {
+                            tracing::warn!(%remove_error, "failed to remove partially initialized leader lock");
+                        }
+                        return Err(LeaseError::IoError(format!(
+                            "failed to initialize leader lock: {error}"
+                        )));
+                    }
                     Ok(LockGuard {
                         store: self,
                         owner_token,
@@ -903,5 +911,102 @@ mod tests {
                 .expect("lock presence check"),
             "winning guard should remove its own acquisition lock"
         );
+    }
+}
+
+#[cfg(test)]
+mod lock_init_failure_tests {
+    use super::*;
+    use crate::io::traits::{DirEntry, Metadata};
+    use crate::io::{File, FsResult, MockFs};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct FailingLockWriteFile<'a> {
+        inner: Box<dyn File + 'a>,
+    }
+
+    impl File for FailingLockWriteFile<'_> {
+        fn read_at(&self, offset: u64, len: u64) -> FsResult<bytes::Bytes> {
+            self.inner.read_at(offset, len)
+        }
+        fn write_at(&mut self, _offset: u64, _data: bytes::Bytes) -> FsResult<()> {
+            Err(crate::io::FsError::Io("No space left on device".into()))
+        }
+        fn append(&mut self, data: bytes::Bytes) -> FsResult<u64> {
+            self.inner.append(data)
+        }
+        fn len(&self) -> FsResult<u64> {
+            self.inner.len()
+        }
+        fn sync(&mut self, dur: Durability) -> FsResult<()> {
+            self.inner.sync(dur)
+        }
+        fn close(self: Box<Self>) -> FsResult<()> {
+            self.inner.close()
+        }
+    }
+
+    /// Fails writes to the leader lock file while `fail_lock_writes` is set.
+    struct LockWriteFaultFs {
+        inner: MockFs,
+        fail_lock_writes: AtomicBool,
+    }
+
+    impl Fs for LockWriteFaultFs {
+        fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
+            let file = self.inner.open(path, opts)?;
+            if path.0 == LEADER_LOCK_FILE && self.fail_lock_writes.load(Ordering::SeqCst) {
+                return Ok(Box::new(FailingLockWriteFile { inner: file }));
+            }
+            Ok(file)
+        }
+        fn remove_file(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.remove_file(path)
+        }
+        fn exists(&self, path: &FsPath) -> FsResult<bool> {
+            self.inner.exists(path)
+        }
+        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+            self.inner.metadata(path)
+        }
+        fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.create_dir_all(path)
+        }
+        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+            self.inner.list_dir(path)
+        }
+        fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.remove_dir_all(path)
+        }
+        fn sync_dir(&self, path: &FsPath, dur: Durability) -> FsResult<()> {
+            self.inner.sync_dir(path, dur)
+        }
+        fn rename_atomic(&self, from: &FsPath, to: &FsPath) -> FsResult<()> {
+            self.inner.rename_atomic(from, to)
+        }
+    }
+
+    #[test]
+    fn should_not_leave_leader_lock_behind_when_lock_payload_write_fails() {
+        // Arrange: this process created the lock file, so it is provably ours
+        // to remove. Leaving it would block every later lease mutation.
+        let fs = Arc::new(LockWriteFaultFs {
+            inner: MockFs::new(),
+            fail_lock_writes: AtomicBool::new(true),
+        });
+        let store = FsLeaderStore::new(fs.clone() as Arc<dyn Fs>);
+
+        // Act
+        let failed = store.acquire_leadership("writer-a");
+        fs.fail_lock_writes.store(false, Ordering::SeqCst);
+        let recovered = store.acquire_leadership("writer-a");
+
+        // Assert
+        assert!(
+            failed.is_err(),
+            "the injected lock write failure must surface"
+        );
+        recovered.expect("a failed lock initialization must not wedge later acquisitions");
+        assert!(!fs.exists(&FsPath::new(LEADER_LOCK_FILE)).unwrap());
     }
 }
