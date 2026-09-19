@@ -304,6 +304,13 @@ impl FsWalWriterIo {
                     .unwrap_or_else(|| "WAL write failed persistently".to_string());
                 return Err(Self::error_from_message(message));
             }
+            if state.sync_failed {
+                let message = state
+                    .last_sync_error
+                    .clone()
+                    .unwrap_or_else(|| "WAL sync failed persistently".to_string());
+                return Err(Self::error_from_message(message));
+            }
             let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
                 let message = format!("WAL flush timed out after {timeout:?}");
                 state.write_failed = true;
@@ -394,6 +401,15 @@ impl WalWriter for FsWalWriterIo {
                     .last_sync_error
                     .clone()
                     .unwrap_or_else(|| "WAL sync failed persistently".to_string());
+                return Err(Self::error_from_message(msg));
+            }
+            // A failed batch write stops the writer thread, so this fsync
+            // will never complete; report the write error now.
+            if s.write_failed {
+                let msg = s
+                    .last_write_error
+                    .clone()
+                    .unwrap_or_else(|| "WAL write failed persistently".to_string());
                 return Err(Self::error_from_message(msg));
             }
             let Some(remaining) = timeout.checked_sub(sync_start.elapsed()) else {
@@ -552,6 +568,116 @@ mod tests {
             Ok(Box::new(SyncCountingFile {
                 inner: self.inner.open_persistent_handle(path, options)?,
                 durable_sync_count: Arc::clone(&self.durable_sync_count),
+            }))
+        }
+
+        fn remove_file(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.remove_file(path)
+        }
+
+        fn exists(&self, path: &FsPath) -> FsResult<bool> {
+            self.inner.exists(path)
+        }
+
+        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+            self.inner.metadata(path)
+        }
+
+        fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.create_dir_all(path)
+        }
+
+        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+            self.inner.list_dir(path)
+        }
+
+        fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.remove_dir_all(path)
+        }
+
+        fn sync_dir(&self, path: &FsPath, durability: Durability) -> FsResult<()> {
+            self.inner.sync_dir(path, durability)
+        }
+
+        fn rename_atomic(&self, from: &FsPath, to: &FsPath) -> FsResult<()> {
+            self.inner.rename_atomic(from, to)
+        }
+    }
+
+    /// Fs whose WAL file blocks each write until released, then fails it
+    /// with a no-space error, so a test can queue a sync behind the failure.
+    struct GatedNoSpaceFs {
+        inner: crate::io::MockFs,
+        entered: std::sync::Mutex<std::sync::mpsc::Sender<()>>,
+        release: Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>,
+    }
+
+    struct GatedNoSpaceFile {
+        inner: Box<dyn File>,
+        entered: std::sync::mpsc::Sender<()>,
+        release: Arc<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>,
+    }
+
+    impl GatedNoSpaceFile {
+        fn fail_after_release(&self) -> crate::io::FsError {
+            let _ = self.entered.send(());
+            let _ = self
+                .release
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .recv();
+            crate::io::FsError::Io("No space left on device".to_string())
+        }
+    }
+
+    impl File for GatedNoSpaceFile {
+        fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
+            self.inner.read_at(offset, len)
+        }
+
+        fn write_at(&mut self, _offset: u64, _data: Bytes) -> FsResult<()> {
+            Err(self.fail_after_release())
+        }
+
+        fn append(&mut self, _data: Bytes) -> FsResult<u64> {
+            Err(self.fail_after_release())
+        }
+
+        fn len(&self) -> FsResult<u64> {
+            self.inner.len()
+        }
+
+        fn sync(&mut self, durability: Durability) -> FsResult<()> {
+            self.inner.sync(durability)
+        }
+
+        fn close(self: Box<Self>) -> FsResult<()> {
+            self.inner.close()
+        }
+
+        fn caps(&self) -> FileCaps {
+            self.inner.caps()
+        }
+    }
+
+    impl Fs for GatedNoSpaceFs {
+        fn open(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
+            self.inner.open(path, options)
+        }
+
+        fn open_persistent_handle(
+            &self,
+            path: &FsPath,
+            options: OpenOptions,
+        ) -> FsResult<Box<dyn File>> {
+            Ok(Box::new(GatedNoSpaceFile {
+                inner: self.inner.open_persistent_handle(path, options)?,
+                entered: self
+                    .entered
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone(),
+                release: Arc::clone(&self.release),
             }))
         }
 
@@ -858,6 +984,68 @@ mod tests {
 
         // Assert
         assert_eq!(actual, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn should_fail_pending_sync_promptly_with_write_error_when_runner_write_fails(
+    ) -> MidgeResult<()> {
+        // Arrange: a sync is already waiting when the writer's batch write
+        // fails. The runner exits without completing it, so the waiter must
+        // see the write failure instead of sleeping out its whole timeout.
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let fs = Arc::new(GatedNoSpaceFs {
+            inner: crate::io::MockFs::new(),
+            entered: std::sync::Mutex::new(entered_tx),
+            release: Arc::new(std::sync::Mutex::new(release_rx)),
+        });
+        let writer = Arc::new(FsWalWriterIo::new_with_timeout(
+            "wal.log",
+            fs as Arc<dyn Fs>,
+            Duration::from_secs(10),
+        )?);
+        let appender = {
+            let writer = Arc::clone(&writer);
+            std::thread::spawn(move || {
+                writer.append_record(&WalRecord::new(
+                    WalOpKind::Put,
+                    Bytes::from_static(b"key"),
+                    Some(Bytes::from_static(b"value")),
+                    1,
+                    1,
+                ))
+            })
+        };
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("writer reached the failing write");
+        let syncer = {
+            let writer = Arc::clone(&writer);
+            std::thread::spawn(move || {
+                let started = std::time::Instant::now();
+                let result = writer.sync_with_timeout(Duration::from_secs(10));
+                (result, started.elapsed())
+            })
+        };
+        while writer.sync_state.lock().pending_fsyncs == 0 {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        // Act
+        release_tx.send(()).expect("release the failing write");
+        let (result, elapsed) = syncer.join().expect("join syncer");
+        let _ = appender.join().expect("join appender");
+
+        // Assert
+        assert!(
+            matches!(result, Err(crate::common::MidgeError::NoSpace(_))),
+            "{result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "sync waited {elapsed:?} for a writer that had already failed"
+        );
         Ok(())
     }
 }

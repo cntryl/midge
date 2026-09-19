@@ -393,34 +393,33 @@ pub(crate) fn decompressed_size_with_trailer(block: &[u8]) -> MidgeResult<usize>
 
 /// Quick entropy check to detect if value is likely compressible.
 ///
-/// Samples the first 32 bytes (or full value if smaller) to detect
+/// Samples the first 256 bytes (or the full value if smaller) to detect
 /// repetitive patterns that compress well. Avoids expensive LZ4 compression
 /// for incompressible data like random/encrypted values.
 ///
 /// Returns true if value is likely worth compressing.
 #[inline]
 fn is_likely_compressible(value: &[u8]) -> bool {
+    // The sample must be large enough to tell random from structured data:
+    // a 256-byte uniformly random sample holds about 162 distinct bytes,
+    // while text and structured values hold far fewer. (A 32-byte sample can
+    // hold at most 32, which made the old `< 200` threshold always true.)
+    const SAMPLE_LEN: usize = 256;
+    const MAX_DISTINCT_FOR_COMPRESSIBLE: u32 = 128;
+
     if value.is_empty() {
         return false;
     }
-
-    // Sample up to 32 bytes from the beginning
-    let sample_len = std::cmp::min(32, value.len());
-    let sample = &value[..sample_len];
-
-    // Count unique bytes in sample
+    let sample = &value[..value.len().min(SAMPLE_LEN)];
     let mut seen = [false; 256];
-    let mut unique_count = 0u32;
+    let mut distinct = 0u32;
     for &byte in sample {
-        if !seen[byte as usize] {
-            seen[byte as usize] = true;
-            unique_count += 1;
+        if !seen[usize::from(byte)] {
+            seen[usize::from(byte)] = true;
+            distinct += 1;
         }
     }
-
-    // If sample has < 200 different bytes out of 256 possible,
-    // it's likely compressible (entropy < 7.7 bits/byte)
-    unique_count < 200
+    distinct <= MAX_DISTINCT_FOR_COMPRESSIBLE
 }
 
 /// Compress a WAL record value using LZ4 (fast, latency-optimal).
@@ -1122,5 +1121,48 @@ mod tests {
         // Assert
         assert_eq!(compressed1, compressed2);
         assert_eq!(algo1, algo2);
+    }
+
+    fn pseudo_random_bytes(len: usize) -> Vec<u8> {
+        // xorshift64: deterministic, high-entropy, no extra dependency.
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state.to_le_bytes()[0]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn should_skip_wal_compression_when_value_is_random() {
+        // Arrange: encrypted or already-compressed values look uniformly random.
+        let value = pseudo_random_bytes(4096);
+
+        // Act
+        let likely = super::is_likely_compressible(&value);
+        let (stored, codec) = super::compress_wal_value(&value);
+
+        // Assert
+        assert!(!likely, "random bytes must not be treated as compressible");
+        assert_eq!(codec, None);
+        assert_eq!(stored.as_ref(), value.as_slice());
+    }
+
+    #[test]
+    fn should_compress_wal_value_when_value_is_repetitive_text() {
+        // Arrange
+        let value = "{\"user\":\"alice\",\"role\":\"admin\"}".repeat(64);
+
+        // Act
+        let likely = super::is_likely_compressible(value.as_bytes());
+        let (stored, codec) = super::compress_wal_value(value.as_bytes());
+
+        // Assert
+        assert!(likely);
+        assert!(codec.is_some());
+        assert!(stored.len() < value.len());
     }
 }
