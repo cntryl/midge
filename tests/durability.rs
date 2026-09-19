@@ -34,6 +34,79 @@ mod durability_wal {
     // WAL RECOVERY TESTS
     // ============================================================================
 
+    fn sealed_wal_segments(db_path: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(db_path.join("wal"))
+            .expect("read wal dir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| cntryl_midge::wal::parse_segment_id(name).is_some())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn should_remove_local_wal_segment_when_flushed_segment_contains_delete() {
+        // Arrange
+        let temp_dir = TempDir::new().expect("temp dir");
+        let db_path = temp_dir.path();
+        {
+            let mut engine =
+                Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+                    .expect("open engine");
+            let cf = engine.create_column_family("deletes").expect("create cf");
+            let mut tx = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .expect("begin tx");
+            tx.put(b"k1".to_vec(), b"v1".to_vec(), None)
+                .expect("put k1");
+            tx.commit(WriteOptions::sync()).expect("commit k1");
+            let mut tx = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .expect("begin tx");
+            tx.delete(b"k1".to_vec()).expect("delete k1");
+            tx.put(b"k2".to_vec(), b"v2".to_vec(), None)
+                .expect("put k2");
+            tx.commit(WriteOptions::sync()).expect("commit delete");
+
+            // Act: the first flush seals the segment holding the delete, and
+            // the next flush's prune can retire it once its data is published.
+            engine.flush_cf(&cf).expect("flush delete");
+            let mut tx = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .expect("begin tx");
+            tx.put(b"k3".to_vec(), b"v3".to_vec(), None)
+                .expect("put k3");
+            tx.commit(WriteOptions::sync()).expect("commit k3");
+            engine.flush_cf(&cf).expect("flush after delete");
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown");
+        }
+
+        // Assert
+        assert_eq!(
+            sealed_wal_segments(db_path),
+            Vec::<String>::new(),
+            "flushed segments must be retired even when they contain deletes"
+        );
+        let reopened = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+            .expect("reopen");
+        let cf = reopened.get_column_family("deletes").expect("get cf");
+        let tx = reopened
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("read tx");
+        assert_eq!(tx.get(b"k1").expect("get k1"), None);
+        assert_eq!(
+            tx.get(b"k2").expect("get k2"),
+            Some(Bytes::from_static(b"v2"))
+        );
+        assert_eq!(
+            tx.get(b"k3").expect("get k3"),
+            Some(Bytes::from_static(b"v3"))
+        );
+    }
+
     #[test]
     fn should_recover_writes_given_unflushed_memtable_when_reopening() {
         for_each_storage_mode(durable_storage_modes(), |mode, opts| {
@@ -1895,6 +1968,8 @@ mod durability_atomicity {
         delete
             .commit(WriteOptions::sync())
             .expect("commit durable delete");
+        let retained_delete_wal = std::fs::read(directory.path().join("wal/wal.log"))
+            .expect("capture retained delete WAL bytes");
         engine.flush_cf(&cf).expect("flush delete tombstone");
         for index in 0..2 {
             let mut filler = engine
@@ -1922,13 +1997,20 @@ mod durability_atomicity {
             .shutdown(std::time::Duration::from_secs(5))
             .expect("shutdown database");
 
-        // Act: model conservative WAL retention after an unrelated record prevents
-        // whole-segment pruning. The manifest already incorporates this old batch.
+        // Act: model conservative WAL retention of an already-flushed prefix.
+        // Retention is prefix-closed (a segment is retired only with every
+        // older one), so a retained seed segment implies the later delete
+        // segment is retained too. The manifest already incorporates both.
         std::fs::write(
             directory.path().join("wal/00000000000000000000.wal"),
             retained_wal,
         )
         .expect("restore retained WAL segment");
+        std::fs::write(
+            directory.path().join("wal/00000000000000000001.wal"),
+            retained_delete_wal,
+        )
+        .expect("restore retained delete WAL segment");
         let reopened = Engine::open(options()).expect("reopen database");
         let cf = reopened
             .get_column_family("default")
