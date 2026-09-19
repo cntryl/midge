@@ -38,12 +38,14 @@ pub(crate) fn is_active(name: &str) -> bool {
     }
 }
 
+#[cfg(all(test, feature = "failpoints"))]
+use parking_lot::RwLockWriteGuard;
+#[cfg(feature = "failpoints")]
+use parking_lot::{RwLock, RwLockReadGuard};
 #[cfg(feature = "failpoints")]
 use std::cell::Cell;
-#[cfg(all(test, feature = "failpoints"))]
-use std::sync::RwLockWriteGuard;
 #[cfg(feature = "failpoints")]
-use std::sync::{OnceLock, RwLock, RwLockReadGuard};
+use std::sync::OnceLock;
 
 #[cfg(feature = "failpoints")]
 static FAILPOINT_GATE: OnceLock<RwLock<()>> = OnceLock::new();
@@ -70,11 +72,11 @@ pub(crate) fn read_gate() -> Option<RwLockReadGuard<'static, ()>> {
     if OWNS_FAILPOINT_GATE.with(Cell::get) || FAILPOINT_READ_SCOPE_DEPTH.with(Cell::get) > 0 {
         None
     } else {
-        Some(
-            gate()
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        )
+        // `read_recursive` never waits behind a queued writer. A reader that
+        // blocked there could deadlock across threads: an outer read scope
+        // waiting on a worker whose own failpoint read queued behind a
+        // failpoint test's pending write (#434).
+        Some(gate().read_recursive())
     }
 }
 
@@ -107,9 +109,7 @@ pub(crate) fn with_read_gate<T>(operation: impl FnOnce() -> T) -> T {
         if OWNS_FAILPOINT_GATE.with(Cell::get) || FAILPOINT_READ_SCOPE_DEPTH.with(Cell::get) > 0 {
             return operation();
         }
-        let _guard = gate()
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = gate().read_recursive();
         let _scope = FailpointReadScope::enter();
         operation()
     }
@@ -137,9 +137,7 @@ impl Drop for TestFailpointGuard {
 /// Enter an isolated failpoint test scope.
 #[cfg(all(test, feature = "failpoints"))]
 pub(crate) fn test_failpoint_guard() -> TestFailpointGuard {
-    let guard = gate()
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let guard = gate().write();
     OWNS_FAILPOINT_GATE.with(|owner| owner.set(true));
     TestFailpointGuard { guard: Some(guard) }
 }
@@ -149,6 +147,42 @@ mod tests {
     fn injected_result() -> Result<(), &'static str> {
         super::fail_point!("midge::adapter::return_error", |_| Err("injected"));
         Ok(())
+    }
+
+    #[test]
+    fn should_not_deadlock_when_read_scope_waits_on_worker_while_writer_is_queued() {
+        // Arrange: an outer read scope waits on a worker that evaluates a
+        // failpoint while a failpoint test has queued for the write side.
+        let (worker_done_tx, worker_done_rx) = std::sync::mpsc::channel();
+        let (scope_entered_tx, scope_entered_rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            super::with_read_gate(|| {
+                scope_entered_tx.send(()).expect("report read scope");
+                // Give the writer time to queue behind this read scope.
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                let worker = std::thread::spawn(|| {
+                    // Every `fail_point!` evaluation takes this read gate.
+                    let _gate = super::read_gate();
+                });
+                let _ = worker.join();
+                worker_done_tx.send(()).expect("report worker completion");
+            });
+        });
+        scope_entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("reader entered its scope");
+        let writer = std::thread::spawn(|| drop(super::test_failpoint_guard()));
+
+        // Act
+        let completed = worker_done_rx.recv_timeout(std::time::Duration::from_secs(5));
+
+        // Assert
+        assert!(
+            completed.is_ok(),
+            "a worker's failpoint read must not wait behind a queued writer"
+        );
+        reader.join().expect("join reader");
+        writer.join().expect("join writer");
     }
 
     #[test]
