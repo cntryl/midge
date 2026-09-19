@@ -130,7 +130,9 @@ Salvage mode:
 - preserves authoritative pre-publication SST state if interrupted output cannot be safely published
 - never deletes SST files missing from the recovered manifest; a salvaged
   manifest may be a fallback or truncated replay, so startup residue cleanup
-  retains them and logs them for operator review
+  moves them into `salvage-retained/<millis>/` and logs them for operator
+  review. Startup cleanup never deletes anything under `salvage-retained/`,
+  so a later strict open cannot remove them either
 - marks the engine degraded or in salvage mode for diagnostics
 
 ## Flush Recovery

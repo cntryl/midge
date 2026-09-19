@@ -2752,6 +2752,13 @@ mod recovery_policy_api {
         found
     }
 
+    fn sst_file_names(db_path: &std::path::Path) -> std::collections::BTreeSet<String> {
+        sst_files(db_path)
+            .into_iter()
+            .filter_map(|path| Some(path.file_name()?.to_str()?.to_string()))
+            .collect()
+    }
+
     #[test]
     fn should_retain_sst_files_when_salvage_opens_with_unreadable_manifest() {
         // Arrange
@@ -2774,7 +2781,7 @@ mod recovery_policy_api {
                 .shutdown(Duration::from_secs(5))
                 .expect("shutdown before corruption");
         }
-        let before = sst_files(db_path);
+        let before = sst_file_names(db_path);
         assert!(!before.is_empty(), "flush should have produced an SST");
         for name in [
             "manifest.json",
@@ -2802,9 +2809,13 @@ mod recovery_policy_api {
             EngineHealth::SalvageMode
         );
         assert_eq!(
-            sst_files(db_path),
+            sst_file_names(db_path),
             before,
             "salvage must retain SSTs the unreadable manifest no longer lists"
+        );
+        assert!(
+            db_path.join("salvage-retained").is_dir(),
+            "retained SSTs are quarantined out of the SST directory"
         );
     }
 

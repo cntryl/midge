@@ -93,6 +93,10 @@ pub struct ColumnFamilyState {
     pub active_memtable_started_in_segment: u64,
 }
 
+/// Root directory for SSTs a salvage open kept but could not prove
+/// referenced. Startup cleanup never deletes anything under it.
+pub(crate) const SALVAGE_RETAINED_DIR: &str = "salvage-retained";
+
 impl ColumnFamilyState {
     pub fn new(_id: u32, _name: String) -> Self {
         Self {
@@ -639,13 +643,11 @@ impl RuntimeState {
 
         if self.opened_in_salvage_mode() && !residue.orphan_ssts.is_empty() {
             // A salvaged manifest may be a fallback or a truncated replay, so
-            // "not in the manifest" does not prove an SST is garbage. Keep
-            // every candidate for operator-controlled recovery.
-            tracing::warn!(
-                retained = residue.orphan_ssts.len(),
-                orphan_ssts = ?residue.orphan_ssts,
-                "salvage mode retained SSTs missing from the recovered manifest"
-            );
+            // "not in the manifest" does not prove an SST is garbage. Move
+            // every candidate out of the SST directory for operator-controlled
+            // recovery: left in place, the next strict open would see a
+            // readable manifest without them and delete them.
+            self.quarantine_salvage_retained_ssts(&residue.orphan_ssts);
             self.cleanup_root_staging_residue();
             return;
         }
@@ -700,6 +702,61 @@ impl RuntimeState {
                 );
             }
         }
+    }
+
+    /// Move SSTs a salvage open could not prove unreferenced into
+    /// `salvage-retained/<millis>/`, which startup cleanup never deletes.
+    /// A file that cannot be moved stays in place and marks an anomaly.
+    fn quarantine_salvage_retained_ssts(&mut self, sst_names: &[String]) {
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis());
+        let quarantine = FsPath::new(format!("{SALVAGE_RETAINED_DIR}/{millis}"));
+        if let Err(error) = self.fs.create_dir_all(&quarantine) {
+            self.mark_persistence_anomaly();
+            tracing::warn!(
+                error = %error,
+                retained = sst_names.len(),
+                "salvage mode could not create its SST quarantine; SSTs stay in place"
+            );
+            return;
+        }
+        let mut moved = 0usize;
+        for name in sst_names {
+            let from = FsPath::new(crate::sst::object_key(name));
+            let to = FsPath::new(format!("{}/{name}", quarantine.0));
+            match self.fs.rename_atomic(&from, &to) {
+                Ok(()) => moved += 1,
+                Err(FsError::NotFound(_)) => {}
+                Err(error) => {
+                    self.mark_persistence_anomaly();
+                    tracing::warn!(
+                        path = %from.0.as_str(),
+                        error = %error,
+                        "salvage mode could not quarantine an unlisted SST; it stays in place"
+                    );
+                }
+            }
+        }
+        for dir in [
+            FsPath::new(crate::sst::object_key("")),
+            quarantine.clone(),
+            FsPath::new(SALVAGE_RETAINED_DIR),
+            FsPath::new(""),
+        ] {
+            let dir = FsPath::new(dir.0.trim_end_matches('/'));
+            if let Err(error) = self.fs.sync_dir(&dir, crate::io::Durability::Durable) {
+                self.mark_persistence_anomaly();
+                tracing::warn!(dir = %dir.0.as_str(), error = %error, "failed to sync salvage quarantine directory");
+            }
+        }
+        tracing::warn!(
+            retained = sst_names.len(),
+            moved,
+            quarantine = %quarantine.0.as_str(),
+            orphan_ssts = ?sst_names,
+            "salvage mode quarantined SSTs missing from the recovered manifest"
+        );
     }
 
     fn cleanup_root_staging_residue(&mut self) {

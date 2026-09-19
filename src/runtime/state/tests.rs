@@ -1843,6 +1843,49 @@ fn should_delete_untracked_compaction_output_during_startup_residue_cleanup() {
 }
 
 #[test]
+fn should_retain_salvage_kept_sst_when_later_strict_cleanup_runs() {
+    // Arrange: a salvage open keeps an SST its recovered manifest does not
+    // list. The next normal open sees a readable manifest without it.
+    let temp_dir = tempfile::tempdir().expect("create residue directory");
+    let mut salvage = RuntimeState::new(temp_dir.path().to_path_buf(), false);
+    let kept_name = crate::sst::file_name(0, 1, 9);
+    let _kept = write_valid_sst_for_recovery_test(&salvage, &kept_name, 1, b"kept", 9);
+    salvage.mark_opened_in_salvage_mode();
+    salvage.cleanup_storage_residue();
+    drop(salvage);
+    let mut strict = RuntimeState::new(temp_dir.path().to_path_buf(), false);
+
+    // Act
+    strict.cleanup_storage_residue();
+
+    // Assert
+    let retained = walk_files(temp_dir.path()).into_iter().any(|path| {
+        path.file_name()
+            .is_some_and(|name| name == kept_name.as_str())
+    });
+    assert!(
+        retained,
+        "strict cleanup must not delete an SST a salvage open retained"
+    );
+}
+
+fn walk_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+#[test]
 fn should_maintain_memtable_size_limit() {
     // Arrange
     let state = RuntimeState::new("/tmp/test_midge".into(), true);
