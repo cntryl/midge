@@ -186,7 +186,8 @@ pub struct OpenOptionsBuilder {
     wal: crate::wal::WalBatchingConfig,
     lease_loss_hook: Option<LeaseLossHook>,
     lease_ttl: Duration,
-    lease_clock_skew_tolerance: Duration,
+    /// `None` derives half the lease TTL at build time.
+    lease_clock_skew_tolerance: Option<Duration>,
     ttl_clock: crate::common::time::ClockHandle,
 }
 
@@ -483,7 +484,7 @@ impl OpenOptionsBuilder {
             lease_ttl: Duration::from_secs(30),
             // Half a lease TTL tolerates ordinary NTP/VM clock correction while
             // bounding additional failover latency.
-            lease_clock_skew_tolerance: Duration::from_secs(15),
+            lease_clock_skew_tolerance: None,
             ttl_clock: crate::common::time::ClockHandle(Arc::new(
                 crate::common::time::ObservedClock::default(),
             )),
@@ -614,11 +615,18 @@ impl OpenOptionsBuilder {
     }
 
     /// Set the wall-clock skew allowance used before a persisted lease may be
-    /// taken over. Values are bounded by the configured lease TTL.
+    /// taken over. Values are bounded by the configured lease TTL. When unset
+    /// it is half the lease TTL, which tolerates ordinary NTP or VM clock
+    /// correction.
     #[must_use]
     pub fn lease_clock_skew_tolerance(mut self, tolerance: Duration) -> Self {
-        self.lease_clock_skew_tolerance = tolerance;
+        self.lease_clock_skew_tolerance = Some(tolerance);
         self
+    }
+
+    fn resolved_lease_clock_skew_tolerance(&self) -> Duration {
+        self.lease_clock_skew_tolerance
+            .unwrap_or(self.lease_ttl / 2)
     }
 
     /// Set the primary lease TTL used by local and cloud coordination.
@@ -660,7 +668,7 @@ impl OpenOptionsBuilder {
                 "lease TTL must be greater than zero".to_string(),
             ));
         }
-        if self.lease_clock_skew_tolerance > self.lease_ttl {
+        if self.resolved_lease_clock_skew_tolerance() > self.lease_ttl {
             return Err(MidgeError::InvalidArgument(
                 "lease clock-skew tolerance must not exceed the lease TTL".to_string(),
             ));
@@ -716,6 +724,7 @@ impl OpenOptionsBuilder {
                 "storage I/O timeout must be at least 1 millisecond".to_string(),
             ));
         }
+        let lease_clock_skew_tolerance = self.resolved_lease_clock_skew_tolerance();
         let runtime_response_timeout = self.runtime_response_timeout.unwrap_or_else(|| {
             crate::config::default_runtime_response_timeout(self.cloud.storage_io_timeout)
         });
@@ -780,7 +789,7 @@ impl OpenOptionsBuilder {
             wal: crate::wal::WalBatchingConfig::new(wal_buffer_size, self.wal.batch),
             lease_loss_hook: self.lease_loss_hook,
             lease_ttl: self.lease_ttl,
-            lease_clock_skew_tolerance: self.lease_clock_skew_tolerance,
+            lease_clock_skew_tolerance,
             ttl_clock: self.ttl_clock,
         })
     }

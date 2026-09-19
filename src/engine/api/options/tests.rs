@@ -922,3 +922,38 @@ fn should_reject_cloud_lease_ttl_too_short_to_ever_renew() {
         result.err()
     );
 }
+
+#[test]
+fn should_derive_skew_tolerance_from_ttl_when_only_ttl_is_set() {
+    // Arrange: a caller who shortens the TTL never chose the skew tolerance,
+    // so it must scale with the TTL instead of a fixed 15 s rejecting it.
+    let ttl = Duration::from_secs(10);
+
+    // Act
+    let options = OpenOptions::local("/tmp/midge-ttl-only")
+        .lease_ttl(ttl)
+        .build()
+        .expect("a TTL-only configuration is valid");
+
+    // Assert
+    assert_eq!(options.lease_clock_skew_tolerance(), Duration::from_secs(5));
+}
+
+#[test]
+fn should_reject_explicit_skew_tolerance_when_it_exceeds_ttl() {
+    // Arrange
+    let ttl = Duration::from_secs(10);
+
+    // Act
+    let result = OpenOptions::local("/tmp/midge-ttl-skew")
+        .lease_ttl(ttl)
+        .lease_clock_skew_tolerance(Duration::from_secs(11))
+        .build();
+
+    // Assert
+    assert!(
+        matches!(&result, Err(MidgeError::InvalidArgument(message)) if message.contains("skew")),
+        "{:?}",
+        result.err()
+    );
+}
