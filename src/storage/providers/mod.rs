@@ -59,6 +59,13 @@ pub mod qualification;
 pub mod s3;
 #[cfg(any(feature = "cloud-aws", feature = "cloud-oci"))]
 mod s3_resolver;
+#[cfg(any(
+    feature = "cloud-aws",
+    feature = "cloud-oci",
+    feature = "cloud-azure",
+    feature = "cloud-gcp"
+))]
+mod xml;
 
 #[cfg(all(test, feature = "cloud-common"))]
 pub(crate) mod test_support {
