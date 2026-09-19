@@ -317,9 +317,11 @@ pub(super) fn sparse_start_for_key(
     header: &RunHeader,
     target: Option<&[u8]>,
 ) -> MidgeResult<u64> {
+    // Start at the last indexed record whose key is strictly below the
+    // target. Runs are sorted by key, so every record for the target lies at
+    // or after it, however many index strides those records span.
     let mut cursor = header.sparse_index_offset;
     let mut previous_key: Option<Vec<u8>> = None;
-    let mut previous_offset = RUN_HEADER_LEN as u64;
     let mut selected_offset = RUN_HEADER_LEN as u64;
     for _ in 0..header.sparse_count {
         file.seek(SeekFrom::Start(cursor))?;
@@ -354,9 +356,8 @@ pub(super) fn sparse_start_for_key(
                 "transaction spill sparse index offset is out of bounds".to_string(),
             ));
         }
-        if target.is_some_and(|target| key.as_slice() <= target) {
-            selected_offset = previous_offset;
-            previous_offset = record_offset;
+        if target.is_some_and(|target| key.as_slice() < target) {
+            selected_offset = record_offset;
         }
         previous_key = Some(key);
     }

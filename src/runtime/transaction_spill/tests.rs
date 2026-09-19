@@ -423,3 +423,40 @@ fn should_surface_late_spill_corruption_from_key_cursor_item() -> MidgeResult<()
     assert!(matches!(late, Err(MidgeError::Corruption(_))));
     Ok(())
 }
+
+#[test]
+fn should_find_earliest_same_key_intent_when_key_spans_many_sparse_index_strides() -> MidgeResult<()>
+{
+    // Arrange: one run holds 40 writes to the same key, far more than one
+    // 16-record sparse-index stride, so the earliest ones sit well before the
+    // last index entry for that key.
+    let dir = tempfile::tempdir()?;
+    let mut writes = TransactionWriteSet::new(
+        Arc::new(TransactionMemoryPool::new(64 * 1024)),
+        dir.path(),
+        false,
+        1,
+    );
+    for index in 0_u8..40 {
+        writes.push(put(b"k", &[index; 8]))?;
+    }
+    writes.push(put(b"spill-trigger", &vec![0x5A; 128 * 1024]))?;
+    assert!(
+        writes.has_spills(),
+        "the resident writes must have spilled to a run"
+    );
+
+    let source = writes.take_source();
+
+    // Act
+    let before_second = source.latest_before(1, b"k")?;
+    let before_twentieth = source.latest_before(20, b"k")?;
+
+    // Assert
+    assert!(
+        before_second.is_some(),
+        "the first write to the key (ordinal 0) must be visible before ordinal 1"
+    );
+    assert!(before_twentieth.is_some());
+    Ok(())
+}
