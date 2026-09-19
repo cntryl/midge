@@ -51,6 +51,12 @@ impl ManifestCoordinator {
             crate::runtime::actors::ManifestActor::persist(&event_loop.state).and_then(|()| {
                 event_loop.mirror_metadata_after_local_commit_within("manifest persist", &deadline)
             });
+        if let Err(error) = &result {
+            // Callers checkpoint after a change already committed through the
+            // journal, so this failure cannot undo it; record it for health.
+            event_loop.state.mark_persistence_anomaly();
+            tracing::warn!(%error, "manifest checkpoint failed after a committed change");
+        }
         Self::respond_result(event_loop, request_id, result);
         HandleOutcome::Continue
     }

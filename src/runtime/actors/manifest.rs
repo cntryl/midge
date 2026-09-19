@@ -175,6 +175,9 @@ impl ManifestActor {
             tracing::debug!("Manifest: skipping persistence in memory mode");
             return Ok(());
         }
+        crate::failpoints::fail_point!("midge::manifest::persist", |_| Err(
+            crate::common::MidgeError::Internal("injected manifest persist failure".into())
+        ));
 
         tracing::info!(
             file_count = state.manifest.files.len(),
