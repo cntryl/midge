@@ -239,17 +239,24 @@ fn failpoint_test_lock() -> &'static Mutex<()> {
 
 #[cfg(feature = "failpoints")]
 struct TxnAppendBatchNoSpaceFailpointGuard {
+    // Drop order: the scenario is torn down in `drop` before the gate field
+    // is released.
+    scenario: Option<fail::FailScenario<'static>>,
     _test_guard: crate::failpoints::TestFailpointGuard,
 }
 
 #[cfg(feature = "failpoints")]
 impl TxnAppendBatchNoSpaceFailpointGuard {
+    /// Take the failpoint gate before the `fail` scenario lock, matching
+    /// every other failpoint test; the reverse order deadlocks against them.
     fn setup(request_id: u64) -> Self {
         let test_guard = crate::failpoints::test_failpoint_guard();
+        let scenario = fail::FailScenario::setup();
         set_txn_append_batch_no_space_failpoint_request_id(Some(request_id));
         fail::cfg("midge::wal::inject_no_space_on_txn_append_batch", "return")
             .expect("configure txn append batch no-space failpoint");
         Self {
+            scenario: Some(scenario),
             _test_guard: test_guard,
         }
     }
@@ -260,6 +267,9 @@ impl Drop for TxnAppendBatchNoSpaceFailpointGuard {
     fn drop(&mut self) {
         fail::remove("midge::wal::inject_no_space_on_txn_append_batch");
         set_txn_append_batch_no_space_failpoint_request_id(None);
+        if let Some(scenario) = self.scenario.take() {
+            scenario.teardown();
+        }
     }
 }
 
@@ -1331,7 +1341,6 @@ fn should_fail_all_prepared_transactions_when_batch_append_hits_no_space() -> Mi
     );
 
     {
-        let scenario = fail::FailScenario::setup();
         let failpoint_guard = TxnAppendBatchNoSpaceFailpointGuard::setup(20);
 
         // Act
@@ -1362,7 +1371,6 @@ fn should_fail_all_prepared_transactions_when_batch_append_hits_no_space() -> Mi
         );
 
         drop(failpoint_guard);
-        scenario.teardown();
     }
     let recovery = prepare_put_transaction(
         &mut wal_actor,

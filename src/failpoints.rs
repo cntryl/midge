@@ -135,6 +135,11 @@ impl Drop for TestFailpointGuard {
 }
 
 /// Enter an isolated failpoint test scope.
+///
+/// Take this guard before `fail::FailScenario::setup()`. The scenario holds
+/// the `fail` crate's global mutex, so a test that sets up the scenario first
+/// and then waits here deadlocks against a test holding this gate while it
+/// waits for that mutex.
 #[cfg(all(test, feature = "failpoints"))]
 pub(crate) fn test_failpoint_guard() -> TestFailpointGuard {
     let guard = gate().write();

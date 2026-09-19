@@ -62,19 +62,26 @@ fn failpoint_test_lock() -> &'static Mutex<()> {
 
 #[cfg(feature = "failpoints")]
 struct TxnAppendBatchNoSpaceFailpointGuard {
+    // Drop order: the scenario is torn down in `drop` before the gate field
+    // is released.
+    scenario: Option<fail::FailScenario<'static>>,
     _test_guard: crate::failpoints::TestFailpointGuard,
 }
 
 #[cfg(feature = "failpoints")]
 impl TxnAppendBatchNoSpaceFailpointGuard {
+    /// Take the failpoint gate before the `fail` scenario lock, matching
+    /// every other failpoint test; the reverse order deadlocks against them.
     fn setup(request_id: u64) -> Self {
         let test_guard = crate::failpoints::test_failpoint_guard();
+        let scenario = fail::FailScenario::setup();
         crate::runtime::actors::wal::set_txn_append_batch_no_space_failpoint_request_id(Some(
             request_id,
         ));
         fail::cfg("midge::wal::inject_no_space_on_txn_append_batch", "return")
             .expect("configure txn append batch no-space failpoint");
         Self {
+            scenario: Some(scenario),
             _test_guard: test_guard,
         }
     }
@@ -85,6 +92,9 @@ impl Drop for TxnAppendBatchNoSpaceFailpointGuard {
     fn drop(&mut self) {
         fail::remove("midge::wal::inject_no_space_on_txn_append_batch");
         crate::runtime::actors::wal::set_txn_append_batch_no_space_failpoint_request_id(None);
+        if let Some(scenario) = self.scenario.take() {
+            scenario.teardown();
+        }
     }
 }
 
@@ -1085,7 +1095,6 @@ fn should_fail_all_event_loop_buffered_transactions_when_append_hits_no_space() 
         .expect("queue second transaction");
 
     {
-        let scenario = fail::FailScenario::setup();
         let failpoint_guard = TxnAppendBatchNoSpaceFailpointGuard::setup(60);
 
         // Act
@@ -1129,7 +1138,6 @@ fn should_fail_all_event_loop_buffered_transactions_when_append_hits_no_space() 
         );
 
         drop(failpoint_guard);
-        scenario.teardown();
     }
 
     let recovery_rx = fixture.register(62);
@@ -1172,7 +1180,6 @@ fn should_fail_all_event_loop_strict_transactions_when_shared_append_fails() -> 
         .expect("queue second strict transaction");
 
     {
-        let scenario = fail::FailScenario::setup();
         let failpoint_guard = TxnAppendBatchNoSpaceFailpointGuard::setup(63);
 
         // Act
@@ -1206,7 +1213,6 @@ fn should_fail_all_event_loop_strict_transactions_when_shared_append_fails() -> 
             .is_empty());
 
         drop(failpoint_guard);
-        scenario.teardown();
     }
 
     Ok(())
@@ -1300,7 +1306,6 @@ fn should_fail_same_key_fallback_when_coalesced_prefix_append_fails() -> MidgeRe
         .expect("queue same-key fallback transaction");
 
     {
-        let scenario = fail::FailScenario::setup();
         let failpoint_guard = TxnAppendBatchNoSpaceFailpointGuard::setup(80);
 
         // Act
@@ -1321,7 +1326,6 @@ fn should_fail_same_key_fallback_when_coalesced_prefix_append_fails() -> MidgeRe
         assert_memtable_value(&fixture.event_loop, 0, b"failed-same-key", None);
 
         drop(failpoint_guard);
-        scenario.teardown();
     }
 
     Ok(())
