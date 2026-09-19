@@ -45,6 +45,13 @@ If the active WAL ends with a typed incomplete-tail condition beyond byte 0:
 - the truncated tail is discarded
 - recovery continues
 
+Replay itself never modifies the file, so `midge verify` stays read-only. Before
+the local engine reopens `wal.log` for append, it truncates the file to the
+verified prefix and fsyncs it. Without this, new frames would land after the
+torn bytes, and the next recovery would see mid-file corruption instead of a
+tail. If the truncation fails, the open fails under both recovery policies.
+Cloud recovery applies the same truncation to its local active WAL.
+
 This includes a partial final header or payload with no verified frame after it,
 and an all-zero final region left by file preallocation. These are the expected
 shapes of a torn or unwritten final append. Recovery does not infer this state

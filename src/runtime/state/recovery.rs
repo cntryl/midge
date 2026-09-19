@@ -450,6 +450,16 @@ impl RuntimeState {
             }
         };
 
+        if let Some(tail) = &stats.tolerated_active_tail {
+            // Fail the open under either policy: appending past a torn tail
+            // would corrupt acknowledged writes, and salvage's fallback would
+            // discard the state replay just recovered.
+            Self::truncate_tolerated_active_tail(&storage, tail).map_err(|error| {
+                MidgeError::RecoveryFailed(format!(
+                    "failed to truncate torn active WAL tail: {error}"
+                ))
+            })?;
+        }
         Self::record_wal_recovery_stats(replay_dir, &stats);
         let opened_in_salvage_mode = stats.had_corruption;
         if opened_in_salvage_mode {
@@ -467,6 +477,37 @@ impl RuntimeState {
             bytes_replayed: stats.bytes,
             opened_in_salvage_mode,
         })
+    }
+
+    /// Cut the active WAL back to its verified prefix before the writer
+    /// reopens it for append. Otherwise new frames land after the torn bytes,
+    /// and the next recovery sees mid-file corruption instead of a tail.
+    fn truncate_tolerated_active_tail(
+        storage: &dyn crate::io::Fs,
+        tail: &crate::wal::recovery::ToleratedActiveTail,
+    ) -> MidgeResult<()> {
+        let mut file = storage.open(
+            &tail.path,
+            crate::io::OpenOptions {
+                mode: crate::io::OpenMode::ReadWrite,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        )?;
+        let length = file.len()?;
+        if length <= tail.valid_bytes {
+            return Ok(());
+        }
+        file.truncate(tail.valid_bytes)?;
+        file.sync(crate::io::Durability::Durable)?;
+        tracing::warn!(
+            path = %tail.path,
+            discarded_bytes = length - tail.valid_bytes,
+            valid_bytes = tail.valid_bytes,
+            "truncated torn active WAL tail before reopening for append"
+        );
+        Ok(())
     }
 
     fn handle_wal_recovery_failure(
