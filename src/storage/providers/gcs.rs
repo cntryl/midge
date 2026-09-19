@@ -10,6 +10,7 @@ use super::super::cloud::{
     CloudBackend, CloudCallback, CloudError, CloudEvent, CloudExecutor, CloudListBudget,
     CloudOutcome, CloudRequest, CloudResponse, CloudSigner, ObjectMetadata,
 };
+use super::xml::extract_xml_tag_values;
 use crate::common::{MidgeError, MidgeResult};
 use base64::{
     engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD},
@@ -1752,31 +1753,6 @@ fn extract_gcs_json_list(body: &str) -> MidgeResult<(Vec<String>, Option<String>
         .filter(|value| !value.is_empty()),
     };
     Ok((items, next_page_token))
-}
-
-fn extract_xml_tag_values(body: &str, tag: &str) -> Vec<String> {
-    let open = format!("<{tag}>");
-    let close = format!("</{tag}>");
-    let mut values = Vec::new();
-    let mut rest = body;
-    while let Some(start) = rest.find(&open) {
-        let after_open = &rest[start + open.len()..];
-        let Some(end) = after_open.find(&close) else {
-            break;
-        };
-        values.push(decode_xml_entities(&after_open[..end]));
-        rest = &after_open[end + close.len()..];
-    }
-    values
-}
-
-fn decode_xml_entities(value: &str) -> String {
-    value
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
 }
 
 fn append_query_param(url: &str, key: &str, value: &str) -> String {

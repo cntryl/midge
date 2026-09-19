@@ -12,6 +12,7 @@ use super::super::cloud::{
     ObjectMetadata,
 };
 use super::super::cloud::{CloudCallback, CloudError, CloudEvent, CloudOutcome};
+use super::xml::extract_xml_tag_values;
 use crate::common::{MidgeError, MidgeResult};
 use chrono::Utc;
 use hex;
@@ -1654,31 +1655,6 @@ fn canonicalize_query(query: &str) -> String {
         .collect();
     pairs.sort();
     pairs.join("&")
-}
-
-fn extract_xml_tag_values(body: &str, tag: &str) -> Vec<String> {
-    let open = format!("<{tag}>");
-    let close = format!("</{tag}>");
-    let mut values = Vec::new();
-    let mut rest = body;
-    while let Some(start) = rest.find(&open) {
-        let after_open = &rest[start + open.len()..];
-        let Some(end) = after_open.find(&close) else {
-            break;
-        };
-        values.push(decode_xml_entities(&after_open[..end]));
-        rest = &after_open[end + close.len()..];
-    }
-    values
-}
-
-fn decode_xml_entities(value: &str) -> String {
-    value
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
 }
 
 #[cfg(test)]

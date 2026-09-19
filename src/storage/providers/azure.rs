@@ -11,6 +11,7 @@ use super::super::cloud::{
     CloudBackend, CloudCallback, CloudError, CloudEvent, CloudExecutor, CloudListBudget,
     CloudOutcome, CloudRequest, CloudResponse, CloudSigner, ObjectMetadata,
 };
+use super::xml::extract_xml_tag_values;
 use crate::common::{MidgeError, MidgeResult};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as Base64Engine};
 use chrono::Utc;
@@ -1672,31 +1673,6 @@ fn json_u64(value: &serde_json::Value) -> Option<u64> {
     value
         .as_u64()
         .or_else(|| value.as_str().and_then(|text| text.parse::<u64>().ok()))
-}
-
-fn extract_xml_tag_values(body: &str, tag: &str) -> Vec<String> {
-    let open = format!("<{tag}>");
-    let close = format!("</{tag}>");
-    let mut values = Vec::new();
-    let mut rest = body;
-    while let Some(start) = rest.find(&open) {
-        let after_open = &rest[start + open.len()..];
-        let Some(end) = after_open.find(&close) else {
-            break;
-        };
-        values.push(decode_xml_entities(&after_open[..end]));
-        rest = &after_open[end + close.len()..];
-    }
-    values
-}
-
-fn decode_xml_entities(value: &str) -> String {
-    value
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
 }
 
 /// Managed Identity signer that fetches OAuth tokens from Azure IMDS.
