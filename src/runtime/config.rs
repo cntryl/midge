@@ -108,6 +108,10 @@ pub struct RuntimeConfig {
     /// `leader_store` for fencing checks that must verify `holder_id` as
     /// well as epoch (lsm-spec format/lease.md §5.1, §6 item 1).
     pub leader_holder_id: Option<String>,
+    /// Largest transaction WAL footprint recovery can replay. Cloud mode sets
+    /// this from its streaming replay limits; commits above it are rejected
+    /// so an acknowledged transaction can never block recovery.
+    pub(crate) max_replayable_txn_bytes: Option<usize>,
 }
 
 impl Default for RuntimeConfig {
@@ -141,6 +145,7 @@ impl Default for RuntimeConfig {
             lease_healthy: None,
             leader_store: None,
             leader_holder_id: None,
+            max_replayable_txn_bytes: None,
         }
     }
 }

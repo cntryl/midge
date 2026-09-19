@@ -26,6 +26,12 @@ pub(crate) struct StreamingReplayLimits {
 }
 
 impl StreamingReplayLimits {
+    /// Largest transaction WAL footprint these limits can replay, whether it
+    /// is one batch frame or a split-marker transaction buffered until commit.
+    pub(crate) fn max_replayable_txn_bytes(self) -> usize {
+        self.max_frame_bytes.min(self.max_pending_txn_bytes)
+    }
+
     fn validate(self) -> MidgeResult<()> {
         if self.max_frame_bytes < crate::wal::frame::WAL_FRAME_HEADER_LEN + 3
             || self.max_pending_txn_bytes == 0
@@ -438,9 +444,7 @@ impl ReplayState<'_> {
                             "duplicate transaction begin during streaming replay".into(),
                         ));
                     }
-                    let bytes = size_of::<PendingTxn>()
-                        .saturating_add(size_of::<(u64, u64)>())
-                        .saturating_mul(2);
+                    let bytes = pending_txn_overhead_bytes();
                     self.reserve_pending(bytes)?;
                     self.open_txns.insert(
                         key,
@@ -574,9 +578,30 @@ impl ReplayState<'_> {
 }
 
 fn record_bytes(record: &WalRecord) -> usize {
+    pending_record_bytes(
+        record.key.len(),
+        record.value.as_ref().map_or(0, bytes::Bytes::len),
+        record.range_end.as_ref().map_or(0, bytes::Bytes::len),
+    )
+}
+
+/// Replay buffer charge for one record of a split-marker transaction. The
+/// writer uses the same accounting to reject transactions replay cannot hold.
+pub(crate) fn pending_record_bytes(
+    key_len: usize,
+    value_len: usize,
+    range_end_len: usize,
+) -> usize {
     size_of::<WalRecord>()
         .saturating_mul(2)
-        .saturating_add(record.key.len())
-        .saturating_add(record.value.as_ref().map_or(0, bytes::Bytes::len))
-        .saturating_add(record.range_end.as_ref().map_or(0, bytes::Bytes::len))
+        .saturating_add(key_len)
+        .saturating_add(value_len)
+        .saturating_add(range_end_len)
+}
+
+/// Replay buffer charge for opening one split-marker transaction.
+pub(crate) fn pending_txn_overhead_bytes() -> usize {
+    size_of::<PendingTxn>()
+        .saturating_add(size_of::<(u64, u64)>())
+        .saturating_mul(2)
 }

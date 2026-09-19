@@ -251,6 +251,8 @@ pub struct WalActor {
     /// This writer's own lease holder identity, checked alongside epoch at
     /// each fencing validation.
     leader_holder_id: String,
+    /// Largest transaction WAL footprint recovery can replay, when bounded.
+    max_replayable_txn_bytes: Option<usize>,
 
     // === Optional instrumentation ===
     sync_calls: u64,
@@ -586,6 +588,7 @@ impl WalActor {
             current_epoch: writer_epoch,
             leader_store: None,
             leader_holder_id: String::new(),
+            max_replayable_txn_bytes: None,
         };
 
         // Log resolved WAL mode for diagnostics
@@ -602,6 +605,21 @@ impl WalActor {
 
     pub fn durability_policy(&self) -> DurabilityPolicy {
         self.durability_policy
+    }
+
+    pub(crate) fn set_max_replayable_txn_bytes(&mut self, limit: Option<usize>) {
+        self.max_replayable_txn_bytes = limit;
+    }
+
+    /// Reject a transaction recovery could not replay, before any byte of it
+    /// is written.
+    fn ensure_replayable_transaction(&self, wal_bytes: usize) -> MidgeResult<()> {
+        match self.max_replayable_txn_bytes {
+            Some(limit) if wal_bytes > limit => Err(MidgeError::ResourceLimit(format!(
+                "transaction needs {wal_bytes} WAL replay bytes; recovery replays at most {limit} bytes with the configured memory budget"
+            ))),
+            _ => Ok(()),
+        }
     }
 
     pub(crate) fn set_storage_budget(&mut self, storage: Arc<crate::storage::HybridStorage>) {

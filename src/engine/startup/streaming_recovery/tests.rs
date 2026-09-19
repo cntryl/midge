@@ -824,3 +824,89 @@ fn should_not_reuse_flush_sst_name_when_crash_follows_remote_upload() {
         .shutdown(std::time::Duration::from_secs(30))
         .expect("shutdown");
 }
+
+fn replay_bounded_options(path: &std::path::Path) -> OpenOptions {
+    // 16 MiB budget: the transaction pool is ~1.6 MiB and cloud replay
+    // accepts at most 1 MiB per transaction.
+    OpenOptions::cloud_simulated(path, "bucket", "replay-bounded")
+        .memory_budget(crate::MemoryBudget::Bytes(16 * 1024 * 1024))
+        .local_storage_budget(64 * 1024 * 1024)
+        .background_compaction(false)
+        .build()
+        .expect("replay-bounded options")
+}
+
+fn incompressible(len: usize) -> Vec<u8> {
+    value(7).into_iter().cycle().take(len).collect()
+}
+
+fn commit_one(engine: &Engine, key: &[u8], value: Vec<u8>) -> crate::MidgeResult<()> {
+    let mut tx = engine.begin_tx(0, TransactionMode::ReadWrite)?;
+    tx.put(key.to_vec(), value, None)?;
+    tx.commit(crate::WriteOptions::cloud_strict())
+}
+
+#[test]
+fn should_reject_cloud_commit_that_recovery_could_not_replay() {
+    // Arrange
+    let dir = tempfile::tempdir().expect("database directory");
+    let mut engine = Engine::open(replay_bounded_options(dir.path())).expect("open writer");
+    let limit =
+        super::CloudReplay::limits(&replay_bounded_options(dir.path())).max_replayable_txn_bytes();
+
+    // Act
+    let resident = commit_one(&engine, b"resident", incompressible(limit + 1));
+    let spilled = commit_one(&engine, b"spilled", incompressible(3 * limit));
+    commit_one(&engine, b"small", incompressible(1024)).expect("small commit still works");
+    engine
+        .shutdown(std::time::Duration::from_secs(30))
+        .expect("shutdown writer");
+    let reopened = Engine::open(replay_bounded_options(dir.path()))
+        .expect("every accepted transaction must be replayable");
+
+    // Assert
+    assert!(
+        matches!(resident, Err(crate::MidgeError::ResourceLimit(_))),
+        "{resident:?}"
+    );
+    assert!(
+        matches!(spilled, Err(crate::MidgeError::ResourceLimit(_))),
+        "{spilled:?}"
+    );
+    let tx = reopened
+        .begin_tx(0, TransactionMode::ReadOnly)
+        .expect("read transaction");
+    assert!(tx.get(b"small").expect("read small").is_some());
+    assert!(tx.get(b"resident").expect("read resident").is_none());
+    assert!(tx.get(b"spilled").expect("read spilled").is_none());
+}
+
+#[test]
+fn should_keep_accepted_cloud_commit_replayable_when_batch_is_between_half_and_full_limit() {
+    // Arrange: replay bounds a resident batch by roughly twice its payload,
+    // so a commit in (limit / 2, limit] is the band a frame-size check misses.
+    let dir = tempfile::tempdir().expect("database directory");
+    let mut engine = Engine::open(replay_bounded_options(dir.path())).expect("open writer");
+    let limit =
+        super::CloudReplay::limits(&replay_bounded_options(dir.path())).max_replayable_txn_bytes();
+
+    // Act
+    let committed = commit_one(&engine, b"mid", incompressible(limit * 3 / 5));
+    engine
+        .shutdown(std::time::Duration::from_secs(30))
+        .expect("shutdown writer");
+    let reopened = Engine::open(replay_bounded_options(dir.path()))
+        .expect("every accepted transaction must be replayable");
+
+    // Assert
+    let tx = reopened
+        .begin_tx(0, TransactionMode::ReadOnly)
+        .expect("read transaction");
+    match committed {
+        Ok(()) => assert!(tx.get(b"mid").expect("read mid").is_some()),
+        Err(error) => assert!(
+            matches!(error, crate::MidgeError::ResourceLimit(_)),
+            "{error:?}"
+        ),
+    }
+}

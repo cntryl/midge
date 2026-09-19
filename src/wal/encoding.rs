@@ -753,6 +753,16 @@ pub fn decode_txn_batch_payload(
     })
 }
 
+/// Allocation replay charges for decoding a transaction batch payload. The
+/// writer uses the same bound so it never accepts a batch replay rejects.
+pub(crate) fn txn_batch_decoded_bound(payload_len: usize, op_count: usize) -> usize {
+    let slots =
+        size_of::<TxnBatchRecord>().saturating_add(size_of::<WalRecord>().saturating_mul(2));
+    payload_len
+        .saturating_mul(2)
+        .saturating_add(op_count.saturating_mul(slots))
+}
+
 /// Validate decoded batch allocation before materializing its operation vector.
 pub(crate) fn decode_txn_batch_payload_bounded(
     outer_record: &WalRecord,
@@ -760,12 +770,7 @@ pub(crate) fn decode_txn_batch_payload_bounded(
     max_decoded_bytes: usize,
 ) -> MidgeResult<DecodedTxnBatch> {
     let (header, _) = decode_txn_batch_header(outer_record, payload)?;
-    let slots =
-        size_of::<TxnBatchRecord>().saturating_add(size_of::<WalRecord>().saturating_mul(2));
-    let bound = payload
-        .len()
-        .saturating_mul(2)
-        .saturating_add(header.op_count.saturating_mul(slots));
+    let bound = txn_batch_decoded_bound(payload.len(), header.op_count);
     if bound > max_decoded_bytes {
         return Err(MidgeError::ResourceLimit(format!(
             "transaction batch decoded allocation bound {bound} exceeds {max_decoded_bytes}-byte replay limit"

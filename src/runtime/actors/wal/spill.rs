@@ -10,6 +10,33 @@ use bytes::Bytes;
 use std::time::Instant;
 
 impl WalActor {
+    /// Replay buffer bytes a split-marker transaction needs, charged with the
+    /// same accounting streaming replay uses.
+    fn spilled_replay_bytes(
+        source: &crate::runtime::transaction_spill::TransactionOpSource,
+    ) -> MidgeResult<usize> {
+        let mut replay_bytes = crate::wal::recovery::streaming::pending_txn_overhead_bytes();
+        source.for_each(|_, op| {
+            let (key_len, value_len, range_end_len) = match &op {
+                crate::runtime::TransactionOp::Put { key, value, .. } => {
+                    (key.len(), value.len(), 0)
+                }
+                crate::runtime::TransactionOp::Delete { key, .. } => (key.len(), 0, 0),
+                crate::runtime::TransactionOp::DeleteRange {
+                    start_key, end_key, ..
+                } => (start_key.len(), 0, end_key.len()),
+            };
+            replay_bytes =
+                replay_bytes.saturating_add(crate::wal::recovery::streaming::pending_record_bytes(
+                    key_len,
+                    value_len,
+                    range_end_len,
+                ));
+            Ok(())
+        })?;
+        Ok(replay_bytes)
+    }
+
     /// Stream a spilled transaction through split WAL markers without
     /// reconstructing its complete write set in memory.
     pub(crate) fn append_spilled_transaction(
@@ -44,6 +71,9 @@ impl WalActor {
 
         let effective_durability = durability_policy.unwrap_or(self.durability_policy);
         self.ensure_write_durability_available(state, effective_durability)?;
+        if self.max_replayable_txn_bytes.is_some() {
+            self.ensure_replayable_transaction(Self::spilled_replay_bytes(source)?)?;
+        }
         let sequence_plan = Self::allocate_transaction_sequences(state, source.len())?;
         let commit_time_millis = state.observed_time_millis();
         let mut wal_may_have_changed = false;
