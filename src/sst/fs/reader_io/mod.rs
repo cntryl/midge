@@ -827,10 +827,6 @@ impl SstFileIo {
         self
     }
 
-    pub(crate) fn sst_id(&self) -> u64 {
-        self.sst_id
-    }
-
     pub(crate) fn state_scan(
         self: &Arc<Self>,
         start: Option<Vec<u8>>,
