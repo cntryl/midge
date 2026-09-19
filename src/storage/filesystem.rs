@@ -135,8 +135,7 @@ impl FileSystem {
             fs::create_dir_all(&lock_dir).map_err(|error| {
                 format!("create lock directory {}: {error}", lock_dir.display())
             })?;
-            let identity = full_path.to_string_lossy();
-            let lock_name = format!("{:08x}.lock", crc32c::crc32c(identity.as_bytes()));
+            let lock_name = process_lock_stripe_name(full_path);
             let file = fs::OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -161,8 +160,7 @@ impl FileSystem {
             fs::create_dir_all(&lock_dir).map_err(|error| {
                 format!("create lock directory {}: {error}", lock_dir.display())
             })?;
-            let identity = full_path.to_string_lossy();
-            let lock_name = format!("{:08x}.lock", crc32c::crc32c(identity.as_bytes()));
+            let lock_name = process_lock_stripe_name(full_path);
             let file = fs::OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -366,6 +364,17 @@ fn range_path_metadata(path: &Path) -> Result<StorageObjectMetadata, String> {
     {
         range_metadata(&fs::metadata(path).map_err(|error| range_io_error(&error))?)
     }
+}
+
+/// Cross-process lock file for `full_path`. Keys share a fixed set of stripe
+/// files, so the lock directory stays bounded no matter how many distinct
+/// objects are written or deleted; a collision only serializes two keys.
+/// Each operation holds at most one stripe, always after its in-process
+/// mutex, so sharing a stripe cannot deadlock.
+fn process_lock_stripe_name(full_path: &Path) -> String {
+    let identity = full_path.to_string_lossy();
+    let stripe = crc32c::crc32c(identity.as_bytes()) as usize % CONDITIONAL_LOCK_STRIPES;
+    format!("stripe-{stripe:02x}.lock")
 }
 
 fn mutation_lock(full_path: &Path) -> parking_lot::MutexGuard<'static, ()> {
@@ -1596,6 +1605,35 @@ mod atomic_publish_tests {
         assert!(matches!(interrupted, StorageOutcome::Err(_)));
         assert!(
             matches!(read(&fs, "meta/manifest.json"), StorageOutcome::Ok(bytes) if bytes == b"previous")
+        );
+    }
+}
+
+#[cfg(test)]
+mod lock_stripe_tests {
+    use super::*;
+
+    #[test]
+    fn should_bound_lock_files_when_deleting_many_distinct_missing_keys() {
+        // Arrange: in real cloud mode this backend evicts one local copy per
+        // SST ever produced, so per-key lock files grew without bound.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let fs = FileSystem::new(dir.path()).expect("filesystem backend");
+
+        // Act
+        for index in 0..1_000 {
+            let (tx, rx) = std::sync::mpsc::channel();
+            fs.submit_delete(&format!("sst/{index}.sst"), tx);
+            let _ = rx.recv().expect("delete completion");
+        }
+
+        // Assert
+        let lock_files = std::fs::read_dir(dir.path().join(".midge-locks"))
+            .expect("lock dir")
+            .count();
+        assert!(
+            lock_files <= CONDITIONAL_LOCK_STRIPES,
+            "{lock_files} lock files for 1,000 keys"
         );
     }
 }
