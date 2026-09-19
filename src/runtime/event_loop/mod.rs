@@ -144,6 +144,7 @@ pub struct EventLoop {
     pub(super) pending_msg: Option<RuntimeMsg>,
 
     verification_barrier: VerificationBarrier,
+    legacy_bound_backfill: read_path::LegacyBoundBackfill,
     publication_gate: ManifestPublicationGate,
 
     pub(super) flush_worker_result_rx: crossbeam::channel::Receiver<FlushWorkerResult>,
@@ -275,6 +276,7 @@ impl EventLoop {
             inline_responses: RefCell::new(HashMap::new()),
             pending_msg: None,
             verification_barrier: VerificationBarrier::default(),
+            legacy_bound_backfill: read_path::LegacyBoundBackfill::default(),
             publication_gate: ManifestPublicationGate::default(),
             flush_worker_result_rx,
             flush_barrier_waiters: HashMap::new(),
