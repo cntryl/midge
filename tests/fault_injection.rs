@@ -7799,14 +7799,15 @@ mod cloud_remote_sst_compaction_recovery {
             interrupted.is_err(),
             "the injected partition failure must reach the caller"
         );
-        let after_failure = sst_names(&remote_directory);
-        assert!(
-            after_failure.is_superset(&inputs),
-            "unpublished output cannot retire inputs"
-        );
-        assert!(
-            after_failure.len() > inputs.len(),
-            "the failed job left a remote output"
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut after_failure = sst_names(&remote_directory);
+        while after_failure != inputs && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+            after_failure = sst_names(&remote_directory);
+        }
+        assert_eq!(
+            after_failure, inputs,
+            "a failed job keeps every input and reclaims the partitions it uploaded"
         );
         assert!(sst_names(&directory.path().join("sst")).is_empty());
         engine
@@ -7819,8 +7820,8 @@ mod cloud_remote_sst_compaction_recovery {
         // Assert
         let after_retry = sst_names(&remote_directory);
         assert!(
-            after_retry.difference(&after_failure).next().is_some(),
-            "retry must allocate a fresh generation instead of reusing an orphan identity"
+            after_retry.difference(&inputs).next().is_some(),
+            "retry must publish its own fresh-generation output"
         );
         assert!(sst_names(&directory.path().join("sst")).is_empty());
         let cf = reopened

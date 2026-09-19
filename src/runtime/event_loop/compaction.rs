@@ -270,6 +270,17 @@ impl CompactionCoordinator {
                 )
             });
             completion_error = Some(error.replay());
+            // Partitions uploaded before the failure are named by a reserved,
+            // never-reused generation and referenced by no manifest or
+            // intent. Reclaim them now, or every retry of a deterministically
+            // failing plan leaks another set of remote objects.
+            let orphaned = event_loop.compaction_actor.take_prepared_remote_output_names();
+            if !orphaned.is_empty() {
+                let hybrid_storage = event_loop.hybrid_storage.clone();
+                event_loop
+                    .gc_actor
+                    .delete_ssts(&mut event_loop.state, &orphaned, hybrid_storage);
+            }
             if let (Some(hybrid), Some(token)) = (&event_loop.hybrid_storage, reservation) {
                 event_loop
                     .compaction_actor
