@@ -130,7 +130,10 @@ impl Drop for Engine {
             .name("midge-engine-reaper".to_string())
             .spawn(move || {
                 drop(runtime);
-                Self::release_fencing_parts(lease_heartbeat, lease, lease_guard);
+                if let Err(error) = Self::release_fencing_parts(lease_heartbeat, lease, lease_guard)
+                {
+                    tracing::debug!(%error, "Engine reaper finished without releasing the lease");
+                }
                 tracing::debug!("Engine reaper cleanup complete");
             });
         if let Err(error) = spawn_result {
@@ -147,7 +150,7 @@ impl Engine {
         lease_heartbeat: Option<std::sync::Mutex<crate::lease::LeaseHeartbeat>>,
         lease: Option<Arc<dyn crate::lease::PrimaryLease>>,
         lease_guard: Option<crate::lease::LeaseGuard>,
-    ) {
+    ) -> MidgeResult<()> {
         if let Some(heartbeat_mutex) = lease_heartbeat {
             let mut heartbeat = heartbeat_mutex
                 .lock()
@@ -155,22 +158,39 @@ impl Engine {
             heartbeat.stop();
             tracing::trace!("Engine: lease heartbeat stopped");
         }
-        if let Some(lease) = lease {
-            loop {
-                match lease.release() {
-                    Ok(()) => break,
-                    Err(error) => {
-                        tracing::warn!(
-                            %error,
-                            "primary lease release failed; cleanup reaper will retry"
-                        );
-                        std::thread::sleep(Duration::from_millis(1));
+        let result = lease.map_or(Ok(()), |lease| Self::release_lease_bounded(lease.as_ref()));
+        drop(lease_guard);
+        result
+    }
+
+    /// Release the primary lease, retrying with backoff for at most its TTL.
+    /// The heartbeat has already stopped, so an unreleased lease expires on
+    /// its own by then; retrying longer would only spin and flood the log.
+    fn release_lease_bounded(lease: &dyn crate::lease::PrimaryLease) -> MidgeResult<()> {
+        const MAX_BACKOFF: Duration = Duration::from_secs(1);
+        let deadline = std::time::Instant::now() + lease.ttl();
+        let mut backoff = Duration::from_millis(1);
+        loop {
+            match lease.release() {
+                Ok(()) | Err(crate::lease::LeaseError::AlreadyReleased) => {
+                    tracing::trace!("Engine: lease released");
+                    return Ok(());
+                }
+                Err(error) => {
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    if remaining.is_zero() || matches!(error, crate::lease::LeaseError::Internal(_))
+                    {
+                        tracing::warn!(%error, "primary lease release failed; it will expire at its TTL");
+                        return Err(MidgeError::LeaseUnavailable(format!(
+                            "primary lease release failed; the lease expires at its TTL: {error}"
+                        )));
                     }
+                    tracing::debug!(%error, ?backoff, "primary lease release failed; retrying");
+                    std::thread::sleep(backoff.min(remaining));
+                    backoff = (backoff * 2).min(MAX_BACKOFF);
                 }
             }
-            tracing::trace!("Engine: lease released");
         }
-        drop(lease_guard);
     }
 
     fn has_fencing_resources(&self) -> bool {
@@ -191,10 +211,10 @@ impl Engine {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .take();
-                if let Some((lease_heartbeat, lease, lease_guard)) = resources {
-                    Self::release_fencing_parts(lease_heartbeat, lease, lease_guard);
-                }
-                let _ = completion_tx.send(());
+                let released = resources.map_or(Ok(()), |(lease_heartbeat, lease, lease_guard)| {
+                    Self::release_fencing_parts(lease_heartbeat, lease, lease_guard)
+                });
+                let _ = completion_tx.send(released);
                 tracing::debug!("Engine fencing reaper cleanup complete");
             });
 
@@ -254,8 +274,8 @@ impl Engine {
                 };
                 let terminal_result = runtime_handle.shutdown(Duration::MAX);
                 drop(runtime);
-                Self::release_fencing_parts(resources.0, resources.1, resources.2);
-                let _ = completion_tx.send(terminal_result);
+                let released = Self::release_fencing_parts(resources.0, resources.1, resources.2);
+                let _ = completion_tx.send(terminal_result.and(released));
                 tracing::debug!("Engine runtime and fencing reaper cleanup complete");
             });
         match spawn_result {
@@ -288,7 +308,7 @@ impl Engine {
 
     fn wait_for_fencing_cleanup(&mut self, timeout: Duration) -> MidgeResult<()> {
         enum CleanupWait {
-            KnownComplete,
+            KnownComplete(MidgeResult<()>),
             RuntimeComplete(MidgeResult<()>),
             Timeout,
             Disconnected,
@@ -301,7 +321,7 @@ impl Engine {
         let wait_result = match cleanup {
             PendingFencingCleanup::Known { completion, .. } => {
                 match completion.recv_timeout(timeout) {
-                    Ok(()) => CleanupWait::KnownComplete,
+                    Ok(released) => CleanupWait::KnownComplete(released),
                     Err(crossbeam::channel::RecvTimeoutError::Timeout) => CleanupWait::Timeout,
                     Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
                         CleanupWait::Disconnected
@@ -320,7 +340,7 @@ impl Engine {
         };
 
         match wait_result {
-            CleanupWait::KnownComplete => {
+            CleanupWait::KnownComplete(released) => {
                 let cleanup = self.lease_state.pending_cleanup.take().ok_or_else(|| {
                     MidgeError::Internal("fencing cleanup result was lost".to_string())
                 })?;
@@ -332,7 +352,7 @@ impl Engine {
                         "fencing cleanup result kind changed while waiting".to_string(),
                     ));
                 };
-                terminal_result
+                terminal_result.and(released)
             }
             CleanupWait::RuntimeComplete(result) => {
                 self.lease_state.pending_cleanup.take();

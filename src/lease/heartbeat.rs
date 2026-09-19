@@ -3,7 +3,7 @@
 //! Manages periodic lease renewal in a background thread.
 //! Monitors lease health and triggers shutdown if renewal fails.
 
-use super::traits::{LeaseValidityState, PrimaryLease};
+use super::traits::{LeaseError, LeaseValidityState, PrimaryLease};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -97,6 +97,23 @@ fn run_renewal_worker(
                     break;
                 }
                 tracing::trace!("lease renewed successfully");
+            }
+            Err(error)
+                if matches!(error, LeaseError::IoError(_) | LeaseError::Indeterminate(_))
+                    && validity.is_some_and(|validity| {
+                        matches!(validity.snapshot(), LeaseValidityState::Active { valid_until, .. }
+                            if valid_until > std::time::Instant::now())
+                    }) =>
+            {
+                // The provider could not answer, but this writer's lease is
+                // still valid. Retry within the remaining validity; the lease
+                // is fenced only if it runs out or ownership is actually lost.
+                tracing::warn!(%error, "lease renewal failed transiently; retrying");
+                let pause = (ttl / 20).clamp(Duration::from_millis(10), Duration::from_secs(1));
+                if let Some(validity) = validity {
+                    let observed = validity.snapshot();
+                    let _ = validity.wait_for_change(observed, pause, running);
+                }
             }
             Err(error) => {
                 tracing::error!(%error, "lease renewal failed; marking unhealthy");
@@ -551,6 +568,75 @@ mod tests {
             "expected at least 3 renewals within timeout, got {renewal_count}"
         );
         assert!(is_healthy);
+    }
+
+    struct FlakyRenewalLease {
+        validity: Arc<crate::lease::traits::LeaseValidity>,
+        ttl: Duration,
+        renew_calls: AtomicUsize,
+    }
+
+    impl PrimaryLease for FlakyRenewalLease {
+        fn try_acquire(self: Arc<Self>) -> Result<LeaseGuard, LeaseError> {
+            self.validity
+                .activate(1, std::time::Instant::now() + self.ttl)?;
+            Ok(LeaseGuard::token())
+        }
+
+        fn renew(&self) -> Result<(), LeaseError> {
+            if self.renew_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(LeaseError::IoError("provider read timed out".into()));
+            }
+            self.validity
+                .advance(1, std::time::Instant::now() + self.ttl)
+        }
+
+        fn release(&self) -> Result<(), LeaseError> {
+            self.validity.deactivate(1);
+            Ok(())
+        }
+
+        fn ttl(&self) -> Duration {
+            self.ttl
+        }
+
+        fn holder_id(&self) -> String {
+            "flaky-renewal".to_string()
+        }
+
+        fn epoch(&self) -> u64 {
+            1
+        }
+    }
+
+    #[test]
+    fn should_retry_lease_renewal_when_first_attempt_fails_transiently() {
+        // Arrange: one slow or failed provider call must not fence a writer
+        // whose lease is still valid for most of its TTL.
+        let lease = Arc::new(FlakyRenewalLease {
+            validity: Arc::new(crate::lease::traits::LeaseValidity::new()),
+            ttl: Duration::from_millis(600),
+            renew_calls: AtomicUsize::new(0),
+        });
+        let _guard = Arc::clone(&lease).try_acquire().expect("acquire");
+        let mut heartbeat = LeaseHeartbeat::new_with_healthy_and_validity(
+            lease.clone() as Arc<dyn PrimaryLease>,
+            Arc::new(AtomicBool::new(true)),
+            Some(Arc::clone(&lease.validity)),
+        );
+
+        // Act
+        heartbeat.start();
+        std::thread::sleep(Duration::from_millis(1_000));
+        let healthy = heartbeat.is_healthy();
+        heartbeat.stop();
+
+        // Assert
+        assert!(
+            healthy,
+            "a transient renewal failure must be retried, not fenced"
+        );
+        assert!(lease.renew_calls.load(Ordering::SeqCst) >= 2);
     }
 
     #[test]

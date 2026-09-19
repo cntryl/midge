@@ -73,7 +73,10 @@ impl FileSystemLease {
             let realfs = RealFs::new(db_path).map_err(|e| LeaseError::IoError(e.to_string()))?;
             Arc::new(realfs)
         };
+        Ok(Self::with_fs(fs, ttl, clock_skew_tolerance))
+    }
 
+    fn with_fs(fs: Arc<dyn Fs>, ttl: Duration, clock_skew_tolerance: Duration) -> Self {
         let instance = LEASE_INSTANCE_COUNTER.fetch_add(1, Ordering::Relaxed);
         let holder_id = format!(
             "{}.{}@{}",
@@ -86,7 +89,7 @@ impl FileSystemLease {
 
         let leader_store = Arc::new(FsLeaderStore::new(fs));
 
-        Ok(Self {
+        Self {
             leader_store,
             holder_id,
             acquired: AtomicBool::new(false),
@@ -94,7 +97,12 @@ impl FileSystemLease {
             validity: Arc::new(LeaseValidity::new()),
             ttl,
             clock_skew_tolerance,
-        })
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_fs_for_test(fs: Arc<dyn Fs>, ttl: Duration) -> Self {
+        Self::with_fs(fs, ttl, ttl / 2)
     }
 
     pub(crate) fn lease_validity(&self) -> Arc<LeaseValidity> {
@@ -124,6 +132,10 @@ impl PrimaryLease for FileSystemLease {
         // contention) propagates verbatim — it must not be collapsed into a
         // single blanket variant here, or every distinction made below would
         // be silently discarded.
+        // Other nodes time takeover from the wall-clock stamp the store takes
+        // before its write, so local validity is anchored before it too;
+        // counting a slow fsync or rename here would outlive the record.
+        let validity_anchor = std::time::Instant::now();
         let record = self
             .leader_store
             .acquire_leadership_after_validation_and_publish(
@@ -186,7 +198,7 @@ impl PrimaryLease for FileSystemLease {
 
         let epoch = record.epoch;
         self.validity
-            .activate(epoch, std::time::Instant::now() + self.ttl())?;
+            .activate(epoch, validity_anchor + self.ttl())?;
         self.acquired_epoch.store(epoch, Ordering::Release);
         self.acquired.store(true, Ordering::Release);
 
@@ -206,11 +218,12 @@ impl PrimaryLease for FileSystemLease {
                 return Err(LeaseError::RenewalFailed("lease not acquired".to_string()));
             }
             self.validity.remaining(our_epoch)?;
+            let validity_anchor = std::time::Instant::now();
             self.leader_store
                 .refresh_timestamp(&self.holder_id, our_epoch)
                 .map_err(|error| LeaseError::RenewalFailed(error.to_string()))?;
             self.validity
-                .advance(our_epoch, std::time::Instant::now() + self.ttl())
+                .advance(our_epoch, validity_anchor + self.ttl())
         })();
         if let Err(error) = result {
             self.validity.fence(our_epoch);
@@ -565,6 +578,91 @@ mod tests {
                 .expect("read current leader"),
             Some(second_record),
             "stale renewal and release must preserve the higher-epoch holder"
+        );
+    }
+}
+
+#[cfg(test)]
+mod validity_anchor_tests {
+    use super::*;
+    use crate::io::traits::{DirEntry, Metadata};
+    use crate::io::{Durability, File, FsPath, FsResult, OpenOptions};
+
+    /// Stalls every rename, as a slow NFS commit would.
+    struct SlowRenameFs {
+        inner: MockFs,
+        stall: Duration,
+    }
+
+    impl Fs for SlowRenameFs {
+        fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
+            self.inner.open(path, opts)
+        }
+        fn remove_file(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.remove_file(path)
+        }
+        fn exists(&self, path: &FsPath) -> FsResult<bool> {
+            self.inner.exists(path)
+        }
+        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+            self.inner.metadata(path)
+        }
+        fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.create_dir_all(path)
+        }
+        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+            self.inner.list_dir(path)
+        }
+        fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.remove_dir_all(path)
+        }
+        fn sync_dir(&self, path: &FsPath, dur: Durability) -> FsResult<()> {
+            self.inner.sync_dir(path, dur)
+        }
+        fn rename_atomic(&self, from: &FsPath, to: &FsPath) -> FsResult<()> {
+            std::thread::sleep(self.stall);
+            self.inner.rename_atomic(from, to)
+        }
+    }
+
+    fn valid_until(lease: &FileSystemLease) -> std::time::Instant {
+        match lease.validity.snapshot() {
+            crate::lease::traits::LeaseValidityState::Active { valid_until, .. } => valid_until,
+            other => panic!("lease should be active, found {other:?}"),
+        }
+    }
+
+    #[test]
+    fn should_anchor_filesystem_lease_validity_before_the_leader_write_when_io_stalls() {
+        // Arrange: other nodes time takeover from the wall-clock stamp taken
+        // before the write, so local validity must not also count the stall.
+        let ttl = Duration::from_secs(10);
+        let stall = Duration::from_millis(300);
+        let lease = Arc::new(FileSystemLease::new_with_fs_for_test(
+            Arc::new(SlowRenameFs {
+                inner: MockFs::new(),
+                stall,
+            }),
+            ttl,
+        ));
+
+        // Act
+        let before_acquire = std::time::Instant::now();
+        let _guard = Arc::clone(&lease).try_acquire().expect("acquire");
+        let acquired_until = valid_until(&lease);
+        let before_renew = std::time::Instant::now();
+        lease.renew().expect("renew");
+        let renewed_until = valid_until(&lease);
+
+        // Assert
+        let slack = Duration::from_millis(100);
+        assert!(
+            acquired_until.duration_since(before_acquire) <= ttl + slack,
+            "acquire validity counted the I/O stall"
+        );
+        assert!(
+            renewed_until.duration_since(before_renew) <= ttl + slack,
+            "renew validity counted the I/O stall"
         );
     }
 }

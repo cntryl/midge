@@ -1809,3 +1809,34 @@ fn read_remote_lease(cloud: &CloudStorage) -> String {
     };
     String::from_utf8(bytes).expect("remote lease is UTF-8")
 }
+
+#[test]
+fn should_persist_expiry_not_before_local_validity_when_ttl_has_fractional_seconds() {
+    // Arrange: the holder trusts its lease for the full TTL, so the persisted
+    // expiry other writers read must not be earlier, or another writer can
+    // take over while this one still accepts writes.
+    let dir = tempfile::tempdir().expect("lease dir");
+    let ttl = Duration::from_millis(1500);
+    let lease = Arc::new(CloudStorageLease::new_with_clock_skew_tolerance_and_ttl(
+        test_config(),
+        dir.path(),
+        Duration::ZERO,
+        ttl,
+    ));
+
+    // Act
+    let _guard = Arc::clone(&lease).try_acquire().expect("acquire lease");
+
+    // Assert
+    let stored = std::fs::read_to_string(dir.path().join(LEASE_OBJECT_KEY)).expect("lease doc");
+    let doc = parse_lease_document(&stored).expect("parse lease doc");
+    let acquired = chrono::DateTime::parse_from_rfc3339(&doc.acquired_at).expect("acquired_at");
+    let expires = chrono::DateTime::parse_from_rfc3339(&doc.expires_at).expect("expires_at");
+    let persisted = (expires - acquired)
+        .to_std()
+        .expect("positive lease duration");
+    assert!(
+        persisted >= ttl,
+        "persisted lease duration {persisted:?} is shorter than the holder's validity {ttl:?}"
+    );
+}

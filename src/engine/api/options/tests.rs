@@ -897,3 +897,28 @@ fn should_reject_zero_lease_ttl() {
         matches!(result, Err(MidgeError::InvalidArgument(message)) if message.contains("lease TTL"))
     );
 }
+
+#[test]
+fn should_reject_cloud_lease_ttl_too_short_to_ever_renew() {
+    // Arrange: cloud renewal starts with two thirds of the TTL left and
+    // reserves a fixed provider-write margin, so shorter TTLs never renew
+    // and the engine fences itself a few seconds after opening.
+    let ttl = Duration::from_secs(12);
+
+    // Act
+    let location = crate::config::CloudStorageLocation::new(
+        CloudProviderConfig::aws_s3("ttl-bucket", "us-east-1"),
+        "database-a",
+    );
+    let result = OpenOptions::cloud("/tmp/midge-cloud-ttl", location)
+        .lease_ttl(ttl)
+        .lease_clock_skew_tolerance(Duration::from_secs(1))
+        .build();
+
+    // Assert
+    assert!(
+        matches!(&result, Err(MidgeError::InvalidArgument(message)) if message.contains("lease TTL")),
+        "{:?}",
+        result.err()
+    );
+}
