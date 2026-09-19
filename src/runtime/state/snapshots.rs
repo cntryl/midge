@@ -46,6 +46,13 @@ impl RuntimeState {
             .pinned_sst_names(self.snapshots.max_snapshot_lifetime)
     }
 
+    /// Non-blocking pin sample for the event loop; `None` while a snapshot
+    /// acquisition is in progress.
+    pub(crate) fn try_get_pinned_sst_names(&self) -> Option<HashSet<String>> {
+        self.snapshot_pins
+            .try_pinned_sst_names(self.snapshots.max_snapshot_lifetime)
+    }
+
     /// Warn about snapshots that exceeded max lifetime and return the number observed.
     ///
     /// Timed-out snapshots remain pinned until the owning transaction unregisters.

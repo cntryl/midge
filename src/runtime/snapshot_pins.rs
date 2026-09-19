@@ -121,7 +121,23 @@ impl SnapshotPinRegistry {
         // GC must exclude the capture-to-registration window. Snapshot
         // acquisition takes a shared guard, so the exclusive guard here waits
         // until every in-flight capture has published its pin.
-        let _guard: RwLockWriteGuard<'_, ()> = self.acquisition.write();
+        let guard: RwLockWriteGuard<'_, ()> = self.acquisition.write();
+        self.sample_pinned_sst_names(&guard, max_lifetime)
+    }
+
+    /// Like [`Self::pinned_sst_names`], but returns `None` instead of waiting
+    /// while a snapshot acquisition is in progress. The event loop must use
+    /// this: an acquiring API thread can itself be waiting on the event loop.
+    pub(crate) fn try_pinned_sst_names(&self, max_lifetime: Duration) -> Option<HashSet<String>> {
+        let guard = self.acquisition.try_write()?;
+        Some(self.sample_pinned_sst_names(&guard, max_lifetime))
+    }
+
+    fn sample_pinned_sst_names(
+        &self,
+        _exclusive: &RwLockWriteGuard<'_, ()>,
+        max_lifetime: Duration,
+    ) -> HashSet<String> {
         let now = Instant::now();
         let mut pinned = HashSet::new();
 
