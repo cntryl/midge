@@ -755,7 +755,7 @@ mod tests {
     }
 
     #[test]
-    fn should_accept_appends_and_preserve_corrupt_journal_after_salvaging_a_journal_prefix() {
+    fn should_accept_appends_after_salvaging_a_corrupt_journal_prefix() {
         // Arrange
         let test_dir = create_test_dir();
         crate::metadata::journal::append_edit(&test_dir, &add_sst("a.sst")).expect("append a");
