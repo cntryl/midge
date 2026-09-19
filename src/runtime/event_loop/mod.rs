@@ -1122,6 +1122,10 @@ impl EventLoop {
         let Some(cloud) = self.cloud_metadata_storage.as_ref() else {
             return Ok(());
         };
+        // The remote-ahead check below compares sequences, not epochs, so it
+        // cannot stop a stale holder before the new one publishes. Validate
+        // writer authority before overwriting the authoritative mirror.
+        self.validate_runtime_writer_lease_within(deadline)?;
         let _publication_guard = cloud.try_lock_metadata_publication().ok_or_else(|| {
             crate::common::MidgeError::Busy(
                 "cloud metadata publication is already in progress".to_string(),
