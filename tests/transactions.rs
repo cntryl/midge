@@ -6849,7 +6849,11 @@ mod transaction_delete_range_window {
 
     #[test]
     fn should_reject_spilled_commit_given_covering_range_delete_evicted_from_recent_window() {
-        for_each_storage_mode(durable_storage_modes(), |mode, _opts| {
+        // Arrange
+        let modes = durable_storage_modes();
+
+        // Act
+        for_each_storage_mode(modes, |mode, _opts| {
             // A small memory budget forces the transaction's write set to
             // spill. The tombstones are flushed before commit so the evicting
             // range deletes don't hold the budget and stall the commit.
@@ -6868,5 +6872,8 @@ mod transaction_delete_range_window {
                 });
             }
         });
+
+        // Assert
+        // `assert_commit_conflicts_after_eviction` checks every staged commit above.
     }
 }
