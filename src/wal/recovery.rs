@@ -443,7 +443,71 @@ pub fn replay_wal_with_policy<S: BuildHasher>(
     memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>, S>,
     replay_policy: ReplayPolicy,
 ) -> MidgeResult<RecoveryStats> {
-    replay_wal_with_policy_and_filter(storage, wal_dir, memtables, replay_policy, None)
+    replay_wal_with_policy_and_filter(
+        storage,
+        wal_dir,
+        memtables,
+        replay_policy,
+        None,
+        ReplayScanOptions::default(),
+    )
+}
+
+/// Verify every WAL frame and count records and bytes as strict replay
+/// would, without materializing memtables or retaining replayed records.
+/// Storage verification uses this: it needs only the stats, and a full
+/// replay would allocate another copy of every unflushed write.
+///
+/// # Errors
+///
+/// Returns the error replay would return, or `Timeout` once `deadline`
+/// expires between frames.
+pub(crate) fn validate_wal_with_policy(
+    storage: &dyn Fs,
+    wal_dir: &FsPath,
+    replay_policy: ReplayPolicy,
+    deadline: Option<&crate::common::OperationDeadline>,
+) -> MidgeResult<RecoveryStats> {
+    let mut no_memtables = HashMap::new();
+    replay_wal_with_policy_and_filter(
+        storage,
+        wal_dir,
+        &mut no_memtables,
+        replay_policy,
+        Some(&|_| false),
+        ReplayScanOptions {
+            validate_only: true,
+            deadline,
+        },
+    )
+}
+
+/// How a replay pass scans frames, independent of what it applies.
+#[derive(Clone, Copy, Default)]
+struct ReplayScanOptions<'a> {
+    /// Deduplicate cross-file records by fingerprint instead of retaining a
+    /// copy of each record.
+    validate_only: bool,
+    /// Stop with `Timeout` between frames once this expires.
+    deadline: Option<&'a crate::common::OperationDeadline>,
+}
+
+fn ensure_replay_deadline(
+    deadline: Option<&crate::common::OperationDeadline>,
+) -> Result<(), ReplayFailure> {
+    if deadline.is_some_and(crate::common::OperationDeadline::is_expired) {
+        return Err(ReplayFailure::Error(MidgeError::Timeout(
+            "WAL verification deadline expired".into(),
+        )));
+    }
+    Ok(())
+}
+
+fn record_fingerprint(record: &WalRecord) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    record.hash(&mut hasher);
+    hasher.finish()
 }
 
 pub(crate) fn replay_wal_with_manifest_filter<S: BuildHasher>(
@@ -459,6 +523,7 @@ pub(crate) fn replay_wal_with_manifest_filter<S: BuildHasher>(
         memtables,
         replay_policy,
         Some(should_apply),
+        ReplayScanOptions::default(),
     )
 }
 
@@ -468,6 +533,7 @@ fn replay_wal_with_policy_and_filter<S: BuildHasher>(
     memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>, S>,
     replay_policy: ReplayPolicy,
     should_apply: Option<&dyn Fn(&WalRecord) -> bool>,
+    scan: ReplayScanOptions<'_>,
 ) -> MidgeResult<RecoveryStats> {
     // Invariant: recovery may keep only a verified prefix of the WAL, but it
     // must never materialize a partial frame or reorder committed records.
@@ -484,7 +550,7 @@ fn replay_wal_with_policy_and_filter<S: BuildHasher>(
 
     let replay_paths = collect_replay_paths(storage, wal_dir)?;
     let (epoch_frontiers, max_epoch_scan_had_corruption) =
-        discover_writer_epoch_frontiers(storage, &replay_paths, replay_policy)?;
+        discover_writer_epoch_frontiers(storage, &replay_paths, replay_policy, scan.deadline)?;
     let max_epoch_seen = epoch_frontiers.max_epoch_seen();
     stats.max_epoch_seen = max_epoch_seen;
     if max_epoch_scan_had_corruption {
@@ -499,6 +565,8 @@ fn replay_wal_with_policy_and_filter<S: BuildHasher>(
             epoch_frontiers: &epoch_frontiers,
             should_apply,
             seen_records: std::collections::HashMap::new(),
+            seen_fingerprints: std::collections::HashMap::new(),
+            scan,
             replay_ordinal: 0,
             verified_bytes: 0,
         };
@@ -597,9 +665,29 @@ struct WalReplayState<'a, S: BuildHasher> {
     epoch_frontiers: &'a WriterEpochFrontiers,
     should_apply: Option<&'a dyn Fn(&WalRecord) -> bool>,
     seen_records: std::collections::HashMap<WalRecord, String>,
+    /// Used instead of `seen_records` when `scan.validate_only`.
+    seen_fingerprints: std::collections::HashMap<u64, String>,
+    scan: ReplayScanOptions<'a>,
     replay_ordinal: u64,
     /// End offset of the last verified frame in the file being replayed.
     verified_bytes: u64,
+}
+
+impl<S: BuildHasher> WalReplayState<'_, S> {
+    /// Record `record` as seen in `source`; true when an earlier file already
+    /// carried it, so replay skips this cross-file duplicate.
+    fn first_seen_elsewhere(&mut self, record: &WalRecord, source: &str) -> bool {
+        let first_source = if self.scan.validate_only {
+            self.seen_fingerprints
+                .entry(record_fingerprint(record))
+                .or_insert_with(|| source.to_string())
+        } else {
+            self.seen_records
+                .entry(record.clone())
+                .or_insert_with(|| source.to_string())
+        };
+        first_source != source
+    }
 }
 
 fn replay_wal_paths<S: BuildHasher>(
@@ -723,7 +811,7 @@ pub(crate) fn max_writer_epoch(
 ) -> MidgeResult<u64> {
     let replay_paths = collect_replay_paths(storage, wal_dir)?;
     let (frontiers, _had_corruption) =
-        discover_writer_epoch_frontiers(storage, &replay_paths, replay_policy)?;
+        discover_writer_epoch_frontiers(storage, &replay_paths, replay_policy, None)?;
     Ok(frontiers.max_epoch_seen())
 }
 
@@ -731,6 +819,7 @@ fn discover_writer_epoch_frontiers(
     storage: &dyn Fs,
     replay_paths: &[ReplayFile],
     replay_policy: ReplayPolicy,
+    deadline: Option<&crate::common::OperationDeadline>,
 ) -> MidgeResult<(WriterEpochFrontiers, bool)> {
     let mut frontiers = WriterEpochFrontiers::default();
     let mut had_corruption = false;
@@ -746,6 +835,7 @@ fn discover_writer_epoch_frontiers(
         let snapshot = read_wal_snapshot(&*file, &replay_file.path, &mut file_read_ns)?;
 
         loop {
+            ensure_replay_deadline(deadline).map_err(ReplayFailure::into_error)?;
             match read_next_wal_frame(&snapshot, &replay_file.path, pos) {
                 Ok(NextWalFrame::Eof) => break,
                 Ok(NextWalFrame::Frame(frame)) => {
@@ -801,6 +891,7 @@ fn replay_wal_file<S: BuildHasher>(
     let snapshot = read_wal_snapshot(&*file, file_path, &mut file_read_ns)?;
 
     loop {
+        ensure_replay_deadline(replay_state.scan.deadline)?;
         match read_next_wal_frame(&snapshot, file_path, pos)? {
             NextWalFrame::Eof => break,
             NextWalFrame::Frame(frame) => {
@@ -811,19 +902,11 @@ fn replay_wal_file<S: BuildHasher>(
                 // suppresses a cross-file duplicate.
                 let record_ordinal = replay_state.replay_ordinal;
                 replay_state.replay_ordinal = replay_state.replay_ordinal.saturating_add(1);
-                if replay_state
-                    .seen_records
-                    .get(&frame.record)
-                    .is_some_and(|first_source| first_source != &source)
-                {
+                if replay_state.first_seen_elsewhere(&frame.record, &source) {
                     pos = next_pos;
                     replay_state.verified_bytes = pos;
                     continue;
                 }
-                replay_state
-                    .seen_records
-                    .entry(frame.record.clone())
-                    .or_insert(source);
                 let mut apply_ctx = WalReplayApplyContext {
                     file_path,
                     stats: &mut *replay_state.stats,

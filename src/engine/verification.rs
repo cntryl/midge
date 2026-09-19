@@ -195,7 +195,8 @@ fn verification_stage_error(context: &str, error: MidgeError) -> MidgeError {
         | MidgeError::NotFound
         | MidgeError::InvalidPath
         | MidgeError::Corruption(_)
-        | MidgeError::CompatibilityError(_)) => error,
+        | MidgeError::CompatibilityError(_)
+        | MidgeError::Timeout(_)) => error,
         other => MidgeError::RecoveryFailed(format!("{context}: {other}")),
     }
 }
@@ -233,11 +234,11 @@ fn verify_storage_path_with_sst_fs(
         data_blocks_verified = data_blocks_verified.saturating_add(data_blocks);
     }
 
-    let wal_stats = crate::wal::recovery::replay_wal_with_policy(
+    let wal_stats = crate::wal::recovery::validate_wal_with_policy(
         fs.as_ref(),
         &FsPath::new("wal"),
-        &mut std::collections::HashMap::new(),
         crate::wal::recovery::ReplayPolicy::Strict,
+        deadline,
     )
     .map_err(|error| verification_stage_error("WAL verification failed", error))?;
     let manifest_epoch = crate::metadata::journal::highest_edit_id_with_fs(&fs)
@@ -596,6 +597,40 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(read_lengths.as_slice(), &[1024 * 1024, 1024 * 1024, 123]);
+    }
+
+    #[test]
+    fn should_stop_wal_verification_when_deadline_has_expired() {
+        // Arrange: no SSTs, so only the WAL scan can observe the deadline.
+        let temp_dir = tempfile::tempdir().expect("create verification directory");
+        let db_path = temp_dir.path().to_path_buf();
+        crate::metadata::ensure_or_create_format_marker(&db_path).expect("create format marker");
+        ManifestPersistence::save(&db_path, &Manifest::default()).expect("save empty manifest");
+        std::fs::create_dir_all(db_path.join("wal")).expect("create WAL directory");
+        let mut wal = Vec::new();
+        for sequence in 1..=64_u64 {
+            let record = crate::wal::WalRecord::new(
+                crate::wal::WalOpKind::Put,
+                bytes::Bytes::from(format!("key-{sequence}")),
+                Some(bytes::Bytes::from_static(b"value")),
+                sequence,
+                1,
+            );
+            let payload = crate::wal::encoding::encode(&record).expect("encode WAL record");
+            crate::wal::frame::append_frame(&mut wal, &payload).expect("frame WAL record");
+        }
+        std::fs::write(db_path.join("wal").join(crate::wal::ACTIVE_FILE_NAME), wal)
+            .expect("write WAL");
+        let expired = crate::common::OperationDeadline::from_budget(std::time::Duration::ZERO);
+
+        // Act
+        let result = super::verify_storage_path_with_sst_fs(&db_path, None, None, Some(&expired));
+
+        // Assert
+        assert!(
+            matches!(result, Err(crate::common::MidgeError::Timeout(_))),
+            "WAL verification must honor the caller deadline: {result:?}"
+        );
     }
 
     #[test]
