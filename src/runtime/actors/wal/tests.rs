@@ -2194,3 +2194,46 @@ fn should_reject_resident_transaction_when_batch_payload_exceeds_wal_decode_limi
     )?;
     Ok(())
 }
+
+#[test]
+fn should_build_one_read_snapshot_per_cf_when_validating_insert_only_conflict_checks(
+) -> MidgeResult<()> {
+    // Arrange: every op used to rebuild a full read snapshot (manifest clone,
+    // read view, uncached SST opens) on the event-loop thread.
+    let mut state = RuntimeState::new("/tmp/test_midge_validation_snapshots".into(), true);
+    let mut wal_actor = WalActor::new(
+        "/tmp/test_midge_validation_snapshots".into(),
+        DurabilityPolicy::BestEffort,
+        BatchConfig::default(),
+        true,
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    let ops = (0..100_u32)
+        .map(|index| crate::runtime::TransactionOp::Put {
+            cf_id: 0,
+            key: Bytes::from(format!("key-{index}")),
+            value: Bytes::from_static(b"value"),
+            ttl_seconds: None,
+            insert_only: true,
+        })
+        .collect();
+    WalActor::reset_assertion_snapshot_build_count();
+
+    // Act
+    wal_actor.prepare_transaction_append(
+        &mut state,
+        TransactionAppendParams {
+            request_id: 364,
+            assertions: Vec::new(),
+            ops,
+            durability_policy: Some(DurabilityPolicy::BestEffort),
+            start_sequence: Some(0),
+            conflict_policy: crate::runtime::ConflictPolicy::AbortOnWriteConflict,
+        },
+    )?;
+
+    // Assert
+    assert_eq!(WalActor::assertion_snapshot_build_count(), 1);
+    Ok(())
+}

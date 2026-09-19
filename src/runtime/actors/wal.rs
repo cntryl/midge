@@ -869,7 +869,7 @@ impl WalActor {
         self.ensure_write_durability_available(state, self.durability_policy)?;
 
         // Enforce insert-only if requested by checking in-memory state
-        if insert_only && Self::key_exists(state, cf_id, &key)? {
+        if insert_only && Self::key_exists_for_single_write(state, cf_id, &key)? {
             return Err(MidgeError::InvalidArgument(
                 "key already exists".to_string(),
             ));
