@@ -2817,3 +2817,77 @@ fn should_restore_compaction_completion_deferred_behind_waiting_cf_drop() {
         "column-family DDL keeps its order behind the waiting drop"
     );
 }
+
+#[test]
+fn should_wait_in_select_when_queued_flush_cannot_start() -> crate::common::MidgeResult<()> {
+    // Arrange: a queued immutable whose flush cannot start while the
+    // publication gate is held. Treating it as actionable made the run loop
+    // spin through progress passes every 50 µs instead of blocking.
+    let mut event_loop = create_test_local_event_loop()?;
+    event_loop.state.sequence = 1;
+    event_loop
+        .state
+        .get_cf(0)
+        .expect("default column family")
+        .memtable
+        .put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)?;
+    event_loop.freeze_active_memtable(0)?;
+    assert!(event_loop.state.has_due_immutable_flush());
+    event_loop.publication_gate.active = true;
+
+    // Act
+    let actionable = event_loop.has_actionable_work();
+    let idle_timeout = event_loop.idle_progress_timeout();
+
+    // Assert
+    assert!(
+        !actionable,
+        "a flush that cannot start must not spin the loop"
+    );
+    assert!(idle_timeout.is_some(), "the loop still wakes to re-check");
+    Ok(())
+}
+
+#[test]
+fn should_fsync_batched_wal_while_verification_barrier_is_held() -> crate::common::MidgeResult<()> {
+    // Arrange: a buffered write is acknowledged, then verification freezes
+    // layout maintenance. Group-commit fsync is not layout maintenance; it must
+    // still run once the batch window elapses, or a crash during a long
+    // verification loses writes that should already be durable.
+    let mut event_loop = create_test_local_event_loop()?;
+    event_loop.wal_actor.append(
+        &mut event_loop.state,
+        crate::runtime::actors::wal::AppendParams {
+            request_id: 1,
+            cf_id: 0,
+            key: bytes::Bytes::from_static(b"buffered"),
+            value: Some(bytes::Bytes::from_static(b"value")),
+            insert_only: false,
+            ttl_seconds: None,
+        },
+    )?;
+    assert!(event_loop.wal_actor.has_pending_data());
+    assert!(event_loop.verification_barrier.activate(7));
+    let window = event_loop
+        .wal_actor
+        .sync_deadline_timeout()
+        .unwrap_or_default();
+    std::thread::sleep(window + std::time::Duration::from_millis(20));
+    let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
+
+    // Act
+    let actionable = event_loop.has_actionable_work();
+    event_loop.progress_pass(&msg_rx);
+
+    // Assert
+    assert!(
+        actionable,
+        "a due batched sync is actionable under the barrier"
+    );
+    assert!(
+        !event_loop.wal_actor.has_pending_data(),
+        "the batched WAL must be synced while verification holds the barrier"
+    );
+    assert!(event_loop.verification_barrier.is_active());
+    Ok(())
+}

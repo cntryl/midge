@@ -1355,7 +1355,10 @@ impl EventLoop {
         }
 
         if self.verification_barrier.token.is_some() {
-            return false;
+            // Verification freezes layout maintenance, but group-commit fsync
+            // does not change the layout being verified.
+            return self.wal_actor.should_sync_batch()
+                && (self.wal_actor.has_pending_data() || self.durability.has_pending_waiters());
         }
 
         if self
@@ -1390,7 +1393,7 @@ impl EventLoop {
             return true;
         }
 
-        if self.state.has_due_immutable_flush() {
+        if self.state.has_due_immutable_flush() && !self.flush_start_blocked(false) {
             return true;
         }
 
@@ -1407,8 +1410,9 @@ impl EventLoop {
         if self.verification_barrier.is_active() {
             // Verification deliberately freezes maintenance. Ignoring due
             // retry deadlines here makes the run loop block for the release
-            // message instead of repeatedly timing out at zero duration.
-            return None;
+            // message instead of repeatedly timing out at zero duration. The
+            // batched WAL sync deadline still applies.
+            return self.wal_actor.sync_deadline_timeout();
         }
 
         [
@@ -1439,6 +1443,9 @@ impl EventLoop {
 
     fn progress_pass(&mut self, msg_rx: &Receiver<RuntimeMsg>) {
         if self.verification_barrier.token.is_some() {
+            // Mutations stay deferred behind the barrier, so sync only what
+            // is already in the WAL; do not drain queued writes into it.
+            self.sync_batched_wal_without_draining();
             return;
         }
         self.drain_flush_worker_results();

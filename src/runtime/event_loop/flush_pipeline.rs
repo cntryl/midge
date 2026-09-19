@@ -99,6 +99,17 @@ impl EventLoop {
         self.schedule_next_flush_worker_with_shutdown(true);
     }
 
+    /// Whether a queued flush cannot start right now. The run loop uses the
+    /// same condition, so a queued flush it cannot start does not count as
+    /// actionable work and spin the loop.
+    pub(super) fn flush_start_blocked(&self, allow_during_shutdown: bool) -> bool {
+        (self.shutting_down && !allow_during_shutdown)
+            || self.state.is_memory_mode()
+            || self.flush_actor.is_inflight()
+            || self.publication_gate.active
+            || (!allow_during_shutdown && self.pending_msg.is_some())
+    }
+
     fn schedule_next_flush_worker_with_shutdown(&mut self, allow_during_shutdown: bool) {
         if !allow_during_shutdown
             && self.cloud_maintenance_enabled()
@@ -107,12 +118,7 @@ impl EventLoop {
             self.schedule_cloud_maintenance();
             return;
         }
-        if (self.shutting_down && !allow_during_shutdown)
-            || self.state.is_memory_mode()
-            || self.flush_actor.is_inflight()
-            || self.publication_gate.active
-            || (!allow_during_shutdown && self.pending_msg.is_some())
-        {
+        if self.flush_start_blocked(allow_during_shutdown) {
             return;
         }
         let Some(flush) = self.state.begin_next_immutable_flush() else {
