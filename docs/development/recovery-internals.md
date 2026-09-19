@@ -45,6 +45,13 @@ If the active WAL ends with a typed incomplete-tail condition beyond byte 0:
 - the truncated tail is discarded
 - recovery continues
 
+Replay itself never modifies the file, so `midge verify` stays read-only. Before
+the local engine reopens `wal.log` for append, it truncates the file to the
+verified prefix and fsyncs it. Without this, new frames would land after the
+torn bytes, and the next recovery would see mid-file corruption instead of a
+tail. If the truncation fails, the open fails under both recovery policies.
+Cloud recovery applies the same truncation to its local active WAL.
+
 This includes a partial final header or payload with no verified frame after it,
 and an all-zero final region left by file preallocation. These are the expected
 shapes of a torn or unwritten final append. Recovery does not infer this state
@@ -102,7 +109,15 @@ Use salvage recovery when the operator would rather keep the valid prefix than f
 Salvage mode:
 
 - keeps the valid WAL prefix when possible
+- when WAL replay stops at a corrupt frame, moves every WAL file it did not
+  reach into `wal/salvaged-<millis>/` (the file holding the corrupt frame is
+  copied there in full, then truncated to its replayed prefix) and raises the
+  recovered sequence above what those files hold, so new writes never land
+  behind the corruption or reuse its sequences
 - preserves authoritative pre-publication SST state if interrupted output cannot be safely published
+- never deletes SST files missing from the recovered manifest; a salvaged
+  manifest may be a fallback or truncated replay, so startup residue cleanup
+  retains them and logs them for operator review
 - marks the engine degraded or in salvage mode for diagnostics
 
 ## Flush Recovery
