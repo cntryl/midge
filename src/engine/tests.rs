@@ -2088,7 +2088,10 @@ fn should_stop_retrying_and_report_error_when_lease_release_keeps_failing() {
     let result = Engine::release_fencing_parts(None, Some(engine_lease), None);
 
     // Assert
-    assert!(result.is_err(), "a release that never succeeds must be reported");
+    assert!(
+        result.is_err(),
+        "a release that never succeeds must be reported"
+    );
     assert!(
         started.elapsed() < Duration::from_secs(5),
         "release retries must stop near the lease TTL, took {:?}",
