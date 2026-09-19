@@ -601,11 +601,20 @@ impl EventLoop {
             }
         };
         sealed_segments.sort_by_key(|(segment_id, _)| *segment_id);
+        // Memtables flush in FIFO order per column family, so a segment below
+        // the oldest unflushed memtable's first segment holds only data that
+        // is already in published SSTs, including deletes, which the
+        // per-record proof below cannot certify.
+        let flushed_floor = self.state.wal_recovery_floor_segment();
 
         for (segment_id, path) in sealed_segments {
             if let Err(error) = self.validate_runtime_lease_for_wal_prune() {
                 tracing::warn!(segment_id, %error, "stopped local WAL pruning after lease validation failed");
                 return;
+            }
+            if flushed_floor.is_some_and(|floor| segment_id < floor) {
+                self.remove_flushed_local_wal_segment(segment_id, &path);
+                continue;
             }
             let bytes = match self.read_runtime_file(&path) {
                 Ok(bytes) => bytes,
@@ -651,6 +660,17 @@ impl EventLoop {
         ) {
             self.state.mark_persistence_anomaly();
             tracing::warn!(%error, "failed to sync local WAL directory after pruning");
+        }
+    }
+
+    fn remove_flushed_local_wal_segment(&mut self, segment_id: u64, path: &crate::io::FsPath) {
+        match self.state.fs.remove_file(path) {
+            Ok(()) => tracing::debug!(segment_id, "removed flushed local WAL segment"),
+            Err(crate::io::FsError::NotFound(_)) => {}
+            Err(error) => {
+                self.state.mark_persistence_anomaly();
+                tracing::warn!(segment_id, %error, "failed to remove flushed local WAL segment");
+            }
         }
     }
 
