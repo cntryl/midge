@@ -160,8 +160,11 @@ impl CachePolicy for ClockProPolicy {
             return None;
         }
 
-        // Scan for a victim: cold entry with ref_bit clear (excluding protected types)
-        let max_scans = slots.len() + 1;
+        // Scan for a victim: cold entry with ref_bit clear (excluding protected
+        // types). Two full passes suffice: the first may clear reference bits
+        // and demote unreferenced hot entries, the second then finds a victim
+        // whenever any evictable entry is resident.
+        let max_scans = slots.len().saturating_mul(2) + 1;
         for _ in 0..max_scans {
             let idx = *hand;
             Self::advance_hand(&mut hand, slots.len());
@@ -206,6 +209,11 @@ impl CachePolicy for ClockProPolicy {
                 Self::on_hot_evict(&mut hot_target);
                 return Some(evicted_key);
             }
+            // CLOCK-Pro hot hand: a hot entry not referenced since the last
+            // sweep is demoted to cold, so a later pass can evict it.
+            // Skipping it instead would pin every block read twice.
+            slots[idx].hot_bit = false;
+            *hot_count = hot_count.saturating_sub(1);
         }
 
         None
@@ -482,5 +490,35 @@ mod tests {
         assert!(slots.len() <= 16);
         assert!(slots.capacity() <= 16);
         assert!(policy.key_to_slot.lock().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use crate::sst::cache::{BlockCache, CacheKey, CachePolicyType};
+    use bytes::Bytes;
+
+    #[test]
+    fn should_enforce_shard_capacity_when_every_block_is_read_twice() {
+        // Arrange: a second access promotes a block to hot. Hot blocks whose
+        // reference bit has been cleared must still become evictable.
+        let block = Bytes::from(vec![0_u8; 1024]);
+        let cache = BlockCache::new(4 * 1024, 1, CachePolicyType::ClockPro);
+
+        // Act
+        for index in 0..256 {
+            let key = CacheKey::for_data(index, 0);
+            cache.put(key, &block);
+            let _ = cache.get(&key);
+        }
+
+        // Assert
+        let resident = (0..256)
+            .filter(|index| cache.get(&CacheKey::for_data(*index, 0)).is_some())
+            .count();
+        assert!(
+            resident <= 4,
+            "a 4-block shard must not pin {resident} blocks"
+        );
     }
 }
