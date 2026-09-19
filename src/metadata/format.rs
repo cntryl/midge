@@ -60,9 +60,12 @@ pub fn validate_format_marker(db_path: &Path) -> MidgeResult<u32> {
         }
     })?;
 
+    // The marker is matched verbatim (lsm-spec manifest.md §2): exactly the
+    // prefix, ASCII decimal digits, and one trailing newline.
     let version = contents
-        .trim()
         .strip_prefix(FORMAT_PREFIX)
+        .and_then(|rest| rest.strip_suffix('\n'))
+        .filter(|digits| !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
         .ok_or_else(|| {
             MidgeError::CompatibilityError(format!(
                 "invalid {} marker at '{}': expected '{}<version>'",
@@ -225,6 +228,35 @@ mod tests {
                 if message.contains("invalid FORMAT marker")
                     && message.contains("expected 'midge-format-version=<version>'")
         ));
+    }
+
+    #[test]
+    fn should_reject_open_given_non_verbatim_format_marker_when_starting() {
+        // Arrange
+        let non_verbatim_markers = [
+            format!(" {FORMAT_PREFIX}{CURRENT_FORMAT_VERSION}\n"),
+            format!("{FORMAT_PREFIX}{CURRENT_FORMAT_VERSION} \n"),
+            format!("{FORMAT_PREFIX}{CURRENT_FORMAT_VERSION}\n\n"),
+            format!("{FORMAT_PREFIX}{CURRENT_FORMAT_VERSION}\r\n"),
+            format!("{FORMAT_PREFIX}{CURRENT_FORMAT_VERSION}"),
+            format!("{FORMAT_PREFIX}+{CURRENT_FORMAT_VERSION}\n"),
+            format!("{FORMAT_PREFIX} {CURRENT_FORMAT_VERSION}\n"),
+        ];
+
+        for marker in non_verbatim_markers {
+            let temp_dir = tempfile::tempdir().expect("temp dir");
+            std::fs::write(format_marker_path(temp_dir.path()), &marker)
+                .expect("write non-verbatim format marker");
+
+            // Act
+            let result = validate_format_marker(temp_dir.path());
+
+            // Assert
+            assert!(
+                matches!(result, Err(MidgeError::CompatibilityError(_))),
+                "marker {marker:?} must be rejected, got {result:?}"
+            );
+        }
     }
 
     #[cfg(unix)]
