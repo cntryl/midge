@@ -711,6 +711,46 @@ impl SkipList {
         out
     }
 
+    /// Newest version at or before `snapshot_seq` for each key in
+    /// [start, end), tombstones included, in key order. Seeks to `start` and
+    /// stops at `end`, so the cost follows the range, not the memtable.
+    pub fn range_visible_with_meta(
+        &self,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+        snapshot_seq: u64,
+    ) -> Vec<SkipListEntryWithExp> {
+        let mut preds: [*mut Node; MAX_LEVEL] = [ptr::null_mut(); MAX_LEVEL];
+        let mut succs: [*mut Node; MAX_LEVEL] = [ptr::null_mut(); MAX_LEVEL];
+        let mut curr = if let Some(start_key) = start {
+            self.find(start_key, &mut preds, &mut succs);
+            succs[0]
+        } else {
+            self.head.next.load(AO::Acquire)
+        };
+
+        let mut out = Vec::new();
+        // SAFETY: curr was loaded with Acquire and nodes are never freed
+        // while the list is shared.
+        while let Some(node) = unsafe { curr.as_ref() } {
+            if end.is_some_and(|end_key| node.key.as_ref() >= end_key) {
+                break;
+            }
+            if let Some(vn) = Self::visible_version(&node.versions_head, snapshot_seq) {
+                out.push((
+                    node.key.clone(),
+                    vn.val.clone(),
+                    vn.seq,
+                    vn.val.is_none(),
+                    vn.exp,
+                    vn.op,
+                ));
+            }
+            curr = node.next.load(AO::Acquire);
+        }
+        out
+    }
+
     /// Get all tombstoned keys in range visible at `snapshot_seq`.
     pub fn tombstones_range_visible(
         &self,
