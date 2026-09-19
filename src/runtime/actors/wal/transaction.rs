@@ -484,6 +484,8 @@ impl WalActor {
             )));
         }
 
+        let decoded_bound =
+            crate::wal::encoding::txn_batch_decoded_bound(payload.len(), nested_records.len());
         let mut batch_record = WalRecord::new_cf(
             0,
             WalOpKind::TxnBatch,
@@ -493,9 +495,10 @@ impl WalActor {
             self.current_epoch,
         );
         batch_record.txn_id = Some(sequence_plan.txn_id);
-        self.ensure_replayable_transaction(crate::wal::encoding::record_frame_size_bound(
-            &batch_record,
-        )?)?;
+        // Replay rejects the batch if either its frame or its decoded
+        // allocation exceeds the budget; check the larger of the two.
+        let frame_bound = crate::wal::encoding::record_frame_size_bound(&batch_record)?;
+        self.ensure_replayable_transaction(frame_bound.max(decoded_bound))?;
         Ok(Some(batch_record))
     }
 
