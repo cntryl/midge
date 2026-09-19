@@ -370,6 +370,16 @@ impl EventLoop {
     /// Sync batched WAL if threshold exceeded or if there are pending writes.
     /// In group commit mode, this completes all waiters for the sealed generation.
     pub(super) fn sync_batched_wal_if_needed(&mut self, msg_rx: &Receiver<RuntimeMsg>) {
+        self.sync_batched_wal(Some(msg_rx));
+    }
+
+    /// Batched sync that leaves queued writes in the channel, for use while
+    /// the storage verification barrier defers mutations.
+    pub(super) fn sync_batched_wal_without_draining(&mut self) {
+        self.sync_batched_wal(None);
+    }
+
+    fn sync_batched_wal(&mut self, msg_rx: Option<&Receiver<RuntimeMsg>>) {
         const MAX_DRAIN_WRITES_BEFORE_SYNC: usize = 4096;
 
         if self.wal_actor.is_cloud_async() {
@@ -402,7 +412,9 @@ impl EventLoop {
         // 🔑 CRITICAL INVARIANT: If we have pending waiters, we MUST seal a generation.
         // Even with zero bytes, the durability guarantee requires advancing the generation.
         // Drain any available writes to maximize group commit.
-        let _ = self.drain_pending_writes(msg_rx, MAX_DRAIN_WRITES_BEFORE_SYNC);
+        if let Some(msg_rx) = msg_rx {
+            let _ = self.drain_pending_writes(msg_rx, MAX_DRAIN_WRITES_BEFORE_SYNC);
+        }
 
         // Always sync: the paired operation advances the generation even with
         // zero bytes and completes every waiter sealed into the old generation.
