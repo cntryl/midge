@@ -342,7 +342,29 @@ fn encode_into_inner(record: &WalRecord, buf: &mut Vec<u8>) -> MidgeResult<()> {
 
 /// Reject WAL record shapes that decode successfully field-by-field but are
 /// corrupt for a given operation. lsm-spec format/wal.md §5.1, §5.4.
-fn reject_op_specific_corruption(op: WalOpKind, has_value: bool) -> MidgeResult<()> {
+///
+/// Shared by top-level records and records nested in a `TxnBatch` payload so
+/// both paths enforce the same role-driven shape.
+fn reject_op_specific_corruption(
+    op: WalOpKind,
+    has_value: bool,
+    has_range_end: bool,
+) -> MidgeResult<()> {
+    // A Put/Insert record without VALUE has nothing to apply. Replaying it
+    // as a no-op would silently drop an acknowledged write, so it is corrupt.
+    if op.role() == WalOpRole::ValueWrite && !has_value {
+        return Err(corruption(format!(
+            "{op:?} record is missing its VALUE tag"
+        )));
+    }
+
+    // RANGE_END is required for DeleteRange (lsm-spec format/wal.md §5.1).
+    if op.role() == WalOpRole::RangeDelete && !has_range_end {
+        return Err(corruption(
+            "DeleteRange record is missing its RANGE_END tag",
+        ));
+    }
+
     // A Delete (point-delete) record carries no payload: VALUE (and
     // therefore COMPRESSION, which only qualifies a VALUE) MUST NOT be
     // present. A record carrying either is corrupt, not a delete with an
@@ -460,7 +482,7 @@ pub fn decode_view(data: &[u8]) -> MidgeResult<WalRecordView<'_>> {
     })?;
 
     let op = op.ok_or_else(|| corruption("missing OP"))?;
-    reject_op_specific_corruption(op, value.is_some())?;
+    reject_op_specific_corruption(op, value.is_some(), range_end.is_some())?;
 
     Ok(WalRecordView {
         op,
@@ -881,6 +903,7 @@ fn decode_txn_batch_record(
     let key = read_len_prefixed_bytes(input, "key")?;
     let value = read_optional_bytes(input, "value")?;
     let range_end = read_optional_bytes(input, "range_end")?;
+    reject_op_specific_corruption(op, value.is_some(), range_end.is_some())?;
     Ok(TxnBatchRecord {
         cf_id,
         op,
@@ -1016,6 +1039,97 @@ mod tests {
         // Act
         let encoded = encode(&record).unwrap();
         let error = decode(&encoded[..]).unwrap_err();
+
+        // Assert
+        assert!(
+            matches!(error, MidgeError::Corruption(ref msg) if msg.contains("VALUE")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn should_reject_put_record_missing_value_when_decoding() {
+        // Arrange
+        let record = WalRecord::new(WalOpKind::Put, Bytes::from_static(b"k"), None, 7, 1);
+
+        // Act
+        let encoded = encode(&record).unwrap();
+        let error = decode(&encoded[..]).unwrap_err();
+
+        // Assert
+        assert!(
+            matches!(error, MidgeError::Corruption(ref msg) if msg.contains("VALUE")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn should_reject_delete_range_record_missing_range_end_when_decoding() {
+        // Arrange
+        let record = WalRecord::new(WalOpKind::DeleteRange, Bytes::from_static(b"a"), None, 7, 1);
+
+        // Act
+        let encoded = encode(&record).unwrap();
+        let error = decode(&encoded[..]).unwrap_err();
+
+        // Assert
+        assert!(
+            matches!(error, MidgeError::Corruption(ref msg) if msg.contains("RANGE_END")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn should_reject_txn_batch_nested_put_missing_value_when_decoding() {
+        // Arrange
+        let mut put = WalRecord::new_cf(7, WalOpKind::Put, Bytes::from_static(b"k"), None, 11, 9);
+        put.txn_id = Some(42);
+        let payload = encode_txn_batch_payload(42, 10, 12, 9, &[put]).unwrap();
+        let mut outer = WalRecord::new_cf(
+            0,
+            WalOpKind::TxnBatch,
+            Bytes::from_static(b"txn"),
+            Some(payload.clone()),
+            12,
+            9,
+        );
+        outer.txn_id = Some(42);
+
+        // Act
+        let error = decode_txn_batch_payload(&outer, &payload).unwrap_err();
+
+        // Assert
+        assert!(
+            matches!(error, MidgeError::Corruption(ref msg) if msg.contains("VALUE")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn should_reject_txn_batch_nested_delete_carrying_value_when_decoding() {
+        // Arrange
+        let mut delete = WalRecord::new_cf(
+            7,
+            WalOpKind::Delete,
+            Bytes::from_static(b"k"),
+            Some(Bytes::from_static(b"unexpected")),
+            11,
+            9,
+        );
+        delete.txn_id = Some(42);
+        let payload = encode_txn_batch_payload(42, 10, 12, 9, &[delete]).unwrap();
+        let mut outer = WalRecord::new_cf(
+            0,
+            WalOpKind::TxnBatch,
+            Bytes::from_static(b"txn"),
+            Some(payload.clone()),
+            12,
+            9,
+        );
+        outer.txn_id = Some(42);
+
+        // Act
+        let error = decode_txn_batch_payload(&outer, &payload).unwrap_err();
 
         // Assert
         assert!(

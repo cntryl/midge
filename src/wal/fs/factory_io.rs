@@ -55,6 +55,28 @@ impl FsWalFactoryIo {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn should_sync_wal_directory_when_creating_initial_active_wal() {
+        // Arrange
+        let mock = std::sync::Arc::new(crate::io::MockFs::new());
+        let factory = FsWalFactoryIo::new(mock.clone());
+
+        // Act
+        let _writer = factory
+            .create_writer(crate::wal::ACTIVE_FILE_NAME)
+            .expect("create active WAL");
+
+        // Assert
+        assert!(
+            mock.sync_dir_calls()
+                .iter()
+                .any(|(path, durability)| path.0 == "."
+                    && *durability == crate::io::Durability::Durable),
+            "creating wal.log must make its directory entry durable"
+        );
+    }
+
     use super::*;
 
     #[test]

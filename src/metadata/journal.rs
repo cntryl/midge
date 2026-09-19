@@ -377,8 +377,19 @@ fn append_record_and_marker_with_fs(
         },
     )?;
 
+    let journal_path = FsPath::new(JOURNAL_FILE);
+    // A missing or still-empty journal has never had its directory entry
+    // made durable, whether this append creates it or a crash left it empty.
+    let creating_journal = !fs
+        .exists(&journal_path)
+        .map_err(crate::common::MidgeError::from)?
+        || fs
+            .metadata(&journal_path)
+            .map_err(crate::common::MidgeError::from)?
+            .len
+            == 0;
     let mut file = fs.open(
-        &FsPath::new(JOURNAL_FILE),
+        &journal_path,
         OpenOptions {
             mode: OpenMode::ReadWrite,
             create: true,
@@ -409,6 +420,13 @@ fn append_record_and_marker_with_fs(
     let fsync_start = std::time::Instant::now();
     file.sync(Durability::Durable)
         .map_err(crate::common::MidgeError::from)?;
+    if creating_journal {
+        // An fsynced file is still lost after a crash if the directory entry
+        // naming it was never synced. The acknowledged edit (for example a
+        // column-family create) must survive, so sync the directory once.
+        fs.sync_dir(&FsPath::new("."), Durability::Durable)
+            .map_err(crate::common::MidgeError::from)?;
+    }
     let fsync_ns = fsync_start.elapsed().as_nanos();
 
     Ok((write_ns, fsync_ns))
@@ -673,6 +691,17 @@ fn read_journal_record(
     let typ = file
         .read_at(offset, 1)
         .map_err(crate::common::MidgeError::from)?[0];
+    if typ == 0 {
+        // An unsynced append can persist the new file size but not its bytes,
+        // leaving a zero-filled end. That is a torn tail (the WAL treats it
+        // the same way); zeros followed by data are still corruption.
+        let rest = file
+            .read_at(offset, file_len - offset)
+            .map_err(crate::common::MidgeError::from)?;
+        if rest.iter().all(|byte| *byte == 0) {
+            return Ok(JournalRecordStatus::PartialHeader { record_start });
+        }
+    }
     validate_journal_record_type(typ, record_start)?;
     if offset + 5 > file_len {
         return Ok(JournalRecordStatus::PartialHeader { record_start });
@@ -1390,6 +1419,82 @@ mod tests {
             corrupted_len,
             "durable later records must stay on disk"
         );
+    }
+
+    #[test]
+    fn should_treat_all_zero_journal_tail_as_torn_append_when_replaying() {
+        // Arrange: file size reached disk but the appended bytes did not, a
+        // common shape of an unsynced append after power loss.
+        let td = tempdir().expect("create temp directory");
+        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 1 }).expect("append first");
+        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 2 }).expect("append second");
+        let mut journal = std::fs::OpenOptions::new()
+            .append(true)
+            .open(td.path().join(JOURNAL_FILE))
+            .expect("open journal");
+        journal.write_all(&[0_u8; 64]).expect("append zero tail");
+        journal.sync_all().expect("sync zero tail");
+        drop(journal);
+
+        // Act
+        let edits = replay_journal(td.path()).expect("a zero-filled tail is a torn append");
+        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 3 }).expect("append after repair");
+        let repaired = replay_journal(td.path()).expect("replay repaired journal");
+
+        // Assert
+        assert_eq!(edits.len(), 2);
+        assert_eq!(repaired.len(), 3);
+    }
+
+    #[test]
+    fn should_reject_zero_region_followed_by_data_as_corruption() {
+        // Arrange
+        let td = tempdir().expect("create temp directory");
+        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 1 }).expect("append first");
+        let mut journal = std::fs::OpenOptions::new()
+            .append(true)
+            .open(td.path().join(JOURNAL_FILE))
+            .expect("open journal");
+        journal.write_all(&[0_u8; 16]).expect("append zeros");
+        journal
+            .write_all(&[7_u8; 16])
+            .expect("append data after zeros");
+        journal.sync_all().expect("sync");
+        drop(journal);
+
+        // Act
+        let result = replay_journal(td.path());
+
+        // Assert
+        assert!(matches!(
+            result,
+            Err(crate::common::MidgeError::Corruption(_))
+        ));
+    }
+
+    #[test]
+    fn should_sync_database_directory_when_first_manifest_append_creates_journal() {
+        // Arrange
+        let mock = Arc::new(crate::io::MockFs::new());
+        let fs: Arc<dyn Fs> = mock.clone();
+        let root_syncs = |mock: &crate::io::MockFs| {
+            mock.sync_dir_calls()
+                .into_iter()
+                .filter(|(path, durability)| path.0 == "." && *durability == Durability::Durable)
+                .count()
+        };
+
+        // Act
+        append_edit_with_fs(&fs, &ManifestEdit::BumpWalSeq { seq: 1 }).expect("create journal");
+        let after_create = root_syncs(&mock);
+        append_edit_with_fs(&fs, &ManifestEdit::BumpWalSeq { seq: 2 }).expect("append again");
+
+        // Assert
+        assert_eq!(
+            after_create, 1,
+            "creating the journal must make its directory entry durable"
+        );
+        assert_eq!(root_syncs(&mock), 1, "later appends need no directory sync");
     }
 
     #[test]
