@@ -96,7 +96,15 @@ Use salvage recovery when the operator would rather keep the valid prefix than f
 Salvage mode:
 
 - keeps the valid WAL prefix when possible
+- when WAL replay stops at a corrupt frame, moves every WAL file it did not
+  reach into `wal/salvaged-<millis>/` (the file holding the corrupt frame is
+  copied there in full, then truncated to its replayed prefix) and raises the
+  recovered sequence above what those files hold, so new writes never land
+  behind the corruption or reuse its sequences
 - preserves authoritative pre-publication SST state if interrupted output cannot be safely published
+- never deletes SST files missing from the recovered manifest; a salvaged
+  manifest may be a fallback or truncated replay, so startup residue cleanup
+  retains them and logs them for operator review
 - marks the engine degraded or in salvage mode for diagnostics
 
 ## Flush Recovery
