@@ -1,11 +1,11 @@
 //! Exact WAL retirement with memory bounded independently of segment length.
 
 use super::{
-    exact_state_sequence, file_may_contain_record_key, verify_sst_summary_matches_manifest,
-    CloudWalPruneBatchResults, CloudWalPruneGuard, DataCoverageRecord, ExactCoverageState,
-    FileMeta, GuardedObjectProof, HybridStorage, Manifest, MidgeError, MidgeResult,
-    PublishedWalSegment, RemoteObjectProof, StorageBackend, StorageObjectMetadata,
-    ValidatedWalObject, ValidatedWalPruneCandidate, WalPublicationCatalog,
+    exact_state_sequence, file_may_contain_record_key, file_may_overlap_record_range,
+    verify_sst_summary_matches_manifest, CloudWalPruneBatchResults, CloudWalPruneGuard,
+    DataCoverageRecord, ExactCoverageState, FileMeta, GuardedObjectProof, HybridStorage, Manifest,
+    MidgeError, MidgeResult, PublishedWalSegment, RemoteObjectProof, StorageBackend,
+    StorageObjectMetadata, ValidatedWalObject, ValidatedWalPruneCandidate, WalPublicationCatalog,
 };
 use crate::common::resource_budget::{ResourceBudget, ResourceReservation};
 use crate::io::{Fs, FsPath, OpenMode, OpenOptions};
@@ -352,6 +352,9 @@ impl Coverage<'_> {
         progress: &mut RecordProgress,
         segment_id: u64,
     ) -> MidgeResult<bool> {
+        if matches!(record.op.role(), crate::wal::types::WalOpRole::RangeDelete) {
+            return self.covers_range_delete(record, progress, segment_id);
+        }
         while progress.file_index < self.manifest.files.len() {
             let file = &self.manifest.files[progress.file_index];
             if !file.key_bounds_complete || file_may_contain_record_key(file, record) {
@@ -401,6 +404,39 @@ impl Coverage<'_> {
                         },
                         &mut || self.work.checkpoint(),
                     )?;
+                }
+            }
+            progress.file_index += 1;
+            progress.cursor = crate::sst::fs::reader_io::SstCursorPosition::default();
+            self.work.checkpoint()?;
+        }
+        Ok(progress.state.exactly_covers(record))
+    }
+
+    /// A range delete is covered when committed SSTs in its column family
+    /// hold range tombstones, at or above its sequence, that span its whole
+    /// range, whether in one file or split across compaction outputs.
+    fn covers_range_delete(
+        &mut self,
+        record: &DataCoverageRecord,
+        progress: &mut RecordProgress,
+        segment_id: u64,
+    ) -> MidgeResult<bool> {
+        while progress.file_index < self.manifest.files.len() {
+            let file = &self.manifest.files[progress.file_index];
+            if file_may_overlap_record_range(file, record) {
+                let fs = self.verified_source(file, segment_id)?;
+                let reader = crate::sst::fs::SstFileIo::open_for_compaction(
+                    &file.name,
+                    fs,
+                    self.budget.clone(),
+                )?;
+                let _held = self.budget.reserve(
+                    crate::sst::traits::SstStateReader::range_tombstone_memory_usage(&reader),
+                    "WAL range-delete coverage tombstones",
+                )?;
+                for tombstone in crate::sst::traits::SstStateReader::range_tombstones(&reader) {
+                    progress.state.observe_range_tombstone(&tombstone, record);
                 }
             }
             progress.file_index += 1;
