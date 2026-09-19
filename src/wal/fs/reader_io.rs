@@ -242,6 +242,16 @@ mod tests {
     fn should_return_none_on_eof() -> MidgeResult<()> {
         // Arrange: Create reader on newly created empty file
         let fs = Arc::new(crate::io::MockFs::new());
+        crate::io::Fs::open(
+            fs.as_ref(),
+            &FsPath::new("wal.log"),
+            crate::io::OpenOptions {
+                mode: crate::io::OpenMode::ReadWrite,
+                create: true,
+                create_new: true,
+                truncate: false,
+            },
+        )?;
         let mut reader = FsWalReaderIo::new("wal.log", fs)?;
 
         // Act: Try to read at position 0 from empty file

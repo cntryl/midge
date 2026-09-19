@@ -593,12 +593,11 @@ impl EventLoop {
                 .into_iter()
                 .filter(|entry| !entry.is_dir)
                 .filter_map(|entry| {
-                    let name = std::path::Path::new(&entry.name)
-                        .file_name()?
-                        .to_str()?
-                        .to_string();
-                    crate::wal::parse_segment_id(&name).map(|segment_id| {
-                        (segment_id, crate::io::FsPath::new(format!("wal/{name}")))
+                    crate::wal::parse_segment_id(&entry.name).map(|segment_id| {
+                        (
+                            segment_id,
+                            crate::io::FsPath::new(format!("wal/{}", entry.name)),
+                        )
                     })
                 })
                 .filter(|(segment_id, _)| *segment_id < self.state.wal.current_segment_id)
