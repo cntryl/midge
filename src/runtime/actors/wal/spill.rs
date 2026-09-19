@@ -151,6 +151,7 @@ impl WalActor {
         if !assertions.is_empty() {
             Self::ensure_no_assertion_conflicts(state, assertions, start_sequence)?;
         }
+        let mut snapshots = super::transaction_state::ValidationSnapshots::new(state);
 
         let mut expected_ordinal = 0_u64;
         source.for_each(|ordinal, op| {
@@ -171,7 +172,7 @@ impl WalActor {
                 conflict_policy,
                 crate::runtime::ConflictPolicy::AbortOnWriteConflict
             ) {
-                Self::ensure_no_write_conflict_for_op(state, &op, start_sequence)?;
+                Self::ensure_no_write_conflict_for_op(state, &mut snapshots, &op, start_sequence)?;
             }
 
             if let crate::runtime::TransactionOp::Put {
@@ -184,7 +185,7 @@ impl WalActor {
                 let exists = match source.latest_before(ordinal, key)? {
                     Some(crate::runtime::transaction_spill::IntentLookup::Present(_)) => true,
                     Some(crate::runtime::transaction_spill::IntentLookup::Deleted) => false,
-                    None => Self::key_exists(state, *cf_id, key)?,
+                    None => Self::key_exists(&mut snapshots, *cf_id, key)?,
                 };
                 if exists {
                     return Err(MidgeError::InvalidArgument(
@@ -204,13 +205,14 @@ impl WalActor {
 
     fn ensure_no_write_conflict_for_op(
         state: &RuntimeState,
+        snapshots: &mut super::transaction_state::ValidationSnapshots<'_>,
         op: &crate::runtime::TransactionOp,
         start_sequence: u64,
     ) -> MidgeResult<()> {
         match op {
             crate::runtime::TransactionOp::Put { cf_id, key, .. }
             | crate::runtime::TransactionOp::Delete { cf_id, key } => {
-                if Self::latest_key_sequence(state, *cf_id, key)?
+                if Self::latest_key_sequence(snapshots, *cf_id, key)?
                     .is_some_and(|sequence| sequence > start_sequence)
                     || state
                         .latest_covering_delete_range_sequence(*cf_id, key)
@@ -227,7 +229,7 @@ impl WalActor {
                 start_key,
                 end_key,
             } => {
-                if Self::latest_range_sequence(state, *cf_id, start_key, end_key)?
+                if Self::latest_range_sequence(snapshots, *cf_id, start_key, end_key)?
                     .is_some_and(|sequence| sequence > start_sequence)
                     || state
                         .latest_overlapping_delete_range_sequence(*cf_id, start_key, end_key)

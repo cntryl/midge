@@ -241,6 +241,7 @@ impl WalActor {
         start_sequence: Option<u64>,
         conflict_policy: crate::runtime::ConflictPolicy,
     ) -> MidgeResult<()> {
+        let mut snapshots = super::transaction_state::ValidationSnapshots::new(state);
         if matches!(
             conflict_policy,
             crate::runtime::ConflictPolicy::AbortOnWriteConflict
@@ -250,7 +251,7 @@ impl WalActor {
                     "AbortOnWriteConflict requires transaction start_sequence".to_string(),
                 )
             })?;
-            Self::ensure_no_write_conflicts(state, ops, start_sequence)?;
+            Self::ensure_no_write_conflicts(state, &mut snapshots, ops, start_sequence)?;
         }
 
         // Assertions are enforced regardless of ConflictPolicy: an explicit
@@ -266,7 +267,7 @@ impl WalActor {
         }
 
         let mut intents = Vec::with_capacity(ops.len());
-        let key_exists_after_intents =
+        let mut key_exists_after_intents =
             |cf_id: crate::types::ColumnFamilyId, key: &[u8], intents: &[TransactionIntent<'_>]| {
                 for intent in intents.iter().rev() {
                     match intent {
@@ -285,7 +286,7 @@ impl WalActor {
                         _ => {}
                     }
                 }
-                Self::key_exists(state, cf_id, key)
+                Self::key_exists(&mut snapshots, cf_id, key)
             };
 
         for op in ops {

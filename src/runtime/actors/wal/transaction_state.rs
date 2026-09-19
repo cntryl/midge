@@ -16,6 +16,37 @@ thread_local! {
     };
 }
 
+/// Read snapshots for one validation pass, built at most once per column
+/// family. Every per-op conflict or insert check reads through them instead
+/// of rebuilding a snapshot (manifest clone, read view, uncached SST opens).
+pub(super) struct ValidationSnapshots<'a> {
+    state: &'a RuntimeState,
+    by_cf: std::collections::HashMap<
+        crate::types::ColumnFamilyId,
+        Option<crate::runtime::ReadSnapshot>,
+    >,
+}
+
+impl<'a> ValidationSnapshots<'a> {
+    pub(super) fn new(state: &'a RuntimeState) -> Self {
+        Self {
+            state,
+            by_cf: std::collections::HashMap::new(),
+        }
+    }
+
+    fn get(
+        &mut self,
+        cf_id: crate::types::ColumnFamilyId,
+    ) -> Option<&crate::runtime::ReadSnapshot> {
+        let state = self.state;
+        self.by_cf
+            .entry(cf_id)
+            .or_insert_with(|| WalActor::latest_sequence_snapshot(state, cf_id))
+            .as_ref()
+    }
+}
+
 impl WalActor {
     pub(super) fn preflight_prepared_transaction_ops(
         state: &RuntimeState,
@@ -128,6 +159,7 @@ impl WalActor {
 
     pub(super) fn ensure_no_write_conflicts(
         state: &RuntimeState,
+        snapshots: &mut ValidationSnapshots<'_>,
         ops: &[crate::runtime::TransactionOp],
         start_sequence: u64,
     ) -> MidgeResult<()> {
@@ -142,7 +174,7 @@ impl WalActor {
                         continue;
                     }
 
-                    if let Some(latest_seq) = Self::latest_key_sequence(state, *cf_id, key)? {
+                    if let Some(latest_seq) = Self::latest_key_sequence(snapshots, *cf_id, key)? {
                         if latest_seq > start_sequence {
                             Self::record_write_conflict_point();
                             return Err(MidgeError::WriteConflict(format!(
@@ -168,7 +200,7 @@ impl WalActor {
                     end_key,
                 } => {
                     if let Some(latest_seq) = Self::latest_range_sequence(
-                        state,
+                        snapshots,
                         *cf_id,
                         start_key.as_ref(),
                         end_key.as_ref(),
@@ -266,11 +298,11 @@ impl WalActor {
     }
 
     pub(super) fn latest_key_sequence(
-        state: &RuntimeState,
+        snapshots: &mut ValidationSnapshots<'_>,
         cf_id: crate::types::ColumnFamilyId,
         key: &[u8],
     ) -> MidgeResult<Option<u64>> {
-        let Some(snapshot) = Self::latest_sequence_snapshot(state, cf_id) else {
+        let Some(snapshot) = snapshots.get(cf_id) else {
             return Ok(None);
         };
         snapshot.latest_state_sequence(key)
@@ -321,12 +353,12 @@ impl WalActor {
     }
 
     pub(super) fn latest_range_sequence(
-        state: &RuntimeState,
+        snapshots: &mut ValidationSnapshots<'_>,
         cf_id: crate::types::ColumnFamilyId,
         start_key: &[u8],
         end_key: &[u8],
     ) -> MidgeResult<Option<u64>> {
-        let Some(snapshot) = Self::latest_sequence_snapshot(state, cf_id) else {
+        let Some(snapshot) = snapshots.get(cf_id) else {
             return Ok(None);
         };
         snapshot.latest_sequence_in_range(start_key, end_key)
@@ -431,39 +463,28 @@ impl WalActor {
         Ok(())
     }
 
+    /// Insert-only check for a single write, which needs one snapshot.
+    #[cfg(test)]
+    pub(super) fn key_exists_for_single_write(
+        state: &RuntimeState,
+        cf_id: crate::types::ColumnFamilyId,
+        key: &[u8],
+    ) -> MidgeResult<bool> {
+        Self::key_exists(&mut ValidationSnapshots::new(state), cf_id, key)
+    }
+
     /// Checks the current view (memtables and SSTs) for existence.
     ///
     /// Fails closed: a read error is returned instead of being treated as
     /// "absent", so an insert can never overwrite a key it could not see.
     pub(super) fn key_exists(
-        state: &RuntimeState,
+        snapshots: &mut ValidationSnapshots<'_>,
         cf_id: crate::types::ColumnFamilyId,
         key: &[u8],
     ) -> MidgeResult<bool> {
-        let Some(cf_state) = state.column_families.get(&cf_id) else {
+        let Some(snapshot) = snapshots.get(cf_id) else {
             return Ok(false);
         };
-        let sst_files = state
-            .manifest
-            .files
-            .iter()
-            .filter(|file| file.cf_id == cf_id)
-            .cloned()
-            .collect();
-        let sst_path_prefix = state
-            .sst_dir
-            .strip_prefix(&state.db_path)
-            .unwrap_or_else(|_| std::path::Path::new("sst"))
-            .to_path_buf();
-        let snapshot = crate::runtime::ReadSnapshot::new(
-            cf_state.memtable.clone(),
-            cf_state.immutable_memtables.clone(),
-            sst_files,
-            Arc::clone(state.recovery_sst_fs.as_ref().unwrap_or(&state.fs)),
-            sst_path_prefix,
-            state.is_memory_mode(),
-            state.observed_time_millis(),
-        );
         Ok(snapshot.get(key, u64::MAX)?.is_some())
     }
 

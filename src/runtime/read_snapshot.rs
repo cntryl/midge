@@ -13,6 +13,7 @@ use crate::sst::fs::SstFileIo;
 use crate::sst::traits::SstStateReader;
 use crate::sst::types::{KeyState, RangeTombstone};
 use crate::sst::SkipListMemtable;
+#[cfg(test)]
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -327,38 +328,31 @@ impl SnapshotScan {
         }
 
         // Unknown or quarantined files cannot safely be chained by advisory
-        // bounds. Read them one at a time into one sorted logical source so
-        // correctness is preserved without retaining one cursor per file.
-        let mut states = BTreeMap::<Vec<u8>, KeyState>::new();
+        // bounds, so each gets its own streaming source. Materializing them
+        // into one map would copy every key in range from the whole level
+        // (for example every L1+ file right after a legacy upgrade) into
+        // memory with no budget; one cursor per fallback file is bounded by
+        // the file count instead. The merge across sources already resolves
+        // the same key appearing in several of them.
         for file_meta in candidates.fallback {
             file_meta.record_read();
             self.snapshot
                 .diagnostics
                 .sst_metrics()
                 .record_candidate_sst_file_checked();
-            let reader = self.append_reader_tombstones(&file_meta, start, end)?;
-            let scan = reader.state_scan(
-                self.start.clone(),
-                self.end.clone(),
-                self.reverse,
-                self.sequence,
-                self.snapshot.read_time_millis,
-            );
-            for entry in scan {
-                let (key, state) = entry?;
-                ReadSnapshot::merge_state(
-                    &mut states,
-                    key.to_vec(),
-                    state,
-                    self.snapshot.read_time_millis,
-                );
-            }
+            let _reader = self.append_reader_tombstones(&file_meta, start, end)?;
+            self.sources
+                .push(SnapshotStateSource::new(SnapshotStateIterator::SstLevel(
+                    Box::new(SstLevelStateIterator::new(
+                        Arc::clone(&self.snapshot),
+                        vec![file_meta],
+                        self.start.clone(),
+                        self.end.clone(),
+                        self.reverse,
+                        self.sequence,
+                    )),
+                )));
         }
-        self.sources
-            .push(SnapshotStateSource::new(Self::memory_iterator(
-                states.into_iter().collect(),
-                self.reverse,
-            )));
         Ok(())
     }
 
@@ -564,6 +558,7 @@ impl ReadSnapshot {
                 && !matches!(existing, KeyState::Tombstone(_)))
     }
 
+    #[cfg(test)]
     fn merge_state(
         states: &mut BTreeMap<Vec<u8>, KeyState>,
         key: Vec<u8>,
