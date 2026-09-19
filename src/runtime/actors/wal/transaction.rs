@@ -130,8 +130,20 @@ impl WalActor {
             conflict_policy,
         )?;
         let sequence_plan = Self::allocate_transaction_sequences(state, ops.len())?;
-        let (apply_ops, wal_batch) =
-            self.build_transaction_wal_batch(state, ops, &sequence_plan, effective_durability)?;
+        let (apply_ops, wal_batch) = match self.build_transaction_wal_batch(
+            state,
+            ops,
+            &sequence_plan,
+            effective_durability,
+        ) {
+            Ok(built) => built,
+            Err(error) => {
+                // Nothing was written; give the sequences back so the
+                // durable frontier never skips over an unwritten range.
+                state.sequence = sequence_plan.begin_seq - 1;
+                return Err(error);
+            }
+        };
 
         Ok(PreparedTransactionAppend {
             request_id,
@@ -463,6 +475,14 @@ impl WalActor {
                 sequence_plan.txn_id
             ))
         })?;
+        if payload.len() > crate::wal::frame::WAL_MAX_VALUE_LEN {
+            return Err(MidgeError::ResourceLimit(format!(
+                "transaction batch {} encodes to {} bytes; WAL replay accepts at most {} bytes",
+                sequence_plan.txn_id,
+                payload.len(),
+                crate::wal::frame::WAL_MAX_VALUE_LEN
+            )));
+        }
 
         let mut batch_record = WalRecord::new_cf(
             0,

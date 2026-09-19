@@ -2164,6 +2164,78 @@ fn should_preserve_provider_timeout_from_manifest_metadata_mirror() -> crate::co
     Ok(())
 }
 
+struct NewerHolderLeaderStore;
+
+impl crate::lease::LeaderStore for NewerHolderLeaderStore {
+    fn acquire_leadership(
+        &self,
+        _holder_id: &str,
+    ) -> Result<crate::lease::LeaderRecord, crate::lease::LeaseError> {
+        Err(crate::lease::LeaseError::Internal(
+            "test leader store does not acquire leadership".to_string(),
+        ))
+    }
+
+    fn read_current(&self) -> Result<Option<crate::lease::LeaderRecord>, crate::lease::LeaseError> {
+        Ok(Some(crate::lease::LeaderRecord {
+            epoch: 2,
+            holder_id: "new-writer".to_string(),
+            acquired_at: "test".to_string(),
+        }))
+    }
+}
+
+#[test]
+fn should_not_overwrite_remote_manifest_when_writer_lease_moved_before_newer_publish(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: the new holder has not yet published a higher sequence, so
+    // the remote-ahead check alone would let this stale writer through.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    el.state.manifest.last_persisted_sequence = 10;
+    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
+        .map_err(crate::common::MidgeError::Internal)?;
+    let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
+        Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+        "metadata-fencing".to_string(),
+    ));
+    let remote_manifest = crate::metadata::Manifest {
+        last_persisted_sequence: 5,
+        ..Default::default()
+    };
+    put_cloud_metadata_for_test(
+        &metadata_storage,
+        "manifest.json",
+        serde_json::to_vec_pretty(&remote_manifest).expect("serialize remote manifest"),
+    );
+    el.cloud_metadata_storage = Some(Arc::clone(&metadata_storage));
+    el.fencing.writer_epoch = 1;
+    el.fencing.leader_store = Some(Arc::new(NewerHolderLeaderStore));
+    el.fencing.leader_holder_id = Some("old-writer".to_string());
+
+    // Act
+    let error = el
+        .mirror_metadata_to_authoritative_cloud()
+        .expect_err("a stale writer must not mirror metadata");
+
+    // Assert
+    assert!(
+        matches!(error, crate::common::MidgeError::Fenced(_)),
+        "expected Fenced, got {error:?}"
+    );
+    let retained: crate::metadata::Manifest = serde_json::from_slice(&get_cloud_metadata_for_test(
+        &metadata_storage,
+        "manifest.json",
+    ))
+    .expect("parse retained remote manifest");
+    assert_eq!(
+        retained.last_persisted_sequence, 5,
+        "a stale writer must not overwrite the authoritative remote manifest"
+    );
+    Ok(())
+}
+
 #[test]
 fn should_not_overwrite_newer_remote_manifest_metadata_when_mirroring(
 ) -> crate::common::MidgeResult<()> {

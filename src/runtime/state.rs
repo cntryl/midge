@@ -637,6 +637,19 @@ impl RuntimeState {
             }
         }
 
+        if self.opened_in_salvage_mode() && !residue.orphan_ssts.is_empty() {
+            // A salvaged manifest may be a fallback or a truncated replay, so
+            // "not in the manifest" does not prove an SST is garbage. Keep
+            // every candidate for operator-controlled recovery.
+            tracing::warn!(
+                retained = residue.orphan_ssts.len(),
+                orphan_ssts = ?residue.orphan_ssts,
+                "salvage mode retained SSTs missing from the recovered manifest"
+            );
+            self.cleanup_root_staging_residue();
+            return;
+        }
+
         for orphan_name in residue.orphan_ssts {
             let path = FsPath::new(crate::sst::object_key(&orphan_name));
             let injected_delete_failure =

@@ -371,7 +371,10 @@ impl RuntimeState {
             .unwrap_or(0)
     }
 
-    pub(crate) fn cloud_wal_recovery_floor_segment(&self) -> Option<u64> {
+    /// Lowest WAL segment that may still hold unflushed data. Every sealed
+    /// segment below it is covered by published SSTs. `None` when memtable
+    /// provenance is incomplete, so callers must then retain everything.
+    pub(crate) fn wal_recovery_floor_segment(&self) -> Option<u64> {
         let mut floor = self.wal.current_segment_id;
         if floor == 0 {
             return None;
