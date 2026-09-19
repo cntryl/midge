@@ -268,6 +268,64 @@ pub(crate) fn replay_edits_after_with_fs_unlocked(
         .collect())
 }
 
+/// Durable journal prefix recovered by salvage replay.
+pub(crate) struct SalvagedJournal {
+    /// Durable edits newer than the checkpoint, up to the last fsync marker
+    /// before any corrupt record.
+    pub(crate) edits: Vec<ManifestEdit>,
+    /// Highest edit id in the durable prefix.
+    pub(crate) max_edit_id: u64,
+    /// The first corrupt record, if replay stopped early.
+    pub(crate) corruption: Option<String>,
+}
+
+/// Replay the journal, stopping at the first corrupt record instead of
+/// failing, and keep every durable edit before it.
+pub(crate) fn salvage_edits_after_with_fs_unlocked(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+    checkpoint: u64,
+) -> MidgeResult<SalvagedJournal> {
+    let replay = replay_journal_with_mode(fs, JournalReplayMode::SalvagePrefix)?;
+    Ok(SalvagedJournal {
+        edits: replay
+            .edits
+            .into_iter()
+            .filter(|edit| edit.edit_id > checkpoint)
+            .map(|edit| edit.edit)
+            .collect(),
+        max_edit_id: replay.max_edit_id,
+        corruption: replay.corruption,
+    })
+}
+
+/// Durably copy the current journal to `manifest.journal.corrupt.<millis>`
+/// so an operator can inspect it after salvage rewrites the journal.
+pub(crate) fn preserve_corrupt_journal_with_fs_unlocked(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+) -> MidgeResult<String> {
+    use crate::io::traits::FsPath;
+
+    let Some(file) = open_journal_for_replay(fs)? else {
+        return Err(crate::common::MidgeError::Internal(
+            "manifest journal disappeared before it could be preserved".to_string(),
+        ));
+    };
+    let len = file.len().map_err(crate::common::MidgeError::from)?;
+    let bytes = file
+        .read_at(0, len)
+        .map_err(crate::common::MidgeError::from)?;
+    drop(file);
+    let preserved = format!("{JOURNAL_FILE}.corrupt.{}", millis_since_epoch());
+    crate::io::staging::stage_bytes(
+        fs,
+        &FsPath::new(format!("{preserved}.tmp")),
+        &FsPath::new(&preserved),
+        &bytes,
+        crate::common::MidgeError::Internal,
+    )?;
+    Ok(preserved)
+}
+
 /// Append an edit to the manifest journal using a provided Fs (preferred).
 pub fn append_edit_with_fs(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
@@ -430,6 +488,21 @@ fn replay_journal_with_ids_with_fs(
 fn replay_journal_with_state(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
 ) -> MidgeResult<JournalReplay> {
+    replay_journal_with_mode(fs, JournalReplayMode::Strict)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JournalReplayMode {
+    /// Any corrupt record fails replay.
+    Strict,
+    /// Stop at the first corrupt record and keep the durable prefix.
+    SalvagePrefix,
+}
+
+fn replay_journal_with_mode(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+    mode: JournalReplayMode,
+) -> MidgeResult<JournalReplay> {
     let Some(file) = open_journal_for_replay(fs)? else {
         return Ok(JournalReplay::empty());
     };
@@ -438,13 +511,30 @@ fn replay_journal_with_state(
     let mut state = JournalReplayState::default();
     let mut offset: u64 = 0;
     let mut tail = JournalReplayTail::Clean;
+    let mut corruption = None;
 
     while offset < file_len {
-        match read_journal_record(&*file, offset, file_len)? {
+        let status = match read_journal_record(&*file, offset, file_len) {
+            Ok(status) => status,
+            Err(error) if mode == JournalReplayMode::SalvagePrefix => {
+                corruption = Some(format!("at byte {offset}: {error}"));
+                break;
+            }
+            Err(error) => return Err(error),
+        };
+        match status {
             JournalRecordStatus::Record(record) => {
                 offset = record.next_offset;
-                validate_journal_record_crc(&record)?;
-                handle_journal_record(&record, &mut state)?;
+                let applied = validate_journal_record_crc(&record)
+                    .and_then(|()| handle_journal_record(&record, &mut state));
+                match applied {
+                    Ok(()) => {}
+                    Err(error) if mode == JournalReplayMode::SalvagePrefix => {
+                        corruption = Some(format!("at byte {}: {error}", record.record_start));
+                        break;
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             JournalRecordStatus::PartialHeader { record_start } => {
                 tail = JournalReplayTail::PartialEof {
@@ -492,6 +582,7 @@ fn replay_journal_with_state(
         max_edit_id,
         file_len,
         tail,
+        corruption,
     })
 }
 
@@ -500,6 +591,8 @@ struct JournalReplay {
     max_edit_id: u64,
     file_len: u64,
     tail: JournalReplayTail,
+    /// First corrupt record, when replay ran in salvage mode and stopped.
+    corruption: Option<String>,
 }
 
 impl JournalReplay {
@@ -509,6 +602,7 @@ impl JournalReplay {
             max_edit_id: 0,
             file_len: 0,
             tail: JournalReplayTail::Clean,
+            corruption: None,
         }
     }
 }

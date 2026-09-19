@@ -114,6 +114,10 @@ Salvage mode:
   copied there in full, then truncated to its replayed prefix) and raises the
   recovered sequence above what those files hold, so new writes never land
   behind the corruption or reuse its sequences
+- keeps the durable manifest journal prefix up to the last fsync marker
+  before a corrupt record, copies the corrupt journal to
+  `manifest.journal.corrupt.<millis>`, and checkpoints the salvaged manifest
+  into a fresh snapshot so later journal appends work again
 - preserves authoritative pre-publication SST state if interrupted output cannot be safely published
 - never deletes SST files missing from the recovered manifest; a salvaged
   manifest may be a fallback or truncated replay, so startup residue cleanup
