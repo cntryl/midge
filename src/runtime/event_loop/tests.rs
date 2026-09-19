@@ -2755,3 +2755,65 @@ fn should_not_count_late_response_given_inline_route_when_caller_is_still_waitin
     ));
     assert_eq!(event_loop.router.late_responses_total(), 0);
 }
+
+#[test]
+fn should_restore_compaction_completion_deferred_behind_waiting_cf_drop() {
+    // Arrange: a drop waits for the compaction pipeline to drain, and the
+    // completion that drains it was deferred behind the drop.
+    let mut event_loop = create_test_event_loop().expect("create event loop");
+    event_loop
+        .state
+        .active_compactions
+        .store(1, std::sync::atomic::Ordering::Release);
+    for message in [
+        RuntimeMsg::ManifestDropColumnFamily {
+            request_id: 3451,
+            cf_id: 0,
+            discard_unflushed: false,
+        },
+        RuntimeMsg::ManifestCreateColumnFamily {
+            request_id: 3452,
+            name: "after-drop".to_string(),
+        },
+        RuntimeMsg::CompactionComplete {
+            request_id: 3453,
+            input_ssts: Vec::new(),
+            output_ssts: Vec::new(),
+            cf_id: 0,
+            target_level: 1,
+            succeeded: false,
+        },
+    ] {
+        event_loop
+            .publication_gate
+            .deferred_messages
+            .push_back(message);
+    }
+    event_loop.publication_gate.active = false;
+
+    // Act
+    event_loop.restore_publication_deferred_message();
+
+    // Assert
+    assert!(
+        matches!(
+            event_loop.pending_msg,
+            Some(RuntimeMsg::CompactionComplete {
+                request_id: 3453,
+                ..
+            })
+        ),
+        "the completion that drains the pipeline must not wait behind the drop"
+    );
+    let remaining: Vec<_> = event_loop
+        .publication_gate
+        .deferred_messages
+        .iter()
+        .map(RuntimeMsg::request_id)
+        .collect();
+    assert_eq!(
+        remaining,
+        vec![Some(3451), Some(3452)],
+        "column-family DDL keeps its order behind the waiting drop"
+    );
+}

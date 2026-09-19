@@ -1596,17 +1596,10 @@ impl EventLoop {
             && self.verification_barrier.token.is_none()
             && self.pending_msg.is_none()
         {
-            let eligible =
-                self.publication_gate.deferred_messages.front().is_some_and(
-                    |message| match message {
-                        RuntimeMsg::ManifestDropColumnFamily { cf_id, .. } => {
-                            !self.column_family_publication_pipeline_active(*cf_id)
-                        }
-                        _ => true,
-                    },
-                );
-            if eligible {
-                self.pending_msg = self.publication_gate.finish();
+            if let Some(index) = self.publication_gate.next_restorable_index(|cf_id| {
+                self.column_family_publication_pipeline_active(cf_id)
+            }) {
+                self.pending_msg = self.publication_gate.finish_at(index);
             }
         }
     }

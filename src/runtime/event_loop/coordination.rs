@@ -66,9 +66,39 @@ impl ManifestPublicationGate {
         self.deferred_messages.push_back(message);
     }
 
-    pub(super) fn finish(&mut self) -> Option<RuntimeMsg> {
+    /// Index of the next deferred message that may run. A drop waits until
+    /// its column family's flush and compaction pipeline drains, but the
+    /// messages that drain it (`CompactionComplete` in particular) must not
+    /// queue behind it, or neither ever runs. Column-family DDL still keeps
+    /// FIFO order so a create never overtakes a pending drop.
+    pub(super) fn next_restorable_index(
+        &self,
+        pipeline_active: impl Fn(crate::types::ColumnFamilyId) -> bool,
+    ) -> Option<usize> {
+        let mut ddl_blocked = false;
+        for (index, message) in self.deferred_messages.iter().enumerate() {
+            match message {
+                RuntimeMsg::ManifestDropColumnFamily { cf_id, .. } => {
+                    if !ddl_blocked && !pipeline_active(*cf_id) {
+                        return Some(index);
+                    }
+                    ddl_blocked = true;
+                }
+                RuntimeMsg::ManifestCreateColumnFamily { .. } => {
+                    if !ddl_blocked {
+                        return Some(index);
+                    }
+                }
+                _ => return Some(index),
+            }
+        }
+        None
+    }
+
+    /// End the gate and take the deferred message at `index` to run next.
+    pub(super) fn finish_at(&mut self, index: usize) -> Option<RuntimeMsg> {
         self.active = false;
-        self.deferred_messages.pop_front()
+        self.deferred_messages.remove(index)
     }
 }
 
@@ -224,7 +254,7 @@ mod tests {
         gate.defer(shutdown_message(8));
 
         // Act
-        let released = gate.finish();
+        let released = gate.finish_at(0);
 
         // Assert
         assert!(!gate.active);
