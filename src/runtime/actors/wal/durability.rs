@@ -309,7 +309,7 @@ impl WalActor {
         )
     }
 
-    /// Flush a cloud-staging WAL only when its complete configured I/O wait can
+    /// Flush and fsync a cloud-staging WAL only when its complete configured I/O wait can
     /// still fit inside the shared operation deadline.
     ///
     /// The filesystem writer treats an in-progress flush timeout as a sticky
@@ -341,12 +341,17 @@ impl WalActor {
                     self.storage_io_timeout
                 )));
             }
-            let flush_result = self
+            // Sealing renames the segment and advances local_durable_seq, and
+            // cloud recovery treats a local sealed segment as complete. Fsync
+            // here (one barrier per sealed segment, not per write) so power
+            // loss cannot leave a torn sealed file.
+            let io_timeout = self.storage_io_timeout;
+            let sync_result = self
                 .writer_mut()
                 .ok_or_else(|| MidgeError::Fenced("WAL writer disappeared during flush".into()))?
-                .flush();
-            if let Err(error) = flush_result {
-                self.fence_transition(state, format!("WAL flush failed: {error}"));
+                .sync_with_timeout(io_timeout);
+            if let Err(error) = sync_result {
+                self.fence_transition(state, format!("WAL seal fsync failed: {error}"));
                 return Err(error);
             }
             if let Some(t) = crate::telemetry::Telemetry::global() {
