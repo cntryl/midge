@@ -552,7 +552,11 @@ impl Engine {
         // through pin publication. GC samples the same registry under a read
         // guard, so an obsolete SST cannot be deleted in the capture/register
         // window.
-        let _snapshot_acquisition = self.runtime_handle.begin_snapshot_acquisition();
+        // Any snapshot captured below starts at or after the committed
+        // sequence read here, so it is a safe floor for the compaction horizon.
+        let _snapshot_acquisition = self
+            .runtime_handle
+            .begin_snapshot_acquisition(self.sequence.load(std::sync::atomic::Ordering::SeqCst));
 
         let Some(coordinator) = self
             .ingest_coordinators

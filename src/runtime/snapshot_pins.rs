@@ -20,10 +20,22 @@ pub(crate) struct SnapshotPinRegistry {
     active: DashMap<u64, SnapshotPin>,
     /// Serializes snapshot capture/pin registration with GC's pin sampling.
     acquisition: RwLock<()>,
+    /// Lower bounds of snapshots being captured but not yet registered, keyed
+    /// by acquisition token. The compaction horizon must not pass them.
+    inflight_floors: DashMap<u64, u64>,
+    next_acquisition: std::sync::atomic::AtomicU64,
 }
 
 pub(crate) struct SnapshotAcquisitionGuard<'a> {
+    registry: &'a SnapshotPinRegistry,
+    token: u64,
     _guard: RwLockReadGuard<'a, ()>,
+}
+
+impl Drop for SnapshotAcquisitionGuard<'_> {
+    fn drop(&mut self) {
+        self.registry.inflight_floors.remove(&self.token);
+    }
 }
 
 impl SnapshotPinRegistry {
@@ -85,8 +97,18 @@ impl SnapshotPinRegistry {
             })
     }
 
-    pub(crate) fn begin_acquisition(&self) -> SnapshotAcquisitionGuard<'_> {
+    /// Start capturing a snapshot whose sequence will be at least
+    /// `sequence_floor` (the committed sequence read before capture). Until
+    /// the guard drops, `oldest_sequence` treats that floor as a live reader,
+    /// closing the capture-to-registration window for the compaction horizon.
+    pub(crate) fn begin_acquisition(&self, sequence_floor: u64) -> SnapshotAcquisitionGuard<'_> {
+        let token = self
+            .next_acquisition
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inflight_floors.insert(token, sequence_floor);
         SnapshotAcquisitionGuard {
+            registry: self,
+            token,
             _guard: self.acquisition.read(),
         }
     }
@@ -123,7 +145,9 @@ impl SnapshotPinRegistry {
 
     pub(crate) fn oldest_sequence(&self) -> Option<u64> {
         let _guard = self.acquisition.read();
-        self.active.iter().map(|entry| entry.value().sequence).min()
+        let pinned = self.active.iter().map(|entry| entry.value().sequence);
+        let inflight = self.inflight_floors.iter().map(|entry| *entry.value());
+        pinned.chain(inflight).min()
     }
 
     pub(crate) fn oldest_age_seconds(&self, now: Instant) -> Option<u64> {
@@ -191,6 +215,28 @@ mod tests {
         let pinned = registry.pinned_sst_names(Duration::from_mins(1));
         assert!(pinned.contains("a.sst"));
         assert!(pinned.contains("b.sst"));
+    }
+
+    #[test]
+    fn should_hold_horizon_at_inflight_acquisition_floor_until_it_ends() {
+        // Arrange: a transaction has captured (or is capturing) a snapshot at
+        // or above sequence 5 but has not registered its pin yet.
+        let registry = SnapshotPinRegistry::default();
+        assert!(registry.register(1, 42, Vec::new()));
+
+        // Act
+        let acquisition = registry.begin_acquisition(5);
+        let during = registry.oldest_sequence();
+        drop(acquisition);
+        let after = registry.oldest_sequence();
+
+        // Assert
+        assert_eq!(
+            during,
+            Some(5),
+            "compaction must not drop versions an in-flight snapshot can still read"
+        );
+        assert_eq!(after, Some(42));
     }
 
     #[test]
