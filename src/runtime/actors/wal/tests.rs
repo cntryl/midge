@@ -1938,3 +1938,132 @@ fn should_fence_filesystem_wal_when_replacement_writer_open_fails_after_rename()
 mod admission;
 
 mod floor;
+
+struct DurableSyncCountingFile<'a> {
+    inner: Box<dyn File + 'a>,
+    durable_syncs: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl File for DurableSyncCountingFile<'_> {
+    fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
+        self.inner.read_at(offset, len)
+    }
+    fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()> {
+        self.inner.write_at(offset, data)
+    }
+    fn truncate(&mut self, len: u64) -> FsResult<()> {
+        self.inner.truncate(len)
+    }
+    fn append(&mut self, data: Bytes) -> FsResult<u64> {
+        self.inner.append(data)
+    }
+    fn len(&self) -> FsResult<u64> {
+        self.inner.len()
+    }
+    fn sync(&mut self, dur: FsDurability) -> FsResult<()> {
+        if dur == FsDurability::Durable {
+            self.durable_syncs
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.inner.sync(dur)
+    }
+    fn close(self: Box<Self>) -> FsResult<()> {
+        self.inner.close()
+    }
+}
+
+/// Counts durable file fsyncs so a test can prove a code path made bytes
+/// power-loss safe, not merely handed them to the OS.
+struct DurableSyncCountingFs {
+    inner: MockFs,
+    durable_syncs: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Fs for DurableSyncCountingFs {
+    fn open(&self, path: &FsPath, opts: FsOpenOptions) -> FsResult<Box<dyn File + '_>> {
+        Ok(Box::new(DurableSyncCountingFile {
+            inner: self.inner.open(path, opts)?,
+            durable_syncs: Arc::clone(&self.durable_syncs),
+        }))
+    }
+    fn open_persistent_handle(
+        &self,
+        path: &FsPath,
+        opts: FsOpenOptions,
+    ) -> FsResult<Box<dyn File>> {
+        Ok(Box::new(DurableSyncCountingFile {
+            inner: self.inner.open_persistent_handle(path, opts)?,
+            durable_syncs: Arc::clone(&self.durable_syncs),
+        }))
+    }
+    fn remove_file(&self, path: &FsPath) -> FsResult<()> {
+        self.inner.remove_file(path)
+    }
+    fn exists(&self, path: &FsPath) -> FsResult<bool> {
+        self.inner.exists(path)
+    }
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+        self.inner.metadata(path)
+    }
+    fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
+        self.inner.create_dir_all(path)
+    }
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        self.inner.list_dir(path)
+    }
+    fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
+        self.inner.remove_dir_all(path)
+    }
+    fn sync_dir(&self, path: &FsPath, dur: FsDurability) -> FsResult<()> {
+        self.inner.sync_dir(path, dur)
+    }
+    fn rename_atomic(&self, from: &FsPath, to: &FsPath) -> FsResult<()> {
+        self.inner.rename_atomic(from, to)
+    }
+}
+
+#[test]
+fn should_fsync_active_segment_before_sealing_cloud_async_wal() -> MidgeResult<()> {
+    // Arrange: a seal renames the segment and advances local_durable_seq, so
+    // its bytes must be on disk first or power loss leaves a torn sealed file.
+    let durable_syncs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let fs: Arc<dyn Fs> = Arc::new(DurableSyncCountingFs {
+        inner: MockFs::new(),
+        durable_syncs: Arc::clone(&durable_syncs),
+    });
+    let writer =
+        FsWalFactoryIo::new(Arc::clone(&fs)).create_writer(crate::wal::ACTIVE_FILE_NAME)?;
+    let temp = tempfile::tempdir()?;
+    let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
+    let mut wal_actor = WalActor::new(
+        temp.path().join("unused-wal"),
+        DurabilityPolicy::CloudAsync,
+        BatchConfig::default(),
+        true,
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    wal_actor.install_filesystem_for_test(fs, writer);
+    let prepared = prepare_put_transaction(
+        &mut wal_actor,
+        &mut state,
+        1,
+        b"sealed",
+        b"value",
+        DurabilityPolicy::CloudAsync,
+    )?;
+    wal_actor.append_prepared_transactions(&mut state, vec![prepared])?;
+    let syncs_before_seal = durable_syncs.load(std::sync::atomic::Ordering::SeqCst);
+    let ticket = seal_ticket_for_test(&wal_actor, &state);
+
+    // Act
+    wal_actor.flush_for_cloud_upload(&mut state, &ticket)?;
+
+    // Assert
+    assert!(
+        durable_syncs.load(std::sync::atomic::Ordering::SeqCst) > syncs_before_seal,
+        "sealing a CloudAsync segment must fsync its bytes before the rename"
+    );
+    wal_actor.rotate(&mut state, &ticket)?;
+    Ok(())
+}
