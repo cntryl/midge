@@ -144,12 +144,80 @@ impl ManifestPersistence {
                 if recovery_policy == crate::config::RecoveryPolicy::Strict {
                     return Err(format!("failed to replay manifest journal: {e}"));
                 }
-                tracing::warn!(error = %e, "failed to replay manifest journal; proceeding with snapshot only");
+                Self::salvage_journal_prefix_unlocked(fs, &mut manifest, &e)?;
             }
         }
 
         Self::validate_persisted_sst_names(&manifest)?;
         Ok(manifest)
+    }
+
+    /// Apply the durable journal prefix before the first corrupt record, then
+    /// rewrite the journal so later appends stop tripping on that record.
+    fn salvage_journal_prefix_unlocked(
+        fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+        manifest: &mut Manifest,
+        replay_error: &crate::common::MidgeError,
+    ) -> Result<(), String> {
+        let salvaged = crate::metadata::journal::salvage_edits_after_with_fs_unlocked(
+            fs,
+            manifest.edit_checkpoint_id,
+        )
+        .map_err(|error| format!("failed to salvage manifest journal prefix: {error}"))?;
+        for edit in &salvaged.edits {
+            manifest.apply_edit(edit);
+        }
+        tracing::warn!(
+            error = %replay_error,
+            corruption = ?salvaged.corruption,
+            kept_edits = salvaged.edits.len(),
+            "manifest journal replay failed; salvaged the durable prefix"
+        );
+        if salvaged.corruption.is_none() {
+            return Ok(());
+        }
+        manifest.edit_checkpoint_id = manifest.edit_checkpoint_id.max(salvaged.max_edit_id);
+        // Healing is best effort: if it fails, the salvaged manifest is still
+        // the most complete state available, and appends keep failing closed.
+        if let Err(error) = Self::checkpoint_salvaged_manifest_unlocked(fs, manifest) {
+            tracing::error!(
+                %error,
+                "failed to checkpoint salvaged manifest; journal appends will keep failing"
+            );
+        }
+        Ok(())
+    }
+
+    /// Preserve the corrupt journal, then make the salvaged manifest the
+    /// durable checkpoint and start a fresh journal. The snapshot is written
+    /// before the journal is truncated, so a crash in between replays the
+    /// same salvage on the next open.
+    fn checkpoint_salvaged_manifest_unlocked(
+        fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+        manifest: &Manifest,
+    ) -> Result<(), String> {
+        use crate::io::traits::FsPath;
+
+        let preserved = crate::metadata::journal::preserve_corrupt_journal_with_fs_unlocked(fs)
+            .map_err(|error| format!("failed to preserve corrupt manifest journal: {error}"))?;
+        Self::validate_persisted_sst_names(manifest)?;
+        let json = serde_json::to_vec_pretty(manifest)
+            .map_err(|e| format!("failed to serialize manifest to JSON: {e}"))?;
+        crate::io::staging::stage_bytes(
+            fs,
+            &FsPath::new(Self::MANIFEST_SNAPSHOT_TEMP),
+            &FsPath::new(Self::MANIFEST_SNAPSHOT),
+            &json,
+            |msg| msg,
+        )?;
+        crate::metadata::journal::truncate_journal_with_fs_unlocked(fs)
+            .map_err(|e| format!("failed to truncate journal: {e:?}"))?;
+        Self::save_with_fs(fs, manifest)?;
+        tracing::warn!(
+            preserved = %preserved,
+            "checkpointed salvaged manifest and preserved the corrupt journal"
+        );
+        Ok(())
     }
 
     fn validate_persisted_sst_names(manifest: &Manifest) -> Result<(), String> {
@@ -627,6 +695,99 @@ mod tests {
         assert!(
             error.contains("manifest journal"),
             "expected strict manifest journal error, got: {error}"
+        );
+    }
+
+    fn append_record_with_stale_crc(test_dir: &Path, edit: &crate::metadata::ManifestEdit) {
+        use std::io::Write as _;
+        let payload = serde_json::to_vec(edit).expect("serialize edit");
+        let mut record = vec![edit.record_type()];
+        record.extend_from_slice(
+            &u32::try_from(payload.len())
+                .expect("payload fits u32")
+                .to_le_bytes(),
+        );
+        record.extend_from_slice(&payload);
+        record.extend_from_slice(&0xDEAD_BEEF_u32.to_le_bytes());
+        let mut journal = std::fs::OpenOptions::new()
+            .append(true)
+            .open(test_dir.join("manifest.journal"))
+            .expect("open journal");
+        journal.write_all(&record).expect("append corrupt record");
+        journal.sync_all().expect("sync journal");
+    }
+
+    fn add_sst(name: &str) -> crate::metadata::ManifestEdit {
+        crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
+            name: name.to_string(),
+            ..Default::default()
+        })
+    }
+
+    fn salvage_load(test_dir: &Path) -> Manifest {
+        let fs: std::sync::Arc<dyn crate::io::traits::Fs> =
+            std::sync::Arc::new(crate::io::real::RealFs::new(test_dir).expect("real fs"));
+        ManifestPersistence::load_with_fs_and_policy(&fs, crate::config::RecoveryPolicy::Salvage)
+            .expect("salvage load")
+    }
+
+    #[test]
+    fn should_keep_verified_journal_prefix_when_salvaging_a_corrupt_journal_record() {
+        // Arrange
+        let test_dir = create_test_dir();
+        crate::metadata::journal::append_edit(&test_dir, &add_sst("a.sst")).expect("append a");
+        crate::metadata::journal::append_edit(&test_dir, &add_sst("b.sst")).expect("append b");
+        append_record_with_stale_crc(&test_dir, &add_sst("corrupt.sst"));
+        ManifestPersistence::load(&test_dir).expect_err("strict load must reject the corruption");
+
+        // Act
+        let manifest = salvage_load(&test_dir);
+
+        // Assert
+        let names: Vec<_> = manifest
+            .files
+            .iter()
+            .map(|file| file.name.as_str())
+            .collect();
+        assert!(names.contains(&"a.sst"), "{names:?}");
+        assert!(names.contains(&"b.sst"), "{names:?}");
+        assert!(!names.contains(&"corrupt.sst"), "{names:?}");
+    }
+
+    #[test]
+    fn should_accept_appends_after_salvaging_a_corrupt_journal_prefix() {
+        // Arrange
+        let test_dir = create_test_dir();
+        crate::metadata::journal::append_edit(&test_dir, &add_sst("a.sst")).expect("append a");
+        append_record_with_stale_crc(&test_dir, &add_sst("corrupt.sst"));
+        salvage_load(&test_dir);
+
+        // Act
+        crate::metadata::journal::append_edit(&test_dir, &add_sst("after.sst"))
+            .expect("append after salvage");
+        let reloaded = ManifestPersistence::load(&test_dir).expect("strict load after salvage");
+
+        // Assert
+        let names: Vec<_> = reloaded
+            .files
+            .iter()
+            .map(|file| file.name.as_str())
+            .collect();
+        assert!(names.contains(&"a.sst"), "{names:?}");
+        assert!(names.contains(&"after.sst"), "{names:?}");
+        let preserved = std::fs::read_dir(&test_dir)
+            .expect("read db dir")
+            .filter_map(Result::ok)
+            .any(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                name.starts_with("manifest.journal.corrupt.")
+                    && !std::path::Path::new(&name)
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("tmp"))
+            });
+        assert!(
+            preserved,
+            "the corrupt journal must be preserved for inspection"
         );
     }
 
