@@ -135,8 +135,7 @@ impl FileSystem {
             fs::create_dir_all(&lock_dir).map_err(|error| {
                 format!("create lock directory {}: {error}", lock_dir.display())
             })?;
-            let identity = full_path.to_string_lossy();
-            let lock_name = format!("{:08x}.lock", crc32c::crc32c(identity.as_bytes()));
+            let lock_name = process_lock_stripe_name(full_path);
             let file = fs::OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -161,8 +160,7 @@ impl FileSystem {
             fs::create_dir_all(&lock_dir).map_err(|error| {
                 format!("create lock directory {}: {error}", lock_dir.display())
             })?;
-            let identity = full_path.to_string_lossy();
-            let lock_name = format!("{:08x}.lock", crc32c::crc32c(identity.as_bytes()));
+            let lock_name = process_lock_stripe_name(full_path);
             let file = fs::OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -187,16 +185,124 @@ impl FileSystem {
     }
 }
 
-fn write_file_with_parents(full_path: &Path, data: Vec<u8>) -> StorageOutcome<()> {
-    if let Some(parent) = full_path.parent() {
-        if let Err(e) = fs::create_dir_all(parent) {
-            return StorageOutcome::Err(format!("mkdir {}: {e}", parent.display()));
+/// Prefix of in-flight object temp files. Listing skips them, so a crash
+/// mid-write never exposes a partial object.
+const TEMP_OBJECT_MARKER: &str = ".tmp.";
+
+static TEMP_OBJECT_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Publish {
+    /// Replace any existing object.
+    Replace,
+    /// Fail with a precondition error if the object already exists.
+    CreateNew,
+}
+
+fn is_temp_object_name(name: &str) -> bool {
+    name.starts_with('.') && name.contains(TEMP_OBJECT_MARKER)
+}
+
+/// Make a directory's entries durable. Windows persists them with the file
+/// metadata journal and cannot open directories for syncing.
+fn sync_directory(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        fs::File::open(dir)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        Ok(())
+    }
+}
+
+/// Create `dir` and every missing ancestor, then make each new directory
+/// entry durable so a crash cannot drop the path to a durable object.
+fn create_dir_all_durably(dir: &Path) -> std::io::Result<()> {
+    let mut missing = Vec::new();
+    let mut probe = Some(dir);
+    while let Some(path) = probe {
+        if path.as_os_str().is_empty() || path.exists() {
+            break;
+        }
+        missing.push(path.to_path_buf());
+        probe = path.parent();
+    }
+    fs::create_dir_all(dir)?;
+    for created in missing.iter().rev() {
+        if let Some(parent) = created
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            sync_directory(parent)?;
         }
     }
+    Ok(())
+}
 
-    match fs::write(full_path, data) {
+/// Write `data` to `full_path` so readers see either the previous object or
+/// the complete new one, and the result survives a crash: the bytes go to a
+/// synced temp file in the same directory, which is then renamed (replace)
+/// or hard-linked (create-new, atomic against an existing object) into
+/// place before the directory is synced. Replacement also gives the object
+/// a new file identity, so identity-based etags change on every overwrite.
+fn publish_object_atomically(full_path: &Path, data: &[u8], mode: Publish) -> StorageOutcome<()> {
+    let Some(parent) = full_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    else {
+        return StorageOutcome::Err(format!(
+            "object path has no parent: {}",
+            full_path.display()
+        ));
+    };
+    if let Err(error) = create_dir_all_durably(parent) {
+        return StorageOutcome::Err(format!("mkdir {}: {error}", parent.display()));
+    }
+    let file_name = full_path
+        .file_name()
+        .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+    let nonce = TEMP_OBJECT_NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temp = parent.join(format!(
+        ".{file_name}{TEMP_OBJECT_MARKER}{}.{nonce}",
+        std::process::id()
+    ));
+    let written = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+        .and_then(|mut file| file.write_all(data).and_then(|()| file.sync_all()));
+    if let Err(error) = written {
+        let _ = fs::remove_file(&temp);
+        return StorageOutcome::Err(format!("write {}: {error}", full_path.display()));
+    }
+    crate::failpoints::fail_point!("midge::storage::fs_after_temp_object_write", |_| {
+        StorageOutcome::Err("failpoint: interrupted before publishing object".to_string())
+    });
+    let published = match mode {
+        Publish::Replace => fs::rename(&temp, full_path),
+        Publish::CreateNew => {
+            let linked = fs::hard_link(&temp, full_path);
+            let _ = fs::remove_file(&temp);
+            linked
+        }
+    };
+    match published {
+        Ok(()) => {}
+        Err(error)
+            if mode == Publish::CreateNew && error.kind() == std::io::ErrorKind::AlreadyExists =>
+        {
+            return StorageOutcome::Err("precondition failed: object already exists".to_string());
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&temp);
+            return StorageOutcome::Err(format!("publish {}: {error}", full_path.display()));
+        }
+    }
+    match sync_directory(parent) {
         Ok(()) => StorageOutcome::Ok(()),
-        Err(e) => StorageOutcome::Err(format!("write {}: {e}", full_path.display())),
+        Err(error) => StorageOutcome::Err(format!("sync directory {}: {error}", parent.display())),
     }
 }
 
@@ -260,39 +366,41 @@ fn range_path_metadata(path: &Path) -> Result<StorageObjectMetadata, String> {
     }
 }
 
-fn mutation_lock(full_path: &Path) -> parking_lot::MutexGuard<'static, ()> {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    full_path.hash(&mut hasher);
-    let stripe = usize::try_from(hasher.finish()).unwrap_or(0) % CONDITIONAL_LOCK_STRIPES;
-    MUTATION_LOCKS[stripe].lock()
+/// Cross-process lock file for `full_path`. Keys share a fixed set of stripe
+/// files, so the lock directory stays bounded no matter how many distinct
+/// objects are written or deleted; a collision only serializes two keys.
+/// Each operation holds at most one stripe, always after its in-process
+/// mutex, so sharing a stripe cannot deadlock.
+fn process_lock_stripe_name(full_path: &Path) -> String {
+    let identity = full_path.to_string_lossy();
+    let stripe = crc32c::crc32c(identity.as_bytes()) as usize % CONDITIONAL_LOCK_STRIPES;
+    format!("stripe-{stripe:02x}.lock")
 }
 
-fn create_file_new_with_parents(full_path: &Path, data: &[u8]) -> StorageOutcome<()> {
-    if let Some(parent) = full_path.parent() {
-        if let Err(error) = fs::create_dir_all(parent) {
-            return StorageOutcome::Err(format!("mkdir {}: {error}", parent.display()));
-        }
-    }
+fn mutation_stripe(full_path: &Path) -> usize {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    full_path.hash(&mut hasher);
+    usize::try_from(hasher.finish()).unwrap_or(0) % CONDITIONAL_LOCK_STRIPES
+}
 
-    let mut file = match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(full_path)
-    {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            return StorageOutcome::Err("precondition failed: object already exists".to_string());
-        }
-        Err(error) => {
-            return StorageOutcome::Err(format!("create {}: {error}", full_path.display()));
-        }
-    };
+/// Holds a mutation stripe. With failpoints compiled in it also holds the
+/// failpoint read gate, taken before the stripe: a failpoint evaluated under
+/// the stripe must not wait on the gate while a failpoint test that holds the
+/// gate waits on the same stripe for an unrelated key.
+pub(super) struct MutationGuard {
+    _stripe: parking_lot::MutexGuard<'static, ()>,
+    #[cfg(feature = "failpoints")]
+    _failpoint_gate: Option<parking_lot::RwLockReadGuard<'static, ()>>,
+}
 
-    if let Err(error) = file.write_all(data).and_then(|()| file.sync_all()) {
-        let _ = fs::remove_file(full_path);
-        return StorageOutcome::Err(format!("write {}: {error}", full_path.display()));
+fn mutation_lock(full_path: &Path) -> MutationGuard {
+    #[cfg(feature = "failpoints")]
+    let failpoint_gate = crate::failpoints::read_gate();
+    MutationGuard {
+        _stripe: MUTATION_LOCKS[mutation_stripe(full_path)].lock(),
+        #[cfg(feature = "failpoints")]
+        _failpoint_gate: failpoint_gate,
     }
-    StorageOutcome::Ok(())
 }
 
 impl StorageBackend for FileSystem {
@@ -446,22 +554,7 @@ impl StorageBackend for FileSystem {
             }
         };
 
-        // Always try to create parent directories if present.
-        let outcome = if let Some(parent) = full_path.parent() {
-            if let Err(e) = fs::create_dir_all(parent) {
-                StorageOutcome::Err(format!("mkdir {}: {e}", parent.display()))
-            } else if let Err(e) = fs::write(&full_path, data) {
-                StorageOutcome::Err(format!("write {}: {e}", full_path.display()))
-            } else {
-                StorageOutcome::Ok(())
-            }
-        } else {
-            // Path has no parent (e.g., "foo") — still attempt the write.
-            match fs::write(&full_path, data) {
-                Ok(()) => StorageOutcome::Ok(()),
-                Err(e) => StorageOutcome::Err(format!("write {}: {e}", full_path.display())),
-            }
-        };
+        let outcome = publish_object_atomically(&full_path, &data, Publish::Replace);
 
         let _ = callback.send(StorageEvent::WriteComplete {
             key: key.to_string(),
@@ -522,7 +615,7 @@ impl StorageBackend for FileSystem {
             match identity {
                 Ok(current) => {
                     if current == expected {
-                        write_file_with_parents(&full_path, data)
+                        publish_object_atomically(&full_path, &data, Publish::Replace)
                     } else {
                         StorageOutcome::Err("precondition failed: etag mismatch".to_string())
                     }
@@ -533,7 +626,7 @@ impl StorageBackend for FileSystem {
                 )),
             }
         } else if if_none_match.as_deref() == Some("*") {
-            create_file_new_with_parents(&full_path, &data)
+            publish_object_atomically(&full_path, &data, Publish::CreateNew)
         } else {
             StorageOutcome::Err("conditional write requires a supported precondition".to_string())
         };
@@ -699,7 +792,7 @@ impl StorageBackend for FileSystem {
 
                     for entry in iter.flatten() {
                         if let Some(name) = entry.file_name().to_str() {
-                            if name != ".midge-locks" {
+                            if name != ".midge-locks" && !is_temp_object_name(name) {
                                 items.push(name.to_string());
                             }
                         }
@@ -1443,5 +1536,163 @@ mod tests {
         // Assert
         assert!(fs.is_ok());
         assert!(new_dir.exists());
+    }
+}
+
+#[cfg(all(test, feature = "failpoints"))]
+mod atomic_publish_tests {
+    use super::*;
+
+    fn write(
+        fs: &FileSystem,
+        key: &str,
+        data: &[u8],
+        headers: Vec<(String, String)>,
+    ) -> StorageOutcome<()> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        fs.submit_write_with_headers(key, data.to_vec(), headers, tx);
+        match rx.recv().expect("write completion") {
+            StorageEvent::WriteComplete { result, .. } => result,
+            other => panic!("unexpected event {other:?}"),
+        }
+    }
+
+    fn read(fs: &FileSystem, key: &str) -> StorageOutcome<Vec<u8>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        fs.submit_read(key, tx);
+        match rx.recv().expect("read completion") {
+            StorageEvent::ReadComplete { result, .. } => result,
+            other => panic!("unexpected event {other:?}"),
+        }
+    }
+
+    fn list(fs: &FileSystem, prefix: &str) -> Vec<String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        fs.submit_list(prefix, tx);
+        match rx.recv().expect("list completion") {
+            StorageEvent::ListComplete {
+                result: StorageOutcome::Ok(items),
+                ..
+            } => items,
+            other => panic!("unexpected event {other:?}"),
+        }
+    }
+
+    #[test]
+    fn should_not_expose_partial_object_when_conditional_create_is_interrupted() {
+        // Arrange
+        let _guard = crate::failpoints::test_failpoint_guard();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let fs = FileSystem::new(dir.path()).expect("filesystem backend");
+        let create = || vec![("If-None-Match".to_string(), "*".to_string())];
+        fail::cfg("midge::storage::fs_after_temp_object_write", "return").expect("failpoint");
+
+        // Act
+        let interrupted = write(&fs, "wal/1.wal", b"segment", create());
+        fail::remove("midge::storage::fs_after_temp_object_write");
+
+        // Assert
+        assert!(matches!(interrupted, StorageOutcome::Err(_)));
+        assert!(
+            matches!(read(&fs, "wal/1.wal"), StorageOutcome::Err(message) if message.starts_with("not found"))
+        );
+        assert!(list(&fs, "wal").is_empty(), "temp files must not be listed");
+        assert!(matches!(
+            write(&fs, "wal/1.wal", b"segment", create()),
+            StorageOutcome::Ok(())
+        ));
+        assert!(matches!(read(&fs, "wal/1.wal"), StorageOutcome::Ok(bytes) if bytes == b"segment"));
+    }
+
+    #[test]
+    fn should_keep_previous_object_when_overwrite_is_interrupted() {
+        // Arrange
+        let _guard = crate::failpoints::test_failpoint_guard();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let fs = FileSystem::new(dir.path()).expect("filesystem backend");
+        assert!(matches!(
+            write(&fs, "meta/manifest.json", b"previous", Vec::new()),
+            StorageOutcome::Ok(())
+        ));
+        fail::cfg("midge::storage::fs_after_temp_object_write", "return").expect("failpoint");
+
+        // Act
+        let interrupted = write(&fs, "meta/manifest.json", b"replacement-bytes", Vec::new());
+        fail::remove("midge::storage::fs_after_temp_object_write");
+
+        // Assert
+        assert!(matches!(interrupted, StorageOutcome::Err(_)));
+        assert!(
+            matches!(read(&fs, "meta/manifest.json"), StorageOutcome::Ok(bytes) if bytes == b"previous")
+        );
+    }
+}
+
+#[cfg(all(test, feature = "failpoints"))]
+mod mutation_lock_order_tests {
+    use super::*;
+
+    #[test]
+    fn should_take_stripe_while_failpoint_test_holds_gate_when_stripe_sharer_waits() {
+        // Arrange: a failpoint test holds the gate's write side. Another
+        // thread mutating a different key on the same stripe evaluates a
+        // failpoint inside the stripe. It must wait for the gate before the
+        // stripe, or it holds the stripe the test itself needs.
+        let first = std::path::PathBuf::from("stripe-order-a");
+        let stripe = mutation_stripe(&first);
+        let second = (0..10_000)
+            .map(|index| std::path::PathBuf::from(format!("stripe-order-{index}")))
+            .find(|path| path != &first && mutation_stripe(path) == stripe)
+            .expect("a second path on the same stripe");
+        let test_guard = crate::failpoints::test_failpoint_guard();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let sharer = std::thread::spawn(move || {
+            started_tx.send(()).expect("report start");
+            let _lock = mutation_lock(&second);
+            crate::failpoints::fail_point!("midge::storage::test_stripe_order");
+        });
+        started_rx.recv().expect("sharer started");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Act
+        let acquired = MUTATION_LOCKS[stripe].try_lock_for(std::time::Duration::from_secs(2));
+
+        // Assert
+        assert!(
+            acquired.is_some(),
+            "a stripe sharer must not hold the stripe while waiting on the failpoint gate"
+        );
+        drop(acquired);
+        drop(test_guard);
+        sharer.join().expect("join sharer");
+    }
+}
+
+#[cfg(test)]
+mod lock_stripe_tests {
+    use super::*;
+
+    #[test]
+    fn should_bound_lock_files_when_deleting_many_distinct_missing_keys() {
+        // Arrange: in real cloud mode this backend evicts one local copy per
+        // SST ever produced, so per-key lock files grew without bound.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let fs = FileSystem::new(dir.path()).expect("filesystem backend");
+
+        // Act
+        for index in 0..1_000 {
+            let (tx, rx) = std::sync::mpsc::channel();
+            fs.submit_delete(&format!("sst/{index}.sst"), tx);
+            let _ = rx.recv().expect("delete completion");
+        }
+
+        // Assert
+        let lock_files = std::fs::read_dir(dir.path().join(".midge-locks"))
+            .expect("lock dir")
+            .count();
+        assert!(
+            lock_files <= CONDITIONAL_LOCK_STRIPES,
+            "{lock_files} lock files for 1,000 keys"
+        );
     }
 }
