@@ -20,6 +20,15 @@ impl EventLoop {
         let mut shutdown_error = None;
         self.shutting_down = true;
 
+        // Local mode does not checkpoint memtables on shutdown, so the WAL
+        // tail is the only copy of buffered commits from the last batch
+        // window. Make it durable, and complete the waiters it covers, before
+        // held work is rejected below. CloudAsync seals its segment later.
+        if let Err(error) = self.sync_current_wal() {
+            tracing::error!(error = %error, "Failed to sync local WAL during shutdown");
+            shutdown_error = Some(error);
+        }
+
         // Caller-bearing work held outside the runtime queue cannot make
         // progress once terminal shutdown owns the event loop. Reject it
         // before joining potentially stalled storage workers so those callers
@@ -369,4 +378,112 @@ fn shutdown_waiter_request_id(waiter: &DurabilityWaiter) -> Option<u64> {
 
 fn shutdown_error() -> MidgeError {
     MidgeError::Busy("runtime is shutting down".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::create_test_state;
+    use super::*;
+    use crate::runtime::{ResponseRouter, RuntimeConfig};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    struct CountingSyncWriter(Arc<AtomicUsize>);
+
+    impl crate::wal::WalWriter for CountingSyncWriter {
+        fn append_record(
+            &self,
+            _record: &crate::wal::WalRecord,
+        ) -> crate::common::MidgeResult<u64> {
+            Ok(0)
+        }
+
+        fn append_batch(
+            &self,
+            _records: &[crate::wal::WalRecord],
+        ) -> crate::common::MidgeResult<u64> {
+            Ok(0)
+        }
+
+        fn flush(&self) -> crate::common::MidgeResult<()> {
+            Ok(())
+        }
+
+        fn sync(&self) -> crate::common::MidgeResult<()> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn current_pos(&self) -> u64 {
+            0
+        }
+
+        fn close(&self) -> crate::common::MidgeResult<()> {
+            Ok(())
+        }
+    }
+
+    fn local_event_loop_with_counting_writer() -> (EventLoop, Arc<AtomicUsize>) {
+        let router = Arc::new(ResponseRouter::new());
+        let config = RuntimeConfig {
+            wal_durability_policy: crate::wal::DurabilityPolicy::Batched,
+            ..RuntimeConfig::default()
+        };
+        let mut event_loop = EventLoop::new(create_test_state(), false, router, config, None)
+            .expect("create event loop");
+        let syncs = Arc::new(AtomicUsize::new(0));
+        event_loop
+            .wal_actor
+            .replace_writer_for_test(Box::new(CountingSyncWriter(Arc::clone(&syncs))));
+        (event_loop, syncs)
+    }
+
+    #[test]
+    fn should_fsync_wal_on_clean_shutdown_when_buffered_commits_are_pending() {
+        // Arrange
+        let (mut event_loop, syncs) = local_event_loop_with_counting_writer();
+        event_loop.state.wal.pending_writes = 1;
+        let response = event_loop.router.register(1, "Shutdown");
+
+        // Act
+        let outcome = event_loop.handle_shutdown(Some(1));
+
+        // Assert
+        assert!(matches!(outcome, HandleOutcome::Break));
+        assert!(
+            syncs.load(Ordering::SeqCst) >= 1,
+            "shutdown must fsync the WAL tail"
+        );
+        assert!(matches!(
+            response.recv_timeout(Duration::from_secs(1)),
+            Ok(RuntimeResponse::Ok { request_id: 1 })
+        ));
+    }
+
+    #[test]
+    fn should_complete_wal_durability_waiters_when_local_shutdown_syncs() {
+        // Arrange
+        let (mut event_loop, _syncs) = local_event_loop_with_counting_writer();
+        event_loop.state.wal.pending_writes = 1;
+        let waiter = event_loop.router.register(7, "WalAppend");
+        event_loop
+            .durability
+            .queue_waiter(DurabilityWaiter::WalAppend {
+                request_id: 7,
+                sequence: 1,
+            });
+
+        // Act
+        event_loop.handle_shutdown(None);
+
+        // Assert
+        assert!(matches!(
+            waiter.recv_timeout(Duration::from_secs(1)),
+            Ok(RuntimeResponse::WalAppended {
+                request_id: 7,
+                sequence: 1,
+            })
+        ));
+    }
 }

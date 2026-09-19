@@ -156,6 +156,12 @@ not cancel the mutation. Treat the outcome as unknown, correlate the request in
 runtime diagnostics, and use recovery or an application-level idempotency check
 before retrying.
 
+The same applies when a commit with writes was applied but a later durability
+step (for example the `cloud_strict()` seal and upload acknowledgment) could not
+finish because of shutdown or upload backpressure: `commit()` reports
+`MidgeError::Timeout` rather than `Busy`, `WriteStall` or `NoSpace`, because the
+write is already visible and a retry could apply it twice.
+
 `abandoned_runtime_requests_total` and `late_runtime_responses_total` are global
 diagnostic counters. Their deltas include unrelated requests and both successful
 and failed late responses, so they cannot establish whether one specific timed-out
