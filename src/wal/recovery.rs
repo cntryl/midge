@@ -652,6 +652,28 @@ impl WriterEpochFrontiers {
     }
 }
 
+/// Highest writer epoch recorded in the WAL files under `wal_dir`.
+///
+/// Reads the same files and applies the same corruption policy as replay,
+/// without applying any records, so startup can supply it as the lease epoch
+/// floor (`format/lease.md` §4 step 4) before acquiring leadership. Under
+/// salvage, discovery stops at the same corrupt-prefix boundary replay does.
+///
+/// # Errors
+///
+/// Returns an error if WAL enumeration or reading fails, or if a frame is
+/// corrupt and `replay_policy` does not tolerate it.
+pub(crate) fn max_writer_epoch(
+    storage: &dyn Fs,
+    wal_dir: &FsPath,
+    replay_policy: ReplayPolicy,
+) -> MidgeResult<u64> {
+    let replay_paths = collect_replay_paths(storage, wal_dir)?;
+    let (frontiers, _had_corruption) =
+        discover_writer_epoch_frontiers(storage, &replay_paths, replay_policy)?;
+    Ok(frontiers.max_epoch_seen())
+}
+
 fn discover_writer_epoch_frontiers(
     storage: &dyn Fs,
     replay_paths: &[ReplayFile],

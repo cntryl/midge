@@ -17,6 +17,7 @@ pub(super) struct CloudSstRecoveryProof {
 mod assembly;
 pub(in crate::engine) mod cloud_io;
 mod cloud_recovery;
+mod epoch_floor;
 mod storage;
 mod streaming_recovery;
 mod streaming_wal_fs;

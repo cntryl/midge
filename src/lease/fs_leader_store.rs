@@ -152,7 +152,6 @@ impl LeaderStore for FsLeaderStore {
         self.acquire_leadership_after_validation(holder_id, |_| Ok(()))
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     fn acquire_leadership_with_minimum_epoch(
         &self,
         holder_id: &str,

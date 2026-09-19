@@ -117,6 +117,12 @@ pub(crate) struct CloudBackedTestSetup {
     pub recovery_cloud_wal_dir: PathBuf,
 }
 
+/// Root of the separate filesystem-backed store that simulates cloud under
+/// `db_path`.
+pub(crate) fn simulated_cloud_root(db_path: &Path) -> PathBuf {
+    db_path.join("cloud_store")
+}
+
 /// Builds a deterministic, filesystem-backed “cloud” for tests.
 ///
 /// The engine/testkit should not know about folders/blobs; it only needs the
@@ -125,8 +131,7 @@ pub(crate) fn build_cloud_backed_filesystem_simulation(
     db_path: &Path,
     local_storage_budget_bytes: Option<u64>,
 ) -> MidgeResult<CloudBackedTestSetup> {
-    // Simulate cloud with a separate filesystem-backed store under db_path.
-    let cloud_root = db_path.join("cloud_store");
+    let cloud_root = simulated_cloud_root(db_path);
     let recovery_cloud_wal_dir = cloud_root.join("wal");
     let _ = std::fs::create_dir_all(&recovery_cloud_wal_dir);
 

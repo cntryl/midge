@@ -59,7 +59,10 @@ impl StartupStoragePath {
 }
 
 impl StartupLease {
-    pub(super) fn acquire(opts: &OpenOptions) -> MidgeResult<Self> {
+    /// Acquire the primary lease with an epoch strictly above
+    /// `minimum_epoch`, the highest writer epoch already durable in this
+    /// engine's storage.
+    pub(super) fn acquire(opts: &OpenOptions, minimum_epoch: u64) -> MidgeResult<Self> {
         let storage = opts.storage();
         let created = crate::lease::create_lease_with_validity_and_timeout_and_ttl(
             storage,
@@ -80,6 +83,7 @@ impl StartupLease {
             created.validity,
             Some(storage),
             opts.lease_loss_hook(),
+            minimum_epoch,
         )
     }
 
@@ -88,7 +92,7 @@ impl StartupLease {
         lease: Arc<dyn crate::lease::PrimaryLease>,
         validity: Option<Arc<crate::lease::LeaseValidity>>,
     ) -> MidgeResult<Self> {
-        Self::acquire_created(lease, validity, None, None)
+        Self::acquire_created(lease, validity, None, None, 0)
     }
 
     fn acquire_created(
@@ -96,28 +100,35 @@ impl StartupLease {
         lease_validity: Option<Arc<crate::lease::LeaseValidity>>,
         storage: Option<&Storage>,
         lease_loss_hook: Option<Arc<dyn Fn() + Send + Sync>>,
+        minimum_epoch: u64,
     ) -> MidgeResult<Self> {
-        let lease_guard = lease.clone().try_acquire().map_err(|error| match error {
-            crate::lease::LeaseError::AcquisitionFailed(message) => MidgeError::LeaseHeld(format!(
-                "another Midge instance is already running against this storage: {message}"
-            )),
-            crate::lease::LeaseError::IoError(message) => MidgeError::LeaseUnavailable(message),
-            crate::lease::LeaseError::RenewalFailed(message) => MidgeError::Fenced(message),
-            crate::lease::LeaseError::AlreadyReleased => {
-                MidgeError::Fenced("lease was released during acquisition".to_string())
-            }
-            crate::lease::LeaseError::Indeterminate(message) => {
-                MidgeError::LeaseIndeterminate(message)
-            }
-            crate::lease::LeaseError::EpochExhausted => MidgeError::LeaseEpochExhausted,
-            crate::lease::LeaseError::AlreadyAcquired(message) => MidgeError::Busy(message),
-            crate::lease::LeaseError::Internal(message) => MidgeError::Internal(message),
-        })?;
+        let lease_guard = lease
+            .clone()
+            .try_acquire_with_minimum_epoch(minimum_epoch)
+            .map_err(|error| match error {
+                crate::lease::LeaseError::AcquisitionFailed(message) => {
+                    MidgeError::LeaseHeld(format!(
+                        "another Midge instance is already running against this storage: {message}"
+                    ))
+                }
+                crate::lease::LeaseError::IoError(message) => MidgeError::LeaseUnavailable(message),
+                crate::lease::LeaseError::RenewalFailed(message) => MidgeError::Fenced(message),
+                crate::lease::LeaseError::AlreadyReleased => {
+                    MidgeError::Fenced("lease was released during acquisition".to_string())
+                }
+                crate::lease::LeaseError::Indeterminate(message) => {
+                    MidgeError::LeaseIndeterminate(message)
+                }
+                crate::lease::LeaseError::EpochExhausted => MidgeError::LeaseEpochExhausted,
+                crate::lease::LeaseError::AlreadyAcquired(message) => MidgeError::Busy(message),
+                crate::lease::LeaseError::Internal(message) => MidgeError::Internal(message),
+            })?;
 
         tracing::warn!(
             holder_id = %lease.holder_id(),
             storage = ?storage,
             epoch = lease.epoch(),
+            minimum_epoch,
             "primary lease acquired - this instance is now the exclusive writer"
         );
 

@@ -66,6 +66,14 @@ impl ProviderLeaderStore {
 
 impl LeaderStore for ProviderLeaderStore {
     fn acquire_leadership(&self, holder_id: &str) -> Result<LeaderRecord, LeaseError> {
+        self.acquire_leadership_with_minimum_epoch(holder_id, 0)
+    }
+
+    fn acquire_leadership_with_minimum_epoch(
+        &self,
+        holder_id: &str,
+        minimum_epoch: u64,
+    ) -> Result<LeaderRecord, LeaseError> {
         let current = provider_read_doc_with_metadata(&self.cloud, self.cloud.callback_timeout())?;
         let (existing, metadata) = match current {
             Some((document, metadata)) => (Some(document), Some(metadata)),
@@ -86,6 +94,7 @@ impl LeaderStore for ProviderLeaderStore {
             .and_then(|document| document.epoch)
             .unwrap_or(0);
         let epoch = previous_epoch
+            .max(minimum_epoch)
             .checked_add(1)
             .ok_or(LeaseError::EpochExhausted)?;
         let monotonic_now = Instant::now();
@@ -287,6 +296,14 @@ impl LeaderStore for UnavailableLeaderStore {
         Err(self.failure())
     }
 
+    fn acquire_leadership_with_minimum_epoch(
+        &self,
+        _holder_id: &str,
+        _minimum_epoch: u64,
+    ) -> Result<LeaderRecord, LeaseError> {
+        Err(self.failure())
+    }
+
     fn read_current(&self) -> Result<Option<LeaderRecord>, LeaseError> {
         Err(self.failure())
     }
@@ -405,6 +422,14 @@ impl SimulatedLeaderStore {
 
 impl LeaderStore for SimulatedLeaderStore {
     fn acquire_leadership(&self, holder_id: &str) -> Result<LeaderRecord, LeaseError> {
+        self.acquire_leadership_with_minimum_epoch(holder_id, 0)
+    }
+
+    fn acquire_leadership_with_minimum_epoch(
+        &self,
+        holder_id: &str,
+        minimum_epoch: u64,
+    ) -> Result<LeaderRecord, LeaseError> {
         let monotonic_now = Instant::now();
         let now = chrono::Utc::now();
         let valid_until = monotonic_now + self.ttl;
@@ -434,7 +459,7 @@ impl LeaderStore for SimulatedLeaderStore {
                     .to_rfc3339(),
                 })
             },
-            0,
+            minimum_epoch,
         )?;
         self.validity.activate(record.epoch, valid_until)?;
         Ok(record)
@@ -771,6 +796,13 @@ impl CloudStorageLease {
 
 impl PrimaryLease for CloudStorageLease {
     fn try_acquire(self: std::sync::Arc<Self>) -> Result<LeaseGuard, LeaseError> {
+        self.try_acquire_with_minimum_epoch(0)
+    }
+
+    fn try_acquire_with_minimum_epoch(
+        self: std::sync::Arc<Self>,
+        minimum_epoch: u64,
+    ) -> Result<LeaseGuard, LeaseError> {
         // Borrow the inner value for field access (auto-deref handles Arc -> &T)
         let inner: &Self = &self;
 
@@ -782,7 +814,7 @@ impl PrimaryLease for CloudStorageLease {
 
         let epoch = inner
             .leader_store
-            .acquire_leadership(&inner.holder_id)?
+            .acquire_leadership_with_minimum_epoch(&inner.holder_id, minimum_epoch)?
             .epoch;
         inner
             .acquired_epoch

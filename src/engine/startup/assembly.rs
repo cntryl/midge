@@ -113,8 +113,12 @@ impl EngineStartup {
         let storage_path = StartupStoragePath::resolve(opts.storage());
         storage_path.prepare();
 
-        let startup_lease =
-            super::timing::measure("lease_acquisition", || StartupLease::acquire(opts))?;
+        let minimum_epoch = super::timing::measure("lease_epoch_floor", || {
+            super::epoch_floor::StartupEpochFloor::discover(opts, &storage_path)
+        })?;
+        let startup_lease = super::timing::measure("lease_acquisition", || {
+            StartupLease::acquire(opts, minimum_epoch)
+        })?;
         if !storage_path.memory_mode {
             crate::runtime::transaction_spill::cleanup_orphaned_runs(&storage_path.db_path)?;
         }
