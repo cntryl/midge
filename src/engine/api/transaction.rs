@@ -666,7 +666,15 @@ impl Transaction {
             Ok(sequence) => {
                 self.sequence_publisher.store(sequence, Ordering::SeqCst);
                 let durability_started_at = CommitTiming::phase_start(timing.as_ref());
-                let result = self.finalize_write_durability(sequence, opts, had_writes);
+                let result = self
+                    .finalize_write_durability(sequence, opts, had_writes)
+                    .map_err(|error| {
+                        if had_writes {
+                            post_apply_durability_error(error, sequence)
+                        } else {
+                            error
+                        }
+                    });
                 CommitTiming::record_durability(&mut timing, durability_started_at);
                 result
             }
@@ -858,5 +866,54 @@ impl Drop for Transaction {
     fn drop(&mut self) {
         self.unregister_snapshot();
         self.memory_pool.release(self.assertion_bytes);
+    }
+}
+
+/// Classify a failure from the durability step that runs after a commit was
+/// already applied and made visible. Retry-later kinds would invite callers
+/// to apply a non-idempotent mutation twice, so they become `Timeout`, which
+/// the durability contract defines as "may have been applied; outcome
+/// unknown". Other kinds already say the writer cannot continue.
+fn post_apply_durability_error(error: MidgeError, sequence: u64) -> MidgeError {
+    match error {
+        MidgeError::Busy(detail) | MidgeError::WriteStall(detail) | MidgeError::NoSpace(detail) => {
+            MidgeError::Timeout(format!(
+                "transaction was applied at sequence {sequence}, but its durability \
+                 could not be confirmed ({detail}); treat the outcome as unknown"
+            ))
+        }
+        other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_report_unknown_outcome_when_durability_step_fails_after_apply_with_retryable_error() {
+        for error in [
+            MidgeError::Busy("engine is shutting down".into()),
+            MidgeError::WriteStall("older CloudAsync WAL segments are awaiting upload".into()),
+            MidgeError::NoSpace("upload queue full".into()),
+        ] {
+            // Act
+            let reported = post_apply_durability_error(error, 42);
+
+            // Assert
+            assert!(
+                matches!(&reported, MidgeError::Timeout(message) if message.contains("applied")),
+                "an applied commit must not look retryable: {reported:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_keep_non_retryable_error_when_durability_step_fails_after_apply() {
+        // Act
+        let reported = post_apply_durability_error(MidgeError::Fenced("lease lost".into()), 42);
+
+        // Assert
+        assert!(matches!(reported, MidgeError::Fenced(_)));
     }
 }
