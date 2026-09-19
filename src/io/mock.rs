@@ -71,7 +71,25 @@ fn checked_range(offset: u64, len: u64, file_len: usize) -> FsResult<(usize, usi
         return Err(FsError::Io("offset beyond file".to_string()));
     }
 
-    Ok((start, end.min(file_len)))
+    // RealFs uses an exact positional read, so a range past EOF is an error
+    // rather than a short buffer.
+    if end > file_len {
+        return Err(FsError::Io(format!(
+            "read offset={offset} len={len}: unexpected EOF at {file_len}"
+        )));
+    }
+
+    Ok((start, end))
+}
+
+/// Key prefix for the children of directory `path`; the root lists all keys.
+fn dir_prefix(path: &FsPath) -> String {
+    let trimmed = path.0.trim_end_matches('/');
+    if trimmed.is_empty() {
+        String::new()
+    } else {
+        format!("{trimmed}/")
+    }
 }
 
 fn checked_write_start(offset: u64) -> FsResult<usize> {
@@ -84,6 +102,9 @@ impl Fs for MockFs {
 
         if opts.create_new && files.contains_key(&path.0) {
             return Err(FsError::AlreadyExists(path.0.clone()));
+        }
+        if !opts.create && !opts.create_new && !files.contains_key(&path.0) {
+            return Err(FsError::NotFound(path.0.clone()));
         }
 
         let file_data = files
@@ -105,6 +126,9 @@ impl Fs for MockFs {
 
         if opts.create_new && files.contains_key(&path.0) {
             return Err(FsError::AlreadyExists(path.0.clone()));
+        }
+        if !opts.create && !opts.create_new && !files.contains_key(&path.0) {
+            return Err(FsError::NotFound(path.0.clone()));
         }
 
         let file_data = files
@@ -154,14 +178,24 @@ impl Fs for MockFs {
     }
 
     fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        // Directories are implicit: a child is a directory when some key
+        // continues past it. Return immediate child basenames like RealFs.
         let files = self.files.lock();
-        let entries: Vec<_> = files
-            .keys()
-            .filter(|k| k.starts_with(&path.0))
-            .map(|name| DirEntry {
-                name: name.clone(),
-                is_dir: false,
-            })
+        let prefix = dir_prefix(path);
+        let mut children = std::collections::BTreeMap::new();
+        for rest in files.keys().filter_map(|key| key.strip_prefix(&prefix)) {
+            match rest.split_once('/') {
+                Some((child, _)) => {
+                    children.insert(child.to_string(), true);
+                }
+                None => {
+                    children.entry(rest.to_string()).or_insert(false);
+                }
+            }
+        }
+        let entries: Vec<_> = children
+            .into_iter()
+            .map(|(name, is_dir)| DirEntry { name, is_dir })
             .collect();
 
         if entries.is_empty() && !path.0.is_empty() {
@@ -174,7 +208,8 @@ impl Fs for MockFs {
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
         let mut files = self.files.lock();
         let before = files.len();
-        files.retain(|k, _| !k.starts_with(&path.0));
+        let prefix = dir_prefix(path);
+        files.retain(|k, _| !k.starts_with(&prefix));
 
         if files.len() == before {
             return Err(FsError::NotFound(path.0.clone()));
