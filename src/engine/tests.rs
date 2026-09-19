@@ -2077,7 +2077,7 @@ impl crate::lease::PrimaryLease for FailingReleaseLease {
 }
 
 #[test]
-fn should_stop_retrying_and_report_error_when_lease_release_keeps_failing() {
+fn should_report_error_when_lease_release_keeps_failing() {
     // Arrange: after the heartbeat stops, an unreleased lease simply expires
     // at its TTL, so retrying past that only spins and floods the log.
     let lease = Arc::new(FailingReleaseLease::default());
