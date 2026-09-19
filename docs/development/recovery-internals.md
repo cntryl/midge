@@ -62,6 +62,15 @@ contain a CRC-valid, decodable WAL frame, the length field is corrupt rather
 than a final torn append. Strict recovery fails; salvage recovery retains only
 the verified prefix and reports degraded health.
 
+### Oversized records
+
+Replay decompresses a record VALUE under a fixed 64 MiB ceiling
+(`WAL_MAX_VALUE_LEN`). The writer enforces the same ceiling on the
+uncompressed VALUE, including a whole transaction batch, before any byte is
+written, and rejects the commit with `ResourceLimit`. Compression can shrink a
+frame below the frame limit, so checking only the frame would let an
+acknowledged record fail every later replay.
+
 ### Partial WAL entry
 
 If a frame header or record body is incomplete:
