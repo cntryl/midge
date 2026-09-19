@@ -377,11 +377,30 @@ fn process_lock_stripe_name(full_path: &Path) -> String {
     format!("stripe-{stripe:02x}.lock")
 }
 
-fn mutation_lock(full_path: &Path) -> parking_lot::MutexGuard<'static, ()> {
+fn mutation_stripe(full_path: &Path) -> usize {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     full_path.hash(&mut hasher);
-    let stripe = usize::try_from(hasher.finish()).unwrap_or(0) % CONDITIONAL_LOCK_STRIPES;
-    MUTATION_LOCKS[stripe].lock()
+    usize::try_from(hasher.finish()).unwrap_or(0) % CONDITIONAL_LOCK_STRIPES
+}
+
+/// Holds a mutation stripe. With failpoints compiled in it also holds the
+/// failpoint read gate, taken before the stripe: a failpoint evaluated under
+/// the stripe must not wait on the gate while a failpoint test that holds the
+/// gate waits on the same stripe for an unrelated key.
+pub(super) struct MutationGuard {
+    _stripe: parking_lot::MutexGuard<'static, ()>,
+    #[cfg(feature = "failpoints")]
+    _failpoint_gate: Option<parking_lot::RwLockReadGuard<'static, ()>>,
+}
+
+fn mutation_lock(full_path: &Path) -> MutationGuard {
+    #[cfg(feature = "failpoints")]
+    let failpoint_gate = crate::failpoints::read_gate();
+    MutationGuard {
+        _stripe: MUTATION_LOCKS[mutation_stripe(full_path)].lock(),
+        #[cfg(feature = "failpoints")]
+        _failpoint_gate: failpoint_gate,
+    }
 }
 
 impl StorageBackend for FileSystem {
@@ -1606,6 +1625,46 @@ mod atomic_publish_tests {
         assert!(
             matches!(read(&fs, "meta/manifest.json"), StorageOutcome::Ok(bytes) if bytes == b"previous")
         );
+    }
+}
+
+#[cfg(all(test, feature = "failpoints"))]
+mod mutation_lock_order_tests {
+    use super::*;
+
+    #[test]
+    fn should_take_stripe_while_failpoint_test_holds_gate_when_stripe_sharer_waits() {
+        // Arrange: a failpoint test holds the gate's write side. Another
+        // thread mutating a different key on the same stripe evaluates a
+        // failpoint inside the stripe. It must wait for the gate before the
+        // stripe, or it holds the stripe the test itself needs.
+        let first = std::path::PathBuf::from("stripe-order-a");
+        let stripe = mutation_stripe(&first);
+        let second = (0..10_000)
+            .map(|index| std::path::PathBuf::from(format!("stripe-order-{index}")))
+            .find(|path| path != &first && mutation_stripe(path) == stripe)
+            .expect("a second path on the same stripe");
+        let test_guard = crate::failpoints::test_failpoint_guard();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let sharer = std::thread::spawn(move || {
+            started_tx.send(()).expect("report start");
+            let _lock = mutation_lock(&second);
+            crate::failpoints::fail_point!("midge::storage::test_stripe_order");
+        });
+        started_rx.recv().expect("sharer started");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Act
+        let acquired = MUTATION_LOCKS[stripe].try_lock_for(std::time::Duration::from_secs(2));
+
+        // Assert
+        assert!(
+            acquired.is_some(),
+            "a stripe sharer must not hold the stripe while waiting on the failpoint gate"
+        );
+        drop(acquired);
+        drop(test_guard);
+        sharer.join().expect("join sharer");
     }
 }
 
