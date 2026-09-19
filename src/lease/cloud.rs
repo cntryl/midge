@@ -105,9 +105,7 @@ impl LeaderStore for ProviderLeaderStore {
             holder_id: holder_id.to_string(),
             owner_token: Some(self.owner_token.clone()),
             acquired_at: now.to_rfc3339(),
-            expires_at: (now
-                + chrono::Duration::seconds(CloudStorageLease::lease_ttl_seconds_i64(self.ttl)))
-            .to_rfc3339(),
+            expires_at: (now + CloudStorageLease::persisted_lease_duration(self.ttl)).to_rfc3339(),
         };
         let headers = match metadata {
             Some(metadata) => mutation_precondition_headers(&metadata).ok_or_else(|| {
@@ -187,9 +185,7 @@ impl LeaderStore for ProviderLeaderStore {
             holder_id: holder_id.to_string(),
             owner_token: Some(self.owner_token.clone()),
             acquired_at: existing.acquired_at,
-            expires_at: (now
-                + chrono::Duration::seconds(CloudStorageLease::lease_ttl_seconds_i64(self.ttl)))
-            .to_rfc3339(),
+            expires_at: (now + CloudStorageLease::persisted_lease_duration(self.ttl)).to_rfc3339(),
         };
         let remaining = self.validity.remaining(expected_epoch)?;
         let write_timeout = remaining
@@ -452,11 +448,8 @@ impl LeaderStore for SimulatedLeaderStore {
                     holder_id: holder_id.to_string(),
                     owner_token: Some(self.owner_token.clone()),
                     acquired_at: now.to_rfc3339(),
-                    expires_at: (now
-                        + chrono::Duration::seconds(CloudStorageLease::lease_ttl_seconds_i64(
-                            self.ttl,
-                        )))
-                    .to_rfc3339(),
+                    expires_at: (now + CloudStorageLease::persisted_lease_duration(self.ttl))
+                        .to_rfc3339(),
                 })
             },
             minimum_epoch,
@@ -504,11 +497,8 @@ impl LeaderStore for SimulatedLeaderStore {
                 holder_id: holder_id.to_string(),
                 owner_token: Some(self.owner_token.clone()),
                 acquired_at: current.acquired_at,
-                expires_at: (now
-                    + chrono::Duration::seconds(CloudStorageLease::lease_ttl_seconds_i64(
-                        self.ttl,
-                    )))
-                .to_rfc3339(),
+                expires_at: (now + CloudStorageLease::persisted_lease_duration(self.ttl))
+                    .to_rfc3339(),
             })?;
             Ok(valid_until)
         })?;
@@ -602,8 +592,12 @@ pub struct CloudStorageLease {
 }
 
 impl CloudStorageLease {
-    fn lease_ttl_seconds_i64(duration: Duration) -> i64 {
-        i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
+    /// Lease length written to the shared document. It keeps the TTL's full
+    /// precision: truncating to whole seconds would publish an expiry earlier
+    /// than the holder's own validity, letting another writer take over while
+    /// this one still accepts writes.
+    fn persisted_lease_duration(duration: Duration) -> chrono::Duration {
+        chrono::Duration::from_std(duration).unwrap_or(chrono::Duration::MAX)
     }
 
     pub(crate) fn lease_validity(&self) -> Arc<LeaseValidity> {
