@@ -149,8 +149,14 @@ impl GcActor {
     ) {
         self.reap_finished_cloud_delete_workers();
 
-        // Get set of SSTs pinned by active snapshots
-        let pinned_ssts = state.get_pinned_sst_names();
+        // Get set of SSTs pinned by active snapshots. GC runs on the event
+        // loop, and a thread acquiring a snapshot may hold the acquisition
+        // guard while it waits on that loop, so never block here: defer the
+        // whole batch until that acquisition ends.
+        let Some(pinned_ssts) = state.try_get_pinned_sst_names() else {
+            self.defer_until_snapshot_acquisition_ends(sst_names);
+            return;
+        };
 
         let mut deleted_count = 0;
         let mut scheduled_count = 0;
@@ -261,6 +267,26 @@ impl GcActor {
     #[cfg(test)]
     pub fn last_gc_run(&self) -> Option<std::time::Instant> {
         self.last_gc_run
+    }
+
+    fn defer_until_snapshot_acquisition_ends(&mut self, sst_names: &[String]) {
+        for sst_name in sst_names {
+            if !self
+                .pending_obsolete
+                .iter()
+                .any(|pending| pending == sst_name)
+            {
+                self.pending_obsolete.push_back(sst_name.clone());
+            }
+        }
+        tracing::debug!(
+            deferred = sst_names.len(),
+            "deferring SST GC while a snapshot acquisition is in progress"
+        );
+        // No retry is queued here: the worker channel is drained ahead of API
+        // requests, so an immediate RetryGc would spin the event loop while
+        // the acquiring caller waits on it. The acquisition requests the
+        // retry on the API queue when it ends.
     }
 
     /// Retry files retained by a previous GC pass. A still-pinned file is
@@ -544,6 +570,56 @@ mod tests {
             drop(receiver);
             worker.join().expect("join notification worker");
         });
+    }
+
+    #[test]
+    fn should_defer_gc_instead_of_blocking_when_snapshot_acquisition_is_in_progress() {
+        // Arrange: an API thread holds the acquisition guard while it waits on
+        // the event loop. GC runs on that same event loop, so blocking here
+        // is a deadlock until the response timeout breaks it.
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
+        std::fs::create_dir_all(&state.sst_dir).expect("sst dir");
+        let name = crate::sst::file_name(0, 0, 1);
+        let path = state.sst_dir.join(&name);
+        std::fs::write(&path, b"obsolete").expect("obsolete SST");
+        let (notifier, notifications) = crossbeam::channel::unbounded();
+        let mut actor = GcActor::new();
+        actor.set_retry_notifier(Some(notifier));
+        let pins = Arc::clone(&state.snapshot_pins);
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _acquisition = pins.begin_acquisition(0);
+            held_tx.send(()).expect("report guard held");
+            std::thread::sleep(Duration::from_secs(2));
+        });
+        held_rx.recv().expect("acquisition guard held");
+
+        // Act
+        let started = Instant::now();
+        actor.delete_ssts(&mut state, std::slice::from_ref(&name), None);
+        let elapsed = started.elapsed();
+
+        // Assert
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "GC blocked {elapsed:?} on an in-progress snapshot acquisition"
+        );
+        assert!(path.exists(), "a deferred GC must retain the file");
+        assert!(
+            notifications.try_recv().is_err(),
+            "GC must not queue a worker retry that preempts the waiting caller"
+        );
+        holder.join().expect("join acquisition holder");
+        assert!(
+            state.snapshot_pins.take_gc_deferred(),
+            "the ended acquisition must see that GC deferred behind it"
+        );
+        actor.retry_pending(&mut state, None);
+        assert!(
+            !path.exists(),
+            "the deferred file is deleted once acquisition ends"
+        );
     }
 
     #[test]

@@ -548,10 +548,11 @@ impl Engine {
         }
 
         let runtime_transaction_guard = self.runtime_handle.acquire_transaction_guard()?;
-        // Hold the registry acquisition write guard from snapshot capture
-        // through pin publication. GC samples the same registry under a read
-        // guard, so an obsolete SST cannot be deleted in the capture/register
-        // window.
+        // Hold the registry's shared acquisition guard from snapshot capture
+        // through pin publication. GC samples pins under the exclusive guard,
+        // so an obsolete SST cannot be deleted in the capture/register window.
+        // GC only try-locks it, because this thread may wait on the event loop
+        // (a snapshot-cache miss) while holding the guard.
         // Any snapshot captured below starts at or after the committed
         // sequence read here, so it is a safe floor for the compaction horizon.
         let _snapshot_acquisition = self

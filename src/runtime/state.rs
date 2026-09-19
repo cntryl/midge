@@ -369,7 +369,7 @@ impl RuntimeState {
     }
 
     fn snapshot_retention_metrics(&self, now: Instant) -> (usize, u64) {
-        let pinned_ssts = self.get_pinned_sst_names().len();
+        let pinned_ssts = self.snapshot_pins.observed_pinned_sst_count();
         let oldest_snapshot_age_seconds = self.snapshot_pins.oldest_age_seconds(now).unwrap_or(0);
         (pinned_ssts, oldest_snapshot_age_seconds)
     }
