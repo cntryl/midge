@@ -641,6 +641,14 @@ impl Drop for CloudExecutor {
         };
 
         if let Ok(rt) = Arc::try_unwrap(rt_arc) {
+            if tokio::runtime::Handle::try_current().is_ok() {
+                // An embedder dropped the last reference from inside its own
+                // async context, where blocking shutdown panics. Let the
+                // runtime's workers wind down in the background instead.
+                rt.shutdown_background();
+                tracing::debug!("CloudExecutor tokio runtime shut down in the background");
+                return;
+            }
             // We have exclusive ownership - perform explicit shutdown with timeout
             // Increased from 5s to 10s to accommodate slow cloud operations
             let timeout = Duration::from_secs(10);
@@ -1365,5 +1373,26 @@ mod tests {
         // Assert
         assert!(result.is_err());
         assert!(committed.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[test]
+    fn should_not_panic_when_cloud_executor_is_dropped_inside_async_context() {
+        // Arrange: an embedder may shut the engine down from inside its own
+        // tokio task, releasing the last executor reference there.
+        let executor = CloudExecutor::new(None).expect("create executor");
+        let host = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("host runtime");
+
+        // Act
+        let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            host.block_on(async move { drop(executor) });
+        }));
+
+        // Assert
+        assert!(
+            dropped.is_ok(),
+            "dropping the executor inside an async context must not panic"
+        );
     }
 }
