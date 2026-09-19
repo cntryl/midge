@@ -579,27 +579,34 @@ impl EventLoop {
             // Early remote output staging can leave harmless orphans after a
             // crash. Persist the filename allocation before any such object
             // is uploaded so a cold replacement never reuses its identity.
-            let next = plan.output_seq.checked_add(1).ok_or_else(|| {
-                crate::common::MidgeError::ResourceLimit("SST filename allocation exhausted".into())
-            })?;
-            let counter = self
-                .state
-                .manifest
-                .next_sst_seqs
-                .entry(plan.cf_id)
-                .or_insert(1);
-            *counter = (*counter).max(next);
-            crate::metadata::append_edit(
-                &self.state.db_path,
-                &crate::metadata::ManifestEdit::BumpNextSstSeq {
-                    cf_id: plan.cf_id,
-                    next_seq: *counter,
-                },
-            )?;
-            crate::runtime::actors::ManifestActor::persist(&self.state)?;
-            self.mirror_metadata_to_authoritative_cloud()?;
+            self.reserve_sst_name_durably(plan.cf_id, plan.output_seq)?;
         }
         Ok(plan)
+    }
+
+    /// Persist an SST filename allocation before the object can exist
+    /// remotely. After a crash between upload and publication, a replacement
+    /// must never reuse the orphan's name: immutable publication rejects an
+    /// existing object with different bytes, which would wedge it forever.
+    pub(super) fn reserve_sst_name_durably(
+        &mut self,
+        cf_id: crate::types::ColumnFamilyId,
+        sst_seq: u64,
+    ) -> crate::common::MidgeResult<()> {
+        let next = sst_seq.checked_add(1).ok_or_else(|| {
+            crate::common::MidgeError::ResourceLimit("SST filename allocation exhausted".into())
+        })?;
+        let counter = self.state.manifest.next_sst_seqs.entry(cf_id).or_insert(1);
+        *counter = (*counter).max(next);
+        crate::metadata::append_edit(
+            &self.state.db_path,
+            &crate::metadata::ManifestEdit::BumpNextSstSeq {
+                cf_id,
+                next_seq: *counter,
+            },
+        )?;
+        crate::runtime::actors::ManifestActor::persist(&self.state)?;
+        self.mirror_metadata_to_authoritative_cloud()
     }
 
     fn prepare_compaction_plan_for_launch(
