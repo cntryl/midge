@@ -90,8 +90,8 @@ If corruption is detected at byte 0 or inside the non-tail durable prefix:
 
 Each manifest journal append ends with a CRC-checked fsync marker. Replay keeps
 edits only up to the last marker. A record at EOF whose header or payload is
-incomplete is a torn final append, and the next append rewrites the journal to
-the last marker.
+incomplete, or an all-zero final region left by an unsynced append, is a torn
+final append, and the next append rewrites the journal to the last marker.
 
 The record CRC covers only the payload, so a corrupt length field looks the
 same as a torn payload. If the bytes that length would swallow contain a

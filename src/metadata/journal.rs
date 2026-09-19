@@ -673,6 +673,17 @@ fn read_journal_record(
     let typ = file
         .read_at(offset, 1)
         .map_err(crate::common::MidgeError::from)?[0];
+    if typ == 0 {
+        // An unsynced append can persist the new file size but not its bytes,
+        // leaving a zero-filled end. That is a torn tail (the WAL treats it
+        // the same way); zeros followed by data are still corruption.
+        let rest = file
+            .read_at(offset, file_len - offset)
+            .map_err(crate::common::MidgeError::from)?;
+        if rest.iter().all(|byte| *byte == 0) {
+            return Ok(JournalRecordStatus::PartialHeader { record_start });
+        }
+    }
     validate_journal_record_type(typ, record_start)?;
     if offset + 5 > file_len {
         return Ok(JournalRecordStatus::PartialHeader { record_start });
@@ -1390,6 +1401,52 @@ mod tests {
             corrupted_len,
             "durable later records must stay on disk"
         );
+    }
+
+    #[test]
+    fn should_treat_all_zero_journal_tail_as_torn_append_when_replaying() {
+        // Arrange: file size reached disk but the appended bytes did not, a
+        // common shape of an unsynced append after power loss.
+        let td = tempdir().expect("create temp directory");
+        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 1 }).expect("append first");
+        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 2 }).expect("append second");
+        let mut journal = std::fs::OpenOptions::new()
+            .append(true)
+            .open(td.path().join(JOURNAL_FILE))
+            .expect("open journal");
+        journal.write_all(&[0_u8; 64]).expect("append zero tail");
+        journal.sync_all().expect("sync zero tail");
+        drop(journal);
+
+        // Act
+        let edits = replay_journal(td.path()).expect("a zero-filled tail is a torn append");
+        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 3 }).expect("append after repair");
+        let repaired = replay_journal(td.path()).expect("replay repaired journal");
+
+        // Assert
+        assert_eq!(edits.len(), 2);
+        assert_eq!(repaired.len(), 3);
+    }
+
+    #[test]
+    fn should_reject_zero_region_followed_by_data_as_corruption() {
+        // Arrange
+        let td = tempdir().expect("create temp directory");
+        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 1 }).expect("append first");
+        let mut journal = std::fs::OpenOptions::new()
+            .append(true)
+            .open(td.path().join(JOURNAL_FILE))
+            .expect("open journal");
+        journal.write_all(&[0_u8; 16]).expect("append zeros");
+        journal.write_all(&[7_u8; 16]).expect("append data after zeros");
+        journal.sync_all().expect("sync");
+        drop(journal);
+
+        // Act
+        let result = replay_journal(td.path());
+
+        // Assert
+        assert!(matches!(result, Err(crate::common::MidgeError::Corruption(_))));
     }
 
     #[test]
