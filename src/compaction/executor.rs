@@ -858,12 +858,22 @@ pub(crate) fn write_partitioned_compaction_outputs(
         let partition_tombstone_bytes = partition_tombstones.iter().fold(0usize, |total, item| {
             total.saturating_add(encoded_tombstone_upper_bound(&item.tombstone))
         });
-        let soft_roll = selected_version.is_some()
+        let partition_size = writer
+            .estimated_size_bytes()
+            .saturating_add(partition_tombstone_bytes);
+        // A span of range tombstones with no surviving points must roll too:
+        // local deployments have no hard limit, and every retained tombstone
+        // holds budget until its partition finishes. Any event key is a valid
+        // fragment boundary.
+        // Measured by the tombstones alone: an empty writer's estimate
+        // includes fixed overhead and would otherwise roll on every event.
+        let range_only_roll = partition_point_count == 0
+            && !partition_tombstones.is_empty()
+            && partition_tombstone_bytes >= target_sst_size.max(1);
+        let soft_roll = (selected_version.is_some()
             && partition_point_count > 0
-            && writer
-                .estimated_size_bytes()
-                .saturating_add(partition_tombstone_bytes)
-                >= target_sst_size.max(1);
+            && partition_size >= target_sst_size.max(1))
+            || range_only_roll;
         let hard_roll = if let Some(limit) = output_size_limit {
             let lower_bound = partition_lower_bound
                 .as_ref()

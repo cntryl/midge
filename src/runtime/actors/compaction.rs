@@ -875,6 +875,18 @@ impl CompactionActor {
             .take()
     }
 
+    /// Names of remote partitions uploaded by the current job. Their
+    /// generation was reserved durably before upload and is never reused,
+    /// and no manifest or intent names them until publication, so after a
+    /// failed job they are provably unreferenced.
+    pub(crate) fn take_prepared_remote_output_names(&self) -> Vec<String> {
+        self.prepared_remote_outputs
+            .lock()
+            .drain()
+            .map(|(name, _)| name)
+            .collect()
+    }
+
     pub(crate) fn prepared_remote_output(
         &self,
         name: &str,
@@ -922,8 +934,8 @@ impl CompactionActor {
             largest_seq: Some(summary.largest_seq),
             key_bounds_complete: true,
         };
-        // Input authority has not changed. An interrupted job may leak this
-        // immutable remote object, but it cannot lose a committed input.
+        // Input authority has not changed. If the job fails, the completion
+        // path deletes this unreferenced object; it cannot lose an input.
         if hybrid.ephemeral_sst_cache_enabled() {
             std::fs::remove_file(path)?;
         }
