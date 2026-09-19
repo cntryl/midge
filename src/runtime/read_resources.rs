@@ -19,6 +19,10 @@ pub(crate) struct ReadResources {
     sst_path_prefix: PathBuf,
     block_cache: Arc<BlockCache>,
     readers: Mutex<HashMap<ReaderCacheKey, CachedReader>>,
+    /// Every block-cache id handed out, by SST name. It outlives reader
+    /// eviction, so pruning a dead SST purges its blocks even when its reader
+    /// was already evicted under metadata pressure.
+    block_cache_ids: Mutex<HashMap<String, std::collections::HashSet<u64>>>,
     metadata_budget: ResourceBudget,
     reader_admission: OpenAdmission,
     access_clock: std::sync::atomic::AtomicU64,
@@ -73,6 +77,7 @@ impl ReadResources {
                 block_cache_policy,
             )),
             readers: Mutex::new(HashMap::new()),
+            block_cache_ids: Mutex::new(HashMap::new()),
             metadata_budget: ResourceBudget::new(block_cache_size / 4),
             reader_admission: OpenAdmission::new(block_cache_size / 4),
             access_clock: std::sync::atomic::AtomicU64::new(0),
@@ -166,6 +171,12 @@ impl ReadResources {
                 file_meta.name
             )));
         }
+        self.block_cache_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(cache_key.name.clone())
+            .or_default()
+            .insert(cache_key.sst_id);
         let reader = Arc::new(
             opened
                 .with_block_cache(Arc::clone(&self.block_cache), cache_key.sst_id)
@@ -218,19 +229,26 @@ impl ReadResources {
     }
 
     pub(crate) fn prune_to_live_ssts(&self, live_names: &HashSet<String>) {
-        if let Ok(mut readers) = self.readers.lock() {
-            let stale_sst_ids: Vec<u64> = readers
-                .iter()
-                .filter_map(|(key, reader)| {
-                    (!live_names.contains(&key.name)).then_some(reader.reader.sst_id())
-                })
-                .collect();
-            readers.retain(|key, _reader| live_names.contains(&key.name));
-            drop(readers);
-
-            for sst_id in stale_sst_ids {
-                let _ = self.block_cache.remove_sst(sst_id);
-            }
+        // A poisoned lock only means another thread panicked mid-update; the
+        // maps stay structurally valid, and skipping the prune would leak
+        // dead readers and blocks.
+        self.readers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|key, _reader| live_names.contains(&key.name));
+        let mut stale_sst_ids = Vec::new();
+        self.block_cache_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|name, ids| {
+                let live = live_names.contains(name);
+                if !live {
+                    stale_sst_ids.extend(ids.iter().copied());
+                }
+                live
+            });
+        for sst_id in stale_sst_ids {
+            let _ = self.block_cache.remove_sst(sst_id);
         }
     }
 
@@ -366,6 +384,41 @@ mod tests {
         assert!(
             block_cache.is_empty(),
             "pruning a reader should evict its dead SST blocks"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn should_purge_block_cache_for_dead_sst_when_reader_was_evicted_before_prune(
+    ) -> MidgeResult<()> {
+        // Arrange: metadata pressure evicted the reader while its blocks stay
+        // cached, then compaction deletes the SST.
+        let temp_dir = tempfile::tempdir()?;
+        let file_meta = write_test_sst(&temp_dir, "evicted-then-deleted.sst")?;
+        let resources = ReadResources::new(
+            Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+            PathBuf::new(),
+            1024 * 1024,
+            CachePolicyType::Lru,
+        );
+        let reader = resources.reader_for(&file_meta)?;
+        assert!(matches!(
+            reader.get_state_at(b"key", u64::MAX)?,
+            crate::sst::types::KeyState::Value(_, 7, None, 0)
+        ));
+        drop(reader);
+        let block_cache = resources.block_cache();
+        assert!(!block_cache.is_empty());
+        assert!(resources.evict_idle_reader()?);
+        assert_eq!(resources.cached_reader_count(), 0);
+
+        // Act
+        resources.prune_to_live_ssts(&HashSet::new());
+
+        // Assert
+        assert!(
+            block_cache.is_empty(),
+            "a dead SST's blocks must be purged even after its reader was evicted"
         );
         Ok(())
     }

@@ -20,12 +20,15 @@ impl EventLoop {
         if self.state.is_memory_mode() {
             return Ok(false);
         }
+        let now = std::time::Instant::now();
         let Some(mut updated) = self
             .state
             .manifest
             .files
             .iter()
-            .find(|file| !file.key_bounds_complete)
+            .find(|file| {
+                !file.key_bounds_complete && self.legacy_bound_backfill.is_eligible(&file.name, now)
+            })
             .cloned()
         else {
             return Ok(false);
@@ -37,13 +40,26 @@ impl EventLoop {
             .strip_prefix(&self.state.db_path)
             .unwrap_or_else(|_| std::path::Path::new("sst"));
         let path = path_prefix.join(&updated.name);
-        let summary = crate::sst::fs::SstFileIo::summarize_with_fs(
+        let summary = match crate::sst::fs::SstFileIo::summarize_with_fs(
             &path.to_string_lossy(),
             self.read_resources.as_ref().map_or_else(
                 || std::sync::Arc::clone(&self.state.fs),
                 |resources| resources.sst_fs(),
             ),
-        )?;
+        ) {
+            Ok(summary) => summary,
+            Err(error) => {
+                // Back this file off so the remaining legacy files still get
+                // migrated; surface a file that keeps failing.
+                let attempts = self
+                    .legacy_bound_backfill
+                    .record_failure(&updated.name, now);
+                if attempts >= LegacyBoundBackfill::ANOMALY_AFTER_FAILURES {
+                    self.state.mark_persistence_anomaly();
+                }
+                return Err(error);
+            }
+        };
         updated.smallest_key = Some(summary.smallest_key);
         updated.largest_key = Some(summary.largest_key);
         updated.smallest_seq = Some(summary.smallest_seq);
@@ -61,12 +77,14 @@ impl EventLoop {
             &self.state.db_path,
             &crate::metadata::ManifestEdit::AddSst(updated.clone()),
         )?;
+        let name = updated.name.clone();
         self.state.manifest.add_file(updated);
         self.invalidate_sst_read_views();
         self.publish_snapshot();
 
         crate::runtime::actors::ManifestActor::persist(&self.state)?;
         self.mirror_metadata_after_local_commit("SST key-bound backfill")?;
+        self.legacy_bound_backfill.record_success(&name);
         Ok(true)
     }
 
@@ -242,6 +260,40 @@ impl EventLoop {
         self.create_read_snapshot(cf_id)
             .and_then(|snapshot| snapshot.range_scan(start, end, snapshot_seq).ok())
             .unwrap_or_default()
+    }
+}
+
+/// Per-file backoff for legacy SST key-bound backfill, so one file whose
+/// summary keeps failing does not block every other legacy file.
+#[derive(Default)]
+pub(super) struct LegacyBoundBackfill {
+    failures: std::collections::HashMap<String, (u32, std::time::Instant)>,
+}
+
+impl LegacyBoundBackfill {
+    const BASE_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
+    const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(600);
+    pub(super) const ANOMALY_AFTER_FAILURES: u32 = 3;
+
+    fn is_eligible(&self, name: &str, now: std::time::Instant) -> bool {
+        self.failures
+            .get(name)
+            .is_none_or(|(_, retry_at)| *retry_at <= now)
+    }
+
+    /// Record a failed summary and return the file's failure count.
+    fn record_failure(&mut self, name: &str, now: std::time::Instant) -> u32 {
+        let entry = self.failures.entry(name.to_string()).or_insert((0, now));
+        entry.0 = entry.0.saturating_add(1);
+        let backoff = Self::BASE_BACKOFF
+            .saturating_mul(1_u32 << entry.0.saturating_sub(1).min(16))
+            .min(Self::MAX_BACKOFF);
+        entry.1 = now + backoff;
+        entry.0
+    }
+
+    fn record_success(&mut self, name: &str) {
+        self.failures.remove(name);
     }
 }
 
@@ -491,6 +543,42 @@ mod tests {
         );
         assert_eq!(file.smallest_seq, Some(9));
         assert_eq!(file.largest_seq, Some(10));
+        Ok(())
+    }
+
+    #[test]
+    fn should_backfill_remaining_legacy_files_when_first_legacy_file_fails_summary(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange: an unreadable legacy file sits ahead of a readable one in
+        // manifest order. It must not block the readable file forever.
+        let (_tmp, mut event_loop, _sst_path) = create_event_loop_with_test_sst()?;
+        let readable = event_loop
+            .state
+            .manifest
+            .files
+            .first_mut()
+            .expect("legacy manifest file");
+        readable.key_bounds_complete = false;
+        let readable_name = readable.name.clone();
+        let mut unreadable = readable.clone();
+        unreadable.name = crate::sst::file_name(0, 0, 999);
+        event_loop.state.manifest.files.insert(0, unreadable);
+
+        // Act
+        let first = event_loop.backfill_one_legacy_sst_bounds();
+        let second = event_loop.backfill_one_legacy_sst_bounds();
+
+        // Assert
+        assert!(first.is_err(), "the unreadable file fails its summary");
+        assert!(matches!(second, Ok(true)), "{second:?}");
+        let readable = event_loop
+            .state
+            .manifest
+            .files
+            .iter()
+            .find(|file| file.name == readable_name)
+            .expect("readable file");
+        assert!(readable.key_bounds_complete);
         Ok(())
     }
 
