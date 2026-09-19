@@ -1089,13 +1089,7 @@ fn provider_write_doc_with_timeout(
     mut headers: Vec<(String, String)>,
     timeout: Duration,
 ) -> Result<(), LeaseError> {
-    let timeout_ms = u64::try_from(timeout.as_millis())
-        .unwrap_or(u64::MAX)
-        .max(1);
-    headers.push((
-        crate::storage::cloud::REQUEST_TIMEOUT_HEADER.to_string(),
-        timeout_ms.to_string(),
-    ));
+    crate::storage::cloud::set_request_timeout_header(&mut headers, timeout);
     let (tx, rx) = std::sync::mpsc::channel();
     cloud.submit_put(
         LEASE_OBJECT_KEY,

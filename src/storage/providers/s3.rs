@@ -1273,12 +1273,26 @@ impl CloudBackend for S3Backend {
     }
 
     fn submit_delete(&self, key: &str, headers: Vec<(String, String)>, callback: CloudCallback) {
+        let (headers, request_timeout) =
+            match crate::storage::cloud::split_request_timeout_header(headers) {
+                Ok(split) => split,
+                Err(error) => {
+                    let _ = callback.send(CloudEvent::Delete {
+                        key: key.to_string(),
+                        result: CloudOutcome::Err(CloudError::Protocol(error)),
+                    });
+                    return;
+                }
+            };
         let key = key.to_string();
         let url = self.object_url(&key);
         let conditional_mutation = headers.iter().any(|(name, _)| {
             name.eq_ignore_ascii_case("if-match") || name.eq_ignore_ascii_case("if-none-match")
         });
         let mut request = CloudRequest::new(Method::DELETE, url);
+        if let Some(timeout) = request_timeout {
+            request = request.with_timeout(timeout);
+        }
         if conditional_mutation {
             request = request.with_conditional_conflict_retries();
         }

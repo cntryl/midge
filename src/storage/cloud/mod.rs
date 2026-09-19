@@ -58,6 +58,56 @@ use std::sync::Arc;
 
 pub(crate) const REQUEST_TIMEOUT_HEADER: &str = "x-midge-internal-request-timeout-ms";
 
+/// Bound the provider request by the same budget the storage adapter waits
+/// on, replacing any timeout the caller already supplied. Without it the
+/// provider falls back to the executor default and a mutation can commit
+/// remotely after the caller has already reported a timeout.
+pub(crate) fn set_request_timeout_header(
+    headers: &mut Vec<(String, String)>,
+    timeout: std::time::Duration,
+) {
+    headers.retain(|(name, _)| !name.eq_ignore_ascii_case(REQUEST_TIMEOUT_HEADER));
+    headers.push((
+        REQUEST_TIMEOUT_HEADER.into(),
+        timeout.as_millis().max(1).to_string(),
+    ));
+}
+
+/// Wire headers plus the provider request timeout split out of them.
+#[cfg(any(
+    feature = "cloud-aws",
+    feature = "cloud-azure",
+    feature = "cloud-gcp",
+    feature = "cloud-oci"
+))]
+pub(crate) type SplitRequestHeaders = (Vec<(String, String)>, Option<std::time::Duration>);
+
+/// Split the internal timeout pseudo-header from the headers a provider
+/// sends on the wire.
+#[cfg(any(
+    feature = "cloud-aws",
+    feature = "cloud-azure",
+    feature = "cloud-gcp",
+    feature = "cloud-oci"
+))]
+pub(crate) fn split_request_timeout_header(
+    headers: Vec<(String, String)>,
+) -> Result<SplitRequestHeaders, String> {
+    let mut timeout = None;
+    let mut wire_headers = Vec::with_capacity(headers.len());
+    for (name, value) in headers {
+        if name.eq_ignore_ascii_case(REQUEST_TIMEOUT_HEADER) {
+            let milliseconds = value
+                .parse::<u64>()
+                .map_err(|error| format!("invalid internal request timeout: {error}"))?;
+            timeout = Some(std::time::Duration::from_millis(milliseconds));
+        } else {
+            wire_headers.push((name, value));
+        }
+    }
+    Ok((wire_headers, timeout))
+}
+
 #[cfg(any(
     feature = "cloud-aws",
     feature = "cloud-azure",
@@ -1021,8 +1071,12 @@ impl CloudStorage {
             .submit_get_range(&full_key, start, end, callback);
     }
 
+    /// Submit an unconditional DELETE bounded by this adapter's callback
+    /// timeout.
     pub fn submit_delete(&self, key: &str, callback: CloudCallback) {
-        self.submit_delete_with_headers(key, vec![], callback);
+        let mut headers = Vec::new();
+        set_request_timeout_header(&mut headers, self.callback_timeout);
+        self.submit_delete_with_headers(key, headers, callback);
     }
 
     pub fn submit_delete_with_headers(
@@ -1288,6 +1342,8 @@ impl StorageBackend for CloudStorage {
             return;
         }
         let (tx, rx) = std::sync::mpsc::channel();
+        let mut headers = headers;
+        set_request_timeout_header(&mut headers, self.callback_timeout);
         CloudStorage::submit_delete_with_headers(self, key, headers, tx);
         let event = match rx.recv_timeout(self.callback_timeout) {
             Ok(CloudEvent::Delete { key, result }) => StorageEvent::DeleteComplete {
@@ -2885,6 +2941,150 @@ mod tests {
                 CloudOutcome::Err(_) => panic!("Expected Ok metadata"),
             },
             _ => panic!("Expected HeadComplete"),
+        }
+    }
+
+    #[derive(Default)]
+    struct HeaderRecordingBackend {
+        put_headers: parking_lot::Mutex<Vec<Vec<(String, String)>>>,
+        delete_headers: parking_lot::Mutex<Vec<Vec<(String, String)>>>,
+    }
+
+    impl HeaderRecordingBackend {
+        fn timeout_header(headers: &[(String, String)]) -> Option<String> {
+            headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(REQUEST_TIMEOUT_HEADER))
+                .map(|(_, value)| value.clone())
+        }
+    }
+
+    impl CloudBackend for HeaderRecordingBackend {
+        fn submit_put(
+            &self,
+            key: &str,
+            _data: Vec<u8>,
+            headers: Vec<(String, String)>,
+            callback: CloudCallback,
+        ) {
+            self.put_headers.lock().push(headers);
+            let _ = callback.send(CloudEvent::Put {
+                key: key.to_string(),
+                result: CloudOutcome::Ok(()),
+            });
+        }
+
+        fn submit_get(&self, key: &str, callback: CloudCallback) {
+            let _ = callback.send(CloudEvent::Get {
+                key: key.to_string(),
+                result: CloudOutcome::Err(CloudError::Protocol("unsupported".to_string())),
+            });
+        }
+
+        fn submit_delete(
+            &self,
+            key: &str,
+            headers: Vec<(String, String)>,
+            callback: CloudCallback,
+        ) {
+            self.delete_headers.lock().push(headers);
+            let _ = callback.send(CloudEvent::Delete {
+                key: key.to_string(),
+                result: CloudOutcome::Ok(()),
+            });
+        }
+
+        fn submit_get_range(
+            &self,
+            key: &str,
+            start: u64,
+            end: Option<u64>,
+            callback: CloudCallback,
+        ) {
+            let _ = callback.send(CloudEvent::GetRange {
+                key: key.to_string(),
+                start,
+                end,
+                result: CloudOutcome::Err(CloudError::Protocol("unsupported".to_string())),
+            });
+        }
+    }
+
+    #[test]
+    fn should_bound_provider_put_by_caller_timeout_when_write_is_unreserved() {
+        // Arrange
+        let backend = Arc::new(HeaderRecordingBackend::default());
+        let storage = CloudStorage::new_with_timeout(
+            backend.clone(),
+            "tenant".to_string(),
+            std::time::Duration::from_secs(30),
+        );
+        let (sender, receiver) = mpsc::channel();
+
+        // Act
+        StorageBackend::submit_write_with_headers_and_timeout(
+            &storage,
+            "metadata/registry.json",
+            b"payload".to_vec(),
+            vec![("If-Match".to_string(), "\"e1\"".to_string())],
+            std::time::Duration::from_millis(200),
+            sender,
+        );
+
+        // Assert
+        assert!(matches!(
+            receiver.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(StorageEvent::WriteComplete {
+                result: StorageOutcome::Ok(()),
+                ..
+            })
+        ));
+        let put_headers = backend.put_headers.lock();
+        assert_eq!(put_headers.len(), 1);
+        assert_eq!(
+            HeaderRecordingBackend::timeout_header(&put_headers[0]).as_deref(),
+            Some("200")
+        );
+    }
+
+    #[test]
+    fn should_bound_provider_delete_by_callback_timeout_when_deleting() {
+        // Arrange
+        let backend = Arc::new(HeaderRecordingBackend::default());
+        let storage = CloudStorage::new_with_timeout(
+            backend.clone(),
+            "tenant".to_string(),
+            std::time::Duration::from_millis(750),
+        );
+        let (plain_sender, plain_receiver) = mpsc::channel();
+        let (conditional_sender, conditional_receiver) = mpsc::channel();
+
+        // Act
+        StorageBackend::submit_delete(&storage, "sst/000001.sst", plain_sender);
+        StorageBackend::submit_delete_with_headers(
+            &storage,
+            "sst/000002.sst",
+            vec![("If-Match".to_string(), "\"e1\"".to_string())],
+            conditional_sender,
+        );
+
+        // Assert
+        for receiver in [plain_receiver, conditional_receiver] {
+            assert!(matches!(
+                receiver.recv_timeout(std::time::Duration::from_secs(1)),
+                Ok(StorageEvent::DeleteComplete {
+                    result: StorageOutcome::Ok(()),
+                    ..
+                })
+            ));
+        }
+        let delete_headers = backend.delete_headers.lock();
+        assert_eq!(delete_headers.len(), 2);
+        for headers in delete_headers.iter() {
+            assert_eq!(
+                HeaderRecordingBackend::timeout_header(headers).as_deref(),
+                Some("750")
+            );
         }
     }
 }

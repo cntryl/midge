@@ -2,7 +2,7 @@
 
 use super::{
     cloud_to_storage_outcome, Arc, CloudEvent, CloudStorage, StorageCallback, StorageEvent,
-    StorageObjectMetadata, StorageOutcome, REQUEST_TIMEOUT_HEADER,
+    StorageObjectMetadata, StorageOutcome,
 };
 
 impl CloudStorage {
@@ -82,13 +82,7 @@ impl CloudStorage {
             return;
         }
         let (tx, rx) = std::sync::mpsc::channel();
-        if reservation.is_some() {
-            headers.retain(|(name, _)| !name.eq_ignore_ascii_case(REQUEST_TIMEOUT_HEADER));
-            headers.push((
-                REQUEST_TIMEOUT_HEADER.into(),
-                timeout.as_millis().max(1).to_string(),
-            ));
-        }
+        super::set_request_timeout_header(&mut headers, timeout);
         self.backend.submit_put_with_reservation(
             &self.full_path(key),
             data,

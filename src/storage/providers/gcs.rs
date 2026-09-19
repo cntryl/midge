@@ -1354,6 +1354,17 @@ impl CloudBackend for GcsBackend {
     }
 
     fn submit_delete(&self, key: &str, headers: Vec<(String, String)>, callback: CloudCallback) {
+        let (headers, request_timeout) =
+            match crate::storage::cloud::split_request_timeout_header(headers) {
+                Ok(split) => split,
+                Err(error) => {
+                    let _ = callback.send(CloudEvent::Delete {
+                        key: key.to_string(),
+                        result: CloudOutcome::Err(CloudError::Protocol(error)),
+                    });
+                    return;
+                }
+            };
         let key = key.to_string();
         let mode = self.mode;
         let conditional_mutation = headers.iter().any(|(name, _)| {
@@ -1362,6 +1373,9 @@ impl CloudBackend for GcsBackend {
         });
         let mut url = self.metadata_url(&key);
         let mut request = Self::bodyless_request(mode, Method::DELETE, String::new());
+        if let Some(timeout) = request_timeout {
+            request = request.with_timeout(timeout);
+        }
         for (name, value) in headers {
             if self.mode == GcsBackendMode::Json
                 && name.eq_ignore_ascii_case("x-goog-if-generation-match")
