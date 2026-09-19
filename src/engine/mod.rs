@@ -787,6 +787,29 @@ impl Engine {
 
     // === Column Family Lifecycle ===
 
+    /// Checkpoint the manifest after a column-family change has committed.
+    ///
+    /// The change is already durable in the manifest journal and applied to
+    /// the local registry, so a checkpoint failure must not report the DDL as
+    /// rejected: a caller would retry a create that exists or a drop that
+    /// already happened. The runtime records a failed checkpoint as a
+    /// persistence anomaly; a request that never reached it is only logged.
+    fn checkpoint_after_committed_ddl(&self, operation: &'static str) {
+        if self.cloud_mode {
+            return;
+        }
+        let outcome = next_request_id().and_then(|request_id| {
+            self.runtime_handle
+                .send_and_wait(RuntimeMsg::ManifestPersist { request_id })
+        });
+        match outcome {
+            Ok(RuntimeResponse::Error { error, .. }) | Err(error) => {
+                tracing::warn!(operation, %error, "manifest checkpoint after committed DDL failed");
+            }
+            Ok(_) => {}
+        }
+    }
+
     /// Create a new column family with the given name
     ///
     /// # Errors
@@ -821,12 +844,7 @@ impl Engine {
                 // Start ingest coordinator for new CF
                 let coordinator = Arc::new(ingest::IngestCoordinator::new(cf_id));
                 self.ingest_coordinators.insert(cf_id, coordinator);
-                if !self.cloud_mode {
-                    self.runtime_handle
-                        .send_and_wait(RuntimeMsg::ManifestPersist {
-                            request_id: next_request_id()?,
-                        })?;
-                }
+                self.checkpoint_after_committed_ddl("create_column_family");
 
                 Ok(handle)
             }
@@ -897,12 +915,7 @@ impl Engine {
 
                 // Remove from local registry
                 self.column_families.remove(&cf_id);
-                if !self.cloud_mode {
-                    self.runtime_handle
-                        .send_and_wait(RuntimeMsg::ManifestPersist {
-                            request_id: next_request_id()?,
-                        })?;
-                }
+                self.checkpoint_after_committed_ddl("drop_column_family");
 
                 Ok(())
             }

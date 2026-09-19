@@ -2298,6 +2298,42 @@ mod failure_injection {
         );
     }
 
+    #[test]
+    fn should_report_committed_create_when_post_commit_checkpoint_fails() {
+        // Arrange: the create commits, then the auxiliary snapshot checkpoint
+        // fails. The DDL must still succeed and the failure must be visible.
+        let _guard = failpoint_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut engine = Engine::open(
+            OpenOptions::local(temp_dir.path())
+                .build()
+                .expect("build options"),
+        )
+        .expect("open engine");
+        let scenario = fail::FailScenario::setup();
+        fail::cfg("midge::manifest::persist", "return").expect("configure persist failure");
+
+        // Act
+        let created = engine.create_column_family("after-commit");
+        fail::remove("midge::manifest::persist");
+        scenario.teardown();
+
+        // Assert
+        let handle = created.expect("a committed create must not report failure");
+        assert_eq!(handle.name(), "after-commit");
+        assert!(engine.get_column_family("after-commit").is_some());
+        assert_eq!(
+            engine.get_runtime_metrics().expect("metrics").health,
+            EngineHealth::Degraded,
+            "a failed post-commit checkpoint must be recorded as a persistence anomaly"
+        );
+        engine
+            .shutdown(std::time::Duration::from_secs(5))
+            .expect("shutdown");
+    }
+
     fn failpoint_test_lock() -> &'static Mutex<()> {
         FAILPOINT_TEST_LOCK.get_or_init(|| Mutex::new(()))
     }
