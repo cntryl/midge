@@ -238,8 +238,14 @@ mod tests {
             };
 
         // Act
-        let outputs =
-            execute_compaction_with_output_sink(&plan, &factory, dir.path(), None, Some(&sink), None)?;
+        let outputs = execute_compaction_with_output_sink(
+            &plan,
+            &factory,
+            dir.path(),
+            None,
+            Some(&sink),
+            None,
+        )?;
 
         // Assert
         assert!(
