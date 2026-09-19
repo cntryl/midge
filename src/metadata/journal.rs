@@ -377,8 +377,19 @@ fn append_record_and_marker_with_fs(
         },
     )?;
 
+    let journal_path = FsPath::new(JOURNAL_FILE);
+    // A missing or still-empty journal has never had its directory entry
+    // made durable, whether this append creates it or a crash left it empty.
+    let creating_journal = !fs
+        .exists(&journal_path)
+        .map_err(crate::common::MidgeError::from)?
+        || fs
+            .metadata(&journal_path)
+            .map_err(crate::common::MidgeError::from)?
+            .len
+            == 0;
     let mut file = fs.open(
-        &FsPath::new(JOURNAL_FILE),
+        &journal_path,
         OpenOptions {
             mode: OpenMode::ReadWrite,
             create: true,
@@ -409,6 +420,13 @@ fn append_record_and_marker_with_fs(
     let fsync_start = std::time::Instant::now();
     file.sync(Durability::Durable)
         .map_err(crate::common::MidgeError::from)?;
+    if creating_journal {
+        // An fsynced file is still lost after a crash if the directory entry
+        // naming it was never synced. The acknowledged edit (for example a
+        // column-family create) must survive, so sync the directory once.
+        fs.sync_dir(&FsPath::new("."), Durability::Durable)
+            .map_err(crate::common::MidgeError::from)?;
+    }
     let fsync_ns = fsync_start.elapsed().as_nanos();
 
     Ok((write_ns, fsync_ns))
@@ -1438,7 +1456,9 @@ mod tests {
             .open(td.path().join(JOURNAL_FILE))
             .expect("open journal");
         journal.write_all(&[0_u8; 16]).expect("append zeros");
-        journal.write_all(&[7_u8; 16]).expect("append data after zeros");
+        journal
+            .write_all(&[7_u8; 16])
+            .expect("append data after zeros");
         journal.sync_all().expect("sync");
         drop(journal);
 
@@ -1446,7 +1466,35 @@ mod tests {
         let result = replay_journal(td.path());
 
         // Assert
-        assert!(matches!(result, Err(crate::common::MidgeError::Corruption(_))));
+        assert!(matches!(
+            result,
+            Err(crate::common::MidgeError::Corruption(_))
+        ));
+    }
+
+    #[test]
+    fn should_sync_database_directory_when_first_manifest_append_creates_journal() {
+        // Arrange
+        let mock = Arc::new(crate::io::MockFs::new());
+        let fs: Arc<dyn Fs> = mock.clone();
+        let root_syncs = |mock: &crate::io::MockFs| {
+            mock.sync_dir_calls()
+                .into_iter()
+                .filter(|(path, durability)| path.0 == "." && *durability == Durability::Durable)
+                .count()
+        };
+
+        // Act
+        append_edit_with_fs(&fs, &ManifestEdit::BumpWalSeq { seq: 1 }).expect("create journal");
+        let after_create = root_syncs(&mock);
+        append_edit_with_fs(&fs, &ManifestEdit::BumpWalSeq { seq: 2 }).expect("append again");
+
+        // Assert
+        assert_eq!(
+            after_create, 1,
+            "creating the journal must make its directory entry durable"
+        );
+        assert_eq!(root_syncs(&mock), 1, "later appends need no directory sync");
     }
 
     #[test]

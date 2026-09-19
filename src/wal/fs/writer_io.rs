@@ -83,21 +83,33 @@ impl FsWalWriterIo {
         let path = FsPath::new(path_str);
 
         // Verify file exists or can be created by checking metadata
-        {
-            let _ = fs.open(
-                &path,
-                crate::io::OpenOptions {
-                    mode: crate::io::OpenMode::ReadWrite,
-                    create: true,
-                    create_new: false,
-                    truncate: false,
-                },
-            )?;
-        }
+        let mut file = fs.open(
+            &path,
+            crate::io::OpenOptions {
+                mode: crate::io::OpenMode::ReadWrite,
+                create: true,
+                create_new: false,
+                truncate: false,
+            },
+        )?;
 
         // Get current file size
         let metadata = fs.metadata(&path)?;
         let current_pos = metadata.len;
+        if current_pos == 0 {
+            // A new (or still empty) active WAL: frames fsynced into it later
+            // are lost after a crash unless its directory entry is durable.
+            file.sync(crate::io::Durability::Durable)?;
+            let parent = std::path::Path::new(path_str)
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .map_or_else(
+                    || FsPath::new("."),
+                    |parent| FsPath::new(parent.to_string_lossy()),
+                );
+            fs.sync_dir(&parent, crate::io::Durability::Durable)?;
+        }
+        drop(file);
 
         let writer = Self {
             fs,
