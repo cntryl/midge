@@ -265,7 +265,7 @@ fn should_bound_shutdown_when_primary_lease_release_blocks() -> MidgeResult<()> 
     let lease_heartbeat = engine.lease_state.heartbeat.take();
     let lease = engine.lease_state.lease.take();
     let lease_guard = engine.lease_state.guard.take();
-    Engine::release_fencing_parts(lease_heartbeat, lease, lease_guard);
+    Engine::release_fencing_parts(lease_heartbeat, lease, lease_guard)?;
 
     let blocking_lease = Arc::new(BlockingReleaseLease::default());
     let lease_guard = Arc::clone(&blocking_lease).try_acquire()?;
@@ -2038,5 +2038,67 @@ fn should_reject_intent_replay_sst_when_cloud_object_crc_differs_from_intent() {
     assert!(
         !state.sst_dir.join(&sst_name).exists(),
         "intent SST with mismatched proof must not be staged"
+    );
+}
+
+#[derive(Default)]
+struct FailingReleaseLease {
+    release_attempts: std::sync::atomic::AtomicUsize,
+}
+
+impl crate::lease::PrimaryLease for FailingReleaseLease {
+    fn try_acquire(self: Arc<Self>) -> Result<crate::lease::LeaseGuard, crate::lease::LeaseError> {
+        Ok(crate::lease::LeaseGuard::token())
+    }
+
+    fn renew(&self) -> Result<(), crate::lease::LeaseError> {
+        Ok(())
+    }
+
+    fn release(&self) -> Result<(), crate::lease::LeaseError> {
+        self.release_attempts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(crate::lease::LeaseError::IoError(
+            "lease store is read-only".to_string(),
+        ))
+    }
+
+    fn ttl(&self) -> Duration {
+        Duration::from_millis(300)
+    }
+
+    fn holder_id(&self) -> String {
+        "failing-release-test".to_string()
+    }
+
+    fn epoch(&self) -> u64 {
+        1
+    }
+}
+
+#[test]
+fn should_stop_retrying_and_report_error_when_lease_release_keeps_failing() {
+    // Arrange: after the heartbeat stops, an unreleased lease simply expires
+    // at its TTL, so retrying past that only spins and floods the log.
+    let lease = Arc::new(FailingReleaseLease::default());
+    let engine_lease: Arc<dyn crate::lease::PrimaryLease> = lease.clone();
+    let started = std::time::Instant::now();
+
+    // Act
+    let result = Engine::release_fencing_parts(None, Some(engine_lease), None);
+
+    // Assert
+    assert!(result.is_err(), "a release that never succeeds must be reported");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "release retries must stop near the lease TTL, took {:?}",
+        started.elapsed()
+    );
+    let attempts = lease
+        .release_attempts
+        .load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        (2..=64).contains(&attempts),
+        "retries must back off, not spin: {attempts} attempts"
     );
 }

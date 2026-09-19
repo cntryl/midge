@@ -9,7 +9,7 @@ pub(super) type FencingResources = (
 
 pub(super) enum PendingFencingCleanup {
     Known {
-        completion: crossbeam::channel::Receiver<()>,
+        completion: crossbeam::channel::Receiver<MidgeResult<()>>,
         terminal_result: MidgeResult<()>,
     },
     Runtime {
