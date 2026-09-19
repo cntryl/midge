@@ -2125,3 +2125,64 @@ fn should_fence_when_spilled_apply_fails_after_durable_wal_commit() -> MidgeResu
     assert!(state.persistence_anomaly_detected());
     Ok(())
 }
+
+#[test]
+fn should_reject_resident_transaction_when_batch_payload_exceeds_wal_decode_limit(
+) -> MidgeResult<()> {
+    // Arrange: each value is under the per-entry limit, but the batch payload
+    // is not. It compresses well, so the old frame-size check let it through
+    // and replay then rejected the acknowledged record.
+    let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
+    let db_path = temp.path().to_path_buf();
+    let mut state = RuntimeState::new(db_path.clone(), false);
+    let mut wal_actor = WalActor::new(
+        db_path.join("wal"),
+        DurabilityPolicy::Batched,
+        BatchConfig::default(),
+        false,
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    let half = crate::wal::frame::WAL_MAX_VALUE_LEN / 2 + 1;
+    let sequence_before = state.sequence;
+    let put = |key: &'static [u8]| crate::runtime::TransactionOp::Put {
+        cf_id: 0,
+        key: Bytes::from_static(key),
+        value: Bytes::from(vec![0_u8; half]),
+        ttl_seconds: None,
+        insert_only: false,
+    };
+
+    // Act
+    let result = wal_actor.prepare_transaction_append(
+        &mut state,
+        TransactionAppendParams {
+            request_id: 333,
+            assertions: Vec::new(),
+            ops: vec![put(b"a"), put(b"b")],
+            durability_policy: Some(DurabilityPolicy::Batched),
+            start_sequence: None,
+            conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+        },
+    );
+
+    // Assert
+    assert!(
+        matches!(result, Err(MidgeError::ResourceLimit(_))),
+        "an undecodable batch must be rejected before it is written: {:?}",
+        result.as_ref().err()
+    );
+    assert_eq!(
+        state.sequence, sequence_before,
+        "a rejected batch must not consume sequences"
+    );
+    prepare_put_transaction(
+        &mut wal_actor,
+        &mut state,
+        334,
+        b"small",
+        b"value",
+        DurabilityPolicy::Batched,
+    )?;
+    Ok(())
+}
