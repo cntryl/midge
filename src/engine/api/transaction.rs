@@ -892,11 +892,13 @@ mod tests {
 
     #[test]
     fn should_report_unknown_outcome_when_durability_step_fails_after_apply_with_retryable_error() {
-        for error in [
+        // Arrange
+        let retryable = [
             MidgeError::Busy("engine is shutting down".into()),
             MidgeError::WriteStall("older CloudAsync WAL segments are awaiting upload".into()),
             MidgeError::NoSpace("upload queue full".into()),
-        ] {
+        ];
+        for error in retryable {
             // Act
             let reported = post_apply_durability_error(error, 42);
 
@@ -910,8 +912,11 @@ mod tests {
 
     #[test]
     fn should_keep_non_retryable_error_when_durability_step_fails_after_apply() {
+        // Arrange
+        let error = MidgeError::Fenced("lease lost".into());
+
         // Act
-        let reported = post_apply_durability_error(MidgeError::Fenced("lease lost".into()), 42);
+        let reported = post_apply_durability_error(error, 42);
 
         // Assert
         assert!(matches!(reported, MidgeError::Fenced(_)));
