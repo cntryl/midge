@@ -149,6 +149,71 @@ fn should_require_exact_raw_state_when_streaming_wal_retirement() {
     }
 }
 
+/// SST range tombstones `(start, end, seq)` for one coverage case.
+type TombstoneCase = &'static [(&'static [u8], &'static [u8], u64)];
+
+#[test]
+fn should_retire_cloud_wal_delete_range_only_when_sst_range_tombstones_cover_it() {
+    let tombstone_cases: [(TombstoneCase, bool); 4] = [
+        (&[(b"k", b"z", 7)], true),
+        (&[(b"k", b"m", 7), (b"m", b"z", 7)], true),
+        (&[(b"k", b"m", 7)], false),
+        (&[(b"k", b"z", 6)], false),
+    ];
+    for (tombstones, covered) in tombstone_cases {
+        // Arrange
+        let (_cloud, storage) = hybrid_with_mock_cloud();
+        storage.enable_ephemeral_sst_cache(64 * 1024);
+        let mut record = crate::wal::WalRecord::new(
+            crate::wal::WalOpKind::DeleteRange,
+            Bytes::from_static(b"k"),
+            None,
+            7,
+            1,
+        );
+        record.range_end = Some(Bytes::from_static(b"z"));
+        let payload = crate::wal::encoding::encode(&record).expect("encode WAL");
+        let mut wal = Vec::new();
+        crate::wal::frame::append_frame(&mut wal, &payload).expect("frame WAL");
+        let key = write_authoritative_cloud_wal(&storage, 1, 7, wal);
+        let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
+        let mut writer = factory.create().expect("SST writer");
+        writer
+            .add_with_meta(b"k", None, 7, 2, None)
+            .expect("SST point state");
+        for (start, end, seq) in tombstones {
+            writer
+                .add_range_tombstone(start, end, *seq)
+                .expect("SST range tombstone");
+        }
+        let sst = writer.finish_bytes().expect("SST bytes");
+        let mut manifest = manifest_covering_wal("ranges.sst", &sst, 7, Some(crc32c::crc32c(&sst)));
+        manifest.files[0].largest_key = tombstones.iter().map(|(_, end, _)| end.to_vec()).max();
+        manifest.files[0].smallest_seq = tombstones
+            .iter()
+            .map(|(_, _, seq)| *seq)
+            .min()
+            .map(|seq| seq.min(7));
+        write_cloud_object(&storage, &crate::sst::object_key("ranges.sst"), sst);
+
+        // Act
+        let result =
+            storage.prune_cloud_wal_segment(1, 7, CloudWalPruneGuard::new(manifest, None), 2);
+
+        // Assert
+        if covered {
+            result.expect("SST range tombstones covering the delete retire its WAL");
+            assert!(wait_for_wal_prune_result(&storage, 1).is_ok());
+        } else {
+            assert!(
+                result.is_err(),
+                "tombstones {tombstones:?} do not cover the delete, so WAL must be retained"
+            );
+            assert_cloud_object_exists(&storage, &key);
+        }
+    }
+}
+
 #[test]
 fn should_retain_newer_wal_authority_when_streamed_oldest_segment_is_uncovered() {
     // Arrange
