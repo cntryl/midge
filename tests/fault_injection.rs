@@ -1953,11 +1953,20 @@ mod failure_injection {
         fail::remove("midge::cloud::inject_fail_sst_upload");
         scenario.teardown();
 
-        // Assert: only partition zero reached remote storage. Without a complete
-        // output set, no output may become manifest-authoritative or retire inputs.
-        let failed_remote = sst_file_names(&cloud_root);
-        assert!(failed_remote.is_superset(&initial_remote));
-        assert_eq!(failed_remote.difference(&initial_remote).count(), 1);
+        // Assert: partition zero reached remote storage before the failure.
+        // Without a complete output set, no output may become
+        // manifest-authoritative or retire inputs, and the failed job reclaims
+        // the partition it uploaded.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut failed_remote = sst_file_names(&cloud_root);
+        while failed_remote != initial_remote && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            failed_remote = sst_file_names(&cloud_root);
+        }
+        assert_eq!(
+            failed_remote, initial_remote,
+            "a failed job keeps every input and reclaims the partition it uploaded"
+        );
         assert_eq!(manifest_sst_file_names(&engine), initial_remote);
         shutdown_engine(engine);
         discard_local_cloud_data_cache(db_path);
