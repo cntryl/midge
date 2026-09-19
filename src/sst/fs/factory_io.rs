@@ -331,7 +331,23 @@ impl InMemorySstWriter {
         entries
     }
 
+    /// Map a writer `op_type` to the entry type it encodes.
+    ///
+    /// lsm-spec sst.md §3.2 forbids writers from emitting `EntryType::Merge`,
+    /// and an unknown `op_type` must not silently become a `Put`.
+    fn entry_type_for_op_type(op_type: u8) -> MidgeResult<EntryType> {
+        match op_type {
+            0 => Ok(EntryType::Put),
+            1 => Ok(EntryType::Insert),
+            2 => Ok(EntryType::Delete),
+            _ => Err(crate::common::MidgeError::InvalidArgument(format!(
+                "SST writers must not emit op_type {op_type}; only Put (0), Insert (1), and Delete (2) are writable"
+            ))),
+        }
+    }
+
     fn encode_pending_entry(previous_key: &[u8], entry: &PendingEntry) -> MidgeResult<Vec<u8>> {
+        let entry_type = Self::entry_type_for_op_type(entry.op_type)?;
         let shared_len = Self::shared_prefix_len(previous_key, &entry.key);
         let key_delta = &entry.key[shared_len as usize..];
         crate::sst::encoding::encode_v4(
@@ -339,12 +355,7 @@ impl InMemorySstWriter {
             shared_len,
             entry.value.as_deref(),
             entry.sequence,
-            match entry.op_type {
-                1 => EntryType::Insert,
-                2 => EntryType::Delete,
-                3 => EntryType::Merge,
-                _ => EntryType::Put,
-            },
+            entry_type,
             entry.expiration,
         )
     }
@@ -933,6 +944,7 @@ impl DynSstWriter for InMemorySstWriter {
         op_type: u8,
         expiration: Option<u64>,
     ) -> MidgeResult<()> {
+        Self::entry_type_for_op_type(op_type)?;
         if !self.preserve_legacy_entries {
             crate::sst::encoding::validate_entry_size(key.len(), value.map_or(0, <[u8]>::len))?;
         }
@@ -960,6 +972,7 @@ impl DynSstWriter for InMemorySstWriter {
         op_type: u8,
         expiration: Option<u64>,
     ) -> MidgeResult<()> {
+        Self::entry_type_for_op_type(op_type)?;
         if !self.preserve_legacy_entries {
             crate::sst::encoding::validate_entry_size(key.len(), value.map_or(0, <[u8]>::len))?;
         }
@@ -1659,5 +1672,75 @@ mod tests {
             Err(crate::common::MidgeError::InvalidArgument(_))
         ));
         Ok(())
+    }
+
+    #[test]
+    fn should_reject_unwritable_op_types_when_adding_sst_entries() -> MidgeResult<()> {
+        // Arrange
+        let factory = FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
+
+        for op_type in [3_u8, 4, u8::MAX] {
+            let mut unsorted = factory.create()?;
+            let mut sorted = factory.create()?;
+
+            // Act
+            let unsorted_result = unsorted.add_with_meta(b"key", Some(b"value"), 1, op_type, None);
+            let sorted_result =
+                sorted.add_sorted_with_meta(b"key", Some(b"value"), 1, op_type, None);
+
+            // Assert
+            assert!(
+                matches!(
+                    unsorted_result,
+                    Err(crate::common::MidgeError::InvalidArgument(_))
+                ),
+                "unsorted writer must reject op_type {op_type}, got {unsorted_result:?}"
+            );
+            assert!(
+                matches!(
+                    sorted_result,
+                    Err(crate::common::MidgeError::InvalidArgument(_))
+                ),
+                "sorted writer must reject op_type {op_type}, got {sorted_result:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn should_accept_writable_op_types_when_adding_sst_entries() -> MidgeResult<()> {
+        // Arrange
+        let factory = FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
+        let mut writer = factory.create()?;
+
+        // Act
+        writer.add_with_meta(b"a", Some(b"put"), 3, 0, None)?;
+        writer.add_with_meta(b"b", Some(b"insert"), 2, 1, None)?;
+        writer.add_with_meta(b"c", None, 1, 2, None)?;
+
+        // Assert
+        assert!(!writer.finish_bytes()?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_reject_merge_entry_when_encoding_pending_sst_entry() {
+        // Arrange
+        let entry = PendingEntry {
+            key: b"key".to_vec(),
+            value: Some(b"value".to_vec()),
+            sequence: 1,
+            op_type: 3,
+            expiration: None,
+        };
+
+        // Act
+        let result = InMemorySstWriter::encode_pending_entry(b"", &entry);
+
+        // Assert
+        assert!(
+            matches!(result, Err(crate::common::MidgeError::InvalidArgument(_))),
+            "encoder must never emit EntryType::Merge, got {result:?}"
+        );
     }
 }

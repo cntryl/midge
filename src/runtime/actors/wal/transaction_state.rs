@@ -431,14 +431,17 @@ impl WalActor {
         Ok(())
     }
 
-    /// Checks current in-memory view (active + immutable memtables) for existence
+    /// Checks the current view (memtables and SSTs) for existence.
+    ///
+    /// Fails closed: a read error is returned instead of being treated as
+    /// "absent", so an insert can never overwrite a key it could not see.
     pub(super) fn key_exists(
         state: &RuntimeState,
         cf_id: crate::types::ColumnFamilyId,
         key: &[u8],
-    ) -> bool {
+    ) -> MidgeResult<bool> {
         let Some(cf_state) = state.column_families.get(&cf_id) else {
-            return false;
+            return Ok(false);
         };
         let sst_files = state
             .manifest
@@ -461,7 +464,7 @@ impl WalActor {
             state.is_memory_mode(),
             state.observed_time_millis(),
         );
-        matches!(snapshot.get(key, u64::MAX), Ok(Some(_)))
+        Ok(snapshot.get(key, u64::MAX)?.is_some())
     }
 
     /// Apply a write to the memtable

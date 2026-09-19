@@ -262,12 +262,14 @@ impl WalActor {
                             cf_id: intent_cf,
                             key: intent_key,
                             exists,
-                        } if *intent_cf == cf_id && *intent_key == key => return *exists,
+                        } if *intent_cf == cf_id && *intent_key == key => return Ok(*exists),
                         TransactionIntent::Range {
                             cf_id: intent_cf,
                             start,
                             end,
-                        } if *intent_cf == cf_id && *start <= key && key < *end => return false,
+                        } if *intent_cf == cf_id && *start <= key && key < *end => {
+                            return Ok(false)
+                        }
                         _ => {}
                     }
                 }
@@ -308,7 +310,7 @@ impl WalActor {
                     insert_only: true,
                     ..
                 } => {
-                    if key_exists_after_intents(*cf_id, key, &intents) {
+                    if key_exists_after_intents(*cf_id, key, &intents)? {
                         return Err(MidgeError::InvalidArgument(
                             "key already exists".to_string(),
                         ));

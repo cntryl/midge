@@ -142,7 +142,7 @@ impl WalActor {
                 let exists = match source.latest_before(ordinal, key)? {
                     Some(crate::runtime::transaction_spill::IntentLookup::Present(_)) => true,
                     Some(crate::runtime::transaction_spill::IntentLookup::Deleted) => false,
-                    None => Self::key_exists(state, *cf_id, key),
+                    None => Self::key_exists(state, *cf_id, key)?,
                 };
                 if exists {
                     return Err(MidgeError::InvalidArgument(
