@@ -512,6 +512,11 @@ impl CompactionCoordinator {
         added: &[crate::runtime::FileMeta],
         budget: &crate::common::resource_budget::ResourceBudget,
     ) -> Result<(), crate::common::MidgeError> {
+        // A writer paused past its lease can resume with a finished compaction
+        // queued. Prove authority against the leader store, not only the
+        // cached heartbeat flag, before publishing metadata or uploading.
+        event_loop
+            .validate_runtime_writer_lease_within(&crate::common::OperationDeadline::unbounded())?;
         // Persist the rollback/cleanup obligation before remote upload. If
         // intent persistence fails, no untracked cloud object is created; if
         // upload or publication later fails, startup can prove and remove the
@@ -659,9 +664,22 @@ impl CompactionCoordinator {
                 };
             hybrid.compaction_completed_with_token(token, &output_sizes);
         }
-        event_loop
-            .gc_actor
-            .delete_ssts(&mut event_loop.state, input_ssts, hybrid_storage);
+        // Inputs may still be read by a newer lease holder. Leaking them is
+        // safe; deleting them after losing authority is not.
+        if let Err(error) = event_loop
+            .validate_runtime_writer_lease_within(&crate::common::OperationDeadline::unbounded())
+        {
+            tracing::error!(
+                %error,
+                retained_inputs = input_ssts.len(),
+                "writer lease validation failed before compaction input GC; retaining inputs"
+            );
+            event_loop.state.mark_persistence_anomaly();
+        } else {
+            event_loop
+                .gc_actor
+                .delete_ssts(&mut event_loop.state, input_ssts, hybrid_storage);
+        }
         crate::failpoints::fail_point!("midge::compaction::after_input_sst_gc");
         tracing::info!(
             removed_count = input_ssts.len(),
