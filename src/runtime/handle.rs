@@ -99,8 +99,11 @@ impl RuntimeHandle {
         self.ingest_active.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    pub(crate) fn begin_snapshot_acquisition(&self) -> snapshot_pins::SnapshotAcquisitionGuard<'_> {
-        self.snapshot_pins.begin_acquisition()
+    pub(crate) fn begin_snapshot_acquisition(
+        &self,
+        sequence_floor: u64,
+    ) -> snapshot_pins::SnapshotAcquisitionGuard<'_> {
+        self.snapshot_pins.begin_acquisition(sequence_floor)
     }
 
     pub(crate) fn register_snapshot_pin_while_acquiring(
