@@ -352,6 +352,7 @@ impl RuntimeStorageMaterialization {
             lease_healthy: Some(startup_lease.runtime_lease_health()),
             leader_store: startup_lease.leader_store.clone(),
             leader_holder_id: Some(startup_lease.lease.holder_id()),
+            max_replayable_txn_bytes: Some(limits.max_replayable_txn_bytes()),
             ..Default::default()
         };
 
@@ -487,6 +488,7 @@ impl RuntimeStorageMaterialization {
             lease_healthy: Some(startup_lease.runtime_lease_health()),
             leader_store: startup_lease.leader_store.clone(),
             leader_holder_id: Some(startup_lease.lease.holder_id()),
+            max_replayable_txn_bytes: Some(limits.max_replayable_txn_bytes()),
             ..Default::default()
         };
 

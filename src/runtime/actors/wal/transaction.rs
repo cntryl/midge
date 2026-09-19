@@ -493,6 +493,9 @@ impl WalActor {
             self.current_epoch,
         );
         batch_record.txn_id = Some(sequence_plan.txn_id);
+        self.ensure_replayable_transaction(crate::wal::encoding::record_frame_size_bound(
+            &batch_record,
+        )?)?;
         Ok(Some(batch_record))
     }
 

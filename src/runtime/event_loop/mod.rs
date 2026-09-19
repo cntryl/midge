@@ -226,6 +226,8 @@ impl EventLoop {
             config.storage_io_timeout,
         )?;
 
+        wal_actor.set_max_replayable_txn_bytes(config.max_replayable_txn_bytes);
+
         // Wire leader store for epoch validation at sync boundaries.
         if let Some(store) = config.leader_store.clone() {
             wal_actor.set_leader_store(store, config.leader_holder_id.clone().unwrap_or_default());
