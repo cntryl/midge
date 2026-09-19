@@ -649,6 +649,84 @@ mod durability_wal {
     }
 
     #[test]
+    fn should_recover_post_restart_sync_commit_when_previous_crash_left_torn_wal_tail() {
+        // Arrange
+        let temp_dir = TempDir::new().expect("temp dir");
+        let db_path = temp_dir.path();
+        let wal_log = db_path.join("wal").join("wal.log");
+
+        {
+            let mut engine =
+                Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+                    .expect("open engine");
+            let cf = engine.create_column_family("trust").expect("create cf");
+            for key in [b"prefix".as_slice(), b"torn".as_slice()] {
+                let mut tx = engine
+                    .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                    .expect("begin tx");
+                tx.put(key.to_vec(), b"value".to_vec(), None).expect("put");
+                tx.commit(WriteOptions::sync()).expect("sync commit");
+            }
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before corruption");
+        }
+        truncate_last_bytes(&wal_log, 3);
+        let torn_len = std::fs::metadata(&wal_log)
+            .expect("torn wal metadata")
+            .len();
+
+        {
+            let mut engine = Engine::open(
+                OpenOptions::local(db_path)
+                    .recovery_policy(RecoveryPolicy::Strict)
+                    .build()
+                    .expect("build options"),
+            )
+            .expect("strict recovery should tolerate the torn tail");
+            let cf = engine.get_column_family("trust").expect("get trust cf");
+            let mut tx = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .expect("begin after tx");
+            tx.put(b"after".to_vec(), b"value".to_vec(), None)
+                .expect("put after");
+            tx.commit(WriteOptions::sync()).expect("sync after commit");
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown after post-restart commit");
+        }
+
+        // Act
+        let reopened = Engine::open(
+            OpenOptions::local(db_path)
+                .recovery_policy(RecoveryPolicy::Strict)
+                .build()
+                .expect("build options"),
+        )
+        .expect("strict reopen after a post-restart commit should succeed");
+        let cf = reopened.get_column_family("trust").expect("get trust cf");
+
+        // Assert
+        let tx = reopened
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("begin read tx");
+        assert_eq!(
+            tx.get(b"prefix").expect("get prefix"),
+            Some(Bytes::from_static(b"value"))
+        );
+        assert_eq!(tx.get(b"torn").expect("get torn key"), None);
+        assert_eq!(
+            tx.get(b"after").expect("get after"),
+            Some(Bytes::from_static(b"value"))
+        );
+        let recovered_len = std::fs::metadata(&wal_log).expect("wal metadata").len();
+        assert!(
+            recovered_len > torn_len,
+            "post-restart commit should remain in the active WAL (torn_len={torn_len}, len={recovered_len})"
+        );
+    }
+
+    #[test]
     fn should_fail_strict_but_salvage_valid_prefix_given_corrupted_first_wal_frame_when_reopening()
     {
         // Arrange

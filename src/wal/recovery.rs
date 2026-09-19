@@ -343,6 +343,17 @@ pub struct RecoveryStats {
     pub max_epoch_seen: u64,
     /// Number of WAL records skipped because their `writer_epoch` was stale.
     pub stale_records_skipped: u64,
+    /// Final active WAL whose incomplete tail replay tolerated. Replay stays
+    /// read-only; an owner that reopens the file for append must first
+    /// truncate it to `valid_bytes`, or new frames land after the torn bytes.
+    pub(crate) tolerated_active_tail: Option<ToleratedActiveTail>,
+}
+
+/// Verified prefix of a final active WAL whose incomplete tail was dropped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ToleratedActiveTail {
+    pub(crate) path: FsPath,
+    pub(crate) valid_bytes: u64,
 }
 
 impl Default for RecoveryStats {
@@ -364,6 +375,7 @@ impl RecoveryStats {
             total_replay_ns: 0,
             max_epoch_seen: 0,
             stale_records_skipped: 0,
+            tolerated_active_tail: None,
         }
     }
 
@@ -470,6 +482,7 @@ fn replay_wal_with_policy_and_filter<S: BuildHasher>(
             should_apply,
             seen_records: std::collections::HashMap::new(),
             replay_ordinal: 0,
+            verified_bytes: 0,
         };
         replay_wal_paths(storage, &replay_paths, replay_policy, &mut replay_state)
     };
@@ -567,6 +580,8 @@ struct WalReplayState<'a, S: BuildHasher> {
     should_apply: Option<&'a dyn Fn(&WalRecord) -> bool>,
     seen_records: std::collections::HashMap<WalRecord, String>,
     replay_ordinal: u64,
+    /// End offset of the last verified frame in the file being replayed.
+    verified_bytes: u64,
 }
 
 fn replay_wal_paths<S: BuildHasher>(
@@ -582,8 +597,13 @@ fn replay_wal_paths<S: BuildHasher>(
                     tracing::info!(
                         path = %replay_file.path,
                         error = %failure.error(),
+                        valid_bytes = replay_state.verified_bytes,
                         "wal replay dropped an incomplete final active tail"
                     );
+                    replay_state.stats.tolerated_active_tail = Some(ToleratedActiveTail {
+                        path: replay_file.path.clone(),
+                        valid_bytes: replay_state.verified_bytes,
+                    });
                     return Ok(());
                 }
                 ReplayErrorAction::SalvageVerifiedPrefix => {
@@ -733,6 +753,7 @@ fn replay_wal_file<S: BuildHasher>(
     replay_state: &mut WalReplayState<'_, S>,
 ) -> Result<(), ReplayFailure> {
     let mut pos: u64 = 0;
+    replay_state.verified_bytes = 0;
     let mut file_read_ns: u128 = 0;
     let mut file_apply_ns: u128 = 0;
     let Some(file) = open_wal_replay_file(storage, file_path, &mut file_read_ns)? else {
@@ -763,6 +784,7 @@ fn replay_wal_file<S: BuildHasher>(
                     .is_some_and(|first_source| first_source != &source)
                 {
                     pos = next_pos;
+                    replay_state.verified_bytes = pos;
                     continue;
                 }
                 replay_state
@@ -780,6 +802,7 @@ fn replay_wal_file<S: BuildHasher>(
                 };
                 apply_replayed_wal_record(&frame.record, pos, record_ordinal, &mut apply_ctx)?;
                 pos = next_pos;
+                replay_state.verified_bytes = pos;
             }
         }
     }
