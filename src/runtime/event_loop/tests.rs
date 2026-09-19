@@ -2817,3 +2817,33 @@ fn should_restore_compaction_completion_deferred_behind_waiting_cf_drop() {
         "column-family DDL keeps its order behind the waiting drop"
     );
 }
+
+#[test]
+fn should_wait_in_select_when_queued_flush_cannot_start() -> crate::common::MidgeResult<()> {
+    // Arrange: a queued immutable whose flush cannot start while the
+    // publication gate is held. Treating it as actionable made the run loop
+    // spin through progress passes every 50 µs instead of blocking.
+    let mut event_loop = create_test_local_event_loop()?;
+    event_loop.state.sequence = 1;
+    event_loop
+        .state
+        .get_cf(0)
+        .expect("default column family")
+        .memtable
+        .put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)?;
+    event_loop.freeze_active_memtable(0)?;
+    assert!(event_loop.state.has_due_immutable_flush());
+    event_loop.publication_gate.active = true;
+
+    // Act
+    let actionable = event_loop.has_actionable_work();
+    let idle_timeout = event_loop.idle_progress_timeout();
+
+    // Assert
+    assert!(
+        !actionable,
+        "a flush that cannot start must not spin the loop"
+    );
+    assert!(idle_timeout.is_some(), "the loop still wakes to re-check");
+    Ok(())
+}

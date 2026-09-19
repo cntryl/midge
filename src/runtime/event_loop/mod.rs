@@ -1390,7 +1390,7 @@ impl EventLoop {
             return true;
         }
 
-        if self.state.has_due_immutable_flush() {
+        if self.state.has_due_immutable_flush() && !self.flush_start_blocked(false) {
             return true;
         }
 
