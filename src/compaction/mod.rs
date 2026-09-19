@@ -207,6 +207,51 @@ mod tests {
     }
 
     #[test]
+    fn should_roll_range_only_partition_when_local_tombstones_exceed_target() -> MidgeResult<()> {
+        // Arrange: local deployments have no output size limit, so only the
+        // soft target can roll. A span of range tombstones with no surviving
+        // points must still roll instead of holding every tombstone at once.
+        let dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let mut writer = factory.create()?;
+        for index in 0..512_u32 {
+            let mut start = index.to_be_bytes().to_vec();
+            start.extend_from_slice(&[b'a'; 60]);
+            let mut end = start.clone();
+            end.push(b'z');
+            writer.add_range_tombstone(&start, &end, u64::from(index) + 1)?;
+        }
+        writer.finish_to_path(&dir.path().join("ranges.sst"))?;
+        let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(100);
+        plan.input_files.push("ranges.sst".into());
+        plan.target_sst_size = 16 * 1024;
+        let observed = std::cell::RefCell::new(Vec::new());
+        let sink =
+            |name: &str, path: &Path, _budget: &crate::common::resource_budget::ResourceBudget| {
+                let reader = factory.open(Path::new(name))?;
+                observed
+                    .borrow_mut()
+                    .extend(reader.range_tombstones().into_iter().map(|range| range.seq));
+                std::fs::remove_file(path)?;
+                Ok(())
+            };
+
+        // Act
+        let outputs =
+            execute_compaction_with_output_sink(&plan, &factory, dir.path(), None, Some(&sink), None)?;
+
+        // Assert
+        assert!(
+            (2..=16).contains(&outputs.len()),
+            "range-only span must roll near its target, not per tombstone: {} output(s)",
+            outputs.len()
+        );
+        assert_eq!(*observed.borrow(), (1..=512_u64).collect::<Vec<_>>());
+        Ok(())
+    }
+
+    #[test]
     fn should_roll_before_next_key_when_individual_records_fit_local_staging() -> MidgeResult<()> {
         // Arrange
         let dir = tempdir()?;
