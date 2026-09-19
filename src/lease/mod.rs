@@ -24,7 +24,7 @@
 //!
 //! Lease acquisition MUST occur before engine initialization:
 
-mod cloud;
+pub(crate) mod cloud;
 mod filesystem;
 pub mod fs_leader_store;
 mod heartbeat;

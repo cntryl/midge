@@ -23,7 +23,7 @@ const DEFAULT_CLOUD_LEASE_TTL_SECS: u64 = 30;
 // Provider HTTP clients use a 10-second request timeout. Renewal admission
 // retains one extra second so a timed-out request cannot still land after the
 // holder's monotonic expiry.
-const RENEWAL_WRITE_DEADLINE_MARGIN: Duration = Duration::from_secs(11);
+pub(crate) const RENEWAL_WRITE_DEADLINE_MARGIN: Duration = Duration::from_secs(11);
 
 /// Key used for the lease object in cloud storage.
 const LEASE_OBJECT_KEY: &str = crate::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY;

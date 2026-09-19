@@ -712,6 +712,19 @@ impl OpenOptionsBuilder {
                 "lease clock-skew tolerance must not exceed the lease TTL".to_string(),
             ));
         }
+        // A cloud lease renews with two thirds of its TTL left and reserves a
+        // fixed margin for the conditional provider write. A shorter TTL can
+        // never renew, so the engine would fence itself shortly after open.
+        if matches!(self.storage, Storage::Cloud { .. })
+            && self.lease_ttl.saturating_mul(2) / 3
+                <= crate::lease::cloud::RENEWAL_WRITE_DEADLINE_MARGIN
+        {
+            return Err(MidgeError::InvalidArgument(format!(
+                "cloud lease TTL {:?} is too short to renew; two thirds of it must exceed the {:?} provider write margin",
+                self.lease_ttl,
+                crate::lease::cloud::RENEWAL_WRITE_DEADLINE_MARGIN
+            )));
+        }
         self.cloud.policy.validate()?;
 
         let total_memory = self.resolve_total_memory()?;
