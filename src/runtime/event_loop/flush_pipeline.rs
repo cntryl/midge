@@ -333,6 +333,15 @@ impl EventLoop {
             .entry(identity.cf_id)
             .and_modify(|next| *next = (*next).max(next_sst_seq))
             .or_insert(next_sst_seq);
+        if self.hybrid_storage.is_some() {
+            // The publish worker uploads before it journals AddSst, so the
+            // name must already be durable (as compaction does) or a crash in
+            // that window leaves an orphan whose name the next flush reuses.
+            if let Err(error) = self.reserve_sst_name_durably(identity.cf_id, sst_seq) {
+                self.fail_flush_pipeline(identity.flush_id, reservation, &error, true);
+                return;
+            }
+        }
         let sst_name = crate::sst::file_name(identity.cf_id, 0, sst_seq);
         let build = FlushBuildOutput {
             identity,

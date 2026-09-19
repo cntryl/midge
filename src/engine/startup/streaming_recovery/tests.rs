@@ -720,3 +720,107 @@ fn should_flush_admitted_large_value_when_memtable_target_is_small() {
         .shutdown(std::time::Duration::from_secs(5))
         .expect("close verifier");
 }
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_exit_after_runtime_flush_uploads_sst_in_child() {
+    // Arrange
+    let Some(path) = std::env::var_os("MIDGE_FLUSH_UPLOAD_CRASH_CHILD") else {
+        return;
+    };
+    let path = std::path::PathBuf::from(path);
+    let engine = Engine::open(options(&path, 4 * 1024 * 1024)).expect("open flush writer");
+    let cf = engine.get_column_family("default").expect("default family");
+    let mut tx = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .expect("write");
+    tx.put(b"before-crash".to_vec(), value(1), None)
+        .expect("put");
+    tx.commit(crate::WriteOptions::cloud_strict())
+        .expect("cloud acknowledgment");
+    fail::cfg_callback("midge::flush_worker::after_cloud_sst_upload", || {
+        std::process::exit(75);
+    })
+    .expect("crash after SST upload");
+
+    // Act
+    let _ = engine.flush_cf(&cf);
+
+    // Assert
+    panic!("flush must reach the post-upload crash point");
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_not_reuse_flush_sst_name_when_crash_follows_remote_upload() {
+    // Arrange
+    let dir = tempfile::tempdir().expect("crash directory");
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "engine::startup::streaming_recovery::tests::should_exit_after_runtime_flush_uploads_sst_in_child",
+            "--nocapture",
+        ])
+        .env("MIDGE_FLUSH_UPLOAD_CRASH_CHILD", dir.path())
+        .output()
+        .expect("crash child");
+    assert_child_output(&output, 75);
+    let crashed = crate::metadata::ManifestPersistence::load(dir.path()).expect("crashed manifest");
+    let orphans: Vec<String> = std::fs::read_dir(dir.path().join("cloud_store/sst"))
+        .into_iter()
+        .flatten()
+        .map(|entry| {
+            entry
+                .expect("cloud SST")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|name| !crashed.files.iter().any(|file| &file.name == name))
+        .collect();
+    assert!(
+        !orphans.is_empty(),
+        "the child must leave an uploaded, unpublished SST"
+    );
+    expire_child_lease(dir.path());
+
+    // Act
+    let mut engine = Engine::open(options(dir.path(), 4 * 1024 * 1024))
+        .expect("reopen after crash between upload and publication");
+    let cf = engine.get_column_family("default").expect("default family");
+    let mut tx = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .expect("write");
+    tx.put(b"after-crash".to_vec(), value(2), None)
+        .expect("put");
+    tx.commit(crate::WriteOptions::cloud_strict())
+        .expect("cloud acknowledgment");
+    engine
+        .flush_cf(&cf)
+        .expect("flush must not collide with the orphaned SST name");
+
+    // Assert
+    let recovered = crate::metadata::ManifestPersistence::load(dir.path()).expect("manifest");
+    for orphan in &orphans {
+        assert!(
+            !recovered.files.iter().any(|file| &file.name == orphan),
+            "orphaned SST name reused: {orphan}"
+        );
+    }
+    {
+        let tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("read");
+        assert_eq!(
+            tx.get(b"before-crash").expect("read").as_deref(),
+            Some(value(1).as_slice())
+        );
+        assert_eq!(
+            tx.get(b"after-crash").expect("read").as_deref(),
+            Some(value(2).as_slice())
+        );
+    }
+    engine
+        .shutdown(std::time::Duration::from_secs(30))
+        .expect("shutdown");
+}

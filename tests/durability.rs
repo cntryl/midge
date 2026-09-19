@@ -722,6 +722,84 @@ mod durability_wal {
     }
 
     #[test]
+    fn should_recover_post_restart_sync_commit_when_previous_crash_left_torn_wal_tail() {
+        // Arrange
+        let temp_dir = TempDir::new().expect("temp dir");
+        let db_path = temp_dir.path();
+        let wal_log = db_path.join("wal").join("wal.log");
+
+        {
+            let mut engine =
+                Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+                    .expect("open engine");
+            let cf = engine.create_column_family("trust").expect("create cf");
+            for key in [b"prefix".as_slice(), b"torn".as_slice()] {
+                let mut tx = engine
+                    .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                    .expect("begin tx");
+                tx.put(key.to_vec(), b"value".to_vec(), None).expect("put");
+                tx.commit(WriteOptions::sync()).expect("sync commit");
+            }
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before corruption");
+        }
+        truncate_last_bytes(&wal_log, 3);
+        let torn_len = std::fs::metadata(&wal_log)
+            .expect("torn wal metadata")
+            .len();
+
+        {
+            let mut engine = Engine::open(
+                OpenOptions::local(db_path)
+                    .recovery_policy(RecoveryPolicy::Strict)
+                    .build()
+                    .expect("build options"),
+            )
+            .expect("strict recovery should tolerate the torn tail");
+            let cf = engine.get_column_family("trust").expect("get trust cf");
+            let mut tx = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .expect("begin after tx");
+            tx.put(b"after".to_vec(), b"value".to_vec(), None)
+                .expect("put after");
+            tx.commit(WriteOptions::sync()).expect("sync after commit");
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown after post-restart commit");
+        }
+
+        // Act
+        let reopened = Engine::open(
+            OpenOptions::local(db_path)
+                .recovery_policy(RecoveryPolicy::Strict)
+                .build()
+                .expect("build options"),
+        )
+        .expect("strict reopen after a post-restart commit should succeed");
+        let cf = reopened.get_column_family("trust").expect("get trust cf");
+
+        // Assert
+        let tx = reopened
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("begin read tx");
+        assert_eq!(
+            tx.get(b"prefix").expect("get prefix"),
+            Some(Bytes::from_static(b"value"))
+        );
+        assert_eq!(tx.get(b"torn").expect("get torn key"), None);
+        assert_eq!(
+            tx.get(b"after").expect("get after"),
+            Some(Bytes::from_static(b"value"))
+        );
+        let recovered_len = std::fs::metadata(&wal_log).expect("wal metadata").len();
+        assert!(
+            recovered_len > torn_len,
+            "post-restart commit should remain in the active WAL (torn_len={torn_len}, len={recovered_len})"
+        );
+    }
+
+    #[test]
     fn should_fail_strict_but_salvage_valid_prefix_given_corrupted_first_wal_frame_when_reopening()
     {
         // Arrange
@@ -2655,6 +2733,79 @@ mod recovery_policy_api {
         let metrics = engine.get_runtime_metrics().expect("runtime metrics");
         assert_eq!(metrics.health, EngineHealth::SalvageMode);
         assert_eq!(metrics.salvage_mode_opens, 1);
+    }
+
+    fn sst_files(db_path: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut found = Vec::new();
+        let mut pending = vec![db_path.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in fs::read_dir(&dir).expect("read dir") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "sst") {
+                    found.push(path);
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn should_retain_sst_files_when_salvage_opens_with_unreadable_manifest() {
+        // Arrange
+        let temp_dir = TempDir::new().expect("temp dir");
+        let db_path = temp_dir.path();
+        {
+            let mut engine =
+                Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+                    .expect("open engine");
+            let cf = engine.create_column_family("keep").expect("create cf");
+            let mut tx = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                .expect("begin tx");
+            tx.put(b"key".to_vec(), b"value".to_vec(), None)
+                .expect("put");
+            tx.commit(cntryl_midge::WriteOptions::sync())
+                .expect("sync commit");
+            engine.flush_cf(&cf).expect("flush to sst");
+            engine
+                .shutdown(Duration::from_secs(5))
+                .expect("shutdown before corruption");
+        }
+        let before = sst_files(db_path);
+        assert!(!before.is_empty(), "flush should have produced an SST");
+        for name in [
+            "manifest.json",
+            "manifest.snapshot.json",
+            "manifest.journal",
+        ] {
+            let path = db_path.join(name);
+            if path.exists() {
+                fs::write(&path, b"not-a-valid-manifest").expect("corrupt manifest file");
+            }
+        }
+
+        // Act
+        let engine = Engine::open(
+            OpenOptions::local(db_path)
+                .recovery_policy(RecoveryPolicy::Salvage)
+                .build()
+                .expect("build options"),
+        )
+        .expect("salvage open");
+
+        // Assert
+        assert_eq!(
+            engine.get_runtime_metrics().expect("metrics").health,
+            EngineHealth::SalvageMode
+        );
+        assert_eq!(
+            sst_files(db_path),
+            before,
+            "salvage must retain SSTs the unreadable manifest no longer lists"
+        );
     }
 
     #[test]

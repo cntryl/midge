@@ -299,6 +299,16 @@ fn encode_into_inner(record: &WalRecord, buf: &mut Vec<u8>) -> MidgeResult<()> {
     put_u64(buf, tags::WRITER_EPOCH, record.writer_epoch)?;
 
     if let Some(v) = &record.value {
+        // Replay decompresses VALUE under a fixed ceiling. Compression can
+        // shrink the frame below the frame limit, so check the uncompressed
+        // length here or an acknowledged record fails every later replay.
+        if v.len() > crate::wal::frame::WAL_MAX_VALUE_LEN {
+            return Err(MidgeError::ResourceLimit(format!(
+                "WAL record value is {} bytes; replay accepts at most {} bytes",
+                v.len(),
+                crate::wal::frame::WAL_MAX_VALUE_LEN
+            )));
+        }
         // Preserve Some(empty) distinctly from None by always emitting VALUE when present.
         let (write_val, comp_byte) =
             if v.len() < crate::sst::compression::MIN_COMPRESSION_INPUT_BYTES {
@@ -901,6 +911,53 @@ fn read_optional_bytes(input: &mut &[u8], field: &str) -> MidgeResult<Option<Byt
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn should_reject_value_whose_uncompressed_size_exceeds_wal_decode_limit() {
+        // Arrange: highly compressible, so the compressed frame would pass the
+        // 64 MiB frame check while replay rejects the decompressed size.
+        let oversized = crate::wal::frame::WAL_MAX_VALUE_LEN + 1;
+        let record = WalRecord::new(
+            WalOpKind::TxnBatch,
+            Bytes::from_static(b"txn"),
+            Some(Bytes::from(vec![0_u8; oversized])),
+            1,
+            1,
+        );
+
+        // Act
+        let result = encode(&record);
+
+        // Assert
+        assert!(
+            matches!(result, Err(MidgeError::ResourceLimit(_))),
+            "a value replay cannot decode must be rejected before it is written: {:?}",
+            result.map(|encoded| encoded.len())
+        );
+    }
+
+    #[test]
+    fn should_round_trip_compressible_value_at_wal_decode_limit() {
+        // Arrange
+        let record = WalRecord::new(
+            WalOpKind::TxnBatch,
+            Bytes::from_static(b"txn"),
+            Some(Bytes::from(vec![
+                0_u8;
+                crate::wal::frame::WAL_MAX_VALUE_LEN
+            ])),
+            1,
+            1,
+        );
+
+        // Act
+        let encoded = encode(&record).expect("encode at the limit");
+        let decoded =
+            decode(encoded.as_ref()).expect("anything the writer accepts must decode on replay");
+
+        // Assert
+        assert_eq!(decoded.value, record.value);
+    }
 
     #[test]
     fn should_roundtrip_put_when_value_present() {
