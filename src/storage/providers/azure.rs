@@ -1201,7 +1201,15 @@ fn azure_response_error(
             || code.eq_ignore_ascii_case("TargetConditionNotMet")
     });
 
-    if conditional_mutation && response.status == 412 && predicate_failed {
+    // A create guarded by If-None-Match: * that finds the blob already there
+    // fails with 409 BlobAlreadyExists rather than 412; it is the same lost
+    // race as a failed precondition on the other providers.
+    let create_conflict = response.status == 409
+        && code
+            .as_deref()
+            .is_some_and(|code| code.eq_ignore_ascii_case("BlobAlreadyExists"));
+
+    if conditional_mutation && ((response.status == 412 && predicate_failed) || create_conflict) {
         CloudError::PreconditionFailed(format!("status {}: {detail}", response.status))
     } else {
         CloudError::from_http_status(response.status, detail)
@@ -2088,16 +2096,25 @@ mod tests {
         let predicate = response(412, "TargetConditionNotMet");
         let missing_lease = response(412, "LeaseIdMissing");
         let retained_snapshot = response(409, "SnapshotsPresent");
+        let create_conflict = response(409, "BlobAlreadyExists");
 
         // Act
         let predicate_error = azure_response_error(&predicate, "Azure PUT", true);
         let lease_error = azure_response_error(&missing_lease, "Azure PUT", true);
         let snapshot_error = azure_response_error(&retained_snapshot, "Azure DELETE", true);
+        // Azure answers a failed If-None-Match: * create with 409, not 412.
+        let create_error = azure_response_error(&create_conflict, "Azure PUT", true);
+        let unconditional_create_error = azure_response_error(&create_conflict, "Azure PUT", false);
 
         // Assert
         assert!(matches!(predicate_error, CloudError::PreconditionFailed(_)));
         assert!(matches!(lease_error, CloudError::InvalidRequest(_)));
         assert!(matches!(snapshot_error, CloudError::InvalidRequest(_)));
+        assert!(matches!(create_error, CloudError::PreconditionFailed(_)));
+        assert!(matches!(
+            unconditional_create_error,
+            CloudError::InvalidRequest(_)
+        ));
     }
 
     #[test]
