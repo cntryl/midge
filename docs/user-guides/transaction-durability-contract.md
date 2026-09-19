@@ -220,6 +220,10 @@ without treating the local append barrier as an fsync or cloud-durability
 guarantee. If the local bytes are lost before upload acknowledgment, the write
 can still be lost.
 
+Sealing a segment for upload fsyncs it before the rename, once per segment.
+A sealed local segment is therefore complete after power loss, and recovery
+does not refuse to open because of a torn sealed file.
+
 Use `cloud_async()` when the engine must stage the write for cloud durability but the caller does not need to wait for cloud acknowledgment.
 
 ### `WriteOptions::best_effort()`
