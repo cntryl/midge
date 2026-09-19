@@ -70,6 +70,19 @@ If corruption is detected at byte 0 or inside the non-tail durable prefix:
 - strict recovery fails open
 - salvage mode may keep the valid prefix and mark the engine degraded
 
+## Manifest Journal Tail
+
+Each manifest journal append ends with a CRC-checked fsync marker. Replay keeps
+edits only up to the last marker. A record at EOF whose header or payload is
+incomplete is a torn final append, and the next append rewrites the journal to
+the last marker.
+
+The record CRC covers only the payload, so a corrupt length field looks the
+same as a torn payload. If the bytes that length would swallow contain a
+verified fsync marker, the length is corrupt: durable edits follow it. Replay
+then fails with corruption instead of treating it as a tail, and the journal
+is never truncated past those edits.
+
 ## Strict vs Salvage Recovery
 
 ### Strict

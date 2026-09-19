@@ -592,6 +592,18 @@ fn read_journal_record(
     let payload_offset = len_offset + 4;
 
     if payload_offset + (len as u64) + 4 > file_len {
+        // A torn final append leaves only garbage after its header. If the
+        // bytes this length would swallow hold a verified fsync marker, the
+        // length itself is corrupt and truncating here would erase durable
+        // edits (the same shape the WAL rejects after #153).
+        let rest = file
+            .read_at(payload_offset, file_len - payload_offset)
+            .map_err(crate::common::MidgeError::from)?;
+        if contains_verified_fsync_marker(&rest) {
+            return Err(crate::common::MidgeError::Corruption(format!(
+                "manifest journal record length at byte {record_start} overruns EOF and hides a verified later record (len={len}, file_len={file_len})"
+            )));
+        }
         return Ok(JournalRecordStatus::PartialPayload { record_start });
     }
 
@@ -611,6 +623,44 @@ fn read_journal_record(
         got_crc,
         next_offset: crc_offset + 4,
     }))
+}
+
+/// Whether `bytes` contain a complete, CRC-valid fsync marker record. Every
+/// durable append ends with one, so finding one proves durable data follows.
+fn contains_verified_fsync_marker(bytes: &[u8]) -> bool {
+    const HEADER_LEN: usize = 5;
+    const CRC_LEN: usize = 4;
+    let mut start = 0;
+    while let Some(found) = bytes[start..]
+        .iter()
+        .position(|byte| *byte == FSYNC_MARKER_TYPE)
+    {
+        let record_start = start + found;
+        start = record_start + 1;
+        let Some(len_bytes) = bytes.get(record_start + 1..record_start + HEADER_LEN) else {
+            return false;
+        };
+        let len =
+            u32::from_le_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]) as usize;
+        let payload_start = record_start + HEADER_LEN;
+        let Some(crc_start) = payload_start.checked_add(len) else {
+            continue;
+        };
+        let Some(crc_bytes) = crc_start
+            .checked_add(CRC_LEN)
+            .and_then(|crc_end| bytes.get(crc_start..crc_end))
+        else {
+            continue;
+        };
+        let payload = &bytes[payload_start..crc_start];
+        let mut hasher = Crc32::new();
+        hasher.update(payload);
+        let expected = u32::from_le_bytes([crc_bytes[0], crc_bytes[1], crc_bytes[2], crc_bytes[3]]);
+        if hasher.finalize() == expected && journal_deserialize::<FsyncMarker>(payload).is_ok() {
+            return true;
+        }
+    }
+    false
 }
 
 fn validate_journal_record_type(record_type: u8, record_start: u64) -> MidgeResult<()> {
@@ -1171,6 +1221,81 @@ mod tests {
 
         // Assert
         assert!(matches!(error, crate::common::MidgeError::Corruption(_)));
+    }
+
+    fn corrupt_journal_record_length(db: &std::path::Path, record_start: u64, len: u32) {
+        use std::io::Seek as _;
+        let mut journal = std::fs::OpenOptions::new()
+            .write(true)
+            .open(db.join(JOURNAL_FILE))
+            .expect("open journal for length corruption");
+        journal
+            .seek(std::io::SeekFrom::Start(record_start + 1))
+            .expect("seek to record length");
+        journal
+            .write_all(&len.to_le_bytes())
+            .expect("overwrite record length");
+        journal.sync_all().expect("sync corrupted journal");
+    }
+
+    #[test]
+    fn should_fail_replay_when_corrupt_length_hides_durable_later_records() {
+        // Arrange
+        let td = tempdir().expect("create temp directory");
+        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 1 }).expect("append first");
+        let second_start = std::fs::metadata(td.path().join(JOURNAL_FILE))
+            .expect("journal metadata")
+            .len();
+        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 2 }).expect("append second");
+        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 3 }).expect("append third");
+        corrupt_journal_record_length(td.path(), second_start, u32::MAX);
+
+        // Act
+        let error = replay_journal(td.path())
+            .expect_err("a length that hides durable later records is corruption, not a torn tail");
+
+        // Assert
+        match error {
+            crate::common::MidgeError::Corruption(message) => {
+                assert!(
+                    message.contains("hides a verified later record"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected corruption, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn should_not_truncate_journal_when_corrupt_length_hides_durable_later_records() {
+        // Arrange
+        let td = tempdir().expect("create temp directory");
+        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 1 }).expect("append first");
+        let second_start = std::fs::metadata(td.path().join(JOURNAL_FILE))
+            .expect("journal metadata")
+            .len();
+        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 2 }).expect("append second");
+        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 3 }).expect("append third");
+        corrupt_journal_record_length(td.path(), second_start, u32::MAX);
+        let corrupted_len = std::fs::metadata(td.path().join(JOURNAL_FILE))
+            .expect("journal metadata")
+            .len();
+
+        // Act
+        let result = append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 4 });
+
+        // Assert
+        assert!(
+            result.is_err(),
+            "append must not repair past durable records"
+        );
+        assert_eq!(
+            std::fs::metadata(td.path().join(JOURNAL_FILE))
+                .expect("journal metadata")
+                .len(),
+            corrupted_len,
+            "durable later records must stay on disk"
+        );
     }
 
     #[test]
