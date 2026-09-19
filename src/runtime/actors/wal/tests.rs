@@ -2067,3 +2067,61 @@ fn should_fsync_active_segment_before_sealing_cloud_async_wal() -> MidgeResult<(
     wal_actor.rotate(&mut state, &ticket)?;
     Ok(())
 }
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_fence_when_spilled_apply_fails_after_durable_wal_commit() -> MidgeResult<()> {
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let temp = tempfile::tempdir()?;
+    let fs: Arc<dyn Fs> = Arc::new(MockFs::new());
+    let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
+    let mut actor = WalActor::new(
+        temp.path().join("unused-wal"),
+        DurabilityPolicy::Strict,
+        BatchConfig::default(),
+        true,
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    actor.install_filesystem_for_test(
+        Arc::clone(&fs),
+        FsWalFactoryIo::new(fs).create_writer(crate::wal::ACTIVE_FILE_NAME)?,
+    );
+    let pool = Arc::new(crate::runtime::transaction_spill::TransactionMemoryPool::new(16));
+    let mut write_set =
+        crate::runtime::transaction_spill::TransactionWriteSet::new(pool, temp.path(), false, 1);
+    for key in [b"first".as_slice(), b"second".as_slice()] {
+        write_set.push(crate::runtime::TransactionOp::Put {
+            cf_id: 0,
+            key: Bytes::copy_from_slice(key),
+            value: Bytes::from_static(b"spilled-value"),
+            ttl_seconds: None,
+            insert_only: false,
+        })?;
+    }
+    let source = write_set.take_source();
+    fail::cfg("midge::wal::spilled_apply_op", "1*off->return")
+        .expect("fail the second post-commit apply");
+
+    // Act
+    let result = actor.append_spilled_transaction(
+        &mut state,
+        &source,
+        SpilledTransactionAppendParams {
+            request_id: 339,
+            assertions: Vec::new(),
+            durability_policy: Some(DurabilityPolicy::Strict),
+            start_sequence: 0,
+            conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+        },
+    );
+    fail::remove("midge::wal::spilled_apply_op");
+
+    // Assert: the WAL already holds the whole transaction, so a partial
+    // memtable apply must stop the writer instead of serving it silently.
+    assert!(matches!(result, Err(MidgeError::Fenced(_))), "{result:?}");
+    assert!(actor.is_fenced());
+    assert!(state.persistence_anomaly_detected());
+    Ok(())
+}
