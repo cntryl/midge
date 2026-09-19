@@ -624,9 +624,22 @@ mod tests {
             .maintenance_memory()
             .unwrap()
             .with_contention_errors();
-        let _held = budget
-            .reserve(budget.limit(), "active maintenance")
-            .unwrap();
+        // Background maintenance started with the event loop can briefly hold
+        // part of the shared budget, so wait for it to drain before taking the
+        // whole limit.
+        let reserve_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let _held = loop {
+            match budget.reserve(budget.limit(), "active maintenance") {
+                Ok(held) => break held,
+                Err(error) => {
+                    assert!(
+                        std::time::Instant::now() < reserve_deadline,
+                        "shared maintenance budget never drained: {error}"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        };
         let error = budget.reserve(1, "catalog request").unwrap_err();
         let deadline = OperationDeadline::from_budget(std::time::Duration::ZERO);
 
