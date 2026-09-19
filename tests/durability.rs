@@ -2575,6 +2575,79 @@ mod recovery_policy_api {
         assert_eq!(metrics.salvage_mode_opens, 1);
     }
 
+    fn sst_files(db_path: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut found = Vec::new();
+        let mut pending = vec![db_path.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in fs::read_dir(&dir).expect("read dir") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "sst") {
+                    found.push(path);
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn should_retain_sst_files_when_salvage_opens_with_unreadable_manifest() {
+        // Arrange
+        let temp_dir = TempDir::new().expect("temp dir");
+        let db_path = temp_dir.path();
+        {
+            let mut engine =
+                Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+                    .expect("open engine");
+            let cf = engine.create_column_family("keep").expect("create cf");
+            let mut tx = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                .expect("begin tx");
+            tx.put(b"key".to_vec(), b"value".to_vec(), None)
+                .expect("put");
+            tx.commit(cntryl_midge::WriteOptions::sync())
+                .expect("sync commit");
+            engine.flush_cf(&cf).expect("flush to sst");
+            engine
+                .shutdown(Duration::from_secs(5))
+                .expect("shutdown before corruption");
+        }
+        let before = sst_files(db_path);
+        assert!(!before.is_empty(), "flush should have produced an SST");
+        for name in [
+            "manifest.json",
+            "manifest.snapshot.json",
+            "manifest.journal",
+        ] {
+            let path = db_path.join(name);
+            if path.exists() {
+                fs::write(&path, b"not-a-valid-manifest").expect("corrupt manifest file");
+            }
+        }
+
+        // Act
+        let engine = Engine::open(
+            OpenOptions::local(db_path)
+                .recovery_policy(RecoveryPolicy::Salvage)
+                .build()
+                .expect("build options"),
+        )
+        .expect("salvage open");
+
+        // Assert
+        assert_eq!(
+            engine.get_runtime_metrics().expect("metrics").health,
+            EngineHealth::SalvageMode
+        );
+        assert_eq!(
+            sst_files(db_path),
+            before,
+            "salvage must retain SSTs the unreadable manifest no longer lists"
+        );
+    }
+
     #[test]
     fn should_fail_strict_open_when_intent_log_is_corrupt() {
         // Arrange

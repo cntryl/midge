@@ -90,6 +90,9 @@ Salvage mode:
 
 - keeps the valid WAL prefix when possible
 - preserves authoritative pre-publication SST state if interrupted output cannot be safely published
+- never deletes SST files missing from the recovered manifest; a salvaged
+  manifest may be a fallback or truncated replay, so startup residue cleanup
+  retains them and logs them for operator review
 - marks the engine degraded or in salvage mode for diagnostics
 
 ## Flush Recovery
