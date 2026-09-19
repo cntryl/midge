@@ -1223,14 +1223,20 @@ fn apply_record<S: BuildHasher>(
 
     match record.op.role() {
         WalOpRole::ValueWrite => {
-            if let Some(value) = &record.value {
-                memtable.put_with_seq(
-                    record.key.to_vec(),
-                    value.to_vec(),
-                    record.seq,
-                    record.expiration,
-                )?;
-            }
+            // VALUE is required for Put/Insert; skipping a record without it
+            // would silently drop an acknowledged write.
+            let Some(value) = &record.value else {
+                return Err(MidgeError::Corruption(format!(
+                    "{:?} WAL record at seq {} is missing VALUE",
+                    record.op, record.seq
+                )));
+            };
+            memtable.put_with_seq(
+                record.key.to_vec(),
+                value.to_vec(),
+                record.seq,
+                record.expiration,
+            )?;
         }
         WalOpRole::PointDelete => {
             memtable.delete_with_seq(record.key.to_vec(), record.seq)?;
