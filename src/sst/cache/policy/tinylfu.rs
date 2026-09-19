@@ -3,19 +3,52 @@
 use super::CachePolicy;
 use crate::sst::cache::key::CacheKey;
 use parking_lot::Mutex;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap};
+
+/// Oldest resident entries considered for each eviction.
+const VICTIM_SAMPLE: usize = 16;
+/// Halve every frequency after this many accesses per resident entry, so
+/// old popularity fades instead of pinning a block forever.
+const AGING_ACCESSES_PER_ENTRY: u64 = 10;
 
 /// `TinyLFU` eviction policy
 ///
-/// Combines frequency and recency for better cache hit rates than pure LRU.
-/// Tracks recent accesses and counts frequencies.
+/// Every resident entry keeps a frequency count and a recency position until
+/// it is removed. Eviction picks the least-frequent entry among the oldest
+/// few, so a once-hot block cannot starve the current working set and no
+/// resident block ever becomes unevictable.
 pub struct TinyLfuPolicy {
-    /// Recent access queue (recency window)
-    recent: Mutex<VecDeque<CacheKey>>,
-    /// Frequency table for keys
-    frequencies: Mutex<HashMap<CacheKey, u32>>,
-    /// Window size for recency tracking
-    window_size: usize,
+    state: Mutex<TinyLfuState>,
+}
+
+#[derive(Default)]
+struct TinyLfuState {
+    /// Resident key -> (frequency, recency stamp).
+    entries: HashMap<CacheKey, (u32, u64)>,
+    /// Recency stamp -> key, oldest first.
+    order: BTreeMap<u64, CacheKey>,
+    next_stamp: u64,
+    accesses_since_aging: u64,
+}
+
+impl TinyLfuState {
+    fn forget(&mut self, key: &CacheKey) {
+        if let Some((_, stamp)) = self.entries.remove(key) {
+            self.order.remove(&stamp);
+        }
+    }
+
+    fn age_if_due(&mut self) {
+        let threshold = (self.entries.len() as u64)
+            .saturating_mul(AGING_ACCESSES_PER_ENTRY)
+            .max(AGING_ACCESSES_PER_ENTRY);
+        if self.accesses_since_aging >= threshold {
+            for (frequency, _) in self.entries.values_mut() {
+                *frequency /= 2;
+            }
+            self.accesses_since_aging = 0;
+        }
+    }
 }
 
 impl TinyLfuPolicy {
@@ -23,10 +56,22 @@ impl TinyLfuPolicy {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            recent: Mutex::new(VecDeque::new()),
-            frequencies: Mutex::new(HashMap::new()),
-            window_size: 100, // Configurable in practice
+            state: Mutex::new(TinyLfuState::default()),
         }
+    }
+
+    #[cfg(test)]
+    fn frequency(&self, key: &CacheKey) -> Option<u32> {
+        self.state
+            .lock()
+            .entries
+            .get(key)
+            .map(|(frequency, _)| *frequency)
+    }
+
+    #[cfg(test)]
+    fn tracks(&self, key: &CacheKey) -> bool {
+        self.state.lock().entries.contains_key(key)
     }
 }
 
@@ -38,83 +83,63 @@ impl Default for TinyLfuPolicy {
 
 impl CachePolicy for TinyLfuPolicy {
     fn on_access(&self, key: CacheKey) {
-        let mut recent = self.recent.lock();
-        let mut frequencies = self.frequencies.lock();
-
-        // Add to recent window
-        recent.push_back(key);
-        if recent.len() > self.window_size {
-            let expired = recent
-                .pop_front()
-                .expect("recent window is non-empty after an overflow");
-
-            // Frequency metadata is a bounded, sliding window too.  Leaving
-            // an entry behind after its final recency sample expires makes
-            // policy memory grow with lifetime insertions even when the
-            // cache itself is repeatedly evicting old keys.
-            if !recent.contains(&expired) {
-                frequencies.remove(&expired);
-            }
-        }
-
-        // Increment frequency
-        let frequency = frequencies.entry(key).or_insert(0);
-        *frequency = frequency.saturating_add(1);
+        let mut state = self.state.lock();
+        let stamp = state.next_stamp;
+        state.next_stamp = state.next_stamp.wrapping_add(1);
+        let previous = state.entries.get(&key).copied();
+        let frequency = previous.map_or(1, |(frequency, old_stamp)| {
+            state.order.remove(&old_stamp);
+            frequency.saturating_add(1)
+        });
+        state.entries.insert(key, (frequency, stamp));
+        state.order.insert(stamp, key);
+        state.accesses_since_aging = state.accesses_since_aging.saturating_add(1);
+        state.age_if_due();
     }
 
     fn pick_victim(&self, exclude_types: &[crate::sst::cache::CacheBlockKind]) -> Option<CacheKey> {
-        let mut recent = self.recent.lock();
-        let frequencies = self.frequencies.lock();
-
-        // Find victim with lowest frequency among recent accesses (excluding protected types)
-        let mut victim: Option<CacheKey> = None;
-        let mut min_freq = u32::MAX;
-
-        for &key in recent.iter() {
-            // Skip excluded block types
-            if exclude_types.contains(&key.block_type) {
-                continue;
-            }
-
-            let freq = *frequencies.get(&key).unwrap_or(&0);
-            if freq < min_freq {
-                min_freq = freq;
-                victim = Some(key);
-            }
+        let mut state = self.state.lock();
+        // The newest entry is usually the block being admitted right now; with
+        // one access it would always lose to the resident set and never stay.
+        // Keep it unless nothing else is evictable.
+        let newest = state.order.values().next_back().copied();
+        let candidates = || {
+            state
+                .order
+                .values()
+                .filter(|key| !exclude_types.contains(&key.block_type))
+        };
+        let victim = candidates()
+            .filter(|key| Some(**key) != newest)
+            .take(VICTIM_SAMPLE)
+            .min_by_key(|key| {
+                state
+                    .entries
+                    .get(*key)
+                    .map_or(0, |(frequency, _)| *frequency)
+            })
+            .or_else(|| candidates().next())
+            .copied();
+        if let Some(victim) = victim {
+            state.forget(&victim);
         }
-
-        // Remove victim from recent queue
-        if let Some(v) = victim {
-            recent.retain(|k| *k != v);
-        }
-
         victim
     }
 
     fn on_remove(&self, key: CacheKey) {
-        let mut recent = self.recent.lock();
-        let mut frequencies = self.frequencies.lock();
-
-        recent.retain(|k| *k != key);
-        frequencies.remove(&key);
+        self.state.lock().forget(&key);
     }
 
     fn on_stale(&self, key: CacheKey) {
-        // A stale victim has no corresponding cache entry, so every frequency
-        // sample for it is stale too. Remove the entry outright rather than
-        // leaking a residual count after repeated accesses.
-        let mut recent = self.recent.lock();
-        let mut frequencies = self.frequencies.lock();
-
-        recent.retain(|k| *k != key);
-        frequencies.remove(&key);
+        // A stale victim has no corresponding cache entry, so drop its state.
+        self.state.lock().forget(&key);
     }
 
     fn clear(&self) {
-        let mut recent = self.recent.lock();
-        let mut frequencies = self.frequencies.lock();
-        recent.clear();
-        frequencies.clear();
+        let mut state = self.state.lock();
+        state.entries.clear();
+        state.order.clear();
+        state.accesses_since_aging = 0;
     }
 }
 
@@ -136,6 +161,8 @@ mod tests {
         policy.on_access(key1);
         // Access key2 once
         policy.on_access(key2);
+        // The newest entry is protected as the one being admitted.
+        policy.on_access(CacheKey::for_data(3, 0));
 
         // Assert - key2 should be evicted (lower frequency)
         assert_eq!(policy.pick_victim(&[]), Some(key2));
@@ -153,7 +180,7 @@ mod tests {
         policy.on_access(key1);
 
         // Assert - each access increments the tracked frequency count
-        assert_eq!(policy.frequencies.lock().get(&key1), Some(&3));
+        assert_eq!(policy.frequency(&key1), Some(3));
     }
 
     #[test]
@@ -170,8 +197,7 @@ mod tests {
         policy.on_stale(key);
 
         // Assert
-        assert!(!policy.frequencies.lock().contains_key(&key));
-        assert!(!policy.recent.lock().contains(&key));
+        assert!(!policy.tracks(&key));
     }
 
     // ===== New comprehensive tests =====
@@ -249,18 +275,24 @@ mod tests {
     }
 
     #[test]
-    fn should_bound_frequency_metadata_to_the_recency_window() {
-        // Arrange
+    fn should_bound_policy_metadata_to_resident_entries() {
+        // Arrange: the cache evicts one victim per admission once full, so
+        // policy state must track the resident set, not lifetime insertions.
         let policy = TinyLfuPolicy::new();
+        let resident_limit = 100;
 
         // Act
         for i in 0..10_000 {
             policy.on_access(CacheKey::for_data(i, 0));
+            if policy.state.lock().entries.len() > resident_limit {
+                policy.pick_victim(&[]);
+            }
         }
 
         // Assert
-        assert!(policy.recent.lock().len() <= policy.window_size);
-        assert!(policy.frequencies.lock().len() <= policy.window_size);
+        let state = policy.state.lock();
+        assert!(state.entries.len() <= resident_limit);
+        assert_eq!(state.order.len(), state.entries.len());
     }
 
     #[test]
@@ -275,6 +307,8 @@ mod tests {
             policy.on_access(freq_high);
         }
         policy.on_access(freq_low);
+        // The newest entry is protected as the one being admitted.
+        policy.on_access(CacheKey::for_data(3, 0));
 
         // Assert - low frequency key should be evicted first
         assert_eq!(policy.pick_victim(&[]), Some(freq_low));
@@ -316,5 +350,49 @@ mod tests {
         // Assert - should not panic
         let victim = policy.pick_victim(&[]);
         assert!(victim.is_none());
+    }
+}
+
+#[cfg(test)]
+mod residency_tests {
+    use crate::sst::cache::{BlockCache, CacheKey, CachePolicyType};
+    use bytes::Bytes;
+
+    #[test]
+    fn should_evict_blocks_outside_recent_window_when_tinylfu_shard_is_full() {
+        // Arrange: one hot block pushes every other key out of a fixed-size
+        // access window. Blocks that fall out of it must stay evictable.
+        let block = Bytes::from(vec![0_u8; 1024]);
+        let cache = BlockCache::new(10 * 1024, 1, CachePolicyType::TinyLfu);
+        for index in 0..10 {
+            cache.put(CacheKey::for_data(index, 0), &block);
+        }
+        for _ in 0..150 {
+            let _ = cache.get(&CacheKey::for_data(0, 0));
+        }
+
+        // Act
+        for index in 10..40 {
+            let key = CacheKey::for_data(index, 0);
+            cache.put(key, &block);
+            let _ = cache.get(&key);
+        }
+
+        // Assert
+        let resident = |range: std::ops::Range<u64>| {
+            range
+                .filter(|index| cache.get(&CacheKey::for_data(*index, 0)).is_some())
+                .count()
+        };
+        assert!(
+            resident(30..40) >= 5,
+            "the current working set must be admitted: {} of 10 resident",
+            resident(30..40)
+        );
+        assert_eq!(
+            resident(1..10),
+            0,
+            "cold blocks from the old window must be evictable"
+        );
     }
 }

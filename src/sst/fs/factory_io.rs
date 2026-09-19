@@ -592,27 +592,45 @@ impl InMemorySstWriter {
         Self::append_block(file_bytes, &block_bytes, &self.compression_policy).map(Some)
     }
 
+    /// Build the trie index bytes in memory, or `None` when the tuner did not
+    /// choose a trie or the trie cannot represent these keys (for example a
+    /// shared prefix longer than its `u16` prefix length). The caller then
+    /// records the sparse index kind: a key the write path accepted must
+    /// never make every flush or compaction of it fail.
+    fn build_trie_index(
+        index_kind: IndexKind,
+        block_index_entries: &[(Vec<u8>, BlockHandle)],
+    ) -> Option<Vec<u8>> {
+        if !matches!(index_kind, IndexKind::Trie) {
+            return None;
+        }
+        let mut trie_writer = TrieWriter::new(true);
+        for (block_index, (first_key, _handle)) in block_index_entries.iter().enumerate() {
+            let block_id = u32::try_from(block_index).unwrap_or(u32::MAX);
+            if let Err(error) = trie_writer.add_block_key(first_key, block_id) {
+                tracing::warn!(%error, "trie index cannot represent SST keys; using sparse index");
+                return None;
+            }
+        }
+        trie_writer.finish()
+    }
+
+    fn effective_index_kind(chosen: IndexKind, trie_bytes: Option<&Vec<u8>>) -> IndexKind {
+        if trie_bytes.is_some() {
+            chosen
+        } else {
+            IndexKind::Sparse
+        }
+    }
+
     fn append_trie_block(
         file_bytes: &mut Vec<u8>,
         compression_policy: &CompressionPolicy,
-        index_kind: IndexKind,
-        block_index_entries: &[(Vec<u8>, BlockHandle)],
+        trie_bytes: Option<&Vec<u8>>,
     ) -> MidgeResult<Option<BlockHandle>> {
-        if !matches!(index_kind, IndexKind::Trie) {
-            return Ok(None);
-        }
-
-        let mut trie_writer = TrieWriter::new(true);
-        for (block_index, (first_key, _handle)) in block_index_entries.iter().enumerate() {
-            trie_writer.add_block_key(first_key, u32::try_from(block_index).unwrap_or(u32::MAX))?;
-        }
-
-        match trie_writer.finish() {
-            Some(trie_bytes) => {
-                Self::append_block(file_bytes, &trie_bytes, compression_policy).map(Some)
-            }
-            None => Ok(None),
-        }
+        trie_bytes
+            .map(|bytes| Self::append_block(file_bytes, bytes, compression_policy))
+            .transpose()
     }
 
     fn append_metadata_index_and_footer(
@@ -660,27 +678,18 @@ impl InMemorySstWriter {
     fn append_trie_block_to_stream(
         state: &mut StreamingState,
         compression_policy: &CompressionPolicy,
-        index_kind: IndexKind,
+        trie_bytes: Option<&Vec<u8>>,
     ) -> MidgeResult<Option<BlockHandle>> {
-        if !matches!(index_kind, IndexKind::Trie) {
-            return Ok(None);
-        }
-
-        let mut trie_writer = TrieWriter::new(true);
-        for (block_index, (first_key, _)) in state.block_index_entries.iter().enumerate() {
-            trie_writer.add_block_key(first_key, u32::try_from(block_index).unwrap_or(u32::MAX))?;
-        }
-
-        match trie_writer.finish() {
-            Some(bytes) => Self::append_block_to_stream(
-                state.scratch.as_file_mut(),
-                &mut state.offset,
-                &bytes,
-                compression_policy,
-            )
-            .map(Some),
-            None => Ok(None),
-        }
+        trie_bytes
+            .map(|bytes| {
+                Self::append_block_to_stream(
+                    state.scratch.as_file_mut(),
+                    &mut state.offset,
+                    bytes,
+                    compression_policy,
+                )
+            })
+            .transpose()
     }
 
     fn append_metadata_index_and_footer_to_stream(
@@ -779,9 +788,11 @@ impl InMemorySstWriter {
             range_tombstones,
             compression_policy,
         )?;
-        let index_kind = IndexTuner::decide(&std::mem::take(&mut state.key_profiler).finish());
+        let chosen = IndexTuner::decide(&std::mem::take(&mut state.key_profiler).finish());
+        let trie_bytes = Self::build_trie_index(chosen, &state.block_index_entries);
+        let index_kind = Self::effective_index_kind(chosen, trie_bytes.as_ref());
         let trie_handle =
-            Self::append_trie_block_to_stream(&mut state, compression_policy, index_kind)?;
+            Self::append_trie_block_to_stream(&mut state, compression_policy, trie_bytes.as_ref())?;
         let metadata = SstMetadata {
             format_version: SST_FORMAT_V4,
             index_kind,
@@ -1103,12 +1114,13 @@ impl DynSstWriter for InMemorySstWriter {
         let mut finalized = writer.finalize_data_blocks(entries)?;
         let range_tombstone_handle =
             writer.append_range_tombstone_block(&mut finalized.file_bytes)?;
-        let index_kind = IndexTuner::decide(&finalized.key_profile);
+        let chosen = IndexTuner::decide(&finalized.key_profile);
+        let trie_bytes = Self::build_trie_index(chosen, &finalized.block_index_entries);
+        let index_kind = Self::effective_index_kind(chosen, trie_bytes.as_ref());
         let trie_handle = Self::append_trie_block(
             &mut finalized.file_bytes,
             &writer.compression_policy,
-            index_kind,
-            &finalized.block_index_entries,
+            trie_bytes.as_ref(),
         )?;
         let metadata = SstMetadata {
             format_version: SST_FORMAT_V4,

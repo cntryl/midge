@@ -394,38 +394,25 @@ impl SkipListMemtable {
         snapshot_seq: u64,
         now_millis: u64,
     ) -> Vec<(Vec<u8>, crate::sst::types::KeyState)> {
-        use std::collections::BTreeMap;
-
-        let mut by_key = BTreeMap::new();
-
-        for (key, value, seq, is_tombstone, exp, op) in self.skiplist.drain_with_meta_with_exp() {
-            if snapshot_seq != u64::MAX && seq > snapshot_seq {
-                continue;
-            }
-            if start.is_some_and(|s| key.as_ref() < s) {
-                continue;
-            }
-            if end.is_some_and(|e| key.as_ref() >= e) {
-                continue;
-            }
-            if by_key.contains_key(key.as_ref()) {
-                continue;
-            }
-
-            let state = match (value, is_tombstone) {
-                (_, true) | (None, _) => crate::sst::types::KeyState::Tombstone(seq),
-                (Some(value), false) => {
-                    if Self::is_expired_at(exp, now_millis) {
-                        crate::sst::types::KeyState::Tombstone(seq)
-                    } else {
-                        crate::sst::types::KeyState::Value(value, seq, exp, op.as_u8())
+        // Seek into the range instead of copying every version of the whole
+        // memtable and filtering afterwards: a scan's cost follows its range.
+        self.skiplist
+            .range_visible_with_meta(start, end, snapshot_seq)
+            .into_iter()
+            .map(|(key, value, seq, is_tombstone, exp, op)| {
+                let state = match (value, is_tombstone) {
+                    (_, true) | (None, _) => crate::sst::types::KeyState::Tombstone(seq),
+                    (Some(value), false) => {
+                        if Self::is_expired_at(exp, now_millis) {
+                            crate::sst::types::KeyState::Tombstone(seq)
+                        } else {
+                            crate::sst::types::KeyState::Value(value, seq, exp, op.as_u8())
+                        }
                     }
-                }
-            };
-            by_key.insert(key.to_vec(), state);
-        }
-
-        by_key.into_iter().collect()
+                };
+                (key.to_vec(), state)
+            })
+            .collect()
     }
 
     /// Put with explicit sequence and optional expiration (Unix millis)
@@ -639,6 +626,52 @@ mod tests {
     use crate::MidgeError;
     use bytes::Bytes;
     use std::sync::Arc;
+
+    #[test]
+    fn should_return_newest_visible_state_per_key_only_within_range(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let memtable = SkipListMemtable::new();
+        memtable.put_with_seq(b"a".to_vec(), b"before-range".to_vec(), 1, None)?;
+        memtable.put_with_seq(b"b".to_vec(), b"old".to_vec(), 2, None)?;
+        memtable.put_with_seq(b"b".to_vec(), b"new".to_vec(), 5, None)?;
+        memtable.put_with_seq(b"c".to_vec(), b"live".to_vec(), 3, None)?;
+        memtable.delete_bytes_with_seq(Bytes::from_static(b"c"), 6)?;
+        memtable.put_with_seq(b"d".to_vec(), b"expired".to_vec(), 4, Some(10))?;
+        memtable.put_with_seq(b"z".to_vec(), b"after-range".to_vec(), 7, None)?;
+
+        // Act
+        let latest = memtable.range_state_at_with_time(Some(b"b"), Some(b"z"), u64::MAX, 100);
+        let at_seq_4 = memtable.range_state_at_with_time(Some(b"b"), Some(b"z"), 4, 100);
+
+        // Assert
+        assert_eq!(
+            latest,
+            vec![
+                (
+                    b"b".to_vec(),
+                    KeyState::Value(Bytes::from_static(b"new"), 5, None, 0)
+                ),
+                (b"c".to_vec(), KeyState::Tombstone(6)),
+                (b"d".to_vec(), KeyState::Tombstone(4)),
+            ]
+        );
+        assert_eq!(
+            at_seq_4,
+            vec![
+                (
+                    b"b".to_vec(),
+                    KeyState::Value(Bytes::from_static(b"old"), 2, None, 0)
+                ),
+                (
+                    b"c".to_vec(),
+                    KeyState::Value(Bytes::from_static(b"live"), 3, None, 0)
+                ),
+                (b"d".to_vec(), KeyState::Tombstone(4)),
+            ]
+        );
+        Ok(())
+    }
 
     #[test]
     fn should_match_flush_writer_bound_when_memtable_contains_versions_and_range_tombstones() {

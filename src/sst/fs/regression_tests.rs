@@ -177,3 +177,36 @@ fn should_roundtrip_maximum_decoded_entry_when_writing_sorted_or_unsorted() {
         );
     }
 }
+
+#[test]
+fn should_read_back_sst_when_keys_share_prefix_longer_than_trie_can_encode() {
+    // Arrange: enough keys for the tuner to choose a trie index, all sharing
+    // a prefix longer than the trie's u16 prefix length. The write path
+    // accepts such keys, so flush and compaction must still succeed.
+    let dir = tempfile::tempdir().unwrap();
+    let factory = FsSstFactoryIo::new(Arc::new(crate::io::RealFs::new(dir.path()).unwrap()), 4096);
+    let prefix = vec![b'P'; 70_000];
+    let keys: Vec<Vec<u8>> = (0_u32..200)
+        .map(|index| {
+            let mut key = prefix.clone();
+            key.extend_from_slice(&index.to_be_bytes());
+            key
+        })
+        .collect();
+    let mut writer = factory.create().unwrap();
+    for key in &keys {
+        writer
+            .add_sorted_with_meta(key, Some(b"v"), 1, 0, None)
+            .unwrap();
+    }
+
+    // Act
+    let written = crate::sst::fs::finish_writer_to_path(writer, &dir.path().join("long.sst"));
+
+    // Assert
+    written.expect("an SST of accepted keys must always be writable");
+    let reader = factory.open(Path::new("long.sst")).unwrap();
+    for key in [&keys[0], &keys[99], &keys[199]] {
+        assert_eq!(reader.get(key).unwrap().as_deref(), Some(b"v".as_slice()));
+    }
+}
