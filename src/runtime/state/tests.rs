@@ -1918,15 +1918,15 @@ fn should_protect_every_memtable_generation_when_computing_cloud_wal_floor() {
         .unwrap();
 
     // Act
-    let initial = state.cloud_wal_recovery_floor_segment();
+    let initial = state.wal_recovery_floor_segment();
     let (_, queued) = state
         .immutable_flush_by_id_mut(generation.flush_id)
         .unwrap();
     queued.phase = ImmutableFlushPhase::RetryPending;
     queued.retry_at = Instant::now() + Duration::from_mins(1);
-    let retrying = state.cloud_wal_recovery_floor_segment();
+    let retrying = state.wal_recovery_floor_segment();
     state.complete_immutable_flush(0, &frozen).unwrap();
-    let after_publication = state.cloud_wal_recovery_floor_segment();
+    let after_publication = state.wal_recovery_floor_segment();
 
     // Assert
     assert_eq!(initial, Some(5));
@@ -1946,7 +1946,7 @@ fn should_retain_all_wal_when_immutable_provenance_is_untracked() {
         .push(Arc::new(SkipListMemtable::new()));
 
     // Act
-    let floor = state.cloud_wal_recovery_floor_segment();
+    let floor = state.wal_recovery_floor_segment();
 
     // Assert
     assert_eq!(floor, None);
@@ -1970,7 +1970,7 @@ fn should_preserve_active_wal_floor_when_freeze_identity_is_exhausted() {
 
     // Assert
     assert!(generation.is_none());
-    assert_eq!(state.cloud_wal_recovery_floor_segment(), Some(3));
+    assert_eq!(state.wal_recovery_floor_segment(), Some(3));
     assert!(state.get_cf(0).unwrap().immutable_memtables.is_empty());
 }
 
@@ -1987,7 +1987,7 @@ fn should_retain_all_wal_when_tracked_generation_provenance_is_unknown() {
         .first_wal_segment = None;
 
     // Act
-    let floor = state.cloud_wal_recovery_floor_segment();
+    let floor = state.wal_recovery_floor_segment();
 
     // Assert
     assert_eq!(floor, None);

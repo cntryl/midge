@@ -45,6 +45,13 @@ If the active WAL ends with a typed incomplete-tail condition beyond byte 0:
 - the truncated tail is discarded
 - recovery continues
 
+Replay itself never modifies the file, so `midge verify` stays read-only. Before
+the local engine reopens `wal.log` for append, it truncates the file to the
+verified prefix and fsyncs it. Without this, new frames would land after the
+torn bytes, and the next recovery would see mid-file corruption instead of a
+tail. If the truncation fails, the open fails under both recovery policies.
+Cloud recovery applies the same truncation to its local active WAL.
+
 This includes a partial final header or payload with no verified frame after it,
 and an all-zero final region left by file preallocation. These are the expected
 shapes of a torn or unwritten final append. Recovery does not infer this state
@@ -54,6 +61,15 @@ If a declared payload length overruns EOF but the bytes it would otherwise hide
 contain a CRC-valid, decodable WAL frame, the length field is corrupt rather
 than a final torn append. Strict recovery fails; salvage recovery retains only
 the verified prefix and reports degraded health.
+
+### Oversized records
+
+Replay decompresses a record VALUE under a fixed 64 MiB ceiling
+(`WAL_MAX_VALUE_LEN`). The writer enforces the same ceiling on the
+uncompressed VALUE, including a whole transaction batch, before any byte is
+written, and rejects the commit with `ResourceLimit`. Compression can shrink a
+frame below the frame limit, so checking only the frame would let an
+acknowledged record fail every later replay.
 
 ### Partial WAL entry
 
@@ -69,6 +85,19 @@ If corruption is detected at byte 0 or inside the non-tail durable prefix:
 
 - strict recovery fails open
 - salvage mode may keep the valid prefix and mark the engine degraded
+
+## Manifest Journal Tail
+
+Each manifest journal append ends with a CRC-checked fsync marker. Replay keeps
+edits only up to the last marker. A record at EOF whose header or payload is
+incomplete is a torn final append, and the next append rewrites the journal to
+the last marker.
+
+The record CRC covers only the payload, so a corrupt length field looks the
+same as a torn payload. If the bytes that length would swallow contain a
+verified fsync marker, the length is corrupt: durable edits follow it. Replay
+then fails with corruption instead of treating it as a tail, and the journal
+is never truncated past those edits.
 
 ## Strict vs Salvage Recovery
 
@@ -89,7 +118,19 @@ Use salvage recovery when the operator would rather keep the valid prefix than f
 Salvage mode:
 
 - keeps the valid WAL prefix when possible
+- when WAL replay stops at a corrupt frame, moves every WAL file it did not
+  reach into `wal/salvaged-<millis>/` (the file holding the corrupt frame is
+  copied there in full, then truncated to its replayed prefix) and raises the
+  recovered sequence above what those files hold, so new writes never land
+  behind the corruption or reuse its sequences
+- keeps the durable manifest journal prefix up to the last fsync marker
+  before a corrupt record, copies the corrupt journal to
+  `manifest.journal.corrupt.<millis>`, and checkpoints the salvaged manifest
+  into a fresh snapshot so later journal appends work again
 - preserves authoritative pre-publication SST state if interrupted output cannot be safely published
+- never deletes SST files missing from the recovered manifest; a salvaged
+  manifest may be a fallback or truncated replay, so startup residue cleanup
+  retains them and logs them for operator review
 - marks the engine degraded or in salvage mode for diagnostics
 
 ## Flush Recovery

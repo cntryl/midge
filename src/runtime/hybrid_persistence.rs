@@ -182,6 +182,9 @@ struct ValidatedWalPruneCandidate {
 struct ExactCoverageState {
     state: Option<crate::sst::types::KeyState>,
     ambiguous: bool,
+    /// SST range tombstones at or above a range-delete record's sequence,
+    /// clipped to the record's range.
+    range_cover: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 pub(crate) type CloudWalPruneBatchResults = Vec<(u64, MidgeResult<()>)>;
@@ -982,12 +985,59 @@ impl ExactCoverageState {
         }
     }
 
+    /// Record an SST range tombstone for a range-delete record. Only a
+    /// tombstone at or above the record's sequence can stand in for it.
+    fn observe_range_tombstone(
+        &mut self,
+        tombstone: &crate::sst::types::RangeTombstone,
+        record: &DataCoverageRecord,
+    ) {
+        let Some(range_end) = record.range_end.as_deref() else {
+            return;
+        };
+        if tombstone.seq < record.seq {
+            return;
+        }
+        let start = tombstone.start.as_slice().max(record.key.as_slice());
+        let end = tombstone.end.as_slice().min(range_end);
+        if start < end {
+            self.range_cover.push((start.to_vec(), end.to_vec()));
+        }
+    }
+
+    /// Whether the observed tombstones cover `[start, end)` with no gap. An
+    /// empty or inverted range is malformed, so it is never treated as proven.
+    fn range_covered(&self, start: &[u8], end: &[u8]) -> bool {
+        if start >= end {
+            return false;
+        }
+        let mut intervals: Vec<_> = self.range_cover.iter().collect();
+        intervals.sort_by(|left, right| left.0.cmp(&right.0));
+        let mut covered_to = start;
+        for (interval_start, interval_end) in intervals {
+            if interval_start.as_slice() > covered_to {
+                return false;
+            }
+            covered_to = covered_to.max(interval_end.as_slice());
+            if covered_to >= end {
+                return true;
+            }
+        }
+        covered_to >= end
+    }
+
     fn exactly_covers(&self, record: &DataCoverageRecord) -> bool {
         use crate::sst::types::KeyState;
         use crate::wal::types::WalOpRole;
 
-        if self.ambiguous || matches!(record.op.role(), WalOpRole::RangeDelete) {
+        if self.ambiguous {
             return false;
+        }
+        if matches!(record.op.role(), WalOpRole::RangeDelete) {
+            return record
+                .range_end
+                .as_deref()
+                .is_some_and(|end| self.range_covered(&record.key, end));
         }
         match self.state.as_ref() {
             Some(KeyState::Value(value, sequence, expiration, op_type)) => {
@@ -1098,6 +1148,24 @@ fn wal_data_records_exactly_covered_by_manifest(
         .iter()
         .zip(states)
         .all(|(record, state)| state.exactly_covers(record))
+}
+
+/// Whether `file` may hold range tombstones overlapping a range-delete record.
+/// Files without trustworthy key bounds are always consulted.
+fn file_may_overlap_record_range(file: &FileMeta, record: &DataCoverageRecord) -> bool {
+    if file.cf_id != record.cf_id {
+        return false;
+    }
+    let Some(range_end) = record.range_end.as_deref() else {
+        return false;
+    };
+    let (Some(smallest_key), Some(largest_key)) =
+        (file.smallest_key.as_ref(), file.largest_key.as_ref())
+    else {
+        return !file.key_bounds_complete;
+    };
+    !file.key_bounds_complete
+        || smallest_key.as_slice() < range_end && record.key.as_slice() <= largest_key.as_slice()
 }
 
 fn file_may_contain_record_key(file: &FileMeta, record: &DataCoverageRecord) -> bool {

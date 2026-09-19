@@ -326,3 +326,101 @@ fn should_account_resident_outputs_when_compaction_publication_retains_inputs() 
     assert!(!event_loop.state.intent_log.is_empty());
     Ok(())
 }
+
+struct NewerHolderLeaderStore;
+
+impl crate::lease::LeaderStore for NewerHolderLeaderStore {
+    fn acquire_leadership(
+        &self,
+        _holder_id: &str,
+    ) -> Result<crate::lease::LeaderRecord, crate::lease::LeaseError> {
+        Err(crate::lease::LeaseError::Internal(
+            "test leader store does not acquire leadership".to_string(),
+        ))
+    }
+
+    fn read_current(&self) -> Result<Option<crate::lease::LeaderRecord>, crate::lease::LeaseError> {
+        Ok(Some(crate::lease::LeaderRecord {
+            epoch: 2,
+            holder_id: "new-writer".to_string(),
+            acquired_at: "test".to_string(),
+        }))
+    }
+}
+
+fn stale_writer_event_loop(directory: &tempfile::TempDir) -> MidgeResult<EventLoop> {
+    let state = crate::runtime::RuntimeState::new(directory.path().to_path_buf(), false);
+    let leader_store: Arc<dyn crate::lease::LeaderStore> = Arc::new(NewerHolderLeaderStore);
+    let config = crate::runtime::RuntimeConfig {
+        writer_epoch: 1,
+        leader_store: Some(leader_store),
+        leader_holder_id: Some("old-writer".to_string()),
+        ..crate::runtime::RuntimeConfig::default()
+    };
+    EventLoop::new(
+        state,
+        false,
+        Arc::new(crate::runtime::ResponseRouter::new()),
+        config,
+        None,
+    )
+}
+
+#[test]
+fn should_reject_compaction_publication_when_writer_lease_moved_to_newer_holder() -> MidgeResult<()>
+{
+    // Arrange
+    let directory = tempfile::tempdir()?;
+    let mut event_loop = stale_writer_event_loop(&directory)?;
+    let intents_before = event_loop.state.intent_log.len();
+    let budget = crate::common::resource_budget::ResourceBudget::new(64);
+
+    // Act
+    let result = CompactionCoordinator::publish_compaction_manifest(
+        &mut event_loop,
+        &["input.sst".to_string()],
+        &[],
+        0,
+        &[],
+        &budget,
+    );
+
+    // Assert
+    assert!(
+        matches!(result, Err(MidgeError::Fenced(_))),
+        "a stale writer must not publish compaction output: {result:?}"
+    );
+    assert_eq!(
+        event_loop.state.intent_log.len(),
+        intents_before,
+        "a fenced publication must not record a publication intent"
+    );
+    Ok(())
+}
+
+#[test]
+fn should_retain_compaction_inputs_when_writer_lease_moved_before_input_gc() -> MidgeResult<()> {
+    // Arrange
+    let directory = tempfile::tempdir()?;
+    let mut event_loop = stale_writer_event_loop(&directory)?;
+    let input_name = crate::sst::compaction_file_name(0, 1, 1, 0);
+    let input_path = event_loop.state.sst_dir.join(&input_name);
+    std::fs::create_dir_all(&event_loop.state.sst_dir)?;
+    std::fs::write(&input_path, b"still read by the new holder")?;
+
+    // Act
+    CompactionCoordinator::finalize_published_compaction(
+        &mut event_loop,
+        7_330,
+        std::slice::from_ref(&input_name),
+        &[],
+        None,
+    );
+
+    // Assert
+    assert!(
+        input_path.exists(),
+        "a stale writer must not delete compaction inputs the new holder may still read"
+    );
+    Ok(())
+}

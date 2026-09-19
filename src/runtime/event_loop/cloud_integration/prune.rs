@@ -146,7 +146,7 @@ impl EventLoop {
             return;
         };
         storage.configure_maintenance_memory(self.compaction_actor.compaction_memory_limit());
-        let Some(recovery_floor_segment) = self.state.cloud_wal_recovery_floor_segment() else {
+        let Some(recovery_floor_segment) = self.state.wal_recovery_floor_segment() else {
             return;
         };
         let persisted_sequence = self.state.manifest.last_persisted_sequence;

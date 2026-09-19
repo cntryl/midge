@@ -268,6 +268,64 @@ pub(crate) fn replay_edits_after_with_fs_unlocked(
         .collect())
 }
 
+/// Durable journal prefix recovered by salvage replay.
+pub(crate) struct SalvagedJournal {
+    /// Durable edits newer than the checkpoint, up to the last fsync marker
+    /// before any corrupt record.
+    pub(crate) edits: Vec<ManifestEdit>,
+    /// Highest edit id in the durable prefix.
+    pub(crate) max_edit_id: u64,
+    /// The first corrupt record, if replay stopped early.
+    pub(crate) corruption: Option<String>,
+}
+
+/// Replay the journal, stopping at the first corrupt record instead of
+/// failing, and keep every durable edit before it.
+pub(crate) fn salvage_edits_after_with_fs_unlocked(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+    checkpoint: u64,
+) -> MidgeResult<SalvagedJournal> {
+    let replay = replay_journal_with_mode(fs, JournalReplayMode::SalvagePrefix)?;
+    Ok(SalvagedJournal {
+        edits: replay
+            .edits
+            .into_iter()
+            .filter(|edit| edit.edit_id > checkpoint)
+            .map(|edit| edit.edit)
+            .collect(),
+        max_edit_id: replay.max_edit_id,
+        corruption: replay.corruption,
+    })
+}
+
+/// Durably copy the current journal to `manifest.journal.corrupt.<millis>`
+/// so an operator can inspect it after salvage rewrites the journal.
+pub(crate) fn preserve_corrupt_journal_with_fs_unlocked(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+) -> MidgeResult<String> {
+    use crate::io::traits::FsPath;
+
+    let Some(file) = open_journal_for_replay(fs)? else {
+        return Err(crate::common::MidgeError::Internal(
+            "manifest journal disappeared before it could be preserved".to_string(),
+        ));
+    };
+    let len = file.len().map_err(crate::common::MidgeError::from)?;
+    let bytes = file
+        .read_at(0, len)
+        .map_err(crate::common::MidgeError::from)?;
+    drop(file);
+    let preserved = format!("{JOURNAL_FILE}.corrupt.{}", millis_since_epoch());
+    crate::io::staging::stage_bytes(
+        fs,
+        &FsPath::new(format!("{preserved}.tmp")),
+        &FsPath::new(&preserved),
+        &bytes,
+        crate::common::MidgeError::Internal,
+    )?;
+    Ok(preserved)
+}
+
 /// Append an edit to the manifest journal using a provided Fs (preferred).
 pub fn append_edit_with_fs(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
@@ -430,6 +488,21 @@ fn replay_journal_with_ids_with_fs(
 fn replay_journal_with_state(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
 ) -> MidgeResult<JournalReplay> {
+    replay_journal_with_mode(fs, JournalReplayMode::Strict)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JournalReplayMode {
+    /// Any corrupt record fails replay.
+    Strict,
+    /// Stop at the first corrupt record and keep the durable prefix.
+    SalvagePrefix,
+}
+
+fn replay_journal_with_mode(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+    mode: JournalReplayMode,
+) -> MidgeResult<JournalReplay> {
     let Some(file) = open_journal_for_replay(fs)? else {
         return Ok(JournalReplay::empty());
     };
@@ -438,13 +511,30 @@ fn replay_journal_with_state(
     let mut state = JournalReplayState::default();
     let mut offset: u64 = 0;
     let mut tail = JournalReplayTail::Clean;
+    let mut corruption = None;
 
     while offset < file_len {
-        match read_journal_record(&*file, offset, file_len)? {
+        let status = match read_journal_record(&*file, offset, file_len) {
+            Ok(status) => status,
+            Err(error) if mode == JournalReplayMode::SalvagePrefix => {
+                corruption = Some(format!("at byte {offset}: {error}"));
+                break;
+            }
+            Err(error) => return Err(error),
+        };
+        match status {
             JournalRecordStatus::Record(record) => {
                 offset = record.next_offset;
-                validate_journal_record_crc(&record)?;
-                handle_journal_record(&record, &mut state)?;
+                let applied = validate_journal_record_crc(&record)
+                    .and_then(|()| handle_journal_record(&record, &mut state));
+                match applied {
+                    Ok(()) => {}
+                    Err(error) if mode == JournalReplayMode::SalvagePrefix => {
+                        corruption = Some(format!("at byte {}: {error}", record.record_start));
+                        break;
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             JournalRecordStatus::PartialHeader { record_start } => {
                 tail = JournalReplayTail::PartialEof {
@@ -492,6 +582,7 @@ fn replay_journal_with_state(
         max_edit_id,
         file_len,
         tail,
+        corruption,
     })
 }
 
@@ -500,6 +591,8 @@ struct JournalReplay {
     max_edit_id: u64,
     file_len: u64,
     tail: JournalReplayTail,
+    /// First corrupt record, when replay ran in salvage mode and stopped.
+    corruption: Option<String>,
 }
 
 impl JournalReplay {
@@ -509,6 +602,7 @@ impl JournalReplay {
             max_edit_id: 0,
             file_len: 0,
             tail: JournalReplayTail::Clean,
+            corruption: None,
         }
     }
 }
@@ -592,6 +686,18 @@ fn read_journal_record(
     let payload_offset = len_offset + 4;
 
     if payload_offset + (len as u64) + 4 > file_len {
+        // A torn final append leaves only garbage after its header. If the
+        // bytes this length would swallow hold a verified fsync marker, the
+        // length itself is corrupt and truncating here would erase durable
+        // edits (the same shape the WAL rejects after #153).
+        let rest = file
+            .read_at(payload_offset, file_len - payload_offset)
+            .map_err(crate::common::MidgeError::from)?;
+        if contains_verified_fsync_marker(&rest) {
+            return Err(crate::common::MidgeError::Corruption(format!(
+                "manifest journal record length at byte {record_start} overruns EOF and hides a verified later record (len={len}, file_len={file_len})"
+            )));
+        }
         return Ok(JournalRecordStatus::PartialPayload { record_start });
     }
 
@@ -611,6 +717,44 @@ fn read_journal_record(
         got_crc,
         next_offset: crc_offset + 4,
     }))
+}
+
+/// Whether `bytes` contain a complete, CRC-valid fsync marker record. Every
+/// durable append ends with one, so finding one proves durable data follows.
+fn contains_verified_fsync_marker(bytes: &[u8]) -> bool {
+    const HEADER_LEN: usize = 5;
+    const CRC_LEN: usize = 4;
+    let mut start = 0;
+    while let Some(found) = bytes[start..]
+        .iter()
+        .position(|byte| *byte == FSYNC_MARKER_TYPE)
+    {
+        let record_start = start + found;
+        start = record_start + 1;
+        let Some(len_bytes) = bytes.get(record_start + 1..record_start + HEADER_LEN) else {
+            return false;
+        };
+        let len =
+            u32::from_le_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]) as usize;
+        let payload_start = record_start + HEADER_LEN;
+        let Some(crc_start) = payload_start.checked_add(len) else {
+            continue;
+        };
+        let Some(crc_bytes) = crc_start
+            .checked_add(CRC_LEN)
+            .and_then(|crc_end| bytes.get(crc_start..crc_end))
+        else {
+            continue;
+        };
+        let payload = &bytes[payload_start..crc_start];
+        let mut hasher = Crc32::new();
+        hasher.update(payload);
+        let expected = u32::from_le_bytes([crc_bytes[0], crc_bytes[1], crc_bytes[2], crc_bytes[3]]);
+        if hasher.finalize() == expected && journal_deserialize::<FsyncMarker>(payload).is_ok() {
+            return true;
+        }
+    }
+    false
 }
 
 fn validate_journal_record_type(record_type: u8, record_start: u64) -> MidgeResult<()> {
@@ -1171,6 +1315,81 @@ mod tests {
 
         // Assert
         assert!(matches!(error, crate::common::MidgeError::Corruption(_)));
+    }
+
+    fn corrupt_journal_record_length(db: &std::path::Path, record_start: u64, len: u32) {
+        use std::io::Seek as _;
+        let mut journal = std::fs::OpenOptions::new()
+            .write(true)
+            .open(db.join(JOURNAL_FILE))
+            .expect("open journal for length corruption");
+        journal
+            .seek(std::io::SeekFrom::Start(record_start + 1))
+            .expect("seek to record length");
+        journal
+            .write_all(&len.to_le_bytes())
+            .expect("overwrite record length");
+        journal.sync_all().expect("sync corrupted journal");
+    }
+
+    #[test]
+    fn should_fail_replay_when_corrupt_length_hides_durable_later_records() {
+        // Arrange
+        let td = tempdir().expect("create temp directory");
+        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 1 }).expect("append first");
+        let second_start = std::fs::metadata(td.path().join(JOURNAL_FILE))
+            .expect("journal metadata")
+            .len();
+        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 2 }).expect("append second");
+        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 3 }).expect("append third");
+        corrupt_journal_record_length(td.path(), second_start, u32::MAX);
+
+        // Act
+        let error = replay_journal(td.path())
+            .expect_err("a length that hides durable later records is corruption, not a torn tail");
+
+        // Assert
+        match error {
+            crate::common::MidgeError::Corruption(message) => {
+                assert!(
+                    message.contains("hides a verified later record"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected corruption, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn should_not_truncate_journal_when_corrupt_length_hides_durable_later_records() {
+        // Arrange
+        let td = tempdir().expect("create temp directory");
+        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 1 }).expect("append first");
+        let second_start = std::fs::metadata(td.path().join(JOURNAL_FILE))
+            .expect("journal metadata")
+            .len();
+        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 2 }).expect("append second");
+        append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 3 }).expect("append third");
+        corrupt_journal_record_length(td.path(), second_start, u32::MAX);
+        let corrupted_len = std::fs::metadata(td.path().join(JOURNAL_FILE))
+            .expect("journal metadata")
+            .len();
+
+        // Act
+        let result = append_edit(td.path(), &ManifestEdit::BumpWalSeq { seq: 4 });
+
+        // Assert
+        assert!(
+            result.is_err(),
+            "append must not repair past durable records"
+        );
+        assert_eq!(
+            std::fs::metadata(td.path().join(JOURNAL_FILE))
+                .expect("journal metadata")
+                .len(),
+            corrupted_len,
+            "durable later records must stay on disk"
+        );
     }
 
     #[test]
