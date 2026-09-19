@@ -5,6 +5,7 @@ use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -24,6 +25,9 @@ pub(crate) struct SnapshotPinRegistry {
     /// by acquisition token. The compaction horizon must not pass them.
     inflight_floors: DashMap<u64, u64>,
     next_acquisition: std::sync::atomic::AtomicU64,
+    /// Set while GC is deferred behind an in-flight acquisition, so the
+    /// acquisition's owner can request a retry once it has finished.
+    gc_deferred: AtomicBool,
 }
 
 pub(crate) struct SnapshotAcquisitionGuard<'a> {
@@ -117,6 +121,7 @@ impl SnapshotPinRegistry {
         self.active.len()
     }
 
+    #[cfg(test)]
     pub(crate) fn pinned_sst_names(&self, max_lifetime: Duration) -> HashSet<String> {
         // GC must exclude the capture-to-registration window. Snapshot
         // acquisition takes a shared guard, so the exclusive guard here waits
@@ -128,9 +133,32 @@ impl SnapshotPinRegistry {
     /// Like [`Self::pinned_sst_names`], but returns `None` instead of waiting
     /// while a snapshot acquisition is in progress. The event loop must use
     /// this: an acquiring API thread can itself be waiting on the event loop.
+    ///
+    /// A `None` result leaves [`Self::take_gc_deferred`] set. The flag is
+    /// raised before the try-lock, so an acquisition that ends concurrently
+    /// still observes it after releasing its guard.
     pub(crate) fn try_pinned_sst_names(&self, max_lifetime: Duration) -> Option<HashSet<String>> {
+        self.gc_deferred.store(true, Ordering::SeqCst);
         let guard = self.acquisition.try_write()?;
+        self.gc_deferred.store(false, Ordering::SeqCst);
         Some(self.sample_pinned_sst_names(&guard, max_lifetime))
+    }
+
+    /// Return whether GC deferred behind an acquisition, clearing the flag.
+    /// Call it only after releasing the acquisition guard.
+    pub(crate) fn take_gc_deferred(&self) -> bool {
+        self.gc_deferred.swap(false, Ordering::SeqCst)
+    }
+
+    /// Pin sample for metrics. It skips the acquisition exclusion because a
+    /// gauge can tolerate the capture-to-registration window, and the event
+    /// loop must not wait on an acquiring API thread.
+    pub(crate) fn observed_pinned_sst_count(&self) -> usize {
+        let mut pinned = HashSet::new();
+        for entry in &self.active {
+            pinned.extend(entry.value().pinned_ssts.iter().cloned());
+        }
+        pinned.len()
     }
 
     fn sample_pinned_sst_names(
@@ -319,5 +347,26 @@ mod tests {
         assert_eq!(registry.oldest_sequence(), Some(42));
         let pinned = registry.pinned_sst_names(Duration::from_mins(1));
         assert!(pinned.contains("a.sst"));
+    }
+
+    #[test]
+    fn should_clear_gc_deferral_when_pin_sample_succeeds() {
+        // Arrange
+        let registry = SnapshotPinRegistry::default();
+        let acquisition = registry.begin_acquisition(0);
+        assert!(registry
+            .try_pinned_sst_names(Duration::from_mins(1))
+            .is_none());
+        drop(acquisition);
+
+        // Act
+        let sampled = registry.try_pinned_sst_names(Duration::from_mins(1));
+
+        // Assert
+        assert!(sampled.is_some());
+        assert!(
+            !registry.take_gc_deferred(),
+            "a successful sample must not leave a stale retry request"
+        );
     }
 }

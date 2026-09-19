@@ -41,6 +41,7 @@ impl RuntimeState {
 
     /// Get list of SSTs referenced by active snapshots.
     /// These SSTs must NOT be deleted during garbage collection.
+    #[cfg(test)]
     pub fn get_pinned_sst_names(&self) -> HashSet<String> {
         self.snapshot_pins
             .pinned_sst_names(self.snapshots.max_snapshot_lifetime)

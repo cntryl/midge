@@ -102,8 +102,11 @@ impl RuntimeHandle {
     pub(crate) fn begin_snapshot_acquisition(
         &self,
         sequence_floor: u64,
-    ) -> snapshot_pins::SnapshotAcquisitionGuard<'_> {
-        self.snapshot_pins.begin_acquisition(sequence_floor)
+    ) -> RuntimeSnapshotAcquisition<'_> {
+        RuntimeSnapshotAcquisition {
+            guard: Some(self.snapshot_pins.begin_acquisition(sequence_floor)),
+            handle: self,
+        }
     }
 
     pub(crate) fn register_snapshot_pin_while_acquiring(
@@ -677,6 +680,23 @@ impl RuntimeHandle {
                 "Unexpected response to CheckWriteStall".to_string(),
             )),
             None => Ok(true),
+        }
+    }
+}
+
+/// Snapshot acquisition held by an API thread. When it ends it queues a GC
+/// retry on the API queue if GC deferred behind it, so the retry runs after
+/// the request that caller was waiting on.
+pub(crate) struct RuntimeSnapshotAcquisition<'a> {
+    guard: Option<snapshot_pins::SnapshotAcquisitionGuard<'a>>,
+    handle: &'a RuntimeHandle,
+}
+
+impl Drop for RuntimeSnapshotAcquisition<'_> {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+        if self.handle.snapshot_pins.take_gc_deferred() {
+            let _ = self.handle.msg_tx.try_send(RuntimeMsg::RetryGc);
         }
     }
 }

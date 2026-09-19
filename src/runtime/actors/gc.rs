@@ -152,7 +152,7 @@ impl GcActor {
         // Get set of SSTs pinned by active snapshots. GC runs on the event
         // loop, and a thread acquiring a snapshot may hold the acquisition
         // guard while it waits on that loop, so never block here: defer the
-        // whole batch and retry after the queued work drains.
+        // whole batch until that acquisition ends.
         let Some(pinned_ssts) = state.try_get_pinned_sst_names() else {
             self.defer_until_snapshot_acquisition_ends(sst_names);
             return;
@@ -283,9 +283,10 @@ impl GcActor {
             deferred = sst_names.len(),
             "deferring SST GC while a snapshot acquisition is in progress"
         );
-        if let Some(notifier) = &self.retry_notifier {
-            let _ = notifier.try_send(RuntimeMsg::RetryGc);
-        }
+        // No retry is queued here: the worker channel is drained ahead of API
+        // requests, so an immediate RetryGc would spin the event loop while
+        // the acquiring caller waits on it. The acquisition requests the
+        // retry on the API queue when it ends.
     }
 
     /// Retry files retained by a previous GC pass. A still-pinned file is
@@ -588,7 +589,7 @@ mod tests {
         let pins = Arc::clone(&state.snapshot_pins);
         let (held_tx, held_rx) = std::sync::mpsc::channel();
         let holder = std::thread::spawn(move || {
-            let _acquisition = pins.begin_acquisition();
+            let _acquisition = pins.begin_acquisition(0);
             held_tx.send(()).expect("report guard held");
             std::thread::sleep(Duration::from_secs(2));
         });
@@ -605,8 +606,15 @@ mod tests {
             "GC blocked {elapsed:?} on an in-progress snapshot acquisition"
         );
         assert!(path.exists(), "a deferred GC must retain the file");
-        assert!(matches!(notifications.try_recv(), Ok(RuntimeMsg::RetryGc)));
+        assert!(
+            notifications.try_recv().is_err(),
+            "GC must not queue a worker retry that preempts the waiting caller"
+        );
         holder.join().expect("join acquisition holder");
+        assert!(
+            state.snapshot_pins.take_gc_deferred(),
+            "the ended acquisition must see that GC deferred behind it"
+        );
         actor.retry_pending(&mut state, None);
         assert!(
             !path.exists(),
