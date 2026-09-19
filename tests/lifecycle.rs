@@ -752,7 +752,8 @@ mod solid_cleanup {
                     .strip_prefix(manifest_dir)
                     .expect("runtime source should be inside the crate")
                     .display()
-                    .to_string();
+                    .to_string()
+                    .replace(std::path::MAIN_SEPARATOR, "/");
                 let transition_calls = compact.matches(".wal_actor.begin_sync_transition(").count()
                     + compact
                         .matches(".wal_actor.commit_sync_transition(")
@@ -817,7 +818,8 @@ mod solid_cleanup {
                     .strip_prefix(manifest_dir)
                     .expect("runtime source should be inside the crate")
                     .display()
-                    .to_string();
+                    .to_string()
+                    .replace(std::path::MAIN_SEPARATOR, "/");
                 let transition_calls = compact.matches(".wal_actor.rotate(").count();
                 std::iter::repeat_n(relative, transition_calls)
             })
