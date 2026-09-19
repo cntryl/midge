@@ -347,6 +347,23 @@ pub struct RecoveryStats {
     /// read-only; an owner that reopens the file for append must first
     /// truncate it to `valid_bytes`, or new frames land after the torn bytes.
     pub(crate) tolerated_active_tail: Option<ToleratedActiveTail>,
+    /// Where salvage replay stopped. Replay stays read-only; an owner that
+    /// keeps writing must first move everything past this point aside, or
+    /// new records land behind corruption and reuse on-disk sequences.
+    pub(crate) salvage_stop: Option<WalSalvageStop>,
+}
+
+/// Point at which salvage replay stopped, and the WAL it never reached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WalSalvageStop {
+    /// File holding the first corrupt frame.
+    pub(crate) path: FsPath,
+    /// Verified prefix of `path` that replay applied.
+    pub(crate) valid_bytes: u64,
+    /// Files after `path` in replay order, never replayed.
+    pub(crate) unreplayed_paths: Vec<FsPath>,
+    /// Highest sequence in the verified prefixes of `unreplayed_paths`.
+    pub(crate) max_unreplayed_sequence: Option<u64>,
 }
 
 /// Verified prefix of a final active WAL whose incomplete tail was dropped.
@@ -376,6 +393,7 @@ impl RecoveryStats {
             max_epoch_seen: 0,
             stale_records_skipped: 0,
             tolerated_active_tail: None,
+            salvage_stop: None,
         }
     }
 
@@ -590,7 +608,7 @@ fn replay_wal_paths<S: BuildHasher>(
     replay_policy: ReplayPolicy,
     replay_state: &mut WalReplayState<'_, S>,
 ) -> MidgeResult<()> {
-    for replay_file in replay_paths {
+    for (index, replay_file) in replay_paths.iter().enumerate() {
         if let Err(failure) = replay_wal_file(storage, &replay_file.path, replay_state) {
             match replay_error_action(replay_file, replay_policy, &failure) {
                 ReplayErrorAction::TolerateFinalActiveTail => {
@@ -611,8 +629,23 @@ fn replay_wal_paths<S: BuildHasher>(
                     tracing::warn!(
                         path = %replay_file.path,
                         error = %failure.error(),
+                        valid_bytes = replay_state.verified_bytes,
                         "wal replay stopped at corrupt verified-prefix boundary"
                     );
+                    let unreplayed_paths: Vec<FsPath> = replay_paths[index + 1..]
+                        .iter()
+                        .map(|file| file.path.clone())
+                        .collect();
+                    let max_unreplayed_sequence = unreplayed_paths
+                        .iter()
+                        .filter_map(|path| max_verified_prefix_sequence(storage, path))
+                        .max();
+                    replay_state.stats.salvage_stop = Some(WalSalvageStop {
+                        path: replay_file.path.clone(),
+                        valid_bytes: replay_state.verified_bytes,
+                        unreplayed_paths,
+                        max_unreplayed_sequence,
+                    });
                     return Ok(());
                 }
                 ReplayErrorAction::Fail => return Err(failure.into_error()),
@@ -951,6 +984,21 @@ fn read_next_wal_frame(
         record,
         next_pos: need_end,
     }))
+}
+
+/// Highest sequence among the leading verified frames of `path`. Used only
+/// to keep new writes above sequences that salvage set aside unreplayed.
+fn max_verified_prefix_sequence(storage: &dyn Fs, path: &FsPath) -> Option<u64> {
+    let mut read_ns = 0;
+    let file = open_wal_replay_file(storage, path, &mut read_ns).ok()??;
+    let snapshot = read_wal_snapshot(&*file, path, &mut read_ns).ok()?;
+    let mut pos = 0;
+    let mut max_sequence = None;
+    while let Ok(NextWalFrame::Frame(frame)) = read_next_wal_frame(&snapshot, path, pos) {
+        max_sequence = max_sequence.max(Some(frame.record.seq));
+        pos = frame.next_pos;
+    }
+    max_sequence
 }
 
 fn read_wal_snapshot(
