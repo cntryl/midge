@@ -1387,6 +1387,66 @@ fn should_ignore_only_incomplete_final_active_wal_tail_given_truncated_frame_whe
 }
 
 #[test]
+fn should_report_verified_prefix_without_modifying_file_when_tolerating_active_wal_tail() {
+    // Arrange
+    let dir = TempDir::new().unwrap();
+    let wal_subdir = dir.path().join("wal");
+    std::fs::create_dir(&wal_subdir).unwrap();
+    let storage = RealFs::new(dir.path()).unwrap();
+    let wal_dir = FsPath::new("wal");
+    let active_path = wal_subdir.join(crate::wal::ACTIVE_FILE_NAME);
+    let first = encode_frame(&put_record(b"first", 1, 1));
+    let second = encode_frame(&put_record(b"second", 2, 1));
+    append_raw_bytes(&active_path, &first);
+    append_raw_bytes(&active_path, &second);
+    let mut torn_frame = encode_frame(&put_record(b"torn", 3, 1));
+    torn_frame.truncate(torn_frame.len() - 3);
+    append_raw_bytes(&active_path, &torn_frame);
+    let original_len = std::fs::metadata(&active_path).unwrap().len();
+    let mut memtables = HashMap::new();
+
+    // Act
+    let stats =
+        replay_wal_with_policy(&storage, &wal_dir, &mut memtables, ReplayPolicy::Strict).unwrap();
+
+    // Assert
+    assert_eq!(
+        stats.tolerated_active_tail,
+        Some(ToleratedActiveTail {
+            path: FsPath::new(format!("wal/{}", crate::wal::ACTIVE_FILE_NAME)),
+            valid_bytes: (first.len() + second.len()) as u64,
+        })
+    );
+    assert_eq!(
+        std::fs::metadata(&active_path).unwrap().len(),
+        original_len,
+        "replay must stay read-only; truncation belongs to the owner reopening for append"
+    );
+}
+
+#[test]
+fn should_not_report_tolerated_tail_when_active_wal_is_complete() {
+    // Arrange
+    let dir = TempDir::new().unwrap();
+    let wal_subdir = dir.path().join("wal");
+    std::fs::create_dir(&wal_subdir).unwrap();
+    let storage = RealFs::new(dir.path()).unwrap();
+    let wal_dir = FsPath::new("wal");
+    append_raw_bytes(
+        &wal_subdir.join(crate::wal::ACTIVE_FILE_NAME),
+        &encode_frame(&put_record(b"complete", 1, 1)),
+    );
+    let mut memtables = HashMap::new();
+
+    // Act
+    let stats =
+        replay_wal_with_policy(&storage, &wal_dir, &mut memtables, ReplayPolicy::Strict).unwrap();
+
+    // Assert
+    assert_eq!(stats.tolerated_active_tail, None);
+}
+
+#[test]
 fn should_fail_strict_recovery_given_corrupted_length_before_valid_active_wal_suffix() {
     // Arrange
     let dir = TempDir::new().unwrap();
