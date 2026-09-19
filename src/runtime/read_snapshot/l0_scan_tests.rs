@@ -363,3 +363,50 @@ fn should_open_only_intersecting_l0_readers_when_scan_bounds_are_narrow() -> Mid
     }
     Ok(())
 }
+
+#[test]
+fn should_scan_many_legacy_level_files_as_streamed_sources_with_newest_value_winning(
+) -> MidgeResult<()> {
+    // Arrange: after a legacy upgrade every L1 file lacks trusted bounds and
+    // lands in the fallback bucket. Each streams as its own source now, so
+    // results must still resolve overlapping keys by sequence.
+    let directory = tempfile::tempdir()?;
+    let mut files = Vec::new();
+    for index in 0..20_u64 {
+        let key = format!("k{:02}", index % 5).into_bytes();
+        let value = format!("v{index}").into_bytes();
+        let mut meta = write_sst(
+            directory.path(),
+            index,
+            &[(key.as_slice(), value.as_slice(), index + 1)],
+            &[],
+            (key.as_slice(), key.as_slice()),
+        )?;
+        meta.level = 1;
+        meta.key_bounds_complete = false;
+        files.push(meta);
+    }
+    let (snapshot, _) = snapshot(directory.path(), files)?;
+
+    for reverse in [false, true] {
+        // Act
+        let rows = snapshot
+            .state_scan(None, None, reverse, u64::MAX)
+            .collect::<MidgeResult<Vec<_>>>()?;
+
+        // Assert
+        let mut expected: Vec<_> = (0..5_u64)
+            .map(|slot| {
+                (
+                    bytes::Bytes::from(format!("k{slot:02}")),
+                    bytes::Bytes::from(format!("v{}", 15 + slot)),
+                )
+            })
+            .collect();
+        if reverse {
+            expected.reverse();
+        }
+        assert_eq!(rows, expected);
+    }
+    Ok(())
+}
