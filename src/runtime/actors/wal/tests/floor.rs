@@ -82,11 +82,11 @@ fn should_protect_spilled_transaction_participants_until_all_generations_publish
         state.get_cf_mut(cf_id).unwrap().memtable = Arc::new(crate::sst::SkipListMemtable::new());
         frozen.push((cf_id, table));
     }
-    let before_publication = state.cloud_wal_recovery_floor_segment();
+    let before_publication = state.wal_recovery_floor_segment();
     state
         .complete_immutable_flush(frozen[0].0, &frozen[0].1)
         .unwrap();
-    let after_first_family = state.cloud_wal_recovery_floor_segment();
+    let after_first_family = state.wal_recovery_floor_segment();
     state
         .complete_immutable_flush(frozen[1].0, &frozen[1].1)
         .unwrap();
@@ -95,7 +95,7 @@ fn should_protect_spilled_transaction_participants_until_all_generations_publish
     assert_eq!(observed.data_records.len(), 2);
     assert_eq!(before_publication, Some(7));
     assert_eq!(after_first_family, Some(7));
-    assert_eq!(state.cloud_wal_recovery_floor_segment(), Some(9));
+    assert_eq!(state.wal_recovery_floor_segment(), Some(9));
     Ok(())
 }
 
@@ -146,6 +146,6 @@ fn should_keep_conservative_generation_floor_when_reconstructing_startup_memtabl
     // Assert
     assert!(recovered.wal_recovery_records_replayed > 0);
     assert_eq!(generation.first_wal_segment, Some(1));
-    assert_eq!(recovered.cloud_wal_recovery_floor_segment(), Some(1));
+    assert_eq!(recovered.wal_recovery_floor_segment(), Some(1));
     Ok(())
 }

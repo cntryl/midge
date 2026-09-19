@@ -34,6 +34,79 @@ mod durability_wal {
     // WAL RECOVERY TESTS
     // ============================================================================
 
+    fn sealed_wal_segments(db_path: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(db_path.join("wal"))
+            .expect("read wal dir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| cntryl_midge::wal::parse_segment_id(name).is_some())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn should_remove_local_wal_segment_when_flushed_segment_contains_delete() {
+        // Arrange
+        let temp_dir = TempDir::new().expect("temp dir");
+        let db_path = temp_dir.path();
+        {
+            let mut engine =
+                Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+                    .expect("open engine");
+            let cf = engine.create_column_family("deletes").expect("create cf");
+            let mut tx = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .expect("begin tx");
+            tx.put(b"k1".to_vec(), b"v1".to_vec(), None)
+                .expect("put k1");
+            tx.commit(WriteOptions::sync()).expect("commit k1");
+            let mut tx = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .expect("begin tx");
+            tx.delete(b"k1".to_vec()).expect("delete k1");
+            tx.put(b"k2".to_vec(), b"v2".to_vec(), None)
+                .expect("put k2");
+            tx.commit(WriteOptions::sync()).expect("commit delete");
+
+            // Act: the first flush seals the segment holding the delete, and
+            // the next flush's prune can retire it once its data is published.
+            engine.flush_cf(&cf).expect("flush delete");
+            let mut tx = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .expect("begin tx");
+            tx.put(b"k3".to_vec(), b"v3".to_vec(), None)
+                .expect("put k3");
+            tx.commit(WriteOptions::sync()).expect("commit k3");
+            engine.flush_cf(&cf).expect("flush after delete");
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown");
+        }
+
+        // Assert
+        assert_eq!(
+            sealed_wal_segments(db_path),
+            Vec::<String>::new(),
+            "flushed segments must be retired even when they contain deletes"
+        );
+        let reopened = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+            .expect("reopen");
+        let cf = reopened.get_column_family("deletes").expect("get cf");
+        let tx = reopened
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("read tx");
+        assert_eq!(tx.get(b"k1").expect("get k1"), None);
+        assert_eq!(
+            tx.get(b"k2").expect("get k2"),
+            Some(Bytes::from_static(b"v2"))
+        );
+        assert_eq!(
+            tx.get(b"k3").expect("get k3"),
+            Some(Bytes::from_static(b"v3"))
+        );
+    }
+
     #[test]
     fn should_recover_writes_given_unflushed_memtable_when_reopening() {
         for_each_storage_mode(durable_storage_modes(), |mode, opts| {
@@ -646,6 +719,84 @@ mod durability_wal {
             Some(Bytes::from_static(b"value"))
         );
         assert_eq!(tx.get(b"torn").expect("get torn key"), None);
+    }
+
+    #[test]
+    fn should_recover_post_restart_sync_commit_when_previous_crash_left_torn_wal_tail() {
+        // Arrange
+        let temp_dir = TempDir::new().expect("temp dir");
+        let db_path = temp_dir.path();
+        let wal_log = db_path.join("wal").join("wal.log");
+
+        {
+            let mut engine =
+                Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+                    .expect("open engine");
+            let cf = engine.create_column_family("trust").expect("create cf");
+            for key in [b"prefix".as_slice(), b"torn".as_slice()] {
+                let mut tx = engine
+                    .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                    .expect("begin tx");
+                tx.put(key.to_vec(), b"value".to_vec(), None).expect("put");
+                tx.commit(WriteOptions::sync()).expect("sync commit");
+            }
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown before corruption");
+        }
+        truncate_last_bytes(&wal_log, 3);
+        let torn_len = std::fs::metadata(&wal_log)
+            .expect("torn wal metadata")
+            .len();
+
+        {
+            let mut engine = Engine::open(
+                OpenOptions::local(db_path)
+                    .recovery_policy(RecoveryPolicy::Strict)
+                    .build()
+                    .expect("build options"),
+            )
+            .expect("strict recovery should tolerate the torn tail");
+            let cf = engine.get_column_family("trust").expect("get trust cf");
+            let mut tx = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .expect("begin after tx");
+            tx.put(b"after".to_vec(), b"value".to_vec(), None)
+                .expect("put after");
+            tx.commit(WriteOptions::sync()).expect("sync after commit");
+            engine
+                .shutdown(std::time::Duration::from_secs(5))
+                .expect("shutdown after post-restart commit");
+        }
+
+        // Act
+        let reopened = Engine::open(
+            OpenOptions::local(db_path)
+                .recovery_policy(RecoveryPolicy::Strict)
+                .build()
+                .expect("build options"),
+        )
+        .expect("strict reopen after a post-restart commit should succeed");
+        let cf = reopened.get_column_family("trust").expect("get trust cf");
+
+        // Assert
+        let tx = reopened
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("begin read tx");
+        assert_eq!(
+            tx.get(b"prefix").expect("get prefix"),
+            Some(Bytes::from_static(b"value"))
+        );
+        assert_eq!(tx.get(b"torn").expect("get torn key"), None);
+        assert_eq!(
+            tx.get(b"after").expect("get after"),
+            Some(Bytes::from_static(b"value"))
+        );
+        let recovered_len = std::fs::metadata(&wal_log).expect("wal metadata").len();
+        assert!(
+            recovered_len > torn_len,
+            "post-restart commit should remain in the active WAL (torn_len={torn_len}, len={recovered_len})"
+        );
     }
 
     #[test]
@@ -1817,6 +1968,8 @@ mod durability_atomicity {
         delete
             .commit(WriteOptions::sync())
             .expect("commit durable delete");
+        let retained_delete_wal = std::fs::read(directory.path().join("wal/wal.log"))
+            .expect("capture retained delete WAL bytes");
         engine.flush_cf(&cf).expect("flush delete tombstone");
         for index in 0..2 {
             let mut filler = engine
@@ -1844,13 +1997,20 @@ mod durability_atomicity {
             .shutdown(std::time::Duration::from_secs(5))
             .expect("shutdown database");
 
-        // Act: model conservative WAL retention after an unrelated record prevents
-        // whole-segment pruning. The manifest already incorporates this old batch.
+        // Act: model conservative WAL retention of an already-flushed prefix.
+        // Retention is prefix-closed (a segment is retired only with every
+        // older one), so a retained seed segment implies the later delete
+        // segment is retained too. The manifest already incorporates both.
         std::fs::write(
             directory.path().join("wal/00000000000000000000.wal"),
             retained_wal,
         )
         .expect("restore retained WAL segment");
+        std::fs::write(
+            directory.path().join("wal/00000000000000000001.wal"),
+            retained_delete_wal,
+        )
+        .expect("restore retained delete WAL segment");
         let reopened = Engine::open(options()).expect("reopen database");
         let cf = reopened
             .get_column_family("default")
@@ -2573,6 +2733,79 @@ mod recovery_policy_api {
         let metrics = engine.get_runtime_metrics().expect("runtime metrics");
         assert_eq!(metrics.health, EngineHealth::SalvageMode);
         assert_eq!(metrics.salvage_mode_opens, 1);
+    }
+
+    fn sst_files(db_path: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut found = Vec::new();
+        let mut pending = vec![db_path.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in fs::read_dir(&dir).expect("read dir") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "sst") {
+                    found.push(path);
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn should_retain_sst_files_when_salvage_opens_with_unreadable_manifest() {
+        // Arrange
+        let temp_dir = TempDir::new().expect("temp dir");
+        let db_path = temp_dir.path();
+        {
+            let mut engine =
+                Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+                    .expect("open engine");
+            let cf = engine.create_column_family("keep").expect("create cf");
+            let mut tx = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                .expect("begin tx");
+            tx.put(b"key".to_vec(), b"value".to_vec(), None)
+                .expect("put");
+            tx.commit(cntryl_midge::WriteOptions::sync())
+                .expect("sync commit");
+            engine.flush_cf(&cf).expect("flush to sst");
+            engine
+                .shutdown(Duration::from_secs(5))
+                .expect("shutdown before corruption");
+        }
+        let before = sst_files(db_path);
+        assert!(!before.is_empty(), "flush should have produced an SST");
+        for name in [
+            "manifest.json",
+            "manifest.snapshot.json",
+            "manifest.journal",
+        ] {
+            let path = db_path.join(name);
+            if path.exists() {
+                fs::write(&path, b"not-a-valid-manifest").expect("corrupt manifest file");
+            }
+        }
+
+        // Act
+        let engine = Engine::open(
+            OpenOptions::local(db_path)
+                .recovery_policy(RecoveryPolicy::Salvage)
+                .build()
+                .expect("build options"),
+        )
+        .expect("salvage open");
+
+        // Assert
+        assert_eq!(
+            engine.get_runtime_metrics().expect("metrics").health,
+            EngineHealth::SalvageMode
+        );
+        assert_eq!(
+            sst_files(db_path),
+            before,
+            "salvage must retain SSTs the unreadable manifest no longer lists"
+        );
     }
 
     #[test]

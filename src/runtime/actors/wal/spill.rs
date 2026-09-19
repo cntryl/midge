@@ -76,13 +76,25 @@ impl WalActor {
             sequence_plan.commit_seq,
             sequence_plan.begin_seq,
         )?;
-        self.apply_spilled_transaction_ops(
+        if let Err(error) = self.apply_spilled_transaction_ops(
             state,
             source,
             &sequence_plan,
             effective_durability,
             commit_time_millis,
-        )?;
+        ) {
+            // The WAL already holds the whole transaction, so recovery will
+            // apply all of it. Some ops may be in the memtable now; stop the
+            // writer rather than keep serving a partially applied commit.
+            let message = format!(
+                "spilled transaction {} is durably logged but failed to apply to memtables; \
+                 it will be fully applied on restart: {error}",
+                sequence_plan.txn_id
+            );
+            self.fence_transition(state, message.clone());
+            state.mark_persistence_anomaly();
+            return Err(MidgeError::Fenced(message));
+        }
 
         let deferred = matches!(
             effective_durability,
@@ -363,6 +375,11 @@ impl WalActor {
     ) -> MidgeResult<()> {
         let epoch = self.current_epoch;
         source.for_each(|ordinal, op| {
+            crate::failpoints::fail_point!("midge::wal::spilled_apply_op", |_| Err(
+                MidgeError::Io(std::io::Error::other(
+                    "failpoint: spilled transaction apply read failed"
+                ))
+            ));
             let sequence = sequence_plan.first_op_seq.saturating_add(ordinal);
             let record = Self::wal_record_for_transaction_op(
                 op,
