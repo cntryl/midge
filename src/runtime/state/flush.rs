@@ -332,6 +332,16 @@ impl RuntimeState {
         self.recovery.persistence_anomaly_detected = true;
     }
 
+    /// Record that a remote DDL authority switch could not be resolved.
+    pub(crate) fn mark_ddl_authority_ambiguous(&mut self) {
+        self.recovery.ddl_authority_ambiguous = true;
+    }
+
+    /// Take the DDL ambiguity recorded since the last call.
+    pub(crate) fn take_ddl_authority_ambiguous(&mut self) -> bool {
+        std::mem::take(&mut self.recovery.ddl_authority_ambiguous)
+    }
+
     pub fn compaction_enabled(&self) -> bool {
         self.compaction_config.enabled
     }

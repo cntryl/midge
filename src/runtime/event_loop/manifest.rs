@@ -145,8 +145,8 @@ impl ManifestCoordinator {
             }
             Ok(cf_id)
         });
-        if let Err(error) = &result {
-            Self::record_ddl_authority_ambiguity(event_loop, error);
+        if result.is_err() {
+            Self::record_ddl_authority_ambiguity(event_loop);
         }
         let should_publish = result.is_ok();
         let resp = result.map_or_else(
@@ -250,7 +250,7 @@ impl ManifestCoordinator {
                 Ok(())
             });
         if let Err(error) = result {
-            Self::record_ddl_authority_ambiguity(event_loop, &error);
+            Self::record_ddl_authority_ambiguity(event_loop);
             Self::respond_result(event_loop, request_id, Err(error));
         } else {
             Self::finish_committed_drop(event_loop, request_id, cf_id, &deadline);
@@ -281,15 +281,13 @@ impl ManifestCoordinator {
         Self::respond_result(event_loop, request_id, Ok(()));
     }
 
-    fn record_ddl_authority_ambiguity(
-        event_loop: &mut EventLoop,
-        error: &crate::common::MidgeError,
-    ) {
-        if matches!(
-            error,
-            crate::common::MidgeError::Fenced(message)
-                if message.contains("DDL authority is ambiguous")
-        ) {
+    /// Promote a DDL ambiguity recorded by the DDL path into runtime fencing.
+    ///
+    /// The DDL path marks the state when it cannot resolve a remote authority
+    /// switch. Reading that flag keeps the decision independent of how the
+    /// error is worded or wrapped on its way here.
+    fn record_ddl_authority_ambiguity(event_loop: &mut EventLoop) {
+        if event_loop.state.take_ddl_authority_ambiguous() {
             event_loop.fencing.ddl_authority_ambiguous = true;
             event_loop.state.mark_persistence_anomaly();
             event_loop.publish_snapshot();
@@ -347,5 +345,43 @@ impl ManifestCoordinator {
             |()| RuntimeResponse::Ok { request_id },
         );
         event_loop.respond(request_id, resp);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::event_loop::tests::create_test_local_event_loop;
+
+    #[test]
+    fn should_fence_ddl_authority_from_recorded_state_not_error_text(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange: the DDL path records the ambiguity it could not resolve.
+        // Rewording or wrapping its error must not change what happens here.
+        let mut event_loop = create_test_local_event_loop()?;
+        event_loop.state.mark_ddl_authority_ambiguous();
+
+        // Act
+        ManifestCoordinator::record_ddl_authority_ambiguity(&mut event_loop);
+
+        // Assert
+        assert!(event_loop.fencing.ddl_authority_ambiguous);
+        assert!(event_loop.state.persistence_anomaly_detected());
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_fence_ddl_authority_when_nothing_recorded_the_ambiguity(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let mut event_loop = create_test_local_event_loop()?;
+
+        // Act
+        ManifestCoordinator::record_ddl_authority_ambiguity(&mut event_loop);
+
+        // Assert
+        assert!(!event_loop.fencing.ddl_authority_ambiguous);
+        assert!(!event_loop.state.persistence_anomaly_detected());
+        Ok(())
     }
 }

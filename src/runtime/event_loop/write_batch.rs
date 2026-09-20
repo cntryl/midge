@@ -712,12 +712,11 @@ impl EventLoop {
     }
 
     fn handle_write_error(&mut self, request_id: u64, error: crate::common::MidgeError) {
-        let must_fence = matches!(error, crate::common::MidgeError::Timeout(_))
-            || matches!(
-                &error,
-                crate::common::MidgeError::NoSpace(message)
-                    if message.contains("wal writer")
-            );
+        // A WAL append failure fences the actor itself, so ask it rather than
+        // looking for "wal writer" in the message: a NoSpace raised elsewhere
+        // (storage admission) is backpressure, not lost durability.
+        let must_fence =
+            matches!(error, crate::common::MidgeError::Timeout(_)) || self.wal_actor.is_fenced();
         if must_fence {
             self.state.mark_persistence_anomaly();
             if let Some(healthy) = &self.fencing.lease_healthy {

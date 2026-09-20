@@ -1603,3 +1603,76 @@ fn should_stall_before_wal_when_transaction_would_exceed_hard_l0_ceiling() -> Mi
     );
     Ok(())
 }
+
+#[test]
+fn should_not_fence_runtime_when_no_space_comes_from_outside_the_wal_writer() -> MidgeResult<()> {
+    // Arrange: storage admission pressure is backpressure, not lost
+    // durability, even when its message mentions the wal writer.
+    let temp_dir = tempfile::tempdir().map_err(MidgeError::Io)?;
+    let state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
+    let router = Arc::new(ResponseRouter::new());
+    let lease_healthy = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let mut event_loop = EventLoop::new(
+        state,
+        false,
+        Arc::clone(&router),
+        RuntimeConfig {
+            lease_healthy: Some(Arc::clone(&lease_healthy)),
+            ..RuntimeConfig::default()
+        },
+        None,
+    )?;
+    let response = router.register(2, "TestRequest");
+    assert!(!event_loop.wal_actor.is_fenced());
+
+    // Act
+    event_loop.handle_write_error(
+        2,
+        MidgeError::NoSpace("upload queue full for wal writer backlog".to_string()),
+    );
+
+    // Assert
+    expect_error(&response, 2, |error| {
+        matches!(error, MidgeError::NoSpace(_))
+    });
+    assert!(
+        lease_healthy.load(std::sync::atomic::Ordering::Acquire),
+        "message text must not decide fencing"
+    );
+    assert!(!event_loop.state.persistence_anomaly_detected());
+    Ok(())
+}
+
+#[test]
+fn should_fence_runtime_when_the_wal_actor_reports_a_fenced_writer() -> MidgeResult<()> {
+    // Arrange: the WAL actor fences itself when an append fails, whatever the
+    // error's wording.
+    let temp_dir = tempfile::tempdir().map_err(MidgeError::Io)?;
+    let state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
+    let router = Arc::new(ResponseRouter::new());
+    let lease_healthy = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let mut event_loop = EventLoop::new(
+        state,
+        false,
+        Arc::clone(&router),
+        RuntimeConfig {
+            lease_healthy: Some(Arc::clone(&lease_healthy)),
+            ..RuntimeConfig::default()
+        },
+        None,
+    )?;
+    let response = router.register(3, "TestRequest");
+    event_loop
+        .wal_actor
+        .fence_transition(&mut event_loop.state, "injected append failure".to_string());
+
+    // Act
+    event_loop.handle_write_error(3, MidgeError::NoSpace("device is full".to_string()));
+
+    // Assert
+    expect_error(&response, 3, |error| {
+        matches!(error, MidgeError::NoSpace(_))
+    });
+    assert!(!lease_healthy.load(std::sync::atomic::Ordering::Acquire));
+    Ok(())
+}

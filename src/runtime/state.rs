@@ -210,6 +210,10 @@ pub struct RecoveryStatus {
     pub policy: crate::config::RecoveryPolicy,
     pub opened_in_salvage_mode: bool,
     pub persistence_anomaly_detected: bool,
+    /// Set by the DDL path when a remote authority switch could not be
+    /// resolved. The event loop reads this instead of matching the phrase
+    /// "DDL authority is ambiguous" in an error message.
+    pub ddl_authority_ambiguous: bool,
 }
 
 pub struct CompactionConfig {
