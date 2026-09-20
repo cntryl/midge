@@ -117,6 +117,16 @@ enum ReplayFailure {
     Error(MidgeError),
 }
 
+impl From<crate::wal::frame::FrameError> for ReplayFailure {
+    fn from(error: crate::wal::frame::FrameError) -> Self {
+        if error.is_incomplete_tail() {
+            Self::IncompleteTail(error.into_error())
+        } else {
+            Self::Error(error.into_error())
+        }
+    }
+}
+
 impl ReplayFailure {
     fn error(&self) -> &MidgeError {
         match self {
@@ -184,85 +194,20 @@ pub(crate) fn inspect_active_wal_bytes(
     data: &[u8],
 ) -> Result<VerifiedWalPrefix, WalPrefixInspectionFailure> {
     let mut prefix = VerifiedWalPrefix::default();
-    while prefix.valid_bytes < data.len() {
-        let Some(header_end) = prefix
-            .valid_bytes
-            .checked_add(super::frame::WAL_FRAME_HEADER_LEN)
-        else {
-            return Err(wal_prefix_failure(
-                prefix,
-                ReplayFailure::Error(MidgeError::Corruption(
-                    "active WAL frame offset overflow".to_string(),
-                )),
-            ));
+    loop {
+        let pos = u64::try_from(prefix.valid_bytes).unwrap_or(u64::MAX);
+        let step = crate::wal::frame::next_frame(
+            &data,
+            &"active WAL",
+            pos,
+            crate::wal::frame::FrameLimits::default(),
+        );
+        let (payload, next_pos) = match step {
+            Ok(crate::wal::frame::FrameStep::Eof) => return Ok(prefix),
+            Ok(crate::wal::frame::FrameStep::Frame { payload, next_pos }) => (payload, next_pos),
+            Err(error) => return Err(wal_prefix_failure(prefix, error.into())),
         };
-        if header_end > data.len() {
-            return Err(wal_prefix_failure(
-                prefix,
-                ReplayFailure::IncompleteTail(MidgeError::Corruption(format!(
-                    "Incomplete WAL frame header at pos {} (need {} bytes, have {})",
-                    prefix.valid_bytes,
-                    super::frame::WAL_FRAME_HEADER_LEN,
-                    data.len().saturating_sub(prefix.valid_bytes)
-                ))),
-            ));
-        }
-
-        let header = &data[prefix.valid_bytes..header_end];
-        if header.iter().all(|byte| *byte == 0)
-            && data[prefix.valid_bytes..].iter().all(|byte| *byte == 0)
-        {
-            return Err(wal_prefix_failure(
-                prefix,
-                ReplayFailure::IncompleteTail(MidgeError::Corruption(format!(
-                    "Zero-filled WAL tail at pos {}",
-                    prefix.valid_bytes
-                ))),
-            ));
-        }
-
-        let (payload_len, expected_crc) = match super::frame::decode_frame_header(header) {
-            Ok(decoded) => decoded,
-            Err(error) => {
-                return Err(wal_prefix_failure(prefix, ReplayFailure::Error(error)));
-            }
-        };
-        let Some(payload_end) = header_end.checked_add(payload_len) else {
-            return Err(wal_prefix_failure(
-                prefix,
-                ReplayFailure::Error(MidgeError::Corruption(
-                    "active WAL payload offset overflow".to_string(),
-                )),
-            ));
-        };
-        if payload_end > data.len() {
-            let hides_verified_suffix = contains_verified_wal_frame(&data[header_end..]);
-            let error = MidgeError::Corruption(if hides_verified_suffix {
-                format!(
-                    "WAL frame length at pos {} overruns EOF and hides a verified later frame (len={payload_len}, file_len={})",
-                    prefix.valid_bytes,
-                    data.len()
-                )
-            } else {
-                format!(
-                    "Incomplete WAL record at pos {} (len={payload_len}, file_len={})",
-                    prefix.valid_bytes,
-                    data.len()
-                )
-            });
-            let failure = if hides_verified_suffix {
-                ReplayFailure::Error(error)
-            } else {
-                ReplayFailure::IncompleteTail(error)
-            };
-            return Err(wal_prefix_failure(prefix, failure));
-        }
-
-        let payload = &data[header_end..payload_end];
-        if let Err(error) = super::frame::verify_frame_crc(payload, expected_crc) {
-            return Err(wal_prefix_failure(prefix, ReplayFailure::Error(error)));
-        }
-        let record = match super::encoding::decode(payload) {
+        let record = match super::encoding::decode(payload.as_ref()) {
             Ok(record) => record,
             Err(error) => {
                 return Err(wal_prefix_failure(prefix, ReplayFailure::Error(error)));
@@ -282,9 +227,8 @@ pub(crate) fn inspect_active_wal_bytes(
         prefix.writer_epoch = record.writer_epoch;
         prefix.max_sequence = prefix.max_sequence.max(record.seq);
         prefix.record_count = prefix.record_count.saturating_add(1);
-        prefix.valid_bytes = payload_end;
+        prefix.valid_bytes = usize::try_from(next_pos).unwrap_or(usize::MAX);
     }
-    Ok(prefix)
 }
 
 fn replay_error_action(
@@ -1004,87 +948,21 @@ fn read_next_wal_frame(
     file_path: &FsPath,
     pos: u64,
 ) -> Result<NextWalFrame, ReplayFailure> {
-    let file_len = u64::try_from(snapshot.len()).map_err(|_| {
-        MidgeError::Corruption(format!(
-            "WAL snapshot length does not fit u64 in {file_path}"
-        ))
-    })?;
-    if pos == file_len {
-        return Ok(NextWalFrame::Eof);
+    match crate::wal::frame::next_frame(
+        &snapshot,
+        &file_path,
+        pos,
+        crate::wal::frame::FrameLimits::default(),
+    ) {
+        Ok(crate::wal::frame::FrameStep::Eof) => Ok(NextWalFrame::Eof),
+        Ok(crate::wal::frame::FrameStep::Frame { payload, next_pos }) => {
+            Ok(NextWalFrame::Frame(ReplayedWalFrame {
+                record: super::encoding::decode(payload.as_ref())?,
+                next_pos,
+            }))
+        }
+        Err(error) => Err(error.into()),
     }
-    if pos > file_len {
-        return Err(MidgeError::Corruption(format!(
-            "WAL replay read past EOF at pos {pos} in {file_path} (file_len={file_len})"
-        ))
-        .into());
-    }
-    if file_len.saturating_sub(pos) < crate::wal::frame::WAL_FRAME_HEADER_LEN as u64 {
-        return Err(ReplayFailure::IncompleteTail(MidgeError::Corruption(
-            format!(
-                "Incomplete WAL frame header at pos {} in {} (need {} bytes, have {})",
-                pos,
-                file_path,
-                crate::wal::frame::WAL_FRAME_HEADER_LEN,
-                file_len.saturating_sub(pos)
-            ),
-        )));
-    }
-
-    let header_start = usize::try_from(pos).map_err(|_| {
-        MidgeError::Corruption(format!(
-            "WAL frame offset does not fit memory in {file_path}"
-        ))
-    })?;
-    let header_end = header_start + crate::wal::frame::WAL_FRAME_HEADER_LEN;
-    let header = &snapshot[header_start..header_end];
-    let payload_start = pos + crate::wal::frame::WAL_FRAME_HEADER_LEN as u64;
-    if header.iter().all(|byte| *byte == 0) && snapshot[header_end..].iter().all(|byte| *byte == 0)
-    {
-        return Err(ReplayFailure::IncompleteTail(MidgeError::Corruption(
-            format!("Zero-filled WAL tail at pos {pos} in {file_path}"),
-        )));
-    }
-
-    let (len, expected_crc) = crate::wal::frame::decode_frame_header(header)?;
-    let need_end = payload_start
-        .checked_add(u64::try_from(len).unwrap_or(u64::MAX))
-        .ok_or_else(|| {
-            MidgeError::Corruption(format!(
-                "WAL frame length overflow at pos {pos} in {file_path} (len={len})"
-            ))
-        })?;
-    if need_end > file_len {
-        let hides_verified_suffix = contains_verified_wal_frame(&snapshot[header_end..]);
-        let error = MidgeError::Corruption(if hides_verified_suffix {
-            format!(
-                "WAL frame length at pos {pos} in {file_path} overruns EOF and hides a verified later frame (len={len}, file_len={file_len})"
-            )
-        } else {
-            format!(
-                "Incomplete WAL record at pos {pos} in {file_path} (len={len}, file_len={file_len})"
-            )
-        });
-        return Err(if hides_verified_suffix {
-            ReplayFailure::Error(error)
-        } else {
-            ReplayFailure::IncompleteTail(error)
-        });
-    }
-
-    let payload_end = usize::try_from(need_end).map_err(|_| {
-        MidgeError::Corruption(format!(
-            "WAL payload end does not fit memory in {file_path}"
-        ))
-    })?;
-    let payload = &snapshot[header_end..payload_end];
-
-    crate::wal::frame::verify_frame_crc(payload, expected_crc)?;
-    let record = super::encoding::decode(payload)?;
-
-    Ok(NextWalFrame::Frame(ReplayedWalFrame {
-        record,
-        next_pos: need_end,
-    }))
 }
 
 /// Highest sequence among the leading verified frames of `path`. Used only
@@ -1138,38 +1016,6 @@ fn read_wal_bytes(
         )));
     }
     Ok(bytes)
-}
-
-fn contains_verified_wal_frame(bytes: &[u8]) -> bool {
-    let header_len = crate::wal::frame::WAL_FRAME_HEADER_LEN;
-    if bytes.len() < header_len.saturating_add(3) {
-        return false;
-    }
-
-    for payload_start in header_len..=bytes.len().saturating_sub(3) {
-        if !super::encoding::has_current_record_prefix(&bytes[payload_start..]) {
-            continue;
-        }
-        let header_start = payload_start - header_len;
-        let Ok((payload_len, expected_crc)) =
-            crate::wal::frame::decode_frame_header(&bytes[header_start..payload_start])
-        else {
-            continue;
-        };
-        let Some(payload_end) = payload_start.checked_add(payload_len) else {
-            continue;
-        };
-        if payload_end > bytes.len() {
-            continue;
-        }
-        let payload = &bytes[payload_start..payload_end];
-        if crate::wal::frame::verify_frame_crc(payload, expected_crc).is_ok()
-            && super::encoding::decode_view(payload).is_ok()
-        {
-            return true;
-        }
-    }
-    false
 }
 
 fn apply_replayed_wal_record<S: BuildHasher>(
