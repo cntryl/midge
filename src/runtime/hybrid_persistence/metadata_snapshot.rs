@@ -255,6 +255,23 @@ mod tests {
         (directory, snapshot, manifest)
     }
 
+    /// Wait for the shared budget to drain.
+    ///
+    /// The reservation is released when the last handle drops, which can
+    /// trail the call that returned it, so sampling immediately makes the
+    /// assertion depend on timing.
+    fn assert_budget_drains(snapshot: &CloudMetadataPruneSnapshot) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while snapshot.budget.used() != 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "metadata proof retained {} bytes after completing",
+                snapshot.budget.used()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
     fn mirror(snapshot: &CloudMetadataPruneSnapshot) {
         for name in crate::storage::cloud::CLOUD_METADATA_FILES {
             if let Ok(bytes) = std::fs::read(snapshot.db_path.join(name)) {
@@ -292,7 +309,7 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(snapshot.budget.used(), 0);
+        assert_budget_drains(&snapshot);
     }
 
     #[test]
@@ -310,6 +327,6 @@ mod tests {
 
         // Assert
         assert!(matches!(result, Err::<(), _>(MidgeError::Corruption(_))));
-        assert_eq!(snapshot.budget.used(), 0);
+        assert_budget_drains(&snapshot);
     }
 }
