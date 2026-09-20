@@ -168,7 +168,7 @@ impl SstIdentity {
         match meta.content_crc32c {
             Some(expected) if expected != self.crc32c => {
                 return Err(IdentityMismatch::new(format!(
-                    "SST '{name}' content CRC {:#010x} does not match manifest {expected:#010x}",
+                    "SST '{name}' content CRC mismatch: manifest={expected:08x}, actual={:08x}",
                     self.crc32c
                 )));
             }
