@@ -43,13 +43,7 @@ impl CloudStorage {
                 result,
             }) if returned == full_key && actual_start == start && actual_end == Some(end) => {
                 result
-                    .map_err(|error| {
-                        if error.is_timeout() {
-                            crate::storage::storage_timeout_error(error)
-                        } else {
-                            error.to_string()
-                        }
-                    })
+                    .map_err(super::storage_error_from_cloud)
                     .and_then(|bytes| {
                         if u64::try_from(bytes.len()).ok() == Some(end - start) {
                             Ok(bytes)
@@ -58,8 +52,10 @@ impl CloudStorage {
                         }
                     })
             }
-            Ok(event) => Err(format!("unexpected conditional range response: {event:?}")),
-            Err(error) => Err(crate::storage::storage_timeout_error(error)),
+            Ok(event) => Err(crate::storage::StorageError::protocol(format!(
+                "unexpected conditional range response: {event:?}"
+            ))),
+            Err(error) => Err(crate::storage::StorageError::timeout(error)),
         };
         let _ = callback.send(result);
     }
@@ -97,7 +93,9 @@ impl CloudStorage {
             },
             Ok(other) => StorageEvent::WriteComplete {
                 key: key.to_string(),
-                result: StorageOutcome::Err(format!("unexpected cloud PUT response: {other:?}")),
+                result: StorageOutcome::Err(
+                    format!("unexpected cloud PUT response: {other:?}").into(),
+                ),
             },
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => StorageEvent::WriteComplete {
                 key: key.to_string(),
@@ -107,7 +105,7 @@ impl CloudStorage {
             },
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => StorageEvent::WriteComplete {
                 key: key.to_string(),
-                result: StorageOutcome::Err("cloud PUT callback closed".to_string()),
+                result: StorageOutcome::Err("cloud PUT callback closed".to_string().into()),
             },
         };
         let _ = callback.send(event);

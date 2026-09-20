@@ -24,7 +24,7 @@ impl HybridStorage {
                 StorageOutcome::Err(error) if Self::storage_error_indicates_missing(&error) => {
                     Ok(true)
                 }
-                StorageOutcome::Err(error) => Err(MidgeError::Internal(error)),
+                StorageOutcome::Err(error) => Err(MidgeError::Internal(error.to_string())),
             },
             Ok(event) => Err(MidgeError::Internal(format!(
                 "unexpected local cache metadata response: {event:?}"
@@ -169,7 +169,7 @@ impl HybridStorage {
                     &self.stores.sst,
                     key,
                     data,
-                    Some(&error),
+                    Some(&error.to_string()),
                     self.callback_timeout,
                     deadline,
                 )
@@ -308,7 +308,7 @@ impl HybridStorage {
             Err(error) => {
                 tracing::warn!(
                     key,
-                    error,
+                    %error,
                     "failed to delete obsolete local immutable cache object"
                 );
             }

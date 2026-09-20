@@ -239,13 +239,150 @@ pub enum StorageEvent {
     BackpressureOff,
 }
 
+/// Why a storage operation failed, preserved across the callback boundary.
+///
+/// Providers classify failures precisely; callers need that classification to
+/// decide whether an object is absent, a conditional write lost a race, or a
+/// request timed out. Carrying the kind keeps those decisions out of message
+/// text, where rewording silently changed behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageErrorKind {
+    /// The object does not exist.
+    NotFound,
+    /// A conditional write or delete lost its race.
+    PreconditionFailed,
+    /// The operation exceeded its deadline; its effect is unknown.
+    Timeout,
+    /// Credentials or permissions rejected the request.
+    Unauthorized,
+    /// The request did not complete end to end.
+    Transport,
+    /// The response did not follow the expected protocol.
+    Protocol,
+    /// Local I/O failed.
+    Io,
+}
+
+/// A storage failure with its classification.
+#[derive(Debug, Clone)]
+pub struct StorageError {
+    kind: StorageErrorKind,
+    message: String,
+}
+
+impl StorageError {
+    /// Build an error of `kind`.
+    #[must_use]
+    pub fn new(kind: StorageErrorKind, message: impl std::fmt::Display) -> Self {
+        Self {
+            kind,
+            message: message.to_string(),
+        }
+    }
+
+    #[must_use]
+    pub fn kind(&self) -> StorageErrorKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Consume the error, keeping only its message.
+    #[must_use]
+    pub fn into_message(self) -> String {
+        self.message
+    }
+
+    #[must_use]
+    pub fn is_not_found(&self) -> bool {
+        self.kind == StorageErrorKind::NotFound
+    }
+
+    #[must_use]
+    pub fn is_precondition_failed(&self) -> bool {
+        self.kind == StorageErrorKind::PreconditionFailed
+    }
+
+    #[must_use]
+    pub fn is_timeout(&self) -> bool {
+        self.kind == StorageErrorKind::Timeout
+    }
+
+    /// Local I/O failure.
+    #[must_use]
+    pub(crate) fn io(message: impl std::fmt::Display) -> Self {
+        Self::new(StorageErrorKind::Io, message)
+    }
+
+    /// Malformed or unexpected response.
+    #[must_use]
+    pub(crate) fn protocol(message: impl std::fmt::Display) -> Self {
+        Self::new(StorageErrorKind::Protocol, message)
+    }
+
+    /// Deadline exceeded; the operation's effect is unknown.
+    #[must_use]
+    pub(crate) fn timeout(message: impl std::fmt::Display) -> Self {
+        Self::new(StorageErrorKind::Timeout, message)
+    }
+
+    /// Object absent.
+    #[must_use]
+    pub(crate) fn not_found(message: impl std::fmt::Display) -> Self {
+        Self::new(StorageErrorKind::NotFound, message)
+    }
+
+    /// Conditional write or delete lost its race.
+    #[must_use]
+    pub(crate) fn precondition_failed(message: impl std::fmt::Display) -> Self {
+        Self::new(StorageErrorKind::PreconditionFailed, message)
+    }
+}
+
+impl std::fmt::Display for StorageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl From<String> for StorageError {
+    /// Unclassified failure text. Prefer a specific constructor: this maps to
+    /// `Io`, which callers treat as a generic failure.
+    fn from(message: String) -> Self {
+        Self::io(message)
+    }
+}
+
+impl From<&str> for StorageError {
+    fn from(message: &str) -> Self {
+        Self::io(message)
+    }
+}
+
+impl From<std::io::Error> for StorageError {
+    fn from(error: std::io::Error) -> Self {
+        match error.kind() {
+            std::io::ErrorKind::NotFound => Self::not_found(error),
+            std::io::ErrorKind::AlreadyExists => Self::precondition_failed(error),
+            std::io::ErrorKind::TimedOut => Self::timeout(error),
+            std::io::ErrorKind::PermissionDenied => {
+                Self::new(StorageErrorKind::Unauthorized, error)
+            }
+            _ => Self::io(error),
+        }
+    }
+}
+
 /// Serializable result type for storage operations.
 ///
 /// Can be converted to/from `MidgeResult` for compatibility.
 #[derive(Debug, Clone)]
 pub enum StorageOutcome<T: Clone> {
     Ok(T),
-    Err(String),
+    Err(StorageError),
 }
 
 impl<T: Clone> StorageOutcome<T> {
@@ -265,27 +402,18 @@ impl<T: Clone> StorageOutcome<T> {
 /// Callback type: a sync channel to send `StorageEvent` back to runtime
 pub type StorageCallback = std::sync::mpsc::Sender<StorageEvent>;
 
-const STORAGE_TIMEOUT_PREFIX: &str = "midge storage timeout: ";
-
-/// Preserve a typed timeout category across the legacy string-valued storage
-/// callback boundary. Only trusted adapters add this canonical marker;
-/// provider diagnostic text alone must not control public error typing.
+/// Build a timeout failure for the storage callback boundary.
 #[must_use]
-pub(crate) fn storage_timeout_error(message: impl std::fmt::Display) -> String {
-    format!("{STORAGE_TIMEOUT_PREFIX}{message}")
-}
-
-#[must_use]
-pub(crate) fn storage_error_is_timeout(error: &str) -> bool {
-    error.trim_start().starts_with(STORAGE_TIMEOUT_PREFIX)
+pub(crate) fn storage_timeout_error(message: impl std::fmt::Display) -> StorageError {
+    StorageError::timeout(message)
 }
 
 /// One read response binds the body and provider identity to the same version.
 pub type MetadataReadCallback =
-    std::sync::mpsc::Sender<Result<(Vec<u8>, StorageObjectMetadata), String>>;
+    std::sync::mpsc::Sender<Result<(Vec<u8>, StorageObjectMetadata), StorageError>>;
 
 /// Completion of an exact, conditionally versioned object range.
-pub type RangeReadCallback = std::sync::mpsc::Sender<Result<Vec<u8>, String>>;
+pub type RangeReadCallback = std::sync::mpsc::Sender<Result<Vec<u8>, StorageError>>;
 
 /// Version-aware object I/O required by engine persistence paths.
 ///
@@ -320,7 +448,9 @@ pub trait StorageBackend: Send + Sync + 'static {
             Err(error) => {
                 let _ = callback.send(StorageEvent::WriteComplete {
                     key: key.to_string(),
-                    result: StorageOutcome::Err(format!("retain upload completion: {error}")),
+                    result: StorageOutcome::Err(
+                        format!("retain upload completion: {error}").into(),
+                    ),
                 });
             }
         }
@@ -339,7 +469,9 @@ pub trait StorageBackend: Send + Sync + 'static {
         match retained_callback::retain(callback.clone(), reservation) {
             Ok(retained) => self.submit_read_range(key, start, end, expected, timeout, retained),
             Err(error) => {
-                let _ = callback.send(Err(format!("retain range completion: {error}")));
+                let _ = callback.send(Err(StorageError::io(format!(
+                    "retain range completion: {error}"
+                ))));
             }
         }
     }

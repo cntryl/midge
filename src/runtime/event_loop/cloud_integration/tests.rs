@@ -681,7 +681,9 @@ impl crate::storage::StorageBackend for PostRetirementDependencyChangeBackend {
             let _ = callback.send(crate::storage::StorageEvent::HeadComplete {
                 key: key.to_string(),
                 result: crate::storage::StorageOutcome::Err(
-                    "injected post-retirement SST identity change".to_string(),
+                    "injected post-retirement SST identity change"
+                        .to_string()
+                        .into(),
                 ),
             });
             return;
@@ -1171,7 +1173,7 @@ impl crate::storage::StorageBackend for FailOnceDeleteStorageBackend {
             let _ = callback.send(crate::storage::StorageEvent::DeleteComplete {
                 key: key.to_string(),
                 result: crate::storage::StorageOutcome::Err(
-                    "injected first cloud SST delete failure".to_string(),
+                    "injected first cloud SST delete failure".to_string().into(),
                 ),
             });
             return;
@@ -1190,7 +1192,7 @@ impl crate::storage::StorageBackend for FailOnceDeleteStorageBackend {
             let _ = callback.send(crate::storage::StorageEvent::DeleteComplete {
                 key: key.to_string(),
                 result: crate::storage::StorageOutcome::Err(
-                    "injected first cloud WAL delete failure".to_string(),
+                    "injected first cloud WAL delete failure".to_string().into(),
                 ),
             });
             return;
