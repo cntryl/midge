@@ -503,6 +503,7 @@ fn redrive_ambiguous_prepare_within(
     let mut registry = match remote {
         Some(registry) if registry.epoch == prepare.expected_remote_epoch => registry,
         Some(registry) => {
+            state.mark_ddl_authority_ambiguous();
             return Err(MidgeError::Fenced(format!(
                 "DDL authority is ambiguous: prepared operation expected remote epoch {}, but the registry advanced to {}",
                 prepare.expected_remote_epoch, registry.epoch
@@ -510,6 +511,7 @@ fn redrive_ambiguous_prepare_within(
         }
         None if prepare.expected_remote_epoch == 0 => DdlRegistry::from_manifest(&state.manifest),
         None => {
+            state.mark_ddl_authority_ambiguous();
             return Err(MidgeError::Fenced(format!(
                 "DDL authority is ambiguous: prepared operation expected remote epoch {}, but the registry is missing",
                 prepare.expected_remote_epoch
@@ -525,12 +527,18 @@ fn redrive_ambiguous_prepare_within(
                 apply_local_edit(state, &prepare.edit)?;
                 clear_local_prepare(state)
             }
-            Ok(_) => Err(MidgeError::Fenced(format!(
-                "DDL authority is ambiguous after re-driving the prepared remote CAS ({write_error}); the operation id is not visible"
-            ))),
-            Err(read_error) => Err(MidgeError::Fenced(format!(
-                "DDL authority is ambiguous after re-driving the prepared remote CAS ({write_error}); authority re-read failed: {read_error}"
-            ))),
+            Ok(_) => {
+                state.mark_ddl_authority_ambiguous();
+                Err(MidgeError::Fenced(format!(
+                    "DDL authority is ambiguous after re-driving the prepared remote CAS ({write_error}); the operation id is not visible"
+                )))
+            }
+            Err(read_error) => {
+                state.mark_ddl_authority_ambiguous();
+                Err(MidgeError::Fenced(format!(
+                    "DDL authority is ambiguous after re-driving the prepared remote CAS ({write_error}); authority re-read failed: {read_error}"
+                )))
+            }
         };
     }
 
@@ -651,12 +659,14 @@ pub(crate) fn execute_within(
             }
             Ok(_) => {
                 state.mark_persistence_anomaly();
+                state.mark_ddl_authority_ambiguous();
                 return Err(MidgeError::Fenced(format!(
                     "DDL authority is ambiguous after a lost remote CAS response ({error}); the operation id is not yet visible"
                 )));
             }
             Err(read_error) => {
                 state.mark_persistence_anomaly();
+                state.mark_ddl_authority_ambiguous();
                 return Err(MidgeError::Fenced(format!(
                     "DDL authority is ambiguous after a lost remote CAS response ({error}); authority re-read failed: {read_error}"
                 )));
