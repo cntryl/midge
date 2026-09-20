@@ -576,7 +576,11 @@ fn validate_final_sst(
     // A freshly written SST always carries both proofs, so anything missing
     // here is a defect in the writer rather than an older manifest.
     crate::sst::identity::SstIdentity::of_path(path)?
-        .verify_against(expected, None, crate::sst::identity::ProofPolicy::Required)
+        .verify_against(
+            expected.expected_sst(),
+            None,
+            crate::sst::identity::ProofPolicy::Required,
+        )
         .map_err(|mismatch| {
             MidgeError::Corruption(format!(
                 "staged SST identity changed at '{}': {mismatch}",

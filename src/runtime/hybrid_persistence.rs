@@ -1261,7 +1261,7 @@ fn verify_sst_summary_matches_manifest(
     // only what the decoded summary can attest to.
     crate::sst::identity::verify_summary_against(
         summary,
-        file,
+        file.expected_sst(),
         crate::sst::identity::ProofPolicy::Legacy,
     )
     .map_err(|mismatch| format!("cloud SST '{sst_name}': {mismatch}"))

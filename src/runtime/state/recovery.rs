@@ -759,7 +759,11 @@ impl RuntimeState {
         crate::sst::identity::SstIdentity::of_file(file.as_ref(), size, None)
             .and_then(|identity| {
                 identity
-                    .verify_against(file_meta, None, crate::sst::identity::ProofPolicy::Legacy)
+                    .verify_against(
+                        file_meta.expected_sst(),
+                        None,
+                        crate::sst::identity::ProofPolicy::Legacy,
+                    )
                     .map_err(|mismatch| {
                         MidgeError::RecoveryFailed(format!(
                             "recovery intent SST does not match its publication proof: {mismatch}"

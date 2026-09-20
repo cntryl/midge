@@ -19,7 +19,8 @@ use crate::sst::fs::SstFileSummary;
 /// A borrowed view of the proofs a manifest entry records about one SST.
 ///
 /// The manifest and the runtime message types carry the same fields in two
-/// structs, so the checker borrows from either rather than forcing a clone.
+/// structs, and both live above this layer, so each builds this view itself
+/// (`FileMeta::expected_sst`) rather than the checker depending on them.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ExpectedSst<'a> {
     pub(crate) name: &'a str,
@@ -29,34 +30,6 @@ pub(crate) struct ExpectedSst<'a> {
     pub(crate) largest_key: Option<&'a [u8]>,
     pub(crate) smallest_seq: Option<u64>,
     pub(crate) largest_seq: Option<u64>,
-}
-
-impl<'a> From<&'a crate::metadata::FileMeta> for ExpectedSst<'a> {
-    fn from(meta: &'a crate::metadata::FileMeta) -> Self {
-        Self {
-            name: &meta.name,
-            size_bytes: meta.size_bytes,
-            content_crc32c: meta.content_crc32c,
-            smallest_key: meta.smallest_key.as_deref(),
-            largest_key: meta.largest_key.as_deref(),
-            smallest_seq: meta.smallest_seq,
-            largest_seq: meta.largest_seq,
-        }
-    }
-}
-
-impl<'a> From<&'a crate::runtime::FileMeta> for ExpectedSst<'a> {
-    fn from(meta: &'a crate::runtime::FileMeta) -> Self {
-        Self {
-            name: &meta.name,
-            size_bytes: meta.size_bytes,
-            content_crc32c: meta.content_crc32c,
-            smallest_key: meta.smallest_key.as_deref(),
-            largest_key: meta.largest_key.as_deref(),
-            smallest_seq: meta.smallest_seq,
-            largest_seq: meta.largest_seq,
-        }
-    }
 }
 
 /// Physical identity of an SST file: its length and whole-file CRC32C.
@@ -283,14 +256,16 @@ fn verify_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metadata::FileMeta;
 
-    fn meta(size_bytes: u64, content_crc32c: Option<u32>) -> FileMeta {
-        FileMeta {
-            name: "000001.sst".to_string(),
+    fn meta(size_bytes: u64, content_crc32c: Option<u32>) -> ExpectedSst<'static> {
+        ExpectedSst {
+            name: "000001.sst",
             size_bytes,
             content_crc32c,
-            ..FileMeta::default()
+            smallest_key: None,
+            largest_key: None,
+            smallest_seq: None,
+            largest_seq: None,
         }
     }
 
@@ -304,7 +279,7 @@ mod tests {
         let entry = meta(0, None);
 
         // Act
-        let verdict = identity(4096, 7).verify_against(&entry, None, ProofPolicy::Legacy);
+        let verdict = identity(4096, 7).verify_against(entry, None, ProofPolicy::Legacy);
 
         // Assert
         assert!(verdict.is_ok(), "{verdict:?}");
@@ -317,7 +292,7 @@ mod tests {
 
         // Act
         let mismatch = identity(4096, 7)
-            .verify_against(&entry, None, ProofPolicy::Required)
+            .verify_against(entry, None, ProofPolicy::Required)
             .unwrap_err();
 
         // Assert
@@ -338,7 +313,7 @@ mod tests {
 
         // Act
         let verdict =
-            SstIdentity::of_bytes(b"payload").verify_against(&entry, None, ProofPolicy::Legacy);
+            SstIdentity::of_bytes(b"payload").verify_against(entry, None, ProofPolicy::Legacy);
 
         // Assert
         assert!(verdict.is_ok(), "{verdict:?}");
@@ -351,7 +326,7 @@ mod tests {
 
         // Act
         let mismatch = SstIdentity::of_bytes(b"corrupt")
-            .verify_against(&entry, None, ProofPolicy::Legacy)
+            .verify_against(entry, None, ProofPolicy::Legacy)
             .unwrap_err();
 
         // Assert
@@ -361,8 +336,8 @@ mod tests {
     #[test]
     fn should_reject_a_summary_whose_bounds_disagree_with_the_manifest() {
         // Arrange
-        let entry = FileMeta {
-            smallest_key: Some(b"a".to_vec()),
+        let entry = ExpectedSst {
+            smallest_key: Some(b"a"),
             largest_seq: Some(9),
             ..meta(4, Some(crc32c::crc32c(b"data")))
         };
@@ -376,7 +351,7 @@ mod tests {
 
         // Act
         let mismatch = SstIdentity::of_bytes(b"data")
-            .verify_against(&entry, Some(&summary), ProofPolicy::Legacy)
+            .verify_against(entry, Some(&summary), ProofPolicy::Legacy)
             .unwrap_err();
 
         // Assert

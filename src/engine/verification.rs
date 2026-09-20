@@ -103,7 +103,11 @@ fn verify_manifest_sst(
     // `midge verify` states a verdict about the database rather than deciding
     // whether to keep going, so every proof the manifest can carry is required.
     crate::sst::identity::SstIdentity::of_file(file.as_ref(), actual_len, deadline)?
-        .verify_against(file_meta, None, crate::sst::identity::ProofPolicy::Required)
+        .verify_against(
+            file_meta.expected_sst(),
+            None,
+            crate::sst::identity::ProofPolicy::Required,
+        )
         .map_err(|mismatch| MidgeError::Corruption(mismatch.to_string()))?;
 
     let reader = crate::sst::fs::SstFileIo::open(path, Arc::clone(fs)).map_err(|error| {
