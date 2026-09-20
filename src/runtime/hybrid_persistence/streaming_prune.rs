@@ -103,10 +103,7 @@ pub(super) fn validate(
                 output.candidates.push(ValidatedWalPruneCandidate {
                     segment_id,
                     entry: entry.clone(),
-                    validated: ValidatedWalObject {
-                        proof,
-                        data_records: Vec::new(),
-                    },
+                    validated: ValidatedWalObject { proof },
                 });
                 output.coverage.push(covered);
                 output.reservations.push(Arc::new(reservation));
