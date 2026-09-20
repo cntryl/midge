@@ -270,7 +270,7 @@ fn should_reject_corrupt_remote_publication_with_bounded_checksum_ranges() {
         .expect_err("reject publication checksum mismatch");
 
     // Assert
-    assert!(error.to_string().contains("checksum"), "{error}");
+    assert!(error.to_string().contains("content CRC"), "{error}");
     assert!(
         backend.inner.get_downloads().is_empty(),
         "no whole-object GET is allowed"

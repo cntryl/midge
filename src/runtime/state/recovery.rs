@@ -742,7 +742,6 @@ impl RuntimeState {
         fs: Arc<dyn Fs>,
         file_meta: &crate::runtime::FileMeta,
     ) -> MidgeResult<()> {
-        const CHECKSUM_CHUNK_BYTES: u64 = 1024 * 1024;
         let path = crate::io::FsPath::new(crate::sst::object_key(&file_meta.name));
         let pinned = fs.immutable_read_view(&path)?.unwrap_or(fs);
         let file = pinned.open(
@@ -755,34 +754,29 @@ impl RuntimeState {
             },
         )?;
         let size = file.len()?;
-        if file_meta.size_bytes != 0 && size != file_meta.size_bytes {
-            return Err(MidgeError::RecoveryFailed(format!(
-                "recovery intent SST '{}' size does not match its publication proof",
-                file_meta.name
-            )));
-        }
-        if let Some(expected_crc32c) = file_meta.content_crc32c {
-            let mut checksum = 0_u32;
-            let mut offset = 0_u64;
-            while offset < size {
-                let count = CHECKSUM_CHUNK_BYTES.min(size - offset);
-                let bytes = file.read_at(offset, count)?;
-                if u64::try_from(bytes.len()).ok() != Some(count) {
-                    return Err(MidgeError::RecoveryFailed(format!(
-                        "recovery intent SST '{}' returned a short checksum range",
-                        file_meta.name
-                    )));
-                }
-                checksum = crc32c::crc32c_append(checksum, &bytes);
-                offset += count;
-            }
-            if checksum != expected_crc32c {
-                return Err(MidgeError::RecoveryFailed(format!(
-                    "recovery intent SST '{}' checksum does not match its publication proof",
+        // Recovery keeps readable data an older writer never proved, so a
+        // manifest entry with no recorded size or CRC is accepted.
+        crate::sst::identity::SstIdentity::of_file(file.as_ref(), size, None)
+            .and_then(|identity| {
+                identity
+                    .verify_against(
+                        file_meta.expected_sst(),
+                        None,
+                        crate::sst::identity::ProofPolicy::Legacy,
+                    )
+                    .map_err(|mismatch| {
+                        MidgeError::RecoveryFailed(format!(
+                            "recovery intent SST does not match its publication proof: {mismatch}"
+                        ))
+                    })
+            })
+            .map_err(|error| match error {
+                MidgeError::Corruption(message) => MidgeError::RecoveryFailed(format!(
+                    "recovery intent SST '{}' could not be read in full: {message}",
                     file_meta.name
-                )));
-            }
-        }
+                )),
+                other => other,
+            })?;
         drop(file);
         crate::sst::fs::SstFileIo::open(&path.0, pinned)?;
         Ok(())

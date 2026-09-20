@@ -139,6 +139,21 @@ pub struct FileMeta {
 }
 
 impl FileMeta {
+    /// Borrow this entry's recorded proofs for the SST identity checker.
+    pub(crate) fn expected_sst(&self) -> crate::sst::identity::ExpectedSst<'_> {
+        crate::sst::identity::ExpectedSst {
+            name: &self.name,
+            size_bytes: self.size_bytes,
+            content_crc32c: self.content_crc32c,
+            smallest_key: self.smallest_key.as_deref(),
+            largest_key: self.largest_key.as_deref(),
+            smallest_seq: self.smallest_seq,
+            largest_seq: self.largest_seq,
+        }
+    }
+}
+
+impl FileMeta {
     /// Record a read access to this SST
     pub fn record_read(&self) {
         self.read_count.fetch_add(1, Ordering::Relaxed);

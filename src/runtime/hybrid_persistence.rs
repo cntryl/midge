@@ -1257,49 +1257,14 @@ fn verify_sst_summary_matches_manifest(
     summary: &crate::sst::fs::SstFileSummary,
     file: &FileMeta,
 ) -> Result<(), String> {
-    if file.size_bytes > 0 && summary.size_bytes != file.size_bytes {
-        return Err(format!(
-            "cloud SST '{sst_name}' physical size {} does not match manifest {}",
-            summary.size_bytes, file.size_bytes
-        ));
-    }
-    if file
-        .smallest_key
-        .as_ref()
-        .is_some_and(|key| summary.smallest_key.as_slice() != key.as_slice())
-    {
-        return Err(format!(
-            "cloud SST '{sst_name}' smallest key does not match manifest"
-        ));
-    }
-    if file
-        .largest_key
-        .as_ref()
-        .is_some_and(|key| summary.largest_key.as_slice() != key.as_slice())
-    {
-        return Err(format!(
-            "cloud SST '{sst_name}' largest key does not match manifest"
-        ));
-    }
-    if file
-        .smallest_seq
-        .is_some_and(|sequence| summary.smallest_seq != sequence)
-    {
-        return Err(format!(
-            "cloud SST '{sst_name}' smallest sequence {} does not match manifest {:?}",
-            summary.smallest_seq, file.smallest_seq
-        ));
-    }
-    if file
-        .largest_seq
-        .is_some_and(|sequence| summary.largest_seq != sequence)
-    {
-        return Err(format!(
-            "cloud SST '{sst_name}' largest sequence {} does not match manifest {:?}",
-            summary.largest_seq, file.largest_seq
-        ));
-    }
-    Ok(())
+    // The CRC is proven separately by the streaming pass, so this compares
+    // only what the decoded summary can attest to.
+    crate::sst::identity::verify_summary_against(
+        summary,
+        file.expected_sst(),
+        crate::sst::identity::ProofPolicy::Legacy,
+    )
+    .map_err(|mismatch| format!("cloud SST '{sst_name}': {mismatch}"))
 }
 
 #[cfg(test)]

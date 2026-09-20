@@ -72,35 +72,6 @@ impl StorageVerifier {
     }
 }
 
-fn checksummed_file_crc(file: &dyn crate::io::File, file_len: u64) -> MidgeResult<u32> {
-    checksummed_file_crc_with_deadline(file, file_len, None)
-}
-
-fn checksummed_file_crc_with_deadline(
-    file: &dyn crate::io::File,
-    file_len: u64,
-    deadline: Option<&crate::common::OperationDeadline>,
-) -> MidgeResult<u32> {
-    const VERIFY_CHUNK_BYTES: u64 = 1024 * 1024;
-
-    let mut crc = 0u32;
-    let mut offset = 0u64;
-    while offset < file_len {
-        ensure_verification_deadline(deadline)?;
-        let chunk_len = VERIFY_CHUNK_BYTES.min(file_len - offset);
-        let chunk = file.read_at(offset, chunk_len)?;
-        if u64::try_from(chunk.len()).unwrap_or(u64::MAX) != chunk_len {
-            return Err(MidgeError::Corruption(format!(
-                "verification read returned {} bytes for requested {chunk_len}",
-                chunk.len()
-            )));
-        }
-        crc = crc32c::crc32c_append(crc, &chunk);
-        offset += chunk_len;
-    }
-    Ok(crc)
-}
-
 fn verify_manifest_sst(
     fs: &Arc<dyn Fs>,
     file_meta: &crate::metadata::FileMeta,
@@ -120,14 +91,6 @@ fn verify_manifest_sst(
         .unwrap_or_else(|| Arc::clone(fs));
     let fs = &pinned;
     let actual_len = fs.metadata(&fs_path)?.len;
-    if actual_len != file_meta.size_bytes {
-        return Err(MidgeError::Corruption(format!(
-            "SST '{}' size mismatch: manifest={}, actual={actual_len}",
-            name.as_str(),
-            file_meta.size_bytes
-        )));
-    }
-
     let file = fs.open(
         &fs_path,
         OpenOptions {
@@ -137,23 +100,15 @@ fn verify_manifest_sst(
             truncate: false,
         },
     )?;
-    let expected_crc = file_meta.content_crc32c.ok_or_else(|| {
-        MidgeError::Corruption(format!(
-            "SST '{}' is missing manifest content CRC",
-            name.as_str()
-        ))
-    })?;
-    let actual_crc = if deadline.is_some() {
-        checksummed_file_crc_with_deadline(file.as_ref(), actual_len, deadline)?
-    } else {
-        checksummed_file_crc(file.as_ref(), actual_len)?
-    };
-    if actual_crc != expected_crc {
-        return Err(MidgeError::Corruption(format!(
-            "SST '{}' content CRC mismatch: manifest={expected_crc:08x}, actual={actual_crc:08x}",
-            name.as_str()
-        )));
-    }
+    // `midge verify` states a verdict about the database rather than deciding
+    // whether to keep going, so every proof the manifest can carry is required.
+    crate::sst::identity::SstIdentity::of_file(file.as_ref(), actual_len, deadline)?
+        .verify_against(
+            file_meta.expected_sst(),
+            None,
+            crate::sst::identity::ProofPolicy::Required,
+        )
+        .map_err(|mismatch| MidgeError::Corruption(mismatch.to_string()))?;
 
     let reader = crate::sst::fs::SstFileIo::open(path, Arc::clone(fs)).map_err(|error| {
         MidgeError::Corruption(format!(
@@ -584,14 +539,15 @@ mod tests {
         let file = RecordingFile::new(bytes.clone());
 
         // Act
-        let crc = super::checksummed_file_crc(
+        let identity = crate::sst::identity::SstIdentity::of_file(
             &file,
             u64::try_from(bytes.len()).expect("test length fits u64"),
+            None,
         )
         .expect("checksum recording file");
 
         // Assert
-        assert_eq!(crc, crc32c::crc32c(&bytes));
+        assert_eq!(identity.crc32c, crc32c::crc32c(&bytes));
         let read_lengths = file
             .read_lengths
             .lock()

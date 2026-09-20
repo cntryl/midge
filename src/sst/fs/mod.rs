@@ -18,21 +18,8 @@ pub use reader_io::{SstFileIo, SstFileSummary};
 
 /// Compute immutable SST length and CRC with fixed stack space.
 pub(crate) fn file_identity(path: &Path) -> MidgeResult<(u64, u32)> {
-    let mut file = std::fs::File::open(path)?;
-    // Fixed stack space, independent of SST size; every byte remains covered.
-    let mut buffer = [0_u8; 8192];
-    let mut size = 0_u64;
-    let mut checksum = 0;
-    loop {
-        let count = file.read(&mut buffer)?;
-        if count == 0 {
-            return Ok((size, checksum));
-        }
-        size = size
-            .checked_add(count as u64)
-            .ok_or_else(|| MidgeError::ResourceLimit("SST size overflow".into()))?;
-        checksum = crc32c::crc32c_append(checksum, &buffer[..count]);
-    }
+    let identity = crate::sst::identity::SstIdentity::of_path(path)?;
+    Ok((identity.size_bytes, identity.crc32c))
 }
 
 /// Finalize an SST writer and atomically persist the resulting bytes to a path.

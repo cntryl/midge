@@ -67,6 +67,21 @@ pub struct FileMeta {
     pub key_bounds_complete: bool,
 }
 
+impl FileMeta {
+    /// Borrow this entry's recorded proofs for the SST identity checker.
+    pub(crate) fn expected_sst(&self) -> crate::sst::identity::ExpectedSst<'_> {
+        crate::sst::identity::ExpectedSst {
+            name: &self.name,
+            size_bytes: self.size_bytes,
+            content_crc32c: self.content_crc32c,
+            smallest_key: self.smallest_key.as_deref(),
+            largest_key: self.largest_key.as_deref(),
+            smallest_seq: self.smallest_seq,
+            largest_seq: self.largest_seq,
+        }
+    }
+}
+
 /// A single operation within an atomic transaction apply.
 ///
 /// This type lives in the runtime layer so higher layers can submit a
