@@ -1344,6 +1344,13 @@ impl EventLoop {
         }
 
         let deferred = self.verification_barrier.release(token);
+        let retirements = self.verification_barrier.take_deferred_wal_retirements();
+        if !retirements.is_empty() {
+            self.retire_acked_local_wal_segments(&retirements);
+        }
+        for event in self.verification_barrier.take_deferred_storage_events() {
+            self.handle_storage_event(event);
+        }
         if self.pending_msg.is_none() {
             self.pending_msg = deferred;
         }
@@ -1359,8 +1366,13 @@ impl EventLoop {
         if self.verification_barrier.token.is_some() {
             // Verification freezes layout maintenance, but group-commit fsync
             // does not change the layout being verified.
-            return self.wal_actor.should_sync_batch()
+            let due_sync = self.wal_actor.should_sync_batch()
                 && (self.wal_actor.has_pending_data() || self.durability.has_pending_waiters());
+            return due_sync
+                || self
+                    .hybrid_storage_events
+                    .as_ref()
+                    .is_some_and(|rx| !rx.is_empty());
         }
 
         if self
@@ -1447,7 +1459,9 @@ impl EventLoop {
         if self.verification_barrier.token.is_some() {
             // Mutations stay deferred behind the barrier, so sync only what
             // is already in the WAL; do not drain queued writes into it.
+            // Cloud acknowledgements still complete their waiters.
             self.sync_batched_wal_without_draining();
+            self.drain_hybrid_storage_events();
             return;
         }
         self.drain_flush_worker_results();
@@ -1671,9 +1685,10 @@ impl EventLoop {
             }
 
             let idle_timeout = self.idle_progress_timeout();
-            let selectable_storage_rx = (!self.verification_barrier.is_active())
-                .then(|| self.hybrid_storage_events.clone())
-                .flatten();
+            // Storage events are selected under the barrier too: the handler
+            // takes only the ones that cannot change the verified layout and
+            // defers the rest.
+            let selectable_storage_rx = self.hybrid_storage_events.clone();
             let msg = if let Some(storage_rx) = selectable_storage_rx {
                 if let Some(timeout) = idle_timeout {
                     crossbeam::channel::select! {

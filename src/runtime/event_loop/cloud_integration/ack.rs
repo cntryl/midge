@@ -61,11 +61,30 @@ impl EventLoop {
         self.handle_storage_event_with_deadline(event, None);
     }
 
+    /// Whether an event only affects WAL durability accounting, and so can be
+    /// handled while storage verification holds its barrier. Anything that
+    /// can move SST or WAL files waits for the barrier instead.
+    fn is_verification_safe_storage_event(event: &crate::storage::StorageEvent) -> bool {
+        matches!(
+            event,
+            crate::storage::StorageEvent::CloudAck { .. }
+                | crate::storage::StorageEvent::CloudFail { .. }
+                | crate::storage::StorageEvent::CloudWalPruneAttemptFailed { .. }
+                | crate::storage::StorageEvent::BackpressureOn
+        )
+    }
+
     fn handle_storage_event_with_deadline(
         &mut self,
         event: crate::storage::StorageEvent,
         deadline: Option<&OperationDeadline>,
     ) {
+        if self.verification_barrier.is_active()
+            && !Self::is_verification_safe_storage_event(&event)
+        {
+            self.verification_barrier.defer_storage_event(event);
+            return;
+        }
         match event {
             crate::storage::StorageEvent::CloudAck {
                 segment_id,
@@ -307,7 +326,31 @@ impl EventLoop {
             }
         }
 
-        for (ready_segment_id, _) in ready_segments {
+        let ready_ids: Vec<u64> = ready_segments
+            .iter()
+            .map(|(segment_id, _)| *segment_id)
+            .collect();
+        if self.verification_barrier.is_active() {
+            // Verification replays the local WAL and reads the SSTs, so hold
+            // the retirement, prune and flush until the barrier releases. The
+            // acknowledgement itself has already completed its waiters.
+            tracing::debug!(
+                segments = ready_ids.len(),
+                "deferring acknowledged local WAL retirement under the verification barrier"
+            );
+            self.verification_barrier.defer_wal_retirements(&ready_ids);
+            return;
+        }
+        self.retire_acked_local_wal_segments(&ready_ids);
+    }
+
+    /// Retire local WAL segments whose cloud acknowledgement has committed,
+    /// then run the maintenance that retirement enables.
+    pub(in crate::runtime::event_loop) fn retire_acked_local_wal_segments(
+        &mut self,
+        ready_segment_ids: &[u64],
+    ) {
+        for ready_segment_id in ready_segment_ids {
             if self.remove_cloud_durable_local_wal_segment(*ready_segment_id) {
                 if let Err(error) = self.wal_transition.retire_cloud_durable(*ready_segment_id) {
                     self.fence_wal_transition(&error, Some(*ready_segment_id));

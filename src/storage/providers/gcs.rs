@@ -1428,6 +1428,20 @@ impl CloudBackend for GcsBackend {
     }
 
     fn submit_list(&self, prefix: &str, callback: CloudCallback) {
+        self.submit_list_with_headers(prefix, Vec::new(), callback);
+    }
+
+    fn submit_list_with_headers(
+        &self,
+        prefix: &str,
+        headers: Vec<(String, String)>,
+        callback: CloudCallback,
+    ) {
+        let std::ops::ControlFlow::Continue(request_timeout) =
+            split_request_timeout(prefix, &headers, &callback)
+        else {
+            return;
+        };
         let prefix = prefix.to_string();
         let state = GcsListState {
             prefix: prefix.clone(),
@@ -1443,7 +1457,13 @@ impl CloudBackend for GcsBackend {
             state,
             prefix,
             callback,
-            |state| Ok(Self::bodyless_request(state.mode, Method::GET, state.url())),
+            move |state| {
+                let mut request = Self::bodyless_request(state.mode, Method::GET, state.url());
+                if let Some(timeout) = request_timeout {
+                    request = request.with_timeout(timeout);
+                }
+                Ok(request)
+            },
             |state, resp| {
                 if resp.status != 200 {
                     state.error = Some(gcs_response_error(&resp, "GCS LIST", state.mode, false));
@@ -1506,7 +1526,21 @@ impl CloudBackend for GcsBackend {
     }
 
     fn submit_head(&self, key: &str, callback: CloudCallback) {
+        self.submit_head_with_headers(key, Vec::new(), callback);
+    }
+
+    fn submit_head_with_headers(
+        &self,
+        key: &str,
+        headers: Vec<(String, String)>,
+        callback: CloudCallback,
+    ) {
         let key = key.to_string();
+        let std::ops::ControlFlow::Continue(request_timeout) =
+            split_request_timeout(&key, &headers, &callback)
+        else {
+            return;
+        };
         // GCS JSON: GET metadata URL. GCS XML: HEAD object URL.
         let url = self.metadata_url(&key);
         let method = match self.mode {
@@ -1514,7 +1548,10 @@ impl CloudBackend for GcsBackend {
             GcsBackendMode::Xml => Method::HEAD,
         };
         let mode = self.mode;
-        let request = Self::bodyless_request(mode, method, url);
+        let mut request = Self::bodyless_request(mode, method, url);
+        if let Some(timeout) = request_timeout {
+            request = request.with_timeout(timeout);
+        }
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
             Ok(resp) if resp.status == 200 => {
                 let metadata = match mode {
@@ -1924,6 +1961,25 @@ impl CloudSigner for Goog1HmacSigner {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// Split the internal request-timeout header off HEAD/LIST headers.
+/// Returns `None` after reporting a malformed value through `callback`.
+fn split_request_timeout(
+    key: &str,
+    headers: &[(String, String)],
+    callback: &CloudCallback,
+) -> std::ops::ControlFlow<(), Option<std::time::Duration>> {
+    match crate::storage::cloud::split_request_timeout_header(headers.to_vec()) {
+        Ok((_, timeout)) => std::ops::ControlFlow::Continue(timeout),
+        Err(error) => {
+            let _ = callback.send(CloudEvent::Head {
+                key: key.to_string(),
+                result: CloudOutcome::Err(CloudError::Protocol(error)),
+            });
+            std::ops::ControlFlow::Break(())
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

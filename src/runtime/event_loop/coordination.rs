@@ -107,6 +107,11 @@ impl ManifestPublicationGate {
 pub(crate) struct VerificationBarrier {
     pub(super) token: Option<u64>,
     pub(super) deferred_messages: VecDeque<RuntimeMsg>,
+    /// Cloud-acknowledged segments whose local WAL retirement waits for the
+    /// barrier, because verification is replaying those files.
+    deferred_wal_retirements: Vec<u64>,
+    /// Storage events that would change the layout being verified.
+    deferred_storage_events: VecDeque<crate::storage::StorageEvent>,
 }
 
 impl VerificationBarrier {
@@ -120,6 +125,30 @@ impl VerificationBarrier {
         }
         self.token = Some(token);
         true
+    }
+
+    pub(super) fn defer_wal_retirements(&mut self, segment_ids: &[u64]) {
+        for segment_id in segment_ids {
+            if !self.deferred_wal_retirements.contains(segment_id) {
+                self.deferred_wal_retirements.push(*segment_id);
+            }
+        }
+    }
+
+    pub(super) fn defer_storage_event(&mut self, event: crate::storage::StorageEvent) {
+        self.deferred_storage_events.push_back(event);
+    }
+
+    /// Take the storage events deferred while the barrier was held.
+    pub(super) fn take_deferred_storage_events(
+        &mut self,
+    ) -> VecDeque<crate::storage::StorageEvent> {
+        std::mem::take(&mut self.deferred_storage_events)
+    }
+
+    /// Take the retirements deferred while the barrier was held.
+    pub(super) fn take_deferred_wal_retirements(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.deferred_wal_retirements)
     }
 
     pub(super) fn release(&mut self, token: u64) -> Option<RuntimeMsg> {

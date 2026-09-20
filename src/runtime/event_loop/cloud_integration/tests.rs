@@ -8296,3 +8296,98 @@ fn should_defer_metadata_cleanup_when_publication_lock_outlives_deadline(
     assert!(matches!(result, Err(crate::common::MidgeError::Timeout(_))));
     Ok(())
 }
+
+#[test]
+fn should_complete_cloud_ack_waiter_but_defer_local_wal_retirement_under_verification_barrier(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: verification replays the local WAL, so an acknowledgement may
+    // complete its durability waiter but must not delete a local segment
+    // until the barrier releases.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let request_id = 777u64;
+    let (seq, deferred) = el.wal_actor.append(
+        &mut el.state,
+        crate::runtime::actors::wal::AppendParams {
+            request_id,
+            cf_id: 0,
+            key: Bytes::from_static(b"acked-under-barrier"),
+            value: Some(Bytes::from_static(b"value")),
+            insert_only: false,
+            ttl_seconds: None,
+        },
+    )?;
+    assert!(deferred);
+    let response = el.router.register(request_id, "WalAppend");
+    el.durability
+        .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+            request_id,
+            sequence: seq,
+        });
+    let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    let local_wal = el
+        .state
+        .wal_dir
+        .join(crate::wal::segment_file_name(segment_id));
+    assert!(el.verification_barrier.activate(41));
+
+    // Act
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id,
+        max_sequence,
+    });
+
+    // Assert
+    assert!(
+        matches!(
+            response.try_recv(),
+            Ok(RuntimeResponse::WalAppended {
+                request_id: 777,
+                ..
+            })
+        ),
+        "the ack must complete its waiter while the barrier is held"
+    );
+    assert!(
+        local_wal.exists(),
+        "local WAL must not be retired while verification may be reading it"
+    );
+    let release = el.router.register(42, "EndStorageVerification");
+    el.end_storage_verification(42, 41);
+    assert!(matches!(release.try_recv(), Ok(RuntimeResponse::Ok { .. })));
+    assert!(
+        !local_wal.exists(),
+        "the deferred retirement runs once the barrier releases"
+    );
+    Ok(())
+}
+
+#[test]
+fn should_defer_backpressure_release_until_verification_barrier_ends(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: releasing backpressure resumes flushes, which change the SST
+    // layout verification is checking.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    el.state.set_write_stalled(true);
+    assert!(el.verification_barrier.activate(61));
+
+    // Act
+    el.handle_storage_event(crate::storage::StorageEvent::BackpressureOff);
+
+    // Assert
+    assert!(
+        el.state.write_stalled(),
+        "a layout-changing storage event must wait for the barrier"
+    );
+    let release = el.router.register(62, "EndStorageVerification");
+    el.end_storage_verification(62, 61);
+    assert!(matches!(release.try_recv(), Ok(RuntimeResponse::Ok { .. })));
+    assert!(
+        !el.state.write_stalled(),
+        "the deferred event is replayed once the barrier releases"
+    );
+    Ok(())
+}

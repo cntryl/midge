@@ -1072,6 +1072,20 @@ impl CloudBackend for AzureBackend {
     }
 
     fn submit_list(&self, prefix: &str, callback: CloudCallback) {
+        self.submit_list_with_headers(prefix, Vec::new(), callback);
+    }
+
+    fn submit_list_with_headers(
+        &self,
+        prefix: &str,
+        headers: Vec<(String, String)>,
+        callback: CloudCallback,
+    ) {
+        let std::ops::ControlFlow::Continue(request_timeout) =
+            split_request_timeout(prefix, &headers, &callback)
+        else {
+            return;
+        };
         let prefix = prefix.to_string();
         let state = AzureListState {
             prefix: prefix.clone(),
@@ -1086,7 +1100,13 @@ impl CloudBackend for AzureBackend {
             state,
             prefix,
             callback,
-            |state| Ok(CloudRequest::new(Method::GET, state.url())),
+            move |state| {
+                let mut request = CloudRequest::new(Method::GET, state.url());
+                if let Some(timeout) = request_timeout {
+                    request = request.with_timeout(timeout);
+                }
+                Ok(request)
+            },
             |state, resp| {
                 if resp.status != 200 {
                     state.error = Some(azure_response_error(&resp, "Azure LIST", false));
@@ -1122,9 +1142,26 @@ impl CloudBackend for AzureBackend {
     }
 
     fn submit_head(&self, key: &str, callback: CloudCallback) {
+        self.submit_head_with_headers(key, Vec::new(), callback);
+    }
+
+    fn submit_head_with_headers(
+        &self,
+        key: &str,
+        headers: Vec<(String, String)>,
+        callback: CloudCallback,
+    ) {
         let key = key.to_string();
         let url = self.object_url(&key);
-        let request = CloudRequest::new(Method::HEAD, url);
+        let std::ops::ControlFlow::Continue(request_timeout) =
+            split_request_timeout(&key, &headers, &callback)
+        else {
+            return;
+        };
+        let mut request = CloudRequest::new(Method::HEAD, url);
+        if let Some(timeout) = request_timeout {
+            request = request.with_timeout(timeout);
+        }
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
             Ok(resp) if resp.status == 200 => CloudEvent::Head {
                 key: ctx,
@@ -1904,6 +1941,25 @@ impl CloudSigner for ManagedIdentitySigner {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// Split the internal request-timeout header off HEAD/LIST headers.
+/// Returns `None` after reporting a malformed value through `callback`.
+fn split_request_timeout(
+    key: &str,
+    headers: &[(String, String)],
+    callback: &CloudCallback,
+) -> std::ops::ControlFlow<(), Option<std::time::Duration>> {
+    match crate::storage::cloud::split_request_timeout_header(headers.to_vec()) {
+        Ok((_, timeout)) => std::ops::ControlFlow::Continue(timeout),
+        Err(error) => {
+            let _ = callback.send(CloudEvent::Head {
+                key: key.to_string(),
+                result: CloudOutcome::Err(CloudError::Protocol(error)),
+            });
+            std::ops::ControlFlow::Break(())
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
