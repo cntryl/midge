@@ -556,20 +556,11 @@ impl EventLoop {
         path: &std::path::Path,
         budget: &crate::common::resource_budget::ResourceBudget,
     ) -> crate::common::MidgeResult<u32> {
-        use std::io::Read;
-
+        // The identity pass itself uses fixed stack space, but it still has to
+        // be admitted against the compaction pool before it reads the output.
         const CRC_BUFFER_SIZE: usize = 64 * 1024;
         let _reservation = budget.reserve(CRC_BUFFER_SIZE, "SST checksum buffer")?;
-        let mut file = std::fs::File::open(path)?;
-        let mut buffer = vec![0u8; CRC_BUFFER_SIZE].into_boxed_slice();
-        let mut crc = 0u32;
-        loop {
-            let read = file.read(&mut buffer)?;
-            if read == 0 {
-                return Ok(crc);
-            }
-            crc = crc32c::crc32c_append(crc, &buffer[..read]);
-        }
+        Ok(crate::sst::identity::SstIdentity::of_path(path)?.crc32c)
     }
 
     fn assign_compaction_output_sequence(

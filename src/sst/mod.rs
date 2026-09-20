@@ -42,6 +42,7 @@ pub mod cache;
 pub mod compression;
 pub mod encoding;
 pub mod fs;
+pub(crate) mod identity;
 pub mod index;
 mod name;
 pub mod read_amp_metrics;

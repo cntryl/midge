@@ -573,13 +573,16 @@ fn validate_final_sst(
     expected: &crate::runtime::FileMeta,
     budget: &crate::common::resource_budget::ResourceBudget,
 ) -> MidgeResult<()> {
-    let (actual_size, actual_crc) = crate::sst::fs::file_identity(path)?;
-    if actual_size != expected.size_bytes || expected.content_crc32c != Some(actual_crc) {
-        return Err(MidgeError::Corruption(format!(
-            "staged SST identity changed at '{}': size {actual_size}, crc {actual_crc}",
-            path.display()
-        )));
-    }
+    // A freshly written SST always carries both proofs, so anything missing
+    // here is a defect in the writer rather than an older manifest.
+    crate::sst::identity::SstIdentity::of_path(path)?
+        .verify_against(expected, None, crate::sst::identity::ProofPolicy::Required)
+        .map_err(|mismatch| {
+            MidgeError::Corruption(format!(
+                "staged SST identity changed at '{}': {mismatch}",
+                path.display()
+            ))
+        })?;
     let parent = path.parent().ok_or(MidgeError::InvalidPath)?;
     let name = path
         .file_name()
