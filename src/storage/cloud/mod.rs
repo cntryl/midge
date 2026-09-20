@@ -532,6 +532,27 @@ pub trait CloudBackend: Send + Sync + 'static {
             )),
         });
     }
+
+    /// HEAD carrying internal headers, which is how the caller's deadline
+    /// reaches the provider. Backends that ignore headers keep the default.
+    fn submit_head_with_headers(
+        &self,
+        key: &str,
+        _headers: Vec<(String, String)>,
+        callback: CloudCallback,
+    ) {
+        self.submit_head(key, callback);
+    }
+
+    /// LIST carrying internal headers; see [`Self::submit_head_with_headers`].
+    fn submit_list_with_headers(
+        &self,
+        prefix: &str,
+        _headers: Vec<(String, String)>,
+        callback: CloudCallback,
+    ) {
+        self.submit_list(prefix, callback);
+    }
 }
 
 /// Deterministic mock backend for testing (synchronous).
@@ -1090,13 +1111,28 @@ impl CloudStorage {
     }
 
     pub fn submit_list(&self, prefix: &str, callback: CloudCallback) {
+        let mut headers = Vec::new();
+        set_request_timeout_header(&mut headers, self.callback_timeout);
         let full_prefix = self.full_path(prefix);
-        self.backend.submit_list(&full_prefix, callback);
+        self.backend
+            .submit_list_with_headers(&full_prefix, headers, callback);
     }
 
     pub fn submit_head(&self, key: &str, callback: CloudCallback) {
+        self.submit_head_within(key, self.callback_timeout, callback);
+    }
+
+    pub fn submit_head_within(
+        &self,
+        key: &str,
+        timeout: std::time::Duration,
+        callback: CloudCallback,
+    ) {
+        let mut headers = Vec::new();
+        set_request_timeout_header(&mut headers, timeout);
         let full_key = self.full_path(key);
-        self.backend.submit_head(&full_key, callback);
+        self.backend
+            .submit_head_with_headers(&full_key, headers, callback);
     }
 }
 
@@ -1426,7 +1462,7 @@ impl StorageBackend for CloudStorage {
             return;
         }
         let (tx, rx) = std::sync::mpsc::channel();
-        CloudStorage::submit_head(self, key, tx);
+        CloudStorage::submit_head_within(self, key, timeout, tx);
         let event = match rx.recv_timeout(timeout) {
             Ok(CloudEvent::Head { key, result }) => {
                 let outcome = match result {
@@ -2946,8 +2982,10 @@ mod tests {
 
     #[derive(Default)]
     struct HeaderRecordingBackend {
-        put_headers: parking_lot::Mutex<Vec<Vec<(String, String)>>>,
-        delete_headers: parking_lot::Mutex<Vec<Vec<(String, String)>>>,
+        puts: parking_lot::Mutex<Vec<Vec<(String, String)>>>,
+        deletes: parking_lot::Mutex<Vec<Vec<(String, String)>>>,
+        heads: parking_lot::Mutex<Vec<Vec<(String, String)>>>,
+        lists: parking_lot::Mutex<Vec<Vec<(String, String)>>>,
     }
 
     impl HeaderRecordingBackend {
@@ -2967,7 +3005,7 @@ mod tests {
             headers: Vec<(String, String)>,
             callback: CloudCallback,
         ) {
-            self.put_headers.lock().push(headers);
+            self.puts.lock().push(headers);
             let _ = callback.send(CloudEvent::Put {
                 key: key.to_string(),
                 result: CloudOutcome::Ok(()),
@@ -2987,10 +3025,36 @@ mod tests {
             headers: Vec<(String, String)>,
             callback: CloudCallback,
         ) {
-            self.delete_headers.lock().push(headers);
+            self.deletes.lock().push(headers);
             let _ = callback.send(CloudEvent::Delete {
                 key: key.to_string(),
                 result: CloudOutcome::Ok(()),
+            });
+        }
+
+        fn submit_head_with_headers(
+            &self,
+            key: &str,
+            headers: Vec<(String, String)>,
+            callback: CloudCallback,
+        ) {
+            self.heads.lock().push(headers);
+            let _ = callback.send(CloudEvent::Head {
+                key: key.to_string(),
+                result: CloudOutcome::Ok(ObjectMetadata::new(7, "etag".to_string())),
+            });
+        }
+
+        fn submit_list_with_headers(
+            &self,
+            prefix: &str,
+            headers: Vec<(String, String)>,
+            callback: CloudCallback,
+        ) {
+            self.lists.lock().push(headers);
+            let _ = callback.send(CloudEvent::List {
+                prefix: prefix.to_string(),
+                result: CloudOutcome::Ok(Vec::new()),
             });
         }
 
@@ -3039,7 +3103,7 @@ mod tests {
                 ..
             })
         ));
-        let put_headers = backend.put_headers.lock();
+        let put_headers = backend.puts.lock();
         assert_eq!(put_headers.len(), 1);
         assert_eq!(
             HeaderRecordingBackend::timeout_header(&put_headers[0]).as_deref(),
@@ -3078,7 +3142,7 @@ mod tests {
                 })
             ));
         }
-        let delete_headers = backend.delete_headers.lock();
+        let delete_headers = backend.deletes.lock();
         assert_eq!(delete_headers.len(), 2);
         for headers in delete_headers.iter() {
             assert_eq!(
@@ -3086,5 +3150,52 @@ mod tests {
                 Some("750")
             );
         }
+    }
+    #[test]
+    fn should_bound_provider_read_requests_by_caller_timeout() {
+        // Arrange
+        let backend = Arc::new(HeaderRecordingBackend::default());
+        let storage = CloudStorage::new_with_timeout(
+            backend.clone(),
+            "tenant".to_string(),
+            std::time::Duration::from_millis(900),
+        );
+        let (head_sender, head_receiver) = mpsc::channel();
+        let (list_sender, list_receiver) = mpsc::channel();
+
+        // Act
+        StorageBackend::submit_head_with_timeout(
+            &storage,
+            "sst/000001.sst",
+            std::time::Duration::from_millis(250),
+            head_sender,
+        );
+        StorageBackend::submit_list(&storage, "sst/", list_sender);
+
+        // Assert
+        assert!(matches!(
+            head_receiver.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(StorageEvent::HeadComplete {
+                result: StorageOutcome::Ok(_),
+                ..
+            })
+        ));
+        assert!(matches!(
+            list_receiver.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(StorageEvent::ListComplete {
+                result: StorageOutcome::Ok(_),
+                ..
+            })
+        ));
+        assert_eq!(
+            HeaderRecordingBackend::timeout_header(&backend.heads.lock()[0]).as_deref(),
+            Some("250"),
+            "HEAD must carry the caller's timeout"
+        );
+        assert_eq!(
+            HeaderRecordingBackend::timeout_header(&backend.lists.lock()[0]).as_deref(),
+            Some("900"),
+            "LIST must carry the adapter's callback timeout"
+        );
     }
 }
