@@ -147,7 +147,7 @@ impl CloudStartupRecovery {
         let mut manifest_sequence = None;
         let mut has_manifest_journal = false;
 
-        for file_name in crate::storage::cloud::CLOUD_METADATA_FILES {
+        for file_name in crate::metadata::files::CLOUD_MIRRORED {
             let key = crate::storage::cloud::cloud_metadata_key(file_name);
             let data = match BlockingCloudIo::new(cloud).get_optional(&key) {
                 Ok(Some(data)) => data,
@@ -240,7 +240,7 @@ impl CloudStartupRecovery {
 
         Self::ensure_remote_manifest_metadata_not_ahead(cloud, local_manifest_sequence)?;
 
-        for file_name in crate::storage::cloud::CLOUD_METADATA_FILES {
+        for file_name in crate::metadata::files::CLOUD_MIRRORED {
             let local_path = db_path.join(file_name);
             if !local_path.exists() {
                 continue;

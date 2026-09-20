@@ -1656,7 +1656,7 @@ fn get_cloud_metadata_for_test(
 }
 
 fn put_all_cloud_metadata_for_test(cloud: &crate::storage::cloud::CloudStorage, db_path: &Path) {
-    for file_name in crate::storage::cloud::CLOUD_METADATA_FILES {
+    for file_name in crate::metadata::files::CLOUD_MIRRORED {
         let local_path = db_path.join(file_name);
         if !local_path.exists() {
             continue;
@@ -3175,7 +3175,7 @@ fn should_prune_remote_wal_when_flush_intent_clear_is_mirrored() -> crate::commo
         "cloud intent metadata must reflect the committed local intent clear before WAL prune"
     );
     let metadata_uploads = metadata_backend.get_uploads();
-    let expected_metadata_uploads = crate::storage::cloud::CLOUD_METADATA_FILES
+    let expected_metadata_uploads = crate::metadata::files::CLOUD_MIRRORED
         .iter()
         .filter(|file_name| el.state.db_path.join(file_name).exists())
         .count();

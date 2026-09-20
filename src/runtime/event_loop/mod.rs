@@ -1110,7 +1110,7 @@ impl EventLoop {
         self.ensure_remote_manifest_metadata_not_ahead(cloud, deadline)?;
         let local_manifest_sequence = self.state.manifest.last_persisted_sequence;
 
-        for file_name in crate::storage::cloud::CLOUD_METADATA_FILES {
+        for file_name in crate::metadata::files::CLOUD_MIRRORED {
             if deadline.is_expired() {
                 return Err(crate::common::MidgeError::Timeout(format!(
                     "operation deadline exhausted before cloud metadata local mirror preparation for '{file_name}'"
