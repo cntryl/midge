@@ -490,7 +490,6 @@ mod tests {
                     entry.object_key.clone(),
                     StorageObjectMetadata::content_crc(4, b"test"),
                 ),
-                data_records: Vec::new(),
             },
             entry,
         };

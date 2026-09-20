@@ -4229,6 +4229,40 @@ fn should_not_prune_remote_wal_when_manifest_ssts_conflict_at_same_sequence(
 }
 
 #[test]
+fn should_prove_prune_coverage_through_streaming_validation_without_the_ephemeral_cache(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: prune once had a second, non-streaming coverage implementation
+    // for this configuration. Production always enables the ephemeral cache,
+    // so only tests ran it; one owner now serves both.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    assert!(
+        !el.hybrid_storage
+            .as_ref()
+            .expect("cloud storage")
+            .ephemeral_sst_cache_enabled(),
+        "this fixture exercises the configuration that took the removed path"
+    );
+    let segment_id = 1;
+    let max_sequence = 7;
+    seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
+    el.state.wal.cloud_durable_seq = max_sequence;
+    add_valid_manifest_sst_for_test(&mut el, "streaming-covered.sst", max_sequence);
+
+    // Act
+    el.prune_cloud_wal_segments_covered_by_manifest();
+    drain_prune_completion_for_test(&mut el);
+
+    // Assert
+    assert!(
+        !remote_wal_path_for_test(&el, segment_id).exists(),
+        "a covered segment retires through the single streaming coverage owner"
+    );
+    Ok(())
+}
+
+#[test]
 fn should_retain_remote_wal_when_delete_range_record_has_only_manifest_bounds(
 ) -> crate::common::MidgeResult<()> {
     // Arrange
@@ -4248,11 +4282,14 @@ fn should_retain_remote_wal_when_delete_range_record_has_only_manifest_bounds(
     delete_range.range_end = Some(Bytes::from_static(b"k20"));
     seed_cloud_prune_candidate_with_records(&mut el, segment_id, max_sequence, vec![delete_range]);
     el.state.wal.cloud_durable_seq = max_sequence;
-    add_valid_range_tombstone_manifest_sst_for_test(
+    // An SST whose manifest bounds span the deleted range but which carries
+    // no range tombstone: the bounds alone prove nothing about the delete.
+    add_manifest_sst_meta_for_test(
         &mut el,
-        "delete-range-covered.sst",
+        "delete-range-bounds-only.sst",
+        0,
         b"k10",
-        b"k20",
+        max_sequence,
         max_sequence,
     );
 
