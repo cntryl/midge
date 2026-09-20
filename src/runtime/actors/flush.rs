@@ -687,114 +687,15 @@ fn mirror_control_metadata(
             },
         )?;
         let data = file.read_at(0, file.len()?)?.to_vec();
-        let key = crate::storage::cloud::cloud_metadata_key(file_name);
-        conditional_metadata_put(cloud, file_name, &key, data, local_manifest_sequence)?;
+        crate::runtime::hybrid_persistence::conditional_metadata_mirror_put(
+            cloud,
+            file_name,
+            data,
+            local_manifest_sequence,
+            &crate::common::OperationDeadline::unbounded(),
+        )?;
     }
     Ok(())
-}
-
-fn conditional_metadata_put(
-    cloud: &crate::storage::cloud::CloudStorage,
-    file_name: &str,
-    key: &str,
-    data: Vec<u8>,
-    local_manifest_sequence: u64,
-) -> MidgeResult<()> {
-    let headers = match blocking_head_optional(cloud, key).map_err(MidgeError::Internal)? {
-        Some(metadata) => {
-            let current = blocking_get_optional(cloud, key)
-                .map_err(MidgeError::Internal)?
-                .ok_or_else(|| {
-                    MidgeError::Internal(format!("cloud metadata '{key}' disappeared after HEAD"))
-                })?;
-            crate::metadata::files::ensure_remote_not_ahead(
-                file_name,
-                &current,
-                local_manifest_sequence,
-            )?;
-            if current == data {
-                return Ok(());
-            }
-            crate::storage::cloud::object_match_precondition_headers(
-                &metadata.etag,
-                metadata.generation.as_deref(),
-            )
-            .ok_or_else(|| {
-                MidgeError::Internal(format!(
-                    "cloud metadata '{key}' has no conditional identity token"
-                ))
-            })?
-        }
-        None => vec![("If-None-Match".to_string(), "*".to_string())],
-    };
-    let (tx, rx) = std::sync::mpsc::channel();
-    cloud.submit_put(key, data, headers, tx);
-    match rx.recv_timeout(cloud.callback_timeout()) {
-        Ok(crate::storage::cloud::CloudEvent::Put {
-            result: crate::storage::cloud::CloudOutcome::Ok(()),
-            ..
-        }) => Ok(()),
-        Ok(crate::storage::cloud::CloudEvent::Put {
-            result: crate::storage::cloud::CloudOutcome::Err(error),
-            ..
-        }) => Err(MidgeError::Internal(format!(
-            "cloud metadata put '{key}' failed: {error}"
-        ))),
-        Ok(other) => Err(MidgeError::Internal(format!(
-            "unexpected cloud metadata put response: {other:?}"
-        ))),
-        Err(error) => Err(MidgeError::Timeout(format!(
-            "cloud metadata put '{key}' timed out: {error}"
-        ))),
-    }
-}
-
-fn blocking_get_optional(
-    cloud: &crate::storage::cloud::CloudStorage,
-    key: &str,
-) -> Result<Option<Vec<u8>>, String> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    cloud.submit_get(key, tx);
-    match rx.recv_timeout(cloud.callback_timeout()) {
-        Ok(crate::storage::cloud::CloudEvent::Get {
-            result: crate::storage::cloud::CloudOutcome::Ok(data),
-            ..
-        }) => Ok(Some(data)),
-        Ok(crate::storage::cloud::CloudEvent::Get {
-            result: crate::storage::cloud::CloudOutcome::Err(error),
-            ..
-        }) if crate::storage::cloud::is_not_found_error(&error) => Ok(None),
-        Ok(crate::storage::cloud::CloudEvent::Get {
-            result: crate::storage::cloud::CloudOutcome::Err(error),
-            ..
-        }) => Err(error.to_string()),
-        Ok(other) => Err(format!("unexpected cloud get response: {other:?}")),
-        Err(error) => Err(format!("cloud get timed out: {error}")),
-    }
-}
-
-fn blocking_head_optional(
-    cloud: &crate::storage::cloud::CloudStorage,
-    key: &str,
-) -> Result<Option<crate::storage::cloud::ObjectMetadata>, String> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    cloud.submit_head(key, tx);
-    match rx.recv_timeout(cloud.callback_timeout()) {
-        Ok(crate::storage::cloud::CloudEvent::Head {
-            result: crate::storage::cloud::CloudOutcome::Ok(metadata),
-            ..
-        }) => Ok(Some(metadata)),
-        Ok(crate::storage::cloud::CloudEvent::Head {
-            result: crate::storage::cloud::CloudOutcome::Err(error),
-            ..
-        }) if crate::storage::cloud::is_not_found_error(&error) => Ok(None),
-        Ok(crate::storage::cloud::CloudEvent::Head {
-            result: crate::storage::cloud::CloudOutcome::Err(error),
-            ..
-        }) => Err(error.to_string()),
-        Ok(other) => Err(format!("unexpected cloud head response: {other:?}")),
-        Err(error) => Err(format!("cloud head timed out: {error}")),
-    }
 }
 
 #[cfg(test)]

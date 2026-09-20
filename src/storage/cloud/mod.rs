@@ -23,6 +23,7 @@
 //! - Events are received asynchronously but callback processing is synchronous
 //! - No futures in the engine: all async work happens in `CloudExecutor` embedded tokio runtime
 
+mod blocking;
 mod config;
 #[cfg(feature = "cloud-common")]
 pub(crate) mod range;
@@ -45,6 +46,7 @@ pub mod executor;
 ))]
 mod list_budget;
 
+pub(crate) use blocking::BlockingCloud;
 pub use config::CloudWritePolicy;
 pub(crate) use config::CloudWritePolicyConfig;
 

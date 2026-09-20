@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 mod catalog;
 mod metadata_snapshot;
-pub(crate) use metadata_snapshot::CloudMetadataPruneSnapshot;
+pub(crate) use metadata_snapshot::{conditional_metadata_mirror_put, CloudMetadataPruneSnapshot};
 mod streaming_prune;
 use crate::storage::hybrid::backend::ControlObject;
 use catalog::{commit_catalog_within, load_and_repair_catalog_within, AdmittedCatalog};
