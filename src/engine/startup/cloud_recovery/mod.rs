@@ -1105,10 +1105,10 @@ impl CloudStartupRecovery {
         recovery_policy: RecoveryPolicy,
         opened_in_salvage_mode: &mut bool,
     ) -> MidgeResult<Option<crate::runtime::RecoveredCloudWalSegment>> {
-        match crate::wal::cloud_segment::inspect_bytes(key, data) {
-            Ok(readback) => Ok(Some(crate::runtime::RecoveredCloudWalSegment {
-                max_sequence: readback.validation.max_sequence,
-                writer_epoch: readback.validation.writer_epoch,
+        match crate::wal::cloud_segment::validate_segment_bytes(key, data) {
+            Ok(validation) => Ok(Some(crate::runtime::RecoveredCloudWalSegment {
+                max_sequence: validation.max_sequence,
+                writer_epoch: validation.writer_epoch,
             })),
             Err(error) if recovery_policy == RecoveryPolicy::Salvage => {
                 *opened_in_salvage_mode = true;

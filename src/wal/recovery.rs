@@ -475,19 +475,13 @@ pub(crate) fn validate_wal_with_policy(
         &mut no_memtables,
         replay_policy,
         Some(&|_| false),
-        ReplayScanOptions {
-            validate_only: true,
-            deadline,
-        },
+        ReplayScanOptions { deadline },
     )
 }
 
 /// How a replay pass scans frames, independent of what it applies.
 #[derive(Clone, Copy, Default)]
 struct ReplayScanOptions<'a> {
-    /// Deduplicate cross-file records by fingerprint instead of retaining a
-    /// copy of each record.
-    validate_only: bool,
     /// Stop with `Timeout` between frames once this expires.
     deadline: Option<&'a crate::common::OperationDeadline>,
 }
@@ -503,11 +497,38 @@ fn ensure_replay_deadline(
     Ok(())
 }
 
-fn record_fingerprint(record: &WalRecord) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    record.hash(&mut hasher);
-    hasher.finish()
+/// Fixed-size identity of a replayed record.
+///
+/// Replay suppresses a record that an earlier file already carried. Keeping
+/// the record itself for that check cost a full key/value copy each, roughly
+/// doubling recovery memory on top of the memtables. A duplicate repeats its
+/// epoch, sequence and column family, so those plus a payload checksum
+/// identify it without retaining any bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ReplayedRecordIdentity {
+    writer_epoch: u64,
+    seq: u64,
+    cf_id: ColumnFamilyId,
+    payload_crc: u32,
+}
+
+impl ReplayedRecordIdentity {
+    fn of(record: &WalRecord) -> Self {
+        let mut hasher = crc32c::crc32c(record.key.as_ref());
+        if let Some(value) = record.value.as_ref() {
+            hasher = crc32c::crc32c_append(hasher, value.as_ref());
+        }
+        if let Some(range_end) = record.range_end.as_ref() {
+            hasher = crc32c::crc32c_append(hasher, range_end.as_ref());
+        }
+        hasher = crc32c::crc32c_append(hasher, &[record.op.to_wire_format()]);
+        Self {
+            writer_epoch: record.writer_epoch,
+            seq: record.seq,
+            cf_id: record.cf_id,
+            payload_crc: hasher,
+        }
+    }
 }
 
 pub(crate) fn replay_wal_with_manifest_filter<S: BuildHasher>(
@@ -565,7 +586,6 @@ fn replay_wal_with_policy_and_filter<S: BuildHasher>(
             epoch_frontiers: &epoch_frontiers,
             should_apply,
             seen_records: std::collections::HashMap::new(),
-            seen_fingerprints: std::collections::HashMap::new(),
             scan,
             replay_ordinal: 0,
             verified_bytes: 0,
@@ -664,9 +684,9 @@ struct WalReplayState<'a, S: BuildHasher> {
     open_txns: &'a mut std::collections::HashMap<(u64, u64), RecoveryTxnSpool>,
     epoch_frontiers: &'a WriterEpochFrontiers,
     should_apply: Option<&'a dyn Fn(&WalRecord) -> bool>,
-    seen_records: std::collections::HashMap<WalRecord, String>,
-    /// Used instead of `seen_records` when `scan.validate_only`.
-    seen_fingerprints: std::collections::HashMap<u64, String>,
+    /// Identity of every verified record, with the index of the file that
+    /// first carried it.
+    seen_records: std::collections::HashMap<ReplayedRecordIdentity, u32>,
     scan: ReplayScanOptions<'a>,
     replay_ordinal: u64,
     /// End offset of the last verified frame in the file being replayed.
@@ -676,17 +696,12 @@ struct WalReplayState<'a, S: BuildHasher> {
 impl<S: BuildHasher> WalReplayState<'_, S> {
     /// Record `record` as seen in `source`; true when an earlier file already
     /// carried it, so replay skips this cross-file duplicate.
-    fn first_seen_elsewhere(&mut self, record: &WalRecord, source: &str) -> bool {
-        let first_source = if self.scan.validate_only {
-            self.seen_fingerprints
-                .entry(record_fingerprint(record))
-                .or_insert_with(|| source.to_string())
-        } else {
-            self.seen_records
-                .entry(record.clone())
-                .or_insert_with(|| source.to_string())
-        };
-        first_source != source
+    fn first_seen_elsewhere(&mut self, record: &WalRecord, source_index: u32) -> bool {
+        let first_source = self
+            .seen_records
+            .entry(ReplayedRecordIdentity::of(record))
+            .or_insert(source_index);
+        *first_source != source_index
     }
 }
 
@@ -697,7 +712,10 @@ fn replay_wal_paths<S: BuildHasher>(
     replay_state: &mut WalReplayState<'_, S>,
 ) -> MidgeResult<()> {
     for (index, replay_file) in replay_paths.iter().enumerate() {
-        if let Err(failure) = replay_wal_file(storage, &replay_file.path, replay_state) {
+        let source_index = u32::try_from(index).unwrap_or(u32::MAX);
+        if let Err(failure) =
+            replay_wal_file(storage, &replay_file.path, source_index, replay_state)
+        {
             match replay_error_action(replay_file, replay_policy, &failure) {
                 ReplayErrorAction::TolerateFinalActiveTail => {
                     tracing::info!(
@@ -873,6 +891,7 @@ fn discover_writer_epoch_frontiers(
 fn replay_wal_file<S: BuildHasher>(
     storage: &dyn Fs,
     file_path: &FsPath,
+    source_index: u32,
     replay_state: &mut WalReplayState<'_, S>,
 ) -> Result<(), ReplayFailure> {
     let mut pos: u64 = 0;
@@ -896,13 +915,12 @@ fn replay_wal_file<S: BuildHasher>(
             NextWalFrame::Eof => break,
             NextWalFrame::Frame(frame) => {
                 let next_pos = frame.next_pos;
-                let source = file_path.to_string();
                 // Writer-epoch discovery assigns an ordinal to every verified
                 // frame. Keep this second pass in lockstep even when replay
                 // suppresses a cross-file duplicate.
                 let record_ordinal = replay_state.replay_ordinal;
                 replay_state.replay_ordinal = replay_state.replay_ordinal.saturating_add(1);
-                if replay_state.first_seen_elsewhere(&frame.record, &source) {
+                if replay_state.first_seen_elsewhere(&frame.record, source_index) {
                     pos = next_pos;
                     replay_state.verified_bytes = pos;
                     continue;

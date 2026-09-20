@@ -58,10 +58,10 @@ impl PublishedWalSegment {
         }
         let readback =
             crate::wal::cloud_segment::validate_bytes(&self.object_key, bytes, self.max_sequence)?;
-        if readback.validation.writer_epoch != self.writer_epoch {
+        if readback.writer_epoch != self.writer_epoch {
             return Err(format!(
                 "published cloud WAL segment {} writer epoch {} does not match catalog {}",
-                self.segment_id, readback.validation.writer_epoch, self.writer_epoch
+                self.segment_id, readback.writer_epoch, self.writer_epoch
             ));
         }
         Ok(())
