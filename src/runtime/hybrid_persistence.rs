@@ -527,7 +527,7 @@ impl HybridPersistence for HybridStorage {
         max_sequence: u64,
     ) -> MidgeResult<String> {
         let bytes = std::fs::read(local_path).map_err(MidgeError::Io)?;
-        let readback = crate::wal::cloud_segment::validate_bytes(
+        let readback = crate::wal::cloud_segment::validate_bytes_with_coverage(
             &local_path.display().to_string(),
             &bytes,
             max_sequence,
@@ -603,14 +603,14 @@ impl HybridPersistence for HybridStorage {
         let entry = PublishedWalSegment::from_validated_bytes(
             segment_id,
             expected_max_sequence,
-            local_readback.validation.writer_epoch,
+            local_readback.writer_epoch,
             &local_bytes,
         );
         let remote = validate_remote_wal(self, &entry, deadline)?;
         if remote.proof.bytes() != local_bytes {
             return Err(MidgeError::Internal(format!(
                 "cloud WAL segment {segment_id} does not match the locally sealed bytes for writer epoch {}",
-                local_readback.validation.writer_epoch
+                local_readback.writer_epoch
             )));
         }
         let _catalog_mutation =
@@ -938,7 +938,7 @@ fn validate_remote_wal(
     entry
         .validate_bytes(proof.bytes())
         .map_err(MidgeError::Internal)?;
-    let readback = crate::wal::cloud_segment::validate_bytes(
+    let readback = crate::wal::cloud_segment::validate_bytes_with_coverage(
         &entry.object_key,
         proof.bytes(),
         entry.max_sequence,

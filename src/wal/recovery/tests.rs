@@ -1728,6 +1728,48 @@ fn should_preserve_fencing_ordinal_when_duplicate_frame_is_skipped_across_wal_fi
 }
 
 #[test]
+fn should_keep_replay_dedup_index_free_of_record_payloads() {
+    // Arrange: the index used to hold a full WalRecord (key and value Bytes)
+    // plus a path String per record, roughly doubling recovery memory.
+
+    // Act
+    let identity_size = std::mem::size_of::<super::ReplayedRecordIdentity>();
+
+    // Assert
+    assert!(
+        identity_size <= 32,
+        "the dedup index must stay a fixed-size identity, not a record copy: {identity_size} bytes"
+    );
+}
+
+#[test]
+fn should_replay_distinct_records_that_share_a_key_across_wal_files() {
+    // Arrange: same key and value in two files at different sequences is two
+    // real writes, not a cross-file duplicate.
+    let dir = TempDir::new().unwrap();
+    let wal_subdir = dir.path().join("wal");
+    std::fs::create_dir(&wal_subdir).unwrap();
+    let storage = RealFs::new(dir.path()).unwrap();
+    let wal_dir = FsPath::new("wal");
+    append_raw_bytes(
+        &wal_subdir.join(crate::wal::segment_file_name(1)),
+        &encode_frame(&put_record(b"shared-key", 1, 1)),
+    );
+    append_raw_bytes(
+        &wal_subdir.join(crate::wal::ACTIVE_FILE_NAME),
+        &encode_frame(&put_record(b"shared-key", 2, 1)),
+    );
+    let mut memtables = HashMap::new();
+
+    // Act
+    let stats = replay_wal(&storage, &wal_dir, &mut memtables).unwrap();
+
+    // Assert
+    assert_eq!(stats.record_count, 2, "both writes must be replayed");
+    assert_eq!(stats.max_sequence, Some(2));
+}
+
+#[test]
 fn should_preserve_raw_value_given_forward_clock_skew_during_wal_replay_when_recovering() {
     // Arrange
     let mut record = WalRecord::new(

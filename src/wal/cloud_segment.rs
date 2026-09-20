@@ -38,13 +38,42 @@ pub(crate) fn object_key(segment_id: u64, writer_epoch: u64) -> String {
     super::segment_object_key(segment_id, writer_epoch)
 }
 
+/// Validate a segment without collecting coverage records.
+///
+/// Coverage collection owns a second copy of every key and value, which a
+/// caller that only checks the segment does not need.
 pub(crate) fn validate_bytes(
+    key: &str,
+    data: &[u8],
+    expected_max_sequence: u64,
+) -> Result<SegmentValidation, String> {
+    let validation = validate_segment_bytes(key, data)?;
+    check_expected_max_sequence(key, validation.max_sequence, expected_max_sequence)?;
+    Ok(validation)
+}
+
+/// Validate a segment and collect the records prune coverage compares.
+pub(crate) fn validate_bytes_with_coverage(
     key: &str,
     data: &[u8],
     expected_max_sequence: u64,
 ) -> Result<SegmentReadback, String> {
     let readback = inspect_bytes(key, data)?;
-    let observed_max_sequence = readback.validation.max_sequence;
+    check_expected_max_sequence(key, readback.validation.max_sequence, expected_max_sequence)?;
+    Ok(readback)
+}
+
+/// Frame-, CRC- and shape-check every record, returning only the segment's
+/// validation summary.
+pub(crate) fn validate_segment_bytes(key: &str, data: &[u8]) -> Result<SegmentValidation, String> {
+    inspect(key, data, false).map(|readback| readback.validation)
+}
+
+fn check_expected_max_sequence(
+    key: &str,
+    observed_max_sequence: u64,
+    expected_max_sequence: u64,
+) -> Result<(), String> {
     if observed_max_sequence < expected_max_sequence {
         return Err(format!(
             "cloud WAL segment '{key}' max sequence {observed_max_sequence} is below expected {expected_max_sequence}"
@@ -56,10 +85,14 @@ pub(crate) fn validate_bytes(
         ));
     }
 
-    Ok(readback)
+    Ok(())
 }
 
 pub(crate) fn inspect_bytes(key: &str, data: &[u8]) -> Result<SegmentReadback, String> {
+    inspect(key, data, true)
+}
+
+fn inspect(key: &str, data: &[u8], collect_coverage: bool) -> Result<SegmentReadback, String> {
     if data.is_empty() {
         return Err(format!("cloud WAL segment '{key}' is empty"));
     }
@@ -106,7 +139,9 @@ pub(crate) fn inspect_bytes(key: &str, data: &[u8]) -> Result<SegmentReadback, S
             observed_writer_epoch = Some(record.writer_epoch);
         }
         observed_max_sequence = observed_max_sequence.max(record.seq);
-        append_data_coverage_records(key, &record, &mut data_records)?;
+        if collect_coverage {
+            append_data_coverage_records(key, &record, &mut data_records)?;
+        }
         records += 1;
         pos = payload_end;
     }
