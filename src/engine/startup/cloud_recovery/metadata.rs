@@ -3,24 +3,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 impl CloudStartupRecovery {
-    pub(super) fn remote_manifest_sequence_from_metadata(
-        file_name: &str,
-        data: &[u8],
-    ) -> MidgeResult<Option<u64>> {
-        match file_name {
-            "manifest.json" | "manifest.snapshot.json" => {
-                let manifest: crate::metadata::Manifest =
-                    serde_json::from_slice(data).map_err(|error| {
-                        MidgeError::Internal(format!(
-                            "cloud metadata '{file_name}' is invalid: {error}"
-                        ))
-                    })?;
-                Ok(Some(manifest.last_persisted_sequence))
-            }
-            _ => Ok(None),
-        }
-    }
-
     pub(super) fn load_local_manifest_for_cloud_metadata_mirror(
         db_path: &Path,
         recovery_policy: RecoveryPolicy,
@@ -34,21 +16,12 @@ impl CloudStartupRecovery {
         cloud: &crate::storage::cloud::CloudStorage,
         local_sequence: u64,
     ) -> MidgeResult<()> {
-        for file_name in ["manifest.snapshot.json", "manifest.json"] {
+        for file_name in crate::metadata::files::MANIFEST_BODIES {
             let key = crate::storage::cloud::cloud_metadata_key(file_name);
             let Some(data) = BlockingCloudIo::new(cloud).get_optional(&key)? else {
                 continue;
             };
-            let Some(remote_sequence) =
-                Self::remote_manifest_sequence_from_metadata(file_name, &data)?
-            else {
-                continue;
-            };
-            if remote_sequence > local_sequence {
-                return Err(MidgeError::Internal(format!(
-                    "stale cloud metadata mirror rejected: remote {file_name} is ahead of local manifest ({remote_sequence} > {local_sequence})"
-                )));
-            }
+            crate::metadata::files::ensure_remote_not_ahead(file_name, &data, local_sequence)?;
         }
 
         Ok(())
@@ -78,15 +51,11 @@ impl CloudStartupRecovery {
                         "cloud metadata '{key}' disappeared after HEAD precondition"
                     ))
                 })?;
-                if let Some(remote_sequence) =
-                    Self::remote_manifest_sequence_from_metadata(file_name, &current)?
-                {
-                    if remote_sequence > local_manifest_sequence {
-                        return Err(MidgeError::Internal(format!(
-                            "stale cloud metadata mirror rejected: remote {file_name} is ahead of local manifest ({remote_sequence} > {local_manifest_sequence})"
-                        )));
-                    }
-                }
+                crate::metadata::files::ensure_remote_not_ahead(
+                    file_name,
+                    &current,
+                    local_manifest_sequence,
+                )?;
                 if current == data {
                     return Ok(());
                 }

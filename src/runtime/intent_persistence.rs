@@ -13,7 +13,7 @@ use std::path::PathBuf;
 pub struct IntentPersistence;
 
 impl IntentPersistence {
-    const INTENT_FILE: &'static str = "intent_log.json";
+    const INTENT_FILE: &'static str = crate::metadata::files::INTENT_LOG;
     const INTENT_FILE_TEMP: &'static str = "intent_log.json.tmp";
 
     #[cfg(test)]

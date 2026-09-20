@@ -71,7 +71,7 @@ impl CloudMetadataPruneSnapshot {
         // loading either local metadata or remote bodies. The publication lock
         // keeps these local files stable through authority retirement.
         let mut encoded_bytes = 0usize;
-        for name in crate::storage::cloud::CLOUD_METADATA_FILES {
+        for name in crate::metadata::files::CLOUD_MIRRORED {
             match std::fs::metadata(self.db_path.join(name)) {
                 Ok(metadata) => {
                     encoded_bytes = encoded_bytes
@@ -145,9 +145,9 @@ impl CloudMetadataPruneSnapshot {
         deadline: &crate::common::OperationDeadline,
     ) -> MidgeResult<Vec<GuardedObjectProof>> {
         let backend: Arc<dyn StorageBackend> = self.cloud.clone();
-        let mut objects = Vec::with_capacity(crate::storage::cloud::CLOUD_METADATA_FILES.len());
+        let mut objects = Vec::with_capacity(crate::metadata::files::CLOUD_MIRRORED.len());
         let mut has_manifest_base = false;
-        for file_name in crate::storage::cloud::CLOUD_METADATA_FILES {
+        for file_name in crate::metadata::files::CLOUD_MIRRORED {
             let local_path = self.db_path.join(file_name);
             let local = match std::fs::File::open(&local_path) {
                 Ok(file) => Some(file),
@@ -190,7 +190,7 @@ impl CloudMetadataPruneSnapshot {
                     "cloud metadata '{key}' has a different length"
                 )));
             }
-            if matches!(*file_name, "manifest.snapshot.json" | "manifest.json") {
+            if crate::metadata::files::is_manifest_body(file_name) {
                 has_manifest_base = true;
             }
             // Exact byte comparison has completed against identity-pinned reads.
@@ -224,7 +224,7 @@ mod tests {
             ..Manifest::default()
         };
         crate::metadata::ManifestPersistence::save(directory.path(), &manifest).unwrap();
-        let encoded: usize = crate::storage::cloud::CLOUD_METADATA_FILES
+        let encoded: usize = crate::metadata::files::CLOUD_MIRRORED
             .iter()
             .filter_map(|name| std::fs::metadata(directory.path().join(name)).ok())
             .map(|metadata| usize::try_from(metadata.len()).unwrap())
@@ -273,7 +273,7 @@ mod tests {
     }
 
     fn mirror(snapshot: &CloudMetadataPruneSnapshot) {
-        for name in crate::storage::cloud::CLOUD_METADATA_FILES {
+        for name in crate::metadata::files::CLOUD_MIRRORED {
             if let Ok(bytes) = std::fs::read(snapshot.db_path.join(name)) {
                 let (tx, rx) = std::sync::mpsc::channel();
                 snapshot.cloud.submit_put(

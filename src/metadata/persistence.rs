@@ -14,11 +14,11 @@ pub struct ManifestPersistence;
 
 impl ManifestPersistence {
     /// Manifest file name
-    const MANIFEST_FILE: &'static str = "manifest.json";
+    const MANIFEST_FILE: &'static str = super::files::MANIFEST;
     const MANIFEST_FILE_TEMP: &'static str = "manifest.json.tmp";
 
     /// Snapshot file name
-    const MANIFEST_SNAPSHOT: &'static str = "manifest.snapshot.json";
+    const MANIFEST_SNAPSHOT: &'static str = super::files::MANIFEST_SNAPSHOT;
     const MANIFEST_SNAPSHOT_TEMP: &'static str = "manifest.snapshot.json.tmp";
 
     /// Get the manifest file path

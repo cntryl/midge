@@ -602,7 +602,7 @@ fn finish_with_retained_manifest_admission(remote_metadata: bool) {
     let metadata_path = directory.path().join("metadata");
     std::fs::create_dir_all(&metadata_path).unwrap();
     crate::metadata::ManifestPersistence::save(&metadata_path, &manifest).unwrap();
-    let encoded_bytes: usize = crate::storage::cloud::CLOUD_METADATA_FILES
+    let encoded_bytes: usize = crate::metadata::files::CLOUD_MIRRORED
         .iter()
         .filter_map(|name| std::fs::metadata(metadata_path.join(name)).ok())
         .map(|metadata| usize::try_from(metadata.len()).unwrap())
@@ -623,7 +623,7 @@ fn finish_with_retained_manifest_admission(remote_metadata: bool) {
         Arc::new(MockCloudBackend::new()),
         String::new(),
     ));
-    for name in crate::storage::cloud::CLOUD_METADATA_FILES {
+    for name in crate::metadata::files::CLOUD_MIRRORED {
         if let Ok(bytes) = std::fs::read(metadata_path.join(name)) {
             let (tx, rx) = std::sync::mpsc::channel();
             metadata_cloud.submit_put(

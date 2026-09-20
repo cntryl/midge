@@ -147,7 +147,7 @@ impl CloudStartupRecovery {
         let mut manifest_sequence = None;
         let mut has_manifest_journal = false;
 
-        for file_name in crate::storage::cloud::CLOUD_METADATA_FILES {
+        for file_name in crate::metadata::files::CLOUD_MIRRORED {
             let key = crate::storage::cloud::cloud_metadata_key(file_name);
             let data = match BlockingCloudIo::new(cloud).get_optional(&key) {
                 Ok(Some(data)) => data,
@@ -163,14 +163,13 @@ impl CloudStartupRecovery {
                 }
             };
 
-            if file_name == &"manifest.journal" {
+            if file_name == &crate::metadata::files::JOURNAL {
                 has_manifest_journal = true;
             }
-            if let Some(sequence) = Self::remote_manifest_sequence_from_metadata(file_name, &data)?
-            {
+            if let Some(sequence) = crate::metadata::files::manifest_sequence(file_name, &data)? {
                 match *file_name {
-                    "manifest.snapshot.json" => snapshot_sequence = Some(sequence),
-                    "manifest.json" => manifest_sequence = Some(sequence),
+                    crate::metadata::files::MANIFEST_SNAPSHOT => snapshot_sequence = Some(sequence),
+                    crate::metadata::files::MANIFEST => manifest_sequence = Some(sequence),
                     _ => {}
                 }
             }
@@ -241,7 +240,7 @@ impl CloudStartupRecovery {
 
         Self::ensure_remote_manifest_metadata_not_ahead(cloud, local_manifest_sequence)?;
 
-        for file_name in crate::storage::cloud::CLOUD_METADATA_FILES {
+        for file_name in crate::metadata::files::CLOUD_MIRRORED {
             let local_path = db_path.join(file_name);
             if !local_path.exists() {
                 continue;

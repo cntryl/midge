@@ -98,12 +98,12 @@ pub fn validate_format_marker(db_path: &Path) -> MidgeResult<u32> {
 
 fn has_persisted_state_without_format_marker(db_path: &Path) -> MidgeResult<bool> {
     const ROOT_STATE_FILES: [&str; 7] = [
-        "manifest.json",
-        "manifest.snapshot.json",
-        "intent_log.json",
+        super::files::MANIFEST,
+        super::files::MANIFEST_SNAPSHOT,
+        super::files::INTENT_LOG,
         "manifest.yaml",
         "manifest.snapshot",
-        "manifest.journal",
+        super::files::JOURNAL,
         "intent_log.yaml",
     ];
 

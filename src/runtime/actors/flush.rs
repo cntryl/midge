@@ -671,7 +671,7 @@ fn mirror_control_metadata(
     local_manifest_sequence: u64,
 ) -> MidgeResult<()> {
     let _publication_guard = cloud.lock_metadata_publication();
-    for file_name in crate::storage::cloud::CLOUD_METADATA_FILES {
+    for file_name in crate::metadata::files::CLOUD_MIRRORED {
         let path = crate::io::FsPath::new(*file_name);
         if !task.fs.exists(&path)? {
             continue;
@@ -707,13 +707,11 @@ fn conditional_metadata_put(
                 .ok_or_else(|| {
                     MidgeError::Internal(format!("cloud metadata '{key}' disappeared after HEAD"))
                 })?;
-            if let Some(remote_sequence) = remote_manifest_sequence(file_name, &current)? {
-                if remote_sequence > local_manifest_sequence {
-                    return Err(MidgeError::Fenced(format!(
-                        "remote {file_name} sequence {remote_sequence} is ahead of local {local_manifest_sequence}"
-                    )));
-                }
-            }
+            crate::metadata::files::ensure_remote_not_ahead(
+                file_name,
+                &current,
+                local_manifest_sequence,
+            )?;
             if current == data {
                 return Ok(());
             }
@@ -797,15 +795,6 @@ fn blocking_head_optional(
         Ok(other) => Err(format!("unexpected cloud head response: {other:?}")),
         Err(error) => Err(format!("cloud head timed out: {error}")),
     }
-}
-
-fn remote_manifest_sequence(file_name: &str, data: &[u8]) -> MidgeResult<Option<u64>> {
-    if !matches!(file_name, "manifest.json" | "manifest.snapshot.json") {
-        return Ok(None);
-    }
-    let manifest: crate::metadata::Manifest = serde_json::from_slice(data)
-        .map_err(|error| MidgeError::Corruption(format!("remote manifest JSON: {error}")))?;
-    Ok(Some(manifest.last_persisted_sequence))
 }
 
 #[cfg(test)]

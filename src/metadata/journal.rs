@@ -170,7 +170,7 @@ const FSYNC_MARKER_TYPE: u8 = 9;
 const DROP_COLUMN_FAMILY_AT_RECORD_TYPE: u8 = 10;
 const RECLAIM_COLUMN_FAMILY_RECORD_TYPE: u8 = 11;
 
-const JOURNAL_FILE: &str = "manifest.journal";
+const JOURNAL_FILE: &str = super::files::JOURNAL;
 const JOURNAL_REPAIR_TEMP_FILE: &str = "manifest.journal.repair.tmp";
 
 fn encode_journal_record<T: ?Sized + serde::Serialize>(
@@ -193,7 +193,7 @@ fn encode_journal_record<T: ?Sized + serde::Serialize>(
 fn checkpoint_edit_id_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>) -> MidgeResult<u64> {
     use crate::io::traits::{FsPath, OpenMode, OpenOptions};
 
-    let path = FsPath::new("manifest.snapshot.json");
+    let path = FsPath::new(super::files::MANIFEST_SNAPSHOT);
     let snapshot_exists = match fs.exists(&path) {
         Ok(exists) => exists,
         Err(crate::io::traits::FsError::NotFound(_)) => false,
