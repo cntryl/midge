@@ -766,6 +766,37 @@ fn should_create_remote_object_when_cas_key_is_missing() {
 }
 
 #[test]
+fn should_report_remote_cas_as_not_committed_when_identity_is_stale() {
+    // Arrange: a lost conditional write proves the mutation never applied,
+    // and callers must learn that from the outcome, not the message text.
+    let (_mock_cloud, storage) = hybrid_with_mock_cloud();
+    let key = "metadata/ddl-not-committed.json";
+    let original = storage
+        .compare_exchange_remote_object(key, None, b"epoch-1".to_vec())
+        .expect("create initial remote object");
+    storage
+        .compare_exchange_remote_object(key, Some(original.metadata()), b"epoch-2".to_vec())
+        .expect("advance remote object");
+
+    // Act
+    let failure = storage
+        .compare_exchange_remote_object_phased(
+            key,
+            Some(original.metadata()),
+            b"stale".to_vec(),
+            &crate::common::OperationDeadline::unbounded(),
+        )
+        .expect_err("stale identity must lose provider CAS");
+
+    // Assert
+    assert!(
+        !failure.may_have_committed,
+        "a rejected precondition proves the mutation did not commit"
+    );
+    assert!(matches!(failure.error, crate::common::MidgeError::Busy(_)));
+}
+
+#[test]
 fn should_reject_remote_cas_when_identity_is_stale() {
     // Arrange
     let (_mock_cloud, storage) = hybrid_with_mock_cloud();

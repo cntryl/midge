@@ -16,6 +16,36 @@
 //! WAL/SST key mapping, physical validation, manifest coverage, and prune policy
 //! live in `runtime::hybrid_persistence`; this module never imports those formats.
 
+/// Outcome of a failed conditional remote write.
+///
+/// `may_have_committed` distinguishes a provider that rejected the write from
+/// one that may still apply it. Recovery uses this instead of matching phrases
+/// in the error message, where a reworded message silently changed the path.
+#[derive(Debug)]
+pub(crate) struct RemoteCasFailure {
+    pub(crate) may_have_committed: bool,
+    pub(crate) error: crate::common::MidgeError,
+}
+
+impl RemoteCasFailure {
+    /// The provider never admitted the mutation.
+    pub(crate) fn not_committed(error: crate::common::MidgeError) -> Self {
+        Self {
+            may_have_committed: false,
+            error,
+        }
+    }
+
+    /// The mutation may still be applied, so the caller must resolve it
+    /// against durable state.
+    pub(crate) fn may_have_committed(error: crate::common::MidgeError) -> Self {
+        Self {
+            may_have_committed: true,
+            error,
+        }
+    }
+}
+
 use super::actor;
 use super::policy;
 use crate::storage::{

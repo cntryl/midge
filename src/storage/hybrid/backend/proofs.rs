@@ -1,6 +1,7 @@
 //! Remote object identity proofs and guarded deletion.
 
 use super::thread;
+use super::RemoteCasFailure;
 use super::{
     mpsc, Arc, Duration, HybridStorage, JoinHandle, StorageBackend, StorageEvent, StorageOutcome,
 };
@@ -407,6 +408,9 @@ impl HybridStorage {
 
     /// Conditionally replace or create a remote object and return a stable
     /// proof of the exact bytes that won the provider CAS.
+    /// Conditional-write failure paired with whether the provider may still
+    /// apply the mutation. Callers recover from a definite non-commit; an
+    /// ambiguous one must be resolved against durable state instead.
     #[cfg(test)]
     pub(crate) fn compare_exchange_remote_object(
         &self,
@@ -426,6 +430,7 @@ impl HybridStorage {
     ///
     /// The CAS itself is one round trip, but the readback proof that follows is
     /// three more, so both participate in the deadline.
+    #[cfg(test)]
     pub(crate) fn compare_exchange_remote_object_within(
         &self,
         key: &str,
@@ -433,15 +438,31 @@ impl HybridStorage {
         data: Vec<u8>,
         deadline: &OperationDeadline,
     ) -> crate::common::MidgeResult<RemoteObjectProof> {
-        Self::deadline_timeout(key, "remote CAS", self.callback_timeout, deadline)?;
+        self.compare_exchange_remote_object_phased(key, expected, data, deadline)
+            .map_err(|failure| failure.error)
+    }
+
+    /// Conditional remote write that reports whether a failure may still
+    /// commit at the provider. Recovery paths need that distinction, and
+    /// deriving it from message text is silently fragile.
+    pub(crate) fn compare_exchange_remote_object_phased(
+        &self,
+        key: &str,
+        expected: Option<&StorageObjectMetadata>,
+        data: Vec<u8>,
+        deadline: &OperationDeadline,
+    ) -> Result<RemoteObjectProof, RemoteCasFailure> {
+        // Nothing has been submitted yet, so every failure here is definite.
+        Self::deadline_timeout(key, "remote CAS", self.callback_timeout, deadline)
+            .map_err(RemoteCasFailure::not_committed)?;
         let headers = if let Some(expected) = expected {
             crate::storage::cloud::object_match_precondition_headers(
                 &expected.etag,
                 expected.generation.as_deref(),
             )
             .ok_or_else(|| {
-                crate::common::MidgeError::InvalidArgument(format!(
-                    "remote CAS for '{key}' requires a non-empty identity token"
+                RemoteCasFailure::not_committed(crate::common::MidgeError::InvalidArgument(
+                    format!("remote CAS for '{key}' requires a non-empty identity token"),
                 ))
             })?
         } else {
@@ -449,7 +470,8 @@ impl HybridStorage {
         };
         let expected_bytes = data.clone();
         let (tx, rx) = std::sync::mpsc::channel();
-        let timeout = Self::deadline_timeout(key, "remote CAS", self.callback_timeout, deadline)?;
+        let timeout = Self::deadline_timeout(key, "remote CAS", self.callback_timeout, deadline)
+            .map_err(RemoteCasFailure::not_committed)?;
         self.cloud_backend_for_key(key)
             .submit_write_with_headers_and_timeout(key, data, headers, timeout, tx);
         match rx.recv_timeout(timeout) {
@@ -462,41 +484,58 @@ impl HybridStorage {
                 ..
             }) => {
                 if Self::storage_error_indicates_timeout(&error) {
-                    return Err(crate::common::MidgeError::Timeout(format!(
-                        "remote CAS timed out for '{key}': {error}"
-                    )));
+                    // The provider may still apply a submitted write.
+                    return Err(RemoteCasFailure::may_have_committed(
+                        crate::common::MidgeError::Timeout(format!(
+                            "remote CAS timed out for '{key}': {error}"
+                        )),
+                    ));
                 }
                 if Self::storage_error_indicates_precondition_failure(&error) {
-                    return Err(crate::common::MidgeError::Busy(format!(
-                        "remote CAS conflict for '{key}': {error}"
-                    )));
+                    // The provider rejected the write outright.
+                    return Err(RemoteCasFailure::not_committed(
+                        crate::common::MidgeError::Busy(format!(
+                            "remote CAS conflict for '{key}': {error}"
+                        )),
+                    ));
                 }
-                return Err(crate::common::MidgeError::Internal(format!(
-                    "remote CAS failed for '{key}': {error}"
-                )));
+                return Err(RemoteCasFailure::may_have_committed(
+                    crate::common::MidgeError::Internal(format!(
+                        "remote CAS failed for '{key}': {error}"
+                    )),
+                ));
             }
             Ok(other) => {
-                return Err(crate::common::MidgeError::Internal(format!(
-                    "unexpected remote CAS response for '{key}': {other:?}"
-                )));
+                return Err(RemoteCasFailure::may_have_committed(
+                    crate::common::MidgeError::Internal(format!(
+                        "unexpected remote CAS response for '{key}': {other:?}"
+                    )),
+                ));
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                return Err(crate::common::MidgeError::Timeout(format!(
-                    "remote CAS timed out for '{key}'"
-                )));
+                return Err(RemoteCasFailure::may_have_committed(
+                    crate::common::MidgeError::Timeout(format!("remote CAS timed out for '{key}'")),
+                ));
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(crate::common::MidgeError::Internal(format!(
-                    "remote CAS callback closed for '{key}'"
-                )));
+                return Err(RemoteCasFailure::may_have_committed(
+                    crate::common::MidgeError::Internal(format!(
+                        "remote CAS callback closed for '{key}'"
+                    )),
+                ));
             }
         }
 
-        let proof = self.remote_object_proof_within(key, deadline)?;
+        // The write was accepted, so a failed readback leaves it committed.
+        let proof = self
+            .remote_object_proof_within(key, deadline)
+            .map_err(RemoteCasFailure::may_have_committed)?;
         if proof.bytes != expected_bytes {
-            return Err(crate::common::MidgeError::Corruption(format!(
-                "remote CAS for '{key}' read back different bytes"
-            )));
+            return Err(RemoteCasFailure::may_have_committed(
+                crate::common::MidgeError::Corruption(format!(
+                    "remote CAS for '{key}' read back different bytes"
+                )),
+            ));
         }
         Ok(proof)
     }

@@ -1997,10 +1997,13 @@ fn should_share_create_deadline_with_remote_ddl_registry_cas() -> crate::common:
         matches!(
             response,
             RuntimeResponse::Error {
-                error: crate::common::MidgeError::Timeout(_),
+                error: crate::common::MidgeError::Fenced(_),
                 ..
             }
         ),
+        // A provider timeout raised after the write was submitted cannot
+        // prove the mutation was refused, so DDL fences instead of reporting
+        // a plain Timeout.
         "unexpected DDL deadline response: {response:?}"
     );
     let cas_timeouts = ddl_cloud.registry_cas_timeouts();

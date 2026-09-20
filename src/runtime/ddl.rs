@@ -309,6 +309,7 @@ fn write_remote_registry(
         expected,
         &crate::common::OperationDeadline::unbounded(),
     )
+    .map_err(|failure| failure.error)
 }
 
 fn write_remote_registry_within(
@@ -316,21 +317,24 @@ fn write_remote_registry_within(
     registry: &DdlRegistry,
     expected: Option<&RemoteObjectProof>,
     deadline: &crate::common::OperationDeadline,
-) -> MidgeResult<RemoteObjectProof> {
+) -> Result<RemoteObjectProof, crate::storage::hybrid::backend::RemoteCasFailure> {
     crate::failpoints::fail_point!("midge::ddl::before_remote_cas", |_| Err(
-        MidgeError::Internal(
+        crate::storage::hybrid::backend::RemoteCasFailure::not_committed(MidgeError::Internal(
             "remote DDL CAS failed before submission: injected failure".to_string()
-        )
+        ))
     ));
-    let bytes = serialize(registry)?;
-    let result = storage.compare_exchange_remote_object_within(
+    let bytes = serialize(registry)
+        .map_err(crate::storage::hybrid::backend::RemoteCasFailure::not_committed)?;
+    let result = storage.compare_exchange_remote_object_phased(
         REMOTE_DDL_REGISTRY_KEY,
         expected.map(RemoteObjectProof::metadata),
         bytes,
         deadline,
     )?;
     crate::failpoints::fail_point!("midge::ddl::after_remote_cas", |_| Err(
-        MidgeError::Internal("failpoint: DDL remote CAS completion failed".to_string())
+        crate::storage::hybrid::backend::RemoteCasFailure::may_have_committed(
+            MidgeError::Internal("failpoint: DDL remote CAS completion failed".to_string())
+        )
     ));
     Ok(result)
 }
@@ -514,7 +518,8 @@ fn redrive_ambiguous_prepare_within(
     };
     append_prepared_operation(&mut registry, prepare)?;
 
-    if let Err(write_error) = write_remote_registry_within(storage, &registry, proof, deadline) {
+    if let Err(failure) = write_remote_registry_within(storage, &registry, proof, deadline) {
+        let write_error = failure.error;
         return match reread_remote_registry_after_ambiguous_cas_within(storage, deadline) {
             Ok((Some(remote), _)) if remote.operation(&prepare.op_id).is_some() => {
                 apply_local_edit(state, &prepare.edit)?;
@@ -625,8 +630,11 @@ pub(crate) fn execute_within(
                 .to_string()
         ))
     );
-    if let Err(error) = write_remote_registry_within(storage, &registry, proof.as_ref(), deadline) {
-        if remote_cas_definitely_not_committed(&error) {
+    if let Err(failure) = write_remote_registry_within(storage, &registry, proof.as_ref(), deadline)
+    {
+        let definitely_not_committed = remote_cas_definitely_not_committed(&failure);
+        let error = failure.error;
+        if definitely_not_committed {
             clear_local_prepare(state)?;
             return Err(error);
         }
@@ -672,14 +680,41 @@ pub(crate) fn execute_within(
     Ok(())
 }
 
-fn remote_cas_definitely_not_committed(error: &MidgeError) -> bool {
-    match error {
-        MidgeError::Busy(_) | MidgeError::InvalidArgument(_) => true,
-        MidgeError::Internal(message) => message.contains("failed before submission"),
-        MidgeError::Timeout(message) => {
-            message.contains("before mutation")
-                || message.contains("operation deadline exhausted before 'remote CAS'")
-        }
-        _ => false,
+fn remote_cas_definitely_not_committed(
+    failure: &crate::storage::hybrid::backend::RemoteCasFailure,
+) -> bool {
+    !failure.may_have_committed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_classify_cas_outcome_from_typed_flag_not_message_text() {
+        // Arrange: the old classifier read phrases out of the message, so
+        // rewording an error silently changed the recovery path.
+        let not_committed = crate::storage::hybrid::backend::RemoteCasFailure {
+            may_have_committed: false,
+            error: MidgeError::Internal("provider rejected the request".to_string()),
+        };
+        let ambiguous = crate::storage::hybrid::backend::RemoteCasFailure {
+            may_have_committed: true,
+            error: MidgeError::Timeout("remote CAS stalled before mutation".to_string()),
+        };
+
+        // Act
+        let definite = remote_cas_definitely_not_committed(&not_committed);
+        let uncertain = remote_cas_definitely_not_committed(&ambiguous);
+
+        // Assert
+        assert!(
+            definite,
+            "a pre-submission failure is definitely not committed"
+        );
+        assert!(
+            !uncertain,
+            "an ambiguous failure stays ambiguous even when its text says otherwise"
+        );
     }
 }
