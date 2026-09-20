@@ -901,104 +901,6 @@ impl EventLoop {
         }
     }
 
-    fn cloud_metadata_timeout(
-        key: &str,
-        operation: &str,
-        per_operation_timeout: std::time::Duration,
-        deadline: &crate::common::OperationDeadline,
-    ) -> crate::common::MidgeResult<std::time::Duration> {
-        deadline
-            .clamp_nonzero(per_operation_timeout)
-            .ok_or_else(|| {
-                crate::common::MidgeError::Timeout(format!(
-                    "operation deadline exhausted before cloud metadata {operation} for '{key}'"
-                ))
-            })
-    }
-
-    fn cloud_metadata_get_optional(
-        cloud: &crate::storage::cloud::CloudStorage,
-        key: &str,
-        deadline: &crate::common::OperationDeadline,
-    ) -> crate::common::MidgeResult<Option<Vec<u8>>> {
-        let timeout = Self::cloud_metadata_timeout(key, "GET", cloud.callback_timeout(), deadline)?;
-        let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_get(key, tx);
-        match rx.recv_timeout(timeout) {
-            Ok(crate::storage::cloud::CloudEvent::Get {
-                result: crate::storage::cloud::CloudOutcome::Ok(data),
-                ..
-            }) => Ok(Some(data)),
-            Ok(crate::storage::cloud::CloudEvent::Get {
-                result: crate::storage::cloud::CloudOutcome::Err(error),
-                ..
-            }) if crate::storage::cloud::is_not_found_error(&error) => Ok(None),
-            Ok(crate::storage::cloud::CloudEvent::Get {
-                result: crate::storage::cloud::CloudOutcome::Err(error),
-                ..
-            }) => Err(crate::storage::cloud::contextualize_operation_error(
-                &error,
-                format_args!("cloud metadata get '{key}' failed"),
-                deadline,
-            )),
-            Ok(other) => Err(crate::common::MidgeError::Internal(format!(
-                "unexpected cloud metadata get response for '{key}': {other:?}"
-            ))),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                Err(crate::common::MidgeError::Timeout(format!(
-                    "cloud metadata get '{key}' exceeded the operation deadline"
-                )))
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                Err(crate::common::MidgeError::Internal(format!(
-                    "cloud metadata get callback closed for '{key}'"
-                )))
-            }
-        }
-    }
-
-    fn cloud_metadata_head_optional(
-        cloud: &crate::storage::cloud::CloudStorage,
-        key: &str,
-        deadline: &crate::common::OperationDeadline,
-    ) -> crate::common::MidgeResult<Option<crate::storage::cloud::ObjectMetadata>> {
-        let timeout =
-            Self::cloud_metadata_timeout(key, "HEAD", cloud.callback_timeout(), deadline)?;
-        let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_head(key, tx);
-        match rx.recv_timeout(timeout) {
-            Ok(crate::storage::cloud::CloudEvent::Head {
-                result: crate::storage::cloud::CloudOutcome::Ok(metadata),
-                ..
-            }) => Ok(Some(metadata)),
-            Ok(crate::storage::cloud::CloudEvent::Head {
-                result: crate::storage::cloud::CloudOutcome::Err(error),
-                ..
-            }) if crate::storage::cloud::is_not_found_error(&error) => Ok(None),
-            Ok(crate::storage::cloud::CloudEvent::Head {
-                result: crate::storage::cloud::CloudOutcome::Err(error),
-                ..
-            }) => Err(crate::storage::cloud::contextualize_operation_error(
-                &error,
-                format_args!("cloud metadata head '{key}' failed"),
-                deadline,
-            )),
-            Ok(other) => Err(crate::common::MidgeError::Internal(format!(
-                "unexpected cloud metadata head response for '{key}': {other:?}"
-            ))),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                Err(crate::common::MidgeError::Timeout(format!(
-                    "cloud metadata head '{key}' exceeded the operation deadline"
-                )))
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                Err(crate::common::MidgeError::Internal(format!(
-                    "cloud metadata head callback closed for '{key}'"
-                )))
-            }
-        }
-    }
-
     fn ensure_remote_manifest_metadata_not_ahead(
         &self,
         cloud: &crate::storage::cloud::CloudStorage,
@@ -1007,81 +909,14 @@ impl EventLoop {
         let local_sequence = self.state.manifest.last_persisted_sequence;
         for file_name in crate::metadata::files::MANIFEST_BODIES {
             let key = crate::storage::cloud::cloud_metadata_key(file_name);
-            let Some(data) = Self::cloud_metadata_get_optional(cloud, &key, deadline)? else {
+            let Some(data) =
+                crate::storage::cloud::BlockingCloud::new(cloud, deadline).get_optional(&key)?
+            else {
                 continue;
             };
             crate::metadata::files::ensure_remote_not_ahead(file_name, &data, local_sequence)?;
         }
         Ok(())
-    }
-
-    fn submit_conditional_metadata_put(
-        cloud: &crate::storage::cloud::CloudStorage,
-        file_name: &str,
-        key: &str,
-        data: Vec<u8>,
-        local_manifest_sequence: u64,
-        deadline: &crate::common::OperationDeadline,
-    ) -> crate::common::MidgeResult<()> {
-        let headers = match Self::cloud_metadata_head_optional(cloud, key, deadline)? {
-            Some(metadata) => {
-                let headers = crate::storage::cloud::object_match_precondition_headers(
-                    &metadata.etag,
-                    metadata.generation.as_deref(),
-                )
-                .ok_or_else(|| {
-                    crate::common::MidgeError::Internal(format!(
-                        "cloud metadata '{key}' cannot be conditionally updated without an identity token"
-                    ))
-                })?;
-                let current =
-                    Self::cloud_metadata_get_optional(cloud, key, deadline)?.ok_or_else(|| {
-                        crate::common::MidgeError::Internal(format!(
-                            "cloud metadata '{key}' disappeared after HEAD precondition"
-                        ))
-                    })?;
-                crate::metadata::files::ensure_remote_not_ahead(
-                    file_name,
-                    &current,
-                    local_manifest_sequence,
-                )?;
-                if current == data {
-                    return Ok(());
-                }
-                headers
-            }
-            None => vec![("If-None-Match".to_string(), "*".to_string())],
-        };
-
-        let timeout = Self::cloud_metadata_timeout(key, "PUT", cloud.callback_timeout(), deadline)?;
-        let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_put(key, data, headers, tx);
-
-        match rx.recv_timeout(timeout) {
-            Ok(crate::storage::cloud::CloudEvent::Put { result, .. }) => match result {
-                crate::storage::cloud::CloudOutcome::Ok(()) => Ok(()),
-                crate::storage::cloud::CloudOutcome::Err(error) => {
-                    Err(crate::storage::cloud::contextualize_operation_error(
-                        &error,
-                        format_args!("cloud metadata mirror failed for '{key}'"),
-                        deadline,
-                    ))
-                }
-            },
-            Ok(other) => Err(crate::common::MidgeError::Internal(format!(
-                "unexpected cloud metadata mirror response for '{key}': {other:?}"
-            ))),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                Err(crate::common::MidgeError::Timeout(format!(
-                    "cloud metadata mirror put '{key}' exceeded the operation deadline"
-                )))
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                Err(crate::common::MidgeError::Internal(format!(
-                    "cloud metadata mirror callback closed for '{key}'"
-                )))
-            }
-        }
     }
 
     fn mirror_metadata_to_authoritative_cloud(&self) -> crate::common::MidgeResult<()> {
@@ -1122,11 +957,9 @@ impl EventLoop {
             }
 
             let data = std::fs::read(&local_path)?;
-            let key = crate::storage::cloud::cloud_metadata_key(file_name);
-            Self::submit_conditional_metadata_put(
+            crate::runtime::hybrid_persistence::conditional_metadata_mirror_put(
                 cloud,
                 file_name,
-                &key,
                 data,
                 local_manifest_sequence,
                 deadline,

@@ -212,6 +212,53 @@ impl CloudMetadataPruneSnapshot {
     }
 }
 
+/// Publish one local metadata body to the authoritative cloud mirror.
+///
+/// Every mirror writer (the event loop, the flush worker, startup recovery)
+/// goes through this one function so the protocol and its verdicts stay
+/// identical: a remote body whose manifest sequence is ahead of the local one
+/// is `Fenced`, a cloud round trip that outlives the deadline is `Timeout`,
+/// and the write itself is conditional on the identity the preceding HEAD saw.
+pub(crate) fn conditional_metadata_mirror_put(
+    cloud: &CloudStorage,
+    file_name: &str,
+    data: Vec<u8>,
+    local_manifest_sequence: u64,
+    deadline: &crate::common::OperationDeadline,
+) -> MidgeResult<()> {
+    let io = crate::storage::cloud::BlockingCloud::new(cloud, deadline);
+    let key = crate::storage::cloud::cloud_metadata_key(file_name);
+    let headers = match io.head_optional(&key)? {
+        Some(metadata) => {
+            let headers = crate::storage::cloud::object_match_precondition_headers(
+                &metadata.etag,
+                metadata.generation.as_deref(),
+            )
+            .ok_or_else(|| {
+                MidgeError::Internal(format!(
+                    "cloud metadata '{key}' cannot be conditionally updated without an identity token"
+                ))
+            })?;
+            let current = io.get_optional(&key)?.ok_or_else(|| {
+                MidgeError::Internal(format!(
+                    "cloud metadata '{key}' disappeared after HEAD precondition"
+                ))
+            })?;
+            crate::metadata::files::ensure_remote_not_ahead(
+                file_name,
+                &current,
+                local_manifest_sequence,
+            )?;
+            if current == data {
+                return Ok(());
+            }
+            headers
+        }
+        None => vec![("If-None-Match".to_string(), "*".to_string())],
+    };
+    io.put_with_headers(&key, data, headers)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,6 +317,85 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
+    }
+
+    fn cloud_with_remote_manifest(sequence: u64) -> CloudStorage {
+        let cloud = CloudStorage::new(
+            Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+            String::new(),
+        );
+        let body = serde_json::to_vec(&Manifest {
+            last_persisted_sequence: sequence,
+            ..Manifest::default()
+        })
+        .unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud.submit_put(
+            &crate::storage::cloud::cloud_metadata_key(crate::metadata::files::MANIFEST),
+            body,
+            Vec::new(),
+            tx,
+        );
+        assert!(matches!(
+            rx.recv().unwrap(),
+            crate::storage::cloud::CloudEvent::Put { result: Ok(()), .. }
+        ));
+        cloud
+    }
+
+    /// Every mirror writer shares this function, so the flush worker, the
+    /// event loop and startup recovery all fence on a remote manifest that is
+    /// ahead of the local one instead of disagreeing about the verdict.
+    #[test]
+    fn should_report_fenced_when_remote_manifest_is_ahead_of_local() {
+        // Arrange
+        let cloud = cloud_with_remote_manifest(10);
+        let local = serde_json::to_vec(&Manifest {
+            last_persisted_sequence: 5,
+            ..Manifest::default()
+        })
+        .unwrap();
+
+        // Act
+        let error = conditional_metadata_mirror_put(
+            &cloud,
+            crate::metadata::files::MANIFEST,
+            local,
+            5,
+            &crate::common::OperationDeadline::unbounded(),
+        )
+        .unwrap_err();
+
+        // Assert
+        assert!(
+            matches!(error, MidgeError::Fenced(_)),
+            "remote-ahead mirror must fence, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn should_report_timeout_when_mirror_exceeds_operation_deadline() {
+        // Arrange
+        let cloud = cloud_with_remote_manifest(1);
+        let expired =
+            crate::common::OperationDeadline::from_budget(std::time::Duration::from_nanos(1));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        // Act
+        let error = conditional_metadata_mirror_put(
+            &cloud,
+            crate::metadata::files::MANIFEST,
+            Vec::new(),
+            9,
+            &expired,
+        )
+        .unwrap_err();
+
+        // Assert
+        assert!(
+            matches!(error, MidgeError::Timeout(_)),
+            "an exhausted deadline must report Timeout, got {error:?}"
+        );
     }
 
     fn mirror(snapshot: &CloudMetadataPruneSnapshot) {

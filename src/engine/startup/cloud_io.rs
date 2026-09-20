@@ -1,89 +1,41 @@
-use crate::common::{MidgeError, MidgeResult};
-use crate::storage::cloud::{CloudEvent, CloudOutcome, CloudStorage, ObjectMetadata};
+use crate::common::{MidgeError, MidgeResult, OperationDeadline};
+use crate::storage::cloud::{BlockingCloud, CloudStorage, ObjectMetadata};
 
 /// Synchronous startup adapter over the runtime's callback-oriented cloud API.
 ///
-/// Recovery policy remains in `CloudStartupRecovery`; this type owns only the
-/// callback protocol, timeout, and response-shape validation.
+/// Recovery policy remains in `CloudStartupRecovery`; the callback protocol,
+/// timeout handling, and response-shape validation belong to the shared
+/// `BlockingCloud` adapter this type delegates to.
 pub(in crate::engine) struct BlockingCloudIo<'a> {
     cloud: &'a CloudStorage,
+    deadline: OperationDeadline,
 }
 
 impl<'a> BlockingCloudIo<'a> {
     pub(in crate::engine) fn new(cloud: &'a CloudStorage) -> Self {
-        Self { cloud }
+        Self {
+            cloud,
+            deadline: OperationDeadline::unbounded(),
+        }
+    }
+
+    fn io(&self) -> BlockingCloud<'_> {
+        BlockingCloud::new(self.cloud, &self.deadline)
     }
 
     pub(in crate::engine) fn list(&self, prefix: &str) -> MidgeResult<Vec<String>> {
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.cloud.submit_list(prefix, tx);
-        match rx.recv_timeout(self.cloud.callback_timeout()) {
-            Ok(CloudEvent::List {
-                prefix: returned_prefix,
-                result,
-            }) => {
-                let _ = returned_prefix;
-                match result {
-                    CloudOutcome::Ok(keys) => Ok(keys),
-                    CloudOutcome::Err(error) => Err(MidgeError::Internal(format!(
-                        "cloud list '{prefix}': {error}"
-                    ))),
-                }
-            }
-            Ok(other) => Err(MidgeError::Internal(format!(
-                "unexpected cloud list response for '{prefix}': {other:?}"
-            ))),
-            Err(error) => Err(MidgeError::Internal(format!(
-                "cloud list '{prefix}' timed out or failed: {error}"
-            ))),
-        }
+        self.io().list(prefix)
     }
 
     pub(in crate::engine) fn get_optional(&self, key: &str) -> MidgeResult<Option<Vec<u8>>> {
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.cloud.submit_get(key, tx);
-        match rx.recv_timeout(self.cloud.callback_timeout()) {
-            Ok(CloudEvent::Get { result, .. }) => match result {
-                CloudOutcome::Ok(data) => Ok(Some(data)),
-                CloudOutcome::Err(error) if crate::storage::cloud::is_not_found_error(&error) => {
-                    Ok(None)
-                }
-                CloudOutcome::Err(error) => {
-                    Err(MidgeError::Internal(format!("cloud get '{key}': {error}")))
-                }
-            },
-            Ok(other) => Err(MidgeError::Internal(format!(
-                "unexpected cloud get response for '{key}': {other:?}"
-            ))),
-            Err(error) => Err(MidgeError::Internal(format!(
-                "cloud get '{key}' timed out or failed: {error}"
-            ))),
-        }
+        self.io().get_optional(key)
     }
 
     pub(in crate::engine) fn head_optional(
         &self,
         key: &str,
     ) -> MidgeResult<Option<ObjectMetadata>> {
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.cloud.submit_head(key, tx);
-        match rx.recv_timeout(self.cloud.callback_timeout()) {
-            Ok(CloudEvent::Head { result, .. }) => match result {
-                CloudOutcome::Ok(metadata) => Ok(Some(metadata)),
-                CloudOutcome::Err(error) if crate::storage::cloud::is_not_found_error(&error) => {
-                    Ok(None)
-                }
-                CloudOutcome::Err(error) => {
-                    Err(MidgeError::Internal(format!("cloud head '{key}': {error}")))
-                }
-            },
-            Ok(other) => Err(MidgeError::Internal(format!(
-                "unexpected cloud head response for '{key}': {other:?}"
-            ))),
-            Err(error) => Err(MidgeError::Internal(format!(
-                "cloud head '{key}' timed out or failed: {error}"
-            ))),
-        }
+        self.io().head_optional(key)
     }
 
     pub(in crate::engine) fn put_with_headers(
@@ -92,22 +44,7 @@ impl<'a> BlockingCloudIo<'a> {
         data: Vec<u8>,
         headers: Vec<(String, String)>,
     ) -> MidgeResult<()> {
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.cloud.submit_put(key, data, headers, tx);
-        match rx.recv_timeout(self.cloud.callback_timeout()) {
-            Ok(CloudEvent::Put { result, .. }) => match result {
-                CloudOutcome::Ok(()) => Ok(()),
-                CloudOutcome::Err(error) => {
-                    Err(MidgeError::Internal(format!("cloud put '{key}': {error}")))
-                }
-            },
-            Ok(other) => Err(MidgeError::Internal(format!(
-                "unexpected cloud put response for '{key}': {other:?}"
-            ))),
-            Err(error) => Err(MidgeError::Internal(format!(
-                "cloud put '{key}' timed out or failed: {error}"
-            ))),
-        }
+        self.io().put_with_headers(key, data, headers)
     }
 
     #[cfg(test)]
