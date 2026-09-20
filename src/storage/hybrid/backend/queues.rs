@@ -168,7 +168,7 @@ impl BoundedEventQueue {
                 key.len()
                     + match result {
                         StorageOutcome::Ok(data) => data.len(),
-                        StorageOutcome::Err(error) => error.len(),
+                        StorageOutcome::Err(error) => error.message().len(),
                     }
             }
             StorageEvent::WriteComplete { key, result }
@@ -176,28 +176,28 @@ impl BoundedEventQueue {
                 key.len()
                     + match result {
                         StorageOutcome::Ok(()) => 0,
-                        StorageOutcome::Err(error) => error.len(),
+                        StorageOutcome::Err(error) => error.message().len(),
                     }
             }
             StorageEvent::ListComplete { prefix, result } => {
                 prefix.len()
                     + match result {
                         StorageOutcome::Ok(keys) => keys.iter().map(String::len).sum(),
-                        StorageOutcome::Err(error) => error.len(),
+                        StorageOutcome::Err(error) => error.message().len(),
                     }
             }
             StorageEvent::HeadComplete { key, result } => {
                 key.len()
                     + match result {
                         StorageOutcome::Ok(metadata) => metadata.etag.len() + 24,
-                        StorageOutcome::Err(error) => error.len(),
+                        StorageOutcome::Err(error) => error.message().len(),
                     }
             }
             StorageEvent::CloudFail { error, .. }
             | StorageEvent::CloudWalPruneAttemptFailed { error, .. } => error.len(),
             StorageEvent::CloudWalPruneComplete { result, .. } => match result {
                 StorageOutcome::Ok(()) => 0,
-                StorageOutcome::Err(error) => error.len(),
+                StorageOutcome::Err(error) => error.message().len(),
             },
             StorageEvent::CloudAck { .. }
             | StorageEvent::BackpressureOn
@@ -210,7 +210,7 @@ impl BoundedEventQueue {
         &mut self,
         event: StorageEvent,
         externally_delivered: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::storage::StorageError> {
         let accounted_bytes = Self::event_bytes(&event);
         if let Some(key) = Self::terminal_key(&event) {
             let replaced = self.terminal_entries.remove(&key);
@@ -228,13 +228,13 @@ impl BoundedEventQueue {
                         .saturating_add(replaced.accounted_bytes);
                     self.terminal_entries.insert(key, replaced);
                 }
-                return Err(format!(
+                return Err(crate::storage::StorageError::io(format!(
                     "terminal storage event queue at capacity: entries={}/{}, bytes={}/{}",
                     self.terminal_entries.len(),
                     self.max_entries,
                     self.terminal_pending_bytes,
                     self.max_bytes
-                ));
+                )));
             }
             self.terminal_pending_bytes =
                 self.terminal_pending_bytes.saturating_add(accounted_bytes);
@@ -259,13 +259,13 @@ impl BoundedEventQueue {
         if self.entries.len() >= self.max_entries
             || self.pending_bytes.saturating_add(accounted_bytes) > self.max_bytes
         {
-            return Err(format!(
+            return Err(crate::storage::StorageError::io(format!(
                 "storage event queue at capacity: entries={}/{}, bytes={}/{}",
                 self.entries.len(),
                 self.max_entries,
                 self.pending_bytes,
                 self.max_bytes
-            ));
+            )));
         }
         self.pending_bytes = self.pending_bytes.saturating_add(accounted_bytes);
         self.entries.push_back(QueuedStorageEvent {

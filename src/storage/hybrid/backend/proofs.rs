@@ -162,7 +162,7 @@ impl HybridStorage {
         let timeout =
             Self::deadline_timeout(key, "range object HEAD", self.callback_timeout, deadline)?;
         Self::head_range_object_from_backend(self.cloud_backend_for_key(key), key, timeout).map_err(
-            |error| Self::proof_round_trip_error(key, "range object HEAD", error, deadline),
+            |error| Self::proof_round_trip_error(key, "range object HEAD", &error, deadline),
         )
     }
 
@@ -179,7 +179,7 @@ impl HybridStorage {
             Err(error) => Err(Self::proof_round_trip_error(
                 key,
                 "range object HEAD",
-                error,
+                &error,
                 deadline,
             )),
         }
@@ -200,7 +200,7 @@ impl HybridStorage {
         backend: &Arc<dyn StorageBackend>,
         key: &str,
         timeout: Duration,
-    ) -> Result<StorageObjectMetadata, String> {
+    ) -> Result<StorageObjectMetadata, crate::storage::StorageError> {
         let (tx, rx) = mpsc::channel();
         backend.submit_range_head(key, timeout, tx);
         match rx.recv_timeout(timeout) {
@@ -212,7 +212,9 @@ impl HybridStorage {
                 result: StorageOutcome::Err(error),
                 ..
             }) => Err(error),
-            Ok(other) => Err(format!("unexpected range HEAD response: {other:?}")),
+            Ok(other) => Err(crate::storage::StorageError::protocol(format!(
+                "unexpected range HEAD response: {other:?}"
+            ))),
             Err(mpsc::RecvTimeoutError::Timeout) => Err(crate::storage::storage_timeout_error(
                 "range HEAD timed out",
             )),
@@ -224,14 +226,13 @@ impl HybridStorage {
         backend: &Arc<dyn StorageBackend>,
         key: &str,
         callback_timeout: Duration,
-    ) -> Result<RemoteObjectProof, String> {
+    ) -> crate::common::MidgeResult<RemoteObjectProof> {
         Self::stable_object_proof_from_backend_within(
             backend,
             key,
             callback_timeout,
             &OperationDeadline::unbounded(),
         )
-        .map_err(|error| error.to_string())
     }
 
     pub(super) fn stable_object_proof_from_backend_within(
@@ -247,7 +248,7 @@ impl HybridStorage {
             deadline,
         )?;
         let before = Self::head_object_from_backend_blocking(backend, key, before_timeout)
-            .map_err(|error| Self::proof_round_trip_error(key, "initial HEAD", error, deadline))?;
+            .map_err(|error| Self::proof_round_trip_error(key, "initial HEAD", &error, deadline))?;
 
         let read_timeout =
             Self::deadline_timeout(key, "GET during object proof", callback_timeout, deadline)?;
@@ -263,7 +264,7 @@ impl HybridStorage {
                     format!("metadata-bearing GET callback closed for '{key}'"),
                 ),
             })?
-            .map_err(|error| Self::proof_round_trip_error(key, "GET", error, deadline))?;
+            .map_err(|error| Self::proof_round_trip_error(key, "GET", &error, deadline))?;
         crate::storage::cloud::validate_object_proof(key, &bytes, &metadata)?;
 
         let after_timeout = Self::deadline_timeout(
@@ -273,7 +274,7 @@ impl HybridStorage {
             deadline,
         )?;
         let after = Self::head_object_from_backend_blocking(backend, key, after_timeout)
-            .map_err(|error| Self::proof_round_trip_error(key, "final HEAD", error, deadline))?;
+            .map_err(|error| Self::proof_round_trip_error(key, "final HEAD", &error, deadline))?;
 
         if !before.same_version(&metadata) || !metadata.same_version(&after) {
             return Err(crate::common::MidgeError::Internal(format!(
@@ -292,7 +293,10 @@ impl HybridStorage {
     /// runtime may validate the bytes as WAL, SST, or metadata without giving
     /// those formats to the storage layer.
     #[cfg(test)]
-    pub(crate) fn remote_object_proof(&self, key: &str) -> Result<RemoteObjectProof, String> {
+    pub(crate) fn remote_object_proof(
+        &self,
+        key: &str,
+    ) -> crate::common::MidgeResult<RemoteObjectProof> {
         Self::stable_object_proof_from_backend(
             self.cloud_backend_for_key(key),
             key,
@@ -343,15 +347,15 @@ impl HybridStorage {
     fn proof_round_trip_error(
         key: &str,
         step: &str,
-        error: String,
+        error: &crate::storage::StorageError,
         deadline: &OperationDeadline,
     ) -> crate::common::MidgeError {
-        if deadline.is_expired() || Self::storage_error_indicates_timeout(&error) {
+        if deadline.is_expired() || error.is_timeout() {
             crate::common::MidgeError::Timeout(format!(
                 "{step} timed out while reading object proof for '{key}': {error}"
             ))
         } else {
-            crate::common::MidgeError::Internal(error)
+            crate::common::MidgeError::Internal(error.to_string())
         }
     }
 
@@ -361,9 +365,8 @@ impl HybridStorage {
     pub(crate) fn remote_object_proof_optional(
         &self,
         key: &str,
-    ) -> Result<Option<RemoteObjectProof>, String> {
+    ) -> crate::common::MidgeResult<Option<RemoteObjectProof>> {
         self.remote_object_proof_optional_within(key, &OperationDeadline::unbounded())
-            .map_err(|error| error.to_string())
     }
 
     pub(crate) fn remote_object_proof_optional_within(
@@ -391,7 +394,7 @@ impl HybridStorage {
             }) => Err(Self::proof_round_trip_error(
                 key,
                 "optional object HEAD",
-                error,
+                &error,
                 deadline,
             )),
             Ok(other) => Err(crate::common::MidgeError::Internal(format!(
@@ -595,7 +598,7 @@ impl HybridStorage {
             Self::head_object_from_backend_blocking(&proof.backend, &proof.key, timeout)
         }
         .map_err(|error| {
-            Self::proof_round_trip_error(&proof.key, "guarded object HEAD", error, deadline)
+            Self::proof_round_trip_error(&proof.key, "guarded object HEAD", &error, deadline)
         })?;
         if actual.same_version(&proof.metadata) {
             return Ok(());
@@ -633,7 +636,7 @@ impl HybridStorage {
     fn prepare_guarded_deletes(
         &self,
         targets: Vec<(u64, RemoteObjectProof)>,
-    ) -> Result<Vec<PreparedGuardedDelete>, String> {
+    ) -> Result<Vec<PreparedGuardedDelete>, crate::storage::StorageError> {
         targets
             .into_iter()
             .map(|(request_id, target)| {
@@ -662,16 +665,18 @@ impl HybridStorage {
         &self,
         workers: &PruneWorkerRegistry,
         request_count: usize,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::storage::StorageError> {
         if workers.shutting_down {
-            return Err("hybrid storage is shutting down; guarded delete rejected".to_string());
+            return Err(crate::storage::StorageError::io(
+                "hybrid storage is shutting down; guarded delete rejected",
+            ));
         }
         if workers.handles.len() >= workers.max_workers {
-            return Err(format!(
+            return Err(crate::storage::StorageError::io(format!(
                 "guarded delete workers at capacity: running={}/{}",
                 workers.handles.len(),
                 workers.max_workers
-            ));
+            )));
         }
 
         let pending_completions = self.event_queue.lock().pending_prune_completions();
@@ -685,11 +690,11 @@ impl HybridStorage {
             .saturating_add(request_count)
             > workers.max_requests
         {
-            return Err(format!(
+            return Err(crate::storage::StorageError::io(format!(
                 "guarded delete completion queue at capacity: outstanding={}/{}",
                 active_requests.saturating_add(pending_completions),
                 workers.max_requests
-            ));
+            )));
         }
         Ok(())
     }
@@ -703,14 +708,14 @@ impl HybridStorage {
         &self,
         request_id: u64,
         target: RemoteObjectProof,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::storage::StorageError> {
         self.delete_remote_objects_guarded(vec![(request_id, target)])
     }
 
     pub(crate) fn delete_remote_objects_guarded(
         &self,
         targets: Vec<(u64, RemoteObjectProof)>,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::storage::StorageError> {
         if targets.is_empty() {
             return Ok(());
         }
@@ -770,21 +775,21 @@ impl HybridStorage {
                                 StorageOutcome::Ok(()) => Ok(()),
                                 StorageOutcome::Err(error) => Err(error),
                             },
-                            Ok(other) => Err(format!(
+                            Ok(other) => Err(crate::storage::StorageError::protocol(format!(
                                 "unexpected guarded delete response for '{target_key}': {other:?}"
-                            )),
-                            Err(error) => Err(format!(
+                            ))),
+                            Err(error) => Err(crate::storage::StorageError::timeout(format!(
                                 "guarded delete timed out for '{target_key}': {error}"
-                            )),
+                            ))),
                         }
                     }));
 
                     let result = match result {
                         Ok(Ok(())) => StorageOutcome::Ok(()),
                         Ok(Err(error)) => StorageOutcome::Err(error),
-                        Err(_) => StorageOutcome::Err(format!(
-                            "guarded delete worker panicked for '{target_key}'"
-                        )),
+                        Err(_) => StorageOutcome::Err(
+                            format!("guarded delete worker panicked for '{target_key}'").into(),
+                        ),
                     };
                     let event = StorageEvent::CloudWalPruneComplete {
                         segment_id: request_id,
@@ -856,7 +861,7 @@ impl HybridStorage {
                 StorageOutcome::Err(error) => Err(Self::proof_round_trip_error(
                     &target_key,
                     "conditional DELETE",
-                    error,
+                    &error,
                     deadline,
                 )),
             },

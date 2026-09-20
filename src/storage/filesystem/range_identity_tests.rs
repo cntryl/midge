@@ -16,7 +16,10 @@ fn head(backend: &FileSystem) -> StorageObjectMetadata {
     }
 }
 
-fn read(backend: &FileSystem, metadata: StorageObjectMetadata) -> Result<Vec<u8>, String> {
+fn read(
+    backend: &FileSystem,
+    metadata: StorageObjectMetadata,
+) -> Result<Vec<u8>, crate::storage::StorageError> {
     let (tx, rx) = mpsc::channel();
     backend.submit_read_range(KEY, 1, 4, metadata, Duration::from_secs(2), tx);
     rx.recv().expect("range read response")
@@ -78,7 +81,7 @@ fn should_reject_stale_range_authority_when_same_size_file_is_replaced() -> Midg
     assert!(!before.same_version(&after));
     assert!(stale_read
         .expect_err("stale identity must fail")
-        .contains("precondition failed"));
+        .is_precondition_failed());
     assert!(stale_delete.is_err());
     assert_eq!(current_read, b"ewe");
     assert!(current_delete.is_ok());

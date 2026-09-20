@@ -1143,15 +1143,33 @@ pub(crate) fn is_not_found_error(error: &CloudError) -> bool {
 fn cloud_to_storage_outcome<T: Clone>(result: CloudOutcome<T>) -> StorageOutcome<T> {
     match result {
         CloudOutcome::Ok(value) => StorageOutcome::Ok(value),
-        CloudOutcome::Err(error) => {
-            let message = if error.is_timeout() {
-                crate::storage::storage_timeout_error(error)
-            } else {
-                error.to_string()
-            };
-            StorageOutcome::Err(message)
-        }
+        CloudOutcome::Err(error) => StorageOutcome::Err(storage_error_from_cloud(error)),
     }
+}
+
+/// Carry a provider's classification across the storage boundary, so callers
+/// do not re-derive it from message text.
+fn storage_error_from_cloud(error: CloudError) -> crate::storage::StorageError {
+    use crate::storage::StorageErrorKind;
+    let kind = if error.is_timeout() {
+        StorageErrorKind::Timeout
+    } else {
+        match &error {
+            #[cfg(any(test, feature = "cloud-common"))]
+            CloudError::NotFound(_) => StorageErrorKind::NotFound,
+            CloudError::PreconditionFailed(_) => StorageErrorKind::PreconditionFailed,
+            #[cfg(any(test, feature = "cloud-common"))]
+            CloudError::Unauthorized(_) => StorageErrorKind::Unauthorized,
+            CloudError::Transport(_) => StorageErrorKind::Transport,
+            CloudError::Protocol(_) => StorageErrorKind::Protocol,
+            #[cfg(any(test, feature = "cloud-common"))]
+            CloudError::InvalidRequest(_) | CloudError::ServerError(_) => {
+                StorageErrorKind::Protocol
+            }
+            _ => StorageErrorKind::Io,
+        }
+    };
+    crate::storage::StorageError::new(kind, error)
 }
 
 #[cfg(test)]
@@ -1177,9 +1195,9 @@ impl StorageBackend for CloudStorage {
             {
                 result
             }
-            Ok(event) => {
-                StorageOutcome::Err(format!("range HEAD returned a different object: {event:?}"))
-            }
+            Ok(event) => StorageOutcome::Err(
+                format!("range HEAD returned a different object: {event:?}").into(),
+            ),
             Err(error) => StorageOutcome::Err(crate::storage::storage_timeout_error(error)),
         };
         let _ = callback.send(StorageEvent::HeadComplete {
@@ -1222,14 +1240,16 @@ impl StorageBackend for CloudStorage {
         let result = blocking_cloud_object_proof_within(self, key, &deadline)
             .map_err(|error| match error {
                 crate::common::MidgeError::Timeout(message) => {
-                    crate::storage::storage_timeout_error(message)
+                    crate::storage::StorageError::timeout(message)
                 }
-                other => other.to_string(),
+                other => crate::storage::StorageError::io(other),
             })
             .and_then(|proof| {
                 proof
                     .map(|proof| (proof.bytes, proof.metadata))
-                    .ok_or_else(|| format!("not found: cloud object '{key}'"))
+                    .ok_or_else(|| {
+                        crate::storage::StorageError::not_found(format!("cloud object '{key}'"))
+                    })
             });
         let _ = callback.send(result);
     }
@@ -1262,7 +1282,9 @@ impl StorageBackend for CloudStorage {
             },
             Ok(other) => StorageEvent::ReadComplete {
                 key: key.to_string(),
-                result: StorageOutcome::Err(format!("unexpected cloud GET response: {other:?}")),
+                result: StorageOutcome::Err(
+                    format!("unexpected cloud GET response: {other:?}").into(),
+                ),
             },
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => StorageEvent::ReadComplete {
                 key: key.to_string(),
@@ -1272,7 +1294,7 @@ impl StorageBackend for CloudStorage {
             },
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => StorageEvent::ReadComplete {
                 key: key.to_string(),
-                result: StorageOutcome::Err("cloud GET callback closed".to_string()),
+                result: StorageOutcome::Err("cloud GET callback closed".to_string().into()),
             },
         };
         let _ = callback.send(event);
@@ -1346,7 +1368,9 @@ impl StorageBackend for CloudStorage {
             },
             Ok(other) => StorageEvent::DeleteComplete {
                 key: key.to_string(),
-                result: StorageOutcome::Err(format!("unexpected cloud DELETE response: {other:?}")),
+                result: StorageOutcome::Err(
+                    format!("unexpected cloud DELETE response: {other:?}").into(),
+                ),
             },
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => StorageEvent::DeleteComplete {
                 key: key.to_string(),
@@ -1356,7 +1380,7 @@ impl StorageBackend for CloudStorage {
             },
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => StorageEvent::DeleteComplete {
                 key: key.to_string(),
-                result: StorageOutcome::Err("cloud DELETE callback closed".to_string()),
+                result: StorageOutcome::Err("cloud DELETE callback closed".to_string().into()),
             },
         };
         let _ = callback.send(event);
@@ -1388,7 +1412,9 @@ impl StorageBackend for CloudStorage {
             },
             Ok(other) => StorageEvent::DeleteComplete {
                 key: key.to_string(),
-                result: StorageOutcome::Err(format!("unexpected cloud DELETE response: {other:?}")),
+                result: StorageOutcome::Err(
+                    format!("unexpected cloud DELETE response: {other:?}").into(),
+                ),
             },
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => StorageEvent::DeleteComplete {
                 key: key.to_string(),
@@ -1398,7 +1424,7 @@ impl StorageBackend for CloudStorage {
             },
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => StorageEvent::DeleteComplete {
                 key: key.to_string(),
-                result: StorageOutcome::Err("cloud DELETE callback closed".to_string()),
+                result: StorageOutcome::Err("cloud DELETE callback closed".to_string().into()),
             },
         };
         let _ = callback.send(event);
@@ -1426,7 +1452,9 @@ impl StorageBackend for CloudStorage {
             },
             Ok(other) => StorageEvent::ListComplete {
                 prefix: prefix.to_string(),
-                result: StorageOutcome::Err(format!("unexpected cloud LIST response: {other:?}")),
+                result: StorageOutcome::Err(
+                    format!("unexpected cloud LIST response: {other:?}").into(),
+                ),
             },
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => StorageEvent::ListComplete {
                 prefix: prefix.to_string(),
@@ -1436,7 +1464,7 @@ impl StorageBackend for CloudStorage {
             },
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => StorageEvent::ListComplete {
                 prefix: prefix.to_string(),
-                result: StorageOutcome::Err("cloud LIST callback closed".to_string()),
+                result: StorageOutcome::Err("cloud LIST callback closed".to_string().into()),
             },
         };
         let _ = callback.send(event);
@@ -1482,7 +1510,9 @@ impl StorageBackend for CloudStorage {
             }
             Ok(other) => StorageEvent::HeadComplete {
                 key: key.to_string(),
-                result: StorageOutcome::Err(format!("unexpected cloud HEAD response: {other:?}")),
+                result: StorageOutcome::Err(
+                    format!("unexpected cloud HEAD response: {other:?}").into(),
+                ),
             },
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => StorageEvent::HeadComplete {
                 key: key.to_string(),
@@ -1492,7 +1522,7 @@ impl StorageBackend for CloudStorage {
             },
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => StorageEvent::HeadComplete {
                 key: key.to_string(),
-                result: StorageOutcome::Err("cloud HEAD callback closed".to_string()),
+                result: StorageOutcome::Err("cloud HEAD callback closed".to_string().into()),
             },
         };
         let _ = callback.send(event);
@@ -1796,7 +1826,7 @@ mod tests {
         assert!(matches!(
             outcome,
             StorageOutcome::Err(message)
-                if crate::storage::storage_error_is_timeout(&message)
+                if message.is_timeout()
         ));
     }
 
@@ -1827,8 +1857,8 @@ mod tests {
             StorageEvent::HeadComplete {
                 result: StorageOutcome::Err(message),
                 ..
-            } if !crate::storage::storage_error_is_timeout(&message)
-                && message.contains("closed")
+            } if !message.is_timeout()
+                && message.to_string().contains("closed")
         ));
     }
 
@@ -1885,21 +1915,21 @@ mod tests {
             StorageEvent::ReadComplete {
                 result: StorageOutcome::Err(message),
                 ..
-            } if crate::storage::storage_error_is_timeout(&message)
+            } if message.is_timeout()
         ));
         assert!(matches!(
             write,
             StorageEvent::WriteComplete {
                 result: StorageOutcome::Err(message),
                 ..
-            } if crate::storage::storage_error_is_timeout(&message)
+            } if message.is_timeout()
         ));
         assert!(matches!(
             head,
             StorageEvent::HeadComplete {
                 result: StorageOutcome::Err(message),
                 ..
-            } if crate::storage::storage_error_is_timeout(&message)
+            } if message.is_timeout()
         ));
     }
 
@@ -1943,21 +1973,21 @@ mod tests {
             StorageEvent::DeleteComplete {
                 result: StorageOutcome::Err(message),
                 ..
-            } if crate::storage::storage_error_is_timeout(&message)
+            } if message.is_timeout()
         ));
         assert!(matches!(
             conditional_delete,
             StorageEvent::DeleteComplete {
                 result: StorageOutcome::Err(message),
                 ..
-            } if crate::storage::storage_error_is_timeout(&message)
+            } if message.is_timeout()
         ));
         assert!(matches!(
             list,
             StorageEvent::ListComplete {
                 result: StorageOutcome::Err(message),
                 ..
-            } if crate::storage::storage_error_is_timeout(&message)
+            } if message.is_timeout()
         ));
     }
 
@@ -2221,7 +2251,7 @@ mod tests {
             StorageEvent::ReadComplete {
                 result: StorageOutcome::Err(message),
                 ..
-            } if message.contains("timed out")
+            } if message.to_string().contains("timed out")
         ));
     }
 
@@ -2253,7 +2283,7 @@ mod tests {
             StorageEvent::ReadComplete {
                 result: StorageOutcome::Err(message),
                 ..
-            } if message.contains("timed out")
+            } if message.to_string().contains("timed out")
         ));
     }
 
@@ -2284,7 +2314,7 @@ mod tests {
             StorageEvent::HeadComplete {
                 result: StorageOutcome::Err(message),
                 ..
-            } if message.contains("timed out")
+            } if message.to_string().contains("timed out")
         ));
     }
 
@@ -2317,7 +2347,7 @@ mod tests {
             StorageEvent::WriteComplete {
                 result: StorageOutcome::Err(message),
                 ..
-            } if message.contains("timed out")
+            } if message.to_string().contains("timed out")
         ));
     }
 
@@ -3197,5 +3227,31 @@ mod tests {
             Some("900"),
             "LIST must carry the adapter's callback timeout"
         );
+    }
+    #[test]
+    fn should_preserve_precondition_failed_kind_when_cloud_error_crosses_storage_backend() {
+        // Arrange: a lost conditional write whose message begins with another
+        // class's old prefix. String matching classified it as absent.
+        let error = CloudError::PreconditionFailed("not found: x".to_string());
+
+        // Act
+        let converted = storage_error_from_cloud(error);
+
+        // Assert
+        assert!(converted.is_precondition_failed());
+        assert!(!converted.is_not_found());
+    }
+
+    #[test]
+    fn should_preserve_not_found_kind_when_cloud_error_crosses_storage_backend() {
+        // Arrange
+        let error = CloudError::NotFound("precondition failed: y".to_string());
+
+        // Act
+        let converted = storage_error_from_cloud(error);
+
+        // Assert
+        assert!(converted.is_not_found());
+        assert!(!converted.is_precondition_failed());
     }
 }

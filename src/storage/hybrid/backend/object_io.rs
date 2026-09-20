@@ -21,7 +21,7 @@ impl HybridStorage {
         backend: &Arc<dyn StorageBackend>,
         key: &str,
         callback_timeout: Duration,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, crate::storage::StorageError> {
         let (tx, rx) = std::sync::mpsc::channel();
         backend.submit_read_with_timeout(key, callback_timeout, tx);
         match rx.recv_timeout(callback_timeout) {
@@ -32,23 +32,19 @@ impl HybridStorage {
             Ok(StorageEvent::ReadComplete {
                 result: StorageOutcome::Err(error),
                 ..
-            }) => {
-                let message = format!("cloud object '{key}' unreadable: {error}");
-                if crate::storage::storage_error_is_timeout(&error) {
-                    Err(crate::storage::storage_timeout_error(message))
-                } else {
-                    Err(message)
-                }
-            }
-            Ok(other) => Err(format!(
-                "unexpected cloud read response for '{key}': {other:?}"
+            }) => Err(crate::storage::StorageError::new(
+                error.kind(),
+                format!("cloud object '{key}' unreadable: {error}"),
             )),
+            Ok(other) => Err(crate::storage::StorageError::protocol(format!(
+                "unexpected cloud read response for '{key}': {other:?}"
+            ))),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(
                 crate::storage::storage_timeout_error(format!("cloud read timed out for '{key}'")),
             ),
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                Err(format!("cloud read callback closed for '{key}'"))
-            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(
+                crate::storage::StorageError::io(format!("cloud read callback closed for '{key}'")),
+            ),
         }
     }
 
@@ -61,12 +57,12 @@ impl HybridStorage {
     ) -> crate::common::MidgeResult<Vec<u8>> {
         let timeout = Self::deadline_timeout(key, "read object", callback_timeout, deadline)?;
         Self::read_object_from_backend_blocking(backend, key, timeout).map_err(|error| {
-            if deadline.is_expired() || Self::storage_error_indicates_timeout(&error) {
+            if deadline.is_expired() || error.is_timeout() {
                 crate::common::MidgeError::Timeout(format!(
                     "object read timed out for '{key}': {error}"
                 ))
             } else {
-                crate::common::MidgeError::Internal(error)
+                crate::common::MidgeError::Internal(error.to_string())
             }
         })
     }
@@ -75,7 +71,7 @@ impl HybridStorage {
         backend: &Arc<dyn StorageBackend>,
         key: &str,
         callback_timeout: Duration,
-    ) -> Result<StorageObjectMetadata, String> {
+    ) -> Result<StorageObjectMetadata, crate::storage::StorageError> {
         let (tx, rx) = std::sync::mpsc::channel();
         backend.submit_head_with_timeout(key, callback_timeout, tx);
         match rx.recv_timeout(callback_timeout) {
@@ -91,39 +87,37 @@ impl HybridStorage {
                 result: StorageOutcome::Err(error),
             }) => {
                 let _ = returned_key;
-                let message = format!(
-                    "cloud object '{key}' unreadable during cached proof revalidation: {error}"
-                );
-                if crate::storage::storage_error_is_timeout(&error) {
-                    Err(crate::storage::storage_timeout_error(message))
-                } else {
-                    Err(message)
-                }
+                Err(crate::storage::StorageError::new(
+                    error.kind(),
+                    format!(
+                        "cloud object '{key}' unreadable during cached proof revalidation: {error}"
+                    ),
+                ))
             }
-            Ok(other) => Err(format!(
+            Ok(other) => Err(crate::storage::StorageError::protocol(format!(
                 "unexpected cloud HEAD response for '{key}': {other:?}"
-            )),
+            ))),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(
                 crate::storage::storage_timeout_error(format!("cloud HEAD timed out for '{key}'")),
             ),
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                Err(format!("cloud HEAD callback closed for '{key}'"))
-            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(
+                crate::storage::StorageError::io(format!("cloud HEAD callback closed for '{key}'")),
+            ),
         }
     }
 
-    pub(super) fn storage_error_indicates_missing(error: &str) -> bool {
-        let error = error.trim().to_ascii_lowercase();
-        error.starts_with("not found:")
+    pub(super) fn storage_error_indicates_missing(error: &crate::storage::StorageError) -> bool {
+        error.is_not_found()
     }
 
-    pub(super) fn storage_error_indicates_precondition_failure(error: &str) -> bool {
-        let error = error.trim().to_ascii_lowercase();
-        error == "precondition failed" || error.starts_with("precondition failed:")
+    pub(super) fn storage_error_indicates_precondition_failure(
+        error: &crate::storage::StorageError,
+    ) -> bool {
+        error.is_precondition_failed()
     }
 
-    pub(super) fn storage_error_indicates_timeout(error: &str) -> bool {
-        crate::storage::storage_error_is_timeout(error)
+    pub(super) fn storage_error_indicates_timeout(error: &crate::storage::StorageError) -> bool {
+        error.is_timeout()
     }
 
     #[cfg(test)]
@@ -178,7 +172,7 @@ impl HybridStorage {
         backend: &Arc<dyn StorageBackend>,
         key: &str,
         callback_timeout: Duration,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, crate::storage::StorageError> {
         let (tx, rx) = std::sync::mpsc::channel();
         backend.submit_delete(key, tx);
         match rx.recv_timeout(callback_timeout) {
@@ -201,12 +195,17 @@ impl HybridStorage {
                 result: StorageOutcome::Err(error),
             }) => {
                 let _ = returned_key;
-                Err(format!("object '{key}' delete failed: {error}"))
+                Err(crate::storage::StorageError::new(
+                    error.kind(),
+                    format!("object '{key}' delete failed: {error}"),
+                ))
             }
-            Ok(other) => Err(format!(
+            Ok(other) => Err(crate::storage::StorageError::protocol(format!(
                 "unexpected storage delete response for '{key}': {other:?}"
-            )),
-            Err(error) => Err(format!("storage delete timed out for '{key}': {error}")),
+            ))),
+            Err(error) => Err(crate::storage::StorageError::timeout(format!(
+                "storage delete timed out for '{key}': {error}"
+            ))),
         }
     }
 }
@@ -284,7 +283,9 @@ impl StorageBackend for HybridStorage {
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                         let _ = callback.send(StorageEvent::ReadComplete {
                             key: k,
-                            result: StorageOutcome::Err("cloud read callback closed".to_string()),
+                            result: StorageOutcome::Err(
+                                "cloud read callback closed".to_string().into(),
+                            ),
                         });
                     }
                 }
@@ -292,7 +293,7 @@ impl StorageBackend for HybridStorage {
             _ => {
                 let _ = callback.send(StorageEvent::ReadComplete {
                     key: key.clone(),
-                    result: StorageOutcome::Err("Hybrid read failed".to_string()),
+                    result: StorageOutcome::Err("Hybrid read failed".to_string().into()),
                 });
             }
         }
@@ -343,22 +344,23 @@ impl StorageBackend for HybridStorage {
                     }) => {
                         let message =
                             format!("cloud write failed after local write succeeded: {error}");
-                        if crate::storage::storage_error_is_timeout(&error) {
-                            StorageOutcome::Err(crate::storage::storage_timeout_error(message))
-                        } else {
-                            StorageOutcome::Err(message)
-                        }
+                        StorageOutcome::Err(crate::storage::StorageError::new(
+                            error.kind(),
+                            message,
+                        ))
                     }
-                    Ok(other) => StorageOutcome::Err(format!(
-                        "unexpected cloud write completion event: {other:?}"
-                    )),
+                    Ok(other) => StorageOutcome::Err(
+                        format!("unexpected cloud write completion event: {other:?}").into(),
+                    ),
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                         StorageOutcome::Err(crate::storage::storage_timeout_error(
                             "cloud write callback timed out after local write succeeded",
                         ))
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => StorageOutcome::Err(
-                        "cloud write callback closed after local write succeeded".to_string(),
+                        "cloud write callback closed after local write succeeded"
+                            .to_string()
+                            .into(),
                     ),
                 };
 
@@ -370,7 +372,7 @@ impl StorageBackend for HybridStorage {
             _ => {
                 let _ = callback.send(StorageEvent::WriteComplete {
                     key: key.to_string(),
-                    result: StorageOutcome::Err("Hybrid write failed".to_string()),
+                    result: StorageOutcome::Err("Hybrid write failed".to_string().into()),
                 });
             }
         }
@@ -428,7 +430,7 @@ impl StorageBackend for HybridStorage {
                     ..
                 }),
             ) => StorageOutcome::Ok(()),
-            _ => StorageOutcome::Err("Hybrid delete failed".to_string()),
+            _ => StorageOutcome::Err("Hybrid delete failed".to_string().into()),
         };
 
         let _ = callback.send(StorageEvent::DeleteComplete {

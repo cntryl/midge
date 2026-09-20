@@ -136,7 +136,7 @@ impl HybridStorage {
                 result: StorageOutcome::Err(error),
                 ..
             }) => {
-                return Err(MidgeError::Timeout(error));
+                return Err(MidgeError::Timeout(error.to_string()));
             }
             Ok(event) => {
                 return Err(MidgeError::Internal(format!(
@@ -212,7 +212,7 @@ impl HybridStorage {
             let actual = rx
                 .recv_timeout(timeout)
                 .map_err(|error| MidgeError::Timeout(format!("immutable range readback: {error}")))?
-                .map_err(MidgeError::Internal)?;
+                .map_err(|error| MidgeError::Internal(error.to_string()))?;
             if actual != expected {
                 return Err(MidgeError::Corruption(
                     "immutable object readback differs from publication".into(),

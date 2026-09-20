@@ -609,73 +609,72 @@ fn should_classify_real_gcs_error_shapes_given_wal_catalog_operations() {
 }
 
 #[test]
-fn should_classify_only_normalized_missing_object_errors_as_absent() {
-    // Arrange
-    let errors = [
-        "not found: S3 GET failed: HTTP 404 NoSuchKey",
-        "not found: Azure Blob request failed: 404 BlobNotFound",
-        "not found: read C:\\data\\missing.sst: os error 2",
+fn should_classify_missing_object_errors_by_kind_not_message() {
+    // Arrange: every provider's absent-object error, plus a transport failure
+    // whose text mentions a missing file but which is not an absent object.
+    let missing = [
+        crate::storage::StorageError::not_found("S3 GET failed: HTTP 404 NoSuchKey"),
+        crate::storage::StorageError::not_found("Azure Blob request failed: 404 BlobNotFound"),
+        crate::storage::StorageError::not_found("read C:\\data\\missing.sst: os error 2"),
     ];
+    let credential_failure = crate::storage::StorageError::new(
+        crate::storage::StorageErrorKind::Transport,
+        "failed to read workload token: No such file or directory",
+    );
 
     // Act
-    let all_missing = errors
+    let all_missing = missing
         .iter()
-        .all(|error| HybridStorage::storage_error_indicates_missing(error));
+        .all(HybridStorage::storage_error_indicates_missing);
+    let credential_is_missing = HybridStorage::storage_error_indicates_missing(&credential_failure);
 
     // Assert
     assert!(all_missing);
-}
-
-#[test]
-fn should_not_classify_credential_file_failure_as_missing_object() {
-    // Arrange
-    let error =
-        "transport error: Internal(\"failed to read workload token: No such file or directory\")";
-
-    // Act
-    let missing = HybridStorage::storage_error_indicates_missing(error);
-
-    // Assert
-    assert!(!missing);
+    assert!(
+        !credential_is_missing,
+        "a transport failure is not an absent object, whatever its message says"
+    );
 }
 
 #[test]
 fn should_not_classify_unrelated_numeric_diagnostics_as_absent() {
-    // Arrange
+    // Arrange: diagnostic text mentioning 404 is not an absent object.
     let errors = [
-        "protocol error: expected metadata length 404, got 17",
-        "server error: status 503: upstream request id 404",
+        crate::storage::StorageError::protocol("expected metadata length 404, got 17"),
+        crate::storage::StorageError::protocol("status 503: upstream request id 404"),
     ];
 
     // Act
     let any_missing = errors
         .iter()
-        .any(|error| HybridStorage::storage_error_indicates_missing(error));
+        .any(HybridStorage::storage_error_indicates_missing);
 
     // Assert
     assert!(!any_missing);
 }
 
 #[test]
-fn should_only_classify_structured_precondition_failure_as_cas_conflict() {
+fn should_classify_cas_conflicts_by_kind_not_message() {
     // Arrange
     let conflicts = [
-        "precondition failed: status 412: S3 PUT",
-        "precondition failed",
+        crate::storage::StorageError::precondition_failed("status 412: S3 PUT"),
+        crate::storage::StorageError::precondition_failed(""),
     ];
     let unrelated = [
-        "protocol error: GCS JSON PUT cannot enforce If-Match; use a generation precondition",
-        "protocol error: precondition check failed: unauthorized",
-        "invalid request: object already exists in a retained snapshot",
+        crate::storage::StorageError::protocol(
+            "GCS JSON PUT cannot enforce If-Match; use a generation precondition",
+        ),
+        crate::storage::StorageError::protocol("precondition check failed: unauthorized"),
+        crate::storage::StorageError::protocol("object already exists in a retained snapshot"),
     ];
 
     // Act
     let all_conflicts = conflicts
         .iter()
-        .all(|error| HybridStorage::storage_error_indicates_precondition_failure(error));
+        .all(HybridStorage::storage_error_indicates_precondition_failure);
     let any_unrelated = unrelated
         .iter()
-        .any(|error| HybridStorage::storage_error_indicates_precondition_failure(error));
+        .any(HybridStorage::storage_error_indicates_precondition_failure);
 
     // Assert
     assert!(all_conflicts);
@@ -683,21 +682,24 @@ fn should_only_classify_structured_precondition_failure_as_cas_conflict() {
 }
 
 #[test]
-fn should_classify_only_canonical_storage_timeout_errors_as_timeouts() {
+fn should_classify_timeouts_by_kind_not_message() {
     // Arrange: provider detail text is untrusted diagnostic content. Merely
-    // mentioning "timeout" must not change a public error into Timeout.
-    let timeout = crate::storage::storage_timeout_error("cloud HEAD callback expired");
+    // mentioning "timeout" must not turn an error into a Timeout.
+    let timeout = crate::storage::StorageError::timeout("cloud HEAD callback expired");
     let unrelated = [
-        "unauthorized: workload token for timeout.example was rejected",
-        "invalid request: timeout must be a positive integer",
-        "protocol error: response included x-timeout metadata",
+        crate::storage::StorageError::new(
+            crate::storage::StorageErrorKind::Unauthorized,
+            "workload token for timeout.example was rejected",
+        ),
+        crate::storage::StorageError::protocol("timeout must be a positive integer"),
+        crate::storage::StorageError::protocol("response included x-timeout metadata"),
     ];
 
     // Act
     let classified_timeout = HybridStorage::storage_error_indicates_timeout(&timeout);
     let any_unrelated = unrelated
         .iter()
-        .any(|error| HybridStorage::storage_error_indicates_timeout(error));
+        .any(HybridStorage::storage_error_indicates_timeout);
 
     // Assert
     assert!(classified_timeout);
@@ -1275,7 +1277,7 @@ fn should_reject_guarded_delete_when_worker_capacity_is_exhausted() {
         .expect_err("second guarded delete must be rejected at worker capacity");
 
     // Assert
-    assert!(error.contains("workers at capacity"), "{error}");
+    assert!(error.to_string().contains("workers at capacity"), "{error}");
     assert!(started.elapsed() < Duration::from_millis(50));
 }
 
@@ -1641,7 +1643,7 @@ impl StorageBackend for PanickingWriteBackend {
     fn submit_read(&self, key: &str, callback: StorageCallback) {
         let _ = callback.send(StorageEvent::ReadComplete {
             key: key.to_string(),
-            result: StorageOutcome::Err("read unavailable".to_string()),
+            result: StorageOutcome::Err("read unavailable".to_string().into()),
         });
     }
 
@@ -1679,7 +1681,7 @@ impl StorageBackend for AlwaysFailingWriteBackend {
     fn submit_read(&self, key: &str, callback: StorageCallback) {
         let _ = callback.send(StorageEvent::ReadComplete {
             key: key.to_string(),
-            result: StorageOutcome::Err("read unavailable".to_string()),
+            result: StorageOutcome::Err("read unavailable".to_string().into()),
         });
     }
 
@@ -1687,7 +1689,7 @@ impl StorageBackend for AlwaysFailingWriteBackend {
         self.write_attempts.fetch_add(1, Ordering::SeqCst);
         let _ = callback.send(StorageEvent::WriteComplete {
             key: key.to_string(),
-            result: StorageOutcome::Err("write unavailable".to_string()),
+            result: StorageOutcome::Err("write unavailable".to_string().into()),
         });
     }
 
@@ -1718,7 +1720,7 @@ impl StorageBackend for AlwaysFailingWriteBackend {
     fn submit_head(&self, key: &str, callback: StorageCallback) {
         let _ = callback.send(StorageEvent::HeadComplete {
             key: key.to_string(),
-            result: StorageOutcome::Err("head unavailable".to_string()),
+            result: StorageOutcome::Err("head unavailable".to_string().into()),
         });
     }
 }
@@ -1793,7 +1795,9 @@ impl StorageBackend for BudgetConsumingSstPublicationBackend {
                 std::thread::sleep(delay);
                 let _ = callback.send(StorageEvent::HeadComplete {
                     key,
-                    result: StorageOutcome::Err("not found: delayed miss".to_string()),
+                    result: StorageOutcome::Err(crate::storage::StorageError::not_found(
+                        "delayed miss",
+                    )),
                 });
             });
         } else {
@@ -1834,14 +1838,22 @@ impl StorageBackend for BudgetConsumingProofBackend {
     fn submit_write(&self, key: &str, _data: Vec<u8>, callback: StorageCallback) {
         let _ = callback.send(StorageEvent::WriteComplete {
             key: key.to_string(),
-            result: StorageOutcome::Err("writes are not used by this proof fixture".to_string()),
+            result: StorageOutcome::Err(
+                "writes are not used by this proof fixture"
+                    .to_string()
+                    .into(),
+            ),
         });
     }
 
     fn submit_delete(&self, key: &str, callback: StorageCallback) {
         let _ = callback.send(StorageEvent::DeleteComplete {
             key: key.to_string(),
-            result: StorageOutcome::Err("deletes are not used by this proof fixture".to_string()),
+            result: StorageOutcome::Err(
+                "deletes are not used by this proof fixture"
+                    .to_string()
+                    .into(),
+            ),
         });
     }
 
@@ -1912,7 +1924,7 @@ impl StorageBackend for RacingReadDeleteBackend {
                 let metadata = Self::metadata(&bytes);
                 (bytes, metadata)
             })
-            .ok_or_else(|| "object not found".to_string());
+            .ok_or_else(|| crate::storage::StorageError::not_found("object"));
         let _ = callback.send(result);
     }
 
@@ -1922,7 +1934,7 @@ impl StorageBackend for RacingReadDeleteBackend {
         self.read_started.wait();
         self.release_read.wait();
         let result = snapshot.map_or_else(
-            || StorageOutcome::Err("object not found".to_string()),
+            || StorageOutcome::Err("object not found".to_string().into()),
             StorageOutcome::Ok,
         );
         let _ = callback.send(StorageEvent::ReadComplete { key, result });
@@ -1954,7 +1966,7 @@ impl StorageBackend for RacingReadDeleteBackend {
             self.object.lock().take();
             StorageOutcome::Ok(())
         } else {
-            StorageOutcome::Err("precondition failed".to_string())
+            StorageOutcome::Err(crate::storage::StorageError::precondition_failed(""))
         };
         let _ = callback.send(StorageEvent::DeleteComplete {
             key: key.to_string(),
@@ -1977,7 +1989,7 @@ impl StorageBackend for RacingReadDeleteBackend {
 
     fn submit_head(&self, key: &str, callback: StorageCallback) {
         let result = self.object.lock().as_deref().map_or_else(
-            || StorageOutcome::Err("object not found".to_string()),
+            || StorageOutcome::Err("object not found".to_string().into()),
             |bytes| StorageOutcome::Ok(Self::metadata(bytes)),
         );
         let _ = callback.send(StorageEvent::HeadComplete {
@@ -2684,7 +2696,7 @@ fn should_reject_reader_proof_when_guarded_prune_deletes_wal_during_download() {
     );
     let reader_error = reader_result.expect_err("racing read must not return a stale proof");
     assert!(
-        reader_error.contains("unreadable"),
+        reader_error.to_string().contains("unreadable"),
         "unexpected racing reader error: {reader_error}"
     );
     assert_cloud_object_missing(&storage, &key);
@@ -3536,8 +3548,8 @@ fn should_enforce_internal_storage_event_queue_limits() {
         .expect_err("second event exceeds byte bound");
 
     // Assert
-    assert!(entry_error.contains("entries=1/1"));
-    assert!(byte_error.contains("bytes="));
+    assert!(entry_error.to_string().contains("entries=1/1"));
+    assert!(byte_error.to_string().contains("bytes="));
     // Drain through the same accessor callers use to confirm the rejected
     // second event never made it into the queue: only the first `ack`
     // survived for each queue.

@@ -81,7 +81,7 @@ impl HybridStorage {
             let range = rx
                 .recv_timeout(timeout)
                 .map_err(|error| MidgeError::Timeout(format!("control range: {error}")))?
-                .map_err(|error| control_error_with_reservation(error, &memory))?;
+                .map_err(|error| control_error_with_reservation(&error, &memory))?;
             if range.len() != end - start {
                 return Err(MidgeError::Corruption(
                     "control range has incorrect length".into(),
@@ -144,18 +144,18 @@ impl HybridStorage {
                 result: StorageOutcome::Err(error),
                 ..
             }) if Self::storage_error_indicates_precondition_failure(&error) => {
-                return Err(MidgeError::Busy(error))
+                return Err(MidgeError::Busy(error.to_string()))
             }
             Ok(StorageEvent::WriteComplete {
                 result: StorageOutcome::Err(error),
                 ..
             }) if Self::storage_error_indicates_timeout(&error) => {
-                return Err(MidgeError::Timeout(error))
+                return Err(MidgeError::Timeout(error.to_string()))
             }
             Ok(StorageEvent::WriteComplete {
                 result: StorageOutcome::Err(error),
                 ..
-            }) => return Err(control_error_with_reservation(error, &memory)),
+            }) => return Err(control_error_with_reservation(&error, &memory)),
             Ok(event) => {
                 return Err(MidgeError::Internal(format!(
                     "control CAS failed: {event:?}"
@@ -176,19 +176,23 @@ impl HybridStorage {
     }
 }
 
-fn control_error_with_reservation(error: String, memory: &ResourceReservation) -> MidgeError {
+fn control_error_with_reservation(
+    error: &crate::storage::StorageError,
+    memory: &ResourceReservation,
+) -> MidgeError {
     let classified = control_error(error);
     memory.restore_related_contention();
     classified
 }
 
-fn control_error(error: String) -> MidgeError {
-    if error.contains("Resource limit:") {
-        MidgeError::ResourceLimit(error)
-    } else if HybridStorage::storage_error_indicates_timeout(&error) {
-        MidgeError::Timeout(error)
+fn control_error(error: &crate::storage::StorageError) -> MidgeError {
+    let message = error.message().to_string();
+    if message.contains("Resource limit:") {
+        MidgeError::ResourceLimit(message)
+    } else if error.is_timeout() {
+        MidgeError::Timeout(message)
     } else {
-        MidgeError::Internal(error)
+        MidgeError::Internal(message)
     }
 }
 
@@ -213,7 +217,7 @@ fn control_head(
         Ok(StorageEvent::HeadComplete {
             key: actual,
             result: StorageOutcome::Err(error),
-        }) if actual == key => Err(control_error(error)),
+        }) if actual == key => Err(control_error(&error)),
         Ok(event) => Err(MidgeError::Internal(format!(
             "control HEAD failed: {event:?}"
         ))),

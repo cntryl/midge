@@ -173,15 +173,18 @@ impl RemoteSstFs {
     }
 }
 
-fn storage_error(error: String) -> FsError {
-    if crate::storage::storage_error_is_timeout(&error) {
-        FsError::Timeout(error)
-    } else if error.starts_with("not found:") {
-        FsError::NotFound(error)
-    } else if error.starts_with("precondition failed:") {
-        FsError::Corruption(error)
-    } else {
-        FsError::Io(error)
+fn storage_error(error: crate::storage::StorageError) -> FsError {
+    use crate::storage::StorageErrorKind;
+    let kind = error.kind();
+    let message = error.into_message();
+    match kind {
+        StorageErrorKind::Timeout => FsError::Timeout(message),
+        StorageErrorKind::NotFound => FsError::NotFound(message),
+        StorageErrorKind::PreconditionFailed => FsError::Corruption(message),
+        StorageErrorKind::Unauthorized
+        | StorageErrorKind::Transport
+        | StorageErrorKind::Protocol
+        | StorageErrorKind::Io => FsError::Io(message),
     }
 }
 

@@ -306,9 +306,12 @@ fn schedule_retired_wal_deletes(storage: &HybridStorage, retired: Vec<ValidatedW
         for segment_id in retired_ids {
             storage.queue_cloud_wal_prune_complete(
                 segment_id,
-                crate::storage::StorageOutcome::Err(format!(
-                    "catalog authority retired but physical delete was not admitted: {error}"
-                )),
+                crate::storage::StorageOutcome::Err(
+                    format!(
+                        "catalog authority retired but physical delete was not admitted: {error}"
+                    )
+                    .into(),
+                ),
             );
         }
     }

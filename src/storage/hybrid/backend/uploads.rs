@@ -264,17 +264,19 @@ impl HybridStorage {
     ) {
         match &mut event {
             StorageEvent::CloudFail { error, .. }
-            | StorageEvent::CloudWalPruneAttemptFailed { error, .. }
-            | StorageEvent::CloudWalPruneComplete {
+            | StorageEvent::CloudWalPruneAttemptFailed { error, .. } => {
+                Self::truncate_storage_error(error);
+            }
+            StorageEvent::CloudWalPruneComplete {
                 result: StorageOutcome::Err(error),
                 ..
-            } => Self::truncate_storage_error(error),
+            } => Self::truncate_typed_storage_error(error),
             _ => {}
         }
         let externally_delivered =
             external_event_tx.is_some_and(|tx| tx.try_send(event.clone()).is_ok());
         if let Err(error) = event_queue.lock().try_push(event, externally_delivered) {
-            tracing::error!(error, "bounded storage event queue rejected completion");
+            tracing::error!(%error, "bounded storage event queue rejected completion");
         }
     }
 
@@ -287,6 +289,16 @@ impl HybridStorage {
             end = end.saturating_sub(1);
         }
         error.truncate(end);
+    }
+
+    /// Bound a typed error's message without losing its classification.
+    fn truncate_typed_storage_error(error: &mut crate::storage::StorageError) {
+        let mut message = error.message().to_string();
+        if message.len() <= MAX_CLOUD_ERROR_BYTES {
+            return;
+        }
+        Self::truncate_storage_error(&mut message);
+        *error = crate::storage::StorageError::new(error.kind(), message);
     }
 
     pub(super) fn spawn_wal_upload_worker(
@@ -397,13 +409,19 @@ impl HybridStorage {
 
         Self::handle_wal_upload_result(upload, upload_start, &rx, callback_timeout, |_, _| {
             let proof =
-                Self::stable_object_proof_from_backend(cloud, &object_key, callback_timeout)?;
+                Self::stable_object_proof_from_backend(cloud, &object_key, callback_timeout)
+                    .map_err(|error| match error {
+                        crate::common::MidgeError::Timeout(message) => {
+                            crate::storage::StorageError::timeout(message)
+                        }
+                        other => crate::storage::StorageError::io(other),
+                    })?;
             if proof.bytes == expected_data {
                 Ok(())
             } else {
-                Err(format!(
+                Err(crate::storage::StorageError::protocol(format!(
                     "remote object '{object_key}' differs from uploaded bytes"
-                ))
+                )))
             }
         })
     }
@@ -492,7 +510,7 @@ impl HybridStorage {
         upload_start: Instant,
         rx: &std::sync::mpsc::Receiver<StorageEvent>,
         callback_timeout: Duration,
-        mut verify_remote: impl FnMut(u64, u64) -> Result<(), String>,
+        mut verify_remote: impl FnMut(u64, u64) -> Result<(), crate::storage::StorageError>,
     ) -> StorageEvent {
         let (write_reported_success, write_error, write_failure_kind) =
             match rx.recv_timeout(callback_timeout) {
@@ -501,12 +519,12 @@ impl HybridStorage {
                     match result {
                         StorageOutcome::Ok(()) => (true, None, CloudUploadFailureKind::Other),
                         StorageOutcome::Err(error) => {
-                            let failure_kind = if Self::storage_error_indicates_timeout(&error) {
+                            let failure_kind = if error.is_timeout() {
                                 CloudUploadFailureKind::Timeout
                             } else {
                                 CloudUploadFailureKind::Other
                             };
-                            (false, Some(error), failure_kind)
+                            (false, Some(error.to_string()), failure_kind)
                         }
                     }
                 }
@@ -549,7 +567,7 @@ impl HybridStorage {
                     )
                 };
                 let failure_kind = if write_failure_kind == CloudUploadFailureKind::Timeout
-                    || Self::storage_error_indicates_timeout(&readback_error)
+                    || readback_error.is_timeout()
                 {
                     CloudUploadFailureKind::Timeout
                 } else {

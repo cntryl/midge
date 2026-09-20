@@ -86,7 +86,7 @@ impl FileSystem {
     }
 
     /// Compute a sanitized full path for a given key.
-    fn full_path(&self, key: &str) -> Result<PathBuf, String> {
+    fn full_path(&self, key: &str) -> Result<PathBuf, crate::storage::StorageError> {
         // Prevent absolute paths or path traversal outside the base directory.
         // Treat the key as a relative, forward-slash-friendly path.
         let mut out = self.base_path.clone();
@@ -99,9 +99,11 @@ impl FileSystem {
                 | Component::Prefix(_) => {}
             }
         }
-        let relative = out
-            .strip_prefix(&self.base_path)
-            .map_err(|error| format!("storage path escaped base directory: {error}"))?;
+        let relative = out.strip_prefix(&self.base_path).map_err(|error| {
+            crate::storage::StorageError::io(format!(
+                "storage path escaped base directory: {error}"
+            ))
+        })?;
         let mut current = self.base_path.clone();
         for component in relative.components() {
             let Component::Normal(part) = component else {
@@ -110,25 +112,28 @@ impl FileSystem {
             current.push(part);
             match fs::symlink_metadata(&current) {
                 Ok(metadata) if metadata.file_type().is_symlink() => {
-                    return Err(format!(
+                    return Err(crate::storage::StorageError::io(format!(
                         "storage path contains a symlink: {}",
                         current.display()
-                    ));
+                    )));
                 }
                 Ok(_) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
                 Err(error) => {
-                    return Err(format!(
+                    return Err(crate::storage::StorageError::io(format!(
                         "inspect storage path component {}: {error}",
                         current.display()
-                    ));
+                    )));
                 }
             }
         }
         Ok(out)
     }
 
-    fn acquire_process_lock(&self, full_path: &Path) -> Result<ProcessMutationLock, String> {
+    fn acquire_process_lock(
+        &self,
+        full_path: &Path,
+    ) -> Result<ProcessMutationLock, crate::storage::StorageError> {
         #[cfg(unix)]
         {
             let lock_dir = self.base_path.join(".midge-locks");
@@ -142,14 +147,18 @@ impl FileSystem {
                 .create(true)
                 .truncate(false)
                 .open(lock_dir.join(lock_name))
-                .map_err(|error| format!("open conditional mutation lock: {error}"))?;
+                .map_err(|error| {
+                    crate::storage::StorageError::io(format!(
+                        "open conditional mutation lock: {error}"
+                    ))
+                })?;
             // SAFETY: `file` is a valid open descriptor. `LOCK_EX` requests an
             // advisory exclusive lock which is released in `Drop` above.
             if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-                return Err(format!(
+                return Err(crate::storage::StorageError::io(format!(
                     "acquire conditional mutation lock: {}",
                     std::io::Error::last_os_error()
-                ));
+                )));
             }
             Ok(ProcessMutationLock { file })
         }
@@ -167,9 +176,16 @@ impl FileSystem {
                 .create(true)
                 .truncate(false)
                 .open(lock_dir.join(lock_name))
-                .map_err(|error| format!("open conditional mutation lock: {error}"))?;
-            file.lock()
-                .map_err(|error| format!("acquire conditional mutation lock: {error}"))?;
+                .map_err(|error| {
+                    crate::storage::StorageError::io(format!(
+                        "open conditional mutation lock: {error}"
+                    ))
+                })?;
+            file.lock().map_err(|error| {
+                crate::storage::StorageError::io(format!(
+                    "acquire conditional mutation lock: {error}"
+                ))
+            })?;
             Ok(ProcessMutationLock { file })
         }
 
@@ -252,13 +268,12 @@ fn publish_object_atomically(full_path: &Path, data: &[u8], mode: Publish) -> St
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
     else {
-        return StorageOutcome::Err(format!(
-            "object path has no parent: {}",
-            full_path.display()
-        ));
+        return StorageOutcome::Err(
+            format!("object path has no parent: {}", full_path.display()).into(),
+        );
     };
     if let Err(error) = create_dir_all_durably(parent) {
-        return StorageOutcome::Err(format!("mkdir {}: {error}", parent.display()));
+        return StorageOutcome::Err(format!("mkdir {}: {error}", parent.display()).into());
     }
     let file_name = full_path
         .file_name()
@@ -275,10 +290,14 @@ fn publish_object_atomically(full_path: &Path, data: &[u8], mode: Publish) -> St
         .and_then(|mut file| file.write_all(data).and_then(|()| file.sync_all()));
     if let Err(error) = written {
         let _ = fs::remove_file(&temp);
-        return StorageOutcome::Err(format!("write {}: {error}", full_path.display()));
+        return StorageOutcome::Err(format!("write {}: {error}", full_path.display()).into());
     }
     crate::failpoints::fail_point!("midge::storage::fs_after_temp_object_write", |_| {
-        StorageOutcome::Err("failpoint: interrupted before publishing object".to_string())
+        StorageOutcome::Err(
+            "failpoint: interrupted before publishing object"
+                .to_string()
+                .into(),
+        )
     });
     let published = match mode {
         Publish::Replace => fs::rename(&temp, full_path),
@@ -293,29 +312,35 @@ fn publish_object_atomically(full_path: &Path, data: &[u8], mode: Publish) -> St
         Err(error)
             if mode == Publish::CreateNew && error.kind() == std::io::ErrorKind::AlreadyExists =>
         {
-            return StorageOutcome::Err("precondition failed: object already exists".to_string());
+            return StorageOutcome::Err(crate::storage::StorageError::precondition_failed(
+                "object already exists",
+            ));
         }
         Err(error) => {
             let _ = fs::remove_file(&temp);
-            return StorageOutcome::Err(format!("publish {}: {error}", full_path.display()));
+            return StorageOutcome::Err(format!("publish {}: {error}", full_path.display()).into());
         }
     }
     match sync_directory(parent) {
         Ok(()) => StorageOutcome::Ok(()),
-        Err(error) => StorageOutcome::Err(format!("sync directory {}: {error}", parent.display())),
+        Err(error) => {
+            StorageOutcome::Err(format!("sync directory {}: {error}", parent.display()).into())
+        }
     }
 }
 
-fn range_io_error(error: &std::io::Error) -> String {
+fn range_io_error(error: &std::io::Error) -> crate::storage::StorageError {
     if error.kind() == std::io::ErrorKind::NotFound {
-        format!("not found: {error}")
+        crate::storage::StorageError::not_found(error)
     } else {
-        error.to_string()
+        crate::storage::StorageError::io(error)
     }
 }
 
 #[cfg(not(windows))]
-fn range_metadata(metadata: &fs::Metadata) -> Result<StorageObjectMetadata, String> {
+fn range_metadata(
+    metadata: &fs::Metadata,
+) -> Result<StorageObjectMetadata, crate::storage::StorageError> {
     if !metadata.is_file() {
         return Err("range reads require an ordinary immutable file".into());
     }
@@ -343,7 +368,9 @@ fn range_metadata(metadata: &fs::Metadata) -> Result<StorageObjectMetadata, Stri
     }
 }
 
-fn range_file_metadata(file: &fs::File) -> Result<StorageObjectMetadata, String> {
+fn range_file_metadata(
+    file: &fs::File,
+) -> Result<StorageObjectMetadata, crate::storage::StorageError> {
     #[cfg(windows)]
     {
         windows::range_metadata(file)
@@ -354,7 +381,7 @@ fn range_file_metadata(file: &fs::File) -> Result<StorageObjectMetadata, String>
     }
 }
 
-fn range_path_metadata(path: &Path) -> Result<StorageObjectMetadata, String> {
+fn range_path_metadata(path: &Path) -> Result<StorageObjectMetadata, crate::storage::StorageError> {
     #[cfg(windows)]
     {
         let file = fs::File::open(path).map_err(|error| range_io_error(&error))?;
@@ -456,7 +483,9 @@ impl StorageBackend for FileSystem {
             let mut file = fs::File::open(&path).map_err(|error| range_io_error(&error))?;
             let metadata = range_file_metadata(&file)?;
             if !metadata.same_version(&expected) {
-                return Err("precondition failed: remote SST version changed".into());
+                return Err(crate::storage::StorageError::precondition_failed(
+                    "remote SST version changed",
+                ));
             }
             let len = usize::try_from(end - start).map_err(|error| error.to_string())?;
             let mut bytes = Vec::new();
@@ -470,7 +499,9 @@ impl StorageBackend for FileSystem {
                 .map_err(|error| range_io_error(&error))?;
             let after = range_file_metadata(&file)?;
             if !after.same_version(&expected) {
-                return Err("precondition failed: remote SST changed during range read".into());
+                return Err(crate::storage::StorageError::precondition_failed(
+                    "remote SST changed during range read",
+                ));
             }
             Ok(bytes)
         })();
@@ -494,9 +525,12 @@ impl StorageBackend for FileSystem {
             let _process_lock = self.acquire_process_lock(&path)?;
             let bytes = fs::read(&path).map_err(|error| {
                 if error.kind() == std::io::ErrorKind::NotFound {
-                    format!("not found: read {}: {error}", path.display())
+                    crate::storage::StorageError::not_found(format!(
+                        "read {}: {error}",
+                        path.display()
+                    ))
                 } else {
-                    format!("read {}: {error}", path.display())
+                    crate::storage::StorageError::io(format!("read {}: {error}", path.display()))
                 }
             })?;
             let metadata = StorageObjectMetadata::content_crc(bytes.len() as u64, &bytes);
@@ -520,9 +554,12 @@ impl StorageBackend for FileSystem {
         let outcome = match fs::read(&full_path) {
             Ok(bytes) => StorageOutcome::Ok(bytes),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                StorageOutcome::Err(format!("not found: read {}: {e}", full_path.display()))
+                StorageOutcome::Err(crate::storage::StorageError::not_found(format!(
+                    "read {}: {e}",
+                    full_path.display()
+                )))
             }
-            Err(e) => StorageOutcome::Err(format!("read {}: {e}", full_path.display())),
+            Err(e) => StorageOutcome::Err(format!("read {}: {e}", full_path.display()).into()),
         };
 
         let _ = callback.send(StorageEvent::ReadComplete {
@@ -609,7 +646,7 @@ impl StorageBackend for FileSystem {
                 range_path_metadata(&full_path).map(|metadata| metadata.etag)
             } else {
                 fs::read(&full_path)
-                    .map_err(|error| error.to_string())
+                    .map_err(crate::storage::StorageError::from)
                     .map(|data| StorageObjectMetadata::content_crc(data.len() as u64, &data).etag)
             };
             match identity {
@@ -617,18 +654,24 @@ impl StorageBackend for FileSystem {
                     if current == expected {
                         publish_object_atomically(&full_path, &data, Publish::Replace)
                     } else {
-                        StorageOutcome::Err("precondition failed: etag mismatch".to_string())
+                        StorageOutcome::Err(crate::storage::StorageError::precondition_failed(
+                            "etag mismatch",
+                        ))
                     }
                 }
-                Err(error) => StorageOutcome::Err(format!(
-                    "precondition failed: read {}: {error}",
-                    full_path.display()
+                Err(error) => StorageOutcome::Err(crate::storage::StorageError::new(
+                    error.kind(),
+                    format!("read {}: {error}", full_path.display()),
                 )),
             }
         } else if if_none_match.as_deref() == Some("*") {
             publish_object_atomically(&full_path, &data, Publish::CreateNew)
         } else {
-            StorageOutcome::Err("conditional write requires a supported precondition".to_string())
+            StorageOutcome::Err(
+                "conditional write requires a supported precondition"
+                    .to_string()
+                    .into(),
+            )
         };
 
         let _ = callback.send(StorageEvent::WriteComplete {
@@ -663,9 +706,12 @@ impl StorageBackend for FileSystem {
         let outcome = match fs::remove_file(&full_path) {
             Ok(()) => StorageOutcome::Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                StorageOutcome::Err(format!("not found: delete {}: {e}", full_path.display()))
+                StorageOutcome::Err(crate::storage::StorageError::not_found(format!(
+                    "delete {}: {e}",
+                    full_path.display()
+                )))
             }
-            Err(e) => StorageOutcome::Err(format!("delete {}: {e}", full_path.display())),
+            Err(e) => StorageOutcome::Err(format!("delete {}: {e}", full_path.display()).into()),
         };
 
         let _ = callback.send(StorageEvent::DeleteComplete {
@@ -714,7 +760,7 @@ impl StorageBackend for FileSystem {
                 range_path_metadata(&full_path).map(|metadata| metadata.etag)
             } else {
                 fs::read(&full_path)
-                    .map_err(|error| error.to_string())
+                    .map_err(crate::storage::StorageError::from)
                     .map(|data| StorageObjectMetadata::content_crc(data.len() as u64, &data).etag)
             };
             match identity {
@@ -722,23 +768,26 @@ impl StorageBackend for FileSystem {
                     if current == expected.trim_matches('"') {
                         match fs::remove_file(&full_path) {
                             Ok(()) => StorageOutcome::Ok(()),
-                            Err(error) => StorageOutcome::Err(format!(
-                                "delete {}: {error}",
-                                full_path.display()
-                            )),
+                            Err(error) => StorageOutcome::Err(
+                                format!("delete {}: {error}", full_path.display()).into(),
+                            ),
                         }
                     } else {
-                        StorageOutcome::Err("precondition failed: etag mismatch".to_string())
+                        StorageOutcome::Err(crate::storage::StorageError::precondition_failed(
+                            "etag mismatch",
+                        ))
                     }
                 }
-                Err(error) => StorageOutcome::Err(format!(
-                    "precondition failed: read {}: {error}",
-                    full_path.display()
+                Err(error) => StorageOutcome::Err(crate::storage::StorageError::new(
+                    error.kind(),
+                    format!("read {}: {error}", full_path.display()),
                 )),
             }
         } else {
             StorageOutcome::Err(
-                "conditional delete requires a supported If-Match precondition".to_string(),
+                "conditional delete requires a supported If-Match precondition"
+                    .to_string()
+                    .into(),
             )
         };
 
@@ -756,9 +805,15 @@ impl StorageBackend for FileSystem {
                 let _process_lock = self.acquire_process_lock(&path)?;
                 let bytes = fs::read(&path).map_err(|error| {
                     if error.kind() == std::io::ErrorKind::NotFound {
-                        format!("not found: read {}: {error}", path.display())
+                        crate::storage::StorageError::not_found(format!(
+                            "read {}: {error}",
+                            path.display()
+                        ))
                     } else {
-                        format!("read {}: {error}", path.display())
+                        crate::storage::StorageError::io(format!(
+                            "read {}: {error}",
+                            path.display()
+                        ))
                     }
                 })?;
                 Ok(StorageObjectMetadata::content_crc(
@@ -800,7 +855,7 @@ impl StorageBackend for FileSystem {
 
                     StorageOutcome::Ok(items)
                 }
-                Err(e) => StorageOutcome::Err(format!("list {}: {e}", full.display())),
+                Err(e) => StorageOutcome::Err(format!("list {}: {e}", full.display()).into()),
             }
         } else {
             StorageOutcome::Ok(Vec::new())
@@ -1594,7 +1649,7 @@ mod atomic_publish_tests {
         // Assert
         assert!(matches!(interrupted, StorageOutcome::Err(_)));
         assert!(
-            matches!(read(&fs, "wal/1.wal"), StorageOutcome::Err(message) if message.starts_with("not found"))
+            matches!(read(&fs, "wal/1.wal"), StorageOutcome::Err(error) if error.is_not_found())
         );
         assert!(list(&fs, "wal").is_empty(), "temp files must not be listed");
         assert!(matches!(
