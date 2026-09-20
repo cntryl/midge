@@ -97,36 +97,21 @@ fn inspect(key: &str, data: &[u8], collect_coverage: bool) -> Result<SegmentRead
         return Err(format!("cloud WAL segment '{key}' is empty"));
     }
 
-    let mut pos = 0usize;
+    let mut pos = 0u64;
     let mut records = 0usize;
     let mut observed_max_sequence = 0u64;
     let mut observed_writer_epoch = None;
     let mut data_records = Vec::new();
-    while pos < data.len() {
-        let header_end = pos
-            .checked_add(super::frame::WAL_FRAME_HEADER_LEN)
-            .ok_or_else(|| format!("cloud WAL segment '{key}' frame offset overflow"))?;
-        if header_end > data.len() {
-            return Err(format!(
-                "cloud WAL segment '{key}' has incomplete frame header at offset {pos}"
-            ));
-        }
-
-        let (payload_len, expected_crc) = super::frame::decode_frame_header(&data[pos..header_end])
-            .map_err(|error| format!("cloud WAL segment '{key}' frame header: {error}"))?;
-        let payload_end = header_end
-            .checked_add(payload_len)
-            .ok_or_else(|| format!("cloud WAL segment '{key}' payload offset overflow"))?;
-        if payload_end > data.len() {
-            return Err(format!(
-                "cloud WAL segment '{key}' has incomplete record at offset {pos}"
-            ));
-        }
-
-        let payload = &data[header_end..payload_end];
-        super::frame::verify_frame_crc(payload, expected_crc)
-            .map_err(|error| format!("cloud WAL segment '{key}' frame CRC: {error}"))?;
-        let record = super::encoding::decode(payload)
+    loop {
+        // A sealed segment is complete by construction, so any short or torn
+        // frame is corruption here rather than a tolerable tail.
+        let step = super::frame::next_frame(&data, &key, pos, super::frame::FrameLimits::default())
+            .map_err(|error| format!("cloud WAL segment '{key}' frame: {}", error.into_error()))?;
+        let (payload, next_pos) = match step {
+            super::frame::FrameStep::Eof => break,
+            super::frame::FrameStep::Frame { payload, next_pos } => (payload, next_pos),
+        };
+        let record = super::encoding::decode(payload.as_ref())
             .map_err(|error| format!("cloud WAL segment '{key}' record decode: {error}"))?;
         if let Some(expected_epoch) = observed_writer_epoch {
             if record.writer_epoch != expected_epoch {
@@ -143,7 +128,7 @@ fn inspect(key: &str, data: &[u8], collect_coverage: bool) -> Result<SegmentRead
             append_data_coverage_records(key, &record, &mut data_records)?;
         }
         records += 1;
-        pos = payload_end;
+        pos = next_pos;
     }
 
     if records == 0 {
