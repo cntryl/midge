@@ -871,13 +871,7 @@ pub struct CloudStorage {
     metadata_publication_lock: Mutex<()>,
 }
 
-pub(crate) const CLOUD_METADATA_FILES: &[&str] = &[
-    "FORMAT",
-    "manifest.snapshot.json",
-    "manifest.json",
-    "manifest.journal",
-    "intent_log.json",
-];
+pub(crate) const CLOUD_METADATA_FILES: &[&str] = crate::metadata::files::CLOUD_MIRRORED;
 
 pub(crate) fn cloud_metadata_key(file_name: &str) -> String {
     format!(

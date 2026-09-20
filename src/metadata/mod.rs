@@ -2,6 +2,7 @@
 //!
 //! Tracks SST files, levels, and version history
 
+pub mod files;
 pub mod format;
 pub mod journal;
 pub mod manifest;

@@ -190,7 +190,7 @@ impl CloudMetadataPruneSnapshot {
                     "cloud metadata '{key}' has a different length"
                 )));
             }
-            if matches!(*file_name, "manifest.snapshot.json" | "manifest.json") {
+            if crate::metadata::files::is_manifest_body(file_name) {
                 has_manifest_base = true;
             }
             // Exact byte comparison has completed against identity-pinned reads.
