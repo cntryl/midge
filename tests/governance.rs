@@ -299,6 +299,28 @@ mod architecture_ladder {
     }
 
     #[test]
+    fn should_keep_cloud_adapter_callback_waits_in_one_helper() {
+        // Arrange
+        let source = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/storage/cloud/mod.rs"),
+        )
+        .expect("read storage/cloud/mod.rs");
+        // One in the shared helper and one in the proof path, which reports its
+        // own messages.
+        let allowed = 2;
+
+        // Act
+        let disconnect_arms = source.matches("RecvTimeoutError::Disconnected").count();
+
+        // Assert
+        assert!(
+            disconnect_arms <= allowed,
+            "{disconnect_arms} hand-written callback wait arms in storage/cloud/mod.rs \
+             (allowed {allowed}): route adapter waits through await_cloud_event"
+        );
+    }
+
+    #[test]
     fn should_keep_config_independent_of_storage_when_lib_declares_crate_aliases() {
         // Arrange
         let lib = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"))

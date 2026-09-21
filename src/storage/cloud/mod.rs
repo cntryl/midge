@@ -653,6 +653,52 @@ pub(crate) fn is_not_found_error(error: &CloudError) -> bool {
     error.is_not_found()
 }
 
+/// Wait for a provider callback and report the two ways it can fail to arrive.
+///
+/// The adapter blocks on a channel for every operation. A missing answer is
+/// either the callback budget running out or the provider dropping the
+/// callback, and callers report those identically apart from the operation.
+fn await_cloud_event(
+    rx: &std::sync::mpsc::Receiver<CloudEvent>,
+    timeout: std::time::Duration,
+    operation: &str,
+) -> Result<CloudEvent, crate::storage::StorageError> {
+    rx.recv_timeout(timeout).map_err(|error| match error {
+        std::sync::mpsc::RecvTimeoutError::Timeout => {
+            crate::storage::storage_timeout_error(format!("cloud {operation} callback timed out"))
+        }
+        std::sync::mpsc::RecvTimeoutError::Disconnected => {
+            format!("cloud {operation} callback closed").into()
+        }
+    })
+}
+
+/// Wait for a delete callback and forward its outcome to the storage caller.
+fn deliver_delete_outcome(
+    key: &str,
+    rx: &std::sync::mpsc::Receiver<CloudEvent>,
+    timeout: std::time::Duration,
+    callback: &StorageCallback,
+) {
+    let event = match await_cloud_event(rx, timeout, "DELETE") {
+        Ok(CloudEvent::Delete { key, result }) => StorageEvent::DeleteComplete {
+            key,
+            result: cloud_to_storage_outcome(result),
+        },
+        Ok(other) => StorageEvent::DeleteComplete {
+            key: key.to_string(),
+            result: StorageOutcome::Err(
+                format!("unexpected cloud DELETE response: {other:?}").into(),
+            ),
+        },
+        Err(error) => StorageEvent::DeleteComplete {
+            key: key.to_string(),
+            result: StorageOutcome::Err(error),
+        },
+    };
+    let _ = callback.send(event);
+}
+
 fn cloud_to_storage_outcome<T: Clone>(result: CloudOutcome<T>) -> StorageOutcome<T> {
     match result {
         CloudOutcome::Ok(value) => StorageOutcome::Ok(value),
@@ -788,7 +834,7 @@ impl StorageBackend for CloudStorage {
         }
         let (tx, rx) = std::sync::mpsc::channel();
         self.submit_get(key, tx);
-        let event = match rx.recv_timeout(timeout) {
+        let event = match await_cloud_event(&rx, timeout, "GET") {
             Ok(CloudEvent::Get { key, result }) => StorageEvent::ReadComplete {
                 key,
                 result: cloud_to_storage_outcome(result),
@@ -799,15 +845,9 @@ impl StorageBackend for CloudStorage {
                     format!("unexpected cloud GET response: {other:?}").into(),
                 ),
             },
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => StorageEvent::ReadComplete {
+            Err(error) => StorageEvent::ReadComplete {
                 key: key.to_string(),
-                result: StorageOutcome::Err(crate::storage::storage_timeout_error(
-                    "cloud GET callback timed out",
-                )),
-            },
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => StorageEvent::ReadComplete {
-                key: key.to_string(),
-                result: StorageOutcome::Err("cloud GET callback closed".to_string().into()),
+                result: StorageOutcome::Err(error),
             },
         };
         let _ = callback.send(event);
@@ -874,29 +914,7 @@ impl StorageBackend for CloudStorage {
         }
         let (tx, rx) = std::sync::mpsc::channel();
         CloudStorage::submit_delete(self, key, tx);
-        let event = match rx.recv_timeout(self.callback_timeout) {
-            Ok(CloudEvent::Delete { key, result }) => StorageEvent::DeleteComplete {
-                key,
-                result: cloud_to_storage_outcome(result),
-            },
-            Ok(other) => StorageEvent::DeleteComplete {
-                key: key.to_string(),
-                result: StorageOutcome::Err(
-                    format!("unexpected cloud DELETE response: {other:?}").into(),
-                ),
-            },
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => StorageEvent::DeleteComplete {
-                key: key.to_string(),
-                result: StorageOutcome::Err(crate::storage::storage_timeout_error(
-                    "cloud DELETE callback timed out",
-                )),
-            },
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => StorageEvent::DeleteComplete {
-                key: key.to_string(),
-                result: StorageOutcome::Err("cloud DELETE callback closed".to_string().into()),
-            },
-        };
-        let _ = callback.send(event);
+        deliver_delete_outcome(key, &rx, self.callback_timeout, &callback);
     }
 
     fn submit_delete_with_headers(
@@ -918,29 +936,7 @@ impl StorageBackend for CloudStorage {
         let mut headers = headers;
         set_request_timeout_header(&mut headers, self.callback_timeout);
         CloudStorage::submit_delete_with_headers(self, key, headers, tx);
-        let event = match rx.recv_timeout(self.callback_timeout) {
-            Ok(CloudEvent::Delete { key, result }) => StorageEvent::DeleteComplete {
-                key,
-                result: cloud_to_storage_outcome(result),
-            },
-            Ok(other) => StorageEvent::DeleteComplete {
-                key: key.to_string(),
-                result: StorageOutcome::Err(
-                    format!("unexpected cloud DELETE response: {other:?}").into(),
-                ),
-            },
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => StorageEvent::DeleteComplete {
-                key: key.to_string(),
-                result: StorageOutcome::Err(crate::storage::storage_timeout_error(
-                    "cloud DELETE callback timed out",
-                )),
-            },
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => StorageEvent::DeleteComplete {
-                key: key.to_string(),
-                result: StorageOutcome::Err("cloud DELETE callback closed".to_string().into()),
-            },
-        };
-        let _ = callback.send(event);
+        deliver_delete_outcome(key, &rx, self.callback_timeout, &callback);
     }
 
     fn submit_list(&self, prefix: &str, callback: StorageCallback) {
@@ -955,7 +951,7 @@ impl StorageBackend for CloudStorage {
         }
         let (tx, rx) = std::sync::mpsc::channel();
         CloudStorage::submit_list(self, prefix, tx);
-        let event = match rx.recv_timeout(self.callback_timeout) {
+        let event = match await_cloud_event(&rx, self.callback_timeout, "LIST") {
             Ok(CloudEvent::List {
                 prefix: key_prefix,
                 result,
@@ -969,15 +965,9 @@ impl StorageBackend for CloudStorage {
                     format!("unexpected cloud LIST response: {other:?}").into(),
                 ),
             },
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => StorageEvent::ListComplete {
+            Err(error) => StorageEvent::ListComplete {
                 prefix: prefix.to_string(),
-                result: StorageOutcome::Err(crate::storage::storage_timeout_error(
-                    "cloud LIST callback timed out",
-                )),
-            },
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => StorageEvent::ListComplete {
-                prefix: prefix.to_string(),
-                result: StorageOutcome::Err("cloud LIST callback closed".to_string().into()),
+                result: StorageOutcome::Err(error),
             },
         };
         let _ = callback.send(event);
@@ -1004,7 +994,7 @@ impl StorageBackend for CloudStorage {
         }
         let (tx, rx) = std::sync::mpsc::channel();
         CloudStorage::submit_head_within(self, key, timeout, tx);
-        let event = match rx.recv_timeout(timeout) {
+        let event = match await_cloud_event(&rx, timeout, "HEAD") {
             Ok(CloudEvent::Head { key, result }) => {
                 let outcome = match result {
                     CloudOutcome::Ok(metadata) => StorageOutcome::Ok(StorageObjectMetadata {
@@ -1027,15 +1017,9 @@ impl StorageBackend for CloudStorage {
                     format!("unexpected cloud HEAD response: {other:?}").into(),
                 ),
             },
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => StorageEvent::HeadComplete {
+            Err(error) => StorageEvent::HeadComplete {
                 key: key.to_string(),
-                result: StorageOutcome::Err(crate::storage::storage_timeout_error(
-                    "cloud HEAD callback timed out",
-                )),
-            },
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => StorageEvent::HeadComplete {
-                key: key.to_string(),
-                result: StorageOutcome::Err("cloud HEAD callback closed".to_string().into()),
+                result: StorageOutcome::Err(error),
             },
         };
         let _ = callback.send(event);
