@@ -365,8 +365,7 @@ impl EventLoop {
 
 fn shutdown_waiter_request_id(waiter: &DurabilityWaiter) -> Option<u64> {
     match waiter {
-        DurabilityWaiter::TransactionApply { request_id, .. }
-        | DurabilityWaiter::CloudDurability { request_id } => Some(*request_id),
+        DurabilityWaiter::CloudDurability { request_id } => Some(*request_id),
         DurabilityWaiter::ConfirmWalAppend { .. }
         | DurabilityWaiter::ConfirmTransactionApply { .. } => None,
         #[cfg(test)]

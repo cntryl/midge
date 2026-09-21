@@ -3,8 +3,8 @@
 //! Contains `drain_pending_writes` (opportunistic write coalescing for group commit)
 //! and `wake_write_stall_waiters` (backpressure release).
 
-use super::super::durability::DurabilityWaiter;
 use super::super::{ConflictPolicy, RuntimeMsg, RuntimeResponse, TransactionOp};
+use super::durability_sync::AppliedTransaction;
 #[cfg(test)]
 use super::snapshot::SnapshotCoordinator;
 use super::wal::ApplyTransactionRequest;
@@ -37,16 +37,6 @@ enum WriteResult {
         deferred: bool,
         touched_cfs: Vec<crate::types::ColumnFamilyId>,
     },
-}
-
-impl WriteResult {
-    fn deferred(&self) -> bool {
-        match self {
-            #[cfg(test)]
-            WriteResult::WalAppend { deferred, .. } => *deferred,
-            WriteResult::TransactionApplied { deferred, .. } => *deferred,
-        }
-    }
 }
 
 impl EventLoop {
@@ -523,7 +513,7 @@ impl EventLoop {
             }
             Err(error) => {
                 for request_id in request_ids {
-                    self.finish_drained_write(request_id, Err(duplicate_midge_error(&error)));
+                    self.finish_drained_write(request_id, Err(error.replay()));
                 }
 
                 if let Some((request_id, error)) = deferred_error {
@@ -644,70 +634,37 @@ impl EventLoop {
     }
 
     fn handle_write_success(&mut self, request_id: u64, result: &WriteResult) {
-        let is_transaction = matches!(result, WriteResult::TransactionApplied { .. });
-        let deferred = result.deferred();
-        if self.should_ack_immediately(deferred) {
-            if deferred {
-                self.maybe_queue_confirm_only_waiter(deferred, request_id, is_transaction);
-            } else {
-                if is_transaction {
-                    self.state.clear_pending_transaction_barrier();
+        match result {
+            #[cfg(test)]
+            WriteResult::WalAppend { sequence, deferred } => {
+                if *deferred {
+                    self.maybe_queue_confirm_only_waiter(true, request_id, false);
+                } else {
+                    self.state.confirm_sequences(request_id);
                 }
-                self.state.confirm_sequences(request_id);
-            }
 
-            match result {
-                #[cfg(test)]
-                WriteResult::WalAppend { sequence, .. } => {
-                    self.respond(
-                        request_id,
-                        RuntimeResponse::WalAppended {
-                            request_id,
-                            sequence: *sequence,
-                        },
-                    );
-                }
-                WriteResult::TransactionApplied {
-                    last_sequence,
-                    op_count,
-                    touched_cfs,
-                    ..
-                } => {
-                    self.respond(
-                        request_id,
-                        RuntimeResponse::TransactionApplied {
-                            request_id,
-                            last_sequence: *last_sequence,
-                            op_count: *op_count,
-                            write_stall_hint: self.write_stall_hint_for_cfs(touched_cfs),
-                        },
-                    );
-                }
-            }
-        } else {
-            match result {
-                #[cfg(test)]
-                WriteResult::WalAppend { sequence, .. } => {
-                    self.durability.queue_waiter(DurabilityWaiter::WalAppend {
+                self.respond(
+                    request_id,
+                    RuntimeResponse::WalAppended {
                         request_id,
                         sequence: *sequence,
-                    });
-                }
-                WriteResult::TransactionApplied {
-                    last_sequence,
-                    op_count,
-                    touched_cfs,
-                    ..
-                } => {
-                    self.durability
-                        .queue_waiter(DurabilityWaiter::TransactionApply {
-                            request_id,
-                            last_sequence: *last_sequence,
-                            op_count: *op_count,
-                            touched_cfs: touched_cfs.clone(),
-                        });
-                }
+                    },
+                );
             }
+            WriteResult::TransactionApplied {
+                last_sequence,
+                op_count,
+                deferred,
+                touched_cfs,
+            } => self.ack_applied_transaction(
+                request_id,
+                &AppliedTransaction {
+                    last_sequence: *last_sequence,
+                    op_count: *op_count,
+                    deferred: *deferred,
+                    touched_cfs,
+                },
+            ),
         }
     }
 
@@ -893,37 +850,6 @@ impl StagedTransactionTouches {
                 && range.start_key.as_slice() < end_key
                 && range.end_key.as_slice() > start_key
         })
-    }
-}
-
-fn duplicate_midge_error(error: &MidgeError) -> MidgeError {
-    match error {
-        MidgeError::Io(io_error) => {
-            MidgeError::Io(std::io::Error::new(io_error.kind(), io_error.to_string()))
-        }
-        MidgeError::NotFound => MidgeError::NotFound,
-        MidgeError::InvalidArgument(message) => MidgeError::InvalidArgument(message.clone()),
-        MidgeError::Corruption(message) => MidgeError::Corruption(message.clone()),
-        MidgeError::NotSupported(message) => MidgeError::NotSupported(message.clone()),
-        MidgeError::Internal(message) => MidgeError::Internal(message.clone()),
-        MidgeError::InvalidPath => MidgeError::InvalidPath,
-        MidgeError::NoSpace(message) => MidgeError::NoSpace(message.clone()),
-        MidgeError::RecoveryFailed(message) => MidgeError::RecoveryFailed(message.clone()),
-        MidgeError::CompatibilityError(message) => MidgeError::CompatibilityError(message.clone()),
-        MidgeError::WriteStall(message) => MidgeError::WriteStall(message.clone()),
-        MidgeError::MemoryModeViolation(message) => {
-            MidgeError::MemoryModeViolation(message.clone())
-        }
-        MidgeError::Fenced(message) => MidgeError::Fenced(message.clone()),
-        MidgeError::LeaseHeld(message) => MidgeError::LeaseHeld(message.clone()),
-        MidgeError::LeaseUnavailable(message) => MidgeError::LeaseUnavailable(message.clone()),
-        MidgeError::LeaseIndeterminate(message) => MidgeError::LeaseIndeterminate(message.clone()),
-        MidgeError::LeaseEpochExhausted => MidgeError::LeaseEpochExhausted,
-        MidgeError::WriteConflict(message) => MidgeError::WriteConflict(message.clone()),
-        MidgeError::Aborted(message) => MidgeError::Aborted(message.clone()),
-        MidgeError::Busy(message) => MidgeError::Busy(message.clone()),
-        MidgeError::Timeout(message) => MidgeError::Timeout(message.clone()),
-        MidgeError::ResourceLimit(message) => MidgeError::ResourceLimit(message.clone()),
     }
 }
 

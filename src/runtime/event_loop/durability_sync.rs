@@ -24,38 +24,49 @@ pub(crate) enum CompletionSource {
     SealedGeneration,
 }
 
+/// Post-append state of a transaction the WAL accepted, as handed to the
+/// shared acknowledgement path.
+pub(super) struct AppliedTransaction<'a> {
+    pub(super) last_sequence: u64,
+    pub(super) op_count: usize,
+    /// The append has not reached durable storage yet, so the ack runs ahead
+    /// of the fsync and a confirm-only waiter has to close the gap.
+    pub(super) deferred: bool,
+    pub(super) touched_cfs: &'a [crate::types::ColumnFamilyId],
+}
+
 impl EventLoop {
-    #[inline]
-    pub(super) fn should_ack_immediately(&self, deferred: bool) -> bool {
-        // Ack policy:
-        // - Runtime write-path acks are immediate for all local modes and CloudAsync.
-        // - CloudStrict blocking is enforced by the engine commit path via
-        //   SealWalForCloud(wait_for_ack=true) before commit returns.
-        // - Batched/Strict runtime writes still ack immediately; durability is enforced
-        //   by explicit sync/flush barriers and read-path durability frontiers.
-        //
-        // In Batched mode, deferring the ack until fsync would serialize callers and
-        // defeat group commit (and can make tests look hung).
-        //
-        // CRITICAL: Background CloudAsync must NOT wait for cloud confirmation.
-        // CloudStrict waits happen in commit finalization, not in this runtime helper.
-        if self.wal_actor.is_cloud_async() {
-            // CloudAsync background mode: always ack immediately.
-            // Cloud upload runs asynchronously; commits never block on upload.
-            //
-            // NOTE: WriteOptions::cloud_strict() is handled at the transaction commit
-            // layer (engine/api/transaction.rs) which issues an explicit WalSync +
-            // flush-and-upload sequence. By the time we reach should_ack_immediately,
-            // the commit path has already ensured cloud durability for cloud_strict
-            // writes. Therefore, runtime-level ack policy is always "immediate" for
-            // CloudAsync — the blocking wait happens in the commit path, not here.
-            return true;
+    /// Acknowledge a transaction the WAL accepted.
+    ///
+    /// Ack policy: runtime write-path acks are immediate in every mode.
+    /// `Batched`/`Strict` durability is enforced by explicit sync/flush barriers
+    /// and read-path durability frontiers, `CloudStrict` blocking is enforced by
+    /// the engine commit path via `SealWalForCloud(wait_for_ack=true)` before
+    /// commit returns, and `CloudAsync` must never block a commit on upload.
+    /// Deferring the ack until fsync would serialize callers and defeat group
+    /// commit, so `deferred` only decides whether a confirm-only waiter is
+    /// queued, never whether the caller is answered now.
+    pub(super) fn ack_applied_transaction(
+        &mut self,
+        request_id: u64,
+        result: &AppliedTransaction<'_>,
+    ) {
+        if result.deferred {
+            self.maybe_queue_confirm_only_waiter(true, request_id, true);
+        } else {
+            self.state.clear_pending_transaction_barrier();
+            self.state.confirm_sequences(request_id);
         }
 
-        // Non-CloudAsync always acks immediately.
-        // `deferred` still matters for whether we queue confirm-only waiters.
-        let _ = deferred;
-        true
+        self.respond(
+            request_id,
+            RuntimeResponse::TransactionApplied {
+                request_id,
+                last_sequence: result.last_sequence,
+                op_count: result.op_count,
+                write_stall_hint: self.write_stall_hint_for_cfs(result.touched_cfs),
+            },
+        );
     }
 
     #[inline]
@@ -69,11 +80,6 @@ impl EventLoop {
         // strict durability handled earlier in the commit path)
         // then the request will be confirmed at response time.
         if !deferred {
-            return;
-        }
-
-        // Only queue confirm-only waiters when we are acknowledging before durability.
-        if !self.should_ack_immediately(deferred) {
             return;
         }
 
@@ -118,26 +124,6 @@ impl EventLoop {
                 }
                 DurabilityWaiter::ConfirmWalAppend { request_id } => {
                     self.confirm_for_source(request_id, source);
-                }
-                DurabilityWaiter::TransactionApply {
-                    request_id,
-                    last_sequence,
-                    op_count,
-                    touched_cfs,
-                } => {
-                    if source != CompletionSource::CloudAck {
-                        self.state.clear_pending_transaction_barrier();
-                    }
-                    self.confirm_for_source(request_id, source);
-                    self.respond(
-                        request_id,
-                        RuntimeResponse::TransactionApplied {
-                            request_id,
-                            last_sequence,
-                            op_count,
-                            write_stall_hint: self.write_stall_hint_for_cfs(&touched_cfs),
-                        },
-                    );
                 }
                 DurabilityWaiter::ConfirmTransactionApply { request_id } => {
                     if source != CompletionSource::CloudAck {
@@ -214,7 +200,6 @@ impl EventLoop {
     ) {
         for waiter in waiters {
             let (request_id, clears_transaction_barrier, already_acknowledged) = match waiter {
-                DurabilityWaiter::TransactionApply { request_id, .. } => (request_id, true, false),
                 DurabilityWaiter::ConfirmTransactionApply { request_id } => {
                     (request_id, true, true)
                 }
@@ -546,21 +531,6 @@ mod tests {
             ..RuntimeConfig::default()
         };
         EventLoop::new(state, false, router, config, None)
-    }
-
-    #[test]
-    fn should_ack_immediately_for_local_mode_regardless_of_deferred_flag() {
-        // Arrange
-        let event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
-            .expect("create event loop");
-
-        // Act
-        let ack_not_deferred = event_loop.should_ack_immediately(false);
-        let ack_deferred = event_loop.should_ack_immediately(true);
-
-        // Assert
-        assert!(ack_not_deferred);
-        assert!(ack_deferred);
     }
 
     #[test]
@@ -962,18 +932,99 @@ mod tests {
     }
 
     #[test]
-    fn should_ack_immediately_for_cloud_async_mode_regardless_of_deferred_flag() {
+    fn should_ack_and_queue_confirm_waiter_when_applied_transaction_is_deferred() {
         // Arrange
-        let event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::CloudAsync)
+        let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
             .expect("create event loop");
+        let response = event_loop.router.register(51, "ApplyTransaction");
+        event_loop.state.wal.local_durable_seq = 40;
+        event_loop.state.begin_pending_transaction(3);
+        event_loop.state.cache_sequences_for_test(51, (3, 2, 0));
 
         // Act
-        let ack_not_deferred = event_loop.should_ack_immediately(false);
-        let ack_deferred = event_loop.should_ack_immediately(true);
+        event_loop.ack_applied_transaction(
+            51,
+            &AppliedTransaction {
+                last_sequence: 4,
+                op_count: 2,
+                deferred: true,
+                touched_cfs: &[0],
+            },
+        );
 
         // Assert
-        assert!(ack_not_deferred);
-        assert!(ack_deferred);
+        assert!(matches!(
+            response.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(RuntimeResponse::TransactionApplied {
+                request_id: 51,
+                last_sequence: 4,
+                op_count: 2,
+                ..
+            })
+        ));
+        let waiters = event_loop.durability.drain_all_waiters();
+        assert!(matches!(
+            waiters.as_slice(),
+            [DurabilityWaiter::ConfirmTransactionApply { request_id: 51 }]
+        ));
+        // The append is not durable yet, so the barrier and the idempotency
+        // frontier must stay untouched for the confirm-only waiter to settle.
+        assert_eq!(
+            event_loop.state.pending_transaction_min_sequence(),
+            Some(3),
+            "deferred ack must leave the pending transaction barrier in place"
+        );
+        assert_eq!(
+            event_loop.state.idempotency_entry(51),
+            Some((3, 2, 0)),
+            "deferred ack must not advance the idempotency confirmed_at frontier"
+        );
+    }
+
+    #[test]
+    fn should_ack_without_confirm_waiter_when_applied_transaction_is_already_durable() {
+        // Arrange
+        let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
+            .expect("create event loop");
+        let response = event_loop.router.register(52, "ApplyTransaction");
+        event_loop.state.wal.local_durable_seq = 40;
+        event_loop.state.begin_pending_transaction(9);
+        event_loop.state.cache_sequences_for_test(52, (9, 1, 0));
+
+        // Act
+        event_loop.ack_applied_transaction(
+            52,
+            &AppliedTransaction {
+                last_sequence: 9,
+                op_count: 1,
+                deferred: false,
+                touched_cfs: &[0],
+            },
+        );
+
+        // Assert
+        assert!(matches!(
+            response.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(RuntimeResponse::TransactionApplied {
+                request_id: 52,
+                last_sequence: 9,
+                op_count: 1,
+                ..
+            })
+        ));
+        assert!(!event_loop.durability.has_pending_waiters());
+        // The append is already durable, so the ack itself must retire the
+        // barrier and advance the idempotency confirmed_at frontier.
+        assert_eq!(
+            event_loop.state.pending_transaction_min_sequence(),
+            None,
+            "durable ack must clear the pending transaction barrier"
+        );
+        assert_eq!(
+            event_loop.state.idempotency_entry(52),
+            Some((9, 1, 40)),
+            "durable ack must confirm the request's sequences at the durable frontier"
+        );
     }
 
     #[test]
@@ -1046,44 +1097,5 @@ mod tests {
 
         // Assert
         assert!(!event_loop.durability.has_pending_waiters());
-    }
-
-    #[test]
-    fn should_complete_transaction_with_stall_hint_from_waiter_column_family() {
-        // Arrange
-        let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
-            .expect("create event loop");
-        let secondary_cf = event_loop
-            .state
-            .create_cf("delayed-stall-cf".to_string())
-            .expect("create secondary column family");
-        event_loop.state.max_immutable_memtables = 1;
-        event_loop
-            .state
-            .get_cf_mut(secondary_cf)
-            .expect("secondary column family")
-            .immutable_memtables
-            .push(Arc::new(crate::sst::SkipListMemtable::new()));
-        let response_rx = event_loop.router.register(101, "TestRequest");
-        let waiter = DurabilityWaiter::TransactionApply {
-            request_id: 101,
-            last_sequence: 9,
-            op_count: 1,
-            touched_cfs: vec![secondary_cf],
-        };
-
-        // Act
-        event_loop.complete_durability_waiters(vec![waiter], CompletionSource::WalSync);
-
-        // Assert
-        match response_rx
-            .recv_timeout(std::time::Duration::from_secs(1))
-            .expect("transaction response")
-        {
-            RuntimeResponse::TransactionApplied {
-                write_stall_hint, ..
-            } => assert!(write_stall_hint),
-            other => panic!("unexpected response: {other:?}"),
-        }
     }
 }

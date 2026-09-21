@@ -812,17 +812,40 @@ impl EventLoop {
                     request_id,
                     cf_id: deferred_cf,
                     ..
-                } if deferred_cf == cf_id => self.respond(
-                    request_id,
-                    RuntimeResponse::Error {
-                        request_id,
-                        error: clone_flush_error(error),
-                    },
-                ),
+                } if deferred_cf == cf_id => {
+                    let error = Self::deferred_drop_failure(error);
+                    self.respond(request_id, RuntimeResponse::Error { request_id, error });
+                }
                 other => retained.push_back(other),
             }
         }
         self.publication_gate.deferred_messages = retained;
+    }
+
+    /// Translate a flush-pipeline failure into the error a deferred
+    /// `drop_column_family` caller receives.
+    ///
+    /// Every variant replays faithfully except `Busy`, which is special here
+    /// because of what it means on that API and not because of what it means
+    /// inside the pipeline. `Engine::drop_column_family` documents `Busy` as
+    /// "committed data remains in the active memtable", and the documented
+    /// remedy is `drop_column_family_discarding_unflushed` — a destructive call
+    /// that throws that data away. The flush pipeline raises its own `Busy` for
+    /// transient, internally retried conditions (an `IoError`/`Indeterminate`
+    /// lease validation, for example), which says nothing about unflushed data.
+    /// Replaying such a `Busy` verbatim would make a lease blip indistinguishable
+    /// from the documented contract and invite a compliant caller to discard
+    /// committed data. It is reported as `Aborted` instead: the drop really was
+    /// cancelled before it could publish a result, the original message is kept
+    /// intact, and `Aborted` is still `Severity::Transient`, so the caller
+    /// retries the safe drop rather than reaching for the destructive variant.
+    fn deferred_drop_failure(error: &crate::common::MidgeError) -> crate::common::MidgeError {
+        match error {
+            crate::common::MidgeError::Busy(message) => crate::common::MidgeError::Aborted(
+                format!("column family drop abandoned by a failed flush: {message}"),
+            ),
+            other => other.replay(),
+        }
     }
 
     pub(super) fn flush_frontier_satisfied(&self, cf_id: u32, frontier: u64) -> bool {
@@ -871,7 +894,7 @@ impl EventLoop {
                     waiter.request_id,
                     RuntimeResponse::Error {
                         request_id: waiter.request_id,
-                        error: clone_flush_error(error),
+                        error: error.replay(),
                     },
                 );
             } else {
@@ -959,27 +982,6 @@ impl EventLoop {
     }
 }
 
-fn clone_flush_error(error: &crate::common::MidgeError) -> crate::common::MidgeError {
-    match error {
-        crate::common::MidgeError::Fenced(message) => {
-            crate::common::MidgeError::Fenced(message.clone())
-        }
-        crate::common::MidgeError::NoSpace(message) => {
-            crate::common::MidgeError::NoSpace(message.clone())
-        }
-        crate::common::MidgeError::WriteStall(message) => {
-            crate::common::MidgeError::WriteStall(message.clone())
-        }
-        crate::common::MidgeError::Corruption(message) => {
-            crate::common::MidgeError::Corruption(message.clone())
-        }
-        crate::common::MidgeError::Timeout(message) => {
-            crate::common::MidgeError::Timeout(message.clone())
-        }
-        _ => crate::common::MidgeError::Internal(error.to_string()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1013,6 +1015,98 @@ mod tests {
             None,
         )?;
         Ok((event_loop, hybrid))
+    }
+
+    #[test]
+    fn should_preserve_resource_limit_kind_when_flush_waiter_is_failed(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let directory = tempfile::tempdir()?;
+        let (mut event_loop, _hybrid) = event_loop_with_hybrid_storage(&directory)?;
+        let request_id = 416;
+        let response = event_loop.router.register(request_id, "FlushMemtable");
+        event_loop.flush_barrier_waiters.insert(
+            0,
+            vec![super::super::flush::FlushBarrierWaiter {
+                request_id,
+                frontier: 7,
+            }],
+        );
+
+        // Act
+        event_loop.fail_flush_waiters(
+            0,
+            7,
+            &crate::common::MidgeError::ResourceLimit("flush budget exhausted".to_string()),
+        );
+
+        // Assert: backpressure must reach the flush caller as backpressure, not
+        // as an Internal defect.
+        match response.recv_timeout(std::time::Duration::from_secs(1)) {
+            Ok(crate::runtime::RuntimeResponse::Error { error, .. }) => assert!(
+                matches!(
+                    &error,
+                    crate::common::MidgeError::ResourceLimit(message)
+                        if message == "flush budget exhausted"
+                ),
+                "flush waiter lost the error kind: {error:?}"
+            ),
+            other => panic!("unexpected flush waiter response: {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_report_busy_when_deferred_drop_fails_from_flush_pipeline(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange: a safe drop_column_family deferred behind an active
+        // publication, then failed by a transient flush-pipeline Busy.
+        let directory = tempfile::tempdir()?;
+        let (mut event_loop, _hybrid) = event_loop_with_hybrid_storage(&directory)?;
+        let request_id = 4161;
+        let response = event_loop
+            .router
+            .register(request_id, "ManifestDropColumnFamily");
+        event_loop.publication_gate.deferred_messages.push_back(
+            crate::runtime::RuntimeMsg::ManifestDropColumnFamily {
+                request_id,
+                cf_id: 0,
+                discard_unflushed: false,
+            },
+        );
+
+        // Act
+        event_loop.fail_deferred_column_family_drops(
+            0,
+            &crate::common::MidgeError::Busy(
+                "flush 7 writer validation could not complete: lease io error".to_string(),
+            ),
+        );
+
+        // Assert: Busy on drop_column_family licenses the caller to call
+        // drop_column_family_discarding_unflushed, so a transient pipeline
+        // failure must never wear it — and must not lose its message either.
+        match response.recv_timeout(std::time::Duration::from_secs(1)) {
+            Ok(crate::runtime::RuntimeResponse::Error { error, .. }) => {
+                assert!(
+                    !matches!(error, crate::common::MidgeError::Busy(_)),
+                    "flush pipeline failure reached drop_column_family as Busy: {error:?}"
+                );
+                assert!(
+                    matches!(
+                        &error,
+                        crate::common::MidgeError::Aborted(message)
+                            if message.contains(
+                                "flush 7 writer validation could not complete: lease io error"
+                            )
+                    ),
+                    "deferred drop failure lost the original message: {error:?}"
+                );
+            }
+            other => panic!("unexpected deferred drop response: {other:?}"),
+        }
+        assert!(event_loop.publication_gate.deferred_messages.is_empty());
+        Ok(())
     }
 
     #[test]

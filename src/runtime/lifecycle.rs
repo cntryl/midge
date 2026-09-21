@@ -18,7 +18,7 @@ impl ShutdownTerminal {
     pub(crate) fn replay(&self) -> MidgeResult<()> {
         match self {
             Self::Success => Ok(()),
-            Self::Error(error) => Err(clone_shutdown_error(error)),
+            Self::Error(error) => Err(error.replay()),
         }
     }
 }
@@ -229,10 +229,6 @@ impl RuntimeLifecycle {
             ShutdownState::Ready { .. }
         )
     }
-}
-
-fn clone_shutdown_error(error: &MidgeError) -> MidgeError {
-    error.replay()
 }
 
 pub(crate) struct RuntimeTransactionGuard {
