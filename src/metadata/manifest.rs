@@ -51,6 +51,26 @@ impl Default for Manifest {
     }
 }
 
+impl Manifest {
+    /// Record that the caller journaled `edit_id` and has already applied that
+    /// edit to this in-memory manifest.
+    ///
+    /// The checkpoint horizon only advances when `edit_id` directly follows it.
+    /// Journal ids are contiguous, so a gap means another writer appended an
+    /// edit this manifest may not contain; advancing over it would make a later
+    /// snapshot skip that edit and truncate it away. In that case the horizon
+    /// stays put and the snapshot replays the journal from the older horizon.
+    /// Returns whether the horizon advanced.
+    pub fn note_applied_journal_edit(&mut self, edit_id: u64) -> bool {
+        if self.edit_checkpoint_id.checked_add(1) == Some(edit_id) {
+            self.edit_checkpoint_id = edit_id;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 fn default_next_wal_seq() -> u64 {
     1
 }
