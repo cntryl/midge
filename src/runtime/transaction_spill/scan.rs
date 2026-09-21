@@ -1,11 +1,7 @@
-use super::format::{
-    read_header, read_op_primary_key_frame, read_sparse_offsets, sparse_start_for_key,
-};
+use super::format::{read_op_primary_key_frame, RunFile};
 use super::{op_primary_key_bytes, SpillRun, TransactionWriteSet, RUN_HEADER_LEN};
 use crate::common::{MidgeError, MidgeResult};
 use bytes::Bytes;
-use std::fs::File;
-use std::io::{Seek, SeekFrom};
 
 enum RunKeyDirection {
     Forward,
@@ -17,7 +13,7 @@ enum RunKeyDirection {
 }
 
 pub(super) struct RunKeyCursor {
-    file: File,
+    file: RunFile,
     cursor: u64,
     data_end: u64,
     start: Option<Vec<u8>>,
@@ -34,16 +30,11 @@ impl RunKeyCursor {
         end: Option<&[u8]>,
         reverse: bool,
     ) -> MidgeResult<Self> {
-        let mut file = File::open(&run.path)?;
-        let header = read_header(&mut file)?;
-        if header.record_count != run.record_count {
-            return Err(MidgeError::Corruption(
-                "transaction spill record count changed".to_string(),
-            ));
-        }
-
+        // The run's cached reader owns the decoded sparse index, so a scan pays
+        // for it once instead of re-walking the index file per cursor.
+        let header = run.header()?;
         let (cursor, direction) = if reverse {
-            let starts = read_sparse_offsets(&mut file, &header)?;
+            let starts = run.sparse_offsets()?;
             let chunks = starts
                 .iter()
                 .enumerate()
@@ -65,14 +56,11 @@ impl RunKeyCursor {
                 },
             )
         } else {
-            (
-                sparse_start_for_key(&mut file, &header, start)?,
-                RunKeyDirection::Forward,
-            )
+            (run.sparse_start(start)?, RunKeyDirection::Forward)
         };
 
         Ok(Self {
-            file,
+            file: RunFile::open(&run.path)?,
             cursor,
             data_end: header.ordinal_table_offset,
             start: start.map(<[u8]>::to_vec),
@@ -90,7 +78,7 @@ impl RunKeyCursor {
 
     fn next_forward_key(&mut self) -> MidgeResult<Option<Bytes>> {
         while self.cursor < self.data_end {
-            self.file.seek(SeekFrom::Start(self.cursor))?;
+            self.file.seek_to(self.cursor)?;
             let (key, next_cursor) = read_op_primary_key_frame(&mut self.file)?;
             if next_cursor > self.data_end || next_cursor <= self.cursor {
                 return Err(MidgeError::Corruption(
@@ -135,7 +123,7 @@ impl RunKeyCursor {
         let mut cursor = chunk_start;
         let mut chunk_keys: Vec<Bytes> = Vec::new();
         while cursor < chunk_end {
-            self.file.seek(SeekFrom::Start(cursor))?;
+            self.file.seek_to(cursor)?;
             let (key, next_cursor) = read_op_primary_key_frame(&mut self.file)?;
             if next_cursor > chunk_end || next_cursor <= cursor {
                 return Err(MidgeError::Corruption(

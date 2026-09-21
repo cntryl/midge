@@ -122,7 +122,15 @@ fn should_cover_range_tree_endpoint_duplication_with_spill_disk_reservation() ->
         .collect::<Vec<_>>();
 
     // Act
-    let run = write_run_with_budget(&dir.path().join("txn"), 1, 0, &mut ops, Some(&budget))?;
+    let pool = Arc::new(TransactionMemoryPool::new(usize::MAX));
+    let run = write_run_with_budget(
+        &dir.path().join("txn"),
+        1,
+        0,
+        &mut ops,
+        Some(&budget),
+        &pool,
+    )?;
     let bytes = fs::metadata(&run.path)?.len() + fs::metadata(&run.range_path)?.len();
 
     // Assert
@@ -257,7 +265,7 @@ fn should_reject_corrupt_sparse_index_when_reading_spill_run() -> MidgeResult<()
         op: put(b"key", b"value"),
     }];
     let run = write_run(temp.path(), 1, 0, &mut ops)?;
-    let mut file = File::open(&run.path)?;
+    let mut file = RunFile::open(&run.path)?;
     let header = read_header(&mut file)?;
     drop(file);
     let mut bytes = fs::read(&run.path)?;
@@ -319,7 +327,7 @@ fn should_reject_corrupt_range_index_when_reading_spill_run() -> MidgeResult<()>
         op: delete_range(b"alpha", b"omega"),
     }];
     let run = write_run(temp.path(), 1, 0, &mut ops)?;
-    let mut file = File::open(&run.range_path)?;
+    let mut file = RunFile::open(&run.range_path)?;
     let header = read_range_header(&mut file)?;
     drop(file);
     let mut bytes = fs::read(&run.range_path)?;
@@ -404,8 +412,8 @@ fn should_surface_late_spill_corruption_from_key_cursor_item() -> MidgeResult<()
         },
     ];
     let run = write_run(temp.path(), 1, 0, &mut ops)?;
-    let mut file = File::open(&run.path)?;
-    file.seek(SeekFrom::Start(RUN_HEADER_LEN as u64))?;
+    let mut file = RunFile::open(&run.path)?;
+    file.seek_to(RUN_HEADER_LEN as u64)?;
     let (_, second_offset) = read_op_frame(&mut file)?;
     drop(file);
     let mut bytes = fs::read(&run.path)?;
@@ -458,5 +466,99 @@ fn should_find_earliest_same_key_intent_when_key_spans_many_sparse_index_strides
         "the first write to the key (ordinal 0) must be visible before ordinal 1"
     );
     assert!(before_twentieth.is_some());
+    Ok(())
+}
+
+#[test]
+fn should_bound_file_opens_when_scanning_with_spilled_write_set() -> MidgeResult<()> {
+    // Arrange: a small pool forces several runs, so a per-lookup reopen would
+    // scale with rows multiplied by runs.
+    let dir = tempfile::tempdir()?;
+    let mut writes = TransactionWriteSet::new(
+        Arc::new(TransactionMemoryPool::new(4096)),
+        dir.path(),
+        false,
+        1,
+    );
+    for index in 0_u32..128 {
+        writes.push(put(format!("key-{index:04}").as_bytes(), b"value"))?;
+    }
+    let runs = writes.runs.len();
+    assert!(runs > 1, "the write set must have spilled to several runs");
+    reset_run_file_opens();
+
+    // Act
+    for index in 0_u32..128 {
+        writes.latest_for_key(format!("key-{index:04}").as_bytes())?;
+    }
+    let opens = run_file_opens();
+
+    // Assert: at most one data file and one range file per run, whatever the
+    // number of lookups.
+    assert!(
+        opens <= 2 * runs,
+        "{opens} opens for {runs} runs over 128 lookups"
+    );
+    Ok(())
+}
+
+#[test]
+fn should_not_create_run_per_op_when_pool_is_exhausted_by_other_transaction() -> MidgeResult<()> {
+    // Arrange: another transaction holds the whole pool, so every push below is
+    // refused admission.
+    let dir = tempfile::tempdir()?;
+    let pool = Arc::new(TransactionMemoryPool::new(64 * 1024));
+    assert!(pool.try_reserve(64 * 1024));
+    let mut writes = TransactionWriteSet::new(Arc::clone(&pool), dir.path(), false, 2);
+
+    // Act
+    for index in 0_u32..512 {
+        writes.push(put(format!("key-{index:04}").as_bytes(), b"value"))?;
+    }
+
+    // Assert
+    assert!(
+        writes.runs.len() < 32,
+        "contention produced {} runs for 512 operations",
+        writes.runs.len()
+    );
+    for index in 0_u32..512 {
+        let key = format!("key-{index:04}");
+        assert!(
+            matches!(
+                writes.latest_for_key(key.as_bytes())?,
+                Some(IntentLookup::Present(value)) if value.as_ref() == b"value"
+            ),
+            "{key} was lost while batching direct spills"
+        );
+    }
+    drop(writes);
+    pool.release(64 * 1024);
+    Ok(())
+}
+
+#[test]
+fn should_look_up_spilled_key_when_pool_cannot_charge_sparse_index() -> MidgeResult<()> {
+    // Arrange: a pool with no capacity refuses the cached index, so the reader
+    // must fall back to walking the index in the file.
+    let temp = tempfile::tempdir()?;
+    let pool = Arc::new(TransactionMemoryPool::new(0));
+    let mut ops = (0_u64..40)
+        .map(|ordinal| OrdinalOp {
+            ordinal,
+            op: put(format!("key-{ordinal:02}").as_bytes(), b"value"),
+        })
+        .collect::<Vec<_>>();
+    let run = write_run_with_budget(temp.path(), 1, 0, &mut ops, None, &pool)?;
+
+    // Act
+    let mut latest = None;
+    lookup_run_key(&run, b"key-37", u64::MAX, &mut latest)?;
+
+    // Assert
+    assert!(
+        matches!(latest, Some((37, IntentLookup::Present(value))) if value.as_ref() == b"value")
+    );
+    assert_eq!(pool.resident.load(Ordering::Acquire), 0);
     Ok(())
 }

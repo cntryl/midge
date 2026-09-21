@@ -1612,7 +1612,10 @@ mod transaction_conflicts {
             .expect("begin writer");
 
         // Act
-        let admitted = writer.put(b"spilled".to_vec(), b"value".to_vec(), None);
+        // The write must exceed the pool so it cannot be admitted, and exceed
+        // the off-pool batch bound so it is frozen into a run right away.
+        let value = vec![b'v'; 2_048];
+        let admitted = writer.put(b"spilled".to_vec(), value.clone(), None);
         let spill_runs = std::fs::read_dir(temp_dir.path().join("txn"))
             .expect("open transaction spill directory")
             .filter_map(Result::ok)
@@ -1638,7 +1641,7 @@ mod transaction_conflicts {
             .expect("begin verification transaction");
         assert_eq!(
             current.get(b"spilled").expect("read spilled value"),
-            Some(Bytes::from_static(b"value"))
+            Some(Bytes::from(value))
         );
         drop(asserting);
     }
