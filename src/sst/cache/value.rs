@@ -1,218 +1,121 @@
-//! Cached block value with metadata
+//! Cached block value.
 
 use bytes::Bytes;
-use std::convert::TryFrom;
-use std::sync::atomic::AtomicU64;
-use std::sync::Arc;
 
-/// A cached block value with metadata
+/// Fixed per-entry bookkeeping charged on top of the block payload.
+///
+/// A cached block costs more than its payload: the shard's `DashMap` stores a
+/// [`crate::sst::cache::CacheKey`] and a `Bytes` handle per entry, and the
+/// eviction policy keeps its own slot plus index entry for the same key.
+/// Charging a flat constant keeps the configured cache budget close to the
+/// memory the cache actually holds instead of accounting for payloads alone.
+///
+/// The value is a deliberate under-estimate of the real per-entry cost: it is
+/// better to hold slightly more than the budget suggests than to evict blocks
+/// the budget could have kept.
+pub const ENTRY_OVERHEAD_BYTES: usize = 64;
+
+/// A cached block value.
+///
+/// This is a thin wrapper around the block payload. `Bytes` is already
+/// reference counted, so cloning a `CacheValue` out of a shard does not copy
+/// the block.
 #[derive(Clone, Debug)]
 pub struct CacheValue {
-    /// The actual block data
-    pub data: Arc<Bytes>,
-    /// Insertion timestamp (nanoseconds since epoch)
-    pub inserted_at: u64,
-    /// Access count for frequency tracking
-    pub access_count: Arc<AtomicU64>,
+    /// The actual block data.
+    pub data: Bytes,
 }
 
 impl CacheValue {
-    /// Create a new cached value
+    /// Wrap block data for caching.
+    #[must_use]
     pub fn new(data: Bytes) -> Self {
-        let inserted_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let inserted_at = u64::try_from(inserted_at).unwrap_or(u64::MAX);
-        Self {
-            data: Arc::new(data),
-            inserted_at,
-            access_count: Arc::new(AtomicU64::new(0)),
-        }
+        Self { data }
     }
 
-    /// Get the size of the cached data in bytes
+    /// Bytes this entry charges against shard capacity.
+    ///
+    /// This is the payload length plus [`ENTRY_OVERHEAD_BYTES`], not the raw
+    /// payload length.
     #[must_use]
     pub fn size_bytes(&self) -> usize {
-        self.data.len()
+        Self::charged_bytes(self.data.len())
     }
 
-    /// Increment access count and return the new value
+    /// Bytes a payload of `payload_len` would charge against shard capacity.
     #[must_use]
-    pub fn increment_access(&self) -> u64 {
-        self.access_count
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            + 1
-    }
-
-    /// Get current access count
-    #[must_use]
-    pub fn access_count(&self) -> u64 {
-        self.access_count.load(std::sync::atomic::Ordering::Relaxed)
+    pub const fn charged_bytes(payload_len: usize) -> usize {
+        payload_len.saturating_add(ENTRY_OVERHEAD_BYTES)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{CacheValue, ENTRY_OVERHEAD_BYTES};
+    use bytes::Bytes;
 
     #[test]
-    fn should_report_correct_size_bytes() {
+    fn should_charge_payload_plus_fixed_overhead_when_sizing_an_entry() {
         // Arrange
         let data = Bytes::from(&b"hello"[..]);
+
+        // Act
         let value = CacheValue::new(data);
 
-        // Act
-        let size = value.size_bytes();
-
         // Assert
-        assert_eq!(size, 5);
+        assert_eq!(value.size_bytes(), 5 + ENTRY_OVERHEAD_BYTES);
+        assert_eq!(CacheValue::charged_bytes(5), value.size_bytes());
     }
 
     #[test]
-    fn should_initialize_access_count_to_zero() {
+    fn should_charge_only_the_fixed_overhead_when_the_block_is_empty() {
         // Arrange
-        let data = Bytes::from(&b"test"[..]);
+        let data = Bytes::new();
+
+        // Act
         let value = CacheValue::new(data);
 
+        // Assert
+        assert_eq!(value.size_bytes(), ENTRY_OVERHEAD_BYTES);
+    }
+
+    #[test]
+    fn should_saturate_charged_size_when_payload_length_is_at_the_maximum() {
+        // Arrange
+        let payload_len = usize::MAX;
+
         // Act
-        let count = value.access_count();
+        let charged = CacheValue::charged_bytes(payload_len);
 
         // Assert
-        assert_eq!(count, 0);
+        assert_eq!(charged, usize::MAX);
     }
 
     #[test]
-    fn should_increment_access_count() {
+    fn should_carry_no_per_entry_metadata_beyond_the_payload_handle() {
         // Arrange
-        let data = Bytes::from(&b"test"[..]);
-        let value = CacheValue::new(data);
+        let handle_size = std::mem::size_of::<Bytes>();
 
         // Act
-        let count1 = value.increment_access();
+        let value_size = std::mem::size_of::<CacheValue>();
 
-        // Assert
-        assert_eq!(count1, 1);
-        assert_eq!(value.access_count(), 1);
+        // Assert: no timestamp, no access counter, no extra `Arc` indirection.
+        assert_eq!(value_size, handle_size);
+        assert!(value_size <= 32, "CacheValue grew to {value_size} bytes");
     }
 
     #[test]
-    fn should_monotonically_increase_access_count() {
-        // Arrange
-        let data = Bytes::from(&b"test"[..]);
-        let value = CacheValue::new(data);
-
-        // Act
-        let mut counts = Vec::new();
-        for _ in 0..5 {
-            let count = value.increment_access();
-            counts.push((count, value.access_count()));
-        }
-
-        // Assert
-        for (i, (returned, stored)) in counts.into_iter().enumerate() {
-            let expected = (i as u64) + 1;
-            assert_eq!(returned, expected);
-            assert_eq!(stored, expected);
-        }
-    }
-
-    #[test]
-    fn should_handle_multiple_increments_concurrently() {
-        // Arrange
-        let data = Bytes::from(&b"test"[..]);
-        let value = std::sync::Arc::new(CacheValue::new(data));
-
-        // Act - simulate concurrent increments
-        let mut handles = vec![];
-        for _ in 0..10 {
-            let v = std::sync::Arc::clone(&value);
-            let handle = std::thread::spawn(move || {
-                for _ in 0..10 {
-                    let _ = v.increment_access();
-                }
-            });
-            handles.push(handle);
-        }
-
-        for handle in handles {
-            handle.join().unwrap();
-        }
-
-        // Assert (10 threads * 10 increments = 100)
-        assert_eq!(value.access_count(), 100);
-    }
-
-    #[test]
-    fn should_record_insertion_timestamp() {
-        // Arrange
-        let before_time = u64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-        )
-        .unwrap_or(u64::MAX);
-
-        // Act
-        let data = Bytes::from(&b"test"[..]);
-        let value = CacheValue::new(data);
-
-        let after_time = u64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-        )
-        .unwrap_or(u64::MAX);
-
-        // Assert
-        assert!(value.inserted_at >= before_time);
-        assert!(value.inserted_at <= after_time);
-    }
-
-    #[test]
-    fn should_be_cloneable() {
-        // Arrange
-        let data = Bytes::from(&b"test"[..]);
-        let value1 = CacheValue::new(data);
-        let _ = value1.increment_access();
-
-        // Act
-        let value2 = value1.clone();
-        let _ = value2.increment_access();
-
-        // Assert (both share the same Arc, so access count is shared)
-        assert_eq!(value1.access_count(), 2);
-        assert_eq!(value2.access_count(), 2);
-    }
-
-    #[test]
-    fn should_preserve_data_through_clone() {
+    fn should_share_the_payload_without_copying_when_cloned() {
         // Arrange
         let data = Bytes::from(&b"important data"[..]);
-        let value1 = CacheValue::new(data.clone());
+        let value = CacheValue::new(data.clone());
 
         // Act
-        let value2 = value1.clone();
+        let clone = value.clone();
 
         // Assert
-        assert_eq!(value1.data.as_ref(), &data);
-        assert_eq!(value2.data.as_ref(), &data);
-        assert_eq!(value1.size_bytes(), value2.size_bytes());
-    }
-
-    #[test]
-    fn should_share_access_count_across_clones() {
-        // Arrange
-        let data = Bytes::from(&b"test"[..]);
-        let value1 = CacheValue::new(data);
-
-        // Act
-        let value2 = value1.clone();
-        let _ = value1.increment_access();
-
-        // Assert (clones share the same Arc for access_count)
-        assert_eq!(value2.access_count(), 1);
+        assert_eq!(clone.data, data);
+        assert_eq!(clone.data.as_ptr(), value.data.as_ptr());
+        assert_eq!(clone.size_bytes(), value.size_bytes());
     }
 }

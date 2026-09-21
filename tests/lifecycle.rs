@@ -1476,18 +1476,9 @@ mod resource_cleanup {
         assert!(cache2.put(key, &data));
         assert!(cache3.put(key, &data));
 
-        assert_eq!(
-            cache1.get(&key).map(|v| (*v.data).clone()),
-            Some(data.clone())
-        );
-        assert_eq!(
-            cache2.get(&key).map(|v| (*v.data).clone()),
-            Some(data.clone())
-        );
-        assert_eq!(
-            cache3.get(&key).map(|v| (*v.data).clone()),
-            Some(data.clone())
-        );
+        assert_eq!(cache1.get(&key).map(|v| v.data), Some(data.clone()));
+        assert_eq!(cache2.get(&key).map(|v| v.data), Some(data.clone()));
+        assert_eq!(cache3.get(&key).map(|v| v.data), Some(data.clone()));
 
         // Assert - drop all three populated components together without deadlock
         drop((cache1, cache2, cache3));
@@ -1535,7 +1526,7 @@ mod resource_cleanup {
             let key = CacheKey::for_data(i, 0);
             let byte = u8::try_from(i).expect("test index fits in u8");
             let expected = bytes::Bytes::from(vec![byte; 32]);
-            assert_eq!(cache.get(&key).map(|v| (*v.data).clone()), Some(expected));
+            assert_eq!(cache.get(&key).map(|v| v.data), Some(expected));
         }
         assert_eq!(cache.len(), 10);
 
