@@ -299,6 +299,32 @@ mod architecture_ladder {
     }
 
     #[test]
+    fn should_bound_cloud_seal_when_the_event_loop_forces_a_cloud_async_seal() {
+        // Arrange
+        let source = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src/runtime/event_loop/cloud_integration/sealing.rs"),
+        )
+        .expect("read cloud sealing source");
+        let start = source
+            .find("pub(crate) fn seal_current_cloud_segment(")
+            .expect("seal_current_cloud_segment");
+        let end = source[start..]
+            .find("\n    }\n")
+            .expect("end of seal_current_cloud_segment");
+
+        // Act
+        let body = &source[start..start + end];
+
+        // Assert
+        assert!(
+            !body.contains("OperationDeadline::unbounded()"),
+            "the event loop must not wait indefinitely on a cloud seal: everything queued \
+             behind it stalls until the provider answers"
+        );
+    }
+
+    #[test]
     fn should_require_lossless_entry_methods_when_implementing_sst_writer() {
         // Arrange
         let source = std::fs::read_to_string(
