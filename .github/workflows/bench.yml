@@ -57,9 +57,7 @@ jobs:
         shell: bash
         run: |
           rm -f target/bench_results.json target/bench_summary.md
-          if ! cntryl-tools summarize-benchmarks; then
-            python3 scripts/validate_benchmark_summary_bootstrap.py target/bench_results.json
-          fi
+          cntryl-tools summarize-benchmarks
 
       - name: Upload benchmark summary
         uses: actions/upload-artifact@v7
