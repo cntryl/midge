@@ -846,6 +846,32 @@ fn range_tombstone_is_obsolete(tombstone: &RangeTombstone, policy: TombstoneGcPo
     policy.range_eligible && tombstone_is_obsolete(tombstone.seq, policy.snapshot_horizon)
 }
 
+/// Whether the partition being built should be closed at this key group
+/// because it has reached the target size.
+///
+/// A partition rolls when a surviving version would land in a partition that is
+/// already at the target. A span of range tombstones with no surviving points
+/// must roll too: local deployments have no hard limit, and every retained
+/// tombstone holds budget until its partition finishes; any event key is a
+/// valid fragment boundary. The range-only case is measured by the tombstones
+/// alone, because an empty writer's estimate includes fixed overhead and would
+/// otherwise roll on every event.
+fn soft_roll_due(
+    has_selected_version: bool,
+    partition_point_count: usize,
+    partition_size: usize,
+    partition_tombstone_bytes: usize,
+    has_partition_tombstones: bool,
+    target_sst_size: usize,
+) -> bool {
+    let target = target_sst_size.max(1);
+    let range_only_roll = partition_point_count == 0
+        && has_partition_tombstones
+        && partition_tombstone_bytes >= target;
+    (has_selected_version && partition_point_count > 0 && partition_size >= target)
+        || range_only_roll
+}
+
 /// Newest version in one key group, ignoring range events.
 ///
 /// Two versions at the same sequence must be identical. If they differ, the
@@ -1059,19 +1085,14 @@ pub(crate) fn write_partitioned_compaction_outputs(
         let partition_size = writer
             .estimated_size_bytes()
             .saturating_add(partition_tombstone_bytes);
-        // A span of range tombstones with no surviving points must roll too:
-        // local deployments have no hard limit, and every retained tombstone
-        // holds budget until its partition finishes. Any event key is a valid
-        // fragment boundary.
-        // Measured by the tombstones alone: an empty writer's estimate
-        // includes fixed overhead and would otherwise roll on every event.
-        let range_only_roll = partition_point_count == 0
-            && !partition_tombstones.is_empty()
-            && partition_tombstone_bytes >= target_sst_size.max(1);
-        let soft_roll = (selected_version.is_some()
-            && partition_point_count > 0
-            && partition_size >= target_sst_size.max(1))
-            || range_only_roll;
+        let soft_roll = soft_roll_due(
+            selected_version.is_some(),
+            partition_point_count,
+            partition_size,
+            partition_tombstone_bytes,
+            !partition_tombstones.is_empty(),
+            target_sst_size,
+        );
         let hard_roll = if let Some(limit) = output_size_limit {
             let lower_bound = partition_lower_bound
                 .as_ref()
@@ -1981,6 +2002,173 @@ mod tests {
 
             // Assert
             assert!(survives);
+        }
+    }
+
+    mod soft_roll {
+        use super::*;
+
+        struct Case {
+            has_selected_version: bool,
+            point_count: usize,
+            partition_size: usize,
+            tombstone_bytes: usize,
+            has_tombstones: bool,
+            target: usize,
+        }
+
+        fn due(case: &Case) -> bool {
+            soft_roll_due(
+                case.has_selected_version,
+                case.point_count,
+                case.partition_size,
+                case.tombstone_bytes,
+                case.has_tombstones,
+                case.target,
+            )
+        }
+
+        fn case() -> Case {
+            Case {
+                has_selected_version: true,
+                point_count: 3,
+                partition_size: 100,
+                tombstone_bytes: 0,
+                has_tombstones: false,
+                target: 100,
+            }
+        }
+
+        #[test]
+        fn should_roll_when_the_partition_reaches_the_target_size() {
+            // Arrange
+            let case = case();
+
+            // Act
+            let roll = due(&case);
+
+            // Assert
+            assert!(roll);
+        }
+
+        #[test]
+        fn should_not_roll_when_the_partition_is_below_the_target_size() {
+            // Arrange
+            let case = Case {
+                partition_size: 99,
+                ..case()
+            };
+
+            // Act
+            let roll = due(&case);
+
+            // Assert
+            assert!(!roll);
+        }
+
+        #[test]
+        fn should_not_roll_at_a_group_that_drops_its_only_version() {
+            // Arrange: no surviving version means this key group adds no point.
+            let case = Case {
+                has_selected_version: false,
+                ..case()
+            };
+
+            // Act
+            let roll = due(&case);
+
+            // Assert
+            assert!(!roll);
+        }
+
+        #[test]
+        fn should_not_roll_an_empty_partition_on_writer_overhead_alone() {
+            // Arrange: an empty writer's estimate includes fixed overhead, so a
+            // large size with no points and no tombstones must not roll.
+            let case = Case {
+                point_count: 0,
+                partition_size: 10_000,
+                ..case()
+            };
+
+            // Act
+            let roll = due(&case);
+
+            // Assert
+            assert!(!roll);
+        }
+
+        #[test]
+        fn should_roll_a_range_only_partition_when_tombstones_reach_the_target() {
+            // Arrange: no surviving points, but retained tombstones hold budget.
+            let case = Case {
+                has_selected_version: false,
+                point_count: 0,
+                partition_size: 0,
+                tombstone_bytes: 100,
+                has_tombstones: true,
+                target: 100,
+            };
+
+            // Act
+            let roll = due(&case);
+
+            // Assert
+            assert!(roll);
+        }
+
+        #[test]
+        fn should_not_roll_a_range_only_partition_below_the_target() {
+            // Arrange
+            let case = Case {
+                has_selected_version: false,
+                point_count: 0,
+                partition_size: 0,
+                tombstone_bytes: 99,
+                has_tombstones: true,
+                target: 100,
+            };
+
+            // Act
+            let roll = due(&case);
+
+            // Assert
+            assert!(!roll);
+        }
+
+        #[test]
+        fn should_not_roll_a_range_only_partition_without_tombstones() {
+            // Arrange
+            let case = Case {
+                has_selected_version: false,
+                point_count: 0,
+                partition_size: 0,
+                tombstone_bytes: 100,
+                has_tombstones: false,
+                target: 100,
+            };
+
+            // Act
+            let roll = due(&case);
+
+            // Assert
+            assert!(!roll);
+        }
+
+        #[test]
+        fn should_treat_a_zero_target_as_one_byte() {
+            // Arrange
+            let case = Case {
+                partition_size: 1,
+                target: 0,
+                ..case()
+            };
+
+            // Act
+            let roll = due(&case);
+
+            // Assert
+            assert!(roll);
         }
     }
 }
