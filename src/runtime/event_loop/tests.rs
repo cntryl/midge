@@ -1,5 +1,5 @@
 use super::*;
-use crate::runtime::hybrid_persistence::HybridPersistence;
+use crate::runtime::hybrid_persistence::CloudPersistence;
 use crate::runtime::TestRuntimeMsg;
 use crate::runtime::{state::RuntimeState, ResponseRouter};
 use crate::sst::Memtable;
@@ -174,7 +174,7 @@ pub(in crate::runtime::event_loop) fn create_test_cloud_event_loop(
         cloud,
         storage_policy,
     ));
-    hybrid_storage.fence_cloud_wal_catalog(1)?;
+    CloudPersistence::new(Arc::clone(&hybrid_storage)).fence_cloud_wal_catalog(1)?;
     let config = crate::runtime::RuntimeConfig {
         wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
         hybrid_storage: Some(Arc::clone(&hybrid_storage)),
@@ -474,7 +474,7 @@ fn should_hold_cloud_frontier_at_local_recovery_gap_until_resumed_upload_is_ackn
         cloud,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
-    hybrid_storage.fence_cloud_wal_catalog(1)?;
+    CloudPersistence::new(Arc::clone(&hybrid_storage)).fence_cloud_wal_catalog(1)?;
     let config = crate::runtime::RuntimeConfig {
         wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
         hybrid_storage: Some(Arc::clone(&hybrid_storage)),
@@ -2090,7 +2090,7 @@ fn should_incrementally_drain_recovered_wal_given_bounded_upload_queue_at_open(
         1,
         max_segment_bytes,
     ));
-    storage.fence_cloud_wal_catalog(1)?;
+    CloudPersistence::new(Arc::clone(&storage)).fence_cloud_wal_catalog(1)?;
     let config = crate::runtime::RuntimeConfig {
         wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
         hybrid_storage: Some(Arc::clone(&storage)),
@@ -2916,4 +2916,48 @@ fn should_fsync_batched_wal_while_verification_barrier_is_held() -> crate::commo
     );
     assert!(event_loop.verification_barrier.is_active());
     Ok(())
+}
+
+#[test]
+fn should_not_prune_reader_cache_when_publishing_after_plain_write() {
+    // Arrange
+    let mut event_loop = create_test_local_event_loop().expect("create local event loop");
+    event_loop.set_snapshot_cache(Arc::new(
+        crate::runtime::snapshot_cache::SnapshotCache::new(),
+    ));
+    let read_resources = event_loop
+        .read_resources
+        .clone()
+        .expect("local runtime should construct read resources");
+    let baseline = read_resources.prune_call_count();
+    let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
+
+    // Act
+    for i in 0..1000_u64 {
+        let msg = RuntimeMsg::ApplyTransaction {
+            request_id: i,
+            ops: vec![crate::runtime::TransactionOp::Put {
+                cf_id: 0,
+                key: bytes::Bytes::from(format!("key-{i}")),
+                value: bytes::Bytes::from_static(b"v"),
+                ttl_seconds: None,
+                insert_only: false,
+            }],
+            assertions: Vec::new(),
+            durability_policy: Some(crate::wal::DurabilityPolicy::Batched),
+            start_sequence: None,
+            conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+            response_tx: None,
+        };
+        event_loop.process_wake_msg(msg, &msg_rx, 16);
+    }
+    let after_writes = read_resources.prune_call_count();
+    event_loop.invalidate_sst_read_views();
+    event_loop.publish_snapshot();
+    let after_manifest_change = read_resources.prune_call_count();
+    drop(msg_tx);
+
+    // Assert
+    assert_eq!(after_writes, baseline, "plain writes must not prune");
+    assert_eq!(after_manifest_change, baseline + 1);
 }

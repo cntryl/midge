@@ -541,11 +541,15 @@ impl EventLoop {
         });
 
         if let Some(read_resources) = &self.read_resources {
-            let live_names = self
+            // Live names change only when the manifest is rebuilt into the
+            // view cache; plain write batches never need to prune.
+            let rebuilt = self
                 .sst_read_views
                 .borrow_mut()
-                .live_names(&self.state.manifest);
-            read_resources.prune_to_live_ssts(&live_names);
+                .take_rebuilt_live_names(&self.state.manifest);
+            if let Some(live_names) = rebuilt {
+                read_resources.prune_to_live_ssts(&live_names);
+            }
         }
     }
 

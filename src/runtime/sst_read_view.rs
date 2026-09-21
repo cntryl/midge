@@ -391,6 +391,9 @@ pub(crate) struct SstReadViewCache {
     dirty: bool,
     views: HashMap<crate::types::ColumnFamilyId, Arc<SstReadView>>,
     live_names: Arc<HashSet<String>>,
+    /// Set by every rebuild and cleared when the caller takes the new live
+    /// names, so pruning of dead readers happens only after a manifest change.
+    prune_pending: bool,
     #[cfg(test)]
     file_meta_clones: usize,
 }
@@ -407,6 +410,7 @@ impl SstReadViewCache {
             dirty: true,
             views: HashMap::new(),
             live_names: Arc::new(HashSet::new()),
+            prune_pending: false,
             #[cfg(test)]
             file_meta_clones: 0,
         }
@@ -437,6 +441,7 @@ impl SstReadViewCache {
                 .collect();
             self.live_names = Arc::new(live_names);
             self.dirty = false;
+            self.prune_pending = true;
         }
     }
 
@@ -453,9 +458,19 @@ impl SstReadViewCache {
             .clone()
     }
 
-    pub(crate) fn live_names(&mut self, manifest: &Manifest) -> Arc<HashSet<String>> {
+    /// Returns the live SST names once per rebuild, or `None` when the view
+    /// has not been rebuilt since the last call. A rebuild that happened
+    /// inside `view_for` is still reported here, so no prune is lost.
+    pub(crate) fn take_rebuilt_live_names(
+        &mut self,
+        manifest: &Manifest,
+    ) -> Option<Arc<HashSet<String>>> {
         self.refresh_if_dirty(manifest);
-        Arc::clone(&self.live_names)
+        if std::mem::take(&mut self.prune_pending) {
+            Some(Arc::clone(&self.live_names))
+        } else {
+            None
+        }
     }
 
     #[cfg(test)]

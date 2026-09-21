@@ -27,6 +27,8 @@ pub(crate) struct ReadResources {
     reader_admission: OpenAdmission,
     access_clock: std::sync::atomic::AtomicU64,
     diagnostics: Arc<crate::diagnostics::RuntimeDiagnostics>,
+    #[cfg(test)]
+    prune_calls: std::sync::atomic::AtomicUsize,
 }
 
 struct CachedReader {
@@ -82,6 +84,8 @@ impl ReadResources {
             reader_admission: OpenAdmission::new(block_cache_size / 4),
             access_clock: std::sync::atomic::AtomicU64::new(0),
             diagnostics,
+            #[cfg(test)]
+            prune_calls: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -228,7 +232,15 @@ impl ReadResources {
         Arc::clone(&self.sst_fs)
     }
 
+    #[cfg(test)]
+    pub(crate) fn prune_call_count(&self) -> usize {
+        self.prune_calls.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub(crate) fn prune_to_live_ssts(&self, live_names: &HashSet<String>) {
+        #[cfg(test)]
+        self.prune_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // A poisoned lock only means another thread panicked mid-update; the
         // maps stay structurally valid, and skipping the prune would leak
         // dead readers and blocks.
