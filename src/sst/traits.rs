@@ -220,39 +220,27 @@ pub trait DynSstWriter: Send {
     }
 
     /// Conservative final file size, including all data, indexes, filters,
-    /// tombstones and framing. Bounded local staging rejects writers that
-    /// cannot establish this bound before finalization.
-    fn encoded_size_upper_bound(&self) -> Option<usize> {
-        None
-    }
+    /// tombstones and framing, or `None` when the writer cannot establish one.
+    /// Bounded local staging rejects a `None` before finalization. Required, so
+    /// a writer must say so explicitly rather than inherit an unbounded answer.
+    fn encoded_size_upper_bound(&self) -> Option<usize>;
 
     /// Bound after appending one sorted entry, without mutating the writer.
     /// This must bound the subsequent `encoded_size_upper_bound`, allowing
     /// callers to roll a partition before an otherwise splittable overflow.
     fn encoded_size_upper_bound_after_sorted_entry(
         &self,
-        _key: &[u8],
-        _value: Option<&[u8]>,
-    ) -> Option<usize> {
-        None
-    }
+        key: &[u8],
+        value: Option<&[u8]>,
+    ) -> Option<usize>;
 
     /// Incremental bound for a range tombstone held outside this writer.
     /// Includes possible growth of the file's key-bound metadata.
     fn additional_range_tombstone_size_upper_bound(
         &self,
-        _start: &[u8],
-        _end: &[u8],
-    ) -> Option<usize> {
-        None
-    }
-
-    /// Add a simple key-value entry
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the key-value pair cannot be appended to the SST.
-    fn add(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()>;
+        start: &[u8],
+        end: &[u8],
+    ) -> Option<usize>;
 
     /// Add an entry with metadata
     /// `op_type`: 0=Put, 1=Insert, 2=Delete
@@ -479,12 +467,32 @@ mod tests {
         fn new() -> Self {
             Self { data: Vec::new() }
         }
-    }
 
-    impl DynSstWriter for MockSstWriter {
         fn add(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()> {
             self.data.push((key.to_vec(), value.to_vec()));
             Ok(())
+        }
+    }
+
+    impl DynSstWriter for MockSstWriter {
+        fn encoded_size_upper_bound(&self) -> Option<usize> {
+            None
+        }
+
+        fn encoded_size_upper_bound_after_sorted_entry(
+            &self,
+            _key: &[u8],
+            _value: Option<&[u8]>,
+        ) -> Option<usize> {
+            None
+        }
+
+        fn additional_range_tombstone_size_upper_bound(
+            &self,
+            _start: &[u8],
+            _end: &[u8],
+        ) -> Option<usize> {
+            None
         }
 
         fn add_with_meta(

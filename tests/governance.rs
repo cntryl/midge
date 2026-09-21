@@ -308,13 +308,23 @@ mod architecture_ladder {
         let start = source
             .find("pub trait DynSstWriter")
             .expect("DynSstWriter trait");
-        let trait_source = &source[start..];
+        let trait_end = source[start..]
+            .find("\n}\n")
+            .expect("DynSstWriter trait end");
+        let trait_source = &source[start..start + trait_end];
         let required = [
             "add_with_meta",
             "add_sorted_with_meta",
             "add_range_tombstone",
+            "encoded_size_upper_bound",
+            "encoded_size_upper_bound_after_sorted_entry",
+            "additional_range_tombstone_size_upper_bound",
         ];
-        let removed = ["preserves_versioned_entries", "require_versioned_entries"];
+        let removed = [
+            "preserves_versioned_entries",
+            "require_versioned_entries",
+            "add",
+        ];
 
         // Act
         let defaulted: Vec<&str> = required
@@ -342,7 +352,7 @@ mod architecture_ladder {
         );
         assert!(
             lingering.is_empty(),
-            "the opt-in versioned-entries escape hatch must not return: {lingering:?}"
+            "the lossy entry API must not return (add drops the sequence, kind and TTL): {lingering:?}"
         );
     }
 

@@ -1076,8 +1076,26 @@ mod tests {
     }
 
     impl crate::sst::traits::DynSstWriter for BlockingFinalizeWriter {
-        fn add(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()> {
-            self.inner.add(key, value)
+        fn encoded_size_upper_bound(&self) -> Option<usize> {
+            self.inner.encoded_size_upper_bound()
+        }
+
+        fn encoded_size_upper_bound_after_sorted_entry(
+            &self,
+            key: &[u8],
+            value: Option<&[u8]>,
+        ) -> Option<usize> {
+            self.inner
+                .encoded_size_upper_bound_after_sorted_entry(key, value)
+        }
+
+        fn additional_range_tombstone_size_upper_bound(
+            &self,
+            start: &[u8],
+            end: &[u8],
+        ) -> Option<usize> {
+            self.inner
+                .additional_range_tombstone_size_upper_bound(start, end)
         }
 
         fn add_with_meta(

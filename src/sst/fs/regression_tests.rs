@@ -9,7 +9,9 @@ fn should_read_default_sequence_after_writer_add() {
     let dir = tempfile::tempdir().unwrap();
     let factory = FsSstFactoryIo::new(Arc::new(crate::io::RealFs::new(dir.path()).unwrap()), 4096);
     let mut writer = factory.create().unwrap();
-    writer.add(b"key", b"value").unwrap();
+    writer
+        .add_with_meta(b"key", Some(b"value"), 0, 0, None)
+        .unwrap();
     crate::sst::fs::finish_writer_to_path(writer, &dir.path().join("probe.sst")).unwrap();
     // Act
     let reader = factory.open(Path::new("probe.sst")).unwrap();
@@ -94,8 +96,10 @@ fn should_preserve_zero_sequence_states_in_both_scan_directions() {
     let fs = Arc::new(crate::io::RealFs::new(dir.path()).unwrap());
     let factory = FsSstFactoryIo::new(fs, 4096);
     let mut writer = factory.create().unwrap();
-    writer.add(b"a", b"value").unwrap();
-    writer.add(b"b", b"").unwrap();
+    writer
+        .add_with_meta(b"a", Some(b"value"), 0, 0, None)
+        .unwrap();
+    writer.add_with_meta(b"b", Some(b""), 0, 0, None).unwrap();
     writer
         .add_with_meta(b"c", Some(b"expired"), 0, 0, Some(1))
         .unwrap();
@@ -232,7 +236,9 @@ fn should_reject_sst_publish_when_target_name_is_an_in_root_symlink() {
     .unwrap();
     let factory = FsSstFactoryIo::new(Arc::new(crate::io::RealFs::new(root.path()).unwrap()), 4096);
     let mut writer = factory.create().unwrap();
-    writer.add(b"key", b"value").unwrap();
+    writer
+        .add_with_meta(b"key", Some(b"value"), 0, 0, None)
+        .unwrap();
 
     // Act
     let result = crate::sst::fs::finish_writer_to_path(writer, &root.path().join("linked.sst"));

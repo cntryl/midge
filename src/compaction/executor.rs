@@ -1506,6 +1506,14 @@ mod tests {
                 Some(0)
             }
 
+            fn encoded_size_upper_bound_after_sorted_entry(
+                &self,
+                _key: &[u8],
+                _value: Option<&[u8]>,
+            ) -> Option<usize> {
+                None
+            }
+
             fn additional_range_tombstone_size_upper_bound(
                 &self,
                 start: &[u8],
@@ -1513,10 +1521,6 @@ mod tests {
             ) -> Option<usize> {
                 self.bounds.fetch_add(1, Ordering::SeqCst);
                 Some(start.len().saturating_add(end.len()))
-            }
-
-            fn add(&mut self, _key: &[u8], _value: &[u8]) -> MidgeResult<()> {
-                Ok(())
             }
 
             fn add_with_meta(

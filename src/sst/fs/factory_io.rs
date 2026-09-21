@@ -980,10 +980,6 @@ impl DynSstWriter for InMemorySstWriter {
         })
     }
 
-    fn add(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()> {
-        self.add_with_meta(key, Some(value), 0, 0, None)
-    }
-
     fn add_with_meta(
         &mut self,
         key: &[u8],
