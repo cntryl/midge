@@ -27,6 +27,10 @@ All new behavior should include tests. Put public API coverage in `tests/`; use 
 
 Recent history uses concise imperative or conventional commit subjects, for example `fix: prune cloud-covered remote wal segments`, `feat: enable feature-based testing...`, and `Harden cloud WAL cleanup proof validation`. Prefer `<type>: <summary>` for routine work (`fix`, `feat`, `refactor`, `test`, `docs`, `perf`, `chore`). PRs should explain what changed, why, risk level, linked issues, and exact verification commands run. Note any durability, recovery, or API compatibility impact explicitly.
 
+## Tracking Review Findings
+
+Track code review and audit findings as GitHub issues in `cntryl/midge` rather than fixing them ad hoc. Write findings to a local file first, triage them (drop false positives, merge duplicates, check open issues), and file only confirmed findings. Each issue should state the failure scenario, the regression test that would demonstrate it, and labels: one `priority:p0`–`priority:p3`, an `area:*` subsystem label, and `flea` for bugs or `solid` for design/SOLID work. Work one branch and PR at a time, each covering a logical group of related issues in the same subsystem, and drive it to merge before starting the next; durability fixes follow the TDD guidance above. Mechanical fixes with no design judgment (clippy, unused dependencies, formatting, behavior-preserving file splits) may go straight to a PR without an issue.
+
 ## Security & Configuration Tips
 
 Do not commit credentials or real cloud configuration. Use local filesystem-backed cloud stores and mock providers in tests unless an explicit integration environment is required. Treat storage leaks as acceptable when the alternative is unsafe deletion.
