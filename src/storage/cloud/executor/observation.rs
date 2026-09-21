@@ -23,10 +23,7 @@ impl Attempt {
                 .headers
                 .iter()
                 .any(|(name, _)| name.eq_ignore_ascii_case("range")),
-            request_body_bytes: request.shared_body.as_ref().map_or_else(
-                || request.body.as_ref().map_or(0, Vec::len),
-                bytes::Bytes::len,
-            ),
+            request_body_bytes: request.body.as_ref().map_or(0, bytes::Bytes::len),
             status: 0,
             response_body_bytes: 0,
             transport_error: false,

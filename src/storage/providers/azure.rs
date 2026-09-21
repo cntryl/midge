@@ -833,6 +833,17 @@ impl CloudBackend for AzureBackend {
         headers: Vec<(String, String)>,
         callback: CloudCallback,
     ) {
+        self.submit_put_with_reservation(key, data, headers, None, callback);
+    }
+
+    fn submit_put_with_reservation(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        reservation: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
+        callback: CloudCallback,
+    ) {
         let key = key.to_string();
         let url = self.object_url(&key);
         let len = data.len();
@@ -841,6 +852,7 @@ impl CloudBackend for AzureBackend {
         });
         let mut request = CloudRequest::new(Method::PUT, url)
             .with_body(data)
+            .with_reservation(reservation)
             .with_header("x-ms-blob-type", "BlockBlob")
             .with_header("Content-Length", len.to_string());
         // Merge provided headers into the request (caller-controlled; e.g. If-None-Match)
@@ -942,6 +954,20 @@ impl CloudBackend for AzureBackend {
         timeout: std::time::Duration,
         callback: CloudCallback,
     ) {
+        self.submit_get_range_with_reservation(key, start..end, expected, timeout, None, callback);
+    }
+
+    fn submit_get_range_with_reservation(
+        &self,
+        key: &str,
+        range: std::ops::Range<u64>,
+        expected: crate::storage::StorageObjectMetadata,
+        timeout: std::time::Duration,
+        reservation: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
+        callback: CloudCallback,
+    ) {
+        let start = range.start;
+        let end = range.end;
         let key = key.to_string();
         let Some(conditions) = crate::storage::cloud::object_match_precondition_headers(
             &expected.etag,
@@ -966,7 +992,8 @@ impl CloudBackend for AzureBackend {
             });
             return;
         }
-        let mut request = CloudRequest::new(Method::GET, self.object_url(&key));
+        let mut request =
+            CloudRequest::new(Method::GET, self.object_url(&key)).with_reservation(reservation);
         for (name, value) in conditions {
             request = request.with_header(name, value);
         }
@@ -1381,7 +1408,7 @@ impl CloudSigner for SharedKeySigner {
             .headers
             .push(("x-ms-version".into(), "2024-11-04".into()));
 
-        let content_length = request.body.as_ref().map(std::vec::Vec::len);
+        let content_length = request.body.as_ref().map(bytes::Bytes::len);
 
         let sts = self.string_to_sign(
             request.method.as_str(),
@@ -2014,6 +2041,79 @@ mod tests {
         crate::storage::providers::test_support::assert_get_metadata_length_contract(
             identity_headers,
             |response| object_metadata_from_azure_response(response, Some(3)),
+        );
+    }
+
+    #[test]
+    fn should_not_retain_completion_thread_when_azure_put_carries_reservation() {
+        // Arrange
+        let server = spawn_recording_http_server_with_status(201, Vec::new(), Vec::new());
+        let backend = recording_backend(server.endpoint.clone());
+        let budget = crate::common::resource_budget::ResourceBudget::new(1 << 20);
+        let reservation = Arc::new(budget.reserve(1024, "azure put").unwrap());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let before = crate::storage::retained_callback::retain_calls_on_this_thread();
+
+        // Act
+        backend.submit_put_with_reservation(
+            "blob",
+            vec![1; 1024],
+            Vec::new(),
+            Some(reservation),
+            sender,
+        );
+        let result = receive_put_result(&receiver);
+        let _ = server.finish();
+
+        // Assert
+        assert!(result.is_ok());
+        assert_eq!(
+            crate::storage::retained_callback::retain_calls_on_this_thread(),
+            before
+        );
+    }
+
+    #[test]
+    fn should_not_retain_completion_thread_when_azure_range_read_carries_reservation() {
+        // Arrange
+        let server = spawn_recording_http_server_with_status(
+            206,
+            vec![
+                ("Content-Range".into(), "bytes 10-12/100".into()),
+                ("ETag".into(), "\"version\"".into()),
+            ],
+            vec![1, 2, 3],
+        );
+        let backend = recording_backend(server.endpoint.clone());
+        let expected = crate::storage::StorageObjectMetadata {
+            size: 100,
+            etag: "\"version\"".into(),
+            generation: None,
+        };
+        let budget = crate::common::resource_budget::ResourceBudget::new(1 << 20);
+        let reservation = Arc::new(budget.reserve(3, "azure range").unwrap());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let before = crate::storage::retained_callback::retain_calls_on_this_thread();
+
+        // Act
+        backend.submit_get_range_with_reservation(
+            "sst/table.sst",
+            10..13,
+            expected,
+            std::time::Duration::from_secs(5),
+            Some(reservation),
+            sender,
+        );
+        let event = receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("range completion");
+        let _ = server.finish();
+
+        // Assert
+        assert!(matches!(event, CloudEvent::GetRange { result: Ok(_), .. }));
+        assert_eq!(
+            crate::storage::retained_callback::retain_calls_on_this_thread(),
+            before
         );
     }
 
