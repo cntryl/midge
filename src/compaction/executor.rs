@@ -938,7 +938,6 @@ pub(crate) fn write_partitioned_compaction_outputs(
         _cursor_reservation,
     } = inputs;
     let mut writer = sst_factory.create_for_compaction(budget.clone())?;
-    writer.require_versioned_entries()?;
     let mut partition_lower_bound: Option<(
         Vec<u8>,
         crate::common::resource_budget::ResourceReservation,
@@ -1108,7 +1107,6 @@ pub(crate) fn write_partitioned_compaction_outputs(
             })?;
             partition_lower_bound = Some((event_key.clone(), boundary_reservation));
             writer = sst_factory.create_for_compaction(budget.clone())?;
-            writer.require_versioned_entries()?;
             partition_point_count = 0;
             partition_tombstones.clear();
             let carried_pending = output_size_limit.map(|_| PendingTombstoneBound {
@@ -1504,10 +1502,6 @@ mod tests {
         }
 
         impl crate::sst::traits::DynSstWriter for CountingWriter {
-            fn preserves_versioned_entries(&self) -> bool {
-                true
-            }
-
             fn encoded_size_upper_bound(&self) -> Option<usize> {
                 Some(0)
             }
@@ -1522,6 +1516,37 @@ mod tests {
             }
 
             fn add(&mut self, _key: &[u8], _value: &[u8]) -> MidgeResult<()> {
+                Ok(())
+            }
+
+            fn add_with_meta(
+                &mut self,
+                _key: &[u8],
+                _value: Option<&[u8]>,
+                _seq: u64,
+                _op_type: u8,
+                _expiration: Option<u64>,
+            ) -> MidgeResult<()> {
+                Ok(())
+            }
+
+            fn add_sorted_with_meta(
+                &mut self,
+                _key: &[u8],
+                _value: Option<&[u8]>,
+                _seq: u64,
+                _op_type: u8,
+                _expiration: Option<u64>,
+            ) -> MidgeResult<()> {
+                Ok(())
+            }
+
+            fn add_range_tombstone(
+                &mut self,
+                _start: &[u8],
+                _end: &[u8],
+                _seq: u64,
+            ) -> MidgeResult<()> {
                 Ok(())
             }
 

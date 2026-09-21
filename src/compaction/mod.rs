@@ -1199,10 +1199,6 @@ mod tests {
         }
 
         impl crate::sst::traits::DynSstWriter for RejectFinishBytesWriter {
-            fn preserves_versioned_entries(&self) -> bool {
-                self.inner.preserves_versioned_entries()
-            }
-
             fn add(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()> {
                 self.inner.add(key, value)
             }
@@ -1587,10 +1583,6 @@ mod tests {
         }
 
         impl crate::sst::traits::DynSstWriter for CountingWriter {
-            fn preserves_versioned_entries(&self) -> bool {
-                self.inner.preserves_versioned_entries()
-            }
-
             fn estimated_size_bytes(&self) -> usize {
                 self.inner.estimated_size_bytes()
             }

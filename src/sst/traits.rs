@@ -212,27 +212,6 @@ impl<T> SstReaderExt for T where T: SstReader + SstStateReader {}
 
 /// Object-safe SST writer for polymorphic use
 pub trait DynSstWriter: Send {
-    /// Whether this writer preserves sequence numbers, operation kinds, TTLs,
-    /// and point tombstones supplied through `add_with_meta`.
-    ///
-    /// The default keeps source compatibility for simple third-party writers,
-    /// but durability paths must call `require_versioned_entries` before use.
-    fn preserves_versioned_entries(&self) -> bool {
-        false
-    }
-
-    /// Reject a compatibility-only writer before a durability path can
-    /// silently discard persisted metadata or deletes.
-    fn require_versioned_entries(&self) -> MidgeResult<()> {
-        if self.preserves_versioned_entries() {
-            Ok(())
-        } else {
-            Err(crate::common::MidgeError::NotSupported(
-                "SST writer does not preserve versioned entries".to_string(),
-            ))
-        }
-    }
-
     /// Best-effort retained/encoded size used for soft compaction rollover.
     /// Implementations that cannot estimate return zero and therefore retain
     /// the compatibility single-output behavior.
@@ -278,6 +257,10 @@ pub trait DynSstWriter: Send {
     /// Add an entry with metadata
     /// `op_type`: 0=Put, 1=Insert, 2=Delete
     ///
+    /// Required: a writer that cannot store the sequence, operation kind,
+    /// expiration and point tombstones supplied here must not implement this
+    /// trait, because a default would silently discard persisted deletes.
+    ///
     /// # Errors
     ///
     /// Returns an error when the entry cannot be appended to the SST.
@@ -285,22 +268,16 @@ pub trait DynSstWriter: Send {
         &mut self,
         key: &[u8],
         value: Option<&[u8]>,
-        _seq: u64,
-        _op_type: u8,
-        _expiration: Option<u64>,
-    ) -> MidgeResult<()> {
-        match value {
-            Some(v) => self.add(key, v),
-            None => Ok(()),
-        }
-    }
+        seq: u64,
+        op_type: u8,
+        expiration: Option<u64>,
+    ) -> MidgeResult<()>;
 
     /// Add an entry that is already sorted by key ascending and sequence
     /// descending for equal keys.
     ///
-    /// The default preserves compatibility with writers that only implement
-    /// `add_with_meta`. Filesystem writers use this signal to encode and spill
-    /// complete data blocks incrementally during compaction.
+    /// Filesystem writers use this signal to encode and spill complete data
+    /// blocks incrementally during compaction.
     ///
     /// # Errors
     ///
@@ -312,21 +289,14 @@ pub trait DynSstWriter: Send {
         seq: u64,
         op_type: u8,
         expiration: Option<u64>,
-    ) -> MidgeResult<()> {
-        self.add_with_meta(key, value, seq, op_type, expiration)
-    }
+    ) -> MidgeResult<()>;
 
     /// Add a range tombstone
     ///
     /// # Errors
     ///
     /// Returns an error when the range tombstone cannot be appended to the SST.
-    fn add_range_tombstone(&mut self, start: &[u8], end: &[u8], seq: u64) -> MidgeResult<()> {
-        let _ = (start, end, seq);
-        Err(crate::common::MidgeError::NotSupported(
-            "this SST writer does not support range tombstones".to_string(),
-        ))
-    }
+    fn add_range_tombstone(&mut self, start: &[u8], end: &[u8], seq: u64) -> MidgeResult<()>;
 
     /// Finalize and atomically persist this SST directly to `path`.
     ///
@@ -515,6 +485,39 @@ mod tests {
         fn add(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()> {
             self.data.push((key.to_vec(), value.to_vec()));
             Ok(())
+        }
+
+        fn add_with_meta(
+            &mut self,
+            key: &[u8],
+            value: Option<&[u8]>,
+            _seq: u64,
+            _op_type: u8,
+            _expiration: Option<u64>,
+        ) -> MidgeResult<()> {
+            self.add(key, value.unwrap_or_default())
+        }
+
+        fn add_sorted_with_meta(
+            &mut self,
+            key: &[u8],
+            value: Option<&[u8]>,
+            seq: u64,
+            op_type: u8,
+            expiration: Option<u64>,
+        ) -> MidgeResult<()> {
+            self.add_with_meta(key, value, seq, op_type, expiration)
+        }
+
+        fn add_range_tombstone(
+            &mut self,
+            _start: &[u8],
+            _end: &[u8],
+            _seq: u64,
+        ) -> MidgeResult<()> {
+            Err(crate::common::MidgeError::NotSupported(
+                "this SST writer does not support range tombstones".to_string(),
+            ))
         }
 
         fn finish_bytes(self: Box<Self>) -> MidgeResult<Vec<u8>> {
@@ -739,34 +742,6 @@ mod tests {
 
         // Assert
         assert!(result.is_ok());
-    }
-
-    #[test]
-    fn should_add_with_meta_default_impl_skips_none() {
-        // Arrange
-        let mut writer = MockSstWriter::new();
-
-        // Act - Default impl should skip None values
-        let result = writer.add_with_meta(b"key", None, 100, 0, None);
-
-        // Assert
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn should_reject_compatibility_writer_when_versioned_entries_are_required() {
-        // Arrange
-        let writer: Box<dyn DynSstWriter> = Box::new(MockSstWriter::new());
-
-        // Act
-        let result = writer.require_versioned_entries();
-
-        // Assert
-        assert!(matches!(
-            result,
-            Err(crate::common::MidgeError::NotSupported(message))
-                if message.contains("does not preserve versioned entries")
-        ));
     }
 
     #[test]

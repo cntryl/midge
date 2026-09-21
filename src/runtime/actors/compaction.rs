@@ -1076,10 +1076,6 @@ mod tests {
     }
 
     impl crate::sst::traits::DynSstWriter for BlockingFinalizeWriter {
-        fn preserves_versioned_entries(&self) -> bool {
-            self.inner.preserves_versioned_entries()
-        }
-
         fn add(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()> {
             self.inner.add(key, value)
         }

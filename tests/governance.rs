@@ -299,6 +299,54 @@ mod architecture_ladder {
     }
 
     #[test]
+    fn should_require_lossless_entry_methods_when_implementing_sst_writer() {
+        // Arrange
+        let source = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/sst/traits.rs"),
+        )
+        .expect("read SST traits");
+        let start = source
+            .find("pub trait DynSstWriter")
+            .expect("DynSstWriter trait");
+        let trait_source = &source[start..];
+        let required = [
+            "add_with_meta",
+            "add_sorted_with_meta",
+            "add_range_tombstone",
+        ];
+        let removed = ["preserves_versioned_entries", "require_versioned_entries"];
+
+        // Act
+        let defaulted: Vec<&str> = required
+            .into_iter()
+            .filter(|name| {
+                let declaration = trait_source
+                    .find(&format!("fn {name}("))
+                    .unwrap_or_else(|| panic!("fn {name} missing from DynSstWriter"));
+                let terminator = trait_source[declaration..]
+                    .find(['{', ';'])
+                    .expect("declaration terminator");
+                trait_source[declaration..].as_bytes()[terminator] == b'{'
+            })
+            .collect();
+        let lingering: Vec<&str> = removed
+            .into_iter()
+            .filter(|name| trait_source.contains(&format!("fn {name}(")))
+            .collect();
+
+        // Assert
+        assert!(
+            defaulted.is_empty(),
+            "DynSstWriter methods must be required so a writer cannot silently drop tombstones, \
+             sequences or TTLs: {defaulted:?}"
+        );
+        assert!(
+            lingering.is_empty(),
+            "the opt-in versioned-entries escape hatch must not return: {lingering:?}"
+        );
+    }
+
+    #[test]
     fn should_not_implement_storage_backend_for_hybrid_storage() {
         // Arrange
         let needle = "impl StorageBackend for HybridStorage";
