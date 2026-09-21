@@ -5,8 +5,6 @@
 
 use super::super::{ConflictPolicy, RuntimeMsg, RuntimeResponse, TransactionOp};
 use super::durability_sync::AppliedTransaction;
-#[cfg(test)]
-use super::snapshot::SnapshotCoordinator;
 use super::wal::ApplyTransactionRequest;
 use super::EventLoop;
 use crate::common::MidgeError;
@@ -28,15 +26,17 @@ fn local_strict_group_commit_collect_window(queue_is_empty: bool) -> Option<Dura
     (!queue_is_empty).then_some(LOCAL_STRICT_GROUP_COMMIT_WINDOW)
 }
 
-enum WriteResult {
-    #[cfg(test)]
-    WalAppend { sequence: u64, deferred: bool },
-    TransactionApplied {
-        last_sequence: u64,
-        op_count: usize,
-        deferred: bool,
-        touched_cfs: Vec<crate::types::ColumnFamilyId>,
-    },
+/// Outcome of one applied transaction, owned by the drain path until it is
+/// acknowledged.
+///
+/// The drain path handles exactly one kind of message — `ApplyTransaction` — so
+/// this is a struct rather than a message-shaped enum: there is no second,
+/// test-only production write to model.
+struct WriteResult {
+    last_sequence: u64,
+    op_count: usize,
+    deferred: bool,
+    touched_cfs: Vec<crate::types::ColumnFamilyId>,
 }
 
 impl EventLoop {
@@ -161,56 +161,6 @@ impl EventLoop {
         }
 
         match msg_rx.try_recv() {
-            #[cfg(test)]
-            Ok(RuntimeMsg::WalAppend {
-                request_id,
-                cf_id,
-                key,
-                value,
-                ttl_seconds,
-                insert_only,
-            }) => {
-                let result = self.wal_actor.append(
-                    &mut self.state,
-                    crate::runtime::actors::wal::AppendParams {
-                        request_id,
-                        cf_id,
-                        key: bytes::Bytes::from(key),
-                        value: value.map(bytes::Bytes::from),
-                        insert_only,
-                        ttl_seconds,
-                    },
-                );
-                self.finish_drained_write(
-                    request_id,
-                    result
-                        .map(|(sequence, deferred)| WriteResult::WalAppend { sequence, deferred }),
-                );
-                DrainOutcome::WritesHandled(1)
-            }
-            #[cfg(test)]
-            Ok(RuntimeMsg::WalAppendDeleteRange {
-                request_id,
-                cf_id,
-                start_key,
-                end_key,
-                durability_policy,
-            }) => {
-                let result = self.wal_actor.append_delete_range(
-                    &mut self.state,
-                    request_id,
-                    cf_id,
-                    bytes::Bytes::from(start_key),
-                    bytes::Bytes::from(end_key),
-                    durability_policy,
-                );
-                self.finish_drained_write(
-                    request_id,
-                    result
-                        .map(|(sequence, deferred)| WriteResult::WalAppend { sequence, deferred }),
-                );
-                DrainOutcome::WritesHandled(1)
-            }
             Ok(RuntimeMsg::ApplyTransaction {
                 request_id,
                 ops,
@@ -428,36 +378,9 @@ impl EventLoop {
                     }
                 }
             }
-            other => self.handle_interleavable_coalescing_message(other),
-        }
-    }
-
-    fn handle_interleavable_coalescing_message(&mut self, msg: RuntimeMsg) -> bool {
-        match msg {
-            // Snapshot bookkeeping is actor-owned but does not observe or advance
-            // data/WAL state. Handling it here keeps transaction lifecycle traffic
-            // from fragmenting an already ordered ApplyTransaction batch.
-            #[cfg(test)]
-            RuntimeMsg::RegisterSnapshot {
-                request_id,
-                snapshot_id,
-                sequence,
-                pinned_sst_names,
-            } => {
-                let _ = SnapshotCoordinator::register(
-                    self,
-                    request_id,
-                    snapshot_id,
-                    sequence,
-                    pinned_sst_names,
-                );
-                true
-            }
-            #[cfg(test)]
-            RuntimeMsg::UnregisterSnapshot { snapshot_id } => {
-                let _ = SnapshotCoordinator::unregister(self, snapshot_id);
-                true
-            }
+            // Anything that is not another coalescable `ApplyTransaction` ends the
+            // batch: it is stashed for the main loop, which runs it through
+            // `RuntimeDispatcher::handle` and therefore through both runtime gates.
             other => {
                 if self.pending_msg.is_none() {
                     self.pending_msg = Some(other);
@@ -492,7 +415,7 @@ impl EventLoop {
                     let touched_cfs = touched_cfs.remove(&result.request_id).unwrap_or_default();
                     self.finish_drained_write_after_publish(
                         result.request_id,
-                        Ok(WriteResult::TransactionApplied {
+                        Ok(WriteResult {
                             last_sequence: result.last_sequence,
                             op_count: result.op_count,
                             deferred: result.deferred,
@@ -600,14 +523,12 @@ impl EventLoop {
                     conflict_policy,
                 },
             )
-            .map(
-                |(last_sequence, op_count, deferred)| WriteResult::TransactionApplied {
-                    last_sequence,
-                    op_count,
-                    deferred,
-                    touched_cfs,
-                },
-            );
+            .map(|(last_sequence, op_count, deferred)| WriteResult {
+                last_sequence,
+                op_count,
+                deferred,
+                touched_cfs,
+            });
         self.finish_drained_write(request_id, result);
     }
 
@@ -634,38 +555,21 @@ impl EventLoop {
     }
 
     fn handle_write_success(&mut self, request_id: u64, result: &WriteResult) {
-        match result {
-            #[cfg(test)]
-            WriteResult::WalAppend { sequence, deferred } => {
-                if *deferred {
-                    self.maybe_queue_confirm_only_waiter(true, request_id, false);
-                } else {
-                    self.state.confirm_sequences(request_id);
-                }
-
-                self.respond(
-                    request_id,
-                    RuntimeResponse::WalAppended {
-                        request_id,
-                        sequence: *sequence,
-                    },
-                );
-            }
-            WriteResult::TransactionApplied {
-                last_sequence,
-                op_count,
-                deferred,
+        let WriteResult {
+            last_sequence,
+            op_count,
+            deferred,
+            touched_cfs,
+        } = result;
+        self.ack_applied_transaction(
+            request_id,
+            &AppliedTransaction {
+                last_sequence: *last_sequence,
+                op_count: *op_count,
+                deferred: *deferred,
                 touched_cfs,
-            } => self.ack_applied_transaction(
-                request_id,
-                &AppliedTransaction {
-                    last_sequence: *last_sequence,
-                    op_count: *op_count,
-                    deferred: *deferred,
-                    touched_cfs,
-                },
-            ),
-        }
+            },
+        );
     }
 
     fn handle_write_error(&mut self, request_id: u64, error: crate::common::MidgeError) {

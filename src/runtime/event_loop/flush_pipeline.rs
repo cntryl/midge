@@ -1012,7 +1012,7 @@ mod tests {
             false,
             Arc::new(crate::runtime::ResponseRouter::new()),
             config,
-            None,
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
         )?;
         Ok((event_loop, hybrid))
     }
@@ -1645,7 +1645,7 @@ mod tests {
             false,
             router,
             crate::runtime::RuntimeConfig::default(),
-            None,
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
         )?;
 
         // Act
@@ -1675,7 +1675,13 @@ mod tests {
             wal_durability_policy: crate::wal::DurabilityPolicy::Batched,
             ..crate::runtime::RuntimeConfig::default()
         };
-        let mut event_loop = EventLoop::new(state, false, router, config, None)?;
+        let mut event_loop = EventLoop::new(
+            state,
+            false,
+            router,
+            config,
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
+        )?;
         event_loop.wal_actor.append(
             &mut event_loop.state,
             crate::runtime::actors::wal::AppendParams {
@@ -1755,7 +1761,13 @@ mod tests {
             hybrid_storage: Some(Arc::clone(&hybrid)),
             ..crate::runtime::RuntimeConfig::default()
         };
-        let mut event_loop = EventLoop::new(state, false, router, config, None)?;
+        let mut event_loop = EventLoop::new(
+            state,
+            false,
+            router,
+            config,
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
+        )?;
         event_loop.state.sequence = 1;
         event_loop
             .state

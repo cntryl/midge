@@ -139,8 +139,6 @@ impl Default for WalState {
 pub struct CompactionState {
     /// SSTs currently being compacted (locked from other compactions)
     pub compacting_ssts: Vec<String>,
-    /// Pending compaction tasks
-    pub pending_tasks: usize,
 }
 
 /// Cloud sync state
@@ -453,7 +451,6 @@ impl RuntimeState {
             wal_last_synced_seq: self.wal.last_synced_seq,
             wal_local_durable_seq: self.wal.local_durable_seq,
             wal_cloud_durable_seq: self.wal.cloud_durable_seq,
-            pending_compactions: self.compaction.pending_tasks,
             compacting_ssts: self.compaction.compacting_ssts.len(),
             active_compactions: self
                 .active_compactions
@@ -600,7 +597,6 @@ impl RuntimeState {
             manifest_next_wal_seq: self.manifest.next_wal_seq,
             levels,
             active_snapshots,
-            pending_compactions: self.compaction.pending_tasks,
             compacting_ssts: self.compaction.compacting_ssts.clone(),
             obsolete_files: residue.orphan_ssts,
         }

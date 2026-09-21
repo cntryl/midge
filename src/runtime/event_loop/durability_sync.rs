@@ -530,7 +530,13 @@ mod tests {
             wal_durability_policy: policy,
             ..RuntimeConfig::default()
         };
-        EventLoop::new(state, false, router, config, None)
+        EventLoop::new(
+            state,
+            false,
+            router,
+            config,
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
+        )
     }
 
     #[test]
@@ -597,7 +603,13 @@ mod tests {
             leader_holder_id: Some("old-writer".to_string()),
             ..RuntimeConfig::default()
         };
-        let mut event_loop = EventLoop::new(state, false, Arc::clone(&router), config, None)?;
+        let mut event_loop = EventLoop::new(
+            state,
+            false,
+            Arc::clone(&router),
+            config,
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
+        )?;
         event_loop.wal_actor.append_transaction(
             &mut event_loop.state,
             crate::runtime::actors::wal::TransactionAppendParams {
@@ -889,8 +901,14 @@ mod tests {
             },
             ..RuntimeConfig::default()
         };
-        let mut event_loop =
-            EventLoop::new(state, false, router, config, None).expect("create event loop");
+        let mut event_loop = EventLoop::new(
+            state,
+            false,
+            router,
+            config,
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
+        )
+        .expect("create event loop");
         let first_request = 88;
         let first_response = event_loop.router.register(first_request, "TestRequest");
         event_loop

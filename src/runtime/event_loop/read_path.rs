@@ -408,7 +408,7 @@ mod tests {
             false,
             router,
             crate::runtime::RuntimeConfig::default(),
-            None,
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
         )?;
 
         let sst_name = "00000001.sst".to_string();

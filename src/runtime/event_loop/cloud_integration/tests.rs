@@ -3,6 +3,7 @@ use super::super::wal::{ApplyTransactionRequest, WalCoordinator};
 use super::super::EventLoop;
 use crate::runtime::durability::DurabilityWaiter;
 use crate::runtime::hybrid_persistence::HybridPersistence;
+use crate::runtime::TestRuntimeMsg;
 use crate::runtime::{
     state::RuntimeState, ConflictPolicy, KeyAssertion, ResponseRouter, RuntimeMsg, RuntimeResponse,
 };
@@ -2768,10 +2769,14 @@ fn should_retry_manifest_reclamation_under_continuous_request_load(
     assert!(el.gc_actor.manifest_reclamation_retry_due());
     let (msg_tx, msg_rx) = crossbeam::channel::unbounded::<RuntimeMsg>();
     msg_tx
-        .send(RuntimeMsg::Noop { request_id: 90_301 })
+        .send(RuntimeMsg::Test(TestRuntimeMsg::Noop {
+            request_id: 90_301,
+        }))
         .expect("queue first request");
     msg_tx
-        .send(RuntimeMsg::Noop { request_id: 90_302 })
+        .send(RuntimeMsg::Test(TestRuntimeMsg::Noop {
+            request_id: 90_302,
+        }))
         .expect("queue continuing request load");
 
     // Act: process one normal request while another remains queued.
@@ -3548,10 +3553,10 @@ fn should_not_block_runtime_when_cloud_sst_delete_is_slow() -> crate::common::Mi
     // Act
     let started_at = Instant::now();
     el.handle_runtime_msg(
-        RuntimeMsg::DeleteObsoleteSsts {
+        RuntimeMsg::Test(TestRuntimeMsg::DeleteObsoleteSsts {
             request_id,
             sst_names: vec![sst_name.to_string()],
-        },
+        }),
         &msg_rx,
     );
     let elapsed = started_at.elapsed();
@@ -3711,10 +3716,10 @@ fn should_join_cloud_gc_worker_before_runtime_shutdown() -> crate::common::Midge
     let request_id = 4547;
     let (_response_tx, msg_rx) = crossbeam::channel::unbounded();
     el.handle_runtime_msg(
-        RuntimeMsg::DeleteObsoleteSsts {
+        RuntimeMsg::Test(TestRuntimeMsg::DeleteObsoleteSsts {
             request_id,
             sst_names: vec![sst_name.to_string()],
-        },
+        }),
         &msg_rx,
     );
     delete_started_rx
@@ -5599,7 +5604,13 @@ fn should_preserve_idempotency_allocation_when_failed_cloud_wal_remains_retryabl
         wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
         ..Default::default()
     };
-    let mut el = EventLoop::new(state, false, router, config, None)?;
+    let mut el = EventLoop::new(
+        state,
+        false,
+        router,
+        config,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
+    )?;
 
     // Act
 
@@ -7435,7 +7446,13 @@ fn should_not_start_wal_flush_when_lease_check_leaves_less_than_storage_budget(
         leader_holder_id: Some("writer-1".to_string()),
         ..crate::runtime::RuntimeConfig::default()
     };
-    let mut el = EventLoop::new(state, false, Arc::clone(&router), config, None)?;
+    let mut el = EventLoop::new(
+        state,
+        false,
+        Arc::clone(&router),
+        config,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
+    )?;
     let sequence = append_cloud_async_put(&mut el)?;
     let active_segment = el.state.wal.current_segment_id;
     let request_id = 91_102;
@@ -7505,7 +7522,7 @@ fn should_back_off_failed_cloud_seal_while_normal_requests_make_progress(
     for request_id in 91_301..91_304 {
         response_receivers.push((request_id, el.router.register(request_id, "Noop")));
         msg_tx
-            .send(RuntimeMsg::Noop { request_id })
+            .send(RuntimeMsg::Test(TestRuntimeMsg::Noop { request_id }))
             .expect("queue unrelated request");
     }
 
@@ -7737,10 +7754,14 @@ fn should_retry_runtime_owned_wal_upload_under_continuous_request_load(
     );
     let (msg_tx, msg_rx) = crossbeam::channel::unbounded::<RuntimeMsg>();
     msg_tx
-        .send(RuntimeMsg::Noop { request_id: 90_401 })
+        .send(RuntimeMsg::Test(TestRuntimeMsg::Noop {
+            request_id: 90_401,
+        }))
         .expect("queue first request");
     msg_tx
-        .send(RuntimeMsg::Noop { request_id: 90_402 })
+        .send(RuntimeMsg::Test(TestRuntimeMsg::Noop {
+            request_id: 90_402,
+        }))
         .expect("queue continuing request load");
 
     // Act: process one normal request while another remains queued.

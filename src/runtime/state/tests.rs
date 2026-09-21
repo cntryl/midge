@@ -827,7 +827,6 @@ fn should_initialize_compaction_state() {
 
     // Assert
     assert!(compaction.compacting_ssts.is_empty());
-    assert_eq!(compaction.pending_tasks, 0);
 }
 
 // =========== CloudState Tests ===========

@@ -429,8 +429,14 @@ mod tests {
             wal_durability_policy: crate::wal::DurabilityPolicy::Batched,
             ..RuntimeConfig::default()
         };
-        let mut event_loop = EventLoop::new(create_test_state(), false, router, config, None)
-            .expect("create event loop");
+        let mut event_loop = EventLoop::new(
+            create_test_state(),
+            false,
+            router,
+            config,
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
+        )
+        .expect("create event loop");
         let syncs = Arc::new(AtomicUsize::new(0));
         event_loop
             .wal_actor

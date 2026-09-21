@@ -46,6 +46,40 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// How flush work is executed for one `EventLoop`.
+///
+/// This is an explicit construction-time choice rather than a `cfg!(test)`
+/// branch, so the scheduling semantics a test exercises are the ones it asked
+/// for and are reproducible in a production build.
+pub(crate) enum FlushWorkerMode {
+    /// Flush jobs run on the flush actor's worker threads; completions are
+    /// observed asynchronously by the event loop, and background coordinators
+    /// post follow-up work back through the supplied runtime channel.
+    Background(Sender<RuntimeMsg>),
+    /// Flush jobs are drained to completion inline, before the call that
+    /// scheduled them returns. There is no runtime channel for background
+    /// workers to post back through.
+    ///
+    /// Only test fixtures construct the loop this way today. The variant stays
+    /// in the production enum so flush scheduling is chosen the same way, from
+    /// the same table, in every build.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Inline,
+}
+
+impl FlushWorkerMode {
+    fn worker_msg_tx(self) -> Option<Sender<RuntimeMsg>> {
+        match self {
+            FlushWorkerMode::Background(tx) => Some(tx),
+            FlushWorkerMode::Inline => None,
+        }
+    }
+
+    const fn is_inline(&self) -> bool {
+        matches!(self, FlushWorkerMode::Inline)
+    }
+}
+
 const BACKGROUND_COMPACTION_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const STARTUP_CLOUD_MAINTENANCE_DELAY: Duration = Duration::from_millis(100);
 const HYBRID_STORAGE_POLL_INTERVAL: Duration = Duration::from_millis(5);
@@ -194,8 +228,10 @@ impl EventLoop {
         trace_enabled: bool,
         router: Arc<ResponseRouter>,
         config: super::RuntimeConfig,
-        worker_msg_tx: Option<crossbeam::channel::Sender<super::RuntimeMsg>>,
+        flush_worker_mode: FlushWorkerMode,
     ) -> crate::common::MidgeResult<Self> {
+        let inline_flush_worker = flush_worker_mode.is_inline();
+        let worker_msg_tx = flush_worker_mode.worker_msg_tx();
         let wal_dir = state.wal_dir.clone();
         let sst_dir = state.sst_dir.clone();
         let memory_mode = state.is_memory_mode();
@@ -280,7 +316,7 @@ impl EventLoop {
             publication_gate: ManifestPublicationGate::default(),
             flush_worker_result_rx,
             flush_barrier_waiters: HashMap::new(),
-            inline_flush_worker: cfg!(test) && worker_msg_tx.is_none(),
+            inline_flush_worker,
             shutting_down: false,
             shutdown_cloud_drain_timeout: config.shutdown_cloud_drain_timeout,
             worker_msg_tx,
@@ -1092,7 +1128,6 @@ impl EventLoop {
             .active_compactions
             .load(std::sync::atomic::Ordering::Acquire);
         let layout_is_changing = active_compactions > 0
-            || self.state.compaction.pending_tasks > 0
             || !self.state.compaction.compacting_ssts.is_empty()
             || self.flush_actor.is_inflight()
             || self.publication_gate.active;
@@ -1194,10 +1229,6 @@ impl EventLoop {
         }
 
         if self.cloud_wal.uploads_ready() {
-            return true;
-        }
-
-        if self.state.compaction.pending_tasks > 0 {
             return true;
         }
 

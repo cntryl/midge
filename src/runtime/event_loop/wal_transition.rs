@@ -168,8 +168,14 @@ mod tests {
             wal_durability_policy: crate::wal::DurabilityPolicy::Batched,
             ..RuntimeConfig::default()
         };
-        let mut event_loop =
-            EventLoop::new(state, false, router, config, None).expect("create event loop");
+        let mut event_loop = EventLoop::new(
+            state,
+            false,
+            router,
+            config,
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
+        )
+        .expect("create event loop");
         let fs: Arc<dyn Fs> = Arc::new(MockFs::new());
         let writer = FsWalFactoryIo::new(Arc::clone(&fs))
             .create_writer(ACTIVE_FILE_NAME)

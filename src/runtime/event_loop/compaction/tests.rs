@@ -92,7 +92,7 @@ fn event_loop_with_storage(
             hybrid_storage: Some(Arc::clone(&hybrid)),
             ..Default::default()
         },
-        None,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
     )?;
     Ok((event_loop, hybrid))
 }
@@ -362,7 +362,7 @@ fn stale_writer_event_loop(directory: &tempfile::TempDir) -> MidgeResult<EventLo
         false,
         Arc::new(crate::runtime::ResponseRouter::new()),
         config,
-        None,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
     )
 }
 

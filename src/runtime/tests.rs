@@ -1,5 +1,6 @@
 use super::*;
 use crate::common::MidgeError;
+use crate::runtime::TestRuntimeMsg;
 use crate::wal::DurabilityPolicy;
 use std::sync::Arc;
 use std::thread;
@@ -518,9 +519,9 @@ fn should_finish_accepted_transaction_given_caller_times_out_before_event_loop_r
 fn assert_strict_runtime_value(handle: &RuntimeHandle, key: &[u8], expected: &[u8]) {
     let sequence = match handle
         .send_and_wait_timeout(
-            RuntimeMsg::GetCurrentSequence {
+            RuntimeMsg::Test(TestRuntimeMsg::GetCurrentSequence {
                 request_id: next_request_id().expect("allocate sequence request id"),
-            },
+            }),
             Duration::from_secs(1),
         )
         .expect("query sequence after accepted transaction")
@@ -531,13 +532,13 @@ fn assert_strict_runtime_value(handle: &RuntimeHandle, key: &[u8], expected: &[u
     };
     let read = handle
         .send_and_wait_timeout(
-            RuntimeMsg::Read {
+            RuntimeMsg::Test(TestRuntimeMsg::Read {
                 request_id: next_request_id().expect("allocate read request id"),
                 cf_id: 0,
                 key: key.to_vec(),
                 sequence,
                 requested_durability: crate::types::ReadDurability::Strict,
-            },
+            }),
             Duration::from_secs(1),
         )
         .expect("read accepted transaction")
@@ -696,7 +697,7 @@ fn should_remain_exhausted_without_reusing_request_ids_after_wrap_boundary() {
 #[test]
 fn should_extract_request_id_from_message() {
     // Arrange
-    let msg = RuntimeMsg::Noop { request_id: 42 };
+    let msg = RuntimeMsg::Test(TestRuntimeMsg::Noop { request_id: 42 });
 
     // Act
     let req_id = msg.request_id();
@@ -741,83 +742,83 @@ fn write_side_request_response_messages() -> Vec<RuntimeMsg> {
             request_id: 1,
             cf_id: 0,
         },
-        RuntimeMsg::FlushComplete {
+        RuntimeMsg::Test(TestRuntimeMsg::FlushComplete {
             request_id: 2,
             cf_id: 0,
             sst_name: "flushed.sst".to_string(),
             sequence: 10,
-        },
-        RuntimeMsg::CheckCompaction { request_id: 3 },
-        RuntimeMsg::RunCompaction {
+        }),
+        RuntimeMsg::Test(TestRuntimeMsg::CheckCompaction { request_id: 3 }),
+        RuntimeMsg::Test(TestRuntimeMsg::RunCompaction {
             request_id: 4,
             plan: compaction_plan,
-        },
-        RuntimeMsg::WalAppend {
+        }),
+        RuntimeMsg::Test(TestRuntimeMsg::WalAppend {
             request_id: 5,
             cf_id: 0,
             key: b"k".to_vec(),
             value: Some(b"v".to_vec()),
             ttl_seconds: None,
             insert_only: false,
-        },
-        RuntimeMsg::WalAppendDeleteRange {
+        }),
+        RuntimeMsg::Test(TestRuntimeMsg::WalAppendDeleteRange {
             request_id: 6,
             cf_id: 0,
             start_key: b"a".to_vec(),
             end_key: b"z".to_vec(),
             durability_policy: None,
-        },
-        RuntimeMsg::WalRotate { request_id: 7 },
-        RuntimeMsg::WalSyncComplete {
+        }),
+        RuntimeMsg::Test(TestRuntimeMsg::WalRotate { request_id: 7 }),
+        RuntimeMsg::Test(TestRuntimeMsg::WalSyncComplete {
             request_id: 8,
             segment_id: 1,
-        },
-        RuntimeMsg::CheckGc { request_id: 12 },
-        RuntimeMsg::DeleteObsoleteSsts {
+        }),
+        RuntimeMsg::Test(TestRuntimeMsg::CheckGc { request_id: 12 }),
+        RuntimeMsg::Test(TestRuntimeMsg::DeleteObsoleteSsts {
             request_id: 13,
             sst_names: vec!["old.sst".to_string()],
-        },
-        RuntimeMsg::ManifestAddSst {
+        }),
+        RuntimeMsg::Test(TestRuntimeMsg::ManifestAddSst {
             request_id: 14,
             file_meta: file_meta.clone(),
-        },
-        RuntimeMsg::ManifestCompactionComplete {
+        }),
+        RuntimeMsg::Test(TestRuntimeMsg::ManifestCompactionComplete {
             request_id: 15,
             removed: vec!["old.sst".to_string()],
             added: vec![file_meta],
-        },
-        RuntimeMsg::BeginIngest { request_id: 16 },
-        RuntimeMsg::EndIngest { request_id: 17 },
-        RuntimeMsg::GetIngestState { request_id: 18 },
-        RuntimeMsg::GetRuntimeConfig { request_id: 19 },
+        }),
+        RuntimeMsg::Test(TestRuntimeMsg::BeginIngest { request_id: 16 }),
+        RuntimeMsg::Test(TestRuntimeMsg::EndIngest { request_id: 17 }),
+        RuntimeMsg::Test(TestRuntimeMsg::GetIngestState { request_id: 18 }),
+        RuntimeMsg::Test(TestRuntimeMsg::GetRuntimeConfig { request_id: 19 }),
     ]
 }
 
 fn read_side_request_response_messages() -> Vec<RuntimeMsg> {
     vec![
-        RuntimeMsg::Read {
+        RuntimeMsg::Test(TestRuntimeMsg::Read {
             request_id: 20,
             cf_id: 0,
             key: b"k".to_vec(),
             sequence: 1,
             requested_durability: crate::types::ReadDurability::Strict,
-        },
-        RuntimeMsg::RangeScan {
+        }),
+        RuntimeMsg::Test(TestRuntimeMsg::RangeScan {
             request_id: 21,
             cf_id: 0,
             start: b"a".to_vec(),
             end: b"z".to_vec(),
             sequence: 1,
             requested_durability: crate::types::ReadDurability::Strict,
-        },
-        RuntimeMsg::CaptureReadSnapshot {
+        }),
+        RuntimeMsg::Test(TestRuntimeMsg::CaptureReadSnapshot {
             request_id: 22,
             cf_id: 0,
             sequence: 1,
-        },
-        RuntimeMsg::UnregisterSnapshot { snapshot_id: 23 },
-        RuntimeMsg::Noop { request_id: 24 },
-        RuntimeMsg::StartupPing { request_id: 25 },
+        }),
+        RuntimeMsg::Test(TestRuntimeMsg::UnregisterSnapshot { snapshot_id: 23 }),
+        RuntimeMsg::Test(TestRuntimeMsg::Noop { request_id: 24 }),
+        RuntimeMsg::Test(TestRuntimeMsg::StartupPing { request_id: 25 }),
     ]
 }
 
@@ -850,9 +851,11 @@ fn assert_compact_all_protocol_roundtrip() {
     }
 
     h.send(RuntimeMsg::Shutdown).expect("send shutdown");
-    assert!(RuntimeMsg::GetCurrentSequence { request_id: 7 }
-        .request_id()
-        .is_some());
+    assert!(
+        RuntimeMsg::Test(TestRuntimeMsg::GetCurrentSequence { request_id: 7 })
+            .request_id()
+            .is_some()
+    );
 }
 
 #[test]
@@ -867,10 +870,13 @@ fn should_extract_request_id_from_all_request_response_messages() {
     // Assert
     assert!(messages
         .iter()
-        .filter(|msg| !matches!(msg, RuntimeMsg::UnregisterSnapshot { .. }))
+        .filter(|msg| !matches!(
+            msg,
+            RuntimeMsg::Test(TestRuntimeMsg::UnregisterSnapshot { .. })
+        ))
         .all(|msg| msg.request_id().is_some()));
     assert_eq!(
-        RuntimeMsg::UnregisterSnapshot { snapshot_id: 23 }.request_id(),
+        RuntimeMsg::Test(TestRuntimeMsg::UnregisterSnapshot { snapshot_id: 23 }).request_id(),
         None
     );
     assert_compact_all_protocol_roundtrip();
@@ -1075,8 +1081,12 @@ fn should_create_runtime_handle() {
 
     // Assert - both handles submit onto the same underlying channel, so both
     // sends must succeed against the still-live runtime
-    assert!(handle.send(RuntimeMsg::Noop { request_id: 1 }).is_ok());
-    assert!(handle2.send(RuntimeMsg::Noop { request_id: 2 }).is_ok());
+    assert!(handle
+        .send(RuntimeMsg::Test(TestRuntimeMsg::Noop { request_id: 1 }))
+        .is_ok());
+    assert!(handle2
+        .send(RuntimeMsg::Test(TestRuntimeMsg::Noop { request_id: 2 }))
+        .is_ok());
 
     drop(runtime);
 }
@@ -1085,7 +1095,7 @@ fn should_create_runtime_handle() {
 fn should_handle_send_noop_message() {
     // Arrange
     let (runtime, handle) = Runtime::new();
-    let msg = RuntimeMsg::Noop { request_id: 1 };
+    let msg = RuntimeMsg::Test(TestRuntimeMsg::Noop { request_id: 1 });
 
     // Act
     let result = handle.send(msg);
@@ -1107,7 +1117,7 @@ fn should_detect_closed_channel_on_send() {
     thread::sleep(std::time::Duration::from_millis(10));
 
     // Assert
-    let result = handle.send(RuntimeMsg::Noop { request_id: 1 });
+    let result = handle.send(RuntimeMsg::Test(TestRuntimeMsg::Noop { request_id: 1 }));
     assert!(result.is_err());
 }
 
@@ -1365,4 +1375,348 @@ fn should_count_abandoned_request_given_routed_transaction_when_caller_times_out
 
     handle.lifecycle.mark_closed();
     drop(runtime);
+}
+
+// =========== Runtime gate classification tests ===========
+//
+// The publication gate and the storage-verification barrier classify messages
+// from tables on `RuntimeMsg`. Those tables must list production traffic only:
+// test-only hooks reach them through `RuntimeMsg::Test`, which delegates to a
+// separate `TestRuntimeMsg` table, so a test build and a release build gate the
+// same production messages the same way.
+
+#[test]
+fn should_defer_layout_mutating_messages_when_publication_gate_classifies() {
+    // Arrange
+    let deferred = vec![
+        RuntimeMsg::ManifestPersist { request_id: 1 },
+        RuntimeMsg::ManifestCreateColumnFamily {
+            request_id: 2,
+            name: "cf".to_string(),
+        },
+        RuntimeMsg::ManifestDropColumnFamily {
+            request_id: 3,
+            cf_id: 0,
+            discard_unflushed: false,
+        },
+        RuntimeMsg::CompactionComplete {
+            request_id: 4,
+            input_ssts: Vec::new(),
+            output_ssts: Vec::new(),
+            cf_id: 0,
+            target_level: 1,
+            succeeded: true,
+        },
+        RuntimeMsg::CompactAll { request_id: 5 },
+        RuntimeMsg::RetryGc,
+    ];
+    let passed = vec![
+        RuntimeMsg::WalSync { request_id: 6 },
+        RuntimeMsg::FlushMemtable {
+            request_id: 7,
+            cf_id: 0,
+        },
+        RuntimeMsg::GetRuntimeMetrics { request_id: 8 },
+        RuntimeMsg::BeginTransaction {
+            request_id: 9,
+            cf_id: 0,
+        },
+    ];
+
+    // Act / Assert
+    for msg in deferred {
+        assert!(
+            msg.defers_under_publication_gate(),
+            "{} must be deferred by an active publication gate",
+            msg.kind_name()
+        );
+    }
+    for msg in passed {
+        assert!(
+            !msg.defers_under_publication_gate(),
+            "{} must pass an active publication gate",
+            msg.kind_name()
+        );
+    }
+}
+
+#[test]
+fn should_classify_test_hooks_through_the_test_table_when_publication_gate_classifies() {
+    // Arrange
+    let manifest_hook = RuntimeMsg::Test(TestRuntimeMsg::ManifestAddSst {
+        request_id: 1,
+        file_meta: FileMeta {
+            name: "a.sst".to_string(),
+            level: 0,
+            size_bytes: 1,
+            content_crc32c: None,
+            cf_id: 0,
+            smallest_key: None,
+            largest_key: None,
+            smallest_seq: None,
+            largest_seq: None,
+            key_bounds_complete: false,
+        },
+    });
+    let inert_hook = RuntimeMsg::Test(TestRuntimeMsg::Noop { request_id: 2 });
+
+    // Act / Assert
+    assert!(manifest_hook.defers_under_publication_gate());
+    assert!(!inert_hook.defers_under_publication_gate());
+}
+
+#[test]
+fn should_reject_writes_and_defer_completions_when_verification_barrier_classifies() {
+    // Arrange
+    let rejected = vec![
+        RuntimeMsg::ApplyTransaction {
+            request_id: 1,
+            ops: Vec::new(),
+            assertions: Vec::new(),
+            durability_policy: None,
+            start_sequence: None,
+            conflict_policy: ConflictPolicy::LastWriteWins,
+            response_tx: None,
+        },
+        RuntimeMsg::FlushMemtable {
+            request_id: 2,
+            cf_id: 0,
+        },
+        RuntimeMsg::WalSync { request_id: 3 },
+        RuntimeMsg::SealWalForCloud {
+            request_id: 4,
+            sequence: 1,
+            wait_for_ack: false,
+        },
+        RuntimeMsg::ManifestPersist { request_id: 5 },
+        RuntimeMsg::CompactAll { request_id: 6 },
+    ];
+    let deferred = vec![
+        RuntimeMsg::CompactionComplete {
+            request_id: 7,
+            input_ssts: Vec::new(),
+            output_ssts: Vec::new(),
+            cf_id: 0,
+            target_level: 1,
+            succeeded: true,
+        },
+        RuntimeMsg::RetryGc,
+    ];
+    let allowed = vec![
+        RuntimeMsg::GetRuntimeMetrics { request_id: 8 },
+        RuntimeMsg::BeginTransaction {
+            request_id: 9,
+            cf_id: 0,
+        },
+        RuntimeMsg::CheckWriteStall {
+            request_id: 10,
+            cf_id: 0,
+        },
+    ];
+
+    // Act / Assert
+    for msg in rejected {
+        assert!(
+            matches!(
+                msg.verification_barrier_action(),
+                VerificationBarrierAction::Reject { request_id }
+                    if Some(request_id) == msg.request_id()
+            ),
+            "{} must fail fast under a verification barrier, addressed to its own request id",
+            msg.kind_name()
+        );
+    }
+    for msg in deferred {
+        assert_eq!(
+            msg.verification_barrier_action(),
+            VerificationBarrierAction::Defer,
+            "{} must be parked, not dropped, under a verification barrier",
+            msg.kind_name()
+        );
+    }
+    for msg in allowed {
+        assert_eq!(
+            msg.verification_barrier_action(),
+            VerificationBarrierAction::Allow,
+            "{} must pass a verification barrier",
+            msg.kind_name()
+        );
+    }
+}
+
+#[test]
+fn should_classify_test_hooks_through_the_test_table_when_verification_barrier_classifies() {
+    // Arrange
+    let rejected = RuntimeMsg::Test(TestRuntimeMsg::WalRotate { request_id: 1 });
+    let deferred = RuntimeMsg::Test(TestRuntimeMsg::WalSyncComplete {
+        request_id: 2,
+        segment_id: 1,
+    });
+    let allowed = RuntimeMsg::Test(TestRuntimeMsg::Noop { request_id: 3 });
+
+    // Act / Assert
+    assert!(matches!(
+        rejected.verification_barrier_action(),
+        VerificationBarrierAction::Reject { request_id: 1 }
+    ));
+    assert_eq!(
+        deferred.verification_barrier_action(),
+        VerificationBarrierAction::Defer
+    );
+    assert_eq!(
+        allowed.verification_barrier_action(),
+        VerificationBarrierAction::Allow
+    );
+}
+
+/// Source-scanning guards for the "one table per build" invariant.
+///
+/// The production routing and classification tables must be identical in a
+/// `cfg(test)` build and a release build. No behavioural unit test can check
+/// that: a unit test only ever runs in a `cfg(test)` build, so a `#[cfg(test)]`
+/// arm smuggled into a production table is *live* in exactly the build the test
+/// observes, and every assertion still passes while the release build silently
+/// routes, defers or rejects differently. Reading the source is the only check
+/// that fails for the mutation it is meant to catch.
+///
+/// `include_str!` is used rather than a runtime read so the guard is pinned to
+/// the sources this build was compiled from.
+mod production_tables_have_no_cfg_test_arms {
+    /// Every spelling that makes a table arm differ between builds. Rejecting
+    /// only `#[cfg(test)]` is not enough: `#[cfg(not(test))]` is the idiom this
+    /// module itself introduced for the uninhabited `TestRuntimeMsg`, so it is
+    /// the form a future edit is most likely to reach for, and `cfg!(test)`
+    /// smuggles the same divergence through a guard expression.
+    const BUILD_DIVERGENT: &[&str] = &[
+        "#[cfg(test)]",
+        "#[cfg(not(test))]",
+        "#[cfg(all(test",
+        "#[cfg(any(test",
+        "#[cfg_attr(test",
+        "cfg!(test)",
+    ];
+
+    /// Return the `{ .. }` block that follows `header` (which must end in `{`),
+    /// braces balanced.
+    fn block_after(source: &str, header: &str) -> String {
+        let start = source
+            .find(header)
+            .unwrap_or_else(|| panic!("`{header}` not found; update this guard"));
+        let open = start + header.len() - 1;
+        let mut depth = 0usize;
+        for (offset, byte) in source.as_bytes()[open..].iter().enumerate() {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return source[open..=open + offset].to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unbalanced braces after `{header}`");
+    }
+
+    /// Same, for a header that must be unique in the file — so the guard cannot
+    /// be silently pointed at the wrong block by a later edit.
+    fn sole_block(source: &str, header: &str) -> String {
+        assert_eq!(
+            source.matches(header).count(),
+            1,
+            "`{header}` is no longer unique; update this guard"
+        );
+        block_after(source, header)
+    }
+
+    /// Return the sole block whose header carries no `cfg` attribute, so the
+    /// guard cannot be pointed at a `#[cfg(..)]`-gated stub by reordering the
+    /// file. `sole_block` cannot be used where the header is legitimately
+    /// repeated across gated and ungated impls.
+    fn production_block(source: &str, header: &str) -> String {
+        let mut found: Option<String> = None;
+        for (start, _) in source.match_indices(header) {
+            let gated = source[..start]
+                .lines()
+                .rev()
+                .map(str::trim)
+                .find(|line| !line.is_empty() && !line.starts_with("///"))
+                .is_some_and(|line| line.starts_with("#[cfg"));
+            if gated {
+                continue;
+            }
+            assert!(
+                found.is_none(),
+                "`{header}` has more than one ungated block; update this guard"
+            );
+            found = Some(block_after(&source[start..], header));
+        }
+        found.unwrap_or_else(|| panic!("no ungated `{header}` found; update this guard"))
+    }
+
+    fn assert_no_cfg_test(block: &str, what: &str) {
+        for spelling in BUILD_DIVERGENT {
+            assert!(
+                !block.contains(spelling),
+                "`{what}` contains a `{spelling}` arm: the production table now differs \
+                 between a test build and a release build. Route the test-only case through \
+                 `RuntimeMsg::Test` / `TestRuntimeMsg` instead."
+            );
+        }
+    }
+
+    #[test]
+    fn should_reject_cfg_test_arms_when_scanning_the_protocol_message_tables() {
+        // Arrange
+        let source = include_str!("protocol.rs");
+
+        // Act
+        let message_enum = sole_block(source, "pub enum RuntimeMsg {");
+        let classifiers = sole_block(source, "impl RuntimeMsg {");
+
+        // Assert
+        assert_no_cfg_test(&message_enum, "enum RuntimeMsg");
+        assert_no_cfg_test(&classifiers, "impl RuntimeMsg");
+    }
+
+    #[test]
+    fn should_reject_cfg_test_arms_when_scanning_the_dispatch_routing_table() {
+        // Arrange
+        let source = include_str!("event_loop/dispatch.rs");
+
+        // Act
+        // Selected by the absence of a `cfg` attribute rather than by source
+        // order: both the `#[cfg(test)]` extension and the `#[cfg(not(test))]`
+        // stub share this header, and either could be moved above the
+        // production impl.
+        let production_impl = production_block(source, "impl RuntimeDispatcher {");
+
+        // Assert
+        assert_no_cfg_test(&production_impl, "impl RuntimeDispatcher");
+    }
+
+    #[test]
+    fn should_reject_cfg_test_arms_when_scanning_the_production_write_drain() {
+        // Arrange
+        let source = include_str!("event_loop/write_batch.rs");
+
+        // Act
+        let write_path = sole_block(source, "impl EventLoop {");
+
+        // Assert
+        assert_no_cfg_test(&write_path, "write_batch::EventLoop");
+    }
+
+    #[test]
+    fn should_reject_cfg_test_arms_when_scanning_the_verification_barrier_gate() {
+        // Arrange
+        let source = include_str!("event_loop/verification.rs");
+
+        // Act
+        let gate = sole_block(source, "impl EventLoop {");
+
+        // Assert
+        assert_no_cfg_test(&gate, "verification::EventLoop");
+    }
 }

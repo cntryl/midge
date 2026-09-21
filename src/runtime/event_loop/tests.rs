@@ -1,5 +1,6 @@
 use super::*;
 use crate::runtime::hybrid_persistence::HybridPersistence;
+use crate::runtime::TestRuntimeMsg;
 use crate::runtime::{state::RuntimeState, ResponseRouter};
 use crate::sst::Memtable;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -72,7 +73,10 @@ fn should_drain_flush_completion_after_non_mutating_request() -> crate::common::
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
 
     // Act
-    event_loop.process_one(RuntimeMsg::Noop { request_id }, &msg_rx);
+    event_loop.process_one(
+        RuntimeMsg::Test(TestRuntimeMsg::Noop { request_id }),
+        &msg_rx,
+    );
 
     // Assert
     assert!(matches!(
@@ -145,7 +149,7 @@ pub(in crate::runtime::event_loop) fn create_test_event_loop(
         false,
         router,
         crate::runtime::RuntimeConfig::default(),
-        None,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
     )
 }
 
@@ -177,7 +181,13 @@ pub(in crate::runtime::event_loop) fn create_test_cloud_event_loop(
         writer_epoch: 1,
         ..crate::runtime::RuntimeConfig::default()
     };
-    EventLoop::new(state, false, router, config, None)
+    EventLoop::new(
+        state,
+        false,
+        router,
+        config,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
+    )
 }
 
 pub(in crate::runtime::event_loop) fn create_test_local_event_loop(
@@ -192,7 +202,7 @@ pub(in crate::runtime::event_loop) fn create_test_local_event_loop(
         false,
         router,
         crate::runtime::RuntimeConfig::default(),
-        None,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
     )
 }
 
@@ -223,8 +233,13 @@ fn should_require_cloud_filename_allocation_when_compacting_in_salvage_mode(
         cloud_metadata_storage: Some(Arc::clone(&cloud)),
         ..crate::runtime::RuntimeConfig::default()
     };
-    let mut event_loop =
-        EventLoop::new(state, false, Arc::new(ResponseRouter::new()), config, None)?;
+    let mut event_loop = EventLoop::new(
+        state,
+        false,
+        Arc::new(ResponseRouter::new()),
+        config,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
+    )?;
     let _publication = cloud
         .try_lock_metadata_publication()
         .expect("hold metadata publication");
@@ -471,7 +486,13 @@ fn should_hold_cloud_frontier_at_local_recovery_gap_until_resumed_upload_is_ackn
     let router = Arc::new(ResponseRouter::new());
 
     // Act
-    let mut event_loop = EventLoop::new(state, false, router, config, None)?;
+    let mut event_loop = EventLoop::new(
+        state,
+        false,
+        router,
+        config,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
+    )?;
 
     // Assert
     assert_eq!(event_loop.state.wal.cloud_durable_seq, 1);
@@ -637,7 +658,13 @@ fn should_apply_runtime_config_block_cache_policy_to_read_resources_when_initial
     };
 
     // Act
-    let event_loop = EventLoop::new(state, false, router, config, None)?;
+    let event_loop = EventLoop::new(
+        state,
+        false,
+        router,
+        config,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
+    )?;
 
     // Assert
     assert_eq!(event_loop.compaction_actor.l0_file_count_threshold(), 7);
@@ -716,14 +743,14 @@ fn should_create_event_loop_given_supported_storage_modes() {
         false,
         Arc::new(ResponseRouter::new()),
         crate::runtime::RuntimeConfig::default(),
-        None,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
     );
     let fs_result = EventLoop::new(
         fs_state,
         false,
         Arc::new(ResponseRouter::new()),
         crate::runtime::RuntimeConfig::default(),
-        None,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
     );
 
     // Assert - both storage modes must construct successfully
@@ -1596,40 +1623,27 @@ fn should_publish_all_flushable_cfs_given_local_write_burst_without_further_writ
         .expect("create second cf");
 
     let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
-    let payload = vec![0xA5; 1536];
+    let payload = bytes::Bytes::from(vec![0xA5; 1536]);
+    let burst_write = |request_id: u64, cf_id, key: &'static [u8]| RuntimeMsg::ApplyTransaction {
+        request_id,
+        ops: vec![crate::runtime::TransactionOp::Put {
+            cf_id,
+            key: bytes::Bytes::from_static(key),
+            value: payload.clone(),
+            ttl_seconds: None,
+            insert_only: false,
+        }],
+        assertions: Vec::new(),
+        durability_policy: Some(crate::wal::DurabilityPolicy::Batched),
+        start_sequence: None,
+        conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+        response_tx: None,
+    };
     let burst = vec![
-        RuntimeMsg::WalAppend {
-            request_id: 1,
-            cf_id: 0,
-            key: b"default-1".to_vec(),
-            value: Some(payload.clone()),
-            ttl_seconds: None,
-            insert_only: false,
-        },
-        RuntimeMsg::WalAppend {
-            request_id: 2,
-            cf_id: second_cf_id,
-            key: b"second-1".to_vec(),
-            value: Some(payload.clone()),
-            ttl_seconds: None,
-            insert_only: false,
-        },
-        RuntimeMsg::WalAppend {
-            request_id: 3,
-            cf_id: 0,
-            key: b"default-2".to_vec(),
-            value: Some(payload.clone()),
-            ttl_seconds: None,
-            insert_only: false,
-        },
-        RuntimeMsg::WalAppend {
-            request_id: 4,
-            cf_id: second_cf_id,
-            key: b"second-2".to_vec(),
-            value: Some(payload),
-            ttl_seconds: None,
-            insert_only: false,
-        },
+        burst_write(1, 0, b"default-1"),
+        burst_write(2, second_cf_id, b"second-1"),
+        burst_write(3, 0, b"default-2"),
+        burst_write(4, second_cf_id, b"second-2"),
     ];
 
     let mut burst_iter = burst.into_iter();
@@ -1898,7 +1912,7 @@ fn should_respect_trace_enabled_flag() {
         false,
         router1,
         crate::runtime::RuntimeConfig::default(),
-        None,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
     )
     .expect("Should create");
     let event_loop2 = EventLoop::new(
@@ -1906,7 +1920,7 @@ fn should_respect_trace_enabled_flag() {
         true,
         router2,
         crate::runtime::RuntimeConfig::default(),
-        None,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
     )
     .expect("Should create");
 
@@ -1968,7 +1982,7 @@ fn should_maintain_router_reference() {
         false,
         Arc::clone(&router),
         crate::runtime::RuntimeConfig::default(),
-        None,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
     )
     .expect("Should create");
 
@@ -2093,7 +2107,13 @@ fn should_incrementally_drain_recovered_wal_given_bounded_upload_queue_at_open(
 
     // Act
     let router = Arc::new(ResponseRouter::new());
-    let mut event_loop = EventLoop::new(state, false, router, config, None)?;
+    let mut event_loop = EventLoop::new(
+        state,
+        false,
+        router,
+        config,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
+    )?;
     let backlog_after_open = event_loop.cloud_wal.upload_backlog.len();
     let queued_after_open = storage.pending_upload_count();
     let deadline = Instant::now() + Duration::from_secs(3);
@@ -2152,7 +2172,13 @@ fn should_remove_validated_local_copy_when_remote_recovery_segment_is_initially_
     };
 
     // Act
-    let event_loop = EventLoop::new(state, false, Arc::new(ResponseRouter::new()), config, None)?;
+    let event_loop = EventLoop::new(
+        state,
+        false,
+        Arc::new(ResponseRouter::new()),
+        config,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
+    )?;
 
     // Assert
     assert!(!local_path.exists());

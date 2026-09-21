@@ -99,7 +99,6 @@ impl WorkloadProgress {
                 "compactions_completed": metrics.compactions_run,
                 "compaction_bytes_rewritten": metrics.compaction_bytes_rewritten,
                 "active_compactions": metrics.active_compactions,
-                "pending_compactions": metrics.pending_compactions,
                 "compacting_ssts": metrics.compacting_ssts,
                 "flush_queue": metrics.flush_queue_depth,
                 "flush_inflight": metrics.flush_inflight,

@@ -220,7 +220,7 @@ mod tests {
             false,
             Arc::new(crate::runtime::ResponseRouter::new()),
             config,
-            None,
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
         )?;
         Ok((directory, event_loop, setup.hybrid_storage))
     }

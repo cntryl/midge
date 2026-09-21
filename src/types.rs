@@ -103,7 +103,6 @@ pub struct RuntimeMetricsSnapshot {
     pub wal_last_synced_seq: u64,
     pub wal_local_durable_seq: u64,
     pub wal_cloud_durable_seq: u64,
-    pub pending_compactions: usize,
     pub compacting_ssts: usize,
     pub active_compactions: usize,
     pub pending_cloud_uploads: usize,
@@ -245,7 +244,6 @@ pub struct StorageLayoutSnapshot {
     pub manifest_next_wal_seq: u64,
     pub levels: Vec<StorageLayoutLevel>,
     pub active_snapshots: Vec<SnapshotPinSnapshot>,
-    pub pending_compactions: usize,
     pub compacting_ssts: Vec<String>,
     pub obsolete_files: Vec<String>,
 }

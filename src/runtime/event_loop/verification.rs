@@ -1,5 +1,5 @@
 use super::EventLoop;
-use crate::runtime::{RuntimeMsg, RuntimeResponse};
+use crate::runtime::{RuntimeMsg, RuntimeResponse, VerificationBarrierAction};
 
 impl EventLoop {
     pub(super) fn gate_message_for_flush_publication(
@@ -9,24 +9,7 @@ impl EventLoop {
         if !self.publication_gate.active {
             return Some(msg);
         }
-        let mutating = matches!(
-            &msg,
-            RuntimeMsg::ManifestPersist { .. }
-                | RuntimeMsg::ManifestCreateColumnFamily { .. }
-                | RuntimeMsg::ManifestDropColumnFamily { .. }
-                | RuntimeMsg::CompactionComplete { .. }
-                | RuntimeMsg::CompactAll { .. }
-                | RuntimeMsg::RetryGc
-        );
-        #[cfg(test)]
-        let mutating = mutating
-            || matches!(
-                &msg,
-                RuntimeMsg::ManifestAddSst { .. }
-                    | RuntimeMsg::ManifestCompactionComplete { .. }
-                    | RuntimeMsg::RunCompaction { .. }
-            );
-        if mutating {
+        if msg.defers_under_publication_gate() {
             self.publication_gate.defer(msg);
             None
         } else {
@@ -42,92 +25,43 @@ impl EventLoop {
             return Some(msg);
         }
 
+        match msg.verification_barrier_action() {
+            VerificationBarrierAction::Allow => Some(msg),
+            VerificationBarrierAction::Defer => {
+                self.defer_verification_message(msg);
+                None
+            }
+            VerificationBarrierAction::Reject { request_id } => {
+                self.reject_under_verification_barrier(msg, request_id);
+                None
+            }
+        }
+    }
+
+    /// Fail a barrier-blocked message fast with `Busy`.
+    ///
+    /// Transaction applies may carry their own response channel, so the reply
+    /// has to follow the channel the caller supplied rather than the router.
+    ///
+    /// `request_id` comes from [`VerificationBarrierAction::Reject`], so a
+    /// message without one cannot reach here: it could not have been classified
+    /// as `Reject` in the first place.
+    fn reject_under_verification_barrier(&mut self, msg: RuntimeMsg, request_id: u64) {
+        let error =
+            crate::common::MidgeError::Busy("storage verification barrier is active".to_string());
+        let response = RuntimeResponse::Error { request_id, error };
         match msg {
             RuntimeMsg::ApplyTransaction {
-                request_id,
-                response_tx,
+                response_tx: Some(response_tx),
                 ..
             }
             | RuntimeMsg::ApplySpilledTransaction {
-                request_id,
-                response_tx,
+                response_tx: Some(response_tx),
                 ..
             } => {
-                let response = RuntimeResponse::Error {
-                    request_id,
-                    error: crate::common::MidgeError::Busy(
-                        "storage verification barrier is active".to_string(),
-                    ),
-                };
-                if let Some(response_tx) = response_tx {
-                    let _ = response_tx.send(response);
-                } else {
-                    self.respond(request_id, response);
-                }
-                None
+                let _ = response_tx.send(response);
             }
-            message @ RuntimeMsg::CompactionComplete { .. } => {
-                self.defer_verification_message(message);
-                None
-            }
-            message @ RuntimeMsg::RetryGc => {
-                self.defer_verification_message(message);
-                None
-            }
-            #[cfg(test)]
-            message @ (RuntimeMsg::FlushComplete { .. }
-            | RuntimeMsg::WalSyncComplete { .. }
-            | RuntimeMsg::DeleteObsoleteSsts { .. }
-            | RuntimeMsg::ManifestAddSst { .. }
-            | RuntimeMsg::ManifestCompactionComplete { .. }) => {
-                self.defer_verification_message(message);
-                None
-            }
-            message @ (RuntimeMsg::FlushMemtable { .. }
-            | RuntimeMsg::WalSync { .. }
-            | RuntimeMsg::SealWalForCloud { .. }
-            | RuntimeMsg::ManifestPersist { .. }
-            | RuntimeMsg::ManifestCreateColumnFamily { .. }
-            | RuntimeMsg::ManifestDropColumnFamily { .. }
-            | RuntimeMsg::SetRuntimeConfig { .. }
-            | RuntimeMsg::CompactAll { .. }) => {
-                let request_id = message
-                    .request_id()
-                    .expect("barrier-blocked runtime message has request id");
-                self.respond(
-                    request_id,
-                    RuntimeResponse::Error {
-                        request_id,
-                        error: crate::common::MidgeError::Busy(
-                            "storage verification barrier is active".to_string(),
-                        ),
-                    },
-                );
-                None
-            }
-            #[cfg(test)]
-            message @ (RuntimeMsg::WalAppend { .. }
-            | RuntimeMsg::WalAppendDeleteRange { .. }
-            | RuntimeMsg::WalRotate { .. }
-            | RuntimeMsg::CheckGc { .. }
-            | RuntimeMsg::RunCompaction { .. }
-            | RuntimeMsg::BeginIngest { .. }
-            | RuntimeMsg::EndIngest { .. }) => {
-                let request_id = message
-                    .request_id()
-                    .expect("barrier-blocked test message has request id");
-                self.respond(
-                    request_id,
-                    RuntimeResponse::Error {
-                        request_id,
-                        error: crate::common::MidgeError::Busy(
-                            "storage verification barrier is active".to_string(),
-                        ),
-                    },
-                );
-                None
-            }
-            message => Some(message),
+            _ => self.respond(request_id, response),
         }
     }
 }
