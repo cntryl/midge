@@ -468,9 +468,8 @@ mod tests {
             Self { data: Vec::new() }
         }
 
-        fn add(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()> {
+        fn add(&mut self, key: &[u8], value: &[u8]) {
             self.data.push((key.to_vec(), value.to_vec()));
-            Ok(())
         }
     }
 
@@ -503,7 +502,8 @@ mod tests {
             _op_type: u8,
             _expiration: Option<u64>,
         ) -> MidgeResult<()> {
-            self.add(key, value.unwrap_or_default())
+            self.add(key, value.unwrap_or_default());
+            Ok(())
         }
 
         fn add_sorted_with_meta(
@@ -788,7 +788,7 @@ mod tests {
     fn should_finish_bytes_produces_non_empty_output_when_has_data() {
         // Arrange
         let mut writer = MockSstWriter::new();
-        writer.add(b"test", b"data").unwrap();
+        writer.add(b"test", b"data");
         let boxed = Box::new(writer);
 
         // Act
@@ -820,9 +820,9 @@ mod tests {
         let mut writer = MockSstWriter::new();
 
         // Act
-        writer.add(b"k1", b"v1").unwrap();
-        writer.add(b"k2", b"v2").unwrap();
-        writer.add(b"k3", b"v3").unwrap();
+        writer.add(b"k1", b"v1");
+        writer.add(b"k2", b"v2");
+        writer.add(b"k3", b"v3");
         let boxed = Box::new(writer);
         let result = boxed.finish_bytes().unwrap();
 

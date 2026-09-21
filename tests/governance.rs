@@ -402,7 +402,7 @@ mod architecture_ladder {
                 let terminator = trait_source[declaration..]
                     .find(['{', ';'])
                     .expect("declaration terminator");
-                trait_source[declaration..].as_bytes()[terminator] == b'{'
+                trait_source.as_bytes()[declaration + terminator] == b'{'
             })
             .collect();
         let lingering: Vec<&str> = removed
