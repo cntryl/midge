@@ -277,6 +277,14 @@ impl Fs for RemoteSstFs {
         }))
     }
 
+    fn host_root(&self) -> Option<&Path> {
+        // Writes and directory operations forward to `local`, so callers must
+        // address this filesystem through the same root.
+        self.local.host_root()
+    }
+    fn host_path_anchor(&self) -> Option<&Path> {
+        self.local.host_path_anchor()
+    }
     fn coordination_key(&self) -> u64 {
         self.local.coordination_key()
     }
@@ -808,6 +816,114 @@ mod tests {
             matches!(actual, crate::sst::types::KeyState::Value(value, 9, None, _) if value.as_ref() == b"value")
         );
         assert!(!local.path().join("remote.sst").exists());
+        Ok(())
+    }
+
+    /// Records the root-relative paths a publication renames into and fsyncs,
+    /// so a test can observe how an SST target was addressed rather than only
+    /// where it landed.
+    struct PublicationRecordingFs {
+        inner: crate::io::RealFs,
+        renames: std::sync::Mutex<Vec<String>>,
+        directory_syncs: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl PublicationRecordingFs {
+        fn new(root: &Path) -> crate::common::MidgeResult<Self> {
+            Ok(Self {
+                inner: crate::io::RealFs::new(root)?,
+                renames: std::sync::Mutex::new(Vec::new()),
+                directory_syncs: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+
+        fn recorded(lock: &std::sync::Mutex<Vec<String>>) -> Vec<String> {
+            lock.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    impl Fs for PublicationRecordingFs {
+        fn host_root(&self) -> Option<&Path> {
+            self.inner.host_root()
+        }
+        fn host_path_anchor(&self) -> Option<&Path> {
+            self.inner.host_path_anchor()
+        }
+        fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
+            self.inner.open(path, opts)
+        }
+        fn remove_file(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.remove_file(path)
+        }
+        fn exists(&self, path: &FsPath) -> FsResult<bool> {
+            self.inner.exists(path)
+        }
+        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+            self.inner.metadata(path)
+        }
+        fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.create_dir_all(path)
+        }
+        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+            self.inner.list_dir(path)
+        }
+        fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.remove_dir_all(path)
+        }
+        fn sync_dir(&self, path: &FsPath, dur: Durability) -> FsResult<()> {
+            self.directory_syncs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(path.0.clone());
+            self.inner.sync_dir(path, dur)
+        }
+        fn rename_atomic(&self, from: &FsPath, to: &FsPath) -> FsResult<()> {
+            self.inner.rename_atomic(from, to)?;
+            self.renames
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(to.0.clone());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn should_address_compaction_output_relative_to_local_root_when_publishing_through_remote_view(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange: a cloud-mode SST factory writing through a remote view of
+        // the db directory. Without the view exposing its local host root the
+        // target would be addressed by absolute host path and re-rooted.
+        let db = tempfile::tempdir()?;
+        let remote = tempfile::tempdir()?;
+        let local = Arc::new(PublicationRecordingFs::new(db.path())?);
+        let cloud = Arc::new(super::super::filesystem::FileSystem::new(remote.path())?);
+        let view: Arc<dyn Fs> = Arc::new(RemoteSstFs::new(
+            Arc::clone(&local) as Arc<dyn Fs>,
+            cloud,
+            Duration::from_secs(5),
+        ));
+        let target = db.path().join("sst").join("000042.sst");
+        let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&view), 4096);
+        let mut writer = factory.create()?;
+        writer.add_with_meta(b"key", Some(b"value"), 9, 0, None)?;
+
+        // Act
+        let mapped = crate::sst::fs::fs_relative_sst_path(&view, &target)?;
+        crate::sst::fs::finish_writer_to_path(writer, &target)?;
+
+        // Assert
+        assert_eq!(mapped, FsPath::new("sst/000042.sst"));
+        assert_eq!(
+            PublicationRecordingFs::recorded(&local.renames),
+            vec!["sst/000042.sst".to_string()]
+        );
+        assert_eq!(
+            PublicationRecordingFs::recorded(&local.directory_syncs),
+            vec!["sst".to_string()]
+        );
+        assert!(target.is_file());
         Ok(())
     }
 }

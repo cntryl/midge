@@ -868,7 +868,9 @@ mod tests {
             reservation: None,
             hybrid_storage: None,
         };
-        let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new(&sst_dir)?);
+        // Rooted at the database directory because this fixture stages flush
+        // output beside `sst/` rather than inside it.
+        let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new(&db_path)?);
         let sst_factory = Arc::new(
             crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)
                 .with_compression_policy(crate::sst::compression::CompressionPolicy::default()),
@@ -935,8 +937,11 @@ mod tests {
         let fixture = publication_fixture(usize::MAX)?;
         let scratch = fixture.directory.path().join("failed-scratch");
         let factory = Arc::new(
-            crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096)
-                .with_compaction_scratch_directory(scratch.clone()),
+            crate::sst::FsSstFactoryIo::new(
+                Arc::new(crate::io::RealFs::new(fixture.directory.path())?),
+                4096,
+            )
+            .with_compaction_scratch_directory(scratch.clone()),
         );
         let injected = std::sync::Mutex::new(false);
         fail::cfg_callback("midge::flush_worker::after_scratch_creation", move || {
@@ -1141,7 +1146,7 @@ mod tests {
             reservation: None,
             hybrid_storage: Some(Arc::clone(hybrid)),
         };
-        let fs = Arc::new(crate::io::RealFs::new(&fixture.task.sst_dir)?);
+        let fs = Arc::new(crate::io::RealFs::new(fixture.directory.path())?);
         let factory: Arc<crate::sst::FsSstFactoryIo> =
             Arc::new(crate::sst::FsSstFactoryIo::new(fs, 64 * 1024));
 

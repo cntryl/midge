@@ -398,8 +398,10 @@ mod tests {
         assert!(state.sst_dir.exists(), "sst dir must exist");
         let sst_path = state.sst_dir.join(&sst_name);
 
-        let factory =
-            crate::sst::FsSstFactoryIo::new(std::sync::Arc::new(crate::io::MockFs::new()), 4096);
+        let factory = crate::sst::FsSstFactoryIo::new(
+            std::sync::Arc::new(crate::io::RealFs::new(&state.sst_dir)?),
+            4096,
+        );
         let mut writer = factory.create()?;
         writer.add_with_meta(b"a", Some(b"value"), 10, 0, None)?;
         crate::sst::fs::finish_writer_to_path(writer, &sst_path)?;

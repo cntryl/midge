@@ -340,6 +340,33 @@ pub trait Fs: Send + Sync + 'static {
         Ok(None)
     }
 
+    /// Host directory this filesystem is rooted at, when it has one.
+    ///
+    /// Backends that address a directory on the host expose it so a caller
+    /// holding an absolute host path can map that path onto a root-relative
+    /// [`FsPath`] and reject anything outside the root. Backends without a
+    /// host root (in-memory mocks, object stores) return `None`; their path
+    /// strings are their own key space. Wrappers must delegate to the backend
+    /// they forward writes to, otherwise callers cannot address it.
+    fn host_root(&self) -> Option<&std::path::Path> {
+        None
+    }
+
+    /// Directory a *relative* host path is resolved against when it addresses
+    /// this filesystem's contents.
+    ///
+    /// [`Fs::host_root`] is recorded once, when the filesystem is built. A
+    /// caller that resolved a relative target against the process working
+    /// directory instead would disagree with that recorded root the moment
+    /// the host process changes directory, turning writes that previously
+    /// succeeded into "outside the filesystem root" failures. Backends
+    /// therefore record the directory their own root was resolved from and
+    /// callers anchor relative targets there. Backends without a host root
+    /// return `None`; wrappers must delegate alongside [`Fs::host_root`].
+    fn host_path_anchor(&self) -> Option<&std::path::Path> {
+        None
+    }
+
     /// Return a stable key for coordinating multi-call filesystem transactions.
     ///
     /// Handles that address the same logical filesystem root should return the

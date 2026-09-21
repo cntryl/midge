@@ -22,6 +22,11 @@ use std::path::{Component, Path, PathBuf};
 /// Real filesystem backend
 pub struct RealFs {
     base_path: PathBuf,
+    /// Working directory `base_path` was resolved from, recorded at the same
+    /// instant. Relative host paths naming this filesystem's contents were
+    /// written in that frame, so callers must resolve them there rather than
+    /// against a process working directory that may since have moved.
+    relative_anchor: Option<PathBuf>,
 }
 
 impl RealFs {
@@ -38,9 +43,13 @@ impl RealFs {
     pub fn new(base_path: impl AsRef<Path>) -> FsResult<Self> {
         let path = base_path.as_ref().to_path_buf();
         fs::create_dir_all(&path).map_err(|e| io_err("create_dir_all", &path, &e))?;
+        let relative_anchor = std::env::current_dir().ok();
         let path =
             fs::canonicalize(path).map_err(|e| io_err("canonicalize", base_path.as_ref(), &e))?;
-        Ok(Self { base_path: path })
+        Ok(Self {
+            base_path: path,
+            relative_anchor,
+        })
     }
 
     /// Open a filesystem root that must already exist, without creating it.
@@ -60,9 +69,13 @@ impl RealFs {
                 path.display()
             )));
         }
+        let relative_anchor = std::env::current_dir().ok();
         let path =
             fs::canonicalize(path).map_err(|e| io_err("canonicalize", base_path.as_ref(), &e))?;
-        Ok(Self { base_path: path })
+        Ok(Self {
+            base_path: path,
+            relative_anchor,
+        })
     }
 
     /// Compute sanitized full path, preventing directory traversal.
@@ -155,6 +168,14 @@ impl RealFs {
 }
 
 impl Fs for RealFs {
+    fn host_root(&self) -> Option<&Path> {
+        Some(&self.base_path)
+    }
+
+    fn host_path_anchor(&self) -> Option<&Path> {
+        self.relative_anchor.as_deref()
+    }
+
     fn coordination_key(&self) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         self.base_path.hash(&mut hasher);

@@ -330,16 +330,21 @@ pub trait DynSstWriter: Send {
 
     /// Finalize and atomically persist this SST directly to `path`.
     ///
-    /// The compatibility default uses [`DynSstWriter::finish_bytes`].
-    /// Filesystem streaming writers override it so compaction never
-    /// reconstructs the completed SST in one byte vector.
+    /// Writers built by [`crate::sst::FsSstFactoryIo`] override this and
+    /// persist through the filesystem that factory was injected with, so
+    /// compaction never reconstructs the completed SST in one byte vector and
+    /// a mock or fault-injecting filesystem observes the staging writes.
+    ///
+    /// The default exists only for writers that carry no filesystem — test
+    /// doubles and adapters — and therefore has to open the host filesystem
+    /// itself. Implementations holding an `Arc<dyn Fs>` must not use it.
     ///
     /// # Errors
     ///
     /// Returns an error when finalization or atomic persistence fails.
     fn finish_to_path(self: Box<Self>, path: &Path) -> MidgeResult<()> {
         let bytes = self.finish_bytes()?;
-        crate::sst::fs::persist_sst_bytes_to_path(&bytes, path)
+        crate::sst::fs::persist_sst_bytes_with_host_fs(&bytes, path)
     }
 
     /// Finalize and get SST bytes

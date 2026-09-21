@@ -210,3 +210,71 @@ fn should_read_back_sst_when_keys_share_prefix_longer_than_trie_can_encode() {
         assert_eq!(reader.get(key).unwrap().as_deref(), Some(b"v".as_slice()));
     }
 }
+
+/// Serializes the tests that move the process working directory, which is
+/// global state shared with every other test thread.
+static WORKING_DIRECTORY_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(unix)]
+#[test]
+fn should_reject_sst_publish_when_target_name_is_an_in_root_symlink() {
+    // Arrange: a target that already exists as a symlink to another in-root
+    // file. `RealFs` rejects a symlink in any path component, including the
+    // last, so the publish must fail closed rather than be redirected to a
+    // path the manifest will never name.
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("real")).unwrap();
+    std::fs::write(root.path().join("real").join("linked.sst"), b"untouched").unwrap();
+    std::os::unix::fs::symlink(
+        root.path().join("real").join("linked.sst"),
+        root.path().join("linked.sst"),
+    )
+    .unwrap();
+    let factory = FsSstFactoryIo::new(Arc::new(crate::io::RealFs::new(root.path()).unwrap()), 4096);
+    let mut writer = factory.create().unwrap();
+    writer.add(b"key", b"value").unwrap();
+
+    // Act
+    let result = crate::sst::fs::finish_writer_to_path(writer, &root.path().join("linked.sst"));
+
+    // Assert
+    let error = result.expect_err("a symlinked SST target must be rejected");
+    assert!(
+        format!("{error}").contains("symlink"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        std::fs::read(root.path().join("real").join("linked.sst")).unwrap(),
+        b"untouched",
+        "the symlink's destination must not be overwritten"
+    );
+    assert!(!root.path().join("linked.sst.tmp").exists());
+}
+
+#[test]
+fn should_map_relative_sst_target_onto_root_when_working_directory_moved_after_open() {
+    // Arrange: an engine opened with a relative db path, exactly as
+    // `Engine::open("mydb")` does, followed by a host process working-
+    // directory change. Every later flush and compaction still names its
+    // output by that same relative path.
+    let _serialized = WORKING_DIRECTORY_GUARD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join("mydb")).unwrap();
+    let original = std::env::current_dir().unwrap();
+    std::env::set_current_dir(home.path()).unwrap();
+    let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new("mydb").unwrap());
+
+    // Act
+    std::env::set_current_dir(elsewhere.path()).unwrap();
+    let mapped = crate::sst::fs::fs_relative_sst_path(&fs, Path::new("mydb/output.sst"));
+    std::env::set_current_dir(&original).unwrap();
+
+    // Assert
+    assert_eq!(
+        mapped.expect("a relative target must stay addressable after a chdir"),
+        crate::io::FsPath::new("output.sst")
+    );
+}

@@ -19,8 +19,13 @@ use crate::sst::types::{
     SST_FORMAT_V4,
 };
 
-/// SST factory that uses `io::Fs` abstraction
-/// Allows using real and mock filesystem implementations for testing.
+/// SST factory that uses the `io::Fs` abstraction.
+///
+/// Readers and writers both address `fs`: a writer carries it from creation
+/// and publishes through [`crate::io::staging`], so mock and fault-injecting
+/// filesystems observe the staging write, fsync, rename, and directory sync
+/// that publish an SST. Writers map their target onto `fs` and refuse a target
+/// outside its root rather than publishing somewhere the caller did not name.
 pub struct FsSstFactoryIo {
     fs: Arc<dyn Fs>,
     block_size: usize,
@@ -35,6 +40,7 @@ impl FsSstFactoryIo {
         budget: crate::common::resource_budget::ResourceBudget,
     ) -> MidgeResult<Box<dyn DynSstWriter>> {
         let mut writer = InMemorySstWriter::new_with_budget(
+            Arc::clone(&self.fs),
             self.compression_policy.clone(),
             self.block_size,
             Some(budget.clone()),
@@ -114,6 +120,10 @@ impl FsSstFactoryIo {
 
 /// Simple in-memory SST writer that applies block-level compression.
 struct InMemorySstWriter {
+    /// Filesystem this writer publishes through, injected by the factory so
+    /// staging writes, fsyncs, the rename, and the directory sync all reach
+    /// the same backend the factory reads from.
+    fs: Arc<dyn Fs>,
     entries: Vec<PendingEntry>,
     range_tombstones: Vec<RangeTombstone>,
     block_size: usize,
@@ -199,16 +209,18 @@ impl StreamingState {
 }
 
 impl InMemorySstWriter {
-    fn new(compression_policy: CompressionPolicy, block_size: usize) -> Self {
-        Self::new_with_budget(compression_policy, block_size, None)
+    fn new(fs: Arc<dyn Fs>, compression_policy: CompressionPolicy, block_size: usize) -> Self {
+        Self::new_with_budget(fs, compression_policy, block_size, None)
     }
 
     fn new_with_budget(
+        fs: Arc<dyn Fs>,
         compression_policy: CompressionPolicy,
         block_size: usize,
         budget: Option<crate::common::resource_budget::ResourceBudget>,
     ) -> Self {
         Self {
+            fs,
             entries: Vec::new(),
             range_tombstones: Vec::new(),
             block_size,
@@ -1046,11 +1058,13 @@ impl DynSstWriter for InMemorySstWriter {
 
     fn finish_to_path(self: Box<Self>, path: &Path) -> MidgeResult<()> {
         if self.streaming.is_none() {
+            let fs = Arc::clone(&self.fs);
             let bytes = self.finish_bytes()?;
-            return crate::sst::fs::persist_sst_bytes_to_path(&bytes, path);
+            return crate::sst::fs::persist_sst_bytes_to_path(&fs, &bytes, path);
         }
 
         let InMemorySstWriter {
+            fs,
             entries,
             range_tombstones,
             block_size: _,
@@ -1067,7 +1081,7 @@ impl DynSstWriter for InMemorySstWriter {
             &compression_policy,
         )?;
         let mut source = scratch.reopen().map_err(crate::common::MidgeError::Io)?;
-        let result = crate::sst::fs::persist_sst_stream_to_path(&mut source, path);
+        let result = crate::sst::fs::persist_sst_stream_to_path(&fs, &mut source, path);
         drop(source);
         let cleanup = scratch.close().map_err(crate::common::MidgeError::Io);
         result.and(cleanup)
@@ -1075,6 +1089,7 @@ impl DynSstWriter for InMemorySstWriter {
 
     fn finish_bytes(self: Box<Self>) -> MidgeResult<Vec<u8>> {
         let InMemorySstWriter {
+            fs,
             entries,
             range_tombstones,
             block_size,
@@ -1099,6 +1114,7 @@ impl DynSstWriter for InMemorySstWriter {
         }
 
         let writer = Self {
+            fs,
             entries: Vec::new(),
             range_tombstones,
             block_size,
@@ -1153,6 +1169,7 @@ impl SstFactory for FsSstFactoryIo {
     /// Create a new SST writer
     fn create(&self) -> MidgeResult<Box<dyn DynSstWriter>> {
         Ok(Box::new(InMemorySstWriter::new(
+            Arc::clone(&self.fs),
             self.compression_policy.clone(),
             self.block_size,
         )))
@@ -1163,6 +1180,7 @@ impl SstFactory for FsSstFactoryIo {
         budget: crate::common::resource_budget::ResourceBudget,
     ) -> MidgeResult<Box<dyn DynSstWriter>> {
         let mut writer = InMemorySstWriter::new_with_budget(
+            Arc::clone(&self.fs),
             self.compression_policy.clone(),
             self.block_size,
             Some(budget.clone()),
@@ -1193,16 +1211,272 @@ impl SstFactory for FsSstFactoryIo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::io::traits::{DirEntry, Durability, File, FsError, FsResult, Metadata, OpenOptions};
+    use crate::io::FsPath;
+
+    /// Records every staging operation an SST publication performs and can
+    /// fail the parent-directory sync, so tests observe that persistence runs
+    /// on the filesystem the factory was injected with.
+    struct RecordingFile<'a> {
+        name: String,
+        inner: Box<dyn File + 'a>,
+        events: Arc<parking_lot::Mutex<Vec<String>>>,
+    }
+
+    impl File for RecordingFile<'_> {
+        fn read_at(&self, offset: u64, len: u64) -> FsResult<bytes::Bytes> {
+            self.inner.read_at(offset, len)
+        }
+
+        fn write_at(&mut self, offset: u64, data: bytes::Bytes) -> FsResult<()> {
+            self.inner.write_at(offset, data)?;
+            self.events.lock().push(format!("write {}", self.name));
+            Ok(())
+        }
+
+        fn append(&mut self, data: bytes::Bytes) -> FsResult<u64> {
+            self.inner.append(data)
+        }
+
+        fn len(&self) -> FsResult<u64> {
+            self.inner.len()
+        }
+
+        fn sync(&mut self, durability: Durability) -> FsResult<()> {
+            self.inner.sync(durability)?;
+            self.events.lock().push(format!("file sync {}", self.name));
+            Ok(())
+        }
+
+        fn close(self: Box<Self>) -> FsResult<()> {
+            self.inner.close()
+        }
+    }
+
+    struct RecordingFs {
+        inner: crate::io::RealFs,
+        events: Arc<parking_lot::Mutex<Vec<String>>>,
+        fail_directory_sync: bool,
+    }
+
+    impl RecordingFs {
+        fn new(root: &Path, fail_directory_sync: bool) -> MidgeResult<Self> {
+            Ok(Self {
+                inner: crate::io::RealFs::new(root).map_err(crate::common::MidgeError::from)?,
+                events: Arc::new(parking_lot::Mutex::new(Vec::new())),
+                fail_directory_sync,
+            })
+        }
+    }
+
+    impl Fs for RecordingFs {
+        fn host_root(&self) -> Option<&Path> {
+            self.inner.host_root()
+        }
+
+        fn host_path_anchor(&self) -> Option<&Path> {
+            self.inner.host_path_anchor()
+        }
+
+        fn open(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
+            self.events.lock().push(format!("open {}", path.0));
+            Ok(Box::new(RecordingFile {
+                name: path.0.clone(),
+                inner: self.inner.open(path, options)?,
+                events: Arc::clone(&self.events),
+            }))
+        }
+
+        fn remove_file(&self, path: &FsPath) -> FsResult<()> {
+            self.events.lock().push(format!("remove {}", path.0));
+            self.inner.remove_file(path)
+        }
+
+        fn exists(&self, path: &FsPath) -> FsResult<bool> {
+            self.inner.exists(path)
+        }
+
+        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+            self.inner.metadata(path)
+        }
+
+        fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.create_dir_all(path)
+        }
+
+        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+            self.inner.list_dir(path)
+        }
+
+        fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.remove_dir_all(path)
+        }
+
+        fn sync_dir(&self, path: &FsPath, durability: Durability) -> FsResult<()> {
+            self.events.lock().push(format!("sync_dir {}", path.0));
+            if self.fail_directory_sync {
+                return Err(FsError::Unavailable(
+                    "injected directory sync failure".to_string(),
+                ));
+            }
+            self.inner.sync_dir(path, durability)
+        }
+
+        fn rename_atomic(&self, from: &FsPath, to: &FsPath) -> FsResult<()> {
+            self.inner.rename_atomic(from, to)?;
+            self.events
+                .lock()
+                .push(format!("rename {} -> {}", from.0, to.0));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn should_route_sst_staging_sync_through_injected_fs_when_finishing_writer() -> MidgeResult<()>
+    {
+        // Arrange
+        let directory = tempfile::tempdir()?;
+        let fs = Arc::new(RecordingFs::new(directory.path(), true)?);
+        let events = Arc::clone(&fs.events);
+        let factory = FsSstFactoryIo::new(Arc::clone(&fs) as Arc<dyn Fs>, 4096);
+        let mut writer = factory.create()?;
+        writer.add_with_meta(b"key", Some(b"value"), 1, 0, None)?;
+
+        // Act
+        let result =
+            crate::sst::fs::finish_writer_to_path(writer, &directory.path().join("routed.sst"));
+
+        // Assert
+        let error = result.expect_err("injected directory sync failure must surface");
+        assert!(
+            format!("{error}").contains("injected directory sync failure"),
+            "unexpected error: {error}"
+        );
+        let events = events.lock().clone();
+        assert!(
+            events.contains(&"write routed.sst.tmp".to_string()),
+            "{events:?}"
+        );
+        assert!(
+            events.contains(&"file sync routed.sst.tmp".to_string()),
+            "{events:?}"
+        );
+        assert!(
+            events.contains(&"rename routed.sst.tmp -> routed.sst".to_string()),
+            "{events:?}"
+        );
+        assert!(events.contains(&"sync_dir .".to_string()), "{events:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn should_route_streaming_sst_staging_through_injected_fs_when_finishing_flush_writer(
+    ) -> MidgeResult<()> {
+        // Arrange
+        let directory = tempfile::tempdir()?;
+        let fs = Arc::new(RecordingFs::new(directory.path(), false)?);
+        let events = Arc::clone(&fs.events);
+        let factory = FsSstFactoryIo::new(Arc::clone(&fs) as Arc<dyn Fs>, 4096)
+            .with_compaction_scratch_directory(directory.path().join("scratch"));
+        let budget = crate::common::resource_budget::ResourceBudget::new(4 * 1024 * 1024);
+        let mut writer = factory.create_for_flush(budget)?;
+        for sequence in 0_u64..64 {
+            writer.add_sorted_with_meta(
+                &sequence.to_be_bytes(),
+                Some(b"value"),
+                sequence,
+                0,
+                None,
+            )?;
+        }
+
+        // Act
+        crate::sst::fs::finish_writer_to_path(writer, &directory.path().join("streamed.sst"))?;
+
+        // Assert
+        let events = events.lock().clone();
+        assert!(
+            events.contains(&"file sync streamed.sst.tmp".to_string()),
+            "{events:?}"
+        );
+        assert!(
+            events.contains(&"rename streamed.sst.tmp -> streamed.sst".to_string()),
+            "{events:?}"
+        );
+        assert!(events.contains(&"sync_dir .".to_string()), "{events:?}");
+        assert!(directory.path().join("streamed.sst").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn should_reject_sst_target_when_path_escapes_injected_filesystem_root() -> MidgeResult<()> {
+        // Arrange
+        let root = tempfile::tempdir()?;
+        let outside = tempfile::tempdir()?;
+        let factory = FsSstFactoryIo::new(Arc::new(crate::io::RealFs::new(root.path())?), 4096);
+        let mut writer = factory.create()?;
+        writer.add_with_meta(b"key", Some(b"value"), 1, 0, None)?;
+
+        // Act
+        let result =
+            crate::sst::fs::finish_writer_to_path(writer, &outside.path().join("escaped.sst"));
+
+        // Assert
+        assert!(
+            matches!(&result, Err(crate::common::MidgeError::Internal(message))
+                if message.contains("outside the filesystem root")),
+            "unexpected result: {result:?}"
+        );
+        assert_eq!(
+            result
+                .expect_err("escaping target must be rejected")
+                .severity(),
+            crate::common::Severity::Defect,
+            "a target outside the root is an engine fault, not a caller fault"
+        );
+        assert!(!outside.path().join("escaped.sst").exists());
+        assert!(!root.path().join("escaped.sst").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn should_publish_sst_into_injected_mock_filesystem_when_finishing_writer() -> MidgeResult<()> {
+        // Arrange
+        let fs = Arc::new(crate::io::MockFs::new());
+        let factory = FsSstFactoryIo::new(Arc::clone(&fs) as Arc<dyn Fs>, 4096);
+        let mut writer = factory.create()?;
+        writer.add_with_meta(b"key", Some(b"value"), 1, 0, None)?;
+
+        // Act
+        crate::sst::fs::finish_writer_to_path(writer, Path::new("mocked.sst"))?;
+
+        // Assert
+        assert!(fs
+            .exists(&FsPath::new("mocked.sst"))
+            .map_err(crate::common::MidgeError::from)?);
+        assert!(!fs
+            .exists(&FsPath::new("mocked.sst.tmp"))
+            .map_err(crate::common::MidgeError::from)?);
+        let reader = super::super::SstFileIo::open("mocked.sst", Arc::clone(&fs) as Arc<dyn Fs>)?;
+        assert_eq!(
+            crate::sst::SstReader::get(&reader, b"key")?.as_deref(),
+            Some(b"value".as_slice())
+        );
+        Ok(())
+    }
 
     #[test]
     fn should_stream_flush_larger_than_its_shared_buffer_allowance() -> MidgeResult<()> {
         // Arrange
         let directory = tempfile::tempdir()?;
-        let factory = FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 64 * 1024)
-            .with_compaction_scratch_directory(directory.path().to_path_buf())
-            .with_compression_policy(CompressionPolicy::Fixed(
-                crate::sst::compression::CompressionAlgo::None,
-            ));
+        let factory = FsSstFactoryIo::new(
+            Arc::new(crate::io::RealFs::new(directory.path())?),
+            64 * 1024,
+        )
+        .with_compaction_scratch_directory(directory.path().to_path_buf())
+        .with_compression_policy(CompressionPolicy::Fixed(
+            crate::sst::compression::CompressionAlgo::None,
+        ));
         let budget = crate::common::resource_budget::ResourceBudget::new(1024 * 1024);
         let mut writer = factory.create_for_flush(budget.clone())?;
         let value = vec![7; 16 * 1024];
@@ -1320,8 +1594,11 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let fs = Arc::new(crate::io::RealFs::new(dir.path())?);
         let value = vec![b'v'; MAX_DECOMPRESSED_BLOCK_SIZE];
-        let mut legacy =
-            InMemorySstWriter::new(CompressionPolicy::Fixed(CompressionAlgo::None), 4096);
+        let mut legacy = InMemorySstWriter::new(
+            Arc::clone(&fs) as Arc<dyn Fs>,
+            CompressionPolicy::Fixed(CompressionAlgo::None),
+            4096,
+        );
         legacy.entries.push(PendingEntry {
             key: b"legacy".to_vec(),
             value: Some(value.clone()),
