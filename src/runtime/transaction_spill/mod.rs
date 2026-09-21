@@ -48,7 +48,6 @@ const INTENT_ACCOUNTING_OVERHEAD: usize = 256;
 // by other transactions. Without it every such write became its own run, which
 // meant two files per operation. The bound never exceeds the pool's own
 // capacity, so a zero-capacity pool still spills one operation at a time.
-const DIRECT_SPILL_BATCH_BYTES: usize = 64 * 1024;
 
 /// One bounded pool shared by every transaction opened by an engine.
 #[derive(Debug)]
@@ -204,9 +203,6 @@ pub(crate) struct TransactionWriteSet {
     txn_id: u64,
     resident: Vec<OrdinalOp>,
     resident_bytes: usize,
-    /// Bytes of `resident` that the pool refused and that this write set holds
-    /// anyway, bounded by [`DIRECT_SPILL_BATCH_BYTES`].
-    uncharged_bytes: usize,
     runs: Vec<SpillRun>,
     next_ordinal: u64,
     disk_budget: Option<SpillDiskBudget>,
@@ -226,7 +222,6 @@ impl TransactionWriteSet {
             txn_id,
             resident: Vec::new(),
             resident_bytes: 0,
-            uncharged_bytes: 0,
             runs: Vec::new(),
             next_ordinal: 0,
             disk_budget: None,
@@ -282,34 +277,30 @@ impl TransactionWriteSet {
                 "transaction memory pool cannot admit {bytes} additional bytes"
             )));
         };
-        // Freezing pool-charged intents is what frees pool space, so retry
-        // admission only when there was a charge to release. Doing it
-        // unconditionally would flush the off-pool batch on every write.
-        if self.resident_bytes > 0 {
-            self.spill_resident(&spill_dir)?;
-            if self.pool.try_reserve(bytes) {
-                self.admit_resident(ordinal_op, bytes);
-                return Ok(());
-            }
+        // Freezing this write set's pool-charged intents is what frees pool
+        // space, so try admission again afterwards.
+        self.spill_resident(&spill_dir)?;
+        if self.pool.try_reserve(bytes) {
+            self.admit_resident(ordinal_op, bytes);
+            return Ok(());
         }
 
-        // Other transactions hold the whole pool. Buffer a bounded batch off
-        // the pool instead of freezing one run -- two files -- per operation.
-        let ordinal = ordinal_op.ordinal;
-        self.resident.push(ordinal_op);
-        self.uncharged_bytes = self.uncharged_bytes.saturating_add(bytes);
+        // Other transactions hold the whole pool. The pool is what bounds
+        // resident bytes across every transaction, so this write cannot stay in
+        // memory outside it however small the batch: with many transactions under
+        // pressure the overshoot would grow with their number. Freeze it as its
+        // own run instead.
+        let mut direct = vec![ordinal_op];
+        let run = write_run_with_budget(
+            &spill_dir,
+            self.txn_id,
+            self.runs.len(),
+            direct.as_mut_slice(),
+            self.disk_budget.as_ref(),
+            &self.pool,
+        )?;
+        self.runs.push(run);
         self.next_ordinal = self.next_ordinal.saturating_add(1);
-        if self.uncharged_bytes >= DIRECT_SPILL_BATCH_BYTES.min(self.pool.capacity) {
-            if let Err(error) = self.spill_resident(&spill_dir) {
-                // No run was created, so drop the operation that could not be
-                // admitted and leave earlier intents untouched. Freezing a run
-                // sorts the buffer by key, so remove by ordinal, not position.
-                self.resident.retain(|entry| entry.ordinal != ordinal);
-                self.uncharged_bytes = self.uncharged_bytes.saturating_sub(bytes);
-                self.next_ordinal = self.next_ordinal.saturating_sub(1);
-                return Err(error);
-            }
-        }
         Ok(())
     }
 
@@ -335,7 +326,6 @@ impl TransactionWriteSet {
         self.resident.clear();
         self.pool.release(self.resident_bytes);
         self.resident_bytes = 0;
-        self.uncharged_bytes = 0;
         Ok(())
     }
 
@@ -368,7 +358,6 @@ impl TransactionWriteSet {
             .collect();
         self.pool.release(self.resident_bytes);
         self.resident_bytes = 0;
-        self.uncharged_bytes = 0;
         self.next_ordinal = 0;
         ops
     }
@@ -381,7 +370,6 @@ impl TransactionWriteSet {
             resident_bytes: std::mem::take(&mut self.resident_bytes),
             op_count: usize::try_from(self.next_ordinal).unwrap_or(usize::MAX),
         };
-        self.uncharged_bytes = 0;
         self.next_ordinal = 0;
         source
     }
@@ -389,7 +377,6 @@ impl TransactionWriteSet {
     fn cleanup(&mut self) {
         self.pool.release(self.resident_bytes);
         self.resident_bytes = 0;
-        self.uncharged_bytes = 0;
         self.resident.clear();
         for run in self.runs.drain(..) {
             run.close_reader();

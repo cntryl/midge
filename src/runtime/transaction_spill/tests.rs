@@ -503,33 +503,35 @@ fn should_bound_file_opens_when_scanning_with_spilled_write_set() -> MidgeResult
 }
 
 #[test]
-fn should_not_create_run_per_op_when_pool_is_exhausted_by_other_transaction() -> MidgeResult<()> {
+fn should_hold_no_uncharged_intents_in_memory_when_other_transactions_hold_the_pool(
+) -> MidgeResult<()> {
     // Arrange: another transaction holds the whole pool, so every push below is
-    // refused admission.
+    // refused admission. The pool is what bounds resident bytes across all
+    // transactions, so a refused write must not stay in memory outside it.
     let dir = tempfile::tempdir()?;
     let pool = Arc::new(TransactionMemoryPool::new(64 * 1024));
     assert!(pool.try_reserve(64 * 1024));
     let mut writes = TransactionWriteSet::new(Arc::clone(&pool), dir.path(), false, 2);
 
     // Act
-    for index in 0_u32..512 {
+    for index in 0_u32..8 {
         writes.push(put(format!("key-{index:04}").as_bytes(), b"value"))?;
     }
 
     // Assert
     assert!(
-        writes.runs.len() < 32,
-        "contention produced {} runs for 512 operations",
-        writes.runs.len()
+        writes.resident.is_empty(),
+        "{} refused intents were held in memory outside the pool",
+        writes.resident.len()
     );
-    for index in 0_u32..512 {
+    for index in 0_u32..8 {
         let key = format!("key-{index:04}");
         assert!(
             matches!(
                 writes.latest_for_key(key.as_bytes())?,
                 Some(IntentLookup::Present(value)) if value.as_ref() == b"value"
             ),
-            "{key} was lost while batching direct spills"
+            "{key} was lost while spilling under pool pressure"
         );
     }
     drop(writes);
