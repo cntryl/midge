@@ -394,7 +394,13 @@ mod tests {
             state.manifest.edit_checkpoint_id, 2,
             "the runtime manifest must track its own journal appends"
         );
-        let logs = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+        let logs = String::from_utf8(
+            sink.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+        )
+        .unwrap();
         assert!(
             !logs.contains("stale caller"),
             "routine persists must not take the stale-caller branch: {logs}"
