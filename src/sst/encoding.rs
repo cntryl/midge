@@ -109,7 +109,12 @@ impl TryFrom<u8> for EntryType {
             0 => Ok(EntryType::Put),
             1 => Ok(EntryType::Insert),
             2 => Ok(EntryType::Delete),
-            3 => Ok(EntryType::Merge),
+            // Writers never emit Merge (lsm-spec sst.md 3.2) and no read path
+            // knows how to resolve an operand, so surfacing it as a value would
+            // silently return a merge operand as a complete Put. Fail closed.
+            3 => Err(MidgeError::CompatibilityError(
+                "SST entry type 3 (Merge) is not supported".to_string(),
+            )),
             _ => Err(MidgeError::Corruption(format!("Invalid entry_type: {v}"))),
         }
     }
@@ -380,6 +385,19 @@ fn checked_v4_lengths(key_len: usize, value_len: usize) -> MidgeResult<(u32, u32
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn should_reject_merge_entry_when_decoding_sst_entry() {
+        // Arrange
+        let encoded = encode_v4(b"key", 0, Some(b"operand"), 1, EntryType::Merge, None)
+            .expect("merge entry should encode");
+        // Act
+        let decoded = decode(&encoded, 0);
+        let converted = EntryType::try_from(3_u8);
+        // Assert
+        assert!(matches!(decoded, Err(MidgeError::CompatibilityError(_))));
+        assert!(matches!(converted, Err(MidgeError::CompatibilityError(_))));
+    }
 
     #[test]
     fn should_bound_range_admission_by_complete_encoded_size() {
