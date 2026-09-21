@@ -160,8 +160,10 @@ impl BlockBloomFilter {
 
         let bloom_bytes = &self.bloom_data[start_offset..end_offset];
 
-        // Deserialize and check bloom (fail-safe on corruption)
-        match BloomReader::deserialize(bloom_bytes) {
+        // Borrow the bits rather than copying them: every block's bloom was
+        // already validated when the file was opened, and this runs once per
+        // candidate block on the point-read path.
+        match super::reader::BloomView::parse(bloom_bytes) {
             Ok(bloom) => bloom.contains(key),
             Err(_corruption_error) => {
                 // Fail-safe: corrupted bloom data (k out of range, size mismatch, etc.)

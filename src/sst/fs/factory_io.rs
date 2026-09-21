@@ -814,11 +814,10 @@ impl InMemorySstWriter {
             &block_index_entries,
             trie_handle,
         )?;
-        state
-            .scratch
-            .as_file_mut()
-            .sync_all()
-            .map_err(crate::common::MidgeError::Io)?;
+        // The scratch file carries no durability: `finish_to_path` copies it
+        // into the staging file, and that copy is what is fsynced and renamed
+        // into place. Syncing here would write every output byte to the device
+        // twice. A crash simply orphans the scratch, which cleanup handles.
         Ok(state.scratch)
     }
 }

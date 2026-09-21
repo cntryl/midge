@@ -28,31 +28,7 @@ impl BloomReader {
     /// truncated, contains invalid parameters, or the payload length does not
     /// match the declared bit count.
     pub fn deserialize(data: &[u8]) -> MidgeResult<Self> {
-        if data.len() < 9 {
-            return Err(MidgeError::Corruption(
-                "Bloom filter data too short".to_string(),
-            ));
-        }
-
-        let num_bits = usize::try_from(u32::from_le_bytes([data[0], data[1], data[2], data[3]]))
-            .unwrap_or(usize::MAX);
-        let key_count = usize::try_from(u32::from_le_bytes([data[4], data[5], data[6], data[7]]))
-            .unwrap_or(usize::MAX);
-        let k = data[8];
-
-        // Safety: num_bits=0 would cause mod-by-zero panic in contains()
-        if num_bits == 0 {
-            return Err(MidgeError::Corruption(
-                "Bloom filter num_bits cannot be zero — data corruption detected".to_string(),
-            ));
-        }
-
-        // Safety: k ∈ [1,8] (adaptive k range from writer)
-        if !matches!(k, 1..=8) {
-            return Err(MidgeError::Corruption(format!(
-                "Bloom filter k={k} out of range [1, 8] — data corruption detected"
-            )));
-        }
+        let (num_bits, key_count, k) = parse_bloom_header(data)?;
 
         let bits = data[9..].to_vec();
         let expected_bytes = num_bits.div_ceil(8);
@@ -99,77 +75,137 @@ impl BloomReader {
     }
 }
 
+/// Probe a bloom filter's bit slice.
+///
+/// The reader and the per-block view share this one loop so a borrowed probe
+/// can never drift from an owned one and report a false negative.
+fn probe_bits(bits: &[u8], num_bits_value: usize, k: u8, key: &[u8]) -> BloomTestResult {
+    // Compute both hashes ONCE (Kirsch-Mitzenmacher optimization)
+    let h1 = xxh3_64_with_seed(key, SEED1);
+    let h2 = xxh3_64_with_seed(key, SEED2);
+    let num_bits = usize_to_u64(num_bits_value);
+
+    // Unroll loop by 4 to reduce branch misprediction overhead on constrained CPUs.
+    // Each check is independent enough for ILP (instruction-level parallelism).
+    let k_full_groups = (k as usize) / 4;
+    let k_remainder = (k as usize) % 4;
+
+    // Process 4 hash functions at a time
+    for group in 0..k_full_groups {
+        let base_i = usize_to_u64(group * 4);
+
+        // Check hash function at base_i
+        let combined1 = h1.wrapping_add(base_i.wrapping_mul(h2));
+        let bit_index1 = u64_to_usize(combined1 % num_bits);
+        let byte_index1 = bit_index1 / 8;
+        let bit_offset1 = bit_index1 % 8;
+        if byte_index1 >= bits.len() || (bits[byte_index1] & (1 << bit_offset1)) == 0 {
+            return BloomTestResult::DefinitelyNotPresent;
+        }
+
+        // Check hash function at base_i+1
+        let combined2 = h1.wrapping_add((base_i + 1).wrapping_mul(h2));
+        let bit_index2 = u64_to_usize(combined2 % num_bits);
+        let byte_index2 = bit_index2 / 8;
+        let bit_offset2 = bit_index2 % 8;
+        if byte_index2 >= bits.len() || (bits[byte_index2] & (1 << bit_offset2)) == 0 {
+            return BloomTestResult::DefinitelyNotPresent;
+        }
+
+        // Check hash function at base_i+2
+        let combined3 = h1.wrapping_add((base_i + 2).wrapping_mul(h2));
+        let bit_index3 = u64_to_usize(combined3 % num_bits);
+        let byte_index3 = bit_index3 / 8;
+        let bit_offset3 = bit_index3 % 8;
+        if byte_index3 >= bits.len() || (bits[byte_index3] & (1 << bit_offset3)) == 0 {
+            return BloomTestResult::DefinitelyNotPresent;
+        }
+
+        // Check hash function at base_i+3
+        let combined4 = h1.wrapping_add((base_i + 3).wrapping_mul(h2));
+        let bit_index4 = u64_to_usize(combined4 % num_bits);
+        let byte_index4 = bit_index4 / 8;
+        let bit_offset4 = bit_index4 % 8;
+        if byte_index4 >= bits.len() || (bits[byte_index4] & (1 << bit_offset4)) == 0 {
+            return BloomTestResult::DefinitelyNotPresent;
+        }
+    }
+
+    // Handle remaining 0-3 hash functions
+    for i in 0..k_remainder {
+        let hash_index = usize_to_u64(k_full_groups * 4 + i);
+        let combined = h1.wrapping_add(hash_index.wrapping_mul(h2));
+        let bit_index = u64_to_usize(combined % num_bits);
+        let byte_index = bit_index / 8;
+        let bit_offset = bit_index % 8;
+
+        if byte_index >= bits.len() || (bits[byte_index] & (1 << bit_offset)) == 0 {
+            return BloomTestResult::DefinitelyNotPresent;
+        }
+    }
+
+    BloomTestResult::MightBePresent
+}
+
+/// A bloom filter read in place, without copying its bit array.
+///
+/// Block blooms are validated once when the SST is opened, so a point-read
+/// probe only needs to re-read the header and borrow the bits.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BloomView<'a> {
+    bits: &'a [u8],
+    num_bits: usize,
+    k: u8,
+}
+
+impl<'a> BloomView<'a> {
+    /// Borrow a serialized bloom filter, validating only its header.
+    pub(crate) fn parse(data: &'a [u8]) -> MidgeResult<Self> {
+        let (num_bits, _key_count, k) = parse_bloom_header(data)?;
+        let bits = &data[9..];
+        if bits.len() != num_bits.div_ceil(8) {
+            return Err(MidgeError::Corruption(
+                "Bloom filter size mismatch".to_string(),
+            ));
+        }
+        Ok(Self { bits, num_bits, k })
+    }
+
+    pub(crate) fn contains(&self, key: &[u8]) -> BloomTestResult {
+        probe_bits(self.bits, self.num_bits, self.k, key)
+    }
+}
+
+/// Read and validate the fixed bloom header shared by both readers.
+fn parse_bloom_header(data: &[u8]) -> MidgeResult<(usize, usize, u8)> {
+    if data.len() < 9 {
+        return Err(MidgeError::Corruption(
+            "Bloom filter data too short".to_string(),
+        ));
+    }
+    let num_bits = usize::try_from(u32::from_le_bytes([data[0], data[1], data[2], data[3]]))
+        .unwrap_or(usize::MAX);
+    let key_count = usize::try_from(u32::from_le_bytes([data[4], data[5], data[6], data[7]]))
+        .unwrap_or(usize::MAX);
+    let k = data[8];
+    // Safety: num_bits=0 would cause mod-by-zero panic when probing.
+    if num_bits == 0 {
+        return Err(MidgeError::Corruption(
+            "Bloom filter num_bits cannot be zero — data corruption detected".to_string(),
+        ));
+    }
+    // Safety: k in [1,8] (adaptive k range from writer)
+    if !matches!(k, 1..=8) {
+        return Err(MidgeError::Corruption(format!(
+            "Bloom filter k={k} out of range [1, 8] — data corruption detected"
+        )));
+    }
+    Ok((num_bits, key_count, k))
+}
+
 impl BloomFilterOps for BloomReader {
     fn contains(&self, key: &[u8]) -> BloomTestResult {
-        // Compute both hashes ONCE (Kirsch-Mitzenmacher optimization)
-        let h1 = xxh3_64_with_seed(key, SEED1);
-        let h2 = xxh3_64_with_seed(key, SEED2);
-        let num_bits = usize_to_u64(self.num_bits);
-
-        // Unroll loop by 4 to reduce branch misprediction overhead on constrained CPUs.
-        // Each check is independent enough for ILP (instruction-level parallelism).
-        let k_full_groups = (self.k as usize) / 4;
-        let k_remainder = (self.k as usize) % 4;
-
-        // Process 4 hash functions at a time
-        for group in 0..k_full_groups {
-            let base_i = usize_to_u64(group * 4);
-
-            // Check hash function at base_i
-            let combined1 = h1.wrapping_add(base_i.wrapping_mul(h2));
-            let bit_index1 = u64_to_usize(combined1 % num_bits);
-            let byte_index1 = bit_index1 / 8;
-            let bit_offset1 = bit_index1 % 8;
-            if byte_index1 >= self.bits.len() || (self.bits[byte_index1] & (1 << bit_offset1)) == 0
-            {
-                return BloomTestResult::DefinitelyNotPresent;
-            }
-
-            // Check hash function at base_i+1
-            let combined2 = h1.wrapping_add((base_i + 1).wrapping_mul(h2));
-            let bit_index2 = u64_to_usize(combined2 % num_bits);
-            let byte_index2 = bit_index2 / 8;
-            let bit_offset2 = bit_index2 % 8;
-            if byte_index2 >= self.bits.len() || (self.bits[byte_index2] & (1 << bit_offset2)) == 0
-            {
-                return BloomTestResult::DefinitelyNotPresent;
-            }
-
-            // Check hash function at base_i+2
-            let combined3 = h1.wrapping_add((base_i + 2).wrapping_mul(h2));
-            let bit_index3 = u64_to_usize(combined3 % num_bits);
-            let byte_index3 = bit_index3 / 8;
-            let bit_offset3 = bit_index3 % 8;
-            if byte_index3 >= self.bits.len() || (self.bits[byte_index3] & (1 << bit_offset3)) == 0
-            {
-                return BloomTestResult::DefinitelyNotPresent;
-            }
-
-            // Check hash function at base_i+3
-            let combined4 = h1.wrapping_add((base_i + 3).wrapping_mul(h2));
-            let bit_index4 = u64_to_usize(combined4 % num_bits);
-            let byte_index4 = bit_index4 / 8;
-            let bit_offset4 = bit_index4 % 8;
-            if byte_index4 >= self.bits.len() || (self.bits[byte_index4] & (1 << bit_offset4)) == 0
-            {
-                return BloomTestResult::DefinitelyNotPresent;
-            }
-        }
-
-        // Handle remaining 0-3 hash functions
-        for i in 0..k_remainder {
-            let hash_index = usize_to_u64(k_full_groups * 4 + i);
-            let combined = h1.wrapping_add(hash_index.wrapping_mul(h2));
-            let bit_index = u64_to_usize(combined % num_bits);
-            let byte_index = bit_index / 8;
-            let bit_offset = bit_index % 8;
-
-            if byte_index >= self.bits.len() || (self.bits[byte_index] & (1 << bit_offset)) == 0 {
-                return BloomTestResult::DefinitelyNotPresent;
-            }
-        }
-
-        BloomTestResult::MightBePresent
+        probe_bits(&self.bits, self.num_bits, self.k, key)
     }
 
     fn size_bytes(&self) -> usize {
@@ -700,5 +736,49 @@ mod tests {
         // Assert - Should reject as corruption to prevent mod-by-zero panic
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), MidgeError::Corruption(_)));
+    }
+    /// The probe path runs once per candidate block per SST on every point
+    /// read, so it must borrow the filter's bits instead of copying them.
+    #[test]
+    fn should_borrow_the_filter_bits_when_parsing_a_view() {
+        // Arrange
+        let mut writer = crate::sst::bloom::writer::BloomWriter::with_defaults(64);
+        writer.insert(b"present");
+        let serialized = writer.serialize();
+
+        // Act
+        let view = BloomView::parse(&serialized).expect("parse view");
+
+        // Assert
+        assert!(
+            std::ptr::eq(view.bits.as_ptr(), serialized[9..].as_ptr()),
+            "the view must point into the serialized buffer"
+        );
+    }
+
+    /// One probing loop serves both readers, so a borrowed probe can never
+    /// report a false negative an owned probe would not.
+    #[test]
+    fn should_reach_the_same_verdict_as_the_owned_reader_when_probing() {
+        // Arrange
+        let mut writer = crate::sst::bloom::writer::BloomWriter::with_defaults(64);
+        for index in 0..64u32 {
+            writer.insert(&index.to_le_bytes());
+        }
+        let serialized = writer.serialize();
+        let owned = BloomReader::deserialize(&serialized).expect("deserialize reader");
+        let view = BloomView::parse(&serialized).expect("parse view");
+
+        // Act
+        let disagreement = (0..512u32).find(|probe| {
+            let key = probe.to_le_bytes();
+            owned.contains(&key) != view.contains(&key)
+        });
+
+        // Assert
+        assert!(
+            disagreement.is_none(),
+            "disagreed on probe {disagreement:?}"
+        );
     }
 }
