@@ -846,6 +846,63 @@ fn range_tombstone_is_obsolete(tombstone: &RangeTombstone, policy: TombstoneGcPo
     policy.range_eligible && tombstone_is_obsolete(tombstone.seq, policy.snapshot_horizon)
 }
 
+/// Newest version in one key group, ignoring range events.
+///
+/// Two versions at the same sequence must be identical. If they differ, the
+/// inputs disagree about what was written at that sequence, and compaction must
+/// not paper over that by picking one.
+fn select_newest_version<'a>(
+    events: impl Iterator<Item = &'a CompactionEvent>,
+) -> MidgeResult<Option<&'a CompactionVersion>> {
+    let mut selected: Option<&CompactionVersion> = None;
+    for event in events {
+        let CompactionEvent::Version(version) = event else {
+            continue;
+        };
+        match selected {
+            None => selected = Some(version),
+            Some(current) if current.seq == version.seq && current != version => {
+                return Err(crate::common::MidgeError::Corruption(format!(
+                    "conflicting compaction versions for key {:?} at sequence {}",
+                    String::from_utf8_lossy(&version.key),
+                    version.seq
+                )));
+            }
+            Some(current) if version.seq > current.seq => selected = Some(version),
+            Some(_) => {}
+        }
+    }
+    Ok(selected)
+}
+
+/// Whether a key group's newest version survives tombstone GC.
+///
+/// `obsolete_active_cover` is the highest-sequence obsolete range tombstone
+/// still open at this key group and `range_starts` are the tombstones that open
+/// inside it. Every tombstone still active opened at or before this key group
+/// and has not reached its `RangeEnd`, so it covers the key. A cover that
+/// unexpectedly does not contain the key only retains the version, which is the
+/// safe direction.
+fn survives_tombstone_gc<'a>(
+    version: &CompactionVersion,
+    obsolete_active_cover: Option<&RangeTombstone>,
+    mut range_starts: impl Iterator<Item = &'a RangeTombstone>,
+    gc: TombstoneGcPolicy,
+) -> bool {
+    let covered_by_active = obsolete_active_cover
+        .is_some_and(|active| active.covers(&version.key) && active.seq >= version.seq);
+    let covered_by_start = range_starts.any(|tombstone| {
+        range_tombstone_is_obsolete(tombstone, gc)
+            && tombstone.covers(&version.key)
+            && tombstone.seq >= version.seq
+    });
+    !(covered_by_active
+        || covered_by_start
+        || (gc.point_eligible
+            && version.is_tombstone
+            && tombstone_is_obsolete(version.seq, gc.snapshot_horizon)))
+}
+
 fn encoded_tombstone_upper_bound(tombstone: &RangeTombstone) -> usize {
     std::mem::size_of::<u32>()
         .saturating_mul(2)
@@ -983,48 +1040,19 @@ pub(crate) fn write_partitioned_compaction_outputs(
             }
         }
 
-        let mut selected_version: Option<&CompactionVersion> = None;
-        for event in &key_events {
-            let CompactionEvent::Version(version) = &event.event else {
-                continue;
-            };
-            match selected_version {
-                None => selected_version = Some(version),
-                Some(selected) if selected.seq == version.seq && selected != version => {
-                    return Err(crate::common::MidgeError::Corruption(format!(
-                        "conflicting compaction versions for key {:?} at sequence {}",
-                        String::from_utf8_lossy(&version.key),
-                        version.seq
-                    )));
-                }
-                Some(selected) if version.seq > selected.seq => selected_version = Some(version),
-                Some(_) => {}
-            }
-        }
+        let selected_version = select_newest_version(key_events.iter().map(|event| &event.event))?;
 
         let starts = key_events.iter().filter_map(|event| match &event.event {
             CompactionEvent::RangeStart(tombstone) => Some(tombstone),
             CompactionEvent::RangeEnd(_) | CompactionEvent::Version(_) => None,
         });
         let selected_version = selected_version.filter(|version| {
-            // Every tombstone still active here opened at or before this key
-            // group and has not reached its RangeEnd, so it covers the key;
-            // the highest-sequence obsolete cover therefore decides the group.
-            // A cover that unexpectedly does not contain the key only retains
-            // the version, which is the safe direction.
-            let covered_by_active = active_tombstones
-                .highest_obsolete_cover()
-                .is_some_and(|active| active.covers(&version.key) && active.seq >= version.seq);
-            let covered_by_start = starts.clone().any(|tombstone| {
-                range_tombstone_is_obsolete(tombstone, tombstone_gc)
-                    && tombstone.covers(&version.key)
-                    && tombstone.seq >= version.seq
-            });
-            !(covered_by_active
-                || covered_by_start
-                || (tombstone_gc.point_eligible
-                    && version.is_tombstone
-                    && tombstone_is_obsolete(version.seq, tombstone_gc.snapshot_horizon)))
+            survives_tombstone_gc(
+                version,
+                active_tombstones.highest_obsolete_cover(),
+                starts.clone(),
+                tombstone_gc,
+            )
         });
 
         let partition_tombstone_bytes = partition_tombstones.encoded_bytes();
@@ -1709,5 +1737,250 @@ mod tests {
         // resurrected key.
         assert!(!above_horizon);
         assert!(!maximum_sequence);
+    }
+
+    mod key_group_reduction {
+        use super::*;
+
+        fn version_event(key: &str, seq: u64, is_tombstone: bool, value: &str) -> CompactionEvent {
+            CompactionEvent::Version(mk_version(
+                key,
+                seq,
+                is_tombstone,
+                (!is_tombstone).then_some(value),
+                None,
+            ))
+        }
+
+        fn cover(start: &str, end: &str, seq: u64) -> RangeTombstone {
+            RangeTombstone::new(start.as_bytes().to_vec(), end.as_bytes().to_vec(), seq)
+        }
+
+        fn policy(horizon: Option<u64>, point: bool, range: bool) -> TombstoneGcPolicy {
+            TombstoneGcPolicy {
+                snapshot_horizon: horizon,
+                point_eligible: point,
+                range_eligible: range,
+            }
+        }
+
+        fn selected_seq(events: &[CompactionEvent]) -> MidgeResult<Option<u64>> {
+            select_newest_version(events.iter()).map(|version| version.map(|v| v.seq))
+        }
+
+        #[test]
+        fn should_select_highest_sequence_when_key_group_has_several_versions() {
+            // Arrange
+            let events = [
+                version_event("k", 3, false, "old"),
+                version_event("k", 9, false, "new"),
+                version_event("k", 5, false, "mid"),
+            ];
+
+            // Act
+            let selected = selected_seq(&events);
+
+            // Assert
+            assert_eq!(selected.unwrap(), Some(9));
+        }
+
+        #[test]
+        fn should_keep_one_version_when_equal_sequence_versions_are_identical() {
+            // Arrange
+            let events = [
+                version_event("k", 4, false, "same"),
+                version_event("k", 4, false, "same"),
+            ];
+
+            // Act
+            let selected = selected_seq(&events);
+
+            // Assert
+            assert_eq!(selected.unwrap(), Some(4));
+        }
+
+        #[test]
+        fn should_reject_key_group_when_equal_sequence_versions_disagree() {
+            // Arrange
+            let events = [
+                version_event("k", 4, false, "left"),
+                version_event("k", 4, false, "right"),
+            ];
+
+            // Act
+            let selected = selected_seq(&events);
+
+            // Assert
+            assert!(matches!(
+                selected,
+                Err(crate::common::MidgeError::Corruption(message))
+                    if message.contains("conflicting compaction versions")
+            ));
+        }
+
+        #[test]
+        fn should_select_nothing_when_key_group_holds_only_range_events() {
+            // Arrange
+            let events = [
+                CompactionEvent::RangeStart(cover("a", "m", 7)),
+                CompactionEvent::RangeEnd(cover("a", "m", 7)),
+            ];
+
+            // Act
+            let selected = selected_seq(&events);
+
+            // Assert
+            assert_eq!(selected.unwrap(), None);
+        }
+
+        #[test]
+        fn should_drop_point_tombstone_when_it_is_at_or_below_the_horizon() {
+            // Arrange
+            let version = mk_version("k", 5, true, None::<&str>, None);
+
+            // Act
+            let survives = survives_tombstone_gc(
+                &version,
+                None,
+                std::iter::empty(),
+                policy(Some(5), true, true),
+            );
+
+            // Assert
+            assert!(!survives);
+        }
+
+        #[test]
+        fn should_keep_point_tombstone_when_a_snapshot_can_still_see_it() {
+            // Arrange
+            let version = mk_version("k", 6, true, None::<&str>, None);
+
+            // Act
+            let survives = survives_tombstone_gc(
+                &version,
+                None,
+                std::iter::empty(),
+                policy(Some(5), true, true),
+            );
+
+            // Assert
+            assert!(survives);
+        }
+
+        #[test]
+        fn should_keep_point_tombstone_when_point_gc_is_not_eligible() {
+            // Arrange
+            let version = mk_version("k", 1, true, None::<&str>, None);
+
+            // Act
+            let survives = survives_tombstone_gc(
+                &version,
+                None,
+                std::iter::empty(),
+                policy(Some(100), false, true),
+            );
+
+            // Assert
+            assert!(survives);
+        }
+
+        #[test]
+        fn should_drop_value_when_an_obsolete_active_cover_is_at_least_as_new() {
+            // Arrange
+            let version = mk_version("k", 5, false, Some("v"), None);
+            let active = cover("a", "z", 5);
+
+            // Act
+            let survives = survives_tombstone_gc(
+                &version,
+                Some(&active),
+                std::iter::empty(),
+                policy(Some(10), true, true),
+            );
+
+            // Assert
+            assert!(!survives);
+        }
+
+        #[test]
+        fn should_keep_value_when_the_active_cover_is_older_than_the_value() {
+            // Arrange
+            let version = mk_version("k", 6, false, Some("v"), None);
+            let active = cover("a", "z", 5);
+
+            // Act
+            let survives = survives_tombstone_gc(
+                &version,
+                Some(&active),
+                std::iter::empty(),
+                policy(Some(10), true, true),
+            );
+
+            // Assert
+            assert!(survives);
+        }
+
+        #[test]
+        fn should_keep_value_when_the_active_cover_does_not_contain_the_key() {
+            // Arrange: retaining is the safe direction if the cover is misplaced.
+            let version = mk_version("k", 5, false, Some("v"), None);
+            let active = cover("m", "z", 9);
+
+            // Act
+            let survives = survives_tombstone_gc(
+                &version,
+                Some(&active),
+                std::iter::empty(),
+                policy(Some(10), true, true),
+            );
+
+            // Assert
+            assert!(survives);
+        }
+
+        #[test]
+        fn should_drop_value_when_an_obsolete_range_start_in_the_group_covers_it() {
+            // Arrange
+            let version = mk_version("k", 5, false, Some("v"), None);
+            let starts = [cover("a", "z", 8)];
+
+            // Act
+            let survives =
+                survives_tombstone_gc(&version, None, starts.iter(), policy(Some(10), true, true));
+
+            // Assert
+            assert!(!survives);
+        }
+
+        #[test]
+        fn should_keep_value_when_the_covering_range_start_is_not_yet_obsolete() {
+            // Arrange: sequence 11 is above the horizon, so a snapshot may need the value.
+            let version = mk_version("k", 5, false, Some("v"), None);
+            let starts = [cover("a", "z", 11)];
+
+            // Act
+            let survives =
+                survives_tombstone_gc(&version, None, starts.iter(), policy(Some(10), true, true));
+
+            // Assert
+            assert!(survives);
+        }
+
+        #[test]
+        fn should_keep_value_when_no_tombstone_covers_it() {
+            // Arrange
+            let version = mk_version("k", 5, false, Some("v"), None);
+
+            // Act
+            let survives = survives_tombstone_gc(
+                &version,
+                None,
+                std::iter::empty(),
+                policy(Some(10), true, true),
+            );
+
+            // Assert
+            assert!(survives);
+        }
     }
 }
