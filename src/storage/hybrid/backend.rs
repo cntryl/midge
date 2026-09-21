@@ -48,9 +48,7 @@ impl RemoteCasFailure {
 
 use super::actor;
 use super::policy;
-use crate::storage::{
-    StorageBackend, StorageCallback, StorageEvent, StorageObjectMetadata, StorageOutcome,
-};
+use crate::storage::{StorageBackend, StorageEvent, StorageObjectMetadata, StorageOutcome};
 use crossbeam::channel as cb;
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};

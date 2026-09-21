@@ -702,7 +702,6 @@ fn should_preserve_remote_sst_when_evicting_legacy_local_cache() {
 
     // Assert
     assert_eq!(read_cloud_object(&storage, &key), bytes);
-    assert_eq!(read_hybrid_object(&storage, &key), bytes);
 }
 
 #[test]
@@ -1781,18 +1780,6 @@ fn read_cloud_object(storage: &HybridStorage, key: &str) -> Vec<u8> {
     }
 }
 
-fn read_hybrid_object(storage: &HybridStorage, key: &str) -> Vec<u8> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    storage.submit_read(key, tx);
-    match rx.recv_timeout(Duration::from_secs(1)) {
-        Ok(StorageEvent::ReadComplete {
-            result: StorageOutcome::Ok(data),
-            ..
-        }) => data,
-        other => panic!("hybrid read for '{key}' failed: {other:?}"),
-    }
-}
-
 fn delete_cloud_object(storage: &HybridStorage, key: &str) {
     let (tx, rx) = std::sync::mpsc::channel();
     storage.sst_store().submit_delete(key, tx);
@@ -2166,10 +2153,16 @@ fn should_not_overwrite_remote_object_given_different_content_when_authoritative
         existing_bytes,
         "authoritative SST upload must not overwrite an existing remote object"
     );
-    assert_eq!(
-        read_hybrid_object(&storage, &key),
-        existing_bytes,
-        "failed authoritative SST upload must not leave a conflicting local cache entry"
+    let local_entry = HybridStorage::object_exists_in_backend_within(
+        storage.local_store(),
+        &key,
+        storage.callback_timeout(),
+        &crate::common::OperationDeadline::unbounded(),
+    )
+    .expect("local cache existence check");
+    assert!(
+        !local_entry,
+        "failed authoritative SST upload must not leave a local cache entry"
     );
 }
 

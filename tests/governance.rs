@@ -298,6 +298,30 @@ mod architecture_ladder {
         sources
     }
 
+    #[test]
+    fn should_not_implement_storage_backend_for_hybrid_storage() {
+        // Arrange
+        let needle = "impl StorageBackend for HybridStorage";
+
+        // Act
+        let offenders: Vec<PathBuf> = rust_sources_under("src/storage/hybrid")
+            .into_iter()
+            .filter(|path| {
+                std::fs::read_to_string(path)
+                    .expect("read Rust source")
+                    .contains(needle)
+            })
+            .collect();
+
+        // Assert
+        assert!(
+            offenders.is_empty(),
+            "HybridStorage must not be a StorageBackend: its local-first reads, local-only \
+             writes and lossy lists are unsafe for an object layer whose authority is the \
+             cloud: {offenders:?}"
+        );
+    }
+
     /// Dependency-checked source for one file.
     ///
     /// A file is not exempt because it is named `tests.rs`: a test module still
