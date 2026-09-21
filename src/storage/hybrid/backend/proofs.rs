@@ -32,6 +32,17 @@ impl RemoteObjectProof {
         }
     }
 
+    /// Whole-object identity captured by a caller that already holds the bytes.
+    #[cfg(test)]
+    pub(crate) fn exact(key: String, bytes: Vec<u8>, metadata: StorageObjectMetadata) -> Self {
+        Self {
+            key,
+            bytes,
+            metadata,
+            range_identity: false,
+        }
+    }
+
     pub(crate) fn bytes(&self) -> &[u8] {
         &self.bytes
     }

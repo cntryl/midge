@@ -1,7 +1,7 @@
 //! Cloud WAL segment sealing and flush scheduling.
 
 use super::super::EventLoop;
-use crate::runtime::hybrid_persistence::HybridPersistence;
+use crate::runtime::hybrid_persistence::CloudPersistence;
 use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
 use std::time::Instant;
 
@@ -311,6 +311,7 @@ impl EventLoop {
                 "CloudAsync WAL upload backlog requires HybridStorage".to_string(),
             ));
         };
+        let storage = CloudPersistence::new(storage);
 
         if self.cloud_wal.upload_backlog.is_empty() {
             return Ok(());

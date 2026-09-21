@@ -160,6 +160,58 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn should_compact_legacy_oversized_uncompressed_entry_without_losing_readability(
+    ) -> MidgeResult<()> {
+        use crate::sst::compression::{
+            CompressionAlgo, CompressionPolicy, MAX_DECOMPRESSED_BLOCK_SIZE,
+        };
+
+        // Arrange: reproduce the pre-admission writer's on-disk bytes directly.
+        let dir = tempdir()?;
+        let fs = std::sync::Arc::new(crate::io::RealFs::new(dir.path())?);
+        let value = vec![b'v'; MAX_DECOMPRESSED_BLOCK_SIZE];
+        crate::sst::fs::factory_io::write_legacy_oversized_uncompressed_sst(
+            std::sync::Arc::clone(&fs) as std::sync::Arc<dyn crate::io::Fs>,
+            &dir.path().join("legacy.sst"),
+            b"legacy",
+            value.clone(),
+            7,
+        )?;
+
+        for algo in [
+            CompressionAlgo::None,
+            CompressionAlgo::Lz4,
+            CompressionAlgo::Zstd3,
+        ] {
+            let factory = crate::sst::FsSstFactoryIo::new(fs.clone(), 4096)
+                .with_compression_policy(CompressionPolicy::Fixed(algo));
+            assert_eq!(
+                factory
+                    .open(Path::new("legacy.sst"))?
+                    .get(b"legacy")?
+                    .as_deref(),
+                Some(value.as_slice())
+            );
+            let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(42);
+            plan.compaction_memory_limit = 1024 * 1024 * 1024;
+            plan.input_files.push("legacy.sst".to_string());
+
+            // Act
+            let outputs = execute_compaction(&plan, &factory, dir.path(), None)?;
+
+            // Assert
+            let reader = factory.open(Path::new(&outputs[0]))?;
+            assert_eq!(reader.get(b"legacy")?.as_deref(), Some(value.as_slice()));
+            assert!(matches!(
+                reader.get_state(b"legacy")?,
+                crate::sst::types::KeyState::Value(_, 7, Some(u64::MAX), _)
+            ));
+            assert!(dir.path().join("legacy.sst").exists());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn should_roll_range_only_output_before_pending_metadata_exceeds_local_staging(
     ) -> MidgeResult<()> {
         // Arrange

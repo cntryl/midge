@@ -1,5 +1,3 @@
-#![cfg(test)]
-
 use super::*;
 use crate::metadata::Manifest;
 use crate::runtime::hybrid_persistence::CloudWalPruneProgress;
@@ -75,7 +73,7 @@ fn fixture(
 ) -> (
     tempfile::TempDir,
     Arc<LimitedRanges>,
-    HybridStorage,
+    CloudPersistence,
     Manifest,
 ) {
     let directory = tempfile::tempdir().expect("directory");
@@ -90,11 +88,11 @@ fn fixture(
         expire_after_next_wal_range: AtomicBool::new(false),
     });
     let cloud = Arc::new(CloudStorage::new(backend.clone(), String::new()));
-    let storage = HybridStorage::with_policy(
+    let storage = CloudPersistence::new(Arc::new(HybridStorage::with_policy(
         local,
         cloud,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-    );
+    )));
     storage.enable_ephemeral_sst_cache(1024 * 1024);
     storage.fence_cloud_wal_catalog(2).expect("catalog");
     let value = (0..8192_u32)
@@ -167,7 +165,7 @@ fn should_finish_oldest_wal_proof_across_repeated_provider_timeouts() {
 }
 
 fn attempt(
-    storage: &HybridStorage,
+    storage: &CloudPersistence,
     manifest: &Manifest,
     progress: &CloudWalPruneProgress,
     sequence: u64,
@@ -176,7 +174,7 @@ fn attempt(
 }
 
 fn attempt_with_quantum(
-    storage: &HybridStorage,
+    storage: &CloudPersistence,
     manifest: &Manifest,
     progress: &CloudWalPruneProgress,
     sequence: u64,
@@ -601,7 +599,8 @@ fn finish_with_retained_manifest_admission(remote_metadata: bool) {
     let progress = CloudWalPruneProgress::default();
     let metadata_path = directory.path().join("metadata");
     std::fs::create_dir_all(&metadata_path).unwrap();
-    crate::metadata::ManifestPersistence::save(&metadata_path, &manifest).unwrap();
+    crate::metadata::ManifestPersistence::save(&metadata_path, &manifest)
+        .unwrap();
     let encoded_bytes: usize = crate::metadata::files::CLOUD_MIRRORED
         .iter()
         .filter_map(|name| std::fs::metadata(metadata_path.join(name)).ok())

@@ -121,7 +121,7 @@ impl HybridStorage {
     }
 
     #[cfg(test)]
-    pub(super) fn object_exists_in_backend_within(
+    pub(crate) fn object_exists_in_backend_within(
         backend: &Arc<dyn StorageBackend>,
         key: &str,
         callback_timeout: Duration,

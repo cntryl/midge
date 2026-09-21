@@ -3,7 +3,7 @@
 use super::super::durability_sync::CompletionSource;
 use super::super::EventLoop;
 use crate::common::OperationDeadline;
-use crate::runtime::hybrid_persistence::HybridPersistence;
+use crate::runtime::hybrid_persistence::CloudPersistence;
 use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
 
 impl EventLoop {
@@ -459,7 +459,7 @@ impl EventLoop {
             .state
             .wal_dir
             .join(crate::wal::segment_file_name(segment_id));
-        storage.publish_remote_wal_segment(
+        CloudPersistence::new(std::sync::Arc::clone(storage)).publish_remote_wal_segment(
             segment_id,
             max_sequence,
             &local_path,

@@ -7,7 +7,7 @@
 
 use super::super::state::RuntimeState;
 use crate::common::MidgeResult;
-use crate::runtime::hybrid_persistence::HybridPersistence;
+use crate::runtime::hybrid_persistence::CloudPersistence;
 use crate::runtime::RuntimeMsg;
 #[cfg(test)]
 use std::collections::HashSet;
@@ -461,6 +461,7 @@ impl GcActor {
         std::thread::Builder::new()
             .name("midge-sst-gc".to_string())
             .spawn(move || {
+                let storage = CloudPersistence::new(storage);
                 for (sst_name, sst_path) in ssts {
                     if let Err(error) = storage.delete_sst_object_blocking(&sst_name) {
                         tracing::warn!(

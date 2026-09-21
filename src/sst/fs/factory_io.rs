@@ -118,6 +118,36 @@ impl FsSstFactoryIo {
     }
 }
 
+/// Write an SST whose single entry holds an uncompressed value larger than the
+/// decompressed-block ceiling, exactly as the writer produced before that
+/// admission limit existed.
+///
+/// Compaction owns the round-trip assertion for these files, so the fixture is
+/// built here — where the writer's pending-entry representation lives — and the
+/// behaviour is asserted in `crate::compaction`.
+#[cfg(test)]
+pub(crate) fn write_legacy_oversized_uncompressed_sst(
+    fs: Arc<dyn Fs>,
+    path: &Path,
+    key: &[u8],
+    value: Vec<u8>,
+    sequence: u64,
+) -> MidgeResult<()> {
+    let mut legacy = InMemorySstWriter::new(
+        fs,
+        CompressionPolicy::Fixed(crate::sst::compression::CompressionAlgo::None),
+        4096,
+    );
+    legacy.entries.push(PendingEntry {
+        key: key.to_vec(),
+        value: Some(value),
+        sequence,
+        op_type: 0,
+        expiration: Some(u64::MAX),
+    });
+    super::finish_writer_to_path(Box::new(legacy), path)
+}
+
 /// Simple in-memory SST writer that applies block-level compression.
 struct InMemorySstWriter {
     /// Filesystem this writer publishes through, injected by the factory so
@@ -1583,58 +1613,6 @@ mod tests {
         assert!(budget
             .reserve(budget.limit(), "released writer budget")
             .is_ok());
-        Ok(())
-    }
-
-    #[test]
-    fn should_compact_legacy_oversized_uncompressed_entry_without_losing_readability(
-    ) -> MidgeResult<()> {
-        use crate::sst::compression::{CompressionAlgo, MAX_DECOMPRESSED_BLOCK_SIZE};
-        // Arrange: reproduce the pre-admission writer's on-disk bytes directly.
-        let dir = tempfile::tempdir()?;
-        let fs = Arc::new(crate::io::RealFs::new(dir.path())?);
-        let value = vec![b'v'; MAX_DECOMPRESSED_BLOCK_SIZE];
-        let mut legacy = InMemorySstWriter::new(
-            Arc::clone(&fs) as Arc<dyn Fs>,
-            CompressionPolicy::Fixed(CompressionAlgo::None),
-            4096,
-        );
-        legacy.entries.push(PendingEntry {
-            key: b"legacy".to_vec(),
-            value: Some(value.clone()),
-            sequence: 7,
-            op_type: 0,
-            expiration: Some(u64::MAX),
-        });
-        crate::sst::fs::finish_writer_to_path(Box::new(legacy), &dir.path().join("legacy.sst"))?;
-        for algo in [
-            CompressionAlgo::None,
-            CompressionAlgo::Lz4,
-            CompressionAlgo::Zstd3,
-        ] {
-            let factory = FsSstFactoryIo::new(fs.clone(), 4096)
-                .with_compression_policy(CompressionPolicy::Fixed(algo));
-            assert_eq!(
-                factory
-                    .open(Path::new("legacy.sst"))?
-                    .get(b"legacy")?
-                    .as_deref(),
-                Some(value.as_slice())
-            );
-            let mut plan = crate::compaction::CompactionPlan::new(0, 0, 1).with_output_seq(42);
-            plan.compaction_memory_limit = 1024 * 1024 * 1024;
-            plan.input_files.push("legacy.sst".to_string());
-            // Act
-            let outputs = crate::compaction::execute_compaction(&plan, &factory, dir.path(), None)?;
-            let reader = factory.open(Path::new(&outputs[0]))?;
-            // Assert
-            assert_eq!(reader.get(b"legacy")?.as_deref(), Some(value.as_slice()));
-            assert!(matches!(
-                reader.get_state(b"legacy")?,
-                crate::sst::types::KeyState::Value(_, 7, Some(u64::MAX), _)
-            ));
-            assert!(dir.path().join("legacy.sst").exists());
-        }
         Ok(())
     }
 

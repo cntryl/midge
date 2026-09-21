@@ -957,3 +957,45 @@ fn should_reject_explicit_skew_tolerance_when_it_exceeds_ttl() {
         result.err()
     );
 }
+
+#[test]
+fn should_accept_dotted_native_aws_bucket_when_building_cloud_options() {
+    // Arrange
+    let provider = crate::config::CloudProviderConfig::from(crate::config::AwsS3Config::new(
+        "database.example",
+        "us-east-1",
+    ));
+
+    // Act
+    let options = OpenOptions::cloud(
+        "/tmp/midge-dotted-aws-validation",
+        crate::config::CloudStorageLocation::new(provider, "database"),
+    )
+    .build();
+
+    // Assert
+    assert!(
+        options.is_ok(),
+        "OpenOptions should accept dotted AWS bucket"
+    );
+}
+
+#[test]
+fn should_accept_accountless_sas_connection_string_when_building_cloud_options() {
+    // Arrange
+    let connection_string = "BlobEndpoint=https://account.blob.core.usgovcloudapi.net;SharedAccessSignature=sv=2024-11-04&sig=sensitive";
+    let provider = crate::config::CloudProviderConfig::azure_blob_connection_string(
+        "container",
+        connection_string,
+    );
+
+    // Act
+    let options = OpenOptions::cloud(
+        "/tmp/midge-accountless-azure-sas-validation",
+        crate::config::CloudStorageLocation::new(provider, "database"),
+    )
+    .build();
+
+    // Assert
+    assert!(options.is_ok());
+}

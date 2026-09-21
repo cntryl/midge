@@ -232,7 +232,7 @@ impl HybridStorage {
     }
 
     #[cfg(test)]
-    pub(super) fn pending_upload_bytes(&self) -> u64 {
+    pub(crate) fn pending_upload_bytes(&self) -> u64 {
         self.upload_queue.lock().pending_bytes
     }
 }

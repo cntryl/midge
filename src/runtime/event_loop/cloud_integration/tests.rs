@@ -2,7 +2,12 @@ use super::super::tests::{create_test_cloud_event_loop, create_test_event_loop};
 use super::super::wal::{ApplyTransactionRequest, WalCoordinator};
 use super::super::EventLoop;
 use crate::runtime::durability::DurabilityWaiter;
-use crate::runtime::hybrid_persistence::HybridPersistence;
+use crate::runtime::hybrid_persistence::CloudPersistence;
+
+/// Wrap the raw hybrid backend in the runtime persistence layer under test.
+fn cloud_persistence(storage: &Arc<crate::storage::HybridStorage>) -> CloudPersistence {
+    CloudPersistence::new(Arc::clone(storage))
+}
 use crate::runtime::TestRuntimeMsg;
 use crate::runtime::{
     state::RuntimeState, ConflictPolicy, KeyAssertion, ResponseRouter, RuntimeMsg, RuntimeResponse,
@@ -1214,7 +1219,7 @@ fn seal_segment_for_test(el: &mut EventLoop) -> crate::common::MidgeResult<(u64,
     let (seg_id, max_sequence) = seal_segment_without_remote_proof_for_test(el)?;
     if let Some(storage) = el.hybrid_storage.as_ref() {
         let local_path = el.state.wal_dir.join(crate::wal::segment_file_name(seg_id));
-        storage
+        cloud_persistence(storage)
             .publish_remote_wal_segment(
                 seg_id,
                 max_sequence,
@@ -1353,7 +1358,7 @@ fn publish_remote_wal_bytes_for_test(
     write_test_file(local_path.clone(), bytes);
     write_test_file(remote_wal_path_for_test(el, segment_id), bytes);
     if let Some(storage) = el.hybrid_storage.as_ref() {
-        storage
+        cloud_persistence(storage)
             .publish_remote_wal_segment(
                 segment_id,
                 max_sequence,
@@ -2200,8 +2205,11 @@ fn should_not_overwrite_remote_manifest_when_writer_lease_moved_before_newer_pub
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     el.state.manifest.last_persisted_sequence = 10;
-    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
-        .map_err(crate::common::MidgeError::Internal)?;
+    crate::metadata::ManifestPersistence::save(
+        &el.state.db_path,
+        &el.state.manifest,
+    )
+    .map_err(crate::common::MidgeError::Internal)?;
     let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
         Arc::new(crate::storage::cloud::MockCloudBackend::new()),
         "metadata-fencing".to_string(),
@@ -2250,8 +2258,11 @@ fn should_not_overwrite_newer_remote_manifest_metadata_when_mirroring(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     el.state.manifest.last_persisted_sequence = 10;
-    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
-        .map_err(crate::common::MidgeError::Internal)?;
+    crate::metadata::ManifestPersistence::save(
+        &el.state.db_path,
+        &el.state.manifest,
+    )
+    .map_err(crate::common::MidgeError::Internal)?;
 
     let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
@@ -2300,8 +2311,11 @@ fn should_not_rewrite_unchanged_cloud_metadata_when_mirroring() -> crate::common
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
-        .map_err(crate::common::MidgeError::Internal)?;
+    crate::metadata::ManifestPersistence::save(
+        &el.state.db_path,
+        &el.state.manifest,
+    )
+    .map_err(crate::common::MidgeError::Internal)?;
     let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
         metadata_backend.clone(),
@@ -2331,8 +2345,11 @@ fn should_not_overwrite_manifest_metadata_advanced_after_preflight(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     el.state.manifest.last_persisted_sequence = 30;
-    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
-        .map_err(crate::common::MidgeError::Internal)?;
+    crate::metadata::ManifestPersistence::save(
+        &el.state.db_path,
+        &el.state.manifest,
+    )
+    .map_err(crate::common::MidgeError::Internal)?;
 
     let advanced_manifest = crate::metadata::Manifest {
         last_persisted_sequence: 31,
@@ -2543,8 +2560,11 @@ fn should_keep_event_loop_responsive_when_cloud_metadata_proof_times_out(
     seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
     el.state.wal.cloud_durable_seq = max_sequence;
     add_valid_manifest_sst_for_test(&mut el, "metadata-deadline-prune.sst", max_sequence);
-    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
-        .map_err(crate::common::MidgeError::Internal)?;
+    crate::metadata::ManifestPersistence::save(
+        &el.state.db_path,
+        &el.state.manifest,
+    )
+    .map_err(crate::common::MidgeError::Internal)?;
 
     let inner = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new_with_timeout(
@@ -2680,9 +2700,7 @@ fn should_retain_reclaimed_sst_when_salvage_metadata_mirror_exceeds_deadline(
     )));
     let sst_name = "salvage-retained-after-mirror-timeout.sst";
     let sst_bytes = valid_sst_bytes_for_test(b"salvage", b"value", 64);
-    el.hybrid_storage
-        .as_ref()
-        .expect("hybrid storage")
+    cloud_persistence(el.hybrid_storage.as_ref().expect("hybrid storage"))
         .write_sst_object(sst_name, sst_bytes)?;
     el.gc_actor
         .queue_manifest_reclamation([sst_name.to_string()]);
@@ -2718,9 +2736,7 @@ fn should_retry_manifest_reclamation_after_metadata_publication_timeout(
     )));
     let sst_name = "reclaimed-after-metadata-retry.sst";
     let sst_bytes = valid_sst_bytes_for_test(b"retry", b"value", 65);
-    el.hybrid_storage
-        .as_ref()
-        .expect("hybrid storage")
+    cloud_persistence(el.hybrid_storage.as_ref().expect("hybrid storage"))
         .write_sst_object(sst_name, sst_bytes)?;
     el.gc_actor
         .queue_manifest_reclamation([sst_name.to_string()]);
@@ -2930,8 +2946,11 @@ fn should_not_prune_remote_wal_when_cloud_metadata_is_missing() -> crate::common
     let segment_id = 1;
     let max_sequence = 10;
     seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
-    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
-        .map_err(crate::common::MidgeError::Internal)?;
+    crate::metadata::ManifestPersistence::save(
+        &el.state.db_path,
+        &el.state.manifest,
+    )
+    .map_err(crate::common::MidgeError::Internal)?;
     let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     el.cloud_metadata_storage = Some(Arc::new(crate::storage::cloud::CloudStorage::new(
         metadata_backend,
@@ -3018,8 +3037,11 @@ fn should_retain_remote_wal_when_intent_metadata_needs_convergence(
     seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
     el.state.wal.cloud_durable_seq = max_sequence;
     add_valid_manifest_sst_for_test(&mut el, "coverage.sst", max_sequence);
-    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
-        .map_err(crate::common::MidgeError::Internal)?;
+    crate::metadata::ManifestPersistence::save(
+        &el.state.db_path,
+        &el.state.manifest,
+    )
+    .map_err(crate::common::MidgeError::Internal)?;
 
     el.state
         .append_intent(crate::runtime::IntentLogEntry::WalSynced {
@@ -3087,8 +3109,11 @@ fn should_not_prune_remote_wal_when_cloud_manifest_metadata_is_ahead(
     seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
     el.state.wal.cloud_durable_seq = max_sequence;
     add_valid_manifest_sst_for_test(&mut el, "coverage.sst", max_sequence);
-    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
-        .map_err(crate::common::MidgeError::Internal)?;
+    crate::metadata::ManifestPersistence::save(
+        &el.state.db_path,
+        &el.state.manifest,
+    )
+    .map_err(crate::common::MidgeError::Internal)?;
 
     let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
@@ -3443,9 +3468,7 @@ fn should_delete_obsolete_cloud_sst_objects_after_compaction() -> crate::common:
         ..Default::default()
     });
     write_test_file(el.state.sst_dir.join(input_sst), &input_bytes);
-    el.hybrid_storage
-        .as_ref()
-        .expect("hybrid storage")
+    cloud_persistence(el.hybrid_storage.as_ref().expect("hybrid storage"))
         .write_sst_object(input_sst, input_bytes)?;
     assert!(
         remote_sst_path_for_test(&el, input_sst).exists(),
@@ -3539,7 +3562,7 @@ fn should_not_block_runtime_when_cloud_sst_delete_is_slow() -> crate::common::Mi
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
     el.set_hybrid_storage(Arc::clone(&hybrid_storage));
-    hybrid_storage.write_sst_object(sst_name, sst_bytes)?;
+    cloud_persistence(&hybrid_storage).write_sst_object(sst_name, sst_bytes)?;
 
     let request_id = 4546;
     let response_rx = el.router.register(request_id, "TestRequest");
@@ -3629,7 +3652,7 @@ fn should_retry_failed_cloud_sst_delete_without_runtime_restart() -> crate::comm
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
     el.set_hybrid_storage(Arc::clone(&hybrid_storage));
-    hybrid_storage.write_sst_object(sst_name, sst_bytes)?;
+    cloud_persistence(&hybrid_storage).write_sst_object(sst_name, sst_bytes)?;
 
     let (retry_tx, retry_rx) = crossbeam::channel::unbounded();
     el.gc_actor.set_retry_notifier(Some(retry_tx));
@@ -3711,7 +3734,7 @@ fn should_join_cloud_gc_worker_before_runtime_shutdown() -> crate::common::Midge
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
     el.set_hybrid_storage(Arc::clone(&hybrid_storage));
-    hybrid_storage.write_sst_object(sst_name, sst_bytes)?;
+    cloud_persistence(&hybrid_storage).write_sst_object(sst_name, sst_bytes)?;
 
     let request_id = 4547;
     let (_response_tx, msg_rx) = crossbeam::channel::unbounded();
@@ -5310,9 +5333,7 @@ fn should_keep_local_wal_when_cached_remote_wal_proof_becomes_stale_before_cloud
         .state
         .wal_dir
         .join(crate::wal::segment_file_name(segment_id));
-    el.hybrid_storage
-        .as_ref()
-        .expect("hybrid storage")
+    cloud_persistence(el.hybrid_storage.as_ref().expect("hybrid storage"))
         .publish_remote_wal_segment(
             segment_id,
             max_sequence,
@@ -5344,8 +5365,11 @@ fn should_revalidate_verified_cloud_metadata_on_repeated_wal_cleanup_check(
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
-        .map_err(crate::common::MidgeError::Internal)?;
+    crate::metadata::ManifestPersistence::save(
+        &el.state.db_path,
+        &el.state.manifest,
+    )
+    .map_err(crate::common::MidgeError::Internal)?;
 
     let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
@@ -5388,8 +5412,11 @@ fn should_reject_cached_cloud_metadata_proof_when_remote_metadata_is_deleted(
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
-        .map_err(crate::common::MidgeError::Internal)?;
+    crate::metadata::ManifestPersistence::save(
+        &el.state.db_path,
+        &el.state.manifest,
+    )
+    .map_err(crate::common::MidgeError::Internal)?;
 
     let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
@@ -6454,7 +6481,7 @@ fn should_seal_cloud_wal_with_segment_max_sequence_not_global_sequence(
         std::thread::sleep(Duration::from_millis(10));
     }
 
-    storage
+    cloud_persistence(storage)
         .publish_remote_wal_segment(
             segment_id,
             last_wal_sequence,
@@ -6465,10 +6492,10 @@ fn should_seal_cloud_wal_with_segment_max_sequence_not_global_sequence(
             &crate::common::OperationDeadline::unbounded(),
         )
         .expect("publish the actual segment frontier");
-    storage
+    cloud_persistence(storage)
         .verify_remote_wal_segment(segment_id, last_wal_sequence)
         .expect("remote WAL readback should prove the actual segment max sequence");
-    let overproof = storage
+    let overproof = cloud_persistence(storage)
         .verify_remote_wal_segment(segment_id, global_sequence_without_wal_records)
         .expect_err("remote WAL readback must reject a frontier above the segment contents");
     assert!(
@@ -6579,9 +6606,7 @@ fn complete_retry_and_ack(
         .inflight_segment_for_sequence(last_sequence)
         .expect("inflight segment for strict retry");
     copy_local_segment_to_remote_wal_for_test(el, seg_id);
-    el.hybrid_storage
-        .as_ref()
-        .expect("hybrid storage")
+    cloud_persistence(el.hybrid_storage.as_ref().expect("hybrid storage"))
         .publish_remote_wal_segment(
             seg_id,
             last_sequence,
@@ -7018,8 +7043,8 @@ fn should_back_off_runtime_wal_admission_when_storage_queue_is_full(
         1,
         u64::MAX,
     ));
-    storage.fence_cloud_wal_catalog(1)?;
-    storage.enqueue_wal_segment(
+    cloud_persistence(&storage).fence_cloud_wal_catalog(1)?;
+    cloud_persistence(&storage).enqueue_wal_segment(
         first_segment,
         &el.state
             .wal_dir
@@ -7429,7 +7454,7 @@ fn should_not_start_wal_flush_when_lease_check_leaves_less_than_storage_budget(
         cloud,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
-    storage.fence_cloud_wal_catalog(1)?;
+    cloud_persistence(&storage).fence_cloud_wal_catalog(1)?;
     let leader_store: Arc<dyn crate::lease::LeaderStore> = Arc::new(DelayedLeaderStore::new(
         Duration::from_millis(80),
         "writer-1",
@@ -8034,7 +8059,7 @@ fn should_bound_pending_cloud_ack_given_shutdown_deadline() -> crate::common::Mi
         .state
         .wal_dir
         .join(crate::wal::segment_file_name(segment_id));
-    storage.enqueue_wal_segment(segment_id, &local_path, max_sequence)?;
+    cloud_persistence(&storage).enqueue_wal_segment(segment_id, &local_path, max_sequence)?;
     assert!(storage.process_uploads().is_empty());
     let ack_wait_started = Instant::now();
     while storage_event_rx.is_empty() && ack_wait_started.elapsed() < Duration::from_secs(2) {
@@ -8207,8 +8232,11 @@ fn should_defer_metadata_cleanup_before_provider_reads_when_shared_budget_is_exh
     let el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
-        .map_err(crate::common::MidgeError::Internal)?;
+    crate::metadata::ManifestPersistence::save(
+        &el.state.db_path,
+        &el.state.manifest,
+    )
+    .map_err(crate::common::MidgeError::Internal)?;
     let provider = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
         provider.clone(),
@@ -8519,8 +8547,11 @@ fn should_report_timeout_when_the_cloud_never_answers_the_event_loop_mirror(
             Duration::from_secs(120),
         ),
     ));
-    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
-        .map_err(crate::common::MidgeError::Internal)?;
+    crate::metadata::ManifestPersistence::save(
+        &el.state.db_path,
+        &el.state.manifest,
+    )
+    .map_err(crate::common::MidgeError::Internal)?;
 
     // Act
     let started = std::time::Instant::now();

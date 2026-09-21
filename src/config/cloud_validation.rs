@@ -1260,18 +1260,9 @@ mod tests {
 
         // Act
         let report = provider.validate();
-        let options = crate::engine::OpenOptions::cloud(
-            "/tmp/midge-dotted-aws-validation",
-            CloudStorageLocation::new(provider, "database"),
-        )
-        .build();
 
         // Assert
         assert!(report.is_valid, "dotted AWS bucket should use path style");
-        assert!(
-            options.is_ok(),
-            "OpenOptions should accept dotted AWS bucket"
-        );
     }
 
     #[test]
@@ -1300,20 +1291,13 @@ mod tests {
         let connection_string = "BlobEndpoint=https://account.blob.core.usgovcloudapi.net;SharedAccessSignature=sv=2024-11-04&sig=sensitive";
         let provider =
             CloudProviderConfig::azure_blob_connection_string("container", connection_string);
-        let location = CloudStorageLocation::new(provider.clone(), "database");
 
         // Act
         let report = provider.validate();
-        let options = crate::engine::OpenOptions::cloud(
-            "/tmp/midge-accountless-azure-sas-validation",
-            location,
-        )
-        .build();
         let serialized = serde_json::to_string(&report).expect("serialize report");
 
         // Assert
         assert!(report.is_valid);
-        assert!(options.is_ok());
         assert!(!serialized.contains("sensitive"));
     }
 
