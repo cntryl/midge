@@ -631,44 +631,215 @@ impl BudgetedEvent {
     }
 }
 
-struct BudgetedTombstone {
-    tombstone: RangeTombstone,
-    obsolete: bool,
-    _reservation: crate::common::resource_budget::ResourceReservation,
-}
-
-impl BudgetedTombstone {
-    fn new(
-        tombstone: &RangeTombstone,
-        obsolete: bool,
-        budget: &crate::common::resource_budget::ResourceBudget,
-        label: &'static str,
-    ) -> MidgeResult<Self> {
-        let retained_bytes = std::mem::size_of::<RangeTombstone>()
-            .saturating_add(tombstone.start.capacity())
-            .saturating_add(tombstone.end.capacity());
-        let reservation = budget.reserve(retained_bytes, label)?;
-        Ok(Self {
-            tombstone: tombstone.clone(),
-            obsolete,
-            _reservation: reservation,
-        })
-    }
-}
-
-fn push_tombstone_if_absent(
-    tombstones: &mut Vec<BudgetedTombstone>,
+fn reserve_tombstone(
     tombstone: &RangeTombstone,
     budget: &crate::common::resource_budget::ResourceBudget,
     label: &'static str,
-) -> MidgeResult<()> {
-    if !tombstones
-        .iter()
-        .any(|retained| retained.tombstone == *tombstone)
-    {
-        tombstones.push(BudgetedTombstone::new(tombstone, false, budget, label)?);
+) -> MidgeResult<crate::common::resource_budget::ResourceReservation> {
+    let retained_bytes = std::mem::size_of::<RangeTombstone>()
+        .saturating_add(tombstone.start.capacity())
+        .saturating_add(tombstone.end.capacity());
+    budget.reserve(retained_bytes, label)
+}
+
+/// A retained range tombstone ordered by `(start, end, seq)`.
+///
+/// The key owns the only copy of the tombstone, so indexing it costs no extra
+/// key bytes, and the ordering keeps a partition's tombstones sorted by the
+/// bound the writer encodes first.
+#[derive(Clone, PartialEq, Eq)]
+struct PartitionTombstoneKey(RangeTombstone);
+
+impl Ord for PartitionTombstoneKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0
+            .start
+            .cmp(&other.0.start)
+            .then_with(|| self.0.end.cmp(&other.0.end))
+            .then_with(|| self.0.seq.cmp(&other.0.seq))
     }
-    Ok(())
+}
+
+impl PartialOrd for PartitionTombstoneKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// An active range tombstone ordered by `(seq, start, end)`.
+///
+/// Sequence-major ordering makes the highest-sequence cover the last entry, so
+/// obsolete coverage is a single lookup rather than a scan of every active
+/// tombstone for every merged key group.
+#[derive(Clone, PartialEq, Eq)]
+struct ActiveTombstoneKey(RangeTombstone);
+
+impl Ord for ActiveTombstoneKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0
+            .seq
+            .cmp(&other.0.seq)
+            .then_with(|| self.0.start.cmp(&other.0.start))
+            .then_with(|| self.0.end.cmp(&other.0.end))
+    }
+}
+
+impl PartialOrd for ActiveTombstoneKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Writer context that bounds how much a pending range tombstone would add to
+/// the partition currently being encoded.
+#[derive(Clone, Copy)]
+struct PendingTombstoneBound<'a> {
+    writer: &'a dyn crate::sst::traits::DynSstWriter,
+    lower_bound: Option<&'a [u8]>,
+}
+
+/// Range tombstones retained for the partition being written.
+///
+/// Membership is logarithmic in the partition's tombstone count, and both size
+/// bounds the merge loop consults per key group are maintained incrementally
+/// as tombstones are added, so neither costs a scan of the whole set.
+struct PartitionTombstones {
+    entries: std::collections::BTreeMap<
+        PartitionTombstoneKey,
+        crate::common::resource_budget::ResourceReservation,
+    >,
+    encoded_bytes: usize,
+    pending_bytes: usize,
+}
+
+impl PartitionTombstones {
+    fn new() -> Self {
+        Self {
+            entries: std::collections::BTreeMap::new(),
+            encoded_bytes: 0,
+            pending_bytes: 0,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    fn contains(&self, tombstone: &RangeTombstone) -> bool {
+        self.entries
+            .contains_key(&PartitionTombstoneKey(tombstone.clone()))
+    }
+
+    /// Upper bound on the bytes this partition's tombstones encode to, kept in
+    /// step with the set instead of refolded for every key group.
+    fn encoded_bytes(&self) -> usize {
+        self.encoded_bytes
+    }
+
+    /// Upper bound on the growth these tombstones add to the writer's own
+    /// encoded bound. Only tracked while a staging limit is enforced, since a
+    /// writer that cannot bound a pending tombstone must not be asked to.
+    fn pending_bytes(&self) -> usize {
+        self.pending_bytes
+    }
+
+    fn tombstones(&self) -> impl Iterator<Item = &RangeTombstone> + Clone {
+        self.entries.keys().map(|key| &key.0)
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.encoded_bytes = 0;
+        self.pending_bytes = 0;
+    }
+
+    fn insert(
+        &mut self,
+        tombstone: &RangeTombstone,
+        budget: &crate::common::resource_budget::ResourceBudget,
+        label: &'static str,
+        pending: Option<PendingTombstoneBound<'_>>,
+    ) -> MidgeResult<()> {
+        let key = PartitionTombstoneKey(tombstone.clone());
+        if self.entries.contains_key(&key) {
+            return Ok(());
+        }
+        let pending_growth = match pending {
+            Some(bound) => {
+                pending_tombstone_size(bound.writer, std::iter::once(tombstone), bound.lower_bound)?
+            }
+            None => 0,
+        };
+        let reservation = reserve_tombstone(tombstone, budget, label)?;
+        self.encoded_bytes = self
+            .encoded_bytes
+            .saturating_add(encoded_tombstone_upper_bound(tombstone));
+        self.pending_bytes = self.pending_bytes.saturating_add(pending_growth);
+        self.entries.insert(key, reservation);
+        Ok(())
+    }
+}
+
+/// Range tombstones covering the key group being merged, split by whether
+/// tombstone GC may drop the points they cover.
+struct ActiveTombstones {
+    live: std::collections::BTreeMap<
+        ActiveTombstoneKey,
+        crate::common::resource_budget::ResourceReservation,
+    >,
+    obsolete: std::collections::BTreeMap<
+        ActiveTombstoneKey,
+        crate::common::resource_budget::ResourceReservation,
+    >,
+}
+
+impl ActiveTombstones {
+    fn new() -> Self {
+        Self {
+            live: std::collections::BTreeMap::new(),
+            obsolete: std::collections::BTreeMap::new(),
+        }
+    }
+
+    fn contains(&self, tombstone: &RangeTombstone) -> bool {
+        let key = ActiveTombstoneKey(tombstone.clone());
+        self.live.contains_key(&key) || self.obsolete.contains_key(&key)
+    }
+
+    fn remove(&mut self, tombstone: &RangeTombstone) {
+        let key = ActiveTombstoneKey(tombstone.clone());
+        self.live.remove(&key);
+        self.obsolete.remove(&key);
+    }
+
+    fn insert(
+        &mut self,
+        tombstone: &RangeTombstone,
+        obsolete: bool,
+        budget: &crate::common::resource_budget::ResourceBudget,
+    ) -> MidgeResult<()> {
+        if self.contains(tombstone) {
+            return Ok(());
+        }
+        let reservation = reserve_tombstone(tombstone, budget, "active range tombstone")?;
+        let key = ActiveTombstoneKey(tombstone.clone());
+        if obsolete {
+            self.obsolete.insert(key, reservation);
+        } else {
+            self.live.insert(key, reservation);
+        }
+        Ok(())
+    }
+
+    /// The obsolete cover with the highest sequence, or `None` when tombstone
+    /// GC may not drop anything covering the current key group.
+    fn highest_obsolete_cover(&self) -> Option<&RangeTombstone> {
+        self.obsolete.last_key_value().map(|(key, _)| &key.0)
+    }
+
+    fn live_tombstones(&self) -> impl Iterator<Item = &RangeTombstone> {
+        self.live.keys().map(|key| &key.0)
+    }
 }
 
 fn range_tombstone_is_obsolete(tombstone: &RangeTombstone, policy: TombstoneGcPolicy) -> bool {
@@ -702,11 +873,10 @@ fn ensure_output_fits_local_staging(
     Ok(())
 }
 
-fn prospective_partition_size<'a>(
+fn prospective_partition_size(
     writer: &dyn crate::sst::traits::DynSstWriter,
     next_version: Option<&CompactionVersion>,
-    tombstones: impl Iterator<Item = &'a RangeTombstone>,
-    lower_bound: Option<&[u8]>,
+    pending_tombstone_bytes: usize,
 ) -> MidgeResult<usize> {
     let bound = match next_version {
         Some(version) => writer
@@ -718,7 +888,7 @@ fn prospective_partition_size<'a>(
             "compaction writer cannot bound its next local output".into(),
         )
     })?;
-    Ok(bound.saturating_add(pending_tombstone_size(writer, tombstones, lower_bound)?))
+    Ok(bound.saturating_add(pending_tombstone_bytes))
 }
 
 fn pending_tombstone_size<'a>(
@@ -777,8 +947,8 @@ pub(crate) fn write_partitioned_compaction_outputs(
     let mut partition_ordinal = 0u32;
     let mut output_names = Vec::new();
     let mut cleanup = OutputSetCleanup::new();
-    let mut active_tombstones: Vec<BudgetedTombstone> = Vec::new();
-    let mut partition_tombstones: Vec<BudgetedTombstone> = Vec::new();
+    let mut active_tombstones = ActiveTombstones::new();
+    let mut partition_tombstones = PartitionTombstones::new();
 
     let mut merged = EventMergeIterator::new(cursors, budget.clone())?;
     if merged.peek_event().is_none() {
@@ -810,7 +980,7 @@ pub(crate) fn write_partitioned_compaction_outputs(
 
         for event in &key_events {
             if let CompactionEvent::RangeEnd(tombstone) = &event.event {
-                active_tombstones.retain(|active| active.tombstone != *tombstone);
+                active_tombstones.remove(tombstone);
             }
         }
 
@@ -838,11 +1008,14 @@ pub(crate) fn write_partitioned_compaction_outputs(
             CompactionEvent::RangeEnd(_) | CompactionEvent::Version(_) => None,
         });
         let selected_version = selected_version.filter(|version| {
-            let covered_by_active = active_tombstones.iter().any(|active| {
-                active.obsolete
-                    && active.tombstone.covers(&version.key)
-                    && active.tombstone.seq >= version.seq
-            });
+            // Every tombstone still active here opened at or before this key
+            // group and has not reached its RangeEnd, so it covers the key;
+            // the highest-sequence obsolete cover therefore decides the group.
+            // A cover that unexpectedly does not contain the key only retains
+            // the version, which is the safe direction.
+            let covered_by_active = active_tombstones
+                .highest_obsolete_cover()
+                .is_some_and(|active| active.covers(&version.key) && active.seq >= version.seq);
             let covered_by_start = starts.clone().any(|tombstone| {
                 range_tombstone_is_obsolete(tombstone, tombstone_gc)
                     && tombstone.covers(&version.key)
@@ -855,9 +1028,7 @@ pub(crate) fn write_partitioned_compaction_outputs(
                     && tombstone_is_obsolete(version.seq, tombstone_gc.snapshot_horizon)))
         });
 
-        let partition_tombstone_bytes = partition_tombstones.iter().fold(0usize, |total, item| {
-            total.saturating_add(encoded_tombstone_upper_bound(&item.tombstone))
-        });
+        let partition_tombstone_bytes = partition_tombstones.encoded_bytes();
         let partition_size = writer
             .estimated_size_bytes()
             .saturating_add(partition_tombstone_bytes);
@@ -881,14 +1052,11 @@ pub(crate) fn write_partitioned_compaction_outputs(
             let mut bound = prospective_partition_size(
                 writer.as_ref(),
                 selected_version,
-                partition_tombstones.iter().map(|item| &item.tombstone),
-                lower_bound,
+                partition_tombstones.pending_bytes(),
             )?;
             for tombstone in starts.clone() {
                 if range_tombstone_is_obsolete(tombstone, tombstone_gc)
-                    || partition_tombstones
-                        .iter()
-                        .any(|item| item.tombstone == *tombstone)
+                    || partition_tombstones.contains(tombstone)
                 {
                     continue;
                 }
@@ -907,10 +1075,7 @@ pub(crate) fn write_partitioned_compaction_outputs(
         if should_roll {
             let boundary_reservation =
                 budget.reserve(event_key.len(), "output partition boundary")?;
-            let retained = partition_tombstones
-                .iter()
-                .map(|item| &item.tombstone)
-                .collect::<Vec<_>>();
+            let retained = partition_tombstones.tombstones().collect::<Vec<_>>();
             if let Some((name, path)) = finish_partition(
                 writer,
                 partition_point_count,
@@ -946,15 +1111,19 @@ pub(crate) fn write_partitioned_compaction_outputs(
             writer.require_versioned_entries()?;
             partition_point_count = 0;
             partition_tombstones.clear();
-            for active in &active_tombstones {
-                if !active.obsolete {
-                    push_tombstone_if_absent(
-                        &mut partition_tombstones,
-                        &active.tombstone,
-                        budget,
-                        "carried range tombstone",
-                    )?;
-                }
+            let carried_pending = output_size_limit.map(|_| PendingTombstoneBound {
+                writer: writer.as_ref(),
+                lower_bound: partition_lower_bound
+                    .as_ref()
+                    .map(|(key, _reservation)| key.as_slice()),
+            });
+            for active in active_tombstones.live_tombstones() {
+                partition_tombstones.insert(
+                    active,
+                    budget,
+                    "carried range tombstone",
+                    carried_pending,
+                )?;
             }
         }
 
@@ -966,24 +1135,20 @@ pub(crate) fn write_partitioned_compaction_outputs(
             }
             let obsolete = range_tombstone_is_obsolete(tombstone, tombstone_gc);
             if !obsolete {
-                push_tombstone_if_absent(
-                    &mut partition_tombstones,
+                let pending = output_size_limit.map(|_| PendingTombstoneBound {
+                    writer: writer.as_ref(),
+                    lower_bound: partition_lower_bound
+                        .as_ref()
+                        .map(|(key, _reservation)| key.as_slice()),
+                });
+                partition_tombstones.insert(
                     tombstone,
                     budget,
                     "partition range tombstone",
+                    pending,
                 )?;
             }
-            if !active_tombstones
-                .iter()
-                .any(|active| active.tombstone == *tombstone)
-            {
-                active_tombstones.push(BudgetedTombstone::new(
-                    tombstone,
-                    obsolete,
-                    budget,
-                    "active range tombstone",
-                )?);
-            }
+            active_tombstones.insert(tombstone, obsolete, budget)?;
         }
 
         if let Some(version) = selected_version {
@@ -1002,10 +1167,7 @@ pub(crate) fn write_partitioned_compaction_outputs(
             let bound = prospective_partition_size(
                 writer.as_ref(),
                 None,
-                partition_tombstones.iter().map(|item| &item.tombstone),
-                partition_lower_bound
-                    .as_ref()
-                    .map(|(key, _)| key.as_slice()),
+                partition_tombstones.pending_bytes(),
             )?;
             if bound > limit {
                 return Err(crate::common::MidgeError::ResourceLimit(format!(
@@ -1016,10 +1178,7 @@ pub(crate) fn write_partitioned_compaction_outputs(
     }
 
     ensure_compaction_not_aborted(abort_check)?;
-    let retained = partition_tombstones
-        .iter()
-        .map(|item| &item.tombstone)
-        .collect::<Vec<_>>();
+    let retained = partition_tombstones.tombstones().collect::<Vec<_>>();
     if let Some((name, path)) = finish_partition(
         writer,
         partition_point_count,
@@ -1324,6 +1483,157 @@ mod tests {
         assert_eq!(normalized[0].seq, 9);
         assert_eq!(normalized[1].seq, 5);
         assert_eq!(normalized[2].start, b"m".to_vec());
+    }
+
+    fn mk_tombstone(index: usize, seq: u64) -> RangeTombstone {
+        RangeTombstone::new(
+            format!("key{index:06}a").into_bytes(),
+            format!("key{index:06}b").into_bytes(),
+            seq,
+        )
+    }
+
+    #[test]
+    fn should_keep_compaction_work_linear_when_partition_holds_many_range_tombstones(
+    ) -> MidgeResult<()> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Arrange
+        struct CountingWriter {
+            bounds: AtomicUsize,
+        }
+
+        impl crate::sst::traits::DynSstWriter for CountingWriter {
+            fn preserves_versioned_entries(&self) -> bool {
+                true
+            }
+
+            fn encoded_size_upper_bound(&self) -> Option<usize> {
+                Some(0)
+            }
+
+            fn additional_range_tombstone_size_upper_bound(
+                &self,
+                start: &[u8],
+                end: &[u8],
+            ) -> Option<usize> {
+                self.bounds.fetch_add(1, Ordering::SeqCst);
+                Some(start.len().saturating_add(end.len()))
+            }
+
+            fn add(&mut self, _key: &[u8], _value: &[u8]) -> MidgeResult<()> {
+                Ok(())
+            }
+
+            fn finish_bytes(self: Box<Self>) -> MidgeResult<Vec<u8>> {
+                Ok(Vec::new())
+            }
+        }
+
+        let budget = crate::common::resource_budget::ResourceBudget::new(16 * 1024 * 1024);
+        let writer = CountingWriter {
+            bounds: AtomicUsize::new(0),
+        };
+        let tombstone_count = 2_000usize;
+        let key_groups = 2_000usize;
+
+        // Act
+        let mut partition = PartitionTombstones::new();
+        for index in 0..tombstone_count {
+            let seq = u64::try_from(index).expect("sequence fits in u64") + 1;
+            partition.insert(
+                &mk_tombstone(index, seq),
+                &budget,
+                "partition range tombstone",
+                Some(PendingTombstoneBound {
+                    writer: &writer,
+                    lower_bound: None,
+                }),
+            )?;
+        }
+        let bounds_after_inserts = writer.bounds.load(Ordering::SeqCst);
+        for _ in 0..key_groups {
+            let _bound = prospective_partition_size(&writer, None, partition.pending_bytes())?;
+        }
+        let bounds_after_key_groups = writer.bounds.load(Ordering::SeqCst);
+
+        // Assert: each tombstone is bounded once when it joins the partition,
+        // and the per-key-group size checks never revisit the retained set, so
+        // the work stays linear in tombstones instead of keys x tombstones.
+        assert_eq!(bounds_after_inserts, tombstone_count);
+        assert_eq!(bounds_after_key_groups, tombstone_count);
+        assert_eq!(
+            partition.pending_bytes(),
+            pending_tombstone_size(&writer, partition.tombstones(), None)?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn should_track_encoded_bytes_when_partition_tombstones_are_added_and_cleared(
+    ) -> MidgeResult<()> {
+        // Arrange
+        let budget = crate::common::resource_budget::ResourceBudget::new(1024 * 1024);
+        let mut partition = PartitionTombstones::new();
+        let first = mk_tombstone(1, 7);
+        let second = mk_tombstone(2, 9);
+
+        // Act
+        partition.insert(&first, &budget, "partition range tombstone", None)?;
+        partition.insert(&second, &budget, "partition range tombstone", None)?;
+        partition.insert(&first, &budget, "partition range tombstone", None)?;
+
+        // Assert: the duplicate is dropped and the tracked byte bound matches
+        // a full fold over the retained set.
+        assert_eq!(partition.tombstones().count(), 2);
+        assert!(partition.contains(&first));
+        assert_eq!(
+            partition.encoded_bytes(),
+            encoded_tombstone_upper_bound(&first)
+                .saturating_add(encoded_tombstone_upper_bound(&second))
+        );
+        partition.clear();
+        assert!(partition.is_empty());
+        assert_eq!(partition.encoded_bytes(), 0);
+        assert_eq!(partition.pending_bytes(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn should_report_highest_sequence_cover_when_many_obsolete_tombstones_are_active(
+    ) -> MidgeResult<()> {
+        // Arrange
+        let budget = crate::common::resource_budget::ResourceBudget::new(1024 * 1024);
+        let mut active = ActiveTombstones::new();
+        let live = RangeTombstone::new(b"a".to_vec(), b"z".to_vec(), 400);
+        let highest = RangeTombstone::new(b"a".to_vec(), b"z".to_vec(), 300);
+
+        // Act
+        for seq in 1..=200u64 {
+            active.insert(
+                &RangeTombstone::new(b"a".to_vec(), b"z".to_vec(), seq),
+                true,
+                &budget,
+            )?;
+        }
+        active.insert(&highest, true, &budget)?;
+        active.insert(&live, false, &budget)?;
+        active.insert(&live, false, &budget)?;
+
+        // Assert
+        assert_eq!(active.highest_obsolete_cover(), Some(&highest));
+        assert_eq!(active.live_tombstones().collect::<Vec<_>>(), vec![&live]);
+        assert!(active.contains(&live));
+        active.remove(&highest);
+        active.remove(&live);
+        assert!(!active.contains(&live));
+        assert_eq!(
+            active
+                .highest_obsolete_cover()
+                .map(|tombstone| tombstone.seq),
+            Some(200)
+        );
+        Ok(())
     }
 
     #[test]
