@@ -599,8 +599,7 @@ fn finish_with_retained_manifest_admission(remote_metadata: bool) {
     let progress = CloudWalPruneProgress::default();
     let metadata_path = directory.path().join("metadata");
     std::fs::create_dir_all(&metadata_path).unwrap();
-    crate::metadata::ManifestPersistence::save(&metadata_path, &manifest)
-        .unwrap();
+    crate::metadata::ManifestPersistence::save(&metadata_path, &manifest).unwrap();
     let encoded_bytes: usize = crate::metadata::files::CLOUD_MIRRORED
         .iter()
         .filter_map(|name| std::fs::metadata(metadata_path.join(name)).ok())

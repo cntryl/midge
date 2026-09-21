@@ -2205,11 +2205,8 @@ fn should_not_overwrite_remote_manifest_when_writer_lease_moved_before_newer_pub
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     el.state.manifest.last_persisted_sequence = 10;
-    crate::metadata::ManifestPersistence::save(
-        &el.state.db_path,
-        &el.state.manifest,
-    )
-    .map_err(crate::common::MidgeError::Internal)?;
+    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
+        .map_err(crate::common::MidgeError::Internal)?;
     let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
         Arc::new(crate::storage::cloud::MockCloudBackend::new()),
         "metadata-fencing".to_string(),
@@ -2258,11 +2255,8 @@ fn should_not_overwrite_newer_remote_manifest_metadata_when_mirroring(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     el.state.manifest.last_persisted_sequence = 10;
-    crate::metadata::ManifestPersistence::save(
-        &el.state.db_path,
-        &el.state.manifest,
-    )
-    .map_err(crate::common::MidgeError::Internal)?;
+    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
+        .map_err(crate::common::MidgeError::Internal)?;
 
     let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
@@ -2311,11 +2305,8 @@ fn should_not_rewrite_unchanged_cloud_metadata_when_mirroring() -> crate::common
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    crate::metadata::ManifestPersistence::save(
-        &el.state.db_path,
-        &el.state.manifest,
-    )
-    .map_err(crate::common::MidgeError::Internal)?;
+    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
+        .map_err(crate::common::MidgeError::Internal)?;
     let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
         metadata_backend.clone(),
@@ -2345,11 +2336,8 @@ fn should_not_overwrite_manifest_metadata_advanced_after_preflight(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     el.state.manifest.last_persisted_sequence = 30;
-    crate::metadata::ManifestPersistence::save(
-        &el.state.db_path,
-        &el.state.manifest,
-    )
-    .map_err(crate::common::MidgeError::Internal)?;
+    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
+        .map_err(crate::common::MidgeError::Internal)?;
 
     let advanced_manifest = crate::metadata::Manifest {
         last_persisted_sequence: 31,
@@ -2560,11 +2548,8 @@ fn should_keep_event_loop_responsive_when_cloud_metadata_proof_times_out(
     seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
     el.state.wal.cloud_durable_seq = max_sequence;
     add_valid_manifest_sst_for_test(&mut el, "metadata-deadline-prune.sst", max_sequence);
-    crate::metadata::ManifestPersistence::save(
-        &el.state.db_path,
-        &el.state.manifest,
-    )
-    .map_err(crate::common::MidgeError::Internal)?;
+    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
+        .map_err(crate::common::MidgeError::Internal)?;
 
     let inner = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new_with_timeout(
@@ -2946,11 +2931,8 @@ fn should_not_prune_remote_wal_when_cloud_metadata_is_missing() -> crate::common
     let segment_id = 1;
     let max_sequence = 10;
     seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
-    crate::metadata::ManifestPersistence::save(
-        &el.state.db_path,
-        &el.state.manifest,
-    )
-    .map_err(crate::common::MidgeError::Internal)?;
+    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
+        .map_err(crate::common::MidgeError::Internal)?;
     let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     el.cloud_metadata_storage = Some(Arc::new(crate::storage::cloud::CloudStorage::new(
         metadata_backend,
@@ -3037,11 +3019,8 @@ fn should_retain_remote_wal_when_intent_metadata_needs_convergence(
     seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
     el.state.wal.cloud_durable_seq = max_sequence;
     add_valid_manifest_sst_for_test(&mut el, "coverage.sst", max_sequence);
-    crate::metadata::ManifestPersistence::save(
-        &el.state.db_path,
-        &el.state.manifest,
-    )
-    .map_err(crate::common::MidgeError::Internal)?;
+    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
+        .map_err(crate::common::MidgeError::Internal)?;
 
     el.state
         .append_intent(crate::runtime::IntentLogEntry::WalSynced {
@@ -3109,11 +3088,8 @@ fn should_not_prune_remote_wal_when_cloud_manifest_metadata_is_ahead(
     seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
     el.state.wal.cloud_durable_seq = max_sequence;
     add_valid_manifest_sst_for_test(&mut el, "coverage.sst", max_sequence);
-    crate::metadata::ManifestPersistence::save(
-        &el.state.db_path,
-        &el.state.manifest,
-    )
-    .map_err(crate::common::MidgeError::Internal)?;
+    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
+        .map_err(crate::common::MidgeError::Internal)?;
 
     let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
@@ -5365,11 +5341,8 @@ fn should_revalidate_verified_cloud_metadata_on_repeated_wal_cleanup_check(
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    crate::metadata::ManifestPersistence::save(
-        &el.state.db_path,
-        &el.state.manifest,
-    )
-    .map_err(crate::common::MidgeError::Internal)?;
+    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
+        .map_err(crate::common::MidgeError::Internal)?;
 
     let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
@@ -5412,11 +5385,8 @@ fn should_reject_cached_cloud_metadata_proof_when_remote_metadata_is_deleted(
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    crate::metadata::ManifestPersistence::save(
-        &el.state.db_path,
-        &el.state.manifest,
-    )
-    .map_err(crate::common::MidgeError::Internal)?;
+    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
+        .map_err(crate::common::MidgeError::Internal)?;
 
     let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new(
@@ -8232,11 +8202,8 @@ fn should_defer_metadata_cleanup_before_provider_reads_when_shared_budget_is_exh
     let el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    crate::metadata::ManifestPersistence::save(
-        &el.state.db_path,
-        &el.state.manifest,
-    )
-    .map_err(crate::common::MidgeError::Internal)?;
+    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
+        .map_err(crate::common::MidgeError::Internal)?;
     let provider = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
         provider.clone(),
@@ -8547,11 +8514,8 @@ fn should_report_timeout_when_the_cloud_never_answers_the_event_loop_mirror(
             Duration::from_secs(120),
         ),
     ));
-    crate::metadata::ManifestPersistence::save(
-        &el.state.db_path,
-        &el.state.manifest,
-    )
-    .map_err(crate::common::MidgeError::Internal)?;
+    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
+        .map_err(crate::common::MidgeError::Internal)?;
 
     // Act
     let started = std::time::Instant::now();

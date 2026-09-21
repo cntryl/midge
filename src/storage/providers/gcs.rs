@@ -1307,8 +1307,8 @@ impl CloudBackend for GcsBackend {
         }
         let mode = self.mode;
         let mut url = self.download_url(&key);
-        let mut request = Self::bodyless_request(mode, Method::GET, String::new())
-            .with_reservation(reservation);
+        let mut request =
+            Self::bodyless_request(mode, Method::GET, String::new()).with_reservation(reservation);
         for (name, value) in conditions {
             if mode == GcsBackendMode::Json
                 && name.eq_ignore_ascii_case("x-goog-if-generation-match")
