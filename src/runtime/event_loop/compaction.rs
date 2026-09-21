@@ -528,8 +528,7 @@ impl CompactionCoordinator {
         // A writer paused past its lease can resume with a finished compaction
         // queued. Prove authority against the leader store, not only the
         // cached heartbeat flag, before publishing metadata or uploading.
-        event_loop
-            .validate_runtime_writer_lease_within(&crate::common::OperationDeadline::unbounded())?;
+        event_loop.validate_runtime_writer_lease_within(&event_loop.event_loop_cloud_deadline())?;
         // Persist the rollback/cleanup obligation before remote upload. If
         // intent persistence fails, no untracked cloud object is created; if
         // upload or publication later fails, startup can prove and remove the
@@ -679,8 +678,8 @@ impl CompactionCoordinator {
         }
         // Inputs may still be read by a newer lease holder. Leaking them is
         // safe; deleting them after losing authority is not.
-        if let Err(error) = event_loop
-            .validate_runtime_writer_lease_within(&crate::common::OperationDeadline::unbounded())
+        if let Err(error) =
+            event_loop.validate_runtime_writer_lease_within(&event_loop.event_loop_cloud_deadline())
         {
             tracing::error!(
                 %error,
