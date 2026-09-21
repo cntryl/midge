@@ -332,7 +332,7 @@ mod architecture_ladder {
     fn should_keep_cloud_storage_module_below_its_size_budget() {
         // Arrange
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/storage/cloud/mod.rs");
-        let budget_lines = 1300;
+        let budget_lines = 1100;
 
         // Act
         let lines = std::fs::read_to_string(&path)
