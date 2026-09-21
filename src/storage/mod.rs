@@ -132,6 +132,36 @@ pub struct StorageObjectMetadata {
     pub generation: Option<String>,
 }
 
+impl StorageObjectMetadata {
+    /// Metadata for a provider that reports no object generation.
+    #[cfg(any(
+        test,
+        feature = "cloud-aws",
+        feature = "cloud-azure",
+        feature = "cloud-gcp",
+        feature = "cloud-oci"
+    ))]
+    #[must_use]
+    pub fn new(size: u64, etag: String) -> Self {
+        Self {
+            size,
+            etag,
+            generation: None,
+        }
+    }
+
+    /// Metadata for a provider that reports an object generation.
+    #[cfg(feature = "cloud-gcp")]
+    #[must_use]
+    pub fn with_generation(size: u64, etag: String, generation: impl Into<String>) -> Self {
+        Self {
+            size,
+            etag,
+            generation: Some(generation.into()),
+        }
+    }
+}
+
 /// Public error category retained across the asynchronous cloud WAL pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloudUploadFailureKind {

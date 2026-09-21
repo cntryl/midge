@@ -9,14 +9,6 @@ pub(crate) struct CloudObjectProof {
     pub metadata: StorageObjectMetadata,
 }
 
-pub(crate) fn storage_object_metadata(metadata: ObjectMetadata) -> StorageObjectMetadata {
-    StorageObjectMetadata {
-        size: metadata.size,
-        etag: metadata.etag,
-        generation: metadata.generation,
-    }
-}
-
 /// Validate observations from one metadata-bearing read. Never pair a body
 /// with identity from a separate HEAD, even when both lengths agree.
 pub(crate) fn validate_object_proof(
@@ -67,7 +59,7 @@ pub(crate) fn blocking_cloud_object_proof_within(
         Ok(CloudEvent::GetWithMetadata {
             result: CloudOutcome::Ok((bytes, metadata)),
             ..
-        }) => (bytes, storage_object_metadata(metadata)),
+        }) => (bytes, metadata),
         Ok(CloudEvent::GetWithMetadata {
             result: CloudOutcome::Err(error),
             ..

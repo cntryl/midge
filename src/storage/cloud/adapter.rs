@@ -344,11 +344,7 @@ impl StorageBackend for CloudStorage {
         let event = match await_cloud_event(&rx, timeout, "HEAD") {
             Ok(CloudEvent::Head { key, result }) => {
                 let outcome = match result {
-                    CloudOutcome::Ok(metadata) => StorageOutcome::Ok(StorageObjectMetadata {
-                        size: metadata.size,
-                        etag: metadata.etag,
-                        generation: metadata.generation,
-                    }),
+                    CloudOutcome::Ok(metadata) => StorageOutcome::Ok(metadata),
                     CloudOutcome::Err(err) => {
                         cloud_to_storage_outcome::<StorageObjectMetadata>(CloudOutcome::Err(err))
                     }

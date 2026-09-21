@@ -43,37 +43,10 @@ pub enum CloudEvent {
 pub type CloudCallback = std::sync::mpsc::Sender<CloudEvent>;
 
 /// Basic metadata emitted by HEAD operations.
-#[derive(Clone, Debug)]
-pub struct ObjectMetadata {
-    pub size: u64,
-    pub etag: String,
-    pub generation: Option<String>,
-}
-impl ObjectMetadata {
-    #[cfg(any(
-        test,
-        feature = "cloud-aws",
-        feature = "cloud-azure",
-        feature = "cloud-gcp",
-        feature = "cloud-oci"
-    ))]
-    pub fn new(size: u64, etag: String) -> Self {
-        Self {
-            size,
-            etag,
-            generation: None,
-        }
-    }
-
-    #[cfg(feature = "cloud-gcp")]
-    pub fn with_generation(size: u64, etag: String, generation: impl Into<String>) -> Self {
-        Self {
-            size,
-            etag,
-            generation: Some(generation.into()),
-        }
-    }
-}
+///
+/// The same type the storage layer uses to revalidate cached proofs, so a backend's
+/// answer needs no conversion on its way up.
+pub use crate::storage::StorageObjectMetadata as ObjectMetadata;
 
 pub(crate) fn object_match_precondition_headers(
     etag: &str,
