@@ -39,7 +39,7 @@ impl FsSstFactoryIo {
         &self,
         budget: crate::common::resource_budget::ResourceBudget,
     ) -> MidgeResult<Box<dyn DynSstWriter>> {
-        let mut writer = InMemorySstWriter::new_with_budget(
+        let mut writer = FsSstWriter::new_with_budget(
             Arc::clone(&self.fs),
             self.compression_policy.clone(),
             self.block_size,
@@ -133,7 +133,7 @@ pub(crate) fn write_legacy_oversized_uncompressed_sst(
     value: Vec<u8>,
     sequence: u64,
 ) -> MidgeResult<()> {
-    let mut legacy = InMemorySstWriter::new(
+    let mut legacy = FsSstWriter::new(
         fs,
         CompressionPolicy::Fixed(crate::sst::compression::CompressionAlgo::None),
         4096,
@@ -149,7 +149,7 @@ pub(crate) fn write_legacy_oversized_uncompressed_sst(
 }
 
 /// Simple in-memory SST writer that applies block-level compression.
-struct InMemorySstWriter {
+struct FsSstWriter {
     /// Filesystem this writer publishes through, injected by the factory so
     /// staging writes, fsyncs, the rename, and the directory sync all reach
     /// the same backend the factory reads from.
@@ -238,7 +238,7 @@ impl StreamingState {
     }
 }
 
-impl InMemorySstWriter {
+impl FsSstWriter {
     fn new(fs: Arc<dyn Fs>, compression_policy: CompressionPolicy, block_size: usize) -> Self {
         Self::new_with_budget(fs, compression_policy, block_size, None)
     }
@@ -864,7 +864,7 @@ impl InMemorySstWriter {
     }
 }
 
-impl DynSstWriter for InMemorySstWriter {
+impl DynSstWriter for FsSstWriter {
     fn encoded_size_upper_bound_after_sorted_entry(
         &self,
         key: &[u8],
@@ -1085,7 +1085,7 @@ impl DynSstWriter for InMemorySstWriter {
             return crate::sst::fs::persist_sst_bytes_to_path(&fs, &bytes, path);
         }
 
-        let InMemorySstWriter {
+        let FsSstWriter {
             fs,
             entries,
             range_tombstones,
@@ -1110,7 +1110,7 @@ impl DynSstWriter for InMemorySstWriter {
     }
 
     fn finish_bytes(self: Box<Self>) -> MidgeResult<Vec<u8>> {
-        let InMemorySstWriter {
+        let FsSstWriter {
             fs,
             entries,
             range_tombstones,
@@ -1190,7 +1190,7 @@ impl SstFactory for FsSstFactoryIo {
     }
     /// Create a new SST writer
     fn create(&self) -> MidgeResult<Box<dyn DynSstWriter>> {
-        Ok(Box::new(InMemorySstWriter::new(
+        Ok(Box::new(FsSstWriter::new(
             Arc::clone(&self.fs),
             self.compression_policy.clone(),
             self.block_size,
@@ -1201,7 +1201,7 @@ impl SstFactory for FsSstFactoryIo {
         &self,
         budget: crate::common::resource_budget::ResourceBudget,
     ) -> MidgeResult<Box<dyn DynSstWriter>> {
-        let mut writer = InMemorySstWriter::new_with_budget(
+        let mut writer = FsSstWriter::new_with_budget(
             Arc::clone(&self.fs),
             self.compression_policy.clone(),
             self.block_size,
@@ -1614,7 +1614,7 @@ mod tests {
         let too_large = usize::try_from(u64::from(u32::MAX) + 1).unwrap_or(usize::MAX);
 
         // Act
-        let result = InMemorySstWriter::checked_block_payload_len(too_large);
+        let result = FsSstWriter::checked_block_payload_len(too_large);
 
         // Assert
         assert!(matches!(
@@ -1993,7 +1993,7 @@ mod tests {
         };
 
         // Act
-        let result = InMemorySstWriter::encode_pending_entry(b"", &entry);
+        let result = FsSstWriter::encode_pending_entry(b"", &entry);
 
         // Assert
         assert!(
