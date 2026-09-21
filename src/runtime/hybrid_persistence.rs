@@ -934,7 +934,17 @@ impl<'a> VerifiedManifestWalCoverage<'a> {
                             .as_ref()
                             .is_some_and(|expected| expected == &value)
             }
-            crate::sst::types::KeyState::Tombstone(sequence) => sequence >= record.seq,
+            // A newer tombstone supersedes a value write. At the same sequence a
+            // value write and a delete contradict each other, so only a delete
+            // record is covered by it; skipping the value on that evidence could
+            // lose data, and replaying it is the safe direction.
+            crate::sst::types::KeyState::Tombstone(sequence) => {
+                if matches!(record.op.role(), crate::wal::types::WalOpRole::ValueWrite) {
+                    sequence > record.seq
+                } else {
+                    sequence >= record.seq
+                }
+            }
             crate::sst::types::KeyState::Absent => false,
         }
     }

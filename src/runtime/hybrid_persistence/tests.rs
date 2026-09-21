@@ -3194,3 +3194,111 @@ fn should_bound_sst_publication_with_shared_deadline_when_remote_preflight_consu
         "SST publication reused a fresh callback timeout: {elapsed:?}"
     );
 }
+
+mod contains_wal_record {
+    use super::*;
+
+    fn tombstone_sst(key: &[u8], seq: u64) -> Vec<u8> {
+        use crate::sst::SstFactory;
+
+        let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
+        let mut writer = factory.create().expect("create test SST writer");
+        writer
+            .add_with_meta(
+                key,
+                None,
+                seq,
+                crate::wal::WalOpKind::Delete.to_wire_format(),
+                None,
+            )
+            .expect("add point tombstone");
+        writer.finish_bytes().expect("finish test SST bytes")
+    }
+
+    fn record(
+        op: crate::wal::WalOpKind,
+        value: Option<&'static [u8]>,
+        seq: u64,
+    ) -> crate::wal::WalRecord {
+        crate::wal::WalRecord::new(
+            op,
+            bytes::Bytes::from_static(b"k"),
+            value.map(bytes::Bytes::from_static),
+            seq,
+            0,
+        )
+    }
+
+    /// Whether a manifest SST holding one point tombstone at `tombstone_seq`
+    /// covers `record` for recovery filtering.
+    fn covered(record: &crate::wal::WalRecord, tombstone_seq: u64) -> bool {
+        let dir = tempfile::tempdir().expect("create SST directory");
+        let name = "000001.sst";
+        let bytes = tombstone_sst(&record.key, tombstone_seq);
+        std::fs::write(dir.path().join(name), &bytes).expect("write SST");
+        let file = crate::metadata::FileMeta {
+            name: name.to_string(),
+            level: 0,
+            size_bytes: bytes.len() as u64,
+            content_crc32c: Some(crc32c::crc32c(&bytes)),
+            cf_id: 0,
+            smallest_key: Some(record.key.to_vec()),
+            largest_key: Some(record.key.to_vec()),
+            smallest_seq: Some(tombstone_seq),
+            largest_seq: Some(tombstone_seq),
+            ..Default::default()
+        };
+        let mut manifest = crate::metadata::Manifest::default();
+        manifest.files.push(file.clone());
+        VerifiedManifestWalCoverage::open(dir.path(), &manifest).contains_wal_record(&file, record)
+    }
+
+    #[test]
+    fn should_not_treat_a_same_sequence_tombstone_as_covering_a_value_record() {
+        // Arrange: a put and a delete cannot both have been written at sequence 7,
+        // so skipping the put on the strength of the delete could lose data.
+        let put = record(crate::wal::WalOpKind::Put, Some(b"v"), 7);
+
+        // Act
+        let is_covered = covered(&put, 7);
+
+        // Assert
+        assert!(!is_covered);
+    }
+
+    #[test]
+    fn should_treat_a_newer_tombstone_as_covering_an_older_value_record() {
+        // Arrange
+        let put = record(crate::wal::WalOpKind::Put, Some(b"v"), 7);
+
+        // Act
+        let is_covered = covered(&put, 9);
+
+        // Assert
+        assert!(is_covered);
+    }
+
+    #[test]
+    fn should_not_treat_an_older_tombstone_as_covering_a_newer_value_record() {
+        // Arrange
+        let put = record(crate::wal::WalOpKind::Put, Some(b"v"), 7);
+
+        // Act
+        let is_covered = covered(&put, 5);
+
+        // Assert
+        assert!(!is_covered);
+    }
+
+    #[test]
+    fn should_treat_a_same_sequence_tombstone_as_covering_a_delete_record() {
+        // Arrange: the exact delete the WAL recorded is the tombstone the SST holds.
+        let delete = record(crate::wal::WalOpKind::Delete, None, 7);
+
+        // Act
+        let is_covered = covered(&delete, 7);
+
+        // Assert
+        assert!(is_covered);
+    }
+}
