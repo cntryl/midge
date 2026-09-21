@@ -302,7 +302,7 @@ mod architecture_ladder {
     fn should_keep_sst_factory_io_below_its_size_budget() {
         // Arrange
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/sst/fs/factory_io.rs");
-        let budget_lines = 1300;
+        let budget_lines = 800;
 
         // Act
         let lines = std::fs::read_to_string(&path)
