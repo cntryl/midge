@@ -409,15 +409,10 @@ impl WalCoordinator {
             && (event_loop.state.wal.pending_writes > 0
                 || event_loop.state.wal.local_durable_seq < sequence)
         {
-            let deadline = event_loop.router.registered_at(request_id).map_or_else(
-                crate::common::OperationDeadline::unbounded,
-                |registered_at| {
-                    crate::common::OperationDeadline::from_start(
-                        registered_at,
-                        event_loop.runtime_response_timeout,
-                    )
-                },
-            );
+            // A missing route means the caller abandoned the request, which
+            // is a zero budget, not an unbounded one. This used to be a second
+            // copy of the rule that disagreed with it.
+            let deadline = event_loop.registered_request_deadline(request_id);
             match event_loop.seal_current_cloud_segment_within(&deadline) {
                 Ok(Some((segment_id, max_sequence))) => {
                     if max_sequence < sequence {

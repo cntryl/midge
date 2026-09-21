@@ -8433,3 +8433,89 @@ fn should_defer_backpressure_release_until_verification_barrier_ends(
     );
     Ok(())
 }
+
+/// A backend that accepts requests and never answers them.
+///
+/// The callbacks are retained rather than dropped, so the caller waits on a
+/// live channel exactly as it would against an unresponsive provider.
+#[derive(Default)]
+struct SilentBackend {
+    retained: parking_lot::Mutex<Vec<crate::storage::cloud::CloudCallback>>,
+}
+
+impl SilentBackend {
+    fn retain(&self, callback: crate::storage::cloud::CloudCallback) {
+        self.retained.lock().push(callback);
+    }
+}
+
+impl crate::storage::cloud::CloudBackend for SilentBackend {
+    fn submit_put(
+        &self,
+        _key: &str,
+        _data: Vec<u8>,
+        _headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        self.retain(callback);
+    }
+
+    fn submit_get(&self, _key: &str, callback: crate::storage::cloud::CloudCallback) {
+        self.retain(callback);
+    }
+
+    fn submit_get_range(
+        &self,
+        _key: &str,
+        _start: u64,
+        _end: Option<u64>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        self.retain(callback);
+    }
+
+    fn submit_head(&self, _key: &str, callback: crate::storage::cloud::CloudCallback) {
+        self.retain(callback);
+    }
+}
+
+/// The event loop thread runs the metadata mirror itself, so every read,
+/// write, ack and shutdown waits behind it. It used to wait with an unbounded
+/// deadline, so an unresponsive provider blocked the whole runtime for as long
+/// as the provider stayed silent.
+#[test]
+fn should_report_timeout_when_the_cloud_never_answers_the_event_loop_mirror(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    el.runtime_response_timeout = Duration::from_millis(200);
+    el.cloud_metadata_storage = Some(Arc::new(
+        crate::storage::cloud::CloudStorage::new_with_timeout(
+            Arc::new(SilentBackend::default()),
+            "silent-metadata".to_string(),
+            Duration::from_secs(120),
+        ),
+    ));
+    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
+        .map_err(crate::common::MidgeError::Internal)?;
+
+    // Act
+    let started = std::time::Instant::now();
+    let error = el
+        .mirror_metadata_to_authoritative_cloud()
+        .expect_err("a silent provider must not block the event loop");
+    let waited = started.elapsed();
+
+    // Assert
+    assert!(
+        matches!(error, crate::common::MidgeError::Timeout(_)),
+        "expected Timeout, got {error:?}"
+    );
+    assert!(
+        waited < Duration::from_secs(30),
+        "the mirror waited {waited:?}, so it is not bounded by the runtime budget"
+    );
+    Ok(())
+}

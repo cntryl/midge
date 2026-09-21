@@ -443,6 +443,15 @@ impl EventLoop {
         )
     }
 
+    /// Budget for cloud work the event loop performs on its own thread.
+    ///
+    /// Anything this thread waits for blocks every read, write, ack and
+    /// shutdown behind it, so it gets the same budget the runtime promises
+    /// its callers rather than waiting indefinitely.
+    pub(super) fn event_loop_cloud_deadline(&self) -> crate::common::OperationDeadline {
+        crate::common::OperationDeadline::from_budget(self.runtime_response_timeout)
+    }
+
     /// Set the snapshot cache for read-path bypass.
     pub fn set_snapshot_cache(&mut self, cache: Arc<SnapshotCache>) {
         self.snapshot_cache = Some(cache);
@@ -526,10 +535,8 @@ impl EventLoop {
                     "remote compaction output without cloud storage".into(),
                 )
             })?;
-            storage.verify_remote_object_guards_within(
-                &[proof],
-                &crate::common::OperationDeadline::unbounded(),
-            )?;
+            storage
+                .verify_remote_object_guards_within(&[proof], &self.event_loop_cloud_deadline())?;
             return Ok(meta);
         }
         let path = self.state.sst_dir.join(sst_name);
@@ -848,7 +855,7 @@ impl EventLoop {
             {
                 hybrid.verify_remote_object_guards_within(
                     &[proof],
-                    &crate::common::OperationDeadline::unbounded(),
+                    &self.event_loop_cloud_deadline(),
                 )?;
                 continue;
             }
@@ -911,9 +918,7 @@ impl EventLoop {
     }
 
     fn mirror_metadata_to_authoritative_cloud(&self) -> crate::common::MidgeResult<()> {
-        self.mirror_metadata_to_authoritative_cloud_within(
-            &crate::common::OperationDeadline::unbounded(),
-        )
+        self.mirror_metadata_to_authoritative_cloud_within(&self.event_loop_cloud_deadline())
     }
 
     pub(super) fn mirror_metadata_to_authoritative_cloud_within(
@@ -964,10 +969,8 @@ impl EventLoop {
         &mut self,
         context: &str,
     ) -> crate::common::MidgeResult<()> {
-        self.mirror_metadata_after_local_commit_within(
-            context,
-            &crate::common::OperationDeadline::unbounded(),
-        )
+        let deadline = self.event_loop_cloud_deadline();
+        self.mirror_metadata_after_local_commit_within(context, &deadline)
     }
 
     fn mirror_metadata_after_local_commit_within(
