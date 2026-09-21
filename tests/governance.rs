@@ -299,6 +299,26 @@ mod architecture_ladder {
     }
 
     #[test]
+    fn should_keep_cloud_storage_module_below_its_size_budget() {
+        // Arrange
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/storage/cloud/mod.rs");
+        let budget_lines = 1700;
+
+        // Act
+        let lines = std::fs::read_to_string(&path)
+            .expect("read storage/cloud/mod.rs")
+            .lines()
+            .count();
+
+        // Assert
+        assert!(
+            lines <= budget_lines,
+            "storage/cloud/mod.rs has {lines} lines (budget {budget_lines}): its errors, \
+             backend trait, mock, proofs, adapter and tests each have their own reason to change"
+        );
+    }
+
+    #[test]
     fn should_keep_sst_factory_io_below_its_size_budget() {
         // Arrange
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/sst/fs/factory_io.rs");
