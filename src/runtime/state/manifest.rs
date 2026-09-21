@@ -12,6 +12,30 @@ impl RuntimeState {
         Ok(())
     }
 
+    /// Re-read the manifest and intent log from disk after another writer
+    /// may have advanced them.
+    ///
+    /// The flush worker publishes by doing load-modify-save on both files,
+    /// while the event loop treats its in-memory copies as authoritative and
+    /// rewrites each file wholesale. A publication that fails after the
+    /// journal append or the durable intent leaves disk ahead of memory, and
+    /// the next publication from the event loop would write memory back over
+    /// it, erasing an SST that is already published. Reloading here is what
+    /// makes the two views agree again before anything else publishes.
+    pub(crate) fn reload_persisted_metadata(&mut self) -> MidgeResult<()> {
+        if self.is_memory_mode() {
+            return Ok(());
+        }
+        let policy = self.recovery_policy();
+        self.manifest =
+            crate::metadata::ManifestPersistence::load_with_fs_and_policy(&self.fs, policy)
+                .map_err(crate::common::MidgeError::Internal)?;
+        self.intent_log =
+            crate::runtime::IntentPersistence::load_with_fs_and_policy(&self.fs, policy)
+                .map_err(crate::common::MidgeError::Internal)?;
+        Ok(())
+    }
+
     pub(super) fn persist_intent_entries(
         &self,
         intents: &[crate::runtime::IntentLogEntry],
