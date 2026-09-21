@@ -5,8 +5,8 @@
 #[path = "./stress_config.rs"]
 mod stress_config;
 
-use cntryl_midge::wal::encoding::{decode_view, encode, encode_into};
-use cntryl_midge::wal::{WalOpKind, WalRecord};
+use cntryl_midge::__internal::wal::encoding::{decode_view, encode, encode_into};
+use cntryl_midge::__internal::wal::{WalOpKind, WalRecord};
 use cntryl_midge::Bytes;
 use cntryl_stress::{black_box, stress, stress_main, StressContext};
 

@@ -2,7 +2,7 @@
 //!
 //! Measures fill + drain cycle cost for small and large memtables.
 
-use cntryl_midge::sst::SkipListMemtable;
+use cntryl_midge::__internal::sst::SkipListMemtable;
 use cntryl_midge::Bytes;
 use cntryl_stress::{black_box, stress, stress_main, StressContext};
 

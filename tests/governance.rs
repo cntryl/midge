@@ -9,7 +9,7 @@ mod coverage_manifests {
     //! Internal `FsError` coverage lives in `src/io/traits.rs` unit tests because the
     //! filesystem module is intentionally private to library consumers.
 
-    use cntryl_midge::sst::compression::{CompressionAlgo, CompressionPolicy};
+    use cntryl_midge::__internal::sst::compression::{CompressionAlgo, CompressionPolicy};
     use cntryl_midge::{
         AzureCredentialSource, DurabilityPolicy, Engine, GcsCredentialSource,
         HybridStorageBudgetSnapshot, LocalStorageUsage, MidgeError, OpenOptions, RecoveryPolicy,
@@ -798,5 +798,138 @@ mod failpoints_contract {
 
         // Assert
         assert_eq!(missing_feature, None);
+    }
+}
+
+mod public_api_surface {
+    //! Guards the canonical public export surface of the crate root.
+    //!
+    //! Implementation modules are private; the only way for this crate's own
+    //! tests, benches and fuzz targets to reach them is `__internal`, which is
+    //! compiled only under the non-default `internal-testing` feature.
+
+    use std::path::Path;
+
+    const INTERNAL_MODULE: &str = "__internal";
+    const CANONICAL_PUBLIC_MODULES: [&str; 1] = ["prelude"];
+
+    /// Return every `pub mod` declared in `source` that is neither a canonical
+    /// public module nor nested inside the feature-gated `__internal` module.
+    fn offending_pub_modules(source: &str) -> Vec<String> {
+        let mut offenders = Vec::new();
+        let mut depth: usize = 0;
+        let mut internal_depth: Option<usize> = None;
+
+        for line in source.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("pub mod ") {
+                let name = rest
+                    .trim_end()
+                    .trim_end_matches(['{', ';'])
+                    .trim()
+                    .to_string();
+                let inside_internal = internal_depth.is_some_and(|start| depth > start);
+                let allowed = inside_internal
+                    || name == INTERNAL_MODULE
+                    || CANONICAL_PUBLIC_MODULES.contains(&name.as_str());
+                if !allowed {
+                    offenders.push(name.clone());
+                }
+                if name == INTERNAL_MODULE {
+                    internal_depth = Some(depth);
+                }
+            }
+
+            depth = (depth + line.matches('{').count()).saturating_sub(line.matches('}').count());
+            if internal_depth.is_some_and(|start| depth <= start) {
+                internal_depth = None;
+            }
+        }
+
+        offenders
+    }
+
+    fn crate_root_source() -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs");
+        std::fs::read_to_string(path).expect("read src/lib.rs")
+    }
+
+    #[test]
+    fn should_expose_only_canonical_api_without_internal_feature() {
+        // Arrange
+        let source = crate_root_source();
+
+        // Act
+        let offenders = offending_pub_modules(&source);
+
+        // Assert
+        assert!(
+            offenders.is_empty(),
+            "src/lib.rs must keep implementation modules private; move these behind \
+             `#[cfg(feature = \"internal-testing\")] pub mod __internal`: {offenders:#?}"
+        );
+    }
+
+    #[test]
+    fn should_keep_internal_module_behind_the_internal_testing_feature() {
+        // Arrange
+        let source = crate_root_source();
+        let gate = "#[cfg(feature = \"internal-testing\")]\n#[doc(hidden)]\npub mod __internal {";
+
+        // Act
+        let gated = source.contains(gate);
+
+        // Assert
+        assert!(
+            gated,
+            "`pub mod __internal` must be preceded by `#[cfg(feature = \"internal-testing\")]`"
+        );
+    }
+
+    #[test]
+    fn should_flag_public_module_when_reintroduced_outside_internal_module() {
+        // Arrange
+        let regressed = concat!(
+            "mod common;\n",
+            "pub mod wal;\n",
+            "pub mod prelude {\n",
+            "    pub use crate::Engine;\n",
+            "}\n",
+            "#[cfg(feature = \"internal-testing\")]\n",
+            "#[doc(hidden)]\n",
+            "pub mod __internal {\n",
+            "    pub mod sst {\n",
+            "        pub use crate::sst::*;\n",
+            "    }\n",
+            "}\n",
+        );
+
+        // Act
+        let offenders = offending_pub_modules(regressed);
+
+        // Assert
+        assert_eq!(offenders, vec!["wal".to_string()]);
+    }
+
+    #[test]
+    fn should_reach_internals_only_through_the_gated_module() {
+        // Arrange
+        use cntryl_midge::__internal::wal::{encoding, WalOpKind, WalRecord};
+        let record = WalRecord::new(
+            WalOpKind::Put,
+            cntryl_midge::Bytes::from_static(b"governance-key"),
+            Some(cntryl_midge::Bytes::from_static(b"governance-value")),
+            7,
+            1,
+        );
+
+        // Act
+        let encoded = encoding::encode(&record).expect("encode WAL record");
+
+        // Assert
+        assert_eq!(
+            encoding::decode(encoded.as_ref()).expect("decode WAL record"),
+            record
+        );
     }
 }

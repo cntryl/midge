@@ -1392,7 +1392,7 @@ mod resource_cleanup {
     //! Tests that components properly clean up memory and other resources when
     //! dropped, ensuring the engine can run in constrained environments.
 
-    use cntryl_midge::sst::cache::{BlockCache, CacheKey, CachePolicyType};
+    use cntryl_midge::__internal::sst::cache::{BlockCache, CacheKey, CachePolicyType};
     use std::sync::Arc;
 
     #[test]

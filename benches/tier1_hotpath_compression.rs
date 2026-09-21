@@ -5,7 +5,7 @@
 #[path = "./stress_config.rs"]
 mod stress_config;
 
-use cntryl_midge::sst::compression::{
+use cntryl_midge::__internal::sst::compression::{
     compress_block, compress_block_with_trailer, compress_wal_value, decompress_block,
     decompress_block_with_trailer, decompress_wal_value, CompressionAlgo, CompressionPolicy,
 };

@@ -367,6 +367,7 @@ impl RecoveryStats {
 /// # Errors
 ///
 /// Returns an error if WAL enumeration, decoding, or record application fails.
+#[cfg(test)]
 pub fn replay_wal<S: BuildHasher>(
     storage: &dyn Fs,
     wal_dir: &FsPath,
@@ -381,6 +382,7 @@ pub fn replay_wal<S: BuildHasher>(
 ///
 /// Returns an error if WAL enumeration, decoding, or record application fails
 /// according to the selected replay policy.
+#[cfg(test)]
 pub fn replay_wal_with_policy<S: BuildHasher>(
     storage: &dyn Fs,
     wal_dir: &FsPath,

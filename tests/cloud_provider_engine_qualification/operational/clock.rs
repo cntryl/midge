@@ -1,6 +1,6 @@
 //! One deterministic TTL clock per qualification child; lease clocks stay real.
 
-use cntryl_midge::common::time::Clock;
+use cntryl_midge::__internal::common::time::Clock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 

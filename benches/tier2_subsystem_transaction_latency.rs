@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 #[path = "./stress_config.rs"]
 mod stress_config;
 
-use cntryl_midge::diagnostics::TransactionCommitTimingSample;
+use cntryl_midge::__internal::diagnostics::TransactionCommitTimingSample;
 use cntryl_midge::{ColumnFamilyId, Engine, RuntimeMetricsSnapshot, TransactionMode, WriteOptions};
 use cntryl_stress::{stress, stress_main, ObservationDirection, ObservationUnit, StressContext};
 use stress_config::init_benchmark_telemetry;
@@ -313,7 +313,7 @@ fn run_buffered_transaction_latency_breakdown(
     let start = engine
         .get_runtime_metrics()
         .expect("get starting latency runtime metrics");
-    cntryl_midge::diagnostics::enable_transaction_commit_timing_for_benchmarks();
+    cntryl_midge::__internal::diagnostics::enable_transaction_commit_timing_for_benchmarks();
     let mut client_totals = LatencyClientTotals::default();
     if clients == 1 {
         let workload = workloads
@@ -343,8 +343,8 @@ fn run_buffered_transaction_latency_breakdown(
         .get_runtime_metrics()
         .expect("get ending latency runtime metrics");
     let timing_samples =
-        cntryl_midge::diagnostics::drain_transaction_commit_timings_for_benchmarks();
-    cntryl_midge::diagnostics::disable_transaction_commit_timing_for_benchmarks();
+        cntryl_midge::__internal::diagnostics::drain_transaction_commit_timings_for_benchmarks();
+    cntryl_midge::__internal::diagnostics::disable_transaction_commit_timing_for_benchmarks();
     let commit_totals = CommitTimingTotals::from_samples(&timing_samples);
     let commit_latencies_ns = timing_samples
         .iter()

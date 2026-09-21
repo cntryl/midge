@@ -668,7 +668,7 @@ mod engine_ttl {
 
     use crate::common::*;
     use bytes::Bytes;
-    use cntryl_midge::common::time::Clock;
+    use cntryl_midge::__internal::common::time::Clock;
     use cntryl_midge::{
         MemoryBudget, MidgeEngine, OpenOptions, Query, TransactionMode, WriteOptions,
     };

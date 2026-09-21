@@ -26,11 +26,14 @@
 pub(crate) mod cloud_catalog;
 pub(crate) mod cloud_segment;
 mod config;
+// `encoding`, `frame` and `policy` stay `pub` inside this private module so the
+// crate's own tests and benches can reach them through `crate::__internal`;
+// `wal` itself is private, so nothing downstream can name them.
 pub mod encoding;
 pub mod frame;
-pub mod fs;
+pub(crate) mod fs;
 pub mod policy;
-pub mod recovery;
+pub(crate) mod recovery;
 pub(crate) mod traits;
 pub mod types;
 

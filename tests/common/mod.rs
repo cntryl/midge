@@ -21,7 +21,7 @@ pub enum StorageMode {
 pub struct MidgeOptions {
     pub storage_mode: StorageMode,
     pub wal_sync: bool,
-    pub wal_batch_config: Option<cntryl_midge::wal::policy::BatchConfig>,
+    pub wal_batch_config: Option<cntryl_midge::__internal::wal::policy::BatchConfig>,
     pub memtable_size: usize,
     pub compression: bool,
     pub enable_compaction: bool,

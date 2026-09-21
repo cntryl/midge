@@ -5,7 +5,7 @@
 #[path = "./stress_config.rs"]
 mod stress_config;
 
-use cntryl_midge::sst::{Memtable, SkipListMemtable};
+use cntryl_midge::__internal::sst::{Memtable, SkipListMemtable};
 use cntryl_stress::{black_box, stress, stress_main, StressContext};
 
 const LOOKUP_HIT_BATCH_SIZE: usize = 1_048_576;
@@ -125,7 +125,7 @@ fn get_hit(ctx: &mut StressContext) {
                     memtable
                         .get_key_state_at_with_time(black_box(hit_key), u64::MAX, 0)
                         .unwrap(),
-                    cntryl_midge::sst::types::KeyState::Value(..)
+                    cntryl_midge::__internal::sst::types::KeyState::Value(..)
                 ) {
                     hits += 1;
                 }
@@ -163,7 +163,7 @@ fn get_miss(ctx: &mut StressContext) {
                     memtable
                         .get_key_state_at_with_time(black_box(miss_key.as_slice()), u64::MAX, 0,)
                         .unwrap(),
-                    cntryl_midge::sst::types::KeyState::Absent
+                    cntryl_midge::__internal::sst::types::KeyState::Absent
                 ) {
                     misses += 1;
                 }
