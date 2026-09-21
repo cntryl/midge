@@ -1633,7 +1633,7 @@ fn put_cloud_metadata_for_test(
     file_name: &str,
     data: Vec<u8>,
 ) {
-    let key = crate::storage::cloud::cloud_metadata_key(file_name);
+    let key = crate::cloud_layout::CloudObjectLayout::metadata_key(file_name);
     let (tx, rx) = std::sync::mpsc::channel();
     cloud.submit_put(&key, data, vec![], tx);
     match rx.recv_timeout(Duration::from_secs(1)) {
@@ -1649,7 +1649,7 @@ fn get_cloud_metadata_for_test(
     cloud: &crate::storage::cloud::CloudStorage,
     file_name: &str,
 ) -> Vec<u8> {
-    let key = crate::storage::cloud::cloud_metadata_key(file_name);
+    let key = crate::cloud_layout::CloudObjectLayout::metadata_key(file_name);
     let (tx, rx) = std::sync::mpsc::channel();
     cloud.submit_get(&key, tx);
     match rx.recv_timeout(Duration::from_secs(1)) {
@@ -1673,7 +1673,7 @@ fn put_all_cloud_metadata_for_test(cloud: &crate::storage::cloud::CloudStorage, 
 }
 
 fn delete_cloud_metadata_for_test(cloud: &crate::storage::cloud::CloudStorage, file_name: &str) {
-    let key = crate::storage::cloud::cloud_metadata_key(file_name);
+    let key = crate::cloud_layout::CloudObjectLayout::metadata_key(file_name);
     let (tx, rx) = std::sync::mpsc::channel();
     cloud.submit_delete(&key, tx);
     match rx.recv_timeout(Duration::from_secs(1)) {

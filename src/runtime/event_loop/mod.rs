@@ -946,7 +946,7 @@ impl EventLoop {
     ) -> crate::common::MidgeResult<()> {
         let local_sequence = self.state.manifest.last_persisted_sequence;
         for file_name in crate::metadata::files::MANIFEST_BODIES {
-            let key = crate::storage::cloud::cloud_metadata_key(file_name);
+            let key = crate::cloud_layout::CloudObjectLayout::metadata_key(file_name);
             let Some(data) =
                 crate::storage::cloud::BlockingCloud::new(cloud, deadline).get_optional(&key)?
             else {

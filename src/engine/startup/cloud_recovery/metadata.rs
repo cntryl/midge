@@ -17,7 +17,7 @@ impl CloudStartupRecovery {
         local_sequence: u64,
     ) -> MidgeResult<()> {
         for file_name in crate::metadata::files::MANIFEST_BODIES {
-            let key = crate::storage::cloud::cloud_metadata_key(file_name);
+            let key = crate::cloud_layout::CloudObjectLayout::metadata_key(file_name);
             let Some(data) = BlockingCloudIo::new(cloud).get_optional(&key)? else {
                 continue;
             };

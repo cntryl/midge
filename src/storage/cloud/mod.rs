@@ -316,13 +316,6 @@ pub struct CloudStorage {
     metadata_publication_lock: Mutex<()>,
 }
 
-pub(crate) fn cloud_metadata_key(file_name: &str) -> String {
-    format!(
-        "{}{file_name}",
-        crate::cloud_layout::CloudObjectLayout::METADATA_PREFIX
-    )
-}
-
 mod proof;
 pub(crate) use proof::{
     blocking_cloud_object_proof, blocking_cloud_object_proof_within, validate_object_proof,

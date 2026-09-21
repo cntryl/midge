@@ -148,7 +148,7 @@ impl CloudStartupRecovery {
         let mut has_manifest_journal = false;
 
         for file_name in crate::metadata::files::CLOUD_MIRRORED {
-            let key = crate::storage::cloud::cloud_metadata_key(file_name);
+            let key = crate::cloud_layout::CloudObjectLayout::metadata_key(file_name);
             let data = match BlockingCloudIo::new(cloud).get_optional(&key) {
                 Ok(Some(data)) => data,
                 Ok(None) => continue,
@@ -261,7 +261,7 @@ impl CloudStartupRecovery {
                 }
             };
 
-            let key = crate::storage::cloud::cloud_metadata_key(file_name);
+            let key = crate::cloud_layout::CloudObjectLayout::metadata_key(file_name);
             if let Err(error) = Self::blocking_conditional_cloud_metadata_put(
                 cloud,
                 file_name,

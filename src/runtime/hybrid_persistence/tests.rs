@@ -2598,7 +2598,7 @@ fn should_not_prune_remote_wal_when_cloud_metadata_changes_after_initial_validat
         metadata_backend,
         "metadata-test".to_string(),
     ));
-    let metadata_key = crate::storage::cloud::cloud_metadata_key("manifest.json");
+    let metadata_key = crate::cloud_layout::CloudObjectLayout::metadata_key("manifest.json");
     let metadata_bytes = br#"{"last_persisted_sequence":24}"#.to_vec();
 
     write_cloud_object(&storage, &sst_key, sst_bytes);
@@ -2679,7 +2679,7 @@ fn should_prune_remote_wal_when_worker_side_guard_remains_valid() {
         metadata_backend,
         "metadata-test".to_string(),
     ));
-    let metadata_key = crate::storage::cloud::cloud_metadata_key("manifest.json");
+    let metadata_key = crate::cloud_layout::CloudObjectLayout::metadata_key("manifest.json");
     let metadata_bytes = br#"{"last_persisted_sequence":25}"#.to_vec();
 
     write_cloud_object(&storage, &sst_key, sst_bytes.clone());

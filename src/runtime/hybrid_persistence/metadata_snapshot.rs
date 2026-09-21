@@ -154,7 +154,7 @@ impl CloudMetadataPruneSnapshot {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
                 Err(error) => return Err(error.into()),
             };
-            let key = crate::storage::cloud::cloud_metadata_key(file_name);
+            let key = crate::cloud_layout::CloudObjectLayout::metadata_key(file_name);
             let proof = HybridStorage::read_control_from_backend(
                 &backend,
                 &key,
@@ -227,7 +227,7 @@ pub(crate) fn conditional_metadata_mirror_put(
     deadline: &crate::common::OperationDeadline,
 ) -> MidgeResult<()> {
     let io = crate::storage::cloud::BlockingCloud::new(cloud, deadline);
-    let key = crate::storage::cloud::cloud_metadata_key(file_name);
+    let key = crate::cloud_layout::CloudObjectLayout::metadata_key(file_name);
     let headers = match io.head_optional(&key)? {
         Some(metadata) => {
             let headers = crate::storage::cloud::object_match_precondition_headers(
@@ -331,7 +331,7 @@ mod tests {
         .unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_put(
-            &crate::storage::cloud::cloud_metadata_key(crate::metadata::files::MANIFEST),
+            &crate::cloud_layout::CloudObjectLayout::metadata_key(crate::metadata::files::MANIFEST),
             body,
             Vec::new(),
             tx,
@@ -403,7 +403,7 @@ mod tests {
             if let Ok(bytes) = std::fs::read(snapshot.db_path.join(name)) {
                 let (tx, rx) = std::sync::mpsc::channel();
                 snapshot.cloud.submit_put(
-                    &crate::storage::cloud::cloud_metadata_key(name),
+                    &crate::cloud_layout::CloudObjectLayout::metadata_key(name),
                     bytes,
                     Vec::new(),
                     tx,

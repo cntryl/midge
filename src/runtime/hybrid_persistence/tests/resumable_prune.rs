@@ -625,7 +625,7 @@ fn finish_with_retained_manifest_admission(remote_metadata: bool) {
         if let Ok(bytes) = std::fs::read(metadata_path.join(name)) {
             let (tx, rx) = std::sync::mpsc::channel();
             metadata_cloud.submit_put(
-                &crate::storage::cloud::cloud_metadata_key(name),
+                &crate::cloud_layout::CloudObjectLayout::metadata_key(name),
                 bytes,
                 Vec::new(),
                 tx,

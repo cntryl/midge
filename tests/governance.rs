@@ -299,6 +299,29 @@ mod architecture_ladder {
     }
 
     #[test]
+    fn should_keep_metadata_object_naming_out_of_the_storage_layer() {
+        // Arrange
+        let needle = "fn cloud_metadata_key";
+
+        // Act
+        let offenders: Vec<PathBuf> = rust_sources_under("src/storage")
+            .into_iter()
+            .filter(|path| {
+                std::fs::read_to_string(path)
+                    .expect("read Rust source")
+                    .contains(needle)
+            })
+            .collect();
+
+        // Assert
+        assert!(
+            offenders.is_empty(),
+            "object naming for recovery metadata belongs to CloudObjectLayout, not the storage \
+             layer: {offenders:?}"
+        );
+    }
+
+    #[test]
     fn should_define_shared_provider_helpers_once_when_providers_need_them() {
         // Arrange
         let shared = ["fn current_unix_secs(", "fn object_metadata_from_"];

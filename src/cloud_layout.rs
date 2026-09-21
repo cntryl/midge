@@ -22,11 +22,30 @@ impl CloudObjectLayout {
     pub const METADATA_PREFIX: &'static str = "metadata/";
     /// Mutable primary-lease object in the control store.
     pub const LEASE_OBJECT_KEY: &'static str = "midge_primary_lease.json";
+
+    /// Object key for a mutable recovery-metadata file in the control store.
+    #[must_use]
+    pub(crate) fn metadata_key(file_name: &str) -> String {
+        format!("{}{file_name}", Self::METADATA_PREFIX)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::CloudObjectLayout;
+
+    #[test]
+    fn should_place_metadata_files_under_the_metadata_prefix_when_building_a_key() {
+        // Arrange
+        let file_name = "manifest.json";
+
+        // Act
+        let key = CloudObjectLayout::metadata_key(file_name);
+
+        // Assert
+        assert_eq!(key, "metadata/manifest.json");
+        assert!(key.starts_with(CloudObjectLayout::METADATA_PREFIX));
+    }
 
     #[test]
     fn should_keep_lifecycle_object_classes_disjoint() {
