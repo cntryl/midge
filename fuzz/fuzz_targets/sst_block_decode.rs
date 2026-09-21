@@ -1,6 +1,6 @@
 #![no_main]
 
-use cntryl_midge::sst::types::{decode_range_tombstones, Footer};
+use cntryl_midge::__internal::sst::types::{decode_range_tombstones, Footer};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

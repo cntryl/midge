@@ -12,7 +12,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 tempfile = "3.27"
-cntryl-midge = { path = ".." }
+cntryl-midge = { path = "..", features = ["internal-testing"] }
 
 [[bin]]
 name = "wal_frame_recovery"
