@@ -89,13 +89,14 @@ The WAL is the first durable landing zone for writes in local durable modes.
 - Byte-level WAL segment interpretation, including cloud WAL object-key formatting and transaction-batch expansion, lives in `src/wal/cloud_segment.rs`.
 - `runtime::hybrid_persistence` owns cloud WAL/SST interpretation, manifest coverage decisions, and guarded-prune orchestration.
 - `HybridStorage` exposes only bounded keyed object I/O, byte-identity readback, provider identities, immutable publication, and conditional deletion. It does not import WAL, SST, or manifest formats.
+- `runtime::hybrid_persistence::CloudPersistence` is the single owner of that format layer. It wraps an `Arc<HybridStorage>` and derefs to it, so raw object I/O stays reachable without the format operations being grafted onto the storage type. Its tests live next to it in `runtime/hybrid_persistence/tests/`; `src/storage` holds only format-neutral tests, and `architecture_ladder` in `tests/governance.rs` enforces that with no exemption for files named `tests.rs`.
 - A guarded prune is authorized in the runtime, then rechecks format-neutral object identities in the storage worker immediately before the provider conditional delete.
 
 ## Memtable
 
 The memtable is the newest readable state.
 
-The ordered skiplist implementation lives in the lower `memtable` module. Public scan contracts live in `iterators`, while SST construction consumes the memtable directly; SST and iterator modules do not depend on each other.
+The ordered skiplist implementation lives in the lower `memtable` module. Public scan contracts are the `ScanIterator` types re-exported from `engine`; `iterators` is only an internal bench shim over the memtable skiplist. SST construction consumes the memtable directly; SST and iterator modules do not depend on each other.
 
 ### Responsibilities
 
