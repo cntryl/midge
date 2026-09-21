@@ -9,8 +9,9 @@
 
 use super::super::cloud::{
     CloudBackend, CloudCallback, CloudError, CloudEvent, CloudExecutor, CloudListBudget,
-    CloudOutcome, CloudRequest, CloudResponse, CloudSigner, ObjectMetadata,
+    CloudOutcome, CloudRequest, CloudResponse, CloudSigner,
 };
+use super::rest::object_metadata_from_response;
 use super::xml::extract_xml_tag_values;
 use crate::common::{MidgeError, MidgeResult};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as Base64Engine};
@@ -924,9 +925,10 @@ impl CloudBackend for AzureBackend {
         let request = CloudRequest::new(Method::GET, self.object_url(&key));
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
             Ok(resp) if resp.status == 200 => {
-                let metadata = object_metadata_from_azure_response(
+                let metadata = object_metadata_from_response(
                     &resp,
                     Some(u64::try_from(resp.body.len()).unwrap_or(u64::MAX)),
+                    "Azure",
                 );
                 CloudEvent::GetWithMetadata {
                     key: ctx,
@@ -1192,7 +1194,7 @@ impl CloudBackend for AzureBackend {
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
             Ok(resp) if resp.status == 200 => CloudEvent::Head {
                 key: ctx,
-                result: object_metadata_from_azure_response(&resp, None),
+                result: object_metadata_from_response(&resp, None, "Azure"),
             },
             Ok(resp) => CloudEvent::Head {
                 key: ctx,
@@ -1205,41 +1207,6 @@ impl CloudBackend for AzureBackend {
         };
         self.executor.spawn_request(request, key, callback, mapper);
     }
-}
-
-fn object_metadata_from_azure_response(
-    response: &CloudResponse,
-    known_size: Option<u64>,
-) -> CloudOutcome<ObjectMetadata> {
-    let size = match known_size {
-        Some(_) => crate::storage::cloud::executor::validate_get_response_length(response)?,
-        None => response
-            .headers
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-            .ok_or_else(|| {
-                CloudError::Protocol(
-                    "Azure metadata response is missing Content-Length".to_string(),
-                )
-            })?
-            .1
-            .parse::<u64>()
-            .map_err(|error| {
-                CloudError::Protocol(format!(
-                    "Azure metadata response has invalid Content-Length: {error}"
-                ))
-            })?,
-    };
-    let etag = response
-        .headers
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("etag"))
-        .map(|(_, value)| value.trim())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            CloudError::Protocol("Azure metadata response is missing ETag".to_string())
-        })?;
-    Ok(ObjectMetadata::new(size, etag.to_string()))
 }
 
 fn azure_response_error(
@@ -2040,7 +2007,7 @@ mod tests {
         // Assert
         crate::storage::providers::test_support::assert_get_metadata_length_contract(
             identity_headers,
-            |response| object_metadata_from_azure_response(response, Some(3)),
+            |response| object_metadata_from_response(response, Some(3), "Azure"),
         );
     }
 

@@ -299,6 +299,37 @@ mod architecture_ladder {
     }
 
     #[test]
+    fn should_define_shared_provider_helpers_once_when_providers_need_them() {
+        // Arrange
+        let shared = ["fn current_unix_secs(", "fn object_metadata_from_"];
+        let sources = rust_sources_under("src/storage/providers");
+
+        // Act
+        let duplicated: Vec<(&str, usize)> = shared
+            .into_iter()
+            .map(|needle| {
+                let definitions = sources
+                    .iter()
+                    .map(|path| {
+                        std::fs::read_to_string(path)
+                            .expect("read Rust source")
+                            .matches(needle)
+                            .count()
+                    })
+                    .sum::<usize>();
+                (needle, definitions)
+            })
+            .filter(|(_, definitions)| *definitions > 1)
+            .collect();
+
+        // Assert
+        assert!(
+            duplicated.is_empty(),
+            "provider helpers copied into more than one provider: {duplicated:?}"
+        );
+    }
+
+    #[test]
     fn should_keep_cloud_adapter_callback_waits_in_one_helper() {
         // Arrange
         let source = std::fs::read_to_string(

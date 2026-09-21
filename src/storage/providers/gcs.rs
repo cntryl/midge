@@ -10,6 +10,7 @@ use super::super::cloud::{
     CloudBackend, CloudCallback, CloudError, CloudEvent, CloudExecutor, CloudListBudget,
     CloudOutcome, CloudRequest, CloudResponse, CloudSigner, ObjectMetadata,
 };
+use super::rest::current_unix_secs;
 use super::xml::extract_xml_tag_values;
 use crate::common::{MidgeError, MidgeResult};
 use base64::{
@@ -28,7 +29,6 @@ use sha1::Sha1;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 // ---------------------------------------------------------------------------
 // Credentials
@@ -894,13 +894,6 @@ fn parse_impersonated_access_token_json(body: &str) -> MidgeResult<CachedGcsToke
         access_token.to_string(),
         expires_at,
     ))
-}
-
-fn current_unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 fn required_json_str<'a>(json: &'a serde_json::Value, field: &str) -> MidgeResult<&'a str> {
