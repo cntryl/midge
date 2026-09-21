@@ -299,6 +299,36 @@ mod architecture_ladder {
     }
 
     #[test]
+    fn should_keep_config_independent_of_storage_when_lib_declares_crate_aliases() {
+        // Arrange
+        let lib = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"))
+            .expect("read lib.rs");
+        let forbidden = ["crate::storage", "cloud_preflight_backend"];
+
+        // Act
+        let alias_declared = lib.contains("mod cloud_preflight_backend");
+        let offenders: Vec<PathBuf> = rust_sources_under("src/config.rs")
+            .into_iter()
+            .chain(rust_sources_under("src/config"))
+            .filter(|path| {
+                let source = std::fs::read_to_string(path).expect("read Rust source");
+                forbidden.iter().any(|needle| source.contains(needle))
+            })
+            .collect();
+
+        // Assert
+        assert!(
+            !alias_declared,
+            "lib.rs must not declare a crate-level alias that gives config a path into storage"
+        );
+        assert!(
+            offenders.is_empty(),
+            "config is the foundation layer and must not reach storage, directly or through \
+             an alias: {offenders:?}"
+        );
+    }
+
+    #[test]
     fn should_keep_cloud_storage_module_below_its_size_budget() {
         // Arrange
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/storage/cloud/mod.rs");

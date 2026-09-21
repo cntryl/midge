@@ -53,6 +53,7 @@ mod factory;
 pub mod gcs;
 #[cfg(feature = "cloud-gcp")]
 mod gcs_resolver;
+pub(crate) mod preflight;
 #[cfg(all(test, feature = "cloud-all", feature = "sqrzl-tests"))]
 pub mod qualification;
 #[cfg(any(feature = "cloud-aws", feature = "cloud-oci"))]

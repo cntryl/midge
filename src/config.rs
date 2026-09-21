@@ -105,12 +105,6 @@ impl CloudStorageLocation {
     pub fn validate(&self) -> CloudValidationReport {
         cloud_validation::validate_location(self, &[CloudStorageRole::Standalone])
     }
-
-    /// Run an explicit, read-only deployment preflight.
-    #[must_use]
-    pub fn preflight(&self, options: CloudPreflightOptions) -> CloudValidationReport {
-        cloud_validation::preflight_location(self, &[CloudStorageRole::Standalone], options)
-    }
 }
 
 /// Resolved cloud storage locations for each object class.
@@ -179,12 +173,6 @@ impl CloudStorageTopology {
     #[must_use]
     pub fn validate(&self) -> CloudValidationReport {
         cloud_validation::validate_topology(self)
-    }
-
-    /// Preflight unique locations concurrently under one overall deadline.
-    #[must_use]
-    pub fn preflight(&self, options: CloudPreflightOptions) -> CloudValidationReport {
-        cloud_validation::preflight_topology(self, options)
     }
 }
 

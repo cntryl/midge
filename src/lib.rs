@@ -121,19 +121,6 @@ pub mod __internal {
 pub use cloud_layout::CloudObjectLayout;
 pub use common::{MidgeError, MidgeResult, Severity};
 
-#[cfg(feature = "cloud-common")]
-pub(crate) mod cloud_preflight_backend {
-    #[cfg(test)]
-    pub(crate) use crate::storage::cloud::MockCloudBackend;
-    pub(crate) use crate::storage::cloud::{CloudBackend, CloudEvent};
-
-    pub(crate) fn build(
-        provider: &crate::config::CloudProviderConfig,
-    ) -> crate::common::MidgeResult<std::sync::Arc<dyn CloudBackend>> {
-        crate::storage::providers::build_cloud_backend(provider)
-    }
-}
-
 // Engine / Transactions
 pub use engine::{
     ColumnFamilyHandle, ConflictPolicy, Engine, EngineMetrics, StorageVerifier, Transaction,
