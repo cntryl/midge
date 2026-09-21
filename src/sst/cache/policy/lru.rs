@@ -1,23 +1,180 @@
 //! Least Recently Used (LRU) eviction policy
 
 use super::CachePolicy;
-use crate::sst::cache::key::CacheKey;
-use dashmap::DashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::sst::cache::key::{CacheBlockKind, CacheKey};
+use std::collections::HashMap;
 
-/// LRU eviction policy using generation counter
+/// LRU eviction policy backed by indexed intrusive lists.
 ///
-/// Tracks access order by assigning a monotonically increasing generation
-/// counter to each key on access.
+/// Recency lives in a doubly-linked list held in a slot arena, so recording an
+/// access and picking a victim are both O(1). A generation map with a scan for
+/// the minimum made every eviction cost O(entries in the shard) while holding
+/// the shard's mutation lock, which is what gated concurrent reads.
+///
+/// One list per block kind keeps victim selection O(1) even when the caller
+/// protects metadata blocks: the oldest candidate is the oldest head among the
+/// kinds that are not excluded, rather than a scan past protected entries.
 pub struct LruPolicy {
-    /// Concurrent map from key to its last access generation.
-    ///
-    /// Hits only contend on the shard containing their key. The generation
-    /// itself is atomic so every hit can synchronously publish exact recency
-    /// without taking a policy-wide lock.
-    generations: DashMap<CacheKey, AtomicU64>,
-    /// Current generation counter (incremented on each access)
-    generation: AtomicU64,
+    state: parking_lot::Mutex<LruState>,
+}
+
+/// Position of one tracked key inside the arena.
+struct Slot {
+    key: CacheKey,
+    /// Older neighbour in this key's list, or `None` at the head.
+    previous: Option<usize>,
+    /// Newer neighbour in this key's list, or `None` at the tail.
+    next: Option<usize>,
+    /// Access order across all lists, used to compare heads of different kinds.
+    sequence: u64,
+}
+
+/// Head (least recently used) and tail (most recently used) of one list.
+#[derive(Default, Clone, Copy)]
+struct ListEnds {
+    head: Option<usize>,
+    tail: Option<usize>,
+}
+
+struct LruState {
+    slots: Vec<Option<Slot>>,
+    free_slots: Vec<usize>,
+    index: HashMap<CacheKey, usize>,
+    /// One list per block kind: Index, Data, Filter.
+    lists: [ListEnds; 3],
+    sequence: u64,
+    /// Entries examined by the most recent victim selection, so a test can
+    /// assert the cost does not grow with the number of tracked entries.
+    #[cfg(test)]
+    examined_by_last_pick: usize,
+}
+
+fn list_of(kind: CacheBlockKind) -> usize {
+    match kind {
+        CacheBlockKind::Index => 0,
+        CacheBlockKind::Data => 1,
+        CacheBlockKind::Filter => 2,
+    }
+}
+
+const KINDS: [CacheBlockKind; 3] = [
+    CacheBlockKind::Index,
+    CacheBlockKind::Data,
+    CacheBlockKind::Filter,
+];
+
+impl LruState {
+    fn new() -> Self {
+        Self {
+            slots: Vec::new(),
+            free_slots: Vec::new(),
+            index: HashMap::new(),
+            lists: [ListEnds::default(); 3],
+            sequence: 0,
+            #[cfg(test)]
+            examined_by_last_pick: 0,
+        }
+    }
+
+    fn slot(&self, position: usize) -> &Slot {
+        self.slots[position].as_ref().expect("live slot")
+    }
+
+    fn slot_mut(&mut self, position: usize) -> &mut Slot {
+        self.slots[position].as_mut().expect("live slot")
+    }
+
+    /// Unlink a slot from its list, leaving the slot itself allocated.
+    fn unlink(&mut self, position: usize) {
+        let (previous, next, list) = {
+            let slot = self.slot(position);
+            (slot.previous, slot.next, list_of(slot.key.block_type))
+        };
+        match previous {
+            Some(previous) => self.slot_mut(previous).next = next,
+            None => self.lists[list].head = next,
+        }
+        match next {
+            Some(next) => self.slot_mut(next).previous = previous,
+            None => self.lists[list].tail = previous,
+        }
+        let slot = self.slot_mut(position);
+        slot.previous = None;
+        slot.next = None;
+    }
+
+    /// Append a slot at the most-recently-used end of its list.
+    fn link_as_newest(&mut self, position: usize) {
+        let list = list_of(self.slot(position).key.block_type);
+        let previous_tail = self.lists[list].tail;
+        self.slot_mut(position).previous = previous_tail;
+        self.slot_mut(position).next = None;
+        match previous_tail {
+            Some(tail) => self.slot_mut(tail).next = Some(position),
+            None => self.lists[list].head = Some(position),
+        }
+        self.lists[list].tail = Some(position);
+    }
+
+    fn touch(&mut self, key: CacheKey) {
+        self.sequence += 1;
+        let sequence = self.sequence;
+        if let Some(&position) = self.index.get(&key) {
+            self.unlink(position);
+            self.slot_mut(position).sequence = sequence;
+            self.link_as_newest(position);
+            return;
+        }
+        let slot = Slot {
+            key,
+            previous: None,
+            next: None,
+            sequence,
+        };
+        let position = if let Some(free) = self.free_slots.pop() {
+            self.slots[free] = Some(slot);
+            free
+        } else {
+            self.slots.push(Some(slot));
+            self.slots.len() - 1
+        };
+        self.index.insert(key, position);
+        self.link_as_newest(position);
+    }
+
+    fn release(&mut self, position: usize) {
+        self.unlink(position);
+        let key = self.slot(position).key;
+        self.index.remove(&key);
+        self.slots[position] = None;
+        self.free_slots.push(position);
+    }
+
+    fn remove(&mut self, key: CacheKey) {
+        if let Some(&position) = self.index.get(&key) {
+            self.release(position);
+        }
+    }
+
+    /// The least recently used key that is not of an excluded kind.
+    fn oldest(&mut self, exclude_types: &[CacheBlockKind]) -> Option<usize> {
+        #[cfg(test)]
+        {
+            self.examined_by_last_pick = 0;
+        }
+        let candidates: Vec<usize> = KINDS
+            .iter()
+            .filter(|kind| !exclude_types.contains(kind))
+            .filter_map(|kind| self.lists[list_of(*kind)].head)
+            .collect();
+        #[cfg(test)]
+        {
+            self.examined_by_last_pick = candidates.len();
+        }
+        candidates
+            .into_iter()
+            .min_by_key(|position| self.slot(*position).sequence)
+    }
 }
 
 impl LruPolicy {
@@ -25,21 +182,7 @@ impl LruPolicy {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            generations: DashMap::new(),
-            generation: AtomicU64::new(0),
-        }
-    }
-
-    fn publish_generation(entry: &AtomicU64, generation: u64) {
-        // Accesses are assigned a generation before they touch the map. A
-        // delayed thread must not publish an older generation over a newer
-        // access, so publication is an atomic max rather than a plain store.
-        let mut current = entry.load(Ordering::Acquire);
-        while current < generation {
-            match entry.compare_exchange(current, generation, Ordering::AcqRel, Ordering::Acquire) {
-                Ok(_) => break,
-                Err(observed) => current = observed,
-            }
+            state: parking_lot::Mutex::new(LruState::new()),
         }
     }
 }
@@ -51,83 +194,44 @@ impl Default for LruPolicy {
 }
 
 impl CachePolicy for LruPolicy {
-    /// Record access to a key
-    ///
-    /// Assigns a new generation counter to track recency.
+    /// Record access to a key, making it the most recently used.
     #[inline]
     fn on_access(&self, key: CacheKey) {
-        let generation = self.generation.fetch_add(1, Ordering::Relaxed);
-
-        // The overwhelmingly common path is a hit on an already tracked key.
-        // `DashMap::entry` takes that shard's write lock even when no insertion
-        // is needed, turning a shared hot block into a serialized read path.
-        // A read lookup keeps exact synchronous recency publication while
-        // allowing concurrent hits to CAS the per-key generation.
-        if let Some(entry) = self.generations.get(&key) {
-            Self::publish_generation(entry.value(), generation);
-            return;
-        }
-
-        let entry = self
-            .generations
-            .entry(key)
-            .or_insert_with(|| AtomicU64::new(generation));
-        Self::publish_generation(&entry, generation);
+        self.state.lock().touch(key);
     }
 
-    /// Pick a victim for eviction
+    /// Pick the least recently used key that is not of an excluded kind.
     ///
-    /// Finds the key with the smallest generation (least recently used)
-    /// among non-excluded types.
-    fn pick_victim(&self, exclude_types: &[crate::sst::cache::CacheBlockKind]) -> Option<CacheKey> {
-        loop {
-            let candidate = self
-                .generations
-                .iter()
-                .filter(|entry| {
-                    exclude_types.is_empty() || !exclude_types.contains(&entry.key().block_type)
-                })
-                .map(|entry| (*entry.key(), entry.value().load(Ordering::Acquire)))
-                .min_by_key(|(_, generation)| *generation);
-
-            let (key, generation) = candidate?;
-
-            // A hit can update a candidate while the scan is in progress.
-            // Remove only if the exact generation we selected is still live;
-            // otherwise rescan to retain exact LRU ordering.
-            if self
-                .generations
-                .remove_if(&key, |_, current_generation| {
-                    current_generation.load(Ordering::Acquire) == generation
-                })
-                .is_some()
-            {
-                return Some(key);
-            }
-        }
+    /// The selected key is removed from tracking, matching the previous
+    /// behaviour that `on_stale` relies on.
+    fn pick_victim(&self, exclude_types: &[CacheBlockKind]) -> Option<CacheKey> {
+        let mut state = self.state.lock();
+        let position = state.oldest(exclude_types)?;
+        let key = state.slot(position).key;
+        state.release(position);
+        Some(key)
     }
 
     /// Remove a key from tracking
     #[inline]
     fn on_remove(&self, key: CacheKey) {
-        self.generations.remove(&key);
+        self.state.lock().remove(key);
     }
 
-    /// Mark a key as stale and remove it
+    /// Mark a key as stale.
     ///
-    /// Called when a concurrent removal occurred during eviction.
-    /// Just clean up tracking state.
+    /// `pick_victim` already removed its selected key, so a stale cache entry
+    /// has no tracking left to clean up. Removing here would erase a fresh
+    /// concurrent access instead.
     #[inline]
     fn on_stale(&self, key: CacheKey) {
-        // `pick_victim` conditionally removes its selected generation. A stale
-        // cache entry therefore has no policy entry left to clean up. Leaving
-        // a concurrent fresh access alone is essential for exact recency.
         let _ = key;
     }
 
     /// Clear all state
     fn clear(&self) {
-        self.generations.clear();
+        let mut state = self.state.lock();
+        *state = LruState::new();
     }
 }
 
@@ -365,5 +469,52 @@ mod tests {
         // Assert
         assert_eq!(policy.pick_victim(&[]), Some(cold_key));
         assert_eq!(policy.pick_victim(&[]), Some(hot_key));
+    }
+    /// Eviction used to scan every tracked key to find the minimum
+    /// generation, while holding the shard's mutation lock. Victim selection
+    /// must cost the same whether the shard holds ten entries or a hundred
+    /// thousand.
+    #[test]
+    fn should_examine_a_fixed_number_of_entries_when_picking_a_victim() {
+        // Arrange
+        let policy = LruPolicy::new();
+        for id in 0..100_000u64 {
+            policy.on_access(CacheKey::for_data(id, 0));
+        }
+
+        // Act
+        let victim = policy.pick_victim(&[]);
+        let examined = policy.state.lock().examined_by_last_pick;
+
+        // Assert
+        assert_eq!(victim, Some(CacheKey::for_data(0, 0)));
+        assert!(
+            examined <= KINDS.len(),
+            "victim selection examined {examined} entries"
+        );
+    }
+
+    /// Protecting metadata must not turn selection into a scan past every
+    /// protected entry either.
+    #[test]
+    fn should_examine_a_fixed_number_of_entries_when_metadata_is_protected() {
+        // Arrange
+        let policy = LruPolicy::new();
+        for id in 0..10_000u64 {
+            policy.on_access(CacheKey::for_index(id, 0));
+            policy.on_access(CacheKey::for_filter(id, 8));
+        }
+        policy.on_access(CacheKey::for_data(1, 16));
+
+        // Act
+        let victim = policy.pick_victim(&[CacheBlockKind::Index, CacheBlockKind::Filter]);
+        let examined = policy.state.lock().examined_by_last_pick;
+
+        // Assert
+        assert_eq!(victim, Some(CacheKey::for_data(1, 16)));
+        assert!(
+            examined <= KINDS.len(),
+            "victim selection examined {examined} entries"
+        );
     }
 }
