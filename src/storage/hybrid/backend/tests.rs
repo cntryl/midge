@@ -2,8 +2,8 @@
 //!
 //! Only raw object I/O, budget admission, upload-queue and provider
 //! error-shape behaviour belongs here. WAL catalog, manifest-coverage prune
-//! and SST publication semantics are owned by
-//! `crate::runtime::hybrid_persistence` and tested beside it.
+//! and SST publication semantics are owned by the runtime's
+//! `hybrid_persistence` module and tested beside it.
 
 use super::*;
 

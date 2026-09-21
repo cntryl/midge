@@ -298,10 +298,12 @@ mod architecture_ladder {
         sources
     }
 
+    /// Dependency-checked source for one file.
+    ///
+    /// A file is not exempt because it is named `tests.rs`: a test module still
+    /// belongs to the layer it lives in, and an exemption there let storage
+    /// tests own WAL, SST, manifest and runtime behaviour unnoticed.
     fn production_source(path: &Path) -> String {
-        if path.file_name().is_some_and(|name| name == "tests.rs") {
-            return String::new();
-        }
         let source = std::fs::read_to_string(path).expect("read Rust source");
         if source.trim_start().starts_with("#![cfg(test)]") {
             return String::new();
@@ -423,6 +425,21 @@ mod architecture_ladder {
         assert!(
             violations.is_empty(),
             "storage must provide raw bounded object I/O without format or runtime ownership: {violations:#?}"
+        );
+    }
+
+    #[test]
+    fn should_keep_storage_tests_free_of_runtime_and_format_imports() {
+        // Arrange
+        let forbidden = ["crate::runtime", "crate::wal", "crate::metadata"];
+
+        // Act
+        let violations = prohibited_edges_under("src/storage", &forbidden);
+
+        // Assert
+        assert!(
+            violations.is_empty(),
+            "storage test modules must not reach into runtime orchestration or persistence formats: {violations:#?}"
         );
     }
 
