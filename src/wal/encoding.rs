@@ -143,9 +143,6 @@ fn payload_capacity(record: &WalRecord) -> MidgeResult<usize> {
     }
     // writer_epoch is always present
     capacity = add_capacity(capacity, TLV_HEADER_LEN + 8)?;
-    if record.compression.is_some() {
-        capacity = add_capacity(capacity, TLV_HEADER_LEN + 1)?;
-    }
 
     Ok(capacity)
 }
@@ -153,10 +150,10 @@ fn payload_capacity(record: &WalRecord) -> MidgeResult<usize> {
 /// Conservative physical size before automatic value compression. Compression
 /// only shrinks VALUE; it can introduce one additional compression TLV.
 pub(crate) fn record_frame_size_bound(record: &WalRecord) -> MidgeResult<usize> {
-    let extra_compression_tag = usize::from(record.compression.is_none()) * (TLV_HEADER_LEN + 1);
+    const EXTRA_COMPRESSION_TAG: usize = TLV_HEADER_LEN + 1;
     crate::wal::frame::encoded_frame_len(add_capacity(
         payload_capacity(record)?,
-        extra_compression_tag,
+        EXTRA_COMPRESSION_TAG,
     )?)
 }
 
@@ -318,13 +315,12 @@ fn encode_into_inner(record: &WalRecord, buf: &mut Vec<u8>) -> MidgeResult<()> {
                 (EncodedValue::Owned(value), comp_byte)
             };
         put_tlv(buf, tags::VALUE, write_val.as_slice())?;
+        // COMPRESSION only ever describes what the compressor actually did to
+        // this VALUE. It is never taken from the caller, so the tag cannot
+        // claim a raw value is compressed and make the frame unreplayable.
         if let Some(cb) = comp_byte {
             put_u8(buf, tags::COMPRESSION, cb)?;
-        } else if let Some(c) = record.compression {
-            put_u8(buf, tags::COMPRESSION, c)?;
         }
-    } else if let Some(c) = record.compression {
-        put_u8(buf, tags::COMPRESSION, c)?;
     }
 
     if let Some(exp) = record.expiration {
@@ -537,8 +533,8 @@ pub fn decode(mut bytes: impl Buf) -> MidgeResult<WalRecord> {
         expiration: view.expiration,
         range_end: view.range_end.map(Bytes::copy_from_slice),
         txn_id: view.txn_id,
+        // Decompressed — the decoded record no longer carries a compression tag.
         writer_epoch: view.writer_epoch,
-        compression: None, // Decompressed — no longer carries a compression tag
     })
 }
 
@@ -1462,6 +1458,53 @@ mod tests {
 
         // Assert
         assert_eq!(decoded.op, WalOpKind::TxnBatch);
+    }
+
+    #[test]
+    fn should_tag_compression_only_when_encoder_compressed_the_value() {
+        // Arrange: one value below the compression threshold (stored raw) and
+        // one highly compressible value above it. The COMPRESSION tag is
+        // derived from the compressor's own result — a caller cannot supply
+        // it — so a raw value must never be described as compressed.
+        let raw_value = Bytes::from_static(b"v");
+        assert!(raw_value.len() < crate::sst::compression::MIN_COMPRESSION_INPUT_BYTES);
+        let compressible_value = Bytes::from(vec![b'v'; 8192]);
+        let raw_record = WalRecord::new(
+            WalOpKind::Put,
+            Bytes::from_static(b"raw"),
+            Some(raw_value.clone()),
+            1,
+            7,
+        );
+        let compressed_record = WalRecord::new(
+            WalOpKind::Put,
+            Bytes::from_static(b"big"),
+            Some(compressible_value.clone()),
+            2,
+            7,
+        );
+
+        // Act
+        let raw_encoded = encode(&raw_record).expect("encode raw-value record");
+        let compressed_encoded = encode(&compressed_record).expect("encode compressible record");
+        let raw_view = decode_view(&raw_encoded).expect("decode raw-value view");
+        let compressed_view = decode_view(&compressed_encoded).expect("decode compressed view");
+
+        // Assert: the raw frame carries no COMPRESSION tag at all, while the
+        // compressed one does, and both replay back to the original bytes.
+        assert_eq!(raw_view.compression, None);
+        assert_eq!(raw_view.value, Some(raw_value.as_ref()));
+        assert!(compressed_view.compression.is_some());
+        assert_eq!(
+            decode(&raw_encoded[..]).expect("replay raw record").value,
+            Some(raw_value)
+        );
+        assert_eq!(
+            decode(&compressed_encoded[..])
+                .expect("replay compressed record")
+                .value,
+            Some(compressible_value)
+        );
     }
 
     #[test]

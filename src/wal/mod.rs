@@ -5,9 +5,12 @@
 //! ## Implementation
 //!
 //! Uses modern `io::Fs-based` implementations for production code:
-//! - [`fs::FsWalWriterIo`] - Append records to WAL
-//! - [`fs::FsWalReaderIo`] - Read records from WAL
-//! - [`fs::FsWalFactoryIo`] - Factory for creating readers/writers
+//! - `fs::FsWalWriterIo` - Append records to WAL
+//! - `fs::FsWalFactoryIo` - Factory for creating writers
+//!
+//! Reading a WAL back is recovery's job: `recovery` owns frame scanning,
+//! torn-tail tolerance, and writer-epoch fencing, so no standalone reader type
+//! is published.
 //!
 //! The `io::Fs` abstraction enables better testability with swappable implementations
 //! (real and mock). All production code has been migrated to this interface.
@@ -28,7 +31,7 @@ pub mod frame;
 pub mod fs;
 pub mod policy;
 pub mod recovery;
-pub mod traits;
+pub(crate) mod traits;
 pub mod types;
 
 /// Active WAL filename. This file is mutable and is never uploaded as-is.
@@ -97,7 +100,7 @@ pub(crate) use config::WalBatchingConfig;
 pub use types::{WalOpKind, WalRecord};
 
 // Re-export traits
-pub use traits::{WalReaderDyn, WalWriter};
+pub use traits::WalWriter;
 
 // Re-export encoding functions
 

@@ -702,7 +702,7 @@ mod solid_cleanup {
     }
 
     #[test]
-    fn should_keep_unsequenced_wal_append_op_out_of_public_writer_trait() {
+    fn should_keep_record_building_wal_appends_out_of_public_writer_trait() {
         // Arrange
         let wal_trait = production_source("src/wal/traits.rs");
         let filesystem_writer = production_source("src/wal/fs/writer_io.rs");
@@ -715,21 +715,25 @@ mod solid_cleanup {
             "WalWriter should expose the prebuilt-record append path"
         );
         assert!(
-            wal_trait.contains("fn append_op_with_seq("),
-            "WalWriter should keep the explicit-sequence append path"
-        );
-        assert!(
             wal_trait.contains("fn append_batch(&self, records: &[WalRecord])"),
             "WalWriter should keep the batch append path"
         );
-        assert!(
-            !wal_trait.contains("fn append_op("),
-            "WalWriter should not expose unsequenced append_op"
-        );
-        assert!(
-            !filesystem_writer.contains("fn append_op("),
-            "filesystem WAL writer should not reintroduce unsequenced append_op"
-        );
+        // A trait method that builds the record itself has no writer epoch to
+        // stamp, and recovery exempts epoch 0 from stale-writer fencing.
+        for helper in [
+            "fn append_op(",
+            "fn append_op_with_seq(",
+            "fn append_op_bytes(",
+        ] {
+            assert!(
+                !wal_trait.contains(helper),
+                "WalWriter should not expose a record-building append ({helper})"
+            );
+            assert!(
+                !filesystem_writer.contains(helper),
+                "filesystem WAL writer should not reintroduce {helper}"
+            );
+        }
     }
 
     #[test]

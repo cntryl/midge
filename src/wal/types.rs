@@ -108,6 +108,11 @@ impl WalOpKind {
 }
 
 /// A single WAL record using TLV encoding format.
+///
+/// A record always carries its value uncompressed. Whether the encoded frame
+/// carries a COMPRESSION tag is decided by [`crate::wal::encoding`] from the
+/// compressor's own result, and decode reverses it, so no caller can describe
+/// a raw value as compressed and produce a frame that fails to replay.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct WalRecord {
     /// Column family ID this record belongs to.
@@ -138,10 +143,6 @@ pub struct WalRecord {
     #[serde(default)]
     pub txn_id: Option<u64>,
 
-    /// Optional compression type for the value.
-    #[serde(default)]
-    pub compression: Option<u8>,
-
     /// Writer fencing epoch (monotonic fencing token).
     /// Stamped by the writer and encoded into WAL so storage/replay
     /// can enforce fencing semantics.  Required on every record.
@@ -166,7 +167,6 @@ impl WalRecord {
             expiration: None,
             range_end: None,
             txn_id: None,
-            compression: None,
             writer_epoch,
         }
     }
@@ -189,7 +189,6 @@ impl WalRecord {
             expiration: None,
             range_end: None,
             txn_id: None,
-            compression: None,
             writer_epoch,
         }
     }

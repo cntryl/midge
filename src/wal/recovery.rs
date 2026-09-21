@@ -1058,7 +1058,6 @@ fn apply_replayed_wal_record<S: BuildHasher>(
                     range_end: buffered.range_end,
                     txn_id: Some(batch.txn_id),
                     writer_epoch: batch.writer_epoch,
-                    compression: None,
                 };
                 apply_wal_record_to_memtables(
                     &replay_record,

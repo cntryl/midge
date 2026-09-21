@@ -1028,7 +1028,6 @@ impl WalActor {
             range_end: Some(end_key),
             txn_id: None,
             writer_epoch: self.current_epoch,
-            compression: None,
         };
 
         let record_size = record.estimated_size();

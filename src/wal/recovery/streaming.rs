@@ -431,7 +431,6 @@ impl ReplayState<'_> {
                         range_end: op.range_end,
                         txn_id: Some(batch.txn_id),
                         writer_epoch: batch.writer_epoch,
-                        compression: None,
                     })
                     .collect();
                 self.apply_atomic(&records)?;
