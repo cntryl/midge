@@ -782,6 +782,17 @@ impl EventLoop {
         }
         self.flush_actor.finish_pipeline();
         if publication_phase {
+            // The worker may have already appended the manifest journal batch
+            // or the durable intent before failing, leaving disk ahead of the
+            // in-memory copies this loop publishes from. Reconcile before the
+            // gate opens, or the next publication overwrites those edits.
+            if let Err(error) = self.state.reload_persisted_metadata() {
+                tracing::error!(
+                    flush_id,
+                    %error,
+                    "failed to reload persisted metadata after a failed publication"
+                );
+            }
             self.publication_gate.active = false;
         }
         let retry_after = self.state.mark_immutable_flush_failed(flush_id);

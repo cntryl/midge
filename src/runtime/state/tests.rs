@@ -2035,3 +2035,78 @@ fn should_retain_all_wal_when_tracked_generation_provenance_is_unknown() {
     // Assert
     assert_eq!(floor, None);
 }
+
+/// The flush worker publishes by writing the manifest journal and the intent
+/// log on disk. If the publication then fails, the event loop's in-memory
+/// copies are behind disk, and the next publication it performs rewrites both
+/// files from memory — erasing an SST that is already published. Reloading
+/// from disk is what stops that.
+#[test]
+fn should_keep_a_worker_published_sst_when_the_event_loop_publishes_next() {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create state directory");
+    let mut state = RuntimeState::try_new(
+        temp_dir.path().to_path_buf(),
+        false,
+        crate::config::RecoveryPolicy::Strict,
+    )
+    .expect("open state");
+    let published = crate::metadata::FileMeta {
+        name: "000000_00_00000000000000000009.sst".to_string(),
+        level: 0,
+        size_bytes: 4096,
+        content_crc32c: Some(7),
+        cf_id: 0,
+        sst_seq: 9,
+        ..crate::metadata::FileMeta::default()
+    };
+    crate::metadata::journal::append_edit_batch_with_fs(
+        &state.fs,
+        &[crate::metadata::ManifestEdit::AddSst(published.clone())],
+    )
+    .expect("append worker journal edit");
+    crate::runtime::IntentPersistence::save(
+        &state.db_path,
+        &[crate::runtime::IntentLogEntry::SstAdded {
+            file_meta: crate::runtime::FileMeta {
+                name: published.name.clone(),
+                level: published.level,
+                size_bytes: published.size_bytes,
+                content_crc32c: published.content_crc32c,
+                cf_id: published.cf_id,
+                smallest_key: None,
+                largest_key: None,
+                smallest_seq: None,
+                largest_seq: None,
+                key_bounds_complete: false,
+            },
+        }],
+    )
+    .expect("write worker intent");
+
+    // Act
+    state
+        .reload_persisted_metadata()
+        .expect("reconcile with disk");
+    state
+        .record_compaction_publication_intent(0, Vec::new(), Vec::new())
+        .expect("event loop publishes next");
+
+    // Assert
+    assert!(
+        state.manifest_has_file(&published.name),
+        "the worker's published SST must survive the next publication"
+    );
+    let persisted = crate::runtime::IntentPersistence::load_with_fs_and_policy(
+        &state.fs,
+        crate::config::RecoveryPolicy::Strict,
+    )
+    .expect("reload intents");
+    assert!(
+        persisted.iter().any(|entry| matches!(
+            entry,
+            crate::runtime::IntentLogEntry::SstAdded { file_meta } if file_meta.name == published.name
+        )),
+        "the worker's intent must not be erased: {persisted:?}"
+    );
+}
