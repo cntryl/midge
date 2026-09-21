@@ -299,6 +299,26 @@ mod architecture_ladder {
     }
 
     #[test]
+    fn should_keep_sst_factory_io_below_its_size_budget() {
+        // Arrange
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/sst/fs/factory_io.rs");
+        let budget_lines = 1300;
+
+        // Act
+        let lines = std::fs::read_to_string(&path)
+            .expect("read factory_io.rs")
+            .lines()
+            .count();
+
+        // Assert
+        assert!(
+            lines <= budget_lines,
+            "factory_io.rs has {lines} lines (budget {budget_lines}): the writer, its size \
+             bounds and its tests belong in separate modules"
+        );
+    }
+
+    #[test]
     fn should_bound_cloud_seal_when_the_event_loop_forces_a_cloud_async_seal() {
         // Arrange
         let source = std::fs::read_to_string(
