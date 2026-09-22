@@ -1,8 +1,8 @@
 use super::*;
 use crate::metadata::Manifest;
 use crate::runtime::hybrid_persistence::CloudWalPruneProgress;
-use crate::sst::encoding::EntryType;
 use crate::storage::cloud::{CloudCallback, CloudError, CloudEvent};
+use crate::types::EntryType;
 
 struct LimitedRanges {
     inner: MockCloudBackend,

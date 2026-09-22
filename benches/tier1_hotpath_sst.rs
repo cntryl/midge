@@ -13,7 +13,8 @@ mod stress_config;
 
 use cntryl_stress::{black_box, stress, stress_main, StressContext};
 
-use cntryl_midge::__internal::sst::encoding::{decode, encode, EntryType};
+use cntryl_midge::__internal::sst::encoding::{decode, encode};
+use cntryl_midge::__internal::types::EntryType;
 
 const ENCODE_BATCH_SIZE: usize = 2048;
 const DECODE_BATCH_SIZE: usize = 65_536;

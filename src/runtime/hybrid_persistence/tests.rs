@@ -25,7 +25,7 @@ use std::sync::{
     Barrier,
 };
 
-use crate::sst::encoding::EntryType;
+use crate::types::EntryType;
 use std::time::{Duration, Instant};
 
 mod resumable_prune;
@@ -377,9 +377,9 @@ fn should_require_exact_raw_state_when_streaming_wal_retirement() {
                 sst_value,
                 7,
                 if sst_value.is_some() {
-                    crate::sst::encoding::EntryType::Put
+                    crate::types::EntryType::Put
                 } else {
-                    crate::sst::encoding::EntryType::Delete
+                    crate::types::EntryType::Delete
                 },
                 sst_expiration,
             )
@@ -3209,13 +3209,7 @@ mod contains_wal_record {
         let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
         let mut writer = factory.create().expect("create test SST writer");
         writer
-            .add_with_meta(
-                key,
-                None,
-                seq,
-                crate::sst::encoding::EntryType::Delete,
-                None,
-            )
+            .add_with_meta(key, None, seq, crate::types::EntryType::Delete, None)
             .expect("add point tombstone");
         writer.finish_bytes().expect("finish test SST bytes")
     }

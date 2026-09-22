@@ -1,5 +1,5 @@
 use super::*;
-use crate::sst::encoding::EntryType;
+use crate::types::EntryType;
 use std::path::PathBuf;
 
 struct RecoveryRangeBudgetBackend {

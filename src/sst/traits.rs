@@ -4,7 +4,7 @@ use bytes::Bytes;
 use std::path::Path;
 
 use crate::common::MidgeResult;
-use crate::sst::encoding::EntryType;
+use crate::types::{EntryType, KeyState, RangeTombstone};
 
 /// One owned logical version yielded by an SST's raw compaction cursor.
 ///
@@ -66,7 +66,7 @@ pub trait SstStateReader: Send + Sync {
     /// # Errors
     ///
     /// Returns an error when the SST cannot be read or decoded.
-    fn get_state(&self, key: &[u8]) -> MidgeResult<super::types::KeyState>;
+    fn get_state(&self, key: &[u8]) -> MidgeResult<KeyState>;
 
     /// Scan a key range returning presence state for each key
     ///
@@ -77,7 +77,7 @@ pub trait SstStateReader: Send + Sync {
         &self,
         start: Option<&[u8]>,
         end: Option<&[u8]>,
-    ) -> MidgeResult<Vec<(Bytes, super::types::KeyState)>>;
+    ) -> MidgeResult<Vec<(Bytes, KeyState)>>;
 
     /// Snapshot-aware range lookup with a caller-owned TTL clock.
     fn scan_range_state_with_time(
@@ -85,7 +85,7 @@ pub trait SstStateReader: Send + Sync {
         start: Option<&[u8]>,
         end: Option<&[u8]>,
         _now_millis: u64,
-    ) -> MidgeResult<Vec<(Bytes, super::types::KeyState)>> {
+    ) -> MidgeResult<Vec<(Bytes, KeyState)>> {
         self.scan_range_state(start, end)
     }
 
@@ -95,7 +95,7 @@ pub trait SstStateReader: Send + Sync {
         &self,
         start: Option<&[u8]>,
         end: Option<&[u8]>,
-    ) -> MidgeResult<Vec<(Bytes, super::types::KeyState)>>;
+    ) -> MidgeResult<Vec<(Bytes, KeyState)>>;
 
     /// Consume this reader and stream persisted logical versions without
     /// interpreting TTL expiration.
@@ -132,23 +132,21 @@ pub trait SstStateReader: Send + Sync {
         let versions = states
             .into_iter()
             .filter_map(|(key, state)| match state {
-                super::types::KeyState::Absent => None,
-                super::types::KeyState::Tombstone(seq) => Some(RawSstVersion {
+                KeyState::Absent => None,
+                KeyState::Tombstone(seq) => Some(RawSstVersion {
                     key: key.to_vec(),
                     seq,
                     is_tombstone: true,
                     value: None,
                     expiration: None,
                 }),
-                super::types::KeyState::Value(value, seq, expiration, _op_type) => {
-                    Some(RawSstVersion {
-                        key: key.to_vec(),
-                        seq,
-                        is_tombstone: false,
-                        value: Some(value.to_vec()),
-                        expiration,
-                    })
-                }
+                KeyState::Value(value, seq, expiration, _op_type) => Some(RawSstVersion {
+                    key: key.to_vec(),
+                    seq,
+                    is_tombstone: false,
+                    value: Some(value.to_vec()),
+                    expiration,
+                }),
             })
             .collect::<Vec<_>>();
         let retained_bytes = versions.iter().fold(0usize, |total, version| {
@@ -171,15 +169,11 @@ pub trait SstStateReader: Send + Sync {
     /// # Errors
     ///
     /// Returns an error when the SST cannot be read or decoded.
-    fn get_state_at(&self, key: &[u8], snapshot_seq: u64) -> MidgeResult<super::types::KeyState> {
+    fn get_state_at(&self, key: &[u8], snapshot_seq: u64) -> MidgeResult<KeyState> {
         let state = self.get_state(key)?;
         match state {
-            super::types::KeyState::Value(_val, seq, _exp, _op) if seq > snapshot_seq => {
-                Ok(super::types::KeyState::Absent)
-            }
-            super::types::KeyState::Tombstone(seq) if seq > snapshot_seq => {
-                Ok(super::types::KeyState::Absent)
-            }
+            KeyState::Value(_val, seq, _exp, _op) if seq > snapshot_seq => Ok(KeyState::Absent),
+            KeyState::Tombstone(seq) if seq > snapshot_seq => Ok(KeyState::Absent),
             _ => Ok(state),
         }
     }
@@ -190,12 +184,12 @@ pub trait SstStateReader: Send + Sync {
         key: &[u8],
         snapshot_seq: u64,
         _now_millis: u64,
-    ) -> MidgeResult<super::types::KeyState> {
+    ) -> MidgeResult<KeyState> {
         self.get_state_at(key, snapshot_seq)
     }
 
     /// Return all range tombstones stored in this SST
-    fn range_tombstones(&self) -> Vec<super::types::RangeTombstone> {
+    fn range_tombstones(&self) -> Vec<RangeTombstone> {
         Vec::new()
     }
 
@@ -429,15 +423,12 @@ mod tests {
     }
 
     impl SstStateReader for MockSstReader {
-        fn get_state(&self, key: &[u8]) -> MidgeResult<crate::sst::types::KeyState> {
+        fn get_state(&self, key: &[u8]) -> MidgeResult<KeyState> {
             Ok(match self.data.get(key) {
-                Some(value) => crate::sst::types::KeyState::Value(
-                    Bytes::copy_from_slice(value),
-                    0,
-                    None,
-                    crate::sst::encoding::EntryType::Put,
-                ),
-                None => crate::sst::types::KeyState::Absent,
+                Some(value) => {
+                    KeyState::Value(Bytes::copy_from_slice(value), 0, None, EntryType::Put)
+                }
+                None => KeyState::Absent,
             })
         }
 
@@ -445,21 +436,11 @@ mod tests {
             &self,
             start: Option<&[u8]>,
             end: Option<&[u8]>,
-        ) -> MidgeResult<Vec<(Bytes, crate::sst::types::KeyState)>> {
+        ) -> MidgeResult<Vec<(Bytes, KeyState)>> {
             Ok(self
                 .scan_range(start, end)?
                 .into_iter()
-                .map(|(key, value)| {
-                    (
-                        key,
-                        crate::sst::types::KeyState::Value(
-                            value,
-                            0,
-                            None,
-                            crate::sst::encoding::EntryType::Put,
-                        ),
-                    )
-                })
+                .map(|(key, value)| (key, KeyState::Value(value, 0, None, EntryType::Put)))
                 .collect())
         }
 
@@ -467,7 +448,7 @@ mod tests {
             &self,
             start: Option<&[u8]>,
             end: Option<&[u8]>,
-        ) -> MidgeResult<Vec<(Bytes, crate::sst::types::KeyState)>> {
+        ) -> MidgeResult<Vec<(Bytes, KeyState)>> {
             self.scan_range_state(start, end)
         }
     }

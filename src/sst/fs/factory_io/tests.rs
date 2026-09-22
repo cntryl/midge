@@ -1,7 +1,7 @@
 use super::*;
 use crate::io::traits::{DirEntry, Durability, File, FsError, FsResult, Metadata, OpenOptions};
 use crate::io::FsPath;
-use crate::sst::encoding::EntryType;
+use crate::types::{EntryType, KeyState};
 
 /// Records every staging operation an SST publication performs and can
 /// fail the parent-directory sync, so tests observe that persistence runs
@@ -689,18 +689,18 @@ fn should_roundtrip_stateful_entries_when_sst_contains_range_tombstones() -> Mid
     // Assert
     assert_eq!(states.len(), 3);
     match &states[0].1 {
-        crate::sst::types::KeyState::Value(value, seq, expiration, op_type) => {
+        KeyState::Value(value, seq, expiration, op_type) => {
             assert_eq!(states[0].0.as_ref(), b"alpha");
             assert_eq!(value.as_ref(), b"value-a");
             assert_eq!(*seq, 10);
             assert_eq!(*expiration, Some(4_000_000_000_000));
-            assert_eq!(*op_type, crate::sst::encoding::EntryType::Put);
+            assert_eq!(*op_type, EntryType::Put);
         }
         other => panic!("expected value state, got {other:?}"),
     }
 
     match &states[1].1 {
-        crate::sst::types::KeyState::Tombstone(seq) => {
+        KeyState::Tombstone(seq) => {
             assert_eq!(states[1].0.as_ref(), b"alpha");
             assert_eq!(*seq, 9);
         }
@@ -734,11 +734,11 @@ fn should_roundtrip_large_key_when_sst_entry_key_delta_exceeds_inline_limit() ->
     assert_eq!(states.len(), 1);
     assert_eq!(states[0].0.as_ref(), oversized_key.as_slice());
     match &states[0].1 {
-        crate::sst::types::KeyState::Value(value, sequence, expiration, op_type) => {
+        KeyState::Value(value, sequence, expiration, op_type) => {
             assert_eq!(value.as_ref(), b"value");
             assert_eq!(*sequence, 1);
             assert_eq!(*expiration, None);
-            assert_eq!(*op_type, crate::sst::encoding::EntryType::Put);
+            assert_eq!(*op_type, EntryType::Put);
         }
         other => panic!("expected value state, got {other:?}"),
     }
@@ -763,12 +763,12 @@ fn should_roundtrip_empty_value_when_sst_entry_is_put() -> MidgeResult<()> {
     // Assert
     assert_eq!(states.len(), 1);
     match &states[0].1 {
-        crate::sst::types::KeyState::Value(value, sequence, expiration, op_type) => {
+        KeyState::Value(value, sequence, expiration, op_type) => {
             assert_eq!(states[0].0.as_ref(), b"empty");
             assert_eq!(value.as_ref(), b"");
             assert_eq!(*sequence, 1);
             assert_eq!(*expiration, None);
-            assert_eq!(*op_type, crate::sst::encoding::EntryType::Put);
+            assert_eq!(*op_type, EntryType::Put);
         }
         other => panic!("expected empty value state, got {other:?}"),
     }

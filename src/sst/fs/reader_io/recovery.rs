@@ -4,7 +4,7 @@ use super::{BlockHandle, SstFileIo};
 use crate::common::resource_budget::{ResourceBudget, ResourceReservation};
 use crate::common::{MidgeError, MidgeResult};
 #[cfg(test)]
-use crate::sst::encoding::EntryType;
+use crate::types::EntryType;
 use bytes::Bytes;
 use std::sync::{Arc, Mutex};
 

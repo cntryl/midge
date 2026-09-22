@@ -5,9 +5,9 @@ use super::{
     SstScanLifecycle,
 };
 use crate::common::resource_budget::{ResourceBudget, ResourceReservation};
-#[cfg(test)]
-use crate::sst::encoding::EntryType;
 use crate::sst::traits::RawSstVersion;
+#[cfg(test)]
+use crate::types::EntryType;
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct SstCursorPosition {

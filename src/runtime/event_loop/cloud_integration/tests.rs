@@ -12,7 +12,7 @@ use crate::runtime::TestRuntimeMsg;
 use crate::runtime::{
     state::RuntimeState, ConflictPolicy, KeyAssertion, ResponseRouter, RuntimeMsg, RuntimeResponse,
 };
-use crate::sst::encoding::EntryType;
+use crate::types::EntryType;
 use crate::wal::DurabilityPolicy;
 use bytes::Bytes;
 use std::path::{Path, PathBuf};
@@ -1470,7 +1470,7 @@ fn valid_value_sst_bytes_with_expiration_for_test(
             key,
             Some(value),
             seq,
-            crate::sst::encoding::EntryType::Put,
+            crate::types::EntryType::Put,
             Some(expiration),
         )
         .expect("add expiring test SST entry");
@@ -1497,13 +1497,7 @@ fn valid_point_tombstone_sst_bytes_for_test(key: &[u8], seq: u64) -> Vec<u8> {
     let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
     let mut writer = factory.create().expect("create test SST writer");
     writer
-        .add_with_meta(
-            key,
-            None,
-            seq,
-            crate::sst::encoding::EntryType::Delete,
-            None,
-        )
+        .add_with_meta(key, None, seq, crate::types::EntryType::Delete, None)
         .expect("add point tombstone test SST entry");
     writer.finish_bytes().expect("finish test SST bytes")
 }

@@ -1,8 +1,9 @@
 //! SST core types and structures
 
-use crate::sst::encoding::EntryType;
+#[cfg(test)]
+use crate::types::KeyState;
+use crate::types::{EntryType, RangeTombstone};
 use bytes::Bytes;
-use std::fmt;
 
 use crate::sst::index::tuner::IndexKind;
 
@@ -425,27 +426,6 @@ fn decode_metadata_bytes(
     Ok(bytes.to_vec())
 }
 
-/// Range tombstone for covering key ranges
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RangeTombstone {
-    pub start: Vec<u8>,
-    pub end: Vec<u8>,
-    pub seq: u64,
-}
-
-impl RangeTombstone {
-    #[must_use]
-    pub fn new(start: Vec<u8>, end: Vec<u8>, seq: u64) -> Self {
-        Self { start, end, seq }
-    }
-
-    /// Check if a key is covered by this range tombstone
-    #[must_use]
-    pub fn covers(&self, key: &[u8]) -> bool {
-        key >= self.start.as_slice() && key < self.end.as_slice()
-    }
-}
-
 /// Apply point-key admission limits to both endpoints and bound the complete
 /// singleton range block (count, two lengths, sequence, and endpoint bytes).
 pub(crate) fn validate_range_tombstone_size(
@@ -632,26 +612,6 @@ impl SstEntry {
 
     pub fn is_expired(&self, now_millis: u64) -> bool {
         crate::common::time::is_expired_at(self.expiration, now_millis)
-    }
-}
-
-/// Key state in SST (used for tombstone-aware reads)
-#[derive(Debug, Clone, PartialEq)]
-pub enum KeyState {
-    Absent,
-    Tombstone(u64),                            // sequence number
-    Value(Bytes, u64, Option<u64>, EntryType), // value, seq, expiration, op_type
-}
-
-impl fmt::Display for KeyState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            KeyState::Absent => write!(f, "Absent"),
-            KeyState::Tombstone(seq) => write!(f, "Tombstone(seq={seq})"),
-            KeyState::Value(_, seq, exp, op) => {
-                write!(f, "Value(seq={seq}, exp={exp:?}, op={op})")
-            }
-        }
     }
 }
 
@@ -1226,7 +1186,7 @@ mod tests {
             b"k".to_vec(),
             Some(Bytes::from_static(b"v")),
             5,
-            crate::sst::encoding::EntryType::Insert,
+            EntryType::Insert,
             None,
         );
 
@@ -1242,7 +1202,7 @@ mod tests {
         assert!(!entry.is_tombstone());
         assert!(matches!(
             state,
-            KeyState::Value(_, 5, None, crate::sst::encoding::EntryType::Insert)
+            KeyState::Value(_, 5, None, EntryType::Insert)
         ));
     }
 

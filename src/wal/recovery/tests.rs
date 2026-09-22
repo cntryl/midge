@@ -629,13 +629,13 @@ fn should_mask_preserved_expired_record_at_read_time_when_recovering() {
         recovered_memtable
             .get_key_state_at_with_time(b"expired_key", u64::MAX, 0)
             .unwrap(),
-        crate::sst::types::KeyState::Value(_, 1, Some(1), _)
+        crate::types::KeyState::Value(_, 1, Some(1), _)
     ));
     assert_eq!(
         recovered_memtable
             .get_key_state_at_with_time(b"expired_key", u64::MAX, 1)
             .unwrap(),
-        crate::sst::types::KeyState::Tombstone(1)
+        crate::types::KeyState::Tombstone(1)
     );
     // Future record should be present
     assert!(recovered_memtable.get(b"future_key").unwrap().is_some());
@@ -1794,11 +1794,8 @@ fn should_preserve_raw_value_given_forward_clock_skew_during_wal_replay_when_rec
     // Assert
     assert!(matches!(
         visible_before_expiration,
-        crate::sst::types::KeyState::Value(value, 7, Some(20_000), _)
+        crate::types::KeyState::Value(value, 7, Some(20_000), _)
             if value.as_ref() == b"ttl-value"
     ));
-    assert_eq!(
-        masked_at_expiration,
-        crate::sst::types::KeyState::Tombstone(7)
-    );
+    assert_eq!(masked_at_expiration, crate::types::KeyState::Tombstone(7));
 }

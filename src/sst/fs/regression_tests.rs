@@ -1,9 +1,9 @@
 use crate::io::traits::{DirEntry, Metadata};
 use crate::io::{Durability, File, Fs, FsPath, FsResult, HostAddressing, OpenOptions};
 use crate::sst::compression::{CompressionAlgo, CompressionPolicy};
-use crate::sst::encoding::EntryType;
 use crate::sst::fs::FsSstFactoryIo;
 use crate::sst::traits::SstFactory;
+use crate::types::EntryType;
 use std::{path::Path, sync::Arc};
 
 #[test]
@@ -95,7 +95,8 @@ fn should_bound_zstd_allocation_by_reserved_decoded_size() {
 
 #[test]
 fn should_preserve_zero_sequence_states_in_both_scan_directions() {
-    use crate::sst::{types::KeyState, SstStateReader};
+    use crate::sst::SstStateReader;
+    use crate::types::KeyState;
     // Arrange
     let dir = tempfile::tempdir().unwrap();
     let fs = Arc::new(crate::io::RealFs::new(dir.path()).unwrap());
@@ -139,10 +140,10 @@ fn should_preserve_zero_sequence_states_in_both_scan_directions() {
         assert_eq!(&reader.get_state_at_with_time(key, 0, 2).unwrap(), state);
     }
     assert!(
-        matches!(&forward[0].1,KeyState::Value(value,0,None,crate::sst::encoding::EntryType::Put) if value.as_ref()==b"value")
+        matches!(&forward[0].1,KeyState::Value(value,0,None,EntryType::Put) if value.as_ref()==b"value")
     );
     assert!(
-        matches!(&forward[1].1,KeyState::Value(value,0,None,crate::sst::encoding::EntryType::Put) if value.is_empty())
+        matches!(&forward[1].1,KeyState::Value(value,0,None,EntryType::Put) if value.is_empty())
     );
     assert!(matches!(forward[2].1, KeyState::Tombstone(0)));
     assert!(matches!(forward[3].1, KeyState::Tombstone(0)));

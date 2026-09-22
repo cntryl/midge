@@ -2,8 +2,8 @@
 
 use super::*;
 use crate::common::resource_budget::ResourceBudget;
-use crate::sst::encoding::EntryType;
 use crate::sst::SstReader;
+use crate::types::EntryType;
 
 #[test]
 fn should_retain_compaction_partition_when_upload_workspace_cannot_be_admitted() -> MidgeResult<()>

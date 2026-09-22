@@ -9,9 +9,9 @@ use super::super::state::RuntimeState;
 use crate::common::{MidgeError, MidgeResult};
 use crate::compaction::{Compactor, LeveledCompactionConfig};
 use crate::runtime::{next_request_id, RuntimeMsg};
-#[cfg(test)]
-use crate::sst::encoding::EntryType;
 use crate::sst::SstFactory;
+#[cfg(test)]
+use crate::types::EntryType;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;

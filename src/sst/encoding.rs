@@ -25,8 +25,8 @@
 //! followed by `[extended_key_delta_len: u32][extended_value_len: u32]` before the key bytes.
 
 use crate::common::{MidgeError, MidgeResult};
+use crate::types::EntryType;
 use bytes::{BufMut, BytesMut};
-use std::convert::TryFrom;
 
 /// Restart point interval for block building
 ///
@@ -83,50 +83,6 @@ pub(crate) fn validate_entry_size(key_len: usize, value_len: usize) -> MidgeResu
         )));
     }
     Ok(())
-}
-
-/// Entry type for SST entries
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EntryType {
-    Put = 0,
-    Insert = 1,
-    Delete = 2,
-    Merge = 3,
-}
-
-impl EntryType {
-    /// Whether this entry writes a value (a put or an insert), as opposed to
-    /// deleting one or carrying an unsupported merge operand.
-    #[must_use]
-    pub const fn is_value_write(self) -> bool {
-        matches!(self, Self::Put | Self::Insert)
-    }
-}
-
-impl std::fmt::Display for EntryType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", *self as u8)
-    }
-}
-
-impl TryFrom<u8> for EntryType {
-    type Error = MidgeError;
-
-    fn try_from(v: u8) -> Result<Self, Self::Error> {
-        match v {
-            0 => Ok(EntryType::Put),
-            1 => Ok(EntryType::Insert),
-            2 => Ok(EntryType::Delete),
-            // Writers never emit Merge (lsm-spec sst.md 3.2) and no read path
-            // knows how to resolve an operand, so surfacing it as a value would
-            // silently return a merge operand as a complete Put. Fail closed.
-            3 => Err(MidgeError::CompatibilityError(
-                "SST entry type 3 (Merge) is not supported".to_string(),
-            )),
-            _ => Err(MidgeError::Corruption(format!("Invalid entry_type: {v}"))),
-        }
-    }
 }
 
 /// Encode a single SST entry into `buf`.

@@ -14,7 +14,8 @@ use crate::sst::cache::BlockCache;
 use crate::sst::index::tuner::IndexKind;
 use crate::sst::read_amp_metrics::ReadAmpMetrics;
 use crate::sst::trie::TrieReader;
-use crate::sst::types::{BlockHandle, Footer, KeyState, RangeTombstone, SstEntry, SST_FORMAT_V4};
+use crate::sst::types::{BlockHandle, Footer, SstEntry, SST_FORMAT_V4};
+use crate::types::{EntryType, KeyState, RangeTombstone};
 
 type IndexEntries = Arc<Vec<(Vec<u8>, BlockHandle)>>;
 
@@ -376,7 +377,7 @@ impl SstRawVersionScan {
             return Ok(Some(crate::sst::traits::RawSstVersion {
                 key,
                 seq: entry.sequence,
-                is_tombstone: matches!(entry.entry_type, crate::sst::encoding::EntryType::Delete),
+                is_tombstone: matches!(entry.entry_type, EntryType::Delete),
                 value,
                 expiration: entry.expiration,
             }));

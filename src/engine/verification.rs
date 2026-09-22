@@ -407,8 +407,8 @@ mod tests {
     use super::StorageVerifier;
     use crate::io::{Durability, File, FsError, FsResult};
     use crate::metadata::{FileMeta, Manifest, ManifestPersistence};
-    use crate::sst::encoding::EntryType;
     use crate::sst::{FsSstFactoryIo, SstFactory};
+    use crate::types::EntryType;
     use bytes::Bytes;
     use std::sync::{Arc, Mutex};
 

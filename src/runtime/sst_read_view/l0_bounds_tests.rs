@@ -5,9 +5,9 @@ use crate::io::{Fs, RealFs};
 use crate::memtable::SkipListMemtable;
 use crate::runtime::read_resources::ReadResources;
 use crate::runtime::read_snapshot::ReadSnapshot;
-use crate::sst::encoding::EntryType;
 use crate::sst::traits::SstFactory;
 use crate::sst::FsSstFactoryIo;
+use crate::types::EntryType;
 use std::path::Path;
 
 const CACHE_BYTES: usize = 64 * 1024;

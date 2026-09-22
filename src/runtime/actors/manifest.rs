@@ -10,7 +10,7 @@ use super::super::state::RuntimeState;
 use super::super::FileMeta;
 use crate::common::MidgeResult;
 #[cfg(test)]
-use crate::sst::encoding::EntryType;
+use crate::types::EntryType;
 
 /// Actor handling manifest operations
 pub struct ManifestActor {

@@ -3,10 +3,103 @@
 //! Runtime, storage, and metadata code can depend on these types without
 //! depending on the public `Engine` facade.
 
+use crate::common::MidgeError;
 use crate::config::EngineHealth;
+use bytes::Bytes;
+use std::fmt;
 
 /// Column family identifier.
 pub type ColumnFamilyId = u32;
+
+/// Logical operation associated with a versioned key.
+///
+/// The discriminants are part of the persisted SST and WAL-compatible state
+/// representation, so this shared type owns them below either codec.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryType {
+    Put = 0,
+    Insert = 1,
+    Delete = 2,
+    Merge = 3,
+}
+
+impl EntryType {
+    /// Whether this entry writes a value (a put or an insert), as opposed to
+    /// deleting one or carrying an unsupported merge operand.
+    #[must_use]
+    pub const fn is_value_write(self) -> bool {
+        matches!(self, Self::Put | Self::Insert)
+    }
+}
+
+impl fmt::Display for EntryType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", *self as u8)
+    }
+}
+
+impl TryFrom<u8> for EntryType {
+    type Error = MidgeError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Put),
+            1 => Ok(Self::Insert),
+            2 => Ok(Self::Delete),
+            // Writers never emit Merge (lsm-spec sst.md 3.2) and no read path
+            // knows how to resolve an operand, so surfacing it as a value would
+            // silently return a merge operand as a complete Put. Fail closed.
+            3 => Err(MidgeError::CompatibilityError(
+                "SST entry type 3 (Merge) is not supported".to_string(),
+            )),
+            _ => Err(MidgeError::Corruption(format!(
+                "Invalid entry_type: {value}"
+            ))),
+        }
+    }
+}
+
+/// Range tombstone for covering key ranges.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RangeTombstone {
+    pub start: Vec<u8>,
+    pub end: Vec<u8>,
+    pub seq: u64,
+}
+
+impl RangeTombstone {
+    #[must_use]
+    pub fn new(start: Vec<u8>, end: Vec<u8>, seq: u64) -> Self {
+        Self { start, end, seq }
+    }
+
+    /// Check whether a key lies in the half-open tombstone range.
+    #[must_use]
+    pub fn covers(&self, key: &[u8]) -> bool {
+        key >= self.start.as_slice() && key < self.end.as_slice()
+    }
+}
+
+/// Snapshot-visible state for one versioned key.
+#[derive(Debug, Clone, PartialEq)]
+pub enum KeyState {
+    Absent,
+    Tombstone(u64),
+    Value(Bytes, u64, Option<u64>, EntryType),
+}
+
+impl fmt::Display for KeyState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Absent => write!(f, "Absent"),
+            Self::Tombstone(seq) => write!(f, "Tombstone(seq={seq})"),
+            Self::Value(_, seq, expiration, operation) => {
+                write!(f, "Value(seq={seq}, exp={expiration:?}, op={operation})")
+            }
+        }
+    }
+}
 
 /// Key-value pair produced by internal ordered read sources.
 #[derive(Clone, Debug)]
@@ -267,4 +360,42 @@ pub struct StorageVerificationReport {
     /// Whether the pass covered authoritative storage rather than a cloud cache.
     pub authoritative: bool,
     pub health: EngineHealth,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_preserve_entry_type_wire_tags_and_reject_unsupported_merge() {
+        // Arrange / Act / Assert
+        assert_eq!(EntryType::Put as u8, 0);
+        assert_eq!(EntryType::Insert as u8, 1);
+        assert_eq!(EntryType::Delete as u8, 2);
+        assert_eq!(EntryType::Merge as u8, 3);
+        assert!(matches!(EntryType::try_from(0), Ok(EntryType::Put)));
+        assert!(matches!(EntryType::try_from(1), Ok(EntryType::Insert)));
+        assert!(matches!(EntryType::try_from(2), Ok(EntryType::Delete)));
+        assert!(matches!(
+            EntryType::try_from(3),
+            Err(MidgeError::CompatibilityError(message))
+                if message == "SST entry type 3 (Merge) is not supported"
+        ));
+    }
+
+    #[test]
+    fn should_preserve_half_open_ranges_and_snapshot_state_display() {
+        // Arrange
+        let tombstone = RangeTombstone::new(b"alpha".to_vec(), b"omega".to_vec(), 7);
+        let state = KeyState::Value(Bytes::from_static(b"value"), 9, Some(11), EntryType::Insert);
+
+        // Act
+        let rendered = state.to_string();
+
+        // Assert
+        assert!(tombstone.covers(b"alpha"));
+        assert!(tombstone.covers(b"middle"));
+        assert!(!tombstone.covers(b"omega"));
+        assert_eq!(rendered, "Value(seq=9, exp=Some(11), op=1)");
+    }
 }

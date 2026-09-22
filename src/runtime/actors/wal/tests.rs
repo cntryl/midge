@@ -7,7 +7,7 @@ use crate::runtime::wal_transition::{WalSealTicket, WalSyncTicket};
 #[cfg(feature = "failpoints")]
 use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
 use crate::runtime::RuntimeState;
-use crate::sst::encoding::EntryType;
+use crate::types::EntryType;
 use bytes::Bytes;
 use std::path::PathBuf;
 #[cfg(feature = "failpoints")]

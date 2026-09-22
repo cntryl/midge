@@ -11,7 +11,7 @@ pub use strategy::{CompactionPlan, Compactor, LeveledCompactionConfig};
 use crate::common::MidgeError;
 use crate::common::MidgeResult;
 #[cfg(test)]
-use crate::sst::encoding::EntryType;
+use crate::types::EntryType;
 use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
@@ -206,7 +206,7 @@ mod tests {
             assert_eq!(reader.get(b"legacy")?.as_deref(), Some(value.as_slice()));
             assert!(matches!(
                 reader.get_state(b"legacy")?,
-                crate::sst::types::KeyState::Value(_, 7, Some(u64::MAX), _)
+                crate::types::KeyState::Value(_, 7, Some(u64::MAX), _)
             ));
             assert!(dir.path().join("legacy.sst").exists());
         }
@@ -685,7 +685,7 @@ mod tests {
         // Assert
         assert!(matches!(
             state,
-            crate::sst::types::KeyState::Value(ref value, 7, Some(actual), _)
+            crate::types::KeyState::Value(ref value, 7, Some(actual), _)
                 if value.as_ref() == b"value" && actual == expiration
         ));
         Ok(())
@@ -721,12 +721,12 @@ mod tests {
         // Assert
         assert!(matches!(
             raw.as_slice(),
-            [(key, crate::sst::types::KeyState::Value(value, 9, Some(actual), _))]
+            [(key, crate::types::KeyState::Value(value, 9, Some(actual), _))]
                 if key.as_ref() == b"expired"
                     && value.as_ref() == b"value"
                     && *actual == expiration
         ));
-        assert!(matches!(visible, crate::sst::types::KeyState::Tombstone(9)));
+        assert!(matches!(visible, crate::types::KeyState::Tombstone(9)));
         Ok(())
     }
 
@@ -754,7 +754,7 @@ mod tests {
         // Assert
         assert!(matches!(
             reader.get_state(b"same")?,
-            crate::sst::types::KeyState::Tombstone(4)
+            crate::types::KeyState::Tombstone(4)
         ));
         Ok(())
     }
@@ -785,7 +785,7 @@ mod tests {
         // Assert
         assert!(matches!(
             versions.as_slice(),
-            [(key, crate::sst::types::KeyState::Value(value, 7, Some(900), _))]
+            [(key, crate::types::KeyState::Value(value, 7, Some(900), _))]
                 if key.as_ref() == b"same" && value.as_ref() == b"value"
         ));
         Ok(())
@@ -819,7 +819,7 @@ mod tests {
         assert!(
             states
                 .iter()
-                .any(|(_, state)| matches!(state, crate::sst::types::KeyState::Tombstone(_))),
+                .any(|(_, state)| matches!(state, crate::types::KeyState::Tombstone(_))),
             "point tombstone must be retained without a bottommost proof"
         );
 
@@ -857,7 +857,7 @@ mod tests {
 
         let reader = factory.open(std::path::Path::new(&output_name))?;
         match reader.get_state(b"alpha")? {
-            crate::sst::types::KeyState::Tombstone(seq) => assert_eq!(seq, 11),
+            crate::types::KeyState::Tombstone(seq) => assert_eq!(seq, 11),
             other => panic!("expected preserved tombstone, got {other:?}"),
         }
 
@@ -887,11 +887,11 @@ mod tests {
         let reader = factory.open(std::path::Path::new(&output_names[0]))?;
         assert!(matches!(
             reader.get_state(b"alpha")?,
-            crate::sst::types::KeyState::Absent
+            crate::types::KeyState::Absent
         ));
         assert!(matches!(
             reader.get_state(b"beta")?,
-            crate::sst::types::KeyState::Value(_, 6, _, _)
+            crate::types::KeyState::Value(_, 6, _, _)
         ));
         Ok(())
     }
@@ -936,11 +936,11 @@ mod tests {
         let reader = factory.open(std::path::Path::new(&output_names[0]))?;
         assert!(matches!(
             reader.get_state(b"alpha")?,
-            crate::sst::types::KeyState::Absent
+            crate::types::KeyState::Absent
         ));
         assert!(matches!(
             reader.get_state(b"beta")?,
-            crate::sst::types::KeyState::Value(_, 6, _, _)
+            crate::types::KeyState::Value(_, 6, _, _)
         ));
         Ok(())
     }
@@ -1009,7 +1009,7 @@ mod tests {
         let reader = factory.open(std::path::Path::new(&output_names[0]))?;
         assert!(matches!(
             reader.get_state(b"a")?,
-            crate::sst::types::KeyState::Tombstone(5)
+            crate::types::KeyState::Tombstone(5)
         ));
         Ok(())
     }
@@ -1038,7 +1038,7 @@ mod tests {
         let reader = factory.open(std::path::Path::new(&output_names[0]))?;
         assert!(matches!(
             reader.get_state(b"point")?,
-            crate::sst::types::KeyState::Tombstone(11)
+            crate::types::KeyState::Tombstone(11)
         ));
         assert_eq!(reader.range_tombstones().len(), 1);
         assert_eq!(reader.range_tombstones()[0].seq, 11);
@@ -1074,12 +1074,12 @@ mod tests {
         let reader = factory.open(std::path::Path::new(&output_names[0]))?;
         assert!(matches!(
             reader.get_state(b"middle")?,
-            crate::sst::types::KeyState::Absent
+            crate::types::KeyState::Absent
         ));
         assert!(reader.range_tombstones().is_empty());
         assert!(matches!(
             reader.get_state(b"zulu")?,
-            crate::sst::types::KeyState::Value(_, 3, _, _)
+            crate::types::KeyState::Value(_, 3, _, _)
         ));
         Ok(())
     }
@@ -1556,7 +1556,7 @@ mod tests {
         assert_eq!(reader.range_tombstones().len(), 1);
         assert_eq!(
             reader.range_tombstones()[0],
-            crate::sst::types::RangeTombstone::new(b"a".to_vec(), b"z".to_vec(), 17)
+            crate::types::RangeTombstone::new(b"a".to_vec(), b"z".to_vec(), 17)
         );
         Ok(())
     }
@@ -1618,12 +1618,12 @@ mod tests {
                     .expect("open partition")
                     .get_state(b"same")
                     .ok()
-                    .filter(|state| !matches!(state, crate::sst::types::KeyState::Absent))
+                    .filter(|state| !matches!(state, crate::types::KeyState::Absent))
             })
             .expect("latest same-key version");
         assert!(matches!(
             same_state,
-            crate::sst::types::KeyState::Value(value, 33, None, crate::sst::encoding::EntryType::Put)
+            crate::types::KeyState::Value(value, 33, None, crate::types::EntryType::Put)
                 if value.as_ref() == b"same-33"
         ));
         Ok(())
@@ -1833,7 +1833,7 @@ mod tests {
         let reader = factory.open(Path::new(&outputs[0]))?;
         assert!(matches!(
             reader.get_state(b"key-032")?,
-            crate::sst::types::KeyState::Value(value, 1000, _, _)
+            crate::types::KeyState::Value(value, 1000, _, _)
                 if value.as_ref() == b"new-source"
         ));
         Ok(())
@@ -1898,7 +1898,7 @@ mod tests {
         let reader = factory.open(Path::new(&outputs[0]))?;
         assert!(matches!(
             reader.get_state(b"boundary")?,
-            crate::sst::types::KeyState::Value(value, 5, _, _)
+            crate::types::KeyState::Value(value, 5, _, _)
                 if value.as_ref() == b"newest"
         ));
         Ok(())

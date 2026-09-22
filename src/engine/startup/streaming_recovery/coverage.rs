@@ -78,7 +78,7 @@ impl ReplayCoverage {
     }
 
     fn contains_record(&self, record: &crate::wal::WalRecord) -> bool {
-        use crate::sst::types::KeyState;
+        use crate::types::KeyState;
         use crate::wal::types::WalOpRole;
         // Keep the existing conservative rule: tombstones are always replayed.
         if !matches!(record.op.role(), WalOpRole::ValueWrite) {
@@ -155,7 +155,7 @@ impl ReplayCoverage {
         &self,
         file: &crate::metadata::FileMeta,
         key: &[u8],
-    ) -> Option<crate::sst::types::KeyState> {
+    ) -> Option<crate::types::KeyState> {
         let mut cached = self.reader.borrow_mut();
         if let Some(cached) = cached.as_ref().filter(|cached| cached.name == file.name) {
             return cached.reader.get_state_at_with_time(key, u64::MAX, 0).ok();
@@ -251,11 +251,11 @@ impl Drop for ReplayCoverage {
     }
 }
 
-fn state_sequence(state: &crate::sst::types::KeyState) -> Option<u64> {
+fn state_sequence(state: &crate::types::KeyState) -> Option<u64> {
     match state {
-        crate::sst::types::KeyState::Value(_, sequence, _, _)
-        | crate::sst::types::KeyState::Tombstone(sequence) => Some(*sequence),
-        crate::sst::types::KeyState::Absent => None,
+        crate::types::KeyState::Value(_, sequence, _, _)
+        | crate::types::KeyState::Tombstone(sequence) => Some(*sequence),
+        crate::types::KeyState::Absent => None,
     }
 }
 
@@ -419,9 +419,9 @@ mod tests {
         for (index, (value, sequence, expiration)) in entries.iter().enumerate() {
             let mut writer = factory.create().expect("SST writer");
             let operation = if value.is_some() {
-                crate::sst::encoding::EntryType::Put
+                crate::types::EntryType::Put
             } else {
-                crate::sst::encoding::EntryType::Delete
+                crate::types::EntryType::Delete
             };
             writer
                 .add_with_meta(b"key", *value, *sequence, operation, *expiration)

@@ -1,6 +1,6 @@
 use super::*;
 use crate::lease::PrimaryLease;
-use crate::sst::encoding::EntryType;
+use crate::types::EntryType;
 
 #[derive(Default)]
 struct BlockingReleaseState {

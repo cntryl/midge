@@ -10,8 +10,7 @@ use self::sink::BlockSink;
 use crate::io::Fs;
 
 use crate::sst::compression::CompressionPolicy;
-use crate::sst::encoding::EntryType;
-use crate::sst::types::RangeTombstone;
+use crate::types::{EntryType, RangeTombstone};
 
 /// SST factory that uses the `io::Fs` abstraction.
 ///

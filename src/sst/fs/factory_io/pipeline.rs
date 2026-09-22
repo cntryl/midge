@@ -10,14 +10,13 @@ use super::{CompressionPolicy, FsSstWriter, PendingEntry, StreamingState};
 use crate::common::MidgeResult;
 use crate::io::Fs;
 use crate::sst::bloom::{BlockBloomFilter, BloomWriter};
-use crate::sst::encoding::EntryType;
 use crate::sst::index::profiler::KeyStructureProfiler;
 use crate::sst::index::tuner::{IndexKind, IndexTuner};
 use crate::sst::trie::writer::TrieWriter;
 use crate::sst::types::{
-    encode_range_tombstones, BlockHandle, Footer, KeyRangeMetadata, RangeTombstone, SstMetadata,
-    SST_FORMAT_V4,
+    encode_range_tombstones, BlockHandle, Footer, KeyRangeMetadata, SstMetadata, SST_FORMAT_V4,
 };
+use crate::types::{EntryType, RangeTombstone};
 use std::sync::Arc;
 
 /// Mutable state shared by both writer entry paths before blocks are emitted.

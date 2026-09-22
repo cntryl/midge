@@ -603,6 +603,47 @@ mod architecture_ladder {
     }
 
     #[test]
+    fn should_keep_version_state_types_owned_below_sst_codecs() {
+        // Arrange
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let shared =
+            std::fs::read_to_string(root.join("src/types.rs")).expect("read shared types source");
+        let sst_sources = rust_sources_under("src/sst");
+        let misplaced_definitions = [
+            "pub enum EntryType",
+            "pub struct RangeTombstone",
+            "pub enum KeyState",
+            "pub use crate::types::EntryType",
+            "pub use crate::types::RangeTombstone",
+            "pub use crate::types::KeyState",
+            "pub use crate::types::{",
+            "pub(crate) use crate::types::{",
+        ];
+
+        // Act
+        let offenders: Vec<_> = sst_sources
+            .iter()
+            .flat_map(|path| {
+                let source = std::fs::read_to_string(path).expect("read SST source");
+                misplaced_definitions
+                    .iter()
+                    .filter(move |needle| source.contains(**needle))
+                    .map(move |needle| format!("{}:{needle}", path.display()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        // Assert
+        assert!(shared.contains("pub enum EntryType"));
+        assert!(shared.contains("pub struct RangeTombstone"));
+        assert!(shared.contains("pub enum KeyState"));
+        assert!(
+            offenders.is_empty(),
+            "SST codecs must consume shared version state instead of defining or re-exporting it: {offenders:?}"
+        );
+    }
+
+    #[test]
     fn should_bound_cloud_seal_when_the_event_loop_forces_a_cloud_async_seal() {
         // Arrange
         let source = std::fs::read_to_string(

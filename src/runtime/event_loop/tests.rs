@@ -2,7 +2,7 @@ use super::*;
 use crate::runtime::hybrid_persistence::CloudPersistence;
 use crate::runtime::TestRuntimeMsg;
 use crate::runtime::{state::RuntimeState, ResponseRouter};
-use crate::sst::encoding::EntryType;
+use crate::types::EntryType;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 

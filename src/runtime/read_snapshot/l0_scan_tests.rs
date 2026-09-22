@@ -1,8 +1,8 @@
 use super::*;
 use crate::io::RealFs;
-use crate::sst::encoding::EntryType;
 use crate::sst::traits::SstFactory;
 use crate::sst::FsSstFactoryIo;
+use crate::types::EntryType;
 use std::path::Path;
 
 type Point<'a> = (&'a [u8], &'a [u8], u64);

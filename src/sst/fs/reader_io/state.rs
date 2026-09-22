@@ -2,6 +2,7 @@ use super::{KeyState, SstEntry, SstFileIo};
 use crate::common::{MidgeError, MidgeResult};
 use crate::sst::bloom::writer::BloomTestResult;
 use crate::sst::encoding;
+use crate::types::EntryType;
 use bytes::Bytes;
 
 impl SstFileIo {
@@ -67,7 +68,7 @@ impl SstFileIo {
     }
 
     fn state_from_entry_view(block_data: &Bytes, entry: encoding::EntryView<'_>) -> KeyState {
-        if matches!(entry.entry_type, encoding::EntryType::Delete) {
+        if matches!(entry.entry_type, EntryType::Delete) {
             return KeyState::Tombstone(entry.sequence);
         }
 

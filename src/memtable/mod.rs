@@ -1,8 +1,7 @@
 //! Ordered in-memory state shared by the WAL recovery and SST publication layers.
 //!
 //! This module owns the concrete skiplist memtable and its conservative encoded
-//! bounds. SST layout types remain imported temporarily while their ownership is
-//! refactored separately.
+//! bounds.
 
 pub(crate) mod size_bound;
 pub(crate) mod skiplist;
@@ -16,7 +15,7 @@ pub mod bench {
 
 use crate::common::{MidgeError, MidgeResult};
 use crate::memtable::skiplist::{OpType, SkipList};
-use crate::sst::encoding::EntryType;
+use crate::types::{EntryType, KeyState, RangeTombstone};
 use bytes::Bytes;
 use parking_lot::RwLock;
 use std::sync::Arc;
@@ -40,7 +39,7 @@ pub struct SkipListMemtable {
     size_bytes: std::sync::atomic::AtomicUsize,
     encoded_size_bound: std::sync::atomic::AtomicUsize,
     range_tombstone_count: std::sync::atomic::AtomicUsize,
-    range_tombstones: RwLock<Vec<crate::sst::types::RangeTombstone>>,
+    range_tombstones: RwLock<Vec<RangeTombstone>>,
 }
 
 impl SkipListMemtable {
@@ -97,7 +96,7 @@ impl SkipListMemtable {
 
     pub(crate) fn visit_frozen_ranges(
         &self,
-        mut visit: impl FnMut(&crate::sst::types::RangeTombstone) -> MidgeResult<()>,
+        mut visit: impl FnMut(&RangeTombstone) -> MidgeResult<()>,
     ) -> MidgeResult<()> {
         for range in self.range_tombstones.read().iter() {
             visit(range)?;
@@ -166,11 +165,7 @@ impl SkipListMemtable {
     ///
     /// Returns an error when the underlying memtable cannot service the lookup.
     #[cfg(test)]
-    pub fn get_key_state_at(
-        &self,
-        key: &[u8],
-        snapshot_seq: u64,
-    ) -> MidgeResult<crate::sst::types::KeyState> {
+    pub fn get_key_state_at(&self, key: &[u8], snapshot_seq: u64) -> MidgeResult<KeyState> {
         self.get_key_state_at_with_time(key, snapshot_seq, Self::current_time_millis())
     }
 
@@ -180,18 +175,18 @@ impl SkipListMemtable {
         key: &[u8],
         snapshot_seq: u64,
         now_millis: u64,
-    ) -> MidgeResult<crate::sst::types::KeyState> {
+    ) -> MidgeResult<KeyState> {
         Ok(self
             .skiplist
             .get_visible_entry_with_exp(key, snapshot_seq)
-            .map_or(crate::sst::types::KeyState::Absent, |entry| {
+            .map_or(KeyState::Absent, |entry| {
                 match (entry.value, entry.is_tombstone) {
-                    (_, true) | (None, _) => crate::sst::types::KeyState::Tombstone(entry.seq),
+                    (_, true) | (None, _) => KeyState::Tombstone(entry.seq),
                     (Some(value), false) => {
                         if Self::is_expired_at(entry.expiration, now_millis) {
-                            crate::sst::types::KeyState::Tombstone(entry.seq)
+                            KeyState::Tombstone(entry.seq)
                         } else {
-                            crate::sst::types::KeyState::Value(
+                            KeyState::Value(
                                 value,
                                 entry.seq,
                                 entry.expiration,
@@ -265,7 +260,7 @@ impl SkipListMemtable {
         start: Option<&[u8]>,
         end: Option<&[u8]>,
         snapshot_seq: u64,
-    ) -> Vec<(Vec<u8>, crate::sst::types::KeyState)> {
+    ) -> Vec<(Vec<u8>, KeyState)> {
         self.range_state_at_with_time(start, end, snapshot_seq, Self::current_time_millis())
     }
 
@@ -276,7 +271,7 @@ impl SkipListMemtable {
         end: Option<&[u8]>,
         snapshot_seq: u64,
         now_millis: u64,
-    ) -> Vec<(Vec<u8>, crate::sst::types::KeyState)> {
+    ) -> Vec<(Vec<u8>, KeyState)> {
         // Seek into the range instead of copying every version of the whole
         // memtable and filtering afterwards: a scan's cost follows its range.
         self.skiplist
@@ -284,12 +279,12 @@ impl SkipListMemtable {
             .into_iter()
             .map(|(key, value, seq, is_tombstone, exp, op)| {
                 let state = match (value, is_tombstone) {
-                    (_, true) | (None, _) => crate::sst::types::KeyState::Tombstone(seq),
+                    (_, true) | (None, _) => KeyState::Tombstone(seq),
                     (Some(value), false) => {
                         if Self::is_expired_at(exp, now_millis) {
-                            crate::sst::types::KeyState::Tombstone(seq)
+                            KeyState::Tombstone(seq)
                         } else {
-                            crate::sst::types::KeyState::Value(value, seq, exp, entry_type_of(op))
+                            KeyState::Value(value, seq, exp, entry_type_of(op))
                         }
                     }
                 };
@@ -385,7 +380,7 @@ impl SkipListMemtable {
 
         let mut range_tombstones = self.range_tombstones.write();
         let old_capacity = range_tombstones.capacity();
-        range_tombstones.push(crate::sst::types::RangeTombstone::new(
+        range_tombstones.push(RangeTombstone::new(
             start_key.to_vec(),
             end_key.to_vec(),
             seq,
@@ -393,7 +388,7 @@ impl SkipListMemtable {
         let capacity_bytes = range_tombstones
             .capacity()
             .saturating_sub(old_capacity)
-            .saturating_mul(std::mem::size_of::<crate::sst::types::RangeTombstone>());
+            .saturating_mul(std::mem::size_of::<RangeTombstone>());
         let size_delta = capacity_bytes
             .saturating_add(start_key.len())
             .saturating_add(end_key.len());
@@ -411,7 +406,7 @@ impl SkipListMemtable {
 
     /// Return range tombstones visible at `snapshot_seq` in insertion order.
     #[must_use]
-    pub fn range_tombstones_at(&self, snapshot_seq: u64) -> Vec<crate::sst::types::RangeTombstone> {
+    pub fn range_tombstones_at(&self, snapshot_seq: u64) -> Vec<RangeTombstone> {
         if self
             .range_tombstone_count
             .load(std::sync::atomic::Ordering::Acquire)
@@ -429,7 +424,7 @@ impl SkipListMemtable {
 
     /// Return all range tombstones for flush/compaction publication.
     #[must_use]
-    pub fn range_tombstones(&self) -> Vec<crate::sst::types::RangeTombstone> {
+    pub fn range_tombstones(&self) -> Vec<RangeTombstone> {
         if self
             .range_tombstone_count
             .load(std::sync::atomic::Ordering::Acquire)
@@ -477,7 +472,7 @@ impl SkipListMemtable {
 #[cfg(test)]
 mod tests {
     use super::SkipListMemtable;
-    use crate::sst::types::KeyState;
+    use crate::types::{EntryType, KeyState};
     use crate::MidgeError;
     use bytes::Bytes;
     use std::sync::Arc;
@@ -505,12 +500,7 @@ mod tests {
             vec![
                 (
                     b"b".to_vec(),
-                    KeyState::Value(
-                        Bytes::from_static(b"new"),
-                        5,
-                        None,
-                        crate::sst::encoding::EntryType::Put
-                    )
+                    KeyState::Value(Bytes::from_static(b"new"), 5, None, EntryType::Put)
                 ),
                 (b"c".to_vec(), KeyState::Tombstone(6)),
                 (b"d".to_vec(), KeyState::Tombstone(4)),
@@ -521,21 +511,11 @@ mod tests {
             vec![
                 (
                     b"b".to_vec(),
-                    KeyState::Value(
-                        Bytes::from_static(b"old"),
-                        2,
-                        None,
-                        crate::sst::encoding::EntryType::Put
-                    )
+                    KeyState::Value(Bytes::from_static(b"old"), 2, None, EntryType::Put)
                 ),
                 (
                     b"c".to_vec(),
-                    KeyState::Value(
-                        Bytes::from_static(b"live"),
-                        3,
-                        None,
-                        crate::sst::encoding::EntryType::Put
-                    )
+                    KeyState::Value(Bytes::from_static(b"live"), 3, None, EntryType::Put)
                 ),
                 (b"d".to_vec(), KeyState::Tombstone(4)),
             ]
@@ -603,11 +583,11 @@ mod tests {
         // Assert
         assert!(matches!(
             at_15,
-            KeyState::Value(value, 10, None, crate::sst::encoding::EntryType::Put) if value == Bytes::from_static(b"old")
+            KeyState::Value(value, 10, None, EntryType::Put) if value == Bytes::from_static(b"old")
         ));
         assert!(matches!(
             at_25,
-            KeyState::Value(value, 20, None, crate::sst::encoding::EntryType::Put) if value == Bytes::from_static(b"new")
+            KeyState::Value(value, 20, None, EntryType::Put) if value == Bytes::from_static(b"new")
         ));
     }
 
@@ -633,7 +613,7 @@ mod tests {
         // Assert
         assert!(matches!(
             before_delete,
-            KeyState::Value(value, 10, None, crate::sst::encoding::EntryType::Put) if value == Bytes::from_static(b"value")
+            KeyState::Value(value, 10, None, EntryType::Put) if value == Bytes::from_static(b"value")
         ));
         assert!(matches!(after_delete, KeyState::Tombstone(20)));
     }

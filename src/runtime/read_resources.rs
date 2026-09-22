@@ -5,9 +5,9 @@ use crate::common::{MidgeError, MidgeResult};
 use crate::io::Fs;
 use crate::metadata::FileMeta;
 use crate::sst::cache::{BlockCache, CachePolicyType};
-#[cfg(test)]
-use crate::sst::encoding::EntryType;
 use crate::sst::fs::SstFileIo;
+#[cfg(test)]
+use crate::types::EntryType;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
@@ -335,12 +335,7 @@ mod tests {
             let reader = resources.reader_for(&meta)?;
             assert!(matches!(
                 reader.get_state_at(b"key", u64::MAX)?,
-                crate::sst::types::KeyState::Value(
-                    _,
-                    7,
-                    None,
-                    crate::sst::encoding::EntryType::Put
-                )
+                crate::types::KeyState::Value(_, 7, None, crate::types::EntryType::Put)
             ));
         }
 
@@ -388,7 +383,7 @@ mod tests {
         let block_cache = resources.block_cache();
         assert!(matches!(
             reader.get_state_at(b"key", u64::MAX)?,
-            crate::sst::types::KeyState::Value(_, 7, None, crate::sst::encoding::EntryType::Put)
+            crate::types::KeyState::Value(_, 7, None, crate::types::EntryType::Put)
         ));
         assert!(
             !block_cache.is_empty(),
@@ -423,7 +418,7 @@ mod tests {
         let reader = resources.reader_for(&file_meta)?;
         assert!(matches!(
             reader.get_state_at(b"key", u64::MAX)?,
-            crate::sst::types::KeyState::Value(_, 7, None, crate::sst::encoding::EntryType::Put)
+            crate::types::KeyState::Value(_, 7, None, crate::types::EntryType::Put)
         ));
         drop(reader);
         let block_cache = resources.block_cache();

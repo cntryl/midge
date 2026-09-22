@@ -90,7 +90,7 @@ impl CloudStartupRecovery {
 mod tests {
     use super::CloudStartupRecovery;
     use crate::metadata::FileMeta;
-    use crate::sst::encoding::EntryType;
+    use crate::types::EntryType;
 
     fn write_sst(directory: &tempfile::TempDir, name: &str) -> (std::path::PathBuf, Vec<u8>) {
         let fs = std::sync::Arc::new(crate::io::RealFs::new(directory.path()).expect("open fs"));

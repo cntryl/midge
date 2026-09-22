@@ -137,7 +137,7 @@ fn get_hit(ctx: &mut StressContext) {
                     memtable
                         .get_key_state_at_with_time(black_box(hit_key), u64::MAX, 0)
                         .unwrap(),
-                    cntryl_midge::__internal::sst::types::KeyState::Value(..)
+                    cntryl_midge::__internal::types::KeyState::Value(..)
                 ) {
                     hits += 1;
                 }
@@ -175,7 +175,7 @@ fn get_miss(ctx: &mut StressContext) {
                     memtable
                         .get_key_state_at_with_time(black_box(miss_key.as_slice()), u64::MAX, 0,)
                         .unwrap(),
-                    cntryl_midge::__internal::sst::types::KeyState::Absent
+                    cntryl_midge::__internal::types::KeyState::Absent
                 ) {
                     misses += 1;
                 }

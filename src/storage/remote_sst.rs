@@ -417,8 +417,8 @@ impl Fs for VerifiedLocalSstFs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sst::encoding::EntryType;
     use crate::sst::traits::{SstFactory, SstStateReader};
+    use crate::types::EntryType;
 
     struct RecordingBackend {
         inner: super::super::filesystem::FileSystem,
@@ -679,7 +679,7 @@ mod tests {
         let unverified = crate::sst::fs::SstFileIo::open("sst/other.sst", fs);
         // Assert
         assert!(
-            matches!(value, crate::sst::types::KeyState::Value(bytes, 9, None, _) if bytes.as_ref() == b"verified")
+            matches!(value, crate::types::KeyState::Value(bytes, 9, None, _) if bytes.as_ref() == b"verified")
         );
         assert!(
             unverified.is_err(),
@@ -742,7 +742,7 @@ mod tests {
         );
         assert!(matches!(
             state,
-            crate::sst::types::KeyState::Value(_, 9, None, _)
+            crate::types::KeyState::Value(_, 9, None, _)
         ));
         assert_eq!(count, 1024);
         assert!(cloud
@@ -813,7 +813,7 @@ mod tests {
         let actual = reader.get_state_at(b"key", 9)?;
         // Assert
         assert!(
-            matches!(actual, crate::sst::types::KeyState::Value(value, 9, None, _) if value.as_ref() == b"value")
+            matches!(actual, crate::types::KeyState::Value(value, 9, None, _) if value.as_ref() == b"value")
         );
         assert!(!local.path().join("remote.sst").exists());
         Ok(())

@@ -378,13 +378,13 @@ impl Coverage<'_> {
                                 "WAL exact coverage state",
                             )?;
                             let raw = if version.is_tombstone {
-                                crate::sst::types::KeyState::Tombstone(version.seq)
+                                crate::types::KeyState::Tombstone(version.seq)
                             } else {
-                                crate::sst::types::KeyState::Value(
+                                crate::types::KeyState::Value(
                                     bytes::Bytes::from(version.value.unwrap_or_default()),
                                     version.seq,
                                     version.expiration,
-                                    crate::sst::encoding::EntryType::Put,
+                                    crate::types::EntryType::Put,
                                 )
                             };
                             let retain = progress

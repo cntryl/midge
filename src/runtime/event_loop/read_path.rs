@@ -307,8 +307,8 @@ mod tests {
     use super::super::tests::create_test_event_loop;
     use super::super::EventLoop;
     use crate::runtime::{state::RuntimeState, ResponseRouter};
-    use crate::sst::encoding::EntryType;
     use crate::sst::traits::SstFactory;
+    use crate::types::EntryType;
     use std::sync::Arc;
 
     struct FakeReader;
@@ -341,16 +341,16 @@ mod tests {
     }
 
     impl crate::sst::traits::SstStateReader for FakeReader {
-        fn get_state(&self, key: &[u8]) -> crate::common::MidgeResult<crate::sst::types::KeyState> {
+        fn get_state(&self, key: &[u8]) -> crate::common::MidgeResult<crate::types::KeyState> {
             Ok(if key == b"a" {
-                crate::sst::types::KeyState::Value(
+                crate::types::KeyState::Value(
                     bytes::Bytes::copy_from_slice(b"va"),
                     10,
                     None,
-                    crate::sst::encoding::EntryType::Put,
+                    crate::types::EntryType::Put,
                 )
             } else {
-                crate::sst::types::KeyState::Absent
+                crate::types::KeyState::Absent
             })
         }
 
@@ -358,17 +358,17 @@ mod tests {
             &self,
             start: Option<&[u8]>,
             end: Option<&[u8]>,
-        ) -> crate::common::MidgeResult<Vec<(bytes::Bytes, crate::sst::types::KeyState)>> {
+        ) -> crate::common::MidgeResult<Vec<(bytes::Bytes, crate::types::KeyState)>> {
             let s = start.unwrap_or(&[]);
             let e = end.unwrap_or(&[255u8]);
             if s <= &b"a"[..] && &b"a"[..] < e {
                 Ok(vec![(
                     bytes::Bytes::copy_from_slice(b"a"),
-                    crate::sst::types::KeyState::Value(
+                    crate::types::KeyState::Value(
                         bytes::Bytes::copy_from_slice(b"va"),
                         10,
                         None,
-                        crate::sst::encoding::EntryType::Put,
+                        crate::types::EntryType::Put,
                     ),
                 )])
             } else {
@@ -380,7 +380,7 @@ mod tests {
             &self,
             start: Option<&[u8]>,
             end: Option<&[u8]>,
-        ) -> crate::common::MidgeResult<Vec<(bytes::Bytes, crate::sst::types::KeyState)>> {
+        ) -> crate::common::MidgeResult<Vec<(bytes::Bytes, crate::types::KeyState)>> {
             self.scan_range_state(start, end)
         }
     }

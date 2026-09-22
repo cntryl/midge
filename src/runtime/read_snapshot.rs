@@ -9,12 +9,12 @@ use crate::memtable::SkipListMemtable;
 use crate::metadata::FileMeta;
 use crate::runtime::read_resources::ReadResources;
 use crate::runtime::sst_read_view::{LevelRangeCandidates, RangeCandidates, SstReadView};
-#[cfg(test)]
-use crate::sst::encoding::EntryType;
 use crate::sst::fs::reader_io::SstStateScan;
 use crate::sst::fs::SstFileIo;
 use crate::sst::traits::SstStateReader;
-use crate::sst::types::{KeyState, RangeTombstone};
+#[cfg(test)]
+use crate::types::EntryType;
+use crate::types::{KeyState, RangeTombstone};
 #[cfg(test)]
 use std::collections::BTreeMap;
 use std::sync::Arc;

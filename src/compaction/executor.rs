@@ -11,12 +11,12 @@
 //! SST, the aggregate plan, or a second deduplicated output vector.
 
 use crate::common::MidgeResult;
-#[cfg(test)]
-use crate::sst::encoding::EntryType;
 use crate::sst::traits::{RawSstVersion, RawSstVersionCursor, SstFactory};
 #[cfg(test)]
-use crate::sst::types::KeyState;
-use crate::sst::types::RangeTombstone;
+use crate::types::EntryType;
+#[cfg(test)]
+use crate::types::KeyState;
+use crate::types::RangeTombstone;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::path::Path;
@@ -1213,9 +1213,9 @@ impl<'a> PartitionRoller<'a> {
                 version.value.as_deref(),
                 version.seq,
                 if version.is_tombstone {
-                    crate::sst::encoding::EntryType::Delete
+                    crate::types::EntryType::Delete
                 } else {
-                    crate::sst::encoding::EntryType::Put
+                    crate::types::EntryType::Put
                 },
                 version.expiration,
             )?;
@@ -1675,7 +1675,7 @@ mod tests {
                             bytes::Bytes::from_static(b"v1"),
                             42,
                             Some(900),
-                            crate::sst::encoding::EntryType::Put,
+                            crate::types::EntryType::Put,
                         ),
                     ),
                     (bytes::Bytes::from_static(b"beta"), KeyState::Tombstone(41)),

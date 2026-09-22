@@ -180,7 +180,7 @@ struct ValidatedWalPruneCandidate {
 
 #[derive(Clone, Default)]
 struct ExactCoverageState {
-    state: Option<crate::sst::types::KeyState>,
+    state: Option<crate::types::KeyState>,
     ambiguous: bool,
     /// SST range tombstones at or above a range-delete record's sequence,
     /// clipped to the record's range.
@@ -757,16 +757,16 @@ fn contextualize_cloud_error(error: MidgeError, context: &str) -> MidgeError {
     }
 }
 
-fn exact_state_sequence(state: &crate::sst::types::KeyState) -> Option<u64> {
+fn exact_state_sequence(state: &crate::types::KeyState) -> Option<u64> {
     match state {
-        crate::sst::types::KeyState::Absent => None,
-        crate::sst::types::KeyState::Tombstone(sequence)
-        | crate::sst::types::KeyState::Value(_, sequence, _, _) => Some(*sequence),
+        crate::types::KeyState::Absent => None,
+        crate::types::KeyState::Tombstone(sequence)
+        | crate::types::KeyState::Value(_, sequence, _, _) => Some(*sequence),
     }
 }
 
 impl ExactCoverageState {
-    fn observe(&mut self, state: crate::sst::types::KeyState) {
+    fn observe(&mut self, state: crate::types::KeyState) {
         let Some(sequence) = exact_state_sequence(&state) else {
             return;
         };
@@ -789,7 +789,7 @@ impl ExactCoverageState {
     /// tombstone at or above the record's sequence can stand in for it.
     fn observe_range_tombstone(
         &mut self,
-        tombstone: &crate::sst::types::RangeTombstone,
+        tombstone: &crate::types::RangeTombstone,
         record: &DataCoverageRecord,
     ) {
         let Some(range_end) = record.range_end.as_deref() else {
@@ -827,7 +827,7 @@ impl ExactCoverageState {
     }
 
     fn exactly_covers(&self, record: &DataCoverageRecord) -> bool {
-        use crate::sst::types::KeyState;
+        use crate::types::KeyState;
         use crate::wal::types::WalOpRole;
 
         if self.ambiguous {
@@ -874,7 +874,7 @@ impl<'a> VerifiedManifestWalCoverage<'a> {
         }
     }
 
-    fn state_for(&self, file: &FileMeta, key: &[u8]) -> Option<crate::sst::types::KeyState> {
+    fn state_for(&self, file: &FileMeta, key: &[u8]) -> Option<crate::types::KeyState> {
         let mut readers = self.readers.borrow_mut();
         let reader = readers.entry(file.name.clone()).or_insert_with(|| {
             let name = crate::sst::PersistedSstName::parse(&file.name).ok()?;
@@ -925,7 +925,7 @@ impl<'a> VerifiedManifestWalCoverage<'a> {
             return false;
         };
         match state {
-            crate::sst::types::KeyState::Value(value, sequence, _, _) => {
+            crate::types::KeyState::Value(value, sequence, _, _) => {
                 sequence > record.seq
                     || sequence == record.seq
                         && record
@@ -937,14 +937,14 @@ impl<'a> VerifiedManifestWalCoverage<'a> {
             // value write and a delete contradict each other, so only a delete
             // record is covered by it; skipping the value on that evidence could
             // lose data, and replaying it is the safe direction.
-            crate::sst::types::KeyState::Tombstone(sequence) => {
+            crate::types::KeyState::Tombstone(sequence) => {
                 if matches!(record.op.role(), crate::wal::types::WalOpRole::ValueWrite) {
                     sequence > record.seq
                 } else {
                     sequence >= record.seq
                 }
             }
-            crate::sst::types::KeyState::Absent => false,
+            crate::types::KeyState::Absent => false,
         }
     }
 }
