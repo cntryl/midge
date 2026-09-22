@@ -7,6 +7,7 @@ use crate::runtime::wal_transition::{WalSealTicket, WalSyncTicket};
 #[cfg(feature = "failpoints")]
 use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
 use crate::runtime::RuntimeState;
+use crate::types::EntryType;
 use bytes::Bytes;
 use std::path::PathBuf;
 #[cfg(feature = "failpoints")]
@@ -128,9 +129,9 @@ fn should_check_transaction_assertions_against_remote_sst_when_local_cache_is_em
     let mut state = RuntimeState::new(local.path().to_path_buf(), false);
     let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
     let mut writer = factory.create()?;
-    writer.add_with_meta(b"asserted", Some(b"value"), 9, 0, None)?;
+    writer.add_with_meta(b"asserted", Some(b"value"), 9, EntryType::Put, None)?;
     let bytes = writer.finish_bytes()?;
-    let name = crate::sst::file_name(0, 0, 1);
+    let name = crate::cloud_layout::file_name(0, 0, 1);
     std::fs::create_dir_all(remote.path().join("sst"))?;
     std::fs::write(remote.path().join("sst").join(&name), &bytes)?;
     state.manifest.files.push(crate::metadata::FileMeta {
@@ -765,7 +766,7 @@ fn should_fence_strict_transaction_when_sync_fails_after_records_are_appended() 
         .get_cf(0)
         .expect("default column family")
         .memtable
-        .iter_all(u64::MAX)
+        .iter_all()
         .is_empty());
     assert!(matches!(later, Err(MidgeError::Fenced(_))));
     assert_eq!(state.sequence, sequence_after_failure);
@@ -810,7 +811,7 @@ fn should_apply_wal_sequence_to_memtable() -> MidgeResult<()> {
     // Assert: memtable contains one entry and its seq equals WAL seq
     assert!(!deferred);
     let cf_state = state.get_cf(0).expect("cf exists");
-    let entries = cf_state.memtable.iter_all(u64::MAX);
+    let entries = cf_state.memtable.iter_all();
     assert_eq!(entries.len(), 1);
     let (key, value, m_seq) = &entries[0];
     assert_eq!(key.as_slice(), b"k");
@@ -953,7 +954,7 @@ fn should_append_multiple_prepared_transactions_with_one_physical_call() -> Midg
     assert!(state.pending_transaction_min_sequence().is_some());
 
     let cf_state = state.get_cf(0).expect("cf exists");
-    let entries = cf_state.memtable.iter_all(u64::MAX);
+    let entries = cf_state.memtable.iter_all();
     assert!(entries.iter().any(|(key, value, _sequence)| {
         key.as_slice() == b"coalesce-a"
             && value
@@ -1054,7 +1055,7 @@ fn should_durably_append_strict_transaction_group_once_before_memtable_apply() -
         .get_cf(0)
         .expect("default column family")
         .memtable
-        .iter_all(u64::MAX);
+        .iter_all();
     assert_eq!(entries.len(), 2);
 
     Ok(())
@@ -1109,7 +1110,7 @@ fn should_reject_whole_group_before_wal_append_given_duplicate_key_sequence() ->
         .get_cf(0)
         .expect("default column family")
         .memtable
-        .iter_all(u64::MAX)
+        .iter_all()
         .is_empty());
     Ok(())
 }
@@ -1203,7 +1204,7 @@ fn should_leave_no_partial_writes_given_later_memtable_preflight_failure() -> Mi
         .get_cf(0)
         .expect("first column family remains")
         .memtable
-        .iter_all(u64::MAX)
+        .iter_all()
         .is_empty());
     Ok(())
 }
@@ -1278,7 +1279,7 @@ fn should_apply_no_strict_group_member_when_shared_sync_fails() -> MidgeResult<(
         .get_cf(0)
         .expect("default column family")
         .memtable
-        .iter_all(u64::MAX)
+        .iter_all()
         .is_empty());
 
     fail::remove("midge::wal::inject_no_space_on_sync");
@@ -1365,7 +1366,7 @@ fn should_fail_all_prepared_transactions_when_batch_append_hits_no_space() -> Mi
                 .get_cf(0)
                 .expect("cf exists")
                 .memtable
-                .iter_all(u64::MAX)
+                .iter_all()
                 .is_empty(),
             "failed coalesced append must not publish partial memtable state"
         );
@@ -1385,7 +1386,7 @@ fn should_fail_all_prepared_transactions_when_batch_append_hits_no_space() -> Mi
         .get_cf(0)
         .expect("cf exists")
         .memtable
-        .iter_all(u64::MAX)
+        .iter_all()
         .iter()
         .any(|(key, value, _sequence)| {
             key.as_slice() == b"recovered"
@@ -1722,7 +1723,7 @@ fn should_fence_each_append_path_after_physical_commit_before_accounting() -> Mi
             .get_cf(0)
             .expect("default column family")
             .memtable
-            .iter_all(u64::MAX)
+            .iter_all()
             .is_empty());
         let later = prepare_put_transaction(
             &mut actor,
@@ -1849,7 +1850,7 @@ fn should_fence_filesystem_wal_when_replacement_writer_open_fails_after_rename()
         .get_cf(0)
         .expect("default column family")
         .memtable
-        .iter_all(u64::MAX)
+        .iter_all()
         .len();
 
     // Act
@@ -1904,7 +1905,7 @@ fn should_fence_filesystem_wal_when_replacement_writer_open_fails_after_rename()
             .get_cf(0)
             .expect("default column family")
             .memtable
-            .iter_all(u64::MAX)
+            .iter_all()
             .len(),
         entries_before,
         "rejected write must not mutate the memtable"
@@ -1935,7 +1936,7 @@ fn should_fence_filesystem_wal_when_replacement_writer_open_fails_after_rename()
             .get_cf(0)
             .expect("default column family")
             .memtable
-            .iter_all(u64::MAX)
+            .iter_all()
             .len(),
         entries_before + 1
     );

@@ -3,15 +3,14 @@
 //! Provides a sharded LRU/TinyLFU/CLOCK-Pro cache for SST blocks with:
 //! - **Sharding**: 16 independent shards to reduce lock contention
 //! - **Pluggable policies**: LRU, `TinyLFU`, CLOCK-Pro eviction
-//! - **Admission utilities**: Optional frequency helpers are available, but the default
-//!   insertion path does not enforce a separate second-access admission gate.
+//! - **Admission**: Insertion is capacity-gated only; there is no separate
+//!   second-access admission gate.
 //! - **Metrics**: Hit/miss/eviction tracking per shard
 //!
 //! Point-read paths populate the block cache synchronously. Range-scan paths
 //! that use contiguous readahead avoid one-pass scan pollution by bypassing
 //! cache insertion entirely.
 
-pub mod admission;
 mod config;
 pub mod key;
 pub mod metrics;
@@ -153,7 +152,11 @@ impl BlockCache {
         aggregated
     }
 
-    /// Get total size in bytes
+    /// Get total charged size in bytes.
+    ///
+    /// Each entry charges its payload plus
+    /// [`value::ENTRY_OVERHEAD_BYTES`], so this is the memory the cache
+    /// accounts for rather than the sum of the cached payloads.
     #[must_use]
     pub fn size_bytes(&self) -> u64 {
         self.shards.iter().map(|s| s.size_bytes()).sum()
@@ -237,7 +240,25 @@ mod tests {
     #[test]
     fn should_not_create_zero_byte_shards_when_capacity_is_less_than_requested_shards() {
         // Arrange
+
+        // Act
         let cache = BlockCache::new(2, 16, CachePolicyType::Lru);
+
+        // Assert
+        assert_eq!(cache.num_shards(), 2);
+        for shard in &cache.shards {
+            assert!(
+                shard.capacity_bytes() > 0,
+                "shard capacity must not round down to zero"
+            );
+        }
+    }
+
+    #[test]
+    fn should_admit_one_entry_when_capacity_covers_exactly_one_charged_entry() {
+        // Arrange
+        let capacity = CacheValue::charged_bytes(1) as u64;
+        let cache = BlockCache::new(capacity, 1, CachePolicyType::Lru);
         let key = CacheKey::for_data(1, 0);
         let value = Bytes::from(vec![7u8; 1]);
 
@@ -245,9 +266,9 @@ mod tests {
         let inserted = cache.put(key, &value);
 
         // Assert
-        assert_eq!(cache.num_shards(), 2);
         assert!(inserted);
         assert!(cache.get(&key).is_some());
+        assert_eq!(cache.size_bytes(), capacity);
     }
 
     #[test]
@@ -364,7 +385,11 @@ mod tests {
     #[test]
     fn should_respect_capacity_per_shard() {
         // Arrange
-        let cache = BlockCache::new(100, 1, CachePolicyType::Lru);
+        let cache = BlockCache::new(
+            CacheValue::charged_bytes(100) as u64,
+            1,
+            CachePolicyType::Lru,
+        );
         let data1 = vec![b'x'; 60];
         let data2 = vec![b'y'; 60];
 
@@ -401,8 +426,9 @@ mod tests {
             CachePolicyType::ClockPro,
         ];
 
+        let capacity = 2 * CacheValue::charged_bytes(32) as u64;
         for policy in policies {
-            let cache = BlockCache::new(90, 1, policy);
+            let cache = BlockCache::new(capacity, 1, policy);
 
             // Act
             for sst_id in 0..6 {
@@ -417,7 +443,7 @@ mod tests {
                 "{policy:?} should admit cache entries"
             );
             assert!(
-                metrics.memory_bytes() <= 90,
+                metrics.memory_bytes() <= capacity,
                 "{policy:?} should evict until within capacity"
             );
             assert!(

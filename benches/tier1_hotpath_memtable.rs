@@ -5,7 +5,7 @@
 #[path = "./stress_config.rs"]
 mod stress_config;
 
-use cntryl_midge::sst::{Memtable, SkipListMemtable};
+use cntryl_midge::__internal::memtable::SkipListMemtable;
 use cntryl_stress::{black_box, stress, stress_main, StressContext};
 
 const LOOKUP_HIT_BATCH_SIZE: usize = 1_048_576;
@@ -41,7 +41,7 @@ fn make_value_indexed(i: usize) -> Vec<u8> {
 fn warmed_memtable(value: &[u8]) -> SkipListMemtable {
     let memtable = SkipListMemtable::new();
     for i in 0..100 {
-        let _ = memtable.put(make_key(i), value.to_vec());
+        let _ = memtable.put_with_seq(make_key(i), value.to_vec(), i as u64 + 1, None);
     }
     memtable
 }
@@ -51,6 +51,7 @@ fn run_put_single(ctx: &mut StressContext, scenario: &'static str, value_size: u
     let keys: Vec<Vec<u8>> = (100..100 + ROTATING_WRITE_KEYS).map(make_key).collect();
     let memtable = warmed_memtable(&value);
     let mut key_index = 0usize;
+    let mut next_sequence = 101_u64;
     ctx.parameter("scenario", scenario);
     ctx.parameter("value_size", value_size);
     ctx.parameter("batch_size", PUT_SINGLE_BATCH_SIZE);
@@ -61,7 +62,13 @@ fn run_put_single(ctx: &mut StressContext, scenario: &'static str, value_size: u
             for _ in 0..PUT_SINGLE_BATCH_SIZE {
                 let idx = key_index % keys.len();
                 key_index = key_index.wrapping_add(1);
-                let _ = memtable.put(black_box(keys[idx].clone()), black_box(value.clone()));
+                let _ = memtable.put_with_seq(
+                    black_box(keys[idx].clone()),
+                    black_box(value.clone()),
+                    next_sequence,
+                    None,
+                );
+                next_sequence = next_sequence.saturating_add(1);
             }
         });
 }
@@ -92,8 +99,13 @@ fn put_batch_100(ctx: &mut StressContext) {
             let mut inserted = 0usize;
             for _ in 0..PUT_BATCH_ROUNDS {
                 let memtable = SkipListMemtable::new();
-                for key in &keys {
-                    let _ = memtable.put(black_box(key.clone()), black_box(value.clone()));
+                for (sequence, key) in keys.iter().enumerate() {
+                    let _ = memtable.put_with_seq(
+                        black_box(key.clone()),
+                        black_box(value.clone()),
+                        sequence as u64 + 1,
+                        None,
+                    );
                     inserted = inserted.wrapping_add(1);
                 }
                 black_box(memtable);
@@ -109,7 +121,7 @@ fn get_hit(ctx: &mut StressContext) {
     let values: Vec<Vec<u8>> = (0..1000).map(make_value_indexed).collect();
     let memtable = SkipListMemtable::new();
     for i in 0..1000 {
-        let _ = memtable.put(keys[i].clone(), values[i].clone());
+        let _ = memtable.put_with_seq(keys[i].clone(), values[i].clone(), i as u64 + 1, None);
     }
     let hit_keys: Vec<&[u8]> = keys.iter().map(Vec::as_slice).collect();
     ctx.parameter("lookup_batch_size", LOOKUP_HIT_BATCH_SIZE);
@@ -125,7 +137,7 @@ fn get_hit(ctx: &mut StressContext) {
                     memtable
                         .get_key_state_at_with_time(black_box(hit_key), u64::MAX, 0)
                         .unwrap(),
-                    cntryl_midge::sst::types::KeyState::Value(..)
+                    cntryl_midge::__internal::types::KeyState::Value(..)
                 ) {
                     hits += 1;
                 }
@@ -144,7 +156,7 @@ fn get_miss(ctx: &mut StressContext) {
     let values: Vec<Vec<u8>> = (0..1000).map(make_value_indexed).collect();
     let memtable = SkipListMemtable::new();
     for i in 0..1000 {
-        let _ = memtable.put(keys[i].clone(), values[i].clone());
+        let _ = memtable.put_with_seq(keys[i].clone(), values[i].clone(), i as u64 + 1, None);
     }
     let miss_keys: Vec<Vec<u8>> = (0..1000)
         .map(|i| format!("key_{i:010}_missing").into_bytes())
@@ -163,7 +175,7 @@ fn get_miss(ctx: &mut StressContext) {
                     memtable
                         .get_key_state_at_with_time(black_box(miss_key.as_slice()), u64::MAX, 0,)
                         .unwrap(),
-                    cntryl_midge::sst::types::KeyState::Absent
+                    cntryl_midge::__internal::types::KeyState::Absent
                 ) {
                     misses += 1;
                 }
@@ -177,10 +189,11 @@ fn delete(ctx: &mut StressContext) {
     let keys: Vec<Vec<u8>> = (0..DELETE_KEY_COUNT).map(make_key).collect();
     let value = make_value(128);
     let memtable = SkipListMemtable::new();
-    for key in &keys {
-        let _ = memtable.put(key.clone(), value.clone());
+    for (sequence, key) in keys.iter().enumerate() {
+        let _ = memtable.put_with_seq(key.clone(), value.clone(), sequence as u64 + 1, None);
     }
     let mut key_index = 0usize;
+    let mut next_sequence = DELETE_KEY_COUNT as u64 + 1;
     ctx.parameter("key_count", keys.len());
     ctx.parameter("batch_size", DELETE_BATCH_SIZE);
     ctx.parameter("logical_unit", "memtable_delete");
@@ -190,7 +203,8 @@ fn delete(ctx: &mut StressContext) {
         for _ in 0..DELETE_BATCH_SIZE {
             let idx = key_index % keys.len();
             key_index = key_index.wrapping_add(1);
-            let _ = memtable.delete(black_box(keys[idx].clone()));
+            let _ = memtable.delete_with_seq(black_box(keys[idx].clone()), next_sequence);
+            next_sequence = next_sequence.saturating_add(1);
             deleted = deleted.wrapping_add(1);
         }
         black_box(deleted);
@@ -209,8 +223,8 @@ fn size_bytes(ctx: &mut StressContext) {
     let keys: Vec<Vec<u8>> = (0..100).map(make_key).collect();
     let value = make_value(1024);
     let memtable = SkipListMemtable::new();
-    for key in &keys {
-        let _ = memtable.put(key.clone(), value.clone());
+    for (sequence, key) in keys.iter().enumerate() {
+        let _ = memtable.put_with_seq(key.clone(), value.clone(), sequence as u64 + 1, None);
     }
     ctx.parameter("key_count", keys.len());
     ctx.parameter("value_size", value.len());

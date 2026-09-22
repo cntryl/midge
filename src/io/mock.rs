@@ -41,12 +41,6 @@ impl MockFs {
         self.files.lock().get(path).map(|f| f.data.clone())
     }
 
-    /// Clear all files
-    #[cfg(test)]
-    pub fn clear(&self) {
-        self.files.lock().clear();
-    }
-
     #[cfg(test)]
     pub(crate) fn set_sync_dir_failure(&self, fail: bool) {
         self.fail_sync_dir.store(fail, Ordering::Relaxed);

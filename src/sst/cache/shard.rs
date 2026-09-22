@@ -58,7 +58,6 @@ impl CacheShard {
         let _lock = self.lock_mutation();
         if let Some(value_ref) = self.entries.get(key) {
             let value = value_ref.value().clone();
-            let _ = value.increment_access();
             self.policy.on_access(*key);
             self.metrics.record_hit();
             Some(value)
@@ -75,7 +74,7 @@ impl CacheShard {
     pub fn put(&self, key: CacheKey, value: &Bytes) -> bool {
         let _lock = self.lock_mutation();
 
-        let new_size = u64::try_from(value.len()).unwrap_or(u64::MAX);
+        let new_size = u64::try_from(CacheValue::charged_bytes(value.len())).unwrap_or(u64::MAX);
         if !self.can_fit_value(new_size) {
             return false;
         }
@@ -89,6 +88,10 @@ impl CacheShard {
     /// No single allocation may make a shard permanently exceed capacity.
     /// Metadata remains eviction-protected under ordinary pressure, but an
     /// oversized index/filter block is rejected just like oversized data.
+    ///
+    /// `value_size` is the charged size (payload plus per-entry overhead), so
+    /// admission uses the same accounting as eviction. Otherwise an entry that
+    /// exactly filled the shard would be admitted and then immediately evicted.
     fn can_fit_value(&self, value_size: u64) -> bool {
         value_size <= self.max_bytes
     }
@@ -249,9 +252,17 @@ impl CacheShard {
         self.metrics.clone()
     }
 
-    /// Get current size in bytes
+    /// Get current charged size in bytes.
+    ///
+    /// Each entry charges its payload plus
+    /// [`crate::sst::cache::value::ENTRY_OVERHEAD_BYTES`].
     pub fn size_bytes(&self) -> u64 {
         self.metrics.memory_bytes()
+    }
+
+    /// Get this shard's capacity in bytes.
+    pub fn capacity_bytes(&self) -> u64 {
+        self.max_bytes
     }
 
     /// Get number of entries
@@ -269,6 +280,7 @@ impl CacheShard {
 mod tests {
     use super::*;
     use crate::sst::cache::key::CacheBlockKind;
+    use crate::sst::cache::value::ENTRY_OVERHEAD_BYTES;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
@@ -366,7 +378,7 @@ mod tests {
             }),
             mutation_lock: Mutex::new(()),
             metrics: CacheMetrics::new(),
-            max_bytes: 1,
+            max_bytes: CacheValue::charged_bytes(1) as u64,
         });
         assert!(shard.put(target, &Bytes::from_static(b"a")));
         state.pause_target.store(true, Ordering::SeqCst);
@@ -436,7 +448,8 @@ mod tests {
     #[test]
     fn should_keep_large_data_block_after_many_small_evictions() {
         // Arrange
-        let shard = CacheShard::new(100, CachePolicyType::Lru);
+        let capacity = CacheValue::charged_bytes(100) as u64;
+        let shard = CacheShard::new(capacity, CachePolicyType::Lru);
         let small = Bytes::from(vec![1u8; 1]);
         let large = Bytes::from(vec![2u8; 100]);
         let final_key = CacheKey::for_data(999, 0);
@@ -456,13 +469,13 @@ mod tests {
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().data.to_vec(), large.to_vec());
         assert!(metrics.eviction_count() - before_evictions > 50);
-        assert!(shard.size_bytes() <= 100);
+        assert!(shard.size_bytes() <= capacity);
     }
 
     #[test]
     fn should_report_false_when_data_block_exceeds_shard_capacity() {
         // Arrange
-        let shard = CacheShard::new(8, CachePolicyType::Lru);
+        let shard = CacheShard::new(CacheValue::charged_bytes(8) as u64, CachePolicyType::Lru);
         let key = CacheKey::for_data(1, 0);
         let value = Bytes::from(vec![0u8; 16]);
 
@@ -479,7 +492,7 @@ mod tests {
     #[test]
     fn should_reject_oversized_metadata_block_without_exceeding_capacity() {
         // Arrange
-        let shard = CacheShard::new(8, CachePolicyType::Lru);
+        let shard = CacheShard::new(CacheValue::charged_bytes(8) as u64, CachePolicyType::Lru);
         let index_key = CacheKey::for_index(1, 0);
         let filter_key = CacheKey::for_filter(1, 8);
         let value = Bytes::from(vec![0u8; 16]);
@@ -515,13 +528,14 @@ mod tests {
         assert!(shard.get(&target_data).is_none());
         assert!(shard.get(&target_index).is_none());
         assert!(shard.get(&other_data).is_some());
-        assert_eq!(shard.size_bytes(), 32);
+        assert_eq!(shard.size_bytes(), CacheValue::charged_bytes(32) as u64);
     }
 
     #[test]
     fn should_preserve_metadata_blocks_when_eviction_overflows() {
         // Arrange
-        let shard = CacheShard::new(120, CachePolicyType::Lru);
+        let capacity = 3 * CacheValue::charged_bytes(40) as u64;
+        let shard = CacheShard::new(capacity, CachePolicyType::Lru);
         let index_key = CacheKey::for_index(1, 0);
         let filter_key = CacheKey::for_filter(1, 40);
         let data_key = CacheKey::for_data(1, 80);
@@ -539,7 +553,7 @@ mod tests {
         assert!(shard.get(&filter_key).is_some());
         assert!(shard.get(&data_key).is_none());
         assert!(shard.get(&next_data_key).is_some());
-        assert!(shard.size_bytes() <= 120);
+        assert!(shard.size_bytes() <= capacity);
     }
 
     #[test]
@@ -561,7 +575,7 @@ mod tests {
     #[test]
     fn should_evict_on_overflow() {
         // Arrange
-        let shard = CacheShard::new(100, CachePolicyType::Lru);
+        let shard = CacheShard::new(CacheValue::charged_bytes(100) as u64, CachePolicyType::Lru);
         let key1 = CacheKey::for_data(1, 0);
         let key2 = CacheKey::for_data(2, 0);
         let data1 = vec![b'x'; 80];
@@ -711,7 +725,7 @@ mod tests {
 
         // Assert
         assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().size_bytes(), 0);
+        assert_eq!(retrieved.unwrap().size_bytes(), ENTRY_OVERHEAD_BYTES);
     }
 
     #[test]
@@ -757,7 +771,7 @@ mod tests {
         let key2 = CacheKey::for_data(2, 0);
 
         // Act
-        assert!(shard.put(key1, &Bytes::from(&b"1000B"[..]))); // 5 bytes
+        assert!(shard.put(key1, &Bytes::from(&b"1000B"[..]))); // 5 payload bytes
         let size_after_first = shard.size_bytes();
         assert!(shard.put(key2, &Bytes::from(vec![0u8; 995]))); // 995 bytes
         let size_after_second = shard.size_bytes();
@@ -770,8 +784,9 @@ mod tests {
     #[test]
     fn should_distinguish_different_policies() {
         // Arrange
-        let shard_lru = CacheShard::new(1000, CachePolicyType::Lru);
-        let shard_tinyfu = CacheShard::new(1000, CachePolicyType::TinyLfu);
+        let capacity = 5 * CacheValue::charged_bytes(5) as u64;
+        let shard_lru = CacheShard::new(capacity, CachePolicyType::Lru);
+        let shard_tinyfu = CacheShard::new(capacity, CachePolicyType::TinyLfu);
 
         // Act (both should work, just with different eviction strategies)
         for i in 0..5 {
@@ -802,7 +817,8 @@ mod tests {
     #[test]
     fn should_handle_single_entry_eviction() {
         // Arrange
-        let shard = CacheShard::new(10, CachePolicyType::Lru); // Very small cache
+        // Very small cache: room for one 5-byte entry, not two.
+        let shard = CacheShard::new(CacheValue::charged_bytes(5) as u64, CachePolicyType::Lru);
         let key1 = CacheKey::for_data(1, 0);
         let key2 = CacheKey::for_data(2, 0);
 
@@ -836,7 +852,10 @@ mod tests {
     #[test]
     fn should_track_eviction_metrics() {
         // Arrange
-        let shard = CacheShard::new(50, CachePolicyType::Lru);
+        let shard = CacheShard::new(
+            3 * CacheValue::charged_bytes(15) as u64,
+            CachePolicyType::Lru,
+        );
 
         // Act
         for i in 0..5 {

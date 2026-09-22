@@ -5,7 +5,7 @@ pub const WAL_MAX_RECORD_LEN: usize = 64 * 1024 * 1024;
 /// Largest uncompressed VALUE a WAL record may carry. Replay decompresses
 /// VALUE with this ceiling, so the writer must never accept more even when
 /// compression shrinks the frame below [`WAL_MAX_RECORD_LEN`].
-pub const WAL_MAX_VALUE_LEN: usize = crate::sst::compression::MAX_DECOMPRESSED_BLOCK_SIZE;
+pub const WAL_MAX_VALUE_LEN: usize = crate::codec::MAX_DECOMPRESSED_BLOCK_SIZE;
 
 /// Compute the encoded WAL frame length for a payload.
 ///

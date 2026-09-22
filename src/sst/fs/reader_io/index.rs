@@ -263,7 +263,7 @@ impl SstFileIo {
                 if let Some(telemetry) = crate::telemetry::Telemetry::global() {
                     telemetry.metrics().record_cache_hit();
                 }
-                Ok(cached_value.data.as_ref().clone())
+                Ok(cached_value.data)
             } else {
                 read_metrics.record_block_cache_miss();
                 if let Some(telemetry) = crate::telemetry::Telemetry::global() {

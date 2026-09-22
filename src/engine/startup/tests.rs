@@ -59,6 +59,13 @@ impl DelayedRecoveryBackend {
 }
 
 impl crate::storage::cloud::CloudBackend for DelayedRecoveryBackend {
+    crate::storage::cloud::unsupported_cloud_backend!(
+        submit_get_with_metadata,
+        submit_delete,
+        submit_list,
+        submit_head,
+    );
+
     fn submit_put(
         &self,
         key: &str,
@@ -619,7 +626,7 @@ fn should_not_log_cloud_credentials_when_tracing_engine_startup() {
         "gcs-bearer-do-not-log",
     ];
     let providers = [
-        crate::storage::providers::CloudProviderConfig::s3_compatible(
+        crate::config::CloudProviderConfig::s3_compatible(
             "bucket",
             "region",
             "https://s3.example",

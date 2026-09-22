@@ -229,9 +229,7 @@ fn sync_catalog_copy_within(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::hybrid_persistence::{
-        CloudStorage, HybridPersistence, PublishedWalSegment,
-    };
+    use crate::runtime::hybrid_persistence::{CloudPersistence, CloudStorage, PublishedWalSegment};
     use std::sync::Arc;
 
     #[test]
@@ -240,11 +238,11 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let local =
             Arc::new(crate::storage::filesystem::FileSystem::new(directory.path()).unwrap());
-        let storage = HybridStorage::with_policy(
+        let storage = CloudPersistence::new(Arc::new(HybridStorage::with_policy(
             local.clone(),
             local,
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-        );
+        )));
         let first = catalog_budget(&storage);
         let _held = first.reserve(4096, "retained catalog").unwrap();
 
@@ -297,11 +295,11 @@ mod tests {
     fn should_leave_catalog_authority_unchanged_when_decode_admission_fails() {
         // Arrange
         let directory = tempfile::tempdir().unwrap();
-        let storage = HybridStorage::with_policy(
+        let storage = CloudPersistence::new(Arc::new(HybridStorage::with_policy(
             Arc::new(crate::storage::filesystem::FileSystem::new(directory.path()).unwrap()),
             Arc::new(CloudStorage::with_mock()),
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-        );
+        )));
         let mut catalog = WalPublicationCatalog::empty(7).unwrap();
         for segment_id in 0..128 {
             catalog

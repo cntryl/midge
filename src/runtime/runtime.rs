@@ -126,7 +126,13 @@ impl Runtime {
         let event_loop_handle = thread::Builder::new()
             .name("midge-runtime".to_string())
             .spawn(move || {
-                match EventLoop::new(state, trace_enabled, router, config, Some(worker_msg_tx)) {
+                match EventLoop::new(
+                    state,
+                    trace_enabled,
+                    router,
+                    config,
+                    crate::runtime::event_loop::FlushWorkerMode::Background(worker_msg_tx),
+                ) {
                     Ok(mut event_loop) => {
                         // Share the snapshot cache with the event loop
                         event_loop.set_snapshot_cache(snapshot_cache);

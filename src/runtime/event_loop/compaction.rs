@@ -274,9 +274,7 @@ impl CompactionCoordinator {
             // never-reused generation and referenced by no manifest or
             // intent. Reclaim them now, or every retry of a deterministically
             // failing plan leaks another set of remote objects.
-            let orphaned = event_loop
-                .compaction_actor
-                .take_prepared_remote_output_names();
+            let orphaned = event_loop.compaction_actor.take_prepared_output_names();
             if !orphaned.is_empty() {
                 let hybrid_storage = event_loop.hybrid_storage.clone();
                 event_loop
@@ -476,7 +474,7 @@ impl CompactionCoordinator {
         let mut generation = None;
         for (expected_partition, name) in output_ssts.iter().enumerate() {
             let (name_cf, name_level, name_generation, name_partition) =
-                crate::sst::parse_compaction_file_name(name).ok_or_else(|| {
+                crate::cloud_layout::parse_compaction_file_name(name).ok_or_else(|| {
                     crate::common::MidgeError::Corruption(format!(
                         "compaction output has non-canonical partition name: {name}"
                     ))

@@ -63,7 +63,6 @@ struct WorkerEvidence {
     remaining_l0_bytes: u64,
     peak_rss_bytes: u64,
     write_stalls_total: u64,
-    pending_compactions: usize,
     obsolete_file_backlog: usize,
     digest_before_crash: DigestEvidence,
 }
@@ -481,7 +480,6 @@ fn run_worker(base_records: u64, path: &Path, partial_path: &Path) -> MidgeResul
         remaining_l0_bytes,
         peak_rss_bytes,
         write_stalls_total: metrics_after.write_stalls_total,
-        pending_compactions: metrics_after.pending_compactions,
         obsolete_file_backlog: metrics_after.obsolete_file_backlog,
         digest_before_crash,
     };

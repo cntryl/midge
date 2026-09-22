@@ -1,14 +1,292 @@
-use super::range::{lookup_range_index, validate_range_index, write_range_index_file};
+use super::range::{
+    lookup_range_index, read_range_header, validate_range_index, write_range_index_file,
+    RangeHeader,
+};
 use super::{
     consider_lookup, op_heap_bytes, op_primary_key_bytes, IntentLookup, OrdinalOp, SpillDiskBudget,
-    SpillDiskCharge, SpillRun, TransactionOp, MAX_FRAME_BYTES, RUN_HEADER_LEN, RUN_MAGIC,
-    RUN_VERSION, SPARSE_INDEX_STRIDE,
+    SpillDiskCharge, SpillReaderCache, SpillRun, TransactionMemoryPool, TransactionOp,
+    MAX_FRAME_BYTES, RUN_HEADER_LEN, RUN_MAGIC, RUN_VERSION, SPARSE_INDEX_STRIDE,
 };
 use crate::common::{MidgeError, MidgeResult};
 use bytes::Bytes;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
+use std::sync::Arc;
+
+/// Read-ahead window for one open spill file.
+///
+/// Runs are read as long chains of small CRC frames, so an unbuffered handle
+/// costs several syscalls per field. The window stays small because the reader
+/// cache bounds how many runs can retain handles at once.
+const RUN_READ_BUFFER_BYTES: usize = 16 * 1024;
+
+#[cfg(test)]
+thread_local! {
+    static RUN_FILE_TRACKER: std::cell::RefCell<Option<Arc<RunFileTracker>>> = const {
+        std::cell::RefCell::new(None)
+    };
+    static SPARSE_INDEX_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct RunFileTracker {
+    live: std::sync::atomic::AtomicUsize,
+    peak: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+impl RunFileTracker {
+    fn opened(&self) {
+        let live = self.live.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+        self.peak
+            .fetch_max(live, std::sync::atomic::Ordering::AcqRel);
+    }
+
+    fn closed(&self) {
+        let previous = self.live.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        debug_assert!(previous > 0, "spill file handle accounting underflow");
+    }
+}
+
+#[cfg(test)]
+pub(super) fn reset_peak_run_files() {
+    RUN_FILE_TRACKER.with(|tracker| {
+        *tracker.borrow_mut() = Some(Arc::new(RunFileTracker::default()));
+    });
+}
+
+#[cfg(test)]
+pub(super) fn peak_run_files() -> usize {
+    RUN_FILE_TRACKER.with(|tracker| {
+        tracker.borrow().as_ref().map_or(0, |tracker| {
+            tracker.peak.load(std::sync::atomic::Ordering::Acquire)
+        })
+    })
+}
+
+#[cfg(test)]
+pub(super) fn reset_sparse_index_decodes() {
+    SPARSE_INDEX_DECODES.with(|decodes| decodes.set(0));
+}
+
+#[cfg(test)]
+pub(super) fn sparse_index_decodes() -> usize {
+    SPARSE_INDEX_DECODES.with(std::cell::Cell::get)
+}
+
+/// Buffered, position-tracking reader over one immutable spill file.
+///
+/// Every read path used to seek by absolute offset and then ask the kernel for
+/// the resulting position. Tracking the offset here keeps `BufReader`'s window
+/// intact across frames and removes an `lseek` per field.
+#[derive(Debug)]
+pub(super) struct RunFile {
+    reader: BufReader<File>,
+    position: u64,
+    #[cfg(test)]
+    tracker: Option<Arc<RunFileTracker>>,
+}
+
+impl RunFile {
+    pub(super) fn open(path: &Path) -> MidgeResult<Self> {
+        let file = File::open(path)?;
+        #[cfg(test)]
+        let tracker = RUN_FILE_TRACKER.with(|tracker| tracker.borrow().clone());
+        #[cfg(test)]
+        if let Some(tracker) = &tracker {
+            tracker.opened();
+        }
+        Ok(Self {
+            reader: BufReader::with_capacity(RUN_READ_BUFFER_BYTES, file),
+            position: 0,
+            #[cfg(test)]
+            tracker,
+        })
+    }
+
+    pub(super) fn seek_to(&mut self, offset: u64) -> MidgeResult<()> {
+        if offset == self.position {
+            return Ok(());
+        }
+        // A relative seek keeps buffered bytes when the target is still inside
+        // the window, which is the common case while walking one sparse chunk.
+        match (i64::try_from(offset), i64::try_from(self.position)) {
+            (Ok(target), Ok(current)) if target.checked_sub(current).is_some() => {
+                self.reader.seek_relative(target - current)?;
+            }
+            _ => {
+                self.reader.seek(SeekFrom::Start(offset))?;
+            }
+        }
+        self.position = offset;
+        Ok(())
+    }
+
+    #[must_use]
+    pub(super) fn position(&self) -> u64 {
+        self.position
+    }
+
+    fn len(&self) -> MidgeResult<u64> {
+        Ok(self.reader.get_ref().metadata()?.len())
+    }
+}
+
+#[cfg(test)]
+impl Drop for RunFile {
+    fn drop(&mut self) {
+        if let Some(tracker) = &self.tracker {
+            tracker.closed();
+        }
+    }
+}
+
+impl Read for RunFile {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.reader.read(buf)?;
+        self.position = self
+            .position
+            .saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+        Ok(read)
+    }
+}
+
+/// One run's open handles plus its decoded sparse index.
+///
+/// Point lookups used to reopen both files and re-walk the whole sparse index
+/// for every key. The reader keeps the handles open for the life of the run and
+/// binary-searches an in-memory index whose bytes are charged to the pool.
+#[derive(Debug)]
+pub(super) struct RunReader {
+    data: RunFile,
+    range: RunFile,
+    header: RunHeader,
+    range_header: RangeHeader,
+    sparse: Option<Vec<(Bytes, u64)>>,
+    charged_bytes: usize,
+    pool: Arc<TransactionMemoryPool>,
+}
+
+impl RunReader {
+    pub(super) fn open(run: &SpillRun) -> MidgeResult<Self> {
+        let mut data = RunFile::open(&run.path)?;
+        let header = read_header(&mut data)?;
+        if header.record_count != run.record_count {
+            return Err(MidgeError::Corruption(
+                "transaction spill record count changed".to_string(),
+            ));
+        }
+        let mut range = RunFile::open(&run.range_path)?;
+        let range_header = read_range_header(&mut range)?;
+        let charge = sparse_charge_upper_bound(&data, &header)?;
+        let (sparse, charged_bytes) = if run.pool.try_reserve(charge) {
+            // The reservation covers the Vec allocation and every copied key
+            // before decoding materializes either of them.
+            match read_sparse_entries(&mut data, &header) {
+                Ok(entries) => (Some(entries), charge),
+                Err(error) => {
+                    run.pool.release(charge);
+                    return Err(error);
+                }
+            }
+        } else {
+            // The pool is the memory bound the transaction agreed to. Fall back
+            // to reading the index from the file rather than exceeding it.
+            (None, 0)
+        };
+        Ok(Self {
+            data,
+            range,
+            header,
+            range_header,
+            sparse,
+            charged_bytes,
+            pool: Arc::clone(&run.pool),
+        })
+    }
+
+    pub(super) fn header(&self) -> RunHeader {
+        self.header
+    }
+
+    pub(super) fn sparse_start(&mut self, target: Option<&[u8]>) -> MidgeResult<u64> {
+        if let Some(entries) = &self.sparse {
+            return Ok(sparse_start_in(entries, target));
+        }
+        sparse_start_for_key(&mut self.data, &self.header, target)
+    }
+
+    pub(super) fn sparse_chunks(&mut self) -> MidgeResult<Vec<(u64, u64)>> {
+        if let Some(entries) = &self.sparse {
+            return Ok(sparse_chunks_from_entries(
+                entries,
+                self.header.ordinal_table_offset,
+            ));
+        }
+        read_sparse_chunks(&mut self.data, &self.header)
+    }
+}
+
+impl Drop for RunReader {
+    fn drop(&mut self) {
+        self.pool.release(self.charged_bytes);
+        self.charged_bytes = 0;
+    }
+}
+
+fn sparse_charge_upper_bound(file: &RunFile, header: &RunHeader) -> MidgeResult<usize> {
+    let encoded_bytes = file
+        .len()?
+        .checked_sub(header.sparse_index_offset)
+        .ok_or_else(|| {
+            MidgeError::Corruption(
+                "transaction spill sparse index starts beyond end of file".to_string(),
+            )
+        })?;
+    let encoded_bytes = u64_to_usize(encoded_bytes)?;
+    let slots = header
+        .sparse_count
+        .checked_mul(size_of::<(Bytes, u64)>())
+        .ok_or_else(|| {
+            MidgeError::Corruption(
+                "transaction spill sparse index reservation overflow".to_string(),
+            )
+        })?;
+    slots.checked_add(encoded_bytes).ok_or_else(|| {
+        MidgeError::Corruption("transaction spill sparse index reservation overflow".to_string())
+    })
+}
+
+/// Offset of the last indexed record whose key is strictly below `target`.
+///
+/// Runs are key-sorted, so every record for the target lies at or after that
+/// offset however many index strides the target's own records span.
+fn sparse_start_in(entries: &[(Bytes, u64)], target: Option<&[u8]>) -> u64 {
+    let Some(target) = target else {
+        return RUN_HEADER_LEN as u64;
+    };
+    let index = entries.partition_point(|(key, _)| key.as_ref() < target);
+    if index == 0 {
+        RUN_HEADER_LEN as u64
+    } else {
+        entries[index - 1].1
+    }
+}
+
+fn sparse_chunks_from_entries(entries: &[(Bytes, u64)], data_end: u64) -> Vec<(u64, u64)> {
+    entries
+        .iter()
+        .enumerate()
+        .map(|(index, (_, chunk_start))| {
+            let chunk_end = entries
+                .get(index + 1)
+                .map_or(data_end, |(_, offset)| *offset);
+            (*chunk_start, chunk_end)
+        })
+        .collect()
+}
 
 #[cfg(test)]
 pub(super) fn write_run(
@@ -17,15 +295,44 @@ pub(super) fn write_run(
     run_number: usize,
     ops: &mut [OrdinalOp],
 ) -> MidgeResult<SpillRun> {
-    write_run_with_budget(spill_dir, txn_id, run_number, ops, None)
+    write_run_with_budget(
+        spill_dir,
+        txn_id,
+        run_number,
+        ops,
+        None,
+        &Arc::new(TransactionMemoryPool::new(usize::MAX)),
+    )
 }
 
+#[cfg(test)]
 pub(super) fn write_run_with_budget(
     spill_dir: &Path,
     txn_id: u64,
     run_number: usize,
     ops: &mut [OrdinalOp],
     budget: Option<&SpillDiskBudget>,
+    pool: &Arc<TransactionMemoryPool>,
+) -> MidgeResult<SpillRun> {
+    write_run_with_reader_cache(
+        spill_dir,
+        txn_id,
+        run_number,
+        ops,
+        budget,
+        pool,
+        &Arc::new(SpillReaderCache::default()),
+    )
+}
+
+pub(super) fn write_run_with_reader_cache(
+    spill_dir: &Path,
+    txn_id: u64,
+    run_number: usize,
+    ops: &mut [OrdinalOp],
+    budget: Option<&SpillDiskBudget>,
+    pool: &Arc<TransactionMemoryPool>,
+    reader_cache: &Arc<SpillReaderCache>,
 ) -> MidgeResult<SpillRun> {
     let path = spill_dir.join(format!("{txn_id:016x}-{run_number:08x}.run"));
     let temp_path = path.with_extension("run.tmp");
@@ -68,6 +375,8 @@ pub(super) fn write_run_with_budget(
         path,
         range_path,
         record_count: ops.len(),
+        pool: Arc::clone(pool),
+        reader_cache: Arc::clone(reader_cache),
         _disk_charge: disk_charge,
     })
 }
@@ -153,7 +462,8 @@ fn write_run_file(path: &Path, ops: &mut [OrdinalOp]) -> MidgeResult<()> {
     )?;
     file.seek(SeekFrom::Start(0))?;
     file.write_all(&header)?;
-    file.sync_all()?;
+    // Spill runs are pre-commit scratch that startup deletes wholesale, so an
+    // fsync here buys no durability and only costs write latency.
     Ok(())
 }
 
@@ -175,6 +485,7 @@ fn encode_header(
     Ok(header)
 }
 
+#[derive(Debug, Clone, Copy)]
 pub(super) struct RunHeader {
     pub(super) record_count: usize,
     pub(super) ordinal_table_offset: u64,
@@ -182,9 +493,9 @@ pub(super) struct RunHeader {
     pub(super) sparse_count: usize,
 }
 
-pub(super) fn read_header(file: &mut File) -> MidgeResult<RunHeader> {
+pub(super) fn read_header(file: &mut RunFile) -> MidgeResult<RunHeader> {
     let mut header = [0_u8; RUN_HEADER_LEN];
-    file.seek(SeekFrom::Start(0))?;
+    file.seek_to(0)?;
     file.read_exact(&mut header)?;
     if &header[..8] != RUN_MAGIC {
         return Err(MidgeError::Corruption(
@@ -215,7 +526,7 @@ pub(super) fn for_each_run_ordinal<F>(run: &SpillRun, mut visitor: F) -> MidgeRe
 where
     F: FnMut(OrdinalOp) -> MidgeResult<()>,
 {
-    let mut file = File::open(&run.path)?;
+    let mut file = RunFile::open(&run.path)?;
     let header = read_header(&mut file)?;
     if header.record_count != run.record_count {
         return Err(MidgeError::Corruption(
@@ -224,7 +535,7 @@ where
     }
     let mut table_cursor = header.ordinal_table_offset;
     for _ in 0..header.record_count {
-        file.seek(SeekFrom::Start(table_cursor))?;
+        file.seek_to(table_cursor)?;
         let (payload, next_cursor) = read_frame(&mut file)?;
         table_cursor = next_cursor;
         if payload.len() != 16 {
@@ -239,7 +550,7 @@ where
                 "transaction spill ordinal offset is out of bounds".to_string(),
             ));
         }
-        file.seek(SeekFrom::Start(record_offset))?;
+        file.seek_to(record_offset)?;
         let (ordinal_op, _) = read_op_frame(&mut file)?;
         if ordinal_op.ordinal != ordinal {
             return Err(MidgeError::Corruption(
@@ -252,16 +563,27 @@ where
     validate_range_index(&run.range_path)
 }
 
-fn validate_sparse_index(file: &mut File, header: &RunHeader) -> MidgeResult<()> {
-    sparse_start_for_key(file, header, None).map(|_| ())
+fn validate_sparse_index(file: &mut RunFile, header: &RunHeader) -> MidgeResult<()> {
+    for_each_sparse_entry(file, header, |_, _| {})
 }
 
-pub(super) fn read_sparse_offsets(file: &mut File, header: &RunHeader) -> MidgeResult<Vec<u64>> {
+/// Decode and validate every sparse-index frame exactly once.
+///
+/// All three sparse readers share this walk so that the checksum, ordering, and
+/// bounds checks cannot drift apart between the cached and uncached paths.
+fn for_each_sparse_entry<F>(
+    file: &mut RunFile,
+    header: &RunHeader,
+    mut visitor: F,
+) -> MidgeResult<()>
+where
+    F: FnMut(&Bytes, u64),
+{
     let mut cursor = header.sparse_index_offset;
-    let mut previous_key: Option<Vec<u8>> = None;
-    let mut offsets = Vec::with_capacity(header.sparse_count);
-    for _ in 0..header.sparse_count {
-        file.seek(SeekFrom::Start(cursor))?;
+    let mut previous_key: Option<Bytes> = None;
+    let mut previous_offset: Option<u64> = None;
+    for index in 0..header.sparse_count {
+        file.seek_to(cursor)?;
         let (payload, next_cursor) = read_frame(file)?;
         cursor = next_cursor;
         if payload.len() < 12 {
@@ -278,7 +600,8 @@ pub(super) fn read_sparse_offsets(file: &mut File, header: &RunHeader) -> MidgeR
                 "transaction spill sparse index entry has invalid length".to_string(),
             ));
         }
-        let key = payload[4..key_end].to_vec();
+        let record_offset = read_u64_at(&payload, key_end)?;
+        let key = Bytes::from(payload).slice(4..key_end);
         if previous_key
             .as_ref()
             .is_some_and(|previous| previous > &key)
@@ -287,80 +610,86 @@ pub(super) fn read_sparse_offsets(file: &mut File, header: &RunHeader) -> MidgeR
                 "transaction spill sparse index is not sorted".to_string(),
             ));
         }
-        let record_offset = read_u64_at(&payload, key_end)?;
         if record_offset < RUN_HEADER_LEN as u64 || record_offset >= header.ordinal_table_offset {
             return Err(MidgeError::Corruption(
                 "transaction spill sparse index offset is out of bounds".to_string(),
             ));
         }
-        if offsets
-            .last()
-            .is_some_and(|previous| *previous >= record_offset)
-        {
+        if previous_offset.is_some_and(|previous| previous >= record_offset) {
             return Err(MidgeError::Corruption(
                 "transaction spill sparse offsets are not increasing".to_string(),
             ));
         }
-        offsets.push(record_offset);
+        if index == 0 && record_offset != RUN_HEADER_LEN as u64 {
+            return Err(MidgeError::Corruption(
+                "transaction spill sparse index does not cover the first record".to_string(),
+            ));
+        }
+        visitor(&key, record_offset);
         previous_key = Some(key);
+        previous_offset = Some(record_offset);
     }
-    if header.record_count != 0 && offsets.first().copied() != Some(RUN_HEADER_LEN as u64) {
+    if header.record_count != 0 && previous_offset.is_none() {
         return Err(MidgeError::Corruption(
             "transaction spill sparse index does not cover the first record".to_string(),
         ));
     }
-    Ok(offsets)
+    Ok(())
+}
+
+fn read_sparse_entries(file: &mut RunFile, header: &RunHeader) -> MidgeResult<Vec<(Bytes, u64)>> {
+    #[cfg(test)]
+    SPARSE_INDEX_DECODES.with(|decodes| decodes.set(decodes.get().saturating_add(1)));
+    let mut entries = Vec::with_capacity(header.sparse_count);
+    for_each_sparse_entry(file, header, |key, offset| {
+        entries.push((key.clone(), offset));
+    })?;
+    Ok(entries)
+}
+
+fn read_sparse_chunks(file: &mut RunFile, header: &RunHeader) -> MidgeResult<Vec<(u64, u64)>> {
+    let mut chunks = Vec::with_capacity(header.sparse_count);
+    let mut previous = None;
+    for_each_sparse_entry(file, header, |_, offset| {
+        if let Some(chunk_start) = previous {
+            chunks.push((chunk_start, offset));
+        }
+        previous = Some(offset);
+    })?;
+    if let Some(chunk_start) = previous {
+        chunks.push((chunk_start, header.ordinal_table_offset));
+    }
+    Ok(chunks)
+}
+
+pub(super) fn previous_sparse_offset(
+    file: &mut RunFile,
+    header: &RunHeader,
+    before: u64,
+) -> MidgeResult<Option<u64>> {
+    let mut previous = None;
+    for_each_sparse_entry(file, header, |_, offset| {
+        if offset < before {
+            previous = Some(offset);
+        }
+    })?;
+    Ok(previous)
 }
 
 pub(super) fn sparse_start_for_key(
-    file: &mut File,
+    file: &mut RunFile,
     header: &RunHeader,
     target: Option<&[u8]>,
 ) -> MidgeResult<u64> {
     // Start at the last indexed record whose key is strictly below the
     // target. Runs are sorted by key, so every record for the target lies at
     // or after it, however many index strides those records span.
-    let mut cursor = header.sparse_index_offset;
-    let mut previous_key: Option<Vec<u8>> = None;
     let mut selected_offset = RUN_HEADER_LEN as u64;
-    for _ in 0..header.sparse_count {
-        file.seek(SeekFrom::Start(cursor))?;
-        let (payload, next_cursor) = read_frame(file)?;
-        cursor = next_cursor;
-        if payload.len() < 12 {
-            return Err(MidgeError::Corruption(
-                "transaction spill sparse index entry is truncated".to_string(),
-            ));
+    for_each_sparse_entry(file, header, |key, offset| {
+        if target.is_some_and(|target| key.as_ref() < target) {
+            selected_offset = offset;
         }
-        let key_len = read_u32_at(&payload, 0)? as usize;
-        let key_end = 4_usize.checked_add(key_len).ok_or_else(|| {
-            MidgeError::Corruption("transaction spill sparse key length overflow".to_string())
-        })?;
-        if key_end.checked_add(8) != Some(payload.len()) {
-            return Err(MidgeError::Corruption(
-                "transaction spill sparse index entry has invalid length".to_string(),
-            ));
-        }
-        let key = payload[4..key_end].to_vec();
-        if previous_key
-            .as_ref()
-            .is_some_and(|previous| previous > &key)
-        {
-            return Err(MidgeError::Corruption(
-                "transaction spill sparse index is not sorted".to_string(),
-            ));
-        }
-        let record_offset = read_u64_at(&payload, key_end)?;
-        if record_offset < RUN_HEADER_LEN as u64 || record_offset >= header.ordinal_table_offset {
-            return Err(MidgeError::Corruption(
-                "transaction spill sparse index offset is out of bounds".to_string(),
-            ));
-        }
-        if target.is_some_and(|target| key.as_slice() < target) {
-            selected_offset = record_offset;
-        }
-        previous_key = Some(key);
-    }
+    })?;
     Ok(selected_offset)
 }
 
@@ -370,40 +699,40 @@ pub(super) fn lookup_run_key(
     ordinal_ceiling: u64,
     latest: &mut Option<(u64, IntentLookup)>,
 ) -> MidgeResult<()> {
-    let mut file = File::open(&run.path)?;
-    let header = read_header(&mut file)?;
-    if header.record_count != run.record_count {
-        return Err(MidgeError::Corruption(
-            "transaction spill record count changed".to_string(),
-        ));
-    }
-
-    let point_start = sparse_start_for_key(&mut file, &header, Some(key))?;
-    let mut cursor = point_start;
-    while cursor < header.ordinal_table_offset {
-        file.seek(SeekFrom::Start(cursor))?;
-        let (ordinal_op, next_cursor) = read_op_frame(&mut file)?;
-        if next_cursor > header.ordinal_table_offset {
-            return Err(MidgeError::Corruption(
-                "transaction spill data frame overlaps ordinal table".to_string(),
-            ));
-        }
-        cursor = next_cursor;
-        match ordinal_op.primary_key().cmp(key) {
-            std::cmp::Ordering::Less => {}
-            std::cmp::Ordering::Equal => match &ordinal_op.op {
-                TransactionOp::Put { .. } | TransactionOp::Delete { .. } => {
-                    if ordinal_op.ordinal < ordinal_ceiling {
-                        consider_lookup(&ordinal_op, key, latest);
+    run.with_reader(|reader| {
+        let header = reader.header();
+        let mut cursor = reader.sparse_start(Some(key))?;
+        while cursor < header.ordinal_table_offset {
+            reader.data.seek_to(cursor)?;
+            let (ordinal_op, next_cursor) = read_op_frame(&mut reader.data)?;
+            if next_cursor > header.ordinal_table_offset {
+                return Err(MidgeError::Corruption(
+                    "transaction spill data frame overlaps ordinal table".to_string(),
+                ));
+            }
+            cursor = next_cursor;
+            match ordinal_op.primary_key().cmp(key) {
+                std::cmp::Ordering::Less => {}
+                std::cmp::Ordering::Equal => match &ordinal_op.op {
+                    TransactionOp::Put { .. } | TransactionOp::Delete { .. } => {
+                        if ordinal_op.ordinal < ordinal_ceiling {
+                            consider_lookup(&ordinal_op, key, latest);
+                        }
                     }
-                }
-                TransactionOp::DeleteRange { .. } => {}
-            },
-            std::cmp::Ordering::Greater => break,
+                    TransactionOp::DeleteRange { .. } => {}
+                },
+                std::cmp::Ordering::Greater => break,
+            }
         }
-    }
 
-    lookup_range_index(&run.range_path, key, ordinal_ceiling, latest)
+        lookup_range_index(
+            &mut reader.range,
+            &reader.range_header,
+            key,
+            ordinal_ceiling,
+            latest,
+        )
+    })
 }
 
 fn write_op_frame(file: &mut File, ordinal_op: &OrdinalOp) -> MidgeResult<()> {
@@ -451,7 +780,7 @@ fn write_op_frame(file: &mut File, ordinal_op: &OrdinalOp) -> MidgeResult<()> {
     )
 }
 
-pub(super) fn read_op_frame(file: &mut File) -> MidgeResult<(OrdinalOp, u64)> {
+pub(super) fn read_op_frame(file: &mut RunFile) -> MidgeResult<(OrdinalOp, u64)> {
     let (payload_len, expected_crc) = read_frame_header(file)?;
     if payload_len < 30 {
         return Err(MidgeError::Corruption(
@@ -532,7 +861,7 @@ pub(super) fn read_op_frame(file: &mut File) -> MidgeResult<(OrdinalOp, u64)> {
             "transaction spill delete operation carries a TTL".to_string(),
         ));
     }
-    Ok((OrdinalOp { ordinal, op }, file.stream_position()?))
+    Ok((OrdinalOp { ordinal, op }, file.position()))
 }
 
 /// Read and checksum one key-sorted operation while retaining only its key.
@@ -540,7 +869,7 @@ pub(super) fn read_op_frame(file: &mut File) -> MidgeResult<(OrdinalOp, u64)> {
 /// A spilled value may be as large as a WAL frame. Scan cursors must not
 /// reconstruct that value merely to merge intent keys, so the second field is
 /// checksummed through a fixed scratch buffer and discarded.
-pub(super) fn read_op_primary_key_frame(file: &mut File) -> MidgeResult<(Bytes, u64)> {
+pub(super) fn read_op_primary_key_frame(file: &mut RunFile) -> MidgeResult<(Bytes, u64)> {
     let (payload_len, expected_crc) = read_frame_header(file)?;
     if payload_len < 30 {
         return Err(MidgeError::Corruption(
@@ -604,7 +933,7 @@ pub(super) fn read_op_primary_key_frame(file: &mut File) -> MidgeResult<(Bytes, 
             "transaction spill frame checksum mismatch".to_string(),
         ));
     }
-    Ok((Bytes::from(key), file.stream_position()?))
+    Ok((Bytes::from(key), file.position()))
 }
 
 fn write_frame(file: &mut File, payload: &[u8]) -> MidgeResult<()> {
@@ -654,7 +983,7 @@ pub(super) fn field_len_bytes(length: usize) -> MidgeResult<[u8; 4]> {
         .map_err(|_| MidgeError::ResourceLimit("transaction spill field is too large".to_string()))
 }
 
-pub(super) fn read_frame_header(file: &mut File) -> MidgeResult<(usize, u32)> {
+pub(super) fn read_frame_header(file: &mut RunFile) -> MidgeResult<(usize, u32)> {
     let mut frame_header = [0_u8; 8];
     file.read_exact(&mut frame_header)?;
     let length = read_u32_at(&frame_header, 0)? as usize;
@@ -666,13 +995,17 @@ pub(super) fn read_frame_header(file: &mut File) -> MidgeResult<(usize, u32)> {
     Ok((length, read_u32_at(&frame_header, 4)?))
 }
 
-pub(super) fn read_crc_exact(file: &mut File, dst: &mut [u8], crc: &mut u32) -> MidgeResult<()> {
+pub(super) fn read_crc_exact(file: &mut RunFile, dst: &mut [u8], crc: &mut u32) -> MidgeResult<()> {
     file.read_exact(dst)?;
     *crc = crc32c::crc32c_append(*crc, dst);
     Ok(())
 }
 
-pub(super) fn read_crc_vec(file: &mut File, length: usize, crc: &mut u32) -> MidgeResult<Vec<u8>> {
+pub(super) fn read_crc_vec(
+    file: &mut RunFile,
+    length: usize,
+    crc: &mut u32,
+) -> MidgeResult<Vec<u8>> {
     let mut bytes = Vec::new();
     bytes.try_reserve_exact(length).map_err(|_| {
         MidgeError::ResourceLimit(format!(
@@ -684,7 +1017,7 @@ pub(super) fn read_crc_vec(file: &mut File, length: usize, crc: &mut u32) -> Mid
     Ok(bytes)
 }
 
-fn read_frame(file: &mut File) -> MidgeResult<(Vec<u8>, u64)> {
+fn read_frame(file: &mut RunFile) -> MidgeResult<(Vec<u8>, u64)> {
     let (length, expected_crc) = read_frame_header(file)?;
     let mut payload = Vec::new();
     payload.try_reserve_exact(length).map_err(|_| {
@@ -699,7 +1032,7 @@ fn read_frame(file: &mut File) -> MidgeResult<(Vec<u8>, u64)> {
             "transaction spill frame checksum mismatch".to_string(),
         ));
     }
-    Ok((payload, file.stream_position()?))
+    Ok((payload, file.position()))
 }
 
 pub(super) fn read_u32_at(bytes: &[u8], offset: usize) -> MidgeResult<u32> {

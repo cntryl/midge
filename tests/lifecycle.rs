@@ -637,6 +637,31 @@ mod solid_cleanup {
     }
 
     #[test]
+    fn should_expose_only_the_combined_host_addressing_capability() {
+        // Arrange
+        let traits = read_source("src/io/traits.rs");
+        let mut sources = Vec::new();
+        collect_rust_sources(&source_path("src"), &mut sources);
+        let removed_capabilities = ["host_root", "host_path_anchor"];
+
+        // Act
+
+        // Assert
+        assert!(traits.contains("pub struct HostAddressing"));
+        assert!(traits.contains("fn host_addressing("));
+        for source in sources {
+            let content = fs::read_to_string(&source).expect("rust source should be readable");
+            for capability in removed_capabilities {
+                assert!(
+                    !content.contains(capability),
+                    "{} should use the combined host-addressing capability instead of {capability}",
+                    source.display()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn should_remove_legacy_manifest_sst_list_from_current_model() {
         // Arrange
         let manifest = production_source("src/metadata/manifest.rs");
@@ -702,7 +727,7 @@ mod solid_cleanup {
     }
 
     #[test]
-    fn should_keep_unsequenced_wal_append_op_out_of_public_writer_trait() {
+    fn should_keep_record_building_wal_appends_out_of_public_writer_trait() {
         // Arrange
         let wal_trait = production_source("src/wal/traits.rs");
         let filesystem_writer = production_source("src/wal/fs/writer_io.rs");
@@ -715,21 +740,25 @@ mod solid_cleanup {
             "WalWriter should expose the prebuilt-record append path"
         );
         assert!(
-            wal_trait.contains("fn append_op_with_seq("),
-            "WalWriter should keep the explicit-sequence append path"
-        );
-        assert!(
             wal_trait.contains("fn append_batch(&self, records: &[WalRecord])"),
             "WalWriter should keep the batch append path"
         );
-        assert!(
-            !wal_trait.contains("fn append_op("),
-            "WalWriter should not expose unsequenced append_op"
-        );
-        assert!(
-            !filesystem_writer.contains("fn append_op("),
-            "filesystem WAL writer should not reintroduce unsequenced append_op"
-        );
+        // A trait method that builds the record itself has no writer epoch to
+        // stamp, and recovery exempts epoch 0 from stale-writer fencing.
+        for helper in [
+            "fn append_op(",
+            "fn append_op_with_seq(",
+            "fn append_op_bytes(",
+        ] {
+            assert!(
+                !wal_trait.contains(helper),
+                "WalWriter should not expose a record-building append ({helper})"
+            );
+            assert!(
+                !filesystem_writer.contains(helper),
+                "filesystem WAL writer should not reintroduce {helper}"
+            );
+        }
     }
 
     #[test]
@@ -1048,7 +1077,11 @@ mod solid_cleanup {
         assert!(provider_config.contains("pub enum S3CredentialSource"));
         assert!(provider_config.contains("pub enum AzureCredentialSource"));
         assert!(provider_config.contains("pub enum GcsCredentialSource"));
-        assert!(provider_module.contains("pub(crate) use crate::config::CloudProviderConfig"));
+        // storage consumes the config-owned type where it needs it. It must not
+        // re-export it, which would make storage look like the owner; that
+        // direction is pinned by
+        // governance::should_import_config_types_directly_when_storage_needs_them.
+        assert!(provider_module.contains("use crate::config::CloudProviderConfig"));
         assert!(provider_config.contains("impl CloudProviderConfig"));
     }
 
@@ -1122,7 +1155,10 @@ mod solid_cleanup {
 
     #[test]
     fn should_keep_moved_config_types_out_of_lower_layers_engine_imports() {
-        // Arrange
+        // Arrange: these lower layers must reach config types through the
+        // config layer that owns them, never back up through the engine.
+        // Naming crate::config directly is the correct direction and is not
+        // forbidden here.
         let files = [
             "src/metadata/persistence.rs",
             "src/runtime/intent_persistence.rs",
@@ -1143,10 +1179,6 @@ mod solid_cleanup {
             "use crate::engine::api::CloudProviderConfig",
             "crate::engine::api::AzureCredentialSource",
             "crate::engine::api::GcsCredentialSource",
-            "crate::config::CloudProviderConfig",
-            "crate::config::AzureCredentialSource",
-            "crate::config::GcsCredentialSource",
-            "crate::config::S3CredentialSource",
         ];
 
         // Act / Assert
@@ -1388,7 +1420,7 @@ mod resource_cleanup {
     //! Tests that components properly clean up memory and other resources when
     //! dropped, ensuring the engine can run in constrained environments.
 
-    use cntryl_midge::sst::cache::{BlockCache, CacheKey, CachePolicyType};
+    use cntryl_midge::__internal::sst::cache::{BlockCache, CacheKey, CachePolicyType};
     use std::sync::Arc;
 
     #[test]
@@ -1476,18 +1508,9 @@ mod resource_cleanup {
         assert!(cache2.put(key, &data));
         assert!(cache3.put(key, &data));
 
-        assert_eq!(
-            cache1.get(&key).map(|v| (*v.data).clone()),
-            Some(data.clone())
-        );
-        assert_eq!(
-            cache2.get(&key).map(|v| (*v.data).clone()),
-            Some(data.clone())
-        );
-        assert_eq!(
-            cache3.get(&key).map(|v| (*v.data).clone()),
-            Some(data.clone())
-        );
+        assert_eq!(cache1.get(&key).map(|v| v.data), Some(data.clone()));
+        assert_eq!(cache2.get(&key).map(|v| v.data), Some(data.clone()));
+        assert_eq!(cache3.get(&key).map(|v| v.data), Some(data.clone()));
 
         // Assert - drop all three populated components together without deadlock
         drop((cache1, cache2, cache3));
@@ -1535,7 +1558,7 @@ mod resource_cleanup {
             let key = CacheKey::for_data(i, 0);
             let byte = u8::try_from(i).expect("test index fits in u8");
             let expected = bytes::Bytes::from(vec![byte; 32]);
-            assert_eq!(cache.get(&key).map(|v| (*v.data).clone()), Some(expected));
+            assert_eq!(cache.get(&key).map(|v| v.data), Some(expected));
         }
         assert_eq!(cache.len(), 10);
 

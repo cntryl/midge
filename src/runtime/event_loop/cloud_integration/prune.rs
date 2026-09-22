@@ -1,7 +1,7 @@
 //! Cloud-covered WAL pruning coordination.
 
 use super::super::EventLoop;
-use crate::runtime::hybrid_persistence::{CloudWalPruneGuard, HybridPersistence};
+use crate::runtime::hybrid_persistence::{CloudPersistence, CloudWalPruneGuard};
 
 // Amortize catalog, metadata, and SST proof round trips across strict-write
 // workloads that publish many small WAL segments. Keep the batch bounded so a
@@ -12,7 +12,7 @@ const CLOUD_WAL_PRUNE_BATCH_SIZE: usize = 32;
 const CLOUD_WAL_PRUNE_WORK_QUANTUM: std::time::Duration = std::time::Duration::from_millis(100);
 
 fn run_cloud_wal_prune_preflight(
-    storage: &crate::storage::HybridStorage,
+    storage: &CloudPersistence,
     candidates: &[(u64, u64)],
     candidate_ids: Vec<u64>,
     metadata_snapshot: Option<crate::runtime::hybrid_persistence::CloudMetadataPruneSnapshot>,
@@ -194,7 +194,7 @@ impl EventLoop {
             .name(worker_name)
             .spawn(move || {
                 run_cloud_wal_prune_preflight(
-                    storage.as_ref(),
+                    &CloudPersistence::new(storage),
                     &candidates,
                     worker_candidate_ids,
                     metadata_snapshot,

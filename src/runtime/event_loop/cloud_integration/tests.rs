@@ -1,12 +1,18 @@
 use super::super::tests::{create_test_cloud_event_loop, create_test_event_loop};
 use super::super::wal::{ApplyTransactionRequest, WalCoordinator};
 use super::super::EventLoop;
-use crate::runtime::durability::DurabilityWaiter;
-use crate::runtime::hybrid_persistence::HybridPersistence;
+use crate::runtime::durability::{DurabilityWaiter, TestDurabilityWaiter};
+use crate::runtime::hybrid_persistence::CloudPersistence;
+
+/// Wrap the raw hybrid backend in the runtime persistence layer under test.
+fn cloud_persistence(storage: &Arc<crate::storage::HybridStorage>) -> CloudPersistence {
+    CloudPersistence::new(Arc::clone(storage))
+}
+use crate::runtime::TestRuntimeMsg;
 use crate::runtime::{
     state::RuntimeState, ConflictPolicy, KeyAssertion, ResponseRouter, RuntimeMsg, RuntimeResponse,
 };
-use crate::sst::Memtable;
+use crate::types::EntryType;
 use crate::wal::DurabilityPolicy;
 use bytes::Bytes;
 use std::path::{Path, PathBuf};
@@ -117,7 +123,7 @@ fn should_give_ready_compaction_a_turn_before_continuing_flushes() -> crate::com
     el.state.set_compaction_enabled(true);
     el.state.manifest.next_sst_seqs.insert(0, 5);
     for number in 1..=4 {
-        let name = crate::sst::file_name(0, 0, number);
+        let name = crate::cloud_layout::file_name(0, 0, number);
         let bytes = add_valid_manifest_sst_for_test(&mut el, &name, 81);
         write_test_file(el.state.sst_dir.join(&name), &bytes);
     }
@@ -1213,7 +1219,7 @@ fn seal_segment_for_test(el: &mut EventLoop) -> crate::common::MidgeResult<(u64,
     let (seg_id, max_sequence) = seal_segment_without_remote_proof_for_test(el)?;
     if let Some(storage) = el.hybrid_storage.as_ref() {
         let local_path = el.state.wal_dir.join(crate::wal::segment_file_name(seg_id));
-        storage
+        cloud_persistence(storage)
             .publish_remote_wal_segment(
                 seg_id,
                 max_sequence,
@@ -1352,7 +1358,7 @@ fn publish_remote_wal_bytes_for_test(
     write_test_file(local_path.clone(), bytes);
     write_test_file(remote_wal_path_for_test(el, segment_id), bytes);
     if let Some(storage) = el.hybrid_storage.as_ref() {
-        storage
+        cloud_persistence(storage)
             .publish_remote_wal_segment(
                 segment_id,
                 max_sequence,
@@ -1444,7 +1450,7 @@ fn valid_sst_bytes_for_test(key: &[u8], value: &[u8], seq: u64) -> Vec<u8> {
     let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
     let mut writer = factory.create().expect("create test SST writer");
     writer
-        .add_with_meta(key, Some(value), seq, 0, None)
+        .add_with_meta(key, Some(value), seq, EntryType::Put, None)
         .expect("add test SST entry");
     writer.finish_bytes().expect("finish test SST bytes")
 }
@@ -1464,7 +1470,7 @@ fn valid_value_sst_bytes_with_expiration_for_test(
             key,
             Some(value),
             seq,
-            crate::wal::WalOpKind::Put.to_wire_format(),
+            crate::types::EntryType::Put,
             Some(expiration),
         )
         .expect("add expiring test SST entry");
@@ -1477,10 +1483,10 @@ fn valid_sst_bytes_without_key_for_test(seq: u64) -> Vec<u8> {
     let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
     let mut writer = factory.create().expect("create test SST writer");
     writer
-        .add_with_meta(b"a", Some(b"first"), seq, 0, None)
+        .add_with_meta(b"a", Some(b"first"), seq, EntryType::Put, None)
         .expect("add first test SST entry");
     writer
-        .add_with_meta(b"z", Some(b"last"), seq, 0, None)
+        .add_with_meta(b"z", Some(b"last"), seq, EntryType::Put, None)
         .expect("add last test SST entry");
     writer.finish_bytes().expect("finish test SST bytes")
 }
@@ -1491,13 +1497,7 @@ fn valid_point_tombstone_sst_bytes_for_test(key: &[u8], seq: u64) -> Vec<u8> {
     let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
     let mut writer = factory.create().expect("create test SST writer");
     writer
-        .add_with_meta(
-            key,
-            None,
-            seq,
-            crate::wal::WalOpKind::Delete.to_wire_format(),
-            None,
-        )
+        .add_with_meta(key, None, seq, crate::types::EntryType::Delete, None)
         .expect("add point tombstone test SST entry");
     writer.finish_bytes().expect("finish test SST bytes")
 }
@@ -1627,7 +1627,7 @@ fn put_cloud_metadata_for_test(
     file_name: &str,
     data: Vec<u8>,
 ) {
-    let key = crate::storage::cloud::cloud_metadata_key(file_name);
+    let key = crate::cloud_layout::CloudObjectLayout::metadata_key(file_name);
     let (tx, rx) = std::sync::mpsc::channel();
     cloud.submit_put(&key, data, vec![], tx);
     match rx.recv_timeout(Duration::from_secs(1)) {
@@ -1643,7 +1643,7 @@ fn get_cloud_metadata_for_test(
     cloud: &crate::storage::cloud::CloudStorage,
     file_name: &str,
 ) -> Vec<u8> {
-    let key = crate::storage::cloud::cloud_metadata_key(file_name);
+    let key = crate::cloud_layout::CloudObjectLayout::metadata_key(file_name);
     let (tx, rx) = std::sync::mpsc::channel();
     cloud.submit_get(&key, tx);
     match rx.recv_timeout(Duration::from_secs(1)) {
@@ -1667,7 +1667,7 @@ fn put_all_cloud_metadata_for_test(cloud: &crate::storage::cloud::CloudStorage, 
 }
 
 fn delete_cloud_metadata_for_test(cloud: &crate::storage::cloud::CloudStorage, file_name: &str) {
-    let key = crate::storage::cloud::cloud_metadata_key(file_name);
+    let key = crate::cloud_layout::CloudObjectLayout::metadata_key(file_name);
     let (tx, rx) = std::sync::mpsc::channel();
     cloud.submit_delete(&key, tx);
     match rx.recv_timeout(Duration::from_secs(1)) {
@@ -2679,9 +2679,7 @@ fn should_retain_reclaimed_sst_when_salvage_metadata_mirror_exceeds_deadline(
     )));
     let sst_name = "salvage-retained-after-mirror-timeout.sst";
     let sst_bytes = valid_sst_bytes_for_test(b"salvage", b"value", 64);
-    el.hybrid_storage
-        .as_ref()
-        .expect("hybrid storage")
+    cloud_persistence(el.hybrid_storage.as_ref().expect("hybrid storage"))
         .write_sst_object(sst_name, sst_bytes)?;
     el.gc_actor
         .queue_manifest_reclamation([sst_name.to_string()]);
@@ -2717,9 +2715,7 @@ fn should_retry_manifest_reclamation_after_metadata_publication_timeout(
     )));
     let sst_name = "reclaimed-after-metadata-retry.sst";
     let sst_bytes = valid_sst_bytes_for_test(b"retry", b"value", 65);
-    el.hybrid_storage
-        .as_ref()
-        .expect("hybrid storage")
+    cloud_persistence(el.hybrid_storage.as_ref().expect("hybrid storage"))
         .write_sst_object(sst_name, sst_bytes)?;
     el.gc_actor
         .queue_manifest_reclamation([sst_name.to_string()]);
@@ -2768,10 +2764,14 @@ fn should_retry_manifest_reclamation_under_continuous_request_load(
     assert!(el.gc_actor.manifest_reclamation_retry_due());
     let (msg_tx, msg_rx) = crossbeam::channel::unbounded::<RuntimeMsg>();
     msg_tx
-        .send(RuntimeMsg::Noop { request_id: 90_301 })
+        .send(RuntimeMsg::Test(TestRuntimeMsg::Noop {
+            request_id: 90_301,
+        }))
         .expect("queue first request");
     msg_tx
-        .send(RuntimeMsg::Noop { request_id: 90_302 })
+        .send(RuntimeMsg::Test(TestRuntimeMsg::Noop {
+            request_id: 90_302,
+        }))
         .expect("queue continuing request load");
 
     // Act: process one normal request while another remains queued.
@@ -3209,7 +3209,7 @@ fn should_publish_control_intent_before_remote_compaction_sst() -> crate::common
     el.state.set_compaction_enabled(false);
     let input_sst = "ordered-control-input.sst";
     add_valid_manifest_sst_for_test(&mut el, input_sst, 10);
-    let output_sst = crate::sst::compaction_file_name(0, 1, 11, 0);
+    let output_sst = crate::cloud_layout::compaction_file_name(0, 1, 11, 0);
     let output_bytes = valid_sst_bytes_for_test(b"ordered", b"value", 11);
     write_test_file(el.state.sst_dir.join(&output_sst), &output_bytes);
 
@@ -3271,7 +3271,7 @@ fn should_mirror_cleared_compaction_intent_after_cloud_sst_publish(
     let input_sst = "compaction-input.sst";
     add_valid_manifest_sst_for_test(&mut el, input_sst, 10);
 
-    let output_sst = crate::sst::compaction_file_name(0, 1, 10, 0);
+    let output_sst = crate::cloud_layout::compaction_file_name(0, 1, 10, 0);
     let output_bytes = valid_sst_bytes_for_test(b"prune-candidate", b"value", 10);
     write_test_file(el.state.sst_dir.join(&output_sst), &output_bytes);
 
@@ -3334,7 +3334,7 @@ fn should_unblock_compaction_waiters_when_cleared_compaction_intent_mirror_fails
     let input_sst = "mirror-fail-input.sst";
     add_valid_manifest_sst_for_test(&mut el, input_sst, 10);
 
-    let output_sst = crate::sst::compaction_file_name(0, 1, 10, 0);
+    let output_sst = crate::cloud_layout::compaction_file_name(0, 1, 10, 0);
     let output_bytes = valid_sst_bytes_for_test(b"prune-candidate", b"value", 10);
     write_test_file(el.state.sst_dir.join(&output_sst), &output_bytes);
 
@@ -3438,16 +3438,14 @@ fn should_delete_obsolete_cloud_sst_objects_after_compaction() -> crate::common:
         ..Default::default()
     });
     write_test_file(el.state.sst_dir.join(input_sst), &input_bytes);
-    el.hybrid_storage
-        .as_ref()
-        .expect("hybrid storage")
+    cloud_persistence(el.hybrid_storage.as_ref().expect("hybrid storage"))
         .write_sst_object(input_sst, input_bytes)?;
     assert!(
         remote_sst_path_for_test(&el, input_sst).exists(),
         "test setup should create the obsolete provider SST object"
     );
 
-    let output_sst = crate::sst::compaction_file_name(0, 1, 11, 0);
+    let output_sst = crate::cloud_layout::compaction_file_name(0, 1, 11, 0);
     let output_bytes = valid_sst_bytes_for_test(b"obsolete", b"new-value", 11);
     write_test_file(el.state.sst_dir.join(&output_sst), &output_bytes);
 
@@ -3524,7 +3522,7 @@ fn should_not_block_runtime_when_cloud_sst_delete_is_slow() -> crate::common::Mi
     let cloud_backend: Arc<dyn crate::storage::StorageBackend> =
         Arc::new(BlockingDeleteStorageBackend::new(
             cloud_backend_inner,
-            crate::sst::object_key(sst_name),
+            crate::cloud_layout::object_key(sst_name),
             delete_started_tx,
             Arc::clone(&release_delete),
         ));
@@ -3534,7 +3532,7 @@ fn should_not_block_runtime_when_cloud_sst_delete_is_slow() -> crate::common::Mi
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
     el.set_hybrid_storage(Arc::clone(&hybrid_storage));
-    hybrid_storage.write_sst_object(sst_name, sst_bytes)?;
+    cloud_persistence(&hybrid_storage).write_sst_object(sst_name, sst_bytes)?;
 
     let request_id = 4546;
     let response_rx = el.router.register(request_id, "TestRequest");
@@ -3548,10 +3546,10 @@ fn should_not_block_runtime_when_cloud_sst_delete_is_slow() -> crate::common::Mi
     // Act
     let started_at = Instant::now();
     el.handle_runtime_msg(
-        RuntimeMsg::DeleteObsoleteSsts {
+        RuntimeMsg::Test(TestRuntimeMsg::DeleteObsoleteSsts {
             request_id,
             sst_names: vec![sst_name.to_string()],
-        },
+        }),
         &msg_rx,
     );
     let elapsed = started_at.elapsed();
@@ -3614,7 +3612,7 @@ fn should_retry_failed_cloud_sst_delete_without_runtime_restart() -> crate::comm
     );
     let failing_cloud = Arc::new(FailOnceDeleteStorageBackend::new(
         cloud_backend_inner,
-        crate::sst::object_key(sst_name),
+        crate::cloud_layout::object_key(sst_name),
     ));
     let cloud_backend: Arc<dyn crate::storage::StorageBackend> =
         Arc::clone(&failing_cloud) as Arc<dyn crate::storage::StorageBackend>;
@@ -3624,7 +3622,7 @@ fn should_retry_failed_cloud_sst_delete_without_runtime_restart() -> crate::comm
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
     el.set_hybrid_storage(Arc::clone(&hybrid_storage));
-    hybrid_storage.write_sst_object(sst_name, sst_bytes)?;
+    cloud_persistence(&hybrid_storage).write_sst_object(sst_name, sst_bytes)?;
 
     let (retry_tx, retry_rx) = crossbeam::channel::unbounded();
     el.gc_actor.set_retry_notifier(Some(retry_tx));
@@ -3696,7 +3694,7 @@ fn should_join_cloud_gc_worker_before_runtime_shutdown() -> crate::common::Midge
     let cloud_backend: Arc<dyn crate::storage::StorageBackend> =
         Arc::new(BlockingDeleteStorageBackend::new(
             cloud_backend_inner,
-            crate::sst::object_key(sst_name),
+            crate::cloud_layout::object_key(sst_name),
             delete_started_tx,
             Arc::clone(&release_delete),
         ));
@@ -3706,15 +3704,15 @@ fn should_join_cloud_gc_worker_before_runtime_shutdown() -> crate::common::Midge
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
     el.set_hybrid_storage(Arc::clone(&hybrid_storage));
-    hybrid_storage.write_sst_object(sst_name, sst_bytes)?;
+    cloud_persistence(&hybrid_storage).write_sst_object(sst_name, sst_bytes)?;
 
     let request_id = 4547;
     let (_response_tx, msg_rx) = crossbeam::channel::unbounded();
     el.handle_runtime_msg(
-        RuntimeMsg::DeleteObsoleteSsts {
+        RuntimeMsg::Test(TestRuntimeMsg::DeleteObsoleteSsts {
             request_id,
             sst_names: vec![sst_name.to_string()],
-        },
+        }),
         &msg_rx,
     );
     delete_started_rx
@@ -4977,10 +4975,10 @@ fn should_validate_uncached_cloud_ack_before_local_wal_removal() -> crate::commo
     // Assert
     assert!(deferred, "CloudAsync append should wait for CloudAck");
     el.durability
-        .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+        .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
             request_id,
             sequence: seq,
-        });
+        }));
 
     let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
     let local_wal = el
@@ -5122,10 +5120,10 @@ fn should_not_advance_cloud_durability_across_unacked_segment_gap() -> crate::co
     // Assert
     assert!(first_deferred, "CloudAsync first append should defer");
     el.durability
-        .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+        .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
             request_id: first_request,
             sequence: first_seq,
-        });
+        }));
     let (first_segment, first_max_sequence) = seal_segment_for_test(&mut el)?;
 
     let second_request = 602u64;
@@ -5142,10 +5140,10 @@ fn should_not_advance_cloud_durability_across_unacked_segment_gap() -> crate::co
     )?;
     assert!(second_deferred, "CloudAsync second append should defer");
     el.durability
-        .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+        .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
             request_id: second_request,
             sequence: second_seq,
-        });
+        }));
     let (second_segment, second_max_sequence) = seal_segment_for_test(&mut el)?;
     assert!(second_segment > first_segment);
     let second_local_wal = el
@@ -5217,10 +5215,10 @@ fn should_drop_buffered_cloud_acks_when_earlier_segment_fails() -> crate::common
     // Assert
     assert!(first_deferred, "CloudAsync first append should defer");
     el.durability
-        .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+        .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
             request_id: first_request,
             sequence: first_seq,
-        });
+        }));
     let (first_segment, _) = seal_segment_for_test(&mut el)?;
 
     let second_request = 612u64;
@@ -5237,10 +5235,10 @@ fn should_drop_buffered_cloud_acks_when_earlier_segment_fails() -> crate::common
     )?;
     assert!(second_deferred, "CloudAsync second append should defer");
     el.durability
-        .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+        .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
             request_id: second_request,
             sequence: second_seq,
-        });
+        }));
     let (second_segment, second_max_sequence) = seal_segment_for_test(&mut el)?;
 
     el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
@@ -5295,19 +5293,17 @@ fn should_keep_local_wal_when_cached_remote_wal_proof_becomes_stale_before_cloud
     // Assert
     assert!(deferred, "CloudAsync append should wait for CloudAck");
     el.durability
-        .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+        .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
             request_id,
             sequence: seq,
-        });
+        }));
 
     let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
     let local_wal = el
         .state
         .wal_dir
         .join(crate::wal::segment_file_name(segment_id));
-    el.hybrid_storage
-        .as_ref()
-        .expect("hybrid storage")
+    cloud_persistence(el.hybrid_storage.as_ref().expect("hybrid storage"))
         .publish_remote_wal_segment(
             segment_id,
             max_sequence,
@@ -5482,10 +5478,10 @@ fn should_cloud_async_ack_confirm_idempotent_request() -> crate::common::MidgeRe
 
     // Queue waiter for this append (simulates EventLoop behavior)
     el.durability
-        .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+        .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
             request_id,
             sequence: seq,
-        });
+        }));
 
     // Simulate sealing & uploading segment for CloudAsync as EventLoop would do
     let (seg_id, max_sequence) = seal_segment_for_test(&mut el)?;
@@ -5541,10 +5537,10 @@ fn should_cloud_async_retry_after_ack_return_same_sequence_without_queueing(
 
     // Queue waiter for this append (simulates EventLoop behavior)
     el.durability
-        .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+        .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
             request_id,
             sequence: seq1,
-        });
+        }));
 
     // Simulate sealing & uploading segment for CloudAsync as EventLoop would do
     let (seg_id, max_sequence) = seal_segment_for_test(&mut el)?;
@@ -5599,7 +5595,13 @@ fn should_preserve_idempotency_allocation_when_failed_cloud_wal_remains_retryabl
         wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
         ..Default::default()
     };
-    let mut el = EventLoop::new(state, false, router, config, None)?;
+    let mut el = EventLoop::new(
+        state,
+        false,
+        router,
+        config,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
+    )?;
 
     // Act
 
@@ -5626,10 +5628,10 @@ fn should_preserve_idempotency_allocation_when_failed_cloud_wal_remains_retryabl
 
     // Queue waiter for this append (simulates EventLoop behavior)
     el.durability
-        .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+        .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
             request_id,
             sequence: seq1,
-        });
+        }));
 
     // Simulate sealing & uploading segment for CloudAsync as EventLoop would do
     let (seg_id, _max_sequence) = seal_segment_for_test(&mut el)?;
@@ -5672,10 +5674,10 @@ fn should_not_advance_cloud_frontier_across_failed_segment_gap() -> crate::commo
     )?;
     assert!(first_deferred);
     el.durability
-        .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+        .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
             request_id: 701,
             sequence: first_seq,
-        });
+        }));
     let (first_segment, first_max_sequence) = seal_segment_for_test(&mut el)?;
 
     let (second_seq, second_deferred) = el.wal_actor.append(
@@ -5691,10 +5693,10 @@ fn should_not_advance_cloud_frontier_across_failed_segment_gap() -> crate::commo
     )?;
     assert!(second_deferred);
     el.durability
-        .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+        .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
             request_id: 702,
             sequence: second_seq,
-        });
+        }));
     let (second_segment, second_max_sequence) = seal_segment_for_test(&mut el)?;
 
     // Act
@@ -6443,7 +6445,7 @@ fn should_seal_cloud_wal_with_segment_max_sequence_not_global_sequence(
         std::thread::sleep(Duration::from_millis(10));
     }
 
-    storage
+    cloud_persistence(storage)
         .publish_remote_wal_segment(
             segment_id,
             last_wal_sequence,
@@ -6454,10 +6456,10 @@ fn should_seal_cloud_wal_with_segment_max_sequence_not_global_sequence(
             &crate::common::OperationDeadline::unbounded(),
         )
         .expect("publish the actual segment frontier");
-    storage
+    cloud_persistence(storage)
         .verify_remote_wal_segment(segment_id, last_wal_sequence)
         .expect("remote WAL readback should prove the actual segment max sequence");
-    let overproof = storage
+    let overproof = cloud_persistence(storage)
         .verify_remote_wal_segment(segment_id, global_sequence_without_wal_records)
         .expect_err("remote WAL readback must reject a frontier above the segment contents");
     assert!(
@@ -6568,9 +6570,7 @@ fn complete_retry_and_ack(
         .inflight_segment_for_sequence(last_sequence)
         .expect("inflight segment for strict retry");
     copy_local_segment_to_remote_wal_for_test(el, seg_id);
-    el.hybrid_storage
-        .as_ref()
-        .expect("hybrid storage")
+    cloud_persistence(el.hybrid_storage.as_ref().expect("hybrid storage"))
         .publish_remote_wal_segment(
             seg_id,
             last_sequence,
@@ -7007,8 +7007,8 @@ fn should_back_off_runtime_wal_admission_when_storage_queue_is_full(
         1,
         u64::MAX,
     ));
-    storage.fence_cloud_wal_catalog(1)?;
-    storage.enqueue_wal_segment(
+    cloud_persistence(&storage).fence_cloud_wal_catalog(1)?;
+    cloud_persistence(&storage).enqueue_wal_segment(
         first_segment,
         &el.state
             .wal_dir
@@ -7181,9 +7181,7 @@ fn should_use_latest_surviving_waiter_deadline_given_older_waiter_already_expire
     );
 
     // Act
-    let deadline = el
-        .cloud_ack_deadline(segment_id)
-        .expect("a surviving waiter supplies a deadline");
+    let deadline = el.cloud_ack_deadline(segment_id);
 
     // Assert
     assert!(
@@ -7418,7 +7416,7 @@ fn should_not_start_wal_flush_when_lease_check_leaves_less_than_storage_budget(
         cloud,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
-    storage.fence_cloud_wal_catalog(1)?;
+    cloud_persistence(&storage).fence_cloud_wal_catalog(1)?;
     let leader_store: Arc<dyn crate::lease::LeaderStore> = Arc::new(DelayedLeaderStore::new(
         Duration::from_millis(80),
         "writer-1",
@@ -7435,7 +7433,13 @@ fn should_not_start_wal_flush_when_lease_check_leaves_less_than_storage_budget(
         leader_holder_id: Some("writer-1".to_string()),
         ..crate::runtime::RuntimeConfig::default()
     };
-    let mut el = EventLoop::new(state, false, Arc::clone(&router), config, None)?;
+    let mut el = EventLoop::new(
+        state,
+        false,
+        Arc::clone(&router),
+        config,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
+    )?;
     let sequence = append_cloud_async_put(&mut el)?;
     let active_segment = el.state.wal.current_segment_id;
     let request_id = 91_102;
@@ -7505,7 +7509,7 @@ fn should_back_off_failed_cloud_seal_while_normal_requests_make_progress(
     for request_id in 91_301..91_304 {
         response_receivers.push((request_id, el.router.register(request_id, "Noop")));
         msg_tx
-            .send(RuntimeMsg::Noop { request_id })
+            .send(RuntimeMsg::Test(TestRuntimeMsg::Noop { request_id }))
             .expect("queue unrelated request");
     }
 
@@ -7737,10 +7741,14 @@ fn should_retry_runtime_owned_wal_upload_under_continuous_request_load(
     );
     let (msg_tx, msg_rx) = crossbeam::channel::unbounded::<RuntimeMsg>();
     msg_tx
-        .send(RuntimeMsg::Noop { request_id: 90_401 })
+        .send(RuntimeMsg::Test(TestRuntimeMsg::Noop {
+            request_id: 90_401,
+        }))
         .expect("queue first request");
     msg_tx
-        .send(RuntimeMsg::Noop { request_id: 90_402 })
+        .send(RuntimeMsg::Test(TestRuntimeMsg::Noop {
+            request_id: 90_402,
+        }))
         .expect("queue continuing request load");
 
     // Act: process one normal request while another remains queued.
@@ -8013,7 +8021,7 @@ fn should_bound_pending_cloud_ack_given_shutdown_deadline() -> crate::common::Mi
         .state
         .wal_dir
         .join(crate::wal::segment_file_name(segment_id));
-    storage.enqueue_wal_segment(segment_id, &local_path, max_sequence)?;
+    cloud_persistence(&storage).enqueue_wal_segment(segment_id, &local_path, max_sequence)?;
     assert!(storage.process_uploads().is_empty());
     let ack_wait_started = Instant::now();
     while storage_event_rx.is_empty() && ack_wait_started.elapsed() < Duration::from_secs(2) {
@@ -8202,6 +8210,7 @@ fn should_defer_metadata_cleanup_before_provider_reads_when_shared_budget_is_exh
         el.state.fs.clone(),
         el.state.recovery_policy(),
         budget.clone(),
+        el.metadata_publication_lock.clone(),
     );
     let invoked = AtomicBool::new(false);
 
@@ -8318,13 +8327,14 @@ fn should_defer_metadata_cleanup_when_publication_lock_outlives_deadline(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());
-    let held = cloud.lock_metadata_publication();
+    let held = el.metadata_publication_lock.lock();
     let snapshot = crate::runtime::hybrid_persistence::CloudMetadataPruneSnapshot::new(
         cloud.clone(),
         el.state.db_path.clone(),
         el.state.fs.clone(),
         el.state.recovery_policy(),
         crate::common::resource_budget::ResourceBudget::new(1024 * 1024),
+        el.metadata_publication_lock.clone(),
     );
     let deadline = crate::common::OperationDeadline::from_budget(Duration::from_millis(200));
 
@@ -8363,10 +8373,10 @@ fn should_complete_cloud_ack_waiter_but_defer_local_wal_retirement_under_verific
     assert!(deferred);
     let response = el.router.register(request_id, "WalAppend");
     el.durability
-        .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+        .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
             request_id,
             sequence: seq,
-        });
+        }));
     let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
     let local_wal = el
         .state
@@ -8464,6 +8474,10 @@ impl crate::storage::cloud::CloudBackend for SilentBackend {
         self.retain(callback);
     }
 
+    fn submit_get_with_metadata(&self, _key: &str, callback: crate::storage::cloud::CloudCallback) {
+        self.retain(callback);
+    }
+
     fn submit_get_range(
         &self,
         _key: &str,
@@ -8475,6 +8489,19 @@ impl crate::storage::cloud::CloudBackend for SilentBackend {
     }
 
     fn submit_head(&self, _key: &str, callback: crate::storage::cloud::CloudCallback) {
+        self.retain(callback);
+    }
+
+    fn submit_delete(
+        &self,
+        _key: &str,
+        _headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        self.retain(callback);
+    }
+
+    fn submit_list(&self, _prefix: &str, callback: crate::storage::cloud::CloudCallback) {
         self.retain(callback);
     }
 }
@@ -8516,6 +8543,162 @@ fn should_report_timeout_when_the_cloud_never_answers_the_event_loop_mirror(
     assert!(
         waited < Duration::from_secs(30),
         "the mirror waited {waited:?}, so it is not bounded by the runtime budget"
+    );
+    Ok(())
+}
+
+/// Counts the range HEADs a compaction output's guarded proof costs.
+///
+/// A prepared output's proof carries its own backend, so counting here
+/// counts proof verifications exactly, without seeing unrelated traffic.
+struct CountingSstHeadBackend {
+    inner: Arc<crate::storage::filesystem::FileSystem>,
+    sst_key: String,
+    sst_range_heads: AtomicUsize,
+}
+
+impl crate::storage::StorageBackend for CountingSstHeadBackend {
+    fn submit_range_head(
+        &self,
+        key: &str,
+        timeout: Duration,
+        callback: crate::storage::StorageCallback,
+    ) {
+        if key == self.sst_key {
+            self.sst_range_heads.fetch_add(1, Ordering::SeqCst);
+        }
+        crate::storage::StorageBackend::submit_range_head(
+            self.inner.as_ref(),
+            key,
+            timeout,
+            callback,
+        );
+    }
+
+    crate::storage::forward_storage_backend!(
+        inner;
+        submit_read_range,
+        submit_read_with_metadata,
+        submit_read,
+        submit_write,
+        submit_write_with_headers,
+        submit_delete,
+        submit_delete_with_headers,
+        submit_list,
+        submit_head,
+    );
+}
+
+#[test]
+fn should_head_each_compaction_output_once_when_publishing_prepared_remote_outputs(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    el.state.set_compaction_enabled(false);
+
+    let input_sst = "compaction-input.sst";
+    add_valid_manifest_sst_for_test(&mut el, input_sst, 10);
+
+    let output_sst = crate::cloud_layout::compaction_file_name(0, 1, 10, 0);
+    let output_bytes = valid_sst_bytes_for_test(b"counted", b"value", 11);
+    write_test_file(el.state.sst_dir.join(&output_sst), &output_bytes);
+
+    // A proof for an output the worker already staged, pointing at a backend
+    // that counts how many times the event loop re-verifies it.
+    let counting = Arc::new(CountingSstHeadBackend {
+        inner: Arc::new(
+            crate::storage::filesystem::FileSystem::new(el.state.db_path.join("counted_store"))
+                .expect("counted cloud store"),
+        ),
+        sst_key: crate::cloud_layout::object_key(&output_sst),
+        sst_range_heads: AtomicUsize::new(0),
+    });
+    // Place the staged object in that store directly, so the HEAD the
+    // publication turn performs resolves against a real object.
+    let staged_path = el
+        .state
+        .db_path
+        .join("counted_store")
+        .join(crate::cloud_layout::object_key(&output_sst));
+    std::fs::create_dir_all(staged_path.parent().expect("staged object parent"))
+        .expect("staged object directory");
+    write_test_file(staged_path, &output_bytes);
+    // Read the staged object's real identity through the inner store, so the
+    // proof matches and the turn publishes. Going through `inner` keeps this
+    // setup HEAD out of the count.
+    let (metadata_tx, metadata_rx) = std::sync::mpsc::channel();
+    crate::storage::StorageBackend::submit_range_head(
+        counting.inner.as_ref(),
+        &crate::cloud_layout::object_key(&output_sst),
+        Duration::from_secs(5),
+        metadata_tx,
+    );
+    let metadata = match metadata_rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(crate::storage::StorageEvent::HeadComplete {
+            result: crate::storage::StorageOutcome::Ok(metadata),
+            ..
+        }) => metadata,
+        other => panic!("staged object identity unavailable: {other:?}"),
+    };
+    let proof = crate::storage::hybrid::backend::GuardedObjectProof::range_identity(
+        Arc::clone(&counting) as Arc<dyn crate::storage::StorageBackend>,
+        crate::cloud_layout::object_key(&output_sst),
+        metadata,
+    );
+    el.compaction_actor
+        .prepare_for_completion_test(&mut el.state, &[input_sst.to_string()])?;
+    // Seed after prepare_for_completion_test: preparing a compaction clears
+    // the staged-output map.
+    el.compaction_actor.insert_prepared_output_for_test(
+        &output_sst,
+        crate::runtime::actors::compaction::PreparedCompactionOutput {
+            metadata: crate::runtime::FileMeta {
+                name: output_sst.clone(),
+                level: 1,
+                size_bytes: output_bytes.len() as u64,
+                content_crc32c: None,
+                cf_id: 0,
+                smallest_key: Some(b"counted".to_vec()),
+                largest_key: Some(b"counted".to_vec()),
+                smallest_seq: Some(11),
+                largest_seq: Some(11),
+                key_bounds_complete: true,
+            },
+            proof: Some(proof),
+        },
+    );
+    let request_id = 5252;
+    let response_rx = el.router.register(request_id, "TestRequest");
+    let (_tx, msg_rx) = crossbeam::channel::unbounded();
+
+    // Act
+    el.handle_runtime_msg(
+        RuntimeMsg::CompactionComplete {
+            request_id,
+            input_ssts: vec![input_sst.to_string()],
+            output_ssts: vec![output_sst.clone()],
+            cf_id: 0,
+            target_level: 1,
+            succeeded: true,
+        },
+        &msg_rx,
+    );
+
+    // Assert
+    assert!(
+        matches!(
+            response_rx.recv_timeout(Duration::from_secs(5)),
+            Ok(RuntimeResponse::Ok { .. })
+        ),
+        "the publication turn must succeed for its round-trip count to mean anything"
+    );
+    assert_eq!(
+        counting.sst_range_heads.load(Ordering::SeqCst),
+        1,
+        "one publication turn must verify each staged output's proof once, \
+         not once per code path that happens to hold the proof"
     );
     Ok(())
 }

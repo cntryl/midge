@@ -5,7 +5,7 @@
 #[path = "./stress_config.rs"]
 mod stress_config;
 
-use cntryl_midge::sst::cache::{BlockCache, CacheKey, CachePolicyType};
+use cntryl_midge::__internal::sst::cache::{BlockCache, CacheKey, CachePolicyType};
 use cntryl_midge::Bytes;
 use cntryl_stress::{black_box, stress, stress_main, StressContext};
 

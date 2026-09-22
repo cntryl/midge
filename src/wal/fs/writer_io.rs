@@ -66,6 +66,7 @@ impl FsWalWriterIo {
     /// # Errors
     ///
     /// Returns an error if the WAL file cannot be created or opened.
+    #[cfg(test)]
     pub fn new(path_str: &str, fs: Arc<dyn Fs>) -> MidgeResult<Self> {
         Self::new_with_timeout(path_str, fs, crate::config::DEFAULT_STORAGE_IO_TIMEOUT)
     }

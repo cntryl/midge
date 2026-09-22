@@ -1,4 +1,4 @@
-//! SST block compression helpers and policies.
+//! Shared persisted block and WAL compression helpers and policies.
 
 use crate::common::MidgeResult;
 use bytes::Bytes;
@@ -82,6 +82,77 @@ pub const MAX_DECOMPRESSED_BLOCK_SIZE: usize = 64 * 1024 * 1024;
 
 /// Block trailer size (`compression_type` + crc32c)
 pub const BLOCK_TRAILER_SIZE: usize = 5;
+
+/// Distinct safe bounds for decoding a compressed payload and reserving its
+/// destination buffer.
+///
+/// Frames without a zstd content size need a deliberately smaller decoder
+/// bound than their conservative reservation bound. Keeping both values avoids
+/// a drift between the WAL streaming preflight and the SST read path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DecompressedLenHint {
+    pub(crate) decode_limit: usize,
+    pub(crate) reservation_limit: usize,
+}
+
+/// Determine the bounded decoded-size hint for one compressed payload.
+///
+/// The returned reservation limit is suitable for accounting before a decode;
+/// the decode limit is the maximum output passed to the decoder itself.
+pub(crate) fn decompressed_len_hint(
+    algo: CompressionAlgo,
+    compressed: &[u8],
+) -> MidgeResult<DecompressedLenHint> {
+    match algo {
+        CompressionAlgo::None => Ok(DecompressedLenHint {
+            decode_limit: compressed.len(),
+            reservation_limit: compressed.len(),
+        }),
+        CompressionAlgo::Lz4 => {
+            if compressed.len() < 4 {
+                return Err(crate::common::MidgeError::Corruption(
+                    "LZ4 block is missing its size prefix".to_string(),
+                ));
+            }
+            let declared_size =
+                u32::from_le_bytes([compressed[0], compressed[1], compressed[2], compressed[3]])
+                    as usize;
+            let declared_size = enforce_decompressed_size(declared_size, "LZ4")?;
+            Ok(DecompressedLenHint {
+                decode_limit: declared_size,
+                reservation_limit: declared_size,
+            })
+        }
+        CompressionAlgo::Zstd3 | CompressionAlgo::Zstd9 => {
+            let declared_size = match zstd::zstd_safe::get_frame_content_size(compressed) {
+                Ok(Some(size)) => {
+                    let size = usize::try_from(size).map_err(|_| {
+                        crate::common::MidgeError::Corruption(format!(
+                            "Zstd frame content size {size} exceeds addressable memory"
+                        ))
+                    })?;
+                    Some(enforce_decompressed_size(size, "Zstd")?)
+                }
+                Ok(None) => None,
+                Err(error) => {
+                    return Err(crate::common::MidgeError::Corruption(format!(
+                        "Zstd frame content size unavailable: {error}"
+                    )))
+                }
+            };
+            Ok(match declared_size {
+                Some(size) => DecompressedLenHint {
+                    decode_limit: size,
+                    reservation_limit: size,
+                },
+                None => DecompressedLenHint {
+                    decode_limit: MAX_BLOCK_SIZE,
+                    reservation_limit: MAX_DECOMPRESSED_BLOCK_SIZE,
+                },
+            })
+        }
+    }
+}
 
 /// Compress block data according to policy
 ///
@@ -211,45 +282,18 @@ pub fn decompress_block(compressed: &[u8], algo: CompressionAlgo) -> MidgeResult
         CompressionAlgo::None => Ok(Bytes::copy_from_slice(compressed)),
 
         CompressionAlgo::Lz4 => {
-            if compressed.len() < 4 {
-                return Err(crate::common::MidgeError::Corruption(
-                    "LZ4 block is missing its size prefix".to_string(),
-                ));
-            }
-            let declared_size =
-                u32::from_le_bytes([compressed[0], compressed[1], compressed[2], compressed[3]])
-                    as usize;
-            enforce_decompressed_size(declared_size, "LZ4")?;
+            let hint = decompressed_len_hint(algo, compressed)?;
             let decompressed = lz4_flex::decompress_size_prepended(compressed).map_err(|e| {
                 crate::common::MidgeError::Corruption(format!("LZ4 decompression failed: {e}"))
             })?;
+            debug_assert!(decompressed.len() <= hint.decode_limit);
             Ok(Bytes::from(decompressed))
         }
 
         CompressionAlgo::Zstd3 | CompressionAlgo::Zstd9 => {
-            // Blocks are normally capped by the target size, but a single SST
-            // entry can be larger than that target and must remain readable.
-            // Frames produced by our zstd compressor include the content size,
-            // so use it as the bound and keep MAX_BLOCK_SIZE as the fallback for
-            // external frames without a declared size.
-            let max_decompressed_size = match zstd::zstd_safe::get_frame_content_size(compressed) {
-                Ok(Some(size)) => {
-                    let size = usize::try_from(size).map_err(|_| {
-                        crate::common::MidgeError::Corruption(format!(
-                            "Zstd frame content size {size} exceeds addressable memory"
-                        ))
-                    })?;
-                    enforce_decompressed_size(size, "Zstd")?
-                }
-                Ok(None) => MAX_BLOCK_SIZE,
-                Err(err) => {
-                    return Err(crate::common::MidgeError::Corruption(format!(
-                        "Zstd frame content size unavailable: {err}"
-                    )))
-                }
-            };
+            let hint = decompressed_len_hint(algo, compressed)?;
             let decompressed =
-                zstd::bulk::decompress(compressed, max_decompressed_size).map_err(|e| {
+                zstd::bulk::decompress(compressed, hint.decode_limit).map_err(|e| {
                     crate::common::MidgeError::Corruption(format!("Zstd decompression failed: {e}"))
                 })?;
             Ok(Bytes::from(decompressed))
@@ -349,46 +393,7 @@ pub(crate) fn decompressed_size_with_trailer(block: &[u8]) -> MidgeResult<usize>
         ))
     })?;
     let compressed = &block[..compressed_data_len];
-    match algo {
-        CompressionAlgo::None => Ok(compressed.len()),
-        CompressionAlgo::Lz4 => {
-            if compressed.len() < 4 {
-                return Err(crate::common::MidgeError::Corruption(
-                    "LZ4 block is missing its size prefix".to_string(),
-                ));
-            }
-            let size =
-                u32::from_le_bytes([compressed[0], compressed[1], compressed[2], compressed[3]])
-                    as usize;
-            if size > MAX_DECOMPRESSED_BLOCK_SIZE {
-                return Err(crate::common::MidgeError::Corruption(format!(
-                    "LZ4 declared output size {size} exceeds {MAX_DECOMPRESSED_BLOCK_SIZE} byte limit"
-                )));
-            }
-            Ok(size)
-        }
-        CompressionAlgo::Zstd3 | CompressionAlgo::Zstd9 => {
-            let size = match zstd::zstd_safe::get_frame_content_size(compressed) {
-                Ok(Some(size)) => usize::try_from(size).map_err(|_| {
-                    crate::common::MidgeError::Corruption(format!(
-                        "Zstd frame content size {size} exceeds addressable memory"
-                    ))
-                })?,
-                Ok(None) => MAX_DECOMPRESSED_BLOCK_SIZE,
-                Err(error) => {
-                    return Err(crate::common::MidgeError::Corruption(format!(
-                        "Zstd frame content size unavailable: {error}"
-                    )))
-                }
-            };
-            if size > MAX_DECOMPRESSED_BLOCK_SIZE {
-                return Err(crate::common::MidgeError::Corruption(format!(
-                    "Zstd declared output size {size} exceeds {MAX_DECOMPRESSED_BLOCK_SIZE} byte limit"
-                )));
-            }
-            Ok(size)
-        }
-    }
+    Ok(decompressed_len_hint(algo, compressed)?.reservation_limit)
 }
 
 /// Quick entropy check to detect if value is likely compressible.
@@ -1164,5 +1169,44 @@ mod tests {
         assert!(likely);
         assert!(codec.is_some());
         assert!(stored.len() < value.len());
+    }
+
+    #[test]
+    fn should_apply_distinct_decode_reservation_bounds_for_zstd_without_content_size() {
+        use std::io::Write;
+
+        // Arrange
+        let input = b"unknown zstd frame size stays bounded during decode".repeat(32);
+        let mut encoder =
+            zstd::stream::write::Encoder::new(Vec::new(), 3).expect("create zstd test encoder");
+        encoder
+            .set_pledged_src_size(Some(u64::try_from(input.len()).expect("input length fits")))
+            .expect("set zstd test input size");
+        encoder
+            .include_contentsize(false)
+            .expect("omit zstd content size");
+        encoder.write_all(&input).expect("write zstd test input");
+        let compressed = encoder.finish().expect("finish zstd test encoder");
+        assert!(matches!(
+            zstd::zstd_safe::get_frame_content_size(&compressed),
+            Ok(None)
+        ));
+
+        // Act
+        let hint = decompressed_len_hint(CompressionAlgo::Zstd3, &compressed)
+            .expect("derive zstd size hint");
+        let decoded = decompress_block(&compressed, CompressionAlgo::Zstd3)
+            .expect("decode zstd frame without content size");
+        let mut block = compressed;
+        block.push(CompressionAlgo::Zstd3.to_u8());
+        block.extend_from_slice(&crc32c::crc32c(&block).to_le_bytes());
+        let reservation = decompressed_size_with_trailer(&block)
+            .expect("reserve zstd block without content size");
+
+        // Assert
+        assert_eq!(hint.decode_limit, MAX_BLOCK_SIZE);
+        assert_eq!(hint.reservation_limit, MAX_DECOMPRESSED_BLOCK_SIZE);
+        assert_eq!(reservation, MAX_DECOMPRESSED_BLOCK_SIZE);
+        assert_eq!(decoded.as_ref(), input.as_slice());
     }
 }

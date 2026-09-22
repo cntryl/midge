@@ -1,5 +1,6 @@
 use super::{CloudStartupRecovery, MidgeError, MidgeResult};
-use crate::sst::identity::{ExpectedSst, ProofPolicy, SstIdentity};
+use crate::sst::identity::{ProofPolicy, SstIdentity};
+use crate::types::ExpectedSst;
 use std::path::Path;
 
 /// Describe a manifest proof for the shared identity checker.
@@ -90,13 +91,14 @@ impl CloudStartupRecovery {
 mod tests {
     use super::CloudStartupRecovery;
     use crate::metadata::FileMeta;
+    use crate::types::EntryType;
 
     fn write_sst(directory: &tempfile::TempDir, name: &str) -> (std::path::PathBuf, Vec<u8>) {
         let fs = std::sync::Arc::new(crate::io::RealFs::new(directory.path()).expect("open fs"));
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let mut writer = crate::sst::traits::SstFactory::create(&factory).expect("create writer");
         writer
-            .add_with_meta(b"key", Some(b"value"), 7, 0, None)
+            .add_with_meta(b"key", Some(b"value"), 7, EntryType::Put, None)
             .expect("add entry");
         let path = directory.path().join(name);
         crate::sst::fs::finish_writer_to_path(writer, &path).expect("finish sst");

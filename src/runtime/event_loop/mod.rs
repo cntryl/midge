@@ -46,6 +46,40 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// How flush work is executed for one `EventLoop`.
+///
+/// This is an explicit construction-time choice rather than a `cfg!(test)`
+/// branch, so the scheduling semantics a test exercises are the ones it asked
+/// for and are reproducible in a production build.
+pub(crate) enum FlushWorkerMode {
+    /// Flush jobs run on the flush actor's worker threads; completions are
+    /// observed asynchronously by the event loop, and background coordinators
+    /// post follow-up work back through the supplied runtime channel.
+    Background(Sender<RuntimeMsg>),
+    /// Flush jobs are drained to completion inline, before the call that
+    /// scheduled them returns. There is no runtime channel for background
+    /// workers to post back through.
+    ///
+    /// Only test fixtures construct the loop this way today. The variant stays
+    /// in the production enum so flush scheduling is chosen the same way, from
+    /// the same table, in every build.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Inline,
+}
+
+impl FlushWorkerMode {
+    fn worker_msg_tx(self) -> Option<Sender<RuntimeMsg>> {
+        match self {
+            FlushWorkerMode::Background(tx) => Some(tx),
+            FlushWorkerMode::Inline => None,
+        }
+    }
+
+    const fn is_inline(&self) -> bool {
+        matches!(self, FlushWorkerMode::Inline)
+    }
+}
+
 const BACKGROUND_COMPACTION_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const STARTUP_CLOUD_MAINTENANCE_DELAY: Duration = Duration::from_millis(100);
 const HYBRID_STORAGE_POLL_INTERVAL: Duration = Duration::from_millis(5);
@@ -57,7 +91,7 @@ use super::read_snapshot::ReadSnapshot;
 use super::snapshot_cache::{CfSnapshotData, PublishedSnapshot, SnapshotCache};
 use super::sst_read_view::SstReadViewCache;
 use super::state::RuntimeState;
-use super::{ResponseRouter, RuntimeMsg, RuntimeResponse};
+use super::{MetadataPublicationLock, ResponseRouter, RuntimeMsg, RuntimeResponse};
 use crate::runtime::actors::flush::FlushWorkerResult;
 
 struct RecoveredCloudWalConfig {
@@ -118,6 +152,7 @@ pub struct EventLoop {
     pub(super) hybrid_storage_events:
         Option<crossbeam::channel::Receiver<crate::storage::StorageEvent>>,
     pub(super) cloud_metadata_storage: Option<Arc<crate::storage::cloud::CloudStorage>>,
+    pub(super) metadata_publication_lock: MetadataPublicationLock,
     pub(super) trace_enabled: bool,
     pub(super) loop_debug: bool,
     pub(super) loop_debug_wakes: u64,
@@ -194,8 +229,10 @@ impl EventLoop {
         trace_enabled: bool,
         router: Arc<ResponseRouter>,
         config: super::RuntimeConfig,
-        worker_msg_tx: Option<crossbeam::channel::Sender<super::RuntimeMsg>>,
+        flush_worker_mode: FlushWorkerMode,
     ) -> crate::common::MidgeResult<Self> {
+        let inline_flush_worker = flush_worker_mode.is_inline();
+        let worker_msg_tx = flush_worker_mode.worker_msg_tx();
         let wal_dir = state.wal_dir.clone();
         let sst_dir = state.sst_dir.clone();
         let memory_mode = state.is_memory_mode();
@@ -257,6 +294,7 @@ impl EventLoop {
             hybrid_storage: None,
             hybrid_storage_events: config.hybrid_storage_events.clone(),
             cloud_metadata_storage: config.cloud_metadata_storage.clone(),
+            metadata_publication_lock: config.metadata_publication_lock.clone(),
             trace_enabled,
             loop_debug: std::env::var_os("MIDGE_LOOP_DEBUG").is_some(),
             loop_debug_wakes: 0,
@@ -280,7 +318,7 @@ impl EventLoop {
             publication_gate: ManifestPublicationGate::default(),
             flush_worker_result_rx,
             flush_barrier_waiters: HashMap::new(),
-            inline_flush_worker: cfg!(test) && worker_msg_tx.is_none(),
+            inline_flush_worker,
             shutting_down: false,
             shutdown_cloud_drain_timeout: config.shutdown_cloud_drain_timeout,
             worker_msg_tx,
@@ -505,11 +543,15 @@ impl EventLoop {
         });
 
         if let Some(read_resources) = &self.read_resources {
-            let live_names = self
+            // Live names change only when the manifest is rebuilt into the
+            // view cache; plain write batches never need to prune.
+            let rebuilt = self
                 .sst_read_views
                 .borrow_mut()
-                .live_names(&self.state.manifest);
-            read_resources.prune_to_live_ssts(&live_names);
+                .take_rebuilt_live_names(&self.state.manifest);
+            if let Some(live_names) = rebuilt {
+                read_resources.prune_to_live_ssts(&live_names);
+            }
         }
     }
 
@@ -524,19 +566,19 @@ impl EventLoop {
         sst_name: &str,
         budget: &crate::common::resource_budget::ResourceBudget,
     ) -> crate::common::MidgeResult<crate::runtime::FileMeta> {
-        if let Some((meta, proof)) = self.compaction_actor.prepared_remote_output(sst_name) {
+        if let Some(prepared) = self.compaction_actor.prepared_output(sst_name) {
+            let meta = prepared.metadata;
             if meta.cf_id != cf_id || meta.level != level || meta.name != sst_name {
                 return Err(crate::common::MidgeError::Corruption(
-                    "remote compaction output identity mismatch".into(),
+                    "compaction output identity mismatch".into(),
                 ));
             }
-            let storage = self.hybrid_storage.as_ref().ok_or_else(|| {
-                crate::common::MidgeError::Internal(
-                    "remote compaction output without cloud storage".into(),
-                )
-            })?;
-            storage
-                .verify_remote_object_guards_within(&[proof], &self.event_loop_cloud_deadline())?;
+            // The proof is verified in mirror_ssts_to_authoritative_cloud,
+            // which runs later in the same publication turn and immediately
+            // before the manifest batch. Checking it here as well spent a
+            // second provider round trip per output on the event loop, each
+            // with its own full runtime_response_timeout, and the earlier of
+            // the two proves strictly less.
             return Ok(meta);
         }
         let path = self.state.sst_dir.join(sst_name);
@@ -851,13 +893,16 @@ impl EventLoop {
         };
 
         for sst_name in sst_names {
-            if let Some((_metadata, proof)) = self.compaction_actor.prepared_remote_output(sst_name)
-            {
-                hybrid.verify_remote_object_guards_within(
-                    &[proof],
-                    &self.event_loop_cloud_deadline(),
-                )?;
-                continue;
+            if let Some(prepared) = self.compaction_actor.prepared_output(sst_name) {
+                // A local-only partition is summarized on the worker but never
+                // uploaded, so it has no proof and still needs mirroring here.
+                if let Some(proof) = prepared.proof {
+                    hybrid.verify_remote_object_guards_within(
+                        &[proof],
+                        &self.event_loop_cloud_deadline(),
+                    )?;
+                    continue;
+                }
             }
             let path = self.state.sst_dir.join(sst_name);
             crate::sst::fs::SstFileIo::summarize_with_real_fs_for_compaction(
@@ -866,7 +911,7 @@ impl EventLoop {
             )?;
             let (size, checksum) = crate::sst::fs::file_identity(&path)?;
             hybrid.publish_immutable_file(
-                &crate::sst::object_key(sst_name),
+                &crate::cloud_layout::object_key(sst_name),
                 &path,
                 size,
                 checksum,
@@ -893,7 +938,9 @@ impl EventLoop {
                     tracing::warn!(%error, sst_name = name, "retaining local SST cache after failed eviction");
                 }
             }
-            if let Err(error) = storage.evict_local_object_cache(&crate::sst::object_key(name)) {
+            if let Err(error) =
+                storage.evict_local_object_cache(&crate::cloud_layout::object_key(name))
+            {
                 tracing::warn!(%error, sst_name = name, "retaining secondary SST cache after failed eviction");
             }
         }
@@ -906,7 +953,7 @@ impl EventLoop {
     ) -> crate::common::MidgeResult<()> {
         let local_sequence = self.state.manifest.last_persisted_sequence;
         for file_name in crate::metadata::files::MANIFEST_BODIES {
-            let key = crate::storage::cloud::cloud_metadata_key(file_name);
+            let key = crate::cloud_layout::CloudObjectLayout::metadata_key(file_name);
             let Some(data) =
                 crate::storage::cloud::BlockingCloud::new(cloud, deadline).get_optional(&key)?
             else {
@@ -932,7 +979,7 @@ impl EventLoop {
         // cannot stop a stale holder before the new one publishes. Validate
         // writer authority before overwriting the authoritative mirror.
         self.validate_runtime_writer_lease_within(deadline)?;
-        let _publication_guard = cloud.try_lock_metadata_publication().ok_or_else(|| {
+        let _publication_guard = self.metadata_publication_lock.try_lock().ok_or_else(|| {
             crate::common::MidgeError::Busy(
                 "cloud metadata publication is already in progress".to_string(),
             )
@@ -998,7 +1045,7 @@ impl EventLoop {
         sst_name: &str,
         sequence: u64,
         file_meta: Option<crate::runtime::FileMeta>,
-        _frozen_memtable: Option<&std::sync::Arc<crate::sst::SkipListMemtable>>,
+        _frozen_memtable: Option<&std::sync::Arc<crate::memtable::SkipListMemtable>>,
     ) -> crate::common::MidgeResult<()> {
         let Some(file_meta) = file_meta else {
             return Ok(());
@@ -1092,7 +1139,6 @@ impl EventLoop {
             .active_compactions
             .load(std::sync::atomic::Ordering::Acquire);
         let layout_is_changing = active_compactions > 0
-            || self.state.compaction.pending_tasks > 0
             || !self.state.compaction.compacting_ssts.is_empty()
             || self.flush_actor.is_inflight()
             || self.publication_gate.active;
@@ -1194,10 +1240,6 @@ impl EventLoop {
         }
 
         if self.cloud_wal.uploads_ready() {
-            return true;
-        }
-
-        if self.state.compaction.pending_tasks > 0 {
             return true;
         }
 

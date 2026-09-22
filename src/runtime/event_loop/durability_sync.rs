@@ -4,7 +4,7 @@
 //! `complete_durability_waiters` helper that deduplicates the waiter-completion
 //! pattern used by cloud ack, WAL sync, and forced sync code paths.
 
-use super::super::durability::DurabilityWaiter;
+use super::super::durability::{DurabilityWaiter, TestDurabilityWaiter};
 use super::super::RuntimeMsg;
 use super::super::RuntimeResponse;
 use super::EventLoop;
@@ -24,38 +24,49 @@ pub(crate) enum CompletionSource {
     SealedGeneration,
 }
 
+/// Post-append state of a transaction the WAL accepted, as handed to the
+/// shared acknowledgement path.
+pub(super) struct AppliedTransaction<'a> {
+    pub(super) last_sequence: u64,
+    pub(super) op_count: usize,
+    /// The append has not reached durable storage yet, so the ack runs ahead
+    /// of the fsync and a confirm-only waiter has to close the gap.
+    pub(super) deferred: bool,
+    pub(super) touched_cfs: &'a [crate::types::ColumnFamilyId],
+}
+
 impl EventLoop {
-    #[inline]
-    pub(super) fn should_ack_immediately(&self, deferred: bool) -> bool {
-        // Ack policy:
-        // - Runtime write-path acks are immediate for all local modes and CloudAsync.
-        // - CloudStrict blocking is enforced by the engine commit path via
-        //   SealWalForCloud(wait_for_ack=true) before commit returns.
-        // - Batched/Strict runtime writes still ack immediately; durability is enforced
-        //   by explicit sync/flush barriers and read-path durability frontiers.
-        //
-        // In Batched mode, deferring the ack until fsync would serialize callers and
-        // defeat group commit (and can make tests look hung).
-        //
-        // CRITICAL: Background CloudAsync must NOT wait for cloud confirmation.
-        // CloudStrict waits happen in commit finalization, not in this runtime helper.
-        if self.wal_actor.is_cloud_async() {
-            // CloudAsync background mode: always ack immediately.
-            // Cloud upload runs asynchronously; commits never block on upload.
-            //
-            // NOTE: WriteOptions::cloud_strict() is handled at the transaction commit
-            // layer (engine/api/transaction.rs) which issues an explicit WalSync +
-            // flush-and-upload sequence. By the time we reach should_ack_immediately,
-            // the commit path has already ensured cloud durability for cloud_strict
-            // writes. Therefore, runtime-level ack policy is always "immediate" for
-            // CloudAsync — the blocking wait happens in the commit path, not here.
-            return true;
+    /// Acknowledge a transaction the WAL accepted.
+    ///
+    /// Ack policy: runtime write-path acks are immediate in every mode.
+    /// `Batched`/`Strict` durability is enforced by explicit sync/flush barriers
+    /// and read-path durability frontiers, `CloudStrict` blocking is enforced by
+    /// the engine commit path via `SealWalForCloud(wait_for_ack=true)` before
+    /// commit returns, and `CloudAsync` must never block a commit on upload.
+    /// Deferring the ack until fsync would serialize callers and defeat group
+    /// commit, so `deferred` only decides whether a confirm-only waiter is
+    /// queued, never whether the caller is answered now.
+    pub(super) fn ack_applied_transaction(
+        &mut self,
+        request_id: u64,
+        result: &AppliedTransaction<'_>,
+    ) {
+        if result.deferred {
+            self.maybe_queue_confirm_only_waiter(true, request_id, true);
+        } else {
+            self.state.clear_pending_transaction_barrier();
+            self.state.confirm_sequences(request_id);
         }
 
-        // Non-CloudAsync always acks immediately.
-        // `deferred` still matters for whether we queue confirm-only waiters.
-        let _ = deferred;
-        true
+        self.respond(
+            request_id,
+            RuntimeResponse::TransactionApplied {
+                request_id,
+                last_sequence: result.last_sequence,
+                op_count: result.op_count,
+                write_stall_hint: self.write_stall_hint_for_cfs(result.touched_cfs),
+            },
+        );
     }
 
     #[inline]
@@ -69,11 +80,6 @@ impl EventLoop {
         // strict durability handled earlier in the commit path)
         // then the request will be confirmed at response time.
         if !deferred {
-            return;
-        }
-
-        // Only queue confirm-only waiters when we are acknowledging before durability.
-        if !self.should_ack_immediately(deferred) {
             return;
         }
 
@@ -102,42 +108,11 @@ impl EventLoop {
     ) {
         for w in waiters {
             match w {
-                #[cfg(test)]
-                DurabilityWaiter::WalAppend {
-                    request_id,
-                    sequence,
-                } => {
-                    self.confirm_for_source(request_id, source);
-                    self.respond(
-                        request_id,
-                        RuntimeResponse::WalAppended {
-                            request_id,
-                            sequence,
-                        },
-                    );
+                DurabilityWaiter::Test(waiter) => {
+                    self.complete_test_durability_waiter(&waiter, source);
                 }
                 DurabilityWaiter::ConfirmWalAppend { request_id } => {
                     self.confirm_for_source(request_id, source);
-                }
-                DurabilityWaiter::TransactionApply {
-                    request_id,
-                    last_sequence,
-                    op_count,
-                    touched_cfs,
-                } => {
-                    if source != CompletionSource::CloudAck {
-                        self.state.clear_pending_transaction_barrier();
-                    }
-                    self.confirm_for_source(request_id, source);
-                    self.respond(
-                        request_id,
-                        RuntimeResponse::TransactionApplied {
-                            request_id,
-                            last_sequence,
-                            op_count,
-                            write_stall_hint: self.write_stall_hint_for_cfs(&touched_cfs),
-                        },
-                    );
                 }
                 DurabilityWaiter::ConfirmTransactionApply { request_id } => {
                     if source != CompletionSource::CloudAck {
@@ -147,33 +122,6 @@ impl EventLoop {
                 }
                 DurabilityWaiter::CloudDurability { request_id } => {
                     self.respond(request_id, RuntimeResponse::Ok { request_id });
-                }
-                #[cfg(test)]
-                DurabilityWaiter::Read {
-                    request_id,
-                    cf_id,
-                    key,
-                    sequence,
-                } => {
-                    let value = self.handle_read(cf_id, &key, sequence);
-                    self.respond(request_id, RuntimeResponse::ReadValue { request_id, value });
-                }
-                #[cfg(test)]
-                DurabilityWaiter::RangeScan {
-                    request_id,
-                    cf_id,
-                    start,
-                    end,
-                    sequence,
-                } => {
-                    let results = self.handle_range_scan(cf_id, &start, &end, sequence);
-                    self.respond(
-                        request_id,
-                        RuntimeResponse::RangeScanResults {
-                            request_id,
-                            results,
-                        },
-                    );
                 }
             }
 
@@ -214,16 +162,14 @@ impl EventLoop {
     ) {
         for waiter in waiters {
             let (request_id, clears_transaction_barrier, already_acknowledged) = match waiter {
-                DurabilityWaiter::TransactionApply { request_id, .. } => (request_id, true, false),
                 DurabilityWaiter::ConfirmTransactionApply { request_id } => {
                     (request_id, true, true)
                 }
                 DurabilityWaiter::ConfirmWalAppend { request_id } => (request_id, false, true),
                 DurabilityWaiter::CloudDurability { request_id } => (request_id, false, false),
-                #[cfg(test)]
-                DurabilityWaiter::WalAppend { request_id, .. }
-                | DurabilityWaiter::Read { request_id, .. }
-                | DurabilityWaiter::RangeScan { request_id, .. } => (request_id, false, false),
+                DurabilityWaiter::Test(waiter) => {
+                    Self::test_durability_waiter_failure_state(&waiter)
+                }
             };
             if clears_transaction_barrier {
                 self.state.clear_pending_transaction_barrier();
@@ -468,6 +414,86 @@ impl EventLoop {
 }
 
 #[cfg(test)]
+impl EventLoop {
+    fn complete_test_durability_waiter(
+        &mut self,
+        waiter: &TestDurabilityWaiter,
+        source: CompletionSource,
+    ) {
+        match waiter {
+            TestDurabilityWaiter::WalAppend {
+                request_id,
+                sequence,
+            } => {
+                self.confirm_for_source(*request_id, source);
+                self.respond(
+                    *request_id,
+                    RuntimeResponse::WalAppended {
+                        request_id: *request_id,
+                        sequence: *sequence,
+                    },
+                );
+            }
+            TestDurabilityWaiter::Read {
+                request_id,
+                cf_id,
+                key,
+                sequence,
+            } => {
+                let value = self.handle_read(*cf_id, key, *sequence);
+                self.respond(
+                    *request_id,
+                    RuntimeResponse::ReadValue {
+                        request_id: *request_id,
+                        value,
+                    },
+                );
+            }
+            TestDurabilityWaiter::RangeScan {
+                request_id,
+                cf_id,
+                start,
+                end,
+                sequence,
+            } => {
+                let results = self.handle_range_scan(*cf_id, start, end, *sequence);
+                self.respond(
+                    *request_id,
+                    RuntimeResponse::RangeScanResults {
+                        request_id: *request_id,
+                        results,
+                    },
+                );
+            }
+        }
+    }
+
+    fn test_durability_waiter_failure_state(waiter: &TestDurabilityWaiter) -> (u64, bool, bool) {
+        match waiter {
+            TestDurabilityWaiter::WalAppend { request_id, .. }
+            | TestDurabilityWaiter::Read { request_id, .. }
+            | TestDurabilityWaiter::RangeScan { request_id, .. } => (*request_id, false, false),
+        }
+    }
+}
+
+#[cfg(not(test))]
+impl EventLoop {
+    fn complete_test_durability_waiter(
+        &mut self,
+        waiter: &TestDurabilityWaiter,
+        _source: CompletionSource,
+    ) {
+        let _ = self;
+        match *waiter {}
+    }
+
+    fn test_durability_waiter_failure_state(waiter: &TestDurabilityWaiter) -> (u64, bool, bool) {
+        match *waiter {}
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::super::tests::create_test_state;
     use super::*;
@@ -545,22 +571,13 @@ mod tests {
             wal_durability_policy: policy,
             ..RuntimeConfig::default()
         };
-        EventLoop::new(state, false, router, config, None)
-    }
-
-    #[test]
-    fn should_ack_immediately_for_local_mode_regardless_of_deferred_flag() {
-        // Arrange
-        let event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
-            .expect("create event loop");
-
-        // Act
-        let ack_not_deferred = event_loop.should_ack_immediately(false);
-        let ack_deferred = event_loop.should_ack_immediately(true);
-
-        // Assert
-        assert!(ack_not_deferred);
-        assert!(ack_deferred);
+        EventLoop::new(
+            state,
+            false,
+            router,
+            config,
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
+        )
     }
 
     #[test]
@@ -627,7 +644,13 @@ mod tests {
             leader_holder_id: Some("old-writer".to_string()),
             ..RuntimeConfig::default()
         };
-        let mut event_loop = EventLoop::new(state, false, Arc::clone(&router), config, None)?;
+        let mut event_loop = EventLoop::new(
+            state,
+            false,
+            Arc::clone(&router),
+            config,
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
+        )?;
         event_loop.wal_actor.append_transaction(
             &mut event_loop.state,
             crate::runtime::actors::wal::TransactionAppendParams {
@@ -919,8 +942,14 @@ mod tests {
             },
             ..RuntimeConfig::default()
         };
-        let mut event_loop =
-            EventLoop::new(state, false, router, config, None).expect("create event loop");
+        let mut event_loop = EventLoop::new(
+            state,
+            false,
+            router,
+            config,
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
+        )
+        .expect("create event loop");
         let first_request = 88;
         let first_response = event_loop.router.register(first_request, "TestRequest");
         event_loop
@@ -962,18 +991,99 @@ mod tests {
     }
 
     #[test]
-    fn should_ack_immediately_for_cloud_async_mode_regardless_of_deferred_flag() {
+    fn should_queue_confirm_waiter_after_deferred_transaction_acknowledgement() {
         // Arrange
-        let event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::CloudAsync)
+        let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
             .expect("create event loop");
+        let response = event_loop.router.register(51, "ApplyTransaction");
+        event_loop.state.wal.local_durable_seq = 40;
+        event_loop.state.begin_pending_transaction(3);
+        event_loop.state.cache_sequences_for_test(51, (3, 2, 0));
 
         // Act
-        let ack_not_deferred = event_loop.should_ack_immediately(false);
-        let ack_deferred = event_loop.should_ack_immediately(true);
+        event_loop.ack_applied_transaction(
+            51,
+            &AppliedTransaction {
+                last_sequence: 4,
+                op_count: 2,
+                deferred: true,
+                touched_cfs: &[0],
+            },
+        );
 
         // Assert
-        assert!(ack_not_deferred);
-        assert!(ack_deferred);
+        assert!(matches!(
+            response.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(RuntimeResponse::TransactionApplied {
+                request_id: 51,
+                last_sequence: 4,
+                op_count: 2,
+                ..
+            })
+        ));
+        let waiters = event_loop.durability.drain_all_waiters();
+        assert!(matches!(
+            waiters.as_slice(),
+            [DurabilityWaiter::ConfirmTransactionApply { request_id: 51 }]
+        ));
+        // The append is not durable yet, so the barrier and the idempotency
+        // frontier must stay untouched for the confirm-only waiter to settle.
+        assert_eq!(
+            event_loop.state.pending_transaction_min_sequence(),
+            Some(3),
+            "deferred ack must leave the pending transaction barrier in place"
+        );
+        assert_eq!(
+            event_loop.state.idempotency_entry(51),
+            Some((3, 2, 0)),
+            "deferred ack must not advance the idempotency confirmed_at frontier"
+        );
+    }
+
+    #[test]
+    fn should_ack_without_confirm_waiter_when_applied_transaction_is_already_durable() {
+        // Arrange
+        let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
+            .expect("create event loop");
+        let response = event_loop.router.register(52, "ApplyTransaction");
+        event_loop.state.wal.local_durable_seq = 40;
+        event_loop.state.begin_pending_transaction(9);
+        event_loop.state.cache_sequences_for_test(52, (9, 1, 0));
+
+        // Act
+        event_loop.ack_applied_transaction(
+            52,
+            &AppliedTransaction {
+                last_sequence: 9,
+                op_count: 1,
+                deferred: false,
+                touched_cfs: &[0],
+            },
+        );
+
+        // Assert
+        assert!(matches!(
+            response.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(RuntimeResponse::TransactionApplied {
+                request_id: 52,
+                last_sequence: 9,
+                op_count: 1,
+                ..
+            })
+        ));
+        assert!(!event_loop.durability.has_pending_waiters());
+        // The append is already durable, so the ack itself must retire the
+        // barrier and advance the idempotency confirmed_at frontier.
+        assert_eq!(
+            event_loop.state.pending_transaction_min_sequence(),
+            None,
+            "durable ack must clear the pending transaction barrier"
+        );
+        assert_eq!(
+            event_loop.state.idempotency_entry(52),
+            Some((9, 1, 40)),
+            "durable ack must confirm the request's sequences at the durable frontier"
+        );
     }
 
     #[test]
@@ -1049,41 +1159,109 @@ mod tests {
     }
 
     #[test]
-    fn should_complete_transaction_with_stall_hint_from_waiter_column_family() {
+    fn should_complete_test_wal_append_waiter_through_unconditional_boundary() {
         // Arrange
         let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
             .expect("create event loop");
-        let secondary_cf = event_loop
-            .state
-            .create_cf("delayed-stall-cf".to_string())
-            .expect("create secondary column family");
-        event_loop.state.max_immutable_memtables = 1;
-        event_loop
-            .state
-            .get_cf_mut(secondary_cf)
-            .expect("secondary column family")
-            .immutable_memtables
-            .push(Arc::new(crate::sst::SkipListMemtable::new()));
-        let response_rx = event_loop.router.register(101, "TestRequest");
-        let waiter = DurabilityWaiter::TransactionApply {
-            request_id: 101,
-            last_sequence: 9,
-            op_count: 1,
-            touched_cfs: vec![secondary_cf],
-        };
+        let response = event_loop.router.register(73, "WalAppend");
+        let waiter = DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
+            request_id: 73,
+            sequence: 19,
+        });
 
         // Act
         event_loop.complete_durability_waiters(vec![waiter], CompletionSource::WalSync);
 
         // Assert
-        match response_rx
-            .recv_timeout(std::time::Duration::from_secs(1))
-            .expect("transaction response")
-        {
-            RuntimeResponse::TransactionApplied {
-                write_stall_hint, ..
-            } => assert!(write_stall_hint),
-            other => panic!("unexpected response: {other:?}"),
-        }
+        assert!(matches!(
+            response.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(RuntimeResponse::WalAppended {
+                request_id: 73,
+                sequence: 19,
+            })
+        ));
+    }
+
+    #[test]
+    fn should_complete_test_read_waiter_through_unconditional_boundary() {
+        // Arrange
+        let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
+            .expect("create event loop");
+        let response = event_loop.router.register(75, "Read");
+        let waiter = DurabilityWaiter::Test(TestDurabilityWaiter::Read {
+            request_id: 75,
+            cf_id: 0,
+            key: b"missing".to_vec(),
+            sequence: 0,
+        });
+
+        // Act
+        event_loop.complete_durability_waiters(vec![waiter], CompletionSource::WalSync);
+
+        // Assert
+        assert!(matches!(
+            response.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(RuntimeResponse::ReadValue {
+                request_id: 75,
+                value: None,
+            })
+        ));
+    }
+
+    #[test]
+    fn should_complete_test_range_scan_waiter_through_unconditional_boundary() {
+        // Arrange
+        let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
+            .expect("create event loop");
+        let response = event_loop.router.register(76, "RangeScan");
+        let waiter = DurabilityWaiter::Test(TestDurabilityWaiter::RangeScan {
+            request_id: 76,
+            cf_id: 0,
+            start: b"a".to_vec(),
+            end: b"z".to_vec(),
+            sequence: 0,
+        });
+
+        // Act
+        event_loop.complete_durability_waiters(vec![waiter], CompletionSource::WalSync);
+
+        // Assert
+        assert!(matches!(
+            response.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(RuntimeResponse::RangeScanResults {
+                request_id: 76,
+                results,
+            }) if results.is_empty()
+        ));
+    }
+
+    #[test]
+    fn should_preserve_transaction_barrier_when_test_waiter_fails() {
+        // Arrange
+        let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
+            .expect("create event loop");
+        event_loop.state.begin_pending_transaction(41);
+        let response = event_loop.router.register(74, "WalAppend");
+        let waiter = DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
+            request_id: 74,
+            sequence: 41,
+        });
+        let error = crate::common::MidgeError::Internal("injected waiter failure".to_string());
+
+        // Act
+        event_loop.fail_durability_waiters(vec![waiter], &error);
+
+        // Assert
+        assert_eq!(
+            event_loop.state.pending_transaction_min_sequence(),
+            Some(41)
+        );
+        assert!(matches!(
+            response.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(RuntimeResponse::Error {
+                request_id: 74,
+                error: crate::common::MidgeError::Internal(message),
+            }) if message == "injected waiter failure"
+        ));
     }
 }

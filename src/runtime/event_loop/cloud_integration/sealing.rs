@@ -1,7 +1,7 @@
 //! Cloud WAL segment sealing and flush scheduling.
 
 use super::super::EventLoop;
-use crate::runtime::hybrid_persistence::HybridPersistence;
+use crate::runtime::hybrid_persistence::CloudPersistence;
 use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
 use std::time::Instant;
 
@@ -13,10 +13,17 @@ struct CloudSealPlan {
 }
 
 impl EventLoop {
+    /// Seal the active cloud WAL segment on the event loop thread.
+    ///
+    /// Everything queued behind this call - reads, writes, acks, shutdown -
+    /// waits for it, so it gets the budget the runtime promises its callers
+    /// instead of waiting on the provider indefinitely. A timeout is a normal
+    /// failure: the caller logs it and the seal is attempted again later.
     pub(crate) fn seal_current_cloud_segment(
         &mut self,
     ) -> crate::common::MidgeResult<Option<(u64, u64)>> {
-        self.seal_current_cloud_segment_inner(false, &crate::common::OperationDeadline::unbounded())
+        let deadline = self.event_loop_cloud_deadline();
+        self.seal_current_cloud_segment_inner(false, &deadline)
     }
 
     pub(in crate::runtime::event_loop) fn seal_current_cloud_segment_within(
@@ -26,6 +33,12 @@ impl EventLoop {
         self.seal_current_cloud_segment_inner(false, deadline)
     }
 
+    /// Seal the WAL segment recovered at startup.
+    ///
+    /// Deliberately unbounded: this runs during open, before the event loop
+    /// serves any request, so nothing is stalled behind it. A bounded budget
+    /// would turn a slow provider into `RecoveryFailed` and fail the open,
+    /// where waiting succeeds. Retain data when unsure.
     pub(in crate::runtime::event_loop) fn seal_recovered_cloud_active_segment(
         &mut self,
     ) -> crate::common::MidgeResult<Option<(u64, u64)>> {
@@ -311,6 +324,7 @@ impl EventLoop {
                 "CloudAsync WAL upload backlog requires HybridStorage".to_string(),
             ));
         };
+        let storage = CloudPersistence::new(storage);
 
         if self.cloud_wal.upload_backlog.is_empty() {
             return Ok(());

@@ -2,8 +2,7 @@
 
 use super::{
     Arc, Duration, FlushCandidate, FlushReason, HashSet, ImmutableFlush, ImmutableFlushPhase,
-    Instant, Memtable, RuntimeState, SkipListMemtable, INITIAL_FLUSH_RETRY_BACKOFF,
-    MAX_FLUSH_RETRY_BACKOFF,
+    Instant, RuntimeState, SkipListMemtable, INITIAL_FLUSH_RETRY_BACKOFF, MAX_FLUSH_RETRY_BACKOFF,
 };
 
 impl RuntimeState {

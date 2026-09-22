@@ -1,7 +1,8 @@
 use super::*;
-use crate::runtime::hybrid_persistence::HybridPersistence;
+use crate::runtime::hybrid_persistence::CloudPersistence;
+use crate::runtime::TestRuntimeMsg;
 use crate::runtime::{state::RuntimeState, ResponseRouter};
-use crate::sst::Memtable;
+use crate::types::EntryType;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -72,7 +73,10 @@ fn should_drain_flush_completion_after_non_mutating_request() -> crate::common::
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
 
     // Act
-    event_loop.process_one(RuntimeMsg::Noop { request_id }, &msg_rx);
+    event_loop.process_one(
+        RuntimeMsg::Test(TestRuntimeMsg::Noop { request_id }),
+        &msg_rx,
+    );
 
     // Assert
     assert!(matches!(
@@ -145,7 +149,7 @@ pub(in crate::runtime::event_loop) fn create_test_event_loop(
         false,
         router,
         crate::runtime::RuntimeConfig::default(),
-        None,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
     )
 }
 
@@ -170,14 +174,20 @@ pub(in crate::runtime::event_loop) fn create_test_cloud_event_loop(
         cloud,
         storage_policy,
     ));
-    hybrid_storage.fence_cloud_wal_catalog(1)?;
+    CloudPersistence::new(Arc::clone(&hybrid_storage)).fence_cloud_wal_catalog(1)?;
     let config = crate::runtime::RuntimeConfig {
         wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
         hybrid_storage: Some(Arc::clone(&hybrid_storage)),
         writer_epoch: 1,
         ..crate::runtime::RuntimeConfig::default()
     };
-    EventLoop::new(state, false, router, config, None)
+    EventLoop::new(
+        state,
+        false,
+        router,
+        config,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
+    )
 }
 
 pub(in crate::runtime::event_loop) fn create_test_local_event_loop(
@@ -192,7 +202,7 @@ pub(in crate::runtime::event_loop) fn create_test_local_event_loop(
         false,
         router,
         crate::runtime::RuntimeConfig::default(),
-        None,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
     )
 }
 
@@ -223,10 +233,16 @@ fn should_require_cloud_filename_allocation_when_compacting_in_salvage_mode(
         cloud_metadata_storage: Some(Arc::clone(&cloud)),
         ..crate::runtime::RuntimeConfig::default()
     };
-    let mut event_loop =
-        EventLoop::new(state, false, Arc::new(ResponseRouter::new()), config, None)?;
-    let _publication = cloud
-        .try_lock_metadata_publication()
+    let mut event_loop = EventLoop::new(
+        state,
+        false,
+        Arc::new(ResponseRouter::new()),
+        config,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
+    )?;
+    let publication_lock = event_loop.metadata_publication_lock.clone();
+    let _publication = publication_lock
+        .try_lock()
         .expect("hold metadata publication");
 
     // Act
@@ -459,7 +475,7 @@ fn should_hold_cloud_frontier_at_local_recovery_gap_until_resumed_upload_is_ackn
         cloud,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
-    hybrid_storage.fence_cloud_wal_catalog(1)?;
+    CloudPersistence::new(Arc::clone(&hybrid_storage)).fence_cloud_wal_catalog(1)?;
     let config = crate::runtime::RuntimeConfig {
         wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
         hybrid_storage: Some(Arc::clone(&hybrid_storage)),
@@ -471,7 +487,13 @@ fn should_hold_cloud_frontier_at_local_recovery_gap_until_resumed_upload_is_ackn
     let router = Arc::new(ResponseRouter::new());
 
     // Act
-    let mut event_loop = EventLoop::new(state, false, router, config, None)?;
+    let mut event_loop = EventLoop::new(
+        state,
+        false,
+        router,
+        config,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
+    )?;
 
     // Assert
     assert_eq!(event_loop.state.wal.cloud_durable_seq, 1);
@@ -637,7 +659,13 @@ fn should_apply_runtime_config_block_cache_policy_to_read_resources_when_initial
     };
 
     // Act
-    let event_loop = EventLoop::new(state, false, router, config, None)?;
+    let event_loop = EventLoop::new(
+        state,
+        false,
+        router,
+        config,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
+    )?;
 
     // Assert
     assert_eq!(event_loop.compaction_actor.l0_file_count_threshold(), 7);
@@ -658,7 +686,7 @@ fn valid_sst_bytes_for_event_loop_test(key: &[u8], value: &[u8], seq: u64) -> Ve
     let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
     let mut writer = factory.create().expect("create test SST writer");
     writer
-        .add_with_meta(key, Some(value), seq, 0, None)
+        .add_with_meta(key, Some(value), seq, EntryType::Put, None)
         .expect("add test SST entry");
     writer.finish_bytes().expect("finish test SST bytes")
 }
@@ -716,14 +744,14 @@ fn should_create_event_loop_given_supported_storage_modes() {
         false,
         Arc::new(ResponseRouter::new()),
         crate::runtime::RuntimeConfig::default(),
-        None,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
     );
     let fs_result = EventLoop::new(
         fs_state,
         false,
         Arc::new(ResponseRouter::new()),
         crate::runtime::RuntimeConfig::default(),
-        None,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
     );
 
     // Assert - both storage modes must construct successfully
@@ -1320,7 +1348,7 @@ fn should_mark_persistence_anomaly_when_compaction_metadata_range_is_missing() {
         .manifest
         .files
         .push(crate::metadata::FileMeta {
-            name: crate::sst::file_name(0, 0, 1),
+            name: crate::cloud_layout::file_name(0, 0, 1),
             level: 0,
             cf_id: 0,
             smallest_key: None,
@@ -1596,40 +1624,27 @@ fn should_publish_all_flushable_cfs_given_local_write_burst_without_further_writ
         .expect("create second cf");
 
     let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
-    let payload = vec![0xA5; 1536];
+    let payload = bytes::Bytes::from(vec![0xA5; 1536]);
+    let burst_write = |request_id: u64, cf_id, key: &'static [u8]| RuntimeMsg::ApplyTransaction {
+        request_id,
+        ops: vec![crate::runtime::TransactionOp::Put {
+            cf_id,
+            key: bytes::Bytes::from_static(key),
+            value: payload.clone(),
+            ttl_seconds: None,
+            insert_only: false,
+        }],
+        assertions: Vec::new(),
+        durability_policy: Some(crate::wal::DurabilityPolicy::Batched),
+        start_sequence: None,
+        conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+        response_tx: None,
+    };
     let burst = vec![
-        RuntimeMsg::WalAppend {
-            request_id: 1,
-            cf_id: 0,
-            key: b"default-1".to_vec(),
-            value: Some(payload.clone()),
-            ttl_seconds: None,
-            insert_only: false,
-        },
-        RuntimeMsg::WalAppend {
-            request_id: 2,
-            cf_id: second_cf_id,
-            key: b"second-1".to_vec(),
-            value: Some(payload.clone()),
-            ttl_seconds: None,
-            insert_only: false,
-        },
-        RuntimeMsg::WalAppend {
-            request_id: 3,
-            cf_id: 0,
-            key: b"default-2".to_vec(),
-            value: Some(payload.clone()),
-            ttl_seconds: None,
-            insert_only: false,
-        },
-        RuntimeMsg::WalAppend {
-            request_id: 4,
-            cf_id: second_cf_id,
-            key: b"second-2".to_vec(),
-            value: Some(payload),
-            ttl_seconds: None,
-            insert_only: false,
-        },
+        burst_write(1, 0, b"default-1"),
+        burst_write(2, second_cf_id, b"second-1"),
+        burst_write(3, 0, b"default-2"),
+        burst_write(4, second_cf_id, b"second-2"),
     ];
 
     let mut burst_iter = burst.into_iter();
@@ -1713,7 +1728,7 @@ fn should_advance_compaction_output_sequence_past_recovered_manifest_name() {
         .manifest
         .files
         .push(crate::metadata::FileMeta {
-            name: crate::sst::compaction_file_name(0, 1, 409, 0),
+            name: crate::cloud_layout::compaction_file_name(0, 1, 409, 0),
             level: 1,
             cf_id: 0,
             ..Default::default()
@@ -1806,7 +1821,7 @@ mod compaction_scheduling {
             .store(true, std::sync::atomic::Ordering::SeqCst);
 
         for seq in 1..=4 {
-            let name = crate::sst::file_name(0, 0, seq);
+            let name = crate::cloud_layout::file_name(0, 0, seq);
             let file = write_runtime_l0_sst_for_test(&event_loop, &name, seq);
             event_loop
                 .state
@@ -1898,7 +1913,7 @@ fn should_respect_trace_enabled_flag() {
         false,
         router1,
         crate::runtime::RuntimeConfig::default(),
-        None,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
     )
     .expect("Should create");
     let event_loop2 = EventLoop::new(
@@ -1906,7 +1921,7 @@ fn should_respect_trace_enabled_flag() {
         true,
         router2,
         crate::runtime::RuntimeConfig::default(),
-        None,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
     )
     .expect("Should create");
 
@@ -1968,7 +1983,7 @@ fn should_maintain_router_reference() {
         false,
         Arc::clone(&router),
         crate::runtime::RuntimeConfig::default(),
-        None,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
     )
     .expect("Should create");
 
@@ -2076,7 +2091,7 @@ fn should_incrementally_drain_recovered_wal_given_bounded_upload_queue_at_open(
         1,
         max_segment_bytes,
     ));
-    storage.fence_cloud_wal_catalog(1)?;
+    CloudPersistence::new(Arc::clone(&storage)).fence_cloud_wal_catalog(1)?;
     let config = crate::runtime::RuntimeConfig {
         wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
         hybrid_storage: Some(Arc::clone(&storage)),
@@ -2093,7 +2108,13 @@ fn should_incrementally_drain_recovered_wal_given_bounded_upload_queue_at_open(
 
     // Act
     let router = Arc::new(ResponseRouter::new());
-    let mut event_loop = EventLoop::new(state, false, router, config, None)?;
+    let mut event_loop = EventLoop::new(
+        state,
+        false,
+        router,
+        config,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
+    )?;
     let backlog_after_open = event_loop.cloud_wal.upload_backlog.len();
     let queued_after_open = storage.pending_upload_count();
     let deadline = Instant::now() + Duration::from_secs(3);
@@ -2152,7 +2173,13 @@ fn should_remove_validated_local_copy_when_remote_recovery_segment_is_initially_
     };
 
     // Act
-    let event_loop = EventLoop::new(state, false, Arc::new(ResponseRouter::new()), config, None)?;
+    let event_loop = EventLoop::new(
+        state,
+        false,
+        Arc::new(ResponseRouter::new()),
+        config,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
+    )?;
 
     // Assert
     assert!(!local_path.exists());
@@ -2168,8 +2195,8 @@ fn should_defer_column_family_drop_until_compaction_publication_finishes() {
         .manifest_actor
         .create_column_family(&mut event_loop.state, "compacting")
         .expect("create compacting column family");
-    let input_name = crate::sst::file_name(cf_id, 0, 1);
-    let output_name = crate::sst::file_name(cf_id, 1, 2);
+    let input_name = crate::cloud_layout::file_name(cf_id, 0, 1);
+    let output_name = crate::cloud_layout::file_name(cf_id, 1, 2);
     let input_bytes = valid_sst_bytes_for_event_loop_test(b"key", b"old", 1);
     let output_bytes = valid_sst_bytes_for_event_loop_test(b"key", b"new", 2);
     std::fs::write(event_loop.state.sst_dir.join(&input_name), &input_bytes)
@@ -2277,12 +2304,12 @@ fn should_restore_deferred_column_family_drop_before_emergent_compaction_followu
         .manifest_actor
         .create_column_family(&mut event_loop.state, "drop-before-followup")
         .expect("create column family");
-    let current_input = crate::sst::file_name(cf_id, 0, 1);
-    let current_output = crate::sst::file_name(cf_id, 1, 10);
+    let current_input = crate::cloud_layout::file_name(cf_id, 0, 1);
+    let current_output = crate::cloud_layout::file_name(cf_id, 1, 10);
     for (name, key, sequence) in
         std::iter::once((current_input.clone(), b'a', 1_u64)).chain((2_u8..=5).map(|index| {
             (
-                crate::sst::file_name(cf_id, 0, u64::from(index)),
+                crate::cloud_layout::file_name(cf_id, 0, u64::from(index)),
                 b'a'.saturating_add(index),
                 u64::from(index),
             )
@@ -2381,8 +2408,8 @@ fn should_reject_late_compaction_output_after_column_family_is_dropped() {
         .drop_column_family(&mut event_loop.state, cf_id)
         .expect("drop column family");
 
-    let input_name = crate::sst::file_name(cf_id, 0, 1);
-    let output_name = crate::sst::file_name(cf_id, 1, 2);
+    let input_name = crate::cloud_layout::file_name(cf_id, 0, 1);
+    let output_name = crate::cloud_layout::file_name(cf_id, 1, 2);
     let output_bytes = valid_sst_bytes_for_event_loop_test(b"key", b"value", 2);
     std::fs::write(event_loop.state.sst_dir.join(&output_name), output_bytes)
         .expect("write late compaction output");
@@ -2428,7 +2455,7 @@ fn should_reject_out_of_order_compaction_output_set_before_publication(
 ) -> crate::common::MidgeResult<()> {
     // Arrange
     let mut event_loop = create_test_local_event_loop()?;
-    let input_name = crate::sst::file_name(0, 0, 1);
+    let input_name = crate::cloud_layout::file_name(0, 0, 1);
     let input_bytes = valid_sst_bytes_for_event_loop_test(b"input", b"value", 1);
     std::fs::write(event_loop.state.sst_dir.join(&input_name), &input_bytes)?;
     event_loop
@@ -2447,8 +2474,8 @@ fn should_reject_out_of_order_compaction_output_set_before_publication(
             largest_seq: Some(1),
             ..Default::default()
         });
-    let first_name = crate::sst::compaction_file_name(0, 1, 2, 0);
-    let second_name = crate::sst::compaction_file_name(0, 1, 2, 1);
+    let first_name = crate::cloud_layout::compaction_file_name(0, 1, 2, 0);
+    let second_name = crate::cloud_layout::compaction_file_name(0, 1, 2, 1);
     let first_bytes = valid_sst_bytes_for_event_loop_test(b"a", b"first", 2);
     let second_bytes = valid_sst_bytes_for_event_loop_test(b"z", b"second", 2);
     std::fs::write(event_loop.state.sst_dir.join(&first_name), first_bytes)?;
@@ -2506,9 +2533,9 @@ fn should_reject_compaction_when_target_span_changes_before_publication(
 ) -> crate::common::MidgeResult<()> {
     // Arrange
     let mut event_loop = create_test_local_event_loop()?;
-    let source_name = crate::sst::file_name(0, 0, 1);
-    let selected_target = crate::sst::file_name(0, 1, 2);
-    let concurrent_target = crate::sst::file_name(0, 1, 3);
+    let source_name = crate::cloud_layout::file_name(0, 0, 1);
+    let selected_target = crate::cloud_layout::file_name(0, 1, 2);
+    let concurrent_target = crate::cloud_layout::file_name(0, 1, 3);
     for (name, level, key, smallest, largest, sequence) in [
         (&source_name, 0, b'm', b'a', b'z', 1_u64),
         (&selected_target, 1, b'b', b'a', b'm', 2_u64),
@@ -2533,7 +2560,7 @@ fn should_reject_compaction_when_target_span_changes_before_publication(
                 ..Default::default()
             });
     }
-    let output_name = crate::sst::compaction_file_name(0, 1, 4, 0);
+    let output_name = crate::cloud_layout::compaction_file_name(0, 1, 4, 0);
     let output_bytes = valid_sst_bytes_for_event_loop_test(b"m", b"replacement", 4);
     std::fs::write(event_loop.state.sst_dir.join(&output_name), output_bytes)?;
     let captured_inputs = vec![source_name.clone(), selected_target.clone()];
@@ -2599,7 +2626,7 @@ fn should_return_exact_compaction_failure_to_compact_all_waiter() -> crate::comm
 {
     // Arrange
     let mut event_loop = create_test_local_event_loop()?;
-    let input_name = crate::sst::file_name(0, 0, 1);
+    let input_name = crate::cloud_layout::file_name(0, 0, 1);
     event_loop
         .state
         .manifest
@@ -2890,4 +2917,48 @@ fn should_fsync_batched_wal_while_verification_barrier_is_held() -> crate::commo
     );
     assert!(event_loop.verification_barrier.is_active());
     Ok(())
+}
+
+#[test]
+fn should_not_prune_reader_cache_when_publishing_after_plain_write() {
+    // Arrange
+    let mut event_loop = create_test_local_event_loop().expect("create local event loop");
+    event_loop.set_snapshot_cache(Arc::new(
+        crate::runtime::snapshot_cache::SnapshotCache::new(),
+    ));
+    let read_resources = event_loop
+        .read_resources
+        .clone()
+        .expect("local runtime should construct read resources");
+    let baseline = read_resources.prune_call_count();
+    let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
+
+    // Act
+    for i in 0..1000_u64 {
+        let msg = RuntimeMsg::ApplyTransaction {
+            request_id: i,
+            ops: vec![crate::runtime::TransactionOp::Put {
+                cf_id: 0,
+                key: bytes::Bytes::from(format!("key-{i}")),
+                value: bytes::Bytes::from_static(b"v"),
+                ttl_seconds: None,
+                insert_only: false,
+            }],
+            assertions: Vec::new(),
+            durability_policy: Some(crate::wal::DurabilityPolicy::Batched),
+            start_sequence: None,
+            conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+            response_tx: None,
+        };
+        event_loop.process_wake_msg(msg, &msg_rx, 16);
+    }
+    let after_writes = read_resources.prune_call_count();
+    event_loop.invalidate_sst_read_views();
+    event_loop.publish_snapshot();
+    let after_manifest_change = read_resources.prune_call_count();
+    drop(msg_tx);
+
+    // Assert
+    assert_eq!(after_writes, baseline, "plain writes must not prune");
+    assert_eq!(after_manifest_change, baseline + 1);
 }

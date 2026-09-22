@@ -35,7 +35,7 @@ pub struct MidgeOptions {
     pub wal_sync: bool,
 
     /// Batch config for WAL group commit (optional).
-    pub wal_batch_config: Option<cntryl_midge::wal::policy::BatchConfig>,
+    pub wal_batch_config: Option<cntryl_midge::__internal::wal::policy::BatchConfig>,
     /// Maximum memtable size before flush.
     pub memtable_size: usize,
     /// Compression enabled.

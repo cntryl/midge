@@ -37,7 +37,7 @@ pub(crate) struct FlushBuildOutput {
 
 pub(crate) struct FlushBuildCompletion {
     pub identity: FlushIdentity,
-    pub memtable: Arc<crate::sst::SkipListMemtable>,
+    pub memtable: Arc<crate::memtable::SkipListMemtable>,
     pub staging_path: PathBuf,
     pub reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
     pub build_ns: u64,
@@ -49,12 +49,12 @@ pub(crate) struct FlushPublishTask {
     pub build: FlushBuildOutput,
     pub sst_name: String,
     pub sst_seq: u64,
-    pub db_path: PathBuf,
     pub sst_dir: PathBuf,
     pub fs: Arc<dyn crate::io::Fs>,
     pub recovery_policy: crate::config::RecoveryPolicy,
     pub hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
     pub cloud_metadata_storage: Option<Arc<crate::storage::cloud::CloudStorage>>,
+    pub metadata_publication_lock: crate::runtime::MetadataPublicationLock,
     pub lease_healthy: Option<Arc<AtomicBool>>,
     pub leader_store: Option<Arc<dyn crate::lease::LeaderStore>>,
     pub leader_holder_id: Option<String>,
@@ -84,7 +84,7 @@ pub(crate) enum FlushWorkerResult {
 #[derive(Clone)]
 struct FlushBuildTask {
     identity: FlushIdentity,
-    memtable: Arc<crate::sst::SkipListMemtable>,
+    memtable: Arc<crate::memtable::SkipListMemtable>,
     staging_path: PathBuf,
     reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
     hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
@@ -109,7 +109,7 @@ impl FlushActor {
     pub fn new(
         sst_dir: &Path,
         memory_mode: bool,
-        compression_policy: crate::sst::compression::CompressionPolicy,
+        compression_policy: crate::codec::CompressionPolicy,
         completion_tx: crossbeam::channel::Sender<FlushWorkerResult>,
     ) -> MidgeResult<Self> {
         Self::new_with_memory_limit(
@@ -124,7 +124,7 @@ impl FlushActor {
     pub(crate) fn new_with_memory_limit(
         sst_dir: &Path,
         memory_mode: bool,
-        compression_policy: crate::sst::compression::CompressionPolicy,
+        compression_policy: crate::codec::CompressionPolicy,
         completion_tx: crossbeam::channel::Sender<FlushWorkerResult>,
         memory_bytes: usize,
     ) -> MidgeResult<Self> {
@@ -166,7 +166,7 @@ impl FlushActor {
     pub(crate) fn submit_build(
         &mut self,
         identity: FlushIdentity,
-        memtable: Arc<crate::sst::SkipListMemtable>,
+        memtable: Arc<crate::memtable::SkipListMemtable>,
         staging_path: PathBuf,
         hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
     ) -> MidgeResult<()> {
@@ -483,7 +483,7 @@ fn upload(
 ) -> MidgeResult<()> {
     if let Some(hybrid) = &task.hybrid_storage {
         hybrid.publish_immutable_file(
-            &crate::sst::object_key(&task.sst_name),
+            &crate::cloud_layout::object_key(&task.sst_name),
             final_path,
             task.build.file_meta.size_bytes,
             task.build
@@ -541,11 +541,7 @@ fn finalize_staged_sst(
 }
 
 fn db_relative_fs_path(task: &FlushPublishTask, path: &Path) -> MidgeResult<crate::io::FsPath> {
-    let relative = path
-        .strip_prefix(&task.db_path)
-        .map_err(|_| MidgeError::InvalidPath)?;
-    let relative = relative.to_str().ok_or(MidgeError::InvalidPath)?;
-    Ok(crate::io::FsPath::new(relative))
+    crate::sst::fs::fs_relative_sst_path(&task.fs, path)
 }
 
 fn cleanup_non_authoritative_staging(task: &FlushPublishTask) {
@@ -677,7 +673,7 @@ fn mirror_control_metadata(
     cloud: &crate::storage::cloud::CloudStorage,
     local_manifest_sequence: u64,
 ) -> MidgeResult<()> {
-    let _publication_guard = cloud.lock_metadata_publication();
+    let _publication_guard = task.metadata_publication_lock.lock();
     for file_name in crate::metadata::files::CLOUD_MIRRORED {
         let path = crate::io::FsPath::new(*file_name);
         if !task.fs.exists(&path)? {
@@ -728,6 +724,10 @@ mod tests {
     }
 
     impl crate::io::Fs for PublicationTestFs {
+        fn host_addressing(&self) -> Option<crate::io::HostAddressing<'_>> {
+            crate::io::Fs::host_addressing(&self.inner)
+        }
+
         fn coordination_key(&self) -> u64 {
             crate::io::Fs::coordination_key(&self.inner)
         }
@@ -842,6 +842,7 @@ mod tests {
 
     struct PublicationFixture {
         directory: tempfile::TempDir,
+        db_path: PathBuf,
         task: FlushPublishTask,
         sst_backend: Arc<crate::storage::cloud::MockCloudBackend>,
         control_backend: Arc<crate::storage::cloud::MockCloudBackend>,
@@ -859,7 +860,7 @@ mod tests {
             cf_id: 0,
             sequence: 1,
         };
-        let memtable = Arc::new(crate::sst::SkipListMemtable::new());
+        let memtable = Arc::new(crate::memtable::SkipListMemtable::new());
         memtable.put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)?;
         let mut build_task = FlushBuildTask {
             identity,
@@ -868,10 +869,12 @@ mod tests {
             reservation: None,
             hybrid_storage: None,
         };
-        let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new(&sst_dir)?);
+        // Rooted at the database directory because this fixture stages flush
+        // output beside `sst/` rather than inside it.
+        let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new(&db_path)?);
         let sst_factory = Arc::new(
             crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)
-                .with_compression_policy(crate::sst::compression::CompressionPolicy::default()),
+                .with_compression_policy(crate::codec::CompressionPolicy::default()),
         );
         let file_meta = FlushActor::write_memtable_to_staging(&sst_factory, &mut build_task)?;
 
@@ -906,20 +909,21 @@ mod tests {
                 file_meta,
                 reservation: None,
             },
-            sst_name: crate::sst::file_name(identity.cf_id, 0, 1),
+            sst_name: crate::cloud_layout::file_name(identity.cf_id, 0, 1),
             sst_seq: 1,
-            db_path,
             sst_dir,
             fs: publication_fs,
             recovery_policy: crate::config::RecoveryPolicy::Strict,
             hybrid_storage: Some(hybrid),
             cloud_metadata_storage: Some(control_cloud),
+            metadata_publication_lock: crate::runtime::MetadataPublicationLock::default(),
             lease_healthy: Some(Arc::new(AtomicBool::new(true))),
             leader_store: Some(leader_store),
             leader_holder_id: Some("flush-test".to_string()),
         };
         Ok(PublicationFixture {
             directory,
+            db_path,
             task,
             sst_backend,
             control_backend,
@@ -935,8 +939,11 @@ mod tests {
         let fixture = publication_fixture(usize::MAX)?;
         let scratch = fixture.directory.path().join("failed-scratch");
         let factory = Arc::new(
-            crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096)
-                .with_compaction_scratch_directory(scratch.clone()),
+            crate::sst::FsSstFactoryIo::new(
+                Arc::new(crate::io::RealFs::new(fixture.directory.path())?),
+                4096,
+            )
+            .with_compaction_scratch_directory(scratch.clone()),
         );
         let injected = std::sync::Mutex::new(false);
         fail::cfg_callback("midge::flush_worker::after_scratch_creation", move || {
@@ -958,7 +965,7 @@ mod tests {
             *injected = true;
         })
         .unwrap();
-        let memtable = Arc::new(crate::sst::SkipListMemtable::new());
+        let memtable = Arc::new(crate::memtable::SkipListMemtable::new());
         memtable.put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)?;
         let task = FlushBuildTask {
             identity: fixture.task.build.identity,
@@ -1020,7 +1027,7 @@ mod tests {
         corrupted[middle] ^= 1;
         let (tx, rx) = std::sync::mpsc::channel();
         fixture.sst_backend.submit_put(
-            &crate::sst::object_key(&fixture.task.sst_name),
+            &crate::cloud_layout::object_key(&fixture.task.sst_name),
             corrupted,
             Vec::new(),
             tx,
@@ -1102,14 +1109,14 @@ mod tests {
         let mut manifest = crate::metadata::Manifest::default();
         manifest.next_sst_seqs.insert(0, 100);
         crate::metadata::ManifestPersistence::save_snapshot_and_truncate_journal(
-            &fixture.task.db_path,
+            &fixture.db_path,
             &manifest,
         )
         .map_err(MidgeError::Internal)?;
 
         // Act
         let delta = FlushActor::publish(&fixture.task)?;
-        let persisted = crate::metadata::ManifestPersistence::load(&fixture.task.db_path)
+        let persisted = crate::metadata::ManifestPersistence::load(&fixture.db_path)
             .map_err(MidgeError::Internal)?;
 
         // Assert
@@ -1131,7 +1138,7 @@ mod tests {
             .expect("hybrid storage");
         // The final SST itself fits; its concurrent readback copy does not.
         hybrid.enable_ephemeral_sst_cache(fixture.task.build.file_meta.size_bytes);
-        let memtable = Arc::new(crate::sst::SkipListMemtable::new());
+        let memtable = Arc::new(crate::memtable::SkipListMemtable::new());
         memtable.put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)?;
         let staging_path = fixture.directory.path().join("admitted/flush-2.sst");
         let mut task = FlushBuildTask {
@@ -1141,7 +1148,7 @@ mod tests {
             reservation: None,
             hybrid_storage: Some(Arc::clone(hybrid)),
         };
-        let fs = Arc::new(crate::io::RealFs::new(&fixture.task.sst_dir)?);
+        let fs = Arc::new(crate::io::RealFs::new(fixture.directory.path())?);
         let factory: Arc<crate::sst::FsSstFactoryIo> =
             Arc::new(crate::sst::FsSstFactoryIo::new(fs, 64 * 1024));
 
@@ -1165,7 +1172,7 @@ mod tests {
         // Arrange
         let mut fixture = publication_fixture(usize::MAX)?;
         let sync_fs = Arc::new(PublicationTestFs {
-            inner: crate::io::RealFs::new(&fixture.task.db_path)?,
+            inner: crate::io::RealFs::new(&fixture.db_path)?,
             fail_rename: false,
             fail_sync: AtomicBool::new(false),
             sync_dir_calls: parking_lot::Mutex::new(Vec::new()),
@@ -1216,7 +1223,7 @@ mod tests {
         // Arrange
         let mut fixture = publication_fixture(usize::MAX)?;
         fixture.task.fs = Arc::new(PublicationTestFs {
-            inner: crate::io::RealFs::new(&fixture.task.db_path)?,
+            inner: crate::io::RealFs::new(&fixture.db_path)?,
             fail_rename: true,
             fail_sync: AtomicBool::new(false),
             sync_dir_calls: parking_lot::Mutex::new(Vec::new()),
@@ -1248,7 +1255,7 @@ mod tests {
         let mut actor = FlushActor::new(
             directory.path(),
             false,
-            crate::sst::compression::CompressionPolicy::default(),
+            crate::codec::CompressionPolicy::default(),
             completion_tx,
         )?;
 
@@ -1268,7 +1275,7 @@ mod tests {
         let actor = FlushActor::new(
             Path::new("/unused"),
             true,
-            crate::sst::compression::CompressionPolicy::default(),
+            crate::codec::CompressionPolicy::default(),
             completion_tx,
         )?;
 
@@ -1296,7 +1303,7 @@ mod tests {
     fn should_fence_flush_before_manifest_persistence_when_epoch_changes() -> MidgeResult<()> {
         // Arrange
         let fixture = publication_fixture(4)?;
-        let db_path = fixture.task.db_path.clone();
+        let db_path = fixture.db_path.clone();
 
         // Act
         let error = FlushActor::publish(&fixture.task).expect_err("publication must be fenced");
@@ -1321,7 +1328,7 @@ mod tests {
     fn should_recover_durable_publication_without_accepting_stale_completion() -> MidgeResult<()> {
         // Arrange
         let fixture = publication_fixture(5)?;
-        let db_path = fixture.task.db_path.clone();
+        let db_path = fixture.db_path.clone();
         let sst_name = fixture.task.sst_name.clone();
 
         // Act
@@ -1349,7 +1356,7 @@ mod tests {
     {
         // Arrange
         let fixture = publication_fixture(6)?;
-        let db_path = fixture.task.db_path.clone();
+        let db_path = fixture.db_path.clone();
         let sst_name = fixture.task.sst_name.clone();
 
         // Act

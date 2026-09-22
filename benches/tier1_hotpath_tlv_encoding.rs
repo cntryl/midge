@@ -5,7 +5,7 @@
 #[path = "./stress_config.rs"]
 mod stress_config;
 
-use cntryl_midge::common::tlv::{
+use cntryl_midge::__internal::common::tlv::{
     decode_tlv_field, decode_varint32, encode_bytes_with_tag, encode_u64_with_tag,
     encode_u8_with_tag, encode_varint32, encode_varint_with_tag,
 };

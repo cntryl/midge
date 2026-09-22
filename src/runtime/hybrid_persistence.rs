@@ -180,7 +180,7 @@ struct ValidatedWalPruneCandidate {
 
 #[derive(Clone, Default)]
 struct ExactCoverageState {
-    state: Option<crate::sst::types::KeyState>,
+    state: Option<crate::types::KeyState>,
     ambiguous: bool,
     /// SST range tombstones at or above a range-delete record's sequence,
     /// clipped to the record's range.
@@ -375,99 +375,33 @@ fn retire_covered_wal_catalog_prefix_within(
 }
 
 /// Runtime-owned format operations layered over raw hybrid object I/O.
-pub(crate) trait HybridPersistence {
-    fn enqueue_wal_segment(
-        &self,
-        segment_id: u64,
-        local_path: &Path,
-        max_sequence: u64,
-    ) -> MidgeResult<String>;
+///
+/// `HybridStorage` stays format-neutral: it moves keyed bytes and enforces
+/// budgets. `CloudPersistence` owns everything above that - WAL catalog
+/// authority, manifest coverage, and SST publication proofs - so the format
+/// stack has exactly one owner instead of an extension trait bolted onto the
+/// storage type.
+///
+/// The `Deref` is the composition edge, not a convenience: every format
+/// operation below is expressed in terms of the raw object I/O it wraps, and
+/// callers that already hold this handle read and write plain objects through
+/// the same value.
+pub(crate) struct CloudPersistence {
+    storage: Arc<HybridStorage>,
+}
 
-    fn fence_cloud_wal_catalog(&self, writer_epoch: u64) -> MidgeResult<AdmittedCatalog>;
-
-    #[cfg(test)]
-    fn verify_remote_wal_segment(
-        &self,
-        segment_id: u64,
-        expected_max_sequence: u64,
-    ) -> Result<(), String>;
-
-    /// Publish a sealed WAL segment to the authoritative cloud catalog.
-    ///
-    /// `deadline` is the shared budget for every cloud round trip this makes,
-    /// including immutable-WAL proof, both catalog proofs, conditional writes,
-    /// and exact readback. It belongs to the caller waiting on the
-    /// acknowledgement, so the whole sequence stays inside that caller's
-    /// response timeout.
-    fn publish_remote_wal_segment(
-        &self,
-        segment_id: u64,
-        expected_max_sequence: u64,
-        local_path: &Path,
-        fencing_epoch: u64,
-        deadline: &crate::common::OperationDeadline,
-    ) -> MidgeResult<()>;
-
-    #[cfg(test)]
-    fn verify_manifest_cloud_objects(&self, manifest: &Manifest) -> Result<(), String>;
-
-    #[cfg(test)]
-    fn verify_manifest_cloud_objects_within(
-        &self,
-        manifest: &Manifest,
-        deadline: &crate::common::OperationDeadline,
-    ) -> MidgeResult<()>;
-
-    #[cfg(test)]
-    fn prune_cloud_wal_segment(
-        &self,
-        segment_id: u64,
-        expected_max_sequence: u64,
-        guard: CloudWalPruneGuard,
-        fencing_epoch: u64,
-    ) -> Result<(), String>;
-
-    #[cfg(test)]
-    fn prune_cloud_wal_segment_within(
-        &self,
-        segment_id: u64,
-        expected_max_sequence: u64,
-        guard: CloudWalPruneGuard,
-        fencing_epoch: u64,
-        deadline: &crate::common::OperationDeadline,
-    ) -> MidgeResult<()>;
-
-    fn prune_cloud_wal_segments_within(
-        &self,
-        candidates: &[(u64, u64)],
-        guard: CloudWalPruneGuard,
-        fencing_epoch: u64,
-        deadline: &crate::common::OperationDeadline,
-    ) -> MidgeResult<CloudWalPruneBatchResults>;
-
-    #[cfg(test)]
-    fn write_sst_object(&self, sst_name: &str, data: Vec<u8>) -> MidgeResult<()>;
-
-    #[cfg(test)]
-    fn write_sst_object_with_proof(
-        &self,
-        sst_name: &str,
-        data: Vec<u8>,
-        deadline: &crate::common::OperationDeadline,
-    ) -> MidgeResult<GuardedObjectProof>;
-
-    #[cfg(test)]
-    fn write_sst_object_within(
-        &self,
-        sst_name: &str,
-        data: Vec<u8>,
-        deadline: &crate::common::OperationDeadline,
-    ) -> MidgeResult<()> {
-        let _ = deadline;
-        self.write_sst_object(sst_name, data)
+impl CloudPersistence {
+    pub(crate) fn new(storage: Arc<HybridStorage>) -> Self {
+        Self { storage }
     }
+}
 
-    fn delete_sst_object_blocking(&self, sst_name: &str) -> MidgeResult<()>;
+impl std::ops::Deref for CloudPersistence {
+    type Target = HybridStorage;
+
+    fn deref(&self) -> &HybridStorage {
+        &self.storage
+    }
 }
 
 #[cfg(test)]
@@ -476,7 +410,7 @@ fn validate_remote_sst_within(
     file: &FileMeta,
     deadline: &crate::common::OperationDeadline,
 ) -> MidgeResult<RemoteObjectProof> {
-    let key = crate::sst::object_key(&file.name);
+    let key = crate::cloud_layout::object_key(&file.name);
     let proof = storage.remote_object_proof_within(&key, deadline)?;
     validate_sst_object_bytes(
         &file.name,
@@ -534,8 +468,8 @@ fn validate_sst_object_bytes(
     Ok(summary)
 }
 
-impl HybridPersistence for HybridStorage {
-    fn enqueue_wal_segment(
+impl CloudPersistence {
+    pub(crate) fn enqueue_wal_segment(
         &self,
         segment_id: u64,
         local_path: &Path,
@@ -554,7 +488,10 @@ impl HybridPersistence for HybridStorage {
         Ok(object_key)
     }
 
-    fn fence_cloud_wal_catalog(&self, writer_epoch: u64) -> MidgeResult<AdmittedCatalog> {
+    pub(crate) fn fence_cloud_wal_catalog(
+        &self,
+        writer_epoch: u64,
+    ) -> MidgeResult<AdmittedCatalog> {
         let deadline = crate::common::OperationDeadline::unbounded();
         let existing = load_and_repair_catalog_within(self, &deadline)?;
         let (mut catalog, expected) = if let Some(authority) = existing {
@@ -574,25 +511,7 @@ impl HybridPersistence for HybridStorage {
         Ok(catalog)
     }
 
-    #[cfg(test)]
-    fn verify_remote_wal_segment(
-        &self,
-        segment_id: u64,
-        expected_max_sequence: u64,
-    ) -> Result<(), String> {
-        let (_, entry) = authoritative_wal_entry(self, segment_id)?;
-        if entry.max_sequence != expected_max_sequence {
-            return Err(format!(
-                "cloud WAL catalog segment {segment_id} max sequence {} does not match expected {expected_max_sequence}",
-                entry.max_sequence
-            ));
-        }
-        validate_remote_wal(self, &entry, &crate::common::OperationDeadline::unbounded())
-            .map(|_| ())
-            .map_err(|error| error.to_string())
-    }
-
-    fn publish_remote_wal_segment(
+    pub(crate) fn publish_remote_wal_segment(
         &self,
         segment_id: u64,
         expected_max_sequence: u64,
@@ -675,72 +594,7 @@ impl HybridPersistence for HybridStorage {
         }
     }
 
-    #[cfg(test)]
-    fn verify_manifest_cloud_objects(&self, manifest: &Manifest) -> Result<(), String> {
-        self.verify_manifest_cloud_objects_within(
-            manifest,
-            &crate::common::OperationDeadline::unbounded(),
-        )
-        .map_err(|error| error.to_string())
-    }
-
-    #[cfg(test)]
-    fn verify_manifest_cloud_objects_within(
-        &self,
-        manifest: &Manifest,
-        deadline: &crate::common::OperationDeadline,
-    ) -> MidgeResult<()> {
-        for file in &manifest.files {
-            validate_remote_sst_within(self, file, deadline)?;
-        }
-        Ok(())
-    }
-
-    #[cfg(test)]
-    fn prune_cloud_wal_segment(
-        &self,
-        segment_id: u64,
-        expected_max_sequence: u64,
-        guard: CloudWalPruneGuard,
-        fencing_epoch: u64,
-    ) -> Result<(), String> {
-        self.prune_cloud_wal_segment_within(
-            segment_id,
-            expected_max_sequence,
-            guard,
-            fencing_epoch,
-            &crate::common::OperationDeadline::unbounded(),
-        )
-        .map_err(|error| error.to_string())
-    }
-
-    #[cfg(test)]
-    fn prune_cloud_wal_segment_within(
-        &self,
-        segment_id: u64,
-        expected_max_sequence: u64,
-        guard: CloudWalPruneGuard,
-        fencing_epoch: u64,
-        deadline: &crate::common::OperationDeadline,
-    ) -> MidgeResult<()> {
-        let mut results = self.prune_cloud_wal_segments_within(
-            &[(segment_id, expected_max_sequence)],
-            guard,
-            fencing_epoch,
-            deadline,
-        )?;
-        let Some((_, result)) = results.pop() else {
-            // Catalog authority was retired and a storage-owned conditional
-            // delete worker now owns the terminal completion event.
-            return Ok(());
-        };
-        if result.is_ok() {
-            self.queue_cloud_wal_prune_complete(segment_id, crate::storage::StorageOutcome::Ok(()));
-        }
-        result
-    }
-
-    fn prune_cloud_wal_segments_within(
+    pub(crate) fn prune_cloud_wal_segments_within(
         &self,
         candidates: &[(u64, u64)],
         guard: CloudWalPruneGuard,
@@ -831,62 +685,11 @@ impl HybridPersistence for HybridStorage {
         Ok(sorted_cloud_wal_prune_results(results))
     }
 
-    #[cfg(test)]
-    fn write_sst_object(&self, sst_name: &str, data: Vec<u8>) -> MidgeResult<()> {
-        self.write_sst_object_within(
-            sst_name,
-            data,
-            &crate::common::OperationDeadline::unbounded(),
-        )
-    }
-
-    #[cfg(test)]
-    fn write_sst_object_within(
-        &self,
-        sst_name: &str,
-        data: Vec<u8>,
-        deadline: &crate::common::OperationDeadline,
-    ) -> MidgeResult<()> {
-        self.write_sst_object_with_proof(sst_name, data, deadline)
-            .map(|_| ())
-    }
-
-    #[cfg(test)]
-    fn write_sst_object_with_proof(
-        &self,
-        sst_name: &str,
-        data: Vec<u8>,
-        deadline: &crate::common::OperationDeadline,
-    ) -> MidgeResult<GuardedObjectProof> {
-        let expected_size = data.len() as u64;
-        let expected_crc = crc32c::crc32c(&data);
-        validate_sst_object_bytes(sst_name, expected_size, None, None, &data)
-            .map_err(MidgeError::Internal)?;
-        crate::failpoints::fail_point!("midge::cloud::inject_fail_sst_upload", |_| Err(
-            MidgeError::Internal("failpoint: cloud SST upload failed".to_string())
-        ));
-
-        let key = crate::sst::object_key(sst_name);
-        self.publish_immutable_object_within(&key, data, deadline)?;
-        let proof = self
-            .remote_object_proof_within(&key, deadline)
-            .map_err(|error| contextualize_cloud_error(error, "cloud SST readback failed"))?;
-        validate_sst_object_bytes(
-            sst_name,
-            expected_size,
-            Some(expected_crc),
-            None,
-            proof.bytes(),
-        )
-        .map_err(MidgeError::Internal)?;
-        Ok(self.remote_identity_guard(&proof))
-    }
-
-    fn delete_sst_object_blocking(&self, sst_name: &str) -> MidgeResult<()> {
+    pub(crate) fn delete_sst_object_blocking(&self, sst_name: &str) -> MidgeResult<()> {
         crate::failpoints::fail_point!("midge::cloud::inject_fail_sst_delete", |_| Err(
             MidgeError::Internal("failpoint: cloud SST delete failed".to_string())
         ));
-        self.delete_immutable_object_blocking(&crate::sst::object_key(sst_name))
+        self.delete_immutable_object_blocking(&crate::cloud_layout::object_key(sst_name))
     }
 }
 
@@ -954,16 +757,16 @@ fn contextualize_cloud_error(error: MidgeError, context: &str) -> MidgeError {
     }
 }
 
-fn exact_state_sequence(state: &crate::sst::types::KeyState) -> Option<u64> {
+fn exact_state_sequence(state: &crate::types::KeyState) -> Option<u64> {
     match state {
-        crate::sst::types::KeyState::Absent => None,
-        crate::sst::types::KeyState::Tombstone(sequence)
-        | crate::sst::types::KeyState::Value(_, sequence, _, _) => Some(*sequence),
+        crate::types::KeyState::Absent => None,
+        crate::types::KeyState::Tombstone(sequence)
+        | crate::types::KeyState::Value(_, sequence, _, _) => Some(*sequence),
     }
 }
 
 impl ExactCoverageState {
-    fn observe(&mut self, state: crate::sst::types::KeyState) {
+    fn observe(&mut self, state: crate::types::KeyState) {
         let Some(sequence) = exact_state_sequence(&state) else {
             return;
         };
@@ -986,7 +789,7 @@ impl ExactCoverageState {
     /// tombstone at or above the record's sequence can stand in for it.
     fn observe_range_tombstone(
         &mut self,
-        tombstone: &crate::sst::types::RangeTombstone,
+        tombstone: &crate::types::RangeTombstone,
         record: &DataCoverageRecord,
     ) {
         let Some(range_end) = record.range_end.as_deref() else {
@@ -1024,7 +827,7 @@ impl ExactCoverageState {
     }
 
     fn exactly_covers(&self, record: &DataCoverageRecord) -> bool {
-        use crate::sst::types::KeyState;
+        use crate::types::KeyState;
         use crate::wal::types::WalOpRole;
 
         if self.ambiguous {
@@ -1043,8 +846,7 @@ impl ExactCoverageState {
                         && matches!(record.op.role(), WalOpRole::ValueWrite)
                         && record.value.as_deref() == Some(value.as_ref())
                         && record.expiration == *expiration
-                        && crate::wal::WalOpKind::from_wire_format(*op_type)
-                            .is_ok_and(|op| matches!(op.role(), WalOpRole::ValueWrite))
+                        && op_type.is_value_write()
             }
             Some(KeyState::Tombstone(sequence)) => {
                 *sequence > record.seq
@@ -1072,10 +874,10 @@ impl<'a> VerifiedManifestWalCoverage<'a> {
         }
     }
 
-    fn state_for(&self, file: &FileMeta, key: &[u8]) -> Option<crate::sst::types::KeyState> {
+    fn state_for(&self, file: &FileMeta, key: &[u8]) -> Option<crate::types::KeyState> {
         let mut readers = self.readers.borrow_mut();
         let reader = readers.entry(file.name.clone()).or_insert_with(|| {
-            let name = crate::sst::PersistedSstName::parse(&file.name).ok()?;
+            let name = crate::cloud_layout::PersistedSstName::parse(&file.name).ok()?;
             let bytes = std::fs::read(self.sst_dir.join(name.as_str())).ok()?;
             if file.size_bytes != 0
                 && u64::try_from(bytes.len()).unwrap_or(u64::MAX) != file.size_bytes
@@ -1123,7 +925,7 @@ impl<'a> VerifiedManifestWalCoverage<'a> {
             return false;
         };
         match state {
-            crate::sst::types::KeyState::Value(value, sequence, _, _) => {
+            crate::types::KeyState::Value(value, sequence, _, _) => {
                 sequence > record.seq
                     || sequence == record.seq
                         && record
@@ -1131,8 +933,18 @@ impl<'a> VerifiedManifestWalCoverage<'a> {
                             .as_ref()
                             .is_some_and(|expected| expected == &value)
             }
-            crate::sst::types::KeyState::Tombstone(sequence) => sequence >= record.seq,
-            crate::sst::types::KeyState::Absent => false,
+            // A newer tombstone supersedes a value write. At the same sequence a
+            // value write and a delete contradict each other, so only a delete
+            // record is covered by it; skipping the value on that evidence could
+            // lose data, and replaying it is the safe direction.
+            crate::types::KeyState::Tombstone(sequence) => {
+                if matches!(record.op.role(), crate::wal::types::WalOpRole::ValueWrite) {
+                    sequence > record.seq
+                } else {
+                    sequence >= record.seq
+                }
+            }
+            crate::types::KeyState::Absent => false,
         }
     }
 }
@@ -1268,178 +1080,4 @@ fn verify_sst_summary_matches_manifest(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn should_preserve_timeout_variant_when_adding_cloud_publication_context() {
-        // Arrange
-        let timeout = MidgeError::Timeout("remote CAS timed out".to_string());
-
-        // Act
-        let contextualized =
-            contextualize_cloud_error(timeout, "cloud WAL catalog publication failed");
-
-        // Assert
-        assert!(matches!(
-            contextualized,
-            MidgeError::Timeout(message)
-                if message.contains("catalog publication")
-                    && message.contains("remote CAS timed out")
-        ));
-    }
-
-    #[test]
-    fn should_require_manifest_coverage_for_wal_records() {
-        // Arrange
-        let manifest = Manifest {
-            files: vec![FileMeta {
-                cf_id: 7,
-                smallest_key: Some(b"a".to_vec()),
-                largest_key: Some(b"m".to_vec()),
-                smallest_seq: Some(10),
-                largest_seq: Some(20),
-                ..FileMeta::default()
-            }],
-            ..Manifest::default()
-        };
-        let covered = DataCoverageRecord {
-            cf_id: 7,
-            op: crate::wal::WalOpKind::Put,
-            key: b"b".to_vec(),
-            value: Some(b"value".to_vec()),
-            expiration: None,
-            range_end: None,
-            seq: 12,
-        };
-        let outside_key = DataCoverageRecord {
-            key: b"z".to_vec(),
-            ..covered.clone()
-        };
-
-        // Act
-        let covered_result = wal_data_records_covered_by_manifest(&[covered], &manifest);
-        let outside_result = wal_data_records_covered_by_manifest(&[outside_key], &manifest);
-
-        // Assert
-        assert!(covered_result);
-        assert!(!outside_result);
-    }
-
-    #[test]
-    fn should_classify_individual_wal_record_coverage_from_manifest_proof() {
-        // Arrange
-        let manifest = Manifest {
-            files: vec![FileMeta {
-                cf_id: 7,
-                smallest_key: Some(b"a".to_vec()),
-                largest_key: Some(b"m".to_vec()),
-                smallest_seq: Some(10),
-                largest_seq: Some(20),
-                ..FileMeta::default()
-            }],
-            ..Manifest::default()
-        };
-        let covered = crate::wal::WalRecord::new_cf(
-            7,
-            crate::wal::WalOpKind::Put,
-            bytes::Bytes::from_static(b"b"),
-            Some(bytes::Bytes::from_static(b"old")),
-            12,
-            1,
-        );
-        let outside_sequence = crate::wal::WalRecord {
-            seq: 21,
-            ..covered.clone()
-        };
-        let transaction_marker = crate::wal::WalRecord {
-            op: crate::wal::WalOpKind::TxnBatch,
-            ..covered.clone()
-        };
-        let point_tombstone = crate::wal::WalRecord {
-            op: crate::wal::WalOpKind::Delete,
-            value: None,
-            ..covered.clone()
-        };
-
-        // Act
-        let covered_result = wal_record_covered_by_manifest(&covered, &manifest);
-        let outside_result = wal_record_covered_by_manifest(&outside_sequence, &manifest);
-        let marker_result = wal_record_covered_by_manifest(&transaction_marker, &manifest);
-        let tombstone_result = wal_record_covered_by_manifest(&point_tombstone, &manifest);
-        let unverified_result =
-            wal_record_covered_by_verified_manifest(&covered, &manifest, &|_, _| false);
-
-        // Assert
-        assert!(covered_result);
-        assert!(!outside_result);
-        assert!(!marker_result);
-        assert!(!tombstone_result);
-        assert!(!unverified_result);
-    }
-
-    #[test]
-    fn should_not_treat_manifest_bounds_as_exact_value_coverage() {
-        // Arrange: a concurrent flush can place unrelated entries on both
-        // sides of this WAL write without persisting the write itself.
-        let manifest = Manifest {
-            files: vec![FileMeta {
-                cf_id: 7,
-                smallest_key: Some(b"a".to_vec()),
-                largest_key: Some(b"z".to_vec()),
-                smallest_seq: Some(10),
-                largest_seq: Some(20),
-                ..FileMeta::default()
-            }],
-            ..Manifest::default()
-        };
-        let overwrite = crate::wal::WalRecord::new_cf(
-            7,
-            crate::wal::WalOpKind::Put,
-            bytes::Bytes::from_static(b"target"),
-            Some(bytes::Bytes::from_static(b"new")),
-            15,
-            1,
-        );
-
-        // Act
-        let covered = wal_record_covered_by_verified_manifest(&overwrite, &manifest, &|_, _| false);
-
-        // Assert
-        assert!(!covered, "bounds alone cannot prove exact value coverage");
-    }
-
-    #[test]
-    fn should_require_full_range_coverage_for_wal_tombstones() {
-        // Arrange
-        let file = FileMeta {
-            cf_id: 1,
-            smallest_key: Some(b"a".to_vec()),
-            largest_key: Some(b"m".to_vec()),
-            smallest_seq: Some(1),
-            largest_seq: Some(9),
-            ..FileMeta::default()
-        };
-        let covered = DataCoverageRecord {
-            cf_id: 1,
-            op: crate::wal::WalOpKind::DeleteRange,
-            key: b"c".to_vec(),
-            value: None,
-            expiration: None,
-            range_end: Some(b"k".to_vec()),
-            seq: 5,
-        };
-        let uncovered = DataCoverageRecord {
-            range_end: Some(b"z".to_vec()),
-            ..covered.clone()
-        };
-
-        // Act
-        let covered_result = file_covers_record(&file, &covered);
-        let uncovered_result = file_covers_record(&file, &uncovered);
-
-        // Assert
-        assert!(covered_result);
-        assert!(!uncovered_result);
-    }
-}
+mod tests;

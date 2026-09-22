@@ -1,10 +1,8 @@
-#![cfg(test)]
-
 use super::*;
 use crate::metadata::Manifest;
 use crate::runtime::hybrid_persistence::CloudWalPruneProgress;
 
-fn disjoint_segments(records_per_segment: u64) -> (HybridStorage, Manifest) {
+fn disjoint_segments(records_per_segment: u64) -> (CloudPersistence, Manifest) {
     let (_cloud, storage) = hybrid_with_mock_cloud();
     storage.enable_ephemeral_sst_cache(1024 * 1024);
     let mut manifest = Manifest::default();
@@ -32,7 +30,7 @@ fn disjoint_segments(records_per_segment: u64) -> (HybridStorage, Manifest) {
             file.largest_key = Some(key);
             file.key_bounds_complete = true;
             manifest.files.push(file);
-            write_cloud_object(&storage, &crate::sst::object_key(&name), bytes);
+            write_cloud_object(&storage, &crate::cloud_layout::object_key(&name), bytes);
         }
         write_authoritative_cloud_wal(&storage, segment, segment * records_per_segment, wal);
     }
@@ -134,7 +132,7 @@ fn should_retire_completed_batch_prefix_when_proof_memory_cannot_hold_all_candid
 }
 
 fn wait_for_retired_segments(
-    storage: &HybridStorage,
+    storage: &CloudPersistence,
     mut pending: std::collections::BTreeSet<u64>,
 ) {
     let deadline = Instant::now() + Duration::from_secs(2);

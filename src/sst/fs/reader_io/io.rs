@@ -72,9 +72,8 @@ impl SstFileIo {
         let end = handle.offset.checked_add(handle.size).ok_or_else(|| {
             MidgeError::Corruption(format!("SST {kind} block handle overflows file offsets"))
         })?;
-        let minimum_size = 4_u64.saturating_add(
-            u64::try_from(crate::sst::compression::BLOCK_TRAILER_SIZE).unwrap_or(u64::MAX),
-        );
+        let minimum_size = 4_u64
+            .saturating_add(u64::try_from(crate::codec::BLOCK_TRAILER_SIZE).unwrap_or(u64::MAX));
         if handle.size < minimum_size || end > block_region_end {
             return Err(MidgeError::Corruption(format!(
                 "SST {kind} block [{}, {}) exceeds block region ending at {block_region_end}",
@@ -319,10 +318,10 @@ impl SstFileIo {
             ));
         }
         let raw = &buffer[4..];
-        let decoded_size = crate::sst::compression::decompressed_size_with_trailer(raw)?;
+        let decoded_size = crate::codec::decompressed_size_with_trailer(raw)?;
         let retained_size = decoded_size.saturating_mul(4).saturating_add(256);
         let retained_reservation = budget.reserve(retained_size, resource)?;
-        let decoded = crate::sst::compression::decompress_block_with_trailer(raw)?;
+        let decoded = crate::codec::decompress_block_with_trailer(raw)?;
         if decoded.len() > decoded_size {
             return Err(MidgeError::Corruption(format!(
                 "decoded {resource} exceeded its declared size"
@@ -365,7 +364,7 @@ impl SstFileIo {
     /// Every V4 block carries `[payload][algo:u8][crc32c:u32]` and is rejected
     /// if that trailer cannot be verified and decoded.
     fn decompress_raw_block(raw: &[u8]) -> MidgeResult<bytes::Bytes> {
-        use crate::sst::compression;
+        use crate::codec as compression;
 
         if raw.len() < compression::BLOCK_TRAILER_SIZE {
             return Err(MidgeError::Corruption(

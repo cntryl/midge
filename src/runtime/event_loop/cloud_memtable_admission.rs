@@ -2,9 +2,8 @@
 
 use super::EventLoop;
 use crate::common::{MidgeError, MidgeResult};
+use crate::memtable::size_bound::{flush_staging_bytes, point_bytes, range_bytes, FIXED_SST_BYTES};
 use crate::runtime::TransactionOp;
-use crate::sst::size_bound::{flush_staging_bytes, point_bytes, range_bytes, FIXED_SST_BYTES};
-use crate::sst::Memtable;
 use std::collections::HashMap;
 
 impl EventLoop {
@@ -220,7 +219,7 @@ mod tests {
             false,
             Arc::new(crate::runtime::ResponseRouter::new()),
             config,
-            None,
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
         )?;
         Ok((directory, event_loop, setup.hybrid_storage))
     }

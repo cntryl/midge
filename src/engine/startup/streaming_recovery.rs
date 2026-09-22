@@ -3,10 +3,10 @@
 use super::RuntimeStorageMaterialization;
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::{Fs, FsPath};
+use crate::memtable::SkipListMemtable;
 use crate::runtime::actors::flush::{
     FlushActor, FlushBuildOutput, FlushIdentity, FlushPublishTask, FlushWorkerResult,
 };
-use crate::sst::{Memtable, SkipListMemtable};
 use crate::wal::recovery::streaming::{replay_wal_with_checkpoint, StreamingReplayLimits};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -37,7 +37,7 @@ impl CloudReplay {
         let hard_limit = (opts.memory_budget_bytes() / 8).min(disk_window);
         let target = opts
             .memtable_size_limit()
-            .saturating_add(crate::sst::size_bound::FIXED_SST_BYTES)
+            .saturating_add(crate::memtable::size_bound::FIXED_SST_BYTES)
             .min(hard_limit);
         StreamingReplayLimits {
             max_frame_bytes: (opts.memory_budget_bytes() / 16).min(hard_limit),
@@ -223,7 +223,7 @@ fn checkpoint_family(
         sequence: file_meta.largest_seq.unwrap_or(0),
         ..identity
     };
-    let name = crate::sst::file_name(cf_id, 0, sst_seq);
+    let name = crate::cloud_layout::file_name(cf_id, 0, sst_seq);
     let completion = super::timing::measure("recovery_checkpoint_publication", || {
         actor.submit_publish(FlushPublishTask {
             build: FlushBuildOutput {
@@ -234,12 +234,12 @@ fn checkpoint_family(
             },
             sst_name: name.clone(),
             sst_seq,
-            db_path: state.db_path.clone(),
             sst_dir: state.sst_dir.clone(),
             fs: Arc::clone(&state.fs),
             recovery_policy: state.recovery_policy(),
             hybrid_storage: config.hybrid_storage.clone(),
             cloud_metadata_storage: config.cloud_metadata_storage.clone(),
+            metadata_publication_lock: config.metadata_publication_lock.clone(),
             lease_healthy: config.lease_healthy.clone(),
             leader_store: config.leader_store.clone(),
             leader_holder_id: config.leader_holder_id.clone(),
@@ -326,7 +326,7 @@ fn install_checkpoint_output(
         }
         if delta.cloud_metadata_published {
             std::fs::remove_file(state.sst_dir.join(name))?;
-            storage.evict_local_object_cache(&crate::sst::object_key(name))?;
+            storage.evict_local_object_cache(&crate::cloud_layout::object_key(name))?;
             storage.reconcile_local_disk_usage(
                 super::RuntimeRecoveryMaterialization::local_directory_bytes(&state.sst_dir)?
                     .saturating_add(

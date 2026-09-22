@@ -19,12 +19,11 @@ pub struct CloudRequest {
     pub method: Method,
     pub url: String,
     pub headers: Vec<(String, String)>,
-    pub body: Option<Vec<u8>>,
+    pub body: Option<bytes::Bytes>,
     pub timeout: Option<Duration>,
     response_limit: usize,
     retry_conditional_conflicts: bool,
     reservation: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
-    shared_body: Option<bytes::Bytes>,
 }
 
 impl CloudRequest {
@@ -38,7 +37,6 @@ impl CloudRequest {
             response_limit: MAX_CLOUD_RESPONSE_BYTES,
             retry_conditional_conflicts: false,
             reservation: None,
-            shared_body: None,
         }
     }
 
@@ -48,7 +46,7 @@ impl CloudRequest {
     }
 
     pub fn with_body(mut self, body: Vec<u8>) -> Self {
-        self.body = Some(body);
+        self.body = Some(bytes::Bytes::from(body));
         self
     }
 
@@ -63,7 +61,7 @@ impl CloudRequest {
     fn share_admitted_body(mut self) -> Self {
         if let Some(reservation) = &self.reservation {
             if let Some(body) = self.body.take() {
-                self.shared_body = Some(bytes::Bytes::from_owner(ReservedBody {
+                self.body = Some(bytes::Bytes::from_owner(ReservedBody {
                     bytes: body,
                     _reservation: Arc::clone(reservation),
                 }));
@@ -120,7 +118,7 @@ impl CloudRequest {
 }
 
 struct ReservedBody {
-    bytes: Vec<u8>,
+    bytes: bytes::Bytes,
     _reservation: Arc<crate::common::resource_budget::ResourceReservation>,
 }
 
@@ -533,9 +531,7 @@ impl CloudExecutor {
             for (k, v) in &request.headers {
                 builder = builder.header(k, v);
             }
-            if let Some(body) = request.shared_body {
-                builder = builder.body(body);
-            } else if let Some(body) = request.body {
+            if let Some(body) = request.body {
                 builder = builder.body(body);
             }
 
@@ -683,7 +679,7 @@ mod tests {
         let budget = crate::common::resource_budget::ResourceBudget::new(1024);
         let reservation = Arc::new(budget.reserve(1024, "transport payload").unwrap());
         let body = bytes::Bytes::from_owner(super::ReservedBody {
-            bytes: vec![7; 1024],
+            bytes: bytes::Bytes::from(vec![7; 1024]),
             _reservation: reservation,
         });
         let transport_slice = body.slice(128..256);
@@ -712,7 +708,7 @@ mod tests {
 
         // Act
         let retry = request.clone();
-        let body = retry.shared_body.as_ref().unwrap();
+        let body = retry.body.as_ref().unwrap();
         let same_allocation = body.as_ptr() == pointer;
         drop(request);
         let held = budget.used();
@@ -722,6 +718,22 @@ mod tests {
         assert!(same_allocation);
         assert_eq!(held, 4096);
         assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn should_share_body_across_attempts_when_request_is_cloned_for_retry() {
+        // Arrange
+        let bytes = vec![7_u8; 1 << 20];
+        let request =
+            CloudRequest::new(Method::PUT, "http://unused/object".into()).with_body(bytes);
+
+        // Act
+        let retry = request.clone();
+
+        // Assert
+        let original = request.body.as_ref().unwrap();
+        let cloned = retry.body.as_ref().unwrap();
+        assert_eq!(original.as_ptr(), cloned.as_ptr());
     }
 
     struct SlowSuccessfulSigner;

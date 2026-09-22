@@ -25,8 +25,8 @@
 //! followed by `[extended_key_delta_len: u32][extended_value_len: u32]` before the key bytes.
 
 use crate::common::{MidgeError, MidgeResult};
+use crate::types::EntryType;
 use bytes::{BufMut, BytesMut};
-use std::convert::TryFrom;
 
 /// Restart point interval for block building
 ///
@@ -77,42 +77,12 @@ pub(crate) fn validate_entry_size(key_len: usize, value_len: usize) -> MidgeResu
     let size = header
         .checked_add(key_len)
         .and_then(|size| size.checked_add(value_len));
-    if size.is_none_or(|size| size > crate::sst::compression::MAX_DECOMPRESSED_BLOCK_SIZE) {
+    if size.is_none_or(|size| size > crate::codec::MAX_DECOMPRESSED_BLOCK_SIZE) {
         return Err(MidgeError::ResourceLimit(format!(
             "SST entry with {key_len} key bytes and {value_len} value bytes exceeds the 64 MiB decoded block limit"
         )));
     }
     Ok(())
-}
-
-/// Entry type for SST entries
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EntryType {
-    Put = 0,
-    Insert = 1,
-    Delete = 2,
-    Merge = 3,
-}
-
-impl std::fmt::Display for EntryType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", *self as u8)
-    }
-}
-
-impl TryFrom<u8> for EntryType {
-    type Error = MidgeError;
-
-    fn try_from(v: u8) -> Result<Self, Self::Error> {
-        match v {
-            0 => Ok(EntryType::Put),
-            1 => Ok(EntryType::Insert),
-            2 => Ok(EntryType::Delete),
-            3 => Ok(EntryType::Merge),
-            _ => Err(MidgeError::Corruption(format!("Invalid entry_type: {v}"))),
-        }
-    }
 }
 
 /// Encode a single SST entry into `buf`.
@@ -382,10 +352,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn should_classify_value_writes_from_entry_type() {
+        // Arrange
+        let cases = [
+            (EntryType::Put, true),
+            (EntryType::Insert, true),
+            (EntryType::Delete, false),
+            (EntryType::Merge, false),
+        ];
+
+        for (entry_type, expected) in cases {
+            // Act
+            let is_value_write = entry_type.is_value_write();
+
+            // Assert
+            assert_eq!(is_value_write, expected, "{entry_type:?}");
+        }
+    }
+
+    #[test]
+    fn should_reject_merge_entry_when_decoding_sst_entry() {
+        // Arrange
+        let encoded = encode_v4(b"key", 0, Some(b"operand"), 1, EntryType::Merge, None)
+            .expect("merge entry should encode");
+        // Act
+        let decoded = decode(&encoded, 0);
+        let converted = EntryType::try_from(3_u8);
+        // Assert
+        assert!(matches!(decoded, Err(MidgeError::CompatibilityError(_))));
+        assert!(matches!(converted, Err(MidgeError::CompatibilityError(_))));
+    }
+
+    #[test]
     fn should_bound_range_admission_by_complete_encoded_size() {
         use crate::sst::types::validate_range_tombstone_size;
         // Arrange
-        let limit = crate::sst::compression::MAX_DECOMPRESSED_BLOCK_SIZE;
+        let limit = crate::codec::MAX_DECOMPRESSED_BLOCK_SIZE;
         let half = limit / 2;
         // Act
         let accepted = validate_range_tombstone_size(half, half - 20);
@@ -401,7 +403,7 @@ mod tests {
     #[test]
     fn should_admit_only_entries_within_decoded_limit_including_extended_headers() {
         // Arrange
-        let limit = crate::sst::compression::MAX_DECOMPRESSED_BLOCK_SIZE;
+        let limit = crate::codec::MAX_DECOMPRESSED_BLOCK_SIZE;
         for key_len in [0, 3, 65_535, 65_536] {
             let header = if key_len > 65_535 { 34 } else { 26 };
             let value_len = limit - header - key_len;

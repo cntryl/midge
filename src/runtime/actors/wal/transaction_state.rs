@@ -3,7 +3,6 @@
 use super::{TransactionApplyOp, WalActor};
 use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::state::RuntimeState;
-use crate::sst::Memtable;
 use crate::wal::{DurabilityPolicy, WalOpKind};
 use bytes::Bytes;
 use std::collections::{HashMap, HashSet};

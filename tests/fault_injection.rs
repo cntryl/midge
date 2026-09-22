@@ -159,7 +159,8 @@ mod failure_injection {
     }
 
     #[test]
-    fn should_return_busy_before_wal_sync_failure_when_safe_drop_has_unflushed_data() {
+    fn should_license_unflushed_discard_before_wal_sync_failure_when_safe_drop_has_unflushed_data()
+    {
         // Arrange
         let _guard = failpoint_test_lock()
             .lock()
@@ -179,7 +180,11 @@ mod failure_injection {
         let drop_result = engine.drop_column_family(cf.id());
 
         // Assert
-        assert!(matches!(drop_result, Err(MidgeError::Busy(_))));
+        let error = drop_result.expect_err("safe drop must refuse to discard committed data");
+        assert!(
+            error.licenses_unflushed_discard(),
+            "unflushed data must be reported before the WAL sync failure: {error}"
+        );
         assert_eq!(
             read_cf_value(&engine, &cf, b"key"),
             Some(Bytes::from_static(b"value"))
@@ -2582,7 +2587,7 @@ mod chaos_real {
     use std::thread;
 
     use bytes::Bytes;
-    use cntryl_midge::wal::{self, WalOpKind, WalRecord};
+    use cntryl_midge::__internal::wal::{self, WalOpKind, WalRecord};
     use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
     use serde::{Deserialize, Serialize};
     use tempfile::TempDir;
@@ -6339,7 +6344,7 @@ mod cloud_crash_recovery {
         assert!(
             db_path
                 .join("wal")
-                .join(cntryl_midge::wal::segment_file_name(1))
+                .join(cntryl_midge::__internal::wal::segment_file_name(1))
                 .exists(),
             "the sealed segment must survive on disk for restart recovery"
         );
@@ -10800,7 +10805,7 @@ mod transaction_spill_hardening {
     //! Hardening contract for bounded transaction memory and durable spill runs.
 
     use bytes::Bytes;
-    use cntryl_midge::wal::{WalOpKind, WalRecord};
+    use cntryl_midge::__internal::wal::{WalOpKind, WalRecord};
     use cntryl_midge::{
         Engine, MemoryBudget, MidgeError, OpenOptions, Query, TransactionMode, WriteOptions,
     };
@@ -11577,21 +11582,22 @@ mod transaction_spill_hardening {
     }
 
     fn read_wal_frames(path: &Path) -> Vec<(WalRecord, usize)> {
+        use cntryl_midge::__internal::wal::{encoding, frame};
+
         let bytes = fs::read(path).expect("read active WAL");
         let mut frames = Vec::new();
         let mut offset = 0usize;
         while offset < bytes.len() {
-            let header_end = offset + cntryl_midge::wal::frame::WAL_FRAME_HEADER_LEN;
+            let header_end = offset + frame::WAL_FRAME_HEADER_LEN;
             let (payload_len, expected_crc) =
-                cntryl_midge::wal::frame::decode_frame_header(&bytes[offset..header_end])
+                frame::decode_frame_header(&bytes[offset..header_end])
                     .expect("decode WAL frame header");
             let payload_start = header_end;
             let payload_end = payload_start + payload_len;
             let payload = &bytes[payload_start..payload_end];
-            cntryl_midge::wal::frame::verify_frame_crc(payload, expected_crc)
-                .expect("verify WAL frame CRC");
+            frame::verify_frame_crc(payload, expected_crc).expect("verify WAL frame CRC");
             frames.push((
-                cntryl_midge::wal::encoding::decode(payload).expect("decode WAL record"),
+                encoding::decode(payload).expect("decode WAL record"),
                 payload_len,
             ));
             offset = payload_end;

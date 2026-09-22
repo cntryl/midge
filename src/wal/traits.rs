@@ -3,7 +3,7 @@
 //! Clean trait contracts for WAL implementations.
 
 use crate::common::{MidgeError, MidgeResult};
-use crate::wal::types::{WalOpKind, WalPos, WalRecord};
+use crate::wal::types::{WalPos, WalRecord};
 use std::time::Duration;
 
 /// Failed append with an operation-specific proof that no bytes remain.
@@ -36,6 +36,13 @@ impl WalAppendError {
 /// Writer contract for a WAL implementation.
 ///
 /// Implementations must provide append semantics and durability controls.
+///
+/// Every append takes a fully built [`WalRecord`], so the caller — the only
+/// party that knows the live writer epoch — always stamps it. There is
+/// deliberately no convenience append that builds a record from loose fields:
+/// such a helper has no epoch to stamp, and recovery exempts epoch 0 from
+/// stale-writer fencing, so its records could survive a failover and overwrite
+/// a newer writer's data on replay.
 pub trait WalWriter: Send + Sync {
     /// Append a pre-encoded record to the log and return the position where
     /// the record was written.
@@ -53,44 +60,6 @@ pub trait WalWriter: Send + Sync {
     #[doc(hidden)]
     fn append_record_accounted(&self, record: &WalRecord) -> Result<WalPos, WalAppendError> {
         self.append_record(record).map_err(WalAppendError::unknown)
-    }
-
-    /// Append an operation with an explicit sequence number.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the operation cannot be encoded or appended.
-    fn append_op_with_seq(
-        &self,
-        kind: WalOpKind,
-        key: &[u8],
-        value: Option<&[u8]>,
-        seq: u64,
-    ) -> MidgeResult<WalPos> {
-        let record = WalRecord::new(
-            kind,
-            bytes::Bytes::copy_from_slice(key),
-            value.map(bytes::Bytes::copy_from_slice),
-            seq,
-            0, // writer_epoch: default impls use epoch 0 (callers should use append_record directly)
-        );
-        self.append_record(&record)
-    }
-
-    /// Append with Bytes (zero-copy)
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the operation cannot be appended.
-    fn append_op_bytes(
-        &self,
-        kind: WalOpKind,
-        key: bytes::Bytes,
-        value: Option<bytes::Bytes>,
-        seq: u64,
-    ) -> MidgeResult<WalPos> {
-        let record = WalRecord::new(kind, key, value, seq, 0);
-        self.append_record(&record)
     }
 
     /// Batch append multiple records in a single write.
@@ -168,64 +137,78 @@ pub trait WalWriter: Send + Sync {
     }
 }
 
-/// Reader contract for WAL implementations.
-///
-/// Readers provide random access reads and a replay facility for recovery.
-pub trait WalReader {
-    /// Read a record located at `pos`. Returns `Ok(None)` if the position is
-    /// beyond EOF.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the record cannot be decoded or loaded.
-    fn read_at(&mut self, pos: WalPos) -> MidgeResult<Option<WalRecord>>;
+// Reading a WAL back is recovery's job, not a writer-side capability: the
+// recovery path (`crate::wal::recovery`) owns frame scanning, torn-tail
+// tolerance, and writer-epoch fencing. No reader trait is published here,
+// because a generic "read one record" API cannot express those rules and an
+// embedder using it would bypass fencing entirely.
 
-    /// Replay records starting at `start` (inclusive). The callback is invoked
-    /// for each record in order. Returning an Err from the callback aborts the
-    /// replay and returns the error upward.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when WAL replay fails or the callback returns an error.
-    fn replay<F>(&mut self, start: WalPos, cb: F) -> MidgeResult<()>
-    where
-        F: FnMut(&WalRecord) -> MidgeResult<()>;
+#[cfg(test)]
+mod tests {
+    use super::WalWriter;
+    use crate::io::{Fs, FsPath};
+    use crate::wal::types::{WalOpKind, WalRecord};
+    use std::sync::Arc;
 
-    /// Close the reader and release resources.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the reader cannot be closed cleanly.
-    fn close(&mut self) -> MidgeResult<()>;
-}
+    /// Decode the writer epoch of every frame the writer persisted.
+    fn persisted_writer_epochs(fs: &Arc<crate::io::MockFs>, path_str: &str) -> Vec<u64> {
+        let path = FsPath::new(path_str);
+        let file = fs
+            .open(
+                &path,
+                crate::io::OpenOptions {
+                    mode: crate::io::OpenMode::ReadOnly,
+                    create: false,
+                    create_new: false,
+                    truncate: false,
+                },
+            )
+            .expect("open persisted WAL");
+        let frames = crate::wal::frame::FileFrames::new(&*file, &path);
+        let mut epochs = Vec::new();
+        let mut pos = 0;
+        loop {
+            match crate::wal::frame::next_frame(
+                &frames,
+                &path,
+                pos,
+                crate::wal::frame::FrameLimits::default(),
+            ) {
+                Ok(crate::wal::frame::FrameStep::Eof) => break,
+                Ok(crate::wal::frame::FrameStep::Frame { payload, next_pos }) => {
+                    let record =
+                        crate::wal::encoding::decode(payload.as_ref()).expect("decode WAL frame");
+                    epochs.push(record.writer_epoch);
+                    pos = next_pos;
+                }
+                Err(error) => panic!("unexpected WAL frame error: {}", error.into_error()),
+            }
+        }
+        epochs
+    }
 
-/// Object-safe wrapper for WAL readers.
-///
-/// The existing `WalReader` trait has generic methods which make it non-object-safe;
-/// this small adapter trait exposes the same capability using a boxed callback.
-pub trait WalReaderDyn: Send {
-    /// Read a record at a specific WAL position.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the record cannot be decoded or loaded.
-    fn read_at(&mut self, pos: WalPos) -> MidgeResult<Option<WalRecord>>;
+    #[test]
+    fn should_persist_caller_epoch_when_writer_epoch_is_nonzero() {
+        // Arrange: the writer trait has no record-building convenience append,
+        // so the only way in stamps the caller's live epoch. Epoch 0 is exempt
+        // from stale-writer fencing during replay, so a record written by an
+        // epoch-3 writer must never land on disk as epoch 0.
+        let fs = Arc::new(crate::io::MockFs::new());
+        let writer = crate::wal::fs::FsWalWriterIo::new("wal.log", Arc::clone(&fs) as Arc<dyn Fs>)
+            .expect("create WAL writer");
+        let record = WalRecord::new(
+            WalOpKind::Put,
+            bytes::Bytes::from_static(b"key"),
+            Some(bytes::Bytes::from_static(b"value")),
+            1,
+            3,
+        );
 
-    /// Replay records through a boxed callback.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when WAL replay fails or the callback returns an error.
-    fn replay_boxed(
-        &mut self,
-        start: WalPos,
-        cb: &mut dyn FnMut(&WalRecord) -> MidgeResult<()>,
-    ) -> MidgeResult<()>;
+        // Act
+        writer.append_record(&record).expect("append record");
+        writer.close().expect("close writer");
 
-    /// Close the reader and release resources.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the reader cannot be closed cleanly.
-    fn close(&mut self) -> MidgeResult<()>;
+        // Assert
+        assert_eq!(persisted_writer_epochs(&fs, "wal.log"), vec![3]);
+    }
 }

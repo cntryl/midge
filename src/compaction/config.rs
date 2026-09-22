@@ -1,4 +1,4 @@
-use crate::sst::compression::CompressionPolicy;
+use crate::codec::CompressionPolicy;
 
 pub(crate) const DEFAULT_TARGET_SST_SIZE: usize = 256 * 1024 * 1024;
 pub(crate) const DEFAULT_COMPACTION_MEMORY_LIMIT: usize = 64 * 1024 * 1024;

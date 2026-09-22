@@ -753,7 +753,7 @@ mod streaming_scan_hardening {
 }
 
 mod compression_compatibility {
-    use cntryl_midge::sst::compression::{
+    use cntryl_midge::__internal::codec::{
         compress_block_with_trailer, decompress_block_with_trailer, CompressionAlgo,
         CompressionPolicy, BLOCK_TRAILER_SIZE,
     };
@@ -1798,9 +1798,12 @@ mod provider_feature_contract {
             "pub enum CloudProviderConfig"
         ));
         assert!(!provider_config.contains("cfg(feature = \"cloud-"));
+        // Storage imports the config-owned DTO where it uses it. It must not
+        // re-export it as if it owned it; that direction is pinned by
+        // governance::should_import_config_types_directly_when_storage_needs_them.
         assert!(contains_normalized(
             &storage_providers,
-            "pub(crate) use crate::config::CloudProviderConfig;"
+            "use crate::config::CloudProviderConfig;"
         ));
         assert!(!repository_root()
             .join("src/storage/providers/config.rs")

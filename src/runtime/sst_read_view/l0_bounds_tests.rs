@@ -2,10 +2,12 @@ use super::*;
 use crate::common::MidgeResult;
 use crate::diagnostics::RuntimeDiagnostics;
 use crate::io::{Fs, RealFs};
+use crate::memtable::SkipListMemtable;
 use crate::runtime::read_resources::ReadResources;
 use crate::runtime::read_snapshot::ReadSnapshot;
 use crate::sst::traits::SstFactory;
-use crate::sst::{FsSstFactoryIo, SkipListMemtable};
+use crate::sst::FsSstFactoryIo;
+use crate::types::EntryType;
 use std::path::Path;
 
 const CACHE_BYTES: usize = 64 * 1024;
@@ -15,7 +17,7 @@ fn write_point_sst(path: &Path, index: u64) -> MidgeResult<FileMeta> {
     let name = format!("disjoint-{index}.sst");
     let factory = FsSstFactoryIo::new(Arc::new(RealFs::new(path)?), 4096);
     let mut writer = factory.create()?;
-    writer.add_with_meta(&key, Some(b"value"), 7, 0, None)?;
+    writer.add_with_meta(&key, Some(b"value"), 7, EntryType::Put, None)?;
     let bytes = writer.finish_bytes()?;
     std::fs::write(path.join(&name), &bytes)?;
     Ok(FileMeta {
@@ -148,7 +150,7 @@ fn should_preserve_range_tombstones_when_l0_file_endpoints_are_inclusive() -> Mi
             writer.add_range_tombstone(b"a", b"z", 2)?;
         } else {
             for key in [b"a", b"m", b"z"] {
-                writer.add_with_meta(key, Some(b"visible"), 1, 0, None)?;
+                writer.add_with_meta(key, Some(b"visible"), 1, EntryType::Put, None)?;
             }
         }
         let bytes = writer.finish_bytes()?;

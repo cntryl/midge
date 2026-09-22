@@ -6,7 +6,7 @@ use super::{
 };
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::{Fs, FsPath};
-use crate::sst::{size_bound, SkipListMemtable};
+use crate::memtable::{size_bound, SkipListMemtable};
 use crate::wal::{types::WalOpRole, WalRecord};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -431,7 +431,6 @@ impl ReplayState<'_> {
                         range_end: op.range_end,
                         txn_id: Some(batch.txn_id),
                         writer_epoch: batch.writer_epoch,
-                        compression: None,
                     })
                     .collect();
                 self.apply_atomic(&records)?;

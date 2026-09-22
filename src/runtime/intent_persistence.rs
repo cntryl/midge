@@ -69,7 +69,7 @@ impl IntentPersistence {
 
     fn validate_persisted_sst_names(intents: &[IntentLogEntry]) -> Result<(), String> {
         fn validate(name: &str, context: &str) -> Result<(), String> {
-            crate::sst::PersistedSstName::parse(name)
+            crate::cloud_layout::PersistedSstName::parse(name)
                 .map(|_| ())
                 .map_err(|error| format!("{context} SST name is invalid: {error}"))
         }

@@ -4,6 +4,7 @@ use bytes::Bytes;
 use std::path::Path;
 
 use crate::common::MidgeResult;
+use crate::types::{EntryType, KeyState, RangeTombstone};
 
 /// One owned logical version yielded by an SST's raw compaction cursor.
 ///
@@ -65,7 +66,7 @@ pub trait SstStateReader: Send + Sync {
     /// # Errors
     ///
     /// Returns an error when the SST cannot be read or decoded.
-    fn get_state(&self, key: &[u8]) -> MidgeResult<super::types::KeyState>;
+    fn get_state(&self, key: &[u8]) -> MidgeResult<KeyState>;
 
     /// Scan a key range returning presence state for each key
     ///
@@ -76,7 +77,7 @@ pub trait SstStateReader: Send + Sync {
         &self,
         start: Option<&[u8]>,
         end: Option<&[u8]>,
-    ) -> MidgeResult<Vec<(Bytes, super::types::KeyState)>>;
+    ) -> MidgeResult<Vec<(Bytes, KeyState)>>;
 
     /// Snapshot-aware range lookup with a caller-owned TTL clock.
     fn scan_range_state_with_time(
@@ -84,7 +85,7 @@ pub trait SstStateReader: Send + Sync {
         start: Option<&[u8]>,
         end: Option<&[u8]>,
         _now_millis: u64,
-    ) -> MidgeResult<Vec<(Bytes, super::types::KeyState)>> {
+    ) -> MidgeResult<Vec<(Bytes, KeyState)>> {
         self.scan_range_state(start, end)
     }
 
@@ -94,7 +95,7 @@ pub trait SstStateReader: Send + Sync {
         &self,
         start: Option<&[u8]>,
         end: Option<&[u8]>,
-    ) -> MidgeResult<Vec<(Bytes, super::types::KeyState)>>;
+    ) -> MidgeResult<Vec<(Bytes, KeyState)>>;
 
     /// Consume this reader and stream persisted logical versions without
     /// interpreting TTL expiration.
@@ -131,23 +132,21 @@ pub trait SstStateReader: Send + Sync {
         let versions = states
             .into_iter()
             .filter_map(|(key, state)| match state {
-                super::types::KeyState::Absent => None,
-                super::types::KeyState::Tombstone(seq) => Some(RawSstVersion {
+                KeyState::Absent => None,
+                KeyState::Tombstone(seq) => Some(RawSstVersion {
                     key: key.to_vec(),
                     seq,
                     is_tombstone: true,
                     value: None,
                     expiration: None,
                 }),
-                super::types::KeyState::Value(value, seq, expiration, _op_type) => {
-                    Some(RawSstVersion {
-                        key: key.to_vec(),
-                        seq,
-                        is_tombstone: false,
-                        value: Some(value.to_vec()),
-                        expiration,
-                    })
-                }
+                KeyState::Value(value, seq, expiration, _op_type) => Some(RawSstVersion {
+                    key: key.to_vec(),
+                    seq,
+                    is_tombstone: false,
+                    value: Some(value.to_vec()),
+                    expiration,
+                }),
             })
             .collect::<Vec<_>>();
         let retained_bytes = versions.iter().fold(0usize, |total, version| {
@@ -170,15 +169,11 @@ pub trait SstStateReader: Send + Sync {
     /// # Errors
     ///
     /// Returns an error when the SST cannot be read or decoded.
-    fn get_state_at(&self, key: &[u8], snapshot_seq: u64) -> MidgeResult<super::types::KeyState> {
+    fn get_state_at(&self, key: &[u8], snapshot_seq: u64) -> MidgeResult<KeyState> {
         let state = self.get_state(key)?;
         match state {
-            super::types::KeyState::Value(_val, seq, _exp, _op) if seq > snapshot_seq => {
-                Ok(super::types::KeyState::Absent)
-            }
-            super::types::KeyState::Tombstone(seq) if seq > snapshot_seq => {
-                Ok(super::types::KeyState::Absent)
-            }
+            KeyState::Value(_val, seq, _exp, _op) if seq > snapshot_seq => Ok(KeyState::Absent),
+            KeyState::Tombstone(seq) if seq > snapshot_seq => Ok(KeyState::Absent),
             _ => Ok(state),
         }
     }
@@ -189,12 +184,12 @@ pub trait SstStateReader: Send + Sync {
         key: &[u8],
         snapshot_seq: u64,
         _now_millis: u64,
-    ) -> MidgeResult<super::types::KeyState> {
+    ) -> MidgeResult<KeyState> {
         self.get_state_at(key, snapshot_seq)
     }
 
     /// Return all range tombstones stored in this SST
-    fn range_tombstones(&self) -> Vec<super::types::RangeTombstone> {
+    fn range_tombstones(&self) -> Vec<RangeTombstone> {
         Vec::new()
     }
 
@@ -212,27 +207,6 @@ impl<T> SstReaderExt for T where T: SstReader + SstStateReader {}
 
 /// Object-safe SST writer for polymorphic use
 pub trait DynSstWriter: Send {
-    /// Whether this writer preserves sequence numbers, operation kinds, TTLs,
-    /// and point tombstones supplied through `add_with_meta`.
-    ///
-    /// The default keeps source compatibility for simple third-party writers,
-    /// but durability paths must call `require_versioned_entries` before use.
-    fn preserves_versioned_entries(&self) -> bool {
-        false
-    }
-
-    /// Reject a compatibility-only writer before a durability path can
-    /// silently discard persisted metadata or deletes.
-    fn require_versioned_entries(&self) -> MidgeResult<()> {
-        if self.preserves_versioned_entries() {
-            Ok(())
-        } else {
-            Err(crate::common::MidgeError::NotSupported(
-                "SST writer does not preserve versioned entries".to_string(),
-            ))
-        }
-    }
-
     /// Best-effort retained/encoded size used for soft compaction rollover.
     /// Implementations that cannot estimate return zero and therefore retain
     /// the compatibility single-output behavior.
@@ -241,42 +215,34 @@ pub trait DynSstWriter: Send {
     }
 
     /// Conservative final file size, including all data, indexes, filters,
-    /// tombstones and framing. Bounded local staging rejects writers that
-    /// cannot establish this bound before finalization.
-    fn encoded_size_upper_bound(&self) -> Option<usize> {
-        None
-    }
+    /// tombstones and framing, or `None` when the writer cannot establish one.
+    /// Bounded local staging rejects a `None` before finalization. Required, so
+    /// a writer must say so explicitly rather than inherit an unbounded answer.
+    fn encoded_size_upper_bound(&self) -> Option<usize>;
 
     /// Bound after appending one sorted entry, without mutating the writer.
     /// This must bound the subsequent `encoded_size_upper_bound`, allowing
     /// callers to roll a partition before an otherwise splittable overflow.
     fn encoded_size_upper_bound_after_sorted_entry(
         &self,
-        _key: &[u8],
-        _value: Option<&[u8]>,
-    ) -> Option<usize> {
-        None
-    }
+        key: &[u8],
+        value: Option<&[u8]>,
+    ) -> Option<usize>;
 
     /// Incremental bound for a range tombstone held outside this writer.
     /// Includes possible growth of the file's key-bound metadata.
     fn additional_range_tombstone_size_upper_bound(
         &self,
-        _start: &[u8],
-        _end: &[u8],
-    ) -> Option<usize> {
-        None
-    }
-
-    /// Add a simple key-value entry
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the key-value pair cannot be appended to the SST.
-    fn add(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()>;
+        start: &[u8],
+        end: &[u8],
+    ) -> Option<usize>;
 
     /// Add an entry with metadata
     /// `op_type`: 0=Put, 1=Insert, 2=Delete
+    ///
+    /// Required: a writer that cannot store the sequence, operation kind,
+    /// expiration and point tombstones supplied here must not implement this
+    /// trait, because a default would silently discard persisted deletes.
     ///
     /// # Errors
     ///
@@ -285,22 +251,16 @@ pub trait DynSstWriter: Send {
         &mut self,
         key: &[u8],
         value: Option<&[u8]>,
-        _seq: u64,
-        _op_type: u8,
-        _expiration: Option<u64>,
-    ) -> MidgeResult<()> {
-        match value {
-            Some(v) => self.add(key, v),
-            None => Ok(()),
-        }
-    }
+        seq: u64,
+        op_type: EntryType,
+        expiration: Option<u64>,
+    ) -> MidgeResult<()>;
 
     /// Add an entry that is already sorted by key ascending and sequence
     /// descending for equal keys.
     ///
-    /// The default preserves compatibility with writers that only implement
-    /// `add_with_meta`. Filesystem writers use this signal to encode and spill
-    /// complete data blocks incrementally during compaction.
+    /// Filesystem writers use this signal to encode and spill complete data
+    /// blocks incrementally during compaction.
     ///
     /// # Errors
     ///
@@ -310,36 +270,34 @@ pub trait DynSstWriter: Send {
         key: &[u8],
         value: Option<&[u8]>,
         seq: u64,
-        op_type: u8,
+        op_type: EntryType,
         expiration: Option<u64>,
-    ) -> MidgeResult<()> {
-        self.add_with_meta(key, value, seq, op_type, expiration)
-    }
+    ) -> MidgeResult<()>;
 
     /// Add a range tombstone
     ///
     /// # Errors
     ///
     /// Returns an error when the range tombstone cannot be appended to the SST.
-    fn add_range_tombstone(&mut self, start: &[u8], end: &[u8], seq: u64) -> MidgeResult<()> {
-        let _ = (start, end, seq);
-        Err(crate::common::MidgeError::NotSupported(
-            "this SST writer does not support range tombstones".to_string(),
-        ))
-    }
+    fn add_range_tombstone(&mut self, start: &[u8], end: &[u8], seq: u64) -> MidgeResult<()>;
 
     /// Finalize and atomically persist this SST directly to `path`.
     ///
-    /// The compatibility default uses [`DynSstWriter::finish_bytes`].
-    /// Filesystem streaming writers override it so compaction never
-    /// reconstructs the completed SST in one byte vector.
+    /// Writers built by [`crate::sst::FsSstFactoryIo`] override this and
+    /// persist through the filesystem that factory was injected with, so
+    /// compaction never reconstructs the completed SST in one byte vector and
+    /// a mock or fault-injecting filesystem observes the staging writes.
+    ///
+    /// The default exists only for writers that carry no filesystem — test
+    /// doubles and adapters — and therefore has to open the host filesystem
+    /// itself. Implementations holding an `Arc<dyn Fs>` must not use it.
     ///
     /// # Errors
     ///
     /// Returns an error when finalization or atomic persistence fails.
     fn finish_to_path(self: Box<Self>, path: &Path) -> MidgeResult<()> {
         let bytes = self.finish_bytes()?;
-        crate::sst::fs::persist_sst_bytes_to_path(&bytes, path)
+        crate::sst::fs::persist_sst_bytes_with_host_fs(&bytes, path)
     }
 
     /// Finalize and get SST bytes
@@ -465,12 +423,12 @@ mod tests {
     }
 
     impl SstStateReader for MockSstReader {
-        fn get_state(&self, key: &[u8]) -> MidgeResult<crate::sst::types::KeyState> {
+        fn get_state(&self, key: &[u8]) -> MidgeResult<KeyState> {
             Ok(match self.data.get(key) {
                 Some(value) => {
-                    crate::sst::types::KeyState::Value(Bytes::copy_from_slice(value), 0, None, 0)
+                    KeyState::Value(Bytes::copy_from_slice(value), 0, None, EntryType::Put)
                 }
-                None => crate::sst::types::KeyState::Absent,
+                None => KeyState::Absent,
             })
         }
 
@@ -478,11 +436,11 @@ mod tests {
             &self,
             start: Option<&[u8]>,
             end: Option<&[u8]>,
-        ) -> MidgeResult<Vec<(Bytes, crate::sst::types::KeyState)>> {
+        ) -> MidgeResult<Vec<(Bytes, KeyState)>> {
             Ok(self
                 .scan_range(start, end)?
                 .into_iter()
-                .map(|(key, value)| (key, crate::sst::types::KeyState::Value(value, 0, None, 0)))
+                .map(|(key, value)| (key, KeyState::Value(value, 0, None, EntryType::Put)))
                 .collect())
         }
 
@@ -490,7 +448,7 @@ mod tests {
             &self,
             start: Option<&[u8]>,
             end: Option<&[u8]>,
-        ) -> MidgeResult<Vec<(Bytes, crate::sst::types::KeyState)>> {
+        ) -> MidgeResult<Vec<(Bytes, KeyState)>> {
             self.scan_range_state(start, end)
         }
     }
@@ -504,12 +462,65 @@ mod tests {
         fn new() -> Self {
             Self { data: Vec::new() }
         }
+
+        fn add(&mut self, key: &[u8], value: &[u8]) {
+            self.data.push((key.to_vec(), value.to_vec()));
+        }
     }
 
     impl DynSstWriter for MockSstWriter {
-        fn add(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()> {
-            self.data.push((key.to_vec(), value.to_vec()));
+        fn encoded_size_upper_bound(&self) -> Option<usize> {
+            None
+        }
+
+        fn encoded_size_upper_bound_after_sorted_entry(
+            &self,
+            _key: &[u8],
+            _value: Option<&[u8]>,
+        ) -> Option<usize> {
+            None
+        }
+
+        fn additional_range_tombstone_size_upper_bound(
+            &self,
+            _start: &[u8],
+            _end: &[u8],
+        ) -> Option<usize> {
+            None
+        }
+
+        fn add_with_meta(
+            &mut self,
+            key: &[u8],
+            value: Option<&[u8]>,
+            _seq: u64,
+            _op_type: EntryType,
+            _expiration: Option<u64>,
+        ) -> MidgeResult<()> {
+            self.add(key, value.unwrap_or_default());
             Ok(())
+        }
+
+        fn add_sorted_with_meta(
+            &mut self,
+            key: &[u8],
+            value: Option<&[u8]>,
+            seq: u64,
+            op_type: EntryType,
+            expiration: Option<u64>,
+        ) -> MidgeResult<()> {
+            self.add_with_meta(key, value, seq, op_type, expiration)
+        }
+
+        fn add_range_tombstone(
+            &mut self,
+            _start: &[u8],
+            _end: &[u8],
+            _seq: u64,
+        ) -> MidgeResult<()> {
+            Err(crate::common::MidgeError::NotSupported(
+                "this SST writer does not support range tombstones".to_string(),
+            ))
         }
 
         fn finish_bytes(self: Box<Self>) -> MidgeResult<Vec<u8>> {
@@ -523,6 +534,18 @@ mod tests {
             }
             Ok(result)
         }
+    }
+
+    #[test]
+    fn should_carry_a_typed_operation_through_add_with_meta() {
+        // Arrange
+        let mut writer = MockSstWriter::new();
+
+        // Act
+        let result = writer.add_with_meta(b"k", Some(b"v"), 1, EntryType::Insert, None);
+
+        // Assert
+        assert!(result.is_ok());
     }
 
     // =========== Trait Object Safety Tests ===========
@@ -730,38 +753,10 @@ mod tests {
         let mut writer = MockSstWriter::new();
 
         // Act - Default impl should call add() for Some(value)
-        let result = writer.add_with_meta(b"key", Some(b"value"), 100, 0, None);
+        let result = writer.add_with_meta(b"key", Some(b"value"), 100, EntryType::Put, None);
 
         // Assert
         assert!(result.is_ok());
-    }
-
-    #[test]
-    fn should_add_with_meta_default_impl_skips_none() {
-        // Arrange
-        let mut writer = MockSstWriter::new();
-
-        // Act - Default impl should skip None values
-        let result = writer.add_with_meta(b"key", None, 100, 0, None);
-
-        // Assert
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn should_reject_compatibility_writer_when_versioned_entries_are_required() {
-        // Arrange
-        let writer: Box<dyn DynSstWriter> = Box::new(MockSstWriter::new());
-
-        // Act
-        let result = writer.require_versioned_entries();
-
-        // Assert
-        assert!(matches!(
-            result,
-            Err(crate::common::MidgeError::NotSupported(message))
-                if message.contains("does not preserve versioned entries")
-        ));
     }
 
     #[test]
@@ -800,7 +795,7 @@ mod tests {
     fn should_finish_bytes_produces_non_empty_output_when_has_data() {
         // Arrange
         let mut writer = MockSstWriter::new();
-        writer.add(b"test", b"data").unwrap();
+        writer.add(b"test", b"data");
         let boxed = Box::new(writer);
 
         // Act
@@ -832,9 +827,9 @@ mod tests {
         let mut writer = MockSstWriter::new();
 
         // Act
-        writer.add(b"k1", b"v1").unwrap();
-        writer.add(b"k2", b"v2").unwrap();
-        writer.add(b"k3", b"v3").unwrap();
+        writer.add(b"k1", b"v1");
+        writer.add(b"k2", b"v2");
+        writer.add(b"k3", b"v3");
         let boxed = Box::new(writer);
         let result = boxed.finish_bytes().unwrap();
 

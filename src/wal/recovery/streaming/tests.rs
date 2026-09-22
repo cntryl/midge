@@ -180,7 +180,7 @@ fn should_checkpoint_single_wal_object_larger_than_configured_local_capacity() {
             checkpoint_count += 1;
             recovered_entries += tables
                 .values()
-                .map(|table| table.iter_all(u64::MAX).len())
+                .map(|table| table.iter_all().len())
                 .sum::<usize>();
             tables.clear();
             Ok(())
@@ -189,7 +189,7 @@ fn should_checkpoint_single_wal_object_larger_than_configured_local_capacity() {
     .unwrap();
     recovered_entries += memtables
         .values()
-        .map(|table| table.iter_all(u64::MAX).len())
+        .map(|table| table.iter_all().len())
         .sum::<usize>();
 
     // Assert
@@ -235,7 +235,7 @@ fn should_checkpoint_only_complete_split_transactions() {
         None,
         config,
         &mut |tables, stats| {
-            let entries = tables[&0].iter_all(u64::MAX);
+            let entries = tables[&0].iter_all();
             txn_counts.push(
                 entries
                     .iter()

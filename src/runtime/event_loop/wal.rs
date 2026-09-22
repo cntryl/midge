@@ -1,5 +1,5 @@
 use super::super::durability::DurabilityWaiter;
-use super::durability_sync::CompletionSource;
+use super::durability_sync::{AppliedTransaction, CompletionSource};
 use super::{EventLoop, HandleOutcome};
 use crate::runtime::{ConflictPolicy, KeyAssertion, RuntimeMsg, RuntimeResponse, TransactionOp};
 use crate::wal::DurabilityPolicy;
@@ -85,32 +85,15 @@ impl WalCoordinator {
         ) {
             Ok((last_sequence, op_count, deferred)) => {
                 event_loop.publish_snapshot();
-                if event_loop.should_ack_immediately(deferred) {
-                    if deferred {
-                        event_loop.maybe_queue_confirm_only_waiter(deferred, request_id, true);
-                    } else {
-                        event_loop.state.clear_pending_transaction_barrier();
-                        event_loop.state.confirm_sequences(request_id);
-                    }
-                    event_loop.respond(
-                        request_id,
-                        RuntimeResponse::TransactionApplied {
-                            request_id,
-                            last_sequence,
-                            op_count,
-                            write_stall_hint: event_loop.write_stall_hint_for_cfs(&touched_cfs),
-                        },
-                    );
-                } else {
-                    event_loop
-                        .durability
-                        .queue_waiter(DurabilityWaiter::TransactionApply {
-                            request_id,
-                            last_sequence,
-                            op_count,
-                            touched_cfs,
-                        });
-                }
+                event_loop.ack_applied_transaction(
+                    request_id,
+                    &AppliedTransaction {
+                        last_sequence,
+                        op_count,
+                        deferred,
+                        touched_cfs: &touched_cfs,
+                    },
+                );
             }
             Err(error) => {
                 event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
@@ -191,33 +174,15 @@ impl WalCoordinator {
                 Ok((last_sequence, op_count, deferred)) => {
                     event_loop.publish_snapshot();
 
-                    if event_loop.should_ack_immediately(deferred) {
-                        if deferred {
-                            event_loop.maybe_queue_confirm_only_waiter(deferred, request_id, true);
-                        } else {
-                            event_loop.state.clear_pending_transaction_barrier();
-                            event_loop.state.confirm_sequences(request_id);
-                        }
-
-                        event_loop.respond(
-                            request_id,
-                            RuntimeResponse::TransactionApplied {
-                                request_id,
-                                last_sequence,
-                                op_count,
-                                write_stall_hint: event_loop.write_stall_hint_for_cfs(&touched_cfs),
-                            },
-                        );
-                    } else {
-                        event_loop
-                            .durability
-                            .queue_waiter(DurabilityWaiter::TransactionApply {
-                                request_id,
-                                last_sequence,
-                                op_count,
-                                touched_cfs,
-                            });
-                    }
+                    event_loop.ack_applied_transaction(
+                        request_id,
+                        &AppliedTransaction {
+                            last_sequence,
+                            op_count,
+                            deferred,
+                            touched_cfs: &touched_cfs,
+                        },
+                    );
                 }
                 Err(error) => {
                     event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
@@ -525,29 +490,20 @@ impl WalCoordinator {
     ) {
         event_loop.publish_snapshot();
 
-        if event_loop.should_ack_immediately(deferred) {
-            if event_loop.wal_actor.is_cloud_async() {
-                event_loop.state.confirm_sequences(request_id);
-            } else if deferred {
-                event_loop.maybe_queue_confirm_only_waiter(deferred, request_id, false);
-            } else {
-                event_loop.state.confirm_sequences(request_id);
-            }
-
-            event_loop.respond(
-                request_id,
-                RuntimeResponse::WalAppended {
-                    request_id,
-                    sequence,
-                },
-            );
+        if event_loop.wal_actor.is_cloud_async() {
+            event_loop.state.confirm_sequences(request_id);
+        } else if deferred {
+            event_loop.maybe_queue_confirm_only_waiter(deferred, request_id, false);
         } else {
-            event_loop
-                .durability
-                .queue_waiter(DurabilityWaiter::WalAppend {
-                    request_id,
-                    sequence,
-                });
+            event_loop.state.confirm_sequences(request_id);
         }
+
+        event_loop.respond(
+            request_id,
+            RuntimeResponse::WalAppended {
+                request_id,
+                sequence,
+            },
+        );
     }
 }

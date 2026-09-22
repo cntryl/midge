@@ -74,7 +74,7 @@ fn should_hold_spill_disk_charge_through_commit_source_until_files_are_removed()
 fn should_reject_oversized_range_before_staging_or_spilling() -> MidgeResult<()> {
     // Arrange
     let dir = tempfile::tempdir()?;
-    let limit = crate::sst::compression::MAX_DECOMPRESSED_BLOCK_SIZE;
+    let limit = crate::codec::MAX_DECOMPRESSED_BLOCK_SIZE;
     for (start_len, end_len) in [(limit, 1), (1, limit), (limit / 2, limit / 2)] {
         let pool = Arc::new(TransactionMemoryPool::new(1024));
         let mut writes = TransactionWriteSet::new(pool.clone(), dir.path(), false, 1);
@@ -122,7 +122,15 @@ fn should_cover_range_tree_endpoint_duplication_with_spill_disk_reservation() ->
         .collect::<Vec<_>>();
 
     // Act
-    let run = write_run_with_budget(&dir.path().join("txn"), 1, 0, &mut ops, Some(&budget))?;
+    let pool = Arc::new(TransactionMemoryPool::new(usize::MAX));
+    let run = write_run_with_budget(
+        &dir.path().join("txn"),
+        1,
+        0,
+        &mut ops,
+        Some(&budget),
+        &pool,
+    )?;
     let bytes = fs::metadata(&run.path)?.len() + fs::metadata(&run.range_path)?.len();
 
     // Assert
@@ -257,7 +265,7 @@ fn should_reject_corrupt_sparse_index_when_reading_spill_run() -> MidgeResult<()
         op: put(b"key", b"value"),
     }];
     let run = write_run(temp.path(), 1, 0, &mut ops)?;
-    let mut file = File::open(&run.path)?;
+    let mut file = RunFile::open(&run.path)?;
     let header = read_header(&mut file)?;
     drop(file);
     let mut bytes = fs::read(&run.path)?;
@@ -319,7 +327,7 @@ fn should_reject_corrupt_range_index_when_reading_spill_run() -> MidgeResult<()>
         op: delete_range(b"alpha", b"omega"),
     }];
     let run = write_run(temp.path(), 1, 0, &mut ops)?;
-    let mut file = File::open(&run.range_path)?;
+    let mut file = RunFile::open(&run.range_path)?;
     let header = read_range_header(&mut file)?;
     drop(file);
     let mut bytes = fs::read(&run.range_path)?;
@@ -404,8 +412,8 @@ fn should_surface_late_spill_corruption_from_key_cursor_item() -> MidgeResult<()
         },
     ];
     let run = write_run(temp.path(), 1, 0, &mut ops)?;
-    let mut file = File::open(&run.path)?;
-    file.seek(SeekFrom::Start(RUN_HEADER_LEN as u64))?;
+    let mut file = RunFile::open(&run.path)?;
+    file.seek_to(RUN_HEADER_LEN as u64)?;
     let (_, second_offset) = read_op_frame(&mut file)?;
     drop(file);
     let mut bytes = fs::read(&run.path)?;
@@ -458,5 +466,109 @@ fn should_find_earliest_same_key_intent_when_key_spans_many_sparse_index_strides
         "the first write to the key (ordinal 0) must be visible before ordinal 1"
     );
     assert!(before_twentieth.is_some());
+    Ok(())
+}
+
+#[test]
+fn should_bound_live_file_handles_when_scanning_spilled_runs() -> MidgeResult<()> {
+    // Arrange: another transaction holds the pool, forcing every intent into
+    // its own run. An eager scan cursor used to retain one additional handle
+    // per run on top of the run's cached data and range handles.
+    let dir = tempfile::tempdir()?;
+    let pool = Arc::new(TransactionMemoryPool::new(4096));
+    assert!(pool.try_reserve(4096));
+    let mut writes = TransactionWriteSet::new(Arc::clone(&pool), dir.path(), false, 1);
+    for index in 0_u32..32 {
+        writes.push(put(format!("key-{index:04}").as_bytes(), b"value"))?;
+    }
+    let runs = writes.runs.len();
+    assert_eq!(runs, 32, "each refused intent must become its own run");
+    reset_peak_run_files();
+    reset_sparse_index_decodes();
+
+    // Act
+    let keys = writes
+        .key_scan(None, None, true)?
+        .collect::<MidgeResult<Vec<_>>>()?;
+    let peak = peak_run_files();
+
+    // Assert
+    assert_eq!(keys.len(), 32);
+    assert!(
+        peak <= MAX_CACHED_SPILL_READERS * 2 + 1,
+        "{peak} spill handles were live for a cache limit of {MAX_CACHED_SPILL_READERS}"
+    );
+    assert_eq!(sparse_index_decodes(), 0);
+    drop(writes);
+    pool.release(4096);
+    Ok(())
+}
+
+#[test]
+fn should_hold_no_uncharged_intents_in_memory_when_other_transactions_hold_the_pool(
+) -> MidgeResult<()> {
+    // Arrange: another transaction holds the whole pool, so every push below is
+    // refused admission. The pool is what bounds resident bytes across all
+    // transactions, so a refused write must not stay in memory outside it.
+    let dir = tempfile::tempdir()?;
+    let pool = Arc::new(TransactionMemoryPool::new(64 * 1024));
+    assert!(pool.try_reserve(64 * 1024));
+    let mut writes = TransactionWriteSet::new(Arc::clone(&pool), dir.path(), false, 2);
+
+    // Act
+    for index in 0_u32..8 {
+        writes.push(put(format!("key-{index:04}").as_bytes(), b"value"))?;
+    }
+
+    // Assert
+    assert!(
+        writes.resident.is_empty(),
+        "{} refused intents were held in memory outside the pool",
+        writes.resident.len()
+    );
+    for index in 0_u32..8 {
+        let key = format!("key-{index:04}");
+        assert!(
+            matches!(
+                writes.latest_for_key(key.as_bytes())?,
+                Some(IntentLookup::Present(value)) if value.as_ref() == b"value"
+            ),
+            "{key} was lost while spilling under pool pressure"
+        );
+    }
+    drop(writes);
+    pool.release(64 * 1024);
+    Ok(())
+}
+
+#[test]
+fn should_look_up_spilled_key_when_pool_cannot_charge_sparse_index() -> MidgeResult<()> {
+    // Arrange: a pool with no capacity refuses the cached index, so the reader
+    // must fall back to walking the index in the file.
+    let temp = tempfile::tempdir()?;
+    let pool = Arc::new(TransactionMemoryPool::new(0));
+    let mut ops = (0_u64..40)
+        .map(|ordinal| OrdinalOp {
+            ordinal,
+            op: put(format!("key-{ordinal:02}").as_bytes(), b"value"),
+        })
+        .collect::<Vec<_>>();
+    let run = write_run_with_budget(temp.path(), 1, 0, &mut ops, None, &pool)?;
+    reset_sparse_index_decodes();
+
+    // Act
+    let mut latest = None;
+    lookup_run_key(&run, b"key-37", u64::MAX, &mut latest)?;
+
+    // Assert
+    assert!(
+        matches!(latest, Some((37, IntentLookup::Present(value))) if value.as_ref() == b"value")
+    );
+    assert_eq!(pool.resident.load(Ordering::Acquire), 0);
+    assert_eq!(
+        sparse_index_decodes(),
+        0,
+        "a rejected reservation must fall back before decoding the sparse index"
+    );
     Ok(())
 }

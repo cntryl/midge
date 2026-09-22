@@ -10,8 +10,8 @@
 #[path = "./stress_config.rs"]
 mod stress_config;
 
-use cntryl_midge::sst::bloom::writer::BloomFilterOps;
-use cntryl_midge::sst::bloom::BloomWriter;
+use cntryl_midge::__internal::sst::bloom::writer::BloomFilterOps;
+use cntryl_midge::__internal::sst::bloom::{BloomReader, BloomWriter};
 use cntryl_midge::Bytes;
 use cntryl_stress::{black_box, stress, stress_main, StressContext};
 
@@ -25,7 +25,7 @@ fn usize_to_u64(value: usize) -> u64 {
 
 cntryl_stress::stress_allocator!();
 
-fn build_filter(expected_keys: usize) -> (cntryl_midge::sst::bloom::BloomReader, Vec<Bytes>) {
+fn build_filter(expected_keys: usize) -> (BloomReader, Vec<Bytes>) {
     let mut builder = BloomWriter::with_defaults(expected_keys);
     let keys: Vec<Bytes> = (0..expected_keys)
         .map(|i| Bytes::from(format!("key_{i:010}")))

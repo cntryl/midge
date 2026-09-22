@@ -103,7 +103,7 @@ impl SstFileIo {
         key: &[u8],
         snapshot_seq: u64,
         now_millis: u64,
-    ) -> MidgeResult<(crate::sst::types::KeyState, SstPointReadStats)> {
+    ) -> MidgeResult<(crate::types::KeyState, SstPointReadStats)> {
         if self.key_outside_persisted_range(key) {
             self.read_amp_metrics.record_read(0, 0, 0);
             return Ok((KeyState::Absent, SstPointReadStats::default()));
@@ -165,7 +165,7 @@ impl crate::sst::SstStateReader for SstFileIo {
         &self,
         start: Option<&[u8]>,
         end: Option<&[u8]>,
-    ) -> MidgeResult<Vec<(Bytes, crate::sst::types::KeyState)>> {
+    ) -> MidgeResult<Vec<(Bytes, crate::types::KeyState)>> {
         if self.range_outside_persisted_bounds(start, end) {
             return Ok(Vec::new());
         }
@@ -200,9 +200,9 @@ impl crate::sst::SstStateReader for SstFileIo {
         Ok(result)
     }
 
-    fn get_state(&self, key: &[u8]) -> MidgeResult<crate::sst::types::KeyState> {
+    fn get_state(&self, key: &[u8]) -> MidgeResult<crate::types::KeyState> {
         if self.key_outside_persisted_range(key) {
-            return Ok(crate::sst::types::KeyState::Absent);
+            return Ok(crate::types::KeyState::Absent);
         }
 
         let mut best_state = KeyState::Absent;
@@ -235,16 +235,12 @@ impl crate::sst::SstStateReader for SstFileIo {
         key: &[u8],
         snapshot_seq: u64,
         now_millis: u64,
-    ) -> MidgeResult<crate::sst::types::KeyState> {
+    ) -> MidgeResult<crate::types::KeyState> {
         self.get_state_at_with_time_and_stats(key, snapshot_seq, now_millis)
             .map(|(state, _stats)| state)
     }
 
-    fn get_state_at(
-        &self,
-        key: &[u8],
-        snapshot_seq: u64,
-    ) -> MidgeResult<crate::sst::types::KeyState> {
+    fn get_state_at(&self, key: &[u8], snapshot_seq: u64) -> MidgeResult<crate::types::KeyState> {
         let now_millis = crate::common::time::unix_time_millis();
         self.get_state_at_with_time(key, snapshot_seq, now_millis)
     }
@@ -254,7 +250,7 @@ impl crate::sst::SstStateReader for SstFileIo {
         start: Option<&[u8]>,
         end: Option<&[u8]>,
         now_millis: u64,
-    ) -> MidgeResult<Vec<(Bytes, crate::sst::types::KeyState)>> {
+    ) -> MidgeResult<Vec<(Bytes, crate::types::KeyState)>> {
         if self.range_outside_persisted_bounds(start, end) {
             return Ok(Vec::new());
         }
@@ -309,12 +305,12 @@ impl crate::sst::SstStateReader for SstFileIo {
         &self,
         start: Option<&[u8]>,
         end: Option<&[u8]>,
-    ) -> MidgeResult<Vec<(Bytes, crate::sst::types::KeyState)>> {
+    ) -> MidgeResult<Vec<(Bytes, crate::types::KeyState)>> {
         let now_millis = crate::common::time::unix_time_millis();
         self.scan_range_state_with_time(start, end, now_millis)
     }
 
-    fn range_tombstones(&self) -> Vec<crate::sst::types::RangeTombstone> {
+    fn range_tombstones(&self) -> Vec<crate::types::RangeTombstone> {
         self.range_tombstones.clone()
     }
 
@@ -322,7 +318,7 @@ impl crate::sst::SstStateReader for SstFileIo {
         self.range_tombstones.iter().fold(
             self.range_tombstones
                 .len()
-                .saturating_mul(std::mem::size_of::<crate::sst::types::RangeTombstone>()),
+                .saturating_mul(std::mem::size_of::<crate::types::RangeTombstone>()),
             |total, tombstone| {
                 total
                     .saturating_add(tombstone.start.capacity())

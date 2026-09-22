@@ -15,6 +15,10 @@ struct ControlledFs {
 }
 
 impl Fs for ControlledFs {
+    fn host_addressing(&self) -> Option<crate::io::HostAddressing<'_>> {
+        self.inner.host_addressing()
+    }
+
     fn immutable_read_view(&self, path: &FsPath) -> FsResult<Option<Arc<dyn Fs>>> {
         if path.0 == self.blocked_name {
             self.blocked_opens.fetch_add(1, Ordering::SeqCst);

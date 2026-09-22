@@ -2,7 +2,7 @@
 //!
 //! Measures bloom filter construction throughput for deterministic keysets.
 
-use cntryl_midge::sst::bloom::BloomWriter;
+use cntryl_midge::__internal::sst::bloom::BloomWriter;
 use cntryl_stress::{black_box, stress, stress_main, StressContext};
 
 fn make_test_keys(count: usize) -> Vec<Vec<u8>> {

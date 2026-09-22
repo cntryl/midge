@@ -33,7 +33,6 @@ pub(super) fn wait(engine: &Engine, deadline: Instant) -> RuntimeMetricsSnapshot
 fn inspect(metrics: &RuntimeMetricsSnapshot) -> Result<bool, &'static str> {
     if metrics.active_compactions != 0
         || metrics.compacting_ssts != 0
-        || metrics.pending_compactions != 0
         || metrics.flush_inflight != 0
         || metrics.flush_queue_depth != 0
         || metrics.pending_cloud_uploads != 0

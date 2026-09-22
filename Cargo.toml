@@ -94,6 +94,10 @@ winapi = { version = "0.3", features = ["fileapi", "winbase"] }
 [dev-dependencies]
 proptest = "1.11"
 cntryl-stress = "0.4"
+# Self dev-dependency: turns on `internal-testing` for tests/ and benches/ so
+# they can reach implementation internals through `cntryl_midge::__internal`
+# without those modules being public API for downstream consumers.
+cntryl-midge = { path = ".", features = ["internal-testing"] }
 
 # =============================================================================
 # Features
@@ -124,6 +128,11 @@ cloud-aws = [
 ]
 
 sqrzl-tests = []
+
+# Exposes `cntryl_midge::__internal` for this crate's own tests, benches and
+# fuzz targets. Never enable it from a downstream crate: nothing behind it is
+# stable API.
+internal-testing = []
 cloud-azure = [
     "cloud-common",
     "dep:base64",

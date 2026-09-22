@@ -2,7 +2,7 @@
 //!
 //! Covers exact key lookup, prefix range lookup, and key-shape sensitivity.
 
-use cntryl_midge::sst::trie::{TrieBuilder, TrieReader};
+use cntryl_midge::__internal::sst::trie::{TrieBuilder, TrieReader};
 use cntryl_stress::{black_box, stress, stress_main, StressContext};
 
 #[path = "./stress_config.rs"]

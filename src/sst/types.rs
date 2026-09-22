@@ -1,7 +1,9 @@
 //! SST core types and structures
 
+#[cfg(test)]
+use crate::types::KeyState;
+use crate::types::{EntryType, RangeTombstone};
 use bytes::Bytes;
-use std::fmt;
 
 use crate::sst::index::tuner::IndexKind;
 
@@ -424,27 +426,6 @@ fn decode_metadata_bytes(
     Ok(bytes.to_vec())
 }
 
-/// Range tombstone for covering key ranges
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RangeTombstone {
-    pub start: Vec<u8>,
-    pub end: Vec<u8>,
-    pub seq: u64,
-}
-
-impl RangeTombstone {
-    #[must_use]
-    pub fn new(start: Vec<u8>, end: Vec<u8>, seq: u64) -> Self {
-        Self { start, end, seq }
-    }
-
-    /// Check if a key is covered by this range tombstone
-    #[must_use]
-    pub fn covers(&self, key: &[u8]) -> bool {
-        key >= self.start.as_slice() && key < self.end.as_slice()
-    }
-}
-
 /// Apply point-key admission limits to both endpoints and bound the complete
 /// singleton range block (count, two lengths, sequence, and endpoint bytes).
 pub(crate) fn validate_range_tombstone_size(
@@ -456,7 +437,7 @@ pub(crate) fn validate_range_tombstone_size(
     let encoded_len = start_len
         .checked_add(end_len)
         .and_then(|size| size.checked_add(20));
-    if encoded_len.is_none_or(|size| size > crate::sst::compression::MAX_DECOMPRESSED_BLOCK_SIZE) {
+    if encoded_len.is_none_or(|size| size > crate::codec::MAX_DECOMPRESSED_BLOCK_SIZE) {
         return Err(crate::common::MidgeError::ResourceLimit(
             "SST range tombstone exceeds the 64 MiB decoded block limit".to_string(),
         ));
@@ -604,7 +585,7 @@ pub struct SstEntry {
     pub key: Vec<u8>,
     pub value: Option<Bytes>,
     pub sequence: u64,
-    pub op_type: u8, // 0=Put, 1=Insert, 2=Delete
+    pub op_type: EntryType,
     pub expiration: Option<u64>,
 }
 
@@ -613,7 +594,7 @@ impl SstEntry {
         key: Vec<u8>,
         value: Option<Bytes>,
         sequence: u64,
-        op_type: u8,
+        op_type: EntryType,
         expiration: Option<u64>,
     ) -> Self {
         Self {
@@ -626,31 +607,11 @@ impl SstEntry {
     }
 
     pub fn is_tombstone(&self) -> bool {
-        self.op_type == 2
+        self.op_type == EntryType::Delete
     }
 
     pub fn is_expired(&self, now_millis: u64) -> bool {
         crate::common::time::is_expired_at(self.expiration, now_millis)
-    }
-}
-
-/// Key state in SST (used for tombstone-aware reads)
-#[derive(Debug, Clone, PartialEq)]
-pub enum KeyState {
-    Absent,
-    Tombstone(u64),                     // sequence number
-    Value(Bytes, u64, Option<u64>, u8), // value, seq, expiration, op_type
-}
-
-impl fmt::Display for KeyState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            KeyState::Absent => write!(f, "Absent"),
-            KeyState::Tombstone(seq) => write!(f, "Tombstone(seq={seq})"),
-            KeyState::Value(_, seq, exp, op) => {
-                write!(f, "Value(seq={seq}, exp={exp:?}, op={op})")
-            }
-        }
     }
 }
 
@@ -1190,13 +1151,19 @@ mod tests {
         // (no setup)
 
         // Act
-        let entry = SstEntry::new(b"key".to_vec(), Some(Bytes::from("value")), 100, 0, None);
+        let entry = SstEntry::new(
+            b"key".to_vec(),
+            Some(Bytes::from("value")),
+            100,
+            EntryType::Put,
+            None,
+        );
 
         // Assert
         assert_eq!(entry.key, b"key");
         assert_eq!(entry.value.unwrap(), Bytes::from("value"));
         assert_eq!(entry.sequence, 100);
-        assert_eq!(entry.op_type, 0);
+        assert_eq!(entry.op_type, EntryType::Put);
         assert_eq!(entry.expiration, None);
     }
 
@@ -1206,16 +1173,43 @@ mod tests {
         // (no setup)
 
         // Act
-        let entry = SstEntry::new(b"key".to_vec(), None, 100, 2, None);
+        let entry = SstEntry::new(b"key".to_vec(), None, 100, EntryType::Delete, None);
 
         // Assert
         assert!(entry.value.is_none());
     }
 
     #[test]
+    fn should_carry_a_typed_operation_when_building_an_entry_and_a_key_state() {
+        // Arrange
+        let entry = SstEntry::new(
+            b"k".to_vec(),
+            Some(Bytes::from_static(b"v")),
+            5,
+            EntryType::Insert,
+            None,
+        );
+
+        // Act
+        let state = KeyState::Value(
+            Bytes::from_static(b"v"),
+            entry.sequence,
+            entry.expiration,
+            entry.op_type,
+        );
+
+        // Assert
+        assert!(!entry.is_tombstone());
+        assert!(matches!(
+            state,
+            KeyState::Value(_, 5, None, EntryType::Insert)
+        ));
+    }
+
+    #[test]
     fn should_identify_tombstone_entry_when_op_type_is_2() {
         // Arrange
-        let entry = SstEntry::new(b"key".to_vec(), None, 1, 2, None);
+        let entry = SstEntry::new(b"key".to_vec(), None, 1, EntryType::Delete, None);
 
         // Act
         // (none)
@@ -1227,7 +1221,13 @@ mod tests {
     #[test]
     fn should_identify_non_tombstone_for_op_type_0_put() {
         // Arrange
-        let entry = SstEntry::new(b"key".to_vec(), Some(Bytes::from("val")), 1, 0, None);
+        let entry = SstEntry::new(
+            b"key".to_vec(),
+            Some(Bytes::from("val")),
+            1,
+            EntryType::Put,
+            None,
+        );
 
         // Act
         // (none)
@@ -1239,7 +1239,13 @@ mod tests {
     #[test]
     fn should_identify_non_tombstone_for_op_type_1_insert() {
         // Arrange
-        let entry = SstEntry::new(b"key".to_vec(), Some(Bytes::from("val")), 1, 1, None);
+        let entry = SstEntry::new(
+            b"key".to_vec(),
+            Some(Bytes::from("val")),
+            1,
+            EntryType::Insert,
+            None,
+        );
 
         // Act
         // (none)
@@ -1251,7 +1257,13 @@ mod tests {
     #[test]
     fn should_entry_not_expired_when_no_expiration() {
         // Arrange
-        let entry = SstEntry::new(b"key".to_vec(), Some(Bytes::from("val")), 1, 0, None);
+        let entry = SstEntry::new(
+            b"key".to_vec(),
+            Some(Bytes::from("val")),
+            1,
+            EntryType::Put,
+            None,
+        );
 
         // Act
         // (none)
@@ -1263,7 +1275,13 @@ mod tests {
     #[test]
     fn should_entry_not_expired_when_current_time_before_expiration() {
         // Arrange
-        let entry = SstEntry::new(b"key".to_vec(), Some(Bytes::from("val")), 1, 0, Some(1000));
+        let entry = SstEntry::new(
+            b"key".to_vec(),
+            Some(Bytes::from("val")),
+            1,
+            EntryType::Put,
+            Some(1000),
+        );
 
         // Act
         // (none)
@@ -1275,7 +1293,13 @@ mod tests {
     #[test]
     fn should_entry_expired_when_current_time_equals_expiration() {
         // Arrange
-        let entry = SstEntry::new(b"key".to_vec(), Some(Bytes::from("val")), 1, 0, Some(1000));
+        let entry = SstEntry::new(
+            b"key".to_vec(),
+            Some(Bytes::from("val")),
+            1,
+            EntryType::Put,
+            Some(1000),
+        );
 
         // Act
         // (none)
@@ -1287,7 +1311,13 @@ mod tests {
     #[test]
     fn should_entry_expired_when_current_time_after_expiration() {
         // Arrange
-        let entry = SstEntry::new(b"key".to_vec(), Some(Bytes::from("val")), 1, 0, Some(1000));
+        let entry = SstEntry::new(
+            b"key".to_vec(),
+            Some(Bytes::from("val")),
+            1,
+            EntryType::Put,
+            Some(1000),
+        );
 
         // Act
         // (none)
@@ -1299,7 +1329,13 @@ mod tests {
     #[test]
     fn should_entry_handle_zero_expiration() {
         // Arrange
-        let entry = SstEntry::new(b"key".to_vec(), Some(Bytes::from("val")), 1, 0, Some(0));
+        let entry = SstEntry::new(
+            b"key".to_vec(),
+            Some(Bytes::from("val")),
+            1,
+            EntryType::Put,
+            Some(0),
+        );
 
         // Act
         // (none)
@@ -1315,7 +1351,7 @@ mod tests {
             b"key".to_vec(),
             Some(Bytes::from("val")),
             1,
-            0,
+            EntryType::Put,
             Some(u64::MAX),
         );
 
@@ -1333,7 +1369,7 @@ mod tests {
             b"key".to_vec(),
             Some(Bytes::from("value")),
             100,
-            0,
+            EntryType::Put,
             Some(500),
         );
 
@@ -1350,7 +1386,13 @@ mod tests {
     fn should_entry_with_large_sequence() {
         // Arrange
         // (setup)
-        let entry = SstEntry::new(b"key".to_vec(), Some(Bytes::from("val")), u64::MAX, 0, None);
+        let entry = SstEntry::new(
+            b"key".to_vec(),
+            Some(Bytes::from("val")),
+            u64::MAX,
+            EntryType::Put,
+            None,
+        );
 
         // Act
         // (none)
@@ -1365,7 +1407,13 @@ mod tests {
         let binary_key = vec![0u8, 1u8, 255u8];
 
         // Act
-        let entry = SstEntry::new(binary_key.clone(), Some(Bytes::from("val")), 1, 0, None);
+        let entry = SstEntry::new(
+            binary_key.clone(),
+            Some(Bytes::from("val")),
+            1,
+            EntryType::Put,
+            None,
+        );
 
         // Assert
         assert_eq!(entry.key, binary_key);
@@ -1406,11 +1454,11 @@ mod tests {
         // (no setup)
 
         // Act
-        let state = KeyState::Value(Bytes::from("val"), 100, Some(500), 0);
+        let state = KeyState::Value(Bytes::from("val"), 100, Some(500), EntryType::Put);
 
         // Assert
         assert!(
-            matches!(state, KeyState::Value(_, 100, Some(500), 0)),
+            matches!(state, KeyState::Value(_, 100, Some(500), EntryType::Put)),
             "expected Value state with correct fields"
         );
     }
@@ -1443,7 +1491,7 @@ mod tests {
     #[test]
     fn should_format_key_state_value() {
         // Arrange
-        let state = KeyState::Value(Bytes::from("val"), 100, Some(500), 0);
+        let state = KeyState::Value(Bytes::from("val"), 100, Some(500), EntryType::Put);
 
         // Act
         let formatted = format!("{state}");
@@ -1456,7 +1504,7 @@ mod tests {
     #[test]
     fn should_key_state_clone() {
         // Arrange
-        let state1 = KeyState::Value(Bytes::from("val"), 100, Some(500), 0);
+        let state1 = KeyState::Value(Bytes::from("val"), 100, Some(500), EntryType::Put);
 
         // Act
         let state2 = state1.clone();
@@ -1471,7 +1519,7 @@ mod tests {
         // (no setup)
 
         // Act
-        let state = KeyState::Value(Bytes::from("val"), 1, Some(0), 0);
+        let state = KeyState::Value(Bytes::from("val"), 1, Some(0), EntryType::Put);
 
         // Assert
         assert!(
@@ -1486,7 +1534,7 @@ mod tests {
         // (no setup)
 
         // Act
-        let state = KeyState::Value(Bytes::from("val"), u64::MAX, None, 0);
+        let state = KeyState::Value(Bytes::from("val"), u64::MAX, None, EntryType::Put);
 
         // Assert
         assert!(

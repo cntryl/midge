@@ -1,8 +1,10 @@
 //! Bounded fixture construction. Source data is deterministic and independent
 //! of Midge reads; no complete backlog or expected-value ledger is kept in RAM.
 
+use cntryl_midge::__internal::wal::{
+    cloud_segment_object_key, encoding, frame, WalOpKind, WalRecord,
+};
 use cntryl_midge::{
-    wal::{cloud_segment_object_key, encoding, frame, WalOpKind, WalRecord},
     CloudObjectLayout, CloudProviderConfig, CloudStorageLocation, Engine, MemoryBudget,
     OpenOptions, TransactionMode, WriteOptions,
 };

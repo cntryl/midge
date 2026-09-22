@@ -273,6 +273,13 @@ mod ownership_tests {
         pending: parking_lot::Mutex<Option<(Vec<u8>, CloudCallback)>>,
     }
     impl CloudBackend for PendingUpload {
+        crate::storage::cloud::unsupported_cloud_backend!(
+            submit_get,
+            submit_get_with_metadata,
+            submit_delete,
+            submit_list,
+        );
+
         fn submit_put(
             &self,
             _key: &str,

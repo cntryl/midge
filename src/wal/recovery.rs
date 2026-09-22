@@ -10,7 +10,7 @@
 use super::types::{ColumnFamilyId, WalOpRole, WalRecord};
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::{File, Fs, FsError, FsPath, OpenMode, OpenOptions};
-use crate::sst::SkipListMemtable;
+use crate::memtable::SkipListMemtable;
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 use std::io::{Read as _, Seek as _, Write as _};
@@ -367,6 +367,7 @@ impl RecoveryStats {
 /// # Errors
 ///
 /// Returns an error if WAL enumeration, decoding, or record application fails.
+#[cfg(test)]
 pub fn replay_wal<S: BuildHasher>(
     storage: &dyn Fs,
     wal_dir: &FsPath,
@@ -381,6 +382,7 @@ pub fn replay_wal<S: BuildHasher>(
 ///
 /// Returns an error if WAL enumeration, decoding, or record application fails
 /// according to the selected replay policy.
+#[cfg(test)]
 pub fn replay_wal_with_policy<S: BuildHasher>(
     storage: &dyn Fs,
     wal_dir: &FsPath,
@@ -1058,7 +1060,6 @@ fn apply_replayed_wal_record<S: BuildHasher>(
                     range_end: buffered.range_end,
                     txn_id: Some(batch.txn_id),
                     writer_epoch: batch.writer_epoch,
-                    compression: None,
                 };
                 apply_wal_record_to_memtables(
                     &replay_record,

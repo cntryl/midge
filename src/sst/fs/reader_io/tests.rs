@@ -1,8 +1,9 @@
 use super::*;
+use crate::codec::{CompressionAlgo, CompressionPolicy, BLOCK_TRAILER_SIZE};
 use crate::io::traits::{DirEntry, Metadata};
 use crate::io::{Durability, File, Fs, FsError, FsPath, FsResult, OpenOptions};
-use crate::sst::compression::{CompressionAlgo, CompressionPolicy, BLOCK_TRAILER_SIZE};
 use crate::sst::traits::{SstFactory, SstReader, SstStateReader};
+use crate::types::EntryType;
 use std::collections::HashSet;
 use std::sync::Mutex;
 
@@ -84,6 +85,10 @@ impl File for CountingFile<'_> {
 }
 
 impl Fs for CountingFs {
+    fn host_addressing(&self) -> Option<crate::io::HostAddressing<'_>> {
+        self.inner.host_addressing()
+    }
+
     fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
         Ok(Box::new(CountingFile {
             inner: self.inner.open(path, opts)?,
@@ -145,7 +150,7 @@ fn write_marked_key_sst(temp_dir: &tempfile::TempDir, name: &str, marker: u8) ->
 
     for i in 0..96u64 {
         let key = format!("key_{i:04}");
-        writer.add_with_meta(key.as_bytes(), Some(&value), i + 1, 0, None)?;
+        writer.add_with_meta(key.as_bytes(), Some(&value), i + 1, EntryType::Put, None)?;
     }
 
     crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join(name))
@@ -159,7 +164,7 @@ fn write_single_value_sst(
     let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
     let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
     let mut writer = factory.create()?;
-    writer.add_with_meta(b"key", Some(value), 1, 0, None)?;
+    writer.add_with_meta(b"key", Some(value), 1, EntryType::Put, None)?;
     crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join(name))
 }
 
@@ -179,7 +184,7 @@ fn write_keyed_sst(
             key,
             Some(&value),
             u64::try_from(index + 1).unwrap_or(u64::MAX),
-            0,
+            EntryType::Put,
             None,
         )?;
     }
@@ -656,7 +661,13 @@ fn should_reject_corrupt_sparse_index_given_nonmonotonic_offsets_when_opening() 
     let value = vec![b'v'; 256];
     for index in 0..96u64 {
         let key = format!("random-key-{index:04}");
-        writer.add_with_meta(key.as_bytes(), Some(&value), index + 1, 0, None)?;
+        writer.add_with_meta(
+            key.as_bytes(),
+            Some(&value),
+            index + 1,
+            EntryType::Put,
+            None,
+        )?;
     }
     let path = temp_dir.path().join("nonmonotonic-index.sst");
     crate::sst::fs::finish_writer_to_path(writer, &path)?;
@@ -800,12 +811,12 @@ fn should_get_state_at_return_newest_visible_version_across_duplicate_blocks() -
     let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
     let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
     let mut writer = factory.create()?;
-    writer.add_with_meta(b"aaa", Some(&vec![b'a'; 256]), 100, 0, None)?;
+    writer.add_with_meta(b"aaa", Some(&vec![b'a'; 256]), 100, EntryType::Put, None)?;
     for seq in 1..=32u64 {
         let value = vec![u8::try_from(seq).unwrap_or(u8::MAX); 512];
-        writer.add_with_meta(b"dup", Some(&value), seq, 0, None)?;
+        writer.add_with_meta(b"dup", Some(&value), seq, EntryType::Put, None)?;
     }
-    writer.add_with_meta(b"zzz", Some(&vec![b'z'; 256]), 100, 0, None)?;
+    writer.add_with_meta(b"zzz", Some(&vec![b'z'; 256]), 100, EntryType::Put, None)?;
     crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join("versions.sst"))?;
 
     let reader = SstFileIo::open(
@@ -851,12 +862,12 @@ fn should_stream_raw_versions_in_compaction_order_across_blocks() -> MidgeResult
     let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
     let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
     let mut writer = factory.create()?;
-    writer.add_with_meta(b"aaa", Some(b"first"), 100, 0, None)?;
+    writer.add_with_meta(b"aaa", Some(b"first"), 100, EntryType::Put, None)?;
     for sequence in 1..=32u64 {
         let value = vec![u8::try_from(sequence).unwrap_or(u8::MAX); 512];
-        writer.add_with_meta(b"dup", Some(&value), sequence, 0, None)?;
+        writer.add_with_meta(b"dup", Some(&value), sequence, EntryType::Put, None)?;
     }
-    writer.add_with_meta(b"zzz", Some(b"last"), 100, 0, None)?;
+    writer.add_with_meta(b"zzz", Some(b"last"), 100, EntryType::Put, None)?;
     crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join("raw-versions.sst"))?;
     let reader = Box::new(SstFileIo::open(
         "raw-versions.sst",
@@ -943,12 +954,24 @@ fn should_get_state_at_return_newest_visible_version_across_many_trie_blocks() -
     let mut writer = factory.create()?;
     for index in 0..128u64 {
         let key = format!("tenant/shared/key/{index:04}");
-        writer.add_with_meta(key.as_bytes(), Some(b"filler"), index + 1, 0, None)?;
+        writer.add_with_meta(
+            key.as_bytes(),
+            Some(b"filler"),
+            index + 1,
+            EntryType::Put,
+            None,
+        )?;
     }
     let target_key = b"tenant/shared/key/0064-target";
     for sequence in 1..=32u64 {
         let value = vec![u8::try_from(sequence).unwrap_or(u8::MAX); 8192];
-        writer.add_with_meta(target_key, Some(&value), sequence + 1_000, 0, None)?;
+        writer.add_with_meta(
+            target_key,
+            Some(&value),
+            sequence + 1_000,
+            EntryType::Put,
+            None,
+        )?;
     }
     crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join("trie-versions.sst"))?;
 
@@ -988,9 +1011,9 @@ fn should_preserve_tombstone_ttl_semantics_when_get_state_at_reads() -> MidgeRes
     let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
     let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
     let mut writer = factory.create()?;
-    writer.add_with_meta(b"dead", Some(b"old"), 4, 0, None)?;
-    writer.add_with_meta(b"dead", None, 9, 2, None)?;
-    writer.add_with_meta(b"ttl", Some(b"expired"), 11, 0, Some(1))?;
+    writer.add_with_meta(b"dead", Some(b"old"), 4, EntryType::Put, None)?;
+    writer.add_with_meta(b"dead", None, 9, EntryType::Delete, None)?;
+    writer.add_with_meta(b"ttl", Some(b"expired"), 11, EntryType::Put, Some(1))?;
     crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join("state.sst"))?;
     let reader = SstFileIo::open(
         "state.sst",
@@ -1025,7 +1048,7 @@ fn should_reject_current_format_block_with_crc_mismatch() -> MidgeResult<()> {
     let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
     let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
     let mut writer = factory.create()?;
-    writer.add_with_meta(b"crc-key", Some(b"crc-value"), 7, 0, None)?;
+    writer.add_with_meta(b"crc-key", Some(b"crc-value"), 7, EntryType::Put, None)?;
     let path = temp_dir.path().join("crc.sst");
     crate::sst::fs::finish_writer_to_path(writer, &path)?;
 
@@ -1083,7 +1106,7 @@ fn should_report_corruption_given_shipping_codec_payload_when_reading_through_fu
         let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096)
             .with_compression_policy(CompressionPolicy::Fixed(algorithm));
         let mut writer = factory.create()?;
-        writer.add_with_meta(b"codec-key", Some(&value), 1, 0, None)?;
+        writer.add_with_meta(b"codec-key", Some(&value), 1, EntryType::Put, None)?;
         let path = temp_dir.path().join("codec.sst");
         crate::sst::fs::finish_writer_to_path(writer, &path)?;
         let reader = SstFileIo::open("codec.sst", Arc::clone(&fs))?;
@@ -1198,7 +1221,7 @@ fn should_charge_summary_key_bounds_while_raw_cursor_advances() -> MidgeResult<(
     let factory = crate::sst::FsSstFactoryIo::new(fs.clone(), 4096);
     let mut writer = factory.create()?;
     for prefix in *b"amz" {
-        writer.add_with_meta(&vec![prefix; 8192], Some(b"value"), 1, 0, None)?;
+        writer.add_with_meta(&vec![prefix; 8192], Some(b"value"), 1, EntryType::Put, None)?;
     }
     crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join("summary-bounds.sst"))?;
     let raw_budget = crate::common::resource_budget::ResourceBudget::new(16 * 1024 * 1024);

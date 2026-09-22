@@ -9,7 +9,7 @@ mod coverage_manifests {
     //! Internal `FsError` coverage lives in `src/io/traits.rs` unit tests because the
     //! filesystem module is intentionally private to library consumers.
 
-    use cntryl_midge::sst::compression::{CompressionAlgo, CompressionPolicy};
+    use cntryl_midge::__internal::codec::{CompressionAlgo, CompressionPolicy};
     use cntryl_midge::{
         AzureCredentialSource, DurabilityPolicy, Engine, GcsCredentialSource,
         HybridStorageBudgetSnapshot, LocalStorageUsage, MidgeError, OpenOptions, RecoveryPolicy,
@@ -298,10 +298,603 @@ mod architecture_ladder {
         sources
     }
 
+    #[test]
+    fn should_import_config_types_directly_when_storage_needs_them() {
+        // Arrange
+        let source = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/storage/providers/mod.rs"),
+        )
+        .expect("read storage/providers/mod.rs");
+
+        // Act
+        let reexports: Vec<&str> = source
+            .lines()
+            .map(str::trim)
+            .filter(|line| {
+                line.starts_with("pub(crate) use crate::config")
+                    || line.starts_with("pub use crate::config")
+            })
+            .collect();
+
+        // Assert
+        assert!(
+            reexports.is_empty(),
+            "storage must import config types where it uses them, not re-export them as if \
+             it owned them: {reexports:?}"
+        );
+    }
+
+    #[test]
+    fn should_keep_metadata_object_naming_out_of_the_storage_layer() {
+        // Arrange
+        let needle = "fn cloud_metadata_key";
+
+        // Act
+        let offenders: Vec<PathBuf> = rust_sources_under("src/storage")
+            .into_iter()
+            .filter(|path| {
+                std::fs::read_to_string(path)
+                    .expect("read Rust source")
+                    .contains(needle)
+            })
+            .collect();
+
+        // Assert
+        assert!(
+            offenders.is_empty(),
+            "object naming for recovery metadata belongs to CloudObjectLayout, not the storage \
+             layer: {offenders:?}"
+        );
+    }
+
+    const UNFLUSHED_DATA_PRESENT_CONSTRUCTION: &str = "UnflushedDataPresent {";
+
+    #[test]
+    fn should_construct_the_unflushed_discard_licence_in_only_the_active_memtable_check() {
+        // Arrange: MidgeError::UnflushedDataPresent is a permission to throw
+        // committed data away. Busy used to carry that meaning implicitly,
+        // which let four unrelated producers forge it; a second construction
+        // site is a second forgery, so the count is the invariant.
+        let needle = UNFLUSHED_DATA_PRESENT_CONSTRUCTION;
+        let classifier = Path::new("src").join("common").join("error.rs");
+        let expected = Path::new("src").join("runtime").join("ddl.rs");
+
+        // Act
+        let producers: Vec<PathBuf> = rust_sources_under("src")
+            .into_iter()
+            .filter(|path| !path.ends_with(&classifier))
+            .filter(|path| production_source(path).contains(needle))
+            .collect();
+
+        // Assert
+        assert_eq!(
+            producers.len(),
+            1,
+            "only the active-memtable check may emit the discard licence: {producers:?}"
+        );
+        assert!(
+            producers[0].ends_with(&expected),
+            "the discard licence moved out of runtime/ddl.rs: {producers:?}"
+        );
+    }
+
+    #[test]
+    fn should_define_shared_provider_helpers_once_when_providers_need_them() {
+        // Arrange
+        let shared = ["fn current_unix_secs(", "fn object_metadata_from_"];
+        let sources = rust_sources_under("src/storage/providers");
+
+        // Act
+        let duplicated: Vec<(&str, usize)> = shared
+            .into_iter()
+            .map(|needle| {
+                let definitions = sources
+                    .iter()
+                    .map(|path| {
+                        std::fs::read_to_string(path)
+                            .expect("read Rust source")
+                            .matches(needle)
+                            .count()
+                    })
+                    .sum::<usize>();
+                (needle, definitions)
+            })
+            .filter(|(_, definitions)| *definitions > 1)
+            .collect();
+
+        // Assert
+        assert!(
+            duplicated.is_empty(),
+            "provider helpers copied into more than one provider: {duplicated:?}"
+        );
+    }
+
+    #[test]
+    fn should_keep_cloud_adapter_callback_waits_in_one_helper() {
+        // Arrange
+        let source = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/storage/cloud/adapter.rs"),
+        )
+        .expect("read storage/cloud/adapter.rs");
+        // One in the shared helper and one in the proof path, which reports its
+        // own messages.
+        let allowed = 2;
+
+        // Act
+        let disconnect_arms = source.matches("RecvTimeoutError::Disconnected").count();
+
+        // Assert
+        assert!(
+            disconnect_arms <= allowed,
+            "{disconnect_arms} hand-written callback wait arms in storage/cloud/adapter.rs \
+             (allowed {allowed}): route adapter waits through await_cloud_event"
+        );
+    }
+
+    #[test]
+    fn should_keep_cloud_boundary_runtime_publication_owners_separate() {
+        // Arrange
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let module = std::fs::read_to_string(root.join("src/storage/cloud/mod.rs"))
+            .expect("read storage/cloud/mod.rs");
+        let backend = std::fs::read_to_string(root.join("src/storage/cloud/backend.rs"))
+            .expect("read storage/cloud/backend.rs");
+        let dispatcher = std::fs::read_to_string(root.join("src/storage/cloud/dispatcher.rs"))
+            .expect("read storage/cloud/dispatcher.rs");
+        let cloud_sources = rust_sources_under("src/storage/cloud");
+
+        // Act
+        let publication_owner_leaks: Vec<_> = cloud_sources
+            .iter()
+            .filter_map(|path| {
+                let source = std::fs::read_to_string(path).expect("read cloud source");
+                (source.contains("MetadataPublicationLock")
+                    || source.contains("metadata_publication_lock")
+                    || source.contains("lock_metadata_publication"))
+                .then(|| path.display().to_string())
+            })
+            .collect();
+
+        // Assert
+        assert!(backend.contains("pub trait CloudBackend"));
+        assert!(dispatcher.contains("pub struct CloudStorage"));
+        assert!(module.contains("mod backend;"));
+        assert!(module.contains("mod dispatcher;"));
+        assert!(!module.contains("pub trait CloudBackend"));
+        assert!(!module.contains("pub struct CloudStorage"));
+        assert!(
+            !backend.contains("cloud backend does not support GET"),
+            "core provider operations must remain required, not regain runtime unsupported defaults"
+        );
+        assert!(
+            publication_owner_leaks.is_empty(),
+            "metadata-publication serialization belongs to runtime, not cloud transport: {publication_owner_leaks:?}"
+        );
+    }
+
+    #[test]
+    fn should_keep_config_independent_of_storage_when_lib_declares_crate_aliases() {
+        // Arrange
+        let lib = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"))
+            .expect("read lib.rs");
+        let forbidden = ["crate::storage", "cloud_preflight_backend"];
+
+        // Act
+        let alias_declared = lib.contains("mod cloud_preflight_backend");
+        let offenders: Vec<PathBuf> = rust_sources_under("src/config.rs")
+            .into_iter()
+            .chain(rust_sources_under("src/config"))
+            .filter(|path| {
+                let source = std::fs::read_to_string(path).expect("read Rust source");
+                forbidden.iter().any(|needle| source.contains(needle))
+            })
+            .collect();
+
+        // Assert
+        assert!(
+            !alias_declared,
+            "lib.rs must not declare a crate-level alias that gives config a path into storage"
+        );
+        assert!(
+            offenders.is_empty(),
+            "config is the foundation layer and must not reach storage, directly or through \
+             an alias: {offenders:?}"
+        );
+    }
+
+    #[test]
+    fn should_keep_cloud_storage_module_below_its_size_budget() {
+        // Arrange
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/storage/cloud/mod.rs");
+        let budget_lines = 520;
+
+        // Act
+        let lines = std::fs::read_to_string(&path)
+            .expect("read storage/cloud/mod.rs")
+            .lines()
+            .count();
+
+        // Assert
+        assert!(
+            lines <= budget_lines,
+            "storage/cloud/mod.rs has {lines} lines (budget {budget_lines}): its errors, \
+             backend trait, mock, proofs, adapter and tests each have their own reason to change"
+        );
+    }
+
+    #[test]
+    fn should_keep_sst_factory_io_below_its_size_budget() {
+        // Arrange
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/sst/fs/factory_io.rs");
+        let budget_lines = 800;
+
+        // Act
+        let lines = std::fs::read_to_string(&path)
+            .expect("read factory_io.rs")
+            .lines()
+            .count();
+
+        // Assert
+        assert!(
+            lines <= budget_lines,
+            "factory_io.rs has {lines} lines (budget {budget_lines}): the writer, its size \
+             bounds and its tests belong in separate modules"
+        );
+    }
+
+    #[test]
+    fn should_keep_skiplist_memtable_ownership_outside_the_sst_module() {
+        // Arrange
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let memtable = std::fs::read_to_string(root.join("src/memtable/mod.rs"))
+            .expect("read memtable module source");
+        let misplaced_sst_surface = [
+            "pub struct SkipListMemtable",
+            "pub trait Memtable",
+            "fn entry_type_of",
+            "mod size_bound",
+            "crate::memtable::SkipListMemtable",
+            "crate::memtable::entry_type_of",
+            "pub use crate::memtable",
+        ];
+        let legacy_memtable_surface = [
+            "seq_generator",
+            "pub fn put(",
+            "pub fn delete(",
+            "pub fn put_with_exp(",
+            "iter_all_with_meta(&self, _max_seq",
+            "iter_all(&self, max_seq",
+        ];
+
+        // Act
+        let lingering_sst_symbols: Vec<_> = rust_sources_under("src/sst")
+            .into_iter()
+            .flat_map(|path| {
+                let source = std::fs::read_to_string(&path).expect("read SST source");
+                misplaced_sst_surface
+                    .iter()
+                    .filter(move |symbol| source.contains(**symbol))
+                    .map(move |symbol| format!("{}:{symbol}", path.display()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let lingering_legacy_surface: Vec<_> = legacy_memtable_surface
+            .into_iter()
+            .filter(|symbol| memtable.contains(symbol))
+            .collect();
+
+        // Assert
+        assert!(
+            lingering_sst_symbols.is_empty(),
+            "SST still owns: {lingering_sst_symbols:?}"
+        );
+        assert!(
+            root.join("src/memtable/size_bound.rs").is_file(),
+            "encoded memtable bounds must live with their owner"
+        );
+        assert!(
+            !root.join("src/sst/size_bound.rs").exists(),
+            "SST must not retain a compatibility size-bound module"
+        );
+        assert!(memtable.contains("pub struct SkipListMemtable"));
+        assert!(memtable.contains("pub(crate) mod size_bound;"));
+        assert!(
+            lingering_legacy_surface.is_empty(),
+            "memtable still exposes legacy mutation or iteration surface: {lingering_legacy_surface:?}"
+        );
+    }
+
+    const SST_VERSION_STATE_LEGACY_DEFINITIONS: [&str; 8] = [
+        "pub enum EntryType",
+        "pub struct RangeTombstone",
+        "pub enum KeyState",
+        "pub use crate::types::EntryType",
+        "pub use crate::types::RangeTombstone",
+        "pub use crate::types::KeyState",
+        "pub use crate::types::{",
+        "pub(crate) use crate::types::{",
+    ];
+
+    #[test]
+    fn should_keep_version_state_types_owned_below_sst_codecs() {
+        // Arrange
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let shared =
+            std::fs::read_to_string(root.join("src/types.rs")).expect("read shared types source");
+        let sst_sources = rust_sources_under("src/sst");
+        // Act
+        let offenders: Vec<_> = sst_sources
+            .iter()
+            .flat_map(|path| {
+                let source = std::fs::read_to_string(path).expect("read SST source");
+                SST_VERSION_STATE_LEGACY_DEFINITIONS
+                    .iter()
+                    .filter(move |needle| source.contains(**needle))
+                    .map(move |needle| format!("{}:{needle}", path.display()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        // Assert
+        assert!(shared.contains("pub enum EntryType"));
+        assert!(shared.contains("pub struct RangeTombstone"));
+        assert!(shared.contains("pub enum KeyState"));
+        assert!(
+            offenders.is_empty(),
+            "SST codecs must consume shared version state instead of defining or re-exporting it: {offenders:?}"
+        );
+    }
+
+    const LEGACY_PERSISTED_SST_DEFINITIONS: [&str; 8] = [
+        "mod name;",
+        "struct PersistedSstName",
+        "SST_SEQUENCE_WIDTH",
+        "fn file_name(",
+        "fn compaction_file_name(",
+        "fn parse_compaction_file_name",
+        "fn object_key(",
+        "fn temp_object_key(",
+    ];
+
+    const LEGACY_PERSISTED_SST_SYMBOLS: [&str; 7] = [
+        "PersistedSstName",
+        "SST_SEQUENCE_WIDTH",
+        "file_name",
+        "compaction_file_name",
+        "parse_compaction_file_name",
+        "object_key",
+        "temp_object_key",
+    ];
+
+    fn is_public_use_statement(statement: &str) -> bool {
+        statement.contains("pubuse")
+            || statement
+                .match_indices("pub(")
+                .any(|(index, _)| statement[index..].contains(")use"))
+    }
+
+    fn persisted_sst_naming_offenders(sst_sources: &[PathBuf]) -> Vec<String> {
+        sst_sources
+            .iter()
+            .flat_map(|path| {
+                let source = std::fs::read_to_string(path).expect("read SST source");
+                let definitions = LEGACY_PERSISTED_SST_DEFINITIONS
+                    .iter()
+                    .filter(|symbol| source.contains(**symbol))
+                    .map(move |symbol| format!("{}:{symbol}", path.display()))
+                    .collect::<Vec<_>>();
+                let reexports = source
+                    .split(';')
+                    .map(|statement| statement.split_whitespace().collect::<String>())
+                    .filter(|statement| is_public_use_statement(statement))
+                    .flat_map(|statement| {
+                        let symbols = LEGACY_PERSISTED_SST_SYMBOLS
+                            .iter()
+                            .filter(|symbol| statement.contains(**symbol))
+                            .map(|symbol| format!("{}:{statement}:{symbol}", path.display()))
+                            .collect::<Vec<_>>();
+                        let glob = statement
+                            .contains('*')
+                            .then(|| format!("{}:{statement}:glob re-export", path.display()));
+                        symbols.into_iter().chain(glob).collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+                let layout_import = source
+                    .contains("cloud_layout")
+                    .then(|| format!("{}:cloud_layout compatibility import", path.display()));
+                definitions
+                    .into_iter()
+                    .chain(reexports)
+                    .chain(layout_import)
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    fn persisted_sst_proof_offenders(sst_sources: &[PathBuf]) -> Vec<String> {
+        sst_sources
+            .iter()
+            .flat_map(|path| {
+                let source = std::fs::read_to_string(path).expect("read SST source");
+                let compact = source.split_whitespace().collect::<String>();
+                let aliases = ["structExpectedSst", "typeExpectedSst"]
+                    .iter()
+                    .filter(|symbol| compact.contains(**symbol))
+                    .map(|symbol| format!("{}:{symbol}", path.display()))
+                    .collect::<Vec<_>>();
+                let reexports = source
+                    .split(';')
+                    .map(|statement| statement.split_whitespace().collect::<String>())
+                    .filter(|statement| is_public_use_statement(statement))
+                    .filter(|statement| {
+                        statement.contains("ExpectedSst") || statement.contains('*')
+                    })
+                    .map(move |statement| format!("{}:{statement}", path.display()))
+                    .collect::<Vec<_>>();
+                aliases.into_iter().chain(reexports).collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn should_keep_persisted_sst_layout_proof_views_below_sst() {
+        // Arrange
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let layout = std::fs::read_to_string(root.join("src/cloud_layout.rs"))
+            .expect("read cloud layout source");
+        let shared =
+            std::fs::read_to_string(root.join("src/types.rs")).expect("read shared types source");
+        let sst_sources = rust_sources_under("src/sst");
+
+        // Act
+        let naming_offenders = persisted_sst_naming_offenders(&sst_sources);
+        let proof_offenders = persisted_sst_proof_offenders(&sst_sources);
+
+        // Assert
+        assert!(layout.contains("pub(crate) struct PersistedSstName"));
+        assert!(layout.contains("pub(crate) const SST_SEQUENCE_WIDTH"));
+        assert!(layout.contains("pub(crate) fn file_name"));
+        assert!(layout.contains("pub(crate) fn compaction_file_name"));
+        assert!(layout.contains("pub(crate) fn parse_compaction_file_name"));
+        assert!(layout.contains("pub(crate) fn object_key"));
+        assert!(layout.contains("pub(crate) fn temp_object_key"));
+        assert!(shared.contains("pub(crate) struct ExpectedSst"));
+        assert!(
+            naming_offenders.is_empty(),
+            "SST must not own or re-export persisted naming/layout helpers: {naming_offenders:?}"
+        );
+        assert!(
+            proof_offenders.is_empty(),
+            "SST must consume ExpectedSst without owning or re-exporting it: {proof_offenders:?}"
+        );
+        assert!(
+            !root.join("src/sst/name.rs").exists(),
+            "SST must not retain a compatibility naming module"
+        );
+    }
+
+    const CLOUD_SEAL_FUNCTION_END: &str = "\n    }\n";
+    const DYN_SST_WRITER_TRAIT_END: &str = "\n}\n";
+    const OPENING_BRACE: char = '\x7b';
+
+    fn dyn_sst_writer_method_declaration(name: &str) -> String {
+        format!("fn {name}(")
+    }
+
+    #[test]
+    fn should_bound_cloud_seal_when_the_event_loop_forces_a_cloud_async_seal() {
+        // Arrange
+        let source = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src/runtime/event_loop/cloud_integration/sealing.rs"),
+        )
+        .expect("read cloud sealing source");
+        let start = source
+            .find("pub(crate) fn seal_current_cloud_segment(")
+            .expect("seal_current_cloud_segment");
+        let end = source[start..]
+            .find(CLOUD_SEAL_FUNCTION_END)
+            .expect("end of seal_current_cloud_segment");
+
+        // Act
+        let body = &source[start..start + end];
+
+        // Assert
+        assert!(
+            !body.contains("OperationDeadline::unbounded()"),
+            "the event loop must not wait indefinitely on a cloud seal: everything queued \
+             behind it stalls until the provider answers"
+        );
+    }
+
+    #[test]
+    fn should_require_lossless_entry_methods_when_implementing_sst_writer() {
+        // Arrange
+        let source = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/sst/traits.rs"),
+        )
+        .expect("read SST traits");
+        let start = source
+            .find("pub trait DynSstWriter")
+            .expect("DynSstWriter trait");
+        let trait_end = source[start..]
+            .find(DYN_SST_WRITER_TRAIT_END)
+            .expect("DynSstWriter trait end");
+        let trait_source = &source[start..start + trait_end];
+        let required = [
+            "add_with_meta",
+            "add_sorted_with_meta",
+            "add_range_tombstone",
+            "encoded_size_upper_bound",
+            "encoded_size_upper_bound_after_sorted_entry",
+            "additional_range_tombstone_size_upper_bound",
+        ];
+        let removed = [
+            "preserves_versioned_entries",
+            "require_versioned_entries",
+            "add",
+        ];
+
+        // Act
+        let defaulted: Vec<&str> = required
+            .into_iter()
+            .filter(|name| {
+                let declaration = trait_source
+                    .find(&dyn_sst_writer_method_declaration(name))
+                    .unwrap_or_else(|| panic!("DynSstWriter method missing"));
+                let terminator = trait_source[declaration..]
+                    .find([OPENING_BRACE, ';'])
+                    .expect("declaration terminator");
+                trait_source.as_bytes()[declaration + terminator] == OPENING_BRACE as u8
+            })
+            .collect();
+        let lingering: Vec<&str> = removed
+            .into_iter()
+            .filter(|name| trait_source.contains(&dyn_sst_writer_method_declaration(name)))
+            .collect();
+
+        // Assert
+        assert!(
+            defaulted.is_empty(),
+            "DynSstWriter methods must be required so a writer cannot silently drop tombstones, \
+             sequences or TTLs"
+        );
+        assert!(
+            lingering.is_empty(),
+            "the lossy entry API must not return (add drops the sequence, kind and TTL)"
+        );
+    }
+
+    #[test]
+    fn should_not_implement_storage_backend_for_hybrid_storage() {
+        // Arrange
+        let needle = "impl StorageBackend for HybridStorage";
+
+        // Act
+        let offenders: Vec<PathBuf> = rust_sources_under("src/storage/hybrid")
+            .into_iter()
+            .filter(|path| {
+                std::fs::read_to_string(path)
+                    .expect("read Rust source")
+                    .contains(needle)
+            })
+            .collect();
+
+        // Assert
+        assert!(
+            offenders.is_empty(),
+            "HybridStorage must not be a StorageBackend: its local-first reads, local-only \
+             writes and lossy lists are unsafe for an object layer whose authority is the \
+             cloud: {offenders:?}"
+        );
+    }
+
+    /// Dependency-checked source for one file.
+    ///
+    /// A file is not exempt because it is named `tests.rs`: a test module still
+    /// belongs to the layer it lives in, and an exemption there let storage
+    /// tests own WAL, SST, manifest and runtime behaviour unnoticed.
     fn production_source(path: &Path) -> String {
-        if path.file_name().is_some_and(|name| name == "tests.rs") {
-            return String::new();
-        }
         let source = std::fs::read_to_string(path).expect("read Rust source");
         if source.trim_start().starts_with("#![cfg(test)]") {
             return String::new();
@@ -427,11 +1020,25 @@ mod architecture_ladder {
     }
 
     #[test]
+    fn should_keep_storage_tests_free_of_runtime_format_imports() {
+        // Arrange
+        let forbidden = ["crate::runtime", "crate::wal", "crate::metadata"];
+
+        // Act
+        let violations = prohibited_edges_under("src/storage", &forbidden);
+
+        // Assert
+        assert!(
+            violations.is_empty(),
+            "storage test modules must not reach into runtime orchestration or persistence formats: {violations:#?}"
+        );
+    }
+
+    #[test]
     fn should_keep_sst_below_read_layers() {
         // Arrange
         let forbidden = [
             "crate::engine",
-            "crate::iterators",
             "crate::metadata",
             "crate::runtime",
             "crate::storage",
@@ -449,31 +1056,14 @@ mod architecture_ladder {
     }
 
     #[test]
-    fn should_keep_iterator_contracts_in_lower_layer() {
+    fn should_keep_persistence_formats_below_storage_orchestration() {
         // Arrange
         let forbidden = [
             "crate::engine",
-            "crate::metadata",
             "crate::runtime",
             "crate::sst",
             "crate::storage",
-            "crate::wal",
         ];
-
-        // Act
-        let violations = prohibited_edges_under("src/iterators", &forbidden);
-
-        // Assert
-        assert!(
-            violations.is_empty(),
-            "shared iterator contracts must be owned below SST and orchestration: {violations:#?}"
-        );
-    }
-
-    #[test]
-    fn should_keep_persistence_formats_below_storage_orchestration() {
-        // Arrange
-        let forbidden = ["crate::engine", "crate::runtime", "crate::storage"];
 
         // Act
         let mut violations = prohibited_edges_under("src/wal", &forbidden);
@@ -798,5 +1388,140 @@ mod failpoints_contract {
 
         // Assert
         assert_eq!(missing_feature, None);
+    }
+}
+
+mod public_api_surface {
+    //! Guards the canonical public export surface of the crate root.
+    //!
+    //! Implementation modules are private; the only way for this crate's own
+    //! tests, benches and fuzz targets to reach them is `__internal`, which is
+    //! compiled only under the non-default `internal-testing` feature.
+
+    use std::path::Path;
+
+    const INTERNAL_MODULE: &str = "__internal";
+    const CANONICAL_PUBLIC_MODULES: [&str; 1] = ["prelude"];
+
+    /// Return every `pub mod` declared in `source` that is neither a canonical
+    /// public module nor nested inside the feature-gated `__internal` module.
+    fn offending_pub_modules(source: &str) -> Vec<String> {
+        let mut offenders = Vec::new();
+        let mut depth: usize = 0;
+        let mut internal_depth: Option<usize> = None;
+
+        for line in source.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("pub mod ") {
+                let name = rest
+                    .trim_end()
+                    .trim_end_matches(['{', ';'])
+                    .trim()
+                    .to_string();
+                let inside_internal = internal_depth.is_some_and(|start| depth > start);
+                let allowed = inside_internal
+                    || name == INTERNAL_MODULE
+                    || CANONICAL_PUBLIC_MODULES.contains(&name.as_str());
+                if !allowed {
+                    offenders.push(name.clone());
+                }
+                if name == INTERNAL_MODULE {
+                    internal_depth = Some(depth);
+                }
+            }
+
+            depth = (depth + line.matches('{').count()).saturating_sub(line.matches('}').count());
+            if internal_depth.is_some_and(|start| depth <= start) {
+                internal_depth = None;
+            }
+        }
+
+        offenders
+    }
+
+    fn crate_root_source() -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs");
+        std::fs::read_to_string(path).expect("read src/lib.rs")
+    }
+
+    #[test]
+    fn should_expose_only_canonical_api_without_internal_feature() {
+        // Arrange
+        let source = crate_root_source();
+
+        // Act
+        let offenders = offending_pub_modules(&source);
+
+        // Assert
+        assert!(
+            offenders.is_empty(),
+            "src/lib.rs must keep implementation modules private; move these behind \
+             `#[cfg(feature = \"internal-testing\")] pub mod __internal`: {offenders:#?}"
+        );
+    }
+
+    const INTERNAL_TESTING_MODULE_GATE: &str =
+        "#[cfg(feature = \"internal-testing\")]\n#[doc(hidden)]\npub mod __internal {";
+
+    #[test]
+    fn should_keep_internal_module_behind_the_internal_testing_feature() {
+        // Arrange
+        let source = crate_root_source();
+
+        // Act
+        let gated = source.contains(INTERNAL_TESTING_MODULE_GATE);
+
+        // Assert
+        assert!(
+            gated,
+            "`pub mod __internal` must be preceded by `#[cfg(feature = \"internal-testing\")]`"
+        );
+    }
+
+    #[test]
+    fn should_flag_public_module_when_reintroduced_outside_internal_module() {
+        // Arrange
+        let regressed = concat!(
+            "mod common;\n",
+            "pub mod wal;\n",
+            "pub mod prelude {\n",
+            "    pub use crate::Engine;\n",
+            "}\n",
+            "#[cfg(feature = \"internal-testing\")]\n",
+            "#[doc(hidden)]\n",
+            "pub mod __internal {\n",
+            "    pub mod sst {\n",
+            "        pub use crate::sst::*;\n",
+            "    }\n",
+            "}\n",
+        );
+
+        // Act
+        let offenders = offending_pub_modules(regressed);
+
+        // Assert
+        assert_eq!(offenders, vec!["wal".to_string()]);
+    }
+
+    #[test]
+    fn should_reach_internals_only_through_the_gated_module() {
+        // Arrange
+        use cntryl_midge::__internal::wal::{encoding, WalOpKind, WalRecord};
+        let record = WalRecord::new(
+            WalOpKind::Put,
+            cntryl_midge::Bytes::from_static(b"governance-key"),
+            Some(cntryl_midge::Bytes::from_static(b"governance-value")),
+            7,
+            1,
+        );
+
+        // Act
+        let encoded = encoding::encode(&record).expect("encode WAL record");
+
+        // Assert
+        assert_eq!(
+            encoding::decode(encoded.as_ref()).expect("decode WAL record"),
+            record
+        );
     }
 }

@@ -30,6 +30,7 @@ pub(crate) mod wal_transition_boundary;
 mod config;
 mod handle;
 mod lifecycle;
+mod metadata_publication;
 mod protocol;
 mod router;
 #[path = "runtime.rs"]
@@ -47,14 +48,17 @@ pub(crate) use config::{CloudRuntimePolicy, CloudWalSealPolicy};
 pub(crate) use config::{RecoveredCloudActiveWal, RecoveredCloudWalSegment};
 pub use handle::RuntimeHandle;
 pub(crate) use lifecycle::{RuntimeLifecycle, RuntimeLifecycleState, RuntimeTransactionGuard};
+pub(crate) use metadata_publication::MetadataPublicationLock;
 pub(crate) use protocol::next_request_id;
 #[cfg(test)]
 pub use protocol::CompactionPlan;
 pub use protocol::{
     FileMeta, IntentLogEntry, KeyAssertion, PublicationPhase, RuntimeMsg, RuntimeResponse,
-    TransactionOp,
+    TestRuntimeMsg, TransactionOp,
 };
-pub(crate) use protocol::{SpilledTransactionSubmission, TransactionSubmission};
+pub(crate) use protocol::{
+    SpilledTransactionSubmission, TransactionSubmission, VerificationBarrierAction,
+};
 pub(crate) use router::ResponseRouter;
 pub use runtime_worker::Runtime;
 #[cfg(test)]

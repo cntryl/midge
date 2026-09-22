@@ -9,10 +9,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// Number of owners of a registered pin. A pin is registered by exactly one
+/// transaction and unregistered when that transaction drops it, so the count
+/// reported to observability is always one; the registry keeps no per-pin
+/// counter to increment.
+const PIN_REF_COUNT: usize = 1;
+
 struct SnapshotPin {
     sequence: u64,
     created_at: Instant,
-    ref_count: usize,
     pinned_ssts: Arc<HashSet<String>>,
 }
 
@@ -28,6 +33,11 @@ pub(crate) struct SnapshotPinRegistry {
     /// Set while GC is deferred behind an in-flight acquisition, so the
     /// acquisition's owner can request a retry once it has finished.
     gc_deferred: AtomicBool,
+    /// Test-only count of per-SST-name membership probes performed while
+    /// releasing pins, so regression tests can assert that releasing a pin
+    /// whose generation is still held stays independent of the pinned count.
+    #[cfg(test)]
+    membership_probes: std::sync::atomic::AtomicUsize,
 }
 
 pub(crate) struct SnapshotAcquisitionGuard<'a> {
@@ -70,7 +80,6 @@ impl SnapshotPinRegistry {
                 entry.insert(SnapshotPin {
                     sequence,
                     created_at: Instant::now(),
-                    ref_count: 1,
                     pinned_ssts,
                 });
                 true
@@ -89,16 +98,72 @@ impl SnapshotPinRegistry {
         // transactions concurrent while a GC pass obtains the exclusive guard
         // before sampling pins and deleting obsolete files.
         let _guard = self.acquisition.read();
-        self.active
-            .remove(&snapshot_id)
-            .map_or((false, false), |(_, pin)| {
-                let released_last_pin = pin.pinned_ssts.iter().any(|sst_name| {
-                    self.active
-                        .iter()
-                        .all(|active| !active.pinned_ssts.contains(sst_name))
-                });
-                (true, released_last_pin)
-            })
+        let Some((_, pin)) = self.active.remove(&snapshot_id) else {
+            return (false, false);
+        };
+        (true, self.released_last_pin(&pin.pinned_ssts))
+    }
+
+    /// Whether dropping `released` left any of its SSTs unpinned.
+    ///
+    /// Snapshots taken against the same SST generation share one
+    /// `Arc<HashSet<String>>`, so the common concurrent case is decided by a
+    /// pointer comparison: if another live pin holds the very same generation,
+    /// it pins exactly the same names and nothing was released. Only when
+    /// every survivor holds a different generation does this fall back to
+    /// per-name probes, and then it probes each distinct surviving generation
+    /// once rather than re-walking the registry for every name.
+    fn released_last_pin(&self, released: &Arc<HashSet<String>>) -> bool {
+        if released.is_empty() {
+            return false;
+        }
+
+        let mut survivors: Vec<Arc<HashSet<String>>> = Vec::new();
+        for active in &self.active {
+            let generation = &active.value().pinned_ssts;
+            if Arc::ptr_eq(generation, released) {
+                return false;
+            }
+            if generation.is_empty() || Self::contains_generation(&survivors, generation) {
+                continue;
+            }
+            survivors.push(Arc::clone(generation));
+        }
+
+        if survivors.is_empty() {
+            self.record_membership_probes(0);
+            return true;
+        }
+
+        let mut probes = 0usize;
+        let released_last_pin = released.iter().any(|sst_name| {
+            probes += 1;
+            survivors
+                .iter()
+                .all(|generation| !generation.contains(sst_name))
+        });
+        self.record_membership_probes(probes);
+        released_last_pin
+    }
+
+    fn contains_generation(
+        generations: &[Arc<HashSet<String>>],
+        candidate: &Arc<HashSet<String>>,
+    ) -> bool {
+        generations
+            .iter()
+            .any(|generation| Arc::ptr_eq(generation, candidate))
+    }
+
+    #[cfg_attr(not(test), allow(unused_variables, clippy::unused_self))]
+    fn record_membership_probes(&self, probes: usize) {
+        #[cfg(test)]
+        self.membership_probes.fetch_add(probes, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    fn membership_probes(&self) -> usize {
+        self.membership_probes.load(Ordering::Relaxed)
     }
 
     /// Start capturing a snapshot whose sequence will be at least
@@ -127,7 +192,9 @@ impl SnapshotPinRegistry {
         // acquisition takes a shared guard, so the exclusive guard here waits
         // until every in-flight capture has published its pin.
         let guard: RwLockWriteGuard<'_, ()> = self.acquisition.write();
-        self.sample_pinned_sst_names(&guard, max_lifetime)
+        let generations = self.sample_pinned_generations(&guard, max_lifetime);
+        drop(guard);
+        Self::union_generations(&generations)
     }
 
     /// Like [`Self::pinned_sst_names`], but returns `None` instead of waiting
@@ -141,7 +208,12 @@ impl SnapshotPinRegistry {
         self.gc_deferred.store(true, Ordering::SeqCst);
         let guard = self.acquisition.try_write()?;
         self.gc_deferred.store(false, Ordering::SeqCst);
-        Some(self.sample_pinned_sst_names(&guard, max_lifetime))
+        // Only the generation Arcs are collected under the exclusive guard;
+        // materializing the names (which blocks every begin_tx and every pin
+        // release while held) happens after it is dropped.
+        let generations = self.sample_pinned_generations(&guard, max_lifetime);
+        drop(guard);
+        Some(Self::union_generations(&generations))
     }
 
     /// Return whether GC deferred behind an acquisition, clearing the flag.
@@ -154,20 +226,33 @@ impl SnapshotPinRegistry {
     /// gauge can tolerate the capture-to-registration window, and the event
     /// loop must not wait on an acquiring API thread.
     pub(crate) fn observed_pinned_sst_count(&self) -> usize {
-        let mut pinned = HashSet::new();
+        let mut generations: Vec<Arc<HashSet<String>>> = Vec::new();
         for entry in &self.active {
-            pinned.extend(entry.value().pinned_ssts.iter().cloned());
+            let generation = &entry.value().pinned_ssts;
+            if Self::contains_generation(&generations, generation) {
+                continue;
+            }
+            generations.push(Arc::clone(generation));
         }
-        pinned.len()
+        match generations.as_slice() {
+            [] => 0,
+            [only] => only.len(),
+            _ => Self::union_generations(&generations).len(),
+        }
     }
 
-    fn sample_pinned_sst_names(
+    /// Collect the distinct SST generations held by live pins, warning about
+    /// pins older than `max_lifetime`. Deduplicating by `Arc` pointer keeps the
+    /// work proportional to the number of distinct generations rather than to
+    /// active pins times pinned SSTs, and no names are cloned here, so the
+    /// caller's exclusive guard is held for as short a time as possible.
+    fn sample_pinned_generations(
         &self,
         _exclusive: &RwLockWriteGuard<'_, ()>,
         max_lifetime: Duration,
-    ) -> HashSet<String> {
+    ) -> Vec<Arc<HashSet<String>>> {
         let now = Instant::now();
-        let mut pinned = HashSet::new();
+        let mut generations: Vec<Arc<HashSet<String>>> = Vec::new();
 
         for entry in &self.active {
             let snapshot_id = *entry.key();
@@ -181,10 +266,30 @@ impl SnapshotPinRegistry {
                     "Long-lived snapshot exceeds max lifetime; retaining pin until transaction closes"
                 );
             }
-            pinned.extend(snapshot.pinned_ssts.iter().cloned());
+            if Self::contains_generation(&generations, &snapshot.pinned_ssts) {
+                continue;
+            }
+            generations.push(Arc::clone(&snapshot.pinned_ssts));
         }
 
-        pinned
+        generations
+    }
+
+    /// Flatten distinct generations into the set of pinned SST names. GC must
+    /// see every name any live pin holds, so this is a union: a name missing
+    /// here would let GC delete a file a reader still needs.
+    fn union_generations(generations: &[Arc<HashSet<String>>]) -> HashSet<String> {
+        match generations {
+            [] => HashSet::new(),
+            [only] => (**only).clone(),
+            _ => {
+                let mut pinned = HashSet::new();
+                for generation in generations {
+                    pinned.extend(generation.iter().cloned());
+                }
+                pinned
+            }
+        }
     }
 
     pub(crate) fn oldest_sequence(&self) -> Option<u64> {
@@ -231,7 +336,7 @@ impl SnapshotPinRegistry {
                     snapshot_id: *entry.key(),
                     sequence: snapshot.sequence,
                     age_seconds: now.duration_since(snapshot.created_at).as_secs(),
-                    ref_count: snapshot.ref_count,
+                    ref_count: PIN_REF_COUNT,
                 }
             })
             .collect::<Vec<_>>();
@@ -329,6 +434,132 @@ mod tests {
         assert_eq!(empty_release, (true, false));
         assert_eq!(shared_sst_release, (true, false));
         assert_eq!(last_sst_release, (true, true));
+    }
+
+    fn generation(names: &[&str]) -> Arc<HashSet<String>> {
+        Arc::new(names.iter().map(|name| (*name).to_string()).collect())
+    }
+
+    #[test]
+    fn should_release_pin_in_constant_time_when_other_pin_shares_generation() {
+        // Arrange: two snapshots captured against the same SST generation hold
+        // the same Arc, the normal concurrent-reader case.
+        let registry = SnapshotPinRegistry::default();
+        let shared: Arc<HashSet<String>> = Arc::new(
+            (0..100_000u32)
+                .map(|index| format!("{index:06}.sst"))
+                .collect(),
+        );
+        {
+            let _guard = registry.acquisition.write();
+            assert!(registry.register_while_acquired(7, 42, Arc::clone(&shared)));
+            assert!(registry.register_while_acquired(8, 43, Arc::clone(&shared)));
+        }
+
+        // Act
+        let release = registry.unregister_with_gc_hint(7);
+
+        // Assert
+        assert_eq!(
+            release,
+            (true, false),
+            "a generation another pin still holds releases nothing"
+        );
+        assert_eq!(
+            registry.membership_probes(),
+            0,
+            "a shared generation must be decided by pointer identity, not by probing every name"
+        );
+    }
+
+    #[test]
+    fn should_report_released_ssts_when_surviving_generations_differ() {
+        // Arrange: distinct generations, so pointer identity cannot decide it.
+        let registry = SnapshotPinRegistry::default();
+        {
+            let _guard = registry.acquisition.write();
+            assert!(registry.register_while_acquired(7, 42, generation(&["a.sst", "b.sst"])));
+            assert!(registry.register_while_acquired(8, 43, generation(&["b.sst"])));
+        }
+
+        // Act
+        let release = registry.unregister_with_gc_hint(7);
+
+        // Assert
+        assert_eq!(
+            release,
+            (true, true),
+            "a.sst is no longer pinned by any live snapshot"
+        );
+        assert!(
+            registry.membership_probes() > 0,
+            "distinct generations must still fall back to per-name probes"
+        );
+    }
+
+    #[test]
+    fn should_not_probe_names_when_released_pin_holds_no_ssts() {
+        // Arrange
+        let registry = SnapshotPinRegistry::default();
+        assert!(registry.register(7, 42, Vec::new()));
+        assert!(registry.register(8, 43, vec!["a.sst".to_string()]));
+
+        // Act
+        let release = registry.unregister_with_gc_hint(7);
+
+        // Assert
+        assert_eq!(release, (true, false));
+        assert_eq!(registry.membership_probes(), 0);
+    }
+
+    #[test]
+    fn should_sample_union_of_names_when_pins_hold_distinct_generations() {
+        // Arrange
+        let registry = SnapshotPinRegistry::default();
+        {
+            let _guard = registry.acquisition.write();
+            assert!(registry.register_while_acquired(7, 42, generation(&["a.sst", "b.sst"])));
+            assert!(registry.register_while_acquired(8, 43, generation(&["b.sst", "c.sst"])));
+            let shared = generation(&["d.sst"]);
+            assert!(registry.register_while_acquired(9, 44, Arc::clone(&shared)));
+            assert!(registry.register_while_acquired(10, 45, shared));
+        }
+
+        // Act
+        let pinned = registry.pinned_sst_names(Duration::from_mins(1));
+
+        // Assert: deduplicating generations must never drop a pinned name.
+        assert_eq!(
+            pinned,
+            ["a.sst", "b.sst", "c.sst", "d.sst"]
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect::<HashSet<String>>()
+        );
+        assert_eq!(registry.observed_pinned_sst_count(), 4);
+    }
+
+    #[test]
+    fn should_count_shared_generation_once_when_many_pins_hold_it() {
+        // Arrange
+        let registry = SnapshotPinRegistry::default();
+        let shared = generation(&["a.sst", "b.sst"]);
+        {
+            let _guard = registry.acquisition.write();
+            for snapshot_id in 0..8 {
+                assert!(registry.register_while_acquired(snapshot_id, 42, Arc::clone(&shared)));
+            }
+        }
+
+        // Act
+        let observed = registry.observed_pinned_sst_count();
+
+        // Assert
+        assert_eq!(observed, 2);
+        assert_eq!(
+            registry.pinned_sst_names(Duration::from_mins(1)),
+            (*shared).clone()
+        );
     }
 
     #[test]

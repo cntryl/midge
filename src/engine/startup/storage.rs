@@ -6,7 +6,7 @@ use super::{
 };
 use crate::common::{MidgeError, MidgeResult};
 use crate::config::{RecoveryPolicy, Storage};
-use crate::runtime::hybrid_persistence::HybridPersistence;
+use crate::runtime::hybrid_persistence::CloudPersistence;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -294,8 +294,7 @@ impl RuntimeStorageMaterialization {
         cloud
             .hybrid_storage
             .configure_maintenance_memory(opts.compaction_memory_pool_size());
-        let wal_catalog = cloud
-            .hybrid_storage
+        let wal_catalog = CloudPersistence::new(Arc::clone(&cloud.hybrid_storage))
             .fence_cloud_wal_catalog(startup_lease.writer_epoch)?;
         startup_lease.ensure_healthy("after cloud WAL catalog fencing")?;
 
@@ -429,7 +428,8 @@ impl RuntimeStorageMaterialization {
             sst_storage.clone(),
             opts.storage_io_timeout(),
         ));
-        let wal_catalog = hybrid_storage.fence_cloud_wal_catalog(startup_lease.writer_epoch)?;
+        let wal_catalog = CloudPersistence::new(Arc::clone(&hybrid_storage))
+            .fence_cloud_wal_catalog(startup_lease.writer_epoch)?;
         startup_lease.ensure_healthy("after cloud WAL catalog fencing")?;
 
         CloudStartupRecovery::hydrate_cloud_metadata(
@@ -610,7 +610,7 @@ impl RuntimeRecoveryMaterialization {
             if path.exists() {
                 std::fs::remove_file(path)?;
             }
-            storage.evict_local_object_cache(&crate::sst::object_key(&meta.name))?;
+            storage.evict_local_object_cache(&crate::cloud_layout::object_key(&meta.name))?;
         }
         if !salvaged.is_empty() {
             materialized.state.salvaged_local_ssts.extend(salvaged);

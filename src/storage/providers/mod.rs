@@ -53,8 +53,16 @@ mod factory;
 pub mod gcs;
 #[cfg(feature = "cloud-gcp")]
 mod gcs_resolver;
+pub(crate) mod preflight;
 #[cfg(all(test, feature = "cloud-all", feature = "sqrzl-tests"))]
 pub mod qualification;
+#[cfg(any(
+    feature = "cloud-aws",
+    feature = "cloud-oci",
+    feature = "cloud-azure",
+    feature = "cloud-gcp"
+))]
+mod rest;
 #[cfg(any(feature = "cloud-aws", feature = "cloud-oci"))]
 pub mod s3;
 #[cfg(any(feature = "cloud-aws", feature = "cloud-oci"))]
@@ -366,12 +374,12 @@ use crate::storage::cloud::CloudBackend;
 use crate::storage::cloud::CloudStorage;
 
 #[cfg(feature = "cloud-azure")]
-pub(crate) use crate::config::AzureCredentialSource;
-pub(crate) use crate::config::CloudProviderConfig;
+use crate::config::AzureCredentialSource;
+use crate::config::CloudProviderConfig;
 #[cfg(any(feature = "cloud-aws", feature = "cloud-oci"))]
-pub(crate) use crate::config::S3CredentialSource;
+use crate::config::S3CredentialSource;
 #[cfg(feature = "cloud-gcp")]
-pub(crate) use crate::config::{GcsApiStyle, GcsCredentialSource};
+use crate::config::{GcsApiStyle, GcsCredentialSource};
 
 #[cfg(feature = "cloud-common")]
 pub(crate) fn build_cloud_backend(

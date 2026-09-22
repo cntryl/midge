@@ -10,6 +10,7 @@ use super::super::cloud::{
     CloudBackend, CloudCallback, CloudError, CloudEvent, CloudExecutor, CloudListBudget,
     CloudOutcome, CloudRequest, CloudResponse, CloudSigner, ObjectMetadata,
 };
+use super::rest::{conditional_range_preconditions, current_unix_secs};
 use super::xml::extract_xml_tag_values;
 use crate::common::{MidgeError, MidgeResult};
 use base64::{
@@ -28,7 +29,6 @@ use sha1::Sha1;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 // ---------------------------------------------------------------------------
 // Credentials
@@ -109,7 +109,7 @@ impl GcsProvider {
     pub(crate) fn with_bearer_credential_endpoint(
         bucket: String,
         project_id: String,
-        source: &super::GcsCredentialSource,
+        source: &crate::config::GcsCredentialSource,
         endpoint: Option<String>,
     ) -> MidgeResult<Self> {
         let provider = GcsTokenProvider::from_source(source)?;
@@ -273,20 +273,20 @@ enum GcsTokenProvider {
 }
 
 impl GcsTokenProvider {
-    fn from_source(source: &super::GcsCredentialSource) -> MidgeResult<Self> {
+    fn from_source(source: &crate::config::GcsCredentialSource) -> MidgeResult<Self> {
         match source {
-            super::GcsCredentialSource::BearerToken { token } => {
+            crate::config::GcsCredentialSource::BearerToken { token } => {
                 Ok(Self::StaticBearer(token.clone()))
             }
-            super::GcsCredentialSource::ApplicationDefault => Ok(Self::ApplicationDefault),
-            super::GcsCredentialSource::ServiceAccountJsonFile { path } => {
+            crate::config::GcsCredentialSource::ApplicationDefault => Ok(Self::ApplicationDefault),
+            crate::config::GcsCredentialSource::ServiceAccountJsonFile { path } => {
                 Ok(Self::ServiceAccountFile(path.clone()))
             }
-            super::GcsCredentialSource::AuthorizedUserJsonFile { path } => {
+            crate::config::GcsCredentialSource::AuthorizedUserJsonFile { path } => {
                 Ok(Self::AuthorizedUserFile(path.clone()))
             }
-            super::GcsCredentialSource::MetadataServer => Ok(Self::MetadataServer),
-            super::GcsCredentialSource::HmacKey { .. } => Err(MidgeError::InvalidArgument(
+            crate::config::GcsCredentialSource::MetadataServer => Ok(Self::MetadataServer),
+            crate::config::GcsCredentialSource::HmacKey { .. } => Err(MidgeError::InvalidArgument(
                 "GCS HMAC credentials are not bearer-token credentials".to_string(),
             )),
         }
@@ -896,13 +896,6 @@ fn parse_impersonated_access_token_json(body: &str) -> MidgeResult<CachedGcsToke
     ))
 }
 
-fn current_unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
 fn required_json_str<'a>(json: &'a serde_json::Value, field: &str) -> MidgeResult<&'a str> {
     json.get(field)
         .and_then(|value| value.as_str())
@@ -1108,6 +1101,17 @@ impl CloudBackend for GcsBackend {
         headers: Vec<(String, String)>,
         callback: CloudCallback,
     ) {
+        self.submit_put_with_reservation(key, data, headers, None, callback);
+    }
+
+    fn submit_put_with_reservation(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        reservation: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
+        callback: CloudCallback,
+    ) {
         let key = key.to_string();
         let method = match self.mode {
             GcsBackendMode::Json => Method::POST,
@@ -1123,6 +1127,7 @@ impl CloudBackend for GcsBackend {
         let content_length = data.len();
         let mut request = CloudRequest::new(method, String::new())
             .with_body(data)
+            .with_reservation(reservation)
             .with_header("Content-Type", "application/octet-stream")
             .with_header("Content-Length", content_length.to_string());
         // JSON uploads express mutation preconditions as query parameters. The
@@ -1255,33 +1260,37 @@ impl CloudBackend for GcsBackend {
         timeout: std::time::Duration,
         callback: CloudCallback,
     ) {
+        self.submit_get_range_with_reservation(key, start..end, expected, timeout, None, callback);
+    }
+
+    fn submit_get_range_with_reservation(
+        &self,
+        key: &str,
+        range: std::ops::Range<u64>,
+        expected: crate::storage::StorageObjectMetadata,
+        timeout: std::time::Duration,
+        reservation: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
+        callback: CloudCallback,
+    ) {
+        let start = range.start;
+        let end = range.end;
         let key = key.to_string();
-        let Some(conditions) = crate::storage::cloud::object_match_precondition_headers(
-            &expected.etag,
-            expected.generation.as_deref(),
-        ) else {
-            let _ = callback.send(CloudEvent::GetRange {
-                key,
-                start,
-                end: Some(end),
-                result: Err(CloudError::Protocol(
-                    "range request lacks object identity".into(),
-                )),
-            });
-            return;
+        let conditions = match conditional_range_preconditions(&range, &expected) {
+            Ok(conditions) => conditions,
+            Err(error) => {
+                let _ = callback.send(CloudEvent::GetRange {
+                    key,
+                    start,
+                    end: Some(end),
+                    result: Err(error),
+                });
+                return;
+            }
         };
-        if start >= end || end > expected.size {
-            let _ = callback.send(CloudEvent::GetRange {
-                key,
-                start,
-                end: Some(end),
-                result: Err(CloudError::Protocol("invalid object byte range".into())),
-            });
-            return;
-        }
         let mode = self.mode;
         let mut url = self.download_url(&key);
-        let mut request = Self::bodyless_request(mode, Method::GET, String::new());
+        let mut request =
+            Self::bodyless_request(mode, Method::GET, String::new()).with_reservation(reservation);
         for (name, value) in conditions {
             if mode == GcsBackendMode::Json
                 && name.eq_ignore_ascii_case("x-goog-if-generation-match")
@@ -2035,6 +2044,80 @@ mod tests {
         crate::storage::providers::test_support::assert_get_metadata_length_contract(
             identity_headers,
             |response| parse_gcs_media_object_metadata(response, GcsBackendMode::Json),
+        );
+    }
+
+    #[test]
+    fn should_not_retain_completion_thread_when_gcs_put_carries_reservation() {
+        // Arrange
+        let server = spawn_recording_http_server_with_status(200, Vec::new(), Vec::new());
+        let backend = recording_json_backend(server.endpoint.clone());
+        let budget = crate::common::resource_budget::ResourceBudget::new(1 << 20);
+        let reservation = Arc::new(budget.reserve(1024, "gcs put").unwrap());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let before = crate::storage::retained_callback::retain_calls_on_this_thread();
+
+        // Act
+        backend.submit_put_with_reservation(
+            "blob",
+            vec![1; 1024],
+            Vec::new(),
+            Some(reservation),
+            sender,
+        );
+        let result = receive_put_result(&receiver);
+        let _ = server.finish();
+
+        // Assert
+        assert!(result.is_ok());
+        assert_eq!(
+            crate::storage::retained_callback::retain_calls_on_this_thread(),
+            before
+        );
+    }
+
+    #[test]
+    fn should_not_retain_completion_thread_when_gcs_range_read_carries_reservation() {
+        // Arrange
+        let server = spawn_recording_http_server_with_status(
+            206,
+            vec![
+                ("Content-Range".into(), "bytes 10-12/100".into()),
+                ("ETag".into(), "\"version\"".into()),
+                ("x-goog-generation".into(), "42".into()),
+            ],
+            vec![1, 2, 3],
+        );
+        let backend = recording_json_backend(server.endpoint.clone());
+        let expected = crate::storage::StorageObjectMetadata {
+            size: 100,
+            etag: "\"version\"".into(),
+            generation: Some("42".into()),
+        };
+        let budget = crate::common::resource_budget::ResourceBudget::new(1 << 20);
+        let reservation = Arc::new(budget.reserve(3, "gcs range").unwrap());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let before = crate::storage::retained_callback::retain_calls_on_this_thread();
+
+        // Act
+        backend.submit_get_range_with_reservation(
+            "sst/table.sst",
+            10..13,
+            expected,
+            std::time::Duration::from_secs(5),
+            Some(reservation),
+            sender,
+        );
+        let event = receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("range completion");
+        let _ = server.finish();
+
+        // Assert
+        assert!(matches!(event, CloudEvent::GetRange { result: Ok(_), .. }));
+        assert_eq!(
+            crate::storage::retained_callback::retain_calls_on_this_thread(),
+            before
         );
     }
 

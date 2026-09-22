@@ -118,14 +118,21 @@ not commit later.
 containing NUL and the reserved name `default` are rejected.
 
 `drop_column_family` is the safe default: it waits for in-flight flush and
-compaction publication, but returns `MidgeError::Busy` while committed data
-remains in the active memtable. Flush that column family and retry to avoid an
-implicit active-memtable discard; the drop still makes all data in the column
-family inaccessible and eligible for reclamation. If discarding committed,
-unflushed writes is deliberate, call the explicitly destructive
-`drop_column_family_discarding_unflushed` method. Writes ordered after either
-drop request are not pulled across its WAL barrier and fail against the
-dropped column family.
+compaction publication, but returns `MidgeError::UnflushedDataPresent` while
+committed data remains in the active memtable. Flush that column family and
+retry to avoid an implicit active-memtable discard; the drop still makes all
+data in the column family inaccessible and eligible for reclamation. If
+discarding committed, unflushed writes is deliberate, call the explicitly
+destructive `drop_column_family_discarding_unflushed` method. Writes ordered
+after either drop request are not pulled across its WAL barrier and fail
+against the dropped column family.
+
+`UnflushedDataPresent` is the only error that licenses that destructive call,
+and `MidgeError::licenses_unflushed_discard` is the supported way to test for
+it. In particular `MidgeError::Busy` from this API does **not** mean there is
+unflushed data: it also reports in-flight flush publication, a remote DDL
+registry CAS conflict, an active storage-verification barrier, and shutdown.
+Those clear on their own, so retry the safe drop rather than escalating.
 
 Reclamation is callerless once the drop is locally committed. If authoritative
 manifest publication times out, Midge retains the SSTs and retries publication

@@ -9,9 +9,11 @@
 
 use super::super::cloud::{
     CloudBackend, CloudExecutor, CloudListBudget, CloudRequest, CloudResponse, CloudSigner,
-    ObjectMetadata,
 };
 use super::super::cloud::{CloudCallback, CloudError, CloudEvent, CloudOutcome};
+use super::rest::{
+    conditional_range_preconditions, current_unix_secs, object_metadata_from_response,
+};
 use super::xml::extract_xml_tag_values;
 use crate::common::{MidgeError, MidgeResult};
 use chrono::Utc;
@@ -24,7 +26,6 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 use url::{Host, Url};
 use urlencoding::encode;
 
@@ -832,13 +833,6 @@ fn required_temporary_credential_expiry(value: &str, source: &str) -> MidgeResul
     Ok(expiry)
 }
 
-fn current_unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
 /// Configuration for S3-compatible storage
 #[derive(Clone, Debug)]
 pub struct S3Config {
@@ -1143,9 +1137,10 @@ impl CloudBackend for S3Backend {
         let request = CloudRequest::new(Method::GET, self.object_url(&key));
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
             Ok(resp) if resp.status == 200 => {
-                let metadata = object_metadata_from_s3_response(
+                let metadata = object_metadata_from_response(
                     &resp,
                     Some(u64::try_from(resp.body.len()).unwrap_or(u64::MAX)),
+                    "S3",
                 );
                 CloudEvent::GetWithMetadata {
                     key: ctx,
@@ -1188,29 +1183,18 @@ impl CloudBackend for S3Backend {
         let start = range.start;
         let end = range.end;
         let key = key.to_string();
-        let Some(conditions) = crate::storage::cloud::object_match_precondition_headers(
-            &expected.etag,
-            expected.generation.as_deref(),
-        ) else {
-            let _ = callback.send(CloudEvent::GetRange {
-                key,
-                start,
-                end: Some(end),
-                result: Err(CloudError::Protocol(
-                    "range request lacks object identity".into(),
-                )),
-            });
-            return;
+        let conditions = match conditional_range_preconditions(&range, &expected) {
+            Ok(conditions) => conditions,
+            Err(error) => {
+                let _ = callback.send(CloudEvent::GetRange {
+                    key,
+                    start,
+                    end: Some(end),
+                    result: Err(error),
+                });
+                return;
+            }
         };
-        if start >= end || end > expected.size {
-            let _ = callback.send(CloudEvent::GetRange {
-                key,
-                start,
-                end: Some(end),
-                result: Err(CloudError::Protocol("invalid object byte range".into())),
-            });
-            return;
-        }
         let mut request =
             CloudRequest::new(Method::GET, self.object_url(&key)).with_reservation(reservation);
         for (name, value) in conditions {
@@ -1426,7 +1410,7 @@ impl CloudBackend for S3Backend {
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
             Ok(resp) if resp.status == 200 => CloudEvent::Head {
                 key: ctx,
-                result: object_metadata_from_s3_response(&resp, None),
+                result: object_metadata_from_response(&resp, None, "S3"),
             },
             Ok(resp) => CloudEvent::Head {
                 key: ctx,
@@ -1439,37 +1423,6 @@ impl CloudBackend for S3Backend {
         };
         self.executor.spawn_request(request, key, callback, mapper);
     }
-}
-
-fn object_metadata_from_s3_response(
-    response: &CloudResponse,
-    known_size: Option<u64>,
-) -> CloudOutcome<ObjectMetadata> {
-    let size = match known_size {
-        Some(_) => crate::storage::cloud::executor::validate_get_response_length(response)?,
-        None => response
-            .headers
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-            .ok_or_else(|| {
-                CloudError::Protocol("S3 metadata response is missing Content-Length".to_string())
-            })?
-            .1
-            .parse::<u64>()
-            .map_err(|error| {
-                CloudError::Protocol(format!(
-                    "S3 metadata response has invalid Content-Length: {error}"
-                ))
-            })?,
-    };
-    let etag = response
-        .headers
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("etag"))
-        .map(|(_, value)| value.trim())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| CloudError::Protocol("S3 metadata response is missing ETag".to_string()))?;
-    Ok(ObjectMetadata::new(size, etag.to_string()))
 }
 
 fn s3_response_error(
@@ -1765,7 +1718,7 @@ mod tests {
         // Assert
         crate::storage::providers::test_support::assert_get_metadata_length_contract(
             identity_headers,
-            |response| object_metadata_from_s3_response(response, Some(3)),
+            |response| object_metadata_from_response(response, Some(3), "S3"),
         );
     }
 

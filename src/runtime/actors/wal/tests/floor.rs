@@ -79,7 +79,8 @@ fn should_protect_spilled_transaction_participants_until_all_generations_publish
         state
             .track_new_immutable_flush(cf_id, table.clone(), sequence)
             .unwrap();
-        state.get_cf_mut(cf_id).unwrap().memtable = Arc::new(crate::sst::SkipListMemtable::new());
+        state.get_cf_mut(cf_id).unwrap().memtable =
+            Arc::new(crate::memtable::SkipListMemtable::new());
         frozen.push((cf_id, table));
     }
     let before_publication = state.wal_recovery_floor_segment();

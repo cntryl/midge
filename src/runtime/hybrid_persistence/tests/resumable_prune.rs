@@ -1,9 +1,8 @@
-#![cfg(test)]
-
 use super::*;
 use crate::metadata::Manifest;
 use crate::runtime::hybrid_persistence::CloudWalPruneProgress;
 use crate::storage::cloud::{CloudCallback, CloudError, CloudEvent};
+use crate::types::EntryType;
 
 struct LimitedRanges {
     inner: MockCloudBackend,
@@ -75,7 +74,7 @@ fn fixture(
 ) -> (
     tempfile::TempDir,
     Arc<LimitedRanges>,
-    HybridStorage,
+    CloudPersistence,
     Manifest,
 ) {
     let directory = tempfile::tempdir().expect("directory");
@@ -90,11 +89,11 @@ fn fixture(
         expire_after_next_wal_range: AtomicBool::new(false),
     });
     let cloud = Arc::new(CloudStorage::new(backend.clone(), String::new()));
-    let storage = HybridStorage::with_policy(
+    let storage = CloudPersistence::new(Arc::new(HybridStorage::with_policy(
         local,
         cloud,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-    );
+    )));
     storage.enable_ephemeral_sst_cache(1024 * 1024);
     storage.fence_cloud_wal_catalog(2).expect("catalog");
     let value = (0..8192_u32)
@@ -118,7 +117,11 @@ fn fixture(
     let sst = valid_sst_bytes(b"k", &value, records);
     let manifest =
         manifest_covering_wal("resumable.sst", &sst, records, Some(crc32c::crc32c(&sst)));
-    write_cloud_object(&storage, &crate::sst::object_key("resumable.sst"), sst);
+    write_cloud_object(
+        &storage,
+        &crate::cloud_layout::object_key("resumable.sst"),
+        sst,
+    );
     backend.reads.lock().clear();
     (directory, backend, storage, manifest)
 }
@@ -167,7 +170,7 @@ fn should_finish_oldest_wal_proof_across_repeated_provider_timeouts() {
 }
 
 fn attempt(
-    storage: &HybridStorage,
+    storage: &CloudPersistence,
     manifest: &Manifest,
     progress: &CloudWalPruneProgress,
     sequence: u64,
@@ -176,7 +179,7 @@ fn attempt(
 }
 
 fn attempt_with_quantum(
-    storage: &HybridStorage,
+    storage: &CloudPersistence,
     manifest: &Manifest,
     progress: &CloudWalPruneProgress,
     sequence: u64,
@@ -231,7 +234,7 @@ fn should_restart_semantic_progress_when_sst_provider_identity_changes() {
         .lock()
         .iter()
         .any(|(key, _)| key.contains("resumable.sst")));
-    let key = crate::sst::object_key("resumable.sst");
+    let key = crate::cloud_layout::object_key("resumable.sst");
     let bytes = read_cloud_object(&storage, &key);
     write_cloud_object(&storage, &key, bytes);
     backend.reads.lock().clear();
@@ -282,13 +285,23 @@ fn should_resume_legacy_sst_summary_across_timeouts_with_many_versions_of_one_ke
         let mut writer = factory.create().expect("writer");
         for sequence in (1..=100).rev() {
             writer
-                .add_with_meta(b"k", Some(&vec![b'x'; 8192]), sequence, 0, None)
+                .add_with_meta(
+                    b"k",
+                    Some(&vec![b'x'; 8192]),
+                    sequence,
+                    EntryType::Put,
+                    None,
+                )
                 .expect("historical version");
         }
         let bytes = writer.finish_bytes().expect("historical SST");
         let mut manifest = manifest_covering_wal("resumable.sst", &bytes, 100, None);
         manifest.files[0].smallest_seq = Some(1);
-        write_cloud_object(&storage, &crate::sst::object_key("resumable.sst"), bytes);
+        write_cloud_object(
+            &storage,
+            &crate::cloud_layout::object_key("resumable.sst"),
+            bytes,
+        );
         let progress = CloudWalPruneProgress::default();
         let mut retired = false;
         // Act
@@ -425,7 +438,7 @@ fn should_resume_cross_family_transaction_proof_without_retiring_partial_coverag
                     .remove(0);
             file.cf_id = family;
             manifest.files.push(file);
-            write_cloud_object(&storage, &crate::sst::object_key(name), bytes);
+            write_cloud_object(&storage, &crate::cloud_layout::object_key(name), bytes);
         }
         let progress = CloudWalPruneProgress::default();
         let mut retired = false;
@@ -529,7 +542,7 @@ fn should_preserve_oldest_proof_progress_while_newer_ssts_are_appended() {
         file.largest_key = Some(b"z".to_vec());
         file.key_bounds_complete = true;
         manifest.files.push(file);
-        write_cloud_object(&storage, &crate::sst::object_key(&name), bytes);
+        write_cloud_object(&storage, &crate::cloud_layout::object_key(&name), bytes);
     }
     // Assert
     assert!(
@@ -627,7 +640,7 @@ fn finish_with_retained_manifest_admission(remote_metadata: bool) {
         if let Ok(bytes) = std::fs::read(metadata_path.join(name)) {
             let (tx, rx) = std::sync::mpsc::channel();
             metadata_cloud.submit_put(
-                &crate::storage::cloud::cloud_metadata_key(name),
+                &crate::cloud_layout::CloudObjectLayout::metadata_key(name),
                 bytes,
                 Vec::new(),
                 tx,
@@ -644,6 +657,7 @@ fn finish_with_retained_manifest_admission(remote_metadata: bool) {
         Arc::new(crate::io::real::RealFs::new(&metadata_path).unwrap()),
         crate::config::RecoveryPolicy::default(),
         budget.clone(),
+        crate::runtime::MetadataPublicationLock::default(),
     )
     .with_progress(progress.clone());
     let mut attempts = 0;

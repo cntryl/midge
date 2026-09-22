@@ -5,10 +5,10 @@
 
 use crate::common::{MidgeError, MidgeResult};
 use crate::diagnostics::RuntimeDiagnostics;
+use crate::memtable::SkipListMemtable;
 use crate::metadata::Manifest;
 use crate::runtime::snapshot_pins::SnapshotPinRegistry;
 use crate::runtime::{IntentLogEntry, PublicationPhase};
-use crate::sst::{Memtable, SkipListMemtable};
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -139,8 +139,6 @@ impl Default for WalState {
 pub struct CompactionState {
     /// SSTs currently being compacted (locked from other compactions)
     pub compacting_ssts: Vec<String>,
-    /// Pending compaction tasks
-    pub pending_tasks: usize,
 }
 
 /// Cloud sync state
@@ -453,7 +451,6 @@ impl RuntimeState {
             wal_last_synced_seq: self.wal.last_synced_seq,
             wal_local_durable_seq: self.wal.local_durable_seq,
             wal_cloud_durable_seq: self.wal.cloud_durable_seq,
-            pending_compactions: self.compaction.pending_tasks,
             compacting_ssts: self.compaction.compacting_ssts.len(),
             active_compactions: self
                 .active_compactions
@@ -600,7 +597,6 @@ impl RuntimeState {
             manifest_next_wal_seq: self.manifest.next_wal_seq,
             levels,
             active_snapshots,
-            pending_compactions: self.compaction.pending_tasks,
             compacting_ssts: self.compaction.compacting_ssts.clone(),
             obsolete_files: residue.orphan_ssts,
         }
@@ -629,7 +625,7 @@ impl RuntimeState {
         let residue = self.storage_residue_assessment();
 
         for temp_name in residue.sst_temp_files {
-            let path = FsPath::new(crate::sst::object_key(&temp_name));
+            let path = FsPath::new(crate::cloud_layout::object_key(&temp_name));
             match self.fs.remove_file(&path) {
                 Ok(()) => {
                     tracing::info!(path = %path.0.as_str(), "deleted non-authoritative SST temp residue");
@@ -657,7 +653,7 @@ impl RuntimeState {
         }
 
         for orphan_name in residue.orphan_ssts {
-            let path = FsPath::new(crate::sst::object_key(&orphan_name));
+            let path = FsPath::new(crate::cloud_layout::object_key(&orphan_name));
             let injected_delete_failure =
                 crate::failpoints::is_active("midge::recovery::inject_orphan_sst_delete_failure");
             if injected_delete_failure {
@@ -727,7 +723,7 @@ impl RuntimeState {
         }
         let mut moved = 0usize;
         for name in sst_names {
-            let from = FsPath::new(crate::sst::object_key(name));
+            let from = FsPath::new(crate::cloud_layout::object_key(name));
             let to = FsPath::new(format!("{}/{name}", quarantine.0));
             match self.fs.rename_atomic(&from, &to) {
                 Ok(()) => moved += 1,
@@ -743,7 +739,7 @@ impl RuntimeState {
             }
         }
         for dir in [
-            FsPath::new(crate::sst::object_key("")),
+            FsPath::new(crate::cloud_layout::object_key("")),
             quarantine.clone(),
             FsPath::new(SALVAGE_RETAINED_DIR),
             FsPath::new(""),

@@ -2,6 +2,7 @@ use super::*;
 use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::event_loop::EventLoop;
 use crate::runtime::state::RuntimeState;
+use crate::runtime::TestRuntimeMsg;
 use crate::runtime::{ConflictPolicy, ResponseRouter, RuntimeConfig};
 use crate::wal::DurabilityPolicy;
 use bytes::Bytes;
@@ -40,7 +41,7 @@ impl EventLoopFixture {
                 wal_durability_policy: policy,
                 ..RuntimeConfig::default()
             },
-            None,
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
         )?;
 
         Ok(Self {
@@ -251,15 +252,6 @@ fn expect_transaction_applied(
     }
 }
 
-fn expect_ok(rx: &crossbeam::channel::Receiver<RuntimeResponse>, expected_request_id: u64) {
-    match recv_response(rx) {
-        RuntimeResponse::Ok { request_id } => {
-            assert_eq!(request_id, expected_request_id);
-        }
-        other => panic!("unexpected response for {expected_request_id}: {other:?}"),
-    }
-}
-
 fn expect_error<F>(
     rx: &crossbeam::channel::Receiver<RuntimeResponse>,
     expected_request_id: u64,
@@ -314,7 +306,7 @@ fn should_fence_runtime_when_storage_acknowledgement_times_out() -> MidgeResult<
             lease_healthy: Some(Arc::clone(&lease_healthy)),
             ..RuntimeConfig::default()
         },
-        None,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
     )?;
     let response = router.register(1, "TestRequest");
 
@@ -679,21 +671,19 @@ fn should_return_inline_error_when_same_key_insert_only_fallback_rejects_from_co
 }
 
 #[test]
-fn should_coalesce_across_snapshot_bookkeeping_messages() -> MidgeResult<()> {
+fn should_stash_snapshot_bookkeeping_instead_of_coalescing_past_it() -> MidgeResult<()> {
     // Arrange
     let mut fixture = EventLoopFixture::batched()?;
     let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
     let first_rx = fixture.register(42);
-    let register_rx = fixture.register(43);
-    let second_rx = fixture.register(44);
 
     msg_tx
-        .send(RuntimeMsg::RegisterSnapshot {
+        .send(RuntimeMsg::Test(TestRuntimeMsg::RegisterSnapshot {
             request_id: 43,
             snapshot_id: 900,
             sequence: 0,
             pinned_sst_names: Vec::new(),
-        })
+        }))
         .expect("queue snapshot registration");
     msg_tx
         .send(txn_msg(
@@ -715,13 +705,23 @@ fn should_coalesce_across_snapshot_bookkeeping_messages() -> MidgeResult<()> {
     );
 
     // Assert
-    assert_eq!(handled, 2);
-    assert_eq!(fixture.event_loop.wal_actor.append_calls(), 1);
+    // The coalescing loop must not run any message itself: everything that is
+    // not another `ApplyTransaction` is stashed for the main loop, which runs it
+    // through `RuntimeDispatcher::handle` and therefore through both gates.
+    assert_eq!(handled, 1);
     assert_eq!(expect_transaction_applied(&first_rx, 42).1, 1);
-    expect_ok(&register_rx, 43);
-    assert_eq!(expect_transaction_applied(&second_rx, 44).1, 1);
+    assert!(
+        matches!(
+            fixture.event_loop.pending_msg.take(),
+            Some(RuntimeMsg::Test(TestRuntimeMsg::RegisterSnapshot {
+                request_id: 43,
+                ..
+            }))
+        ),
+        "snapshot bookkeeping must be stashed for the dispatcher, not handled inline"
+    );
     assert_memtable_value(&fixture.event_loop, 0, b"before-register", Some(b"value-a"));
-    assert_memtable_value(&fixture.event_loop, 0, b"after-register", Some(b"value-b"));
+    assert_memtable_value(&fixture.event_loop, 0, b"after-register", None);
 
     Ok(())
 }
@@ -742,10 +742,10 @@ fn should_not_drop_non_write_after_coalescing_stashes_pending_message() -> Midge
         );
         msg_tx.send(txn_msg).expect("queue transaction");
         msg_tx
-            .send(RuntimeMsg::Noop { request_id: 39 })
+            .send(RuntimeMsg::Test(TestRuntimeMsg::Noop { request_id: 39 }))
             .expect("queue first non-write");
         msg_tx
-            .send(RuntimeMsg::Noop { request_id: 40 })
+            .send(RuntimeMsg::Test(TestRuntimeMsg::Noop { request_id: 40 }))
             .expect("queue second non-write");
 
         // Act
@@ -756,11 +756,13 @@ fn should_not_drop_non_write_after_coalescing_stashes_pending_message() -> Midge
         assert_eq!(expect_transaction_applied(&txn_rx, 38).1, 1);
         assert_eq!(fixture.event_loop.wal_actor.sync_calls(), expected_syncs);
         match fixture.event_loop.pending_msg.take() {
-            Some(RuntimeMsg::Noop { request_id }) => assert_eq!(request_id, 39),
+            Some(RuntimeMsg::Test(TestRuntimeMsg::Noop { request_id })) => {
+                assert_eq!(request_id, 39);
+            }
             other => panic!("expected first non-write to be stashed, got {other:?}"),
         }
         match msg_rx.try_recv() {
-            Ok(RuntimeMsg::Noop { request_id }) => assert_eq!(request_id, 40),
+            Ok(RuntimeMsg::Test(TestRuntimeMsg::Noop { request_id })) => assert_eq!(request_id, 40),
             other => panic!("expected second non-write to remain queued, got {other:?}"),
         }
     }
@@ -775,7 +777,8 @@ fn should_leave_control_message_queued_when_pending_slot_is_occupied_during_coal
     let mut fixture = EventLoopFixture::batched()?;
     let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
     let transaction_rx = fixture.register(41);
-    fixture.event_loop.pending_msg = Some(RuntimeMsg::Noop { request_id: 42 });
+    fixture.event_loop.pending_msg =
+        Some(RuntimeMsg::Test(TestRuntimeMsg::Noop { request_id: 42 }));
     msg_tx
         .send(RuntimeMsg::FlushMemtable {
             request_id: 43,
@@ -799,7 +802,7 @@ fn should_leave_control_message_queued_when_pending_slot_is_occupied_during_coal
     assert_eq!(expect_transaction_applied(&transaction_rx, 41).1, 1);
     assert!(matches!(
         fixture.event_loop.pending_msg,
-        Some(RuntimeMsg::Noop { request_id: 42 })
+        Some(RuntimeMsg::Test(TestRuntimeMsg::Noop { request_id: 42 }))
     ));
     assert!(matches!(
         msg_rx.try_recv(),
@@ -1130,7 +1133,7 @@ fn should_fail_all_event_loop_buffered_transactions_when_append_hits_no_space() 
             .get_cf(0)
             .expect("default column family should exist")
             .memtable
-            .iter_all(u64::MAX)
+            .iter_all()
             .is_empty());
         assert!(
             fixture.event_loop.state.sequence > 0,
@@ -1209,7 +1212,7 @@ fn should_fail_all_event_loop_strict_transactions_when_shared_append_fails() -> 
             .get_cf(0)
             .expect("default column family")
             .memtable
-            .iter_all(u64::MAX)
+            .iter_all()
             .is_empty());
 
         drop(failpoint_guard);
@@ -1271,7 +1274,7 @@ fn should_fail_all_event_loop_strict_transactions_when_shared_sync_fails() -> Mi
         .get_cf(0)
         .expect("default column family")
         .memtable
-        .iter_all(u64::MAX)
+        .iter_all()
         .is_empty());
 
     fail::remove("midge::wal::inject_no_space_on_sync");
@@ -1505,7 +1508,7 @@ fn should_report_stall_hint_for_transaction_actual_column_family() -> MidgeResul
         .get_cf_mut(secondary_cf)
         .expect("secondary column family")
         .immutable_memtables
-        .push(Arc::new(crate::sst::SkipListMemtable::new()));
+        .push(Arc::new(crate::memtable::SkipListMemtable::new()));
     assert!(!fixture.event_loop.state.should_stall_writes(0));
     assert!(fixture.event_loop.state.should_stall_writes(secondary_cf));
     let response_rx = fixture.register(901);
@@ -1620,7 +1623,7 @@ fn should_not_fence_runtime_when_no_space_comes_from_outside_the_wal_writer() ->
             lease_healthy: Some(Arc::clone(&lease_healthy)),
             ..RuntimeConfig::default()
         },
-        None,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
     )?;
     let response = router.register(2, "TestRequest");
     assert!(!event_loop.wal_actor.is_fenced());
@@ -1659,7 +1662,7 @@ fn should_fence_runtime_when_the_wal_actor_reports_a_fenced_writer() -> MidgeRes
             lease_healthy: Some(Arc::clone(&lease_healthy)),
             ..RuntimeConfig::default()
         },
-        None,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
     )?;
     let response = router.register(3, "TestRequest");
     event_loop

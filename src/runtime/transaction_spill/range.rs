@@ -1,6 +1,6 @@
 use super::format::{
     field_len_bytes, read_crc_exact, read_crc_vec, read_frame_header, read_u32_at, read_u64_at,
-    u64_to_usize, usize_to_u64, write_frame_parts,
+    u64_to_usize, usize_to_u64, write_frame_parts, RunFile,
 };
 use super::{
     IntentLookup, OrdinalOp, TransactionOp, NO_RANGE_CHILD, RANGE_HEADER_LEN, RANGE_MAGIC,
@@ -108,7 +108,8 @@ pub(super) fn write_range_index_file(path: &Path, ops: &[OrdinalOp]) -> MidgeRes
     file.seek(SeekFrom::Start(0))?;
     file.write_all(&header)?;
     file.seek(SeekFrom::Start(end))?;
-    file.sync_all()?;
+    // Range indexes are pre-commit scratch alongside their run, so the WAL
+    // commit -- not an fsync here -- is their durability boundary.
     Ok(())
 }
 
@@ -167,6 +168,7 @@ fn write_range_node_frame(
     )
 }
 
+#[derive(Debug, Clone, Copy)]
 pub(super) struct RangeHeader {
     node_count: usize,
     pub(super) node_section_offset: u64,
@@ -181,9 +183,9 @@ struct RangeNode {
     max_end: Bytes,
 }
 
-pub(super) fn read_range_header(file: &mut File) -> MidgeResult<RangeHeader> {
+pub(super) fn read_range_header(file: &mut RunFile) -> MidgeResult<RangeHeader> {
     let mut header = [0_u8; RANGE_HEADER_LEN];
-    file.seek(SeekFrom::Start(0))?;
+    file.seek_to(0)?;
     file.read_exact(&mut header)?;
     if &header[..8] != RANGE_MAGIC {
         return Err(MidgeError::Corruption(
@@ -226,7 +228,7 @@ pub(super) fn read_range_header(file: &mut File) -> MidgeResult<RangeHeader> {
 }
 
 fn read_range_node(
-    file: &mut File,
+    file: &mut RunFile,
     header: &RangeHeader,
     node_index: u64,
 ) -> MidgeResult<RangeNode> {
@@ -243,7 +245,7 @@ fn read_range_node(
         .ok_or_else(|| {
             MidgeError::Corruption("transaction range table offset overflow".to_string())
         })?;
-    file.seek(SeekFrom::Start(usize_to_u64(table_offset)?))?;
+    file.seek_to(usize_to_u64(table_offset)?)?;
     let mut entry = [0_u8; RANGE_TABLE_ENTRY_LEN];
     file.read_exact(&mut entry)?;
     let expected_crc = read_u32_at(&entry, 8)?;
@@ -258,11 +260,11 @@ fn read_range_node(
             "transaction range node offset is out of bounds".to_string(),
         ));
     }
-    file.seek(SeekFrom::Start(node_offset))?;
+    file.seek_to(node_offset)?;
     read_range_node_frame(file)
 }
 
-fn read_range_node_frame(file: &mut File) -> MidgeResult<RangeNode> {
+fn read_range_node_frame(file: &mut RunFile) -> MidgeResult<RangeNode> {
     let (payload_len, expected_crc) = read_frame_header(file)?;
     if payload_len < 36 {
         return Err(MidgeError::Corruption(
@@ -300,7 +302,7 @@ fn read_range_node_frame(file: &mut File) -> MidgeResult<RangeNode> {
 }
 
 fn read_crc_field(
-    file: &mut File,
+    file: &mut RunFile,
     payload_len: usize,
     consumed: &mut usize,
     crc: &mut u32,
@@ -320,28 +322,28 @@ fn read_crc_field(
 }
 
 pub(super) fn lookup_range_index(
-    path: &Path,
+    file: &mut RunFile,
+    header: &RangeHeader,
     key: &[u8],
     ordinal_ceiling: u64,
     latest: &mut Option<(u64, IntentLookup)>,
 ) -> MidgeResult<()> {
-    let mut file = File::open(path)?;
-    let header = read_range_header(&mut file)?;
     if header.node_count == 0 {
         return Ok(());
     }
+    let node_count = header.node_count;
     let mut lookup = RangeLookup {
-        file: &mut file,
-        header: &header,
+        file,
+        header,
         key,
         ordinal_ceiling,
         latest,
     };
-    lookup_range_subtree(&mut lookup, 0, None, header.node_count)
+    lookup_range_subtree(&mut lookup, 0, None, node_count)
 }
 
 struct RangeLookup<'a> {
-    file: &'a mut File,
+    file: &'a mut RunFile,
     header: &'a RangeHeader,
     key: &'a [u8],
     ordinal_ceiling: u64,
@@ -386,7 +388,7 @@ fn lookup_range_subtree(
 }
 
 pub(super) fn validate_range_index(path: &Path) -> MidgeResult<()> {
-    let mut file = File::open(path)?;
+    let mut file = RunFile::open(path)?;
     let header = read_range_header(&mut file)?;
     for index in 0..header.node_count {
         let node = read_range_node(&mut file, &header, usize_to_u64(index)?)?;

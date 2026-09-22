@@ -68,6 +68,10 @@ pub struct RuntimeConfig {
     pub hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
     pub hybrid_storage_events: Option<crossbeam::channel::Receiver<crate::storage::StorageEvent>>,
     pub cloud_metadata_storage: Option<Arc<crate::storage::cloud::CloudStorage>>,
+    /// Runtime-owned mutual exclusion for control-location metadata authority.
+    /// It is deliberately independent of a cloud dispatcher so separately
+    /// constructed dispatchers still serialize the same runtime's publication.
+    pub(crate) metadata_publication_lock: crate::runtime::MetadataPublicationLock,
     /// Immutable SST reads, including compaction inputs, may be backed by
     /// version-pinned cloud range requests instead of resident local files.
     pub(crate) sst_read_fs: Option<Arc<dyn crate::io::Fs>>,
@@ -87,7 +91,7 @@ pub struct RuntimeConfig {
     /// A recovered active WAL file that must be sealed and enqueued after the
     /// runtime has installed its cloud upload pipeline.
     pub(crate) recovered_cloud_active_wal: Option<RecoveredCloudActiveWal>,
-    pub compression_policy: crate::sst::compression::CompressionPolicy,
+    pub compression_policy: crate::codec::CompressionPolicy,
     pub block_cache_size: usize,
     pub block_cache_policy: crate::sst::cache::CachePolicyType,
     pub(crate) target_sst_size: usize,
@@ -127,13 +131,14 @@ impl Default for RuntimeConfig {
             hybrid_storage: None,
             hybrid_storage_events: None,
             cloud_metadata_storage: None,
+            metadata_publication_lock: crate::runtime::MetadataPublicationLock::default(),
             sst_read_fs: None,
             recovered_cloud_wal_segments: BTreeMap::new(),
             recovered_cloud_wal_segment_epochs: BTreeMap::new(),
             recovered_local_wal_segments: BTreeMap::new(),
             recovered_local_wal_segment_epochs: BTreeMap::new(),
             recovered_cloud_active_wal: None,
-            compression_policy: crate::sst::compression::CompressionPolicy::default(),
+            compression_policy: crate::codec::CompressionPolicy::default(),
             block_cache_size: 128 * 1024 * 1024,
             block_cache_policy: crate::sst::cache::CachePolicyType::Lru,
             target_sst_size: crate::compaction::DEFAULT_TARGET_SST_SIZE,

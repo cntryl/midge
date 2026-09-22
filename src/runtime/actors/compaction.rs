@@ -10,6 +10,8 @@ use crate::common::{MidgeError, MidgeResult};
 use crate::compaction::{Compactor, LeveledCompactionConfig};
 use crate::runtime::{next_request_id, RuntimeMsg};
 use crate::sst::SstFactory;
+#[cfg(test)]
+use crate::types::EntryType;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -18,17 +20,21 @@ use std::thread::JoinHandle;
 #[path = "compaction/publication_tests.rs"]
 mod publication_tests;
 
-type PreparedRemoteOutputs = Arc<
-    parking_lot::Mutex<
-        std::collections::HashMap<
-            String,
-            (
-                crate::runtime::FileMeta,
-                crate::storage::hybrid::backend::GuardedObjectProof,
-            ),
-        >,
-    >,
->;
+/// A finished compaction partition, summarized where it was written.
+///
+/// Summarizing re-reads the partition and CRCs it, so it belongs on the
+/// compaction worker. On the event loop a 64 MiB output would stall every
+/// queued read, write, ack and shutdown behind it.
+#[derive(Clone)]
+pub(crate) struct PreparedCompactionOutput {
+    pub(crate) metadata: crate::runtime::FileMeta,
+    /// Present only for a partition already uploaded to the authoritative
+    /// cloud. A local-only partition has nothing to prove remotely.
+    pub(crate) proof: Option<crate::storage::hybrid::backend::GuardedObjectProof>,
+}
+
+type PreparedCompactionOutputs =
+    Arc<parking_lot::Mutex<std::collections::HashMap<String, PreparedCompactionOutput>>>;
 
 /// Storage capabilities required by compaction. Keeping this contract beside
 /// the consumer prevents the actor from depending on the complete hybrid
@@ -52,14 +58,14 @@ pub(crate) trait CompactionStorage: Send + Sync {
     fn abort(&self, token: crate::storage::hybrid::actor::StorageReservationToken);
     fn maintenance_memory(&self) -> Option<crate::common::resource_budget::ResourceBudget>;
     fn immutable_file_partition_target(&self, pool: usize) -> usize;
-    fn publish_immutable_file(
+    fn stage_output_partition(
         &self,
-        key: &str,
+        cf_id: u32,
+        level: u32,
+        name: &str,
         path: &std::path::Path,
-        size: u64,
-        checksum: u32,
         budget: &crate::common::resource_budget::ResourceBudget,
-    ) -> MidgeResult<crate::storage::hybrid::backend::GuardedObjectProof>;
+    ) -> MidgeResult<PreparedCompactionOutput>;
 }
 
 impl CompactionStorage for crate::storage::HybridStorage {
@@ -105,16 +111,112 @@ impl CompactionStorage for crate::storage::HybridStorage {
         Self::immutable_file_partition_target(pool)
     }
 
-    fn publish_immutable_file(
+    fn stage_output_partition(
         &self,
-        key: &str,
+        cf_id: u32,
+        level: u32,
+        name: &str,
         path: &std::path::Path,
-        size: u64,
-        checksum: u32,
         budget: &crate::common::resource_budget::ResourceBudget,
-    ) -> MidgeResult<crate::storage::hybrid::backend::GuardedObjectProof> {
-        self.publish_immutable_file(key, path, size, checksum, budget)
+    ) -> MidgeResult<PreparedCompactionOutput> {
+        let (metadata, size, crc) = summarize_output_partition(cf_id, level, name, path, budget)?;
+        let proof = crate::storage::HybridStorage::publish_immutable_file(
+            self,
+            &crate::cloud_layout::object_key(name),
+            path,
+            size,
+            crc,
+            budget,
+        )?;
+        // Input authority has not changed. If the job fails, the completion
+        // path deletes this unreferenced object; it cannot lose an input.
+        if self.ephemeral_sst_cache_enabled() {
+            std::fs::remove_file(path)?;
+        }
+        Ok(PreparedCompactionOutput {
+            metadata,
+            proof: Some(proof),
+        })
     }
+}
+
+/// Summarize a finished partition into publishable metadata on the worker.
+///
+/// The trait implementation below owns remote staging; local-only compaction
+/// takes this same worker-side path without creating a remote proof.
+fn summarize_output_partition(
+    cf_id: u32,
+    level: u32,
+    name: &str,
+    path: &std::path::Path,
+    budget: &crate::common::resource_budget::ResourceBudget,
+) -> MidgeResult<(crate::runtime::FileMeta, u64, u32)> {
+    let summary =
+        crate::sst::fs::SstFileIo::summarize_with_real_fs_for_compaction(path, budget.clone())?;
+    let (size, crc) = crate::sst::fs::file_identity(path)?;
+    if size != summary.size_bytes {
+        return Err(MidgeError::Corruption(
+            "compaction partition changed before upload".into(),
+        ));
+    }
+    Ok((
+        crate::runtime::FileMeta {
+            name: name.to_string(),
+            level,
+            size_bytes: summary.size_bytes,
+            content_crc32c: Some(crc),
+            cf_id,
+            smallest_key: Some(summary.smallest_key),
+            largest_key: Some(summary.largest_key),
+            smallest_seq: Some(summary.smallest_seq),
+            largest_seq: Some(summary.largest_seq),
+            key_bounds_complete: true,
+        },
+        size,
+        crc,
+    ))
+}
+
+fn stage_local_output_partition(
+    cf_id: u32,
+    level: u32,
+    name: &str,
+    path: &std::path::Path,
+    budget: &crate::common::resource_budget::ResourceBudget,
+) -> MidgeResult<PreparedCompactionOutput> {
+    let (metadata, _size, _crc) = summarize_output_partition(cf_id, level, name, path, budget)?;
+    Ok(PreparedCompactionOutput {
+        metadata,
+        proof: None,
+    })
+}
+
+/// Record a partition that was staged on the compaction worker. The actor owns
+/// only the per-job map and the post-record failpoint; remote summarization,
+/// upload, and eviction belong to `CompactionStorage`.
+#[allow(clippy::too_many_arguments)]
+fn record_staged_output_partition(
+    storage: Option<&dyn CompactionStorage>,
+    prepared: &PreparedCompactionOutputs,
+    cf_id: u32,
+    level: u32,
+    name: &str,
+    path: &std::path::Path,
+    budget: &crate::common::resource_budget::ResourceBudget,
+) -> MidgeResult<()> {
+    let Some(storage) = storage else {
+        let output = stage_local_output_partition(cf_id, level, name, path, budget)?;
+        prepared.lock().insert(name.to_string(), output);
+        return Ok(());
+    };
+    let output = storage.stage_output_partition(cf_id, level, name, path, budget)?;
+    prepared.lock().insert(name.to_string(), output);
+    crate::failpoints::fail_point!("midge::compaction::after_remote_partition_evicted", |_| {
+        Err(MidgeError::Internal(
+            "failpoint: compaction interrupted after remote partition eviction".into(),
+        ))
+    });
+    Ok(())
 }
 
 /// Actor handling SST compaction
@@ -148,7 +250,7 @@ pub struct CompactionActor {
     worker_error: Arc<std::sync::Mutex<Option<MidgeError>>>,
     /// Metadata and exact provider identities proved before each remote
     /// partition's local staging file was released.
-    prepared_remote_outputs: PreparedRemoteOutputs,
+    prepared_outputs: PreparedCompactionOutputs,
 }
 
 impl CompactionActor {
@@ -174,9 +276,7 @@ impl CompactionActor {
             worker_cancel: Arc::new(AtomicBool::new(false)),
             worker_handle: None,
             worker_error: Arc::new(std::sync::Mutex::new(None)),
-            prepared_remote_outputs: Arc::new(parking_lot::Mutex::new(
-                std::collections::HashMap::new(),
-            )),
+            prepared_outputs: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -456,7 +556,7 @@ impl CompactionActor {
             let name = name.to_string_lossy();
             let name = name.strip_suffix(".tmp").unwrap_or(&name);
             let Some((cf, level, output_generation, _)) =
-                crate::sst::parse_compaction_file_name(name)
+                crate::cloud_layout::parse_compaction_file_name(name)
             else {
                 continue;
             };
@@ -596,7 +696,7 @@ impl CompactionActor {
             ));
         }
 
-        self.prepared_remote_outputs.lock().clear();
+        self.prepared_outputs.lock().clear();
         self.storage_reservation =
             if let Some(hybrid) = sba.filter(|hybrid| hybrid.ephemeral_sst_cache_enabled()) {
                 Some(
@@ -681,7 +781,7 @@ impl CompactionActor {
             &state.sst_dir,
             None,
             sba,
-            &self.prepared_remote_outputs,
+            &self.prepared_outputs,
         )?;
 
         tracing::info!(
@@ -698,13 +798,13 @@ impl CompactionActor {
         output_dir: &std::path::Path,
         abort_check: Option<&dyn Fn() -> bool>,
         storage: Option<&Arc<dyn CompactionStorage>>,
-        prepared: &PreparedRemoteOutputs,
+        prepared: &PreparedCompactionOutputs,
     ) -> MidgeResult<Vec<String>> {
         let sink = |name: &str,
                     path: &std::path::Path,
                     budget: &crate::common::resource_budget::ResourceBudget| {
-            Self::prepare_remote_partition(
-                storage.expect("cloud storage").as_ref(),
+            record_staged_output_partition(
+                storage.map(Arc::as_ref),
                 prepared,
                 plan.cf_id,
                 plan.target_level,
@@ -713,7 +813,10 @@ impl CompactionActor {
                 budget,
             )
         };
-        let output_sink = storage.map(|_| &sink as &crate::compaction::CompactionOutputSink<'_>);
+        // Installed even without cloud storage: summarizing on the worker is
+        // what keeps a local-only compaction's full-file re-read and CRC off
+        // the event loop.
+        let output_sink = Some(&sink as &crate::compaction::CompactionOutputSink<'_>);
         let target = storage.map_or(plan.target_sst_size, |storage| {
             plan.target_sst_size
                 .min(storage.immutable_file_partition_target(plan.compaction_memory_limit))
@@ -755,7 +858,7 @@ impl CompactionActor {
         self.worker_cancel.store(false, Ordering::Release);
         let worker_cancel = Arc::clone(&self.worker_cancel);
         let worker_error = Arc::clone(&self.worker_error);
-        let prepared_outputs = Arc::clone(&self.prepared_remote_outputs);
+        let prepared_outputs = Arc::clone(&self.prepared_outputs);
         store_compaction_worker_error(&worker_error, None);
         let job_id = next_request_id()?;
 
@@ -879,73 +982,29 @@ impl CompactionActor {
     /// generation was reserved durably before upload and is never reused,
     /// and no manifest or intent names them until publication, so after a
     /// failed job they are provably unreferenced.
-    pub(crate) fn take_prepared_remote_output_names(&self) -> Vec<String> {
-        self.prepared_remote_outputs
+    pub(crate) fn take_prepared_output_names(&self) -> Vec<String> {
+        self.prepared_outputs
             .lock()
             .drain()
             .map(|(name, _)| name)
             .collect()
     }
 
-    pub(crate) fn prepared_remote_output(
-        &self,
-        name: &str,
-    ) -> Option<(
-        crate::runtime::FileMeta,
-        crate::storage::hybrid::backend::GuardedObjectProof,
-    )> {
-        self.prepared_remote_outputs.lock().get(name).cloned()
+    pub(crate) fn prepared_output(&self, name: &str) -> Option<PreparedCompactionOutput> {
+        self.prepared_outputs.lock().get(name).cloned()
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn prepare_remote_partition(
-        hybrid: &dyn CompactionStorage,
-        prepared: &PreparedRemoteOutputs,
-        cf_id: u32,
-        level: u32,
+    /// Seed an output the worker would have staged, so a publication test can
+    /// exercise the prepared-output path without running a real compaction.
+    #[cfg(test)]
+    pub(crate) fn insert_prepared_output_for_test(
+        &self,
         name: &str,
-        path: &std::path::Path,
-        budget: &crate::common::resource_budget::ResourceBudget,
-    ) -> MidgeResult<()> {
-        let summary =
-            crate::sst::fs::SstFileIo::summarize_with_real_fs_for_compaction(path, budget.clone())?;
-        let (size, crc) = crate::sst::fs::file_identity(path)?;
-        if size != summary.size_bytes {
-            return Err(MidgeError::Corruption(
-                "compaction partition changed before upload".into(),
-            ));
-        }
-        let proof = hybrid.publish_immutable_file(
-            &crate::sst::object_key(name),
-            path,
-            size,
-            crc,
-            budget,
-        )?;
-        let metadata = crate::runtime::FileMeta {
-            name: name.to_string(),
-            level,
-            size_bytes: summary.size_bytes,
-            content_crc32c: Some(crc),
-            cf_id,
-            smallest_key: Some(summary.smallest_key),
-            largest_key: Some(summary.largest_key),
-            smallest_seq: Some(summary.smallest_seq),
-            largest_seq: Some(summary.largest_seq),
-            key_bounds_complete: true,
-        };
-        // Input authority has not changed. If the job fails, the completion
-        // path deletes this unreferenced object; it cannot lose an input.
-        if hybrid.ephemeral_sst_cache_enabled() {
-            std::fs::remove_file(path)?;
-        }
-        prepared.lock().insert(name.to_string(), (metadata, proof));
-        crate::failpoints::fail_point!("midge::compaction::after_remote_partition_evicted", |_| {
-            Err(MidgeError::Internal(
-                "failpoint: compaction interrupted after remote partition eviction".into(),
-            ))
-        });
-        Ok(())
+        output: PreparedCompactionOutput,
+    ) {
+        self.prepared_outputs
+            .lock()
+            .insert(name.to_string(), output);
     }
 
     #[cfg(test)]
@@ -1033,7 +1092,7 @@ mod tests {
         actor.prepare_compaction(&mut state, &plan, Some(&compaction_storage))?;
         let residue = state
             .sst_dir
-            .join(crate::sst::compaction_file_name(0, 1, 42, 0));
+            .join(crate::cloud_layout::compaction_file_name(0, 1, 42, 0));
         std::fs::write(&residue, [0_u8; 300])?;
 
         // Act
@@ -1076,12 +1135,26 @@ mod tests {
     }
 
     impl crate::sst::traits::DynSstWriter for BlockingFinalizeWriter {
-        fn preserves_versioned_entries(&self) -> bool {
-            self.inner.preserves_versioned_entries()
+        fn encoded_size_upper_bound(&self) -> Option<usize> {
+            self.inner.encoded_size_upper_bound()
         }
 
-        fn add(&mut self, key: &[u8], value: &[u8]) -> MidgeResult<()> {
-            self.inner.add(key, value)
+        fn encoded_size_upper_bound_after_sorted_entry(
+            &self,
+            key: &[u8],
+            value: Option<&[u8]>,
+        ) -> Option<usize> {
+            self.inner
+                .encoded_size_upper_bound_after_sorted_entry(key, value)
+        }
+
+        fn additional_range_tombstone_size_upper_bound(
+            &self,
+            start: &[u8],
+            end: &[u8],
+        ) -> Option<usize> {
+            self.inner
+                .additional_range_tombstone_size_upper_bound(start, end)
         }
 
         fn add_with_meta(
@@ -1089,7 +1162,7 @@ mod tests {
             key: &[u8],
             value: Option<&[u8]>,
             seq: u64,
-            op_type: u8,
+            op_type: EntryType,
             expiration: Option<u64>,
         ) -> MidgeResult<()> {
             self.inner
@@ -1101,7 +1174,7 @@ mod tests {
             key: &[u8],
             value: Option<&[u8]>,
             seq: u64,
-            op_type: u8,
+            op_type: EntryType,
             expiration: Option<u64>,
         ) -> MidgeResult<()> {
             self.inner
@@ -1539,7 +1612,13 @@ mod tests {
             Arc::new(crate::sst::FsSstFactoryIo::new(real_fs, 4096));
         let mut input_writer = delegate.create().expect("create input SST writer");
         input_writer
-            .add_with_meta(b"key", Some(b"authoritative value"), 1, 0, None)
+            .add_with_meta(
+                b"key",
+                Some(b"authoritative value"),
+                1,
+                EntryType::Put,
+                None,
+            )
             .expect("write input value");
         crate::sst::fs::finish_writer_to_path(input_writer, &input_path)
             .expect("finalize input SST");

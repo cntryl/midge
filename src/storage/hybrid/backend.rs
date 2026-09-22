@@ -48,9 +48,7 @@ impl RemoteCasFailure {
 
 use super::actor;
 use super::policy;
-use crate::storage::{
-    StorageBackend, StorageCallback, StorageEvent, StorageObjectMetadata, StorageOutcome,
-};
+use crate::storage::{StorageBackend, StorageEvent, StorageObjectMetadata, StorageOutcome};
 use crossbeam::channel as cb;
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
@@ -72,7 +70,8 @@ mod uploads;
 
 use proofs::PruneWorkerRegistry;
 pub(crate) use proofs::{GuardedObjectProof, RemoteObjectProof};
-use queues::{BoundedEventQueue, HybridQueueLimits, UploadQueue};
+pub(crate) use queues::HybridQueueLimits;
+use queues::{BoundedEventQueue, UploadQueue};
 
 const MAX_PENDING_WAL_UPLOADS: usize = 1_024;
 const MAX_PENDING_WAL_UPLOAD_BYTES: u64 = 1024 * 1024 * 1024;
@@ -262,7 +261,7 @@ impl HybridStorage {
         )
     }
 
-    fn with_policy_event_sender_and_limits(
+    pub(crate) fn with_policy_event_sender_and_limits(
         local: Arc<dyn StorageBackend>,
         cloud: Arc<dyn StorageBackend>,
         policy: policy::StorageBudgetPolicy,
@@ -280,7 +279,7 @@ impl HybridStorage {
         )
     }
 
-    fn with_class_stores_policy_event_sender_and_limits(
+    pub(crate) fn with_class_stores_policy_event_sender_and_limits(
         local: Arc<dyn StorageBackend>,
         wal_cloud: Arc<dyn StorageBackend>,
         cloud: Arc<dyn StorageBackend>,
@@ -386,6 +385,25 @@ impl HybridStorage {
                     "{operation} timed out waiting to mutate the cloud WAL catalog"
                 ))
             })
+    }
+}
+
+/// Raw per-class object-store handles for tests that assert object placement.
+///
+/// These expose the format-neutral routing only; no caller outside tests needs
+/// a store handle, so the accessors stay behind `cfg(test)`.
+#[cfg(test)]
+impl HybridStorage {
+    pub(crate) fn callback_timeout(&self) -> Duration {
+        self.callback_timeout
+    }
+
+    pub(crate) fn local_store(&self) -> &Arc<dyn StorageBackend> {
+        &self.stores.local
+    }
+
+    pub(crate) fn sst_store(&self) -> &Arc<dyn StorageBackend> {
+        &self.stores.sst
     }
 }
 

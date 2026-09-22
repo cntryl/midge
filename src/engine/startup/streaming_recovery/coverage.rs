@@ -78,7 +78,7 @@ impl ReplayCoverage {
     }
 
     fn contains_record(&self, record: &crate::wal::WalRecord) -> bool {
-        use crate::sst::types::KeyState;
+        use crate::types::KeyState;
         use crate::wal::types::WalOpRole;
         // Keep the existing conservative rule: tombstones are always replayed.
         if !matches!(record.op.role(), WalOpRole::ValueWrite) {
@@ -142,8 +142,7 @@ impl ReplayCoverage {
                     || sequence == record.seq
                         && record.value.as_ref() == Some(&value)
                         && record.expiration == expiration
-                        && crate::wal::WalOpKind::from_wire_format(operation)
-                            .is_ok_and(|op| matches!(op.role(), WalOpRole::ValueWrite))
+                        && operation.is_value_write()
             }
             Some(KeyState::Tombstone(sequence)) => sequence > record.seq,
             Some(KeyState::Absent) | None => false,
@@ -156,7 +155,7 @@ impl ReplayCoverage {
         &self,
         file: &crate::metadata::FileMeta,
         key: &[u8],
-    ) -> Option<crate::sst::types::KeyState> {
+    ) -> Option<crate::types::KeyState> {
         let mut cached = self.reader.borrow_mut();
         if let Some(cached) = cached.as_ref().filter(|cached| cached.name == file.name) {
             return cached.reader.get_state_at_with_time(key, u64::MAX, 0).ok();
@@ -164,7 +163,7 @@ impl ReplayCoverage {
         // The old reader's reservations must be released before even the
         // next full-object verification buffer is allocated.
         self.release_cached(&mut cached);
-        let path = FsPath::new(crate::sst::object_key(&file.name));
+        let path = FsPath::new(crate::cloud_layout::object_key(&file.name));
         let mut verified = self.verified.borrow_mut();
         if !verified.contains_key(&file.name) {
             let reservation = self
@@ -252,11 +251,11 @@ impl Drop for ReplayCoverage {
     }
 }
 
-fn state_sequence(state: &crate::sst::types::KeyState) -> Option<u64> {
+fn state_sequence(state: &crate::types::KeyState) -> Option<u64> {
     match state {
-        crate::sst::types::KeyState::Value(_, sequence, _, _)
-        | crate::sst::types::KeyState::Tombstone(sequence) => Some(*sequence),
-        crate::sst::types::KeyState::Absent => None,
+        crate::types::KeyState::Value(_, sequence, _, _)
+        | crate::types::KeyState::Tombstone(sequence) => Some(*sequence),
+        crate::types::KeyState::Absent => None,
     }
 }
 
@@ -420,21 +419,15 @@ mod tests {
         for (index, (value, sequence, expiration)) in entries.iter().enumerate() {
             let mut writer = factory.create().expect("SST writer");
             let operation = if value.is_some() {
-                WalOpKind::Put
+                crate::types::EntryType::Put
             } else {
-                WalOpKind::Delete
+                crate::types::EntryType::Delete
             };
             writer
-                .add_with_meta(
-                    b"key",
-                    *value,
-                    *sequence,
-                    operation.to_wire_format(),
-                    *expiration,
-                )
+                .add_with_meta(b"key", *value, *sequence, operation, *expiration)
                 .expect("SST entry");
             let bytes = writer.finish_bytes().expect("SST bytes");
-            let name = crate::sst::file_name(0, 0, index as u64 + 1);
+            let name = crate::cloud_layout::file_name(0, 0, index as u64 + 1);
             std::fs::write(dir.path().join("cloud/sst").join(&name), &bytes).expect("remote SST");
             manifest.files.push(crate::metadata::FileMeta {
                 name,

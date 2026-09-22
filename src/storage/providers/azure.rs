@@ -9,8 +9,9 @@
 
 use super::super::cloud::{
     CloudBackend, CloudCallback, CloudError, CloudEvent, CloudExecutor, CloudListBudget,
-    CloudOutcome, CloudRequest, CloudResponse, CloudSigner, ObjectMetadata,
+    CloudOutcome, CloudRequest, CloudResponse, CloudSigner,
 };
+use super::rest::{conditional_range_preconditions, object_metadata_from_response};
 use super::xml::extract_xml_tag_values;
 use crate::common::{MidgeError, MidgeResult};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as Base64Engine};
@@ -488,18 +489,20 @@ impl AzureProvider {
         account_name: String,
         container: String,
         endpoint: Option<String>,
-        source: super::AzureCredentialSource,
+        source: crate::config::AzureCredentialSource,
     ) -> MidgeResult<Self> {
         let endpoint = identity_blob_endpoint(endpoint)?;
         match source {
-            super::AzureCredentialSource::EnvironmentClientSecret => Self::with_oauth_provider(
-                account_name,
-                container,
-                endpoint,
-                AzureOAuthProvider::from_environment_client_secret()?,
-                "environment-client-secret",
-            ),
-            super::AzureCredentialSource::WorkloadIdentity {
+            crate::config::AzureCredentialSource::EnvironmentClientSecret => {
+                Self::with_oauth_provider(
+                    account_name,
+                    container,
+                    endpoint,
+                    AzureOAuthProvider::from_environment_client_secret()?,
+                    "environment-client-secret",
+                )
+            }
+            crate::config::AzureCredentialSource::WorkloadIdentity {
                 tenant_id,
                 client_id,
                 token_file,
@@ -510,7 +513,7 @@ impl AzureProvider {
                 AzureOAuthProvider::from_workload_identity(tenant_id, client_id, token_file)?,
                 "workload-identity",
             ),
-            super::AzureCredentialSource::LightweightDefaultChain => {
+            crate::config::AzureCredentialSource::LightweightDefaultChain => {
                 if AzureOAuthProvider::has_environment_client_secret() {
                     return Self::with_oauth_provider(
                         account_name,
@@ -536,7 +539,7 @@ impl AzureProvider {
                     endpoint,
                 )
             }
-            super::AzureCredentialSource::ManagedIdentity { client_id } => {
+            crate::config::AzureCredentialSource::ManagedIdentity { client_id } => {
                 Self::with_managed_identity_and_azure_endpoint(
                     account_name,
                     container,
@@ -833,6 +836,17 @@ impl CloudBackend for AzureBackend {
         headers: Vec<(String, String)>,
         callback: CloudCallback,
     ) {
+        self.submit_put_with_reservation(key, data, headers, None, callback);
+    }
+
+    fn submit_put_with_reservation(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        reservation: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
+        callback: CloudCallback,
+    ) {
         let key = key.to_string();
         let url = self.object_url(&key);
         let len = data.len();
@@ -841,6 +855,7 @@ impl CloudBackend for AzureBackend {
         });
         let mut request = CloudRequest::new(Method::PUT, url)
             .with_body(data)
+            .with_reservation(reservation)
             .with_header("x-ms-blob-type", "BlockBlob")
             .with_header("Content-Length", len.to_string());
         // Merge provided headers into the request (caller-controlled; e.g. If-None-Match)
@@ -912,9 +927,10 @@ impl CloudBackend for AzureBackend {
         let request = CloudRequest::new(Method::GET, self.object_url(&key));
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
             Ok(resp) if resp.status == 200 => {
-                let metadata = object_metadata_from_azure_response(
+                let metadata = object_metadata_from_response(
                     &resp,
                     Some(u64::try_from(resp.body.len()).unwrap_or(u64::MAX)),
+                    "Azure",
                 );
                 CloudEvent::GetWithMetadata {
                     key: ctx,
@@ -942,31 +958,35 @@ impl CloudBackend for AzureBackend {
         timeout: std::time::Duration,
         callback: CloudCallback,
     ) {
+        self.submit_get_range_with_reservation(key, start..end, expected, timeout, None, callback);
+    }
+
+    fn submit_get_range_with_reservation(
+        &self,
+        key: &str,
+        range: std::ops::Range<u64>,
+        expected: crate::storage::StorageObjectMetadata,
+        timeout: std::time::Duration,
+        reservation: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
+        callback: CloudCallback,
+    ) {
+        let start = range.start;
+        let end = range.end;
         let key = key.to_string();
-        let Some(conditions) = crate::storage::cloud::object_match_precondition_headers(
-            &expected.etag,
-            expected.generation.as_deref(),
-        ) else {
-            let _ = callback.send(CloudEvent::GetRange {
-                key,
-                start,
-                end: Some(end),
-                result: Err(CloudError::Protocol(
-                    "range request lacks object identity".into(),
-                )),
-            });
-            return;
+        let conditions = match conditional_range_preconditions(&range, &expected) {
+            Ok(conditions) => conditions,
+            Err(error) => {
+                let _ = callback.send(CloudEvent::GetRange {
+                    key,
+                    start,
+                    end: Some(end),
+                    result: Err(error),
+                });
+                return;
+            }
         };
-        if start >= end || end > expected.size {
-            let _ = callback.send(CloudEvent::GetRange {
-                key,
-                start,
-                end: Some(end),
-                result: Err(CloudError::Protocol("invalid object byte range".into())),
-            });
-            return;
-        }
-        let mut request = CloudRequest::new(Method::GET, self.object_url(&key));
+        let mut request =
+            CloudRequest::new(Method::GET, self.object_url(&key)).with_reservation(reservation);
         for (name, value) in conditions {
             request = request.with_header(name, value);
         }
@@ -1165,7 +1185,7 @@ impl CloudBackend for AzureBackend {
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
             Ok(resp) if resp.status == 200 => CloudEvent::Head {
                 key: ctx,
-                result: object_metadata_from_azure_response(&resp, None),
+                result: object_metadata_from_response(&resp, None, "Azure"),
             },
             Ok(resp) => CloudEvent::Head {
                 key: ctx,
@@ -1178,41 +1198,6 @@ impl CloudBackend for AzureBackend {
         };
         self.executor.spawn_request(request, key, callback, mapper);
     }
-}
-
-fn object_metadata_from_azure_response(
-    response: &CloudResponse,
-    known_size: Option<u64>,
-) -> CloudOutcome<ObjectMetadata> {
-    let size = match known_size {
-        Some(_) => crate::storage::cloud::executor::validate_get_response_length(response)?,
-        None => response
-            .headers
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-            .ok_or_else(|| {
-                CloudError::Protocol(
-                    "Azure metadata response is missing Content-Length".to_string(),
-                )
-            })?
-            .1
-            .parse::<u64>()
-            .map_err(|error| {
-                CloudError::Protocol(format!(
-                    "Azure metadata response has invalid Content-Length: {error}"
-                ))
-            })?,
-    };
-    let etag = response
-        .headers
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("etag"))
-        .map(|(_, value)| value.trim())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            CloudError::Protocol("Azure metadata response is missing ETag".to_string())
-        })?;
-    Ok(ObjectMetadata::new(size, etag.to_string()))
 }
 
 fn azure_response_error(
@@ -1381,7 +1366,7 @@ impl CloudSigner for SharedKeySigner {
             .headers
             .push(("x-ms-version".into(), "2024-11-04".into()));
 
-        let content_length = request.body.as_ref().map(std::vec::Vec::len);
+        let content_length = request.body.as_ref().map(bytes::Bytes::len);
 
         let sts = self.string_to_sign(
             request.method.as_str(),
@@ -2013,7 +1998,80 @@ mod tests {
         // Assert
         crate::storage::providers::test_support::assert_get_metadata_length_contract(
             identity_headers,
-            |response| object_metadata_from_azure_response(response, Some(3)),
+            |response| object_metadata_from_response(response, Some(3), "Azure"),
+        );
+    }
+
+    #[test]
+    fn should_not_retain_completion_thread_when_azure_put_carries_reservation() {
+        // Arrange
+        let server = spawn_recording_http_server_with_status(201, Vec::new(), Vec::new());
+        let backend = recording_backend(server.endpoint.clone());
+        let budget = crate::common::resource_budget::ResourceBudget::new(1 << 20);
+        let reservation = Arc::new(budget.reserve(1024, "azure put").unwrap());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let before = crate::storage::retained_callback::retain_calls_on_this_thread();
+
+        // Act
+        backend.submit_put_with_reservation(
+            "blob",
+            vec![1; 1024],
+            Vec::new(),
+            Some(reservation),
+            sender,
+        );
+        let result = receive_put_result(&receiver);
+        let _ = server.finish();
+
+        // Assert
+        assert!(result.is_ok());
+        assert_eq!(
+            crate::storage::retained_callback::retain_calls_on_this_thread(),
+            before
+        );
+    }
+
+    #[test]
+    fn should_not_retain_completion_thread_when_azure_range_read_carries_reservation() {
+        // Arrange
+        let server = spawn_recording_http_server_with_status(
+            206,
+            vec![
+                ("Content-Range".into(), "bytes 10-12/100".into()),
+                ("ETag".into(), "\"version\"".into()),
+            ],
+            vec![1, 2, 3],
+        );
+        let backend = recording_backend(server.endpoint.clone());
+        let expected = crate::storage::StorageObjectMetadata {
+            size: 100,
+            etag: "\"version\"".into(),
+            generation: None,
+        };
+        let budget = crate::common::resource_budget::ResourceBudget::new(1 << 20);
+        let reservation = Arc::new(budget.reserve(3, "azure range").unwrap());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let before = crate::storage::retained_callback::retain_calls_on_this_thread();
+
+        // Act
+        backend.submit_get_range_with_reservation(
+            "sst/table.sst",
+            10..13,
+            expected,
+            std::time::Duration::from_secs(5),
+            Some(reservation),
+            sender,
+        );
+        let event = receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("range completion");
+        let _ = server.finish();
+
+        // Assert
+        assert!(matches!(event, CloudEvent::GetRange { result: Ok(_), .. }));
+        assert_eq!(
+            crate::storage::retained_callback::retain_calls_on_this_thread(),
+            before
         );
     }
 
@@ -3226,14 +3284,14 @@ mod tests {
             "account".to_string(),
             "container".to_string(),
             Some("https://account.blob.core.usgovcloudapi.net".to_string()),
-            super::super::AzureCredentialSource::EnvironmentClientSecret,
+            crate::config::AzureCredentialSource::EnvironmentClientSecret,
         )
         .expect("government OAuth provider");
         let china = AzureProvider::from_lightweight_credential_source(
             "account".to_string(),
             "container".to_string(),
             Some("https://account.blob.core.chinacloudapi.cn".to_string()),
-            super::super::AzureCredentialSource::EnvironmentClientSecret,
+            crate::config::AzureCredentialSource::EnvironmentClientSecret,
         )
         .expect("China OAuth provider");
 

@@ -6,7 +6,7 @@
 //! `cargo test --lib --features sqrzl-tests storage::providers::qualification -- --ignored --test-threads=1`
 
 use super::build_cloud_storage;
-use super::CloudProviderConfig;
+use crate::config::CloudProviderConfig;
 use crate::config::{CloudPreflightOptions, CloudStorageLocation};
 use crate::storage::cloud::{CloudEvent, CloudOutcome, CloudStorage, ObjectMetadata};
 use std::fmt::Write as _;

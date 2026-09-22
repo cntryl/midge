@@ -120,7 +120,7 @@ impl ManifestEdit {
 
     fn validate_persisted_sst_names(&self) -> MidgeResult<()> {
         fn validate(name: &str) -> MidgeResult<()> {
-            crate::sst::PersistedSstName::parse(name).map(|_| ())
+            crate::cloud_layout::PersistedSstName::parse(name).map(|_| ())
         }
 
         match self {
@@ -327,10 +327,11 @@ pub(crate) fn preserve_corrupt_journal_with_fs_unlocked(
 }
 
 /// Append an edit to the manifest journal using a provided Fs (preferred).
+/// Returns the journal edit id assigned to the record.
 pub fn append_edit_with_fs(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     edit: &ManifestEdit,
-) -> MidgeResult<()> {
+) -> MidgeResult<u64> {
     edit.validate_persisted_sst_names()?;
     with_manifest_writer_lock(fs, || append_validated_edit_with_fs(fs, edit))
 }
@@ -338,7 +339,7 @@ pub fn append_edit_with_fs(
 fn append_validated_edit_with_fs(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     edit: &ManifestEdit,
-) -> MidgeResult<()> {
+) -> MidgeResult<u64> {
     let edit_id = next_edit_id_with_fs(fs)?;
     let record = encode_journal_record(
         edit.record_type(),
@@ -359,7 +360,7 @@ fn append_validated_edit_with_fs(
         fsync_ns,
         "manifest journal append: edit and marker durably synced (ns)"
     );
-    Ok(())
+    Ok(edit_id)
 }
 
 fn append_record_and_marker_with_fs(
@@ -469,7 +470,7 @@ fn repair_partial_journal_tail(
 }
 
 /// Convenience wrapper: append via a `RealFs` created from `db_path` (backwards compatible)
-pub fn append_edit(db_path: &Path, edit: &ManifestEdit) -> MidgeResult<()> {
+pub fn append_edit(db_path: &Path, edit: &ManifestEdit) -> MidgeResult<u64> {
     let fs: std::sync::Arc<dyn crate::io::traits::Fs> =
         std::sync::Arc::new(crate::io::real::RealFs::new(db_path).map_err(|e| {
             crate::common::MidgeError::Internal(format!("failed to create RealFs: {e:?}"))
@@ -944,10 +945,11 @@ fn next_replay_edit_id(state: &JournalReplayState) -> u64 {
 }
 
 /// Append a batch of edits as a single TLV record using the provided Fs (preferred).
+/// Returns the journal edit id assigned to the record.
 pub fn append_edit_batch_with_fs(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     batch: &[ManifestEdit],
-) -> MidgeResult<()> {
+) -> MidgeResult<u64> {
     for edit in batch {
         edit.validate_persisted_sst_names()?;
     }
@@ -957,7 +959,7 @@ pub fn append_edit_batch_with_fs(
 fn append_validated_edit_batch_with_fs(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     batch: &[ManifestEdit],
-) -> MidgeResult<()> {
+) -> MidgeResult<u64> {
     let edit_id = next_edit_id_with_fs(fs)?;
     let record = encode_journal_record(
         BATCH_RECORD_TYPE,
@@ -996,11 +998,11 @@ fn append_validated_edit_batch_with_fs(
         fsync_ns,
         "manifest journal batch append: edit and marker durably synced (ns)"
     );
-    Ok(())
+    Ok(edit_id)
 }
 
 /// Convenience wrapper: append batch via a `RealFs` created from `db_path` (backwards compatible)
-pub fn append_edit_batch(db_path: &Path, batch: &[ManifestEdit]) -> MidgeResult<()> {
+pub fn append_edit_batch(db_path: &Path, batch: &[ManifestEdit]) -> MidgeResult<u64> {
     let fs: std::sync::Arc<dyn crate::io::traits::Fs> =
         std::sync::Arc::new(crate::io::real::RealFs::new(db_path).map_err(|e| {
             crate::common::MidgeError::Internal(format!("failed to create RealFs: {e:?}"))
@@ -1099,6 +1101,10 @@ mod tests {
     }
 
     impl Fs for GatedJournalFs {
+        fn host_addressing(&self) -> Option<crate::io::HostAddressing<'_>> {
+            self.inner.host_addressing()
+        }
+
         fn coordination_key(&self) -> u64 {
             self.inner.coordination_key()
         }
@@ -1182,7 +1188,7 @@ mod tests {
         // Arrange
         let td = tempdir().unwrap();
         let db = td.path();
-        let sst_name = crate::sst::file_name(0, 0, 1);
+        let sst_name = crate::cloud_layout::file_name(0, 0, 1);
 
         let file = FileMeta {
             name: sst_name.clone(),

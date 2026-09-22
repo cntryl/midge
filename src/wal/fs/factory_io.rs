@@ -41,16 +41,6 @@ impl FsWalFactoryIo {
         )?;
         Ok(Box::new(writer))
     }
-
-    /// Create a new WAL reader using the `io::Fs` backend
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the reader cannot be opened.
-    pub fn create_reader(&self, path_str: &str) -> MidgeResult<Box<dyn crate::wal::WalReaderDyn>> {
-        let reader = super::FsWalReaderIo::open(path_str, Arc::clone(&self.fs))?;
-        Ok(Box::new(reader))
-    }
 }
 
 #[cfg(test)]
@@ -91,18 +81,5 @@ mod tests {
         // Assert
         assert_eq!(writer.current_pos(), 0);
         Ok(())
-    }
-
-    #[test]
-    fn should_create_reader() {
-        // Arrange
-        let fs = Arc::new(crate::io::MockFs::new());
-        let factory = FsWalFactoryIo::new(fs);
-
-        // Act
-        let result = factory.create_reader("wal.log");
-
-        // Assert
-        assert!(result.is_err()); // File doesn't exist in mock
     }
 }

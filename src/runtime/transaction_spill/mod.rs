@@ -6,10 +6,11 @@
 use super::TransactionOp;
 use crate::common::{MidgeError, MidgeResult};
 use bytes::Bytes;
+use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 mod format;
 mod range;
@@ -17,18 +18,20 @@ mod scan;
 
 #[cfg(test)]
 use format::u64_to_usize;
-use format::{for_each_run_ordinal, lookup_run_key, remove_run, write_run_with_budget};
+use format::{
+    for_each_run_ordinal, lookup_run_key, remove_run, write_run_with_reader_cache, RunHeader,
+    RunReader,
+};
 #[cfg(test)]
-use format::{read_header, read_op_frame, write_run};
+use format::{
+    peak_run_files, read_header, read_op_frame, reset_peak_run_files, reset_sparse_index_decodes,
+    sparse_index_decodes, write_run, write_run_with_budget, RunFile,
+};
 #[cfg(test)]
 use range::read_range_header;
 pub(crate) use scan::IntentKeyScan;
 #[cfg(test)]
 use scan::RunKeyCursor;
-#[cfg(test)]
-use std::fs::File;
-#[cfg(test)]
-use std::io::{Seek, SeekFrom};
 const RUN_MAGIC: &[u8; 8] = b"MDGTXN01";
 const RUN_VERSION: u32 = 2;
 const RUN_HEADER_LEN: usize = 48;
@@ -39,10 +42,16 @@ const RANGE_VERSION: u32 = 1;
 const RANGE_HEADER_LEN: usize = 32;
 const RANGE_TABLE_ENTRY_LEN: usize = 12;
 const NO_RANGE_CHILD: u64 = u64::MAX;
+/// Each cached reader owns one data handle and one range-index handle.
+const MAX_CACHED_SPILL_READERS: usize = 8;
 // Covers resident Vec capacity plus temporary ordinal, sparse-key, and range
 // interval-tree metadata built while freezing a run. Key/value bytes and the
 // enum allocation itself are charged separately below.
 const INTENT_ACCOUNTING_OVERHEAD: usize = 256;
+// Upper bound on intents buffered outside the pool once the pool is fully held
+// by other transactions. Without it every such write became its own run, which
+// meant two files per operation. The bound never exceeds the pool's own
+// capacity, so a zero-capacity pool still spills one operation at a time.
 
 /// One bounded pool shared by every transaction opened by an engine.
 #[derive(Debug)]
@@ -108,12 +117,77 @@ impl OrdinalOp {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Default)]
+struct SpillReaderCache {
+    readers: Mutex<VecDeque<(PathBuf, RunReader)>>,
+}
+
+impl SpillReaderCache {
+    fn with_reader<T>(
+        &self,
+        run: &SpillRun,
+        action: impl FnOnce(&mut RunReader) -> MidgeResult<T>,
+    ) -> MidgeResult<T> {
+        let mut readers = self.readers.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut reader = if let Some(index) = readers.iter().position(|(path, _)| path == &run.path)
+        {
+            readers
+                .remove(index)
+                .expect("cached spill reader index must remain valid")
+                .1
+        } else {
+            if readers.len() == MAX_CACHED_SPILL_READERS {
+                readers.pop_front();
+            }
+            RunReader::open(run)?
+        };
+        let result = action(&mut reader);
+        readers.push_back((run.path.clone(), reader));
+        result
+    }
+
+    fn remove(&self, path: &Path) {
+        self.readers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|(cached, _)| cached != path);
+    }
+}
+
+#[derive(Debug)]
 struct SpillRun {
     path: PathBuf,
     range_path: PathBuf,
     record_count: usize,
+    pool: Arc<TransactionMemoryPool>,
+    reader_cache: Arc<SpillReaderCache>,
     _disk_charge: Option<Arc<SpillDiskCharge>>,
+}
+
+impl SpillRun {
+    fn with_reader<T>(
+        &self,
+        action: impl FnOnce(&mut RunReader) -> MidgeResult<T>,
+    ) -> MidgeResult<T> {
+        self.reader_cache.with_reader(self, action)
+    }
+
+    fn header(&self) -> MidgeResult<RunHeader> {
+        self.with_reader(|reader| Ok(reader.header()))
+    }
+
+    fn sparse_start(&self, target: Option<&[u8]>) -> MidgeResult<u64> {
+        self.with_reader(|reader| reader.sparse_start(target))
+    }
+
+    fn sparse_chunks(&self) -> MidgeResult<Vec<(u64, u64)>> {
+        self.with_reader(RunReader::sparse_chunks)
+    }
+
+    /// Release the run's handles and pooled index before its files are removed.
+    fn close_reader(&self) {
+        self.reader_cache.remove(&self.path);
+    }
 }
 
 #[derive(Clone)]
@@ -161,6 +235,7 @@ pub(crate) enum IntentLookup {
 #[derive(Debug)]
 pub(crate) struct TransactionWriteSet {
     pool: Arc<TransactionMemoryPool>,
+    reader_cache: Arc<SpillReaderCache>,
     spill_dir: Option<PathBuf>,
     txn_id: u64,
     resident: Vec<OrdinalOp>,
@@ -180,6 +255,7 @@ impl TransactionWriteSet {
     ) -> Self {
         Self {
             pool,
+            reader_cache: Arc::new(SpillReaderCache::default()),
             spill_dir: (!memory_mode).then(|| db_path.join("txn")),
             txn_id,
             resident: Vec::new(),
@@ -239,21 +315,31 @@ impl TransactionWriteSet {
                 "transaction memory pool cannot admit {bytes} additional bytes"
             )));
         };
+        // Freezing this write set's pool-charged intents is what frees pool
+        // space, so try admission again afterwards.
         self.spill_resident(&spill_dir)?;
         if self.pool.try_reserve(bytes) {
             self.admit_resident(ordinal_op, bytes);
-        } else {
-            let mut direct = vec![ordinal_op];
-            let run = write_run_with_budget(
-                &spill_dir,
-                self.txn_id,
-                self.runs.len(),
-                direct.as_mut_slice(),
-                self.disk_budget.as_ref(),
-            )?;
-            self.runs.push(run);
-            self.next_ordinal = self.next_ordinal.saturating_add(1);
+            return Ok(());
         }
+
+        // Other transactions hold the whole pool. The pool is what bounds
+        // resident bytes across every transaction, so this write cannot stay in
+        // memory outside it however small the batch: with many transactions under
+        // pressure the overshoot would grow with their number. Freeze it as its
+        // own run instead.
+        let mut direct = vec![ordinal_op];
+        let run = write_run_with_reader_cache(
+            &spill_dir,
+            self.txn_id,
+            self.runs.len(),
+            direct.as_mut_slice(),
+            self.disk_budget.as_ref(),
+            &self.pool,
+            &self.reader_cache,
+        )?;
+        self.runs.push(run);
+        self.next_ordinal = self.next_ordinal.saturating_add(1);
         Ok(())
     }
 
@@ -267,12 +353,14 @@ impl TransactionWriteSet {
         if self.resident.is_empty() {
             return Ok(());
         }
-        let run = write_run_with_budget(
+        let run = write_run_with_reader_cache(
             spill_dir,
             self.txn_id,
             self.runs.len(),
             self.resident.as_mut_slice(),
             self.disk_budget.as_ref(),
+            &self.pool,
+            &self.reader_cache,
         )?;
         self.runs.push(run);
         self.resident.clear();
@@ -331,6 +419,7 @@ impl TransactionWriteSet {
         self.resident_bytes = 0;
         self.resident.clear();
         for run in self.runs.drain(..) {
+            run.close_reader();
             remove_run(&run.path);
             remove_run(&run.range_path);
         }
@@ -415,6 +504,7 @@ impl Drop for TransactionOpSource {
         self.resident_pool.release(self.resident_bytes);
         self.resident_bytes = 0;
         for run in self.runs.drain(..) {
+            run.close_reader();
             remove_run(&run.path);
             remove_run(&run.range_path);
         }

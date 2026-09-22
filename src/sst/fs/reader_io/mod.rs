@@ -14,7 +14,8 @@ use crate::sst::cache::BlockCache;
 use crate::sst::index::tuner::IndexKind;
 use crate::sst::read_amp_metrics::ReadAmpMetrics;
 use crate::sst::trie::TrieReader;
-use crate::sst::types::{BlockHandle, Footer, KeyState, RangeTombstone, SstEntry, SST_FORMAT_V4};
+use crate::sst::types::{BlockHandle, Footer, SstEntry, SST_FORMAT_V4};
+use crate::types::{EntryType, KeyState, RangeTombstone};
 
 type IndexEntries = Arc<Vec<(Vec<u8>, BlockHandle)>>;
 
@@ -278,13 +279,13 @@ impl SstRawVersionScan {
             ));
         }
         let raw = &buffer[4..];
-        let decompressed_size = crate::sst::compression::decompressed_size_with_trailer(raw)?;
+        let decompressed_size = crate::codec::decompressed_size_with_trailer(raw)?;
         let decompressed_reservation = self
             .budget
             .as_ref()
             .map(|budget| budget.reserve(decompressed_size, "decompressed SST block"))
             .transpose()?;
-        let block = crate::sst::compression::decompress_block_with_trailer(raw)?;
+        let block = crate::codec::decompress_block_with_trailer(raw)?;
         if block.len() > decompressed_size {
             return Err(MidgeError::Corruption(
                 "decoded SST block exceeded its declared size".into(),
@@ -376,7 +377,7 @@ impl SstRawVersionScan {
             return Ok(Some(crate::sst::traits::RawSstVersion {
                 key,
                 seq: entry.sequence,
-                is_tombstone: matches!(entry.entry_type, crate::sst::encoding::EntryType::Delete),
+                is_tombstone: matches!(entry.entry_type, EntryType::Delete),
                 value,
                 expiration: entry.expiration,
             }));

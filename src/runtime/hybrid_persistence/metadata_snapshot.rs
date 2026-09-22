@@ -12,6 +12,7 @@ pub(crate) struct CloudMetadataPruneSnapshot {
     db_path: std::path::PathBuf,
     fs: Arc<dyn crate::io::traits::Fs>,
     recovery_policy: crate::config::RecoveryPolicy,
+    metadata_publication_lock: crate::runtime::MetadataPublicationLock,
     budget: crate::common::resource_budget::ResourceBudget,
     progress: CloudWalPruneProgress,
 }
@@ -23,6 +24,7 @@ impl CloudMetadataPruneSnapshot {
         fs: Arc<dyn crate::io::traits::Fs>,
         recovery_policy: crate::config::RecoveryPolicy,
         budget: crate::common::resource_budget::ResourceBudget,
+        metadata_publication_lock: crate::runtime::MetadataPublicationLock,
     ) -> Self {
         Self {
             cloud,
@@ -30,6 +32,7 @@ impl CloudMetadataPruneSnapshot {
             fs,
             recovery_policy,
             budget,
+            metadata_publication_lock,
             progress: CloudWalPruneProgress::default(),
         }
     }
@@ -61,8 +64,8 @@ impl CloudMetadataPruneSnapshot {
                 )
             })?;
         let _publication_guard = self
-            .cloud
-            .lock_metadata_publication_for(lock_timeout)
+            .metadata_publication_lock
+            .lock_for(lock_timeout)
             .ok_or_else(|| {
                 MidgeError::Timeout("metadata proof timed out acquiring publication lock".into())
             })?;
@@ -154,7 +157,7 @@ impl CloudMetadataPruneSnapshot {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
                 Err(error) => return Err(error.into()),
             };
-            let key = crate::storage::cloud::cloud_metadata_key(file_name);
+            let key = crate::cloud_layout::CloudObjectLayout::metadata_key(file_name);
             let proof = HybridStorage::read_control_from_backend(
                 &backend,
                 &key,
@@ -227,7 +230,7 @@ pub(crate) fn conditional_metadata_mirror_put(
     deadline: &crate::common::OperationDeadline,
 ) -> MidgeResult<()> {
     let io = crate::storage::cloud::BlockingCloud::new(cloud, deadline);
-    let key = crate::storage::cloud::cloud_metadata_key(file_name);
+    let key = crate::cloud_layout::CloudObjectLayout::metadata_key(file_name);
     let headers = match io.head_optional(&key)? {
         Some(metadata) => {
             let headers = crate::storage::cloud::object_match_precondition_headers(
@@ -286,6 +289,7 @@ mod tests {
             Arc::new(crate::io::real::RealFs::new(directory.path()).unwrap()),
             crate::config::RecoveryPolicy::default(),
             crate::common::resource_budget::ResourceBudget::new(charge + 128 * 1024),
+            crate::runtime::MetadataPublicationLock::default(),
         );
         mirror(&snapshot);
         snapshot
@@ -331,7 +335,7 @@ mod tests {
         .unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_put(
-            &crate::storage::cloud::cloud_metadata_key(crate::metadata::files::MANIFEST),
+            &crate::cloud_layout::CloudObjectLayout::metadata_key(crate::metadata::files::MANIFEST),
             body,
             Vec::new(),
             tx,
@@ -403,7 +407,7 @@ mod tests {
             if let Ok(bytes) = std::fs::read(snapshot.db_path.join(name)) {
                 let (tx, rx) = std::sync::mpsc::channel();
                 snapshot.cloud.submit_put(
-                    &crate::storage::cloud::cloud_metadata_key(name),
+                    &crate::cloud_layout::CloudObjectLayout::metadata_key(name),
                     bytes,
                     Vec::new(),
                     tx,
@@ -414,6 +418,68 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn should_serialize_prune_proofs_across_separately_constructed_dispatchers() {
+        // Arrange
+        let directory = tempfile::tempdir().unwrap();
+        let manifest = Manifest::default();
+        crate::metadata::ManifestPersistence::save(directory.path(), &manifest).unwrap();
+        let lock = crate::runtime::MetadataPublicationLock::default();
+        let fs: Arc<dyn crate::io::traits::Fs> =
+            Arc::new(crate::io::real::RealFs::new(directory.path()).unwrap());
+        let first = CloudMetadataPruneSnapshot::new(
+            Arc::new(CloudStorage::new(
+                Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+                "first-control-dispatcher".into(),
+            )),
+            directory.path().to_path_buf(),
+            Arc::clone(&fs),
+            crate::config::RecoveryPolicy::default(),
+            crate::common::resource_budget::ResourceBudget::new(1024 * 1024),
+            lock.clone(),
+        );
+        let second = CloudMetadataPruneSnapshot::new(
+            Arc::new(CloudStorage::new(
+                Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+                "second-control-dispatcher".into(),
+            )),
+            directory.path().to_path_buf(),
+            fs,
+            crate::config::RecoveryPolicy::default(),
+            crate::common::resource_budget::ResourceBudget::new(1024 * 1024),
+            lock,
+        );
+        mirror(&first);
+        mirror(&second);
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let first_worker = std::thread::spawn(move || {
+            first.verify_exact_then(&crate::common::OperationDeadline::unbounded(), |_, _| {
+                entered_tx.send(()).expect("signal held publication lock");
+                release_rx.recv().expect("release publication lock");
+                Ok(())
+            })
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("first dispatcher holds publication lock");
+        let deadline =
+            crate::common::OperationDeadline::from_budget(std::time::Duration::from_millis(50));
+
+        // Act
+        let result: MidgeResult<()> = second.verify_exact_then(&deadline, |_, _| {
+            panic!("second dispatcher must not publish while the first owns the runtime lock")
+        });
+        release_tx.send(()).expect("release first dispatcher");
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::Timeout(_))));
+        first_worker
+            .join()
+            .expect("join first dispatcher")
+            .expect("first proof completes after release");
     }
 
     #[test]

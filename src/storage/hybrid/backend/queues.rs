@@ -8,15 +8,15 @@ use super::{
 };
 
 #[derive(Debug, Clone, Copy)]
-pub(super) struct HybridQueueLimits {
-    pub(super) upload_entries: usize,
-    pub(super) upload_bytes: u64,
-    pub(super) worker_entries: usize,
-    pub(super) event_entries: usize,
-    pub(super) event_bytes: usize,
-    pub(super) prune_workers: usize,
-    pub(super) prune_requests: usize,
-    pub(super) callback_timeout: Duration,
+pub(crate) struct HybridQueueLimits {
+    pub(crate) upload_entries: usize,
+    pub(crate) upload_bytes: u64,
+    pub(crate) worker_entries: usize,
+    pub(crate) event_entries: usize,
+    pub(crate) event_bytes: usize,
+    pub(crate) prune_workers: usize,
+    pub(crate) prune_requests: usize,
+    pub(crate) callback_timeout: Duration,
 }
 
 impl Default for HybridQueueLimits {

@@ -6,7 +6,7 @@
 use super::EventLoop;
 
 #[cfg(test)]
-use super::super::durability::DurabilityWaiter;
+use super::super::durability::{DurabilityWaiter, TestDurabilityWaiter};
 #[cfg(test)]
 use super::super::RuntimeResponse;
 
@@ -156,12 +156,13 @@ impl EventLoop {
         if let Some(pending_min) = self.state.pending_transaction_min_sequence() {
             if sequence >= pending_min {
                 // Defer this read until transaction completes
-                self.durability.queue_waiter(DurabilityWaiter::Read {
-                    request_id,
-                    cf_id,
-                    key,
-                    sequence,
-                });
+                self.durability
+                    .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::Read {
+                        request_id,
+                        cf_id,
+                        key,
+                        sequence,
+                    }));
                 return;
             }
         }
@@ -173,12 +174,13 @@ impl EventLoop {
             let value = self.handle_read(cf_id, &key, sequence);
             self.respond(request_id, RuntimeResponse::ReadValue { request_id, value });
         } else {
-            self.durability.queue_waiter(DurabilityWaiter::Read {
-                request_id,
-                cf_id,
-                key,
-                sequence,
-            });
+            self.durability
+                .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::Read {
+                    request_id,
+                    cf_id,
+                    key,
+                    sequence,
+                }));
         }
     }
 
@@ -202,13 +204,15 @@ impl EventLoop {
         if let Some(pending_min) = self.state.pending_transaction_min_sequence() {
             if sequence >= pending_min {
                 // Defer this scan until transaction completes
-                self.durability.queue_waiter(DurabilityWaiter::RangeScan {
-                    request_id,
-                    cf_id,
-                    start,
-                    end,
-                    sequence,
-                });
+                self.durability.queue_waiter(DurabilityWaiter::Test(
+                    TestDurabilityWaiter::RangeScan {
+                        request_id,
+                        cf_id,
+                        start,
+                        end,
+                        sequence,
+                    },
+                ));
                 return;
             }
         }
@@ -226,13 +230,14 @@ impl EventLoop {
                 },
             );
         } else {
-            self.durability.queue_waiter(DurabilityWaiter::RangeScan {
-                request_id,
-                cf_id,
-                start,
-                end,
-                sequence,
-            });
+            self.durability
+                .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::RangeScan {
+                    request_id,
+                    cf_id,
+                    start,
+                    end,
+                    sequence,
+                }));
         }
     }
 
@@ -303,6 +308,7 @@ mod tests {
     use super::super::EventLoop;
     use crate::runtime::{state::RuntimeState, ResponseRouter};
     use crate::sst::traits::SstFactory;
+    use crate::types::EntryType;
     use std::sync::Arc;
 
     struct FakeReader;
@@ -335,16 +341,16 @@ mod tests {
     }
 
     impl crate::sst::traits::SstStateReader for FakeReader {
-        fn get_state(&self, key: &[u8]) -> crate::common::MidgeResult<crate::sst::types::KeyState> {
+        fn get_state(&self, key: &[u8]) -> crate::common::MidgeResult<crate::types::KeyState> {
             Ok(if key == b"a" {
-                crate::sst::types::KeyState::Value(
+                crate::types::KeyState::Value(
                     bytes::Bytes::copy_from_slice(b"va"),
                     10,
                     None,
-                    0,
+                    crate::types::EntryType::Put,
                 )
             } else {
-                crate::sst::types::KeyState::Absent
+                crate::types::KeyState::Absent
             })
         }
 
@@ -352,17 +358,17 @@ mod tests {
             &self,
             start: Option<&[u8]>,
             end: Option<&[u8]>,
-        ) -> crate::common::MidgeResult<Vec<(bytes::Bytes, crate::sst::types::KeyState)>> {
+        ) -> crate::common::MidgeResult<Vec<(bytes::Bytes, crate::types::KeyState)>> {
             let s = start.unwrap_or(&[]);
             let e = end.unwrap_or(&[255u8]);
             if s <= &b"a"[..] && &b"a"[..] < e {
                 Ok(vec![(
                     bytes::Bytes::copy_from_slice(b"a"),
-                    crate::sst::types::KeyState::Value(
+                    crate::types::KeyState::Value(
                         bytes::Bytes::copy_from_slice(b"va"),
                         10,
                         None,
-                        0,
+                        crate::types::EntryType::Put,
                     ),
                 )])
             } else {
@@ -374,7 +380,7 @@ mod tests {
             &self,
             start: Option<&[u8]>,
             end: Option<&[u8]>,
-        ) -> crate::common::MidgeResult<Vec<(bytes::Bytes, crate::sst::types::KeyState)>> {
+        ) -> crate::common::MidgeResult<Vec<(bytes::Bytes, crate::types::KeyState)>> {
             self.scan_range_state(start, end)
         }
     }
@@ -408,7 +414,7 @@ mod tests {
             false,
             router,
             crate::runtime::RuntimeConfig::default(),
-            None,
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
         )?;
 
         let sst_name = "00000001.sst".to_string();
@@ -416,7 +422,7 @@ mod tests {
         let fs = std::sync::Arc::new(crate::io::RealFs::new(&el.state.sst_dir)?);
         let factory = std::sync::Arc::new(crate::sst::FsSstFactoryIo::new(fs, 64 * 1024));
         let mut writer = factory.create()?;
-        writer.add_with_meta(b"a", Some(b"va".as_ref()), 10, 0, None)?;
+        writer.add_with_meta(b"a", Some(b"va".as_ref()), 10, EntryType::Put, None)?;
         writer.add_range_tombstone(b"b", b"z", 9)?;
         crate::sst::fs::finish_writer_to_path(writer, &sst_path)?;
 
@@ -561,7 +567,7 @@ mod tests {
         readable.key_bounds_complete = false;
         let readable_name = readable.name.clone();
         let mut unreadable = readable.clone();
-        unreadable.name = crate::sst::file_name(0, 0, 999);
+        unreadable.name = crate::cloud_layout::file_name(0, 0, 999);
         event_loop.state.manifest.files.insert(0, unreadable);
 
         // Act

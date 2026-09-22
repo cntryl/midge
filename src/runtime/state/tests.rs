@@ -1,4 +1,5 @@
 use super::*;
+use crate::types::EntryType;
 use std::path::PathBuf;
 
 struct RecoveryRangeBudgetBackend {
@@ -130,7 +131,7 @@ fn write_valid_sst_for_recovery_test(
     let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
     let mut writer = factory.create().expect("create recovery test SST");
     writer
-        .add_with_meta(key, Some(b"value"), sequence, 0, None)
+        .add_with_meta(key, Some(b"value"), sequence, EntryType::Put, None)
         .expect("write recovery test entry");
     let bytes = writer.finish_bytes().expect("finish recovery test SST");
     std::fs::create_dir_all(&state.sst_dir).expect("create recovery test SST directory");
@@ -172,9 +173,9 @@ fn should_replay_published_compaction_from_remote_ssts_without_local_staging() {
     let remote_dir = tempfile::tempdir().expect("remote recovery directory");
     let mut state = RuntimeState::new(local_dir.path().to_path_buf(), false);
     let remote_state = RuntimeState::new(remote_dir.path().to_path_buf(), false);
-    let input_name = crate::sst::file_name(0, 0, 1);
+    let input_name = crate::cloud_layout::file_name(0, 0, 1);
     let input = write_valid_sst_for_recovery_test(&remote_state, &input_name, 0, b"a", 1);
-    let output_name = crate::sst::file_name(0, 1, 2);
+    let output_name = crate::cloud_layout::file_name(0, 1, 2);
     let output = write_valid_sst_for_recovery_test(&remote_state, &output_name, 1, b"a", 1);
     state
         .manifest
@@ -226,7 +227,7 @@ fn should_reject_corrupt_remote_publication_with_bounded_checksum_ranges() {
         backend.clone(),
         "midge".into(),
     ));
-    let name = crate::sst::file_name(0, 0, 7);
+    let name = crate::cloud_layout::file_name(0, 0, 7);
     let corrupt_bytes = vec![0x5A; 3 * 1024 * 1024 + 19];
     let file_meta = crate::runtime::FileMeta {
         name: name.clone(),
@@ -242,7 +243,7 @@ fn should_reject_corrupt_remote_publication_with_bounded_checksum_ranges() {
     };
     let (tx, rx) = std::sync::mpsc::channel();
     cloud.submit_put(
-        &crate::sst::object_key(&name),
+        &crate::cloud_layout::object_key(&name),
         corrupt_bytes,
         Vec::new(),
         tx,
@@ -827,7 +828,6 @@ fn should_initialize_compaction_state() {
 
     // Assert
     assert!(compaction.compacting_ssts.is_empty());
-    assert_eq!(compaction.pending_tasks, 0);
 }
 
 // =========== CloudState Tests ===========
@@ -1117,7 +1117,7 @@ fn should_replay_intent_log_idempotently_given_duplicate_publish_intents_when_re
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create duplicate-intent directory");
     let state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
-    let sst_name = crate::sst::file_name(0, 0, 17);
+    let sst_name = crate::cloud_layout::file_name(0, 0, 17);
     let file_meta = write_valid_sst_for_recovery_test(&state, &sst_name, 0, b"value", 17);
     let duplicate = crate::runtime::IntentLogEntry::SstAdded {
         file_meta: file_meta.clone(),
@@ -1234,8 +1234,8 @@ fn should_roll_back_output_durable_compaction_when_manifest_is_still_prepublicat
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create recovery directory");
     let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
-    let input_name = crate::sst::file_name(0, 0, 1);
-    let output_name = crate::sst::file_name(0, 1, 2);
+    let input_name = crate::cloud_layout::file_name(0, 0, 1);
+    let output_name = crate::cloud_layout::file_name(0, 1, 2);
     let input = write_valid_sst_for_recovery_test(&state, &input_name, 0, b"input", 1);
     let output = write_valid_sst_for_recovery_test(&state, &output_name, 1, b"input", 2);
     state
@@ -1353,12 +1353,12 @@ fn should_replay_every_compaction_publication_crash_point_to_complete_authority(
         let temp_dir = tempfile::tempdir().expect("create publication crash directory");
         let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
         let input_names = [
-            crate::sst::file_name(0, 0, 1),
-            crate::sst::file_name(0, 0, 2),
+            crate::cloud_layout::file_name(0, 0, 1),
+            crate::cloud_layout::file_name(0, 0, 2),
         ];
         let output_names = [
-            crate::sst::compaction_file_name(0, 1, 3, 0),
-            crate::sst::compaction_file_name(0, 1, 3, 1),
+            crate::cloud_layout::compaction_file_name(0, 1, 3, 0),
+            crate::cloud_layout::compaction_file_name(0, 1, 3, 1),
         ];
         let inputs = [
             write_valid_sst_for_recovery_test(&state, &input_names[0], 0, b"a", 1),
@@ -1453,7 +1453,7 @@ fn should_retain_inputs_for_output_durable_remove_only_compaction_after_crash() 
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create recovery directory");
     let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
-    let input_name = crate::sst::file_name(0, 0, 1);
+    let input_name = crate::cloud_layout::file_name(0, 0, 1);
     let input = write_valid_sst_for_recovery_test(&state, &input_name, 0, b"deleted", 1);
     state
         .manifest
@@ -1490,7 +1490,7 @@ fn should_publish_remove_only_compaction_after_manifest_phase_crash() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create recovery directory");
     let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
-    let input_name = crate::sst::file_name(0, 0, 1);
+    let input_name = crate::cloud_layout::file_name(0, 0, 1);
     let input = write_valid_sst_for_recovery_test(&state, &input_name, 0, b"deleted", 1);
     state
         .manifest
@@ -1527,9 +1527,9 @@ fn should_supersede_stale_output_durable_intent_when_retrying_same_compaction_in
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create recovery directory");
     let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
-    let input_name = crate::sst::file_name(0, 0, 1);
+    let input_name = crate::cloud_layout::file_name(0, 0, 1);
     let first_output = crate::runtime::FileMeta {
-        name: crate::sst::file_name(0, 1, 2),
+        name: crate::cloud_layout::file_name(0, 1, 2),
         level: 1,
         size_bytes: 1,
         content_crc32c: None,
@@ -1541,7 +1541,7 @@ fn should_supersede_stale_output_durable_intent_when_retrying_same_compaction_in
         key_bounds_complete: true,
     };
     let retry_output = crate::runtime::FileMeta {
-        name: crate::sst::file_name(0, 1, 3),
+        name: crate::cloud_layout::file_name(0, 1, 3),
         level: 1,
         size_bytes: 1,
         content_crc32c: None,
@@ -1579,8 +1579,8 @@ fn should_keep_distinct_remove_only_compaction_intents_for_distinct_inputs() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create intent directory");
     let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
-    let first_input = crate::sst::file_name(0, 6, 1);
-    let second_input = crate::sst::file_name(0, 6, 2);
+    let first_input = crate::cloud_layout::file_name(0, 6, 1);
+    let second_input = crate::cloud_layout::file_name(0, 6, 2);
     state
         .record_compaction_publication_intent(0, vec![first_input.clone()], Vec::new())
         .expect("persist first remove-only intent");
@@ -1611,9 +1611,9 @@ fn should_recover_published_retry_when_legacy_stale_intent_precedes_it() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create recovery directory");
     let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
-    let input_name = crate::sst::file_name(0, 0, 1);
-    let stale_output_name = crate::sst::file_name(0, 1, 2);
-    let retry_output_name = crate::sst::file_name(0, 1, 3);
+    let input_name = crate::cloud_layout::file_name(0, 0, 1);
+    let stale_output_name = crate::cloud_layout::file_name(0, 1, 2);
+    let retry_output_name = crate::cloud_layout::file_name(0, 1, 3);
     let stale_output = write_valid_sst_for_recovery_test(&state, &stale_output_name, 1, b"key", 2);
     let retry_output = write_valid_sst_for_recovery_test(&state, &retry_output_name, 1, b"key", 3);
     state
@@ -1653,9 +1653,9 @@ fn should_recover_manifest_published_retry_when_it_precedes_stale_output_intent(
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create recovery directory");
     let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
-    let input_name = crate::sst::file_name(0, 0, 1);
-    let stale_output_name = crate::sst::file_name(0, 1, 2);
-    let retry_output_name = crate::sst::file_name(0, 1, 3);
+    let input_name = crate::cloud_layout::file_name(0, 0, 1);
+    let stale_output_name = crate::cloud_layout::file_name(0, 1, 2);
+    let retry_output_name = crate::cloud_layout::file_name(0, 1, 3);
     let input = write_valid_sst_for_recovery_test(&state, &input_name, 0, b"key", 1);
     let stale_output = write_valid_sst_for_recovery_test(&state, &stale_output_name, 1, b"key", 2);
     let retry_output = write_valid_sst_for_recovery_test(&state, &retry_output_name, 1, b"key", 3);
@@ -1697,9 +1697,9 @@ fn should_fail_closed_when_multiple_retry_outputs_are_manifest_visible() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create recovery directory");
     let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
-    let input_name = crate::sst::file_name(0, 0, 1);
-    let first_output_name = crate::sst::file_name(0, 1, 2);
-    let second_output_name = crate::sst::file_name(0, 1, 3);
+    let input_name = crate::cloud_layout::file_name(0, 0, 1);
+    let first_output_name = crate::cloud_layout::file_name(0, 1, 2);
+    let second_output_name = crate::cloud_layout::file_name(0, 1, 3);
     let first_output = write_valid_sst_for_recovery_test(&state, &first_output_name, 1, b"key", 2);
     let second_output =
         write_valid_sst_for_recovery_test(&state, &second_output_name, 1, b"key", 3);
@@ -1744,8 +1744,8 @@ fn should_reject_compaction_intent_for_dropped_column_family_after_crash() {
     state
         .column_families
         .insert(cf_id, ColumnFamilyState::new(cf_id, "dropped".to_string()));
-    let input_name = crate::sst::file_name(cf_id, 0, 1);
-    let output_name = crate::sst::file_name(cf_id, 1, 2);
+    let input_name = crate::cloud_layout::file_name(cf_id, 0, 1);
+    let output_name = crate::cloud_layout::file_name(cf_id, 1, 2);
     let mut input = write_valid_sst_for_recovery_test(&state, &input_name, 0, b"key", 1);
     input.cf_id = cf_id;
     let mut output = write_valid_sst_for_recovery_test(&state, &output_name, 1, b"key", 2);
@@ -1793,9 +1793,9 @@ fn should_fail_closed_when_output_durable_compaction_manifest_is_partial() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create recovery directory");
     let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
-    let first_input_name = crate::sst::file_name(0, 0, 1);
-    let missing_input_name = crate::sst::file_name(0, 0, 2);
-    let output_name = crate::sst::file_name(0, 1, 3);
+    let first_input_name = crate::cloud_layout::file_name(0, 0, 1);
+    let missing_input_name = crate::cloud_layout::file_name(0, 0, 2);
+    let output_name = crate::cloud_layout::file_name(0, 1, 3);
     let first_input = write_valid_sst_for_recovery_test(&state, &first_input_name, 0, b"a", 1);
     let output = write_valid_sst_for_recovery_test(&state, &output_name, 1, b"a", 3);
     state
@@ -1831,7 +1831,7 @@ fn should_delete_untracked_compaction_output_during_startup_residue_cleanup() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create residue directory");
     let mut state = RuntimeState::new(temp_dir.path().to_path_buf(), false);
-    let orphan_name = crate::sst::file_name(0, 1, 9);
+    let orphan_name = crate::cloud_layout::file_name(0, 1, 9);
     let _orphan = write_valid_sst_for_recovery_test(&state, &orphan_name, 1, b"orphan", 9);
     assert!(state.sst_dir.join(&orphan_name).exists());
 
@@ -1848,7 +1848,7 @@ fn should_retain_salvage_kept_sst_when_later_strict_cleanup_runs() {
     // list. The next normal open sees a readable manifest without it.
     let temp_dir = tempfile::tempdir().expect("create residue directory");
     let mut salvage = RuntimeState::new(temp_dir.path().to_path_buf(), false);
-    let kept_name = crate::sst::file_name(0, 1, 9);
+    let kept_name = crate::cloud_layout::file_name(0, 1, 9);
     let _kept = write_valid_sst_for_recovery_test(&salvage, &kept_name, 1, b"kept", 9);
     salvage.mark_opened_in_salvage_mode();
     salvage.cleanup_storage_residue();

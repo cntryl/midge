@@ -2,7 +2,7 @@
 //!
 //! Measures fill + drain cycle cost for small and large memtables.
 
-use cntryl_midge::sst::SkipListMemtable;
+use cntryl_midge::__internal::memtable::SkipListMemtable;
 use cntryl_midge::Bytes;
 use cntryl_stress::{black_box, stress, stress_main, StressContext};
 
@@ -43,7 +43,7 @@ fn run_memtable_rotate(ctx: &mut StressContext, scenario: &'static str, count: u
                 .put_bytes_with_seq(key.clone(), value.clone(), seq as u64 + 1, None)
                 .unwrap();
         }
-        black_box(memtable.iter_all(u64::MAX));
+        black_box(memtable.iter_all());
     });
 }
 

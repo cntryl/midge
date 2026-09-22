@@ -9,6 +9,8 @@
 use super::super::state::RuntimeState;
 use super::super::FileMeta;
 use crate::common::MidgeResult;
+#[cfg(test)]
+use crate::types::EntryType;
 
 /// Actor handling manifest operations
 pub struct ManifestActor {
@@ -44,6 +46,7 @@ impl ManifestActor {
         }
 
         // Append to manifest journal (durable edit log) - skip in memory mode
+        let mut journaled_id = None;
         if !state.is_memory_mode() {
             let edit = crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
                 name: file_meta.name.clone(),
@@ -64,7 +67,7 @@ impl ManifestActor {
                     "failpoint: no space on manifest add_sst append".to_string()
                 ))
             );
-            crate::metadata::append_edit(&state.db_path, &edit)?;
+            journaled_id = Some(crate::metadata::append_edit(&state.db_path, &edit)?);
         }
 
         // Now that intent is durable, apply mutation to in-memory manifest
@@ -84,6 +87,9 @@ impl ManifestActor {
         };
 
         state.manifest.add_file(manifest_meta);
+        if let Some(edit_id) = journaled_id {
+            state.manifest.note_applied_journal_edit(edit_id);
+        }
         self.pending_edits += 1;
 
         tracing::info!(
@@ -125,6 +131,7 @@ impl ManifestActor {
                 },
             ));
         }
+        let mut journaled_id = None;
         if !edits.is_empty() {
             crate::failpoints::fail_point!(
                 "midge::manifest::inject_no_space_on_compaction_batch_edit",
@@ -132,7 +139,7 @@ impl ManifestActor {
                     "failpoint: no space on manifest compaction batch append".to_string()
                 ))
             );
-            crate::metadata::append_edit_batch(&state.db_path, &edits)?;
+            journaled_id = Some(crate::metadata::append_edit_batch(&state.db_path, &edits)?);
         }
 
         // Now that intent is durable, apply mutations to in-memory manifest
@@ -155,6 +162,9 @@ impl ManifestActor {
                 ..Default::default()
             };
             state.manifest.add_file(manifest_meta);
+        }
+        if let Some(edit_id) = journaled_id {
+            state.manifest.note_applied_journal_edit(edit_id);
         }
 
         self.pending_edits += 1;
@@ -314,11 +324,135 @@ mod tests {
         assert_eq!(state.manifest.files.len(), 3);
     }
 
+    fn sst_meta(sequence: u64) -> crate::runtime::FileMeta {
+        crate::runtime::FileMeta {
+            name: crate::cloud_layout::file_name(0, 0, sequence),
+            ..memory_file_meta("")
+        }
+    }
+
+    fn read_snapshot(state: &crate::runtime::state::RuntimeState) -> crate::metadata::Manifest {
+        let bytes = std::fs::read(state.db_path.join("manifest.snapshot.json"))
+            .expect("snapshot should exist after persist");
+        serde_json::from_slice(&bytes).expect("snapshot should parse")
+    }
+
+    #[derive(Clone, Default)]
+    struct LogSink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
+        type Writer = Self;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    impl std::io::Write for LogSink {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn should_not_treat_runtime_manifest_as_stale_when_persisting_twice_in_one_session() {
+        // Arrange
+        let tmp = tempfile::tempdir().expect("create tmpdir");
+        let mut state = crate::runtime::state::RuntimeState::new(tmp.path().to_path_buf(), false);
+        let mut actor = ManifestActor::new();
+        let sink = LogSink::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(sink.clone())
+            .finish();
+
+        // Act
+        let mut persisted_checkpoints = Vec::new();
+        tracing::subscriber::with_default(subscriber, || {
+            for sequence in [1, 2] {
+                actor
+                    .compaction_complete(&mut state, &[], &[sst_meta(sequence)])
+                    .expect("compaction edit");
+                ManifestActor::persist(&state).expect("persist");
+                persisted_checkpoints.push(read_snapshot(&state).edit_checkpoint_id);
+            }
+        });
+
+        // Assert
+        assert_eq!(
+            persisted_checkpoints,
+            vec![1, 2],
+            "each snapshot must record the edit the runtime just journaled"
+        );
+        assert_eq!(
+            state.manifest.edit_checkpoint_id, 2,
+            "the runtime manifest must track its own journal appends"
+        );
+        let logs = String::from_utf8(
+            sink.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+        )
+        .unwrap();
+        assert!(
+            !logs.contains("stale caller"),
+            "routine persists must not take the stale-caller branch: {logs}"
+        );
+    }
+
+    #[test]
+    fn should_keep_foreign_journal_edit_when_runtime_persists_after_racing_append() {
+        // Arrange: a flush publish journals an edit from another thread that
+        // the runtime manifest has not applied yet, then the runtime journals
+        // and applies its own edit (a backfill) and persists.
+        let tmp = tempfile::tempdir().expect("create tmpdir");
+        let mut state = crate::runtime::state::RuntimeState::new(tmp.path().to_path_buf(), false);
+        let mut actor = ManifestActor::new();
+        actor
+            .compaction_complete(&mut state, &[], &[sst_meta(1)])
+            .expect("first local edit");
+        let flushed = sst_meta(2);
+        crate::metadata::append_edit(
+            &state.db_path,
+            &crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
+                name: flushed.name.clone(),
+                ..Default::default()
+            }),
+        )
+        .expect("racing flush append");
+
+        // Act
+        actor
+            .compaction_complete(&mut state, &[], &[sst_meta(3)])
+            .expect("backfill-style local edit");
+        ManifestActor::persist(&state).expect("persist");
+
+        // Assert: the snapshot may not skip the edit this manifest never saw
+        let snapshot = read_snapshot(&state);
+        let names: Vec<_> = snapshot.files.iter().map(|f| f.name.clone()).collect();
+        assert!(
+            names.contains(&flushed.name),
+            "racing flush edit was lost by the snapshot: {names:?}"
+        );
+        assert_eq!(names.len(), 3, "unexpected snapshot files: {names:?}");
+        let reloaded = crate::metadata::ManifestPersistence::load(&state.db_path).expect("reload");
+        assert_eq!(reloaded.files.len(), 3);
+    }
+
     #[test]
     fn should_fail_to_add_sst_given_corrupted_file_when_validating() {
         // Arrange: create a temp dir and a corrupt SST file (partial content)
         let tmp = tempfile::tempdir().expect("create tmpdir");
-        let sst_name = crate::sst::file_name(0, 0, 1);
+        let sst_name = crate::cloud_layout::file_name(0, 0, 1);
         let sst_path = tmp.path().join(&sst_name);
 
         // Write corrupted content (not a valid SST)
@@ -356,7 +490,7 @@ mod tests {
     fn should_fail_to_add_sst_given_missing_final_file_when_only_tmp_exists() {
         // Arrange: create a temp dir and a leftover .tmp file (simulate crash before rename)
         let tmp = tempfile::tempdir().expect("create tmpdir");
-        let sst_name = crate::sst::file_name(0, 0, 2);
+        let sst_name = crate::cloud_layout::file_name(0, 0, 2);
         let tmp_name = format!("{sst_name}.tmp");
         let tmp_path = tmp.path().join(&tmp_name);
 
@@ -393,15 +527,17 @@ mod tests {
     fn should_add_sst_successfully_given_valid_file_when_manifest_updated() -> MidgeResult<()> {
         // Arrange: create a valid on-disk SST via the Fs SstFactory
         let tmp = tempfile::tempdir().expect("create tmpdir");
-        let sst_name = crate::sst::file_name(0, 0, 3);
+        let sst_name = crate::cloud_layout::file_name(0, 0, 3);
         let mut state = crate::runtime::state::RuntimeState::new(tmp.path().to_path_buf(), false);
         assert!(state.sst_dir.exists(), "sst dir must exist");
         let sst_path = state.sst_dir.join(&sst_name);
 
-        let factory =
-            crate::sst::FsSstFactoryIo::new(std::sync::Arc::new(crate::io::MockFs::new()), 4096);
+        let factory = crate::sst::FsSstFactoryIo::new(
+            std::sync::Arc::new(crate::io::RealFs::new(&state.sst_dir)?),
+            4096,
+        );
         let mut writer = factory.create()?;
-        writer.add_with_meta(b"a", Some(b"value"), 10, 0, None)?;
+        writer.add_with_meta(b"a", Some(b"value"), 10, EntryType::Put, None)?;
         crate::sst::fs::finish_writer_to_path(writer, &sst_path)?;
         assert!(
             sst_path.exists(),

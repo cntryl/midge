@@ -20,6 +20,24 @@ type LocalWalPaths = (
 #[cfg(test)]
 const CLOUD_WAL_RECOVERY_MAX_IN_FLIGHT: usize = 8;
 
+/// Why an authoritative cloud SST failed validation during recovery.
+enum SstLoss {
+    /// The object is missing or does not match the manifest: it is gone for good.
+    Definitive(MidgeError),
+    /// The check itself failed (timeout, I/O, permissions), so nothing is known
+    /// about the object.
+    Indeterminate(MidgeError),
+}
+
+/// What salvage recovery does with one manifest SST after validating it.
+enum SstDisposition {
+    Retain,
+    /// Dropped because the object is definitively lost; the drop is made durable.
+    DropDefinitive,
+    /// Retained because the validation check did not establish object loss.
+    RetainIndeterminate,
+}
+
 impl CloudStartupRecovery {
     pub(crate) fn cleanup_non_authoritative_compaction_outputs(
         state: &mut RuntimeState,
@@ -28,7 +46,7 @@ impl CloudStartupRecovery {
     ) -> MidgeResult<std::collections::BTreeSet<String>> {
         let mut cleaned = std::collections::BTreeSet::new();
         for file_meta in candidates {
-            let key = crate::sst::object_key(&file_meta.name);
+            let key = crate::cloud_layout::object_key(&file_meta.name);
             let deadline =
                 crate::common::OperationDeadline::from_budget(storage.storage_io_timeout());
             let metadata = storage
@@ -90,35 +108,46 @@ impl CloudStartupRecovery {
     /// Validate the authoritative inventory without materializing the local cache.
     /// SST metadata and data blocks are checked when a reader requests them;
     /// ordinary startup must not scan or copy the object-store dataset.
-    pub(super) fn ensure_local_sst_cache_from_cloud(
+    pub(in crate::engine) fn ensure_local_sst_cache_from_cloud(
         state: &mut RuntimeState,
         cloud_root: &Path,
     ) -> MidgeResult<()> {
         let remote_sst_dir = cloud_root.join("sst");
         let mut retained_files = Vec::with_capacity(state.manifest.files.len());
         let mut manifest_changed = false;
+        let mut definitively_lost: Vec<String> = Vec::new();
 
         for file in state.manifest.files.clone() {
             let remote_path = remote_sst_dir.join(&file.name);
             let validation = std::fs::metadata(&remote_path)
                 .map_err(|error| {
-                    MidgeError::RecoveryFailed(format!(
+                    let loss = MidgeError::RecoveryFailed(format!(
                         "authoritative cloud SST '{}' is unavailable: {error}",
                         file.name
-                    ))
+                    ));
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        SstLoss::Definitive(loss)
+                    } else {
+                        SstLoss::Indeterminate(loss)
+                    }
                 })
-                .and_then(|metadata| Self::validate_manifest_sst_size(&file, metadata.len()));
-            if Self::retain_manifest_sst_after_metadata_validation(state, &file, validation)? {
-                retained_files.push(file);
-            } else {
-                manifest_changed = true;
+                .and_then(|metadata| {
+                    Self::validate_manifest_sst_size(&file, metadata.len())
+                        .map_err(SstLoss::Definitive)
+                });
+            match Self::retain_manifest_sst_after_metadata_validation(state, &file, validation)? {
+                SstDisposition::Retain | SstDisposition::RetainIndeterminate => {
+                    retained_files.push(file);
+                }
+                SstDisposition::DropDefinitive => {
+                    definitively_lost.push(file.name.clone());
+                    manifest_changed = true;
+                }
             }
         }
 
         if manifest_changed {
-            state.manifest.files = retained_files;
-            crate::metadata::ManifestPersistence::save(&state.db_path, &state.manifest)
-                .map_err(MidgeError::Internal)?;
+            Self::commit_manifest_removals(state, retained_files, &definitively_lost)?;
             state.restore_sequence_floor_from_manifest();
         }
 
@@ -148,7 +177,7 @@ impl CloudStartupRecovery {
         let mut has_manifest_journal = false;
 
         for file_name in crate::metadata::files::CLOUD_MIRRORED {
-            let key = crate::storage::cloud::cloud_metadata_key(file_name);
+            let key = crate::cloud_layout::CloudObjectLayout::metadata_key(file_name);
             let data = match BlockingCloudIo::new(cloud).get_optional(&key) {
                 Ok(Some(data)) => data,
                 Ok(None) => continue,
@@ -261,7 +290,7 @@ impl CloudStartupRecovery {
                 }
             };
 
-            let key = crate::storage::cloud::cloud_metadata_key(file_name);
+            let key = crate::cloud_layout::CloudObjectLayout::metadata_key(file_name);
             if let Err(error) = Self::blocking_conditional_cloud_metadata_put(
                 cloud,
                 file_name,
@@ -1279,31 +1308,38 @@ impl CloudStartupRecovery {
     ) -> MidgeResult<()> {
         let mut retained_files = Vec::with_capacity(state.manifest.files.len());
         let mut manifest_changed = false;
+        let mut definitively_lost: Vec<String> = Vec::new();
 
         for file in state.manifest.files.clone() {
-            let key = crate::sst::object_key(&file.name);
+            let key = crate::cloud_layout::object_key(&file.name);
             let validation = BlockingCloudIo::new(cloud)
                 .head_optional(&key)
+                .map_err(SstLoss::Indeterminate)
                 .and_then(|metadata| {
                     metadata.ok_or_else(|| {
-                        MidgeError::RecoveryFailed(format!(
+                        SstLoss::Definitive(MidgeError::RecoveryFailed(format!(
                             "authoritative cloud SST '{}' is missing",
                             file.name
-                        ))
+                        )))
                     })
                 })
-                .and_then(|metadata| Self::validate_manifest_sst_size(&file, metadata.size));
-            if Self::retain_manifest_sst_after_metadata_validation(state, &file, validation)? {
-                retained_files.push(file);
-            } else {
-                manifest_changed = true;
+                .and_then(|metadata| {
+                    Self::validate_manifest_sst_size(&file, metadata.size)
+                        .map_err(SstLoss::Definitive)
+                });
+            match Self::retain_manifest_sst_after_metadata_validation(state, &file, validation)? {
+                SstDisposition::Retain | SstDisposition::RetainIndeterminate => {
+                    retained_files.push(file);
+                }
+                SstDisposition::DropDefinitive => {
+                    definitively_lost.push(file.name.clone());
+                    manifest_changed = true;
+                }
             }
         }
 
         if manifest_changed {
-            state.manifest.files = retained_files;
-            crate::metadata::ManifestPersistence::save(&state.db_path, &state.manifest)
-                .map_err(MidgeError::Internal)?;
+            Self::commit_manifest_removals(state, retained_files, &definitively_lost)?;
             state.restore_sequence_floor_from_manifest();
         }
 
@@ -1323,14 +1359,55 @@ impl CloudStartupRecovery {
         Ok(())
     }
 
+    /// Persist a salvage-mode drop of manifest SSTs.
+    ///
+    /// Only `definitively_lost` names are journaled and snapshotted: the object is
+    /// gone or does not match the manifest, so leaving the entry would make every
+    /// later persist resurrect a file that cannot be read. Indeterminate losses stay
+    /// in both the running and durable manifests so a later persist cannot erase a
+    /// possibly live remote SST.
+    fn commit_manifest_removals(
+        state: &mut RuntimeState,
+        retained_files: Vec<crate::metadata::FileMeta>,
+        definitively_lost: &[String],
+    ) -> MidgeResult<()> {
+        if definitively_lost.is_empty() {
+            state.manifest.files = retained_files;
+            return crate::metadata::ManifestPersistence::save(&state.db_path, &state.manifest)
+                .map_err(MidgeError::Internal);
+        }
+        let edits: Vec<crate::metadata::ManifestEdit> = definitively_lost
+            .iter()
+            .map(|name| crate::metadata::ManifestEdit::RemoveSst { name: name.clone() })
+            .collect();
+        let edit_id = crate::metadata::append_edit_batch(&state.db_path, &edits)?;
+        let mut durable = state.manifest.clone();
+        durable
+            .files
+            .retain(|file| !definitively_lost.contains(&file.name));
+        durable.note_applied_journal_edit(edit_id);
+        crate::metadata::ManifestPersistence::save_snapshot_and_truncate_journal(
+            &state.db_path,
+            &durable,
+        )
+        .map_err(MidgeError::Internal)?;
+        state.manifest.files = retained_files;
+        state.manifest.note_applied_journal_edit(edit_id);
+        Ok(())
+    }
+
     fn retain_manifest_sst_after_metadata_validation(
         state: &mut RuntimeState,
         file: &crate::metadata::FileMeta,
-        validation: MidgeResult<()>,
-    ) -> MidgeResult<bool> {
-        let Err(error) = validation else {
+        validation: Result<(), SstLoss>,
+    ) -> MidgeResult<SstDisposition> {
+        let Err(loss) = validation else {
             state.salvaged_local_ssts.remove(&file.name);
-            return Ok(true);
+            return Ok(SstDisposition::Retain);
+        };
+        let (error, definitive) = match loss {
+            SstLoss::Definitive(error) => (error, true),
+            SstLoss::Indeterminate(error) => (error, false),
         };
         if state.recovery_policy() == RecoveryPolicy::Strict {
             return Err(MidgeError::RecoveryFailed(format!(
@@ -1355,7 +1432,11 @@ impl CloudStartupRecovery {
             retained_local_copy = retain,
             "authoritative cloud SST metadata validation failed during salvage"
         );
-        Ok(retain)
+        Ok(match (retain, definitive) {
+            (true, _) => SstDisposition::Retain,
+            (false, true) => SstDisposition::DropDefinitive,
+            (false, false) => SstDisposition::RetainIndeterminate,
+        })
     }
 
     pub(super) fn retain_verified_local_sst(
@@ -1414,7 +1495,7 @@ impl CloudStartupRecovery {
         proof: &CloudSstRecoveryProof,
     ) -> MidgeResult<()> {
         let sst_name = proof.name.clone();
-        let cloud_key = crate::sst::object_key(&sst_name);
+        let cloud_key = crate::cloud_layout::object_key(&sst_name);
         let local_path = state.sst_dir.join(&sst_name);
         if Self::local_sst_file_matches_proof(
             &local_path,
@@ -1554,8 +1635,9 @@ impl CloudStartupRecovery {
         sst_name: &str,
         data: &[u8],
     ) -> MidgeResult<()> {
-        let temp_path = crate::io::traits::FsPath::new(crate::sst::temp_object_key(sst_name));
-        let target_path = crate::io::traits::FsPath::new(crate::sst::object_key(sst_name));
+        let temp_path =
+            crate::io::traits::FsPath::new(crate::cloud_layout::temp_object_key(sst_name));
+        let target_path = crate::io::traits::FsPath::new(crate::cloud_layout::object_key(sst_name));
         crate::io::staging::stage_bytes(
             staging_fs,
             &temp_path,

@@ -2,7 +2,7 @@
 //!
 //! Covers block compression/decompression, incompressible inputs, and WAL batches.
 
-use cntryl_midge::sst::compression::{
+use cntryl_midge::__internal::codec::{
     compress_block_with_trailer, compress_wal_value, decompress_block_with_trailer,
     decompress_wal_value, CompressionAlgo, CompressionPolicy,
 };

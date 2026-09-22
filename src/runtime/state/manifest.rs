@@ -355,6 +355,7 @@ impl RuntimeState {
                 ..Default::default()
             }),
         )
+        .map(|_| ())
     }
 
     pub(super) fn append_manifest_compaction_batch(
@@ -392,7 +393,7 @@ impl RuntimeState {
             return Ok(());
         }
 
-        crate::metadata::append_edit_batch(&self.db_path, &edits)
+        crate::metadata::append_edit_batch(&self.db_path, &edits).map(|_| ())
     }
 
     pub(super) fn persist_manifest_checkpoint(&self) -> MidgeResult<()> {

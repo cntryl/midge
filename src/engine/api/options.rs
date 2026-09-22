@@ -38,6 +38,7 @@ impl std::fmt::Debug for LeaseLossHook {
     }
 }
 
+use crate::codec::{CompressionAlgo, CompressionPolicy};
 use crate::common::{MidgeError, MidgeResult};
 #[cfg(test)]
 use crate::config::{
@@ -47,7 +48,6 @@ use crate::config::{
 pub use crate::config::{RecoveryPolicy, Storage};
 pub use crate::sst::cache::BlockCachePolicy;
 use crate::sst::cache::{CachePolicyConfig, CachePolicyType};
-use crate::sst::compression::{CompressionAlgo, CompressionPolicy};
 pub use crate::storage::cloud::CloudWritePolicy;
 use crate::storage::cloud::CloudWritePolicyConfig;
 

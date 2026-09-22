@@ -12,50 +12,112 @@
 //!   - `sst`         - sorted-string table
 //!   - `storage`     - storage orchestration layer
 //!   - `compaction`  - compaction planning + execution
-//!   - `iterators`   - iterator implementations
 //!   - `metrics`     - performance instrumentation
 //!
 //! # Public API Surface
 //!
-//! Only types re-exported at the bottom of this file are intended to be
-//! stable for external consumption. Some implementation modules remain public
-//! during the 0.x series for integration tests and diagnostics, but they are
-//! not stable API and may change without compatibility guarantees.
+//! Only the types re-exported at the bottom of this file and the [`prelude`]
+//! are public API. Every implementation module is private. This crate's own
+//! tests, benches and fuzz targets reach internals through `__internal`,
+//! which is compiled only when the non-default `internal-testing` feature is
+//! enabled, and which carries no compatibility guarantee.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
+// Implementation modules are private. The ones re-exported through
+// `__internal` carry `#[doc(hidden)]` so rustdoc and the pedantic
+// documentation lints treat them as the internals they are, and they relax
+// `dead_code`/`unused_imports` when `internal-testing` is off, because their
+// only remaining callers (tests, benches, fuzz targets) are then unreachable.
+// Both lints stay active in every build that enables the feature, which is
+// every build CI and developers run.
+
 // Foundation - no dependencies
 mod cloud_layout;
 #[doc(hidden)]
-pub mod common;
+#[cfg_attr(not(feature = "internal-testing"), allow(dead_code, unused_imports))]
+mod codec;
 #[doc(hidden)]
-pub mod config;
+#[cfg_attr(not(feature = "internal-testing"), allow(dead_code, unused_imports))]
+mod common;
 #[doc(hidden)]
-pub mod types;
+#[cfg_attr(not(feature = "internal-testing"), allow(dead_code, unused_imports))]
+mod config;
+#[doc(hidden)]
+#[cfg_attr(not(feature = "internal-testing"), allow(dead_code, unused_imports))]
+mod types;
 
 // Internal modules used by engine/runtime.
 mod compaction;
 #[doc(hidden)]
-pub mod diagnostics;
+#[cfg_attr(not(feature = "internal-testing"), allow(dead_code, unused_imports))]
+mod diagnostics;
 mod failpoints;
-#[cfg(test)]
-pub mod io;
-#[cfg(not(test))]
 mod io;
-#[doc(hidden)]
-pub mod iterators;
 mod lease;
+#[doc(hidden)]
+#[cfg_attr(not(feature = "internal-testing"), allow(dead_code, unused_imports))]
 mod memtable;
 mod metadata;
 mod runtime;
 #[doc(hidden)]
-pub mod sst;
+#[cfg_attr(not(feature = "internal-testing"), allow(dead_code, unused_imports))]
+mod sst;
 mod storage;
 mod telemetry;
 #[doc(hidden)]
-pub mod wal;
+#[cfg_attr(not(feature = "internal-testing"), allow(dead_code, unused_imports))]
+mod wal;
 
 // Main engine (canonical public API — re-exported below)
 mod engine;
+
+// ---------------------------------------------------------------------------
+// Internal Test Surface (NOT public API)
+// ---------------------------------------------------------------------------
+
+/// Implementation internals exposed for this crate's own tests, benches and
+/// fuzz targets.
+///
+/// Gated behind the non-default `internal-testing` feature. Nothing here is
+/// public API: names, shapes and behaviour may change in any release without
+/// a compatibility guarantee. Downstream consumers must use the canonical
+/// re-exports (or [`prelude`]) instead.
+#[cfg(feature = "internal-testing")]
+#[doc(hidden)]
+pub mod __internal {
+    pub mod codec {
+        pub use crate::codec::*;
+    }
+    pub mod common {
+        pub use crate::common::*;
+    }
+    pub mod config {
+        pub use crate::config::*;
+    }
+    pub mod diagnostics {
+        pub use crate::diagnostics::*;
+    }
+    pub mod memtable {
+        pub use crate::memtable::*;
+    }
+    pub mod sst {
+        pub use crate::sst::*;
+    }
+    /// Cloud-boundary types exposed only to this crate's compile-contract
+    /// tests. They remain outside Midge's supported public API.
+    pub mod storage {
+        pub mod cloud {
+            #[doc(inline)]
+            pub use crate::storage::cloud::{CloudBackend, CloudCallback};
+        }
+    }
+    pub mod types {
+        pub use crate::types::*;
+    }
+    pub mod wal {
+        pub use crate::wal::*;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Public Export Surface
@@ -68,19 +130,6 @@ mod engine;
 // Errors
 pub use cloud_layout::CloudObjectLayout;
 pub use common::{MidgeError, MidgeResult, Severity};
-
-#[cfg(feature = "cloud-common")]
-pub(crate) mod cloud_preflight_backend {
-    #[cfg(test)]
-    pub(crate) use crate::storage::cloud::MockCloudBackend;
-    pub(crate) use crate::storage::cloud::{CloudBackend, CloudEvent};
-
-    pub(crate) fn build(
-        provider: &crate::config::CloudProviderConfig,
-    ) -> crate::common::MidgeResult<std::sync::Arc<dyn CloudBackend>> {
-        crate::storage::providers::build_cloud_backend(provider)
-    }
-}
 
 // Engine / Transactions
 pub use engine::{

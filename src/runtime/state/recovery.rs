@@ -2,7 +2,7 @@
 
 use super::{
     Arc, CloudState, ColumnFamilyState, CompactionConfig, CompactionState, Fs, HashMap,
-    IntentLogEntry, Manifest, Memtable, MidgeError, MidgeResult, PathBuf, PublicationPhase,
+    IntentLogEntry, Manifest, MidgeError, MidgeResult, PathBuf, PublicationPhase,
     RecoveryLoadState, RecoveryStatus, RuntimeDiagnostics, RuntimeMode, RuntimePersistence,
     RuntimeState, SkipListMemtable, SnapshotPinRegistry, SnapshotState, TransactionCoordination,
     WalRecoveryState, WalState, WritePressureState,
@@ -30,7 +30,7 @@ impl RuntimeState {
         manifest
             .files
             .iter()
-            .filter_map(|file| crate::sst::parse_compaction_file_name(&file.name))
+            .filter_map(|file| crate::cloud_layout::parse_compaction_file_name(&file.name))
             .map(|(_, _, generation, _)| generation)
             // The manifest counter reserves names before cloud output
             // publication. An interrupted job can leave no visible SSTs.
@@ -742,7 +742,7 @@ impl RuntimeState {
         fs: Arc<dyn Fs>,
         file_meta: &crate::runtime::FileMeta,
     ) -> MidgeResult<()> {
-        let path = crate::io::FsPath::new(crate::sst::object_key(&file_meta.name));
+        let path = crate::io::FsPath::new(crate::cloud_layout::object_key(&file_meta.name));
         let pinned = fs.immutable_read_view(&path)?.unwrap_or(fs);
         let file = pinned.open(
             &path,

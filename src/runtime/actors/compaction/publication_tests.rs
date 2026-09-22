@@ -3,6 +3,7 @@
 use super::*;
 use crate::common::resource_budget::ResourceBudget;
 use crate::sst::SstReader;
+use crate::types::EntryType;
 
 #[test]
 fn should_retain_compaction_partition_when_upload_workspace_cannot_be_admitted() -> MidgeResult<()>
@@ -14,12 +15,18 @@ fn should_retain_compaction_partition_when_upload_workspace_cannot_be_admitted()
     let path = directory.path().join("partition.sst");
     let factory =
         crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::RealFs::new(directory.path())?), 4096)
-            .with_compression_policy(crate::sst::compression::CompressionPolicy::Fixed(
-                crate::sst::compression::CompressionAlgo::None,
+            .with_compression_policy(crate::codec::CompressionPolicy::Fixed(
+                crate::codec::CompressionAlgo::None,
             ));
     let mut writer = factory.create()?;
     for key in 0_u64..64 {
-        writer.add_with_meta(&key.to_be_bytes(), Some(&vec![7; 4096]), key + 1, 0, None)?;
+        writer.add_with_meta(
+            &key.to_be_bytes(),
+            Some(&vec![7; 4096]),
+            key + 1,
+            EntryType::Put,
+            None,
+        )?;
     }
     crate::sst::fs::finish_writer_to_path(writer, &path)?;
     let original = std::fs::read(&path)?;
@@ -32,13 +39,13 @@ fn should_retain_compaction_partition_when_upload_workspace_cannot_be_admitted()
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     );
     hybrid.enable_ephemeral_sst_cache(1024 * 1024);
-    let prepared = PreparedRemoteOutputs::default();
+    let prepared = PreparedCompactionOutputs::default();
     let budget = ResourceBudget::new(1024 * 1024);
     let name = "000000_01_00000000000000000002.sst";
 
     // Act
     let result =
-        CompactionActor::prepare_remote_partition(&hybrid, &prepared, 0, 1, name, &path, &budget);
+        record_staged_output_partition(Some(&hybrid), &prepared, 0, 1, name, &path, &budget);
 
     // Assert
     assert!(
@@ -47,7 +54,9 @@ fn should_retain_compaction_partition_when_upload_workspace_cannot_be_admitted()
     );
     assert_eq!(std::fs::read(path)?, original);
     assert!(prepared.lock().is_empty());
-    assert!(!cloud_path.join(crate::sst::object_key(name)).exists());
+    assert!(!cloud_path
+        .join(crate::cloud_layout::object_key(name))
+        .exists());
     assert_eq!(budget.used(), 0);
     Ok(())
 }
@@ -60,6 +69,8 @@ struct PendingUpload {
 }
 
 impl crate::storage::cloud::CloudBackend for PendingUpload {
+    crate::storage::cloud::unsupported_cloud_backend!(submit_get, submit_delete, submit_list);
+
     fn submit_put(
         &self,
         _key: &str,
@@ -98,7 +109,7 @@ fn should_retain_compaction_upload_charge_after_timeout_until_provider_releases_
     let factory =
         crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::RealFs::new(directory.path())?), 4096);
     let mut writer = factory.create()?;
-    writer.add_with_meta(b"key", Some(b"retained value"), 1, 0, None)?;
+    writer.add_with_meta(b"key", Some(b"retained value"), 1, EntryType::Put, None)?;
     crate::sst::fs::finish_writer_to_path(writer, &path)?;
     let backend = Arc::new(PendingUpload::default());
     let cloud: Arc<dyn crate::storage::StorageBackend> = Arc::new(
@@ -117,11 +128,11 @@ fn should_retain_compaction_upload_charge_after_timeout_until_provider_releases_
     );
     hybrid.enable_ephemeral_sst_cache(1024 * 1024);
     let budget = ResourceBudget::new(2 * 1024 * 1024);
-    let prepared = PreparedRemoteOutputs::default();
+    let prepared = PreparedCompactionOutputs::default();
 
     // Act
-    let result = CompactionActor::prepare_remote_partition(
-        &hybrid,
+    let result = record_staged_output_partition(
+        Some(&hybrid),
         &prepared,
         0,
         1,
@@ -162,12 +173,18 @@ fn should_roll_over_remote_compaction_outputs_to_leave_room_for_upload_workspace
             Arc::new(crate::io::RealFs::new(directory.path())?),
             4096,
         )
-        .with_compression_policy(crate::sst::compression::CompressionPolicy::Fixed(
-            crate::sst::compression::CompressionAlgo::None,
+        .with_compression_policy(crate::codec::CompressionPolicy::Fixed(
+            crate::codec::CompressionAlgo::None,
         ));
         let mut writer = factory.create()?;
         for key in 0_u64..64 {
-            writer.add_with_meta(&key.to_be_bytes(), Some(&vec![7; 4096]), key + 1, 0, None)?;
+            writer.add_with_meta(
+                &key.to_be_bytes(),
+                Some(&vec![7; 4096]),
+                key + 1,
+                EntryType::Put,
+                None,
+            )?;
         }
         crate::sst::fs::finish_writer_to_path(writer, &directory.path().join("input.sst"))?;
         let cloud_path = directory.path().join("cloud");
@@ -185,7 +202,7 @@ fn should_roll_over_remote_compaction_outputs_to_leave_room_for_upload_workspace
         plan.input_files.push("input.sst".into());
         plan.compaction_memory_limit = 1024 * 1024;
         plan.target_sst_size = 1024 * 1024;
-        let prepared = PreparedRemoteOutputs::default();
+        let prepared = PreparedCompactionOutputs::default();
         let compaction_storage: Arc<dyn CompactionStorage> = hybrid.clone();
 
         // Act
@@ -207,17 +224,23 @@ fn should_roll_over_remote_compaction_outputs_to_leave_room_for_upload_workspace
         for name in outputs {
             assert_eq!(directory.path().join(&name).exists(), !ephemeral);
             let reader = crate::sst::fs::SstFileIo::open_with_real_fs(
-                &cloud_path.join(crate::sst::object_key(&name)),
+                &cloud_path.join(crate::cloud_layout::object_key(&name)),
             )?;
             actual.extend(reader.scan_range(None, None)?);
-            let (_, proof) = prepared.lock().get(&name).cloned().expect("prepared proof");
+            let proof = prepared
+                .lock()
+                .get(&name)
+                .cloned()
+                .expect("prepared output")
+                .proof
+                .expect("an uploaded partition carries its proof");
             hybrid.verify_remote_object_guards_within(
                 std::slice::from_ref(&proof),
                 &crate::common::OperationDeadline::unbounded(),
             )?;
             drop(reader);
             std::fs::write(
-                cloud_path.join(crate::sst::object_key(&name)),
+                cloud_path.join(crate::cloud_layout::object_key(&name)),
                 b"replacement",
             )?;
             assert!(
@@ -280,6 +303,55 @@ fn should_not_start_upload_after_publication_deadline_is_spent_on_head() -> Midg
         "sequential storage calls must consume one attempt budget"
     );
     assert_eq!(budget.used(), 0);
+    assert!(path.exists());
+    Ok(())
+}
+
+#[test]
+fn should_summarize_compaction_output_on_the_worker_when_there_is_no_cloud_storage(
+) -> MidgeResult<()> {
+    // Arrange: a finished partition and no cloud storage at all, which is the
+    // local-only compaction shape.
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("partition.sst");
+    let factory =
+        crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::RealFs::new(directory.path())?), 4096);
+    let mut writer = factory.create()?;
+    for key in 0_u64..8 {
+        writer.add_with_meta(
+            &key.to_be_bytes(),
+            Some(b"value"),
+            key + 1,
+            EntryType::Put,
+            None,
+        )?;
+    }
+    crate::sst::fs::finish_writer_to_path(writer, &path)?;
+    let prepared = PreparedCompactionOutputs::default();
+    let budget = ResourceBudget::new(1024 * 1024);
+    let name = "000000_01_00000000000000000002.sst";
+
+    // Act
+    record_staged_output_partition(None, &prepared, 0, 1, name, &path, &budget)?;
+
+    // Assert: the worker, not the event loop, paid for the re-read and CRC.
+    let output = prepared
+        .lock()
+        .get(name)
+        .cloned()
+        .expect("summarized output");
+    assert_eq!(output.metadata.name, name);
+    assert_eq!(output.metadata.level, 1);
+    assert_eq!(output.metadata.cf_id, 0);
+    assert_eq!(output.metadata.smallest_seq, Some(1));
+    assert_eq!(output.metadata.largest_seq, Some(8));
+    assert!(output.metadata.content_crc32c.is_some());
+    assert!(output.metadata.key_bounds_complete);
+    assert!(
+        output.proof.is_none(),
+        "a local-only partition has nothing to prove remotely"
+    );
+    // Nothing uploaded, so the local file must remain the only copy.
     assert!(path.exists());
     Ok(())
 }

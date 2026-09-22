@@ -2,6 +2,7 @@ use super::*;
 use crate::io::RealFs;
 use crate::sst::traits::SstFactory;
 use crate::sst::FsSstFactoryIo;
+use crate::types::EntryType;
 use std::path::Path;
 
 type Point<'a> = (&'a [u8], &'a [u8], u64);
@@ -18,7 +19,7 @@ fn write_sst(
     let factory = FsSstFactoryIo::new(Arc::new(RealFs::new(path)?), 4096);
     let mut writer = factory.create()?;
     for (key, value, sequence) in points {
-        writer.add_with_meta(key, Some(value), *sequence, 0, None)?;
+        writer.add_with_meta(key, Some(value), *sequence, EntryType::Put, None)?;
     }
     for (start, end, sequence) in tombstones {
         writer.add_range_tombstone(start, end, *sequence)?;
