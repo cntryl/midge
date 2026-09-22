@@ -2,22 +2,16 @@
 
 use crate::common::MidgeResult;
 use crate::sst::traits::{DynSstWriter, SstFactory};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
 
+use self::sink::BlockSink;
 use crate::io::Fs;
 
-use crate::sst::bloom::{BlockBloomFilter, BloomWriter};
 use crate::sst::compression::CompressionPolicy;
 use crate::sst::encoding::EntryType;
-use crate::sst::index::profiler::{KeyStructureProfile, KeyStructureProfiler};
-use crate::sst::index::tuner::{IndexKind, IndexTuner};
-use crate::sst::trie::writer::TrieWriter;
-use crate::sst::types::{
-    encode_range_tombstones, BlockHandle, Footer, KeyRangeMetadata, RangeTombstone, SstMetadata,
-    SST_FORMAT_V4,
-};
+use crate::sst::types::RangeTombstone;
 
 /// SST factory that uses the `io::Fs` abstraction.
 ///
@@ -178,32 +172,9 @@ struct PendingEntry {
     expiration: Option<u64>,
 }
 
-struct FinalizedDataBlocks {
-    file_bytes: Vec<u8>,
-    block_index_entries: Vec<(Vec<u8>, BlockHandle)>,
-    block_bloom: BlockBloomFilter,
-    key_profile: KeyStructureProfile,
-    smallest_key: Option<Vec<u8>>,
-    largest_key: Option<Vec<u8>>,
-}
-
 struct StreamingState {
-    scratch: super::scratch::TrackedScratch,
-    offset: u64,
-    block_index_entries: Vec<(Vec<u8>, BlockHandle)>,
-    key_profiler: KeyStructureProfiler,
-    current_block: Vec<u8>,
-    current_block_keys: Vec<Vec<u8>>,
-    current_first_key: Option<Vec<u8>>,
-    block_bloom: BlockBloomFilter,
-    previous_key: Vec<u8>,
-    last_key: Option<Vec<u8>>,
-    last_sequence: u64,
-    smallest_key: Option<Vec<u8>>,
-    largest_key: Option<Vec<u8>>,
-    budget: Option<crate::common::resource_budget::ResourceBudget>,
-    current_reservations: Vec<crate::common::resource_budget::ResourceReservation>,
-    persistent_reservations: Vec<crate::common::resource_budget::ResourceReservation>,
+    sink: sink::ScratchBlockSink,
+    pipeline: pipeline::BlockPipeline,
 }
 
 impl StreamingState {
@@ -217,23 +188,8 @@ impl StreamingState {
         directory: Option<&Path>,
     ) -> MidgeResult<Self> {
         Ok(Self {
-            scratch: super::scratch::TrackedScratch::new(outstanding, directory)
-                .map_err(crate::common::MidgeError::Io)?,
-            offset: 0,
-            block_index_entries: Vec::new(),
-            key_profiler: KeyStructureProfiler::new(),
-            current_block: Vec::new(),
-            current_block_keys: Vec::new(),
-            current_first_key: None,
-            block_bloom: BlockBloomFilter::new(),
-            previous_key: Vec::new(),
-            last_key: None,
-            last_sequence: 0,
-            smallest_key: None,
-            largest_key: None,
-            budget,
-            current_reservations: Vec::new(),
-            persistent_reservations: Vec::new(),
+            sink: sink::ScratchBlockSink::new(budget, outstanding, directory)?,
+            pipeline: pipeline::BlockPipeline::new(),
         })
     }
 }
@@ -283,7 +239,8 @@ impl DynSstWriter for FsSstWriter {
                 ))
             }));
         };
-        let index = streaming
+        let pipeline = &streaming.pipeline;
+        let index = pipeline
             .block_index_entries
             .iter()
             .fold(0usize, |total, (key, _)| {
@@ -291,26 +248,30 @@ impl DynSstWriter for FsSstWriter {
                     .saturating_add(256)
                     .saturating_add(key.len().saturating_mul(8))
             });
-        let current_index = streaming.current_first_key.as_ref().map_or(0, |key| {
+        let current_index = pipeline.current_first_key.as_ref().map_or(0, |key| {
             256usize.saturating_add(key.len().saturating_mul(8))
         });
         let current_bloom =
-            BloomWriter::with_defaults(streaming.current_block_keys.len()).size_bytes();
-        let key_bounds = streaming
+            crate::sst::bloom::BloomWriter::with_defaults(pipeline.current_block_keys.len())
+                .size_bytes();
+        let key_bounds = pipeline
             .smallest_key
             .as_ref()
             .map_or(0, Vec::len)
-            .saturating_add(streaming.largest_key.as_ref().map_or(0, Vec::len))
+            .saturating_add(pipeline.largest_key.as_ref().map_or(0, Vec::len))
             .saturating_mul(2);
         Some(
             fixed
-                .saturating_add(usize::try_from(streaming.offset).unwrap_or(usize::MAX))
-                .saturating_add(streaming.current_block.len().saturating_mul(2))
+                .saturating_add(
+                    usize::try_from(streaming.sink.offset().unwrap_or(u64::MAX))
+                        .unwrap_or(usize::MAX),
+                )
+                .saturating_add(pipeline.current_block.len().saturating_mul(2))
                 .saturating_add(index)
                 .saturating_add(current_index)
                 .saturating_add(key_bounds)
                 .saturating_add(
-                    streaming
+                    pipeline
                         .block_bloom
                         .size_bytes()
                         .saturating_add(current_bloom)
@@ -321,27 +282,31 @@ impl DynSstWriter for FsSstWriter {
 
     fn estimated_size_bytes(&self) -> usize {
         if let Some(streaming) = &self.streaming {
-            let persisted = usize::try_from(streaming.offset).unwrap_or(usize::MAX);
-            let index = streaming.block_index_entries.iter().fold(
-                streaming
+            let pipeline = &streaming.pipeline;
+            let persisted =
+                usize::try_from(streaming.sink.offset().unwrap_or(u64::MAX)).unwrap_or(usize::MAX);
+            let index = pipeline.block_index_entries.iter().fold(
+                pipeline
                     .block_index_entries
                     .len()
-                    .saturating_mul(std::mem::size_of::<(Vec<u8>, BlockHandle)>()),
+                    .saturating_mul(
+                        std::mem::size_of::<(Vec<u8>, crate::sst::types::BlockHandle)>(),
+                    ),
                 |total, (key, _)| total.saturating_add(key.len()),
             );
-            let current_bloom = if streaming.current_block_keys.is_empty() {
+            let current_bloom = if pipeline.current_block_keys.is_empty() {
                 0
             } else {
-                BloomWriter::with_defaults(streaming.current_block_keys.len())
+                crate::sst::bloom::BloomWriter::with_defaults(pipeline.current_block_keys.len())
                     .size_bytes()
                     .saturating_add(13)
             };
-            let bloom = streaming
+            let bloom = pipeline
                 .block_bloom
                 .size_bytes()
                 .saturating_add(current_bloom);
             return persisted
-                .saturating_add(streaming.current_block.len())
+                .saturating_add(pipeline.current_block.len())
                 .saturating_add(index.saturating_mul(2))
                 .saturating_add(bloom)
                 .saturating_add(16 * 1024);
@@ -409,11 +374,11 @@ impl DynSstWriter for FsSstWriter {
             .saturating_add(key.len().saturating_mul(4))
             .saturating_add(value.map_or(0, <[u8]>::len))
             .saturating_add(64);
-        let entry_reservation = self
-            .budget
-            .as_ref()
-            .map(|budget| budget.reserve(retained_bytes, "SST current block entry"))
-            .transpose()?;
+        let streaming = self
+            .streaming
+            .as_mut()
+            .expect("streaming state is initialized above");
+        let entry_reservation = streaming.sink.reserve_entry(retained_bytes)?;
         let entry = PendingEntry {
             key: key.to_vec(),
             value: value.map(<[u8]>::to_vec),
@@ -421,10 +386,8 @@ impl DynSstWriter for FsSstWriter {
             op_type,
             expiration,
         };
-        Self::append_sorted_entry(
-            self.streaming
-                .as_mut()
-                .expect("streaming state is initialized above"),
+        streaming.pipeline.append_sorted_entry(
+            &mut streaming.sink,
             entry,
             block_size,
             &compression_policy,
@@ -485,15 +448,12 @@ impl DynSstWriter for FsSstWriter {
 
     fn finish_bytes(self: Box<Self>) -> MidgeResult<Vec<u8>> {
         let FsSstWriter {
-            fs,
             entries,
             range_tombstones,
             block_size,
             compression_policy,
             streaming,
-            budget,
-            range_tombstone_reservations: _range_tombstone_reservations,
-            preserve_legacy_entries,
+            ..
         } = *self;
 
         if let Some(streaming) = streaming {
@@ -509,50 +469,7 @@ impl DynSstWriter for FsSstWriter {
             return Ok(bytes);
         }
 
-        let writer = Self {
-            fs,
-            entries: Vec::new(),
-            range_tombstones,
-            block_size,
-            compression_policy,
-            streaming: None,
-            budget,
-            range_tombstone_reservations: Vec::new(),
-            preserve_legacy_entries,
-        };
-
-        let entries = Self::sort_entries(entries);
-        let mut finalized = writer.finalize_data_blocks(entries)?;
-        let range_tombstone_handle =
-            writer.append_range_tombstone_block(&mut finalized.file_bytes)?;
-        let chosen = IndexTuner::decide(&finalized.key_profile);
-        let trie_bytes = Self::build_trie_index(chosen, &finalized.block_index_entries);
-        let index_kind = Self::effective_index_kind(chosen, trie_bytes.as_ref());
-        let trie_handle = Self::append_trie_block(
-            &mut finalized.file_bytes,
-            &writer.compression_policy,
-            trie_bytes.as_ref(),
-        )?;
-        let metadata = SstMetadata {
-            format_version: SST_FORMAT_V4,
-            index_kind,
-            range_tombstone_handle,
-            key_range: finalized.smallest_key.zip(finalized.largest_key).map(
-                |(smallest_key, largest_key)| KeyRangeMetadata {
-                    smallest_key,
-                    largest_key,
-                },
-            ),
-        };
-        Self::append_metadata_index_and_footer(
-            &mut finalized.file_bytes,
-            &writer.compression_policy,
-            &metadata,
-            &finalized.block_index_entries,
-            trie_handle,
-            &finalized.block_bloom,
-        )?;
-        Ok(finalized.file_bytes)
+        Self::finish_buffered(entries, &range_tombstones, block_size, &compression_policy)
     }
 }
 
@@ -605,6 +522,7 @@ impl SstFactory for FsSstFactoryIo {
 }
 
 mod pipeline;
+mod sink;
 
 #[cfg(test)]
 mod tests;

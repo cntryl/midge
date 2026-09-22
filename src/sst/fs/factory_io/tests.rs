@@ -193,6 +193,90 @@ fn should_route_streaming_sst_staging_through_injected_fs_when_finishing_flush_w
 }
 
 #[test]
+fn should_produce_identical_bytes_when_same_entries_written_via_create_and_create_for_flush(
+) -> MidgeResult<()> {
+    // Arrange
+    let factory = FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096)
+        .with_compression_policy(CompressionPolicy::Fixed(
+            crate::sst::compression::CompressionAlgo::Lz4,
+        ));
+    let entries = (0_u64..192)
+        .map(|index| {
+            let key = format!("account/customer/region/{index:04}").into_bytes();
+            let value = if index % 17 == 0 {
+                None
+            } else {
+                Some(format!("value-{index:04}").into_bytes())
+            };
+            let entry_type = if value.is_some() {
+                EntryType::Put
+            } else {
+                EntryType::Delete
+            };
+            let expiration = (index % 11 == 0).then_some(4_000_000_000_000 + index);
+            (key, value, index, entry_type, expiration)
+        })
+        .collect::<Vec<_>>();
+    let mut buffered = factory.create()?;
+    let mut flush = factory.create_for_flush(
+        crate::common::resource_budget::ResourceBudget::new(4 * 1024 * 1024),
+    )?;
+
+    // Act
+    for (key, value, sequence, entry_type, expiration) in entries.iter().rev() {
+        buffered.add_with_meta(key, value.as_deref(), *sequence, *entry_type, *expiration)?;
+    }
+    for (key, value, sequence, entry_type, expiration) in &entries {
+        flush.add_sorted_with_meta(key, value.as_deref(), *sequence, *entry_type, *expiration)?;
+    }
+    for writer in [&mut buffered, &mut flush] {
+        writer.add_range_tombstone(
+            b"account/customer/region/0020",
+            b"account/customer/region/0030",
+            400,
+        )?;
+        writer.add_range_tombstone(
+            b"account/customer/region/0150",
+            b"account/customer/region/0160",
+            401,
+        )?;
+    }
+    let buffered_bytes = buffered.finish_bytes()?;
+    let flush_bytes = flush.finish_bytes()?;
+
+    // Assert
+    assert_eq!(buffered_bytes, flush_bytes);
+    Ok(())
+}
+
+#[test]
+fn should_keep_sst_encoding_policy_in_the_shared_block_pipeline() {
+    // Arrange
+    let writer = include_str!("../factory_io.rs");
+    let pipeline = include_str!("pipeline.rs");
+    let sink = include_str!("sink.rs");
+
+    // Act
+    let legacy_streaming_helpers = [
+        "append_block_to_stream",
+        "flush_streaming_current_block",
+        "append_range_tombstone_block_to_stream",
+        "append_trie_block_to_stream",
+        "append_metadata_index_and_footer_to_stream",
+    ];
+
+    // Assert
+    assert!(pipeline.contains("fn append_block<S: BlockSink>"));
+    assert!(pipeline.contains("fn append_metadata_index_and_footer<S: BlockSink>"));
+    assert!(!pipeline.contains("fn finalize_data_blocks"));
+    assert!(legacy_streaming_helpers
+        .iter()
+        .all(|helper| !writer.contains(helper) && !pipeline.contains(helper)));
+    assert!(!sink.contains("CompressionPolicy"));
+    assert!(!sink.contains("encode_readable_block"));
+}
+
+#[test]
 fn should_reject_sst_target_when_path_escapes_injected_filesystem_root() -> MidgeResult<()> {
     // Arrange
     let root = tempfile::tempdir()?;
@@ -312,6 +396,49 @@ fn should_reject_flush_entry_when_shared_writer_memory_is_exhausted() -> MidgeRe
     ));
     assert_eq!(budget.used(), 0);
     assert!(factory.compaction_scratch_cleanup_verified());
+    Ok(())
+}
+
+#[test]
+fn should_release_final_block_reservations_before_reserving_finalization_workspace(
+) -> MidgeResult<()> {
+    // Arrange
+    const ENTRY_COUNT: usize = 8;
+    let first_key = b"k0";
+    let value = b"v";
+    let entry_reservations = ENTRY_COUNT
+        * (std::mem::size_of::<PendingEntry>() + first_key.len() * 4 + value.len() + 64);
+    let index_entry_bytes =
+        std::mem::size_of::<(Vec<u8>, crate::sst::types::BlockHandle)>() + first_key.len();
+    let persistent_metadata_bytes = index_entry_bytes + ENTRY_COUNT * 16;
+    let finalization_bytes = index_entry_bytes * 4 + 16 * 1024;
+    let budget = crate::common::resource_budget::ResourceBudget::new(
+        finalization_bytes + persistent_metadata_bytes,
+    );
+    assert!(
+        16 * 1024 + entry_reservations > budget.limit(),
+        "the fixture must reject if finalization overlaps retained entries"
+    );
+    let factory = FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
+    let mut writer = factory.create_for_flush(budget.clone())?;
+    for index in 0..ENTRY_COUNT {
+        let key = format!("k{index}");
+        writer.add_sorted_with_meta(
+            key.as_bytes(),
+            Some(value),
+            u64::try_from(index).expect("small fixture index"),
+            EntryType::Put,
+            None,
+        )?;
+    }
+
+    // Act
+    let bytes = writer.finish_bytes()?;
+
+    // Assert
+    assert!(!bytes.is_empty());
+    assert_eq!(budget.used(), 0);
+    assert!(budget.peak() <= budget.limit());
     Ok(())
 }
 
