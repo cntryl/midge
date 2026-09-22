@@ -47,7 +47,7 @@ impl SstFileIo {
                 full_key,
                 value_bytes,
                 entry.sequence,
-                entry.entry_type as u8,
+                entry.entry_type,
                 entry.expiration,
             ));
             offset = next_offset;
@@ -80,7 +80,7 @@ impl SstFileIo {
             block_data.slice(value_offset..value_end),
             entry.sequence,
             entry.expiration,
-            entry.entry_type as u8,
+            entry.entry_type,
         )
     }
 

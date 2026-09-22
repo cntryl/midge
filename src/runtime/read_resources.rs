@@ -333,7 +333,12 @@ mod tests {
             let reader = resources.reader_for(&meta)?;
             assert!(matches!(
                 reader.get_state_at(b"key", u64::MAX)?,
-                crate::sst::types::KeyState::Value(_, 7, None, 0)
+                crate::sst::types::KeyState::Value(
+                    _,
+                    7,
+                    None,
+                    crate::sst::encoding::EntryType::Put
+                )
             ));
         }
 
@@ -381,7 +386,7 @@ mod tests {
         let block_cache = resources.block_cache();
         assert!(matches!(
             reader.get_state_at(b"key", u64::MAX)?,
-            crate::sst::types::KeyState::Value(_, 7, None, 0)
+            crate::sst::types::KeyState::Value(_, 7, None, crate::sst::encoding::EntryType::Put)
         ));
         assert!(
             !block_cache.is_empty(),
@@ -416,7 +421,7 @@ mod tests {
         let reader = resources.reader_for(&file_meta)?;
         assert!(matches!(
             reader.get_state_at(b"key", u64::MAX)?,
-            crate::sst::types::KeyState::Value(_, 7, None, 0)
+            crate::sst::types::KeyState::Value(_, 7, None, crate::sst::encoding::EntryType::Put)
         ));
         drop(reader);
         let block_cache = resources.block_cache();

@@ -384,7 +384,7 @@ impl Coverage<'_> {
                                     bytes::Bytes::from(version.value.unwrap_or_default()),
                                     version.seq,
                                     version.expiration,
-                                    crate::wal::WalOpKind::Put.to_wire_format(),
+                                    crate::sst::encoding::EntryType::Put,
                                 )
                             };
                             let retain = progress

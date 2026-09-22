@@ -129,8 +129,12 @@ fn should_preserve_zero_sequence_states_in_both_scan_directions() {
     for (key, state) in &forward {
         assert_eq!(&reader.get_state_at_with_time(key, 0, 2).unwrap(), state);
     }
-    assert!(matches!(&forward[0].1,KeyState::Value(value,0,None,0) if value.as_ref()==b"value"));
-    assert!(matches!(&forward[1].1,KeyState::Value(value,0,None,0) if value.is_empty()));
+    assert!(
+        matches!(&forward[0].1,KeyState::Value(value,0,None,crate::sst::encoding::EntryType::Put) if value.as_ref()==b"value")
+    );
+    assert!(
+        matches!(&forward[1].1,KeyState::Value(value,0,None,crate::sst::encoding::EntryType::Put) if value.is_empty())
+    );
     assert!(matches!(forward[2].1, KeyState::Tombstone(0)));
     assert!(matches!(forward[3].1, KeyState::Tombstone(0)));
 }

@@ -1479,7 +1479,12 @@ mod tests {
                 Ok(vec![
                     (
                         bytes::Bytes::from_static(b"alpha"),
-                        KeyState::Value(bytes::Bytes::from_static(b"v1"), 42, Some(900), 0),
+                        KeyState::Value(
+                            bytes::Bytes::from_static(b"v1"),
+                            42,
+                            Some(900),
+                            crate::sst::encoding::EntryType::Put,
+                        ),
                     ),
                     (bytes::Bytes::from_static(b"beta"), KeyState::Tombstone(41)),
                 ])

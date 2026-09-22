@@ -846,8 +846,7 @@ impl ExactCoverageState {
                         && matches!(record.op.role(), WalOpRole::ValueWrite)
                         && record.value.as_deref() == Some(value.as_ref())
                         && record.expiration == *expiration
-                        && crate::wal::WalOpKind::from_wire_format(*op_type)
-                            .is_ok_and(|op| matches!(op.role(), WalOpRole::ValueWrite))
+                        && op_type.is_value_write()
             }
             Some(KeyState::Tombstone(sequence)) => {
                 *sequence > record.seq

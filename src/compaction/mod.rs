@@ -1585,7 +1585,7 @@ mod tests {
             .expect("latest same-key version");
         assert!(matches!(
             same_state,
-            crate::sst::types::KeyState::Value(value, 33, None, 0)
+            crate::sst::types::KeyState::Value(value, 33, None, crate::sst::encoding::EntryType::Put)
                 if value.as_ref() == b"same-33"
         ));
         Ok(())

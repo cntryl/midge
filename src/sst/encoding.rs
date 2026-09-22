@@ -95,6 +95,15 @@ pub enum EntryType {
     Merge = 3,
 }
 
+impl EntryType {
+    /// Whether this entry writes a value (a put or an insert), as opposed to
+    /// deleting one or carrying an unsupported merge operand.
+    #[must_use]
+    pub const fn is_value_write(self) -> bool {
+        matches!(self, Self::Put | Self::Insert)
+    }
+}
+
 impl std::fmt::Display for EntryType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", *self as u8)
@@ -385,6 +394,25 @@ fn checked_v4_lengths(key_len: usize, value_len: usize) -> MidgeResult<(u32, u32
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn should_classify_only_put_and_insert_as_value_writes() {
+        // Arrange
+        let cases = [
+            (EntryType::Put, true),
+            (EntryType::Insert, true),
+            (EntryType::Delete, false),
+            (EntryType::Merge, false),
+        ];
+
+        for (entry_type, expected) in cases {
+            // Act
+            let is_value_write = entry_type.is_value_write();
+
+            // Assert
+            assert_eq!(is_value_write, expected, "{entry_type:?}");
+        }
+    }
 
     #[test]
     fn should_reject_merge_entry_when_decoding_sst_entry() {

@@ -33,9 +33,21 @@
 
 use crate::common::{MidgeError, MidgeResult};
 use crate::memtable::skiplist::{OpType, SkipList};
+use crate::sst::encoding::EntryType;
 use bytes::Bytes;
 use parking_lot::RwLock;
 use std::sync::Arc;
+
+/// The SST entry type for a memtable version.
+///
+/// Spelled out rather than reusing the encoded byte, so the two numbering
+/// schemes are never conflated.
+fn entry_type_of(op: OpType) -> EntryType {
+    match op {
+        OpType::Put => EntryType::Put,
+        OpType::Delete => EntryType::Delete,
+    }
+}
 
 pub mod bloom;
 pub mod cache;
@@ -313,7 +325,7 @@ impl SkipListMemtable {
                                 value,
                                 entry.seq,
                                 entry.expiration,
-                                entry.op.as_u8(),
+                                entry_type_of(entry.op),
                             )
                         }
                     }
@@ -407,7 +419,7 @@ impl SkipListMemtable {
                         if Self::is_expired_at(exp, now_millis) {
                             crate::sst::types::KeyState::Tombstone(seq)
                         } else {
-                            crate::sst::types::KeyState::Value(value, seq, exp, op.as_u8())
+                            crate::sst::types::KeyState::Value(value, seq, exp, entry_type_of(op))
                         }
                     }
                 };
@@ -651,7 +663,12 @@ mod tests {
             vec![
                 (
                     b"b".to_vec(),
-                    KeyState::Value(Bytes::from_static(b"new"), 5, None, 0)
+                    KeyState::Value(
+                        Bytes::from_static(b"new"),
+                        5,
+                        None,
+                        crate::sst::encoding::EntryType::Put
+                    )
                 ),
                 (b"c".to_vec(), KeyState::Tombstone(6)),
                 (b"d".to_vec(), KeyState::Tombstone(4)),
@@ -662,11 +679,21 @@ mod tests {
             vec![
                 (
                     b"b".to_vec(),
-                    KeyState::Value(Bytes::from_static(b"old"), 2, None, 0)
+                    KeyState::Value(
+                        Bytes::from_static(b"old"),
+                        2,
+                        None,
+                        crate::sst::encoding::EntryType::Put
+                    )
                 ),
                 (
                     b"c".to_vec(),
-                    KeyState::Value(Bytes::from_static(b"live"), 3, None, 0)
+                    KeyState::Value(
+                        Bytes::from_static(b"live"),
+                        3,
+                        None,
+                        crate::sst::encoding::EntryType::Put
+                    )
                 ),
                 (b"d".to_vec(), KeyState::Tombstone(4)),
             ]
@@ -802,11 +829,11 @@ mod tests {
         // Assert
         assert!(matches!(
             at_15,
-            KeyState::Value(value, 10, None, 0) if value == Bytes::from_static(b"old")
+            KeyState::Value(value, 10, None, crate::sst::encoding::EntryType::Put) if value == Bytes::from_static(b"old")
         ));
         assert!(matches!(
             at_25,
-            KeyState::Value(value, 20, None, 0) if value == Bytes::from_static(b"new")
+            KeyState::Value(value, 20, None, crate::sst::encoding::EntryType::Put) if value == Bytes::from_static(b"new")
         ));
     }
 
@@ -832,7 +859,7 @@ mod tests {
         // Assert
         assert!(matches!(
             before_delete,
-            KeyState::Value(value, 10, None, 0) if value == Bytes::from_static(b"value")
+            KeyState::Value(value, 10, None, crate::sst::encoding::EntryType::Put) if value == Bytes::from_static(b"value")
         ));
         assert!(matches!(after_delete, KeyState::Tombstone(20)));
     }

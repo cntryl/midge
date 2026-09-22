@@ -341,7 +341,7 @@ mod tests {
                     bytes::Bytes::copy_from_slice(b"va"),
                     10,
                     None,
-                    0,
+                    crate::sst::encoding::EntryType::Put,
                 )
             } else {
                 crate::sst::types::KeyState::Absent
@@ -362,7 +362,7 @@ mod tests {
                         bytes::Bytes::copy_from_slice(b"va"),
                         10,
                         None,
-                        0,
+                        crate::sst::encoding::EntryType::Put,
                     ),
                 )])
             } else {

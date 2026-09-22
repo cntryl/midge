@@ -545,7 +545,7 @@ fn should_roundtrip_stateful_entries_when_sst_contains_range_tombstones() -> Mid
             assert_eq!(value.as_ref(), b"value-a");
             assert_eq!(*seq, 10);
             assert_eq!(*expiration, Some(4_000_000_000_000));
-            assert_eq!(*op_type, 0);
+            assert_eq!(*op_type, crate::sst::encoding::EntryType::Put);
         }
         other => panic!("expected value state, got {other:?}"),
     }
@@ -589,7 +589,7 @@ fn should_roundtrip_large_key_when_sst_entry_key_delta_exceeds_inline_limit() ->
             assert_eq!(value.as_ref(), b"value");
             assert_eq!(*sequence, 1);
             assert_eq!(*expiration, None);
-            assert_eq!(*op_type, 0);
+            assert_eq!(*op_type, crate::sst::encoding::EntryType::Put);
         }
         other => panic!("expected value state, got {other:?}"),
     }
@@ -619,7 +619,7 @@ fn should_roundtrip_empty_value_when_sst_entry_is_put() -> MidgeResult<()> {
             assert_eq!(value.as_ref(), b"");
             assert_eq!(*sequence, 1);
             assert_eq!(*expiration, None);
-            assert_eq!(*op_type, 0);
+            assert_eq!(*op_type, crate::sst::encoding::EntryType::Put);
         }
         other => panic!("expected empty value state, got {other:?}"),
     }

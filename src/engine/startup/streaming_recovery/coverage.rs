@@ -142,8 +142,7 @@ impl ReplayCoverage {
                     || sequence == record.seq
                         && record.value.as_ref() == Some(&value)
                         && record.expiration == expiration
-                        && crate::wal::WalOpKind::from_wire_format(operation)
-                            .is_ok_and(|op| matches!(op.role(), WalOpRole::ValueWrite))
+                        && operation.is_value_write()
             }
             Some(KeyState::Tombstone(sequence)) => sequence > record.seq,
             Some(KeyState::Absent) | None => false,
