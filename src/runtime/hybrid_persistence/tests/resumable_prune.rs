@@ -649,6 +649,7 @@ fn finish_with_retained_manifest_admission(remote_metadata: bool) {
         Arc::new(crate::io::real::RealFs::new(&metadata_path).unwrap()),
         crate::config::RecoveryPolicy::default(),
         budget.clone(),
+        crate::runtime::MetadataPublicationLock::default(),
     )
     .with_progress(progress.clone());
     let mut attempts = 0;

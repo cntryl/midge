@@ -54,6 +54,7 @@ pub(crate) struct FlushPublishTask {
     pub recovery_policy: crate::config::RecoveryPolicy,
     pub hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
     pub cloud_metadata_storage: Option<Arc<crate::storage::cloud::CloudStorage>>,
+    pub metadata_publication_lock: crate::runtime::MetadataPublicationLock,
     pub lease_healthy: Option<Arc<AtomicBool>>,
     pub leader_store: Option<Arc<dyn crate::lease::LeaderStore>>,
     pub leader_holder_id: Option<String>,
@@ -672,7 +673,7 @@ fn mirror_control_metadata(
     cloud: &crate::storage::cloud::CloudStorage,
     local_manifest_sequence: u64,
 ) -> MidgeResult<()> {
-    let _publication_guard = cloud.lock_metadata_publication();
+    let _publication_guard = task.metadata_publication_lock.lock();
     for file_name in crate::metadata::files::CLOUD_MIRRORED {
         let path = crate::io::FsPath::new(*file_name);
         if !task.fs.exists(&path)? {
@@ -915,6 +916,7 @@ mod tests {
             recovery_policy: crate::config::RecoveryPolicy::Strict,
             hybrid_storage: Some(hybrid),
             cloud_metadata_storage: Some(control_cloud),
+            metadata_publication_lock: crate::runtime::MetadataPublicationLock::default(),
             lease_healthy: Some(Arc::new(AtomicBool::new(true))),
             leader_store: Some(leader_store),
             leader_holder_id: Some("flush-test".to_string()),

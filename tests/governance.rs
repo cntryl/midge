@@ -411,9 +411,9 @@ mod architecture_ladder {
     fn should_keep_cloud_adapter_callback_waits_in_one_helper() {
         // Arrange
         let source = std::fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/storage/cloud/mod.rs"),
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/storage/cloud/adapter.rs"),
         )
-        .expect("read storage/cloud/mod.rs");
+        .expect("read storage/cloud/adapter.rs");
         // One in the shared helper and one in the proof path, which reports its
         // own messages.
         let allowed = 2;
@@ -424,8 +424,49 @@ mod architecture_ladder {
         // Assert
         assert!(
             disconnect_arms <= allowed,
-            "{disconnect_arms} hand-written callback wait arms in storage/cloud/mod.rs \
+            "{disconnect_arms} hand-written callback wait arms in storage/cloud/adapter.rs \
              (allowed {allowed}): route adapter waits through await_cloud_event"
+        );
+    }
+
+    #[test]
+    fn should_keep_cloud_boundary_and_runtime_publication_owners_separate() {
+        // Arrange
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let module = std::fs::read_to_string(root.join("src/storage/cloud/mod.rs"))
+            .expect("read storage/cloud/mod.rs");
+        let backend = std::fs::read_to_string(root.join("src/storage/cloud/backend.rs"))
+            .expect("read storage/cloud/backend.rs");
+        let dispatcher = std::fs::read_to_string(root.join("src/storage/cloud/dispatcher.rs"))
+            .expect("read storage/cloud/dispatcher.rs");
+        let cloud_sources = rust_sources_under("src/storage/cloud");
+
+        // Act
+        let publication_owner_leaks: Vec<_> = cloud_sources
+            .iter()
+            .filter_map(|path| {
+                let source = std::fs::read_to_string(path).expect("read cloud source");
+                (source.contains("MetadataPublicationLock")
+                    || source.contains("metadata_publication_lock")
+                    || source.contains("lock_metadata_publication"))
+                .then(|| path.display().to_string())
+            })
+            .collect();
+
+        // Assert
+        assert!(backend.contains("pub trait CloudBackend"));
+        assert!(dispatcher.contains("pub struct CloudStorage"));
+        assert!(module.contains("mod backend;"));
+        assert!(module.contains("mod dispatcher;"));
+        assert!(!module.contains("pub trait CloudBackend"));
+        assert!(!module.contains("pub struct CloudStorage"));
+        assert!(
+            !backend.contains("cloud backend does not support GET"),
+            "core provider operations must remain required, not regain runtime unsupported defaults"
+        );
+        assert!(
+            publication_owner_leaks.is_empty(),
+            "metadata-publication serialization belongs to runtime, not cloud transport: {publication_owner_leaks:?}"
         );
     }
 

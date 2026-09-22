@@ -241,8 +241,9 @@ fn should_require_cloud_filename_allocation_when_compacting_in_salvage_mode(
         config,
         crate::runtime::event_loop::FlushWorkerMode::Inline,
     )?;
-    let _publication = cloud
-        .try_lock_metadata_publication()
+    let publication_lock = event_loop.metadata_publication_lock.clone();
+    let _publication = publication_lock
+        .try_lock()
         .expect("hold metadata publication");
 
     // Act

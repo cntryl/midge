@@ -194,6 +194,7 @@ impl EventLoop {
             recovery_policy: self.state.recovery_policy(),
             hybrid_storage: self.hybrid_storage.clone(),
             cloud_metadata_storage: self.cloud_metadata_storage.clone(),
+            metadata_publication_lock: self.metadata_publication_lock.clone(),
             lease_healthy: self.fencing.lease_healthy.clone(),
             leader_store: self.fencing.leader_store.clone(),
             leader_holder_id: self.fencing.leader_holder_id.clone(),

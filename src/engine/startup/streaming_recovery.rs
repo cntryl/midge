@@ -239,6 +239,7 @@ fn checkpoint_family(
             recovery_policy: state.recovery_policy(),
             hybrid_storage: config.hybrid_storage.clone(),
             cloud_metadata_storage: config.cloud_metadata_storage.clone(),
+            metadata_publication_lock: config.metadata_publication_lock.clone(),
             lease_healthy: config.lease_healthy.clone(),
             leader_store: config.leader_store.clone(),
             leader_holder_id: config.leader_holder_id.clone(),

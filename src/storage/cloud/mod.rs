@@ -30,7 +30,9 @@ pub(crate) mod range;
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]
-pub(crate) use test_support::forward_cloud_backend;
+pub(crate) use test_support::{
+    forward_cloud_backend, unsupported_cloud_backend, UnsupportedCloudBackend,
+};
 #[cfg(any(
     feature = "cloud-aws",
     feature = "cloud-azure",
@@ -53,9 +55,6 @@ pub(crate) use config::CloudWritePolicyConfig;
 use super::{StorageBackend, StorageCallback, StorageEvent, StorageObjectMetadata, StorageOutcome};
 #[cfg(test)]
 use crate::common::MidgeError;
-use parking_lot::{Mutex, MutexGuard};
-#[cfg(test)]
-use std::collections::HashMap;
 use std::sync::Arc;
 
 pub(crate) const REQUEST_TIMEOUT_HEADER: &str = "x-midge-internal-request-timeout-ms";
@@ -135,341 +134,22 @@ mod event;
 pub(crate) use event::object_match_precondition_headers;
 pub use event::{CloudCallback, CloudEvent, ObjectMetadata};
 
-/// Non-blocking cloud backend interface used by the engine.
-pub trait CloudBackend: Send + Sync + 'static {
-    /// Carry admission through a bounded read until the backend finishes.
-    /// Implementations whose callback can precede payload release must override
-    /// this method and attach the reservation to the underlying operation.
-    fn submit_get_range_with_reservation(
-        &self,
-        key: &str,
-        range: std::ops::Range<u64>,
-        expected: StorageObjectMetadata,
-        timeout: std::time::Duration,
-        reservation: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
-        callback: CloudCallback,
-    ) {
-        let start = range.start;
-        let end = range.end;
-        let Some(reservation) = reservation else {
-            self.submit_get_range_with_identity(key, start, end, expected, timeout, callback);
-            return;
-        };
-        match crate::storage::retained_callback::retain(callback.clone(), reservation) {
-            Ok(retained) => {
-                self.submit_get_range_with_identity(key, start, end, expected, timeout, retained);
-            }
-            Err(error) => {
-                let _ = callback.send(CloudEvent::GetRange {
-                    key: key.to_string(),
-                    start,
-                    end: Some(end),
-                    result: Err(CloudError::Protocol(format!(
-                        "retain range completion: {error}"
-                    ))),
-                });
-            }
-        }
-    }
-
-    /// Exact bounded read with an identity precondition; no whole-object fallback.
-    fn submit_get_range_with_identity(
-        &self,
-        key: &str,
-        start: u64,
-        end: u64,
-        _expected: StorageObjectMetadata,
-        _timeout: std::time::Duration,
-        callback: CloudCallback,
-    ) {
-        let _ = callback.send(CloudEvent::GetRange {
-            key: key.to_string(),
-            start,
-            end: Some(end),
-            result: Err(CloudError::Protocol(
-                "conditional range reads unsupported".into(),
-            )),
-        });
-    }
-
-    /// Override the default deadline applied to provider HTTP requests.
-    #[cfg(feature = "cloud-common")]
-    fn set_request_timeout(&self, _timeout: std::time::Duration) {}
-
-    /// Carry upload admission until the backend releases its payload. Native
-    /// providers can attach it to the transport; compatibility implementations
-    /// must signal completion only after their upload buffer is no longer used.
-    fn submit_put_with_reservation(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        reservation: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
-        callback: CloudCallback,
-    ) {
-        let Some(reservation) = reservation else {
-            self.submit_put(key, data, headers, callback);
-            return;
-        };
-        match crate::storage::retained_callback::retain(callback.clone(), reservation) {
-            Ok(retained) => self.submit_put(key, data, headers, retained),
-            Err(error) => {
-                let _ = callback.send(CloudEvent::Put {
-                    key: key.to_string(),
-                    result: Err(CloudError::Protocol(format!(
-                        "retain upload completion: {error}"
-                    ))),
-                });
-            }
-        }
-    }
-
-    /// Submit a PUT request for `key` with optional HTTP headers. Implementations
-    /// MUST honor headers (e.g. `If-None-Match`, `If-Match`) when supported by the
-    /// provider to allow conditional writes.
-    fn submit_put(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        callback: CloudCallback,
-    );
-    fn submit_get(&self, key: &str, callback: CloudCallback) {
-        let _ = callback.send(CloudEvent::Get {
-            key: key.to_string(),
-            result: Err(CloudError::Protocol(
-                "cloud backend does not support GET".to_string(),
-            )),
-        });
-    }
-    fn submit_get_with_metadata(&self, key: &str, callback: CloudCallback) {
-        let _ = callback.send(CloudEvent::GetWithMetadata {
-            key: key.to_string(),
-            result: Err(CloudError::Protocol(
-                "cloud backend does not support metadata-bearing GET".to_string(),
-            )),
-        });
-    }
-    /// Submit a ranged GET. `end` is an exclusive byte offset.
-    #[cfg(any(test, feature = "cloud-common"))]
-    fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback);
-    /// Submit an idempotent delete. Implementations must report success when
-    /// the target is already absent; conditional-precondition failures remain
-    /// errors.
-    fn submit_delete(&self, key: &str, _headers: Vec<(String, String)>, callback: CloudCallback) {
-        let _ = callback.send(CloudEvent::Delete {
-            key: key.to_string(),
-            result: Err(CloudError::Protocol(
-                "cloud backend does not support DELETE".to_string(),
-            )),
-        });
-    }
-    fn submit_list(&self, prefix: &str, callback: CloudCallback) {
-        let _ = callback.send(CloudEvent::List {
-            prefix: prefix.to_string(),
-            result: Err(CloudError::Protocol(
-                "cloud backend does not support LIST".to_string(),
-            )),
-        });
-    }
-    fn submit_head(&self, key: &str, callback: CloudCallback) {
-        let _ = callback.send(CloudEvent::Head {
-            key: key.to_string(),
-            result: Err(CloudError::Protocol(
-                "cloud backend does not support HEAD".to_string(),
-            )),
-        });
-    }
-
-    /// HEAD carrying internal headers, which is how the caller's deadline
-    /// reaches the provider. Backends that ignore headers keep the default.
-    fn submit_head_with_headers(
-        &self,
-        key: &str,
-        _headers: Vec<(String, String)>,
-        callback: CloudCallback,
-    ) {
-        self.submit_head(key, callback);
-    }
-
-    /// LIST carrying internal headers; see [`Self::submit_head_with_headers`].
-    fn submit_list_with_headers(
-        &self,
-        prefix: &str,
-        _headers: Vec<(String, String)>,
-        callback: CloudCallback,
-    ) {
-        self.submit_list(prefix, callback);
-    }
-}
+mod backend;
+pub use backend::CloudBackend;
 
 #[cfg(test)]
 mod mock;
 #[cfg(test)]
 pub use mock::MockCloudBackend;
 
-/// Namespace-aware dispatcher that forwards calls to the active backend.
-pub struct CloudStorage {
-    backend: Arc<dyn CloudBackend>,
-    namespace: String,
-    callback_timeout: std::time::Duration,
-    metadata_publication_lock: Mutex<()>,
-}
+mod dispatcher;
+pub use dispatcher::CloudStorage;
 
 mod proof;
 pub(crate) use proof::{
     blocking_cloud_object_proof, blocking_cloud_object_proof_within, validate_object_proof,
     CloudObjectProof,
 };
-
-impl CloudStorage {
-    #[cfg(test)]
-    pub fn new(backend: Arc<dyn CloudBackend>, namespace: String) -> Self {
-        Self::new_with_timeout(
-            backend,
-            namespace,
-            crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
-        )
-    }
-
-    #[cfg(any(test, feature = "cloud-common"))]
-    pub(crate) fn new_with_timeout(
-        backend: Arc<dyn CloudBackend>,
-        namespace: String,
-        callback_timeout: std::time::Duration,
-    ) -> Self {
-        Self {
-            backend,
-            namespace,
-            callback_timeout,
-            metadata_publication_lock: Mutex::new(()),
-        }
-    }
-
-    #[cfg(test)]
-    pub fn with_mock() -> Self {
-        let backend = Arc::new(MockCloudBackend::new());
-        Self::new(backend, "midge".to_string())
-    }
-
-    pub(crate) fn callback_timeout(&self) -> std::time::Duration {
-        self.callback_timeout
-    }
-
-    pub(crate) fn try_lock_metadata_publication(&self) -> Option<MutexGuard<'_, ()>> {
-        self.metadata_publication_lock.try_lock()
-    }
-
-    pub(crate) fn lock_metadata_publication_for(
-        &self,
-        timeout: std::time::Duration,
-    ) -> Option<MutexGuard<'_, ()>> {
-        self.metadata_publication_lock.try_lock_for(timeout)
-    }
-
-    pub(crate) fn lock_metadata_publication(&self) -> MutexGuard<'_, ()> {
-        self.metadata_publication_lock.lock()
-    }
-
-    fn full_path(&self, suffix: &str) -> String {
-        let namespace = self.namespace.trim_matches('/');
-        let suffix = suffix.trim_start_matches('/');
-        if namespace.is_empty() {
-            suffix.to_string()
-        } else if suffix.is_empty() {
-            namespace.to_string()
-        } else {
-            format!("{namespace}/{suffix}")
-        }
-    }
-
-    pub(crate) fn strip_namespace<'a>(&self, key: &'a str) -> &'a str {
-        let namespace = self.namespace.trim_matches('/');
-        if namespace.is_empty() {
-            return key;
-        }
-        key.strip_prefix(namespace)
-            .and_then(|rest| rest.strip_prefix('/'))
-            .unwrap_or(key)
-    }
-
-    pub fn submit_put(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        callback: CloudCallback,
-    ) {
-        let full_key = self.full_path(key);
-        self.backend.submit_put(&full_key, data, headers, callback);
-    }
-
-    pub fn submit_get(&self, key: &str, callback: CloudCallback) {
-        let full_key = self.full_path(key);
-        self.backend.submit_get(&full_key, callback);
-    }
-
-    pub fn submit_get_with_metadata(&self, key: &str, callback: CloudCallback) {
-        let full_key = self.full_path(key);
-        self.backend.submit_get_with_metadata(&full_key, callback);
-    }
-
-    #[cfg(test)]
-    pub fn submit_get_range(
-        &self,
-        key: &str,
-        start: u64,
-        end: Option<u64>,
-        callback: CloudCallback,
-    ) {
-        let full_key = self.full_path(key);
-        self.backend
-            .submit_get_range(&full_key, start, end, callback);
-    }
-
-    /// Submit an unconditional DELETE bounded by this adapter's callback
-    /// timeout.
-    pub fn submit_delete(&self, key: &str, callback: CloudCallback) {
-        let mut headers = Vec::new();
-        set_request_timeout_header(&mut headers, self.callback_timeout);
-        self.submit_delete_with_headers(key, headers, callback);
-    }
-
-    pub fn submit_delete_with_headers(
-        &self,
-        key: &str,
-        headers: Vec<(String, String)>,
-        callback: CloudCallback,
-    ) {
-        let full_key = self.full_path(key);
-        self.backend.submit_delete(&full_key, headers, callback);
-    }
-
-    pub fn submit_list(&self, prefix: &str, callback: CloudCallback) {
-        let mut headers = Vec::new();
-        set_request_timeout_header(&mut headers, self.callback_timeout);
-        let full_prefix = self.full_path(prefix);
-        self.backend
-            .submit_list_with_headers(&full_prefix, headers, callback);
-    }
-
-    pub fn submit_head(&self, key: &str, callback: CloudCallback) {
-        self.submit_head_within(key, self.callback_timeout, callback);
-    }
-
-    pub fn submit_head_within(
-        &self,
-        key: &str,
-        timeout: std::time::Duration,
-        callback: CloudCallback,
-    ) {
-        let mut headers = Vec::new();
-        set_request_timeout_header(&mut headers, timeout);
-        let full_key = self.full_path(key);
-        self.backend
-            .submit_head_with_headers(&full_key, headers, callback);
-    }
-}
 
 pub(crate) fn is_not_found_error(error: &CloudError) -> bool {
     error.is_not_found()

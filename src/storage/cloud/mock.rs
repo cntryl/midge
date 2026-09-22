@@ -2,6 +2,8 @@
 
 #[allow(clippy::wildcard_imports)]
 use super::*;
+use parking_lot::Mutex;
+use std::collections::HashMap;
 
 fn usize_to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)

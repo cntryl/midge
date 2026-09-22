@@ -101,6 +101,14 @@ pub mod __internal {
     pub mod sst {
         pub use crate::sst::*;
     }
+    /// Cloud-boundary types exposed only to this crate's compile-contract
+    /// tests. They remain outside Midge's supported public API.
+    pub mod storage {
+        pub mod cloud {
+            #[doc(inline)]
+            pub use crate::storage::cloud::{CloudBackend, CloudCallback};
+        }
+    }
     pub mod types {
         pub use crate::types::*;
     }

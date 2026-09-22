@@ -8,6 +8,14 @@ use std::sync::{mpsc, Mutex};
 struct PendingPut(Mutex<Option<(Vec<u8>, CloudCallback)>>);
 
 impl CloudBackend for PendingPut {
+    crate::storage::cloud::unsupported_cloud_backend!(
+        submit_get,
+        submit_get_with_metadata,
+        submit_delete,
+        submit_list,
+        submit_head,
+    );
+
     fn submit_put(
         &self,
         _key: &str,

@@ -91,7 +91,7 @@ use super::read_snapshot::ReadSnapshot;
 use super::snapshot_cache::{CfSnapshotData, PublishedSnapshot, SnapshotCache};
 use super::sst_read_view::SstReadViewCache;
 use super::state::RuntimeState;
-use super::{ResponseRouter, RuntimeMsg, RuntimeResponse};
+use super::{MetadataPublicationLock, ResponseRouter, RuntimeMsg, RuntimeResponse};
 use crate::runtime::actors::flush::FlushWorkerResult;
 
 struct RecoveredCloudWalConfig {
@@ -152,6 +152,7 @@ pub struct EventLoop {
     pub(super) hybrid_storage_events:
         Option<crossbeam::channel::Receiver<crate::storage::StorageEvent>>,
     pub(super) cloud_metadata_storage: Option<Arc<crate::storage::cloud::CloudStorage>>,
+    pub(super) metadata_publication_lock: MetadataPublicationLock,
     pub(super) trace_enabled: bool,
     pub(super) loop_debug: bool,
     pub(super) loop_debug_wakes: u64,
@@ -293,6 +294,7 @@ impl EventLoop {
             hybrid_storage: None,
             hybrid_storage_events: config.hybrid_storage_events.clone(),
             cloud_metadata_storage: config.cloud_metadata_storage.clone(),
+            metadata_publication_lock: config.metadata_publication_lock.clone(),
             trace_enabled,
             loop_debug: std::env::var_os("MIDGE_LOOP_DEBUG").is_some(),
             loop_debug_wakes: 0,
@@ -975,7 +977,7 @@ impl EventLoop {
         // cannot stop a stale holder before the new one publishes. Validate
         // writer authority before overwriting the authoritative mirror.
         self.validate_runtime_writer_lease_within(deadline)?;
-        let _publication_guard = cloud.try_lock_metadata_publication().ok_or_else(|| {
+        let _publication_guard = self.metadata_publication_lock.try_lock().ok_or_else(|| {
             crate::common::MidgeError::Busy(
                 "cloud metadata publication is already in progress".to_string(),
             )

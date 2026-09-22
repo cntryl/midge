@@ -59,6 +59,13 @@ impl DelayedRecoveryBackend {
 }
 
 impl crate::storage::cloud::CloudBackend for DelayedRecoveryBackend {
+    crate::storage::cloud::unsupported_cloud_backend!(
+        submit_get_with_metadata,
+        submit_delete,
+        submit_list,
+        submit_head,
+    );
+
     fn submit_put(
         &self,
         key: &str,

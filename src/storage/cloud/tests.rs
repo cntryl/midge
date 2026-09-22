@@ -18,6 +18,8 @@ struct DelayedMissingGetBackend;
 struct DroppedHeadCallbackBackend;
 
 impl CloudBackend for ConditionalPutOnlyBackend {
+    crate::storage::cloud::unsupported_cloud_backend!(submit_get_with_metadata);
+
     fn submit_put(
         &self,
         key: &str,
@@ -87,6 +89,8 @@ impl CloudBackend for ConditionalPutOnlyBackend {
 }
 
 impl CloudBackend for DelayedMissingGetBackend {
+    crate::storage::cloud::unsupported_cloud_backend!(submit_delete, submit_list);
+
     fn submit_put(
         &self,
         key: &str,
@@ -148,6 +152,13 @@ impl CloudBackend for DelayedMissingGetBackend {
 }
 
 impl CloudBackend for DroppedHeadCallbackBackend {
+    crate::storage::cloud::unsupported_cloud_backend!(
+        submit_get,
+        submit_get_with_metadata,
+        submit_delete,
+        submit_list,
+    );
+
     fn submit_put(
         &self,
         key: &str,
@@ -477,6 +488,8 @@ struct ReplacingGetBackend {
 }
 
 impl CloudBackend for ReplacingGetBackend {
+    crate::storage::cloud::unsupported_cloud_backend!(submit_list);
+
     crate::storage::cloud::forward_cloud_backend!(inner; submit_put);
 
     fn submit_get(&self, key: &str, callback: CloudCallback) {
@@ -1474,6 +1487,12 @@ impl HeaderRecordingBackend {
 }
 
 impl CloudBackend for HeaderRecordingBackend {
+    crate::storage::cloud::unsupported_cloud_backend!(
+        submit_get_with_metadata,
+        submit_list,
+        submit_head,
+    );
+
     fn submit_put(
         &self,
         key: &str,

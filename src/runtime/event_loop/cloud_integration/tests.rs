@@ -8217,6 +8217,7 @@ fn should_defer_metadata_cleanup_before_provider_reads_when_shared_budget_is_exh
         el.state.fs.clone(),
         el.state.recovery_policy(),
         budget.clone(),
+        el.metadata_publication_lock.clone(),
     );
     let invoked = AtomicBool::new(false);
 
@@ -8333,13 +8334,14 @@ fn should_defer_metadata_cleanup_when_publication_lock_outlives_deadline(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());
-    let held = cloud.lock_metadata_publication();
+    let held = el.metadata_publication_lock.lock();
     let snapshot = crate::runtime::hybrid_persistence::CloudMetadataPruneSnapshot::new(
         cloud.clone(),
         el.state.db_path.clone(),
         el.state.fs.clone(),
         el.state.recovery_policy(),
         crate::common::resource_budget::ResourceBudget::new(1024 * 1024),
+        el.metadata_publication_lock.clone(),
     );
     let deadline = crate::common::OperationDeadline::from_budget(Duration::from_millis(200));
 
@@ -8479,6 +8481,10 @@ impl crate::storage::cloud::CloudBackend for SilentBackend {
         self.retain(callback);
     }
 
+    fn submit_get_with_metadata(&self, _key: &str, callback: crate::storage::cloud::CloudCallback) {
+        self.retain(callback);
+    }
+
     fn submit_get_range(
         &self,
         _key: &str,
@@ -8490,6 +8496,19 @@ impl crate::storage::cloud::CloudBackend for SilentBackend {
     }
 
     fn submit_head(&self, _key: &str, callback: crate::storage::cloud::CloudCallback) {
+        self.retain(callback);
+    }
+
+    fn submit_delete(
+        &self,
+        _key: &str,
+        _headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        self.retain(callback);
+    }
+
+    fn submit_list(&self, _prefix: &str, callback: crate::storage::cloud::CloudCallback) {
         self.retain(callback);
     }
 }
