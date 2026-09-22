@@ -437,7 +437,7 @@ pub(crate) fn validate_range_tombstone_size(
     let encoded_len = start_len
         .checked_add(end_len)
         .and_then(|size| size.checked_add(20));
-    if encoded_len.is_none_or(|size| size > crate::sst::compression::MAX_DECOMPRESSED_BLOCK_SIZE) {
+    if encoded_len.is_none_or(|size| size > crate::codec::MAX_DECOMPRESSED_BLOCK_SIZE) {
         return Err(crate::common::MidgeError::ResourceLimit(
             "SST range tombstone exceeds the 64 MiB decoded block limit".to_string(),
         ));

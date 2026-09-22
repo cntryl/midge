@@ -77,7 +77,7 @@ pub(crate) fn validate_entry_size(key_len: usize, value_len: usize) -> MidgeResu
     let size = header
         .checked_add(key_len)
         .and_then(|size| size.checked_add(value_len));
-    if size.is_none_or(|size| size > crate::sst::compression::MAX_DECOMPRESSED_BLOCK_SIZE) {
+    if size.is_none_or(|size| size > crate::codec::MAX_DECOMPRESSED_BLOCK_SIZE) {
         return Err(MidgeError::ResourceLimit(format!(
             "SST entry with {key_len} key bytes and {value_len} value bytes exceeds the 64 MiB decoded block limit"
         )));
@@ -387,7 +387,7 @@ mod tests {
     fn should_bound_range_admission_by_complete_encoded_size() {
         use crate::sst::types::validate_range_tombstone_size;
         // Arrange
-        let limit = crate::sst::compression::MAX_DECOMPRESSED_BLOCK_SIZE;
+        let limit = crate::codec::MAX_DECOMPRESSED_BLOCK_SIZE;
         let half = limit / 2;
         // Act
         let accepted = validate_range_tombstone_size(half, half - 20);
@@ -403,7 +403,7 @@ mod tests {
     #[test]
     fn should_admit_only_entries_within_decoded_limit_including_extended_headers() {
         // Arrange
-        let limit = crate::sst::compression::MAX_DECOMPRESSED_BLOCK_SIZE;
+        let limit = crate::codec::MAX_DECOMPRESSED_BLOCK_SIZE;
         for key_len in [0, 3, 65_535, 65_536] {
             let header = if key_len > 65_535 { 34 } else { 26 };
             let value_len = limit - header - key_len;

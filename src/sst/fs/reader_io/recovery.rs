@@ -93,14 +93,14 @@ impl SstFileIo {
             ));
         }
         let raw = &buffer[4..];
-        let decoded_size = crate::sst::compression::decompressed_size_with_trailer(raw)?;
+        let decoded_size = crate::codec::decompressed_size_with_trailer(raw)?;
         let reservation = budget.reserve(
             decoded_size
                 .saturating_add(std::mem::size_of::<ReservedBytes>())
                 .saturating_add(std::mem::size_of::<usize>()),
             "recovery decoded block",
         )?;
-        let decoded = crate::sst::compression::decompress_block_with_trailer(raw)?;
+        let decoded = crate::codec::decompress_block_with_trailer(raw)?;
         if decoded.len() > decoded_size {
             return Err(MidgeError::Corruption(
                 "recovery block exceeded declared decoded size".into(),

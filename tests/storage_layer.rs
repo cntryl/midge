@@ -753,7 +753,7 @@ mod streaming_scan_hardening {
 }
 
 mod compression_compatibility {
-    use cntryl_midge::__internal::sst::compression::{
+    use cntryl_midge::__internal::codec::{
         compress_block_with_trailer, decompress_block_with_trailer, CompressionAlgo,
         CompressionPolicy, BLOCK_TRAILER_SIZE,
     };

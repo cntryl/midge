@@ -109,7 +109,7 @@ impl FlushActor {
     pub fn new(
         sst_dir: &Path,
         memory_mode: bool,
-        compression_policy: crate::sst::compression::CompressionPolicy,
+        compression_policy: crate::codec::CompressionPolicy,
         completion_tx: crossbeam::channel::Sender<FlushWorkerResult>,
     ) -> MidgeResult<Self> {
         Self::new_with_memory_limit(
@@ -124,7 +124,7 @@ impl FlushActor {
     pub(crate) fn new_with_memory_limit(
         sst_dir: &Path,
         memory_mode: bool,
-        compression_policy: crate::sst::compression::CompressionPolicy,
+        compression_policy: crate::codec::CompressionPolicy,
         completion_tx: crossbeam::channel::Sender<FlushWorkerResult>,
         memory_bytes: usize,
     ) -> MidgeResult<Self> {
@@ -874,7 +874,7 @@ mod tests {
         let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new(&db_path)?);
         let sst_factory = Arc::new(
             crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)
-                .with_compression_policy(crate::sst::compression::CompressionPolicy::default()),
+                .with_compression_policy(crate::codec::CompressionPolicy::default()),
         );
         let file_meta = FlushActor::write_memtable_to_staging(&sst_factory, &mut build_task)?;
 
@@ -1255,7 +1255,7 @@ mod tests {
         let mut actor = FlushActor::new(
             directory.path(),
             false,
-            crate::sst::compression::CompressionPolicy::default(),
+            crate::codec::CompressionPolicy::default(),
             completion_tx,
         )?;
 
@@ -1275,7 +1275,7 @@ mod tests {
         let actor = FlushActor::new(
             Path::new("/unused"),
             true,
-            crate::sst::compression::CompressionPolicy::default(),
+            crate::codec::CompressionPolicy::default(),
             completion_tx,
         )?;
 

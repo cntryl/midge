@@ -1,7 +1,7 @@
 use super::*;
+use crate::codec::{CompressionAlgo, CompressionPolicy, BLOCK_TRAILER_SIZE};
 use crate::io::traits::{DirEntry, Metadata};
 use crate::io::{Durability, File, Fs, FsError, FsPath, FsResult, OpenOptions};
-use crate::sst::compression::{CompressionAlgo, CompressionPolicy, BLOCK_TRAILER_SIZE};
 use crate::sst::traits::{SstFactory, SstReader, SstStateReader};
 use crate::types::EntryType;
 use std::collections::HashSet;

@@ -35,6 +35,9 @@
 mod cloud_layout;
 #[doc(hidden)]
 #[cfg_attr(not(feature = "internal-testing"), allow(dead_code, unused_imports))]
+mod codec;
+#[doc(hidden)]
+#[cfg_attr(not(feature = "internal-testing"), allow(dead_code, unused_imports))]
 mod common;
 #[doc(hidden)]
 #[cfg_attr(not(feature = "internal-testing"), allow(dead_code, unused_imports))]
@@ -82,6 +85,9 @@ mod engine;
 #[cfg(feature = "internal-testing")]
 #[doc(hidden)]
 pub mod __internal {
+    pub mod codec {
+        pub use crate::codec::*;
+    }
     pub mod common {
         pub use crate::common::*;
     }

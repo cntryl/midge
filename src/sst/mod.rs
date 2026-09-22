@@ -32,7 +32,6 @@
 
 pub mod bloom;
 pub mod cache;
-pub mod compression;
 pub mod encoding;
 pub mod fs;
 pub(crate) mod identity;

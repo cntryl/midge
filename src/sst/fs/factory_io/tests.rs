@@ -197,9 +197,7 @@ fn should_produce_identical_bytes_when_same_entries_written_via_create_and_creat
 ) -> MidgeResult<()> {
     // Arrange
     let factory = FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096)
-        .with_compression_policy(CompressionPolicy::Fixed(
-            crate::sst::compression::CompressionAlgo::Lz4,
-        ));
+        .with_compression_policy(CompressionPolicy::Fixed(crate::codec::CompressionAlgo::Lz4));
     let entries = (0_u64..192)
         .map(|index| {
             let key = format!("account/customer/region/{index:04}").into_bytes();
@@ -342,7 +340,7 @@ fn should_stream_flush_larger_than_its_shared_buffer_allowance() -> MidgeResult<
     )
     .with_compaction_scratch_directory(directory.path().to_path_buf())
     .with_compression_policy(CompressionPolicy::Fixed(
-        crate::sst::compression::CompressionAlgo::None,
+        crate::codec::CompressionAlgo::None,
     ));
     let budget = crate::common::resource_budget::ResourceBudget::new(1024 * 1024);
     let mut writer = factory.create_for_flush(budget.clone())?;
@@ -481,7 +479,7 @@ fn should_release_compaction_reservations_when_legacy_entry_exceeds_budget() -> 
     let factory = FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
     let budget = crate::common::resource_budget::ResourceBudget::new(1024 * 1024);
     let mut writer = factory.create_for_compaction(budget.clone())?;
-    let legacy_value = vec![b'v'; crate::sst::compression::MAX_DECOMPRESSED_BLOCK_SIZE];
+    let legacy_value = vec![b'v'; crate::codec::MAX_DECOMPRESSED_BLOCK_SIZE];
     // Act
     let result =
         writer.add_sorted_with_meta(b"legacy", Some(&legacy_value), 7, EntryType::Put, None);
@@ -515,7 +513,7 @@ fn should_reject_unrepresentable_compressed_block_length_before_prefix_encoding(
 fn should_bound_final_file_size_when_point_indexes_and_compression_are_present() -> MidgeResult<()>
 {
     // Arrange
-    use crate::sst::compression::CompressionAlgo;
+    use crate::codec::CompressionAlgo;
     for algorithm in [
         CompressionAlgo::None,
         CompressionAlgo::Lz4,
@@ -578,7 +576,7 @@ fn should_bound_encoded_output_when_range_tombstones_dominate_the_sst() -> Midge
     // Arrange
     let fs = Arc::new(crate::io::MockFs::new());
     let factory = FsSstFactoryIo::new(fs, 4096).with_compression_policy(CompressionPolicy::Fixed(
-        crate::sst::compression::CompressionAlgo::None,
+        crate::codec::CompressionAlgo::None,
     ));
     for streaming in [false, true] {
         let mut writer = factory.create()?;

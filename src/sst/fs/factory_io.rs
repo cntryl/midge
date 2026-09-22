@@ -9,7 +9,7 @@ use std::sync::Arc;
 use self::sink::BlockSink;
 use crate::io::Fs;
 
-use crate::sst::compression::CompressionPolicy;
+use crate::codec::CompressionPolicy;
 use crate::types::{EntryType, RangeTombstone};
 
 /// SST factory that uses the `io::Fs` abstraction.
@@ -128,7 +128,7 @@ pub(crate) fn write_legacy_oversized_uncompressed_sst(
 ) -> MidgeResult<()> {
     let mut legacy = FsSstWriter::new(
         fs,
-        CompressionPolicy::Fixed(crate::sst::compression::CompressionAlgo::None),
+        CompressionPolicy::Fixed(crate::codec::CompressionAlgo::None),
         4096,
     );
     legacy.entries.push(PendingEntry {

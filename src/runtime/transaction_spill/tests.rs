@@ -74,7 +74,7 @@ fn should_hold_spill_disk_charge_through_commit_source_until_files_are_removed()
 fn should_reject_oversized_range_before_staging_or_spilling() -> MidgeResult<()> {
     // Arrange
     let dir = tempfile::tempdir()?;
-    let limit = crate::sst::compression::MAX_DECOMPRESSED_BLOCK_SIZE;
+    let limit = crate::codec::MAX_DECOMPRESSED_BLOCK_SIZE;
     for (start_len, end_len) in [(limit, 1), (1, limit), (limit / 2, limit / 2)] {
         let pool = Arc::new(TransactionMemoryPool::new(1024));
         let mut writes = TransactionWriteSet::new(pool.clone(), dir.path(), false, 1);

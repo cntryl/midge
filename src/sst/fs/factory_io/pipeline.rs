@@ -264,17 +264,14 @@ impl FsSstWriter {
     }
 
     pub(super) fn clamp_block_size(block_size: usize) -> usize {
-        block_size.clamp(
-            4 * 1024,
-            crate::sst::compression::MAX_DECOMPRESSED_BLOCK_SIZE,
-        )
+        block_size.clamp(4 * 1024, crate::codec::MAX_DECOMPRESSED_BLOCK_SIZE)
     }
 
     pub(super) fn encode_readable_block(
         bytes: &[u8],
         policy: &CompressionPolicy,
     ) -> MidgeResult<bytes::Bytes> {
-        use crate::sst::compression::{
+        use crate::codec::{
             compress_block_with_trailer, CompressionAlgo, MAX_DECOMPRESSED_BLOCK_SIZE,
         };
         // Legacy raw blocks can exceed the compressed decoder's ceiling. Keep

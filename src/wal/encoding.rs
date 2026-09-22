@@ -307,13 +307,12 @@ fn encode_into_inner(record: &WalRecord, buf: &mut Vec<u8>) -> MidgeResult<()> {
             )));
         }
         // Preserve Some(empty) distinctly from None by always emitting VALUE when present.
-        let (write_val, comp_byte) =
-            if v.len() < crate::sst::compression::MIN_COMPRESSION_INPUT_BYTES {
-                (EncodedValue::Borrowed(v.as_ref()), None)
-            } else {
-                let (value, comp_byte) = crate::sst::compression::compress_wal_value(v);
-                (EncodedValue::Owned(value), comp_byte)
-            };
+        let (write_val, comp_byte) = if v.len() < crate::codec::MIN_COMPRESSION_INPUT_BYTES {
+            (EncodedValue::Borrowed(v.as_ref()), None)
+        } else {
+            let (value, comp_byte) = crate::codec::compress_wal_value(v);
+            (EncodedValue::Owned(value), comp_byte)
+        };
         put_tlv(buf, tags::VALUE, write_val.as_slice())?;
         // COMPRESSION only ever describes what the compressor actually did to
         // this VALUE. It is never taken from the caller, so the tag cannot
@@ -517,8 +516,7 @@ pub fn decode(mut bytes: impl Buf) -> MidgeResult<WalRecord> {
     // Decompress value if a compression tag is present
     let value = match view.value {
         Some(raw_val) => {
-            let decompressed =
-                crate::sst::compression::decompress_wal_value(raw_val, view.compression)?;
+            let decompressed = crate::codec::decompress_wal_value(raw_val, view.compression)?;
             Some(decompressed)
         }
         None => None,
@@ -1467,7 +1465,7 @@ mod tests {
         // derived from the compressor's own result — a caller cannot supply
         // it — so a raw value must never be described as compressed.
         let raw_value = Bytes::from_static(b"v");
-        assert!(raw_value.len() < crate::sst::compression::MIN_COMPRESSION_INPUT_BYTES);
+        assert!(raw_value.len() < crate::codec::MIN_COMPRESSION_INPUT_BYTES);
         let compressible_value = Bytes::from(vec![b'v'; 8192]);
         let raw_record = WalRecord::new(
             WalOpKind::Put,

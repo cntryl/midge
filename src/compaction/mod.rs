@@ -164,9 +164,7 @@ mod tests {
     #[test]
     fn should_compact_legacy_oversized_uncompressed_entry_without_losing_readability(
     ) -> MidgeResult<()> {
-        use crate::sst::compression::{
-            CompressionAlgo, CompressionPolicy, MAX_DECOMPRESSED_BLOCK_SIZE,
-        };
+        use crate::codec::{CompressionAlgo, CompressionPolicy, MAX_DECOMPRESSED_BLOCK_SIZE};
 
         // Arrange: reproduce the pre-admission writer's on-disk bytes directly.
         let dir = tempdir()?;
@@ -317,9 +315,7 @@ mod tests {
         let dir = tempdir()?;
         let fs = std::sync::Arc::new(crate::io::RealFs::new(dir.path())?);
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096).with_compression_policy(
-            crate::sst::compression::CompressionPolicy::Fixed(
-                crate::sst::compression::CompressionAlgo::None,
-            ),
+            crate::codec::CompressionPolicy::Fixed(crate::codec::CompressionAlgo::None),
         );
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(99);
         plan.target_sst_size = 128 * 1024;
@@ -415,9 +411,7 @@ mod tests {
         let dir = tempdir()?;
         let fs = std::sync::Arc::new(crate::io::RealFs::new(dir.path())?);
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096).with_compression_policy(
-            crate::sst::compression::CompressionPolicy::Fixed(
-                crate::sst::compression::CompressionAlgo::None,
-            ),
+            crate::codec::CompressionPolicy::Fixed(crate::codec::CompressionAlgo::None),
         );
         let mut writer = factory.create()?;
         for index in 0..100u32 {
@@ -1483,7 +1477,7 @@ mod tests {
         let temp_dir = tempdir()?;
         let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096)
-            .with_compression_policy(crate::sst::compression::CompressionPolicy::None);
+            .with_compression_policy(crate::codec::CompressionPolicy::None);
         let mut input = factory.create()?;
         let value = vec![b'v'; 256];
         let keys = (0..512u64)

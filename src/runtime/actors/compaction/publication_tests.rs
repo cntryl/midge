@@ -15,8 +15,8 @@ fn should_retain_compaction_partition_when_upload_workspace_cannot_be_admitted()
     let path = directory.path().join("partition.sst");
     let factory =
         crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::RealFs::new(directory.path())?), 4096)
-            .with_compression_policy(crate::sst::compression::CompressionPolicy::Fixed(
-                crate::sst::compression::CompressionAlgo::None,
+            .with_compression_policy(crate::codec::CompressionPolicy::Fixed(
+                crate::codec::CompressionAlgo::None,
             ));
     let mut writer = factory.create()?;
     for key in 0_u64..64 {
@@ -171,8 +171,8 @@ fn should_roll_over_remote_compaction_outputs_to_leave_room_for_upload_workspace
             Arc::new(crate::io::RealFs::new(directory.path())?),
             4096,
         )
-        .with_compression_policy(crate::sst::compression::CompressionPolicy::Fixed(
-            crate::sst::compression::CompressionAlgo::None,
+        .with_compression_policy(crate::codec::CompressionPolicy::Fixed(
+            crate::codec::CompressionAlgo::None,
         ));
         let mut writer = factory.create()?;
         for key in 0_u64..64 {

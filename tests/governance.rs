@@ -9,7 +9,7 @@ mod coverage_manifests {
     //! Internal `FsError` coverage lives in `src/io/traits.rs` unit tests because the
     //! filesystem module is intentionally private to library consumers.
 
-    use cntryl_midge::__internal::sst::compression::{CompressionAlgo, CompressionPolicy};
+    use cntryl_midge::__internal::codec::{CompressionAlgo, CompressionPolicy};
     use cntryl_midge::{
         AzureCredentialSource, DurabilityPolicy, Engine, GcsCredentialSource,
         HybridStorageBudgetSnapshot, LocalStorageUsage, MidgeError, OpenOptions, RecoveryPolicy,

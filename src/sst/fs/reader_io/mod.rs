@@ -279,13 +279,13 @@ impl SstRawVersionScan {
             ));
         }
         let raw = &buffer[4..];
-        let decompressed_size = crate::sst::compression::decompressed_size_with_trailer(raw)?;
+        let decompressed_size = crate::codec::decompressed_size_with_trailer(raw)?;
         let decompressed_reservation = self
             .budget
             .as_ref()
             .map(|budget| budget.reserve(decompressed_size, "decompressed SST block"))
             .transpose()?;
-        let block = crate::sst::compression::decompress_block_with_trailer(raw)?;
+        let block = crate::codec::decompress_block_with_trailer(raw)?;
         if block.len() > decompressed_size {
             return Err(MidgeError::Corruption(
                 "decoded SST block exceeded its declared size".into(),
