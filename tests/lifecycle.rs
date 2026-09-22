@@ -1052,7 +1052,11 @@ mod solid_cleanup {
         assert!(provider_config.contains("pub enum S3CredentialSource"));
         assert!(provider_config.contains("pub enum AzureCredentialSource"));
         assert!(provider_config.contains("pub enum GcsCredentialSource"));
-        assert!(provider_module.contains("pub(crate) use crate::config::CloudProviderConfig"));
+        // storage consumes the config-owned type where it needs it. It must not
+        // re-export it, which would make storage look like the owner; that
+        // direction is pinned by
+        // governance::should_import_config_types_directly_when_storage_needs_them.
+        assert!(provider_module.contains("use crate::config::CloudProviderConfig"));
         assert!(provider_config.contains("impl CloudProviderConfig"));
     }
 
@@ -1126,7 +1130,10 @@ mod solid_cleanup {
 
     #[test]
     fn should_keep_moved_config_types_out_of_lower_layers_engine_imports() {
-        // Arrange
+        // Arrange: these lower layers must reach config types through the
+        // config layer that owns them, never back up through the engine.
+        // Naming crate::config directly is the correct direction and is not
+        // forbidden here.
         let files = [
             "src/metadata/persistence.rs",
             "src/runtime/intent_persistence.rs",
@@ -1147,10 +1154,6 @@ mod solid_cleanup {
             "use crate::engine::api::CloudProviderConfig",
             "crate::engine::api::AzureCredentialSource",
             "crate::engine::api::GcsCredentialSource",
-            "crate::config::CloudProviderConfig",
-            "crate::config::AzureCredentialSource",
-            "crate::config::GcsCredentialSource",
-            "crate::config::S3CredentialSource",
         ];
 
         // Act / Assert
