@@ -9,6 +9,8 @@ use super::super::state::RuntimeState;
 use crate::common::{MidgeError, MidgeResult};
 use crate::compaction::{Compactor, LeveledCompactionConfig};
 use crate::runtime::{next_request_id, RuntimeMsg};
+#[cfg(test)]
+use crate::sst::encoding::EntryType;
 use crate::sst::SstFactory;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -1103,7 +1105,7 @@ mod tests {
             key: &[u8],
             value: Option<&[u8]>,
             seq: u64,
-            op_type: u8,
+            op_type: EntryType,
             expiration: Option<u64>,
         ) -> MidgeResult<()> {
             self.inner
@@ -1115,7 +1117,7 @@ mod tests {
             key: &[u8],
             value: Option<&[u8]>,
             seq: u64,
-            op_type: u8,
+            op_type: EntryType,
             expiration: Option<u64>,
         ) -> MidgeResult<()> {
             self.inner
@@ -1553,7 +1555,13 @@ mod tests {
             Arc::new(crate::sst::FsSstFactoryIo::new(real_fs, 4096));
         let mut input_writer = delegate.create().expect("create input SST writer");
         input_writer
-            .add_with_meta(b"key", Some(b"authoritative value"), 1, 0, None)
+            .add_with_meta(
+                b"key",
+                Some(b"authoritative value"),
+                1,
+                EntryType::Put,
+                None,
+            )
             .expect("write input value");
         crate::sst::fs::finish_writer_to_path(input_writer, &input_path)
             .expect("finalize input SST");

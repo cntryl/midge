@@ -3,6 +3,8 @@
 use super::{BlockHandle, SstFileIo};
 use crate::common::resource_budget::{ResourceBudget, ResourceReservation};
 use crate::common::{MidgeError, MidgeResult};
+#[cfg(test)]
+use crate::sst::encoding::EntryType;
 use bytes::Bytes;
 use std::sync::{Arc, Mutex};
 
@@ -130,7 +132,7 @@ mod tests {
         let factory = crate::sst::FsSstFactoryIo::new(fs.clone(), 128);
         let mut writer = factory.create()?;
         for key in [b"a", b"z"] {
-            writer.add_with_meta(key, Some(&[7; 4096]), 1, 0, None)?;
+            writer.add_with_meta(key, Some(&[7; 4096]), 1, EntryType::Put, None)?;
         }
         std::fs::write(dir.path().join("blocks.sst"), writer.finish_bytes()?)?;
         let budget = ResourceBudget::new(128 * 1024);
@@ -164,7 +166,7 @@ mod tests {
         let fs = Arc::new(crate::io::RealFs::new(dir.path())?);
         let factory = crate::sst::FsSstFactoryIo::new(fs.clone(), 128);
         let mut writer = factory.create()?;
-        writer.add_with_meta(b"key", Some(&vec![7; 64 * 1024]), 1, 0, None)?;
+        writer.add_with_meta(b"key", Some(&vec![7; 64 * 1024]), 1, EntryType::Put, None)?;
         std::fs::write(dir.path().join("large.sst"), writer.finish_bytes()?)?;
         let budget = ResourceBudget::new(16 * 1024);
         let reader = SstFileIo::open_for_recovery("large.sst", fs, budget.clone())?;
@@ -191,7 +193,7 @@ mod tests {
         let fs = Arc::new(crate::io::RealFs::new(dir.path())?);
         let factory = crate::sst::FsSstFactoryIo::new(fs.clone(), 128);
         let mut writer = factory.create()?;
-        writer.add_with_meta(b"key", Some(b"value"), 1, 0, None)?;
+        writer.add_with_meta(b"key", Some(b"value"), 1, EntryType::Put, None)?;
         let mut bytes = writer.finish_bytes()?;
         let path = dir.path().join("corrupt.sst");
         std::fs::write(&path, &bytes)?;

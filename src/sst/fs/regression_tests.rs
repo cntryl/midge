@@ -1,4 +1,5 @@
 use crate::sst::compression::{CompressionAlgo, CompressionPolicy};
+use crate::sst::encoding::EntryType;
 use crate::sst::fs::FsSstFactoryIo;
 use crate::sst::traits::SstFactory;
 use std::{path::Path, sync::Arc};
@@ -10,7 +11,7 @@ fn should_read_default_sequence_after_writer_add() {
     let factory = FsSstFactoryIo::new(Arc::new(crate::io::RealFs::new(dir.path()).unwrap()), 4096);
     let mut writer = factory.create().unwrap();
     writer
-        .add_with_meta(b"key", Some(b"value"), 0, 0, None)
+        .add_with_meta(b"key", Some(b"value"), 0, EntryType::Put, None)
         .unwrap();
     crate::sst::fs::finish_writer_to_path(writer, &dir.path().join("probe.sst")).unwrap();
     // Act
@@ -27,12 +28,14 @@ fn should_read_empty_key_when_trie_has_deep_leftmost_branch() {
     let factory = FsSstFactoryIo::new(Arc::new(crate::io::RealFs::new(dir.path()).unwrap()), 4096);
     let mut writer = factory.create().unwrap();
     let value = vec![b'v'; 4096];
-    writer.add_with_meta(b"", Some(&value), 1, 0, None).unwrap();
+    writer
+        .add_with_meta(b"", Some(&value), 1, EntryType::Put, None)
+        .unwrap();
     for n in (1..=300).rev() {
         let mut key = vec![b'a'; n];
         key.push(b'b');
         writer
-            .add_with_meta(&key, Some(&value), 1, 0, None)
+            .add_with_meta(&key, Some(&value), 1, EntryType::Put, None)
             .unwrap();
     }
     crate::sst::fs::finish_writer_to_path(writer, &dir.path().join("probe.sst")).unwrap();
@@ -54,9 +57,9 @@ fn should_reject_oversized_entry_before_sst_writer_accepts_it() {
     for sorted in [false, true] {
         let mut writer = factory.create().unwrap();
         let result = if sorted {
-            writer.add_sorted_with_meta(b"key", Some(&value), 1, 0, None)
+            writer.add_sorted_with_meta(b"key", Some(&value), 1, EntryType::Put, None)
         } else {
-            writer.add_with_meta(b"key", Some(&value), 1, 0, None)
+            writer.add_with_meta(b"key", Some(&value), 1, EntryType::Put, None)
         };
         // Assert
         assert!(matches!(result, Err(crate::MidgeError::ResourceLimit(_))));
@@ -97,16 +100,20 @@ fn should_preserve_zero_sequence_states_in_both_scan_directions() {
     let factory = FsSstFactoryIo::new(fs, 4096);
     let mut writer = factory.create().unwrap();
     writer
-        .add_with_meta(b"a", Some(b"value"), 0, 0, None)
-        .unwrap();
-    writer.add_with_meta(b"b", Some(b""), 0, 0, None).unwrap();
-    writer
-        .add_with_meta(b"c", Some(b"expired"), 0, 0, Some(1))
+        .add_with_meta(b"a", Some(b"value"), 0, EntryType::Put, None)
         .unwrap();
     writer
-        .add_with_meta(b"d", Some(b"masked"), 0, 0, None)
+        .add_with_meta(b"b", Some(b""), 0, EntryType::Put, None)
         .unwrap();
-    writer.add_with_meta(b"d", None, 0, 2, None).unwrap();
+    writer
+        .add_with_meta(b"c", Some(b"expired"), 0, EntryType::Put, Some(1))
+        .unwrap();
+    writer
+        .add_with_meta(b"d", Some(b"masked"), 0, EntryType::Put, None)
+        .unwrap();
+    writer
+        .add_with_meta(b"d", None, 0, EntryType::Delete, None)
+        .unwrap();
     crate::sst::fs::finish_writer_to_path(writer, &dir.path().join("zero.sst")).unwrap();
     let reader = Arc::new(
         crate::sst::fs::SstFileIo::open_with_real_fs(&dir.path().join("zero.sst")).unwrap(),
@@ -169,11 +176,11 @@ fn should_roundtrip_maximum_decoded_entry_when_writing_sorted_or_unsorted() {
         // Act
         if sorted {
             writer
-                .add_sorted_with_meta(b"key", Some(&value), 1, 0, Some(u64::MAX))
+                .add_sorted_with_meta(b"key", Some(&value), 1, EntryType::Put, Some(u64::MAX))
                 .unwrap();
         } else {
             writer
-                .add_with_meta(b"key", Some(&value), 1, 0, Some(u64::MAX))
+                .add_with_meta(b"key", Some(&value), 1, EntryType::Put, Some(u64::MAX))
                 .unwrap();
         }
         crate::sst::fs::finish_writer_to_path(writer, &dir.path().join("max.sst")).unwrap();
@@ -204,7 +211,7 @@ fn should_read_back_sst_when_keys_share_prefix_longer_than_trie_can_encode() {
     let mut writer = factory.create().unwrap();
     for key in &keys {
         writer
-            .add_sorted_with_meta(key, Some(b"v"), 1, 0, None)
+            .add_sorted_with_meta(key, Some(b"v"), 1, EntryType::Put, None)
             .unwrap();
     }
 
@@ -241,7 +248,7 @@ fn should_reject_sst_publish_when_target_name_is_an_in_root_symlink() {
     let factory = FsSstFactoryIo::new(Arc::new(crate::io::RealFs::new(root.path()).unwrap()), 4096);
     let mut writer = factory.create().unwrap();
     writer
-        .add_with_meta(b"key", Some(b"value"), 0, 0, None)
+        .add_with_meta(b"key", Some(b"value"), 0, EntryType::Put, None)
         .unwrap();
 
     // Act

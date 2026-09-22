@@ -1,6 +1,7 @@
 use super::*;
 use crate::metadata::Manifest;
 use crate::runtime::hybrid_persistence::CloudWalPruneProgress;
+use crate::sst::encoding::EntryType;
 use crate::storage::cloud::{CloudCallback, CloudError, CloudEvent};
 
 struct LimitedRanges {
@@ -280,7 +281,13 @@ fn should_resume_legacy_sst_summary_across_timeouts_with_many_versions_of_one_ke
         let mut writer = factory.create().expect("writer");
         for sequence in (1..=100).rev() {
             writer
-                .add_with_meta(b"k", Some(&vec![b'x'; 8192]), sequence, 0, None)
+                .add_with_meta(
+                    b"k",
+                    Some(&vec![b'x'; 8192]),
+                    sequence,
+                    EntryType::Put,
+                    None,
+                )
                 .expect("historical version");
         }
         let bytes = writer.finish_bytes().expect("historical SST");

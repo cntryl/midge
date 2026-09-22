@@ -142,7 +142,7 @@ pub(crate) fn write_legacy_oversized_uncompressed_sst(
         key: key.to_vec(),
         value: Some(value),
         sequence,
-        op_type: 0,
+        op_type: EntryType::Put,
         expiration: Some(u64::MAX),
     });
     super::finish_writer_to_path(Box::new(legacy), path)
@@ -174,7 +174,7 @@ struct PendingEntry {
     key: Vec<u8>,
     value: Option<Vec<u8>>,
     sequence: u64,
-    op_type: u8,
+    op_type: EntryType,
     expiration: Option<u64>,
 }
 
@@ -359,10 +359,10 @@ impl DynSstWriter for FsSstWriter {
         key: &[u8],
         value: Option<&[u8]>,
         seq: u64,
-        op_type: u8,
+        op_type: EntryType,
         expiration: Option<u64>,
     ) -> MidgeResult<()> {
-        Self::entry_type_for_op_type(op_type)?;
+        Self::writable_entry_type(op_type)?;
         if !self.preserve_legacy_entries {
             crate::sst::encoding::validate_entry_size(key.len(), value.map_or(0, <[u8]>::len))?;
         }
@@ -387,10 +387,10 @@ impl DynSstWriter for FsSstWriter {
         key: &[u8],
         value: Option<&[u8]>,
         seq: u64,
-        op_type: u8,
+        op_type: EntryType,
         expiration: Option<u64>,
     ) -> MidgeResult<()> {
-        Self::entry_type_for_op_type(op_type)?;
+        Self::writable_entry_type(op_type)?;
         if !self.preserve_legacy_entries {
             crate::sst::encoding::validate_entry_size(key.len(), value.map_or(0, <[u8]>::len))?;
         }

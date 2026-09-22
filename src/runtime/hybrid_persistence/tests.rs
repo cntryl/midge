@@ -25,6 +25,7 @@ use std::sync::{
     Barrier,
 };
 
+use crate::sst::encoding::EntryType;
 use std::time::{Duration, Instant};
 
 mod resumable_prune;
@@ -375,7 +376,11 @@ fn should_require_exact_raw_state_when_streaming_wal_retirement() {
                 b"k",
                 sst_value,
                 7,
-                if sst_value.is_some() { 0 } else { 2 },
+                if sst_value.is_some() {
+                    crate::sst::encoding::EntryType::Put
+                } else {
+                    crate::sst::encoding::EntryType::Delete
+                },
                 sst_expiration,
             )
             .expect("SST raw state");
@@ -431,7 +436,7 @@ fn should_retire_cloud_wal_delete_range_only_when_sst_range_tombstones_cover_it(
         let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
         let mut writer = factory.create().expect("SST writer");
         writer
-            .add_with_meta(b"k", None, 7, 2, None)
+            .add_with_meta(b"k", None, 7, EntryType::Delete, None)
             .expect("SST point state");
         for (start, end, seq) in tombstones {
             writer
@@ -1340,7 +1345,7 @@ fn valid_sst_bytes(key: &[u8], value: &[u8], seq: u64) -> Vec<u8> {
     let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
     let mut writer = factory.create().expect("create SST writer");
     writer
-        .add_with_meta(key, Some(value), seq, 0, None)
+        .add_with_meta(key, Some(value), seq, EntryType::Put, None)
         .expect("add SST entry");
     writer.finish_bytes().expect("finish SST bytes")
 }
@@ -3208,7 +3213,7 @@ mod contains_wal_record {
                 key,
                 None,
                 seq,
-                crate::wal::WalOpKind::Delete.to_wire_format(),
+                crate::sst::encoding::EntryType::Delete,
                 None,
             )
             .expect("add point tombstone");

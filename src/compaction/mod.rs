@@ -10,6 +10,8 @@ pub use strategy::{CompactionPlan, Compactor, LeveledCompactionConfig};
 #[cfg(test)]
 use crate::common::MidgeError;
 use crate::common::MidgeResult;
+#[cfg(test)]
+use crate::sst::encoding::EntryType;
 use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
@@ -324,7 +326,13 @@ mod tests {
         for index in 0..12_u8 {
             let name = format!("input-{index}.sst");
             let mut writer = factory.create()?;
-            writer.add_with_meta(&[index], Some(&vec![index; 96 * 1024]), 1, 0, None)?;
+            writer.add_with_meta(
+                &[index],
+                Some(&vec![index; 96 * 1024]),
+                1,
+                EntryType::Put,
+                None,
+            )?;
             writer.finish_to_path(&dir.path().join(&name))?;
             plan.input_files.push(name);
         }
@@ -370,7 +378,13 @@ mod tests {
         let fs = std::sync::Arc::new(crate::io::RealFs::new(dir.path())?);
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let mut writer = factory.create()?;
-        writer.add_with_meta(b"large", Some(&vec![b'v'; 128 * 1024]), 1, 0, None)?;
+        writer.add_with_meta(
+            b"large",
+            Some(&vec![b'v'; 128 * 1024]),
+            1,
+            EntryType::Put,
+            None,
+        )?;
         writer.finish_to_path(&dir.path().join("input.sst"))?;
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(1);
         plan.input_files.push("input.sst".into());
@@ -407,7 +421,13 @@ mod tests {
         );
         let mut writer = factory.create()?;
         for index in 0..100u32 {
-            writer.add_with_meta(&index.to_be_bytes(), Some(&vec![b'v'; 1024]), 1, 0, None)?;
+            writer.add_with_meta(
+                &index.to_be_bytes(),
+                Some(&vec![b'v'; 1024]),
+                1,
+                EntryType::Put,
+                None,
+            )?;
         }
         writer.finish_to_path(&dir.path().join("input.sst"))?;
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(1);
@@ -652,7 +672,7 @@ mod tests {
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let expiration = u64::MAX - 1;
         let mut input_writer = factory.create()?;
-        input_writer.add_with_meta(b"live", Some(b"value"), 7, 0, Some(expiration))?;
+        input_writer.add_with_meta(b"live", Some(b"value"), 7, EntryType::Put, Some(expiration))?;
         crate::sst::fs::finish_writer_to_path(input_writer, &temp_dir.path().join("input.sst"))?;
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(41);
         plan.input_files.push("input.sst".to_string());
@@ -681,7 +701,13 @@ mod tests {
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let expiration = 100;
         let mut writer = factory.create()?;
-        writer.add_with_meta(b"expired", Some(b"value"), 9, 0, Some(expiration))?;
+        writer.add_with_meta(
+            b"expired",
+            Some(b"value"),
+            9,
+            EntryType::Put,
+            Some(expiration),
+        )?;
         crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join("expired.sst"))?;
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(49);
         plan.input_files.push("expired.sst".to_string());
@@ -712,10 +738,10 @@ mod tests {
         let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let mut older = factory.create()?;
-        older.add_with_meta(b"same", Some(b"old"), 3, 0, None)?;
+        older.add_with_meta(b"same", Some(b"old"), 3, EntryType::Put, None)?;
         crate::sst::fs::finish_writer_to_path(older, &temp_dir.path().join("older.sst"))?;
         let mut newer = factory.create()?;
-        newer.add_with_meta(b"same", None, 4, 2, None)?;
+        newer.add_with_meta(b"same", None, 4, EntryType::Delete, None)?;
         crate::sst::fs::finish_writer_to_path(newer, &temp_dir.path().join("newer.sst"))?;
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(50);
         plan.input_files
@@ -744,7 +770,7 @@ mod tests {
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         for name in ["first.sst", "second.sst"] {
             let mut writer = factory.create()?;
-            writer.add_with_meta(b"same", Some(b"value"), 7, 0, Some(900))?;
+            writer.add_with_meta(b"same", Some(b"value"), 7, EntryType::Put, Some(900))?;
             crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join(name))?;
         }
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(51);
@@ -774,7 +800,7 @@ mod tests {
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
 
         let mut input_writer = factory.create()?;
-        input_writer.add_with_meta(b"alpha", None, 11, 2, None)?;
+        input_writer.add_with_meta(b"alpha", None, 11, EntryType::Delete, None)?;
         input_writer.add_range_tombstone(b"cat", b"cow", 7)?;
         crate::sst::fs::finish_writer_to_path(input_writer, &temp_dir.path().join("input.sst"))?;
 
@@ -813,8 +839,8 @@ mod tests {
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
 
         let mut input_writer = factory.create()?;
-        input_writer.add_with_meta(b"alpha", Some(b"older"), 5, 0, None)?;
-        input_writer.add_with_meta(b"alpha", None, 11, 2, None)?;
+        input_writer.add_with_meta(b"alpha", Some(b"older"), 5, EntryType::Put, None)?;
+        input_writer.add_with_meta(b"alpha", None, 11, EntryType::Delete, None)?;
         crate::sst::fs::finish_writer_to_path(input_writer, &temp_dir.path().join("input.sst"))?;
 
         let mut plan = CompactionPlan::new(0, 0, 1)
@@ -846,8 +872,8 @@ mod tests {
         let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let mut input_writer = factory.create()?;
-        input_writer.add_with_meta(b"alpha", None, 5, 2, None)?;
-        input_writer.add_with_meta(b"beta", Some(b"live"), 6, 0, None)?;
+        input_writer.add_with_meta(b"alpha", None, 5, EntryType::Delete, None)?;
+        input_writer.add_with_meta(b"beta", Some(b"live"), 6, EntryType::Put, None)?;
         crate::sst::fs::finish_writer_to_path(input_writer, &temp_dir.path().join("input.sst"))?;
         let mut plan = CompactionPlan::new(0, 5, 6)
             .with_output_seq(45)
@@ -879,8 +905,8 @@ mod tests {
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let input_name = crate::sst::file_name(0, 0, 1);
         let mut input_writer = factory.create()?;
-        input_writer.add_with_meta(b"alpha", None, 5, 2, None)?;
-        input_writer.add_with_meta(b"beta", Some(b"live"), 6, 0, None)?;
+        input_writer.add_with_meta(b"alpha", None, 5, EntryType::Delete, None)?;
+        input_writer.add_with_meta(b"beta", Some(b"live"), 6, EntryType::Put, None)?;
         crate::sst::fs::finish_writer_to_path(input_writer, &temp_dir.path().join(&input_name))?;
         let input_size = std::fs::metadata(temp_dir.path().join(&input_name))?.len();
         let files = vec![crate::metadata::FileMeta {
@@ -930,11 +956,11 @@ mod tests {
         let target_name = crate::sst::file_name(0, 2, 2);
 
         let mut source_writer = factory.create()?;
-        source_writer.add_with_meta(b"m", Some(b"live"), 6, 0, None)?;
+        source_writer.add_with_meta(b"m", Some(b"live"), 6, EntryType::Put, None)?;
         crate::sst::fs::finish_writer_to_path(source_writer, &temp_dir.path().join(&source_name))?;
         let mut target_writer = factory.create()?;
-        target_writer.add_with_meta(b"a", None, 5, 2, None)?;
-        target_writer.add_with_meta(b"z", Some(b"edge"), 4, 0, None)?;
+        target_writer.add_with_meta(b"a", None, 5, EntryType::Delete, None)?;
+        target_writer.add_with_meta(b"z", Some(b"edge"), 4, EntryType::Put, None)?;
         crate::sst::fs::finish_writer_to_path(target_writer, &temp_dir.path().join(&target_name))?;
 
         let files = vec![
@@ -996,7 +1022,7 @@ mod tests {
         let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let mut input_writer = factory.create()?;
-        input_writer.add_with_meta(b"point", None, 11, 2, None)?;
+        input_writer.add_with_meta(b"point", None, 11, EntryType::Delete, None)?;
         input_writer.add_range_tombstone(b"a", b"z", 11)?;
         crate::sst::fs::finish_writer_to_path(input_writer, &temp_dir.path().join("input.sst"))?;
         let mut plan = CompactionPlan::new(0, 5, 6)
@@ -1026,8 +1052,8 @@ mod tests {
         let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let mut value_writer = factory.create()?;
-        value_writer.add_with_meta(b"middle", Some(b"deleted"), 1, 0, None)?;
-        value_writer.add_with_meta(b"zulu", Some(b"live"), 3, 0, None)?;
+        value_writer.add_with_meta(b"middle", Some(b"deleted"), 1, EntryType::Put, None)?;
+        value_writer.add_with_meta(b"zulu", Some(b"live"), 3, EntryType::Put, None)?;
         crate::sst::fs::finish_writer_to_path(value_writer, &temp_dir.path().join("values.sst"))?;
         let mut tombstone_writer = factory.create()?;
         tombstone_writer.add_range_tombstone(b"a", b"z", 2)?;
@@ -1066,7 +1092,7 @@ mod tests {
         let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let mut input_writer = factory.create()?;
-        input_writer.add_with_meta(b"deleted", None, 5, 2, None)?;
+        input_writer.add_with_meta(b"deleted", None, 5, EntryType::Delete, None)?;
         crate::sst::fs::finish_writer_to_path(input_writer, &temp_dir.path().join("input.sst"))?;
         let mut plan = CompactionPlan::new(0, 5, 6)
             .with_output_seq(47)
@@ -1097,7 +1123,7 @@ mod tests {
             ("second.sst", b"second"),
         ] {
             let mut writer = factory.create()?;
-            writer.add_with_meta(b"same", Some(value), 7, 0, None)?;
+            writer.add_with_meta(b"same", Some(value), 7, EntryType::Put, None)?;
             crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join(name))?;
         }
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(48);
@@ -1126,7 +1152,7 @@ mod tests {
         let input_name = "input.sst";
         let input_path = temp_dir.path().join(input_name);
         let mut writer = factory.create()?;
-        writer.add_with_meta(b"key", Some(b"value"), 1, 0, None)?;
+        writer.add_with_meta(b"key", Some(b"value"), 1, EntryType::Put, None)?;
         crate::sst::fs::finish_writer_to_path(writer, &input_path)?;
         let input_bytes = std::fs::read(&input_path)?;
 
@@ -1160,7 +1186,7 @@ mod tests {
         let input_name = "input.sst";
         let input_path = temp_dir.path().join(input_name);
         let mut writer = factory.create()?;
-        writer.add_with_meta(b"key", Some(b"value"), 1, 0, None)?;
+        writer.add_with_meta(b"key", Some(b"value"), 1, EntryType::Put, None)?;
         crate::sst::fs::finish_writer_to_path(writer, &input_path)?;
         let input_bytes = std::fs::read(&input_path)?;
 
@@ -1226,7 +1252,7 @@ mod tests {
                 key: &[u8],
                 value: Option<&[u8]>,
                 seq: u64,
-                op_type: u8,
+                op_type: EntryType,
                 expiration: Option<u64>,
             ) -> MidgeResult<()> {
                 self.inner
@@ -1238,7 +1264,7 @@ mod tests {
                 key: &[u8],
                 value: Option<&[u8]>,
                 seq: u64,
-                op_type: u8,
+                op_type: EntryType,
                 expiration: Option<u64>,
             ) -> MidgeResult<()> {
                 self.inner
@@ -1285,7 +1311,7 @@ mod tests {
         let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
         let base_factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let mut input = base_factory.create()?;
-        input.add_with_meta(b"key", Some(b"value"), 7, 0, None)?;
+        input.add_with_meta(b"key", Some(b"value"), 7, EntryType::Put, None)?;
         crate::sst::fs::finish_writer_to_path(input, &temp_dir.path().join("input.sst"))?;
         let factory = RejectFinishBytesFactory {
             inner: base_factory,
@@ -1313,7 +1339,13 @@ mod tests {
         let value = vec![b'v'; 512];
         for index in 0..96u64 {
             let key = format!("key-{index:04}");
-            input.add_with_meta(key.as_bytes(), Some(&value), index + 1, 0, None)?;
+            input.add_with_meta(
+                key.as_bytes(),
+                Some(&value),
+                index + 1,
+                EntryType::Put,
+                None,
+            )?;
         }
         crate::sst::fs::finish_writer_to_path(input, &temp_dir.path().join("large-input.sst"))?;
         let mut plan = CompactionPlan::new(7, 0, 1).with_output_seq(52);
@@ -1368,7 +1400,7 @@ mod tests {
         let mut input = factory.create()?;
         for index in 0..50_000u64 {
             let key = format!("structured-key-{index:020}");
-            input.add_with_meta(key.as_bytes(), Some(b"v"), index + 1, 0, None)?;
+            input.add_with_meta(key.as_bytes(), Some(b"v"), index + 1, EntryType::Put, None)?;
         }
         crate::sst::fs::finish_writer_to_path(input, &temp_dir.path().join("small-keys.sst"))?;
         let mut plan = CompactionPlan::new(8, 0, 1).with_output_seq(53);
@@ -1401,7 +1433,13 @@ mod tests {
         let value = vec![b'v'; 512];
         for index in 0..96u64 {
             let key = format!("key-{index:04}");
-            input.add_with_meta(key.as_bytes(), Some(&value), index + 1, 0, None)?;
+            input.add_with_meta(
+                key.as_bytes(),
+                Some(&value),
+                index + 1,
+                EntryType::Put,
+                None,
+            )?;
         }
         input.add_range_tombstone(b"key-0010", b"key-0080", 200)?;
         crate::sst::fs::finish_writer_to_path(input, &temp_dir.path().join("range-input.sst"))?;
@@ -1456,7 +1494,7 @@ mod tests {
                 key,
                 Some(&value),
                 u64::try_from(index).expect("index fits") + 1,
-                0,
+                EntryType::Put,
                 None,
             )?;
         }
@@ -1531,17 +1569,17 @@ mod tests {
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let mut input = factory.create()?;
         let large_value = vec![b'x'; 8 * 1024];
-        input.add_with_meta(b"a", Some(&large_value), 1, 0, None)?;
+        input.add_with_meta(b"a", Some(&large_value), 1, EntryType::Put, None)?;
         for sequence in 2..=33 {
             input.add_with_meta(
                 b"same",
                 Some(format!("same-{sequence:02}").as_bytes()),
                 sequence,
-                0,
+                EntryType::Put,
                 None,
             )?;
         }
-        input.add_with_meta(b"z", Some(&large_value), 34, 0, None)?;
+        input.add_with_meta(b"z", Some(&large_value), 34, EntryType::Put, None)?;
         crate::sst::fs::finish_writer_to_path(input, &temp_dir.path().join("same-key.sst"))?;
         let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(55);
         plan.target_sst_size = 4096;
@@ -1632,7 +1670,7 @@ mod tests {
                 key: &[u8],
                 value: Option<&[u8]>,
                 seq: u64,
-                op_type: u8,
+                op_type: EntryType,
                 expiration: Option<u64>,
             ) -> MidgeResult<()> {
                 self.inner
@@ -1644,7 +1682,7 @@ mod tests {
                 key: &[u8],
                 value: Option<&[u8]>,
                 seq: u64,
-                op_type: u8,
+                op_type: EntryType,
                 expiration: Option<u64>,
             ) -> MidgeResult<()> {
                 self.inner
@@ -1710,7 +1748,7 @@ mod tests {
                 format!("key-{index:04}").as_bytes(),
                 Some(&value),
                 index + 1,
-                0,
+                EntryType::Put,
                 None,
             )?;
         }
@@ -1753,7 +1791,7 @@ mod tests {
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let source_name = "source.sst".to_string();
         let mut source = factory.create()?;
-        source.add_with_meta(b"key-032", Some(b"new-source"), 1000, 0, None)?;
+        source.add_with_meta(b"key-032", Some(b"new-source"), 1000, EntryType::Put, None)?;
         crate::sst::fs::finish_writer_to_path(source, &temp_dir.path().join(&source_name))?;
         let mut target_names = Vec::new();
         for index in 0..65u64 {
@@ -1763,7 +1801,7 @@ mod tests {
                 format!("key-{index:03}").as_bytes(),
                 Some(b"target"),
                 index + 1,
-                0,
+                EntryType::Put,
                 None,
             )?;
             crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join(&name))?;
@@ -1841,7 +1879,7 @@ mod tests {
             ("target-right.sst", 5, b"newest".as_slice()),
         ] {
             let mut writer = factory.create()?;
-            writer.add_with_meta(b"boundary", Some(value), sequence, 0, None)?;
+            writer.add_with_meta(b"boundary", Some(value), sequence, EntryType::Put, None)?;
             crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join(name))?;
         }
         let mut plan = CompactionPlan::new(0, 1, 2).with_output_seq(58);
@@ -1913,7 +1951,7 @@ mod tests {
         let base_factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let source_name = "transition-source.sst".to_string();
         let mut source = base_factory.create()?;
-        source.add_with_meta(b"key-04", Some(b"source"), 100, 0, None)?;
+        source.add_with_meta(b"key-04", Some(b"source"), 100, EntryType::Put, None)?;
         crate::sst::fs::finish_writer_to_path(source, &temp_dir.path().join(&source_name))?;
         let mut target_names = Vec::new();
         for index in 0..8u64 {
@@ -1923,7 +1961,7 @@ mod tests {
                 format!("key-{index:02}").as_bytes(),
                 Some(b"target"),
                 index + 1,
-                0,
+                EntryType::Put,
                 None,
             )?;
             crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join(&name))?;
@@ -1982,7 +2020,7 @@ mod tests {
                     key.as_bytes(),
                     Some(&value),
                     input_index.saturating_mul(1000).saturating_add(key_index),
-                    0,
+                    EntryType::Put,
                     None,
                 )?;
             }

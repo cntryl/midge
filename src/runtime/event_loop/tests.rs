@@ -2,6 +2,7 @@ use super::*;
 use crate::runtime::hybrid_persistence::CloudPersistence;
 use crate::runtime::TestRuntimeMsg;
 use crate::runtime::{state::RuntimeState, ResponseRouter};
+use crate::sst::encoding::EntryType;
 use crate::sst::Memtable;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -685,7 +686,7 @@ fn valid_sst_bytes_for_event_loop_test(key: &[u8], value: &[u8], seq: u64) -> Ve
     let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
     let mut writer = factory.create().expect("create test SST writer");
     writer
-        .add_with_meta(key, Some(value), seq, 0, None)
+        .add_with_meta(key, Some(value), seq, EntryType::Put, None)
         .expect("add test SST entry");
     writer.finish_bytes().expect("finish test SST bytes")
 }

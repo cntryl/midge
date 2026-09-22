@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::common::resource_budget::ResourceBudget;
+use crate::sst::encoding::EntryType;
 use crate::sst::SstReader;
 
 #[test]
@@ -19,7 +20,13 @@ fn should_retain_compaction_partition_when_upload_workspace_cannot_be_admitted()
             ));
     let mut writer = factory.create()?;
     for key in 0_u64..64 {
-        writer.add_with_meta(&key.to_be_bytes(), Some(&vec![7; 4096]), key + 1, 0, None)?;
+        writer.add_with_meta(
+            &key.to_be_bytes(),
+            Some(&vec![7; 4096]),
+            key + 1,
+            EntryType::Put,
+            None,
+        )?;
     }
     crate::sst::fs::finish_writer_to_path(writer, &path)?;
     let original = std::fs::read(&path)?;
@@ -98,7 +105,7 @@ fn should_retain_compaction_upload_charge_after_timeout_until_provider_releases_
     let factory =
         crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::RealFs::new(directory.path())?), 4096);
     let mut writer = factory.create()?;
-    writer.add_with_meta(b"key", Some(b"retained value"), 1, 0, None)?;
+    writer.add_with_meta(b"key", Some(b"retained value"), 1, EntryType::Put, None)?;
     crate::sst::fs::finish_writer_to_path(writer, &path)?;
     let backend = Arc::new(PendingUpload::default());
     let cloud: Arc<dyn crate::storage::StorageBackend> = Arc::new(
@@ -167,7 +174,13 @@ fn should_roll_over_remote_compaction_outputs_to_leave_room_for_upload_workspace
         ));
         let mut writer = factory.create()?;
         for key in 0_u64..64 {
-            writer.add_with_meta(&key.to_be_bytes(), Some(&vec![7; 4096]), key + 1, 0, None)?;
+            writer.add_with_meta(
+                &key.to_be_bytes(),
+                Some(&vec![7; 4096]),
+                key + 1,
+                EntryType::Put,
+                None,
+            )?;
         }
         crate::sst::fs::finish_writer_to_path(writer, &directory.path().join("input.sst"))?;
         let cloud_path = directory.path().join("cloud");

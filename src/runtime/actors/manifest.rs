@@ -9,6 +9,8 @@
 use super::super::state::RuntimeState;
 use super::super::FileMeta;
 use crate::common::MidgeResult;
+#[cfg(test)]
+use crate::sst::encoding::EntryType;
 
 /// Actor handling manifest operations
 pub struct ManifestActor {
@@ -535,7 +537,7 @@ mod tests {
             4096,
         );
         let mut writer = factory.create()?;
-        writer.add_with_meta(b"a", Some(b"value"), 10, 0, None)?;
+        writer.add_with_meta(b"a", Some(b"value"), 10, EntryType::Put, None)?;
         crate::sst::fs::finish_writer_to_path(writer, &sst_path)?;
         assert!(
             sst_path.exists(),

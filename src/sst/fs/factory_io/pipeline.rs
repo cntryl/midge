@@ -147,18 +147,15 @@ impl FsSstWriter {
         entries
     }
 
-    /// Map a writer `op_type` to the entry type it encodes.
+    /// Reject entry types SST writers must never emit.
     ///
-    /// lsm-spec sst.md §3.2 forbids writers from emitting `EntryType::Merge`,
-    /// and an unknown `op_type` must not silently become a `Put`.
-    pub(super) fn entry_type_for_op_type(op_type: u8) -> MidgeResult<EntryType> {
-        match op_type {
-            0 => Ok(EntryType::Put),
-            1 => Ok(EntryType::Insert),
-            2 => Ok(EntryType::Delete),
-            _ => Err(crate::common::MidgeError::InvalidArgument(format!(
-                "SST writers must not emit op_type {op_type}; only Put (0), Insert (1), and Delete (2) are writable"
+    /// lsm-spec sst.md §3.2 forbids writers from emitting `EntryType::Merge`.
+    pub(super) fn writable_entry_type(entry_type: EntryType) -> MidgeResult<EntryType> {
+        match entry_type {
+            EntryType::Merge => Err(crate::common::MidgeError::InvalidArgument(format!(
+                "SST writers must not emit entry type {entry_type:?}; only Put, Insert, and Delete are writable"
             ))),
+            other => Ok(other),
         }
     }
 
@@ -166,7 +163,7 @@ impl FsSstWriter {
         previous_key: &[u8],
         entry: &PendingEntry,
     ) -> MidgeResult<Vec<u8>> {
-        let entry_type = Self::entry_type_for_op_type(entry.op_type)?;
+        let entry_type = Self::writable_entry_type(entry.op_type)?;
         let shared_len = Self::shared_prefix_len(previous_key, &entry.key);
         let key_delta = &entry.key[shared_len as usize..];
         crate::sst::encoding::encode_v4(

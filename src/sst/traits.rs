@@ -4,6 +4,7 @@ use bytes::Bytes;
 use std::path::Path;
 
 use crate::common::MidgeResult;
+use crate::sst::encoding::EntryType;
 
 /// One owned logical version yielded by an SST's raw compaction cursor.
 ///
@@ -257,7 +258,7 @@ pub trait DynSstWriter: Send {
         key: &[u8],
         value: Option<&[u8]>,
         seq: u64,
-        op_type: u8,
+        op_type: EntryType,
         expiration: Option<u64>,
     ) -> MidgeResult<()>;
 
@@ -275,7 +276,7 @@ pub trait DynSstWriter: Send {
         key: &[u8],
         value: Option<&[u8]>,
         seq: u64,
-        op_type: u8,
+        op_type: EntryType,
         expiration: Option<u64>,
     ) -> MidgeResult<()>;
 
@@ -512,7 +513,7 @@ mod tests {
             key: &[u8],
             value: Option<&[u8]>,
             _seq: u64,
-            _op_type: u8,
+            _op_type: EntryType,
             _expiration: Option<u64>,
         ) -> MidgeResult<()> {
             self.add(key, value.unwrap_or_default());
@@ -524,7 +525,7 @@ mod tests {
             key: &[u8],
             value: Option<&[u8]>,
             seq: u64,
-            op_type: u8,
+            op_type: EntryType,
             expiration: Option<u64>,
         ) -> MidgeResult<()> {
             self.add_with_meta(key, value, seq, op_type, expiration)
@@ -552,6 +553,18 @@ mod tests {
             }
             Ok(result)
         }
+    }
+
+    #[test]
+    fn should_carry_a_typed_operation_through_add_with_meta() {
+        // Arrange
+        let mut writer = MockSstWriter::new();
+
+        // Act
+        let result = writer.add_with_meta(b"k", Some(b"v"), 1, EntryType::Insert, None);
+
+        // Assert
+        assert!(result.is_ok());
     }
 
     // =========== Trait Object Safety Tests ===========
@@ -759,7 +772,7 @@ mod tests {
         let mut writer = MockSstWriter::new();
 
         // Act - Default impl should call add() for Some(value)
-        let result = writer.add_with_meta(b"key", Some(b"value"), 100, 0, None);
+        let result = writer.add_with_meta(b"key", Some(b"value"), 100, EntryType::Put, None);
 
         // Assert
         assert!(result.is_ok());

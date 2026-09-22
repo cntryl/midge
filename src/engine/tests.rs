@@ -1,5 +1,6 @@
 use super::*;
 use crate::lease::PrimaryLease;
+use crate::sst::encoding::EntryType;
 
 #[derive(Default)]
 struct BlockingReleaseState {
@@ -1517,7 +1518,7 @@ fn test_sst_bytes_with_key_value(key: &[u8], value: &[u8]) -> Vec<u8> {
     let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
     let mut writer = factory.create().expect("create test sst writer");
     writer
-        .add_with_meta(key, Some(value), 1, 0, None)
+        .add_with_meta(key, Some(value), 1, EntryType::Put, None)
         .expect("write test sst entry");
     writer.finish_bytes().expect("finish test sst bytes")
 }

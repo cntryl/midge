@@ -55,17 +55,6 @@ pub enum OpType {
     Delete,
 }
 
-impl OpType {
-    /// Convert `OpType` to u8 for SST encoding (0=Put, 2=Delete)
-    #[must_use]
-    pub fn as_u8(&self) -> u8 {
-        match self {
-            OpType::Put => 0,
-            OpType::Delete => 2,
-        }
-    }
-}
-
 /// Visible skiplist entry metadata at a snapshot sequence.
 pub struct SkipListVisibleEntry {
     pub value: Option<Bytes>,
@@ -800,7 +789,7 @@ impl SkipList {
             Option<&[u8]>,
             u64,
             Option<u64>,
-            u8,
+            OpType,
         ) -> crate::common::MidgeResult<()>,
     ) -> crate::common::MidgeResult<()> {
         let mut current = self.head.next.load(AO::Acquire);
@@ -844,13 +833,7 @@ impl SkipList {
                 (entries, following, charge)
             };
             for (key, value, sequence, _, expiration, operation) in entries {
-                visit(
-                    &key,
-                    value.as_deref(),
-                    sequence,
-                    expiration,
-                    operation.as_u8(),
-                )?;
+                visit(&key, value.as_deref(), sequence, expiration, operation)?;
             }
             current = following;
         }
@@ -1055,9 +1038,21 @@ mod tests {
         assert_eq!(
             actual,
             vec![
-                (b"a".to_vec(), None, 2, None, 2),
-                (b"a".to_vec(), Some(b"old".to_vec()), 1, Some(99), 0),
-                (b"b".to_vec(), Some(b"new".to_vec()), 3, Some(100), 0),
+                (b"a".to_vec(), None, 2, None, OpType::Delete),
+                (
+                    b"a".to_vec(),
+                    Some(b"old".to_vec()),
+                    1,
+                    Some(99),
+                    OpType::Put
+                ),
+                (
+                    b"b".to_vec(),
+                    Some(b"new".to_vec()),
+                    3,
+                    Some(100),
+                    OpType::Put
+                ),
             ]
         );
         assert!(failed.is_err());
@@ -1379,34 +1374,6 @@ mod tests {
         assert_eq!(entries[1].0, Bytes::from_static(b"b"));
         assert!(entries[1].3); // tombstone
         assert_eq!(entries[2].4, Some(12345)); // has expiration
-    }
-
-    // ========================================================================
-    // OpType enum tests
-    // ========================================================================
-
-    #[test]
-    fn should_convert_optype_put_to_u8() {
-        // Arrange
-        // (no setup)
-
-        // Act
-        let code = OpType::Put.as_u8();
-
-        // Assert: Put maps to 0
-        assert_eq!(code, 0);
-    }
-
-    #[test]
-    fn should_convert_optype_delete_to_u8() {
-        // Arrange
-        // (no setup)
-
-        // Act
-        let code = OpType::Delete.as_u8();
-
-        // Assert: Delete maps to 2
-        assert_eq!(code, 2);
     }
 
     // ========================================================================

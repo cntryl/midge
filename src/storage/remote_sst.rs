@@ -418,6 +418,7 @@ impl Fs for VerifiedLocalSstFs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sst::encoding::EntryType;
     use crate::sst::traits::{SstFactory, SstStateReader};
 
     struct RecordingBackend {
@@ -502,7 +503,7 @@ mod tests {
         let local_fs = Arc::new(crate::io::RealFs::new(local.path())?);
         let factory = crate::sst::FsSstFactoryIo::new(local_fs.clone(), 4096);
         let mut writer = factory.create()?;
-        writer.add_with_meta(b"key", Some(b"value"), 9, 0, None)?;
+        writer.add_with_meta(b"key", Some(b"value"), 9, EntryType::Put, None)?;
         let bytes = writer.finish_bytes()?;
         let meta = crate::metadata::FileMeta {
             name: "remote.sst".into(),
@@ -656,7 +657,7 @@ mod tests {
         let local_fs = Arc::new(crate::io::RealFs::new(local.path())?);
         let factory = crate::sst::FsSstFactoryIo::new(local_fs.clone(), 4096);
         let mut writer = factory.create()?;
-        writer.add_with_meta(b"key", Some(b"verified"), 9, 0, None)?;
+        writer.add_with_meta(b"key", Some(b"verified"), 9, EntryType::Put, None)?;
         let bytes = writer.finish_bytes()?;
         std::fs::create_dir_all(local.path().join("sst"))?;
         std::fs::write(local.path().join("sst/allowed.sst"), &bytes)?;
@@ -708,7 +709,7 @@ mod tests {
                 *byte = u8::try_from(offset.wrapping_mul(73).wrapping_add(index as usize) % 251)
                     .expect("remainder fits u8");
             }
-            writer.add_with_meta(&index.to_be_bytes(), Some(&value), 9, 0, None)?;
+            writer.add_with_meta(&index.to_be_bytes(), Some(&value), 9, EntryType::Put, None)?;
         }
         let bytes = writer.finish_bytes()?;
         let size = bytes.len() as u64;
@@ -803,7 +804,7 @@ mod tests {
         let fs = Arc::new(crate::io::RealFs::new(local.path())?);
         let factory = crate::sst::FsSstFactoryIo::new(fs.clone(), 4096);
         let mut writer = factory.create()?;
-        writer.add_with_meta(b"key", Some(b"value"), 9, 0, None)?;
+        writer.add_with_meta(b"key", Some(b"value"), 9, EntryType::Put, None)?;
         let (tx, rx) = std::sync::mpsc::channel();
         cloud.submit_write("sst/remote.sst", writer.finish_bytes()?, tx);
         rx.recv().expect("write completion");
@@ -907,7 +908,7 @@ mod tests {
         let target = db.path().join("sst").join("000042.sst");
         let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&view), 4096);
         let mut writer = factory.create()?;
-        writer.add_with_meta(b"key", Some(b"value"), 9, 0, None)?;
+        writer.add_with_meta(b"key", Some(b"value"), 9, EntryType::Put, None)?;
 
         // Act
         let mapped = crate::sst::fs::fs_relative_sst_path(&view, &target)?;

@@ -7,6 +7,7 @@ use crate::runtime::wal_transition::{WalSealTicket, WalSyncTicket};
 #[cfg(feature = "failpoints")]
 use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
 use crate::runtime::RuntimeState;
+use crate::sst::encoding::EntryType;
 use bytes::Bytes;
 use std::path::PathBuf;
 #[cfg(feature = "failpoints")]
@@ -128,7 +129,7 @@ fn should_check_transaction_assertions_against_remote_sst_when_local_cache_is_em
     let mut state = RuntimeState::new(local.path().to_path_buf(), false);
     let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
     let mut writer = factory.create()?;
-    writer.add_with_meta(b"asserted", Some(b"value"), 9, 0, None)?;
+    writer.add_with_meta(b"asserted", Some(b"value"), 9, EntryType::Put, None)?;
     let bytes = writer.finish_bytes()?;
     let name = crate::sst::file_name(0, 0, 1);
     std::fs::create_dir_all(remote.path().join("sst"))?;

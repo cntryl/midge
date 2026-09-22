@@ -5,6 +5,8 @@ use super::{
     SstScanLifecycle,
 };
 use crate::common::resource_budget::{ResourceBudget, ResourceReservation};
+#[cfg(test)]
+use crate::sst::encoding::EntryType;
 use crate::sst::traits::RawSstVersion;
 
 #[derive(Clone, Copy, Default)]
@@ -160,7 +162,13 @@ mod tests {
         let factory = crate::sst::FsSstFactoryIo::new(fs.clone(), 4096);
         let mut writer = factory.create()?;
         for sequence in (1..=3).rev() {
-            writer.add_with_meta(b"shared-key", Some(b"value"), sequence, 0, None)?;
+            writer.add_with_meta(
+                b"shared-key",
+                Some(b"value"),
+                sequence,
+                EntryType::Put,
+                None,
+            )?;
         }
         crate::sst::fs::finish_writer_to_path(writer, &directory.path().join("resume.sst"))?;
         let budget = ResourceBudget::new(128 * 1024);

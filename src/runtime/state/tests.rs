@@ -1,4 +1,5 @@
 use super::*;
+use crate::sst::encoding::EntryType;
 use std::path::PathBuf;
 
 struct RecoveryRangeBudgetBackend {
@@ -130,7 +131,7 @@ fn write_valid_sst_for_recovery_test(
     let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
     let mut writer = factory.create().expect("create recovery test SST");
     writer
-        .add_with_meta(key, Some(b"value"), sequence, 0, None)
+        .add_with_meta(key, Some(b"value"), sequence, EntryType::Put, None)
         .expect("write recovery test entry");
     let bytes = writer.finish_bytes().expect("finish recovery test SST");
     std::fs::create_dir_all(&state.sst_dir).expect("create recovery test SST directory");

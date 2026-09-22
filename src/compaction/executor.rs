@@ -11,6 +11,8 @@
 //! SST, the aggregate plan, or a second deduplicated output vector.
 
 use crate::common::MidgeResult;
+#[cfg(test)]
+use crate::sst::encoding::EntryType;
 use crate::sst::traits::{RawSstVersion, RawSstVersionCursor, SstFactory};
 #[cfg(test)]
 use crate::sst::types::KeyState;
@@ -1203,7 +1205,11 @@ pub(crate) fn write_partitioned_compaction_outputs(
                 &version.key,
                 version.value.as_deref(),
                 version.seq,
-                u8::from(version.is_tombstone) * 2,
+                if version.is_tombstone {
+                    crate::sst::encoding::EntryType::Delete
+                } else {
+                    crate::sst::encoding::EntryType::Put
+                },
                 version.expiration,
             )?;
             partition_point_count = partition_point_count.saturating_add(1);
@@ -1582,7 +1588,7 @@ mod tests {
                 _key: &[u8],
                 _value: Option<&[u8]>,
                 _seq: u64,
-                _op_type: u8,
+                _op_type: EntryType,
                 _expiration: Option<u64>,
             ) -> MidgeResult<()> {
                 Ok(())
@@ -1593,7 +1599,7 @@ mod tests {
                 _key: &[u8],
                 _value: Option<&[u8]>,
                 _seq: u64,
-                _op_type: u8,
+                _op_type: EntryType,
                 _expiration: Option<u64>,
             ) -> MidgeResult<()> {
                 Ok(())

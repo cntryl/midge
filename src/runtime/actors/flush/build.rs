@@ -61,7 +61,8 @@ pub(super) fn write(
             bounds.include(key, budget)?;
             smallest_seq = smallest_seq.min(sequence);
             largest_seq = largest_seq.max(sequence);
-            writer.add_sorted_with_meta(key, value, sequence, op_type, expiration)
+            let entry_type = crate::sst::entry_type_of(op_type);
+            writer.add_sorted_with_meta(key, value, sequence, entry_type, expiration)
         })?;
     task.memtable.visit_frozen_ranges(|range| {
         bounds.include(&range.start, budget)?;

@@ -8,6 +8,8 @@ use crate::io::Fs;
 use crate::metadata::FileMeta;
 use crate::runtime::read_resources::ReadResources;
 use crate::runtime::sst_read_view::{LevelRangeCandidates, RangeCandidates, SstReadView};
+#[cfg(test)]
+use crate::sst::encoding::EntryType;
 use crate::sst::fs::reader_io::SstStateScan;
 use crate::sst::fs::SstFileIo;
 use crate::sst::traits::SstStateReader;
@@ -1081,7 +1083,7 @@ mod tests {
         let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let mut writer = factory.create()?;
-        writer.add_with_meta(b"cache-key", Some(b"cache-value"), 10, 0, None)?;
+        writer.add_with_meta(b"cache-key", Some(b"cache-value"), 10, EntryType::Put, None)?;
         crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join("cache.sst"))?;
 
         let file_meta = FileMeta {
@@ -1184,7 +1186,7 @@ mod tests {
             let name = format!("point-{index:04}.sst");
             let key = index.to_be_bytes();
             let mut writer = factory.create()?;
-            writer.add_with_meta(&key, Some(key.as_slice()), index + 1, 0, None)?;
+            writer.add_with_meta(&key, Some(key.as_slice()), index + 1, EntryType::Put, None)?;
             crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join(&name))?;
             let size_bytes = std::fs::metadata(temp_dir.path().join(&name))?.len();
             files.push(FileMeta {
@@ -1244,7 +1246,7 @@ mod tests {
             let name = format!("level-{index:04}.sst");
             let key = format!("key-{index:04}").into_bytes();
             let mut writer = factory.create()?;
-            writer.add_with_meta(&key, Some(key.as_slice()), index + 1, 0, None)?;
+            writer.add_with_meta(&key, Some(key.as_slice()), index + 1, EntryType::Put, None)?;
             crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join(&name))?;
             files.push(FileMeta {
                 name,
@@ -1331,12 +1333,12 @@ mod tests {
         let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
         let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096);
         let mut first_writer = factory.create()?;
-        first_writer.add_with_meta(b"a", Some(b"first-a"), 1, 0, None)?;
-        first_writer.add_with_meta(b"b", Some(b"old-b"), 2, 0, None)?;
+        first_writer.add_with_meta(b"a", Some(b"first-a"), 1, EntryType::Put, None)?;
+        first_writer.add_with_meta(b"b", Some(b"old-b"), 2, EntryType::Put, None)?;
         crate::sst::fs::finish_writer_to_path(first_writer, &temp_dir.path().join("first.sst"))?;
         let mut second_writer = factory.create()?;
-        second_writer.add_with_meta(b"b", Some(b"new-b"), 3, 0, None)?;
-        second_writer.add_with_meta(b"c", Some(b"second-c"), 4, 0, None)?;
+        second_writer.add_with_meta(b"b", Some(b"new-b"), 3, EntryType::Put, None)?;
+        second_writer.add_with_meta(b"c", Some(b"second-c"), 4, EntryType::Put, None)?;
         crate::sst::fs::finish_writer_to_path(second_writer, &temp_dir.path().join("second.sst"))?;
         let files = vec![
             FileMeta {
@@ -1402,11 +1404,11 @@ mod tests {
         let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096);
 
         let mut old_writer = factory.create()?;
-        old_writer.add_with_meta(b"b", Some(b"old"), 1, 0, None)?;
+        old_writer.add_with_meta(b"b", Some(b"old"), 1, EntryType::Put, None)?;
         crate::sst::fs::finish_writer_to_path(old_writer, &temp_dir.path().join("old.sst"))?;
 
         let mut tombstone_writer = factory.create()?;
-        tombstone_writer.add_with_meta(b"m", Some(b"new"), 3, 0, None)?;
+        tombstone_writer.add_with_meta(b"m", Some(b"new"), 3, EntryType::Put, None)?;
         tombstone_writer.add_range_tombstone(b"a", b"c", 2)?;
         crate::sst::fs::finish_writer_to_path(
             tombstone_writer,

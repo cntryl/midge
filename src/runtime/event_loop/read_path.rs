@@ -302,6 +302,7 @@ mod tests {
     use super::super::tests::create_test_event_loop;
     use super::super::EventLoop;
     use crate::runtime::{state::RuntimeState, ResponseRouter};
+    use crate::sst::encoding::EntryType;
     use crate::sst::traits::SstFactory;
     use std::sync::Arc;
 
@@ -416,7 +417,7 @@ mod tests {
         let fs = std::sync::Arc::new(crate::io::RealFs::new(&el.state.sst_dir)?);
         let factory = std::sync::Arc::new(crate::sst::FsSstFactoryIo::new(fs, 64 * 1024));
         let mut writer = factory.create()?;
-        writer.add_with_meta(b"a", Some(b"va".as_ref()), 10, 0, None)?;
+        writer.add_with_meta(b"a", Some(b"va".as_ref()), 10, EntryType::Put, None)?;
         writer.add_range_tombstone(b"b", b"z", 9)?;
         crate::sst::fs::finish_writer_to_path(writer, &sst_path)?;
 

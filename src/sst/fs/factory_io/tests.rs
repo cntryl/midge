@@ -1,6 +1,7 @@
 use super::*;
 use crate::io::traits::{DirEntry, Durability, File, FsError, FsResult, Metadata, OpenOptions};
 use crate::io::FsPath;
+use crate::sst::encoding::EntryType;
 
 /// Records every staging operation an SST publication performs and can
 /// fail the parent-directory sync, so tests observe that persistence runs
@@ -127,7 +128,7 @@ fn should_route_sst_staging_sync_through_injected_fs_when_finishing_writer() -> 
     let events = Arc::clone(&fs.events);
     let factory = FsSstFactoryIo::new(Arc::clone(&fs) as Arc<dyn Fs>, 4096);
     let mut writer = factory.create()?;
-    writer.add_with_meta(b"key", Some(b"value"), 1, 0, None)?;
+    writer.add_with_meta(b"key", Some(b"value"), 1, EntryType::Put, None)?;
 
     // Act
     let result =
@@ -168,7 +169,13 @@ fn should_route_streaming_sst_staging_through_injected_fs_when_finishing_flush_w
     let budget = crate::common::resource_budget::ResourceBudget::new(4 * 1024 * 1024);
     let mut writer = factory.create_for_flush(budget)?;
     for sequence in 0_u64..64 {
-        writer.add_sorted_with_meta(&sequence.to_be_bytes(), Some(b"value"), sequence, 0, None)?;
+        writer.add_sorted_with_meta(
+            &sequence.to_be_bytes(),
+            Some(b"value"),
+            sequence,
+            EntryType::Put,
+            None,
+        )?;
     }
 
     // Act
@@ -196,7 +203,7 @@ fn should_reject_sst_target_when_path_escapes_injected_filesystem_root() -> Midg
     let outside = tempfile::tempdir()?;
     let factory = FsSstFactoryIo::new(Arc::new(crate::io::RealFs::new(root.path())?), 4096);
     let mut writer = factory.create()?;
-    writer.add_with_meta(b"key", Some(b"value"), 1, 0, None)?;
+    writer.add_with_meta(b"key", Some(b"value"), 1, EntryType::Put, None)?;
 
     // Act
     let result = crate::sst::fs::finish_writer_to_path(writer, &outside.path().join("escaped.sst"));
@@ -225,7 +232,7 @@ fn should_publish_sst_into_injected_mock_filesystem_when_finishing_writer() -> M
     let fs = Arc::new(crate::io::MockFs::new());
     let factory = FsSstFactoryIo::new(Arc::clone(&fs) as Arc<dyn Fs>, 4096);
     let mut writer = factory.create()?;
-    writer.add_with_meta(b"key", Some(b"value"), 1, 0, None)?;
+    writer.add_with_meta(b"key", Some(b"value"), 1, EntryType::Put, None)?;
 
     // Act
     crate::sst::fs::finish_writer_to_path(writer, Path::new("mocked.sst"))?;
@@ -264,7 +271,13 @@ fn should_stream_flush_larger_than_its_shared_buffer_allowance() -> MidgeResult<
 
     // Act
     for sequence in 0_u64..1024 {
-        writer.add_sorted_with_meta(&sequence.to_be_bytes(), Some(&value), sequence, 0, None)?;
+        writer.add_sorted_with_meta(
+            &sequence.to_be_bytes(),
+            Some(&value),
+            sequence,
+            EntryType::Put,
+            None,
+        )?;
     }
     crate::sst::fs::finish_writer_to_path(writer, &output)?;
 
@@ -293,7 +306,7 @@ fn should_reject_flush_entry_when_shared_writer_memory_is_exhausted() -> MidgeRe
     let mut writer = factory.create_for_flush(budget.clone())?;
 
     // Act
-    let result = writer.add_sorted_with_meta(b"key", Some(b"value"), 1, 0, None);
+    let result = writer.add_sorted_with_meta(b"key", Some(b"value"), 1, EntryType::Put, None);
     drop(writer);
 
     // Assert
@@ -347,7 +360,8 @@ fn should_release_compaction_reservations_when_legacy_entry_exceeds_budget() -> 
     let mut writer = factory.create_for_compaction(budget.clone())?;
     let legacy_value = vec![b'v'; crate::sst::compression::MAX_DECOMPRESSED_BLOCK_SIZE];
     // Act
-    let result = writer.add_sorted_with_meta(b"legacy", Some(&legacy_value), 7, 0, None);
+    let result =
+        writer.add_sorted_with_meta(b"legacy", Some(&legacy_value), 7, EntryType::Put, None);
     drop(writer);
     // Assert
     assert!(
@@ -399,11 +413,17 @@ fn should_bound_final_file_size_when_point_indexes_and_compression_are_present()
                         key.as_bytes(),
                         Some(&value),
                         index,
-                        0,
+                        EntryType::Put,
                         Some(u64::MAX),
                     )?;
                 } else {
-                    writer.add_with_meta(key.as_bytes(), Some(&value), index, 0, Some(u64::MAX))?;
+                    writer.add_with_meta(
+                        key.as_bytes(),
+                        Some(&value),
+                        index,
+                        EntryType::Put,
+                        Some(u64::MAX),
+                    )?;
                 }
                 assert!(
                     predicted
@@ -440,7 +460,7 @@ fn should_bound_encoded_output_when_range_tombstones_dominate_the_sst() -> Midge
     for streaming in [false, true] {
         let mut writer = factory.create()?;
         if streaming {
-            writer.add_sorted_with_meta(b"point", Some(b"value"), 1, 0, None)?;
+            writer.add_sorted_with_meta(b"point", Some(b"value"), 1, EntryType::Put, None)?;
         }
         for index in 0..128_u32 {
             let mut start = vec![b'a'; 512];
@@ -527,9 +547,15 @@ fn should_roundtrip_stateful_entries_when_sst_contains_range_tombstones() -> Mid
     let path = temp_dir.path().join("stateful.sst");
 
     let mut writer = factory.create()?;
-    writer.add_with_meta(b"alpha", Some(b"value-a"), 10, 0, Some(4_000_000_000_000))?;
-    writer.add_with_meta(b"alpha", None, 9, 2, None)?;
-    writer.add_with_meta(b"beta", Some(b"value-b"), 8, 1, None)?;
+    writer.add_with_meta(
+        b"alpha",
+        Some(b"value-a"),
+        10,
+        EntryType::Put,
+        Some(4_000_000_000_000),
+    )?;
+    writer.add_with_meta(b"alpha", None, 9, EntryType::Delete, None)?;
+    writer.add_with_meta(b"beta", Some(b"value-b"), 8, EntryType::Insert, None)?;
     writer.add_range_tombstone(b"cat", b"cow", 7)?;
     crate::sst::fs::finish_writer_to_path(writer, &path)?;
 
@@ -576,7 +602,7 @@ fn should_roundtrip_large_key_when_sst_entry_key_delta_exceeds_inline_limit() ->
 
     // Act
     let mut writer = factory.create()?;
-    writer.add_with_meta(&oversized_key, Some(b"value"), 1, 0, None)?;
+    writer.add_with_meta(&oversized_key, Some(b"value"), 1, EntryType::Put, None)?;
     crate::sst::fs::finish_writer_to_path(writer, &path)?;
     let reader = factory.open(std::path::Path::new("large-key.sst"))?;
     let states = reader.scan_range_state(None, None)?;
@@ -606,7 +632,7 @@ fn should_roundtrip_empty_value_when_sst_entry_is_put() -> MidgeResult<()> {
 
     // Act
     let mut writer = factory.create()?;
-    writer.add_with_meta(b"empty", Some(b""), 1, 0, None)?;
+    writer.add_with_meta(b"empty", Some(b""), 1, EntryType::Put, None)?;
     crate::sst::fs::finish_writer_to_path(writer, &path)?;
     let reader = factory.open(std::path::Path::new("empty-value.sst"))?;
     let states = reader.scan_range_state(None, None)?;
@@ -638,7 +664,7 @@ fn should_roundtrip_multiple_blocks_when_sorted_compaction_spills() -> MidgeResu
     // Act
     for index in 0..2_000 {
         let key = format!("key-{index:06}");
-        writer.add_sorted_with_meta(key.as_bytes(), Some(b"value"), index, 0, None)?;
+        writer.add_sorted_with_meta(key.as_bytes(), Some(b"value"), index, EntryType::Put, None)?;
     }
     crate::sst::fs::finish_writer_to_path(writer, &path)?;
     let reader = factory.open(std::path::Path::new("streamed.sst"))?;
@@ -663,10 +689,10 @@ fn should_reject_out_of_order_entries_on_sorted_writer_path() -> MidgeResult<()>
     let fs = Arc::new(crate::io::MockFs::new());
     let factory = FsSstFactoryIo::new(fs, 4096);
     let mut writer = factory.create()?;
-    writer.add_sorted_with_meta(b"b", Some(b"value"), 2, 0, None)?;
+    writer.add_sorted_with_meta(b"b", Some(b"value"), 2, EntryType::Put, None)?;
 
     // Act
-    let result = writer.add_sorted_with_meta(b"a", Some(b"value"), 1, 0, None);
+    let result = writer.add_sorted_with_meta(b"a", Some(b"value"), 1, EntryType::Put, None);
 
     // Assert
     assert!(matches!(
@@ -677,50 +703,50 @@ fn should_reject_out_of_order_entries_on_sorted_writer_path() -> MidgeResult<()>
 }
 
 #[test]
-fn should_reject_unwritable_op_types_when_adding_sst_entries() -> MidgeResult<()> {
-    // Arrange
-    let factory = FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
-
-    for op_type in [3_u8, 4, u8::MAX] {
-        let mut unsorted = factory.create()?;
-        let mut sorted = factory.create()?;
-
-        // Act
-        let unsorted_result = unsorted.add_with_meta(b"key", Some(b"value"), 1, op_type, None);
-        let sorted_result = sorted.add_sorted_with_meta(b"key", Some(b"value"), 1, op_type, None);
-
-        // Assert
-        assert!(
-            matches!(
-                unsorted_result,
-                Err(crate::common::MidgeError::InvalidArgument(_))
-            ),
-            "unsorted writer must reject op_type {op_type}, got {unsorted_result:?}"
-        );
-        assert!(
-            matches!(
-                sorted_result,
-                Err(crate::common::MidgeError::InvalidArgument(_))
-            ),
-            "sorted writer must reject op_type {op_type}, got {sorted_result:?}"
-        );
-    }
-    Ok(())
-}
-
-#[test]
 fn should_accept_writable_op_types_when_adding_sst_entries() -> MidgeResult<()> {
     // Arrange
     let factory = FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
     let mut writer = factory.create()?;
 
     // Act
-    writer.add_with_meta(b"a", Some(b"put"), 3, 0, None)?;
-    writer.add_with_meta(b"b", Some(b"insert"), 2, 1, None)?;
-    writer.add_with_meta(b"c", None, 1, 2, None)?;
+    writer.add_with_meta(b"a", Some(b"put"), 3, EntryType::Put, None)?;
+    writer.add_with_meta(b"b", Some(b"insert"), 2, EntryType::Insert, None)?;
+    writer.add_with_meta(b"c", None, 1, EntryType::Delete, None)?;
 
     // Assert
     assert!(!writer.finish_bytes()?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn should_reject_merge_entry_when_adding_sst_entries() -> MidgeResult<()> {
+    // Arrange
+    let factory = FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
+    let mut unsorted = factory.create()?;
+    let mut sorted = factory.create()?;
+
+    // Act
+    let unsorted_result = unsorted.add_with_meta(b"key", Some(b"value"), 1, EntryType::Merge, None);
+    let sorted_result =
+        sorted.add_sorted_with_meta(b"key", Some(b"value"), 1, EntryType::Merge, None);
+
+    // Assert
+    // The writer must refuse at the call, not buffer the entry and fail later
+    // when the block spills.
+    assert!(
+        matches!(
+            unsorted_result,
+            Err(crate::common::MidgeError::InvalidArgument(_))
+        ),
+        "add_with_meta must reject Merge, got {unsorted_result:?}"
+    );
+    assert!(
+        matches!(
+            sorted_result,
+            Err(crate::common::MidgeError::InvalidArgument(_))
+        ),
+        "add_sorted_with_meta must reject Merge, got {sorted_result:?}"
+    );
     Ok(())
 }
 
@@ -731,7 +757,7 @@ fn should_reject_merge_entry_when_encoding_pending_sst_entry() {
         key: b"key".to_vec(),
         value: Some(b"value".to_vec()),
         sequence: 1,
-        op_type: 3,
+        op_type: EntryType::Merge,
         expiration: None,
     };
 

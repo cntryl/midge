@@ -5,6 +5,8 @@ use crate::common::{MidgeError, MidgeResult};
 use crate::io::Fs;
 use crate::metadata::FileMeta;
 use crate::sst::cache::{BlockCache, CachePolicyType};
+#[cfg(test)]
+use crate::sst::encoding::EntryType;
 use crate::sst::fs::SstFileIo;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -300,7 +302,7 @@ mod tests {
         let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let mut writer = factory.create()?;
-        writer.add_with_meta(b"key", Some(b"value"), 7, 0, None)?;
+        writer.add_with_meta(b"key", Some(b"value"), 7, EntryType::Put, None)?;
         crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join(name))?;
 
         Ok(FileMeta {

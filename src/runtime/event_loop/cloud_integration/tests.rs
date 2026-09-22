@@ -12,6 +12,7 @@ use crate::runtime::TestRuntimeMsg;
 use crate::runtime::{
     state::RuntimeState, ConflictPolicy, KeyAssertion, ResponseRouter, RuntimeMsg, RuntimeResponse,
 };
+use crate::sst::encoding::EntryType;
 use crate::sst::Memtable;
 use crate::wal::DurabilityPolicy;
 use bytes::Bytes;
@@ -1450,7 +1451,7 @@ fn valid_sst_bytes_for_test(key: &[u8], value: &[u8], seq: u64) -> Vec<u8> {
     let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
     let mut writer = factory.create().expect("create test SST writer");
     writer
-        .add_with_meta(key, Some(value), seq, 0, None)
+        .add_with_meta(key, Some(value), seq, EntryType::Put, None)
         .expect("add test SST entry");
     writer.finish_bytes().expect("finish test SST bytes")
 }
@@ -1470,7 +1471,7 @@ fn valid_value_sst_bytes_with_expiration_for_test(
             key,
             Some(value),
             seq,
-            crate::wal::WalOpKind::Put.to_wire_format(),
+            crate::sst::encoding::EntryType::Put,
             Some(expiration),
         )
         .expect("add expiring test SST entry");
@@ -1483,10 +1484,10 @@ fn valid_sst_bytes_without_key_for_test(seq: u64) -> Vec<u8> {
     let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
     let mut writer = factory.create().expect("create test SST writer");
     writer
-        .add_with_meta(b"a", Some(b"first"), seq, 0, None)
+        .add_with_meta(b"a", Some(b"first"), seq, EntryType::Put, None)
         .expect("add first test SST entry");
     writer
-        .add_with_meta(b"z", Some(b"last"), seq, 0, None)
+        .add_with_meta(b"z", Some(b"last"), seq, EntryType::Put, None)
         .expect("add last test SST entry");
     writer.finish_bytes().expect("finish test SST bytes")
 }
@@ -1501,7 +1502,7 @@ fn valid_point_tombstone_sst_bytes_for_test(key: &[u8], seq: u64) -> Vec<u8> {
             key,
             None,
             seq,
-            crate::wal::WalOpKind::Delete.to_wire_format(),
+            crate::sst::encoding::EntryType::Delete,
             None,
         )
         .expect("add point tombstone test SST entry");

@@ -419,18 +419,12 @@ mod tests {
         for (index, (value, sequence, expiration)) in entries.iter().enumerate() {
             let mut writer = factory.create().expect("SST writer");
             let operation = if value.is_some() {
-                WalOpKind::Put
+                crate::sst::encoding::EntryType::Put
             } else {
-                WalOpKind::Delete
+                crate::sst::encoding::EntryType::Delete
             };
             writer
-                .add_with_meta(
-                    b"key",
-                    *value,
-                    *sequence,
-                    operation.to_wire_format(),
-                    *expiration,
-                )
+                .add_with_meta(b"key", *value, *sequence, operation, *expiration)
                 .expect("SST entry");
             let bytes = writer.finish_bytes().expect("SST bytes");
             let name = crate::sst::file_name(0, 0, index as u64 + 1);

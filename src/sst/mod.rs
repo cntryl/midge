@@ -42,7 +42,7 @@ use std::sync::Arc;
 ///
 /// Spelled out rather than reusing the encoded byte, so the two numbering
 /// schemes are never conflated.
-fn entry_type_of(op: OpType) -> EntryType {
+pub(crate) fn entry_type_of(op: OpType) -> EntryType {
     match op {
         OpType::Put => EntryType::Put,
         OpType::Delete => EntryType::Delete,
@@ -137,7 +137,7 @@ pub fn temp_object_key(file_name: &str) -> String {
     )
 }
 
-type MemtableEntryWithMeta = (Vec<u8>, Option<Vec<u8>>, u64, Option<u64>, u8);
+type MemtableEntryWithMeta = (Vec<u8>, Option<Vec<u8>>, u64, Option<u64>, EntryType);
 
 /// Memtable trait for lock-free concurrent access
 pub trait Memtable: Send + Sync {
@@ -220,7 +220,7 @@ impl SkipListMemtable {
     pub(crate) fn visit_frozen_versions(
         &self,
         budget: &crate::common::resource_budget::ResourceBudget,
-        visit: impl FnMut(&[u8], Option<&[u8]>, u64, Option<u64>, u8) -> MidgeResult<()>,
+        visit: impl FnMut(&[u8], Option<&[u8]>, u64, Option<u64>, OpType) -> MidgeResult<()>,
     ) -> MidgeResult<()> {
         self.skiplist.visit_versions(budget, visit)
     }
@@ -249,7 +249,7 @@ impl SkipListMemtable {
                     value.map(|vb| vb.to_vec()),
                     seq,
                     exp,
-                    op.as_u8(),
+                    entry_type_of(op),
                 )
             })
             .collect()

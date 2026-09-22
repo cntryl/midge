@@ -407,6 +407,7 @@ mod tests {
     use super::StorageVerifier;
     use crate::io::{Durability, File, FsError, FsResult};
     use crate::metadata::{FileMeta, Manifest, ManifestPersistence};
+    use crate::sst::encoding::EntryType;
     use crate::sst::{FsSstFactoryIo, SstFactory};
     use bytes::Bytes;
     use std::sync::{Arc, Mutex};
@@ -496,7 +497,13 @@ mod tests {
             let key = format!("key-{index:04}");
             let value = vec![u8::try_from(index).expect("test byte"); 48];
             writer
-                .add_with_meta(key.as_bytes(), Some(&value), index + 1, 0, None)
+                .add_with_meta(
+                    key.as_bytes(),
+                    Some(&value),
+                    index + 1,
+                    EntryType::Put,
+                    None,
+                )
                 .expect("append SST entry");
         }
         let bytes = writer.finish_bytes().expect("finish SST bytes");
