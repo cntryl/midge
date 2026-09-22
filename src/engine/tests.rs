@@ -2105,3 +2105,136 @@ fn should_report_error_when_lease_release_keeps_failing() {
         "retries must back off, not spin: {attempts} attempts"
     );
 }
+
+mod salvage_removes_definitively_lost_ssts {
+    use super::*;
+
+    /// A salvage-mode runtime whose on-disk manifest authority lists one SST.
+    fn salvage_state_with_persisted_sst(
+        sst_seq: u64,
+        size_bytes: u64,
+    ) -> (tempfile::TempDir, crate::runtime::RuntimeState, String) {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let mut state = crate::runtime::RuntimeState::try_new(
+            temp_dir.path().to_path_buf(),
+            false,
+            RecoveryPolicy::Salvage,
+        )
+        .expect("create runtime state");
+        let sst_name = crate::sst::file_name(0, 0, sst_seq);
+        state.manifest.files.push(crate::metadata::FileMeta {
+            name: sst_name.clone(),
+            level: 0,
+            size_bytes,
+            cf_id: 0,
+            sst_seq,
+            ..Default::default()
+        });
+        crate::metadata::ManifestPersistence::save_snapshot_and_truncate_journal(
+            &state.db_path,
+            &state.manifest,
+        )
+        .expect("persist the manifest that lists the SST");
+        (temp_dir, state, sst_name)
+    }
+
+    fn persisted_names(state: &crate::runtime::RuntimeState) -> Vec<String> {
+        crate::metadata::ManifestPersistence::load(&state.db_path)
+            .expect("load persisted manifest")
+            .files
+            .into_iter()
+            .map(|file| file.name)
+            .collect()
+    }
+
+    #[test]
+    fn should_remove_the_manifest_entry_durably_when_salvage_finds_the_sst_missing_from_cloud() {
+        // Arrange
+        let (_temp, mut state, sst_name) = salvage_state_with_persisted_sst(6, 128);
+        let cloud = cloud_with_stale_sst_listing();
+
+        // Act
+        Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+            .expect("salvage tolerates a missing authoritative SST");
+
+        // Assert
+        assert!(state
+            .manifest
+            .files
+            .iter()
+            .all(|file| file.name != sst_name));
+        assert!(
+            !persisted_names(&state).contains(&sst_name),
+            "the removal must survive a restart, not be reverted by the next snapshot"
+        );
+    }
+
+    #[test]
+    fn should_remove_the_manifest_entry_durably_when_salvage_finds_the_sst_wrongly_sized() {
+        // Arrange
+        let bytes = test_sst_bytes();
+        let (_temp, mut state, sst_name) =
+            salvage_state_with_persisted_sst(7, bytes.len() as u64 + 1);
+        let cloud = cloud_with_stale_sst_listing();
+        Engine::blocking_cloud_put(&cloud, &crate::sst::object_key(&sst_name), bytes)
+            .expect("upload wrongly sized SST");
+
+        // Act
+        Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+            .expect("salvage tolerates a wrongly sized authoritative SST");
+
+        // Assert
+        assert!(state
+            .manifest
+            .files
+            .iter()
+            .all(|file| file.name != sst_name));
+        assert!(!persisted_names(&state).contains(&sst_name));
+    }
+
+    #[test]
+    fn should_not_make_a_salvage_drop_durable_when_the_cloud_check_itself_fails() {
+        // Arrange: `sst` is a file, so stat-ing an SST beneath it fails with an
+        // error that is not NotFound. Nothing is known about the object, so it
+        // must not be erased from the durable manifest.
+        let (_temp, mut state, sst_name) = salvage_state_with_persisted_sst(9, 128);
+        let cloud_root = tempfile::tempdir().expect("create cloud root");
+        std::fs::write(cloud_root.path().join("sst"), b"not a directory")
+            .expect("create a file where the SST directory should be");
+
+        // Act
+        super::startup::CloudStartupRecovery::ensure_local_sst_cache_from_cloud(
+            &mut state,
+            cloud_root.path(),
+        )
+        .expect("salvage tolerates an unverifiable authoritative SST");
+
+        // Assert
+        assert!(
+            persisted_names(&state).contains(&sst_name),
+            "an indeterminate failure must not erase the durable manifest entry"
+        );
+    }
+
+    #[test]
+    fn should_keep_the_manifest_entry_when_the_cloud_sst_is_valid() {
+        // Arrange
+        let bytes = test_sst_bytes();
+        let (_temp, mut state, sst_name) = salvage_state_with_persisted_sst(8, bytes.len() as u64);
+        let cloud = cloud_with_stale_sst_listing();
+        Engine::blocking_cloud_put(&cloud, &crate::sst::object_key(&sst_name), bytes)
+            .expect("upload SST");
+
+        // Act
+        Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+            .expect("a valid SST is retained");
+
+        // Assert
+        assert!(state
+            .manifest
+            .files
+            .iter()
+            .any(|file| file.name == sst_name));
+        assert!(persisted_names(&state).contains(&sst_name));
+    }
+}
