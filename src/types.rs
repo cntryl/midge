@@ -382,24 +382,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_preserve_entry_type_wire_tags_and_reject_unsupported_merge() {
-        // Arrange / Act / Assert
+    fn should_preserve_entry_type_wire_tags_given_unsupported_merge() {
+        // Arrange
+        let unsupported_merge_tag = 3;
+
+        // Act
+        let decoded_put = EntryType::try_from(0);
+        let decoded_insert = EntryType::try_from(1);
+        let decoded_delete = EntryType::try_from(2);
+        let rejected_merge = EntryType::try_from(unsupported_merge_tag);
+
+        // Assert
         assert_eq!(EntryType::Put as u8, 0);
         assert_eq!(EntryType::Insert as u8, 1);
         assert_eq!(EntryType::Delete as u8, 2);
         assert_eq!(EntryType::Merge as u8, 3);
-        assert!(matches!(EntryType::try_from(0), Ok(EntryType::Put)));
-        assert!(matches!(EntryType::try_from(1), Ok(EntryType::Insert)));
-        assert!(matches!(EntryType::try_from(2), Ok(EntryType::Delete)));
+        assert!(matches!(decoded_put, Ok(EntryType::Put)));
+        assert!(matches!(decoded_insert, Ok(EntryType::Insert)));
+        assert!(matches!(decoded_delete, Ok(EntryType::Delete)));
         assert!(matches!(
-            EntryType::try_from(3),
+            rejected_merge,
             Err(MidgeError::CompatibilityError(message))
                 if message == "SST entry type 3 (Merge) is not supported"
         ));
     }
 
     #[test]
-    fn should_preserve_half_open_ranges_and_snapshot_state_display() {
+    fn should_preserve_half_open_ranges_when_rendering_snapshot_state() {
         // Arrange
         let tombstone = RangeTombstone::new(b"alpha".to_vec(), b"omega".to_vec(), 7);
         let state = KeyState::Value(Bytes::from_static(b"value"), 9, Some(11), EntryType::Insert);

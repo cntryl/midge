@@ -1172,7 +1172,7 @@ mod tests {
     }
 
     #[test]
-    fn should_keep_decode_and_reservation_bounds_distinct_for_zstd_without_content_size() {
+    fn should_apply_distinct_decode_reservation_bounds_for_zstd_without_content_size() {
         use std::io::Write;
 
         // Arrange

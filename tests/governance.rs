@@ -347,13 +347,15 @@ mod architecture_ladder {
         );
     }
 
+    const UNFLUSHED_DATA_PRESENT_CONSTRUCTION: &str = "UnflushedDataPresent {";
+
     #[test]
     fn should_construct_the_unflushed_discard_licence_in_only_the_active_memtable_check() {
         // Arrange: MidgeError::UnflushedDataPresent is a permission to throw
         // committed data away. Busy used to carry that meaning implicitly,
         // which let four unrelated producers forge it; a second construction
         // site is a second forgery, so the count is the invariant.
-        let needle = "UnflushedDataPresent {";
+        let needle = UNFLUSHED_DATA_PRESENT_CONSTRUCTION;
         let classifier = Path::new("src").join("common").join("error.rs");
         let expected = Path::new("src").join("runtime").join("ddl.rs");
 
@@ -430,7 +432,7 @@ mod architecture_ladder {
     }
 
     #[test]
-    fn should_keep_cloud_boundary_and_runtime_publication_owners_separate() {
+    fn should_keep_cloud_boundary_runtime_publication_owners_separate() {
         // Arrange
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let module = std::fs::read_to_string(root.join("src/storage/cloud/mod.rs"))
@@ -602,6 +604,17 @@ mod architecture_ladder {
         );
     }
 
+    const SST_VERSION_STATE_LEGACY_DEFINITIONS: [&str; 8] = [
+        "pub enum EntryType",
+        "pub struct RangeTombstone",
+        "pub enum KeyState",
+        "pub use crate::types::EntryType",
+        "pub use crate::types::RangeTombstone",
+        "pub use crate::types::KeyState",
+        "pub use crate::types::{",
+        "pub(crate) use crate::types::{",
+    ];
+
     #[test]
     fn should_keep_version_state_types_owned_below_sst_codecs() {
         // Arrange
@@ -609,23 +622,12 @@ mod architecture_ladder {
         let shared =
             std::fs::read_to_string(root.join("src/types.rs")).expect("read shared types source");
         let sst_sources = rust_sources_under("src/sst");
-        let misplaced_definitions = [
-            "pub enum EntryType",
-            "pub struct RangeTombstone",
-            "pub enum KeyState",
-            "pub use crate::types::EntryType",
-            "pub use crate::types::RangeTombstone",
-            "pub use crate::types::KeyState",
-            "pub use crate::types::{",
-            "pub(crate) use crate::types::{",
-        ];
-
         // Act
         let offenders: Vec<_> = sst_sources
             .iter()
             .flat_map(|path| {
                 let source = std::fs::read_to_string(path).expect("read SST source");
-                misplaced_definitions
+                SST_VERSION_STATE_LEGACY_DEFINITIONS
                     .iter()
                     .filter(move |needle| source.contains(**needle))
                     .map(move |needle| format!("{}:{needle}", path.display()))
@@ -643,41 +645,40 @@ mod architecture_ladder {
         );
     }
 
-    #[test]
-    fn should_keep_persisted_sst_layout_proof_views_below_sst() {
-        // Arrange
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let layout = std::fs::read_to_string(root.join("src/cloud_layout.rs"))
-            .expect("read cloud layout source");
-        let shared =
-            std::fs::read_to_string(root.join("src/types.rs")).expect("read shared types source");
-        let sst_sources = rust_sources_under("src/sst");
-        let legacy_sst_definitions = [
-            "mod name;",
-            "struct PersistedSstName",
-            "SST_SEQUENCE_WIDTH",
-            "fn file_name(",
-            "fn compaction_file_name(",
-            "fn parse_compaction_file_name",
-            "fn object_key(",
-            "fn temp_object_key(",
-        ];
-        let legacy_sst_symbols = [
-            "PersistedSstName",
-            "SST_SEQUENCE_WIDTH",
-            "file_name",
-            "compaction_file_name",
-            "parse_compaction_file_name",
-            "object_key",
-            "temp_object_key",
-        ];
+    const LEGACY_PERSISTED_SST_DEFINITIONS: [&str; 8] = [
+        "mod name;",
+        "struct PersistedSstName",
+        "SST_SEQUENCE_WIDTH",
+        "fn file_name(",
+        "fn compaction_file_name(",
+        "fn parse_compaction_file_name",
+        "fn object_key(",
+        "fn temp_object_key(",
+    ];
 
-        // Act
-        let naming_offenders = sst_sources
+    const LEGACY_PERSISTED_SST_SYMBOLS: [&str; 7] = [
+        "PersistedSstName",
+        "SST_SEQUENCE_WIDTH",
+        "file_name",
+        "compaction_file_name",
+        "parse_compaction_file_name",
+        "object_key",
+        "temp_object_key",
+    ];
+
+    fn is_public_use_statement(statement: &str) -> bool {
+        statement.contains("pubuse")
+            || statement
+                .match_indices("pub(")
+                .any(|(index, _)| statement[index..].contains(")use"))
+    }
+
+    fn persisted_sst_naming_offenders(sst_sources: &[PathBuf]) -> Vec<String> {
+        sst_sources
             .iter()
             .flat_map(|path| {
                 let source = std::fs::read_to_string(path).expect("read SST source");
-                let definitions = legacy_sst_definitions
+                let definitions = LEGACY_PERSISTED_SST_DEFINITIONS
                     .iter()
                     .filter(|symbol| source.contains(**symbol))
                     .map(move |symbol| format!("{}:{symbol}", path.display()))
@@ -685,14 +686,9 @@ mod architecture_ladder {
                 let reexports = source
                     .split(';')
                     .map(|statement| statement.split_whitespace().collect::<String>())
-                    .filter(|statement| {
-                        statement.contains("pubuse")
-                            || statement
-                                .match_indices("pub(")
-                                .any(|(index, _)| statement[index..].contains(")use"))
-                    })
+                    .filter(|statement| is_public_use_statement(statement))
                     .flat_map(|statement| {
-                        let symbols = legacy_sst_symbols
+                        let symbols = LEGACY_PERSISTED_SST_SYMBOLS
                             .iter()
                             .filter(|symbol| statement.contains(**symbol))
                             .map(|symbol| format!("{}:{statement}:{symbol}", path.display()))
@@ -712,8 +708,11 @@ mod architecture_ladder {
                     .chain(layout_import)
                     .collect::<Vec<_>>()
             })
-            .collect::<Vec<_>>();
-        let proof_offenders = sst_sources
+            .collect()
+    }
+
+    fn persisted_sst_proof_offenders(sst_sources: &[PathBuf]) -> Vec<String> {
+        sst_sources
             .iter()
             .flat_map(|path| {
                 let source = std::fs::read_to_string(path).expect("read SST source");
@@ -726,12 +725,7 @@ mod architecture_ladder {
                 let reexports = source
                     .split(';')
                     .map(|statement| statement.split_whitespace().collect::<String>())
-                    .filter(|statement| {
-                        statement.contains("pubuse")
-                            || statement
-                                .match_indices("pub(")
-                                .any(|(index, _)| statement[index..].contains(")use"))
-                    })
+                    .filter(|statement| is_public_use_statement(statement))
                     .filter(|statement| {
                         statement.contains("ExpectedSst") || statement.contains('*')
                     })
@@ -739,7 +733,22 @@ mod architecture_ladder {
                     .collect::<Vec<_>>();
                 aliases.into_iter().chain(reexports).collect::<Vec<_>>()
             })
-            .collect::<Vec<_>>();
+            .collect()
+    }
+
+    #[test]
+    fn should_keep_persisted_sst_layout_proof_views_below_sst() {
+        // Arrange
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let layout = std::fs::read_to_string(root.join("src/cloud_layout.rs"))
+            .expect("read cloud layout source");
+        let shared =
+            std::fs::read_to_string(root.join("src/types.rs")).expect("read shared types source");
+        let sst_sources = rust_sources_under("src/sst");
+
+        // Act
+        let naming_offenders = persisted_sst_naming_offenders(&sst_sources);
+        let proof_offenders = persisted_sst_proof_offenders(&sst_sources);
 
         // Assert
         assert!(layout.contains("pub(crate) struct PersistedSstName"));
@@ -764,6 +773,14 @@ mod architecture_ladder {
         );
     }
 
+    const CLOUD_SEAL_FUNCTION_END: &str = "\n    }\n";
+    const DYN_SST_WRITER_TRAIT_END: &str = "\n}\n";
+    const OPENING_BRACE: char = '\x7b';
+
+    fn dyn_sst_writer_method_declaration(name: &str) -> String {
+        format!("fn {name}(")
+    }
+
     #[test]
     fn should_bound_cloud_seal_when_the_event_loop_forces_a_cloud_async_seal() {
         // Arrange
@@ -776,7 +793,7 @@ mod architecture_ladder {
             .find("pub(crate) fn seal_current_cloud_segment(")
             .expect("seal_current_cloud_segment");
         let end = source[start..]
-            .find("\n    }\n")
+            .find(CLOUD_SEAL_FUNCTION_END)
             .expect("end of seal_current_cloud_segment");
 
         // Act
@@ -801,7 +818,7 @@ mod architecture_ladder {
             .find("pub trait DynSstWriter")
             .expect("DynSstWriter trait");
         let trait_end = source[start..]
-            .find("\n}\n")
+            .find(DYN_SST_WRITER_TRAIT_END)
             .expect("DynSstWriter trait end");
         let trait_source = &source[start..start + trait_end];
         let required = [
@@ -823,28 +840,28 @@ mod architecture_ladder {
             .into_iter()
             .filter(|name| {
                 let declaration = trait_source
-                    .find(&format!("fn {name}("))
-                    .unwrap_or_else(|| panic!("fn {name} missing from DynSstWriter"));
+                    .find(&dyn_sst_writer_method_declaration(name))
+                    .unwrap_or_else(|| panic!("DynSstWriter method missing"));
                 let terminator = trait_source[declaration..]
-                    .find(['{', ';'])
+                    .find([OPENING_BRACE, ';'])
                     .expect("declaration terminator");
-                trait_source.as_bytes()[declaration + terminator] == b'{'
+                trait_source.as_bytes()[declaration + terminator] == OPENING_BRACE as u8
             })
             .collect();
         let lingering: Vec<&str> = removed
             .into_iter()
-            .filter(|name| trait_source.contains(&format!("fn {name}(")))
+            .filter(|name| trait_source.contains(&dyn_sst_writer_method_declaration(name)))
             .collect();
 
         // Assert
         assert!(
             defaulted.is_empty(),
             "DynSstWriter methods must be required so a writer cannot silently drop tombstones, \
-             sequences or TTLs: {defaulted:?}"
+             sequences or TTLs"
         );
         assert!(
             lingering.is_empty(),
-            "the lossy entry API must not return (add drops the sequence, kind and TTL): {lingering:?}"
+            "the lossy entry API must not return (add drops the sequence, kind and TTL)"
         );
     }
 
@@ -1003,7 +1020,7 @@ mod architecture_ladder {
     }
 
     #[test]
-    fn should_keep_storage_tests_free_of_runtime_and_format_imports() {
+    fn should_keep_storage_tests_free_of_runtime_format_imports() {
         // Arrange
         let forbidden = ["crate::runtime", "crate::wal", "crate::metadata"];
 
@@ -1443,14 +1460,16 @@ mod public_api_surface {
         );
     }
 
+    const INTERNAL_TESTING_MODULE_GATE: &str =
+        "#[cfg(feature = \"internal-testing\")]\n#[doc(hidden)]\npub mod __internal {";
+
     #[test]
     fn should_keep_internal_module_behind_the_internal_testing_feature() {
         // Arrange
         let source = crate_root_source();
-        let gate = "#[cfg(feature = \"internal-testing\")]\n#[doc(hidden)]\npub mod __internal {";
 
         // Act
-        let gated = source.contains(gate);
+        let gated = source.contains(INTERNAL_TESTING_MODULE_GATE);
 
         // Assert
         assert!(

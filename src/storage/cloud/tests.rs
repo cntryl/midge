@@ -189,7 +189,7 @@ impl CloudBackend for DroppedHeadCallbackBackend {
 // =========== CloudOutcome Tests ===========
 
 #[test]
-fn should_share_one_metadata_type_between_backends_and_the_storage_layer() {
+fn should_share_one_metadata_type_across_storage_layers() {
     // Arrange
     let from_backend = ObjectMetadata::new(7, "etag".to_string());
 

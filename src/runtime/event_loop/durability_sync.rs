@@ -991,7 +991,7 @@ mod tests {
     }
 
     #[test]
-    fn should_ack_and_queue_confirm_waiter_when_applied_transaction_is_deferred() {
+    fn should_queue_confirm_waiter_after_deferred_transaction_acknowledgement() {
         // Arrange
         let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
             .expect("create event loop");

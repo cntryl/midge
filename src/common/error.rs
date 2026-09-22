@@ -281,22 +281,30 @@ mod tests {
             MidgeError::NotFound,
         ];
 
-        // Act + Assert
-        assert!(
-            licence.licenses_unflushed_discard(),
-            "the active-memtable refusal is the discard licence"
-        );
-        for error in non_licences {
-            assert!(
-                !error.licenses_unflushed_discard(),
-                "{error} must not be read as permission to discard committed data"
-            );
-        }
+        // Act
+        let licence_allows_discard = licence.licenses_unflushed_discard();
+        let non_licence_discard_permissions = non_licences
+            .iter()
+            .map(MidgeError::licenses_unflushed_discard)
+            .collect::<Vec<_>>();
 
         // The licence must survive replay across the runtime boundary, or a
         // caller that only sees the replayed error loses the distinction.
         let replayed = licence.replay();
-        assert!(replayed.licenses_unflushed_discard());
+        let replayed_allows_discard = replayed.licenses_unflushed_discard();
+
+        // Assert
+        assert!(
+            licence_allows_discard,
+            "the active-memtable refusal is the discard licence"
+        );
+        for (error, allows_discard) in non_licences.iter().zip(non_licence_discard_permissions) {
+            assert!(
+                !allows_discard,
+                "{error} must not be read as permission to discard committed data"
+            );
+        }
+        assert!(replayed_allows_discard);
         assert!(matches!(
             replayed,
             MidgeError::UnflushedDataPresent {

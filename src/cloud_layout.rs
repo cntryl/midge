@@ -216,7 +216,9 @@ mod tests {
             "not-an-sst.tmp",
         ];
 
-        // Act / Assert
+        // Act
+
+        // Assert
         for name in unsafe_names {
             assert!(
                 PersistedSstName::parse(name).is_err(),

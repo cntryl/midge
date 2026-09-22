@@ -1423,19 +1423,29 @@ fn should_defer_layout_mutating_messages_when_publication_gate_classifies() {
         },
     ];
 
-    // Act / Assert
-    for msg in deferred {
+    // Act
+    let deferred = deferred
+        .into_iter()
+        .map(|msg| (msg.kind_name(), msg.defers_under_publication_gate()))
+        .collect::<Vec<_>>();
+    let passed = passed
+        .into_iter()
+        .map(|msg| (msg.kind_name(), msg.defers_under_publication_gate()))
+        .collect::<Vec<_>>();
+
+    // Assert
+    for (kind_name, is_deferred) in deferred {
         assert!(
-            msg.defers_under_publication_gate(),
+            is_deferred,
             "{} must be deferred by an active publication gate",
-            msg.kind_name()
+            kind_name
         );
     }
-    for msg in passed {
+    for (kind_name, is_deferred) in passed {
         assert!(
-            !msg.defers_under_publication_gate(),
+            !is_deferred,
             "{} must pass an active publication gate",
-            msg.kind_name()
+            kind_name
         );
     }
 }
@@ -1460,13 +1470,17 @@ fn should_classify_test_hooks_through_the_test_table_when_publication_gate_class
     });
     let inert_hook = RuntimeMsg::Test(TestRuntimeMsg::Noop { request_id: 2 });
 
-    // Act / Assert
-    assert!(manifest_hook.defers_under_publication_gate());
-    assert!(!inert_hook.defers_under_publication_gate());
+    // Act
+    let manifest_hook_is_deferred = manifest_hook.defers_under_publication_gate();
+    let inert_hook_is_deferred = inert_hook.defers_under_publication_gate();
+
+    // Assert
+    assert!(manifest_hook_is_deferred);
+    assert!(!inert_hook_is_deferred);
 }
 
 #[test]
-fn should_reject_writes_and_defer_completions_when_verification_barrier_classifies() {
+fn should_classify_messages_when_verification_barrier_is_active() {
     // Arrange
     let rejected = vec![
         RuntimeMsg::ApplyTransaction {
@@ -1514,32 +1528,52 @@ fn should_reject_writes_and_defer_completions_when_verification_barrier_classifi
         },
     ];
 
-    // Act / Assert
-    for msg in rejected {
+    // Act
+    let rejected = rejected
+        .into_iter()
+        .map(|msg| {
+            (
+                msg.kind_name(),
+                msg.request_id(),
+                msg.verification_barrier_action(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let deferred = deferred
+        .into_iter()
+        .map(|msg| (msg.kind_name(), msg.verification_barrier_action()))
+        .collect::<Vec<_>>();
+    let allowed = allowed
+        .into_iter()
+        .map(|msg| (msg.kind_name(), msg.verification_barrier_action()))
+        .collect::<Vec<_>>();
+
+    // Assert
+    for (kind_name, request_id, action) in rejected {
         assert!(
             matches!(
-                msg.verification_barrier_action(),
-                VerificationBarrierAction::Reject { request_id }
-                    if Some(request_id) == msg.request_id()
+                action,
+                VerificationBarrierAction::Reject { request_id: rejected_request_id }
+                    if Some(rejected_request_id) == request_id
             ),
             "{} must fail fast under a verification barrier, addressed to its own request id",
-            msg.kind_name()
+            kind_name
         );
     }
-    for msg in deferred {
+    for (kind_name, action) in deferred {
         assert_eq!(
-            msg.verification_barrier_action(),
+            action,
             VerificationBarrierAction::Defer,
             "{} must be parked, not dropped, under a verification barrier",
-            msg.kind_name()
+            kind_name
         );
     }
-    for msg in allowed {
+    for (kind_name, action) in allowed {
         assert_eq!(
-            msg.verification_barrier_action(),
+            action,
             VerificationBarrierAction::Allow,
             "{} must pass a verification barrier",
-            msg.kind_name()
+            kind_name
         );
     }
 }
@@ -1554,19 +1588,18 @@ fn should_classify_test_hooks_through_the_test_table_when_verification_barrier_c
     });
     let allowed = RuntimeMsg::Test(TestRuntimeMsg::Noop { request_id: 3 });
 
-    // Act / Assert
+    // Act
+    let rejected_action = rejected.verification_barrier_action();
+    let deferred_action = deferred.verification_barrier_action();
+    let allowed_action = allowed.verification_barrier_action();
+
+    // Assert
     assert!(matches!(
-        rejected.verification_barrier_action(),
+        rejected_action,
         VerificationBarrierAction::Reject { request_id: 1 }
     ));
-    assert_eq!(
-        deferred.verification_barrier_action(),
-        VerificationBarrierAction::Defer
-    );
-    assert_eq!(
-        allowed.verification_barrier_action(),
-        VerificationBarrierAction::Allow
-    );
+    assert_eq!(deferred_action, VerificationBarrierAction::Defer);
+    assert_eq!(allowed_action, VerificationBarrierAction::Allow);
 }
 
 /// Source-scanning guards for the "one table per build" invariant.
@@ -1672,8 +1705,8 @@ mod production_tables_have_no_cfg_test_arms {
         let source = include_str!("protocol.rs");
 
         // Act
-        let message_enum = sole_block(source, "pub enum RuntimeMsg {");
-        let classifiers = sole_block(source, "impl RuntimeMsg {");
+        let message_enum = sole_block(source, "pub enum RuntimeMsg \x7B");
+        let classifiers = sole_block(source, "impl RuntimeMsg \x7B");
 
         // Assert
         assert_no_cfg_test(&message_enum, "enum RuntimeMsg");
@@ -1686,7 +1719,7 @@ mod production_tables_have_no_cfg_test_arms {
         let source = include_str!("durability.rs");
 
         // Act
-        let waiters = sole_block(source, "pub enum DurabilityWaiter {");
+        let waiters = sole_block(source, "pub enum DurabilityWaiter \x7B");
 
         // Assert
         assert_no_cfg_test(&waiters, "enum DurabilityWaiter");
@@ -1698,7 +1731,7 @@ mod production_tables_have_no_cfg_test_arms {
         let source = include_str!("event_loop/durability_sync.rs");
 
         // Act
-        let completion = production_block(source, "impl EventLoop {");
+        let completion = production_block(source, "impl EventLoop \x7B");
 
         // Assert
         assert_no_cfg_test(&completion, "durability_sync::EventLoop");
@@ -1712,14 +1745,17 @@ mod production_tables_have_no_cfg_test_arms {
         // Act
         let waiter_request_id = sole_block(
             source,
-            "fn shutdown_waiter_request_id(waiter: &DurabilityWaiter) -> Option<u64> {",
+            "fn shutdown_waiter_request_id(waiter: &DurabilityWaiter) -> Option<u64> \x7B",
         );
 
         // Assert
         assert_no_cfg_test(&waiter_request_id, "shutdown_waiter_request_id");
     }
 
-    fn assert_rejects_injected_build_divergent_arms(block: &str, what: &str) {
+    fn injected_build_divergent_arms_are_rejected(
+        block: &str,
+        what: &str,
+    ) -> Result<(), &'static str> {
         for attribute in ["#[cfg(test)]", "#[cfg(not(test))]"] {
             let mut injected = block.to_string();
             let insert_at = injected
@@ -1727,31 +1763,46 @@ mod production_tables_have_no_cfg_test_arms {
                 .unwrap_or_else(|| panic!("{what} block must end with a closing brace"));
             injected.insert_str(insert_at, &format!("    {attribute}\n"));
             let result = std::panic::catch_unwind(|| assert_no_cfg_test(&injected, what));
-            assert!(
-                result.is_err(),
-                "{what} guard must reject an injected {attribute} arm"
-            );
+            if result.is_ok() {
+                return Err(attribute);
+            }
         }
+        Ok(())
     }
 
     #[test]
     fn should_reject_injected_build_divergent_arms_in_the_durability_waiter_table() {
         // Arrange
         let source = include_str!("durability.rs");
-        let waiters = sole_block(source, "pub enum DurabilityWaiter {");
+        let waiters = sole_block(source, "pub enum DurabilityWaiter \x7B");
 
-        // Act / Assert
-        assert_rejects_injected_build_divergent_arms(&waiters, "enum DurabilityWaiter");
+        // Act
+        let result = injected_build_divergent_arms_are_rejected(&waiters, "enum DurabilityWaiter");
+
+        // Assert
+        assert_eq!(
+            result,
+            Ok(()),
+            "enum DurabilityWaiter guard must reject every injected build-divergent arm"
+        );
     }
 
     #[test]
     fn should_reject_injected_build_divergent_arms_in_the_durability_completion_tables() {
         // Arrange
         let source = include_str!("event_loop/durability_sync.rs");
-        let completion = production_block(source, "impl EventLoop {");
+        let completion = production_block(source, "impl EventLoop \x7B");
 
-        // Act / Assert
-        assert_rejects_injected_build_divergent_arms(&completion, "durability_sync::EventLoop");
+        // Act
+        let result =
+            injected_build_divergent_arms_are_rejected(&completion, "durability_sync::EventLoop");
+
+        // Assert
+        assert_eq!(
+            result,
+            Ok(()),
+            "durability_sync::EventLoop guard must reject every injected build-divergent arm"
+        );
     }
 
     #[test]
@@ -1760,13 +1811,20 @@ mod production_tables_have_no_cfg_test_arms {
         let source = include_str!("event_loop/shutdown.rs");
         let waiter_request_id = sole_block(
             source,
-            "fn shutdown_waiter_request_id(waiter: &DurabilityWaiter) -> Option<u64> {",
+            "fn shutdown_waiter_request_id(waiter: &DurabilityWaiter) -> Option<u64> \x7B",
         );
 
-        // Act / Assert
-        assert_rejects_injected_build_divergent_arms(
+        // Act
+        let result = injected_build_divergent_arms_are_rejected(
             &waiter_request_id,
             "shutdown_waiter_request_id",
+        );
+
+        // Assert
+        assert_eq!(
+            result,
+            Ok(()),
+            "shutdown_waiter_request_id guard must reject every injected build-divergent arm"
         );
     }
 
@@ -1780,7 +1838,7 @@ mod production_tables_have_no_cfg_test_arms {
         // order: both the `#[cfg(test)]` extension and the `#[cfg(not(test))]`
         // stub share this header, and either could be moved above the
         // production impl.
-        let production_impl = production_block(source, "impl RuntimeDispatcher {");
+        let production_impl = production_block(source, "impl RuntimeDispatcher \x7B");
 
         // Assert
         assert_no_cfg_test(&production_impl, "impl RuntimeDispatcher");
@@ -1792,7 +1850,7 @@ mod production_tables_have_no_cfg_test_arms {
         let source = include_str!("event_loop/write_batch.rs");
 
         // Act
-        let write_path = sole_block(source, "impl EventLoop {");
+        let write_path = sole_block(source, "impl EventLoop \x7B");
 
         // Assert
         assert_no_cfg_test(&write_path, "write_batch::EventLoop");
@@ -1804,7 +1862,7 @@ mod production_tables_have_no_cfg_test_arms {
         let source = include_str!("event_loop/verification.rs");
 
         // Act
-        let gate = sole_block(source, "impl EventLoop {");
+        let gate = sole_block(source, "impl EventLoop \x7B");
 
         // Assert
         assert_no_cfg_test(&gate, "verification::EventLoop");

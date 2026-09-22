@@ -1912,7 +1912,8 @@ mod tests {
     }
 
     #[test]
-    fn should_retire_obsolete_and_carry_live_ranges_between_partitions() -> MidgeResult<()> {
+    fn should_carry_live_ranges_after_retiring_obsolete_ranges_between_partitions(
+    ) -> MidgeResult<()> {
         // Arrange
         let budget = crate::common::resource_budget::ResourceBudget::new(1024 * 1024);
         let mut tracker = RangeTombstoneTracker::new();

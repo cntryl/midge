@@ -352,7 +352,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_classify_only_put_and_insert_as_value_writes() {
+    fn should_classify_value_writes_from_entry_type() {
         // Arrange
         let cases = [
             (EntryType::Put, true),
