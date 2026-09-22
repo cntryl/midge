@@ -564,10 +564,11 @@ impl EventLoop {
         sst_name: &str,
         budget: &crate::common::resource_budget::ResourceBudget,
     ) -> crate::common::MidgeResult<crate::runtime::FileMeta> {
-        if let Some((meta, _proof)) = self.compaction_actor.prepared_remote_output(sst_name) {
+        if let Some(prepared) = self.compaction_actor.prepared_output(sst_name) {
+            let meta = prepared.metadata;
             if meta.cf_id != cf_id || meta.level != level || meta.name != sst_name {
                 return Err(crate::common::MidgeError::Corruption(
-                    "remote compaction output identity mismatch".into(),
+                    "compaction output identity mismatch".into(),
                 ));
             }
             // The proof is verified in mirror_ssts_to_authoritative_cloud,
@@ -890,13 +891,16 @@ impl EventLoop {
         };
 
         for sst_name in sst_names {
-            if let Some((_metadata, proof)) = self.compaction_actor.prepared_remote_output(sst_name)
-            {
-                hybrid.verify_remote_object_guards_within(
-                    &[proof],
-                    &self.event_loop_cloud_deadline(),
-                )?;
-                continue;
+            if let Some(prepared) = self.compaction_actor.prepared_output(sst_name) {
+                // A local-only partition is summarized on the worker but never
+                // uploaded, so it has no proof and still needs mirroring here.
+                if let Some(proof) = prepared.proof {
+                    hybrid.verify_remote_object_guards_within(
+                        &[proof],
+                        &self.event_loop_cloud_deadline(),
+                    )?;
+                    continue;
+                }
             }
             let path = self.state.sst_dir.join(sst_name);
             crate::sst::fs::SstFileIo::summarize_with_real_fs_for_compaction(

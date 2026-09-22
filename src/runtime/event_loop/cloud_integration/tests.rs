@@ -8639,21 +8639,23 @@ fn should_head_each_compaction_output_once_when_publishing_prepared_remote_outpu
         .prepare_for_completion_test(&mut el.state, &[input_sst.to_string()])?;
     // Seed after prepare_for_completion_test: preparing a compaction clears
     // the staged-output map.
-    el.compaction_actor.insert_prepared_remote_output_for_test(
+    el.compaction_actor.insert_prepared_output_for_test(
         &output_sst,
-        crate::runtime::FileMeta {
-            name: output_sst.clone(),
-            level: 1,
-            size_bytes: output_bytes.len() as u64,
-            content_crc32c: None,
-            cf_id: 0,
-            smallest_key: Some(b"counted".to_vec()),
-            largest_key: Some(b"counted".to_vec()),
-            smallest_seq: Some(11),
-            largest_seq: Some(11),
-            key_bounds_complete: true,
+        crate::runtime::actors::compaction::PreparedCompactionOutput {
+            metadata: crate::runtime::FileMeta {
+                name: output_sst.clone(),
+                level: 1,
+                size_bytes: output_bytes.len() as u64,
+                content_crc32c: None,
+                cf_id: 0,
+                smallest_key: Some(b"counted".to_vec()),
+                largest_key: Some(b"counted".to_vec()),
+                smallest_seq: Some(11),
+                largest_seq: Some(11),
+                key_bounds_complete: true,
+            },
+            proof: Some(proof),
         },
-        proof,
     );
     let request_id = 5252;
     let response_rx = el.router.register(request_id, "TestRequest");
