@@ -7188,9 +7188,7 @@ fn should_use_latest_surviving_waiter_deadline_given_older_waiter_already_expire
     );
 
     // Act
-    let deadline = el
-        .cloud_ack_deadline(segment_id)
-        .expect("a surviving waiter supplies a deadline");
+    let deadline = el.cloud_ack_deadline(segment_id);
 
     // Assert
     assert!(

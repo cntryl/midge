@@ -187,10 +187,9 @@ impl EventLoop {
         max_sequence: u64,
         attempt_deadline: Option<&OperationDeadline>,
     ) {
-        let deadline = attempt_deadline.copied().unwrap_or_else(|| {
-            self.cloud_ack_deadline(segment_id)
-                .unwrap_or_else(OperationDeadline::unbounded)
-        });
+        let deadline = attempt_deadline
+            .copied()
+            .unwrap_or_else(|| self.cloud_ack_deadline(segment_id));
         if let Err(error) = self.validate_runtime_writer_lease_within(&deadline) {
             self.handle_cloud_upload_failure(
                 segment_id,
@@ -416,30 +415,21 @@ impl EventLoop {
     /// caller has abandoned, the accepted WAL obligation continues through
     /// bounded maintenance attempts so provider latency cannot monopolize the
     /// event loop.
-    pub(super) fn cloud_ack_deadline(&self, segment_id: u64) -> Option<OperationDeadline> {
+    pub(super) fn cloud_ack_deadline(&self, segment_id: u64) -> OperationDeadline {
         let request_ids = self
             .durability
             .cloud_durability_request_ids_at_or_after(segment_id);
         if request_ids.is_empty() {
-            return Some(OperationDeadline::from_budget(
-                self.runtime_response_timeout,
-            ));
+            return OperationDeadline::from_budget(self.runtime_response_timeout);
         }
         let latest_start = request_ids
             .iter()
             .filter_map(|request_id| self.router.registered_at(*request_id))
             .max();
         latest_start.map_or_else(
-            || {
-                Some(OperationDeadline::from_budget(
-                    self.runtime_response_timeout,
-                ))
-            },
+            || OperationDeadline::from_budget(self.runtime_response_timeout),
             |latest_start| {
-                Some(OperationDeadline::from_start(
-                    latest_start,
-                    self.runtime_response_timeout,
-                ))
+                OperationDeadline::from_start(latest_start, self.runtime_response_timeout)
             },
         )
     }
