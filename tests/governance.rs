@@ -685,13 +685,22 @@ mod architecture_ladder {
                 let reexports = source
                     .split(';')
                     .map(|statement| statement.split_whitespace().collect::<String>())
-                    .filter(|statement| statement.contains("pub") && statement.contains("use"))
+                    .filter(|statement| {
+                        statement.contains("pubuse")
+                            || statement
+                                .match_indices("pub(")
+                                .any(|(index, _)| statement[index..].contains(")use"))
+                    })
                     .flat_map(|statement| {
-                        legacy_sst_symbols
+                        let symbols = legacy_sst_symbols
                             .iter()
                             .filter(|symbol| statement.contains(**symbol))
                             .map(|symbol| format!("{}:{statement}:{symbol}", path.display()))
-                            .collect::<Vec<_>>()
+                            .collect::<Vec<_>>();
+                        let glob = statement
+                            .contains("::*")
+                            .then(|| format!("{}:{statement}:glob re-export", path.display()));
+                        symbols.into_iter().chain(glob).collect::<Vec<_>>()
                     })
                     .collect::<Vec<_>>();
                 let layout_import = source
@@ -717,8 +726,15 @@ mod architecture_ladder {
                 let reexports = source
                     .split(';')
                     .map(|statement| statement.split_whitespace().collect::<String>())
-                    .filter(|statement| statement.contains("pub") && statement.contains("use"))
-                    .filter(|statement| statement.contains("ExpectedSst"))
+                    .filter(|statement| {
+                        statement.contains("pubuse")
+                            || statement
+                                .match_indices("pub(")
+                                .any(|(index, _)| statement[index..].contains(")use"))
+                    })
+                    .filter(|statement| {
+                        statement.contains("ExpectedSst") || statement.contains("::*")
+                    })
                     .map(move |statement| format!("{}:{statement}", path.display()))
                     .collect::<Vec<_>>();
                 aliases.into_iter().chain(reexports).collect::<Vec<_>>()
