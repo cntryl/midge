@@ -1437,15 +1437,13 @@ fn should_defer_layout_mutating_messages_when_publication_gate_classifies() {
     for (kind_name, is_deferred) in deferred {
         assert!(
             is_deferred,
-            "{} must be deferred by an active publication gate",
-            kind_name
+            "{kind_name} must be deferred by an active publication gate"
         );
     }
     for (kind_name, is_deferred) in passed {
         assert!(
             !is_deferred,
-            "{} must pass an active publication gate",
-            kind_name
+            "{kind_name} must pass an active publication gate"
         );
     }
 }
@@ -1556,24 +1554,21 @@ fn should_classify_messages_when_verification_barrier_is_active() {
                 VerificationBarrierAction::Reject { request_id: rejected_request_id }
                     if Some(rejected_request_id) == request_id
             ),
-            "{} must fail fast under a verification barrier, addressed to its own request id",
-            kind_name
+            "{kind_name} must fail fast under a verification barrier, addressed to its own request id"
         );
     }
     for (kind_name, action) in deferred {
         assert_eq!(
             action,
             VerificationBarrierAction::Defer,
-            "{} must be parked, not dropped, under a verification barrier",
-            kind_name
+            "{kind_name} must be parked, not dropped, under a verification barrier"
         );
     }
     for (kind_name, action) in allowed {
         assert_eq!(
             action,
             VerificationBarrierAction::Allow,
-            "{} must pass a verification barrier",
-            kind_name
+            "{kind_name} must pass a verification barrier"
         );
     }
 }
