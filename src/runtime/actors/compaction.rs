@@ -58,14 +58,14 @@ pub(crate) trait CompactionStorage: Send + Sync {
     fn abort(&self, token: crate::storage::hybrid::actor::StorageReservationToken);
     fn maintenance_memory(&self) -> Option<crate::common::resource_budget::ResourceBudget>;
     fn immutable_file_partition_target(&self, pool: usize) -> usize;
-    fn publish_immutable_file(
+    fn stage_output_partition(
         &self,
-        key: &str,
+        cf_id: u32,
+        level: u32,
+        name: &str,
         path: &std::path::Path,
-        size: u64,
-        checksum: u32,
         budget: &crate::common::resource_budget::ResourceBudget,
-    ) -> MidgeResult<crate::storage::hybrid::backend::GuardedObjectProof>;
+    ) -> MidgeResult<PreparedCompactionOutput>;
 }
 
 impl CompactionStorage for crate::storage::HybridStorage {
@@ -111,16 +111,112 @@ impl CompactionStorage for crate::storage::HybridStorage {
         Self::immutable_file_partition_target(pool)
     }
 
-    fn publish_immutable_file(
+    fn stage_output_partition(
         &self,
-        key: &str,
+        cf_id: u32,
+        level: u32,
+        name: &str,
         path: &std::path::Path,
-        size: u64,
-        checksum: u32,
         budget: &crate::common::resource_budget::ResourceBudget,
-    ) -> MidgeResult<crate::storage::hybrid::backend::GuardedObjectProof> {
-        self.publish_immutable_file(key, path, size, checksum, budget)
+    ) -> MidgeResult<PreparedCompactionOutput> {
+        let (metadata, size, crc) = summarize_output_partition(cf_id, level, name, path, budget)?;
+        let proof = crate::storage::HybridStorage::publish_immutable_file(
+            self,
+            &crate::sst::object_key(name),
+            path,
+            size,
+            crc,
+            budget,
+        )?;
+        // Input authority has not changed. If the job fails, the completion
+        // path deletes this unreferenced object; it cannot lose an input.
+        if self.ephemeral_sst_cache_enabled() {
+            std::fs::remove_file(path)?;
+        }
+        Ok(PreparedCompactionOutput {
+            metadata,
+            proof: Some(proof),
+        })
     }
+}
+
+/// Summarize a finished partition into publishable metadata on the worker.
+///
+/// The trait implementation below owns remote staging; local-only compaction
+/// takes this same worker-side path without creating a remote proof.
+fn summarize_output_partition(
+    cf_id: u32,
+    level: u32,
+    name: &str,
+    path: &std::path::Path,
+    budget: &crate::common::resource_budget::ResourceBudget,
+) -> MidgeResult<(crate::runtime::FileMeta, u64, u32)> {
+    let summary =
+        crate::sst::fs::SstFileIo::summarize_with_real_fs_for_compaction(path, budget.clone())?;
+    let (size, crc) = crate::sst::fs::file_identity(path)?;
+    if size != summary.size_bytes {
+        return Err(MidgeError::Corruption(
+            "compaction partition changed before upload".into(),
+        ));
+    }
+    Ok((
+        crate::runtime::FileMeta {
+            name: name.to_string(),
+            level,
+            size_bytes: summary.size_bytes,
+            content_crc32c: Some(crc),
+            cf_id,
+            smallest_key: Some(summary.smallest_key),
+            largest_key: Some(summary.largest_key),
+            smallest_seq: Some(summary.smallest_seq),
+            largest_seq: Some(summary.largest_seq),
+            key_bounds_complete: true,
+        },
+        size,
+        crc,
+    ))
+}
+
+fn stage_local_output_partition(
+    cf_id: u32,
+    level: u32,
+    name: &str,
+    path: &std::path::Path,
+    budget: &crate::common::resource_budget::ResourceBudget,
+) -> MidgeResult<PreparedCompactionOutput> {
+    let (metadata, _size, _crc) = summarize_output_partition(cf_id, level, name, path, budget)?;
+    Ok(PreparedCompactionOutput {
+        metadata,
+        proof: None,
+    })
+}
+
+/// Record a partition that was staged on the compaction worker. The actor owns
+/// only the per-job map and the post-record failpoint; remote summarization,
+/// upload, and eviction belong to `CompactionStorage`.
+#[allow(clippy::too_many_arguments)]
+fn record_staged_output_partition(
+    storage: Option<&dyn CompactionStorage>,
+    prepared: &PreparedCompactionOutputs,
+    cf_id: u32,
+    level: u32,
+    name: &str,
+    path: &std::path::Path,
+    budget: &crate::common::resource_budget::ResourceBudget,
+) -> MidgeResult<()> {
+    let Some(storage) = storage else {
+        let output = stage_local_output_partition(cf_id, level, name, path, budget)?;
+        prepared.lock().insert(name.to_string(), output);
+        return Ok(());
+    };
+    let output = storage.stage_output_partition(cf_id, level, name, path, budget)?;
+    prepared.lock().insert(name.to_string(), output);
+    crate::failpoints::fail_point!("midge::compaction::after_remote_partition_evicted", |_| {
+        Err(MidgeError::Internal(
+            "failpoint: compaction interrupted after remote partition eviction".into(),
+        ))
+    });
+    Ok(())
 }
 
 /// Actor handling SST compaction
@@ -707,7 +803,7 @@ impl CompactionActor {
         let sink = |name: &str,
                     path: &std::path::Path,
                     budget: &crate::common::resource_budget::ResourceBudget| {
-            Self::prepare_partition(
+            record_staged_output_partition(
                 storage.map(Arc::as_ref),
                 prepared,
                 plan.cf_id,
@@ -909,98 +1005,6 @@ impl CompactionActor {
         self.prepared_outputs
             .lock()
             .insert(name.to_string(), output);
-    }
-
-    /// Summarize a finished partition into publishable metadata.
-    ///
-    /// Re-reads and CRCs the partition, so it must run on the compaction
-    /// worker rather than the event loop. Returns the metadata plus the
-    /// identity the upload path needs.
-    fn summarize_partition(
-        cf_id: u32,
-        level: u32,
-        name: &str,
-        path: &std::path::Path,
-        budget: &crate::common::resource_budget::ResourceBudget,
-    ) -> MidgeResult<(crate::runtime::FileMeta, u64, u32)> {
-        let summary =
-            crate::sst::fs::SstFileIo::summarize_with_real_fs_for_compaction(path, budget.clone())?;
-        let (size, crc) = crate::sst::fs::file_identity(path)?;
-        if size != summary.size_bytes {
-            return Err(MidgeError::Corruption(
-                "compaction partition changed before upload".into(),
-            ));
-        }
-        Ok((
-            crate::runtime::FileMeta {
-                name: name.to_string(),
-                level,
-                size_bytes: summary.size_bytes,
-                content_crc32c: Some(crc),
-                cf_id,
-                smallest_key: Some(summary.smallest_key),
-                largest_key: Some(summary.largest_key),
-                smallest_seq: Some(summary.smallest_seq),
-                largest_seq: Some(summary.largest_seq),
-                key_bounds_complete: true,
-            },
-            size,
-            crc,
-        ))
-    }
-
-    /// Prepare one finished partition for publication.
-    ///
-    /// Summarization happens either way; only the upload is cloud-specific.
-    /// A local-only compaction therefore pays for its own metadata here, on
-    /// the worker, instead of leaving the event loop to re-read the file
-    /// during publication.
-    #[allow(clippy::too_many_arguments)]
-    fn prepare_partition(
-        storage: Option<&dyn CompactionStorage>,
-        prepared: &PreparedCompactionOutputs,
-        cf_id: u32,
-        level: u32,
-        name: &str,
-        path: &std::path::Path,
-        budget: &crate::common::resource_budget::ResourceBudget,
-    ) -> MidgeResult<()> {
-        let (metadata, size, crc) = Self::summarize_partition(cf_id, level, name, path, budget)?;
-        let Some(hybrid) = storage else {
-            prepared.lock().insert(
-                name.to_string(),
-                PreparedCompactionOutput {
-                    metadata,
-                    proof: None,
-                },
-            );
-            return Ok(());
-        };
-        let proof = hybrid.publish_immutable_file(
-            &crate::sst::object_key(name),
-            path,
-            size,
-            crc,
-            budget,
-        )?;
-        // Input authority has not changed. If the job fails, the completion
-        // path deletes this unreferenced object; it cannot lose an input.
-        if hybrid.ephemeral_sst_cache_enabled() {
-            std::fs::remove_file(path)?;
-        }
-        prepared.lock().insert(
-            name.to_string(),
-            PreparedCompactionOutput {
-                metadata,
-                proof: Some(proof),
-            },
-        );
-        crate::failpoints::fail_point!("midge::compaction::after_remote_partition_evicted", |_| {
-            Err(MidgeError::Internal(
-                "failpoint: compaction interrupted after remote partition eviction".into(),
-            ))
-        });
-        Ok(())
     }
 
     #[cfg(test)]

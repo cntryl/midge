@@ -45,7 +45,7 @@ fn should_retain_compaction_partition_when_upload_workspace_cannot_be_admitted()
 
     // Act
     let result =
-        CompactionActor::prepare_partition(Some(&hybrid), &prepared, 0, 1, name, &path, &budget);
+        record_staged_output_partition(Some(&hybrid), &prepared, 0, 1, name, &path, &budget);
 
     // Assert
     assert!(
@@ -67,6 +67,8 @@ struct PendingUpload {
 }
 
 impl crate::storage::cloud::CloudBackend for PendingUpload {
+    crate::storage::cloud::unsupported_cloud_backend!(submit_get, submit_delete, submit_list);
+
     fn submit_put(
         &self,
         _key: &str,
@@ -127,7 +129,7 @@ fn should_retain_compaction_upload_charge_after_timeout_until_provider_releases_
     let prepared = PreparedCompactionOutputs::default();
 
     // Act
-    let result = CompactionActor::prepare_partition(
+    let result = record_staged_output_partition(
         Some(&hybrid),
         &prepared,
         0,
@@ -328,7 +330,7 @@ fn should_summarize_compaction_output_on_the_worker_when_there_is_no_cloud_stora
     let name = "000000_01_00000000000000000002.sst";
 
     // Act
-    CompactionActor::prepare_partition(None, &prepared, 0, 1, name, &path, &budget)?;
+    record_staged_output_partition(None, &prepared, 0, 1, name, &path, &budget)?;
 
     // Assert: the worker, not the event loop, paid for the re-read and CRC.
     let output = prepared
