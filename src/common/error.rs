@@ -75,6 +75,15 @@ pub enum MidgeError {
 
     /// A bounded resource pool cannot admit more work.
     ResourceLimit(String),
+
+    /// A safe column-family drop was refused because committed data still
+    /// sits in the active memtable.
+    ///
+    /// This is the only failure that licenses discarding that data. Every
+    /// other error, [`MidgeError::Busy`] included, means the drop did not
+    /// happen and must be retried, never escalated to the destructive
+    /// variant.
+    UnflushedDataPresent { cf_id: u32, bytes: usize },
 }
 
 impl fmt::Display for MidgeError {
@@ -106,6 +115,10 @@ impl fmt::Display for MidgeError {
             MidgeError::Busy(msg) => write!(f, "Busy: {msg}"),
             MidgeError::Timeout(msg) => write!(f, "Timeout: {msg}"),
             MidgeError::ResourceLimit(msg) => write!(f, "Resource limit: {msg}"),
+            MidgeError::UnflushedDataPresent { cf_id, bytes } => write!(
+                f,
+                "Unflushed committed data: column family {cf_id} holds {bytes} byte(s) in its active memtable"
+            ),
         }
     }
 }
@@ -149,7 +162,8 @@ impl MidgeError {
             | Self::NotSupported(_)
             | Self::InvalidPath
             | Self::MemoryModeViolation(_)
-            | Self::WriteConflict(_) => Severity::Caller,
+            | Self::WriteConflict(_)
+            | Self::UnflushedDataPresent { .. } => Severity::Caller,
 
             Self::Io(_) | Self::LeaseHeld(_) | Self::LeaseUnavailable(_) | Self::Aborted(_) => {
                 Severity::Transient
@@ -173,6 +187,20 @@ impl MidgeError {
                 Severity::Fatal
             }
         }
+    }
+
+    /// Whether this failure licenses discarding committed, unflushed data.
+    ///
+    /// Only [`MidgeError::UnflushedDataPresent`] does. A caller that has just
+    /// been refused a safe column-family drop must ask this rather than
+    /// reading [`MidgeError::Busy`] as permission: `Busy` is also produced by
+    /// in-flight publication work, a remote DDL CAS conflict, an active
+    /// storage-verification barrier, and shutdown, none of which mean there
+    /// is data to discard. Those conditions clear on their own, so the
+    /// correct response is to retry the safe drop.
+    #[must_use]
+    pub fn licenses_unflushed_discard(&self) -> bool {
+        matches!(self, Self::UnflushedDataPresent { .. })
     }
 }
 
@@ -206,6 +234,10 @@ impl MidgeError {
             Self::Busy(message) => Self::Busy(message.clone()),
             Self::Timeout(message) => Self::Timeout(message.clone()),
             Self::ResourceLimit(message) => Self::ResourceLimit(message.clone()),
+            Self::UnflushedDataPresent { cf_id, bytes } => Self::UnflushedDataPresent {
+                cf_id: *cf_id,
+                bytes: *bytes,
+            },
         }
     }
 }
@@ -228,6 +260,52 @@ impl From<io::Error> for MidgeError {
 #[cfg(test)]
 mod tests {
     use super::{MidgeError, Severity};
+
+    #[test]
+    fn should_license_unflushed_discard_only_when_active_memtable_holds_committed_data() {
+        // Arrange: every failure a safe column-family drop can return. Only
+        // the active-memtable refusal may be read as permission to discard
+        // committed data; the rest clear on their own and must be retried.
+        let licence = MidgeError::UnflushedDataPresent {
+            cf_id: 7,
+            bytes: 128,
+        };
+        let non_licences = [
+            MidgeError::Busy("column family 7 still has flush publication work in flight".into()),
+            MidgeError::Busy("remote CAS conflict for 'ddl/registry'".into()),
+            MidgeError::Busy("storage verification barrier is active".into()),
+            MidgeError::Busy("runtime is shutting down".into()),
+            MidgeError::Aborted("deferred drop".into()),
+            MidgeError::Timeout("runtime response".into()),
+            MidgeError::InvalidArgument("column family 7 not found".into()),
+            MidgeError::NotFound,
+        ];
+
+        // Act + Assert
+        assert!(
+            licence.licenses_unflushed_discard(),
+            "the active-memtable refusal is the discard licence"
+        );
+        for error in non_licences {
+            assert!(
+                !error.licenses_unflushed_discard(),
+                "{error} must not be read as permission to discard committed data"
+            );
+        }
+
+        // The licence must survive replay across the runtime boundary, or a
+        // caller that only sees the replayed error loses the distinction.
+        let replayed = licence.replay();
+        assert!(replayed.licenses_unflushed_discard());
+        assert!(matches!(
+            replayed,
+            MidgeError::UnflushedDataPresent {
+                cf_id: 7,
+                bytes: 128
+            }
+        ));
+        assert_eq!(licence.severity(), Severity::Caller);
+    }
 
     #[test]
     fn should_classify_as_backpressure_when_error_is_transient_admission_pressure() {

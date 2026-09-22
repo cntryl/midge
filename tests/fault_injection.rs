@@ -159,7 +159,8 @@ mod failure_injection {
     }
 
     #[test]
-    fn should_return_busy_before_wal_sync_failure_when_safe_drop_has_unflushed_data() {
+    fn should_license_unflushed_discard_before_wal_sync_failure_when_safe_drop_has_unflushed_data()
+    {
         // Arrange
         let _guard = failpoint_test_lock()
             .lock()
@@ -179,7 +180,11 @@ mod failure_injection {
         let drop_result = engine.drop_column_family(cf.id());
 
         // Assert
-        assert!(matches!(drop_result, Err(MidgeError::Busy(_))));
+        let error = drop_result.expect_err("safe drop must refuse to discard committed data");
+        assert!(
+            error.licenses_unflushed_discard(),
+            "unflushed data must be reported before the WAL sync failure: {error}"
+        );
         assert_eq!(
             read_cf_value(&engine, &cf, b"key"),
             Some(Bytes::from_static(b"value"))

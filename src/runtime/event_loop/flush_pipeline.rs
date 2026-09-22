@@ -825,20 +825,20 @@ impl EventLoop {
     /// Translate a flush-pipeline failure into the error a deferred
     /// `drop_column_family` caller receives.
     ///
-    /// Every variant replays faithfully except `Busy`, which is special here
-    /// because of what it means on that API and not because of what it means
-    /// inside the pipeline. `Engine::drop_column_family` documents `Busy` as
-    /// "committed data remains in the active memtable", and the documented
-    /// remedy is `drop_column_family_discarding_unflushed` — a destructive call
-    /// that throws that data away. The flush pipeline raises its own `Busy` for
-    /// transient, internally retried conditions (an `IoError`/`Indeterminate`
-    /// lease validation, for example), which says nothing about unflushed data.
-    /// Replaying such a `Busy` verbatim would make a lease blip indistinguishable
-    /// from the documented contract and invite a compliant caller to discard
-    /// committed data. It is reported as `Aborted` instead: the drop really was
-    /// cancelled before it could publish a result, the original message is kept
-    /// intact, and `Aborted` is still `Severity::Transient`, so the caller
-    /// retries the safe drop rather than reaching for the destructive variant.
+    /// Every variant replays faithfully except `Busy`, which is reported as
+    /// `Aborted`.
+    ///
+    /// `Busy` no longer carries the discard licence: `drop_column_family`
+    /// grants that only through `MidgeError::UnflushedDataPresent`, which
+    /// nothing in this pipeline can construct, so a verbatim replay would no
+    /// longer be misread as permission to throw committed data away. The
+    /// remap stays because it is still the more accurate report. The flush
+    /// pipeline raises `Busy` for transient, internally retried conditions
+    /// (an `IoError`/`Indeterminate` lease validation, for example), but from
+    /// the caller's side the drop was cancelled before it could publish a
+    /// result, which is what `Aborted` says. The original message is kept
+    /// intact, and `Aborted` is `Severity::Transient`, so the caller retries
+    /// the safe drop.
     fn deferred_drop_failure(error: &crate::common::MidgeError) -> crate::common::MidgeError {
         match error {
             crate::common::MidgeError::Busy(message) => crate::common::MidgeError::Aborted(

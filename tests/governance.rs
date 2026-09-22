@@ -348,6 +348,35 @@ mod architecture_ladder {
     }
 
     #[test]
+    fn should_construct_the_unflushed_discard_licence_in_only_the_active_memtable_check() {
+        // Arrange: MidgeError::UnflushedDataPresent is a permission to throw
+        // committed data away. Busy used to carry that meaning implicitly,
+        // which let four unrelated producers forge it; a second construction
+        // site is a second forgery, so the count is the invariant.
+        let needle = "UnflushedDataPresent {";
+        let classifier = Path::new("src").join("common").join("error.rs");
+        let expected = Path::new("src").join("runtime").join("ddl.rs");
+
+        // Act
+        let producers: Vec<PathBuf> = rust_sources_under("src")
+            .into_iter()
+            .filter(|path| !path.ends_with(&classifier))
+            .filter(|path| production_source(path).contains(needle))
+            .collect();
+
+        // Assert
+        assert_eq!(
+            producers.len(),
+            1,
+            "only the active-memtable check may emit the discard licence: {producers:?}"
+        );
+        assert!(
+            producers[0].ends_with(&expected),
+            "the discard licence moved out of runtime/ddl.rs: {producers:?}"
+        );
+    }
+
+    #[test]
     fn should_define_shared_provider_helpers_once_when_providers_need_them() {
         // Arrange
         let shared = ["fn current_unix_secs(", "fn object_metadata_from_"];

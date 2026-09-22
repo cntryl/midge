@@ -862,10 +862,20 @@ impl Engine {
     ///
     /// Returns [`MidgeError::InvalidArgument`] for the default, missing, or
     /// already-dropped column family and when DDL is attempted during ingest
-    /// mode. Returns [`MidgeError::Busy`] when committed data remains in the
-    /// active memtable; call [`Self::drop_column_family_discarding_unflushed`]
-    /// only when intentionally discarding it. Other errors report persistence
-    /// or runtime failures.
+    /// mode.
+    ///
+    /// Returns [`MidgeError::UnflushedDataPresent`] -- and only that error --
+    /// when committed data remains in the active memtable. That is the sole
+    /// signal that licenses [`Self::drop_column_family_discarding_unflushed`];
+    /// ask [`MidgeError::licenses_unflushed_discard`] rather than matching on
+    /// a variant.
+    ///
+    /// Every other error, [`MidgeError::Busy`] included, means the drop did
+    /// not happen. `Busy` here reports in-flight flush publication, a remote
+    /// DDL registry CAS conflict, an active storage-verification barrier, or
+    /// shutdown -- conditions that clear on their own and say nothing about
+    /// unflushed data. Retry the safe drop; never escalate to the destructive
+    /// variant on anything but the licence above.
     pub fn drop_column_family(&self, cf_id: ColumnFamilyId) -> MidgeResult<()> {
         self.drop_column_family_inner(cf_id, false)
     }

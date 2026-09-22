@@ -275,7 +275,11 @@ fn should_fail_drop_column_family_given_unflushed_data_when_memtable_not_empty()
         let result = engine.drop_column_family(cf_id);
 
         // Assert
-        assert!(matches!(result, Err(MidgeError::Busy(_))));
+        let error = result.expect_err("safe drop must refuse to discard committed data");
+        assert!(
+            error.licenses_unflushed_discard(),
+            "the refusal must be the discard licence, not a bare Busy: {error}"
+        );
         let reader = engine
             .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
             .expect("column family must remain readable after rejected drop");

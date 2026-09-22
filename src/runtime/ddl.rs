@@ -126,14 +126,25 @@ pub(crate) fn drop_edit(
             "Column family {cf_id} not found or already deleted"
         ))
     })?;
+    // Report unflushed data before in-flight publication work. Both block a
+    // safe drop, but only this one is actionable by the caller: flush, or
+    // explicitly discard. In-flight publication clears on its own, so
+    // surfacing it first would tell the caller to retry when what they
+    // actually have to do is decide about their data.
+    if !discard_unflushed {
+        let unflushed_bytes = cf_state.memtable.size_bytes();
+        if unflushed_bytes != 0 {
+            // The one signal that licenses discarding committed data. Nothing
+            // else on this path may construct it.
+            return Err(MidgeError::UnflushedDataPresent {
+                cf_id,
+                bytes: unflushed_bytes,
+            });
+        }
+    }
     if !cf_state.immutable_flushes.is_empty() {
         return Err(MidgeError::Busy(format!(
             "column family {cf_id} still has flush publication work in flight"
-        )));
-    }
-    if !discard_unflushed && cf_state.memtable.size_bytes() != 0 {
-        return Err(MidgeError::Busy(format!(
-            "column family {cf_id} contains unflushed committed data; flush it first or explicitly discard it"
         )));
     }
     let dropped_sst_names = state
@@ -699,6 +710,94 @@ fn remote_cas_definitely_not_committed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A memory-mode state holding one empty column family, plus its id.
+    fn state_with_column_family(label: &str) -> (RuntimeState, crate::types::ColumnFamilyId) {
+        let mut state = RuntimeState::new(std::path::PathBuf::from(label), true);
+        let edit = create_edit(&state, "drop-me").expect("create edit");
+        apply_local_edit(&mut state, &edit).expect("apply create");
+        let ManifestEdit::CreateColumnFamily { id, .. } = edit else {
+            unreachable!("create_edit returns a CreateColumnFamily edit")
+        };
+        (state, id)
+    }
+
+    #[test]
+    fn should_license_unflushed_discard_when_safe_drop_finds_committed_data_in_active_memtable() {
+        // Arrange
+        let (state, cf_id) = state_with_column_family("/tmp/midge-ddl-licence");
+        state
+            .get_cf(cf_id)
+            .expect("column family")
+            .memtable
+            .put(b"key".to_vec(), b"value".to_vec())
+            .expect("write into the active memtable");
+
+        // Act
+        let error = drop_edit(&state, cf_id, false).expect_err("safe drop must refuse");
+
+        // Assert
+        assert!(
+            error.licenses_unflushed_discard(),
+            "the refusal must be the discard licence: {error}"
+        );
+        assert!(matches!(
+            error,
+            MidgeError::UnflushedDataPresent { cf_id: reported, bytes } if reported == cf_id && bytes > 0
+        ));
+    }
+
+    #[test]
+    fn should_not_license_unflushed_discard_when_flush_publication_is_still_in_flight() {
+        // Arrange: an empty active memtable, so the only thing blocking the
+        // drop is publication work that will clear on its own.
+        let (mut state, cf_id) = state_with_column_family("/tmp/midge-ddl-inflight");
+        let memtable = std::sync::Arc::clone(&state.get_cf(cf_id).expect("column family").memtable);
+        state
+            .track_new_immutable_flush(cf_id, memtable, 1)
+            .expect("queue a flush");
+
+        // Act
+        let error = drop_edit(&state, cf_id, false).expect_err("safe drop must refuse");
+
+        // Assert
+        assert!(
+            !error.licenses_unflushed_discard(),
+            "in-flight publication must never be read as permission to discard data: {error}"
+        );
+        assert!(matches!(error, MidgeError::Busy(_)));
+    }
+
+    #[test]
+    fn should_report_unflushed_data_before_publication_work_when_both_block_a_safe_drop() {
+        // Arrange: both conditions hold at once. Only one of them is
+        // actionable by the caller, and that is the one they must be told.
+        let (mut state, cf_id) = state_with_column_family("/tmp/midge-ddl-both");
+        let memtable = std::sync::Arc::clone(&state.get_cf(cf_id).expect("column family").memtable);
+        memtable
+            .put(b"key".to_vec(), b"value".to_vec())
+            .expect("write into the active memtable");
+        state
+            .track_new_immutable_flush(cf_id, memtable, 1)
+            .expect("queue a flush");
+
+        // Act
+        let safe = drop_edit(&state, cf_id, false).expect_err("safe drop must refuse");
+        let destructive = drop_edit(&state, cf_id, true).expect_err("destructive drop must wait");
+
+        // Assert
+        assert!(
+            safe.licenses_unflushed_discard(),
+            "unflushed data outranks publication work on the safe path: {safe}"
+        );
+        // The destructive path skips the data check but still waits for
+        // publication, so it reports the condition that really blocks it.
+        assert!(
+            !destructive.licenses_unflushed_discard(),
+            "the destructive path has no data question left to answer: {destructive}"
+        );
+        assert!(matches!(destructive, MidgeError::Busy(_)));
+    }
 
     #[test]
     fn should_classify_cas_outcome_from_typed_flag_not_message_text() {
