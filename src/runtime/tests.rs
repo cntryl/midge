@@ -1245,7 +1245,7 @@ fn should_shutdown_runtime() {
 #[test]
 fn should_clone_compaction_plan_preserving_all_fields() {
     // Arrange
-    let sst_name = crate::sst::file_name(0, 0, 1);
+    let sst_name = crate::cloud_layout::file_name(0, 0, 1);
     let plan = CompactionPlan {
         input_files: vec![sst_name.clone()],
         source_level: 0,

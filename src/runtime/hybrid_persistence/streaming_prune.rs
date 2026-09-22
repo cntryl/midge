@@ -119,7 +119,7 @@ pub(super) fn validate(
     }
     for (name, proof) in &coverage.progress.ssts {
         if proof.complete {
-            let key = crate::sst::object_key(name);
+            let key = crate::cloud_layout::object_key(name);
             output.reservations.push(Arc::clone(&proof.reservation));
             output.dependencies.push(GuardedObjectProof::range_identity(
                 storage.remote_sst_backend(),
@@ -444,7 +444,7 @@ impl Coverage<'_> {
     }
 
     fn verified_source(&mut self, file: &FileMeta, segment_id: u64) -> MidgeResult<Arc<dyn Fs>> {
-        let key = crate::sst::object_key(&file.name);
+        let key = crate::cloud_layout::object_key(&file.name);
         let mut proof = if let Some(proof) = self.progress.ssts.remove(&file.name) {
             proof
         } else {

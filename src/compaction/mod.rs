@@ -147,7 +147,7 @@ fn bounded_partition_target_size(configured_target: usize, compaction_pool: usiz
 /// numeric fields so plain directory/object-store listings sort predictably.
 #[cfg(test)]
 fn output_filename(plan: &CompactionPlan, partition: u32, output_dir: &Path) -> PathBuf {
-    output_dir.join(crate::sst::compaction_file_name(
+    output_dir.join(crate::cloud_layout::compaction_file_name(
         plan.cf_id,
         plan.target_level,
         plan.output_seq,
@@ -626,7 +626,7 @@ mod tests {
         let plan = CompactionPlan::new(0, 0, 1).with_output_seq(40);
         let output_path = temp_dir
             .path()
-            .join(crate::sst::compaction_file_name(0, 1, 40, 0));
+            .join(crate::cloud_layout::compaction_file_name(0, 1, 40, 0));
 
         // Act
         let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
@@ -805,7 +805,7 @@ mod tests {
         let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
 
         // Assert
-        let output_name = crate::sst::compaction_file_name(0, 1, 42, 0);
+        let output_name = crate::cloud_layout::compaction_file_name(0, 1, 42, 0);
         assert_eq!(output_names, vec![output_name.clone()]);
 
         let reader = factory.open(std::path::Path::new(&output_name))?;
@@ -846,7 +846,7 @@ mod tests {
         let output_names = execute_compaction(&plan, &factory, temp_dir.path(), None)?;
 
         // Assert
-        let output_name = crate::sst::compaction_file_name(0, 1, 43, 0);
+        let output_name = crate::cloud_layout::compaction_file_name(0, 1, 43, 0);
         assert_eq!(output_names, vec![output_name.clone()]);
 
         let reader = factory.open(std::path::Path::new(&output_name))?;
@@ -897,7 +897,7 @@ mod tests {
         let temp_dir = tempdir()?;
         let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
-        let input_name = crate::sst::file_name(0, 0, 1);
+        let input_name = crate::cloud_layout::file_name(0, 0, 1);
         let mut input_writer = factory.create()?;
         input_writer.add_with_meta(b"alpha", None, 5, EntryType::Delete, None)?;
         input_writer.add_with_meta(b"beta", Some(b"live"), 6, EntryType::Put, None)?;
@@ -946,8 +946,8 @@ mod tests {
         let temp_dir = tempdir()?;
         let fs = std::sync::Arc::new(crate::io::RealFs::new(temp_dir.path())?);
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
-        let source_name = crate::sst::file_name(0, 1, 1);
-        let target_name = crate::sst::file_name(0, 2, 2);
+        let source_name = crate::cloud_layout::file_name(0, 1, 1);
+        let target_name = crate::cloud_layout::file_name(0, 2, 2);
 
         let mut source_writer = factory.create()?;
         source_writer.add_with_meta(b"m", Some(b"live"), 6, EntryType::Put, None)?;
@@ -977,7 +977,7 @@ mod tests {
                 ..Default::default()
             },
             crate::metadata::FileMeta {
-                name: crate::sst::file_name(0, 3, 3),
+                name: crate::cloud_layout::file_name(0, 3, 3),
                 level: 3,
                 size_bytes: 1,
                 cf_id: 0,
@@ -1100,7 +1100,7 @@ mod tests {
         assert!(output_names.is_empty());
         assert!(!temp_dir
             .path()
-            .join(crate::sst::file_name(0, 6, 47))
+            .join(crate::cloud_layout::file_name(0, 6, 47))
             .exists());
         Ok(())
     }
@@ -1132,7 +1132,7 @@ mod tests {
         assert!(matches!(error, MidgeError::Corruption(_)));
         assert!(!temp_dir
             .path()
-            .join(crate::sst::compaction_file_name(0, 1, 48, 0))
+            .join(crate::cloud_layout::compaction_file_name(0, 1, 48, 0))
             .exists());
         Ok(())
     }
@@ -1163,7 +1163,7 @@ mod tests {
         assert_eq!(std::fs::read(&input_path)?, input_bytes);
         assert!(!temp_dir
             .path()
-            .join(crate::sst::compaction_file_name(0, 1, 44, 0))
+            .join(crate::cloud_layout::compaction_file_name(0, 1, 44, 0))
             .exists());
         Ok(())
     }
@@ -1204,7 +1204,7 @@ mod tests {
         assert!(
             !temp_dir
                 .path()
-                .join(crate::sst::compaction_file_name(0, 1, 45, 0))
+                .join(crate::cloud_layout::compaction_file_name(0, 1, 45, 0))
                 .exists(),
             "aborted output must not survive for a later manifest publication"
         );
@@ -1358,7 +1358,7 @@ mod tests {
         for (partition, output) in outputs.iter().enumerate() {
             assert_eq!(
                 output,
-                &crate::sst::compaction_file_name(
+                &crate::cloud_layout::compaction_file_name(
                     7,
                     1,
                     52,
@@ -1770,7 +1770,9 @@ mod tests {
         assert!(
             (0..4).all(|partition| !temp_dir
                 .path()
-                .join(crate::sst::compaction_file_name(0, 1, 56, partition))
+                .join(crate::cloud_layout::compaction_file_name(
+                    0, 1, 56, partition
+                ))
                 .exists()),
             "cancelled output set must leave no authoritative-looking partition"
         );

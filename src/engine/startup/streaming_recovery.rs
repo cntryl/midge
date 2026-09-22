@@ -223,7 +223,7 @@ fn checkpoint_family(
         sequence: file_meta.largest_seq.unwrap_or(0),
         ..identity
     };
-    let name = crate::sst::file_name(cf_id, 0, sst_seq);
+    let name = crate::cloud_layout::file_name(cf_id, 0, sst_seq);
     let completion = super::timing::measure("recovery_checkpoint_publication", || {
         actor.submit_publish(FlushPublishTask {
             build: FlushBuildOutput {
@@ -326,7 +326,7 @@ fn install_checkpoint_output(
         }
         if delta.cloud_metadata_published {
             std::fs::remove_file(state.sst_dir.join(name))?;
-            storage.evict_local_object_cache(&crate::sst::object_key(name))?;
+            storage.evict_local_object_cache(&crate::cloud_layout::object_key(name))?;
             storage.reconcile_local_disk_usage(
                 super::RuntimeRecoveryMaterialization::local_directory_bytes(&state.sst_dir)?
                     .saturating_add(

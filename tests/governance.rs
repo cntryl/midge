@@ -644,6 +644,111 @@ mod architecture_ladder {
     }
 
     #[test]
+    fn should_keep_persisted_sst_layout_proof_views_below_sst() {
+        // Arrange
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let layout = std::fs::read_to_string(root.join("src/cloud_layout.rs"))
+            .expect("read cloud layout source");
+        let shared =
+            std::fs::read_to_string(root.join("src/types.rs")).expect("read shared types source");
+        let sst_sources = rust_sources_under("src/sst");
+        let legacy_sst_definitions = [
+            "mod name;",
+            "struct PersistedSstName",
+            "SST_SEQUENCE_WIDTH",
+            "fn file_name(",
+            "fn compaction_file_name(",
+            "fn parse_compaction_file_name",
+            "fn object_key(",
+            "fn temp_object_key(",
+        ];
+        let legacy_sst_symbols = [
+            "PersistedSstName",
+            "SST_SEQUENCE_WIDTH",
+            "file_name",
+            "compaction_file_name",
+            "parse_compaction_file_name",
+            "object_key",
+            "temp_object_key",
+        ];
+
+        // Act
+        let naming_offenders = sst_sources
+            .iter()
+            .flat_map(|path| {
+                let source = std::fs::read_to_string(path).expect("read SST source");
+                let definitions = legacy_sst_definitions
+                    .iter()
+                    .filter(|symbol| source.contains(**symbol))
+                    .map(move |symbol| format!("{}:{symbol}", path.display()))
+                    .collect::<Vec<_>>();
+                let reexports = source
+                    .split(';')
+                    .map(|statement| statement.split_whitespace().collect::<String>())
+                    .filter(|statement| statement.contains("pub") && statement.contains("use"))
+                    .flat_map(|statement| {
+                        legacy_sst_symbols
+                            .iter()
+                            .filter(|symbol| statement.contains(**symbol))
+                            .map(|symbol| format!("{}:{statement}:{symbol}", path.display()))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+                let layout_import = source
+                    .contains("cloud_layout")
+                    .then(|| format!("{}:cloud_layout compatibility import", path.display()));
+                definitions
+                    .into_iter()
+                    .chain(reexports)
+                    .chain(layout_import)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let proof_offenders = sst_sources
+            .iter()
+            .flat_map(|path| {
+                let source = std::fs::read_to_string(path).expect("read SST source");
+                let compact = source.split_whitespace().collect::<String>();
+                let aliases = ["structExpectedSst", "typeExpectedSst"]
+                    .iter()
+                    .filter(|symbol| compact.contains(**symbol))
+                    .map(|symbol| format!("{}:{symbol}", path.display()))
+                    .collect::<Vec<_>>();
+                let reexports = source
+                    .split(';')
+                    .map(|statement| statement.split_whitespace().collect::<String>())
+                    .filter(|statement| statement.contains("pub") && statement.contains("use"))
+                    .filter(|statement| statement.contains("ExpectedSst"))
+                    .map(move |statement| format!("{}:{statement}", path.display()))
+                    .collect::<Vec<_>>();
+                aliases.into_iter().chain(reexports).collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        // Assert
+        assert!(layout.contains("pub(crate) struct PersistedSstName"));
+        assert!(layout.contains("pub(crate) const SST_SEQUENCE_WIDTH"));
+        assert!(layout.contains("pub(crate) fn file_name"));
+        assert!(layout.contains("pub(crate) fn compaction_file_name"));
+        assert!(layout.contains("pub(crate) fn parse_compaction_file_name"));
+        assert!(layout.contains("pub(crate) fn object_key"));
+        assert!(layout.contains("pub(crate) fn temp_object_key"));
+        assert!(shared.contains("pub(crate) struct ExpectedSst"));
+        assert!(
+            naming_offenders.is_empty(),
+            "SST must not own or re-export persisted naming/layout helpers: {naming_offenders:?}"
+        );
+        assert!(
+            proof_offenders.is_empty(),
+            "SST must consume ExpectedSst without owning or re-exporting it: {proof_offenders:?}"
+        );
+        assert!(
+            !root.join("src/sst/name.rs").exists(),
+            "SST must not retain a compatibility naming module"
+        );
+    }
+
+    #[test]
     fn should_bound_cloud_seal_when_the_event_loop_forces_a_cloud_async_seal() {
         // Arrange
         let source = std::fs::read_to_string(
@@ -920,7 +1025,12 @@ mod architecture_ladder {
     #[test]
     fn should_keep_persistence_formats_below_storage_orchestration() {
         // Arrange
-        let forbidden = ["crate::engine", "crate::runtime", "crate::storage"];
+        let forbidden = [
+            "crate::engine",
+            "crate::runtime",
+            "crate::sst",
+            "crate::storage",
+        ];
 
         // Act
         let mut violations = prohibited_edges_under("src/wal", &forbidden);

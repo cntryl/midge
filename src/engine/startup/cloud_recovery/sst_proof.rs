@@ -1,5 +1,6 @@
 use super::{CloudStartupRecovery, MidgeError, MidgeResult};
-use crate::sst::identity::{ExpectedSst, ProofPolicy, SstIdentity};
+use crate::sst::identity::{ProofPolicy, SstIdentity};
+use crate::types::ExpectedSst;
 use std::path::Path;
 
 /// Describe a manifest proof for the shared identity checker.

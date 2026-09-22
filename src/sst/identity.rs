@@ -15,22 +15,7 @@
 
 use crate::common::{MidgeError, MidgeResult};
 use crate::sst::fs::SstFileSummary;
-
-/// A borrowed view of the proofs a manifest entry records about one SST.
-///
-/// The manifest and the runtime message types carry the same fields in two
-/// structs, and both live above this layer, so each builds this view itself
-/// (`FileMeta::expected_sst`) rather than the checker depending on them.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ExpectedSst<'a> {
-    pub(crate) name: &'a str,
-    pub(crate) size_bytes: u64,
-    pub(crate) content_crc32c: Option<u32>,
-    pub(crate) smallest_key: Option<&'a [u8]>,
-    pub(crate) largest_key: Option<&'a [u8]>,
-    pub(crate) smallest_seq: Option<u64>,
-    pub(crate) largest_seq: Option<u64>,
-}
+use crate::types::ExpectedSst;
 
 /// Physical identity of an SST file: its length and whole-file CRC32C.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

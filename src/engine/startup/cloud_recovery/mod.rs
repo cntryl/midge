@@ -46,7 +46,7 @@ impl CloudStartupRecovery {
     ) -> MidgeResult<std::collections::BTreeSet<String>> {
         let mut cleaned = std::collections::BTreeSet::new();
         for file_meta in candidates {
-            let key = crate::sst::object_key(&file_meta.name);
+            let key = crate::cloud_layout::object_key(&file_meta.name);
             let deadline =
                 crate::common::OperationDeadline::from_budget(storage.storage_io_timeout());
             let metadata = storage
@@ -1311,7 +1311,7 @@ impl CloudStartupRecovery {
         let mut definitively_lost: Vec<String> = Vec::new();
 
         for file in state.manifest.files.clone() {
-            let key = crate::sst::object_key(&file.name);
+            let key = crate::cloud_layout::object_key(&file.name);
             let validation = BlockingCloudIo::new(cloud)
                 .head_optional(&key)
                 .map_err(SstLoss::Indeterminate)
@@ -1495,7 +1495,7 @@ impl CloudStartupRecovery {
         proof: &CloudSstRecoveryProof,
     ) -> MidgeResult<()> {
         let sst_name = proof.name.clone();
-        let cloud_key = crate::sst::object_key(&sst_name);
+        let cloud_key = crate::cloud_layout::object_key(&sst_name);
         let local_path = state.sst_dir.join(&sst_name);
         if Self::local_sst_file_matches_proof(
             &local_path,
@@ -1635,8 +1635,9 @@ impl CloudStartupRecovery {
         sst_name: &str,
         data: &[u8],
     ) -> MidgeResult<()> {
-        let temp_path = crate::io::traits::FsPath::new(crate::sst::temp_object_key(sst_name));
-        let target_path = crate::io::traits::FsPath::new(crate::sst::object_key(sst_name));
+        let temp_path =
+            crate::io::traits::FsPath::new(crate::cloud_layout::temp_object_key(sst_name));
+        let target_path = crate::io::traits::FsPath::new(crate::cloud_layout::object_key(sst_name));
         crate::io::staging::stage_bytes(
             staging_fs,
             &temp_path,

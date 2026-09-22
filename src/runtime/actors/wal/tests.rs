@@ -131,7 +131,7 @@ fn should_check_transaction_assertions_against_remote_sst_when_local_cache_is_em
     let mut writer = factory.create()?;
     writer.add_with_meta(b"asserted", Some(b"value"), 9, EntryType::Put, None)?;
     let bytes = writer.finish_bytes()?;
-    let name = crate::sst::file_name(0, 0, 1);
+    let name = crate::cloud_layout::file_name(0, 0, 1);
     std::fs::create_dir_all(remote.path().join("sst"))?;
     std::fs::write(remote.path().join("sst").join(&name), &bytes)?;
     state.manifest.files.push(crate::metadata::FileMeta {

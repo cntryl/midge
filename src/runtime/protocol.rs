@@ -69,8 +69,8 @@ pub struct FileMeta {
 
 impl FileMeta {
     /// Borrow this entry's recorded proofs for the SST identity checker.
-    pub(crate) fn expected_sst(&self) -> crate::sst::identity::ExpectedSst<'_> {
-        crate::sst::identity::ExpectedSst {
+    pub(crate) fn expected_sst(&self) -> crate::types::ExpectedSst<'_> {
+        crate::types::ExpectedSst {
             name: &self.name,
             size_bytes: self.size_bytes,
             content_crc32c: self.content_crc32c,

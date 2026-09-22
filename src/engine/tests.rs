@@ -508,7 +508,7 @@ fn assert_partitioned_compaction_reads(
         output_files.iter().map(|file| file.name.as_str()).collect();
     assert_eq!(unique_names.len(), output_files.len());
     assert!(output_files.iter().all(|file| {
-        crate::sst::parse_compaction_file_name(&file.name).is_some_and(
+        crate::cloud_layout::parse_compaction_file_name(&file.name).is_some_and(
             |(name_cf, name_level, _, _)| name_cf == cf.id() && name_level == file.level,
         )
     }));
@@ -1564,7 +1564,7 @@ fn should_leave_manifest_sst_remote_when_recovery_only_checks_cloud_metadata() {
         RecoveryPolicy::Strict,
     )
     .expect("create runtime state");
-    let sst_name = crate::sst::file_name(0, 0, 42);
+    let sst_name = crate::cloud_layout::file_name(0, 0, 42);
     let sst_bytes = test_sst_bytes();
     state.manifest.files.push(crate::metadata::FileMeta {
         name: sst_name.clone(),
@@ -1578,8 +1578,12 @@ fn should_leave_manifest_sst_remote_when_recovery_only_checks_cloud_metadata() {
     ));
     let full_reads = Arc::clone(&backend.full_reads);
     let cloud = crate::storage::cloud::CloudStorage::new(backend, "midge".to_string());
-    Engine::blocking_cloud_put(&cloud, &crate::sst::object_key(&sst_name), sst_bytes)
-        .expect("upload test sst");
+    Engine::blocking_cloud_put(
+        &cloud,
+        &crate::cloud_layout::object_key(&sst_name),
+        sst_bytes,
+    )
+    .expect("upload test sst");
 
     // Act
     Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
@@ -1610,12 +1614,12 @@ fn should_exclude_unrelated_manifest_inventory_when_staging_interrupted_publicat
     )
     .expect("create runtime state");
     state.manifest.files.push(crate::metadata::FileMeta {
-        name: crate::sst::file_name(0, 0, 41),
+        name: crate::cloud_layout::file_name(0, 0, 41),
         size_bytes: 1 << 40,
         ..Default::default()
     });
     let interrupted = crate::runtime::FileMeta {
-        name: crate::sst::file_name(0, 0, 42),
+        name: crate::cloud_layout::file_name(0, 0, 42),
         level: 0,
         size_bytes: 4096,
         content_crc32c: None,
@@ -1655,7 +1659,7 @@ fn should_validate_remote_only_manifest_sst_when_cloud_listing_is_stale() {
         RecoveryPolicy::Strict,
     )
     .expect("create runtime state");
-    let sst_name = crate::sst::file_name(0, 0, 1);
+    let sst_name = crate::cloud_layout::file_name(0, 0, 1);
     let sst_bytes = test_sst_bytes();
     state.manifest.files.push(crate::metadata::FileMeta {
         name: sst_name.clone(),
@@ -1670,8 +1674,12 @@ fn should_validate_remote_only_manifest_sst_when_cloud_listing_is_stale() {
         ..Default::default()
     });
     let cloud = cloud_with_stale_sst_listing();
-    Engine::blocking_cloud_put(&cloud, &crate::sst::object_key(&sst_name), sst_bytes)
-        .expect("upload test sst");
+    Engine::blocking_cloud_put(
+        &cloud,
+        &crate::cloud_layout::object_key(&sst_name),
+        sst_bytes,
+    )
+    .expect("upload test sst");
 
     Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
         .expect("stale list should not make readable manifest SST unrecoverable");
@@ -1694,7 +1702,7 @@ fn should_reject_manifest_sst_when_cloud_object_size_differs_from_manifest() {
         RecoveryPolicy::Strict,
     )
     .expect("create runtime state");
-    let sst_name = crate::sst::file_name(0, 0, 3);
+    let sst_name = crate::cloud_layout::file_name(0, 0, 3);
     let committed_sst_bytes = test_sst_bytes_with_value(b"manifest-sized-value");
     let wrong_sst_bytes = test_sst_bytes_with_value(b"different-cloud-object-bytes");
     // Act
@@ -1717,8 +1725,12 @@ fn should_reject_manifest_sst_when_cloud_object_size_differs_from_manifest() {
         ..Default::default()
     });
     let cloud = cloud_with_stale_sst_listing();
-    Engine::blocking_cloud_put(&cloud, &crate::sst::object_key(&sst_name), wrong_sst_bytes)
-        .expect("upload wrong-sized but structurally valid test sst");
+    Engine::blocking_cloud_put(
+        &cloud,
+        &crate::cloud_layout::object_key(&sst_name),
+        wrong_sst_bytes,
+    )
+    .expect("upload wrong-sized but structurally valid test sst");
 
     let error = Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
         .expect_err("strict recovery must reject wrong-sized authoritative cloud SST");
@@ -1743,7 +1755,7 @@ fn should_defer_manifest_sst_body_checksum_until_blocks_are_read() {
         RecoveryPolicy::Strict,
     )
     .expect("create runtime state");
-    let sst_name = crate::sst::file_name(0, 0, 4);
+    let sst_name = crate::cloud_layout::file_name(0, 0, 4);
     let wrong_sst_bytes = test_sst_bytes();
     let expected_crc = crc32c::crc32c(&wrong_sst_bytes) ^ 0xffff_ffff;
     state.manifest.files.push(crate::metadata::FileMeta {
@@ -1760,8 +1772,12 @@ fn should_defer_manifest_sst_body_checksum_until_blocks_are_read() {
         ..Default::default()
     });
     let cloud = cloud_with_stale_sst_listing();
-    Engine::blocking_cloud_put(&cloud, &crate::sst::object_key(&sst_name), wrong_sst_bytes)
-        .expect("upload same-sized but wrong-content test sst");
+    Engine::blocking_cloud_put(
+        &cloud,
+        &crate::cloud_layout::object_key(&sst_name),
+        wrong_sst_bytes,
+    )
+    .expect("upload same-sized but wrong-content test sst");
 
     Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
         .expect("startup validates object metadata without scanning the SST body");
@@ -1784,7 +1800,7 @@ fn should_leave_stale_local_sst_cache_untouched_when_cloud_metadata_is_valid() {
         RecoveryPolicy::Strict,
     )
     .expect("create runtime state");
-    let sst_name = crate::sst::file_name(0, 0, 5);
+    let sst_name = crate::cloud_layout::file_name(0, 0, 5);
     let committed_sst_bytes = test_sst_bytes_with_value(b"manifest-sized-value");
     let stale_local_sst_bytes = test_sst_bytes_with_value(b"different-local-cache-bytes");
     // Act
@@ -1811,7 +1827,7 @@ fn should_leave_stale_local_sst_cache_untouched_when_cloud_metadata_is_valid() {
     let cloud = cloud_with_stale_sst_listing();
     Engine::blocking_cloud_put(
         &cloud,
-        &crate::sst::object_key(&sst_name),
+        &crate::cloud_layout::object_key(&sst_name),
         committed_sst_bytes.clone(),
     )
     .expect("upload authoritative manifest-sized test sst");
@@ -1836,7 +1852,7 @@ fn should_avoid_reading_same_size_local_sst_cache_when_cloud_metadata_is_valid()
         RecoveryPolicy::Strict,
     )
     .expect("create runtime state");
-    let sst_name = crate::sst::file_name(0, 0, 6);
+    let sst_name = crate::cloud_layout::file_name(0, 0, 6);
     let committed_sst_bytes = test_sst_bytes();
     let stale_local_sst_bytes = same_size_sst_with_different_crc(&committed_sst_bytes);
     state.manifest.files.push(crate::metadata::FileMeta {
@@ -1857,7 +1873,7 @@ fn should_avoid_reading_same_size_local_sst_cache_when_cloud_metadata_is_valid()
     let cloud = cloud_with_stale_sst_listing();
     Engine::blocking_cloud_put(
         &cloud,
-        &crate::sst::object_key(&sst_name),
+        &crate::cloud_layout::object_key(&sst_name),
         committed_sst_bytes.clone(),
     )
     .expect("upload authoritative manifest-crc test sst");
@@ -1884,7 +1900,7 @@ fn should_salvage_retain_verified_local_sst_when_cloud_object_is_missing() {
         RecoveryPolicy::Salvage,
     )
     .expect("create runtime state");
-    let sst_name = crate::sst::file_name(0, 0, 7);
+    let sst_name = crate::cloud_layout::file_name(0, 0, 7);
     let committed_sst_bytes = test_sst_bytes();
     state.manifest.files.push(crate::metadata::FileMeta {
         name: sst_name.clone(),
@@ -1937,7 +1953,7 @@ fn should_reject_legacy_local_sst_with_corrupt_data_blocks_when_cloud_object_is_
         RecoveryPolicy::Salvage,
     )
     .expect("create runtime state");
-    let name = crate::sst::file_name(0, 0, 8);
+    let name = crate::cloud_layout::file_name(0, 0, 8);
     let corrupt_bytes = same_size_sst_with_different_crc(&test_sst_bytes());
     state.manifest.files.push(crate::metadata::FileMeta {
         name: name.clone(),
@@ -1972,11 +1988,15 @@ fn should_stage_intent_replay_sst_when_cloud_listing_is_stale_but_object_is_read
         RecoveryPolicy::Strict,
     )
     .expect("create runtime state");
-    let sst_name = crate::sst::file_name(0, 0, 2);
+    let sst_name = crate::cloud_layout::file_name(0, 0, 2);
     let sst_bytes = test_sst_bytes();
     let cloud = cloud_with_stale_sst_listing();
-    Engine::blocking_cloud_put(&cloud, &crate::sst::object_key(&sst_name), sst_bytes)
-        .expect("upload intent replay sst");
+    Engine::blocking_cloud_put(
+        &cloud,
+        &crate::cloud_layout::object_key(&sst_name),
+        sst_bytes,
+    )
+    .expect("upload intent replay sst");
 
     Engine::ensure_named_sst_cache_from_cloud_storage(
         &mut state,
@@ -2003,7 +2023,7 @@ fn should_reject_intent_replay_sst_when_cloud_object_crc_differs_from_intent() {
         RecoveryPolicy::Strict,
     )
     .expect("create runtime state");
-    let sst_name = crate::sst::file_name(0, 0, 7);
+    let sst_name = crate::cloud_layout::file_name(0, 0, 7);
     let sst_bytes = test_sst_bytes();
     let expected_crc = crc32c::crc32c(&sst_bytes) ^ 0xffff_ffff;
     state
@@ -2023,8 +2043,12 @@ fn should_reject_intent_replay_sst_when_cloud_object_crc_differs_from_intent() {
             },
         });
     let cloud = cloud_with_stale_sst_listing();
-    Engine::blocking_cloud_put(&cloud, &crate::sst::object_key(&sst_name), sst_bytes)
-        .expect("upload intent SST with mismatched content proof");
+    Engine::blocking_cloud_put(
+        &cloud,
+        &crate::cloud_layout::object_key(&sst_name),
+        sst_bytes,
+    )
+    .expect("upload intent SST with mismatched content proof");
 
     let proofs = Engine::cloud_recovery_sst_proofs_for_intent_replay(&state);
     let error = Engine::ensure_named_sst_cache_from_cloud_storage(&mut state, &cloud, proofs)
@@ -2122,7 +2146,7 @@ mod salvage_removes_definitively_lost_ssts {
             RecoveryPolicy::Salvage,
         )
         .expect("create runtime state");
-        let sst_name = crate::sst::file_name(0, 0, sst_seq);
+        let sst_name = crate::cloud_layout::file_name(0, 0, sst_seq);
         state.manifest.files.push(crate::metadata::FileMeta {
             name: sst_name.clone(),
             level: 0,
@@ -2177,7 +2201,7 @@ mod salvage_removes_definitively_lost_ssts {
         let (_temp, mut state, sst_name) =
             salvage_state_with_persisted_sst(7, bytes.len() as u64 + 1);
         let cloud = cloud_with_stale_sst_listing();
-        Engine::blocking_cloud_put(&cloud, &crate::sst::object_key(&sst_name), bytes)
+        Engine::blocking_cloud_put(&cloud, &crate::cloud_layout::object_key(&sst_name), bytes)
             .expect("upload wrongly sized SST");
 
         // Act
@@ -2231,7 +2255,7 @@ mod salvage_removes_definitively_lost_ssts {
         // Arrange: one manifest SST is absent while a self-referential symlink
         // makes the other metadata check fail indeterminately.
         let (_temp, mut state, missing_name) = salvage_state_with_persisted_sst(10, 128);
-        let indeterminate_name = crate::sst::file_name(0, 0, 11);
+        let indeterminate_name = crate::cloud_layout::file_name(0, 0, 11);
         state.manifest.files.push(crate::metadata::FileMeta {
             name: indeterminate_name.clone(),
             level: 0,
@@ -2276,7 +2300,7 @@ mod salvage_removes_definitively_lost_ssts {
         let bytes = test_sst_bytes();
         let (_temp, mut state, sst_name) = salvage_state_with_persisted_sst(8, bytes.len() as u64);
         let cloud = cloud_with_stale_sst_listing();
-        Engine::blocking_cloud_put(&cloud, &crate::sst::object_key(&sst_name), bytes)
+        Engine::blocking_cloud_put(&cloud, &crate::cloud_layout::object_key(&sst_name), bytes)
             .expect("upload SST");
 
         // Act

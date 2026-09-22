@@ -1348,7 +1348,7 @@ fn should_mark_persistence_anomaly_when_compaction_metadata_range_is_missing() {
         .manifest
         .files
         .push(crate::metadata::FileMeta {
-            name: crate::sst::file_name(0, 0, 1),
+            name: crate::cloud_layout::file_name(0, 0, 1),
             level: 0,
             cf_id: 0,
             smallest_key: None,
@@ -1728,7 +1728,7 @@ fn should_advance_compaction_output_sequence_past_recovered_manifest_name() {
         .manifest
         .files
         .push(crate::metadata::FileMeta {
-            name: crate::sst::compaction_file_name(0, 1, 409, 0),
+            name: crate::cloud_layout::compaction_file_name(0, 1, 409, 0),
             level: 1,
             cf_id: 0,
             ..Default::default()
@@ -1821,7 +1821,7 @@ mod compaction_scheduling {
             .store(true, std::sync::atomic::Ordering::SeqCst);
 
         for seq in 1..=4 {
-            let name = crate::sst::file_name(0, 0, seq);
+            let name = crate::cloud_layout::file_name(0, 0, seq);
             let file = write_runtime_l0_sst_for_test(&event_loop, &name, seq);
             event_loop
                 .state
@@ -2195,8 +2195,8 @@ fn should_defer_column_family_drop_until_compaction_publication_finishes() {
         .manifest_actor
         .create_column_family(&mut event_loop.state, "compacting")
         .expect("create compacting column family");
-    let input_name = crate::sst::file_name(cf_id, 0, 1);
-    let output_name = crate::sst::file_name(cf_id, 1, 2);
+    let input_name = crate::cloud_layout::file_name(cf_id, 0, 1);
+    let output_name = crate::cloud_layout::file_name(cf_id, 1, 2);
     let input_bytes = valid_sst_bytes_for_event_loop_test(b"key", b"old", 1);
     let output_bytes = valid_sst_bytes_for_event_loop_test(b"key", b"new", 2);
     std::fs::write(event_loop.state.sst_dir.join(&input_name), &input_bytes)
@@ -2304,12 +2304,12 @@ fn should_restore_deferred_column_family_drop_before_emergent_compaction_followu
         .manifest_actor
         .create_column_family(&mut event_loop.state, "drop-before-followup")
         .expect("create column family");
-    let current_input = crate::sst::file_name(cf_id, 0, 1);
-    let current_output = crate::sst::file_name(cf_id, 1, 10);
+    let current_input = crate::cloud_layout::file_name(cf_id, 0, 1);
+    let current_output = crate::cloud_layout::file_name(cf_id, 1, 10);
     for (name, key, sequence) in
         std::iter::once((current_input.clone(), b'a', 1_u64)).chain((2_u8..=5).map(|index| {
             (
-                crate::sst::file_name(cf_id, 0, u64::from(index)),
+                crate::cloud_layout::file_name(cf_id, 0, u64::from(index)),
                 b'a'.saturating_add(index),
                 u64::from(index),
             )
@@ -2408,8 +2408,8 @@ fn should_reject_late_compaction_output_after_column_family_is_dropped() {
         .drop_column_family(&mut event_loop.state, cf_id)
         .expect("drop column family");
 
-    let input_name = crate::sst::file_name(cf_id, 0, 1);
-    let output_name = crate::sst::file_name(cf_id, 1, 2);
+    let input_name = crate::cloud_layout::file_name(cf_id, 0, 1);
+    let output_name = crate::cloud_layout::file_name(cf_id, 1, 2);
     let output_bytes = valid_sst_bytes_for_event_loop_test(b"key", b"value", 2);
     std::fs::write(event_loop.state.sst_dir.join(&output_name), output_bytes)
         .expect("write late compaction output");
@@ -2455,7 +2455,7 @@ fn should_reject_out_of_order_compaction_output_set_before_publication(
 ) -> crate::common::MidgeResult<()> {
     // Arrange
     let mut event_loop = create_test_local_event_loop()?;
-    let input_name = crate::sst::file_name(0, 0, 1);
+    let input_name = crate::cloud_layout::file_name(0, 0, 1);
     let input_bytes = valid_sst_bytes_for_event_loop_test(b"input", b"value", 1);
     std::fs::write(event_loop.state.sst_dir.join(&input_name), &input_bytes)?;
     event_loop
@@ -2474,8 +2474,8 @@ fn should_reject_out_of_order_compaction_output_set_before_publication(
             largest_seq: Some(1),
             ..Default::default()
         });
-    let first_name = crate::sst::compaction_file_name(0, 1, 2, 0);
-    let second_name = crate::sst::compaction_file_name(0, 1, 2, 1);
+    let first_name = crate::cloud_layout::compaction_file_name(0, 1, 2, 0);
+    let second_name = crate::cloud_layout::compaction_file_name(0, 1, 2, 1);
     let first_bytes = valid_sst_bytes_for_event_loop_test(b"a", b"first", 2);
     let second_bytes = valid_sst_bytes_for_event_loop_test(b"z", b"second", 2);
     std::fs::write(event_loop.state.sst_dir.join(&first_name), first_bytes)?;
@@ -2533,9 +2533,9 @@ fn should_reject_compaction_when_target_span_changes_before_publication(
 ) -> crate::common::MidgeResult<()> {
     // Arrange
     let mut event_loop = create_test_local_event_loop()?;
-    let source_name = crate::sst::file_name(0, 0, 1);
-    let selected_target = crate::sst::file_name(0, 1, 2);
-    let concurrent_target = crate::sst::file_name(0, 1, 3);
+    let source_name = crate::cloud_layout::file_name(0, 0, 1);
+    let selected_target = crate::cloud_layout::file_name(0, 1, 2);
+    let concurrent_target = crate::cloud_layout::file_name(0, 1, 3);
     for (name, level, key, smallest, largest, sequence) in [
         (&source_name, 0, b'm', b'a', b'z', 1_u64),
         (&selected_target, 1, b'b', b'a', b'm', 2_u64),
@@ -2560,7 +2560,7 @@ fn should_reject_compaction_when_target_span_changes_before_publication(
                 ..Default::default()
             });
     }
-    let output_name = crate::sst::compaction_file_name(0, 1, 4, 0);
+    let output_name = crate::cloud_layout::compaction_file_name(0, 1, 4, 0);
     let output_bytes = valid_sst_bytes_for_event_loop_test(b"m", b"replacement", 4);
     std::fs::write(event_loop.state.sst_dir.join(&output_name), output_bytes)?;
     let captured_inputs = vec![source_name.clone(), selected_target.clone()];
@@ -2626,7 +2626,7 @@ fn should_return_exact_compaction_failure_to_compact_all_waiter() -> crate::comm
 {
     // Arrange
     let mut event_loop = create_test_local_event_loop()?;
-    let input_name = crate::sst::file_name(0, 0, 1);
+    let input_name = crate::cloud_layout::file_name(0, 0, 1);
     event_loop
         .state
         .manifest

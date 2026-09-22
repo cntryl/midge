@@ -30,7 +30,7 @@ fn disjoint_segments(records_per_segment: u64) -> (CloudPersistence, Manifest) {
             file.largest_key = Some(key);
             file.key_bounds_complete = true;
             manifest.files.push(file);
-            write_cloud_object(&storage, &crate::sst::object_key(&name), bytes);
+            write_cloud_object(&storage, &crate::cloud_layout::object_key(&name), bytes);
         }
         write_authoritative_cloud_wal(&storage, segment, segment * records_per_segment, wal);
     }

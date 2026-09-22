@@ -347,7 +347,7 @@ impl EventLoop {
                 return;
             }
         }
-        let sst_name = crate::sst::file_name(identity.cf_id, 0, sst_seq);
+        let sst_name = crate::cloud_layout::file_name(identity.cf_id, 0, sst_seq);
         let build = FlushBuildOutput {
             identity,
             staging_path,
@@ -579,7 +579,7 @@ impl EventLoop {
         });
         if !primary_absent
             || !matches!(
-                hybrid.local_object_cache_is_absent(&crate::sst::object_key(name)),
+                hybrid.local_object_cache_is_absent(&crate::cloud_layout::object_key(name)),
                 Ok(true)
             )
         {
@@ -1394,7 +1394,7 @@ mod tests {
                 .reserve_for_flush_with_token(128)
                 .expect("flush admission");
             let staging_path = directory.path().join("failed.sst");
-            let name = crate::sst::file_name(0, 0, 1);
+            let name = crate::cloud_layout::file_name(0, 0, 1);
             let path = match residue {
                 "staging" => Some(staging_path.clone()),
                 "temporary" => Some(directory.path().join("failed.sst.tmp")),
@@ -1493,7 +1493,7 @@ mod tests {
             staging_path: staging_path.clone(),
             reservation: Some(reservation),
             file_meta: crate::runtime::FileMeta {
-                name: crate::sst::file_name(0, 0, 1),
+                name: crate::cloud_layout::file_name(0, 0, 1),
                 level: 0,
                 size_bytes: 128,
                 content_crc32c: Some(1),
@@ -1594,7 +1594,7 @@ mod tests {
         let delta = FlushPublicationDelta {
             identity,
             file_meta: crate::runtime::FileMeta {
-                name: crate::sst::file_name(0, 0, 1),
+                name: crate::cloud_layout::file_name(0, 0, 1),
                 level: 0,
                 size_bytes: 128,
                 content_crc32c: Some(1),
@@ -1795,7 +1795,7 @@ mod tests {
                 result: Ok(FlushPublicationDelta {
                     identity,
                     file_meta: crate::runtime::FileMeta {
-                        name: crate::sst::file_name(0, 0, 1),
+                        name: crate::cloud_layout::file_name(0, 0, 1),
                         level: 0,
                         size_bytes: 128,
                         content_crc32c: Some(1),

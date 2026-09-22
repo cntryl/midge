@@ -117,7 +117,11 @@ fn fixture(
     let sst = valid_sst_bytes(b"k", &value, records);
     let manifest =
         manifest_covering_wal("resumable.sst", &sst, records, Some(crc32c::crc32c(&sst)));
-    write_cloud_object(&storage, &crate::sst::object_key("resumable.sst"), sst);
+    write_cloud_object(
+        &storage,
+        &crate::cloud_layout::object_key("resumable.sst"),
+        sst,
+    );
     backend.reads.lock().clear();
     (directory, backend, storage, manifest)
 }
@@ -230,7 +234,7 @@ fn should_restart_semantic_progress_when_sst_provider_identity_changes() {
         .lock()
         .iter()
         .any(|(key, _)| key.contains("resumable.sst")));
-    let key = crate::sst::object_key("resumable.sst");
+    let key = crate::cloud_layout::object_key("resumable.sst");
     let bytes = read_cloud_object(&storage, &key);
     write_cloud_object(&storage, &key, bytes);
     backend.reads.lock().clear();
@@ -293,7 +297,11 @@ fn should_resume_legacy_sst_summary_across_timeouts_with_many_versions_of_one_ke
         let bytes = writer.finish_bytes().expect("historical SST");
         let mut manifest = manifest_covering_wal("resumable.sst", &bytes, 100, None);
         manifest.files[0].smallest_seq = Some(1);
-        write_cloud_object(&storage, &crate::sst::object_key("resumable.sst"), bytes);
+        write_cloud_object(
+            &storage,
+            &crate::cloud_layout::object_key("resumable.sst"),
+            bytes,
+        );
         let progress = CloudWalPruneProgress::default();
         let mut retired = false;
         // Act
@@ -430,7 +438,7 @@ fn should_resume_cross_family_transaction_proof_without_retiring_partial_coverag
                     .remove(0);
             file.cf_id = family;
             manifest.files.push(file);
-            write_cloud_object(&storage, &crate::sst::object_key(name), bytes);
+            write_cloud_object(&storage, &crate::cloud_layout::object_key(name), bytes);
         }
         let progress = CloudWalPruneProgress::default();
         let mut retired = false;
@@ -534,7 +542,7 @@ fn should_preserve_oldest_proof_progress_while_newer_ssts_are_appended() {
         file.largest_key = Some(b"z".to_vec());
         file.key_bounds_complete = true;
         manifest.files.push(file);
-        write_cloud_object(&storage, &crate::sst::object_key(&name), bytes);
+        write_cloud_object(&storage, &crate::cloud_layout::object_key(&name), bytes);
     }
     // Assert
     assert!(

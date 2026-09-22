@@ -78,7 +78,7 @@ fn verify_manifest_sst(
     deadline: Option<&crate::common::OperationDeadline>,
 ) -> MidgeResult<(u64, u64)> {
     ensure_verification_deadline(deadline)?;
-    let name = crate::sst::PersistedSstName::parse(&file_meta.name)?;
+    let name = crate::cloud_layout::PersistedSstName::parse(&file_meta.name)?;
     let relative = name.join_under(Path::new("sst"));
     let path = relative.to_str().ok_or_else(|| {
         MidgeError::Corruption("persisted SST path is not valid UTF-8".to_string())
@@ -507,7 +507,7 @@ mod tests {
                 .expect("append SST entry");
         }
         let bytes = writer.finish_bytes().expect("finish SST bytes");
-        let sst_name = crate::sst::file_name(0, 0, 1);
+        let sst_name = crate::cloud_layout::file_name(0, 0, 1);
         let sst_path = db_path.join("sst").join(&sst_name);
         std::fs::write(&sst_path, &bytes).expect("write SST fixture");
 

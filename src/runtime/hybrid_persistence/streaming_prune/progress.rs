@@ -241,8 +241,8 @@ impl Progress {
         // checks must therefore precede reuse, not just subsequent row reads.
         let mut changed = Vec::new();
         for (name, proof) in &self.ssts {
-            let actual =
-                storage.remote_range_metadata_within(&crate::sst::object_key(name), deadline)?;
+            let actual = storage
+                .remote_range_metadata_within(&crate::cloud_layout::object_key(name), deadline)?;
             if !actual.same_version(&proof.metadata) {
                 changed.push(name.clone());
             }

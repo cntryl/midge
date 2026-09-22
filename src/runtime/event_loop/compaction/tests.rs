@@ -98,7 +98,7 @@ fn event_loop_with_storage(
 }
 
 fn published_output(event_loop: &mut EventLoop) -> String {
-    let output_name = crate::sst::compaction_file_name(0, 1, 42, 0);
+    let output_name = crate::cloud_layout::compaction_file_name(0, 1, 42, 0);
     let metadata = crate::metadata::FileMeta {
         name: output_name.clone(),
         level: 1,
@@ -164,7 +164,7 @@ fn should_settle_async_compaction_failure_according_to_owned_scratch() -> MidgeR
             let (mut event_loop, hybrid) = event_loop_with_storage(&directory, ephemeral)?;
             let compaction_storage: Arc<dyn crate::runtime::actors::compaction::CompactionStorage> =
                 hybrid.clone();
-            let input = crate::sst::file_name(0, 0, 1);
+            let input = crate::cloud_layout::file_name(0, 0, 1);
             event_loop
                 .state
                 .manifest
@@ -403,7 +403,7 @@ fn should_retain_compaction_inputs_when_writer_lease_moved_before_input_gc() -> 
     // Arrange
     let directory = tempfile::tempdir()?;
     let mut event_loop = stale_writer_event_loop(&directory)?;
-    let input_name = crate::sst::compaction_file_name(0, 1, 1, 0);
+    let input_name = crate::cloud_layout::compaction_file_name(0, 1, 1, 0);
     let input_path = event_loop.state.sst_dir.join(&input_name);
     std::fs::create_dir_all(&event_loop.state.sst_dir)?;
     std::fs::write(&input_path, b"still read by the new holder")?;

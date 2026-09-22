@@ -120,7 +120,7 @@ impl ManifestEdit {
 
     fn validate_persisted_sst_names(&self) -> MidgeResult<()> {
         fn validate(name: &str) -> MidgeResult<()> {
-            crate::sst::PersistedSstName::parse(name).map(|_| ())
+            crate::cloud_layout::PersistedSstName::parse(name).map(|_| ())
         }
 
         match self {
@@ -1188,7 +1188,7 @@ mod tests {
         // Arrange
         let td = tempdir().unwrap();
         let db = td.path();
-        let sst_name = crate::sst::file_name(0, 0, 1);
+        let sst_name = crate::cloud_layout::file_name(0, 0, 1);
 
         let file = FileMeta {
             name: sst_name.clone(),

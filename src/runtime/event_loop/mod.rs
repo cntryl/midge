@@ -911,7 +911,7 @@ impl EventLoop {
             )?;
             let (size, checksum) = crate::sst::fs::file_identity(&path)?;
             hybrid.publish_immutable_file(
-                &crate::sst::object_key(sst_name),
+                &crate::cloud_layout::object_key(sst_name),
                 &path,
                 size,
                 checksum,
@@ -938,7 +938,9 @@ impl EventLoop {
                     tracing::warn!(%error, sst_name = name, "retaining local SST cache after failed eviction");
                 }
             }
-            if let Err(error) = storage.evict_local_object_cache(&crate::sst::object_key(name)) {
+            if let Err(error) =
+                storage.evict_local_object_cache(&crate::cloud_layout::object_key(name))
+            {
                 tracing::warn!(%error, sst_name = name, "retaining secondary SST cache after failed eviction");
             }
         }

@@ -567,7 +567,7 @@ mod tests {
         readable.key_bounds_complete = false;
         let readable_name = readable.name.clone();
         let mut unreadable = readable.clone();
-        unreadable.name = crate::sst::file_name(0, 0, 999);
+        unreadable.name = crate::cloud_layout::file_name(0, 0, 999);
         event_loop.state.manifest.files.insert(0, unreadable);
 
         // Act

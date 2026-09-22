@@ -483,7 +483,7 @@ fn upload(
 ) -> MidgeResult<()> {
     if let Some(hybrid) = &task.hybrid_storage {
         hybrid.publish_immutable_file(
-            &crate::sst::object_key(&task.sst_name),
+            &crate::cloud_layout::object_key(&task.sst_name),
             final_path,
             task.build.file_meta.size_bytes,
             task.build
@@ -909,7 +909,7 @@ mod tests {
                 file_meta,
                 reservation: None,
             },
-            sst_name: crate::sst::file_name(identity.cf_id, 0, 1),
+            sst_name: crate::cloud_layout::file_name(identity.cf_id, 0, 1),
             sst_seq: 1,
             sst_dir,
             fs: publication_fs,
@@ -1027,7 +1027,7 @@ mod tests {
         corrupted[middle] ^= 1;
         let (tx, rx) = std::sync::mpsc::channel();
         fixture.sst_backend.submit_put(
-            &crate::sst::object_key(&fixture.task.sst_name),
+            &crate::cloud_layout::object_key(&fixture.task.sst_name),
             corrupted,
             Vec::new(),
             tx,

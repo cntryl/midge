@@ -222,12 +222,12 @@ impl ManifestPersistence {
 
     fn validate_persisted_sst_names(manifest: &Manifest) -> Result<(), String> {
         for file in &manifest.files {
-            crate::sst::PersistedSstName::parse(&file.name)
+            crate::cloud_layout::PersistedSstName::parse(&file.name)
                 .map_err(|error| format!("manifest SST name is invalid: {error}"))?;
         }
         if let Some(checkpoint) = &manifest.cloud_checkpoint {
             for name in &checkpoint.covering_ssts {
-                crate::sst::PersistedSstName::parse(name)
+                crate::cloud_layout::PersistedSstName::parse(name)
                     .map_err(|error| format!("cloud checkpoint SST name is invalid: {error}"))?;
             }
         }
@@ -950,7 +950,7 @@ mod tests {
         let test_dir = create_test_dir();
         let stale_manifest = Manifest::default();
         let writer_dir = test_dir.clone();
-        let journal_file_name = crate::sst::file_name(0, 0, 1);
+        let journal_file_name = crate::cloud_layout::file_name(0, 0, 1);
         let writer_file_name = journal_file_name.clone();
         let writer = std::thread::spawn(move || {
             crate::metadata::append_edit(
@@ -989,13 +989,13 @@ mod tests {
         // Arrange
         let test_dir = create_test_dir();
         let first_edit = crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
-            name: crate::sst::file_name(0, 0, 1),
+            name: crate::cloud_layout::file_name(0, 0, 1),
             level: 0,
             size_bytes: 10,
             ..Default::default()
         });
         let second_edit = crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
-            name: crate::sst::file_name(0, 0, 2),
+            name: crate::cloud_layout::file_name(0, 0, 2),
             level: 0,
             size_bytes: 20,
             ..Default::default()
@@ -1020,14 +1020,14 @@ mod tests {
             loaded
                 .files
                 .iter()
-                .any(|file| file.name == crate::sst::file_name(0, 0, 1)),
+                .any(|file| file.name == crate::cloud_layout::file_name(0, 0, 1)),
             "later stale checkpoint must retain the first writer's durable edit"
         );
         assert!(
             loaded
                 .files
                 .iter()
-                .any(|file| file.name == crate::sst::file_name(0, 0, 2)),
+                .any(|file| file.name == crate::cloud_layout::file_name(0, 0, 2)),
             "later stale checkpoint must retain the second writer's durable edit"
         );
     }
@@ -1038,7 +1038,7 @@ mod tests {
         // Arrange
         let test_dir = create_test_dir();
         let pre_checkpoint = crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
-            name: crate::sst::file_name(0, 0, 1),
+            name: crate::cloud_layout::file_name(0, 0, 1),
             level: 0,
             size_bytes: 10,
             ..Default::default()
@@ -1068,7 +1068,7 @@ mod tests {
             "crash boundary must leave the pre-checkpoint journal record intact"
         );
         let post_checkpoint = crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
-            name: crate::sst::file_name(0, 0, 2),
+            name: crate::cloud_layout::file_name(0, 0, 2),
             level: 0,
             size_bytes: 20,
             ..Default::default()
@@ -1093,13 +1093,13 @@ mod tests {
         assert!(matches!(
             &replayed[0],
             crate::metadata::ManifestEdit::AddSst(file)
-                if file.name == crate::sst::file_name(0, 0, 2)
+                if file.name == crate::cloud_layout::file_name(0, 0, 2)
         ));
         assert_eq!(
             loaded
                 .files
                 .iter()
-                .filter(|file| file.name == crate::sst::file_name(0, 0, 1))
+                .filter(|file| file.name == crate::cloud_layout::file_name(0, 0, 1))
                 .count(),
             1,
             "the pre-checkpoint edit must come only from the published snapshot"
@@ -1108,7 +1108,7 @@ mod tests {
             loaded
                 .files
                 .iter()
-                .filter(|file| file.name == crate::sst::file_name(0, 0, 2))
+                .filter(|file| file.name == crate::cloud_layout::file_name(0, 0, 2))
                 .count(),
             1,
             "the post-checkpoint edit must replay exactly once"
@@ -1121,7 +1121,7 @@ mod tests {
         // Arrange
         let test_dir = create_test_dir();
         let edit = crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
-            name: crate::sst::file_name(0, 0, 7),
+            name: crate::cloud_layout::file_name(0, 0, 7),
             level: 0,
             size_bytes: 700,
             ..Default::default()
@@ -1161,7 +1161,7 @@ mod tests {
             reopened
                 .files
                 .iter()
-                .filter(|file| file.name == crate::sst::file_name(0, 0, 7))
+                .filter(|file| file.name == crate::cloud_layout::file_name(0, 0, 7))
                 .count(),
             1,
             "journal recovery must restore the edit exactly once"
@@ -1173,7 +1173,7 @@ mod tests {
         // Arrange
         let test_dir = create_test_dir();
         let mut manifest = Manifest::default();
-        let sst_name = crate::sst::file_name(0, 0, 1);
+        let sst_name = crate::cloud_layout::file_name(0, 0, 1);
         manifest.files.push(crate::metadata::FileMeta {
             name: sst_name.clone(),
             level: 0,

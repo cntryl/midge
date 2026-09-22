@@ -46,7 +46,7 @@ fn cloud_debt_with_wal_records(
             .next_sst_seqs
             .insert(cf_id, files_per_cf + 1);
         for number in 1..=files_per_cf {
-            let name = crate::sst::file_name(cf_id, 0, number);
+            let name = crate::cloud_layout::file_name(cf_id, 0, number);
             let bytes = add_valid_manifest_sst_for_test(&mut el, &name, 81);
             el.state.manifest.files.last_mut().unwrap().cf_id = cf_id;
             write_test_file(el.state.sst_dir.join(&name), &bytes);
@@ -263,7 +263,7 @@ fn local_debt() -> crate::common::MidgeResult<(EventLoop, crossbeam::channel::Re
     let mut el = crate::runtime::event_loop::tests::create_test_local_event_loop()?;
     let other = el.state.create_cf("remaining-debt".into())?;
     for cf_id in [0, other] {
-        let name = crate::sst::file_name(cf_id, 0, 1);
+        let name = crate::cloud_layout::file_name(cf_id, 0, 1);
         let bytes = valid_sst_bytes_for_test(b"local-debt", b"value", 81);
         write_test_file(el.state.sst_dir.join(&name), &bytes);
         el.state.manifest.files.push(crate::metadata::FileMeta {

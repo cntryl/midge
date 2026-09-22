@@ -581,7 +581,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
         std::fs::create_dir_all(&state.sst_dir).expect("sst dir");
-        let name = crate::sst::file_name(0, 0, 1);
+        let name = crate::cloud_layout::file_name(0, 0, 1);
         let path = state.sst_dir.join(&name);
         std::fs::write(&path, b"obsolete").expect("obsolete SST");
         let (notifier, notifications) = crossbeam::channel::unbounded();

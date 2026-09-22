@@ -1675,7 +1675,7 @@ mod tests {
         let compactor = Compactor::new();
         let mut files = Vec::new();
         for sequence in 1..=6_u64 {
-            let name = crate::sst::file_name(0, 0, sequence);
+            let name = crate::cloud_layout::file_name(0, 0, sequence);
             let file = make_file(
                 &name,
                 0,
@@ -1691,7 +1691,7 @@ mod tests {
             }
             files.push(file);
         }
-        let oldest_cold = crate::sst::file_name(0, 0, 1);
+        let oldest_cold = crate::cloud_layout::file_name(0, 0, 1);
 
         // Act
         let plan = compactor
@@ -1717,7 +1717,7 @@ mod tests {
         let files: Vec<_> = (1..=8_u64)
             .map(|sequence| {
                 make_file(
-                    &crate::sst::file_name(0, 0, sequence),
+                    &crate::cloud_layout::file_name(0, 0, sequence),
                     0,
                     0,
                     1,

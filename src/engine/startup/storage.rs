@@ -610,7 +610,7 @@ impl RuntimeRecoveryMaterialization {
             if path.exists() {
                 std::fs::remove_file(path)?;
             }
-            storage.evict_local_object_cache(&crate::sst::object_key(&meta.name))?;
+            storage.evict_local_object_cache(&crate::cloud_layout::object_key(&meta.name))?;
         }
         if !salvaged.is_empty() {
             materialized.state.salvaged_local_ssts.extend(salvaged);

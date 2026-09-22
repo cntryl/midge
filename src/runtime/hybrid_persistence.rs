@@ -410,7 +410,7 @@ fn validate_remote_sst_within(
     file: &FileMeta,
     deadline: &crate::common::OperationDeadline,
 ) -> MidgeResult<RemoteObjectProof> {
-    let key = crate::sst::object_key(&file.name);
+    let key = crate::cloud_layout::object_key(&file.name);
     let proof = storage.remote_object_proof_within(&key, deadline)?;
     validate_sst_object_bytes(
         &file.name,
@@ -689,7 +689,7 @@ impl CloudPersistence {
         crate::failpoints::fail_point!("midge::cloud::inject_fail_sst_delete", |_| Err(
             MidgeError::Internal("failpoint: cloud SST delete failed".to_string())
         ));
-        self.delete_immutable_object_blocking(&crate::sst::object_key(sst_name))
+        self.delete_immutable_object_blocking(&crate::cloud_layout::object_key(sst_name))
     }
 }
 
@@ -877,7 +877,7 @@ impl<'a> VerifiedManifestWalCoverage<'a> {
     fn state_for(&self, file: &FileMeta, key: &[u8]) -> Option<crate::types::KeyState> {
         let mut readers = self.readers.borrow_mut();
         let reader = readers.entry(file.name.clone()).or_insert_with(|| {
-            let name = crate::sst::PersistedSstName::parse(&file.name).ok()?;
+            let name = crate::cloud_layout::PersistedSstName::parse(&file.name).ok()?;
             let bytes = std::fs::read(self.sst_dir.join(name.as_str())).ok()?;
             if file.size_bytes != 0
                 && u64::try_from(bytes.len()).unwrap_or(u64::MAX) != file.size_bytes

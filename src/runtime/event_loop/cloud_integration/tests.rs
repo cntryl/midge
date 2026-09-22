@@ -123,7 +123,7 @@ fn should_give_ready_compaction_a_turn_before_continuing_flushes() -> crate::com
     el.state.set_compaction_enabled(true);
     el.state.manifest.next_sst_seqs.insert(0, 5);
     for number in 1..=4 {
-        let name = crate::sst::file_name(0, 0, number);
+        let name = crate::cloud_layout::file_name(0, 0, number);
         let bytes = add_valid_manifest_sst_for_test(&mut el, &name, 81);
         write_test_file(el.state.sst_dir.join(&name), &bytes);
     }
@@ -3209,7 +3209,7 @@ fn should_publish_control_intent_before_remote_compaction_sst() -> crate::common
     el.state.set_compaction_enabled(false);
     let input_sst = "ordered-control-input.sst";
     add_valid_manifest_sst_for_test(&mut el, input_sst, 10);
-    let output_sst = crate::sst::compaction_file_name(0, 1, 11, 0);
+    let output_sst = crate::cloud_layout::compaction_file_name(0, 1, 11, 0);
     let output_bytes = valid_sst_bytes_for_test(b"ordered", b"value", 11);
     write_test_file(el.state.sst_dir.join(&output_sst), &output_bytes);
 
@@ -3271,7 +3271,7 @@ fn should_mirror_cleared_compaction_intent_after_cloud_sst_publish(
     let input_sst = "compaction-input.sst";
     add_valid_manifest_sst_for_test(&mut el, input_sst, 10);
 
-    let output_sst = crate::sst::compaction_file_name(0, 1, 10, 0);
+    let output_sst = crate::cloud_layout::compaction_file_name(0, 1, 10, 0);
     let output_bytes = valid_sst_bytes_for_test(b"prune-candidate", b"value", 10);
     write_test_file(el.state.sst_dir.join(&output_sst), &output_bytes);
 
@@ -3334,7 +3334,7 @@ fn should_unblock_compaction_waiters_when_cleared_compaction_intent_mirror_fails
     let input_sst = "mirror-fail-input.sst";
     add_valid_manifest_sst_for_test(&mut el, input_sst, 10);
 
-    let output_sst = crate::sst::compaction_file_name(0, 1, 10, 0);
+    let output_sst = crate::cloud_layout::compaction_file_name(0, 1, 10, 0);
     let output_bytes = valid_sst_bytes_for_test(b"prune-candidate", b"value", 10);
     write_test_file(el.state.sst_dir.join(&output_sst), &output_bytes);
 
@@ -3445,7 +3445,7 @@ fn should_delete_obsolete_cloud_sst_objects_after_compaction() -> crate::common:
         "test setup should create the obsolete provider SST object"
     );
 
-    let output_sst = crate::sst::compaction_file_name(0, 1, 11, 0);
+    let output_sst = crate::cloud_layout::compaction_file_name(0, 1, 11, 0);
     let output_bytes = valid_sst_bytes_for_test(b"obsolete", b"new-value", 11);
     write_test_file(el.state.sst_dir.join(&output_sst), &output_bytes);
 
@@ -3522,7 +3522,7 @@ fn should_not_block_runtime_when_cloud_sst_delete_is_slow() -> crate::common::Mi
     let cloud_backend: Arc<dyn crate::storage::StorageBackend> =
         Arc::new(BlockingDeleteStorageBackend::new(
             cloud_backend_inner,
-            crate::sst::object_key(sst_name),
+            crate::cloud_layout::object_key(sst_name),
             delete_started_tx,
             Arc::clone(&release_delete),
         ));
@@ -3612,7 +3612,7 @@ fn should_retry_failed_cloud_sst_delete_without_runtime_restart() -> crate::comm
     );
     let failing_cloud = Arc::new(FailOnceDeleteStorageBackend::new(
         cloud_backend_inner,
-        crate::sst::object_key(sst_name),
+        crate::cloud_layout::object_key(sst_name),
     ));
     let cloud_backend: Arc<dyn crate::storage::StorageBackend> =
         Arc::clone(&failing_cloud) as Arc<dyn crate::storage::StorageBackend>;
@@ -3694,7 +3694,7 @@ fn should_join_cloud_gc_worker_before_runtime_shutdown() -> crate::common::Midge
     let cloud_backend: Arc<dyn crate::storage::StorageBackend> =
         Arc::new(BlockingDeleteStorageBackend::new(
             cloud_backend_inner,
-            crate::sst::object_key(sst_name),
+            crate::cloud_layout::object_key(sst_name),
             delete_started_tx,
             Arc::clone(&release_delete),
         ));
@@ -8601,7 +8601,7 @@ fn should_head_each_compaction_output_once_when_publishing_prepared_remote_outpu
     let input_sst = "compaction-input.sst";
     add_valid_manifest_sst_for_test(&mut el, input_sst, 10);
 
-    let output_sst = crate::sst::compaction_file_name(0, 1, 10, 0);
+    let output_sst = crate::cloud_layout::compaction_file_name(0, 1, 10, 0);
     let output_bytes = valid_sst_bytes_for_test(b"counted", b"value", 11);
     write_test_file(el.state.sst_dir.join(&output_sst), &output_bytes);
 
@@ -8612,7 +8612,7 @@ fn should_head_each_compaction_output_once_when_publishing_prepared_remote_outpu
             crate::storage::filesystem::FileSystem::new(el.state.db_path.join("counted_store"))
                 .expect("counted cloud store"),
         ),
-        sst_key: crate::sst::object_key(&output_sst),
+        sst_key: crate::cloud_layout::object_key(&output_sst),
         sst_range_heads: AtomicUsize::new(0),
     });
     // Place the staged object in that store directly, so the HEAD the
@@ -8621,7 +8621,7 @@ fn should_head_each_compaction_output_once_when_publishing_prepared_remote_outpu
         .state
         .db_path
         .join("counted_store")
-        .join(crate::sst::object_key(&output_sst));
+        .join(crate::cloud_layout::object_key(&output_sst));
     std::fs::create_dir_all(staged_path.parent().expect("staged object parent"))
         .expect("staged object directory");
     write_test_file(staged_path, &output_bytes);
@@ -8631,7 +8631,7 @@ fn should_head_each_compaction_output_once_when_publishing_prepared_remote_outpu
     let (metadata_tx, metadata_rx) = std::sync::mpsc::channel();
     crate::storage::StorageBackend::submit_range_head(
         counting.inner.as_ref(),
-        &crate::sst::object_key(&output_sst),
+        &crate::cloud_layout::object_key(&output_sst),
         Duration::from_secs(5),
         metadata_tx,
     );
@@ -8644,7 +8644,7 @@ fn should_head_each_compaction_output_once_when_publishing_prepared_remote_outpu
     };
     let proof = crate::storage::hybrid::backend::GuardedObjectProof::range_identity(
         Arc::clone(&counting) as Arc<dyn crate::storage::StorageBackend>,
-        crate::sst::object_key(&output_sst),
+        crate::cloud_layout::object_key(&output_sst),
         metadata,
     );
     el.compaction_actor

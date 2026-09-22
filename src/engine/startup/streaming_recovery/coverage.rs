@@ -163,7 +163,7 @@ impl ReplayCoverage {
         // The old reader's reservations must be released before even the
         // next full-object verification buffer is allocated.
         self.release_cached(&mut cached);
-        let path = FsPath::new(crate::sst::object_key(&file.name));
+        let path = FsPath::new(crate::cloud_layout::object_key(&file.name));
         let mut verified = self.verified.borrow_mut();
         if !verified.contains_key(&file.name) {
             let reservation = self
@@ -427,7 +427,7 @@ mod tests {
                 .add_with_meta(b"key", *value, *sequence, operation, *expiration)
                 .expect("SST entry");
             let bytes = writer.finish_bytes().expect("SST bytes");
-            let name = crate::sst::file_name(0, 0, index as u64 + 1);
+            let name = crate::cloud_layout::file_name(0, 0, index as u64 + 1);
             std::fs::write(dir.path().join("cloud/sst").join(&name), &bytes).expect("remote SST");
             manifest.files.push(crate::metadata::FileMeta {
                 name,

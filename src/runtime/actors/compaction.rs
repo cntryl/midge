@@ -122,7 +122,7 @@ impl CompactionStorage for crate::storage::HybridStorage {
         let (metadata, size, crc) = summarize_output_partition(cf_id, level, name, path, budget)?;
         let proof = crate::storage::HybridStorage::publish_immutable_file(
             self,
-            &crate::sst::object_key(name),
+            &crate::cloud_layout::object_key(name),
             path,
             size,
             crc,
@@ -556,7 +556,7 @@ impl CompactionActor {
             let name = name.to_string_lossy();
             let name = name.strip_suffix(".tmp").unwrap_or(&name);
             let Some((cf, level, output_generation, _)) =
-                crate::sst::parse_compaction_file_name(name)
+                crate::cloud_layout::parse_compaction_file_name(name)
             else {
                 continue;
             };
@@ -1092,7 +1092,7 @@ mod tests {
         actor.prepare_compaction(&mut state, &plan, Some(&compaction_storage))?;
         let residue = state
             .sst_dir
-            .join(crate::sst::compaction_file_name(0, 1, 42, 0));
+            .join(crate::cloud_layout::compaction_file_name(0, 1, 42, 0));
         std::fs::write(&residue, [0_u8; 300])?;
 
         // Act

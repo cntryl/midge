@@ -596,7 +596,7 @@ fn finish_partition(
     }
     ensure_output_fits_local_staging(writer.as_ref(), output_size_limit)?;
     ensure_compaction_not_aborted(abort_check)?;
-    let name = crate::sst::compaction_file_name(
+    let name = crate::cloud_layout::compaction_file_name(
         identity.cf_id,
         identity.target_level,
         identity.generation,

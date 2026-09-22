@@ -101,6 +101,21 @@ impl fmt::Display for KeyState {
     }
 }
 
+/// Borrowed manifest proof fields for one persisted SST.
+///
+/// Metadata and runtime messages both construct this view while the SST
+/// identity checker consumes it, so it belongs below either owner.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ExpectedSst<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) size_bytes: u64,
+    pub(crate) content_crc32c: Option<u32>,
+    pub(crate) smallest_key: Option<&'a [u8]>,
+    pub(crate) largest_key: Option<&'a [u8]>,
+    pub(crate) smallest_seq: Option<u64>,
+    pub(crate) largest_seq: Option<u64>,
+}
+
 /// Key-value pair produced by internal ordered read sources.
 #[derive(Clone, Debug)]
 pub struct KvPair {

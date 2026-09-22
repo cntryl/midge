@@ -54,7 +54,9 @@ fn should_retain_compaction_partition_when_upload_workspace_cannot_be_admitted()
     );
     assert_eq!(std::fs::read(path)?, original);
     assert!(prepared.lock().is_empty());
-    assert!(!cloud_path.join(crate::sst::object_key(name)).exists());
+    assert!(!cloud_path
+        .join(crate::cloud_layout::object_key(name))
+        .exists());
     assert_eq!(budget.used(), 0);
     Ok(())
 }
@@ -222,7 +224,7 @@ fn should_roll_over_remote_compaction_outputs_to_leave_room_for_upload_workspace
         for name in outputs {
             assert_eq!(directory.path().join(&name).exists(), !ephemeral);
             let reader = crate::sst::fs::SstFileIo::open_with_real_fs(
-                &cloud_path.join(crate::sst::object_key(&name)),
+                &cloud_path.join(crate::cloud_layout::object_key(&name)),
             )?;
             actual.extend(reader.scan_range(None, None)?);
             let proof = prepared
@@ -238,7 +240,7 @@ fn should_roll_over_remote_compaction_outputs_to_leave_room_for_upload_workspace
             )?;
             drop(reader);
             std::fs::write(
-                cloud_path.join(crate::sst::object_key(&name)),
+                cloud_path.join(crate::cloud_layout::object_key(&name)),
                 b"replacement",
             )?;
             assert!(

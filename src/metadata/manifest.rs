@@ -160,8 +160,8 @@ pub struct FileMeta {
 
 impl FileMeta {
     /// Borrow this entry's recorded proofs for the SST identity checker.
-    pub(crate) fn expected_sst(&self) -> crate::sst::identity::ExpectedSst<'_> {
-        crate::sst::identity::ExpectedSst {
+    pub(crate) fn expected_sst(&self) -> crate::types::ExpectedSst<'_> {
+        crate::types::ExpectedSst {
             name: &self.name,
             size_bytes: self.size_bytes,
             content_crc32c: self.content_crc32c,
@@ -497,7 +497,7 @@ mod tests {
     fn should_add_file_to_manifest() {
         // Arrange
         let mut manifest = Manifest::default();
-        let sst_name = crate::sst::file_name(0, 0, 1);
+        let sst_name = crate::cloud_layout::file_name(0, 0, 1);
         let file = FileMeta {
             name: sst_name.clone(),
             level: 0,
@@ -540,7 +540,13 @@ mod tests {
         // Arrange
         let mut manifest = Manifest::default();
         let expected_names: Vec<String> = (0_u64..5)
-            .map(|i| crate::sst::file_name(0, u32::try_from(i).expect("loop index fits in u32"), i))
+            .map(|i| {
+                crate::cloud_layout::file_name(
+                    0,
+                    u32::try_from(i).expect("loop index fits in u32"),
+                    i,
+                )
+            })
             .collect();
 
         // Act
@@ -938,7 +944,7 @@ mod tests {
         let cf_id = manifest.create_column_family("dropped".to_string());
         assert!(manifest.delete_column_family_with_reclamation(cf_id, 10, Vec::new()));
         assert!(manifest.mark_column_family_reclaimed(cf_id, &[]));
-        let late_output = crate::sst::file_name(cf_id, 1, 99);
+        let late_output = crate::cloud_layout::file_name(cf_id, 1, 99);
         manifest.files.push(FileMeta {
             name: late_output.clone(),
             cf_id,

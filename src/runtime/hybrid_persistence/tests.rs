@@ -149,7 +149,7 @@ impl CloudPersistence {
             MidgeError::Internal("failpoint: cloud SST upload failed".to_string())
         ));
 
-        let key = crate::sst::object_key(sst_name);
+        let key = crate::cloud_layout::object_key(sst_name);
         self.publish_immutable_object_within(&key, data, deadline)?;
         let proof = self
             .remote_object_proof_within(&key, deadline)
@@ -386,7 +386,11 @@ fn should_require_exact_raw_state_when_streaming_wal_retirement() {
             .expect("SST raw state");
         let sst = writer.finish_bytes().expect("SST bytes");
         let manifest = manifest_covering_wal("raw-state.sst", &sst, 7, Some(crc32c::crc32c(&sst)));
-        write_cloud_object(&storage, &crate::sst::object_key("raw-state.sst"), sst);
+        write_cloud_object(
+            &storage,
+            &crate::cloud_layout::object_key("raw-state.sst"),
+            sst,
+        );
 
         // Act
         let result =
@@ -451,7 +455,11 @@ fn should_retire_cloud_wal_delete_range_only_when_sst_range_tombstones_cover_it(
             .map(|(_, _, seq)| *seq)
             .min()
             .map(|seq| seq.min(7));
-        write_cloud_object(&storage, &crate::sst::object_key("ranges.sst"), sst);
+        write_cloud_object(
+            &storage,
+            &crate::cloud_layout::object_key("ranges.sst"),
+            sst,
+        );
 
         // Act
         let result =
@@ -490,7 +498,11 @@ fn should_retain_newer_wal_authority_when_streamed_oldest_segment_is_uncovered()
     let second = write_authoritative_cloud_wal(&storage, 2, 2, valid_wal_bytes(2));
     let sst = valid_sst_bytes(b"k", b"v", 2);
     let manifest = manifest_covering_wal("prefix.sst", &sst, 2, Some(crc32c::crc32c(&sst)));
-    write_cloud_object(&storage, &crate::sst::object_key("prefix.sst"), sst);
+    write_cloud_object(
+        &storage,
+        &crate::cloud_layout::object_key("prefix.sst"),
+        sst,
+    );
 
     // Act
     let results = storage
@@ -575,7 +587,7 @@ fn should_delete_range_verified_wal_with_filesystem_identity() {
     let name = "filesystem-prune.sst";
     let sst = valid_sst_bytes(b"k", b"v", sequence);
     let manifest = manifest_covering_wal(name, &sst, sequence, Some(crc32c::crc32c(&sst)));
-    write_cloud_object(&storage, &crate::sst::object_key(name), sst);
+    write_cloud_object(&storage, &crate::cloud_layout::object_key(name), sst);
 
     // Act
     storage
@@ -599,7 +611,7 @@ fn should_retire_large_cloud_wal_without_whole_object_downloads() {
     let name = "streamed-retirement.sst";
     let sst = valid_sst_bytes(b"k", b"v", sequence);
     let manifest = manifest_covering_wal(name, &sst, sequence, Some(crc32c::crc32c(&sst)));
-    write_cloud_object(&storage, &crate::sst::object_key(name), sst);
+    write_cloud_object(&storage, &crate::cloud_layout::object_key(name), sst);
     cloud.clear_history();
 
     // Act
@@ -635,7 +647,7 @@ fn should_prune_wal_without_fetching_unrelated_ssts_when_local_cache_is_ephemera
     let name = "relevant.sst";
     let bytes = valid_sst_bytes(b"k", b"v", sequence);
     let mut manifest = manifest_covering_wal(name, &bytes, sequence, Some(crc32c::crc32c(&bytes)));
-    write_cloud_object(&storage, &crate::sst::object_key(name), bytes);
+    write_cloud_object(&storage, &crate::cloud_layout::object_key(name), bytes);
     manifest.files.push(crate::metadata::FileMeta {
         name: "unrelated.sst".into(),
         cf_id: 0,
@@ -665,7 +677,7 @@ fn should_publish_sst_without_duplicate_local_copy_when_ephemeral_cache_is_enabl
     let (_cloud, storage) = hybrid_with_mock_cloud();
     storage.enable_ephemeral_sst_cache(20 * 1024 * 1024 * 1024);
     let name = "ephemeral.sst";
-    let key = crate::sst::object_key(name);
+    let key = crate::cloud_layout::object_key(name);
     let bytes = valid_sst_bytes(b"key", b"value", 1);
 
     // Act
@@ -693,7 +705,7 @@ fn should_preserve_remote_sst_when_evicting_legacy_local_cache() {
     // Arrange
     let (_cloud, storage) = hybrid_with_mock_cloud();
     let name = "legacy-local.sst";
-    let key = crate::sst::object_key(name);
+    let key = crate::cloud_layout::object_key(name);
     let bytes = valid_sst_bytes(b"key", b"value", 1);
     storage
         .write_sst_object(name, bytes.clone())
@@ -910,7 +922,7 @@ fn should_preserve_same_epoch_catalog_updates_when_publication_races_retirement(
     let sst_bytes = valid_sst_bytes(b"k", b"v", retired_max_sequence);
     write_cloud_object(
         &storage,
-        &crate::sst::object_key(sst_name),
+        &crate::cloud_layout::object_key(sst_name),
         sst_bytes.clone(),
     );
     let manifest = manifest_covering_wal(
@@ -1330,7 +1342,7 @@ fn should_route_each_object_class_to_its_separate_cloud_store() {
             .iter()
             .map(|(key, _)| key.as_str())
             .collect::<Vec<_>>(),
-        vec![crate::sst::object_key("000017.sst")]
+        vec![crate::cloud_layout::object_key("000017.sst")]
     );
     assert_eq!(
         control_mock.get_uploads(),
@@ -1928,7 +1940,11 @@ fn should_revalidate_manifest_ssts_on_repeated_validation() {
     let (mock_cloud, storage) = hybrid_with_mock_cloud();
     let sst_name = "cached.sst";
     let bytes = valid_sst_bytes(b"a", b"v1", 1);
-    write_cloud_object(&storage, &crate::sst::object_key(sst_name), bytes.clone());
+    write_cloud_object(
+        &storage,
+        &crate::cloud_layout::object_key(sst_name),
+        bytes.clone(),
+    );
     let manifest = manifest_for_ssts(&[(sst_name, bytes.len() as u64)]);
 
     mock_cloud.clear_history();
@@ -1970,12 +1986,12 @@ fn should_revalidate_full_manifest_after_extension() {
     let second_bytes = valid_sst_bytes(b"b", b"v2", 2);
     write_cloud_object(
         &storage,
-        &crate::sst::object_key(first_name),
+        &crate::cloud_layout::object_key(first_name),
         first_bytes.clone(),
     );
     write_cloud_object(
         &storage,
-        &crate::sst::object_key(second_name),
+        &crate::cloud_layout::object_key(second_name),
         second_bytes.clone(),
     );
 
@@ -2035,7 +2051,7 @@ fn should_reject_cached_manifest_sst_proof_when_cloud_object_is_deleted() {
     let (_mock_cloud, storage) = hybrid_with_mock_cloud();
     let sst_name = "deleted-after-proof.sst";
     let bytes = valid_sst_bytes(b"a", b"v1", 1);
-    let key = crate::sst::object_key(sst_name);
+    let key = crate::cloud_layout::object_key(sst_name);
     write_cloud_object(&storage, &key, bytes.clone());
     let manifest = manifest_for_ssts(&[(sst_name, bytes.len() as u64)]);
 
@@ -2061,7 +2077,7 @@ fn should_reject_cached_manifest_sst_proof_when_cloud_object_is_overwritten() {
     let (_mock_cloud, storage) = hybrid_with_mock_cloud();
     let sst_name = "overwritten-after-proof.sst";
     let bytes = valid_sst_bytes(b"a", b"v1", 1);
-    let key = crate::sst::object_key(sst_name);
+    let key = crate::cloud_layout::object_key(sst_name);
     write_cloud_object(&storage, &key, bytes.clone());
     let manifest = manifest_for_ssts(&[(sst_name, bytes.len() as u64)]);
 
@@ -2087,7 +2103,7 @@ fn should_reject_manifest_sst_when_content_crc_differs() {
     let (_mock_cloud, storage) = hybrid_with_mock_cloud();
     let sst_name = "wrong-crc.sst";
     let bytes = valid_sst_bytes(b"a", b"v1", 1);
-    let key = crate::sst::object_key(sst_name);
+    let key = crate::cloud_layout::object_key(sst_name);
     let wrong_crc = crc32c::crc32c(&bytes) ^ 0xffff_ffff;
     write_cloud_object(&storage, &key, bytes.clone());
     let manifest = manifest_for_ssts_with_crc(&[(sst_name, bytes.len() as u64, Some(wrong_crc))]);
@@ -2110,7 +2126,7 @@ fn should_not_reuse_size_only_sst_proof_when_manifest_later_requires_crc() {
     let (_mock_cloud, storage) = hybrid_with_mock_cloud();
     let sst_name = "crc-after-size-proof.sst";
     let bytes = valid_sst_bytes(b"a", b"v1", 1);
-    let key = crate::sst::object_key(sst_name);
+    let key = crate::cloud_layout::object_key(sst_name);
     let wrong_crc = crc32c::crc32c(&bytes) ^ 0xffff_ffff;
     write_cloud_object(&storage, &key, bytes.clone());
     let size_only_manifest = manifest_for_ssts(&[(sst_name, bytes.len() as u64)]);
@@ -2137,7 +2153,7 @@ fn should_not_overwrite_remote_object_given_different_content_when_authoritative
     // Arrange
     let (_mock_cloud, storage) = hybrid_with_mock_cloud();
     let sst_name = "collision.sst";
-    let key = crate::sst::object_key(sst_name);
+    let key = crate::cloud_layout::object_key(sst_name);
     let existing_bytes = valid_sst_bytes(b"a", b"already-committed", 1);
     let upload_bytes = valid_sst_bytes(b"b", b"new-upload", 2);
     write_cloud_object(&storage, &key, existing_bytes.clone());
@@ -2176,7 +2192,7 @@ fn should_not_create_remote_sst_when_local_cache_key_already_exists() {
     // Arrange
     let (_mock_cloud, storage) = hybrid_with_mock_cloud();
     let sst_name = "local-collision.sst";
-    let key = crate::sst::object_key(sst_name);
+    let key = crate::cloud_layout::object_key(sst_name);
     let existing_bytes = valid_sst_bytes(b"a", b"local-already-committed", 1);
     let upload_bytes = valid_sst_bytes(b"b", b"new-upload", 2);
     write_local_object(&storage, &key, existing_bytes.clone());
@@ -2204,7 +2220,7 @@ fn should_resume_same_content_sst_publication_after_remote_only_success() {
     // Arrange
     let (_mock_cloud, storage) = hybrid_with_mock_cloud();
     let sst_name = "remote-only-retry.sst";
-    let key = crate::sst::object_key(sst_name);
+    let key = crate::cloud_layout::object_key(sst_name);
     let bytes = valid_sst_bytes(b"retry", b"value", 7);
     write_cloud_object(&storage, &key, bytes.clone());
     assert_cloud_object_exists(&storage, &key);
@@ -2224,7 +2240,7 @@ fn should_retry_same_content_upload_idempotently_given_remote_object_already_exi
     // Arrange
     let (_mock_cloud, storage) = hybrid_with_mock_cloud();
     let sst_name = "fully-published-retry.sst";
-    let key = crate::sst::object_key(sst_name);
+    let key = crate::cloud_layout::object_key(sst_name);
     let bytes = valid_sst_bytes(b"retry", b"value", 8);
     storage
         .write_sst_object(sst_name, bytes.clone())
@@ -2399,7 +2415,7 @@ fn should_not_prune_remote_wal_when_manifest_sst_disappears_after_initial_valida
         valid_wal_bytes(max_sequence),
     );
     let sst_name = "missing-after-validation.sst";
-    let sst_key = crate::sst::object_key(sst_name);
+    let sst_key = crate::cloud_layout::object_key(sst_name);
     let sst_bytes = valid_sst_bytes(b"k", b"v", max_sequence);
     let manifest = manifest_covering_wal(sst_name, &sst_bytes, max_sequence, None);
 
@@ -2455,7 +2471,7 @@ fn assert_wal_prune_rejects_manifest_crc_mismatch(ephemeral: bool) {
         valid_wal_bytes(max_sequence),
     );
     let sst_name = "wrong-crc-prune-guard.sst";
-    let sst_key = crate::sst::object_key(sst_name);
+    let sst_key = crate::cloud_layout::object_key(sst_name);
     let sst_bytes = valid_sst_bytes(b"k", b"v", max_sequence);
     let wrong_crc = crc32c::crc32c(&sst_bytes) ^ 0xffff_ffff;
     let manifest = manifest_covering_wal(sst_name, &sst_bytes, max_sequence, Some(wrong_crc));
@@ -2512,7 +2528,7 @@ fn assert_sst_identity_change_retains_wal(ephemeral: bool) {
         valid_wal_bytes(max_sequence),
     );
     let sst_name = "changed-after-validation.sst";
-    let sst_key = crate::sst::object_key(sst_name);
+    let sst_key = crate::cloud_layout::object_key(sst_name);
     let original = valid_sst_bytes(b"k", b"v", max_sequence);
     let replacement = valid_sst_bytes(b"k", b"v2", max_sequence);
     let manifest = manifest_covering_wal(
@@ -2590,7 +2606,7 @@ fn should_not_prune_remote_wal_when_cloud_metadata_changes_after_initial_validat
         valid_wal_bytes(max_sequence),
     );
     let sst_name = "metadata-guard.sst";
-    let sst_key = crate::sst::object_key(sst_name);
+    let sst_key = crate::cloud_layout::object_key(sst_name);
     let sst_bytes = valid_sst_bytes(b"k", b"v", max_sequence);
     let manifest = manifest_covering_wal(
         sst_name,
@@ -2662,7 +2678,7 @@ fn should_prune_remote_wal_when_worker_side_guard_remains_valid() {
         valid_wal_bytes(max_sequence),
     );
     let sst_name = "guard-valid.sst";
-    let sst_key = crate::sst::object_key(sst_name);
+    let sst_key = crate::cloud_layout::object_key(sst_name);
     let sst_bytes = valid_sst_bytes(b"k", b"v", max_sequence);
     let manifest = crate::metadata::Manifest {
         files: vec![crate::metadata::FileMeta {
