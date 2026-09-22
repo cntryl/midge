@@ -1681,6 +1681,96 @@ mod production_tables_have_no_cfg_test_arms {
     }
 
     #[test]
+    fn should_reject_cfg_test_arms_when_scanning_the_durability_waiter_table() {
+        // Arrange
+        let source = include_str!("durability.rs");
+
+        // Act
+        let waiters = sole_block(source, "pub enum DurabilityWaiter {");
+
+        // Assert
+        assert_no_cfg_test(&waiters, "enum DurabilityWaiter");
+    }
+
+    #[test]
+    fn should_reject_cfg_test_arms_when_scanning_the_durability_completion_tables() {
+        // Arrange
+        let source = include_str!("event_loop/durability_sync.rs");
+
+        // Act
+        let completion = production_block(source, "impl EventLoop {");
+
+        // Assert
+        assert_no_cfg_test(&completion, "durability_sync::EventLoop");
+    }
+
+    #[test]
+    fn should_reject_cfg_test_arms_when_scanning_the_shutdown_waiter_table() {
+        // Arrange
+        let source = include_str!("event_loop/shutdown.rs");
+
+        // Act
+        let waiter_request_id = sole_block(
+            source,
+            "fn shutdown_waiter_request_id(waiter: &DurabilityWaiter) -> Option<u64> {",
+        );
+
+        // Assert
+        assert_no_cfg_test(&waiter_request_id, "shutdown_waiter_request_id");
+    }
+
+    fn assert_rejects_injected_build_divergent_arms(block: &str, what: &str) {
+        for attribute in ["#[cfg(test)]", "#[cfg(not(test))]"] {
+            let mut injected = block.to_string();
+            let insert_at = injected
+                .rfind('}')
+                .unwrap_or_else(|| panic!("{what} block must end with a closing brace"));
+            injected.insert_str(insert_at, &format!("    {attribute}\n"));
+            let result = std::panic::catch_unwind(|| assert_no_cfg_test(&injected, what));
+            assert!(
+                result.is_err(),
+                "{what} guard must reject an injected {attribute} arm"
+            );
+        }
+    }
+
+    #[test]
+    fn should_reject_injected_build_divergent_arms_in_the_durability_waiter_table() {
+        // Arrange
+        let source = include_str!("durability.rs");
+        let waiters = sole_block(source, "pub enum DurabilityWaiter {");
+
+        // Act / Assert
+        assert_rejects_injected_build_divergent_arms(&waiters, "enum DurabilityWaiter");
+    }
+
+    #[test]
+    fn should_reject_injected_build_divergent_arms_in_the_durability_completion_tables() {
+        // Arrange
+        let source = include_str!("event_loop/durability_sync.rs");
+        let completion = production_block(source, "impl EventLoop {");
+
+        // Act / Assert
+        assert_rejects_injected_build_divergent_arms(&completion, "durability_sync::EventLoop");
+    }
+
+    #[test]
+    fn should_reject_injected_build_divergent_arms_in_the_shutdown_waiter_table() {
+        // Arrange
+        let source = include_str!("event_loop/shutdown.rs");
+        let waiter_request_id = sole_block(
+            source,
+            "fn shutdown_waiter_request_id(waiter: &DurabilityWaiter) -> Option<u64> {",
+        );
+
+        // Act / Assert
+        assert_rejects_injected_build_divergent_arms(
+            &waiter_request_id,
+            "shutdown_waiter_request_id",
+        );
+    }
+
+    #[test]
     fn should_reject_cfg_test_arms_when_scanning_the_dispatch_routing_table() {
         // Arrange
         let source = include_str!("event_loop/dispatch.rs");

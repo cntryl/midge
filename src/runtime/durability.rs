@@ -22,14 +22,50 @@ pub struct CloudAsyncInflightSegment {
     pub max_sequence: u64,
 }
 
-/// Waiter types for group commit
+/// Test-only waiter payloads.
+///
+/// These hooks deliberately sit behind [`DurabilityWaiter::Test`] instead of
+/// adding conditional arms to the production waiter table. That keeps every
+/// production completion, failure, and shutdown match identical in test and
+/// release builds while still letting unit tests exercise deferred read and WAL
+/// behavior directly.
+#[cfg(test)]
 #[derive(Debug, Clone)]
-pub enum DurabilityWaiter {
-    #[cfg(test)]
+pub enum TestDurabilityWaiter {
     WalAppend {
         request_id: u64,
         sequence: u64,
     },
+    Read {
+        request_id: u64,
+        cf_id: crate::types::ColumnFamilyId,
+        key: Vec<u8>,
+        sequence: u64,
+    },
+    RangeScan {
+        request_id: u64,
+        cf_id: crate::types::ColumnFamilyId,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        sequence: u64,
+    },
+}
+
+/// Release-build stand-in for [`TestDurabilityWaiter`].
+///
+/// Keeping the type and [`DurabilityWaiter::Test`] in every build lets the
+/// production waiter matches remain unconditional. This enum has no values in
+/// a release build, so the wrapper cannot be constructed there.
+#[cfg(not(test))]
+#[derive(Debug, Clone)]
+pub enum TestDurabilityWaiter {}
+
+/// Waiter types for group commit
+#[derive(Debug, Clone)]
+pub enum DurabilityWaiter {
+    /// Test-only waiter wrapper; unconstructible outside `cfg(test)`.
+    #[allow(dead_code)]
+    Test(TestDurabilityWaiter),
     /// Internal waiter used when caller already acknowledged but needs cleanup.
     ConfirmWalAppend {
         request_id: u64,
@@ -40,21 +76,6 @@ pub enum DurabilityWaiter {
     },
     CloudDurability {
         request_id: u64,
-    },
-    #[cfg(test)]
-    Read {
-        request_id: u64,
-        cf_id: crate::types::ColumnFamilyId,
-        key: Vec<u8>,
-        sequence: u64,
-    },
-    #[cfg(test)]
-    RangeScan {
-        request_id: u64,
-        cf_id: crate::types::ColumnFamilyId,
-        start: Vec<u8>,
-        end: Vec<u8>,
-        sequence: u64,
     },
 }
 

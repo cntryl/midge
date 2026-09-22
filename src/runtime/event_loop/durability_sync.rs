@@ -4,7 +4,7 @@
 //! `complete_durability_waiters` helper that deduplicates the waiter-completion
 //! pattern used by cloud ack, WAL sync, and forced sync code paths.
 
-use super::super::durability::DurabilityWaiter;
+use super::super::durability::{DurabilityWaiter, TestDurabilityWaiter};
 use super::super::RuntimeMsg;
 use super::super::RuntimeResponse;
 use super::EventLoop;
@@ -108,19 +108,8 @@ impl EventLoop {
     ) {
         for w in waiters {
             match w {
-                #[cfg(test)]
-                DurabilityWaiter::WalAppend {
-                    request_id,
-                    sequence,
-                } => {
-                    self.confirm_for_source(request_id, source);
-                    self.respond(
-                        request_id,
-                        RuntimeResponse::WalAppended {
-                            request_id,
-                            sequence,
-                        },
-                    );
+                DurabilityWaiter::Test(waiter) => {
+                    self.complete_test_durability_waiter(&waiter, source);
                 }
                 DurabilityWaiter::ConfirmWalAppend { request_id } => {
                     self.confirm_for_source(request_id, source);
@@ -133,33 +122,6 @@ impl EventLoop {
                 }
                 DurabilityWaiter::CloudDurability { request_id } => {
                     self.respond(request_id, RuntimeResponse::Ok { request_id });
-                }
-                #[cfg(test)]
-                DurabilityWaiter::Read {
-                    request_id,
-                    cf_id,
-                    key,
-                    sequence,
-                } => {
-                    let value = self.handle_read(cf_id, &key, sequence);
-                    self.respond(request_id, RuntimeResponse::ReadValue { request_id, value });
-                }
-                #[cfg(test)]
-                DurabilityWaiter::RangeScan {
-                    request_id,
-                    cf_id,
-                    start,
-                    end,
-                    sequence,
-                } => {
-                    let results = self.handle_range_scan(cf_id, &start, &end, sequence);
-                    self.respond(
-                        request_id,
-                        RuntimeResponse::RangeScanResults {
-                            request_id,
-                            results,
-                        },
-                    );
                 }
             }
 
@@ -205,10 +167,9 @@ impl EventLoop {
                 }
                 DurabilityWaiter::ConfirmWalAppend { request_id } => (request_id, false, true),
                 DurabilityWaiter::CloudDurability { request_id } => (request_id, false, false),
-                #[cfg(test)]
-                DurabilityWaiter::WalAppend { request_id, .. }
-                | DurabilityWaiter::Read { request_id, .. }
-                | DurabilityWaiter::RangeScan { request_id, .. } => (request_id, false, false),
+                DurabilityWaiter::Test(waiter) => {
+                    Self::test_durability_waiter_failure_state(&waiter)
+                }
             };
             if clears_transaction_barrier {
                 self.state.clear_pending_transaction_barrier();
@@ -449,6 +410,86 @@ impl EventLoop {
             return Ok(());
         }
         self.sync_wal_generation(CompletionSource::SealedGeneration)
+    }
+}
+
+#[cfg(test)]
+impl EventLoop {
+    fn complete_test_durability_waiter(
+        &mut self,
+        waiter: &TestDurabilityWaiter,
+        source: CompletionSource,
+    ) {
+        match waiter {
+            TestDurabilityWaiter::WalAppend {
+                request_id,
+                sequence,
+            } => {
+                self.confirm_for_source(*request_id, source);
+                self.respond(
+                    *request_id,
+                    RuntimeResponse::WalAppended {
+                        request_id: *request_id,
+                        sequence: *sequence,
+                    },
+                );
+            }
+            TestDurabilityWaiter::Read {
+                request_id,
+                cf_id,
+                key,
+                sequence,
+            } => {
+                let value = self.handle_read(*cf_id, key, *sequence);
+                self.respond(
+                    *request_id,
+                    RuntimeResponse::ReadValue {
+                        request_id: *request_id,
+                        value,
+                    },
+                );
+            }
+            TestDurabilityWaiter::RangeScan {
+                request_id,
+                cf_id,
+                start,
+                end,
+                sequence,
+            } => {
+                let results = self.handle_range_scan(*cf_id, start, end, *sequence);
+                self.respond(
+                    *request_id,
+                    RuntimeResponse::RangeScanResults {
+                        request_id: *request_id,
+                        results,
+                    },
+                );
+            }
+        }
+    }
+
+    fn test_durability_waiter_failure_state(waiter: &TestDurabilityWaiter) -> (u64, bool, bool) {
+        match waiter {
+            TestDurabilityWaiter::WalAppend { request_id, .. }
+            | TestDurabilityWaiter::Read { request_id, .. }
+            | TestDurabilityWaiter::RangeScan { request_id, .. } => (*request_id, false, false),
+        }
+    }
+}
+
+#[cfg(not(test))]
+impl EventLoop {
+    fn complete_test_durability_waiter(
+        &mut self,
+        waiter: &TestDurabilityWaiter,
+        _source: CompletionSource,
+    ) {
+        let _ = self;
+        match *waiter {}
+    }
+
+    fn test_durability_waiter_failure_state(waiter: &TestDurabilityWaiter) -> (u64, bool, bool) {
+        match *waiter {}
     }
 }
 
@@ -1115,5 +1156,112 @@ mod tests {
 
         // Assert
         assert!(!event_loop.durability.has_pending_waiters());
+    }
+
+    #[test]
+    fn should_complete_test_wal_append_waiter_through_unconditional_boundary() {
+        // Arrange
+        let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
+            .expect("create event loop");
+        let response = event_loop.router.register(73, "WalAppend");
+        let waiter = DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
+            request_id: 73,
+            sequence: 19,
+        });
+
+        // Act
+        event_loop.complete_durability_waiters(vec![waiter], CompletionSource::WalSync);
+
+        // Assert
+        assert!(matches!(
+            response.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(RuntimeResponse::WalAppended {
+                request_id: 73,
+                sequence: 19,
+            })
+        ));
+    }
+
+    #[test]
+    fn should_complete_test_read_waiter_through_unconditional_boundary() {
+        // Arrange
+        let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
+            .expect("create event loop");
+        let response = event_loop.router.register(75, "Read");
+        let waiter = DurabilityWaiter::Test(TestDurabilityWaiter::Read {
+            request_id: 75,
+            cf_id: 0,
+            key: b"missing".to_vec(),
+            sequence: 0,
+        });
+
+        // Act
+        event_loop.complete_durability_waiters(vec![waiter], CompletionSource::WalSync);
+
+        // Assert
+        assert!(matches!(
+            response.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(RuntimeResponse::ReadValue {
+                request_id: 75,
+                value: None,
+            })
+        ));
+    }
+
+    #[test]
+    fn should_complete_test_range_scan_waiter_through_unconditional_boundary() {
+        // Arrange
+        let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
+            .expect("create event loop");
+        let response = event_loop.router.register(76, "RangeScan");
+        let waiter = DurabilityWaiter::Test(TestDurabilityWaiter::RangeScan {
+            request_id: 76,
+            cf_id: 0,
+            start: b"a".to_vec(),
+            end: b"z".to_vec(),
+            sequence: 0,
+        });
+
+        // Act
+        event_loop.complete_durability_waiters(vec![waiter], CompletionSource::WalSync);
+
+        // Assert
+        assert!(matches!(
+            response.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(RuntimeResponse::RangeScanResults {
+                request_id: 76,
+                results,
+            }) if results.is_empty()
+        ));
+    }
+
+    #[test]
+    fn should_preserve_transaction_barrier_when_test_waiter_fails() {
+        // Arrange
+        let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)
+            .expect("create event loop");
+        event_loop.state.begin_pending_transaction(41);
+        let response = event_loop.router.register(74, "WalAppend");
+        let waiter = DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
+            request_id: 74,
+            sequence: 41,
+        });
+        let error = crate::common::MidgeError::Internal("injected waiter failure".to_string());
+
+        // Act
+        event_loop.fail_durability_waiters(vec![waiter], &error);
+
+        // Assert
+        assert_eq!(
+            event_loop.state.pending_transaction_min_sequence(),
+            Some(41)
+        );
+        assert!(matches!(
+            response.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(RuntimeResponse::Error {
+                request_id: 74,
+                error: crate::common::MidgeError::Internal(message),
+            }) if message == "injected waiter failure"
+        ));
     }
 }

@@ -1,7 +1,7 @@
 use super::super::tests::{create_test_cloud_event_loop, create_test_event_loop};
 use super::super::wal::{ApplyTransactionRequest, WalCoordinator};
 use super::super::EventLoop;
-use crate::runtime::durability::DurabilityWaiter;
+use crate::runtime::durability::{DurabilityWaiter, TestDurabilityWaiter};
 use crate::runtime::hybrid_persistence::CloudPersistence;
 
 /// Wrap the raw hybrid backend in the runtime persistence layer under test.
@@ -4982,10 +4982,10 @@ fn should_validate_uncached_cloud_ack_before_local_wal_removal() -> crate::commo
     // Assert
     assert!(deferred, "CloudAsync append should wait for CloudAck");
     el.durability
-        .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+        .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
             request_id,
             sequence: seq,
-        });
+        }));
 
     let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
     let local_wal = el
@@ -5127,10 +5127,10 @@ fn should_not_advance_cloud_durability_across_unacked_segment_gap() -> crate::co
     // Assert
     assert!(first_deferred, "CloudAsync first append should defer");
     el.durability
-        .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+        .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
             request_id: first_request,
             sequence: first_seq,
-        });
+        }));
     let (first_segment, first_max_sequence) = seal_segment_for_test(&mut el)?;
 
     let second_request = 602u64;
@@ -5147,10 +5147,10 @@ fn should_not_advance_cloud_durability_across_unacked_segment_gap() -> crate::co
     )?;
     assert!(second_deferred, "CloudAsync second append should defer");
     el.durability
-        .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+        .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
             request_id: second_request,
             sequence: second_seq,
-        });
+        }));
     let (second_segment, second_max_sequence) = seal_segment_for_test(&mut el)?;
     assert!(second_segment > first_segment);
     let second_local_wal = el
@@ -5222,10 +5222,10 @@ fn should_drop_buffered_cloud_acks_when_earlier_segment_fails() -> crate::common
     // Assert
     assert!(first_deferred, "CloudAsync first append should defer");
     el.durability
-        .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+        .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
             request_id: first_request,
             sequence: first_seq,
-        });
+        }));
     let (first_segment, _) = seal_segment_for_test(&mut el)?;
 
     let second_request = 612u64;
@@ -5242,10 +5242,10 @@ fn should_drop_buffered_cloud_acks_when_earlier_segment_fails() -> crate::common
     )?;
     assert!(second_deferred, "CloudAsync second append should defer");
     el.durability
-        .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+        .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
             request_id: second_request,
             sequence: second_seq,
-        });
+        }));
     let (second_segment, second_max_sequence) = seal_segment_for_test(&mut el)?;
 
     el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
@@ -5300,10 +5300,10 @@ fn should_keep_local_wal_when_cached_remote_wal_proof_becomes_stale_before_cloud
     // Assert
     assert!(deferred, "CloudAsync append should wait for CloudAck");
     el.durability
-        .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+        .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
             request_id,
             sequence: seq,
-        });
+        }));
 
     let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
     let local_wal = el
@@ -5485,10 +5485,10 @@ fn should_cloud_async_ack_confirm_idempotent_request() -> crate::common::MidgeRe
 
     // Queue waiter for this append (simulates EventLoop behavior)
     el.durability
-        .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+        .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
             request_id,
             sequence: seq,
-        });
+        }));
 
     // Simulate sealing & uploading segment for CloudAsync as EventLoop would do
     let (seg_id, max_sequence) = seal_segment_for_test(&mut el)?;
@@ -5544,10 +5544,10 @@ fn should_cloud_async_retry_after_ack_return_same_sequence_without_queueing(
 
     // Queue waiter for this append (simulates EventLoop behavior)
     el.durability
-        .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+        .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
             request_id,
             sequence: seq1,
-        });
+        }));
 
     // Simulate sealing & uploading segment for CloudAsync as EventLoop would do
     let (seg_id, max_sequence) = seal_segment_for_test(&mut el)?;
@@ -5635,10 +5635,10 @@ fn should_preserve_idempotency_allocation_when_failed_cloud_wal_remains_retryabl
 
     // Queue waiter for this append (simulates EventLoop behavior)
     el.durability
-        .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+        .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
             request_id,
             sequence: seq1,
-        });
+        }));
 
     // Simulate sealing & uploading segment for CloudAsync as EventLoop would do
     let (seg_id, _max_sequence) = seal_segment_for_test(&mut el)?;
@@ -5681,10 +5681,10 @@ fn should_not_advance_cloud_frontier_across_failed_segment_gap() -> crate::commo
     )?;
     assert!(first_deferred);
     el.durability
-        .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+        .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
             request_id: 701,
             sequence: first_seq,
-        });
+        }));
     let (first_segment, first_max_sequence) = seal_segment_for_test(&mut el)?;
 
     let (second_seq, second_deferred) = el.wal_actor.append(
@@ -5700,10 +5700,10 @@ fn should_not_advance_cloud_frontier_across_failed_segment_gap() -> crate::commo
     )?;
     assert!(second_deferred);
     el.durability
-        .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+        .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
             request_id: 702,
             sequence: second_seq,
-        });
+        }));
     let (second_segment, second_max_sequence) = seal_segment_for_test(&mut el)?;
 
     // Act
@@ -8378,10 +8378,10 @@ fn should_complete_cloud_ack_waiter_but_defer_local_wal_retirement_under_verific
     assert!(deferred);
     let response = el.router.register(request_id, "WalAppend");
     el.durability
-        .queue_waiter(crate::runtime::durability::DurabilityWaiter::WalAppend {
+        .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
             request_id,
             sequence: seq,
-        });
+        }));
     let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
     let local_wal = el
         .state

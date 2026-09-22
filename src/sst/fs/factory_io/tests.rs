@@ -59,12 +59,8 @@ impl RecordingFs {
 }
 
 impl Fs for RecordingFs {
-    fn host_root(&self) -> Option<&Path> {
-        self.inner.host_root()
-    }
-
-    fn host_path_anchor(&self) -> Option<&Path> {
-        self.inner.host_path_anchor()
+    fn host_addressing(&self) -> Option<crate::io::HostAddressing<'_>> {
+        self.inner.host_addressing()
     }
 
     fn open(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File + '_>> {

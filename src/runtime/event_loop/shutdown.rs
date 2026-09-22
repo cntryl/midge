@@ -1,6 +1,6 @@
 use super::{EventLoop, HandleOutcome};
 use crate::common::MidgeError;
-use crate::runtime::durability::DurabilityWaiter;
+use crate::runtime::durability::{DurabilityWaiter, TestDurabilityWaiter};
 use crate::runtime::{RuntimeMsg, RuntimeResponse};
 
 impl EventLoop {
@@ -365,14 +365,25 @@ impl EventLoop {
 
 fn shutdown_waiter_request_id(waiter: &DurabilityWaiter) -> Option<u64> {
     match waiter {
+        DurabilityWaiter::Test(waiter) => Some(shutdown_test_waiter_request_id(waiter)),
         DurabilityWaiter::CloudDurability { request_id } => Some(*request_id),
         DurabilityWaiter::ConfirmWalAppend { .. }
         | DurabilityWaiter::ConfirmTransactionApply { .. } => None,
-        #[cfg(test)]
-        DurabilityWaiter::WalAppend { request_id, .. }
-        | DurabilityWaiter::Read { request_id, .. }
-        | DurabilityWaiter::RangeScan { request_id, .. } => Some(*request_id),
     }
+}
+
+#[cfg(test)]
+fn shutdown_test_waiter_request_id(waiter: &TestDurabilityWaiter) -> u64 {
+    match waiter {
+        TestDurabilityWaiter::WalAppend { request_id, .. }
+        | TestDurabilityWaiter::Read { request_id, .. }
+        | TestDurabilityWaiter::RangeScan { request_id, .. } => *request_id,
+    }
+}
+
+#[cfg(not(test))]
+fn shutdown_test_waiter_request_id(waiter: &TestDurabilityWaiter) -> u64 {
+    match *waiter {}
 }
 
 fn shutdown_error() -> MidgeError {
@@ -472,12 +483,12 @@ mod tests {
         let (mut event_loop, _syncs) = local_event_loop_with_counting_writer();
         event_loop.state.wal.pending_writes = 1;
         let waiter = event_loop.router.register(7, "WalAppend");
-        event_loop
-            .durability
-            .queue_waiter(DurabilityWaiter::WalAppend {
+        event_loop.durability.queue_waiter(DurabilityWaiter::Test(
+            TestDurabilityWaiter::WalAppend {
                 request_id: 7,
                 sequence: 1,
-            });
+            },
+        ));
 
         // Act
         event_loop.handle_shutdown(None);
@@ -490,5 +501,38 @@ mod tests {
                 sequence: 1,
             })
         ));
+    }
+
+    #[test]
+    fn should_extract_request_ids_from_test_durability_waiters_during_shutdown() {
+        // Arrange
+        let waiters = [
+            DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
+                request_id: 8,
+                sequence: 1,
+            }),
+            DurabilityWaiter::Test(TestDurabilityWaiter::Read {
+                request_id: 9,
+                cf_id: 0,
+                key: b"key".to_vec(),
+                sequence: 1,
+            }),
+            DurabilityWaiter::Test(TestDurabilityWaiter::RangeScan {
+                request_id: 10,
+                cf_id: 0,
+                start: b"a".to_vec(),
+                end: b"z".to_vec(),
+                sequence: 1,
+            }),
+        ];
+
+        // Act
+        let request_ids = waiters
+            .iter()
+            .map(shutdown_waiter_request_id)
+            .collect::<Vec<_>>();
+
+        // Assert
+        assert_eq!(request_ids, vec![Some(8), Some(9), Some(10)]);
     }
 }

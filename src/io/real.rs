@@ -10,7 +10,8 @@
 //! - `sync_dir` uses a directory durability barrier on Unix and Windows.
 
 use super::traits::{
-    DirEntry, Durability, File, FileCaps, Fs, FsError, FsPath, FsResult, Metadata, OpenOptions,
+    DirEntry, Durability, File, FileCaps, Fs, FsError, FsPath, FsResult, HostAddressing, Metadata,
+    OpenOptions,
 };
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -168,12 +169,11 @@ impl RealFs {
 }
 
 impl Fs for RealFs {
-    fn host_root(&self) -> Option<&Path> {
-        Some(&self.base_path)
-    }
-
-    fn host_path_anchor(&self) -> Option<&Path> {
-        self.relative_anchor.as_deref()
+    fn host_addressing(&self) -> Option<HostAddressing<'_>> {
+        Some(HostAddressing {
+            root: &self.base_path,
+            anchor: self.relative_anchor.as_deref(),
+        })
     }
 
     fn coordination_key(&self) -> u64 {

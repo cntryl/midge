@@ -100,7 +100,7 @@ fn canonical_host_path(anchor: Option<&Path>, path: &Path) -> MidgeResult<PathBu
 /// reported as [`MidgeError::Internal`] ([`crate::common::Severity::Defect`])
 /// instead of a caller error that would be documented as pointless to retry.
 pub(crate) fn fs_relative_sst_path(fs: &Arc<dyn Fs>, path: &Path) -> MidgeResult<FsPath> {
-    let Some(root) = fs.host_root() else {
+    let Some(addressing) = fs.host_addressing() else {
         // A rootless filesystem owns its key space, so the caller's own path
         // string is already the key it addresses.
         let path = path.to_str().ok_or_else(|| {
@@ -108,13 +108,13 @@ pub(crate) fn fs_relative_sst_path(fs: &Arc<dyn Fs>, path: &Path) -> MidgeResult
         })?;
         return Ok(FsPath::new(path));
     };
-    let relative = canonical_host_path(fs.host_path_anchor(), path)?
-        .strip_prefix(root)
+    let relative = canonical_host_path(addressing.anchor, path)?
+        .strip_prefix(addressing.root)
         .map_err(|_| {
             MidgeError::Internal(format!(
                 "SST target {} lies outside the filesystem root {}",
                 path.display(),
-                root.display()
+                addressing.root.display()
             ))
         })?
         .to_path_buf();
@@ -140,7 +140,7 @@ pub(crate) fn fs_relative_sst_path(fs: &Arc<dyn Fs>, path: &Path) -> MidgeResult
                 return Err(MidgeError::Internal(format!(
                     "SST target {} escapes the filesystem root {}",
                     path.display(),
-                    root.display()
+                    addressing.root.display()
                 )))
             }
         }
@@ -149,7 +149,7 @@ pub(crate) fn fs_relative_sst_path(fs: &Arc<dyn Fs>, path: &Path) -> MidgeResult
         return Err(MidgeError::Internal(format!(
             "SST target {} names the filesystem root {} rather than a file",
             path.display(),
-            root.display()
+            addressing.root.display()
         )));
     }
     Ok(FsPath::new(parts.join("/")))
@@ -183,9 +183,10 @@ pub(crate) fn persist_sst_bytes_with_host_fs(bytes: &[u8], path: &Path) -> Midge
     // Address the SST inside the root just created for its parent. Re-using
     // `path` verbatim would re-resolve a relative target against the root's
     // own anchor and double the parent prefix.
-    let target = fs
-        .host_root()
-        .map_or_else(|| path.to_path_buf(), |root| root.join(name));
+    let target = fs.host_addressing().map_or_else(
+        || path.to_path_buf(),
+        |addressing| addressing.root.join(name),
+    );
     persist_sst_bytes_to_path(&fs, bytes, &target)
 }
 

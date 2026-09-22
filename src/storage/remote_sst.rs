@@ -3,7 +3,9 @@
 
 use super::{StorageBackend, StorageEvent, StorageObjectMetadata, StorageOutcome};
 use crate::io::traits::{DirEntry, Metadata};
-use crate::io::{Durability, File, Fs, FsError, FsPath, FsResult, OpenMode, OpenOptions};
+use crate::io::{
+    Durability, File, Fs, FsError, FsPath, FsResult, HostAddressing, OpenMode, OpenOptions,
+};
 use bytes::Bytes;
 use std::path::Path;
 use std::sync::Arc;
@@ -277,13 +279,10 @@ impl Fs for RemoteSstFs {
         }))
     }
 
-    fn host_root(&self) -> Option<&Path> {
+    fn host_addressing(&self) -> Option<HostAddressing<'_>> {
         // Writes and directory operations forward to `local`, so callers must
-        // address this filesystem through the same root.
-        self.local.host_root()
-    }
-    fn host_path_anchor(&self) -> Option<&Path> {
-        self.local.host_path_anchor()
+        // address this filesystem through the same host-path frame.
+        self.local.host_addressing()
     }
     fn coordination_key(&self) -> u64 {
         self.local.coordination_key()
@@ -846,11 +845,8 @@ mod tests {
     }
 
     impl Fs for PublicationRecordingFs {
-        fn host_root(&self) -> Option<&Path> {
-            self.inner.host_root()
-        }
-        fn host_path_anchor(&self) -> Option<&Path> {
-            self.inner.host_path_anchor()
+        fn host_addressing(&self) -> Option<HostAddressing<'_>> {
+            self.inner.host_addressing()
         }
         fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
             self.inner.open(path, opts)

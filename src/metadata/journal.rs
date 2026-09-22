@@ -1101,6 +1101,10 @@ mod tests {
     }
 
     impl Fs for GatedJournalFs {
+        fn host_addressing(&self) -> Option<crate::io::HostAddressing<'_>> {
+            self.inner.host_addressing()
+        }
+
         fn coordination_key(&self) -> u64 {
             self.inner.coordination_key()
         }

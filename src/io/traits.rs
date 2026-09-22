@@ -14,6 +14,7 @@ use bytes::Bytes;
 use std::fmt;
 use std::io::{IoSlice, IoSliceMut};
 use std::ops::{BitOr, BitOrAssign};
+use std::path::Path;
 use thiserror::Error;
 
 /// Filesystem errors
@@ -319,6 +320,20 @@ pub trait File: Send {
     }
 }
 
+/// The host path frame used to address a rooted filesystem.
+///
+/// A host-rooted backend records both the canonical root it serves and the
+/// directory against which callers' relative host paths were originally
+/// resolved. Keeping them in one value makes a wrapper either delegate the
+/// complete frame or expose no host addressing capability at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostAddressing<'a> {
+    /// Canonical host directory the filesystem serves.
+    pub root: &'a Path,
+    /// Directory relative host paths are resolved against, if one was recorded.
+    pub anchor: Option<&'a Path>,
+}
+
 /// Filesystem abstraction - agnostic of domain
 pub trait Fs: Send + Sync + 'static {
     /// Return an equivalent view whose remote range reads report to this owner.
@@ -340,30 +355,14 @@ pub trait Fs: Send + Sync + 'static {
         Ok(None)
     }
 
-    /// Host directory this filesystem is rooted at, when it has one.
+    /// Return the host path frame for this filesystem, when it has one.
     ///
-    /// Backends that address a directory on the host expose it so a caller
-    /// holding an absolute host path can map that path onto a root-relative
-    /// [`FsPath`] and reject anything outside the root. Backends without a
-    /// host root (in-memory mocks, object stores) return `None`; their path
-    /// strings are their own key space. Wrappers must delegate to the backend
-    /// they forward writes to, otherwise callers cannot address it.
-    fn host_root(&self) -> Option<&std::path::Path> {
-        None
-    }
-
-    /// Directory a *relative* host path is resolved against when it addresses
-    /// this filesystem's contents.
-    ///
-    /// [`Fs::host_root`] is recorded once, when the filesystem is built. A
-    /// caller that resolved a relative target against the process working
-    /// directory instead would disagree with that recorded root the moment
-    /// the host process changes directory, turning writes that previously
-    /// succeeded into "outside the filesystem root" failures. Backends
-    /// therefore record the directory their own root was resolved from and
-    /// callers anchor relative targets there. Backends without a host root
-    /// return `None`; wrappers must delegate alongside [`Fs::host_root`].
-    fn host_path_anchor(&self) -> Option<&std::path::Path> {
+    /// Backends that address a host directory expose both the canonical root
+    /// and the frame for relative host paths. Backends without host paths
+    /// (in-memory mocks and object stores) return `None`; their path strings
+    /// are their own key space. Wrappers forwarding writes must delegate this
+    /// complete capability to the backend they forward to.
+    fn host_addressing(&self) -> Option<HostAddressing<'_>> {
         None
     }
 

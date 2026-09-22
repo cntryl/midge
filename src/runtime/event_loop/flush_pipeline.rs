@@ -189,7 +189,6 @@ impl EventLoop {
             build,
             sst_name,
             sst_seq,
-            db_path: self.state.db_path.clone(),
             sst_dir: self.state.sst_dir.clone(),
             fs: Arc::clone(&self.state.fs),
             recovery_policy: self.state.recovery_policy(),

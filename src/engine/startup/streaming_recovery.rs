@@ -234,7 +234,6 @@ fn checkpoint_family(
             },
             sst_name: name.clone(),
             sst_seq,
-            db_path: state.db_path.clone(),
             sst_dir: state.sst_dir.clone(),
             fs: Arc::clone(&state.fs),
             recovery_policy: state.recovery_policy(),

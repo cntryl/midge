@@ -85,6 +85,10 @@ impl File for CountingFile<'_> {
 }
 
 impl Fs for CountingFs {
+    fn host_addressing(&self) -> Option<crate::io::HostAddressing<'_>> {
+        self.inner.host_addressing()
+    }
+
     fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
         Ok(Box::new(CountingFile {
             inner: self.inner.open(path, opts)?,

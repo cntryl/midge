@@ -637,6 +637,31 @@ mod solid_cleanup {
     }
 
     #[test]
+    fn should_expose_only_the_combined_host_addressing_capability() {
+        // Arrange
+        let traits = read_source("src/io/traits.rs");
+        let mut sources = Vec::new();
+        collect_rust_sources(&source_path("src"), &mut sources);
+        let removed_capabilities = ["host_root", "host_path_anchor"];
+
+        // Act
+
+        // Assert
+        assert!(traits.contains("pub struct HostAddressing"));
+        assert!(traits.contains("fn host_addressing("));
+        for source in sources {
+            let content = fs::read_to_string(&source).expect("rust source should be readable");
+            for capability in removed_capabilities {
+                assert!(
+                    !content.contains(capability),
+                    "{} should use the combined host-addressing capability instead of {capability}",
+                    source.display()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn should_remove_legacy_manifest_sst_list_from_current_model() {
         // Arrange
         let manifest = production_source("src/metadata/manifest.rs");

@@ -6,7 +6,7 @@
 use super::EventLoop;
 
 #[cfg(test)]
-use super::super::durability::DurabilityWaiter;
+use super::super::durability::{DurabilityWaiter, TestDurabilityWaiter};
 #[cfg(test)]
 use super::super::RuntimeResponse;
 
@@ -156,12 +156,13 @@ impl EventLoop {
         if let Some(pending_min) = self.state.pending_transaction_min_sequence() {
             if sequence >= pending_min {
                 // Defer this read until transaction completes
-                self.durability.queue_waiter(DurabilityWaiter::Read {
-                    request_id,
-                    cf_id,
-                    key,
-                    sequence,
-                });
+                self.durability
+                    .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::Read {
+                        request_id,
+                        cf_id,
+                        key,
+                        sequence,
+                    }));
                 return;
             }
         }
@@ -173,12 +174,13 @@ impl EventLoop {
             let value = self.handle_read(cf_id, &key, sequence);
             self.respond(request_id, RuntimeResponse::ReadValue { request_id, value });
         } else {
-            self.durability.queue_waiter(DurabilityWaiter::Read {
-                request_id,
-                cf_id,
-                key,
-                sequence,
-            });
+            self.durability
+                .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::Read {
+                    request_id,
+                    cf_id,
+                    key,
+                    sequence,
+                }));
         }
     }
 
@@ -202,13 +204,15 @@ impl EventLoop {
         if let Some(pending_min) = self.state.pending_transaction_min_sequence() {
             if sequence >= pending_min {
                 // Defer this scan until transaction completes
-                self.durability.queue_waiter(DurabilityWaiter::RangeScan {
-                    request_id,
-                    cf_id,
-                    start,
-                    end,
-                    sequence,
-                });
+                self.durability.queue_waiter(DurabilityWaiter::Test(
+                    TestDurabilityWaiter::RangeScan {
+                        request_id,
+                        cf_id,
+                        start,
+                        end,
+                        sequence,
+                    },
+                ));
                 return;
             }
         }
@@ -226,13 +230,14 @@ impl EventLoop {
                 },
             );
         } else {
-            self.durability.queue_waiter(DurabilityWaiter::RangeScan {
-                request_id,
-                cf_id,
-                start,
-                end,
-                sequence,
-            });
+            self.durability
+                .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::RangeScan {
+                    request_id,
+                    cf_id,
+                    start,
+                    end,
+                    sequence,
+                }));
         }
     }
 

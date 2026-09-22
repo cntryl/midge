@@ -1,3 +1,5 @@
+use crate::io::traits::{DirEntry, Metadata};
+use crate::io::{Durability, File, Fs, FsPath, FsResult, HostAddressing, OpenOptions};
 use crate::sst::compression::{CompressionAlgo, CompressionPolicy};
 use crate::sst::encoding::EntryType;
 use crate::sst::fs::FsSstFactoryIo;
@@ -230,6 +232,66 @@ fn should_read_back_sst_when_keys_share_prefix_longer_than_trie_can_encode() {
 /// global state shared with every other test thread.
 static WORKING_DIRECTORY_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// A rooted wrapper that forwards all filesystem operations to its inner
+/// backend. It must delegate the complete host-addressing frame too.
+struct AddressingDelegatingFs {
+    inner: crate::io::RealFs,
+}
+
+impl AddressingDelegatingFs {
+    fn new(root: impl AsRef<Path>) -> FsResult<Self> {
+        Ok(Self {
+            inner: crate::io::RealFs::new(root)?,
+        })
+    }
+}
+
+impl Fs for AddressingDelegatingFs {
+    fn host_addressing(&self) -> Option<HostAddressing<'_>> {
+        self.inner.host_addressing()
+    }
+
+    fn coordination_key(&self) -> u64 {
+        self.inner.coordination_key()
+    }
+
+    fn open(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
+        self.inner.open(path, options)
+    }
+
+    fn remove_file(&self, path: &FsPath) -> FsResult<()> {
+        self.inner.remove_file(path)
+    }
+
+    fn exists(&self, path: &FsPath) -> FsResult<bool> {
+        self.inner.exists(path)
+    }
+
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+        self.inner.metadata(path)
+    }
+
+    fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
+        self.inner.create_dir_all(path)
+    }
+
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        self.inner.list_dir(path)
+    }
+
+    fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
+        self.inner.remove_dir_all(path)
+    }
+
+    fn sync_dir(&self, path: &FsPath, durability: Durability) -> FsResult<()> {
+        self.inner.sync_dir(path, durability)
+    }
+
+    fn rename_atomic(&self, from: &FsPath, to: &FsPath) -> FsResult<()> {
+        self.inner.rename_atomic(from, to)
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn should_reject_sst_publish_when_target_name_is_an_in_root_symlink() {
@@ -269,7 +331,7 @@ fn should_reject_sst_publish_when_target_name_is_an_in_root_symlink() {
 }
 
 #[test]
-fn should_map_relative_sst_target_onto_root_when_working_directory_moved_after_open() {
+fn should_resolve_relative_target_against_recorded_anchor_when_wrapper_delegates_addressing() {
     // Arrange: an engine opened with a relative db path, exactly as
     // `Engine::open("mydb")` does, followed by a host process working-
     // directory change. Every later flush and compaction still names its
@@ -282,7 +344,7 @@ fn should_map_relative_sst_target_onto_root_when_working_directory_moved_after_o
     std::fs::create_dir_all(home.path().join("mydb")).unwrap();
     let original = std::env::current_dir().unwrap();
     std::env::set_current_dir(home.path()).unwrap();
-    let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new("mydb").unwrap());
+    let fs: Arc<dyn crate::io::Fs> = Arc::new(AddressingDelegatingFs::new("mydb").unwrap());
 
     // Act
     std::env::set_current_dir(elsewhere.path()).unwrap();

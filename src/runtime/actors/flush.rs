@@ -49,7 +49,6 @@ pub(crate) struct FlushPublishTask {
     pub build: FlushBuildOutput,
     pub sst_name: String,
     pub sst_seq: u64,
-    pub db_path: PathBuf,
     pub sst_dir: PathBuf,
     pub fs: Arc<dyn crate::io::Fs>,
     pub recovery_policy: crate::config::RecoveryPolicy,
@@ -541,11 +540,7 @@ fn finalize_staged_sst(
 }
 
 fn db_relative_fs_path(task: &FlushPublishTask, path: &Path) -> MidgeResult<crate::io::FsPath> {
-    let relative = path
-        .strip_prefix(&task.db_path)
-        .map_err(|_| MidgeError::InvalidPath)?;
-    let relative = relative.to_str().ok_or(MidgeError::InvalidPath)?;
-    Ok(crate::io::FsPath::new(relative))
+    crate::sst::fs::fs_relative_sst_path(&task.fs, path)
 }
 
 fn cleanup_non_authoritative_staging(task: &FlushPublishTask) {
@@ -728,6 +723,10 @@ mod tests {
     }
 
     impl crate::io::Fs for PublicationTestFs {
+        fn host_addressing(&self) -> Option<crate::io::HostAddressing<'_>> {
+            crate::io::Fs::host_addressing(&self.inner)
+        }
+
         fn coordination_key(&self) -> u64 {
             crate::io::Fs::coordination_key(&self.inner)
         }
@@ -842,6 +841,7 @@ mod tests {
 
     struct PublicationFixture {
         directory: tempfile::TempDir,
+        db_path: PathBuf,
         task: FlushPublishTask,
         sst_backend: Arc<crate::storage::cloud::MockCloudBackend>,
         control_backend: Arc<crate::storage::cloud::MockCloudBackend>,
@@ -910,7 +910,6 @@ mod tests {
             },
             sst_name: crate::sst::file_name(identity.cf_id, 0, 1),
             sst_seq: 1,
-            db_path,
             sst_dir,
             fs: publication_fs,
             recovery_policy: crate::config::RecoveryPolicy::Strict,
@@ -922,6 +921,7 @@ mod tests {
         };
         Ok(PublicationFixture {
             directory,
+            db_path,
             task,
             sst_backend,
             control_backend,
@@ -1107,14 +1107,14 @@ mod tests {
         let mut manifest = crate::metadata::Manifest::default();
         manifest.next_sst_seqs.insert(0, 100);
         crate::metadata::ManifestPersistence::save_snapshot_and_truncate_journal(
-            &fixture.task.db_path,
+            &fixture.db_path,
             &manifest,
         )
         .map_err(MidgeError::Internal)?;
 
         // Act
         let delta = FlushActor::publish(&fixture.task)?;
-        let persisted = crate::metadata::ManifestPersistence::load(&fixture.task.db_path)
+        let persisted = crate::metadata::ManifestPersistence::load(&fixture.db_path)
             .map_err(MidgeError::Internal)?;
 
         // Assert
@@ -1170,7 +1170,7 @@ mod tests {
         // Arrange
         let mut fixture = publication_fixture(usize::MAX)?;
         let sync_fs = Arc::new(PublicationTestFs {
-            inner: crate::io::RealFs::new(&fixture.task.db_path)?,
+            inner: crate::io::RealFs::new(&fixture.db_path)?,
             fail_rename: false,
             fail_sync: AtomicBool::new(false),
             sync_dir_calls: parking_lot::Mutex::new(Vec::new()),
@@ -1221,7 +1221,7 @@ mod tests {
         // Arrange
         let mut fixture = publication_fixture(usize::MAX)?;
         fixture.task.fs = Arc::new(PublicationTestFs {
-            inner: crate::io::RealFs::new(&fixture.task.db_path)?,
+            inner: crate::io::RealFs::new(&fixture.db_path)?,
             fail_rename: true,
             fail_sync: AtomicBool::new(false),
             sync_dir_calls: parking_lot::Mutex::new(Vec::new()),
@@ -1301,7 +1301,7 @@ mod tests {
     fn should_fence_flush_before_manifest_persistence_when_epoch_changes() -> MidgeResult<()> {
         // Arrange
         let fixture = publication_fixture(4)?;
-        let db_path = fixture.task.db_path.clone();
+        let db_path = fixture.db_path.clone();
 
         // Act
         let error = FlushActor::publish(&fixture.task).expect_err("publication must be fenced");
@@ -1326,7 +1326,7 @@ mod tests {
     fn should_recover_durable_publication_without_accepting_stale_completion() -> MidgeResult<()> {
         // Arrange
         let fixture = publication_fixture(5)?;
-        let db_path = fixture.task.db_path.clone();
+        let db_path = fixture.db_path.clone();
         let sst_name = fixture.task.sst_name.clone();
 
         // Act
@@ -1354,7 +1354,7 @@ mod tests {
     {
         // Arrange
         let fixture = publication_fixture(6)?;
-        let db_path = fixture.task.db_path.clone();
+        let db_path = fixture.db_path.clone();
         let sst_name = fixture.task.sst_name.clone();
 
         // Act
