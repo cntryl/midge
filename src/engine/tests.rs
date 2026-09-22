@@ -2215,6 +2215,59 @@ mod salvage_removes_definitively_lost_ssts {
             persisted_names(&state).contains(&sst_name),
             "an indeterminate failure must not erase the durable manifest entry"
         );
+        assert!(
+            state
+                .manifest
+                .files
+                .iter()
+                .any(|file| file.name == sst_name),
+            "an indeterminate failure must remain in the running manifest"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn should_retain_indeterminate_sst_during_mixed_salvage() {
+        // Arrange: one manifest SST is absent while a self-referential symlink
+        // makes the other metadata check fail indeterminately.
+        let (_temp, mut state, missing_name) = salvage_state_with_persisted_sst(10, 128);
+        let indeterminate_name = crate::sst::file_name(0, 0, 11);
+        state.manifest.files.push(crate::metadata::FileMeta {
+            name: indeterminate_name.clone(),
+            level: 0,
+            size_bytes: 128,
+            cf_id: 0,
+            sst_seq: 11,
+            ..Default::default()
+        });
+        crate::metadata::ManifestPersistence::save_snapshot_and_truncate_journal(
+            &state.db_path,
+            &state.manifest,
+        )
+        .expect("persist both manifest SSTs");
+        let cloud_root = tempfile::tempdir().expect("create cloud root");
+        let cloud_sst_dir = cloud_root.path().join("sst");
+        std::fs::create_dir(&cloud_sst_dir).expect("create cloud SST directory");
+        std::os::unix::fs::symlink(&indeterminate_name, cloud_sst_dir.join(&indeterminate_name))
+            .expect("create indeterminate SST metadata path");
+
+        // Act
+        super::startup::CloudStartupRecovery::ensure_local_sst_cache_from_cloud(
+            &mut state,
+            cloud_root.path(),
+        )
+        .expect("salvage tolerates mixed definitive and indeterminate losses");
+        crate::metadata::ManifestPersistence::save(&state.db_path, &state.manifest)
+            .expect("persist the running manifest again");
+
+        // Assert
+        assert!(!persisted_names(&state).contains(&missing_name));
+        assert!(persisted_names(&state).contains(&indeterminate_name));
+        assert!(state
+            .manifest
+            .files
+            .iter()
+            .any(|file| file.name == indeterminate_name));
     }
 
     #[test]

@@ -1,19 +1,32 @@
-use super::format::{read_op_primary_key_frame, RunFile};
+use super::format::{previous_sparse_offset, read_op_primary_key_frame, RunFile, RunHeader};
 use super::{op_primary_key_bytes, SpillRun, TransactionWriteSet, RUN_HEADER_LEN};
 use crate::common::{MidgeError, MidgeResult};
 use bytes::Bytes;
+use std::sync::Arc;
+
+enum ReverseChunkSource {
+    Materialized {
+        chunks: Vec<(u64, u64)>,
+        next: usize,
+        pool: Arc<super::TransactionMemoryPool>,
+        charge: usize,
+    },
+    Streaming {
+        header: RunHeader,
+        next_end: u64,
+    },
+}
 
 enum RunKeyDirection {
     Forward,
     Reverse {
-        chunks: Vec<(u64, u64)>,
-        next_chunk: usize,
+        chunks: ReverseChunkSource,
         keys: std::vec::IntoIter<Bytes>,
     },
 }
 
 pub(super) struct RunKeyCursor {
-    file: RunFile,
+    path: std::path::PathBuf,
     cursor: u64,
     data_end: u64,
     start: Option<Vec<u8>>,
@@ -30,28 +43,42 @@ impl RunKeyCursor {
         end: Option<&[u8]>,
         reverse: bool,
     ) -> MidgeResult<Self> {
-        // The run's cached reader owns the decoded sparse index, so a scan pays
-        // for it once instead of re-walking the index file per cursor.
+        // The reader cache supplies the header and any admitted sparse index.
+        // Reverse scans separately reserve their chunk table, then stream the
+        // sparse frames when the transaction pool refuses that reservation.
         let header = run.header()?;
         let (cursor, direction) = if reverse {
-            let starts = run.sparse_offsets()?;
-            let chunks = starts
-                .iter()
-                .enumerate()
-                .map(|(index, chunk_start)| {
-                    let chunk_end = starts
-                        .get(index + 1)
-                        .copied()
-                        .unwrap_or(header.ordinal_table_offset);
-                    (*chunk_start, chunk_end)
-                })
-                .collect::<Vec<_>>();
-            let next_chunk = chunks.len();
+            let charge = header
+                .sparse_count
+                .checked_mul(size_of::<(u64, u64)>())
+                .ok_or_else(|| {
+                    MidgeError::Corruption(
+                        "transaction spill sparse chunk reservation overflow".to_string(),
+                    )
+                })?;
+            let chunks = if run.pool.try_reserve(charge) {
+                match run.sparse_chunks() {
+                    Ok(chunks) => ReverseChunkSource::Materialized {
+                        next: chunks.len(),
+                        chunks,
+                        pool: Arc::clone(&run.pool),
+                        charge,
+                    },
+                    Err(error) => {
+                        run.pool.release(charge);
+                        return Err(error);
+                    }
+                }
+            } else {
+                ReverseChunkSource::Streaming {
+                    header,
+                    next_end: header.ordinal_table_offset,
+                }
+            };
             (
                 RUN_HEADER_LEN as u64,
                 RunKeyDirection::Reverse {
                     chunks,
-                    next_chunk,
                     keys: Vec::new().into_iter(),
                 },
             )
@@ -60,7 +87,7 @@ impl RunKeyCursor {
         };
 
         Ok(Self {
-            file: RunFile::open(&run.path)?,
+            path: run.path.clone(),
             cursor,
             data_end: header.ordinal_table_offset,
             start: start.map(<[u8]>::to_vec),
@@ -77,9 +104,10 @@ impl RunKeyCursor {
     }
 
     fn next_forward_key(&mut self) -> MidgeResult<Option<Bytes>> {
+        let mut file = RunFile::open(&self.path)?;
         while self.cursor < self.data_end {
-            self.file.seek_to(self.cursor)?;
-            let (key, next_cursor) = read_op_primary_key_frame(&mut self.file)?;
+            file.seek_to(self.cursor)?;
+            let (key, next_cursor) = read_op_primary_key_frame(&mut file)?;
             if next_cursor > self.data_end || next_cursor <= self.cursor {
                 return Err(MidgeError::Corruption(
                     "transaction spill data frame exceeds its data section".to_string(),
@@ -106,25 +134,37 @@ impl RunKeyCursor {
     }
 
     fn load_reverse_chunk(&mut self) -> MidgeResult<bool> {
+        let mut file = RunFile::open(&self.path)?;
         let (chunk_start, chunk_end) = {
-            let RunKeyDirection::Reverse {
-                chunks, next_chunk, ..
-            } = &mut self.direction
-            else {
+            let RunKeyDirection::Reverse { chunks, .. } = &mut self.direction else {
                 return Ok(false);
             };
-            if *next_chunk == 0 {
-                self.exhausted = true;
-                return Ok(false);
+            match chunks {
+                ReverseChunkSource::Materialized { chunks, next, .. } => {
+                    if *next == 0 {
+                        self.exhausted = true;
+                        return Ok(false);
+                    }
+                    *next -= 1;
+                    chunks[*next]
+                }
+                ReverseChunkSource::Streaming { header, next_end } => {
+                    let Some(chunk_start) = previous_sparse_offset(&mut file, header, *next_end)?
+                    else {
+                        self.exhausted = true;
+                        return Ok(false);
+                    };
+                    let chunk_end = *next_end;
+                    *next_end = chunk_start;
+                    (chunk_start, chunk_end)
+                }
             }
-            *next_chunk -= 1;
-            chunks[*next_chunk]
         };
         let mut cursor = chunk_start;
         let mut chunk_keys: Vec<Bytes> = Vec::new();
         while cursor < chunk_end {
-            self.file.seek_to(cursor)?;
-            let (key, next_cursor) = read_op_primary_key_frame(&mut self.file)?;
+            file.seek_to(cursor)?;
+            let (key, next_cursor) = read_op_primary_key_frame(&mut file)?;
             if next_cursor > chunk_end || next_cursor <= cursor {
                 return Err(MidgeError::Corruption(
                     "transaction spill sparse chunk does not align to operation frames".to_string(),
@@ -163,6 +203,19 @@ impl RunKeyCursor {
             if !self.load_reverse_chunk()? {
                 return Ok(None);
             }
+        }
+    }
+}
+
+impl Drop for RunKeyCursor {
+    fn drop(&mut self) {
+        if let RunKeyDirection::Reverse {
+            chunks: ReverseChunkSource::Materialized { pool, charge, .. },
+            ..
+        } = &mut self.direction
+        {
+            pool.release(*charge);
+            *charge = 0;
         }
     }
 }

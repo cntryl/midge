@@ -470,35 +470,37 @@ fn should_find_earliest_same_key_intent_when_key_spans_many_sparse_index_strides
 }
 
 #[test]
-fn should_bound_file_opens_when_scanning_with_spilled_write_set() -> MidgeResult<()> {
-    // Arrange: a small pool forces several runs, so a per-lookup reopen would
-    // scale with rows multiplied by runs.
+fn should_bound_live_file_handles_when_scanning_spilled_runs() -> MidgeResult<()> {
+    // Arrange: another transaction holds the pool, forcing every intent into
+    // its own run. An eager scan cursor used to retain one additional handle
+    // per run on top of the run's cached data and range handles.
     let dir = tempfile::tempdir()?;
-    let mut writes = TransactionWriteSet::new(
-        Arc::new(TransactionMemoryPool::new(4096)),
-        dir.path(),
-        false,
-        1,
-    );
-    for index in 0_u32..128 {
+    let pool = Arc::new(TransactionMemoryPool::new(4096));
+    assert!(pool.try_reserve(4096));
+    let mut writes = TransactionWriteSet::new(Arc::clone(&pool), dir.path(), false, 1);
+    for index in 0_u32..32 {
         writes.push(put(format!("key-{index:04}").as_bytes(), b"value"))?;
     }
     let runs = writes.runs.len();
-    assert!(runs > 1, "the write set must have spilled to several runs");
-    reset_run_file_opens();
+    assert_eq!(runs, 32, "each refused intent must become its own run");
+    reset_peak_run_files();
+    reset_sparse_index_decodes();
 
     // Act
-    for index in 0_u32..128 {
-        writes.latest_for_key(format!("key-{index:04}").as_bytes())?;
-    }
-    let opens = run_file_opens();
+    let keys = writes
+        .key_scan(None, None, true)?
+        .collect::<MidgeResult<Vec<_>>>()?;
+    let peak = peak_run_files();
 
-    // Assert: at most one data file and one range file per run, whatever the
-    // number of lookups.
+    // Assert
+    assert_eq!(keys.len(), 32);
     assert!(
-        opens <= 2 * runs,
-        "{opens} opens for {runs} runs over 128 lookups"
+        peak <= MAX_CACHED_SPILL_READERS * 2 + 1,
+        "{peak} spill handles were live for a cache limit of {MAX_CACHED_SPILL_READERS}"
     );
+    assert_eq!(sparse_index_decodes(), 0);
+    drop(writes);
+    pool.release(4096);
     Ok(())
 }
 
@@ -552,6 +554,7 @@ fn should_look_up_spilled_key_when_pool_cannot_charge_sparse_index() -> MidgeRes
         })
         .collect::<Vec<_>>();
     let run = write_run_with_budget(temp.path(), 1, 0, &mut ops, None, &pool)?;
+    reset_sparse_index_decodes();
 
     // Act
     let mut latest = None;
@@ -562,5 +565,10 @@ fn should_look_up_spilled_key_when_pool_cannot_charge_sparse_index() -> MidgeRes
         matches!(latest, Some((37, IntentLookup::Present(value))) if value.as_ref() == b"value")
     );
     assert_eq!(pool.resident.load(Ordering::Acquire), 0);
+    assert_eq!(
+        sparse_index_decodes(),
+        0,
+        "a rejected reservation must fall back before decoding the sparse index"
+    );
     Ok(())
 }

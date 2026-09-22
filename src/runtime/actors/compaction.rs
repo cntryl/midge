@@ -708,7 +708,7 @@ impl CompactionActor {
                     path: &std::path::Path,
                     budget: &crate::common::resource_budget::ResourceBudget| {
             Self::prepare_partition(
-                storage.map(|storage| storage.as_ref()),
+                storage.map(Arc::as_ref),
                 prepared,
                 plan.cf_id,
                 plan.target_level,

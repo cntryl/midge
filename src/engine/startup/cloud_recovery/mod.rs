@@ -34,8 +34,8 @@ enum SstDisposition {
     Retain,
     /// Dropped because the object is definitively lost; the drop is made durable.
     DropDefinitive,
-    /// Dropped because the check failed; the drop is not made durable.
-    DropIndeterminate,
+    /// Retained because the validation check did not establish object loss.
+    RetainIndeterminate,
 }
 
 impl CloudStartupRecovery {
@@ -136,12 +136,13 @@ impl CloudStartupRecovery {
                         .map_err(SstLoss::Definitive)
                 });
             match Self::retain_manifest_sst_after_metadata_validation(state, &file, validation)? {
-                SstDisposition::Retain => retained_files.push(file),
+                SstDisposition::Retain | SstDisposition::RetainIndeterminate => {
+                    retained_files.push(file);
+                }
                 SstDisposition::DropDefinitive => {
                     definitively_lost.push(file.name.clone());
                     manifest_changed = true;
                 }
-                SstDisposition::DropIndeterminate => manifest_changed = true,
             }
         }
 
@@ -1327,12 +1328,13 @@ impl CloudStartupRecovery {
                         .map_err(SstLoss::Definitive)
                 });
             match Self::retain_manifest_sst_after_metadata_validation(state, &file, validation)? {
-                SstDisposition::Retain => retained_files.push(file),
+                SstDisposition::Retain | SstDisposition::RetainIndeterminate => {
+                    retained_files.push(file);
+                }
                 SstDisposition::DropDefinitive => {
                     definitively_lost.push(file.name.clone());
                     manifest_changed = true;
                 }
-                SstDisposition::DropIndeterminate => manifest_changed = true,
             }
         }
 
@@ -1361,10 +1363,9 @@ impl CloudStartupRecovery {
     ///
     /// Only `definitively_lost` names are journaled and snapshotted: the object is
     /// gone or does not match the manifest, so leaving the entry would make every
-    /// later persist resurrect a file that cannot be read. Names dropped only because
-    /// the check itself failed (`indeterminate` losses) are removed from the running
-    /// manifest as before but stay in the durable one, so a transient provider error
-    /// cannot permanently erase a live remote SST.
+    /// later persist resurrect a file that cannot be read. Indeterminate losses stay
+    /// in both the running and durable manifests so a later persist cannot erase a
+    /// possibly live remote SST.
     fn commit_manifest_removals(
         state: &mut RuntimeState,
         retained_files: Vec<crate::metadata::FileMeta>,
@@ -1434,7 +1435,7 @@ impl CloudStartupRecovery {
         Ok(match (retain, definitive) {
             (true, _) => SstDisposition::Retain,
             (false, true) => SstDisposition::DropDefinitive,
-            (false, false) => SstDisposition::DropIndeterminate,
+            (false, false) => SstDisposition::RetainIndeterminate,
         })
     }
 
