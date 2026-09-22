@@ -11,7 +11,7 @@ use super::super::cloud::{
     CloudBackend, CloudCallback, CloudError, CloudEvent, CloudExecutor, CloudListBudget,
     CloudOutcome, CloudRequest, CloudResponse, CloudSigner,
 };
-use super::rest::object_metadata_from_response;
+use super::rest::{conditional_range_preconditions, object_metadata_from_response};
 use super::xml::extract_xml_tag_values;
 use crate::common::{MidgeError, MidgeResult};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as Base64Engine};
@@ -971,29 +971,18 @@ impl CloudBackend for AzureBackend {
         let start = range.start;
         let end = range.end;
         let key = key.to_string();
-        let Some(conditions) = crate::storage::cloud::object_match_precondition_headers(
-            &expected.etag,
-            expected.generation.as_deref(),
-        ) else {
-            let _ = callback.send(CloudEvent::GetRange {
-                key,
-                start,
-                end: Some(end),
-                result: Err(CloudError::Protocol(
-                    "range request lacks object identity".into(),
-                )),
-            });
-            return;
+        let conditions = match conditional_range_preconditions(&range, &expected) {
+            Ok(conditions) => conditions,
+            Err(error) => {
+                let _ = callback.send(CloudEvent::GetRange {
+                    key,
+                    start,
+                    end: Some(end),
+                    result: Err(error),
+                });
+                return;
+            }
         };
-        if start >= end || end > expected.size {
-            let _ = callback.send(CloudEvent::GetRange {
-                key,
-                start,
-                end: Some(end),
-                result: Err(CloudError::Protocol("invalid object byte range".into())),
-            });
-            return;
-        }
         let mut request =
             CloudRequest::new(Method::GET, self.object_url(&key)).with_reservation(reservation);
         for (name, value) in conditions {

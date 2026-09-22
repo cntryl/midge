@@ -3,8 +3,15 @@
 //! Each function is gated by exactly the providers that call it, so no
 //! feature combination compiles code it does not use.
 
+#[cfg(any(
+    feature = "cloud-aws",
+    feature = "cloud-oci",
+    feature = "cloud-azure",
+    feature = "cloud-gcp"
+))]
+use crate::storage::cloud::CloudError;
 #[cfg(any(feature = "cloud-aws", feature = "cloud-oci", feature = "cloud-azure"))]
-use crate::storage::cloud::{CloudError, CloudOutcome, CloudResponse, ObjectMetadata};
+use crate::storage::cloud::{CloudOutcome, CloudResponse, ObjectMetadata};
 
 /// Current Unix time in whole seconds, or zero if the clock is before the epoch.
 #[cfg(any(feature = "cloud-aws", feature = "cloud-oci", feature = "cloud-gcp"))]
@@ -13,6 +20,32 @@ pub(super) fn current_unix_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+/// Identity headers for a conditional ranged read, after checking the request.
+///
+/// A ranged read is pinned to the object version the caller already verified,
+/// so a request whose object has no identity is refused. The range must also be
+/// non-empty and lie within the expected size. Identity is checked first.
+#[cfg(any(
+    feature = "cloud-aws",
+    feature = "cloud-oci",
+    feature = "cloud-azure",
+    feature = "cloud-gcp"
+))]
+pub(super) fn conditional_range_preconditions(
+    range: &std::ops::Range<u64>,
+    expected: &crate::storage::StorageObjectMetadata,
+) -> Result<Vec<(String, String)>, CloudError> {
+    let conditions = crate::storage::cloud::object_match_precondition_headers(
+        &expected.etag,
+        expected.generation.as_deref(),
+    )
+    .ok_or_else(|| CloudError::Protocol("range request lacks object identity".into()))?;
+    if range.start >= range.end || range.end > expected.size {
+        return Err(CloudError::Protocol("invalid object byte range".into()));
+    }
+    Ok(conditions)
 }
 
 /// Object size and `ETag` from a metadata (HEAD or GET) response.
@@ -55,4 +88,98 @@ pub(super) fn object_metadata_from_response(
             CloudError::Protocol(format!("{provider} metadata response is missing ETag"))
         })?;
     Ok(ObjectMetadata::new(size, etag.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::StorageObjectMetadata;
+
+    fn expected(size: u64, etag: &str) -> StorageObjectMetadata {
+        StorageObjectMetadata {
+            size,
+            etag: etag.to_string(),
+            generation: None,
+        }
+    }
+
+    fn protocol_message(error: CloudError) -> String {
+        match error {
+            CloudError::Protocol(message) => message,
+            other => panic!("expected a protocol error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn should_return_identity_headers_when_the_range_lies_within_the_object() {
+        // Arrange
+        let object = expected(100, "\"v1\"");
+
+        // Act
+        let conditions = conditional_range_preconditions(&(0..100), &object);
+
+        // Assert
+        assert!(!conditions.expect("a valid range is accepted").is_empty());
+    }
+
+    #[test]
+    fn should_refuse_a_range_read_when_the_object_has_no_identity() {
+        // Arrange: without an etag or generation the read is not pinned to a version.
+        let object = expected(100, "");
+
+        // Act
+        let error = conditional_range_preconditions(&(0..10), &object).unwrap_err();
+
+        // Assert
+        assert_eq!(
+            protocol_message(error),
+            "range request lacks object identity"
+        );
+    }
+
+    #[test]
+    fn should_refuse_a_range_read_when_the_range_is_empty_or_inverted() {
+        // Arrange
+        let object = expected(100, "\"v1\"");
+
+        for range in [
+            5..5,
+            // Deliberately inverted, which the literal `9..3` form lints against.
+            std::ops::Range { start: 9, end: 3 },
+        ] {
+            // Act
+            let error = conditional_range_preconditions(&range, &object).unwrap_err();
+
+            // Assert
+            assert_eq!(protocol_message(error), "invalid object byte range");
+        }
+    }
+
+    #[test]
+    fn should_refuse_a_range_read_when_the_range_runs_past_the_object() {
+        // Arrange
+        let object = expected(100, "\"v1\"");
+
+        // Act
+        let error = conditional_range_preconditions(&(90..101), &object).unwrap_err();
+
+        // Assert
+        assert_eq!(protocol_message(error), "invalid object byte range");
+    }
+
+    #[test]
+    fn should_check_identity_before_the_range_when_both_are_wrong() {
+        // Arrange
+        let object = expected(100, "");
+
+        // Act
+        let error = conditional_range_preconditions(&std::ops::Range { start: 9, end: 3 }, &object)
+            .unwrap_err();
+
+        // Assert
+        assert_eq!(
+            protocol_message(error),
+            "range request lacks object identity"
+        );
+    }
 }

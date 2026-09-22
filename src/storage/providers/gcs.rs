@@ -10,7 +10,7 @@ use super::super::cloud::{
     CloudBackend, CloudCallback, CloudError, CloudEvent, CloudExecutor, CloudListBudget,
     CloudOutcome, CloudRequest, CloudResponse, CloudSigner, ObjectMetadata,
 };
-use super::rest::current_unix_secs;
+use super::rest::{conditional_range_preconditions, current_unix_secs};
 use super::xml::extract_xml_tag_values;
 use crate::common::{MidgeError, MidgeResult};
 use base64::{
@@ -1275,29 +1275,18 @@ impl CloudBackend for GcsBackend {
         let start = range.start;
         let end = range.end;
         let key = key.to_string();
-        let Some(conditions) = crate::storage::cloud::object_match_precondition_headers(
-            &expected.etag,
-            expected.generation.as_deref(),
-        ) else {
-            let _ = callback.send(CloudEvent::GetRange {
-                key,
-                start,
-                end: Some(end),
-                result: Err(CloudError::Protocol(
-                    "range request lacks object identity".into(),
-                )),
-            });
-            return;
+        let conditions = match conditional_range_preconditions(&range, &expected) {
+            Ok(conditions) => conditions,
+            Err(error) => {
+                let _ = callback.send(CloudEvent::GetRange {
+                    key,
+                    start,
+                    end: Some(end),
+                    result: Err(error),
+                });
+                return;
+            }
         };
-        if start >= end || end > expected.size {
-            let _ = callback.send(CloudEvent::GetRange {
-                key,
-                start,
-                end: Some(end),
-                result: Err(CloudError::Protocol("invalid object byte range".into())),
-            });
-            return;
-        }
         let mode = self.mode;
         let mut url = self.download_url(&key);
         let mut request =
