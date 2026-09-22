@@ -698,7 +698,7 @@ mod architecture_ladder {
                             .map(|symbol| format!("{}:{statement}:{symbol}", path.display()))
                             .collect::<Vec<_>>();
                         let glob = statement
-                            .contains("::*")
+                            .contains('*')
                             .then(|| format!("{}:{statement}:glob re-export", path.display()));
                         symbols.into_iter().chain(glob).collect::<Vec<_>>()
                     })
@@ -733,7 +733,7 @@ mod architecture_ladder {
                                 .any(|(index, _)| statement[index..].contains(")use"))
                     })
                     .filter(|statement| {
-                        statement.contains("ExpectedSst") || statement.contains("::*")
+                        statement.contains("ExpectedSst") || statement.contains('*')
                     })
                     .map(move |statement| format!("{}:{statement}", path.display()))
                     .collect::<Vec<_>>();
