@@ -564,19 +564,18 @@ impl EventLoop {
         sst_name: &str,
         budget: &crate::common::resource_budget::ResourceBudget,
     ) -> crate::common::MidgeResult<crate::runtime::FileMeta> {
-        if let Some((meta, proof)) = self.compaction_actor.prepared_remote_output(sst_name) {
+        if let Some((meta, _proof)) = self.compaction_actor.prepared_remote_output(sst_name) {
             if meta.cf_id != cf_id || meta.level != level || meta.name != sst_name {
                 return Err(crate::common::MidgeError::Corruption(
                     "remote compaction output identity mismatch".into(),
                 ));
             }
-            let storage = self.hybrid_storage.as_ref().ok_or_else(|| {
-                crate::common::MidgeError::Internal(
-                    "remote compaction output without cloud storage".into(),
-                )
-            })?;
-            storage
-                .verify_remote_object_guards_within(&[proof], &self.event_loop_cloud_deadline())?;
+            // The proof is verified in mirror_ssts_to_authoritative_cloud,
+            // which runs later in the same publication turn and immediately
+            // before the manifest batch. Checking it here as well spent a
+            // second provider round trip per output on the event loop, each
+            // with its own full runtime_response_timeout, and the earlier of
+            // the two proves strictly less.
             return Ok(meta);
         }
         let path = self.state.sst_dir.join(sst_name);

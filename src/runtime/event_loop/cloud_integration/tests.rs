@@ -8534,3 +8534,157 @@ fn should_report_timeout_when_the_cloud_never_answers_the_event_loop_mirror(
     );
     Ok(())
 }
+
+/// Counts the range HEADs a compaction output's guarded proof costs.
+///
+/// A prepared output's proof carries its own backend, so counting here
+/// counts proof verifications exactly, without seeing unrelated traffic.
+struct CountingSstHeadBackend {
+    inner: Arc<crate::storage::filesystem::FileSystem>,
+    sst_key: String,
+    sst_range_heads: AtomicUsize,
+}
+
+impl crate::storage::StorageBackend for CountingSstHeadBackend {
+    fn submit_range_head(
+        &self,
+        key: &str,
+        timeout: Duration,
+        callback: crate::storage::StorageCallback,
+    ) {
+        if key == self.sst_key {
+            self.sst_range_heads.fetch_add(1, Ordering::SeqCst);
+        }
+        crate::storage::StorageBackend::submit_range_head(
+            self.inner.as_ref(),
+            key,
+            timeout,
+            callback,
+        );
+    }
+
+    crate::storage::forward_storage_backend!(
+        inner;
+        submit_read_range,
+        submit_read_with_metadata,
+        submit_read,
+        submit_write,
+        submit_write_with_headers,
+        submit_delete,
+        submit_delete_with_headers,
+        submit_list,
+        submit_head,
+    );
+}
+
+#[test]
+fn should_head_each_compaction_output_once_when_publishing_prepared_remote_outputs(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    el.state.set_compaction_enabled(false);
+
+    let input_sst = "compaction-input.sst";
+    add_valid_manifest_sst_for_test(&mut el, input_sst, 10);
+
+    let output_sst = crate::sst::compaction_file_name(0, 1, 10, 0);
+    let output_bytes = valid_sst_bytes_for_test(b"counted", b"value", 11);
+    write_test_file(el.state.sst_dir.join(&output_sst), &output_bytes);
+
+    // A proof for an output the worker already staged, pointing at a backend
+    // that counts how many times the event loop re-verifies it.
+    let counting = Arc::new(CountingSstHeadBackend {
+        inner: Arc::new(
+            crate::storage::filesystem::FileSystem::new(el.state.db_path.join("counted_store"))
+                .expect("counted cloud store"),
+        ),
+        sst_key: crate::sst::object_key(&output_sst),
+        sst_range_heads: AtomicUsize::new(0),
+    });
+    // Place the staged object in that store directly, so the HEAD the
+    // publication turn performs resolves against a real object.
+    let staged_path = el
+        .state
+        .db_path
+        .join("counted_store")
+        .join(crate::sst::object_key(&output_sst));
+    std::fs::create_dir_all(staged_path.parent().expect("staged object parent"))
+        .expect("staged object directory");
+    write_test_file(staged_path, &output_bytes);
+    // Read the staged object's real identity through the inner store, so the
+    // proof matches and the turn publishes. Going through `inner` keeps this
+    // setup HEAD out of the count.
+    let (metadata_tx, metadata_rx) = std::sync::mpsc::channel();
+    crate::storage::StorageBackend::submit_range_head(
+        counting.inner.as_ref(),
+        &crate::sst::object_key(&output_sst),
+        Duration::from_secs(5),
+        metadata_tx,
+    );
+    let metadata = match metadata_rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(crate::storage::StorageEvent::HeadComplete {
+            result: crate::storage::StorageOutcome::Ok(metadata),
+            ..
+        }) => metadata,
+        other => panic!("staged object identity unavailable: {other:?}"),
+    };
+    let proof = crate::storage::hybrid::backend::GuardedObjectProof::range_identity(
+        Arc::clone(&counting) as Arc<dyn crate::storage::StorageBackend>,
+        crate::sst::object_key(&output_sst),
+        metadata,
+    );
+    el.compaction_actor
+        .prepare_for_completion_test(&mut el.state, &[input_sst.to_string()])?;
+    // Seed after prepare_for_completion_test: preparing a compaction clears
+    // the staged-output map.
+    el.compaction_actor.insert_prepared_remote_output_for_test(
+        &output_sst,
+        crate::runtime::FileMeta {
+            name: output_sst.clone(),
+            level: 1,
+            size_bytes: output_bytes.len() as u64,
+            content_crc32c: None,
+            cf_id: 0,
+            smallest_key: Some(b"counted".to_vec()),
+            largest_key: Some(b"counted".to_vec()),
+            smallest_seq: Some(11),
+            largest_seq: Some(11),
+            key_bounds_complete: true,
+        },
+        proof,
+    );
+    let request_id = 5252;
+    let response_rx = el.router.register(request_id, "TestRequest");
+    let (_tx, msg_rx) = crossbeam::channel::unbounded();
+
+    // Act
+    el.handle_runtime_msg(
+        RuntimeMsg::CompactionComplete {
+            request_id,
+            input_ssts: vec![input_sst.to_string()],
+            output_ssts: vec![output_sst.clone()],
+            cf_id: 0,
+            target_level: 1,
+            succeeded: true,
+        },
+        &msg_rx,
+    );
+
+    // Assert
+    assert!(
+        matches!(
+            response_rx.recv_timeout(Duration::from_secs(5)),
+            Ok(RuntimeResponse::Ok { .. })
+        ),
+        "the publication turn must succeed for its round-trip count to mean anything"
+    );
+    assert_eq!(
+        counting.sst_range_heads.load(Ordering::SeqCst),
+        1,
+        "one publication turn must verify each staged output's proof once, \
+         not once per code path that happens to hold the proof"
+    );
+    Ok(())
+}

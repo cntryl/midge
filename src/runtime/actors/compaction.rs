@@ -899,6 +899,20 @@ impl CompactionActor {
         self.prepared_remote_outputs.lock().get(name).cloned()
     }
 
+    /// Seed an output the worker would have staged, so a publication test can
+    /// exercise the prepared-output path without running a real compaction.
+    #[cfg(test)]
+    pub(crate) fn insert_prepared_remote_output_for_test(
+        &self,
+        name: &str,
+        metadata: crate::runtime::FileMeta,
+        proof: crate::storage::hybrid::backend::GuardedObjectProof,
+    ) {
+        self.prepared_remote_outputs
+            .lock()
+            .insert(name.to_string(), (metadata, proof));
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn prepare_remote_partition(
         hybrid: &dyn CompactionStorage,
