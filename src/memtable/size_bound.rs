@@ -1,4 +1,4 @@
-//! Conservative encoded bounds shared by memtable admission and SST writers.
+//! Conservative encoded bounds owned by memtable admission and shared with SST writers.
 
 pub(crate) const FIXED_SST_BYTES: usize = 16 * 1024;
 

@@ -5,10 +5,10 @@
 
 use crate::common::{MidgeError, MidgeResult};
 use crate::diagnostics::RuntimeDiagnostics;
+use crate::memtable::SkipListMemtable;
 use crate::metadata::Manifest;
 use crate::runtime::snapshot_pins::SnapshotPinRegistry;
 use crate::runtime::{IntentLogEntry, PublicationPhase};
-use crate::sst::{Memtable, SkipListMemtable};
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;

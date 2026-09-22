@@ -2,7 +2,7 @@
 
 use super::{
     Arc, CloudState, ColumnFamilyState, CompactionConfig, CompactionState, Fs, HashMap,
-    IntentLogEntry, Manifest, Memtable, MidgeError, MidgeResult, PathBuf, PublicationPhase,
+    IntentLogEntry, Manifest, MidgeError, MidgeResult, PathBuf, PublicationPhase,
     RecoveryLoadState, RecoveryStatus, RuntimeDiagnostics, RuntimeMode, RuntimePersistence,
     RuntimeState, SkipListMemtable, SnapshotPinRegistry, SnapshotState, TransactionCoordination,
     WalRecoveryState, WalState, WritePressureState,

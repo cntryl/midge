@@ -216,7 +216,10 @@ impl DynSstWriter for FsSstWriter {
         start: &[u8],
         end: &[u8],
     ) -> Option<usize> {
-        Some(crate::sst::size_bound::range_bytes(start.len(), end.len()))
+        Some(crate::memtable::size_bound::range_bytes(
+            start.len(),
+            end.len(),
+        ))
     }
 
     fn encoded_size_upper_bound(&self) -> Option<usize> {
@@ -230,10 +233,10 @@ impl DynSstWriter for FsSstWriter {
                     .unwrap_or(usize::MAX),
             )
         });
-        let fixed = ranges.saturating_add(crate::sst::size_bound::FIXED_SST_BYTES);
+        let fixed = ranges.saturating_add(crate::memtable::size_bound::FIXED_SST_BYTES);
         let Some(streaming) = &self.streaming else {
             return Some(self.entries.iter().fold(fixed, |total, entry| {
-                total.saturating_add(crate::sst::size_bound::point_bytes(
+                total.saturating_add(crate::memtable::size_bound::point_bytes(
                     entry.key.len(),
                     entry.value.as_ref().map_or(0, Vec::len),
                 ))

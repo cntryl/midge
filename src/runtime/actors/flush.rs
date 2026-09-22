@@ -37,7 +37,7 @@ pub(crate) struct FlushBuildOutput {
 
 pub(crate) struct FlushBuildCompletion {
     pub identity: FlushIdentity,
-    pub memtable: Arc<crate::sst::SkipListMemtable>,
+    pub memtable: Arc<crate::memtable::SkipListMemtable>,
     pub staging_path: PathBuf,
     pub reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
     pub build_ns: u64,
@@ -84,7 +84,7 @@ pub(crate) enum FlushWorkerResult {
 #[derive(Clone)]
 struct FlushBuildTask {
     identity: FlushIdentity,
-    memtable: Arc<crate::sst::SkipListMemtable>,
+    memtable: Arc<crate::memtable::SkipListMemtable>,
     staging_path: PathBuf,
     reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
     hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
@@ -166,7 +166,7 @@ impl FlushActor {
     pub(crate) fn submit_build(
         &mut self,
         identity: FlushIdentity,
-        memtable: Arc<crate::sst::SkipListMemtable>,
+        memtable: Arc<crate::memtable::SkipListMemtable>,
         staging_path: PathBuf,
         hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
     ) -> MidgeResult<()> {
@@ -860,7 +860,7 @@ mod tests {
             cf_id: 0,
             sequence: 1,
         };
-        let memtable = Arc::new(crate::sst::SkipListMemtable::new());
+        let memtable = Arc::new(crate::memtable::SkipListMemtable::new());
         memtable.put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)?;
         let mut build_task = FlushBuildTask {
             identity,
@@ -965,7 +965,7 @@ mod tests {
             *injected = true;
         })
         .unwrap();
-        let memtable = Arc::new(crate::sst::SkipListMemtable::new());
+        let memtable = Arc::new(crate::memtable::SkipListMemtable::new());
         memtable.put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)?;
         let task = FlushBuildTask {
             identity: fixture.task.build.identity,
@@ -1138,7 +1138,7 @@ mod tests {
             .expect("hybrid storage");
         // The final SST itself fits; its concurrent readback copy does not.
         hybrid.enable_ephemeral_sst_cache(fixture.task.build.file_meta.size_bytes);
-        let memtable = Arc::new(crate::sst::SkipListMemtable::new());
+        let memtable = Arc::new(crate::memtable::SkipListMemtable::new());
         memtable.put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)?;
         let staging_path = fixture.directory.path().join("admitted/flush-2.sst");
         let mut task = FlushBuildTask {

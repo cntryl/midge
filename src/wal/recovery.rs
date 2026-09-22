@@ -10,7 +10,7 @@
 use super::types::{ColumnFamilyId, WalOpRole, WalRecord};
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::{File, Fs, FsError, FsPath, OpenMode, OpenOptions};
-use crate::sst::SkipListMemtable;
+use crate::memtable::SkipListMemtable;
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 use std::io::{Read as _, Seek as _, Write as _};

@@ -1,8 +1,8 @@
 use super::actors::CompactionActor;
 use super::RuntimeState;
 use crate::compaction::{Compactor, LeveledCompactionConfig};
+use crate::memtable::SkipListMemtable;
 use crate::metadata::FileMeta;
-use crate::sst::SkipListMemtable;
 use std::collections::HashSet;
 use std::sync::Arc;
 

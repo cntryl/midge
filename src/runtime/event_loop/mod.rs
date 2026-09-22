@@ -1043,7 +1043,7 @@ impl EventLoop {
         sst_name: &str,
         sequence: u64,
         file_meta: Option<crate::runtime::FileMeta>,
-        _frozen_memtable: Option<&std::sync::Arc<crate::sst::SkipListMemtable>>,
+        _frozen_memtable: Option<&std::sync::Arc<crate::memtable::SkipListMemtable>>,
     ) -> crate::common::MidgeResult<()> {
         let Some(file_meta) = file_meta else {
             return Ok(());

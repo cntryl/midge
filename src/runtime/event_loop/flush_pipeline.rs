@@ -5,7 +5,6 @@ use crate::runtime::actors::flush::{
 };
 use crate::runtime::state::{ImmutableFlush, ImmutableFlushPhase};
 use crate::runtime::RuntimeResponse;
-use crate::sst::Memtable;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -84,7 +83,7 @@ impl EventLoop {
             .state
             .get_cf_mut(cf_id)
             .expect("tracked flush family exists");
-        cf.memtable = Arc::new(crate::sst::SkipListMemtable::new());
+        cf.memtable = Arc::new(crate::memtable::SkipListMemtable::new());
         cf.active_memtable_started_in_segment = current_segment_id;
         crate::failpoints::fail_point!("midge::flush_worker::after_freeze");
         self.publish_snapshot();
@@ -1213,7 +1212,7 @@ mod tests {
         };
         let completion = crate::runtime::actors::flush::FlushBuildCompletion {
             identity,
-            memtable: Arc::new(crate::sst::SkipListMemtable::new()),
+            memtable: Arc::new(crate::memtable::SkipListMemtable::new()),
             staging_path: directory.path().join("orphan.sst"),
             reservation: Some(reservation),
             build_ns: 1,
@@ -1258,7 +1257,7 @@ mod tests {
                 cf_id: 0,
                 sequence: 1,
             },
-            memtable: Arc::new(crate::sst::SkipListMemtable::new()),
+            memtable: Arc::new(crate::memtable::SkipListMemtable::new()),
             staging_path: directory.path().join("orphan.sst"),
             reservation: Some(reservation),
             build_ns: 1,
@@ -1559,7 +1558,7 @@ mod tests {
                     cf_id: 0,
                     sequence: 1,
                 },
-                memtable: Arc::new(crate::sst::SkipListMemtable::new()),
+                memtable: Arc::new(crate::memtable::SkipListMemtable::new()),
                 staging_path,
                 reservation: Some(reservation),
                 build_ns: 1,

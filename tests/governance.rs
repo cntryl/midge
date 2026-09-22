@@ -541,6 +541,68 @@ mod architecture_ladder {
     }
 
     #[test]
+    fn should_keep_skiplist_memtable_ownership_outside_the_sst_module() {
+        // Arrange
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let memtable = std::fs::read_to_string(root.join("src/memtable/mod.rs"))
+            .expect("read memtable module source");
+        let misplaced_sst_surface = [
+            "pub struct SkipListMemtable",
+            "pub trait Memtable",
+            "fn entry_type_of",
+            "mod size_bound",
+            "crate::memtable::SkipListMemtable",
+            "crate::memtable::entry_type_of",
+            "pub use crate::memtable",
+        ];
+        let legacy_memtable_surface = [
+            "seq_generator",
+            "pub fn put(",
+            "pub fn delete(",
+            "pub fn put_with_exp(",
+            "iter_all_with_meta(&self, _max_seq",
+            "iter_all(&self, max_seq",
+        ];
+
+        // Act
+        let lingering_sst_symbols: Vec<_> = rust_sources_under("src/sst")
+            .into_iter()
+            .flat_map(|path| {
+                let source = std::fs::read_to_string(&path).expect("read SST source");
+                misplaced_sst_surface
+                    .iter()
+                    .filter(move |symbol| source.contains(**symbol))
+                    .map(move |symbol| format!("{}:{symbol}", path.display()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let lingering_legacy_surface: Vec<_> = legacy_memtable_surface
+            .into_iter()
+            .filter(|symbol| memtable.contains(symbol))
+            .collect();
+
+        // Assert
+        assert!(
+            lingering_sst_symbols.is_empty(),
+            "SST still owns: {lingering_sst_symbols:?}"
+        );
+        assert!(
+            root.join("src/memtable/size_bound.rs").is_file(),
+            "encoded memtable bounds must live with their owner"
+        );
+        assert!(
+            !root.join("src/sst/size_bound.rs").exists(),
+            "SST must not retain a compatibility size-bound module"
+        );
+        assert!(memtable.contains("pub struct SkipListMemtable"));
+        assert!(memtable.contains("pub(crate) mod size_bound;"));
+        assert!(
+            lingering_legacy_surface.is_empty(),
+            "memtable still exposes legacy mutation or iteration surface: {lingering_legacy_surface:?}"
+        );
+    }
+
+    #[test]
     fn should_bound_cloud_seal_when_the_event_loop_forces_a_cloud_async_seal() {
         // Arrange
         let source = std::fs::read_to_string(
@@ -798,7 +860,6 @@ mod architecture_ladder {
         // Arrange
         let forbidden = [
             "crate::engine",
-            "crate::iterators",
             "crate::metadata",
             "crate::runtime",
             "crate::storage",
@@ -812,28 +873,6 @@ mod architecture_ladder {
         assert!(
             violations.is_empty(),
             "SST format and readers must not depend on iterator facades or orchestration: {violations:#?}"
-        );
-    }
-
-    #[test]
-    fn should_keep_iterator_contracts_in_lower_layer() {
-        // Arrange
-        let forbidden = [
-            "crate::engine",
-            "crate::metadata",
-            "crate::runtime",
-            "crate::sst",
-            "crate::storage",
-            "crate::wal",
-        ];
-
-        // Act
-        let violations = prohibited_edges_under("src/iterators", &forbidden);
-
-        // Assert
-        assert!(
-            violations.is_empty(),
-            "shared iterator contracts must be owned below SST and orchestration: {violations:#?}"
         );
     }
 

@@ -1133,7 +1133,7 @@ fn should_fail_all_event_loop_buffered_transactions_when_append_hits_no_space() 
             .get_cf(0)
             .expect("default column family should exist")
             .memtable
-            .iter_all(u64::MAX)
+            .iter_all()
             .is_empty());
         assert!(
             fixture.event_loop.state.sequence > 0,
@@ -1212,7 +1212,7 @@ fn should_fail_all_event_loop_strict_transactions_when_shared_append_fails() -> 
             .get_cf(0)
             .expect("default column family")
             .memtable
-            .iter_all(u64::MAX)
+            .iter_all()
             .is_empty());
 
         drop(failpoint_guard);
@@ -1274,7 +1274,7 @@ fn should_fail_all_event_loop_strict_transactions_when_shared_sync_fails() -> Mi
         .get_cf(0)
         .expect("default column family")
         .memtable
-        .iter_all(u64::MAX)
+        .iter_all()
         .is_empty());
 
     fail::remove("midge::wal::inject_no_space_on_sync");
@@ -1508,7 +1508,7 @@ fn should_report_stall_hint_for_transaction_actual_column_family() -> MidgeResul
         .get_cf_mut(secondary_cf)
         .expect("secondary column family")
         .immutable_memtables
-        .push(Arc::new(crate::sst::SkipListMemtable::new()));
+        .push(Arc::new(crate::memtable::SkipListMemtable::new()));
     assert!(!fixture.event_loop.state.should_stall_writes(0));
     assert!(fixture.event_loop.state.should_stall_writes(secondary_cf));
     let response_rx = fixture.register(901);

@@ -13,7 +13,6 @@ use crate::runtime::{
     state::RuntimeState, ConflictPolicy, KeyAssertion, ResponseRouter, RuntimeMsg, RuntimeResponse,
 };
 use crate::sst::encoding::EntryType;
-use crate::sst::Memtable;
 use crate::wal::DurabilityPolicy;
 use bytes::Bytes;
 use std::path::{Path, PathBuf};

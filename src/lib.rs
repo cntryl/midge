@@ -12,7 +12,6 @@
 //!   - `sst`         - sorted-string table
 //!   - `storage`     - storage orchestration layer
 //!   - `compaction`  - compaction planning + execution
-//!   - `iterators`   - iterator implementations
 //!   - `metrics`     - performance instrumentation
 //!
 //! # Public API Surface
@@ -51,9 +50,6 @@ mod compaction;
 mod diagnostics;
 mod failpoints;
 mod io;
-#[doc(hidden)]
-#[cfg(feature = "internal-testing")]
-mod iterators;
 mod lease;
 #[doc(hidden)]
 #[cfg_attr(not(feature = "internal-testing"), allow(dead_code, unused_imports))]
@@ -95,8 +91,8 @@ pub mod __internal {
     pub mod diagnostics {
         pub use crate::diagnostics::*;
     }
-    pub mod iterators {
-        pub use crate::iterators::*;
+    pub mod memtable {
+        pub use crate::memtable::*;
     }
     pub mod sst {
         pub use crate::sst::*;

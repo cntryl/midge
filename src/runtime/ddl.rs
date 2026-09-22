@@ -12,7 +12,6 @@ use crate::common::{MidgeError, MidgeResult};
 use crate::io::traits::{FsPath, OpenMode, OpenOptions};
 use crate::metadata::{ColumnFamilyMeta, Manifest, ManifestEdit};
 use crate::runtime::RuntimeState;
-use crate::sst::Memtable;
 use crate::storage::hybrid::backend::{HybridStorage, RemoteObjectProof};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -730,7 +729,7 @@ mod tests {
             .get_cf(cf_id)
             .expect("column family")
             .memtable
-            .put(b"key".to_vec(), b"value".to_vec())
+            .put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)
             .expect("write into the active memtable");
 
         // Act
@@ -775,7 +774,7 @@ mod tests {
         let (mut state, cf_id) = state_with_column_family("/tmp/midge-ddl-both");
         let memtable = std::sync::Arc::clone(&state.get_cf(cf_id).expect("column family").memtable);
         memtable
-            .put(b"key".to_vec(), b"value".to_vec())
+            .put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)
             .expect("write into the active memtable");
         state
             .track_new_immutable_flush(cf_id, memtable, 1)

@@ -189,7 +189,7 @@ fn should_keep_spilled_append_retryable_when_wal_admission_fails_before_first_fr
         .get_cf(0)
         .expect("default CF")
         .memtable
-        .iter_all(u64::MAX)
+        .iter_all()
         .is_empty());
 
     setup.hybrid_storage.release_local_wal_bytes(1024);
@@ -211,7 +211,7 @@ fn should_keep_spilled_append_retryable_when_wal_admission_fails_before_first_fr
             .get_cf(0)
             .expect("default CF")
             .memtable
-            .iter_all(u64::MAX)
+            .iter_all()
             .len(),
         1
     );
@@ -273,7 +273,7 @@ fn should_release_wal_admission_when_failed_append_is_durably_rolled_back() -> M
             .get_cf(0)
             .expect("default CF")
             .memtable
-            .iter_all(u64::MAX)
+            .iter_all()
             .iter()
             .all(|(key, _, _)| key.as_slice() != b"failed-key"));
     }
@@ -350,7 +350,7 @@ fn should_retain_wal_admission_when_failed_append_has_no_rollback_proof() -> Mid
             .get_cf(0)
             .expect("default CF")
             .memtable
-            .iter_all(u64::MAX)
+            .iter_all()
             .is_empty());
     }
     Ok(())

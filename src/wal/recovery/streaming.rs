@@ -6,7 +6,7 @@ use super::{
 };
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::{Fs, FsPath};
-use crate::sst::{size_bound, SkipListMemtable};
+use crate::memtable::{size_bound, SkipListMemtable};
 use crate::wal::{types::WalOpRole, WalRecord};
 use std::collections::HashMap;
 use std::sync::Arc;

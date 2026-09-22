@@ -3,10 +3,10 @@
 use super::RuntimeStorageMaterialization;
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::{Fs, FsPath};
+use crate::memtable::SkipListMemtable;
 use crate::runtime::actors::flush::{
     FlushActor, FlushBuildOutput, FlushIdentity, FlushPublishTask, FlushWorkerResult,
 };
-use crate::sst::{Memtable, SkipListMemtable};
 use crate::wal::recovery::streaming::{replay_wal_with_checkpoint, StreamingReplayLimits};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -37,7 +37,7 @@ impl CloudReplay {
         let hard_limit = (opts.memory_budget_bytes() / 8).min(disk_window);
         let target = opts
             .memtable_size_limit()
-            .saturating_add(crate::sst::size_bound::FIXED_SST_BYTES)
+            .saturating_add(crate::memtable::size_bound::FIXED_SST_BYTES)
             .min(hard_limit);
         StreamingReplayLimits {
             max_frame_bytes: (opts.memory_budget_bytes() / 16).min(hard_limit),

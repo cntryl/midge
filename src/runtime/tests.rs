@@ -898,7 +898,7 @@ fn should_extract_request_id_from_response() {
 
 fn runtime_response_fixtures() -> Vec<RuntimeResponse> {
     let snapshot = Arc::new(crate::runtime::read_snapshot::ReadSnapshot::new(
-        Arc::new(crate::sst::SkipListMemtable::new()),
+        Arc::new(crate::memtable::SkipListMemtable::new()),
         vec![],
         vec![],
         Arc::new(crate::io::MockFs::new()),

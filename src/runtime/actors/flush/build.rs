@@ -49,7 +49,7 @@ pub(super) fn write(
     task.reservation = FlushActor::reserve_flush(
         task.hybrid_storage.as_ref(),
         task.identity.cf_id,
-        crate::sst::size_bound::flush_staging_bytes(task.memtable.encoded_size_upper_bound()),
+        crate::memtable::size_bound::flush_staging_bytes(task.memtable.encoded_size_upper_bound()),
     )?;
     let mut writer = factory.create_for_flush(budget.clone())?;
     crate::failpoints::fail_point!("midge::flush_worker::after_scratch_creation");
@@ -61,7 +61,7 @@ pub(super) fn write(
             bounds.include(key, budget)?;
             smallest_seq = smallest_seq.min(sequence);
             largest_seq = largest_seq.max(sequence);
-            let entry_type = crate::sst::entry_type_of(op_type);
+            let entry_type = crate::memtable::entry_type_of(op_type);
             writer.add_sorted_with_meta(key, value, sequence, entry_type, expiration)
         })?;
     task.memtable.visit_frozen_ranges(|range| {

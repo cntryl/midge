@@ -5,6 +5,7 @@
 
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::Fs;
+use crate::memtable::SkipListMemtable;
 use crate::metadata::FileMeta;
 use crate::runtime::read_resources::ReadResources;
 use crate::runtime::sst_read_view::{LevelRangeCandidates, RangeCandidates, SstReadView};
@@ -14,7 +15,6 @@ use crate::sst::fs::reader_io::SstStateScan;
 use crate::sst::fs::SstFileIo;
 use crate::sst::traits::SstStateReader;
 use crate::sst::types::{KeyState, RangeTombstone};
-use crate::sst::SkipListMemtable;
 #[cfg(test)]
 use std::collections::BTreeMap;
 use std::sync::Arc;

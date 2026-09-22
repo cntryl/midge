@@ -42,9 +42,6 @@ pub(crate) static PROBE_SPLICE_RETRIES: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static PROBE_SPLICE_BARRIER: std::sync::OnceLock<Arc<std::sync::Barrier>> =
     std::sync::OnceLock::new();
 
-/// Entry metadata tuple: (key, `value_opt`, sequence, `is_tombstone`)
-pub type SkipListEntry = (Bytes, Option<Bytes>, u64, bool);
-
 /// Extended entry metadata including optional expiration (Unix millis) and op type.
 pub type SkipListEntryWithExp = (Bytes, Option<Bytes>, u64, bool, Option<u64>, OpType);
 
@@ -873,48 +870,6 @@ impl SkipList {
         out
     }
 
-    /// Delete range by inserting tombstones for all keys in [start, end).
-    ///
-    /// Returns the number of keys whose visible value changed from non-tombstone
-    /// to tombstone at this sequence.
-    pub fn delete_range(&self, start: Option<&[u8]>, end: Option<&[u8]>, seq: u64) -> usize {
-        // Collect all keys in the range first.
-        let start_key = start.unwrap_or(&[]);
-        let mut preds: [*mut Node; MAX_LEVEL] = [ptr::null_mut(); MAX_LEVEL];
-        let mut succs: [*mut Node; MAX_LEVEL] = [ptr::null_mut(); MAX_LEVEL];
-        self.find(start_key, &mut preds, &mut succs);
-
-        let mut keys_to_delete = Vec::with_capacity(32);
-        let mut curr = if start.is_none() {
-            self.head.next.load(AO::Acquire)
-        } else {
-            succs[0]
-        };
-
-        // SAFETY: curr was loaded with Acquire.
-        while let Some(node) = unsafe { curr.as_ref() } {
-            if let Some(end_key) = end {
-                if node.key.as_ref() >= end_key {
-                    break;
-                }
-            }
-            keys_to_delete.push(node.key.clone());
-            curr = node.next.load(AO::Acquire);
-        }
-
-        // Insert tombstones for all keys.
-        let mut changed = 0;
-        for key in keys_to_delete {
-            // Observe if there was a visible value before this seq.
-            if self.get(&key, seq).is_some() {
-                changed += 1;
-            }
-            self.delete(key, seq);
-        }
-
-        changed
-    }
-
     /// Get all keys currently in the skiplist (no snapshot filtering).
     pub fn get_all_keys(&self) -> Vec<Bytes> {
         let mut keys = Vec::with_capacity(128);
@@ -1330,24 +1285,6 @@ mod tests {
             );
         }
         assert_eq!(sl.get_all_keys().len(), 100);
-    }
-
-    #[test]
-    fn should_delete_range() {
-        // Arrange
-        let sl = SkipList::new();
-        sl.upsert(Bytes::from_static(b"a"), Some(Bytes::from_static(b"1")), 1);
-        sl.upsert(Bytes::from_static(b"b"), Some(Bytes::from_static(b"2")), 2);
-        sl.upsert(Bytes::from_static(b"c"), Some(Bytes::from_static(b"3")), 3);
-
-        // Act
-        let changed = sl.delete_range(Some(b"a"), Some(b"c"), 10);
-
-        // Assert
-        assert_eq!(changed, 2); // a and b were deleted
-        assert_eq!(sl.get(b"a", u64::MAX), None);
-        assert_eq!(sl.get(b"b", u64::MAX), None);
-        assert_eq!(sl.get(b"c", u64::MAX), Some(Bytes::from_static(b"3")));
     }
 
     #[test]
@@ -1843,55 +1780,6 @@ mod tests {
 
         // Assert: deleted keys still present in skiplist structure
         assert_eq!(keys.len(), 2);
-    }
-
-    // ========================================================================
-    // delete_range tests
-    // ========================================================================
-
-    #[test]
-    fn should_handle_delete_range_with_no_changes() {
-        // Arrange
-        let sl = SkipList::new();
-        sl.upsert(Bytes::from_static(b"a"), Some(Bytes::from_static(b"1")), 1);
-        sl.delete(Bytes::from_static(b"b"), 2);
-
-        // Act: delete range on already deleted key
-        let changed = sl.delete_range(Some(b"b"), Some(b"b"), 10);
-
-        // Assert: no changes (b was already deleted)
-        assert_eq!(changed, 0);
-    }
-
-    #[test]
-    fn should_delete_full_range_when_unbounded() {
-        // Arrange
-        let sl = SkipList::new();
-        sl.upsert(Bytes::from_static(b"a"), Some(Bytes::from_static(b"1")), 1);
-        sl.upsert(Bytes::from_static(b"b"), Some(Bytes::from_static(b"2")), 2);
-        sl.upsert(Bytes::from_static(b"c"), Some(Bytes::from_static(b"3")), 3);
-
-        // Act: delete [None, None)
-        let changed = sl.delete_range(None, None, 10);
-
-        // Assert: all three keys deleted
-        assert_eq!(changed, 3);
-    }
-
-    #[test]
-    fn should_create_multiple_versions_on_delete_range() {
-        // Arrange
-        let sl = SkipList::new();
-        sl.upsert(Bytes::from_static(b"k"), Some(Bytes::from_static(b"v")), 1);
-
-        // Act
-        sl.delete_range(Some(b"k"), Some(b"l"), 2);
-
-        // Assert
-        // - At snapshot_seq=2, delete seq=2 is visible, so key is deleted.
-        assert_eq!(sl.get(b"k", 2), None);
-        // - At snapshot_seq=3, delete seq=2 remains visible, so key is deleted.
-        assert_eq!(sl.get(b"k", 3), None);
     }
 
     // ========================================================================
