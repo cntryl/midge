@@ -299,6 +299,32 @@ mod architecture_ladder {
     }
 
     #[test]
+    fn should_import_config_types_directly_when_storage_needs_them() {
+        // Arrange
+        let source = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/storage/providers/mod.rs"),
+        )
+        .expect("read storage/providers/mod.rs");
+
+        // Act
+        let reexports: Vec<&str> = source
+            .lines()
+            .map(str::trim)
+            .filter(|line| {
+                line.starts_with("pub(crate) use crate::config")
+                    || line.starts_with("pub use crate::config")
+            })
+            .collect();
+
+        // Assert
+        assert!(
+            reexports.is_empty(),
+            "storage must import config types where it uses them, not re-export them as if \
+             it owned them: {reexports:?}"
+        );
+    }
+
+    #[test]
     fn should_keep_metadata_object_naming_out_of_the_storage_layer() {
         // Arrange
         let needle = "fn cloud_metadata_key";

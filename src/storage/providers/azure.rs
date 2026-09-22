@@ -489,18 +489,20 @@ impl AzureProvider {
         account_name: String,
         container: String,
         endpoint: Option<String>,
-        source: super::AzureCredentialSource,
+        source: crate::config::AzureCredentialSource,
     ) -> MidgeResult<Self> {
         let endpoint = identity_blob_endpoint(endpoint)?;
         match source {
-            super::AzureCredentialSource::EnvironmentClientSecret => Self::with_oauth_provider(
-                account_name,
-                container,
-                endpoint,
-                AzureOAuthProvider::from_environment_client_secret()?,
-                "environment-client-secret",
-            ),
-            super::AzureCredentialSource::WorkloadIdentity {
+            crate::config::AzureCredentialSource::EnvironmentClientSecret => {
+                Self::with_oauth_provider(
+                    account_name,
+                    container,
+                    endpoint,
+                    AzureOAuthProvider::from_environment_client_secret()?,
+                    "environment-client-secret",
+                )
+            }
+            crate::config::AzureCredentialSource::WorkloadIdentity {
                 tenant_id,
                 client_id,
                 token_file,
@@ -511,7 +513,7 @@ impl AzureProvider {
                 AzureOAuthProvider::from_workload_identity(tenant_id, client_id, token_file)?,
                 "workload-identity",
             ),
-            super::AzureCredentialSource::LightweightDefaultChain => {
+            crate::config::AzureCredentialSource::LightweightDefaultChain => {
                 if AzureOAuthProvider::has_environment_client_secret() {
                     return Self::with_oauth_provider(
                         account_name,
@@ -537,7 +539,7 @@ impl AzureProvider {
                     endpoint,
                 )
             }
-            super::AzureCredentialSource::ManagedIdentity { client_id } => {
+            crate::config::AzureCredentialSource::ManagedIdentity { client_id } => {
                 Self::with_managed_identity_and_azure_endpoint(
                     account_name,
                     container,
@@ -3282,14 +3284,14 @@ mod tests {
             "account".to_string(),
             "container".to_string(),
             Some("https://account.blob.core.usgovcloudapi.net".to_string()),
-            super::super::AzureCredentialSource::EnvironmentClientSecret,
+            crate::config::AzureCredentialSource::EnvironmentClientSecret,
         )
         .expect("government OAuth provider");
         let china = AzureProvider::from_lightweight_credential_source(
             "account".to_string(),
             "container".to_string(),
             Some("https://account.blob.core.chinacloudapi.cn".to_string()),
-            super::super::AzureCredentialSource::EnvironmentClientSecret,
+            crate::config::AzureCredentialSource::EnvironmentClientSecret,
         )
         .expect("China OAuth provider");
 

@@ -619,7 +619,7 @@ fn should_not_log_cloud_credentials_when_tracing_engine_startup() {
         "gcs-bearer-do-not-log",
     ];
     let providers = [
-        crate::storage::providers::CloudProviderConfig::s3_compatible(
+        crate::config::CloudProviderConfig::s3_compatible(
             "bucket",
             "region",
             "https://s3.example",

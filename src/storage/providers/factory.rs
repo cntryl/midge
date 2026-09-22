@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::common::{MidgeError, MidgeResult};
 use crate::storage::cloud::CloudBackend;
 
-use super::CloudProviderConfig;
+use crate::config::CloudProviderConfig;
 
 pub(crate) struct CloudProviderFactory;
 
