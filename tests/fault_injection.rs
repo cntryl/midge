@@ -2680,6 +2680,49 @@ mod failure_injection {
             .filter_map(|entry| entry.file_name().into_string().ok())
             .collect()
     }
+
+    #[test]
+    fn should_not_mark_persistence_anomaly_when_local_rotated_segment_spans_epochs() {
+        let _guard = failpoint_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Arrange: an unflushed record survives a clean restart in wal.log, so
+        // the next writer epoch appends to the same file. A second column
+        // family keeps that segment above the flushed floor.
+        let temp = TempDir::new().expect("tempdir");
+        let options = || {
+            OpenOptions::local(temp.path())
+                .background_compaction(false)
+                .build()
+                .expect("build options")
+        };
+        let engine = Engine::open(options()).expect("open");
+        engine.create_column_family("other").expect("create cf");
+        write_cf_value(&engine, &default_cf(&engine), b"pre", b"value-pre");
+        shutdown_engine(engine);
+        let reopened = Engine::open(options()).expect("reopen");
+        let cf = default_cf(&reopened);
+        let other = reopened.get_column_family("other").expect("other cf");
+        write_cf_value(&reopened, &cf, b"post", b"value-post");
+        write_cf_value(&reopened, &other, b"other", b"value-other");
+
+        // Act
+        reopened.flush_cf(&cf).expect("flush default");
+        let health = reopened.get_runtime_metrics().expect("metrics").health;
+
+        let sealed = std::fs::read_dir(temp.path().join("wal"))
+            .expect("list wal")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name() != "wal.log")
+            .count();
+
+        // Assert: the rotated two-epoch segment stayed above the flushed
+        // floor, so prune inspected it.
+        assert!(sealed >= 1, "the mixed-epoch segment must reach inspection");
+        assert_eq!(health, EngineHealth::Healthy);
+        assert_visible(&reopened, &cf, b"pre", b"value-pre");
+        shutdown_engine(reopened);
+    }
 }
 
 mod chaos_real {
