@@ -697,7 +697,10 @@ mod tests {
             .as_ref()
             .expect("physical fsync error should be retained");
         assert!(error.to_string().contains("wal writer fsync failed"));
-        assert!(matches!(error, crate::common::MidgeError::NoSpace(_)), "{error:?}");
+        assert!(
+            matches!(error, crate::common::MidgeError::NoSpace(_)),
+            "{error:?}"
+        );
     }
 
     #[test]
