@@ -184,6 +184,26 @@ impl CloudExecutor {
                 MidgeError::Internal(format!("Failed to build cloud tokio runtime: {e}"))
             })?;
 
+        // Ambient proxy settings are honored; say so once, since a proxy that
+        // drops `Range` shows up only as failed range reads. Values can hold
+        // credentials, so only the variable names are logged.
+        let proxies: Vec<&str> = [
+            "HTTPS_PROXY",
+            "https_proxy",
+            "HTTP_PROXY",
+            "http_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+        ]
+        .into_iter()
+        .filter(|name| std::env::var_os(name).is_some())
+        .collect();
+        if !proxies.is_empty() {
+            tracing::warn!(
+                ?proxies,
+                "cloud HTTP client uses proxy settings from the environment"
+            );
+        }
         let client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -531,7 +551,7 @@ impl CloudExecutor {
             for (k, v) in &request.headers {
                 builder = builder.header(k, v);
             }
-            if let Some(body) = request.body {
+            if let Some(body) = request.body.clone() {
                 builder = builder.body(body);
             }
 
@@ -548,9 +568,8 @@ impl CloudExecutor {
                     if resp.content_length().is_some_and(|length| {
                         length > u64::try_from(request.response_limit).unwrap_or(u64::MAX)
                     }) {
-                        return Err(RequestError::permanent(format!(
-                            "cloud response exceeds {} byte limit",
-                            request.response_limit
+                        return Err(RequestError::permanent(oversized_response_message(
+                            &request, status,
                         )));
                     }
 
@@ -564,7 +583,11 @@ impl CloudExecutor {
                             .response_body_bytes
                             .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
                         append_bounded_response_chunk(&mut body, &chunk, request.response_limit)
-                            .map_err(RequestError::permanent)?;
+                            .map_err(|_| {
+                                RequestError::permanent(oversized_response_message(
+                                    &request, status,
+                                ))
+                            })?;
                     }
 
                     Ok(CloudResponse {
@@ -580,6 +603,33 @@ impl CloudExecutor {
         observation.transport_error = result.is_err();
         observation.cancelled = false;
         result
+    }
+}
+
+/// Explain a response larger than its limit. For a range GET the limit is
+/// the requested length, so an oversized answer almost always means some hop
+/// (a proxy or gateway) ignored `Range` and returned the whole object; say
+/// that, and name where the request went.
+fn oversized_response_message(request: &CloudRequest, status: u16) -> String {
+    let range = request
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("range"))
+        .map(|(_, value)| value.as_str());
+    // The query string can carry signed credentials; keep it out.
+    let target = request.url.split('?').next().unwrap_or_default();
+    match range {
+        Some(range) if status != 206 => format!(
+            "range request not honored: expected 206 Partial Content, got {status} for {range} at {target}"
+        ),
+        Some(range) => format!(
+            "cloud range response is larger than the {} bytes requested ({range} at {target})",
+            request.response_limit
+        ),
+        None => format!(
+            "cloud response exceeds {} byte limit (status {status} at {target})",
+            request.response_limit
+        ),
     }
 }
 
@@ -1092,6 +1142,68 @@ mod tests {
             request_count, 1,
             "cloud mutations must not follow redirects"
         );
+    }
+
+    /// Serve one canned HTTP response, returning the endpoint URL.
+    fn serve_one_response(response: &'static str) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let endpoint = format!(
+            "http://{}/wal/segment?sig=secret",
+            listener.local_addr().expect("server address")
+        );
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept test request");
+            read_complete_http_request(&mut stream);
+            stream
+                .write_all(response.as_bytes())
+                .expect("write test response");
+        });
+        (endpoint, server)
+    }
+
+    fn range_error_for(response: &'static str) -> String {
+        let (endpoint, server) = serve_one_response(response);
+        let request = CloudRequest::new(Method::GET, endpoint)
+            .with_header("Range", "bytes=0-9")
+            .with_response_limit(10);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let result = runtime.block_on(CloudExecutor::execute_request(Client::new(), request));
+        server.join().expect("join test server");
+        match result {
+            Ok(response) => panic!("a whole-object answer must fail, got {}", response.status),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    #[test]
+    fn should_report_unhonored_range_when_provider_returns_whole_object() {
+        // Arrange
+        let response = "HTTP/1.1 200 OK\r\nContent-Length: 40\r\nConnection: close\r\n\r\n0123456789012345678901234567890123456789";
+
+        // Act
+        let message = range_error_for(response);
+
+        // Assert
+        assert!(message.contains("range request not honored"), "{message}");
+        assert!(message.contains("200"), "{message}");
+        assert!(message.contains("/wal/segment"), "{message}");
+        assert!(!message.contains("secret"), "{message}");
+    }
+
+    #[test]
+    fn should_report_unhonored_range_when_provider_streams_whole_object_without_content_length() {
+        // Arrange
+        let response = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n28\r\n0123456789012345678901234567890123456789\r\n0\r\n\r\n";
+
+        // Act
+        let message = range_error_for(response);
+
+        // Assert
+        assert!(message.contains("range request not honored"), "{message}");
+        assert!(message.contains("200"), "{message}");
     }
 
     #[test]

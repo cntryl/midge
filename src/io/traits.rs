@@ -28,6 +28,9 @@ pub enum FsError {
     Corruption(String),
     #[error("io: {0}")]
     Io(String),
+    /// The device or quota is full.
+    #[error("no space: {0}")]
+    NoSpace(String),
     #[error("backend unavailable: {0}")]
     Unavailable(String),
     #[error("timeout: {0}")]
@@ -469,14 +472,8 @@ impl From<FsError> for crate::common::MidgeError {
             FsError::NotFound(_msg) => crate::common::MidgeError::NotFound,
             FsError::AlreadyExists(msg) => crate::common::MidgeError::InvalidArgument(msg),
             FsError::Corruption(msg) => crate::common::MidgeError::Corruption(msg),
-            FsError::Io(msg) => {
-                let lowered = msg.to_ascii_lowercase();
-                if lowered.contains("no space") || lowered.contains("disk full") {
-                    crate::common::MidgeError::NoSpace(msg)
-                } else {
-                    crate::common::MidgeError::Io(std::io::Error::other(msg))
-                }
-            }
+            FsError::Io(msg) => crate::common::MidgeError::Io(std::io::Error::other(msg)),
+            FsError::NoSpace(msg) => crate::common::MidgeError::NoSpace(msg),
             FsError::Unavailable(msg) => crate::common::MidgeError::Internal(msg),
             FsError::Timeout(msg) => crate::common::MidgeError::Timeout(msg),
             FsError::Unsupported(msg) => crate::common::MidgeError::NotSupported(msg),
@@ -494,6 +491,7 @@ mod tests {
             FsError::AlreadyExists(_) => "immutable publication and create-new tests",
             FsError::Corruption(_) => "SST integrity and conditional object-version tests",
             FsError::Io(_) => "filesystem failure injection and retained-data tests",
+            FsError::NoSpace(_) => "disk-full classification regression",
             FsError::Unavailable(_) => "backend availability and retry tests",
             FsError::Timeout(_) => "filesystem timeout classification regression",
             FsError::Unsupported(_) => "unsupported filesystem capability tests",
@@ -508,6 +506,7 @@ mod tests {
             FsError::AlreadyExists(String::new()),
             FsError::Corruption(String::new()),
             FsError::Io(String::new()),
+            FsError::NoSpace(String::new()),
             FsError::Unavailable(String::new()),
             FsError::Timeout(String::new()),
             FsError::Unsupported(String::new()),

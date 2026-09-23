@@ -251,14 +251,19 @@ impl MidgeError {
     }
 }
 
+/// Whether an OS error means the device or quota is full. std maps ENOSPC,
+/// EDQUOT and the Windows disk-full codes to these kinds, so no raw code (whose
+/// meaning differs by platform) or message text is needed.
+pub(crate) fn is_no_space(kind: io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded
+    )
+}
+
 impl From<io::Error> for MidgeError {
     fn from(err: io::Error) -> Self {
-        let raw_code = err.raw_os_error();
-        let text = err.to_string().to_ascii_lowercase();
-        if matches!(raw_code, Some(28 | 112))
-            || text.contains("no space")
-            || text.contains("disk full")
-        {
+        if is_no_space(err.kind()) {
             MidgeError::NoSpace(err.to_string())
         } else {
             MidgeError::Io(err)
@@ -269,6 +274,31 @@ impl From<io::Error> for MidgeError {
 #[cfg(test)]
 mod tests {
     use super::{MidgeError, Severity};
+
+    #[test]
+    fn should_classify_quota_exceeded_as_no_space_when_converting_io_error() {
+        // Arrange
+        let error = std::io::Error::from(std::io::ErrorKind::QuotaExceeded);
+
+        // Act
+        let converted = MidgeError::from(error);
+
+        // Assert
+        assert!(matches!(converted, MidgeError::NoSpace(_)), "{converted:?}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn should_not_classify_host_down_as_no_space_when_linux_raw_os_error_is_112() {
+        // Arrange: errno 112 is EHOSTDOWN on Linux, not a full disk.
+        let error = std::io::Error::from_raw_os_error(112);
+
+        // Act
+        let converted = MidgeError::from(error);
+
+        // Assert
+        assert!(matches!(converted, MidgeError::Io(_)), "{converted:?}");
+    }
 
     #[test]
     fn should_license_unflushed_discard_only_when_active_memtable_holds_committed_data() {

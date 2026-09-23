@@ -186,13 +186,13 @@ fn control_error_with_reservation(
 }
 
 fn control_error(error: &crate::storage::StorageError) -> MidgeError {
+    use crate::storage::StorageErrorKind;
     let message = error.message().to_string();
-    if message.contains("Resource limit:") {
-        MidgeError::ResourceLimit(message)
-    } else if error.is_timeout() {
-        MidgeError::Timeout(message)
-    } else {
-        MidgeError::Internal(message)
+    match error.kind() {
+        StorageErrorKind::ResourceLimit => MidgeError::ResourceLimit(message),
+        StorageErrorKind::Corruption => MidgeError::Corruption(message),
+        StorageErrorKind::Timeout => MidgeError::Timeout(message),
+        _ => MidgeError::Internal(message),
     }
 }
 
@@ -227,6 +227,28 @@ fn control_head(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn should_keep_error_class_when_storage_error_crosses_control_io() {
+        // Arrange
+        let errors = [
+            crate::storage::StorageError::from(MidgeError::ResourceLimit("x".into())),
+            crate::storage::StorageError::from(MidgeError::Corruption("y".into())),
+        ];
+
+        // Act
+        let classified: Vec<_> = errors.iter().map(super::control_error).collect();
+
+        // Assert
+        assert!(
+            matches!(classified[0], MidgeError::ResourceLimit(_)),
+            "{classified:?}"
+        );
+        assert!(
+            matches!(classified[1], MidgeError::Corruption(_)),
+            "{classified:?}"
+        );
+    }
     use super::*;
     use crate::common::MidgeError;
     use crate::storage::cloud::CloudStorage;

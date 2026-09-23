@@ -410,12 +410,7 @@ impl HybridStorage {
         Self::handle_wal_upload_result(upload, upload_start, &rx, callback_timeout, |_, _| {
             let proof =
                 Self::stable_object_proof_from_backend(cloud, &object_key, callback_timeout)
-                    .map_err(|error| match error {
-                        crate::common::MidgeError::Timeout(message) => {
-                            crate::storage::StorageError::timeout(message)
-                        }
-                        other => crate::storage::StorageError::io(other),
-                    })?;
+                    .map_err(crate::storage::StorageError::from)?;
             if proof.bytes == expected_data {
                 Ok(())
             } else {

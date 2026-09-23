@@ -366,6 +366,46 @@ mod architecture_ladder {
     }
 
     #[test]
+    fn should_classify_errors_by_kind_when_mapping_storage_failures() {
+        // Error classes travel as variants; guessing them back from message
+        // text breaks on another platform's wording or a reworded Display.
+        // Arrange
+        // The WAL writer's own copies are #349.
+        let allowed = ["src/wal/fs/writer_io.rs", "src/wal/fs/writer_runner.rs"];
+        let needles = [
+            "contains(\"no space\")",
+            "contains(\"disk full\")",
+            "contains(\"Resource limit:\")",
+            "contains(\"No such file\")",
+            "contains(\"no such file\")",
+            "contains(\"not found\")",
+        ];
+        let mut offenders = Vec::new();
+
+        // Act
+        for path in rust_sources_under("src") {
+            let relative = path
+                .strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                .expect("source under manifest dir");
+            let name = relative.to_string_lossy();
+            if name.contains("tests") || allowed.contains(&name.as_ref()) {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("read source");
+            let source = source.split("#[cfg(test)]\nmod tests").next().unwrap_or("");
+            if needles.iter().any(|needle| source.contains(needle)) {
+                offenders.push(name.to_string());
+            }
+        }
+
+        // Assert
+        assert!(
+            offenders.is_empty(),
+            "classify errors by kind, not message text: {offenders:?}"
+        );
+    }
+
+    #[test]
     fn should_import_config_types_directly_when_storage_needs_them() {
         // Arrange
         let source = std::fs::read_to_string(

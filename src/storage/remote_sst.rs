@@ -182,11 +182,14 @@ fn storage_error(error: crate::storage::StorageError) -> FsError {
     match kind {
         StorageErrorKind::Timeout => FsError::Timeout(message),
         StorageErrorKind::NotFound => FsError::NotFound(message),
-        StorageErrorKind::PreconditionFailed => FsError::Corruption(message),
+        StorageErrorKind::PreconditionFailed | StorageErrorKind::Corruption => {
+            FsError::Corruption(message)
+        }
         StorageErrorKind::Unauthorized
         | StorageErrorKind::Transport
         | StorageErrorKind::Protocol
-        | StorageErrorKind::Io => FsError::Io(message),
+        | StorageErrorKind::Io
+        | StorageErrorKind::ResourceLimit => FsError::Io(message),
     }
 }
 

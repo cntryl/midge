@@ -676,11 +676,6 @@ fn open_journal_for_replay(
     ) {
         Ok(file) => Ok(Some(file)),
         Err(crate::io::traits::FsError::NotFound(_)) => Ok(None),
-        Err(crate::io::traits::FsError::Io(message))
-            if message.contains("No such file") || message.contains("no such file") =>
-        {
-            Ok(None)
-        }
         Err(e) => Err(crate::common::MidgeError::from(e)),
     }
 }

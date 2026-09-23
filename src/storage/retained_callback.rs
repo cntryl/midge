@@ -17,12 +17,10 @@ pub(crate) fn retain_calls_on_this_thread() -> usize {
 pub(crate) fn retain<T: Send + 'static>(
     callback: mpsc::Sender<T>,
     reservation: Arc<ResourceReservation>,
-) -> std::io::Result<mpsc::Sender<T>> {
+) -> crate::common::MidgeResult<mpsc::Sender<T>> {
     #[cfg(test)]
     RETAIN_CALLS.with(|calls| calls.set(calls.get() + 1));
-    let stack = reservation
-        .reserve_related(64 * 1024, "storage completion adapter stack")
-        .map_err(std::io::Error::other)?;
+    let stack = reservation.reserve_related(64 * 1024, "storage completion adapter stack")?;
     let (sender, receiver) = mpsc::channel();
     std::thread::Builder::new()
         .name("midge-storage-completion".into())
