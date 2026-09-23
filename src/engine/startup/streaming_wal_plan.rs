@@ -9,7 +9,7 @@ use crate::storage::{StorageBackend, StorageEvent, StorageOutcome};
 use crate::wal::recovery::streaming::{
     inspect_sealed_wal_file, inspect_wal_file, StreamingReplayLimits,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -55,8 +55,11 @@ impl StreamingCloudWalRecovery {
             local_segments: BTreeMap::new(),
             active_wal: None,
             opened_in_salvage_mode: false,
+            unreplayed_segments: Vec::new(),
+            max_unreplayed_sequence: 0,
         };
         let mut sources = BTreeMap::new();
+        let mut skipped = BTreeSet::new();
         for (segment_id, publication) in &catalog.segments {
             validate_publication_identity(*segment_id, publication, catalog.fencing_epoch)?;
             let result = remote_source(
@@ -70,6 +73,7 @@ impl StreamingCloudWalRecovery {
             let Some(source) =
                 recover_or_salvage(result, policy, &mut plan.opened_in_salvage_mode)?
             else {
+                skipped.insert(*segment_id);
                 continue;
             };
             sources.insert(*segment_id, source);
@@ -81,7 +85,11 @@ impl StreamingCloudWalRecovery {
                 },
             );
         }
-        let (mut active_source, next_local_id) = merge_local_sources(
+        let LocalSources {
+            active: mut active_source,
+            next_segment_id: next_local_id,
+            skipped: skipped_local,
+        } = merge_local_sources(
             db_path,
             &local,
             &mut plan,
@@ -90,7 +98,16 @@ impl StreamingCloudWalRecovery {
             read_window,
             limits,
         )?;
+        skipped.extend(skipped_local);
         enforce_epoch_order(db_path, &mut plan, &mut sources, &mut active_source, policy)?;
+        stop_at_first_hole(
+            db_path,
+            catalog,
+            &skipped,
+            &mut plan,
+            &mut sources,
+            &mut active_source,
+        )?;
         for (segment_id, source) in sources {
             replay_fs.insert(
                 crate::wal::segment_file_name(segment_id),
@@ -116,6 +133,13 @@ fn next_segment_id(highest: Option<u64>) -> MidgeResult<u64> {
         .ok_or_else(|| MidgeError::ResourceLimit("WAL segment identity space exhausted".into()))
 }
 
+struct LocalSources {
+    active: Option<ReplaySource>,
+    next_segment_id: u64,
+    /// Local-only segments that failed validation and were not replayed.
+    skipped: BTreeSet<u64>,
+}
+
 fn merge_local_sources(
     db_path: &Path,
     local: &Arc<dyn Fs>,
@@ -124,15 +148,20 @@ fn merge_local_sources(
     policy: RecoveryPolicy,
     read_window: usize,
     limits: StreamingReplayLimits,
-) -> MidgeResult<(Option<ReplaySource>, u64)> {
+) -> MidgeResult<LocalSources> {
     let paths = CloudStartupRecovery::collect_local_wal_paths(
         &db_path.join("wal"),
         policy,
         &mut plan.opened_in_salvage_mode,
     )?;
     let Some((segments, active)) = paths else {
-        return Ok((None, 1));
+        return Ok(LocalSources {
+            active: None,
+            next_segment_id: 1,
+            skipped: BTreeSet::new(),
+        });
     };
+    let mut skipped = BTreeSet::new();
     // Even skipped or quarantined local identities may not be reused. Check
     // exhaustion before normalization can rename any source files.
     let next_local_id = next_segment_id(segments.keys().copied().max())?;
@@ -147,6 +176,7 @@ fn merge_local_sources(
             &mut plan.opened_in_salvage_mode,
         )?;
         let Some((path, segment)) = selected else {
+            skipped.insert(segment_id);
             continue;
         };
         if let Some(remote) = sources.get(&segment_id) {
@@ -175,7 +205,11 @@ fn merge_local_sources(
         .map(|path| active_local_source(local, &path, policy, limits, plan))
         .transpose()?
         .flatten();
-    Ok((active, next_local_id))
+    Ok(LocalSources {
+        active,
+        next_segment_id: next_local_id,
+        skipped,
+    })
 }
 
 fn validate_publication_identity(
@@ -426,6 +460,7 @@ fn active_local_source(
         return Ok(None);
     };
     let length = file.len()?;
+    let mut salvaged = false;
     let prefix = match inspect_wal_file(file.as_ref(), &path, limits) {
         Ok(prefix) => prefix,
         Err(failure)
@@ -439,6 +474,7 @@ fn active_local_source(
         Err(failure) if failure.is_incomplete_tail() => failure.verified_prefix(),
         Err(failure) if policy == RecoveryPolicy::Salvage && failure.error().is_salvageable() => {
             plan.opened_in_salvage_mode = true;
+            salvaged = true;
             tracing::warn!(error = %failure.error(), "salvaging verified active WAL prefix");
             failure.verified_prefix()
         }
@@ -457,6 +493,12 @@ fn active_local_source(
         return Ok(None);
     }
     if prefix.valid_bytes as u64 != length {
+        if salvaged {
+            // Salvage drops acknowledged records past the corruption; keep the
+            // original bytes before cutting the only copy.
+            CloudStartupRecovery::retain_local_wal_copy(active)?;
+            fs.sync_dir(&FsPath::new("wal"), crate::io::Durability::Durable)?;
+        }
         let file = std::fs::OpenOptions::new().write(true).open(active)?;
         file.set_len(prefix.valid_bytes as u64)?;
         file.sync_all()?;
@@ -537,5 +579,86 @@ fn enforce_epoch_order(
         plan.active_wal = None;
         *active = None;
     }
+    Ok(())
+}
+
+/// Salvage keeps a consistent prefix of history: once a segment is lost,
+/// nothing after it may replay, or a delete in the lost segment could be
+/// undone while newer writes stay visible. Later sources are set aside
+/// (local files renamed, cloud objects kept) and the sequence floor is
+/// lifted above them.
+fn stop_at_first_hole(
+    db_path: &Path,
+    catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
+    skipped: &BTreeSet<u64>,
+    plan: &mut CloudWalRecoveryPlan,
+    sources: &mut BTreeMap<u64, ReplaySource>,
+    active: &mut Option<ReplaySource>,
+) -> MidgeResult<()> {
+    let Some(&hole) = skipped
+        .iter()
+        .find(|segment_id| !sources.contains_key(segment_id))
+    else {
+        return Ok(());
+    };
+    tracing::warn!(
+        segment_id = hole,
+        "stopping salvage replay at lost WAL segment; setting later WAL aside"
+    );
+    let mut max_sequence = 0;
+    let wal_dir = db_path.join("wal");
+    // Every local file at or past the hole goes, including failed copies,
+    // or the next open would find the same hole and drop newer writes.
+    let local_paths: Vec<PathBuf> = std::fs::read_dir(&wal_dir)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .and_then(crate::wal::parse_segment_id)
+                        .is_some_and(|segment_id| segment_id >= hole)
+                })
+                .map(|entry| entry.path())
+                .collect()
+        })
+        .unwrap_or_default();
+    for path in local_paths {
+        CloudStartupRecovery::quarantine_local_wal_alias(&path)?;
+    }
+    let dropped: Vec<u64> = sources.range(hole..).map(|(id, _)| *id).collect();
+    for segment_id in dropped {
+        sources.remove(&segment_id);
+        for segment in [
+            plan.remote_segments.remove(&segment_id),
+            plan.local_segments.remove(&segment_id),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            max_sequence = max_sequence.max(segment.max_sequence);
+        }
+    }
+    plan.unreplayed_segments = catalog
+        .segments
+        .range(hole..)
+        .map(|(_, publication)| publication.clone())
+        .collect();
+    for publication in &plan.unreplayed_segments {
+        max_sequence = max_sequence.max(publication.max_sequence);
+    }
+    if let Some(wal) = plan.active_wal.take() {
+        max_sequence = max_sequence.max(wal.max_sequence);
+    }
+    if active.take().is_some() {
+        quarantine_active(
+            &crate::io::RealFs::new(db_path)?,
+            &wal_dir.join(crate::wal::ACTIVE_FILE_NAME),
+        )?;
+    } else {
+        std::fs::File::open(&wal_dir)?.sync_all()?;
+    }
+    plan.max_unreplayed_sequence = max_sequence;
     Ok(())
 }

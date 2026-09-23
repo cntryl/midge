@@ -314,6 +314,13 @@ impl RuntimeStorageMaterialization {
             )
         })?;
         let recovery_plan = streaming.plan;
+        if !recovery_plan.unreplayed_segments.is_empty() {
+            CloudPersistence::new(Arc::clone(&cloud.hybrid_storage))
+                .retire_unreplayed_wal_segments(
+                    startup_lease.writer_epoch,
+                    &recovery_plan.unreplayed_segments,
+                )?;
+        }
         let mut state = RuntimeState::try_new_before_cloud_replay(
             storage_path.db_path.clone(),
             opts.recovery_policy(),
@@ -364,6 +371,7 @@ impl RuntimeStorageMaterialization {
             streaming_wal: Some(super::streaming_recovery::CloudReplay {
                 fs: streaming.fs,
                 limits,
+                sequence_floor: recovery_plan.max_unreplayed_sequence,
             }),
         })
     }
@@ -450,6 +458,12 @@ impl RuntimeStorageMaterialization {
             )
         })?;
         let recovery_plan = streaming.plan;
+        if !recovery_plan.unreplayed_segments.is_empty() {
+            CloudPersistence::new(Arc::clone(&hybrid_storage)).retire_unreplayed_wal_segments(
+                startup_lease.writer_epoch,
+                &recovery_plan.unreplayed_segments,
+            )?;
+        }
         let mut state = RuntimeState::try_new_before_cloud_replay(
             storage_path.db_path.clone(),
             opts.recovery_policy(),
@@ -501,6 +515,7 @@ impl RuntimeStorageMaterialization {
             streaming_wal: Some(super::streaming_recovery::CloudReplay {
                 fs: streaming.fs,
                 limits,
+                sequence_floor: recovery_plan.max_unreplayed_sequence,
             }),
         })
     }

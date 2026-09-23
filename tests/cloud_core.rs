@@ -1015,3 +1015,156 @@ mod engine_cloud {
         );
     }
 }
+
+mod cloud_wal_salvage_prefix {
+    //! Cloud WAL salvage recovers a consistent prefix of history.
+
+    use cntryl_midge::{
+        Engine, MidgeError, OpenOptions, RecoveryPolicy, TransactionMode, WriteOptions,
+    };
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    fn options(path: &Path, policy: RecoveryPolicy) -> OpenOptions {
+        OpenOptions::cloud_simulated(path, "bucket", "salvage-prefix")
+            .background_compaction(false)
+            .lease_ttl(Duration::from_millis(900))
+            .lease_clock_skew_tolerance(Duration::from_millis(100))
+            .recovery_policy(policy)
+            .build()
+            .expect("options")
+    }
+
+    /// The crash image still holds the live writer's lease until it expires.
+    fn open_after_lease_expiry(path: &Path, policy: RecoveryPolicy) -> Engine {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            match Engine::open(options(path, policy)) {
+                Err(MidgeError::LeaseHeld(_)) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                result => return result.expect("open after lease expiry"),
+            }
+        }
+    }
+
+    fn put(engine: &Engine, cf_id: u32, key: &[u8]) {
+        let mut tx = engine
+            .begin_tx(cf_id, TransactionMode::ReadWrite)
+            .expect("transaction");
+        tx.put(key.to_vec(), b"value".to_vec(), None).expect("put");
+        tx.commit(WriteOptions::cloud_strict())
+            .expect("cloud commit");
+    }
+
+    fn visible(engine: &Engine, keys: &[&[u8]]) -> Vec<bool> {
+        let cf = engine.get_column_family("data").expect("column family");
+        let tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("read transaction");
+        keys.iter()
+            .map(|key| tx.get(key).expect("read").is_some())
+            .collect()
+    }
+
+    fn files(root: &Path) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for entry in entries {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                out.extend(files(&path));
+            } else {
+                out.push(path);
+            }
+        }
+        out.sort();
+        out
+    }
+
+    fn copy_dir(source: &Path, destination: &Path) {
+        for path in files(source) {
+            // A lease renewal in flight leaves this lock behind, which a real
+            // restart must clear by hand; it is not what this image tests.
+            if path
+                .file_name()
+                .is_some_and(|name| name == ".midge_leader.lock")
+            {
+                continue;
+            }
+            let target = destination.join(path.strip_prefix(source).expect("prefix"));
+            std::fs::create_dir_all(target.parent().expect("parent")).expect("mkdir");
+            // The live engine may remove a file mid-copy; the image then
+            // matches a crash taken just after that removal.
+            match std::fs::copy(&path, &target) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                result => {
+                    result.expect("copy");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn should_recover_consistent_prefix_when_cloud_salvage_finds_lost_segment() {
+        // Arrange: a crash image with three published WAL segments, the
+        // middle one corrupted and no local copy left to fill the hole.
+        let live = tempfile::tempdir().expect("live directory");
+        let image = tempfile::tempdir().expect("crash image");
+        let mut engine = Engine::open(options(live.path(), RecoveryPolicy::Strict)).expect("open");
+        let cf = engine.create_column_family("data").expect("column family");
+        for key in [b"x", b"y", b"z"] {
+            put(&engine, cf.id(), key);
+        }
+        copy_dir(live.path(), image.path());
+        engine.shutdown(Duration::from_secs(30)).expect("shutdown");
+        let segments: Vec<_> = files(&image.path().join("cloud_store/wal/epochs"))
+            .into_iter()
+            .filter(|path| path.extension().is_some_and(|extension| extension == "wal"))
+            .collect();
+        assert!(segments.len() >= 3, "each strict commit seals a segment");
+        let mut bytes = std::fs::read(&segments[1]).expect("read segment");
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        std::fs::write(&segments[1], bytes).expect("corrupt segment");
+        for local in [
+            image.path().join("wal"),
+            image.path().join("hybrid_local/wal"),
+        ] {
+            for path in files(&local) {
+                std::fs::remove_file(path).expect("drop local WAL copy");
+            }
+        }
+
+        // Act
+        let mut salvaged = open_after_lease_expiry(image.path(), RecoveryPolicy::Salvage);
+        let after_salvage = visible(&salvaged, &[b"x", b"y", b"z"]);
+        let cf = salvaged.get_column_family("data").expect("column family");
+        put(&salvaged, cf.id(), b"w");
+        salvaged
+            .shutdown(Duration::from_secs(30))
+            .expect("shutdown");
+        let mut reopened =
+            Engine::open(options(image.path(), RecoveryPolicy::Strict)).expect("strict reopen");
+        let after_reopen = visible(&reopened, &[b"x", b"y", b"z", b"w"]);
+        reopened
+            .shutdown(Duration::from_secs(30))
+            .expect("shutdown");
+
+        // Assert
+        assert_eq!(
+            after_salvage,
+            [true, false, false],
+            "no writes past the hole"
+        );
+        assert_eq!(after_reopen, [true, false, false, true]);
+        // Segment 1 was replayed and flushed, so normal pruning may remove it.
+        let kept: Vec<bool> = segments.iter().map(|path| path.exists()).collect();
+        assert!(
+            kept[1..].iter().all(|kept| *kept),
+            "salvage keeps unreplayed WAL objects: {kept:?}"
+        );
+    }
+}

@@ -19,6 +19,8 @@ mod tests;
 pub(super) struct CloudReplay {
     pub fs: Arc<dyn Fs>,
     pub limits: StreamingReplayLimits,
+    /// Sequences at or below this belong to WAL salvage set aside unreplayed.
+    pub sequence_floor: u64,
 }
 
 impl CloudReplay {
@@ -113,7 +115,8 @@ impl CloudReplay {
         materialized.state.sequence = materialized
             .state
             .sequence
-            .max(stats.max_sequence.unwrap_or(0));
+            .max(stats.max_sequence.unwrap_or(0))
+            .max(self.sequence_floor);
         materialized.state.wal.local_durable_seq = materialized.state.sequence;
         materialized.state.compaction_output_generation = materialized
             .state
