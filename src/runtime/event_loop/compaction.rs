@@ -575,7 +575,7 @@ impl CompactionCoordinator {
         event_loop: &mut EventLoop,
     ) -> Result<(), crate::common::MidgeError> {
         crate::failpoints::fail_point!("slice6::after_compaction_update_before_manifest_persist");
-        crate::runtime::actors::ManifestActor::persist(&event_loop.state)?;
+        crate::runtime::actors::ManifestActor::persist(&mut event_loop.state)?;
         event_loop.mirror_metadata_after_local_commit("compaction manifest publish")
     }
 

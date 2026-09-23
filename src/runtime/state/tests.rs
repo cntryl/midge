@@ -2110,3 +2110,139 @@ fn should_keep_a_worker_published_sst_when_the_event_loop_publishes_next() {
         "the worker's intent must not be erased: {persisted:?}"
     );
 }
+
+fn state_with_worker_intent(
+    temp_dir: &tempfile::TempDir,
+) -> (RuntimeState, crate::runtime::IntentLogEntry) {
+    let state = RuntimeState::try_new(
+        temp_dir.path().to_path_buf(),
+        false,
+        crate::config::RecoveryPolicy::Strict,
+    )
+    .expect("open state");
+    let intent = crate::runtime::IntentLogEntry::SstAdded {
+        file_meta: crate::runtime::FileMeta {
+            name: "000000_00_00000000000000000009.sst".to_string(),
+            level: 0,
+            size_bytes: 4096,
+            content_crc32c: Some(7),
+            cf_id: 0,
+            smallest_key: None,
+            largest_key: None,
+            smallest_seq: None,
+            largest_seq: None,
+            key_bounds_complete: false,
+        },
+    };
+    crate::runtime::IntentPersistence::save(&state.db_path, std::slice::from_ref(&intent))
+        .expect("write worker intent");
+    (state, intent)
+}
+
+/// #500: when the reload after a failed flush publication fails, memory is
+/// still behind disk. Publishing from it would erase the worker's intent.
+#[test]
+fn should_refuse_event_loop_publication_when_metadata_reload_fails() {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create state directory");
+    let (mut state, intent) = state_with_worker_intent(&temp_dir);
+    std::fs::write(
+        temp_dir
+            .path()
+            .join(crate::metadata::files::MANIFEST_SNAPSHOT),
+        b"not a manifest",
+    )
+    .expect("corrupt snapshot");
+
+    // Act
+    let reload = state.reload_persisted_metadata();
+    let intent_publication = state.record_compaction_publication_intent(0, Vec::new(), Vec::new());
+    let manifest_publication = crate::runtime::actors::ManifestActor::persist(&mut state);
+
+    // Assert
+    assert!(reload.is_err());
+    assert!(
+        matches!(intent_publication, Err(MidgeError::Fenced(_))),
+        "{intent_publication:?}"
+    );
+    assert!(
+        matches!(manifest_publication, Err(MidgeError::Fenced(_))),
+        "{manifest_publication:?}"
+    );
+    assert!(state.persistence_anomaly_detected());
+    let persisted = crate::runtime::IntentPersistence::load_with_fs_and_policy(
+        &state.fs,
+        crate::config::RecoveryPolicy::Strict,
+    )
+    .expect("reload intents");
+    assert_eq!(format!("{persisted:?}"), format!("{:?}", vec![intent]));
+}
+
+#[test]
+fn should_publish_again_when_a_later_metadata_reload_succeeds() {
+    // Arrange
+    let temp_dir = tempfile::tempdir().expect("create state directory");
+    let (mut state, intent) = state_with_worker_intent(&temp_dir);
+    let snapshot = temp_dir
+        .path()
+        .join(crate::metadata::files::MANIFEST_SNAPSHOT);
+    let original = std::fs::read(&snapshot).ok();
+    std::fs::write(&snapshot, b"not a manifest").expect("corrupt snapshot");
+    assert!(state.reload_persisted_metadata().is_err());
+    match original {
+        Some(bytes) => std::fs::write(&snapshot, bytes).expect("restore snapshot"),
+        None => std::fs::remove_file(&snapshot).expect("remove corrupt snapshot"),
+    }
+
+    // Act
+    state.reload_persisted_metadata().expect("reload succeeds");
+    let publication = state.record_compaction_publication_intent(0, Vec::new(), Vec::new());
+
+    // Assert
+    assert!(publication.is_ok(), "{publication:?}");
+    let persisted = crate::runtime::IntentPersistence::load_with_fs_and_policy(
+        &state.fs,
+        crate::config::RecoveryPolicy::Strict,
+    )
+    .expect("reload intents");
+    assert!(
+        format!("{persisted:?}").contains(&format!("{intent:?}")),
+        "{persisted:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn should_keep_in_memory_manifest_when_intent_reload_fails() {
+    use std::os::unix::fs::PermissionsExt as _;
+    // Arrange: the manifest half of the reload would succeed.
+    let temp_dir = tempfile::tempdir().expect("create state directory");
+    let (mut state, _) = state_with_worker_intent(&temp_dir);
+    crate::metadata::journal::append_edit_batch_with_fs(
+        &state.fs,
+        &[crate::metadata::ManifestEdit::AddSst(
+            crate::metadata::FileMeta {
+                name: "000000_00_00000000000000000009.sst".to_string(),
+                size_bytes: 4096,
+                sst_seq: 9,
+                ..crate::metadata::FileMeta::default()
+            },
+        )],
+    )
+    .expect("append worker journal edit");
+    let intents = temp_dir.path().join("intent_log.json");
+    std::fs::set_permissions(&intents, std::fs::Permissions::from_mode(0o000))
+        .expect("make intent log unreadable");
+
+    // Act
+    let reload = state.reload_persisted_metadata();
+    std::fs::set_permissions(&intents, std::fs::Permissions::from_mode(0o644))
+        .expect("restore intent log permissions");
+
+    // Assert
+    assert!(reload.is_err());
+    assert!(
+        !state.manifest_has_file("000000_00_00000000000000000009.sst"),
+        "reload must assign both files or neither"
+    );
+}

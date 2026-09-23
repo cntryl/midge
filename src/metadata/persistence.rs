@@ -12,6 +12,28 @@ use std::time::Instant;
 /// Manifest persistence operations
 pub struct ManifestPersistence;
 
+/// What a manifest snapshot save wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WrittenCheckpoint {
+    /// The journal edit id the snapshot covers.
+    pub edit_checkpoint_id: u64,
+    /// Whether the caller's manifest already held every edit the snapshot
+    /// covers. Only then may the caller advance its horizon to
+    /// `edit_checkpoint_id`; otherwise another writer journaled an edit the
+    /// caller never applied, and claiming it would let a later snapshot from
+    /// the caller drop it.
+    pub caller_was_current: bool,
+}
+
+impl WrittenCheckpoint {
+    /// Advances `manifest`'s horizon to this checkpoint when that is safe.
+    pub fn adopt_into(self, manifest: &mut Manifest) {
+        if self.caller_was_current {
+            manifest.edit_checkpoint_id = manifest.edit_checkpoint_id.max(self.edit_checkpoint_id);
+        }
+    }
+}
+
 impl ManifestPersistence {
     /// Manifest file name
     const MANIFEST_FILE: &'static str = super::files::MANIFEST;
@@ -130,13 +152,16 @@ impl ManifestPersistence {
         // Replay only edits newer than the snapshot checkpoint. If a crash
         // happened after snapshot rename but before journal truncation, the
         // already-applied prefix is therefore harmless.
-        match crate::metadata::journal::replay_edits_after_with_fs_unlocked(
+        match crate::metadata::journal::replay_identified_edits_after_with_fs_unlocked(
             fs,
             manifest.edit_checkpoint_id,
         ) {
             Ok(edits) => {
-                for edit in &edits {
+                for (edit_id, edit) in &edits {
                     manifest.apply_edit(edit);
+                    // The loaded manifest now holds every edit up to this one,
+                    // so the horizon may cover it (#493).
+                    manifest.edit_checkpoint_id = manifest.edit_checkpoint_id.max(*edit_id);
                 }
                 tracing::info!(replayed = edits.len(), "manifest journal replayed");
             }
@@ -331,10 +356,13 @@ impl ManifestPersistence {
 
     /// Save a full manifest snapshot and truncate journal (atomic as possible).
     /// Writes to `manifest.snapshot.json.tmp` then renames into `manifest.snapshot.json`.
+    ///
+    /// Returns what the snapshot covers, so the caller can advance its
+    /// in-memory checkpoint horizon when that is safe.
     pub fn save_snapshot_and_truncate_journal_with_fs(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         manifest: &Manifest,
-    ) -> Result<(), String> {
+    ) -> Result<WrittenCheckpoint, String> {
         crate::metadata::journal::with_manifest_writer_lock(fs, || {
             Self::save_snapshot_and_truncate_journal_with_fs_unlocked(fs, manifest)
         })
@@ -343,7 +371,7 @@ impl ManifestPersistence {
     fn save_snapshot_and_truncate_journal_with_fs_unlocked(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         manifest: &Manifest,
-    ) -> Result<(), String> {
+    ) -> Result<WrittenCheckpoint, String> {
         use crate::io::staging;
         use crate::io::traits::FsPath;
 
@@ -359,6 +387,13 @@ impl ManifestPersistence {
         for edit in &journal_edits {
             checkpoint.apply_edit(edit);
         }
+        // The caller already held every journaled edit exactly when the
+        // snapshot is its own manifest unchanged by the replay above.
+        // Compare the persisted form: runtime-only fields are not state.
+        let caller_was_current = matches!(
+            (serde_json::to_value(&checkpoint), serde_json::to_value(manifest)),
+            (Ok(written), Ok(caller)) if written == caller
+        );
         checkpoint.edit_checkpoint_id = checkpoint.edit_checkpoint_id.max(
             crate::metadata::journal::highest_edit_id_with_fs_unlocked(fs)
                 .map_err(|error| format!("failed to inspect manifest journal: {error}"))?,
@@ -389,7 +424,10 @@ impl ManifestPersistence {
 
         tracing::info!(path = ?snap_path, "manifest snapshot written and journal truncated");
 
-        Ok(())
+        Ok(WrittenCheckpoint {
+            edit_checkpoint_id: checkpoint.edit_checkpoint_id,
+            caller_was_current,
+        })
     }
 
     /// Save manifest to disk in JSON format (compat wrapper for tests and callers using Path)
@@ -420,7 +458,7 @@ impl ManifestPersistence {
     pub fn save_snapshot_and_truncate_journal(
         db_path: &Path,
         manifest: &Manifest,
-    ) -> Result<(), String> {
+    ) -> Result<WrittenCheckpoint, String> {
         use crate::io::real::RealFs;
         use std::sync::Arc;
 
@@ -1076,14 +1114,24 @@ mod tests {
         let fs: std::sync::Arc<dyn crate::io::traits::Fs> = std::sync::Arc::new(
             crate::io::real::RealFs::open_existing(&test_dir).expect("open test filesystem"),
         );
-        let replayed = crate::metadata::journal::replay_edits_after_with_fs_unlocked(
+        let snapshot_checkpoint = ManifestPersistence::load_json_manifest_file(
             &fs,
-            loaded.edit_checkpoint_id,
+            &crate::io::traits::FsPath::new(ManifestPersistence::MANIFEST_SNAPSHOT),
+            "manifest snapshot",
         )
-        .expect("replay edits newer than checkpoint");
+        .expect("read snapshot")
+        .edit_checkpoint_id;
+        let replayed =
+            crate::metadata::journal::replay_edits_after_with_fs_unlocked(&fs, snapshot_checkpoint)
+                .expect("replay edits newer than checkpoint");
 
         // Assert
-        assert_eq!(loaded.edit_checkpoint_id, 1);
+        assert_eq!(snapshot_checkpoint, 1);
+        assert_eq!(
+            loaded.edit_checkpoint_id, 2,
+            "the loaded manifest holds every replayed edit"
+        );
+        assert_eq!(loaded.files.len(), 2);
         assert_eq!(replayed.len(), 1);
         assert!(matches!(
             &replayed[0],

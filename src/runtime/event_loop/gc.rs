@@ -20,7 +20,7 @@ impl GcCoordinator {
             }
         }
         if event_loop.gc_actor.has_manifest_reclamation() {
-            let published = crate::runtime::actors::ManifestActor::persist(&event_loop.state)
+            let published = crate::runtime::actors::ManifestActor::persist(&mut event_loop.state)
                 .and_then(|()| {
                     // Reclamation cannot use salvage-mode best effort. Until
                     // the remote manifest mirror succeeds, its old snapshot

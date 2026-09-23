@@ -47,8 +47,8 @@ impl ManifestCoordinator {
 
     pub(super) fn persist(event_loop: &mut EventLoop, request_id: u64) -> HandleOutcome {
         let deadline = event_loop.registered_request_deadline(request_id);
-        let result =
-            crate::runtime::actors::ManifestActor::persist(&event_loop.state).and_then(|()| {
+        let result = crate::runtime::actors::ManifestActor::persist(&mut event_loop.state)
+            .and_then(|()| {
                 event_loop.mirror_metadata_after_local_commit_within("manifest persist", &deadline)
             });
         if let Err(error) = &result {

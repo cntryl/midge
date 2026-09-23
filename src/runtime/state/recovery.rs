@@ -164,6 +164,7 @@ impl RuntimeState {
                     || wal_recovery.opened_in_salvage_mode,
                 persistence_anomaly_detected: false,
                 ddl_authority_ambiguous: false,
+                metadata: super::MetadataSync::Current,
             },
             compaction_config: CompactionConfig {
                 enabled: persistence.compaction_enabled(),

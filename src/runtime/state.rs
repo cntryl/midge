@@ -212,6 +212,17 @@ pub struct RecoveryStatus {
     /// resolved. The event loop reads this instead of matching the phrase
     /// "DDL authority is ambiguous" in an error message.
     pub ddl_authority_ambiguous: bool,
+    pub metadata: MetadataSync,
+}
+
+/// Whether the in-memory manifest and intent log match disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetadataSync {
+    Current,
+    /// The manifest and intent log could not be re-read after another writer
+    /// advanced them on disk. Memory is behind disk, so every publication
+    /// from memory is refused until a reload succeeds (#500).
+    ReloadRequired,
 }
 
 pub struct CompactionConfig {

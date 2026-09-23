@@ -27,16 +27,56 @@ impl RuntimeState {
             return Ok(());
         }
         // Strict: only startup may salvage-heal (see RuntimeState::load_manifest).
-        self.manifest = crate::metadata::ManifestPersistence::load_with_fs_and_policy(
+        // Load both before assigning either: a manifest fresher than its
+        // intents is as unsafe to publish from as two stale files.
+        let loaded = crate::metadata::ManifestPersistence::load_with_fs_and_policy(
             &self.fs,
             crate::config::RecoveryPolicy::Strict,
         )
-        .map_err(crate::common::MidgeError::Internal)?;
-        self.intent_log = crate::runtime::IntentPersistence::load_with_fs_and_policy(
-            &self.fs,
-            crate::config::RecoveryPolicy::Strict,
-        )
-        .map_err(crate::common::MidgeError::Internal)?;
+        .and_then(|manifest| {
+            crate::runtime::IntentPersistence::load_with_fs_and_policy(
+                &self.fs,
+                crate::config::RecoveryPolicy::Strict,
+            )
+            .map(|intents| (manifest, intents))
+        });
+        match loaded {
+            Ok((manifest, intents)) => {
+                self.manifest = manifest;
+                self.intent_log = intents;
+                self.recovery.metadata = super::MetadataSync::Current;
+                Ok(())
+            }
+            Err(error) => {
+                self.recovery.metadata = super::MetadataSync::ReloadRequired;
+                self.mark_persistence_anomaly();
+                Err(crate::common::MidgeError::Internal(error))
+            }
+        }
+    }
+
+    /// Retries a reload that failed earlier. A no-op once memory is current.
+    pub(crate) fn retry_metadata_reload(&mut self) -> MidgeResult<()> {
+        if self.recovery.metadata == super::MetadataSync::ReloadRequired {
+            self.reload_persisted_metadata().map_err(|error| {
+                crate::common::MidgeError::Fenced(format!(
+                    "manifest and intent log are still behind disk; refusing to publish: {error}"
+                ))
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Refuses a publication from memory while memory is known to be behind
+    /// disk; see `MetadataSync::ReloadRequired`.
+    pub(crate) fn ensure_metadata_current(&self) -> MidgeResult<()> {
+        if self.recovery.metadata == super::MetadataSync::ReloadRequired {
+            return Err(crate::common::MidgeError::Fenced(
+                "manifest and intent log could not be reloaded after a failed publication; \
+                 refusing to publish from stale metadata"
+                    .into(),
+            ));
+        }
         Ok(())
     }
 
@@ -44,6 +84,7 @@ impl RuntimeState {
         &self,
         intents: &[crate::runtime::IntentLogEntry],
     ) -> MidgeResult<()> {
+        self.ensure_metadata_current()?;
         if !self.is_memory_mode() {
             crate::runtime::IntentPersistence::save(&self.db_path, intents)
                 .map_err(crate::common::MidgeError::Internal)?;
@@ -400,15 +441,18 @@ impl RuntimeState {
         crate::metadata::append_edit_batch(&self.db_path, &edits).map(|_| ())
     }
 
-    pub(super) fn persist_manifest_checkpoint(&self) -> MidgeResult<()> {
+    pub(super) fn persist_manifest_checkpoint(&mut self) -> MidgeResult<()> {
         if self.is_memory_mode() {
             return Ok(());
         }
+        self.retry_metadata_reload()?;
 
         crate::metadata::ManifestPersistence::save_snapshot_and_truncate_journal(
             &self.db_path,
             &self.manifest,
         )
-        .map_err(crate::common::MidgeError::Internal)
+        .map_err(crate::common::MidgeError::Internal)?
+        .adopt_into(&mut self.manifest);
+        Ok(())
     }
 }

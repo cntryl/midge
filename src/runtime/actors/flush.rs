@@ -66,6 +66,35 @@ pub(crate) struct FlushPublicationDelta {
     pub next_sst_seq: u64,
     pub cloud_metadata_published: bool,
     pub persistence_anomaly: bool,
+    /// The snapshot the worker wrote, when it may advance the event loop's
+    /// checkpoint horizon; see `FlushJournalCheckpoint::advance`.
+    pub journal_checkpoint: Option<FlushJournalCheckpoint>,
+}
+
+/// What the flush worker's manifest snapshot covers.
+///
+/// The worker builds its snapshot from disk, not from the event loop's
+/// memory, so the snapshot can hold a journal edit memory never applied: an
+/// orphan left by a writer that failed after appending. Claiming such an
+/// edit would let the next snapshot from memory truncate it away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FlushJournalCheckpoint {
+    /// The horizon of the manifest the worker loaded from disk: every
+    /// journaled edit up to here, orphans included.
+    pub base_edit_id: u64,
+    /// The edit id the snapshot covers. Present only when the snapshot is
+    /// exactly the loaded manifest plus the worker's own edits.
+    pub written_edit_id: u64,
+}
+
+impl FlushJournalCheckpoint {
+    /// Advances the event loop's horizon once it has installed the worker's
+    /// edits, but only if memory already held everything the worker loaded.
+    pub(crate) fn advance(self, manifest: &mut crate::metadata::Manifest) {
+        if manifest.edit_checkpoint_id >= self.base_edit_id {
+            manifest.edit_checkpoint_id = manifest.edit_checkpoint_id.max(self.written_edit_id);
+        }
+    }
 }
 
 pub(crate) struct FlushPublishCompletion {
@@ -388,6 +417,7 @@ impl FlushActor {
         crate::failpoints::fail_point!("midge::flush_worker::before_manifest_persist");
         validate_task_lease(task)?;
         let mut manifest = load_manifest(task)?;
+        let base_edit_id = manifest.edit_checkpoint_id;
         let manifest_meta = runtime_to_manifest_meta(&file_meta);
         let next_sst_seq = task
             .sst_seq
@@ -441,17 +471,8 @@ impl FlushActor {
 
         validate_task_lease(task)?;
         clear_manifest_published_intent(task, &task.sst_name)?;
-        let persistence_anomaly =
-            match crate::metadata::ManifestPersistence::save_snapshot_and_truncate_journal_with_fs(
-                &task.fs, &manifest,
-            ) {
-                Ok(()) => false,
-                Err(error) if task.cloud_metadata_storage.is_none() => {
-                    tracing::warn!(%error, "manifest journal is durable but checkpoint save failed");
-                    true
-                }
-                Err(error) => return Err(MidgeError::Internal(error)),
-            };
+        let (persistence_anomaly, journal_checkpoint) =
+            save_worker_snapshot(task, &manifest, base_edit_id)?;
 
         let cloud_metadata_published = if let Some(cloud) = &task.cloud_metadata_storage {
             mirror_control_metadata(task, cloud, manifest.last_persisted_sequence)?;
@@ -471,6 +492,7 @@ impl FlushActor {
             next_sst_seq,
             cloud_metadata_published,
             persistence_anomaly,
+            journal_checkpoint,
         })
     }
 }
@@ -594,6 +616,34 @@ fn validate_final_sst(
         .ok_or(MidgeError::InvalidPath)?;
     let fs = Arc::new(crate::io::RealFs::new(parent)?);
     crate::sst::fs::SstFileIo::open_for_compaction(name, fs, budget.clone()).map(|_| ())
+}
+
+/// Writes the worker's manifest snapshot. Returns whether a local save
+/// failure left only the journal durable, and the checkpoint the event loop
+/// may adopt.
+fn save_worker_snapshot(
+    task: &FlushPublishTask,
+    manifest: &crate::metadata::Manifest,
+    base_edit_id: u64,
+) -> MidgeResult<(bool, Option<FlushJournalCheckpoint>)> {
+    match crate::metadata::ManifestPersistence::save_snapshot_and_truncate_journal_with_fs(
+        &task.fs, manifest,
+    ) {
+        Ok(written) => Ok((
+            false,
+            written
+                .caller_was_current
+                .then_some(FlushJournalCheckpoint {
+                    base_edit_id,
+                    written_edit_id: written.edit_checkpoint_id,
+                }),
+        )),
+        Err(error) if task.cloud_metadata_storage.is_none() => {
+            tracing::warn!(%error, "manifest journal is durable but checkpoint save failed");
+            Ok((true, None))
+        }
+        Err(error) => Err(MidgeError::Internal(error)),
+    }
 }
 
 fn load_manifest(task: &FlushPublishTask) -> MidgeResult<crate::metadata::Manifest> {

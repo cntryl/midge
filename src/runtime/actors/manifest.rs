@@ -179,7 +179,7 @@ impl ManifestActor {
     }
 
     /// Persist manifest to disk
-    pub fn persist(state: &RuntimeState) -> MidgeResult<()> {
+    pub fn persist(state: &mut RuntimeState) -> MidgeResult<()> {
         // Skip persistence in memory mode
         if state.is_memory_mode() {
             tracing::debug!("Manifest: skipping persistence in memory mode");
@@ -188,6 +188,8 @@ impl ManifestActor {
         crate::failpoints::fail_point!("midge::manifest::persist", |_| Err(
             crate::common::MidgeError::Internal("injected manifest persist failure".into())
         ));
+        // A persist is itself a chance to lift a failed-reload fence (#500).
+        state.retry_metadata_reload()?;
 
         tracing::info!(
             file_count = state.manifest.files.len(),
@@ -201,7 +203,8 @@ impl ManifestActor {
             &state.db_path,
             &state.manifest,
         )
-        .map_err(crate::common::MidgeError::Internal)?;
+        .map_err(crate::common::MidgeError::Internal)?
+        .adopt_into(&mut state.manifest);
 
         tracing::debug!("Manifest persisted");
 
@@ -381,7 +384,7 @@ mod tests {
                 actor
                     .compaction_complete(&mut state, &[], &[sst_meta(sequence)])
                     .expect("compaction edit");
-                ManifestActor::persist(&state).expect("persist");
+                ManifestActor::persist(&mut state).expect("persist");
                 persisted_checkpoints.push(read_snapshot(&state).edit_checkpoint_id);
             }
         });
@@ -434,7 +437,7 @@ mod tests {
         actor
             .compaction_complete(&mut state, &[], &[sst_meta(3)])
             .expect("backfill-style local edit");
-        ManifestActor::persist(&state).expect("persist");
+        ManifestActor::persist(&mut state).expect("persist");
 
         // Assert: the snapshot may not skip the edit this manifest never saw
         let snapshot = read_snapshot(&state);
@@ -571,5 +574,116 @@ mod tests {
         // Assert: valid SST should be accepted
         assert!(result.is_ok(), "add_sst failed: {:?}", result.err());
         Ok(())
+    }
+
+    /// #493: every production journal writer must advance the in-memory
+    /// checkpoint horizon, or each later persist takes the stale-caller branch.
+    #[test]
+    fn should_track_snapshot_checkpoint_when_ddl_journals_before_compaction_persist() {
+        // Arrange
+        let tmp = tempfile::tempdir().expect("create tmpdir");
+        let mut state = crate::runtime::state::RuntimeState::new(tmp.path().to_path_buf(), false);
+        let mut actor = ManifestActor::new();
+        crate::runtime::ddl::apply_local_edit(
+            &mut state,
+            &crate::metadata::ManifestEdit::CreateColumnFamily {
+                id: 1,
+                name: "other".to_string(),
+                created_at: 1,
+            },
+        )
+        .expect("DDL edit");
+        let sink = LogSink::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(sink.clone())
+            .finish();
+
+        // Act
+        tracing::subscriber::with_default(subscriber, || {
+            for sequence in [1, 2] {
+                actor
+                    .compaction_complete(&mut state, &[], &[sst_meta(sequence)])
+                    .expect("compaction edit");
+                ManifestActor::persist(&mut state).expect("persist");
+            }
+        });
+
+        // Assert
+        assert_eq!(
+            state.manifest.edit_checkpoint_id,
+            read_snapshot(&state).edit_checkpoint_id
+        );
+        let logs = String::from_utf8(
+            sink.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+        )
+        .unwrap();
+        assert!(!logs.contains("stale caller"), "{logs}");
+    }
+
+    /// Review of #544: the flush worker's snapshot is built from disk, so it
+    /// can hold an orphan journal edit memory never applied. Installing the
+    /// worker's checkpoint must not let the next memory snapshot drop it.
+    #[test]
+    fn should_keep_orphan_journal_edit_when_flush_checkpoint_installs_before_persist() {
+        // Arrange
+        let tmp = tempfile::tempdir().expect("create tmpdir");
+        let mut state = crate::runtime::state::RuntimeState::new(tmp.path().to_path_buf(), false);
+        let mut actor = ManifestActor::new();
+        actor
+            .compaction_complete(&mut state, &[], &[sst_meta(1)])
+            .expect("compaction edit");
+        ManifestActor::persist(&mut state).expect("persist");
+        crate::metadata::append_edit(
+            &state.db_path,
+            &crate::metadata::ManifestEdit::CreateColumnFamily {
+                id: 7,
+                name: "orphan".to_string(),
+                created_at: 1,
+            },
+        )
+        .expect("orphan append whose writer then failed");
+        // The worker: load from disk, journal and apply its own edit, snapshot.
+        let mut worker = crate::metadata::ManifestPersistence::load(&state.db_path).expect("load");
+        let base_edit_id = worker.edit_checkpoint_id;
+        let flushed = crate::metadata::FileMeta {
+            name: crate::cloud_layout::file_name(0, 0, 2),
+            size_bytes: 10,
+            ..Default::default()
+        };
+        crate::metadata::append_edit(
+            &state.db_path,
+            &crate::metadata::ManifestEdit::AddSst(flushed.clone()),
+        )
+        .expect("worker append");
+        worker.add_file(flushed.clone());
+        let written = crate::metadata::ManifestPersistence::save_snapshot_and_truncate_journal(
+            &state.db_path,
+            &worker,
+        )
+        .expect("worker snapshot");
+        state.manifest.add_file(flushed);
+
+        // Act
+        if written.caller_was_current {
+            crate::runtime::actors::flush::FlushJournalCheckpoint {
+                base_edit_id,
+                written_edit_id: written.edit_checkpoint_id,
+            }
+            .advance(&mut state.manifest);
+        }
+        ManifestActor::persist(&mut state).expect("persist after flush install");
+
+        // Assert
+        let reloaded = crate::metadata::ManifestPersistence::load(&state.db_path).expect("reload");
+        assert!(
+            reloaded.column_families.iter().any(|cf| cf.id == 7),
+            "orphan journal edit was truncated away"
+        );
     }
 }
