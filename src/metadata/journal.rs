@@ -104,6 +104,10 @@ struct JournalEdit {
 }
 
 impl ManifestEdit {
+    pub(crate) fn validate_for_append(&self) -> MidgeResult<()> {
+        self.validate_persisted_sst_names()
+    }
+
     pub fn record_type(&self) -> u8 {
         match self {
             ManifestEdit::AddSst(_) => 1,
@@ -190,7 +194,9 @@ fn encode_journal_record<T: ?Sized + serde::Serialize>(
     Ok(record)
 }
 
-fn checkpoint_edit_id_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>) -> MidgeResult<u64> {
+pub(crate) fn checkpoint_edit_id_with_fs(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+) -> MidgeResult<u64> {
     use crate::io::traits::{FsPath, OpenMode, OpenOptions};
 
     let path = FsPath::new(super::files::MANIFEST_SNAPSHOT);
@@ -221,7 +227,9 @@ fn checkpoint_edit_id_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>) ->
     Ok(manifest.edit_checkpoint_id)
 }
 
-fn next_edit_id_with_fs(fs: &std::sync::Arc<dyn crate::io::traits::Fs>) -> MidgeResult<u64> {
+pub(crate) fn next_edit_id_with_fs(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+) -> MidgeResult<u64> {
     let checkpoint = checkpoint_edit_id_with_fs(fs)?;
     let replay = replay_journal_with_state(fs)?;
     if let JournalReplayTail::PartialEof {
@@ -354,6 +362,16 @@ fn append_validated_edit_with_fs(
     edit: &ManifestEdit,
 ) -> MidgeResult<u64> {
     let edit_id = next_edit_id_with_fs(fs)?;
+    append_validated_edit_with_id(fs, edit, edit_id)
+}
+
+/// Appends a validated edit under `edit_id`. The caller holds the manifest
+/// writer lock and has chosen an id above every durable one.
+pub(crate) fn append_validated_edit_with_id(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+    edit: &ManifestEdit,
+    edit_id: u64,
+) -> MidgeResult<u64> {
     let record = encode_journal_record(
         edit.record_type(),
         &JournalEditEnvelope {
@@ -971,6 +989,16 @@ fn append_validated_edit_batch_with_fs(
     batch: &[ManifestEdit],
 ) -> MidgeResult<u64> {
     let edit_id = next_edit_id_with_fs(fs)?;
+    append_validated_edit_batch_with_id(fs, batch, edit_id)
+}
+
+/// Appends a validated batch under `edit_id`; see
+/// [`append_validated_edit_with_id`].
+pub(crate) fn append_validated_edit_batch_with_id(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+    batch: &[ManifestEdit],
+    edit_id: u64,
+) -> MidgeResult<u64> {
     let record = encode_journal_record(
         BATCH_RECORD_TYPE,
         &JournalEditEnvelope {

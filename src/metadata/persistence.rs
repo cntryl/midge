@@ -12,6 +12,15 @@ use std::time::Instant;
 /// Manifest persistence operations
 pub struct ManifestPersistence;
 
+/// Where the manifest journal stands, as `ManifestStore` tracks it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct JournalPosition {
+    /// The edit id the durable snapshot covers.
+    pub(crate) checkpoint_edit_id: u64,
+    /// The highest edit id durable anywhere: the snapshot or the journal.
+    pub(crate) highest_edit_id: u64,
+}
+
 /// What a manifest snapshot save wrote.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WrittenCheckpoint {
@@ -318,31 +327,37 @@ impl ManifestPersistence {
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         manifest: &Manifest,
     ) -> Result<(), String> {
-        use crate::io::staging;
+        Self::save_mirror(fs, manifest).map_err(|error| error.to_string())
+    }
+
+    /// Writes the legacy `manifest.json` copy, keeping the I/O error's kind.
+    fn save_mirror(
+        fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+        manifest: &Manifest,
+    ) -> crate::common::MidgeResult<()> {
+        use crate::common::MidgeError;
         use crate::io::traits::FsPath;
 
-        Self::validate_persisted_sst_names(manifest)?;
+        Self::validate_persisted_sst_names(manifest).map_err(MidgeError::Corruption)?;
+        let json = serde_json::to_vec(manifest).map_err(|e| {
+            MidgeError::Internal(format!("failed to serialize manifest to JSON: {e}"))
+        })?;
 
-        // Serialize to pretty JSON for machine parsing with human-debuggability.
-        let json = serde_json::to_vec_pretty(manifest)
-            .map_err(|e| format!("failed to serialize manifest to JSON: {e}"))?;
-
-        let temp_path = FsPath::new(Self::MANIFEST_FILE_TEMP);
-        let target_path = FsPath::new(Self::MANIFEST_FILE);
-        staging::stage_bytes_with_hook(
+        crate::io::staging::stage_bytes_typed(
             fs,
-            &temp_path,
-            &target_path,
+            &FsPath::new(Self::MANIFEST_FILE_TEMP),
+            &FsPath::new(Self::MANIFEST_FILE),
             &json,
             || {
                 crate::failpoints::fail_point!(
                     "midge::manifest::inject_no_space_on_checkpoint_save",
-                    |_| Err("failpoint: no space while saving manifest checkpoint".to_string())
+                    |_| Err(MidgeError::NoSpace(
+                        "failpoint: no space while saving manifest checkpoint".to_string()
+                    ))
                 );
                 crate::failpoints::fail_point!("midge::manifest::after_temp_sync_before_rename");
                 Ok(())
             },
-            |msg| msg,
         )?;
 
         tracing::debug!(
@@ -350,7 +365,6 @@ impl ManifestPersistence {
             size_bytes = json.len(),
             "manifest persisted successfully"
         );
-
         Ok(())
     }
 
@@ -358,69 +372,94 @@ impl ManifestPersistence {
     /// Writes to `manifest.snapshot.json.tmp` then renames into `manifest.snapshot.json`.
     ///
     /// Returns what the snapshot covers, so the caller can advance its
-    /// in-memory checkpoint horizon when that is safe.
+    /// in-memory checkpoint horizon when that is safe. Runtime writers go
+    /// through `ManifestStore`; this reads the journal position from disk.
     pub fn save_snapshot_and_truncate_journal_with_fs(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         manifest: &Manifest,
     ) -> Result<WrittenCheckpoint, String> {
         crate::metadata::journal::with_manifest_writer_lock(fs, || {
-            Self::save_snapshot_and_truncate_journal_with_fs_unlocked(fs, manifest)
+            Self::save_snapshot_unlocked(fs, manifest, None)
         })
+        .map_err(|error| error.to_string())
     }
 
-    fn save_snapshot_and_truncate_journal_with_fs_unlocked(
+    /// Writes a snapshot of `manifest` plus every journaled edit it lacks,
+    /// then truncates the journal. The caller holds the manifest writer lock.
+    ///
+    /// `known` is the journal position when the caller already knows it
+    /// (`ManifestStore`); then a current caller costs no metadata reads at all.
+    pub(crate) fn save_snapshot_unlocked(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         manifest: &Manifest,
-    ) -> Result<WrittenCheckpoint, String> {
-        use crate::io::staging;
+        known: Option<JournalPosition>,
+    ) -> crate::common::MidgeResult<WrittenCheckpoint> {
+        use crate::common::MidgeError;
         use crate::io::traits::FsPath;
 
         let snap_path = FsPath::new(Self::MANIFEST_SNAPSHOT);
         let temp = FsPath::new(Self::MANIFEST_SNAPSHOT_TEMP);
 
-        let mut checkpoint = Self::checkpoint_base_with_fs(fs, manifest)?;
-        let journal_edits = crate::metadata::journal::replay_edits_after_with_fs_unlocked(
-            fs,
-            checkpoint.edit_checkpoint_id,
-        )
-        .map_err(|error| format!("failed to replay manifest journal: {error}"))?;
+        let mut checkpoint = match known {
+            // The durable snapshot is not newer than the caller, so the
+            // caller is the base; no need to read the snapshot.
+            Some(position) if position.checkpoint_edit_id <= manifest.edit_checkpoint_id => {
+                manifest.clone()
+            }
+            _ => Self::checkpoint_base_with_fs(fs, manifest).map_err(MidgeError::Internal)?,
+        };
+        let journal_edits = match known {
+            // Nothing was journaled past what the base already holds.
+            Some(position) if position.highest_edit_id <= checkpoint.edit_checkpoint_id => {
+                Vec::new()
+            }
+            _ => crate::metadata::journal::replay_edits_after_with_fs_unlocked(
+                fs,
+                checkpoint.edit_checkpoint_id,
+            )?,
+        };
+        let replayed_nothing = journal_edits.is_empty();
         for edit in &journal_edits {
             checkpoint.apply_edit(edit);
         }
         // The caller already held every journaled edit exactly when the
         // snapshot is its own manifest unchanged by the replay above.
         // Compare the persisted form: runtime-only fields are not state.
-        let caller_was_current = matches!(
-            (serde_json::to_value(&checkpoint), serde_json::to_value(manifest)),
-            (Ok(written), Ok(caller)) if written == caller
-        );
-        checkpoint.edit_checkpoint_id = checkpoint.edit_checkpoint_id.max(
-            crate::metadata::journal::highest_edit_id_with_fs_unlocked(fs)
-                .map_err(|error| format!("failed to inspect manifest journal: {error}"))?,
-        );
-        Self::validate_persisted_sst_names(&checkpoint)?;
-        let json = serde_json::to_vec_pretty(&checkpoint)
-            .map_err(|e| format!("failed to serialize manifest to JSON: {e}"))?;
+        let caller_was_current = (replayed_nothing
+            && checkpoint.edit_checkpoint_id == manifest.edit_checkpoint_id)
+            || matches!(
+                (serde_json::to_value(&checkpoint), serde_json::to_value(manifest)),
+                (Ok(written), Ok(caller)) if written == caller
+            );
+        let highest_edit_id = match known {
+            Some(position) => position.highest_edit_id,
+            None => crate::metadata::journal::highest_edit_id_with_fs_unlocked(fs)?,
+        };
+        checkpoint.edit_checkpoint_id = checkpoint.edit_checkpoint_id.max(highest_edit_id);
+        Self::validate_persisted_sst_names(&checkpoint).map_err(MidgeError::Corruption)?;
+        let json = serde_json::to_vec(&checkpoint).map_err(|e| {
+            MidgeError::Internal(format!("failed to serialize manifest to JSON: {e}"))
+        })?;
 
         crate::failpoints::fail_point!("midge::manifest::inject_snapshot_write_failure", |_| Err(
-            "failpoint: manifest snapshot write failed".to_string()
+            MidgeError::Internal("failpoint: manifest snapshot write failed".to_string())
         ));
 
-        staging::stage_bytes(fs, &temp, &snap_path, &json, |msg| msg)?;
+        crate::io::staging::stage_bytes_typed(fs, &temp, &snap_path, &json, || Ok(()))?;
 
         crate::failpoints::fail_point!(
             "midge::manifest::after_snapshot_rename_before_journal_truncate",
-            |_| Err("failpoint: crash after manifest snapshot rename".to_string())
+            |_| Err(MidgeError::Internal(
+                "failpoint: crash after manifest snapshot rename".to_string()
+            ))
         );
 
-        // truncate journal
-        crate::metadata::journal::truncate_journal_with_fs_unlocked(fs)
-            .map_err(|e| format!("failed to truncate journal: {e:?}"))?;
+        crate::metadata::journal::truncate_journal_with_fs_unlocked(fs)?;
 
         // Keep the legacy manifest filename as a compatibility mirror. The
         // snapshot remains authoritative during recovery, so a crash while
         // updating this mirror cannot reintroduce duplicate journal edits.
-        Self::save_with_fs(fs, &checkpoint)?;
+        Self::save_mirror(fs, &checkpoint)?;
 
         tracing::info!(path = ?snap_path, "manifest snapshot written and journal truncated");
 

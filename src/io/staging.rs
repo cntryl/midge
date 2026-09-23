@@ -6,7 +6,7 @@
 //! They are intentionally small and generic so metadata, intent logs, leader
 //! records, and cloud recovery bootstrap writes all follow the same lifecycle.
 
-use crate::io::traits::{Durability, Fs, FsPath, OpenMode, OpenOptions};
+use crate::io::traits::{Durability, Fs, FsError, FsPath, OpenMode, OpenOptions};
 use bytes::Bytes;
 use std::io::Read;
 use std::sync::Arc;
@@ -139,6 +139,67 @@ where
     F: FnOnce() -> Result<(), E>,
     M: Fn(String) -> E,
 {
+    stage_bytes_classified(
+        fs,
+        temp_path,
+        target_path,
+        data,
+        before_rename,
+        |message, _| map_error(message),
+    )
+}
+
+/// [`stage_bytes_with_hook`] that keeps the filesystem error's kind, so a
+/// full disk reports `NoSpace` rather than an internal defect.
+pub(crate) fn stage_bytes_typed<F>(
+    fs: &Arc<dyn Fs>,
+    temp_path: &FsPath,
+    target_path: &FsPath,
+    data: &[u8],
+    before_rename: F,
+) -> crate::common::MidgeResult<()>
+where
+    F: FnOnce() -> crate::common::MidgeResult<()>,
+{
+    stage_bytes_classified(
+        fs,
+        temp_path,
+        target_path,
+        data,
+        before_rename,
+        |message, cause| classified_error(cause, message),
+    )
+}
+
+/// The `MidgeError` for a staging step that failed with `cause`, carrying the
+/// step's message.
+fn classified_error(cause: Option<&FsError>, message: String) -> crate::common::MidgeError {
+    use crate::common::MidgeError;
+    match cause {
+        Some(FsError::NoSpace(_)) => MidgeError::NoSpace(message),
+        Some(FsError::Timeout(_)) => MidgeError::Timeout(message),
+        Some(FsError::Corruption(_)) => MidgeError::Corruption(message),
+        Some(FsError::Unsupported(_)) => MidgeError::NotSupported(message),
+        Some(FsError::NotFound(_)) => {
+            MidgeError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, message))
+        }
+        Some(_) => MidgeError::Io(std::io::Error::other(message)),
+        None => MidgeError::Internal(message),
+    }
+}
+
+fn stage_bytes_classified<E, F, M>(
+    fs: &Arc<dyn Fs>,
+    temp_path: &FsPath,
+    target_path: &FsPath,
+    data: &[u8],
+    before_rename: F,
+    map_error: M,
+) -> Result<(), E>
+where
+    F: FnOnce() -> Result<(), E>,
+    M: Fn(String, Option<&FsError>) -> E,
+{
     let result = (|| {
         let mut file = fs
             .open(
@@ -151,33 +212,40 @@ where
                 },
             )
             .map_err(|error| {
-                map_error(format!(
-                    "failed to open staging file {temp_path:?}: {error:?}"
-                ))
+                map_error(
+                    format!("failed to open staging file {temp_path:?}: {error:?}"),
+                    Some(&error),
+                )
             })?;
 
         file.write_at(0, Bytes::copy_from_slice(data))
             .map_err(|error| {
-                map_error(format!(
-                    "failed to write staging file {temp_path:?}: {error:?}"
-                ))
+                map_error(
+                    format!("failed to write staging file {temp_path:?}: {error:?}"),
+                    Some(&error),
+                )
             })?;
         file.sync(Durability::Durable).map_err(|error| {
-            map_error(format!(
-                "failed to sync staging file {temp_path:?}: {error:?}"
-            ))
+            map_error(
+                format!("failed to sync staging file {temp_path:?}: {error:?}"),
+                Some(&error),
+            )
         })?;
         drop(file);
 
         crate::failpoints::fail_point!("midge::io::staging::before_rename", |_| Err(map_error(
-            "failpoint: staging publication failed before rename".to_string()
+            "failpoint: staging publication failed before rename".to_string(),
+            None
         )));
         before_rename()?;
 
         fs.rename_atomic(temp_path, target_path).map_err(|error| {
-            map_error(format!(
-                "failed to rename staging file {temp_path:?} -> {target_path:?}: {error:?}"
-            ))
+            map_error(
+                format!(
+                    "failed to rename staging file {temp_path:?} -> {target_path:?}: {error:?}"
+                ),
+                Some(&error),
+            )
         })?;
 
         let parent_path = std::path::Path::new(&target_path.0)
@@ -189,9 +257,10 @@ where
             );
         fs.sync_dir(&parent_path, Durability::Durable)
             .map_err(|error| {
-                map_error(format!(
-                    "failed to sync staging target directory {parent_path:?}: {error:?}"
-                ))
+                map_error(
+                    format!("failed to sync staging target directory {parent_path:?}: {error:?}"),
+                    Some(&error),
+                )
             })?;
 
         Ok(())
