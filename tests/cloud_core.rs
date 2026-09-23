@@ -1028,7 +1028,7 @@ mod cloud_wal_salvage_prefix {
     fn options(path: &Path, policy: RecoveryPolicy) -> OpenOptions {
         OpenOptions::cloud_simulated(path, "bucket", "salvage-prefix")
             .background_compaction(false)
-            .lease_ttl(Duration::from_millis(900))
+            .lease_ttl(Duration::from_secs(3))
             .lease_clock_skew_tolerance(Duration::from_millis(100))
             .recovery_policy(policy)
             .build()
