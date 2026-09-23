@@ -228,6 +228,8 @@ impl WalRotationReceipt {
 /// Actor handling WAL operations
 pub struct WalActor {
     io: WalIoState,
+    /// Operational counters of the owning engine; shared with every writer.
+    counters: crate::telemetry::CounterSink,
     storage_budget: Option<Arc<crate::storage::HybridStorage>>,
     /// Buffered writes pending sync
     pending_sync_count: usize,
@@ -555,34 +557,26 @@ impl WalActor {
         f64::from(upper) * 4_294_967_296.0 + f64::from(lower)
     }
 
-    fn record_no_space_event() {
-        if let Some(t) = crate::telemetry::Telemetry::global() {
-            t.metrics().record_no_space_event();
-            t.metrics().record_write_stall_no_space();
-        }
+    /// Route this actor's (and its writers') events to an engine's counters.
+    pub(crate) fn attach_counters(&self, diagnostics: &crate::diagnostics::RuntimeDiagnostics) {
+        diagnostics.attach(&self.counters);
     }
 
-    fn record_write_conflict_point() {
-        if let Some(t) = crate::telemetry::Telemetry::global() {
-            t.metrics().record_write_conflict_point();
-        }
-    }
-
-    fn record_write_conflict_range() {
-        if let Some(t) = crate::telemetry::Telemetry::global() {
-            t.metrics().record_write_conflict_range();
-        }
+    fn record_no_space_event(counters: &crate::telemetry::CounterSink) {
+        counters.record(|m| {
+            m.record_no_space_event();
+            m.record_write_stall_no_space();
+        });
     }
 
     fn finish_append_instrumentation(&mut self, bytes_written: u64, elapsed: Duration) {
         self.append_calls += 1;
         self.append_total += elapsed;
-        if let Some(t) = crate::telemetry::Telemetry::global() {
-            t.metrics().record_wal_append(bytes_written);
-            t.metrics().record_wal_append_count();
-            t.metrics()
-                .record_wal_append_ns(Self::duration_nanos_u64(elapsed));
-        }
+        self.counters.record(|m| {
+            m.record_wal_append(bytes_written);
+            m.record_wal_append_count();
+            m.record_wal_append_ns(Self::duration_nanos_u64(elapsed));
+        });
     }
 
     fn record_segment_sequence(&mut self, sequence: u64) {
@@ -597,17 +591,21 @@ impl WalActor {
         writer_epoch: u64,
         storage_io_timeout: Duration,
     ) -> MidgeResult<Self> {
+        let counters = crate::telemetry::CounterSink::default();
         let io = if memory_mode {
             WalIoState::Memory
         } else {
             let fs: Arc<dyn Fs> = Arc::new(RealFs::new(wal_dir)?);
-            let factory = FsWalFactoryIo::new(Arc::clone(&fs)).with_io_timeout(storage_io_timeout);
+            let factory = FsWalFactoryIo::new(Arc::clone(&fs))
+                .with_io_timeout(storage_io_timeout)
+                .with_counters(counters.clone());
             let writer = factory.create_writer(crate::wal::ACTIVE_FILE_NAME)?;
             WalIoState::Open { fs, writer }
         };
 
         let actor = Self {
             io,
+            counters,
             storage_budget: None,
             pending_sync_count: 0,
             durability_policy,
@@ -709,7 +707,7 @@ impl WalActor {
             }
         }
         if matches!(failure.error, crate::common::MidgeError::NoSpace(_)) {
-            Self::record_no_space_event();
+            Self::record_no_space_event(&self.counters);
         }
         failure.error
     }
@@ -967,7 +965,7 @@ impl WalActor {
                 let append_result = writer.append_record(&record);
                 if let Err(error) = append_result {
                     if matches!(error, MidgeError::NoSpace(_)) {
-                        Self::record_no_space_event();
+                        Self::record_no_space_event(&self.counters);
                     }
                     self.fence_transition(state, format!("WAL append failed: {error}"));
                     return Err(error);
@@ -1083,7 +1081,7 @@ impl WalActor {
                 let append_result = writer.append_record(&record);
                 if let Err(error) = append_result {
                     if matches!(error, MidgeError::NoSpace(_)) {
-                        Self::record_no_space_event();
+                        Self::record_no_space_event(&self.counters);
                     }
                     self.fence_transition(state, format!("WAL append failed: {error}"));
                     return Err(error);

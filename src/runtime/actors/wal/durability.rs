@@ -44,9 +44,9 @@ impl WalActor {
             }
             DurabilityPolicy::Batched => {
                 state.begin_pending_transaction(begin_seq);
-                if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-                    telemetry.metrics().record_pending_txn_started();
-                }
+                self.counters.record(|m| {
+                    m.record_pending_txn_started();
+                });
             }
             DurabilityPolicy::CloudAsync | DurabilityPolicy::BestEffort => {}
         }
@@ -184,7 +184,7 @@ impl WalActor {
                 }
                 Ok(Err(e)) => {
                     if matches!(e, MidgeError::NoSpace(_)) {
-                        Self::record_no_space_event();
+                        Self::record_no_space_event(&self.counters);
                     }
                     self.fence_transition(state, format!("WAL fsync failed: {e}"));
                     return Err(e);
@@ -208,9 +208,9 @@ impl WalActor {
             // Record the logical WAL sync here. The writer runner owns the
             // physical fsync count and latency metrics at the filesystem call
             // boundary so one barrier is never counted at multiple layers.
-            if let Some(t) = crate::telemetry::Telemetry::global() {
-                t.metrics().record_wal_sync();
-            }
+            self.counters.record(|m| {
+                m.record_wal_sync();
+            });
 
             if std::env::var_os("MIDGE_TRACE_WAL_SYNC").is_some()
                 && self.sync_calls.is_multiple_of(1000)
@@ -355,9 +355,9 @@ impl WalActor {
                 self.fence_transition(state, format!("WAL seal fsync failed: {error}"));
                 return Err(error);
             }
-            if let Some(t) = crate::telemetry::Telemetry::global() {
-                t.metrics().record_wal_flush();
-            }
+            self.counters.record(|m| {
+                m.record_wal_flush();
+            });
         }
 
         tracing::debug!(

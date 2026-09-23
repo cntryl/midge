@@ -34,9 +34,9 @@ impl HybridStorage {
     ) -> crate::common::MidgeResult<()> {
         let mut queue = self.upload_queue.lock();
         if let Err(error) = queue.ensure_capacity(additional_bytes) {
-            if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-                telemetry.metrics().record_write_stall_cloud();
-            }
+            self.counters.record(|m| {
+                m.record_write_stall_cloud();
+            });
             return Err(error);
         }
         Ok(())
@@ -84,9 +84,9 @@ impl HybridStorage {
 
         let mut queue = self.upload_queue.lock();
         if let Err(error) = queue.try_push(upload_state) {
-            if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-                telemetry.metrics().record_write_stall_cloud();
-            }
+            self.counters.record(|m| {
+                m.record_write_stall_cloud();
+            });
             return Err(error);
         }
 
@@ -196,9 +196,9 @@ impl HybridStorage {
 
             upload.status = UploadStatus::InFlight { started_at: now };
             if crate::failpoints::is_active("midge::cloud::inject_fail_wal_upload") {
-                if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-                    telemetry.metrics().record_cloud_async_wal_upload_failed();
-                }
+                self.counters.record(|m| {
+                    m.record_cloud_async_wal_upload_failed();
+                });
                 Self::emit_wal_upload_failure(
                     upload,
                     "failpoint: cloud WAL upload failed",
@@ -302,17 +302,20 @@ impl HybridStorage {
     }
 
     pub(super) fn spawn_wal_upload_worker(
+        counters: &crate::telemetry::CounterSink,
         wal_upload_rx: mpsc::Receiver<UploadState>,
         cloud: Arc<dyn StorageBackend>,
         event_queue: Arc<Mutex<BoundedEventQueue>>,
         external_event_tx: Option<cb::Sender<StorageEvent>>,
         callback_timeout: Duration,
     ) -> (Option<JoinHandle<()>>, bool) {
+        let worker_counters = counters.clone();
         let spawn_result = thread::Builder::new()
             .name("midge-wal-uploader".to_string())
             .spawn(move || {
                 while let Ok(upload) = wal_upload_rx.recv() {
                     Self::process_wal_upload_attempt(
+                        &worker_counters,
                         &upload,
                         &cloud,
                         &event_queue,
@@ -326,15 +329,16 @@ impl HybridStorage {
             Ok(handle) => (Some(handle), false),
             Err(error) => {
                 tracing::error!("Failed to spawn WAL upload worker: {error}");
-                if let Some(t) = crate::telemetry::Telemetry::global() {
-                    t.metrics().record_thread_spawn_failure();
-                }
+                counters.record(|m| {
+                    m.record_thread_spawn_failure();
+                });
                 (None, true)
             }
         }
     }
 
     pub(super) fn process_wal_upload_attempt(
+        counters: &crate::telemetry::CounterSink,
         upload: &UploadState,
         cloud: &Arc<dyn StorageBackend>,
         event_queue: &Arc<Mutex<BoundedEventQueue>>,
@@ -342,14 +346,14 @@ impl HybridStorage {
         callback_timeout: Duration,
     ) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            Self::process_wal_upload(upload, cloud, callback_timeout)
+            Self::process_wal_upload(counters, upload, cloud, callback_timeout)
         }));
         let terminal_event = if let Ok(event) = result {
             event
         } else {
-            if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-                telemetry.metrics().record_cloud_async_wal_upload_failed();
-            }
+            counters.record(|m| {
+                m.record_cloud_async_wal_upload_failed();
+            });
             Self::wal_upload_failure_event(
                 upload,
                 "cloud WAL upload worker panicked",
@@ -363,14 +367,15 @@ impl HybridStorage {
     }
 
     fn process_wal_upload(
+        counters: &crate::telemetry::CounterSink,
         upload: &UploadState,
         cloud: &Arc<dyn StorageBackend>,
         callback_timeout: Duration,
     ) -> StorageEvent {
         let upload_start = Instant::now();
-        if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-            telemetry.metrics().record_cloud_async_wal_upload_started();
-        }
+        counters.record(|m| {
+            m.record_cloud_async_wal_upload_started();
+        });
 
         Self::log_wal_upload_start(upload, true);
         let data = match Self::read_wal_file(upload) {
@@ -384,12 +389,12 @@ impl HybridStorage {
             }
         };
 
-        Self::record_wal_bytes(&data);
+        Self::record_wal_bytes(counters, &data);
         crate::failpoints::fail_point!("midge::cloud::before_wal_upload");
         if crate::failpoints::is_active("midge::cloud::inject_fail_wal_upload") {
-            if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-                telemetry.metrics().record_cloud_async_wal_upload_failed();
-            }
+            counters.record(|m| {
+                m.record_cloud_async_wal_upload_failed();
+            });
             return Self::wal_upload_failure_event(
                 upload,
                 "failpoint: cloud WAL upload failed",
@@ -407,18 +412,25 @@ impl HybridStorage {
             tx,
         );
 
-        Self::handle_wal_upload_result(upload, upload_start, &rx, callback_timeout, |_, _| {
-            let proof =
-                Self::stable_object_proof_from_backend(cloud, &object_key, callback_timeout)
-                    .map_err(crate::storage::StorageError::from)?;
-            if proof.bytes == expected_data {
-                Ok(())
-            } else {
-                Err(crate::storage::StorageError::protocol(format!(
-                    "remote object '{object_key}' differs from uploaded bytes"
-                )))
-            }
-        })
+        Self::handle_wal_upload_result(
+            counters,
+            upload,
+            upload_start,
+            &rx,
+            callback_timeout,
+            |_, _| {
+                let proof =
+                    Self::stable_object_proof_from_backend(cloud, &object_key, callback_timeout)
+                        .map_err(crate::storage::StorageError::from)?;
+                if proof.bytes == expected_data {
+                    Ok(())
+                } else {
+                    Err(crate::storage::StorageError::protocol(format!(
+                        "remote object '{object_key}' differs from uploaded bytes"
+                    )))
+                }
+            },
+        )
     }
 }
 
@@ -445,11 +457,11 @@ impl HybridStorage {
         }
     }
 
-    fn record_wal_bytes(data: &[u8]) {
+    fn record_wal_bytes(counters: &crate::telemetry::CounterSink, data: &[u8]) {
         let bytes = u64::try_from(data.len()).unwrap_or(u64::MAX);
-        if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-            telemetry.metrics().record_cloud_upload(bytes);
-        }
+        counters.record(|m| {
+            m.record_cloud_upload(bytes);
+        });
     }
 
     fn read_wal_file(upload: &UploadState) -> Result<Vec<u8>, String> {
@@ -501,6 +513,7 @@ impl HybridStorage {
     }
 
     fn handle_wal_upload_result(
+        counters: &crate::telemetry::CounterSink,
         upload: &UploadState,
         upload_start: Instant,
         rx: &std::sync::mpsc::Receiver<StorageEvent>,
@@ -542,17 +555,15 @@ impl HybridStorage {
             Ok(()) => {
                 let upload_latency_us = Self::duration_micros_to_u64(upload_start.elapsed());
                 Self::log_wal_upload_ack(upload);
-                if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-                    telemetry
-                        .metrics()
-                        .record_cloud_async_wal_upload_completed(upload_latency_us);
-                }
+                counters.record(|m| {
+                    m.record_cloud_async_wal_upload_completed(upload_latency_us);
+                });
                 Self::wal_upload_ack_event(upload)
             }
             Err(readback_error) => {
-                if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-                    telemetry.metrics().record_cloud_async_wal_upload_failed();
-                }
+                counters.record(|m| {
+                    m.record_cloud_async_wal_upload_failed();
+                });
                 let error = if write_reported_success {
                     format!("remote WAL readback validation failed: {readback_error}")
                 } else {

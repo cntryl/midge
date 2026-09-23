@@ -221,26 +221,26 @@ impl FlushActor {
         match hybrid.reserve_for_flush_with_token(estimated_size.max(1)) {
             Ok(token) => Ok(Some(token)),
             Err(crate::storage::hybrid::actor::ReservationResult::WaitForCloudUpload) => {
-                if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-                    telemetry.metrics().record_write_stall_cloud();
-                }
+                hybrid.counters().record(|m| {
+                    m.record_write_stall_cloud();
+                });
                 Err(MidgeError::WriteStall(format!(
                     "column family {cf_id} flush is waiting for cloud upload capacity"
                 )))
             }
             Err(crate::storage::hybrid::actor::ReservationResult::WaitForCompaction) => {
-                if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-                    telemetry.metrics().record_write_stall_compaction();
-                }
+                hybrid.counters().record(|m| {
+                    m.record_write_stall_compaction();
+                });
                 Err(MidgeError::WriteStall(format!(
                     "column family {cf_id} flush is waiting for compaction capacity"
                 )))
             }
             Err(crate::storage::hybrid::actor::ReservationResult::RejectNoSpace) => {
-                if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-                    telemetry.metrics().record_no_space_event();
-                    telemetry.metrics().record_write_stall_no_space();
-                }
+                hybrid.counters().record(|m| {
+                    m.record_no_space_event();
+                    m.record_write_stall_no_space();
+                });
                 Err(MidgeError::NoSpace(format!(
                     "column family {cf_id} flush has no durable capacity"
                 )))

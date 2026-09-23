@@ -256,9 +256,9 @@ impl CompactionCoordinator {
                 completion_error = event_loop.last_compaction_publication_error.take();
             }
         } else {
-            if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-                telemetry.metrics().record_compaction_failure();
-            }
+            event_loop.state.diagnostics.record(|m| {
+                m.record_compaction_failure();
+            });
             tracing::warn!(
                 input_count = input_ssts.len(),
                 output_count = output_ssts.len(),
@@ -753,17 +753,18 @@ impl CompactionCoordinator {
     }
 
     fn record_compaction_metrics(event_loop: &mut EventLoop, output_ssts: &[String]) {
-        if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-            let bytes_rewritten: u64 = event_loop
-                .state
-                .manifest
-                .files
-                .iter()
-                .filter(|file| output_ssts.contains(&file.name))
-                .map(|file| file.size_bytes)
-                .sum();
-            telemetry.metrics().record_compaction(bytes_rewritten);
-        }
+        let bytes_rewritten: u64 = event_loop
+            .state
+            .manifest
+            .files
+            .iter()
+            .filter(|file| output_ssts.contains(&file.name))
+            .map(|file| file.size_bytes)
+            .sum();
+        event_loop
+            .state
+            .diagnostics
+            .record(|m| m.record_compaction(bytes_rewritten));
     }
 
     fn respond_publish_failure(
@@ -922,9 +923,9 @@ impl CompactionCoordinator {
     }
 
     fn record_compaction_failure(event_loop: &mut EventLoop) {
-        if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-            telemetry.metrics().record_compaction_failure();
-        }
+        event_loop.state.diagnostics.record(|m| {
+            m.record_compaction_failure();
+        });
         event_loop.state.mark_persistence_anomaly();
     }
 }

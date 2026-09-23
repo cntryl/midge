@@ -9162,9 +9162,9 @@ mod observability_api {
             metrics.max_memtable_wal_segment_gap, 0,
             "local explicit flush should leave no outstanding WAL segment gap"
         );
-        assert!(
-            metrics.wal_append_count >= metrics.wal_fsync_count,
-            "WAL append counter should never be below fsync counter"
+        assert_eq!(
+            metrics.wal_append_count, 0,
+            "a best-effort commit does not append to this engine's WAL"
         );
         assert!(metrics.flush_build_count >= 1);
         assert!(metrics.flush_publish_count >= 1);

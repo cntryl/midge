@@ -218,7 +218,9 @@ impl WalActor {
                         .latest_covering_delete_range_sequence(*cf_id, key)
                         .is_some_and(|sequence| sequence > start_sequence)
                 {
-                    Self::record_write_conflict_point();
+                    state
+                        .diagnostics
+                        .record(crate::telemetry::Metrics::record_write_conflict_point);
                     return Err(MidgeError::WriteConflict(format!(
                         "key conflict on cf {cf_id} for key {key:?} after tx start {start_sequence}"
                     )));
@@ -235,7 +237,9 @@ impl WalActor {
                         .latest_overlapping_delete_range_sequence(*cf_id, start_key, end_key)
                         .is_some_and(|sequence| sequence > start_sequence)
                 {
-                    Self::record_write_conflict_range();
+                    state
+                        .diagnostics
+                        .record(crate::telemetry::Metrics::record_write_conflict_range);
                     return Err(MidgeError::WriteConflict(format!(
                         "range conflict on cf {cf_id} for [{start_key:?}, {end_key:?}) after tx start {start_sequence}"
                     )));

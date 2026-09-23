@@ -11,6 +11,39 @@ pub use metrics::Metrics;
 
 use std::sync::{Arc, Mutex, OnceLock};
 
+/// Where a component that outlives or predates its runtime records
+/// operational events. The runtime attaches its engine counters once it
+/// starts; until then (and in standalone use) events only reach global
+/// telemetry, if an exporter was set up. Clones share one attachment.
+#[derive(Clone, Default)]
+pub(crate) struct CounterSink(Arc<OnceLock<Arc<Metrics>>>);
+
+impl CounterSink {
+    /// Route this sink's events to one engine's counters. Only the first
+    /// attachment takes effect.
+    pub(crate) fn attach(&self, counters: Arc<Metrics>) {
+        let _ = self.0.set(counters);
+    }
+
+    pub(crate) fn record(&self, event: impl Fn(&Metrics)) {
+        if let Some(counters) = self.0.get() {
+            event(counters);
+        }
+        if let Some(telemetry) = Telemetry::global() {
+            event(telemetry.metrics());
+        }
+    }
+}
+
+impl std::fmt::Debug for CounterSink {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CounterSink")
+            .field("attached", &self.0.get().is_some())
+            .finish()
+    }
+}
+
 /// Global telemetry instance
 static TELEMETRY: OnceLock<Option<Arc<Telemetry>>> = OnceLock::new();
 static TELEMETRY_INIT: Mutex<()> = Mutex::new(());

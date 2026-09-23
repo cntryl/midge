@@ -651,11 +651,9 @@ impl RuntimeState {
         replay_dir: &std::path::Path,
         stats: &crate::wal::recovery::RecoveryStats,
     ) {
-        if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-            telemetry
-                .metrics()
-                .record_wal_recovery(stats.record_count, stats.bytes);
-        }
+        crate::telemetry::CounterSink::default().record(|m| {
+            m.record_wal_recovery(stats.record_count, stats.bytes);
+        });
         tracing::info!(
             records_recovered = stats.record_count,
             bytes_recovered = stats.bytes,
@@ -1189,10 +1187,9 @@ impl RuntimeState {
             return Ok(());
         }
 
-        if let Some(t) = crate::telemetry::Telemetry::global() {
-            t.metrics()
-                .record_intent_log_replay(self.intent_log.len() as u64);
-        }
+        self.diagnostics.record(|m| {
+            m.record_intent_log_replay(self.intent_log.len() as u64);
+        });
 
         self.intent_log_replay_runs = self.intent_log_replay_runs.saturating_add(1);
         self.intent_log_entries_replayed = self

@@ -317,11 +317,11 @@ impl EventLoop {
 
         for (seg_id, _) in ready_segments {
             if let Some(enqueued_at) = self.durability.retire_cloud_segment(*seg_id) {
-                if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-                    telemetry.metrics().record_cloud_async_wal_ack_latency_us(
-                        Self::elapsed_micros_to_u64(enqueued_at.elapsed()),
-                    );
-                }
+                self.state.diagnostics.record(|m| {
+                    m.record_cloud_async_wal_ack_latency_us(Self::elapsed_micros_to_u64(
+                        enqueued_at.elapsed(),
+                    ));
+                });
             }
         }
 

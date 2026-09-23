@@ -175,7 +175,9 @@ impl WalActor {
 
                     if let Some(latest_seq) = Self::latest_key_sequence(snapshots, *cf_id, key)? {
                         if latest_seq > start_sequence {
-                            Self::record_write_conflict_point();
+                            state
+                                .diagnostics
+                                .record(crate::telemetry::Metrics::record_write_conflict_point);
                             return Err(MidgeError::WriteConflict(format!(
                                 "key conflict on cf {cf_id} for key {key:?}: latest seq {latest_seq} > tx start {start_sequence}"
                             )));
@@ -186,7 +188,9 @@ impl WalActor {
                         state.latest_covering_delete_range_sequence(*cf_id, key)
                     {
                         if range_seq > start_sequence {
-                            Self::record_write_conflict_point();
+                            state
+                                .diagnostics
+                                .record(crate::telemetry::Metrics::record_write_conflict_point);
                             return Err(MidgeError::WriteConflict(format!(
                                 "key conflict on cf {cf_id} for key {key:?}: covered by delete-range seq {range_seq} > tx start {start_sequence}"
                             )));
@@ -205,7 +209,9 @@ impl WalActor {
                         end_key.as_ref(),
                     )? {
                         if latest_seq > start_sequence {
-                            Self::record_write_conflict_range();
+                            state
+                                .diagnostics
+                                .record(crate::telemetry::Metrics::record_write_conflict_range);
                             return Err(MidgeError::WriteConflict(format!(
                                 "range conflict on cf {cf_id} for [{start_key:?}, {end_key:?}): latest seq {latest_seq} > tx start {start_sequence}"
                             )));
@@ -218,7 +224,9 @@ impl WalActor {
                         end_key.as_ref(),
                     ) {
                         if range_seq > start_sequence {
-                            Self::record_write_conflict_range();
+                            state
+                                .diagnostics
+                                .record(crate::telemetry::Metrics::record_write_conflict_range);
                             return Err(MidgeError::WriteConflict(format!(
                                 "range conflict on cf {cf_id} for [{start_key:?}, {end_key:?}): overlaps delete-range seq {range_seq} > tx start {start_sequence}"
                             )));
@@ -271,7 +279,9 @@ impl WalActor {
             if let Some(snapshot) = snapshot {
                 if let Some(latest_seq) = snapshot.latest_state_sequence(&assertion.key)? {
                     if latest_seq > start_sequence {
-                        Self::record_write_conflict_point();
+                        state
+                            .diagnostics
+                            .record(crate::telemetry::Metrics::record_write_conflict_point);
                         return Err(MidgeError::WriteConflict(format!(
                             "assertion conflict on cf {} for key {:?}: latest seq {latest_seq} > tx start {start_sequence}",
                             assertion.cf_id, assertion.key
@@ -284,7 +294,9 @@ impl WalActor {
                 state.latest_covering_delete_range_sequence(assertion.cf_id, &assertion.key)
             {
                 if range_seq > start_sequence {
-                    Self::record_write_conflict_point();
+                    state
+                        .diagnostics
+                        .record(crate::telemetry::Metrics::record_write_conflict_point);
                     return Err(MidgeError::WriteConflict(format!(
                         "assertion conflict on cf {} for key {:?}: covered by delete-range seq {range_seq} > tx start {start_sequence}",
                         assertion.cf_id, assertion.key

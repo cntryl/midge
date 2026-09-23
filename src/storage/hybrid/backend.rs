@@ -136,6 +136,8 @@ struct ObjectStores {
 pub struct HybridStorage {
     /// Format-neutral object-store routing, separate from admission and worker ownership.
     stores: ObjectStores,
+    /// Operational counters of the engine that owns this storage.
+    counters: crate::telemetry::CounterSink,
     /// Storage Budget Actor for disk management
     budget_actor: Arc<Mutex<actor::StorageBudgetActor>>,
     /// Runtime SST files are disposable after remote publication. Avoid a
@@ -174,6 +176,11 @@ pub struct HybridStorage {
 }
 
 impl HybridStorage {
+    /// Where this storage records operational events.
+    pub(crate) fn counters(&self) -> &crate::telemetry::CounterSink {
+        &self.counters
+    }
+
     /// Create a new hybrid storage with an external event sender.
     ///
     /// When `external_event_tx` is provided, CloudAck/CloudFail will be sent to it
@@ -309,7 +316,9 @@ impl HybridStorage {
         // expensive under CloudAsync + synchronous write APIs (e.g. 10k puts).
         let (wal_upload_tx, wal_upload_rx) =
             mpsc::sync_channel::<UploadState>(limits.worker_entries.max(1));
+        let counters = crate::telemetry::CounterSink::default();
         let (upload_worker_handle, upload_worker_failed) = Self::spawn_wal_upload_worker(
+            &counters,
             wal_upload_rx,
             Arc::clone(&wal_cloud),
             event_queue.clone(),
@@ -318,6 +327,7 @@ impl HybridStorage {
         );
 
         Self {
+            counters,
             stores: ObjectStores {
                 local,
                 sst: cloud,

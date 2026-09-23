@@ -73,9 +73,9 @@ impl EventLoop {
     ) -> Result<(), MidgeError> {
         for cf_id in cf_ids {
             if self.state.l0_write_slot_unavailable(*cf_id) {
-                if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-                    telemetry.metrics().record_write_stall_compaction();
-                }
+                self.state.diagnostics.record(|m| {
+                    m.record_write_stall_compaction();
+                });
                 return Err(MidgeError::WriteStall(format!(
                     "column family {cf_id} has no free L0 slot ({}/{})",
                     self.state.l0_slot_usage(*cf_id),

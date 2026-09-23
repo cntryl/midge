@@ -50,9 +50,9 @@ impl EventLoop {
             return Ok(None);
         }
         if self.state.is_immutable_memtable_queue_full(cf_id) {
-            if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-                telemetry.metrics().record_write_stall_memory();
-            }
+            self.state.diagnostics.record(|m| {
+                m.record_write_stall_memory();
+            });
             self.refresh_write_stall_timing();
             return Err(crate::common::MidgeError::WriteStall(format!(
                 "immutable memtable queue is full for column family {cf_id}"
