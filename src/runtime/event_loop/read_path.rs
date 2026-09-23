@@ -82,7 +82,7 @@ impl EventLoop {
         self.invalidate_sst_read_views();
         self.publish_snapshot();
 
-        crate::runtime::actors::ManifestActor::persist(&self.state)?;
+        crate::runtime::actors::ManifestActor::persist(&mut self.state)?;
         self.mirror_metadata_after_local_commit("SST key-bound backfill")?;
         self.legacy_bound_backfill.record_success(&name);
         Ok(true)
@@ -528,7 +528,7 @@ mod tests {
         file.smallest_key = Some(b"narrow".to_vec());
         file.largest_key = Some(b"narrow".to_vec());
         file.key_bounds_complete = false;
-        crate::runtime::actors::ManifestActor::persist(&event_loop.state)?;
+        crate::runtime::actors::ManifestActor::persist(&mut event_loop.state)?;
 
         // Act
         let changed = event_loop.backfill_one_legacy_sst_bounds()?;
@@ -594,7 +594,7 @@ mod tests {
     ) -> crate::common::MidgeResult<()> {
         // Arrange
         let (tmp, mut event_loop, _sst_path) = create_event_loop_with_test_sst()?;
-        crate::runtime::actors::ManifestActor::persist(&event_loop.state)?;
+        crate::runtime::actors::ManifestActor::persist(&mut event_loop.state)?;
         let _test_guard = crate::failpoints::test_failpoint_guard();
         let guard = fail::FailGuard::new(
             "midge::manifest::after_sst_bounds_verified_before_persist",

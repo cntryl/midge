@@ -2157,7 +2157,7 @@ fn should_refuse_event_loop_publication_when_metadata_reload_fails() {
     // Act
     let reload = state.reload_persisted_metadata();
     let intent_publication = state.record_compaction_publication_intent(0, Vec::new(), Vec::new());
-    let manifest_publication = crate::runtime::actors::ManifestActor::persist(&state);
+    let manifest_publication = crate::runtime::actors::ManifestActor::persist(&mut state);
 
     // Assert
     assert!(reload.is_err());

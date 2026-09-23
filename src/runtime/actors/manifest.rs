@@ -179,7 +179,7 @@ impl ManifestActor {
     }
 
     /// Persist manifest to disk
-    pub fn persist(state: &RuntimeState) -> MidgeResult<()> {
+    pub fn persist(state: &mut RuntimeState) -> MidgeResult<()> {
         // Skip persistence in memory mode
         if state.is_memory_mode() {
             tracing::debug!("Manifest: skipping persistence in memory mode");
@@ -202,7 +202,8 @@ impl ManifestActor {
             &state.db_path,
             &state.manifest,
         )
-        .map_err(crate::common::MidgeError::Internal)?;
+        .map_err(crate::common::MidgeError::Internal)?
+        .adopt_into(&mut state.manifest);
 
         tracing::debug!("Manifest persisted");
 
@@ -382,7 +383,7 @@ mod tests {
                 actor
                     .compaction_complete(&mut state, &[], &[sst_meta(sequence)])
                     .expect("compaction edit");
-                ManifestActor::persist(&state).expect("persist");
+                ManifestActor::persist(&mut state).expect("persist");
                 persisted_checkpoints.push(read_snapshot(&state).edit_checkpoint_id);
             }
         });
@@ -435,7 +436,7 @@ mod tests {
         actor
             .compaction_complete(&mut state, &[], &[sst_meta(3)])
             .expect("backfill-style local edit");
-        ManifestActor::persist(&state).expect("persist");
+        ManifestActor::persist(&mut state).expect("persist");
 
         // Assert: the snapshot may not skip the edit this manifest never saw
         let snapshot = read_snapshot(&state);
@@ -572,5 +573,55 @@ mod tests {
         // Assert: valid SST should be accepted
         assert!(result.is_ok(), "add_sst failed: {:?}", result.err());
         Ok(())
+    }
+
+    /// #493: every production journal writer must advance the in-memory
+    /// checkpoint horizon, or each later persist takes the stale-caller branch.
+    #[test]
+    fn should_track_snapshot_checkpoint_when_ddl_journals_before_compaction_persist() {
+        // Arrange
+        let tmp = tempfile::tempdir().expect("create tmpdir");
+        let mut state = crate::runtime::state::RuntimeState::new(tmp.path().to_path_buf(), false);
+        let mut actor = ManifestActor::new();
+        crate::runtime::ddl::apply_local_edit(
+            &mut state,
+            &crate::metadata::ManifestEdit::CreateColumnFamily {
+                id: 1,
+                name: "other".to_string(),
+                created_at: 1,
+            },
+        )
+        .expect("DDL edit");
+        let sink = LogSink::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(sink.clone())
+            .finish();
+
+        // Act
+        tracing::subscriber::with_default(subscriber, || {
+            for sequence in [1, 2] {
+                actor
+                    .compaction_complete(&mut state, &[], &[sst_meta(sequence)])
+                    .expect("compaction edit");
+                ManifestActor::persist(&mut state).expect("persist");
+            }
+        });
+
+        // Assert
+        assert_eq!(
+            state.manifest.edit_checkpoint_id,
+            read_snapshot(&state).edit_checkpoint_id
+        );
+        let logs = String::from_utf8(
+            sink.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+        )
+        .unwrap();
+        assert!(!logs.contains("stale caller"), "{logs}");
     }
 }

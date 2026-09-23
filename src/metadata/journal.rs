@@ -261,10 +261,23 @@ pub(crate) fn replay_edits_after_with_fs_unlocked(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     checkpoint: u64,
 ) -> MidgeResult<Vec<ManifestEdit>> {
+    Ok(
+        replay_identified_edits_after_with_fs_unlocked(fs, checkpoint)?
+            .into_iter()
+            .map(|(_, edit)| edit)
+            .collect(),
+    )
+}
+
+/// Journal edits newer than `checkpoint`, each with its edit id.
+pub(crate) fn replay_identified_edits_after_with_fs_unlocked(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+    checkpoint: u64,
+) -> MidgeResult<Vec<(u64, ManifestEdit)>> {
     Ok(replay_journal_with_ids_with_fs(fs)?
         .into_iter()
         .filter(|edit| edit.edit_id > checkpoint)
-        .map(|edit| edit.edit)
+        .map(|edit| (edit.edit_id, edit.edit))
         .collect())
 }
 

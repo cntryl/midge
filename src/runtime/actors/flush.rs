@@ -66,6 +66,10 @@ pub(crate) struct FlushPublicationDelta {
     pub next_sst_seq: u64,
     pub cloud_metadata_published: bool,
     pub persistence_anomaly: bool,
+    /// The journal edit id of the snapshot the worker wrote. Once the event
+    /// loop installs this delta its manifest holds every edit up to it: the
+    /// publication gate kept any other writer from journaling meanwhile.
+    pub journal_checkpoint: Option<u64>,
 }
 
 pub(crate) struct FlushPublishCompletion {
@@ -441,14 +445,14 @@ impl FlushActor {
 
         validate_task_lease(task)?;
         clear_manifest_published_intent(task, &task.sst_name)?;
-        let persistence_anomaly =
+        let (persistence_anomaly, journal_checkpoint) =
             match crate::metadata::ManifestPersistence::save_snapshot_and_truncate_journal_with_fs(
                 &task.fs, &manifest,
             ) {
-                Ok(()) => false,
+                Ok(written) => (false, Some(written.edit_checkpoint_id)),
                 Err(error) if task.cloud_metadata_storage.is_none() => {
                     tracing::warn!(%error, "manifest journal is durable but checkpoint save failed");
-                    true
+                    (true, None)
                 }
                 Err(error) => return Err(MidgeError::Internal(error)),
             };
@@ -471,6 +475,7 @@ impl FlushActor {
             next_sst_seq,
             cloud_metadata_published,
             persistence_anomaly,
+            journal_checkpoint,
         })
     }
 }

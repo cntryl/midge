@@ -515,6 +515,10 @@ impl EventLoop {
             .manifest
             .last_persisted_sequence
             .max(delta.identity.sequence);
+        if let Some(checkpoint) = delta.journal_checkpoint {
+            let horizon = &mut self.state.manifest.edit_checkpoint_id;
+            *horizon = (*horizon).max(checkpoint);
+        }
         if delta.persistence_anomaly {
             self.state.mark_persistence_anomaly();
         }
@@ -1661,6 +1665,7 @@ mod tests {
             next_sst_seq: 2,
             cloud_metadata_published: false,
             persistence_anomaly: false,
+            journal_checkpoint: None,
         };
 
         // Act
@@ -1862,6 +1867,7 @@ mod tests {
                     next_sst_seq: 2,
                     cloud_metadata_published: false,
                     persistence_anomaly: false,
+                    journal_checkpoint: None,
                 }),
             });
 

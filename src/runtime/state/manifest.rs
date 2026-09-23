@@ -437,7 +437,7 @@ impl RuntimeState {
         crate::metadata::append_edit_batch(&self.db_path, &edits).map(|_| ())
     }
 
-    pub(super) fn persist_manifest_checkpoint(&self) -> MidgeResult<()> {
+    pub(super) fn persist_manifest_checkpoint(&mut self) -> MidgeResult<()> {
         if self.is_memory_mode() {
             return Ok(());
         }
@@ -447,6 +447,8 @@ impl RuntimeState {
             &self.db_path,
             &self.manifest,
         )
-        .map_err(crate::common::MidgeError::Internal)
+        .map_err(crate::common::MidgeError::Internal)?
+        .adopt_into(&mut self.manifest);
+        Ok(())
     }
 }
