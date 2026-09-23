@@ -433,6 +433,31 @@ fn should_not_replay_segments_after_invalid_segment_when_cloud_salvage_skips_one
 }
 
 #[test]
+fn should_lift_sequence_floor_over_verified_prefix_of_corrupt_local_segment_set_aside(
+) -> MidgeResult<()> {
+    // Arrange: segment 2 is lost; local-only segment 3 holds sequences 7
+    // and 8 followed by damage, so it is in neither the catalog nor the plan.
+    let mut fixture = Fixture::new()?;
+    fixture.publish(1, 1, 7, &framed_wal(1, 7, b"one"))?;
+    fixture.publish(2, 2, 7, &framed_wal(2, 7, b"two"))?;
+    corrupt_publication(&mut fixture, 2);
+    let mut local = framed_wal(7, 7, b"seven");
+    local.extend_from_slice(&framed_wal(8, 7, b"eight"));
+    let mut damaged = framed_wal(9, 7, b"nine");
+    damaged[8] ^= 1;
+    local.extend_from_slice(&damaged);
+    let path = fixture.local(&crate::wal::segment_file_name(3), &local)?;
+
+    // Act
+    let recovered = fixture.build(RecoveryPolicy::Salvage)?;
+
+    // Assert
+    assert!(!path.exists());
+    assert_eq!(recovered.plan.max_unreplayed_sequence, 8);
+    Ok(())
+}
+
+#[test]
 fn should_replay_every_segment_when_valid_local_copy_fills_cloud_hole() -> MidgeResult<()> {
     // Arrange
     let mut fixture = Fixture::new()?;
