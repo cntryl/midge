@@ -99,11 +99,13 @@ fn run_renewal_worker(
                 tracing::trace!("lease renewed successfully");
             }
             Err(error)
-                if matches!(error, LeaseError::IoError(_) | LeaseError::Indeterminate(_))
-                    && validity.is_some_and(|validity| {
-                        matches!(validity.snapshot(), LeaseValidityState::Active { valid_until, .. }
+                if matches!(
+                    error,
+                    LeaseError::IoError(_) | LeaseError::Indeterminate(_) | LeaseError::Timeout(_)
+                ) && validity.is_some_and(|validity| {
+                    matches!(validity.snapshot(), LeaseValidityState::Active { valid_until, .. }
                             if valid_until > std::time::Instant::now())
-                    }) =>
+                }) =>
             {
                 // The provider could not answer, but this writer's lease is
                 // still valid. Retry within the remaining validity; the lease

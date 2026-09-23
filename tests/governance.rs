@@ -334,6 +334,38 @@ mod architecture_ladder {
     }
 
     #[test]
+    fn should_classify_lease_errors_by_type_when_validating_writer_authority() {
+        // Lease errors carry their class as a variant; classifying them by
+        // message text drifts as soon as a provider words an error differently.
+        // Arrange
+        let mut offenders = Vec::new();
+
+        // Act
+        for root in ["src/lease", "src/runtime", "src/engine/startup"] {
+            for path in rust_sources_under(root) {
+                let relative = path
+                    .strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                    .expect("source under manifest dir");
+                let name = relative.to_string_lossy();
+                if name.contains("tests") {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).expect("read source");
+                let source = source.split("#[cfg(test)]\nmod tests").next().unwrap_or("");
+                if source.contains("contains(\"timed out\")") {
+                    offenders.push(name.to_string());
+                }
+            }
+        }
+
+        // Assert
+        assert!(
+            offenders.is_empty(),
+            "classify lease errors by variant, not message text: {offenders:?}"
+        );
+    }
+
+    #[test]
     fn should_import_config_types_directly_when_storage_needs_them() {
         // Arrange
         let source = std::fs::read_to_string(

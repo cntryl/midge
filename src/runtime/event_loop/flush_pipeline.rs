@@ -390,11 +390,15 @@ impl EventLoop {
         self.publication_gate.active = false;
 
         if let Err(error) = self.validate_flush_completion(completion.identity) {
-            if matches!(error, crate::common::MidgeError::Busy(_))
-                && self
-                    .state
-                    .immutable_flush_by_id(completion.identity.flush_id)
-                    .is_some()
+            // Busy and Timeout both mean the store did not answer: authority
+            // is unknown, not lost.
+            if matches!(
+                error,
+                crate::common::MidgeError::Busy(_) | crate::common::MidgeError::Timeout(_)
+            ) && self
+                .state
+                .immutable_flush_by_id(completion.identity.flush_id)
+                .is_some()
             {
                 // Validation could not complete, but this runtime still owns
                 // the flush. The worker may already have published it, so
@@ -442,17 +446,11 @@ impl EventLoop {
                     self.fencing.leader_holder_id.as_deref().unwrap_or_default(),
                     identity.writer_epoch,
                 )
-                .map_err(|error| match error {
-                    // The store could not answer: authority is unknown, not
-                    // lost. Report it as retryable so the flush is retried.
-                    crate::lease::LeaseError::IoError(_)
-                    | crate::lease::LeaseError::Indeterminate(_) => {
-                        crate::common::MidgeError::Busy(format!(
-                            "flush {} writer validation could not complete: {error}",
-                            identity.flush_id
-                        ))
-                    }
-                    other => crate::common::MidgeError::Fenced(other.to_string()),
+                .map_err(|error| {
+                    error.into_validation_error(&format!(
+                        "flush {} writer validation",
+                        identity.flush_id
+                    ))
                 })?;
         }
         let Some((cf_id, flush)) = self.state.immutable_flush_by_id(identity.flush_id) else {
@@ -747,7 +745,7 @@ impl EventLoop {
                     self.fencing.leader_holder_id.as_deref().unwrap_or_default(),
                     self.fencing.writer_epoch,
                 )
-                .map_err(|error| crate::common::MidgeError::Fenced(error.to_string()))?;
+                .map_err(|error| error.into_validation_error("local WAL prune"))?;
         }
         Ok(())
     }
@@ -1275,6 +1273,7 @@ mod tests {
     struct FlakyLeaderStore {
         epoch: u64,
         fail_next_read: std::sync::atomic::AtomicBool,
+        error: fn() -> crate::lease::LeaseError,
     }
 
     impl crate::lease::LeaderStore for FlakyLeaderStore {
@@ -1292,9 +1291,7 @@ mod tests {
                 .fail_next_read
                 .swap(false, std::sync::atomic::Ordering::SeqCst)
             {
-                return Err(crate::lease::LeaseError::IoError(
-                    "leader read timed out".into(),
-                ));
+                return Err((self.error)());
             }
             Ok(Some(crate::lease::LeaderRecord {
                 epoch: self.epoch,
@@ -1307,56 +1304,63 @@ mod tests {
     #[test]
     fn should_retry_flush_publication_when_completion_validation_fails_transiently(
     ) -> crate::common::MidgeResult<()> {
-        // Arrange
-        let directory = tempfile::tempdir()?;
-        let (mut event_loop, _hybrid) = event_loop_with_hybrid_storage(&directory)?;
-        event_loop.state.sequence = 1;
-        event_loop
-            .state
-            .get_cf(0)
-            .expect("family")
-            .memtable
-            .put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)?;
-        let flush_id = event_loop.freeze_active_memtable(0)?.expect("frozen");
-        event_loop.fencing.leader_store = Some(Arc::new(FlakyLeaderStore {
-            epoch: event_loop.fencing.writer_epoch,
-            fail_next_read: std::sync::atomic::AtomicBool::new(true),
-        }));
-        event_loop.fencing.leader_holder_id = Some("writer".to_string());
-        let identity = FlushIdentity {
-            flush_id,
-            writer_epoch: event_loop.fencing.writer_epoch,
-            cf_id: 0,
-            sequence: 1,
-        };
-        let (_, flush) = event_loop
-            .state
-            .immutable_flush_by_id_mut(flush_id)
-            .expect("immutable");
-        flush.phase = ImmutableFlushPhase::Publishing;
-        event_loop.publication_gate.active = true;
+        let unanswered: [fn() -> crate::lease::LeaseError; 2] = [
+            || crate::lease::LeaseError::IoError("leader read failed".into()),
+            || crate::lease::LeaseError::Timeout("leader read".into()),
+        ];
+        for error in unanswered {
+            // Arrange
+            let directory = tempfile::tempdir()?;
+            let (mut event_loop, _hybrid) = event_loop_with_hybrid_storage(&directory)?;
+            event_loop.state.sequence = 1;
+            event_loop
+                .state
+                .get_cf(0)
+                .expect("family")
+                .memtable
+                .put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)?;
+            let flush_id = event_loop.freeze_active_memtable(0)?.expect("frozen");
+            event_loop.fencing.leader_store = Some(Arc::new(FlakyLeaderStore {
+                epoch: event_loop.fencing.writer_epoch,
+                fail_next_read: std::sync::atomic::AtomicBool::new(true),
+                error,
+            }));
+            event_loop.fencing.leader_holder_id = Some("writer".to_string());
+            let identity = FlushIdentity {
+                flush_id,
+                writer_epoch: event_loop.fencing.writer_epoch,
+                cf_id: 0,
+                sequence: 1,
+            };
+            let (_, flush) = event_loop
+                .state
+                .immutable_flush_by_id_mut(flush_id)
+                .expect("immutable");
+            flush.phase = ImmutableFlushPhase::Publishing;
+            event_loop.publication_gate.active = true;
 
-        // Act: the leader-store read behind validation fails once. The flush
-        // may already be durably published, so it must be retried, not
-        // stranded in Publishing forever.
-        event_loop.handle_flush_publish_completion(FlushPublishCompletion {
-            identity,
-            reservation: None,
-            publish_ns: 1,
-            result: Err(crate::common::MidgeError::Internal("unused".into())),
-        });
+            // Act: the leader-store read behind validation fails once. The flush
+            // may already be durably published, so it must be retried, not
+            // stranded in Publishing forever.
+            event_loop.handle_flush_publish_completion(FlushPublishCompletion {
+                identity,
+                reservation: None,
+                publish_ns: 1,
+                result: Err(crate::common::MidgeError::Internal("unused".into())),
+            });
 
-        // Assert
-        let (_, flush) = event_loop
-            .state
-            .immutable_flush_by_id(flush_id)
-            .expect("immutable still owned");
-        assert!(
-            matches!(flush.phase, ImmutableFlushPhase::RetryPending),
-            "phase after transient validation failure: {:?}",
-            flush.phase
-        );
-        assert!(!event_loop.publication_gate.active);
+            // Assert
+            let (_, flush) = event_loop
+                .state
+                .immutable_flush_by_id(flush_id)
+                .expect("immutable still owned");
+            assert!(
+                matches!(flush.phase, ImmutableFlushPhase::RetryPending),
+                "phase after transient validation failure: {:?}",
+                flush.phase
+            );
+            assert!(!event_loop.publication_gate.active);
+        }
         Ok(())
     }
 

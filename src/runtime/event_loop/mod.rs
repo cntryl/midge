@@ -1304,8 +1304,20 @@ impl EventLoop {
             self.drain_hybrid_storage_events();
             return;
         }
+        self.background_progress(Some(msg_rx));
+    }
+
+    /// The one list of background progress steps. The idle pass and the
+    /// request fairness slot both run it, so a busy queue cannot starve a
+    /// step the idle pass would have run. The idle pass may drain queued
+    /// writes into its batched sync; the fairness slot runs after dispatch
+    /// and leaves the queue in order.
+    fn background_progress(&mut self, drain_writes_from: Option<&Receiver<RuntimeMsg>>) {
         self.drain_flush_worker_results();
-        self.sync_batched_wal_if_needed(msg_rx);
+        match drain_writes_from {
+            Some(msg_rx) => self.sync_batched_wal_if_needed(msg_rx),
+            None => self.sync_batched_wal_without_draining(),
+        }
         self.maybe_flush_cloud_async_wal();
         self.drain_cloud_wal_upload_backlog();
         self.tick_hybrid_storage();
@@ -1396,20 +1408,12 @@ impl EventLoop {
         outcome
     }
 
-    fn run_request_fairness_slot(&mut self) {
+    pub(super) fn run_request_fairness_slot(&mut self) {
         // A continuously non-empty request queue must not starve background
         // durability and storage progress. Run this bounded slot only after
         // dispatch so a restored control request keeps the publication turn
         // that made it eligible.
-        self.drain_flush_worker_results();
-        self.maybe_flush_cloud_async_wal();
-        self.drain_cloud_wal_upload_backlog();
-        self.tick_hybrid_storage();
-        self.drain_hybrid_storage_events();
-        self.drain_cloud_wal_upload_backlog();
-        self.drain_auto_flush_memtables();
-        self.run_background_compaction_maintenance_if_due();
-        self.retry_manifest_reclamation_if_due();
+        self.background_progress(None);
     }
 
     pub(super) fn handle_runtime_msg(

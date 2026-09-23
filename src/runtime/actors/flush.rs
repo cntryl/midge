@@ -514,7 +514,12 @@ fn validate_task_lease(task: &FlushPublishTask) -> MidgeResult<()> {
                 task.leader_holder_id.as_deref().unwrap_or_default(),
                 task.build.identity.writer_epoch,
             )
-            .map_err(|error| MidgeError::Fenced(error.to_string()))?;
+            .map_err(|error| {
+                error.into_validation_error(&format!(
+                    "flush {} publish",
+                    task.build.identity.flush_id
+                ))
+            })?;
     }
     Ok(())
 }

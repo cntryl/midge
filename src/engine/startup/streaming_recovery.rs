@@ -364,7 +364,7 @@ fn validate_lease(config: &crate::runtime::RuntimeConfig) -> MidgeResult<()> {
                 config.leader_holder_id.as_deref().unwrap_or_default(),
                 config.writer_epoch,
             )
-            .map_err(|error| MidgeError::Fenced(error.to_string()))?;
+            .map_err(|error| error.into_validation_error("cloud WAL recovery"))?;
     }
     Ok(())
 }
