@@ -511,6 +511,34 @@ impl CloudPersistence {
         Ok(catalog)
     }
 
+    /// Drop the segments a salvage open stopped short of from catalog
+    /// authority so later opens do not stop at the same hole and discard
+    /// writes made after it. Their objects stay in place: retirement here is
+    /// not followed by a delete.
+    pub(crate) fn retire_unreplayed_wal_segments(
+        &self,
+        writer_epoch: u64,
+        segments: &[PublishedWalSegment],
+    ) -> MidgeResult<()> {
+        let deadline = crate::common::OperationDeadline::unbounded();
+        let _catalog_mutation =
+            self.lock_wal_catalog_mutation_within(&deadline, "cloud WAL salvage retirement")?;
+        let authority = load_and_repair_catalog_within(self, &deadline)?.ok_or_else(|| {
+            MidgeError::Internal("cloud WAL publication catalog is missing".to_string())
+        })?;
+        let mut catalog = authority.catalog;
+        let mut changed = false;
+        for segment in segments {
+            changed |= catalog
+                .retire(writer_epoch, segment)
+                .map_err(MidgeError::Fenced)?;
+        }
+        if changed {
+            commit_catalog_within(self, Some(&authority.primary), &catalog, &deadline)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn publish_remote_wal_segment(
         &self,
         segment_id: u64,

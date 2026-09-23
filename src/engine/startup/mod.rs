@@ -95,6 +95,13 @@ pub(in crate::engine) struct CloudWalRecoveryPlan {
         std::collections::BTreeMap<u64, crate::runtime::RecoveredCloudWalSegment>,
     pub(in crate::engine) active_wal: Option<crate::runtime::RecoveredCloudActiveWal>,
     pub(in crate::engine) opened_in_salvage_mode: bool,
+    /// Cataloged segments at and after the first hole that salvage stopped
+    /// at. They are not replayed; startup retires them from the catalog and
+    /// keeps their objects.
+    pub(in crate::engine) unreplayed_segments: Vec<crate::wal::cloud_catalog::PublishedWalSegment>,
+    /// Highest sequence held by WAL salvage set aside, so new writes never
+    /// reuse one. Zero when nothing was set aside.
+    pub(in crate::engine) max_unreplayed_sequence: u64,
 }
 
 impl CloudWalRecoveryPlan {

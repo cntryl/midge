@@ -360,6 +360,8 @@ fn should_fail_open_without_truncating_active_wal_when_cloud_salvage_read_fails_
         local_segments: BTreeMap::new(),
         active_wal: None,
         opened_in_salvage_mode: false,
+        unreplayed_segments: Vec::new(),
+        max_unreplayed_sequence: 0,
     };
 
     // Act
@@ -372,5 +374,125 @@ fn should_fail_open_without_truncating_active_wal_when_cloud_salvage_read_fails_
         bytes,
         "wal.log must keep every byte"
     );
+    Ok(())
+}
+
+fn corrupt_publication(fixture: &mut Fixture, id: u64) {
+    fixture
+        .catalog
+        .segments
+        .get_mut(&id)
+        .expect("publication")
+        .content_crc32c ^= 1;
+}
+
+#[test]
+fn should_not_replay_segments_after_invalid_segment_when_cloud_salvage_skips_one() -> MidgeResult<()>
+{
+    // Arrange: segment 2 is lost and no local copy can fill the hole.
+    let mut fixture = Fixture::new()?;
+    fixture.publish(1, 1, 7, &framed_wal(1, 7, b"one"))?;
+    fixture.publish(2, 2, 7, &framed_wal(2, 7, b"two"))?;
+    fixture.publish(3, 3, 7, &framed_wal(3, 7, b"three"))?;
+    corrupt_publication(&mut fixture, 2);
+    let active = fixture.local(crate::wal::ACTIVE_FILE_NAME, &framed_wal(4, 7, b"four"))?;
+
+    // Act
+    let recovered = fixture.build(RecoveryPolicy::Salvage)?;
+
+    // Assert: replay stops at the hole and history past it is set aside.
+    assert!(recovered.plan.opened_in_salvage_mode);
+    assert_eq!(
+        recovered
+            .plan
+            .remote_segments
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    assert_eq!(recovered.fs.list_dir(&FsPath::new("wal"))?.len(), 1);
+    assert_eq!(
+        recovered
+            .plan
+            .unreplayed_segments
+            .iter()
+            .map(|segment| segment.segment_id)
+            .collect::<Vec<_>>(),
+        vec![2, 3]
+    );
+    assert!(recovered.plan.active_wal.is_none());
+    assert!(!active.exists());
+    assert!(active.with_file_name("wal.log.salvage-retained").exists());
+    assert_eq!(recovered.plan.max_unreplayed_sequence, 4);
+    assert_eq!(recovered.next_segment_id, 4);
+    Ok(())
+}
+
+#[test]
+fn should_replay_every_segment_when_valid_local_copy_fills_cloud_hole() -> MidgeResult<()> {
+    // Arrange
+    let mut fixture = Fixture::new()?;
+    let second = framed_wal(2, 7, b"two");
+    fixture.publish(1, 1, 7, &framed_wal(1, 7, b"one"))?;
+    fixture.publish(2, 2, 7, &second)?;
+    fixture.publish(3, 3, 7, &framed_wal(3, 7, b"three"))?;
+    corrupt_publication(&mut fixture, 2);
+    fixture.local(&crate::wal::segment_file_name(2), &second)?;
+
+    // Act
+    let recovered = fixture.build(RecoveryPolicy::Salvage)?;
+
+    // Assert
+    assert_eq!(recovered.fs.list_dir(&FsPath::new("wal"))?.len(), 3);
+    assert!(recovered.plan.unreplayed_segments.is_empty());
+    assert_eq!(recovered.plan.max_unreplayed_sequence, 0);
+    Ok(())
+}
+
+#[test]
+fn should_preserve_active_wal_copy_when_cloud_salvage_truncates_corrupt_suffix() -> MidgeResult<()>
+{
+    // Arrange: three records with a flipped byte inside the second.
+    let fixture = Fixture::new()?;
+    let first = framed_wal(1, 7, b"one");
+    let mut bytes = first.clone();
+    let second_start = bytes.len();
+    bytes.extend(framed_wal(2, 7, b"two"));
+    bytes.extend(framed_wal(3, 7, b"three"));
+    bytes[second_start + 8] ^= 1;
+    let active = fixture.local(crate::wal::ACTIVE_FILE_NAME, &bytes)?;
+
+    // Act
+    let recovered = fixture.build(RecoveryPolicy::Salvage)?;
+
+    // Assert
+    assert!(recovered.plan.opened_in_salvage_mode);
+    assert_eq!(std::fs::read(&active)?, first);
+    assert_eq!(
+        std::fs::read(active.with_file_name("wal.log.salvage-retained"))?,
+        bytes,
+        "salvage must keep a full copy of the original wal.log"
+    );
+    Ok(())
+}
+
+#[test]
+fn should_replay_cataloged_segments_when_corrupt_local_segment_predates_catalog() -> MidgeResult<()>
+{
+    // Arrange: segment 1 was retired from the catalog (covered by SSTs), but
+    // its local copy leaked and is now corrupt.
+    let mut fixture = Fixture::new()?;
+    fixture.publish(5, 5, 7, &framed_wal(5, 7, b"five"))?;
+    fixture.publish(6, 6, 7, &framed_wal(6, 7, b"six"))?;
+    let leaked = fixture.local(&crate::wal::segment_file_name(1), b"corrupt leftover")?;
+
+    // Act
+    let recovered = fixture.build(RecoveryPolicy::Salvage)?;
+
+    // Assert
+    assert_eq!(recovered.fs.list_dir(&FsPath::new("wal"))?.len(), 2);
+    assert!(recovered.plan.unreplayed_segments.is_empty());
+    assert!(leaked.exists(), "the leftover stays where it was");
     Ok(())
 }

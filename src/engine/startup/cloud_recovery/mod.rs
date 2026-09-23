@@ -322,6 +322,8 @@ impl CloudStartupRecovery {
             local_segments: std::collections::BTreeMap::new(),
             active_wal: None,
             opened_in_salvage_mode: false,
+            unreplayed_segments: Vec::new(),
+            max_unreplayed_sequence: 0,
         };
 
         let staging_fs = Self::recovery_staging_fs(db_path)?;
@@ -544,6 +546,8 @@ impl CloudStartupRecovery {
             local_segments: std::collections::BTreeMap::new(),
             active_wal: None,
             opened_in_salvage_mode: false,
+            unreplayed_segments: Vec::new(),
+            max_unreplayed_sequence: 0,
         };
         let staging_fs = Self::recovery_staging_fs(db_path)?;
         for (segment_id, publication) in &catalog.segments {
@@ -1090,6 +1094,32 @@ impl CloudStartupRecovery {
     }
 
     pub(super) fn quarantine_local_wal_alias(path: &Path) -> MidgeResult<()> {
+        let retained_path = Self::unused_retained_path(path)?;
+        std::fs::rename(path, &retained_path).map_err(|error| {
+            MidgeError::RecoveryFailed(format!(
+                "failed to quarantine local WAL alias '{}' as '{}': {error}",
+                path.display(),
+                retained_path.display()
+            ))
+        })
+    }
+
+    /// Durably copy a local WAL file beside itself before salvage rewrites
+    /// it, so the discarded bytes stay available for inspection.
+    pub(super) fn retain_local_wal_copy(path: &Path) -> MidgeResult<()> {
+        let retained_path = Self::unused_retained_path(path)?;
+        std::fs::copy(path, &retained_path)
+            .and_then(|_| std::fs::File::open(&retained_path)?.sync_all())
+            .map_err(|error| {
+                MidgeError::RecoveryFailed(format!(
+                    "failed to retain a copy of local WAL '{}' as '{}': {error}",
+                    path.display(),
+                    retained_path.display()
+                ))
+            })
+    }
+
+    fn unused_retained_path(path: &Path) -> MidgeResult<PathBuf> {
         let file_name = path
             .file_name()
             .and_then(|name| name.to_str())
@@ -1106,16 +1136,9 @@ impl CloudStartupRecovery {
                 format!("{file_name}.salvage-retained.{suffix}")
             };
             let retained_path = path.with_file_name(retained_name);
-            if retained_path.exists() {
-                continue;
+            if !retained_path.exists() {
+                return Ok(retained_path);
             }
-            return std::fs::rename(path, &retained_path).map_err(|error| {
-                MidgeError::RecoveryFailed(format!(
-                    "failed to quarantine local WAL alias '{}' as '{}': {error}",
-                    path.display(),
-                    retained_path.display()
-                ))
-            });
         }
         Err(MidgeError::RecoveryFailed(format!(
             "could not allocate quarantine name for local WAL alias '{}'",
