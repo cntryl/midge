@@ -239,6 +239,7 @@ fn checkpoint_family(
             sst_seq,
             sst_dir: state.sst_dir.clone(),
             fs: Arc::clone(&state.fs),
+            manifest_store: Arc::clone(&state.manifest_store),
             hybrid_storage: config.hybrid_storage.clone(),
             cloud_metadata_storage: config.cloud_metadata_storage.clone(),
             metadata_publication_lock: config.metadata_publication_lock.clone(),
@@ -286,11 +287,10 @@ fn reserve_sst_sequence(
     // must never reuse an orphan's name for a different replay partition.
     state.manifest.next_sst_seqs.insert(cf_id, next_seq);
     crate::failpoints::fail_point!("midge::recovery::before_name_reservation");
-    crate::metadata::ManifestPersistence::save_snapshot_and_truncate_journal(
-        &state.db_path,
-        &state.manifest,
-    )
-    .map_err(MidgeError::Internal)?;
+    state
+        .manifest_store
+        .save_snapshot(&state.manifest)?
+        .adopt_into(&mut state.manifest);
     if let Some(cloud) = &materialized.cloud_metadata_storage_for_mirror {
         validate_lease(config)?;
         super::CloudStartupRecovery::mirror_cloud_metadata(

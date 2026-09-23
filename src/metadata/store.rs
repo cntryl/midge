@@ -8,9 +8,11 @@
 //! snapshot from a current caller reads nothing.
 //!
 //! Remembering is only safe if nothing else writes. Every runtime journal
-//! append and snapshot save goes through the store (a source-scan test keeps
-//! it that way). As a second line of defence the store stats the journal
-//! before trusting its position, and any failed write forgets it, so the
+//! append and snapshot save goes through the store: the free functions that
+//! write directly are compiled only for tests, so a production bypass does
+//! not build. As a second line of defence the store stats the journal and the
+//! snapshot before trusting its position, and any failed write forgets it, so
+//! the
 //! next operation re-reads the position from disk and repairs a torn tail.
 
 use crate::common::MidgeResult;
@@ -20,12 +22,19 @@ use crate::metadata::persistence::{JournalPosition, WrittenCheckpoint};
 use crate::metadata::{Manifest, ManifestPersistence};
 use std::sync::Arc;
 
-/// The journal position the store last wrote, and the journal length that
-/// write left behind.
-#[derive(Debug, Clone, Copy)]
+/// The journal position the store last wrote, and the file lengths that
+/// write left behind. A length that moved means another writer touched the
+/// files, so the position is re-read from disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct KnownPosition {
     position: JournalPosition,
-    journal_len: u64,
+    lengths: FileLengths,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileLengths {
+    journal: u64,
+    snapshot: u64,
 }
 
 /// Owns the manifest journal and snapshot of one open database.
@@ -80,7 +89,7 @@ impl ManifestStore {
                         checkpoint_edit_id: written.edit_checkpoint_id,
                         highest_edit_id: written.edit_checkpoint_id,
                     },
-                    journal_len: self.journal_len()?,
+                    lengths: self.lengths()?,
                 }),
                 Err(_) => None,
             };
@@ -103,7 +112,7 @@ impl ManifestStore {
                         highest_edit_id: edit_id,
                         ..position
                     },
-                    journal_len: self.journal_len()?,
+                    lengths: self.lengths()?,
                 }),
                 // The write may have left a torn tail; re-read from disk,
                 // which repairs it, before the next write.
@@ -116,15 +125,15 @@ impl ManifestStore {
     /// The journal position, from memory when the journal is as the store
     /// left it, otherwise from disk.
     fn position(&self, known: &mut Option<KnownPosition>) -> MidgeResult<JournalPosition> {
-        let journal_len = self.journal_len()?;
+        let lengths = self.lengths()?;
         if let Some(cached) = *known {
-            if cached.journal_len == journal_len {
+            if cached.lengths == lengths {
                 return Ok(cached.position);
             }
             tracing::warn!(
-                expected = cached.journal_len,
-                actual = journal_len,
-                "manifest journal changed outside the store; re-reading its position"
+                expected = ?cached.lengths,
+                actual = ?lengths,
+                "manifest files changed outside the store; re-reading the journal position"
             );
         }
         // `next_edit_id_with_fs` also repairs a torn journal tail.
@@ -135,16 +144,20 @@ impl ManifestStore {
         };
         *known = Some(KnownPosition {
             position,
-            journal_len: self.journal_len()?,
+            lengths: self.lengths()?,
         });
         Ok(position)
     }
 
-    fn journal_len(&self) -> MidgeResult<u64> {
-        match self
-            .fs
-            .metadata(&FsPath::new(crate::metadata::files::JOURNAL))
-        {
+    fn lengths(&self) -> MidgeResult<FileLengths> {
+        Ok(FileLengths {
+            journal: self.file_len(crate::metadata::files::JOURNAL)?,
+            snapshot: self.file_len(crate::metadata::files::MANIFEST_SNAPSHOT)?,
+        })
+    }
+
+    fn file_len(&self, name: &str) -> MidgeResult<u64> {
+        match self.fs.metadata(&FsPath::new(name)) {
             Ok(metadata) => Ok(metadata.len),
             Err(FsError::NotFound(_)) => Ok(0),
             Err(error) => Err(error.into()),

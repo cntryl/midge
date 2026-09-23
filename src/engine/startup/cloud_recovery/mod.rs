@@ -634,17 +634,13 @@ impl CloudStartupRecovery {
             .iter()
             .map(|name| crate::metadata::ManifestEdit::RemoveSst { name: name.clone() })
             .collect();
-        let edit_id = crate::metadata::append_edit_batch(&state.db_path, &edits)?;
+        let edit_id = state.manifest_store.append_batch(&edits)?;
         let mut durable = state.manifest.clone();
         durable
             .files
             .retain(|file| !definitively_lost.contains(&file.name));
         durable.note_applied_journal_edit(edit_id);
-        crate::metadata::ManifestPersistence::save_snapshot_and_truncate_journal(
-            &state.db_path,
-            &durable,
-        )
-        .map_err(MidgeError::Internal)?;
+        state.manifest_store.save_snapshot(&durable)?;
         state.manifest.files = retained_files;
         state.manifest.note_applied_journal_edit(edit_id);
         Ok(())

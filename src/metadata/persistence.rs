@@ -374,6 +374,7 @@ impl ManifestPersistence {
     /// Returns what the snapshot covers, so the caller can advance its
     /// in-memory checkpoint horizon when that is safe. Runtime writers go
     /// through `ManifestStore`; this reads the journal position from disk.
+    #[cfg(test)]
     pub fn save_snapshot_and_truncate_journal_with_fs(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         manifest: &Manifest,
@@ -494,6 +495,7 @@ impl ManifestPersistence {
 
     /// Save a full manifest snapshot and truncate journal (atomic as possible).
     /// This wrapper constructs a `RealFs` and delegates to the fs-backed implementation.
+    #[cfg(test)]
     pub fn save_snapshot_and_truncate_journal(
         db_path: &Path,
         manifest: &Manifest,

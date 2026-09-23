@@ -384,23 +384,23 @@ impl RuntimeState {
             return Ok(());
         }
 
-        crate::metadata::append_edit(
-            &self.db_path,
-            &crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
-                name: file_meta.name.clone(),
-                level: file_meta.level,
-                size_bytes: file_meta.size_bytes,
-                content_crc32c: file_meta.content_crc32c,
-                cf_id: file_meta.cf_id,
-                smallest_key: file_meta.smallest_key.clone(),
-                largest_key: file_meta.largest_key.clone(),
-                smallest_seq: file_meta.smallest_seq,
-                largest_seq: file_meta.largest_seq,
-                key_bounds_complete: file_meta.key_bounds_complete,
-                ..Default::default()
-            }),
-        )
-        .map(|_| ())
+        self.manifest_store
+            .append(&crate::metadata::ManifestEdit::AddSst(
+                crate::metadata::FileMeta {
+                    name: file_meta.name.clone(),
+                    level: file_meta.level,
+                    size_bytes: file_meta.size_bytes,
+                    content_crc32c: file_meta.content_crc32c,
+                    cf_id: file_meta.cf_id,
+                    smallest_key: file_meta.smallest_key.clone(),
+                    largest_key: file_meta.largest_key.clone(),
+                    smallest_seq: file_meta.smallest_seq,
+                    largest_seq: file_meta.largest_seq,
+                    key_bounds_complete: file_meta.key_bounds_complete,
+                    ..Default::default()
+                },
+            ))
+            .map(|_| ())
     }
 
     pub(super) fn append_manifest_compaction_batch(
@@ -438,7 +438,7 @@ impl RuntimeState {
             return Ok(());
         }
 
-        crate::metadata::append_edit_batch(&self.db_path, &edits).map(|_| ())
+        self.manifest_store.append_batch(&edits).map(|_| ())
     }
 
     pub(super) fn persist_manifest_checkpoint(&mut self) -> MidgeResult<()> {
@@ -447,12 +447,9 @@ impl RuntimeState {
         }
         self.retry_metadata_reload()?;
 
-        crate::metadata::ManifestPersistence::save_snapshot_and_truncate_journal(
-            &self.db_path,
-            &self.manifest,
-        )
-        .map_err(crate::common::MidgeError::Internal)?
-        .adopt_into(&mut self.manifest);
+        self.manifest_store
+            .save_snapshot(&self.manifest)?
+            .adopt_into(&mut self.manifest);
         Ok(())
     }
 }

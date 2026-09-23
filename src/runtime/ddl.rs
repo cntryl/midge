@@ -395,13 +395,18 @@ pub(crate) fn apply_local_edit(state: &mut RuntimeState, edit: &ManifestEdit) ->
     crate::failpoints::fail_point!("midge::ddl::before_local_commit", |_| Err(
         MidgeError::Internal("failpoint: DDL local commit failed".to_string())
     ));
-    if !state.is_memory_mode() {
-        crate::metadata::append_edit(&state.db_path, edit)?;
-    }
+    let journaled_id = if state.is_memory_mode() {
+        None
+    } else {
+        Some(state.manifest_store.append(edit)?)
+    };
     crate::failpoints::fail_point!("midge::ddl::after_local_journal_before_memory", |_| Err(
         MidgeError::Internal("failpoint: DDL local visibility failed".to_string(),)
     ));
     state.manifest = candidate;
+    if let Some(edit_id) = journaled_id {
+        state.manifest.note_applied_journal_edit(edit_id);
+    }
     match edit {
         ManifestEdit::CreateColumnFamily { id, name, .. } => {
             state.column_families.entry(*id).or_insert_with(|| {

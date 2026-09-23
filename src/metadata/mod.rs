@@ -10,6 +10,8 @@ pub mod persistence;
 pub(crate) mod store;
 
 pub use format::{ensure_or_create_format_marker, validate_format_marker};
-pub use journal::{append_edit, append_edit_batch, ManifestEdit};
+#[cfg(test)]
+pub use journal::append_edit;
+pub use journal::ManifestEdit;
 pub use manifest::{ColumnFamilyMeta, FileMeta, Manifest};
 pub use persistence::ManifestPersistence;

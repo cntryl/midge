@@ -201,3 +201,28 @@ fn should_keep_every_edit_when_store_resumes_after_snapshot_and_appends() {
     let reloaded = crate::metadata::ManifestPersistence::load(directory.path()).unwrap();
     assert_eq!(reloaded.files.len(), 4);
 }
+
+#[test]
+fn should_not_reuse_edit_id_when_snapshot_saved_outside_store() {
+    // Arrange: the journal ends empty either way, so only the snapshot shows
+    // that another writer journaled and checkpointed an edit.
+    let directory = tempfile::tempdir().expect("tempdir");
+    let fs = observed(&directory);
+    let store = ManifestStore::new(fs.clone());
+    store.save_snapshot(&Manifest::default()).expect("prime");
+    let outside: Arc<dyn Fs> = fs.clone();
+    crate::metadata::journal::append_edit_with_fs(&outside, &add_sst(1)).expect("outside append");
+    crate::metadata::ManifestPersistence::save_snapshot_and_truncate_journal_with_fs(
+        &outside,
+        &Manifest::default(),
+    )
+    .expect("outside snapshot");
+
+    // Act
+    let next = store.append(&add_sst(2)).expect("store append");
+
+    // Assert
+    assert_eq!(next, 2);
+    let reloaded = crate::metadata::ManifestPersistence::load(directory.path()).unwrap();
+    assert_eq!(reloaded.files.len(), 2);
+}

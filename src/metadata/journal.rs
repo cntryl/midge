@@ -2,6 +2,7 @@ use crate::common::MidgeResult;
 use crate::metadata::manifest::{CloudCheckpoint, FileMeta};
 use crc32fast::Hasher as Crc32;
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -349,6 +350,7 @@ pub(crate) fn preserve_corrupt_journal_with_fs_unlocked(
 
 /// Append an edit to the manifest journal using a provided Fs (preferred).
 /// Returns the journal edit id assigned to the record.
+#[cfg(test)]
 pub fn append_edit_with_fs(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     edit: &ManifestEdit,
@@ -357,6 +359,7 @@ pub fn append_edit_with_fs(
     with_manifest_writer_lock(fs, || append_validated_edit_with_fs(fs, edit))
 }
 
+#[cfg(test)]
 fn append_validated_edit_with_fs(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     edit: &ManifestEdit,
@@ -501,6 +504,7 @@ fn repair_partial_journal_tail(
 }
 
 /// Convenience wrapper: append via a `RealFs` created from `db_path` (backwards compatible)
+#[cfg(test)]
 pub fn append_edit(db_path: &Path, edit: &ManifestEdit) -> MidgeResult<u64> {
     let fs: std::sync::Arc<dyn crate::io::traits::Fs> =
         std::sync::Arc::new(crate::io::real::RealFs::new(db_path).map_err(|e| {
@@ -974,6 +978,7 @@ fn next_replay_edit_id(state: &JournalReplayState) -> u64 {
 
 /// Append a batch of edits as a single TLV record using the provided Fs (preferred).
 /// Returns the journal edit id assigned to the record.
+#[cfg(test)]
 pub fn append_edit_batch_with_fs(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     batch: &[ManifestEdit],
@@ -984,6 +989,7 @@ pub fn append_edit_batch_with_fs(
     with_manifest_writer_lock(fs, || append_validated_edit_batch_with_fs(fs, batch))
 }
 
+#[cfg(test)]
 fn append_validated_edit_batch_with_fs(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     batch: &[ManifestEdit],
@@ -1040,6 +1046,7 @@ pub(crate) fn append_validated_edit_batch_with_id(
 }
 
 /// Convenience wrapper: append batch via a `RealFs` created from `db_path` (backwards compatible)
+#[cfg(test)]
 pub fn append_edit_batch(db_path: &Path, batch: &[ManifestEdit]) -> MidgeResult<u64> {
     let fs: std::sync::Arc<dyn crate::io::traits::Fs> =
         std::sync::Arc::new(crate::io::real::RealFs::new(db_path).map_err(|e| {
