@@ -189,7 +189,7 @@ pub(super) fn validate_wal_source(
     validate_buffer_size(range_buffer_bytes)?;
     let file = fs.open(path, READ_ONLY)?;
     if file.len()? != expected_len {
-        return Err(MidgeError::RecoveryFailed(format!(
+        return Err(MidgeError::Corruption(format!(
             "WAL source {path} does not match catalog length {expected_len}"
         )));
     }
@@ -202,7 +202,7 @@ pub(super) fn validate_wal_source(
         offset += length;
     }
     if file.len()? != expected_len || crc != expected_crc {
-        return Err(MidgeError::RecoveryFailed(format!(
+        return Err(MidgeError::Corruption(format!(
             "WAL source {path} does not match its catalog content checksum"
         )));
     }
@@ -423,8 +423,8 @@ mod tests {
         );
 
         // Assert
-        assert!(matches!(incorrect_crc, Err(MidgeError::RecoveryFailed(_))));
-        assert!(matches!(incorrect_size, Err(MidgeError::RecoveryFailed(_))));
+        assert!(matches!(incorrect_crc, Err(MidgeError::Corruption(_))));
+        assert!(matches!(incorrect_size, Err(MidgeError::Corruption(_))));
         assert!(fixture
             .backend
             .ranges

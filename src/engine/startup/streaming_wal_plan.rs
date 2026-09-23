@@ -204,7 +204,7 @@ fn recover_or_salvage<T>(
     match result {
         Ok(value) => Ok(Some(value)),
         Err(error @ (MidgeError::ResourceLimit(_) | MidgeError::NoSpace(_))) => Err(error),
-        Err(error) if policy == RecoveryPolicy::Salvage => {
+        Err(error) if policy == RecoveryPolicy::Salvage && error.is_salvageable() => {
             *salvaged = true;
             tracing::warn!(%error, "skipping invalid WAL source during salvage recovery");
             Ok(None)
@@ -433,7 +433,7 @@ fn active_local_source(
             return Err(failure.error().replay())
         }
         Err(failure) if failure.is_incomplete_tail() => failure.verified_prefix(),
-        Err(failure) if policy == RecoveryPolicy::Salvage => {
+        Err(failure) if policy == RecoveryPolicy::Salvage && failure.error().is_salvageable() => {
             plan.opened_in_salvage_mode = true;
             tracing::warn!(error = %failure.error(), "salvaging verified active WAL prefix");
             failure.verified_prefix()

@@ -2660,8 +2660,7 @@ mod failure_injection {
             return true;
         }
         std::fs::read_dir(db_path.join("salvage-retained"))
-            .map(|dirs| dirs.flatten().any(|dir| dir.path().join(name).exists()))
-            .unwrap_or(false)
+            .is_ok_and(|dirs| dirs.flatten().any(|dir| dir.path().join(name).exists()))
     }
 
     fn sst_file_names(db_path: &Path) -> std::collections::BTreeSet<String> {

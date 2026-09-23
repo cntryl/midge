@@ -150,6 +150,15 @@ pub enum Severity {
 }
 
 impl MidgeError {
+    /// Whether salvage may drop data because of this error. Only proven
+    /// corruption qualifies: a transient I/O error, timeout or provider
+    /// failure says nothing about the bytes, so dropping them would destroy
+    /// acknowledged records.
+    #[must_use]
+    pub(crate) fn is_salvageable(&self) -> bool {
+        matches!(self, Self::Corruption(_))
+    }
+
     /// Classify this failure for retry, backpressure, fencing, or halt.
     ///
     /// Exhaustive by construction: a new variant will not compile until it

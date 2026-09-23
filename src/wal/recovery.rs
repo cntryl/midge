@@ -238,8 +238,7 @@ fn replay_error_action(
 ) -> ReplayErrorAction {
     if replay_file.kind == ReplayFileKind::FinalActive && failure.is_incomplete_tail() {
         ReplayErrorAction::TolerateFinalActiveTail
-    } else if replay_policy == ReplayPolicy::SalvageValidPrefix
-        && matches!(failure.error(), MidgeError::Corruption(_))
+    } else if replay_policy == ReplayPolicy::SalvageValidPrefix && failure.error().is_salvageable()
     {
         ReplayErrorAction::SalvageVerifiedPrefix
     } else {
