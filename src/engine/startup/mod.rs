@@ -97,12 +97,23 @@ pub(in crate::engine) struct CloudWalRecoveryPlan {
     /// at. They are not replayed; startup retires them from the catalog and
     /// keeps their objects.
     pub(in crate::engine) unreplayed_segments: Vec<crate::wal::cloud_catalog::PublishedWalSegment>,
-    /// Highest sequence held by WAL salvage set aside, so new writes never
-    /// reuse one. Zero when nothing was set aside.
+    /// Highest sequence held by WAL salvage set aside, now or on an earlier
+    /// open (the catalog's persisted floor), so new writes never reuse one.
+    /// Zero when nothing was ever set aside.
     pub(in crate::engine) max_unreplayed_sequence: u64,
 }
 
 impl CloudWalRecoveryPlan {
+    /// Whether this open set WAL aside that the catalog does not yet record:
+    /// segments to retire, or a sequence floor above the persisted one.
+    pub(in crate::engine) fn sets_wal_aside(
+        &self,
+        catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
+    ) -> bool {
+        !self.unreplayed_segments.is_empty()
+            || self.max_unreplayed_sequence > catalog.sequence_floor
+    }
+
     fn remote_max_sequences(&self) -> std::collections::BTreeMap<u64, u64> {
         self.remote_segments
             .iter()

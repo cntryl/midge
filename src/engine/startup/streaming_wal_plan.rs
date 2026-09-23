@@ -54,7 +54,7 @@ impl StreamingCloudWalRecovery {
             active_wal: None,
             opened_in_salvage_mode: false,
             unreplayed_segments: Vec::new(),
-            max_unreplayed_sequence: 0,
+            max_unreplayed_sequence: catalog.sequence_floor,
         };
         let mut sources = BTreeMap::new();
         let mut skipped = BTreeSet::new();
@@ -663,6 +663,6 @@ fn stop_at_first_hole(
     } else if !local_paths_empty {
         std::fs::File::open(&wal_dir)?.sync_all()?;
     }
-    plan.max_unreplayed_sequence = max_sequence;
+    plan.max_unreplayed_sequence = plan.max_unreplayed_sequence.max(max_sequence);
     Ok(())
 }

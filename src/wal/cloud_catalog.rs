@@ -73,6 +73,15 @@ pub(crate) struct WalPublicationCatalog {
     pub(crate) format_version: u32,
     pub(crate) fencing_epoch: u64,
     pub(crate) segments: BTreeMap<u64, PublishedWalSegment>,
+    /// Every sequence at or below this may belong to WAL that salvage set
+    /// aside unreplayed, so a later open must not assign it again (#529).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(crate) sequence_floor: u64,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde passes fields by reference
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 impl WalPublicationCatalog {
@@ -84,6 +93,7 @@ impl WalPublicationCatalog {
             format_version: FORMAT_VERSION,
             fencing_epoch,
             segments: BTreeMap::new(),
+            sequence_floor: 0,
         })
     }
 
@@ -151,6 +161,20 @@ impl WalPublicationCatalog {
             )),
             None => Ok(false),
         }
+    }
+
+    /// Raises the sequence floor; it never falls.
+    pub(crate) fn raise_sequence_floor(
+        &mut self,
+        fencing_epoch: u64,
+        floor: u64,
+    ) -> Result<bool, String> {
+        self.require_epoch(fencing_epoch)?;
+        if floor <= self.sequence_floor {
+            return Ok(false);
+        }
+        self.sequence_floor = floor;
+        Ok(true)
     }
 
     fn require_epoch(&self, writer_epoch: u64) -> Result<(), String> {
@@ -258,6 +282,7 @@ mod tests {
             format_version: FORMAT_VERSION,
             fencing_epoch: 7,
             segments: BTreeMap::from([(1, invalid)]),
+            sequence_floor: 0,
         };
         let bytes = serde_json::to_vec(&catalog).unwrap();
 
@@ -275,6 +300,7 @@ mod tests {
             format_version: FORMAT_VERSION,
             fencing_epoch: 7,
             segments: BTreeMap::from([(1, segment(1, 8))]),
+            sequence_floor: 0,
         };
         let bytes = serde_json::to_vec(&catalog).unwrap();
 
@@ -300,5 +326,41 @@ mod tests {
         // Assert
         assert!(result.unwrap_err().contains("changed before retirement"));
         assert_eq!(catalog.segments.get(&1), Some(&expected));
+    }
+
+    #[test]
+    fn should_only_raise_sequence_floor_when_salvage_sets_wal_aside() {
+        // Arrange
+        let mut catalog = WalPublicationCatalog::empty(7).unwrap();
+
+        // Act
+        let raised = catalog.raise_sequence_floor(7, 9).unwrap();
+        let lowered = catalog.raise_sequence_floor(7, 4).unwrap();
+        let stale = catalog.raise_sequence_floor(6, 12);
+
+        // Assert
+        assert!(raised);
+        assert!(!lowered);
+        assert!(stale.unwrap_err().contains("fencing epoch"));
+        assert_eq!(catalog.sequence_floor, 9);
+    }
+
+    #[test]
+    fn should_round_trip_sequence_floor_and_read_catalogs_written_without_it() {
+        // Arrange
+        let mut catalog = WalPublicationCatalog::empty(7).unwrap();
+        let without_floor = serde_json::to_vec(&catalog).unwrap();
+        catalog.raise_sequence_floor(7, 9).unwrap();
+
+        // Act
+        let decoded = WalPublicationCatalog::decode(&catalog.encode().unwrap()).unwrap();
+        let legacy = WalPublicationCatalog::decode(&without_floor).unwrap();
+
+        // Assert
+        assert_eq!(decoded.sequence_floor, 9);
+        assert_eq!(legacy.sequence_floor, 0);
+        assert!(!String::from_utf8(without_floor)
+            .unwrap()
+            .contains("sequence_floor"));
     }
 }
