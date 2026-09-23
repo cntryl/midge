@@ -358,3 +358,84 @@ fn should_resolve_relative_target_against_recorded_anchor_when_wrapper_delegates
         crate::io::FsPath::new("output.sst")
     );
 }
+
+#[cfg(unix)]
+fn publish_one_sst(root: &Path, target: &Path) -> crate::common::MidgeResult<()> {
+    let factory = FsSstFactoryIo::new(Arc::new(crate::io::RealFs::new(root).unwrap()), 4096);
+    let mut writer = factory.create().unwrap();
+    writer
+        .add_with_meta(b"key", Some(b"value"), 0, EntryType::Put, None)
+        .unwrap();
+    crate::sst::fs::finish_writer_to_path(writer, target)
+}
+
+#[cfg(unix)]
+#[test]
+fn should_reject_sst_publish_when_an_ancestor_component_is_a_symlink() {
+    // Arrange: the SST directory is an in-root symlink. Publishing through it
+    // would land the file where no reader (which refuses symlinks) can open it.
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("real")).unwrap();
+    std::os::unix::fs::symlink(root.path().join("real"), root.path().join("sst")).unwrap();
+
+    // Act
+    let result = publish_one_sst(root.path(), &root.path().join("sst").join("x.sst"));
+
+    // Assert
+    let error = result.expect_err("an ancestor symlink must fail closed");
+    assert!(
+        format!("{error}").contains("symlink"),
+        "unexpected error: {error}"
+    );
+    assert!(!root.path().join("real").join("x.sst").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn should_reject_sst_publish_when_target_symlink_resolves_outside_the_root() {
+    // Arrange
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("x.sst"), b"untouched").unwrap();
+    std::os::unix::fs::symlink(outside.path().join("x.sst"), root.path().join("x.sst")).unwrap();
+
+    // Act
+    let result = publish_one_sst(root.path(), &root.path().join("x.sst"));
+
+    // Assert
+    assert!(result.is_err());
+    assert_eq!(
+        std::fs::read(outside.path().join("x.sst")).unwrap(),
+        b"untouched"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn should_reject_sst_publish_when_target_symlink_is_dangling() {
+    // Arrange
+    let root = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(root.path().join("missing.sst"), root.path().join("x.sst")).unwrap();
+
+    // Act
+    let result = publish_one_sst(root.path(), &root.path().join("x.sst"));
+
+    // Assert
+    assert!(result.is_err());
+    assert!(!root.path().join("missing.sst").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn should_reject_sst_publish_when_an_ancestor_symlink_is_dangling() {
+    // Arrange
+    let root = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(root.path().join("missing"), root.path().join("sst")).unwrap();
+
+    // Act
+    let result = publish_one_sst(root.path(), &root.path().join("sst").join("x.sst"));
+
+    // Assert
+    assert!(result.is_err());
+    assert!(!root.path().join("missing").exists());
+}
