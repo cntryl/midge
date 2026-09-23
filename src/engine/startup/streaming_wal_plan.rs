@@ -234,10 +234,14 @@ fn remote_source(
             result: StorageOutcome::Err(error),
             ..
         }) => {
-            return Err(MidgeError::RecoveryFailed(format!(
-                "cloud WAL {} HEAD: {error}",
-                publication.object_key
-            )));
+            let message = format!("cloud WAL {} HEAD: {error}", publication.object_key);
+            // A cataloged segment that no longer exists is lost data, not a
+            // transient failure, so salvage may skip it.
+            return Err(if error.is_not_found() {
+                MidgeError::Corruption(message)
+            } else {
+                MidgeError::RecoveryFailed(message)
+            });
         }
         Ok(other) => {
             return Err(MidgeError::RecoveryFailed(format!(
@@ -277,7 +281,7 @@ fn remote_source(
     if prefix.max_sequence != publication.max_sequence
         || prefix.writer_epoch != publication.writer_epoch
     {
-        return Err(MidgeError::RecoveryFailed(format!(
+        return Err(MidgeError::Corruption(format!(
             "cloud WAL {} sequence or epoch differs from its catalog proof",
             publication.object_key
         )));

@@ -340,82 +340,6 @@ fn should_preserve_skipped_wal_sources_for_safe_salvage() -> MidgeResult<()> {
     Ok(())
 }
 
-/// Wraps a real filesystem and fails every read at or past `fail_from`.
-struct TransientReadFs {
-    inner: crate::io::RealFs,
-    fail_from: u64,
-}
-
-struct TransientReadFile<'a> {
-    inner: Box<dyn crate::io::File + 'a>,
-    fail_from: u64,
-}
-
-impl crate::io::File for TransientReadFile<'_> {
-    fn read_at(&self, offset: u64, len: u64) -> crate::io::FsResult<Bytes> {
-        if offset + len > self.fail_from {
-            return Err(crate::io::FsError::Io("transient EIO".into()));
-        }
-        self.inner.read_at(offset, len)
-    }
-    fn write_at(&mut self, offset: u64, bytes: Bytes) -> crate::io::FsResult<()> {
-        self.inner.write_at(offset, bytes)
-    }
-    fn append(&mut self, bytes: Bytes) -> crate::io::FsResult<u64> {
-        self.inner.append(bytes)
-    }
-    fn len(&self) -> crate::io::FsResult<u64> {
-        self.inner.len()
-    }
-    fn sync(&mut self, durability: crate::io::Durability) -> crate::io::FsResult<()> {
-        self.inner.sync(durability)
-    }
-    fn close(self: Box<Self>) -> crate::io::FsResult<()> {
-        self.inner.close()
-    }
-}
-
-impl Fs for TransientReadFs {
-    fn open(
-        &self,
-        path: &FsPath,
-        opts: crate::io::OpenOptions,
-    ) -> crate::io::FsResult<Box<dyn crate::io::File + '_>> {
-        Ok(Box::new(TransientReadFile {
-            inner: self.inner.open(path, opts)?,
-            fail_from: self.fail_from,
-        }))
-    }
-    fn remove_file(&self, path: &FsPath) -> crate::io::FsResult<()> {
-        self.inner.remove_file(path)
-    }
-    fn exists(&self, path: &FsPath) -> crate::io::FsResult<bool> {
-        self.inner.exists(path)
-    }
-    fn metadata(&self, path: &FsPath) -> crate::io::FsResult<crate::io::traits::Metadata> {
-        self.inner.metadata(path)
-    }
-    fn create_dir_all(&self, path: &FsPath) -> crate::io::FsResult<()> {
-        self.inner.create_dir_all(path)
-    }
-    fn list_dir(&self, path: &FsPath) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
-        self.inner.list_dir(path)
-    }
-    fn remove_dir_all(&self, path: &FsPath) -> crate::io::FsResult<()> {
-        self.inner.remove_dir_all(path)
-    }
-    fn sync_dir(
-        &self,
-        path: &FsPath,
-        durability: crate::io::Durability,
-    ) -> crate::io::FsResult<()> {
-        self.inner.sync_dir(path, durability)
-    }
-    fn rename_atomic(&self, from: &FsPath, to: &FsPath) -> crate::io::FsResult<()> {
-        self.inner.rename_atomic(from, to)
-    }
-}
-
 #[test]
 fn should_fail_open_without_truncating_active_wal_when_cloud_salvage_read_fails_transiently(
 ) -> MidgeResult<()> {
@@ -426,7 +350,7 @@ fn should_fail_open_without_truncating_active_wal_when_cloud_salvage_read_fails_
     bytes.extend(framed_wal(2, 7, b"two"));
     bytes.extend(framed_wal(3, 7, b"three"));
     let active = fixture.local(crate::wal::ACTIVE_FILE_NAME, &bytes)?;
-    let fs: Arc<dyn Fs> = Arc::new(TransientReadFs {
+    let fs: Arc<dyn Fs> = Arc::new(crate::io::transient_read::TransientReadFs {
         inner: crate::io::RealFs::new(fixture.directory.path().join("local"))?,
         fail_from: first.len() as u64,
     });

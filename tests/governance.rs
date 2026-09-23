@@ -303,8 +303,11 @@ mod architecture_ladder {
         // Salvage loads rewrite the journal. Only startup may do that, because
         // only startup records salvage mode, which turns the orphan sweep into
         // a quarantine instead of a delete.
+        // Arrange
         let startup = Path::new("src/runtime/state/recovery.rs");
         let mut offenders = Vec::new();
+
+        // Act
         for path in rust_sources_under("src") {
             let relative = path
                 .strip_prefix(env!("CARGO_MANIFEST_DIR"))
@@ -323,6 +326,7 @@ mod architecture_ladder {
                 }
             }
         }
+        // Assert
         assert!(
             offenders.is_empty(),
             "metadata loads outside startup recovery must be Strict: {offenders:?}"

@@ -177,15 +177,10 @@ impl ManifestPersistence {
             return Ok(());
         }
         manifest.edit_checkpoint_id = manifest.edit_checkpoint_id.max(salvaged.max_edit_id);
-        // Healing is best effort: if it fails, the salvaged manifest is still
-        // the most complete state available, and appends keep failing closed.
-        if let Err(error) = Self::checkpoint_salvaged_manifest_unlocked(fs, manifest) {
-            tracing::error!(
-                %error,
-                "failed to checkpoint salvaged manifest; journal appends will keep failing"
-            );
-        }
-        Ok(())
+        // The heal must succeed: later loads are strict, so a journal that
+        // still holds the corrupt record would fail every publication.
+        Self::checkpoint_salvaged_manifest_unlocked(fs, manifest)
+            .map_err(|error| format!("failed to checkpoint salvaged manifest: {error}"))
     }
 
     /// Preserve the corrupt journal, then make the salvaged manifest the
