@@ -10,6 +10,7 @@ use std::time::Duration;
 pub struct FsWalFactoryIo {
     fs: Arc<dyn Fs>,
     io_timeout: Duration,
+    counters: crate::telemetry::CounterSink,
 }
 
 impl FsWalFactoryIo {
@@ -18,6 +19,7 @@ impl FsWalFactoryIo {
         Self {
             fs,
             io_timeout: crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+            counters: crate::telemetry::CounterSink::default(),
         }
     }
 
@@ -28,16 +30,24 @@ impl FsWalFactoryIo {
         self
     }
 
+    /// Record writer activity into an engine's counters.
+    #[must_use]
+    pub(crate) fn with_counters(mut self, counters: crate::telemetry::CounterSink) -> Self {
+        self.counters = counters;
+        self
+    }
+
     /// Create a new WAL writer using the `io::Fs` backend
     ///
     /// # Errors
     ///
     /// Returns an error if the writer cannot be created.
     pub fn create_writer(&self, path_str: &str) -> MidgeResult<Box<dyn crate::wal::WalWriter>> {
-        let writer = super::FsWalWriterIo::new_with_timeout(
+        let writer = super::FsWalWriterIo::new_with_counters(
             path_str,
             Arc::clone(&self.fs),
             self.io_timeout,
+            self.counters.clone(),
         )?;
         Ok(Box::new(writer))
     }

@@ -266,12 +266,16 @@ impl WalActor {
         &self,
         fs: &Arc<dyn Fs>,
     ) -> MidgeResult<Box<dyn crate::wal::WalWriter>> {
-        let factory = FsWalFactoryIo::new(Arc::clone(fs)).with_io_timeout(self.storage_io_timeout);
+        let factory = FsWalFactoryIo::new(Arc::clone(fs))
+            .with_io_timeout(self.storage_io_timeout)
+            .with_counters(self.counters.clone());
         factory.create_writer(crate::wal::ACTIVE_FILE_NAME)
     }
 
     fn restore_active_writer_after_failed_rotate(&mut self, fs: &Arc<dyn Fs>) -> MidgeResult<()> {
-        let factory = FsWalFactoryIo::new(Arc::clone(fs)).with_io_timeout(self.storage_io_timeout);
+        let factory = FsWalFactoryIo::new(Arc::clone(fs))
+            .with_io_timeout(self.storage_io_timeout)
+            .with_counters(self.counters.clone());
         match factory.create_writer(crate::wal::ACTIVE_FILE_NAME) {
             Ok(writer) => {
                 self.install_transition_writer(writer)?;

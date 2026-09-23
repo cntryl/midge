@@ -114,6 +114,7 @@ pub struct WriterConfig {
     pub sync_cond: Arc<Condvar>,
     pub current_pos: Arc<std::sync::atomic::AtomicU64>,
     pub shutdown: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) counters: crate::telemetry::CounterSink,
 }
 
 pub struct WriterRunner {
@@ -226,11 +227,9 @@ impl WriterRunner {
         let start_pos = self.append_once(file_opt, big_bytes.clone())?;
         let write_elapsed = write_start.elapsed();
 
-        if let Some(t) = crate::telemetry::Telemetry::global() {
-            t.metrics().record_wal_write_syscall(
-                u64::try_from(write_elapsed.as_nanos()).unwrap_or(u64::MAX),
-            );
-        }
+        self.config.counters.record(|m| {
+            m.record_wal_write_syscall(u64::try_from(write_elapsed.as_nanos()).unwrap_or(u64::MAX));
+        });
 
         self.config.current_pos.store(
             start_pos.saturating_add(big_bytes.len() as u64),
@@ -383,12 +382,10 @@ impl WriterRunner {
                 return Err(());
             }
             let sync_elapsed = sync_start.elapsed();
-            if let Some(t) = crate::telemetry::Telemetry::global() {
-                t.metrics().record_wal_fsync_ns(
-                    u64::try_from(sync_elapsed.as_nanos()).unwrap_or(u64::MAX),
-                );
-                t.metrics().record_wal_fsync_count();
-            }
+            self.config.counters.record(|m| {
+                m.record_wal_fsync_ns(u64::try_from(sync_elapsed.as_nanos()).unwrap_or(u64::MAX));
+                m.record_wal_fsync_count();
+            });
         }
 
         let mut s = self.config.sync_state.lock();
@@ -436,9 +433,9 @@ impl WriterRunner {
         drop(pool);
 
         if dropped > 0 {
-            if let Some(t) = crate::telemetry::Telemetry::global() {
-                t.metrics().record_wal_buffer_pool_overflow(dropped as u64);
-            }
+            self.config.counters.record(|m| {
+                m.record_wal_buffer_pool_overflow(dropped as u64);
+            });
         }
 
         self.config.queue_cond.notify_all();
@@ -648,6 +645,7 @@ mod tests {
             sync_cond: Arc::new(Condvar::new()),
             current_pos: Arc::new(AtomicU64::new(0)),
             shutdown: Arc::new(AtomicBool::new(false)),
+            counters: crate::telemetry::CounterSink::default(),
         })
     }
 

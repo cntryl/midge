@@ -405,7 +405,9 @@ impl RuntimeState {
         let (sst_count, sst_bytes) = self.sst_totals();
         let residue = self.storage_residue_assessment();
         let read_path = self.diagnostics.snapshot();
-        let telemetry = crate::telemetry::Telemetry::global().map(|t| t.metrics().snapshot());
+        // This engine's own counters: no telemetry setup needed, and another
+        // engine in the process never shows up here.
+        let telemetry = Some(self.diagnostics.counters());
         let flush_queue_depth = self
             .column_families
             .values()
@@ -962,16 +964,16 @@ impl RuntimeState {
     #[cfg(test)]
     pub fn allocate_sequences_idempotent(&mut self, request_id: u64, count: usize) -> (u64, usize) {
         // Record telemetry
-        if let Some(t) = crate::telemetry::Telemetry::global() {
-            t.metrics().record_idempotency_alloc();
-        }
+        self.diagnostics.record(|m| {
+            m.record_idempotency_alloc();
+        });
 
         // Check if we have cached sequences for this request
         if let Some((first_seq, cnt)) = self.get_cached_sequences(request_id) {
             // Cache hit!
-            if let Some(t) = crate::telemetry::Telemetry::global() {
-                t.metrics().record_idempotency_cache_hit();
-            }
+            self.diagnostics.record(|m| {
+                m.record_idempotency_cache_hit();
+            });
 
             tracing::debug!(
                 request_id = request_id,
@@ -1009,10 +1011,9 @@ impl RuntimeState {
             );
 
             // Record eviction metric
-            if let Some(t) = crate::telemetry::Telemetry::global() {
-                t.metrics()
-                    .record_idempotency_cache_evictions(evict_count as u64);
-            }
+            self.diagnostics.record(|m| {
+                m.record_idempotency_cache_evictions(evict_count as u64);
+            });
         }
 
         // Allocate new sequences
@@ -1125,9 +1126,9 @@ impl RuntimeState {
     pub fn clear_pending_transaction_barrier(&mut self) {
         if let Some(start_time) = self.transaction.pending_started_at {
             let duration_ms = u64::try_from(start_time.elapsed().as_millis()).unwrap_or(u64::MAX);
-            if let Some(t) = crate::telemetry::Telemetry::global() {
-                t.metrics().record_pending_txn_duration_ms(duration_ms);
-            }
+            self.diagnostics.record(|m| {
+                m.record_pending_txn_duration_ms(duration_ms);
+            });
         }
         self.transaction.pending_min_sequence = None;
         self.transaction.pending_started_at = None;

@@ -46,6 +46,7 @@ pub struct ReadPathDiagnosticsSnapshot {
 /// from leaking work into each other's benchmark windows.
 #[derive(Debug, Default)]
 pub(crate) struct RuntimeDiagnostics {
+    counters: EngineCounters,
     read_only_begin_tx_count: AtomicU64,
     read_only_snapshot_cache_hits: AtomicU64,
     read_only_snapshot_cache_misses: AtomicU64,
@@ -55,7 +56,40 @@ pub(crate) struct RuntimeDiagnostics {
     read_amp: crate::sst::ReadAmpMetrics,
 }
 
+/// Operational counters owned by one engine: WAL, compaction, stalls,
+/// conflicts, cache and cloud WAL activity. Always on, so the runtime metrics
+/// snapshot works without any telemetry setup and never mixes engines.
+#[derive(Debug)]
+struct EngineCounters(Arc<crate::telemetry::Metrics>);
+
+impl Default for EngineCounters {
+    fn default() -> Self {
+        Self(Arc::new(crate::telemetry::Metrics::new(
+            &crate::telemetry::TelemetryConfig::default().with_enabled(true),
+        )))
+    }
+}
+
 impl RuntimeDiagnostics {
+    /// Record an operational event for this engine, and mirror it to process
+    /// global telemetry when an exporter has been set up.
+    pub(crate) fn record(&self, event: impl Fn(&crate::telemetry::Metrics)) {
+        event(&self.counters.0);
+        if let Some(telemetry) = crate::telemetry::Telemetry::global() {
+            event(telemetry.metrics());
+        }
+    }
+
+    /// This engine's operational counters.
+    pub(crate) fn counters(&self) -> crate::telemetry::metrics::MetricsSnapshot {
+        self.counters.0.snapshot()
+    }
+
+    /// Point a component's sink at this engine's counters.
+    pub(crate) fn attach(&self, sink: &crate::telemetry::CounterSink) {
+        sink.attach(Arc::clone(&self.counters.0));
+    }
+
     pub(crate) fn snapshot(&self) -> ReadPathDiagnosticsSnapshot {
         ReadPathDiagnosticsSnapshot {
             read_only_begin_tx_count: self.read_only_begin_tx_count.load(Ordering::Relaxed),

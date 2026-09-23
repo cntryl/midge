@@ -122,12 +122,12 @@ impl EventLoop {
         );
         self.try_drain_cloud_wal_upload_backlog_within(deadline)?;
 
-        if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-            telemetry.metrics().record_cloud_async_wal_segment_sealed(
+        self.state.diagnostics.record(|m| {
+            m.record_cloud_async_wal_segment_sealed(
                 bytes_buffered,
                 Self::elapsed_micros_to_u64(seal_start.elapsed()),
             );
-        }
+        });
 
         Ok(Some((segment_id, max_sequence)))
     }

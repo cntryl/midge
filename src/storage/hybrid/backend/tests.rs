@@ -955,6 +955,7 @@ fn should_emit_one_upload_terminal_event_when_wal_ack_logging_panics() {
 
     // Act
     HybridStorage::process_wal_upload_attempt(
+        storage.counters(),
         &upload,
         &storage.stores.wal,
         &storage.event_queue,

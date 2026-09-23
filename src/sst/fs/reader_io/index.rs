@@ -260,15 +260,15 @@ impl SstFileIo {
         if let Some(ref cache) = self.block_cache {
             if let Some(cached_value) = cache.get(&cache_key) {
                 read_metrics.record_block_cache_hit();
-                if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-                    telemetry.metrics().record_cache_hit();
-                }
+                self.diagnostics.record(|m| {
+                    m.record_cache_hit();
+                });
                 Ok(cached_value.data)
             } else {
                 read_metrics.record_block_cache_miss();
-                if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-                    telemetry.metrics().record_cache_miss();
-                }
+                self.diagnostics.record(|m| {
+                    m.record_cache_miss();
+                });
                 let bytes = file.map_or_else(
                     || self.read_block(handle),
                     |file| self.read_block_from(file, handle),

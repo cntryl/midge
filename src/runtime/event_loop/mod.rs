@@ -224,6 +224,21 @@ pub(super) enum HandleOutcome {
 }
 
 impl EventLoop {
+    /// Route components that record on their own threads into this engine's
+    /// counters, so its metrics snapshot reflects this engine alone.
+    /// Also applies the WAL actor's replay limit, set at the same point.
+    fn attach_engine_counters(
+        state: &RuntimeState,
+        wal_actor: &mut WalActor,
+        config: &super::RuntimeConfig,
+    ) {
+        wal_actor.set_max_replayable_txn_bytes(config.max_replayable_txn_bytes);
+        wal_actor.attach_counters(&state.diagnostics);
+        if let Some(storage) = &config.hybrid_storage {
+            state.diagnostics.attach(storage.counters());
+        }
+    }
+
     pub(crate) fn new(
         mut state: RuntimeState,
         trace_enabled: bool,
@@ -264,7 +279,7 @@ impl EventLoop {
             config.storage_io_timeout,
         )?;
 
-        wal_actor.set_max_replayable_txn_bytes(config.max_replayable_txn_bytes);
+        Self::attach_engine_counters(&state, &mut wal_actor, &config);
 
         // Wire leader store for epoch validation at sync boundaries.
         if let Some(store) = config.leader_store.clone() {
@@ -1349,10 +1364,10 @@ impl EventLoop {
     }
 
     fn record_wake_batch(&mut self, batch: usize) {
-        if let Some(telemetry) = crate::telemetry::Telemetry::global() {
-            telemetry.metrics().record_event_loop_wake();
-            telemetry.metrics().record_event_loop_batch(batch as u64);
-        }
+        self.state.diagnostics.record(|m| {
+            m.record_event_loop_wake();
+            m.record_event_loop_batch(batch as u64);
+        });
 
         if self.loop_debug {
             const LOOP_DEBUG_EVERY: u64 = 256;
