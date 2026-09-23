@@ -2710,7 +2710,15 @@ mod failure_injection {
         reopened.flush_cf(&cf).expect("flush default");
         let health = reopened.get_runtime_metrics().expect("metrics").health;
 
-        // Assert
+        let sealed = std::fs::read_dir(temp.path().join("wal"))
+            .expect("list wal")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name() != "wal.log")
+            .count();
+
+        // Assert: the rotated two-epoch segment stayed above the flushed
+        // floor, so prune inspected it.
+        assert!(sealed >= 1, "the mixed-epoch segment must reach inspection");
         assert_eq!(health, EngineHealth::Healthy);
         assert_visible(&reopened, &cf, b"pre", b"value-pre");
         shutdown_engine(reopened);
