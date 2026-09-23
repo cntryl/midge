@@ -9,6 +9,9 @@ struct ObservedFs {
     inner: crate::io::RealFs,
     snapshot_opens: AtomicUsize,
     snapshot_no_space: AtomicBool,
+    /// Fail every stat once the journal has been opened for writing.
+    fail_stats_after_journal_write: AtomicBool,
+    journal_written: AtomicBool,
 }
 
 struct NoSpaceFile<'a> {
@@ -39,6 +42,11 @@ impl File for NoSpaceFile<'_> {
 impl Fs for ObservedFs {
     fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
         let file = self.inner.open(path, opts)?;
+        if path.0 == crate::metadata::files::JOURNAL
+            && opts.mode == crate::io::traits::OpenMode::ReadWrite
+        {
+            self.journal_written.store(true, Ordering::SeqCst);
+        }
         if path.0 == crate::metadata::files::MANIFEST_SNAPSHOT {
             self.snapshot_opens.fetch_add(1, Ordering::SeqCst);
         }
@@ -56,6 +64,11 @@ impl Fs for ObservedFs {
         self.inner.exists(path)
     }
     fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+        if self.fail_stats_after_journal_write.load(Ordering::SeqCst)
+            && self.journal_written.load(Ordering::SeqCst)
+        {
+            return Err(FsError::Io("stat failed".into()));
+        }
         self.inner.metadata(path)
     }
     fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
@@ -83,6 +96,8 @@ fn observed(directory: &tempfile::TempDir) -> Arc<ObservedFs> {
         inner: crate::io::RealFs::new(directory.path()).expect("open fs"),
         snapshot_opens: AtomicUsize::new(0),
         snapshot_no_space: AtomicBool::new(false),
+        fail_stats_after_journal_write: AtomicBool::new(false),
+        journal_written: AtomicBool::new(false),
     })
 }
 
@@ -225,4 +240,34 @@ fn should_not_reuse_edit_id_when_snapshot_saved_outside_store() {
     assert_eq!(next, 2);
     let reloaded = crate::metadata::ManifestPersistence::load(directory.path()).unwrap();
     assert_eq!(reloaded.files.len(), 2);
+}
+
+#[test]
+fn should_report_durable_append_when_stat_after_write_fails() {
+    // Arrange: the append reaches disk, then refreshing the cache fails.
+    let directory = tempfile::tempdir().expect("tempdir");
+    let fs = observed(&directory);
+    let store = ManifestStore::new(fs.clone());
+    fs.fail_stats_after_journal_write
+        .store(true, Ordering::SeqCst);
+
+    // Act
+    let appended = store.append(&add_sst(1));
+    fs.fail_stats_after_journal_write
+        .store(false, Ordering::SeqCst);
+    let next = store.append(&add_sst(2)).expect("next append");
+
+    // Assert: a durable edit is reported as written, and the store re-reads
+    // its position instead of trusting a cache it could not refresh.
+    assert_eq!(appended.expect("durable append reports success"), 1);
+    assert_eq!(next, 2);
+    assert_eq!(
+        *store
+            .known
+            .lock()
+            .map(|known| known.position.highest_edit_id)
+            .as_ref()
+            .unwrap(),
+        2
+    );
 }

@@ -84,12 +84,9 @@ impl ManifestStore {
             let result =
                 ManifestPersistence::save_snapshot_unlocked(&self.fs, manifest, Some(position));
             *known = match &result {
-                Ok(written) => Some(KnownPosition {
-                    position: JournalPosition {
-                        checkpoint_edit_id: written.edit_checkpoint_id,
-                        highest_edit_id: written.edit_checkpoint_id,
-                    },
-                    lengths: self.lengths()?,
+                Ok(written) => self.remember(JournalPosition {
+                    checkpoint_edit_id: written.edit_checkpoint_id,
+                    highest_edit_id: written.edit_checkpoint_id,
                 }),
                 Err(_) => None,
             };
@@ -107,12 +104,9 @@ impl ManifestStore {
             let edit_id = position.highest_edit_id.saturating_add(1).max(1);
             let result = write(&self.fs, edit_id);
             *known = match result {
-                Ok(_) => Some(KnownPosition {
-                    position: JournalPosition {
-                        highest_edit_id: edit_id,
-                        ..position
-                    },
-                    lengths: self.lengths()?,
+                Ok(_) => self.remember(JournalPosition {
+                    highest_edit_id: edit_id,
+                    ..position
                 }),
                 // The write may have left a torn tail; re-read from disk,
                 // which repairs it, before the next write.
@@ -147,6 +141,19 @@ impl ManifestStore {
             lengths: self.lengths()?,
         });
         Ok(position)
+    }
+
+    /// The cache after a write that succeeded. The write is durable, so a
+    /// failed stat must not turn it into an error; the store forgets its
+    /// position instead and re-reads it next time.
+    fn remember(&self, position: JournalPosition) -> Option<KnownPosition> {
+        match self.lengths() {
+            Ok(lengths) => Some(KnownPosition { position, lengths }),
+            Err(error) => {
+                tracing::warn!(%error, "cannot stat manifest files after a write; forgetting position");
+                None
+            }
+        }
     }
 
     fn lengths(&self) -> MidgeResult<FileLengths> {
