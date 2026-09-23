@@ -49,8 +49,6 @@ impl StreamingCloudWalRecovery {
         let mut replay_fs = StreamingWalFs::new(read_window)?;
         let local: Arc<dyn Fs> = Arc::new(crate::io::RealFs::new(db_path)?);
         let mut plan = CloudWalRecoveryPlan {
-            #[cfg(test)]
-            replay_dir: db_path.join("cloud_recovery/wal"),
             remote_segments: BTreeMap::new(),
             local_segments: BTreeMap::new(),
             active_wal: None,

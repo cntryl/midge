@@ -110,7 +110,11 @@ fn should_normalize_recovery_sources_without_copying_wal_bytes() -> MidgeResult<
     // Assert
     assert_eq!(recovered.plan.remote_segments.len(), 2);
     assert!(recovered.plan.local_segments.is_empty());
-    assert!(!recovered.plan.replay_dir.exists());
+    assert!(!fixture
+        .directory
+        .path()
+        .join("local/cloud_recovery")
+        .exists());
     assert!(!legacy.exists());
     let canonical = fixture
         .directory
@@ -355,7 +359,6 @@ fn should_fail_open_without_truncating_active_wal_when_cloud_salvage_read_fails_
         fail_from: first.len() as u64,
     });
     let mut plan = CloudWalRecoveryPlan {
-        replay_dir: fixture.directory.path().join("local/cloud_recovery/wal"),
         remote_segments: BTreeMap::new(),
         local_segments: BTreeMap::new(),
         active_wal: None,
@@ -639,4 +642,24 @@ fn should_fail_strict_recovery_naming_object_when_cataloged_segment_is_missing()
         "unexpected error: {error}"
     );
     Ok(())
+}
+
+/// Cloud WAL recovery has one production path, this module's streaming
+/// planner. A `#[cfg(test)]` item in the cloud recovery module would let
+/// tests exercise a second copy that production never runs (#496).
+#[test]
+fn should_keep_cloud_recovery_free_of_test_only_code_when_scanning_source() {
+    // Arrange
+    let source = include_str!("../cloud_recovery/mod.rs");
+
+    // Act
+    let test_only: Vec<_> = source
+        .lines()
+        .zip(source.lines().skip(1))
+        .filter(|(line, next)| line.trim() == "#[cfg(test)]" && next.trim() != "mod tests;")
+        .map(|(_, next)| next.trim())
+        .collect();
+
+    // Assert
+    assert!(test_only.is_empty(), "test-only items: {test_only:?}");
 }

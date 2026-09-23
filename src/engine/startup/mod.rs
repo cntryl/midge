@@ -87,8 +87,6 @@ struct RuntimeStorageMaterialization {
 }
 
 pub(in crate::engine) struct CloudWalRecoveryPlan {
-    #[cfg(test)]
-    pub(in crate::engine) replay_dir: PathBuf,
     pub(in crate::engine) remote_segments:
         std::collections::BTreeMap<u64, crate::runtime::RecoveredCloudWalSegment>,
     pub(in crate::engine) local_segments:
