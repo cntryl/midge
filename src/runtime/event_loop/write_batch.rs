@@ -119,6 +119,11 @@ impl EventLoop {
         if self.wal_actor.is_cloud_async() {
             return 0;
         }
+        // A fenced runtime must not pull writes around dispatch, which is the
+        // only place a rejected write is answered in queue order.
+        if self.check_lease_health().is_err() {
+            return 0;
+        }
 
         // IMPORTANT: If we already have a buffered non-write message, do not `try_recv()`.
         // Otherwise we could consume another non-write message and have nowhere to stash it.
@@ -470,7 +475,7 @@ impl EventLoop {
 
         let request_id = request.request_id;
         let touched_cfs = Self::transaction_cf_ids(&request.ops);
-        if let Err(error) = self.ensure_l0_write_admission(&touched_cfs) {
+        if let Err(error) = self.admit_drained_transaction(&touched_cfs) {
             return PrepareOutcome::Error { request_id, error };
         }
         staged_touches.record_ops(&request.ops);
@@ -496,6 +501,16 @@ impl EventLoop {
         }
     }
 
+    /// Admission for writes that bypass dispatch: the lease can be lost while
+    /// a drain is running, so each write re-checks the fence before L0.
+    fn admit_drained_transaction(
+        &self,
+        touched_cfs: &[crate::types::ColumnFamilyId],
+    ) -> crate::common::MidgeResult<()> {
+        self.check_lease_health()?;
+        self.ensure_l0_write_admission(touched_cfs)
+    }
+
     fn apply_single_transaction_request(&mut self, request: ApplyTransactionRequest) {
         let ApplyTransactionRequest {
             request_id,
@@ -506,7 +521,7 @@ impl EventLoop {
             conflict_policy,
         } = request;
         let touched_cfs = Self::transaction_cf_ids(&ops);
-        if let Err(error) = self.ensure_l0_write_admission(&touched_cfs) {
+        if let Err(error) = self.admit_drained_transaction(&touched_cfs) {
             self.finish_drained_write(request_id, Err(error));
             return;
         }

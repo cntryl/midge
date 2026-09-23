@@ -133,6 +133,12 @@ impl WalCoordinator {
             return HandleOutcome::Continue;
         }
 
+        // Admission first: memtable preparation reserves flush headroom and
+        // may freeze memtables, which a rejected write must not trigger.
+        if let Err(error) = event_loop.ensure_l0_write_admission(&touched_cfs) {
+            event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
+            return HandleOutcome::Continue;
+        }
         if let Err(error) = event_loop.prepare_cloud_transaction_memtables(&ops) {
             event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
             return HandleOutcome::Continue;
@@ -156,10 +162,6 @@ impl WalCoordinator {
                 MAX_COALESCED_TRANSACTIONS_AFTER_WAKE,
             );
         } else {
-            if let Err(error) = event_loop.ensure_l0_write_admission(&touched_cfs) {
-                event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
-                return HandleOutcome::Continue;
-            }
             match event_loop.wal_actor.append_transaction(
                 &mut event_loop.state,
                 crate::runtime::actors::wal::TransactionAppendParams {

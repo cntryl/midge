@@ -1679,3 +1679,72 @@ fn should_fence_runtime_when_the_wal_actor_reports_a_fenced_writer() -> MidgeRes
     assert!(!lease_healthy.load(std::sync::atomic::Ordering::Acquire));
     Ok(())
 }
+
+#[test]
+fn should_leave_queued_writes_undrained_when_lease_is_unhealthy() -> MidgeResult<()> {
+    // Arrange
+    let mut fixture = EventLoopFixture::batched()?;
+    fixture.event_loop.fencing.lease_healthy =
+        Some(Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
+    for request_id in [71, 72] {
+        fixture.register(request_id);
+        msg_tx
+            .send(txn_msg(
+                request_id,
+                vec![put_op(0, b"fenced-drain", b"value")],
+                Some(DurabilityPolicy::Batched),
+            ))
+            .expect("queue batched transaction");
+    }
+
+    // Act
+    let drained = fixture.event_loop.drain_pending_writes(&msg_rx, 64);
+
+    // Assert: normal dispatch rejects them one by one instead.
+    assert_eq!(drained, 0);
+    assert_eq!(msg_rx.len(), 2);
+    assert_eq!(fixture.event_loop.state.sequence, 0);
+    Ok(())
+}
+
+#[test]
+fn should_not_apply_coalesced_transactions_when_lease_is_unhealthy() -> MidgeResult<()> {
+    // Arrange
+    let mut fixture = EventLoopFixture::batched()?;
+    fixture.event_loop.fencing.lease_healthy =
+        Some(Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
+    let first_rx = fixture.register(73);
+    let second_rx = fixture.register(74);
+    msg_tx
+        .send(txn_msg(
+            74,
+            vec![put_op(0, b"fenced-b", b"value-b")],
+            Some(DurabilityPolicy::Batched),
+        ))
+        .expect("queue second transaction");
+
+    // Act
+    fixture.event_loop.apply_transaction_with_coalescing(
+        &msg_rx,
+        txn_request(
+            73,
+            vec![put_op(0, b"fenced-a", b"value-a")],
+            Some(DurabilityPolicy::Batched),
+        ),
+        1024,
+    );
+
+    // Assert
+    expect_error(&first_rx, 73, |error| {
+        matches!(error, MidgeError::Fenced(_))
+    });
+    assert!(
+        second_rx.try_recv().is_err() && msg_rx.len() == 1,
+        "the second write stays queued for dispatch to fence"
+    );
+    assert_eq!(fixture.event_loop.state.sequence, 0);
+    assert_eq!(fixture.event_loop.wal_actor.append_calls(), 0);
+    Ok(())
+}
