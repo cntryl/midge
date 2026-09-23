@@ -73,12 +73,13 @@ impl EventLoop {
                     .to_string()
             ))
         );
-        crate::metadata::append_edit(
-            &self.state.db_path,
-            &crate::metadata::ManifestEdit::AddSst(updated.clone()),
-        )?;
+        let edit_id = self
+            .state
+            .manifest_store
+            .append(&crate::metadata::ManifestEdit::AddSst(updated.clone()))?;
         let name = updated.name.clone();
         self.state.manifest.add_file(updated);
+        self.state.manifest.note_applied_journal_edit(edit_id);
         self.invalidate_sst_read_views();
         self.publish_snapshot();
 

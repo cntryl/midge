@@ -135,6 +135,7 @@ impl RuntimeState {
             column_families: wal_recovery.column_families,
             manifest,
             fs: fs.clone(),
+            manifest_store: Arc::new(crate::metadata::store::ManifestStore::new(fs.clone())),
             recovery_sst_fs: None,
             salvaged_local_ssts: std::collections::HashSet::new(),
             ttl_clock: Arc::new(crate::common::time::ObservedClock::default()),

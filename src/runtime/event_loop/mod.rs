@@ -657,13 +657,12 @@ impl EventLoop {
         })?;
         let counter = self.state.manifest.next_sst_seqs.entry(cf_id).or_insert(1);
         *counter = (*counter).max(next);
-        crate::metadata::append_edit(
-            &self.state.db_path,
-            &crate::metadata::ManifestEdit::BumpNextSstSeq {
-                cf_id,
-                next_seq: *counter,
-            },
-        )?;
+        let next_seq = *counter;
+        let edit_id = self
+            .state
+            .manifest_store
+            .append(&crate::metadata::ManifestEdit::BumpNextSstSeq { cf_id, next_seq })?;
+        self.state.manifest.note_applied_journal_edit(edit_id);
         crate::runtime::actors::ManifestActor::persist(&mut self.state)?;
         self.mirror_metadata_to_authoritative_cloud()
     }

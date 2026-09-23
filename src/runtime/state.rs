@@ -286,6 +286,8 @@ pub struct RuntimeState {
 
     // Filesystem abstraction for all IO (never call std::fs directly)
     pub fs: std::sync::Arc<dyn Fs>,
+    /// The only runtime writer of the manifest journal and snapshot (#494).
+    pub(crate) manifest_store: Arc<crate::metadata::store::ManifestStore>,
     /// Authoritative SST views used during cloud intent replay. Local SST
     /// staging is disposable and is not a prerequisite for recovery.
     pub(crate) recovery_sst_fs: Option<Arc<dyn Fs>>,

@@ -67,7 +67,7 @@ impl ManifestActor {
                     "failpoint: no space on manifest add_sst append".to_string()
                 ))
             );
-            journaled_id = Some(crate::metadata::append_edit(&state.db_path, &edit)?);
+            journaled_id = Some(state.manifest_store.append(&edit)?);
         }
 
         // Now that intent is durable, apply mutation to in-memory manifest
@@ -139,7 +139,7 @@ impl ManifestActor {
                     "failpoint: no space on manifest compaction batch append".to_string()
                 ))
             );
-            journaled_id = Some(crate::metadata::append_edit_batch(&state.db_path, &edits)?);
+            journaled_id = Some(state.manifest_store.append_batch(&edits)?);
         }
 
         // Now that intent is durable, apply mutations to in-memory manifest
@@ -199,12 +199,10 @@ impl ManifestActor {
 
         // Publish a crash-safe snapshot before truncating the journal. Recovery
         // can therefore replay only edits newer than the checkpoint horizon.
-        crate::metadata::ManifestPersistence::save_snapshot_and_truncate_journal(
-            &state.db_path,
-            &state.manifest,
-        )
-        .map_err(crate::common::MidgeError::Internal)?
-        .adopt_into(&mut state.manifest);
+        state
+            .manifest_store
+            .save_snapshot(&state.manifest)?
+            .adopt_into(&mut state.manifest);
 
         tracing::debug!("Manifest persisted");
 
@@ -639,15 +637,14 @@ mod tests {
             .compaction_complete(&mut state, &[], &[sst_meta(1)])
             .expect("compaction edit");
         ManifestActor::persist(&mut state).expect("persist");
-        crate::metadata::append_edit(
-            &state.db_path,
-            &crate::metadata::ManifestEdit::CreateColumnFamily {
+        state
+            .manifest_store
+            .append(&crate::metadata::ManifestEdit::CreateColumnFamily {
                 id: 7,
                 name: "orphan".to_string(),
                 created_at: 1,
-            },
-        )
-        .expect("orphan append whose writer then failed");
+            })
+            .expect("orphan append whose writer then failed");
         // The worker: load from disk, journal and apply its own edit, snapshot.
         let mut worker = crate::metadata::ManifestPersistence::load(&state.db_path).expect("load");
         let base_edit_id = worker.edit_checkpoint_id;
@@ -656,17 +653,15 @@ mod tests {
             size_bytes: 10,
             ..Default::default()
         };
-        crate::metadata::append_edit(
-            &state.db_path,
-            &crate::metadata::ManifestEdit::AddSst(flushed.clone()),
-        )
-        .expect("worker append");
+        state
+            .manifest_store
+            .append(&crate::metadata::ManifestEdit::AddSst(flushed.clone()))
+            .expect("worker append");
         worker.add_file(flushed.clone());
-        let written = crate::metadata::ManifestPersistence::save_snapshot_and_truncate_journal(
-            &state.db_path,
-            &worker,
-        )
-        .expect("worker snapshot");
+        let written = state
+            .manifest_store
+            .save_snapshot(&worker)
+            .expect("worker snapshot");
         state.manifest.add_file(flushed);
 
         // Act

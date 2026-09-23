@@ -51,6 +51,8 @@ pub(crate) struct FlushPublishTask {
     pub sst_seq: u64,
     pub sst_dir: PathBuf,
     pub fs: Arc<dyn crate::io::Fs>,
+    /// The database's manifest writer; the worker must not bypass it (#494).
+    pub manifest_store: Arc<crate::metadata::store::ManifestStore>,
     pub hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
     pub cloud_metadata_storage: Option<Arc<crate::storage::cloud::CloudStorage>>,
     pub metadata_publication_lock: crate::runtime::MetadataPublicationLock,
@@ -443,16 +445,13 @@ impl FlushActor {
                 )))
             }
             None => {
-                crate::metadata::journal::append_edit_batch_with_fs(
-                    &task.fs,
-                    &[
-                        crate::metadata::ManifestEdit::BumpNextSstSeq {
-                            cf_id: task.build.identity.cf_id,
-                            next_seq: next_sst_seq,
-                        },
-                        crate::metadata::ManifestEdit::AddSst(manifest_meta.clone()),
-                    ],
-                )?;
+                task.manifest_store.append_batch(&[
+                    crate::metadata::ManifestEdit::BumpNextSstSeq {
+                        cf_id: task.build.identity.cf_id,
+                        next_seq: next_sst_seq,
+                    },
+                    crate::metadata::ManifestEdit::AddSst(manifest_meta.clone()),
+                ])?;
                 manifest
                     .next_sst_seqs
                     .insert(task.build.identity.cf_id, next_sst_seq);
@@ -626,9 +625,7 @@ fn save_worker_snapshot(
     manifest: &crate::metadata::Manifest,
     base_edit_id: u64,
 ) -> MidgeResult<(bool, Option<FlushJournalCheckpoint>)> {
-    match crate::metadata::ManifestPersistence::save_snapshot_and_truncate_journal_with_fs(
-        &task.fs, manifest,
-    ) {
+    match task.manifest_store.save_snapshot(manifest) {
         Ok(written) => Ok((
             false,
             written
@@ -642,7 +639,7 @@ fn save_worker_snapshot(
             tracing::warn!(%error, "manifest journal is durable but checkpoint save failed");
             Ok((true, None))
         }
-        Err(error) => Err(MidgeError::Internal(error)),
+        Err(error) => Err(error),
     }
 }
 
@@ -974,6 +971,9 @@ mod tests {
             sst_name: crate::cloud_layout::file_name(identity.cf_id, 0, 1),
             sst_seq: 1,
             sst_dir,
+            manifest_store: Arc::new(crate::metadata::store::ManifestStore::new(Arc::clone(
+                &publication_fs,
+            ))),
             fs: publication_fs,
             hybrid_storage: Some(hybrid),
             cloud_metadata_storage: Some(control_cloud),
