@@ -516,8 +516,7 @@ impl EventLoop {
             .last_persisted_sequence
             .max(delta.identity.sequence);
         if let Some(checkpoint) = delta.journal_checkpoint {
-            let horizon = &mut self.state.manifest.edit_checkpoint_id;
-            *horizon = (*horizon).max(checkpoint);
+            checkpoint.advance(&mut self.state.manifest);
         }
         if delta.persistence_anomaly {
             self.state.mark_persistence_anomaly();

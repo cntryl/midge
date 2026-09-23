@@ -188,7 +188,8 @@ impl ManifestActor {
         crate::failpoints::fail_point!("midge::manifest::persist", |_| Err(
             crate::common::MidgeError::Internal("injected manifest persist failure".into())
         ));
-        state.ensure_metadata_current()?;
+        // A persist is itself a chance to lift a failed-reload fence (#500).
+        state.retry_metadata_reload()?;
 
         tracing::info!(
             file_count = state.manifest.files.len(),
@@ -623,5 +624,66 @@ mod tests {
         )
         .unwrap();
         assert!(!logs.contains("stale caller"), "{logs}");
+    }
+
+    /// Review of #544: the flush worker's snapshot is built from disk, so it
+    /// can hold an orphan journal edit memory never applied. Installing the
+    /// worker's checkpoint must not let the next memory snapshot drop it.
+    #[test]
+    fn should_keep_orphan_journal_edit_when_flush_checkpoint_installs_before_persist() {
+        // Arrange
+        let tmp = tempfile::tempdir().expect("create tmpdir");
+        let mut state = crate::runtime::state::RuntimeState::new(tmp.path().to_path_buf(), false);
+        let mut actor = ManifestActor::new();
+        actor
+            .compaction_complete(&mut state, &[], &[sst_meta(1)])
+            .expect("compaction edit");
+        ManifestActor::persist(&mut state).expect("persist");
+        crate::metadata::append_edit(
+            &state.db_path,
+            &crate::metadata::ManifestEdit::CreateColumnFamily {
+                id: 7,
+                name: "orphan".to_string(),
+                created_at: 1,
+            },
+        )
+        .expect("orphan append whose writer then failed");
+        // The worker: load from disk, journal and apply its own edit, snapshot.
+        let mut worker = crate::metadata::ManifestPersistence::load(&state.db_path).expect("load");
+        let base_edit_id = worker.edit_checkpoint_id;
+        let flushed = crate::metadata::FileMeta {
+            name: crate::cloud_layout::file_name(0, 0, 2),
+            size_bytes: 10,
+            ..Default::default()
+        };
+        crate::metadata::append_edit(
+            &state.db_path,
+            &crate::metadata::ManifestEdit::AddSst(flushed.clone()),
+        )
+        .expect("worker append");
+        worker.add_file(flushed.clone());
+        let written = crate::metadata::ManifestPersistence::save_snapshot_and_truncate_journal(
+            &state.db_path,
+            &worker,
+        )
+        .expect("worker snapshot");
+        state.manifest.add_file(flushed);
+
+        // Act
+        if written.caller_was_current {
+            crate::runtime::actors::flush::FlushJournalCheckpoint {
+                base_edit_id,
+                written_edit_id: written.edit_checkpoint_id,
+            }
+            .advance(&mut state.manifest);
+        }
+        ManifestActor::persist(&mut state).expect("persist after flush install");
+
+        // Assert
+        let reloaded = crate::metadata::ManifestPersistence::load(&state.db_path).expect("reload");
+        assert!(
+            reloaded.column_families.iter().any(|cf| cf.id == 7),
+            "orphan journal edit was truncated away"
+        );
     }
 }

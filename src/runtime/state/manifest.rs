@@ -58,7 +58,11 @@ impl RuntimeState {
     /// Retries a reload that failed earlier. A no-op once memory is current.
     pub(crate) fn retry_metadata_reload(&mut self) -> MidgeResult<()> {
         if self.recovery.metadata == super::MetadataSync::ReloadRequired {
-            self.reload_persisted_metadata()?;
+            self.reload_persisted_metadata().map_err(|error| {
+                crate::common::MidgeError::Fenced(format!(
+                    "manifest and intent log are still behind disk; refusing to publish: {error}"
+                ))
+            })?;
         }
         Ok(())
     }
@@ -441,7 +445,7 @@ impl RuntimeState {
         if self.is_memory_mode() {
             return Ok(());
         }
-        self.ensure_metadata_current()?;
+        self.retry_metadata_reload()?;
 
         crate::metadata::ManifestPersistence::save_snapshot_and_truncate_journal(
             &self.db_path,
