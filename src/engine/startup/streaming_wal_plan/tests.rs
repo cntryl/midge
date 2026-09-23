@@ -476,3 +476,23 @@ fn should_preserve_active_wal_copy_when_cloud_salvage_truncates_corrupt_suffix()
     );
     Ok(())
 }
+
+#[test]
+fn should_replay_cataloged_segments_when_corrupt_local_segment_predates_catalog() -> MidgeResult<()>
+{
+    // Arrange: segment 1 was retired from the catalog (covered by SSTs), but
+    // its local copy leaked and is now corrupt.
+    let mut fixture = Fixture::new()?;
+    fixture.publish(5, 5, 7, &framed_wal(5, 7, b"five"))?;
+    fixture.publish(6, 6, 7, &framed_wal(6, 7, b"six"))?;
+    let leaked = fixture.local(&crate::wal::segment_file_name(1), b"corrupt leftover")?;
+
+    // Act
+    let recovered = fixture.build(RecoveryPolicy::Salvage)?;
+
+    // Assert
+    assert_eq!(recovered.fs.list_dir(&FsPath::new("wal"))?.len(), 2);
+    assert!(recovered.plan.unreplayed_segments.is_empty());
+    assert!(leaked.exists(), "the leftover stays where it was");
+    Ok(())
+}

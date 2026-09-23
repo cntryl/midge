@@ -595,8 +595,12 @@ fn stop_at_first_hole(
     sources: &mut BTreeMap<u64, ReplaySource>,
     active: &mut Option<ReplaySource>,
 ) -> MidgeResult<()> {
+    // Segments upload and retire in id order, so a local file below the
+    // oldest cataloged segment was already retired, meaning SSTs cover it.
+    // A leaked, corrupt copy of it is not a hole.
+    let oldest_needed = catalog.segments.keys().next().copied().unwrap_or(0);
     let Some(&hole) = skipped
-        .iter()
+        .range(oldest_needed..)
         .find(|segment_id| !sources.contains_key(segment_id))
     else {
         return Ok(());
@@ -609,21 +613,23 @@ fn stop_at_first_hole(
     let wal_dir = db_path.join("wal");
     // Every local file at or past the hole goes, including failed copies,
     // or the next open would find the same hole and drop newer writes.
-    let local_paths: Vec<PathBuf> = std::fs::read_dir(&wal_dir)
-        .map(|entries| {
-            entries
-                .filter_map(Result::ok)
-                .filter(|entry| {
-                    entry
-                        .file_name()
-                        .to_str()
-                        .and_then(crate::wal::parse_segment_id)
-                        .is_some_and(|segment_id| segment_id >= hole)
-                })
-                .map(|entry| entry.path())
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut local_paths = Vec::new();
+    let entries = match std::fs::read_dir(&wal_dir) {
+        Ok(entries) => entries.collect::<Result<Vec<_>, _>>()?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        if entry
+            .file_name()
+            .to_str()
+            .and_then(crate::wal::parse_segment_id)
+            .is_some_and(|segment_id| segment_id >= hole)
+        {
+            local_paths.push(entry.path());
+        }
+    }
+    let local_paths_empty = local_paths.is_empty();
     for path in local_paths {
         CloudStartupRecovery::quarantine_local_wal_alias(&path)?;
     }
@@ -656,7 +662,7 @@ fn stop_at_first_hole(
             &crate::io::RealFs::new(db_path)?,
             &wal_dir.join(crate::wal::ACTIVE_FILE_NAME),
         )?;
-    } else {
+    } else if !local_paths_empty {
         std::fs::File::open(&wal_dir)?.sync_all()?;
     }
     plan.max_unreplayed_sequence = max_sequence;
