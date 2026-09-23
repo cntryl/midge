@@ -1,8 +1,8 @@
 //! Cloud replay with bounded reads, transaction buffers, and checkpointable memtables.
 
 use super::{
-    apply_record, collect_replay_paths, open_wal_replay_file, replay_error_action, NextWalFrame,
-    RecoveryStats, ReplayErrorAction, ReplayFile, ReplayPolicy, WriterEpochFrontiers,
+    apply_record, collect_replay_paths, open_wal_replay_file, replay_error_action, EpochPolicy,
+    NextWalFrame, RecoveryStats, ReplayErrorAction, ReplayFile, ReplayPolicy, WriterEpochFrontiers,
 };
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::{Fs, FsPath};
@@ -106,7 +106,7 @@ pub(crate) fn inspect_wal_file(
     path: &FsPath,
     limits: StreamingReplayLimits,
 ) -> Result<super::VerifiedWalPrefix, super::WalPrefixInspectionFailure> {
-    inspect_file(file, path, limits, false, &mut |_| Ok(()))
+    inspect_file(file, path, limits, EpochPolicy::SkipStale, &mut |_| Ok(()))
 }
 
 /// Sealed cloud segments must contain complete frames from exactly one epoch.
@@ -126,7 +126,7 @@ pub(crate) fn visit_sealed_wal_records(
     limits: StreamingReplayLimits,
     visitor: &mut dyn FnMut(&WalRecord) -> MidgeResult<()>,
 ) -> MidgeResult<super::VerifiedWalPrefix> {
-    let prefix = inspect_file(file, path, limits, true, visitor)
+    let prefix = inspect_file(file, path, limits, EpochPolicy::SingleEpoch, visitor)
         .map_err(|failure| failure.failure.into_error())?;
     if prefix.record_count == 0 {
         return Err(MidgeError::Corruption("sealed WAL segment is empty".into()));
@@ -138,14 +138,14 @@ fn inspect_file(
     file: &dyn crate::io::File,
     path: &FsPath,
     limits: StreamingReplayLimits,
-    sealed: bool,
+    epoch_policy: EpochPolicy,
     visitor: &mut dyn FnMut(&WalRecord) -> MidgeResult<()>,
 ) -> Result<super::VerifiedWalPrefix, super::WalPrefixInspectionFailure> {
     inspect_file_from(
         file,
         path,
         limits,
-        sealed,
+        epoch_policy,
         super::VerifiedWalPrefix::default(),
         visitor,
         &mut || Ok(()),
@@ -160,7 +160,15 @@ pub(crate) fn visit_sealed_wal_records_from(
     visitor: &mut dyn FnMut(&WalRecord) -> MidgeResult<()>,
     checkpoint: &mut dyn FnMut() -> MidgeResult<()>,
 ) -> MidgeResult<()> {
-    match inspect_file_from(file, path, limits, true, *progress, visitor, checkpoint) {
+    match inspect_file_from(
+        file,
+        path,
+        limits,
+        EpochPolicy::SingleEpoch,
+        *progress,
+        visitor,
+        checkpoint,
+    ) {
         Ok(prefix) => {
             *progress = prefix;
             if prefix.record_count == 0 {
@@ -179,7 +187,7 @@ fn inspect_file_from(
     file: &dyn crate::io::File,
     path: &FsPath,
     limits: StreamingReplayLimits,
-    sealed: bool,
+    epoch_policy: EpochPolicy,
     mut prefix: super::VerifiedWalPrefix,
     visitor: &mut dyn FnMut(&WalRecord) -> MidgeResult<()>,
     checkpoint: &mut dyn FnMut() -> MidgeResult<()>,
@@ -195,21 +203,21 @@ fn inspect_file_from(
         let NextWalFrame::Frame(frame) = next else {
             return Ok(prefix);
         };
-        if prefix.record_count > 0
-            && (frame.record.writer_epoch < prefix.writer_epoch
-                || (sealed && frame.record.writer_epoch != prefix.writer_epoch))
-        {
-            return Err(super::wal_prefix_failure(
-                prefix,
-                super::ReplayFailure::Error(MidgeError::Corruption(
-                    "active WAL writer epoch regressed".into(),
-                )),
-            ));
-        }
+        let newest = (prefix.record_count > 0).then_some(prefix.writer_epoch);
+        let writer_epoch = epoch_policy
+            .admit(newest, frame.record.writer_epoch)
+            .map_err(|error| {
+                super::wal_prefix_failure(
+                    prefix,
+                    super::ReplayFailure::Error(MidgeError::Corruption(format!(
+                        "sealed WAL segment {error}"
+                    ))),
+                )
+            })?;
         validate_record_contents(&frame.record, limits.max_pending_txn_bytes)
             .map_err(|error| super::wal_prefix_failure(prefix, error.into()))?;
         visitor(&frame.record).map_err(|error| super::wal_prefix_failure(prefix, error.into()))?;
-        prefix.writer_epoch = frame.record.writer_epoch;
+        prefix.writer_epoch = writer_epoch;
         prefix.max_sequence = prefix.max_sequence.max(frame.record.seq);
         prefix.record_count = prefix.record_count.saturating_add(1);
         prefix.valid_bytes = usize::try_from(frame.next_pos).map_err(|_| {

@@ -644,6 +644,38 @@ fn should_fail_strict_recovery_naming_object_when_cataloged_segment_is_missing()
     Ok(())
 }
 
+#[test]
+fn should_keep_every_acknowledged_record_when_fenced_writer_interleaved_into_active_wal(
+) -> MidgeResult<()> {
+    for policy in [RecoveryPolicy::Strict, RecoveryPolicy::Salvage] {
+        // Arrange: a paused, fenced writer (epoch 5) appended into the new
+        // writer's file. Replay skips its record as stale, exactly as local
+        // replay does, so inspection must not reject or truncate the file.
+        let fixture = Fixture::new()?;
+        let bytes = [
+            framed_wal(1, 6, b"first"),
+            framed_wal(2, 6, b"second"),
+            framed_wal(3, 5, b"fenced"),
+            framed_wal(4, 6, b"third"),
+            framed_wal(5, 6, b"fourth"),
+        ]
+        .concat();
+        let path = fixture.local(crate::wal::ACTIVE_FILE_NAME, &bytes)?;
+
+        // Act
+        let recovered = fixture.build(policy)?;
+
+        // Assert
+        let active = recovered.plan.active_wal.expect("active metadata");
+        assert_eq!(active.valid_bytes, bytes.len(), "{policy:?}");
+        assert_eq!(active.writer_epoch, 6);
+        assert_eq!(active.max_sequence, 5);
+        assert!(!recovered.plan.opened_in_salvage_mode);
+        assert_eq!(std::fs::read(&path)?, bytes);
+    }
+    Ok(())
+}
+
 /// Cloud WAL recovery has one production path, this module's streaming
 /// planner. A `#[cfg(test)]` item in the cloud recovery module would let
 /// tests exercise a second copy that production never runs (#496).
