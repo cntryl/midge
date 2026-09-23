@@ -673,7 +673,7 @@ impl EventLoop {
                 }
                 continue;
             }
-            let readback = match crate::wal::cloud_segment::inspect_bytes(&path.0, &bytes) {
+            let readback = match crate::wal::cloud_segment::inspect_local_bytes(&path.0, &bytes) {
                 Ok(readback) => readback,
                 Err(error) => {
                     self.state.mark_persistence_anomaly();
