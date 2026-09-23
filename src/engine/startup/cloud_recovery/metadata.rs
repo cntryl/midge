@@ -5,10 +5,9 @@ use std::sync::Arc;
 impl CloudStartupRecovery {
     pub(super) fn load_local_manifest_for_cloud_metadata_mirror(
         db_path: &Path,
-        recovery_policy: RecoveryPolicy,
     ) -> MidgeResult<crate::metadata::Manifest> {
         let fs: Arc<dyn crate::io::traits::Fs> = Arc::new(crate::io::RealFs::new(db_path)?);
-        crate::metadata::ManifestPersistence::load_with_fs_and_policy(&fs, recovery_policy)
+        crate::metadata::ManifestPersistence::load_with_fs_and_policy(&fs, RecoveryPolicy::Strict)
             .map_err(MidgeError::Internal)
     }
 

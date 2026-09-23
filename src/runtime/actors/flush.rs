@@ -51,7 +51,6 @@ pub(crate) struct FlushPublishTask {
     pub sst_seq: u64,
     pub sst_dir: PathBuf,
     pub fs: Arc<dyn crate::io::Fs>,
-    pub recovery_policy: crate::config::RecoveryPolicy,
     pub hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
     pub cloud_metadata_storage: Option<Arc<crate::storage::cloud::CloudStorage>>,
     pub metadata_publication_lock: crate::runtime::MetadataPublicationLock,
@@ -593,13 +592,21 @@ fn validate_final_sst(
 }
 
 fn load_manifest(task: &FlushPublishTask) -> MidgeResult<crate::metadata::Manifest> {
-    crate::metadata::ManifestPersistence::load_with_fs_and_policy(&task.fs, task.recovery_policy)
-        .map_err(MidgeError::Internal)
+    // Runtime loads are always strict: only startup may salvage-heal the
+    // journal, because only startup records that it opened in salvage mode.
+    crate::metadata::ManifestPersistence::load_with_fs_and_policy(
+        &task.fs,
+        crate::config::RecoveryPolicy::Strict,
+    )
+    .map_err(MidgeError::Internal)
 }
 
 fn load_intents(task: &FlushPublishTask) -> MidgeResult<Vec<crate::runtime::IntentLogEntry>> {
-    crate::runtime::IntentPersistence::load_with_fs_and_policy(&task.fs, task.recovery_policy)
-        .map_err(MidgeError::Internal)
+    crate::runtime::IntentPersistence::load_with_fs_and_policy(
+        &task.fs,
+        crate::config::RecoveryPolicy::Strict,
+    )
+    .map_err(MidgeError::Internal)
 }
 
 fn persist_output_durable_intent(
@@ -913,7 +920,6 @@ mod tests {
             sst_seq: 1,
             sst_dir,
             fs: publication_fs,
-            recovery_policy: crate::config::RecoveryPolicy::Strict,
             hybrid_storage: Some(hybrid),
             cloud_metadata_storage: Some(control_cloud),
             metadata_publication_lock: crate::runtime::MetadataPublicationLock::default(),

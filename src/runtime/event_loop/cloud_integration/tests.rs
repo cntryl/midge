@@ -8208,7 +8208,6 @@ fn should_defer_metadata_cleanup_before_provider_reads_when_shared_budget_is_exh
         cloud,
         el.state.db_path.clone(),
         el.state.fs.clone(),
-        el.state.recovery_policy(),
         budget.clone(),
         el.metadata_publication_lock.clone(),
     );
@@ -8332,7 +8331,6 @@ fn should_defer_metadata_cleanup_when_publication_lock_outlives_deadline(
         cloud.clone(),
         el.state.db_path.clone(),
         el.state.fs.clone(),
-        el.state.recovery_policy(),
         crate::common::resource_budget::ResourceBudget::new(1024 * 1024),
         el.metadata_publication_lock.clone(),
     );

@@ -299,6 +299,37 @@ mod architecture_ladder {
     }
 
     #[test]
+    fn should_load_metadata_strictly_when_outside_startup_recovery() {
+        // Salvage loads rewrite the journal. Only startup may do that, because
+        // only startup records salvage mode, which turns the orphan sweep into
+        // a quarantine instead of a delete.
+        let startup = Path::new("src/runtime/state/recovery.rs");
+        let mut offenders = Vec::new();
+        for path in rust_sources_under("src") {
+            let relative = path
+                .strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                .expect("source under manifest dir");
+            let name = relative.to_string_lossy();
+            if relative == startup || name.contains("tests") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("read source");
+            let source = source.split("#[cfg(test)]\nmod tests").next().unwrap_or("");
+            for (index, _) in source.match_indices("load_with_fs_and_policy(") {
+                let window: String = source[index..].chars().take(160).collect();
+                let definition = source[..index].ends_with("fn ");
+                if !definition && !window.contains("RecoveryPolicy::Strict") {
+                    offenders.push(name.to_string());
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "metadata loads outside startup recovery must be Strict: {offenders:?}"
+        );
+    }
+
+    #[test]
     fn should_import_config_types_directly_when_storage_needs_them() {
         // Arrange
         let source = std::fs::read_to_string(

@@ -11,7 +11,6 @@ pub(crate) struct CloudMetadataPruneSnapshot {
     cloud: Arc<CloudStorage>,
     db_path: std::path::PathBuf,
     fs: Arc<dyn crate::io::traits::Fs>,
-    recovery_policy: crate::config::RecoveryPolicy,
     metadata_publication_lock: crate::runtime::MetadataPublicationLock,
     budget: crate::common::resource_budget::ResourceBudget,
     progress: CloudWalPruneProgress,
@@ -22,7 +21,6 @@ impl CloudMetadataPruneSnapshot {
         cloud: Arc<CloudStorage>,
         db_path: std::path::PathBuf,
         fs: Arc<dyn crate::io::traits::Fs>,
-        recovery_policy: crate::config::RecoveryPolicy,
         budget: crate::common::resource_budget::ResourceBudget,
         metadata_publication_lock: crate::runtime::MetadataPublicationLock,
     ) -> Self {
@@ -30,7 +28,6 @@ impl CloudMetadataPruneSnapshot {
             cloud,
             db_path,
             fs,
-            recovery_policy,
             budget,
             metadata_publication_lock,
             progress: CloudWalPruneProgress::default(),
@@ -134,7 +131,7 @@ impl CloudMetadataPruneSnapshot {
         }
         let manifest = crate::metadata::ManifestPersistence::load_with_fs_and_policy(
             &self.fs,
-            self.recovery_policy,
+            crate::config::RecoveryPolicy::Strict,
         )
         .map_err(MidgeError::Internal)?;
         let guard = CloudMetadataPruneGuard {
@@ -287,7 +284,6 @@ mod tests {
             )),
             directory.path().to_path_buf(),
             Arc::new(crate::io::real::RealFs::new(directory.path()).unwrap()),
-            crate::config::RecoveryPolicy::default(),
             crate::common::resource_budget::ResourceBudget::new(charge + 128 * 1024),
             crate::runtime::MetadataPublicationLock::default(),
         );
@@ -436,7 +432,6 @@ mod tests {
             )),
             directory.path().to_path_buf(),
             Arc::clone(&fs),
-            crate::config::RecoveryPolicy::default(),
             crate::common::resource_budget::ResourceBudget::new(1024 * 1024),
             lock.clone(),
         );
@@ -447,7 +442,6 @@ mod tests {
             )),
             directory.path().to_path_buf(),
             fs,
-            crate::config::RecoveryPolicy::default(),
             crate::common::resource_budget::ResourceBudget::new(1024 * 1024),
             lock,
         );

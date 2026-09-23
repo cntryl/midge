@@ -236,7 +236,6 @@ fn checkpoint_family(
             sst_seq,
             sst_dir: state.sst_dir.clone(),
             fs: Arc::clone(&state.fs),
-            recovery_policy: state.recovery_policy(),
             hybrid_storage: config.hybrid_storage.clone(),
             cloud_metadata_storage: config.cloud_metadata_storage.clone(),
             metadata_publication_lock: config.metadata_publication_lock.clone(),
@@ -314,7 +313,7 @@ fn install_checkpoint_output(
     let name = &delta.file_meta.name;
     state.manifest = crate::metadata::ManifestPersistence::load_with_fs_and_policy(
         &state.fs,
-        state.recovery_policy(),
+        crate::config::RecoveryPolicy::Strict,
     )
     .map_err(MidgeError::Internal)?;
     if delta.persistence_anomaly {
