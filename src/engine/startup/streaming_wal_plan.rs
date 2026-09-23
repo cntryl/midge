@@ -49,14 +49,13 @@ impl StreamingCloudWalRecovery {
         let mut replay_fs = StreamingWalFs::new(read_window)?;
         let local: Arc<dyn Fs> = Arc::new(crate::io::RealFs::new(db_path)?);
         let mut plan = CloudWalRecoveryPlan {
-            #[cfg(test)]
-            replay_dir: db_path.join("cloud_recovery/wal"),
             remote_segments: BTreeMap::new(),
             local_segments: BTreeMap::new(),
             active_wal: None,
             opened_in_salvage_mode: false,
             unreplayed_segments: Vec::new(),
-            max_unreplayed_sequence: 0,
+            max_unreplayed_sequence: catalog.sequence_floor,
+            set_aside_local_paths: Vec::new(),
         };
         let mut sources = BTreeMap::new();
         let mut skipped = BTreeSet::new();
@@ -107,6 +106,7 @@ impl StreamingCloudWalRecovery {
             &mut plan,
             &mut sources,
             &mut active_source,
+            limits,
         )?;
         for (segment_id, source) in sources {
             replay_fs.insert(
@@ -582,6 +582,26 @@ fn enforce_epoch_order(
     Ok(())
 }
 
+/// Highest sequence in the verified prefix of a WAL file being set aside, or
+/// zero when it cannot be read. Best effort: it only lifts the sequence floor.
+fn verified_max_sequence(local: &dyn Fs, path: &Path, limits: StreamingReplayLimits) -> u64 {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return 0;
+    };
+    let wal_path = FsPath::new(format!("wal/{name}"));
+    let file = match local.open(&wal_path, READ_ONLY) {
+        Ok(file) => file,
+        Err(error) => {
+            tracing::warn!(%error, path = %path.display(), "cannot read WAL set aside by salvage");
+            return 0;
+        }
+    };
+    match inspect_wal_file(file.as_ref(), &wal_path, limits) {
+        Ok(prefix) => prefix.max_sequence,
+        Err(failure) => failure.verified_prefix().max_sequence,
+    }
+}
+
 /// Salvage keeps a consistent prefix of history: once a segment is lost,
 /// nothing after it may replay, or a delete in the lost segment could be
 /// undone while newer writes stay visible. Later sources are set aside
@@ -594,6 +614,7 @@ fn stop_at_first_hole(
     plan: &mut CloudWalRecoveryPlan,
     sources: &mut BTreeMap<u64, ReplaySource>,
     active: &mut Option<ReplaySource>,
+    limits: StreamingReplayLimits,
 ) -> MidgeResult<()> {
     // Segments upload and retire in id order, so a local file below the
     // oldest cataloged segment was already retired, meaning SSTs cover it.
@@ -629,9 +650,11 @@ fn stop_at_first_hole(
             local_paths.push(entry.path());
         }
     }
-    let local_paths_empty = local_paths.is_empty();
-    for path in local_paths {
-        CloudStartupRecovery::quarantine_local_wal_alias(&path)?;
+    let local = crate::io::RealFs::new(db_path)?;
+    for path in &local_paths {
+        // A corrupt local-only file is in neither the catalog nor the plan;
+        // its verified prefix is the best record of what it held.
+        max_sequence = max_sequence.max(verified_max_sequence(&local, path, limits));
     }
     let dropped: Vec<u64> = sources.range(hole..).map(|(id, _)| *id).collect();
     for segment_id in dropped {
@@ -658,13 +681,11 @@ fn stop_at_first_hole(
         max_sequence = max_sequence.max(wal.max_sequence);
     }
     if active.take().is_some() {
-        quarantine_active(
-            &crate::io::RealFs::new(db_path)?,
-            &wal_dir.join(crate::wal::ACTIVE_FILE_NAME),
-        )?;
-    } else if !local_paths_empty {
-        std::fs::File::open(&wal_dir)?.sync_all()?;
+        local_paths.push(wal_dir.join(crate::wal::ACTIVE_FILE_NAME));
     }
-    plan.max_unreplayed_sequence = max_sequence;
+    // Renamed only after startup persists the floor that covers them; see
+    // `CloudWalRecoveryPlan::set_aside_local_wal`.
+    plan.set_aside_local_paths = local_paths;
+    plan.max_unreplayed_sequence = plan.max_unreplayed_sequence.max(max_sequence);
     Ok(())
 }

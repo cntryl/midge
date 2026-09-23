@@ -68,7 +68,21 @@ impl Fixture {
         self.build_with_limits(policy, limits())
     }
 
+    /// Plans recovery and renames set-aside local WAL, as startup does once
+    /// the sequence floor is durable.
     fn build_with_limits(
+        &self,
+        policy: RecoveryPolicy,
+        limits: StreamingReplayLimits,
+    ) -> MidgeResult<StreamingCloudWalRecovery> {
+        let recovered = self.plan_only(policy, limits)?;
+        recovered
+            .plan
+            .set_aside_local_wal(&self.directory.path().join("local"))?;
+        Ok(recovered)
+    }
+
+    fn plan_only(
         &self,
         policy: RecoveryPolicy,
         limits: StreamingReplayLimits,
@@ -110,7 +124,11 @@ fn should_normalize_recovery_sources_without_copying_wal_bytes() -> MidgeResult<
     // Assert
     assert_eq!(recovered.plan.remote_segments.len(), 2);
     assert!(recovered.plan.local_segments.is_empty());
-    assert!(!recovered.plan.replay_dir.exists());
+    assert!(!fixture
+        .directory
+        .path()
+        .join("local/cloud_recovery")
+        .exists());
     assert!(!legacy.exists());
     let canonical = fixture
         .directory
@@ -355,13 +373,13 @@ fn should_fail_open_without_truncating_active_wal_when_cloud_salvage_read_fails_
         fail_from: first.len() as u64,
     });
     let mut plan = CloudWalRecoveryPlan {
-        replay_dir: fixture.directory.path().join("local/cloud_recovery/wal"),
         remote_segments: BTreeMap::new(),
         local_segments: BTreeMap::new(),
         active_wal: None,
         opened_in_salvage_mode: false,
         unreplayed_segments: Vec::new(),
         max_unreplayed_sequence: 0,
+        set_aside_local_paths: Vec::new(),
     };
 
     // Act
@@ -426,6 +444,57 @@ fn should_not_replay_segments_after_invalid_segment_when_cloud_salvage_skips_one
     assert!(active.with_file_name("wal.log.salvage-retained").exists());
     assert_eq!(recovered.plan.max_unreplayed_sequence, 4);
     assert_eq!(recovered.next_segment_id, 4);
+    Ok(())
+}
+
+#[test]
+fn should_lift_sequence_floor_over_verified_prefix_of_corrupt_local_segment_set_aside(
+) -> MidgeResult<()> {
+    // Arrange: segment 2 is lost; local-only segment 3 holds sequences 7
+    // and 8 followed by damage, so it is in neither the catalog nor the plan.
+    let mut fixture = Fixture::new()?;
+    fixture.publish(1, 1, 7, &framed_wal(1, 7, b"one"))?;
+    fixture.publish(2, 2, 7, &framed_wal(2, 7, b"two"))?;
+    corrupt_publication(&mut fixture, 2);
+    let mut local = framed_wal(7, 7, b"seven");
+    local.extend_from_slice(&framed_wal(8, 7, b"eight"));
+    let mut damaged = framed_wal(9, 7, b"nine");
+    damaged[8] ^= 1;
+    local.extend_from_slice(&damaged);
+    let path = fixture.local(&crate::wal::segment_file_name(3), &local)?;
+
+    // Act
+    let recovered = fixture.build(RecoveryPolicy::Salvage)?;
+
+    // Assert
+    assert!(!path.exists());
+    assert_eq!(recovered.plan.max_unreplayed_sequence, 8);
+    Ok(())
+}
+
+#[test]
+fn should_not_rename_local_wal_aside_before_startup_persists_its_floor() -> MidgeResult<()> {
+    // Arrange: a crash after planning must leave the hole visible, so the
+    // next open recomputes the floor instead of losing the local files'
+    // sequences.
+    let mut fixture = Fixture::new()?;
+    fixture.publish(1, 1, 7, &framed_wal(1, 7, b"one"))?;
+    fixture.publish(2, 2, 7, &framed_wal(2, 7, b"two"))?;
+    corrupt_publication(&mut fixture, 2);
+    let segment = fixture.local(
+        &crate::wal::segment_file_name(3),
+        &framed_wal(7, 7, b"seven"),
+    )?;
+    let active = fixture.local(crate::wal::ACTIVE_FILE_NAME, &framed_wal(8, 7, b"eight"))?;
+
+    // Act
+    let recovered = fixture.plan_only(RecoveryPolicy::Salvage, limits())?;
+
+    // Assert
+    assert!(segment.exists());
+    assert!(active.exists());
+    assert_eq!(recovered.plan.max_unreplayed_sequence, 8);
+    assert_eq!(recovered.plan.set_aside_local_paths.len(), 2);
     Ok(())
 }
 
@@ -495,4 +564,200 @@ fn should_replay_cataloged_segments_when_corrupt_local_segment_predates_catalog(
     assert!(recovered.plan.unreplayed_segments.is_empty());
     assert!(leaked.exists(), "the leftover stays where it was");
     Ok(())
+}
+
+#[test]
+fn should_reject_strict_recovery_when_later_segment_has_lower_writer_epoch() -> MidgeResult<()> {
+    // Arrange
+    let mut fixture = Fixture::new()?;
+    fixture.publish(1, 1, 8, &framed_wal(1, 8, b"newer epoch"))?;
+    let stale = fixture.local(
+        &crate::wal::segment_file_name(2),
+        &framed_wal(2, 7, b"stale epoch"),
+    )?;
+
+    // Act
+    let result = fixture.build(RecoveryPolicy::Strict);
+
+    // Assert
+    assert!(
+        matches!(&result, Err(MidgeError::RecoveryFailed(message)) if message.contains("epoch regression")),
+        "unexpected result: {:?}",
+        result.as_ref().err()
+    );
+    assert!(stale.exists());
+    Ok(())
+}
+
+#[test]
+fn should_reject_strict_recovery_when_active_wal_has_lower_writer_epoch() -> MidgeResult<()> {
+    // Arrange
+    let mut fixture = Fixture::new()?;
+    fixture.publish(1, 1, 8, &framed_wal(1, 8, b"newer epoch"))?;
+    let active = fixture.local(
+        crate::wal::ACTIVE_FILE_NAME,
+        &framed_wal(2, 7, b"stale active"),
+    )?;
+
+    // Act
+    let result = fixture.build(RecoveryPolicy::Strict);
+
+    // Assert
+    assert!(
+        matches!(&result, Err(MidgeError::RecoveryFailed(message)) if message.contains("epoch regression")),
+        "unexpected result: {:?}",
+        result.as_ref().err()
+    );
+    assert!(active.exists());
+    assert!(!fixture
+        .directory
+        .path()
+        .join("local/wal/wal.log.salvage-retained")
+        .exists());
+    Ok(())
+}
+
+#[test]
+fn should_accept_strict_recovery_when_active_wal_has_rising_writer_epochs() -> MidgeResult<()> {
+    // Arrange: an active WAL reopened in place after failover appends
+    // under a newer epoch; that is its normal shape, not corruption.
+    let fixture = Fixture::new()?;
+    let mut bytes = framed_wal(1, 7, b"before failover");
+    bytes.extend_from_slice(&framed_wal(2, 8, b"after failover"));
+    let path = fixture.local(crate::wal::ACTIVE_FILE_NAME, &bytes)?;
+
+    // Act
+    let recovered = fixture.build(RecoveryPolicy::Strict)?;
+
+    // Assert
+    let active = recovered.plan.active_wal.expect("active metadata");
+    assert_eq!(active.max_sequence, 2);
+    assert_eq!(active.writer_epoch, 8);
+    assert_eq!(active.record_count, 2);
+    assert!(!recovered.plan.opened_in_salvage_mode);
+    assert_eq!(std::fs::read(path)?, bytes);
+    Ok(())
+}
+
+#[test]
+fn should_recover_valid_active_wal_prefix_when_tail_is_zero_filled() -> MidgeResult<()> {
+    // Arrange
+    let fixture = Fixture::new()?;
+    let valid = framed_wal(3, 7, b"value");
+    let mut padded = valid.clone();
+    padded.extend_from_slice(&[0; 64]);
+    let path = fixture.local(crate::wal::ACTIVE_FILE_NAME, &padded)?;
+
+    // Act
+    let recovered = fixture.build(RecoveryPolicy::Strict)?;
+
+    // Assert
+    assert_eq!(
+        recovered
+            .plan
+            .active_wal
+            .expect("active metadata")
+            .max_sequence,
+        3
+    );
+    assert_eq!(std::fs::metadata(path)?.len(), valid.len() as u64);
+    Ok(())
+}
+
+#[test]
+fn should_fail_strict_recovery_without_truncating_when_corrupt_length_hides_valid_suffix(
+) -> MidgeResult<()> {
+    // Arrange
+    let fixture = Fixture::new()?;
+    let mut bytes = framed_wal(1, 7, b"first");
+    bytes.extend_from_slice(&framed_wal(2, 7, b"verified suffix"));
+    let corrupt_length = u32::try_from(bytes.len()).expect("WAL length fits u32");
+    bytes[..4].copy_from_slice(&corrupt_length.to_le_bytes());
+    let path = fixture.local(crate::wal::ACTIVE_FILE_NAME, &bytes)?;
+
+    // Act
+    let result = fixture.build(RecoveryPolicy::Strict);
+
+    // Assert
+    assert!(
+        matches!(&result, Err(MidgeError::RecoveryFailed(message)) if message.contains("hides a verified later frame")),
+        "unexpected result: {:?}",
+        result.as_ref().err()
+    );
+    assert_eq!(std::fs::read(path)?, bytes);
+    Ok(())
+}
+
+#[test]
+fn should_fail_strict_recovery_naming_object_when_cataloged_segment_is_missing() -> MidgeResult<()>
+{
+    // Arrange
+    let mut fixture = Fixture::new()?;
+    fixture.publish(1, 1, 7, &framed_wal(1, 7, b"present"))?;
+    fixture.publish(2, 2, 7, &framed_wal(2, 7, b"missing"))?;
+    let key = fixture.catalog.segments[&2].object_key.clone();
+    std::fs::remove_file(fixture.directory.path().join("cloud").join(&key))?;
+
+    // Act
+    let result = fixture.build(RecoveryPolicy::Strict);
+
+    // Assert
+    let error = result.err().expect("missing publication fails Strict");
+    assert!(
+        error.to_string().contains(&key),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn should_keep_every_acknowledged_record_when_fenced_writer_interleaved_into_active_wal(
+) -> MidgeResult<()> {
+    for policy in [RecoveryPolicy::Strict, RecoveryPolicy::Salvage] {
+        // Arrange: a paused, fenced writer (epoch 5) appended into the new
+        // writer's file. Replay skips its record as stale, exactly as local
+        // replay does, so inspection must not reject or truncate the file.
+        let fixture = Fixture::new()?;
+        let bytes = [
+            framed_wal(1, 6, b"first"),
+            framed_wal(2, 6, b"second"),
+            framed_wal(3, 5, b"fenced"),
+            framed_wal(4, 6, b"third"),
+            framed_wal(5, 6, b"fourth"),
+        ]
+        .concat();
+        let path = fixture.local(crate::wal::ACTIVE_FILE_NAME, &bytes)?;
+
+        // Act
+        let recovered = fixture.build(policy)?;
+
+        // Assert
+        let active = recovered.plan.active_wal.expect("active metadata");
+        assert_eq!(active.valid_bytes, bytes.len(), "{policy:?}");
+        assert_eq!(active.writer_epoch, 6);
+        assert_eq!(active.max_sequence, 5);
+        assert!(!recovered.plan.opened_in_salvage_mode);
+        assert_eq!(std::fs::read(&path)?, bytes);
+    }
+    Ok(())
+}
+
+/// Cloud WAL recovery has one production path, this module's streaming
+/// planner. A `#[cfg(test)]` item in the cloud recovery module would let
+/// tests exercise a second copy that production never runs (#496).
+#[test]
+fn should_keep_cloud_recovery_free_of_test_only_code_when_scanning_source() {
+    // Arrange
+    let source = include_str!("../cloud_recovery/mod.rs");
+
+    // Act
+    let test_only: Vec<_> = source
+        .lines()
+        .zip(source.lines().skip(1))
+        .filter(|(line, next)| line.trim() == "#[cfg(test)]" && next.trim() != "mod tests;")
+        .map(|(_, next)| next.trim())
+        .collect();
+
+    // Assert
+    assert!(test_only.is_empty(), "test-only items: {test_only:?}");
 }

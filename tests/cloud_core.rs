@@ -1167,4 +1167,65 @@ mod cloud_wal_salvage_prefix {
             "salvage keeps unreplayed WAL objects: {kept:?}"
         );
     }
+
+    #[test]
+    fn should_not_reuse_set_aside_sequences_when_salvage_open_crashes_before_flush() {
+        // Arrange: the same lost-middle-segment crash image as above.
+        let live = tempfile::tempdir().expect("live directory");
+        let image = tempfile::tempdir().expect("crash image");
+        let second_image = tempfile::tempdir().expect("salvage crash image");
+        let mut engine = Engine::open(options(live.path(), RecoveryPolicy::Strict)).expect("open");
+        let cf = engine.create_column_family("data").expect("column family");
+        for key in [b"x", b"y", b"z"] {
+            put(&engine, cf.id(), key);
+        }
+        let set_aside_max = engine
+            .get_runtime_metrics()
+            .expect("runtime metrics")
+            .current_sequence;
+        copy_dir(live.path(), image.path());
+        engine.shutdown(Duration::from_secs(30)).expect("shutdown");
+        let segments: Vec<_> = files(&image.path().join("cloud_store/wal/epochs"))
+            .into_iter()
+            .filter(|path| path.extension().is_some_and(|extension| extension == "wal"))
+            .collect();
+        assert!(segments.len() >= 3, "each strict commit seals a segment");
+        let mut bytes = std::fs::read(&segments[1]).expect("read segment");
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        std::fs::write(&segments[1], bytes).expect("corrupt segment");
+        for local in [
+            image.path().join("wal"),
+            image.path().join("hybrid_local/wal"),
+        ] {
+            for path in files(&local) {
+                std::fs::remove_file(path).expect("drop local WAL copy");
+            }
+        }
+        // The salvage open sets segments 2 and 3 aside, then crashes before
+        // anything it accepts is flushed.
+        let mut salvaged = open_after_lease_expiry(image.path(), RecoveryPolicy::Salvage);
+        copy_dir(image.path(), second_image.path());
+        salvaged
+            .shutdown(Duration::from_secs(30))
+            .expect("shutdown");
+
+        // Act
+        let mut reopened = open_after_lease_expiry(second_image.path(), RecoveryPolicy::Salvage);
+        let cf = reopened.get_column_family("data").expect("column family");
+        put(&reopened, cf.id(), b"w");
+        let new_sequence = reopened
+            .get_runtime_metrics()
+            .expect("runtime metrics")
+            .current_sequence;
+        reopened
+            .shutdown(Duration::from_secs(30))
+            .expect("shutdown");
+
+        // Assert
+        assert!(
+            new_sequence > set_aside_max,
+            "new write took sequence {new_sequence}, reusing set-aside WAL up to {set_aside_max}"
+        );
+    }
 }

@@ -28,16 +28,7 @@ pub(crate) struct SegmentReadback {
     pub(crate) data_records: Vec<DataCoverageRecord>,
 }
 
-/// Which writer epochs one WAL file may hold.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EpochPolicy {
-    /// A published cloud object: one writer sealed every record in it.
-    SingleEpoch,
-    /// A local file: a restart appends the next writer epoch to the file the
-    /// previous writer left, so epochs may rise. A fall means a fenced writer
-    /// appended after its successor, which is rejected.
-    NonDecreasing,
-}
+use super::recovery::EpochPolicy;
 
 #[must_use]
 pub(crate) fn file_name(segment_id: u64) -> String {
@@ -104,9 +95,10 @@ pub(crate) fn inspect_bytes(key: &str, data: &[u8]) -> Result<SegmentReadback, S
 }
 
 /// Inspect a locally sealed segment, which may span a restart and so hold
-/// rising writer epochs. The reported epoch is the newest one.
+/// rising writer epochs and stale records from a fenced writer. The reported
+/// epoch is the newest one.
 pub(crate) fn inspect_local_bytes(key: &str, data: &[u8]) -> Result<SegmentReadback, String> {
-    inspect(key, data, true, EpochPolicy::NonDecreasing)
+    inspect(key, data, true, EpochPolicy::SkipStale)
 }
 
 fn inspect(
@@ -135,25 +127,11 @@ fn inspect(
         };
         let record = super::encoding::decode(payload.as_ref())
             .map_err(|error| format!("cloud WAL segment '{key}' record decode: {error}"))?;
-        match (observed_writer_epoch, epoch_policy) {
-            (Some(expected_epoch), EpochPolicy::SingleEpoch)
-                if record.writer_epoch != expected_epoch =>
-            {
-                return Err(format!(
-                    "cloud WAL segment '{key}' mixes writer epochs {expected_epoch} and {}",
-                    record.writer_epoch
-                ));
-            }
-            (Some(newest_epoch), EpochPolicy::NonDecreasing)
-                if record.writer_epoch < newest_epoch =>
-            {
-                return Err(format!(
-                    "WAL segment '{key}' writer epoch regressed from {newest_epoch} to {}",
-                    record.writer_epoch
-                ));
-            }
-            _ => observed_writer_epoch = Some(record.writer_epoch),
-        }
+        observed_writer_epoch = Some(
+            epoch_policy
+                .admit(observed_writer_epoch, record.writer_epoch)
+                .map_err(|error| format!("cloud WAL segment '{key}' {error}"))?,
+        );
         observed_max_sequence = observed_max_sequence.max(record.seq);
         if collect_coverage {
             append_data_coverage_records(key, &record, &mut data_records)?;
@@ -296,18 +274,20 @@ mod tests {
     }
 
     #[test]
-    fn should_reject_local_segment_when_writer_epoch_regresses() {
-        // Arrange: a fenced writer appended after its successor.
+    fn should_accept_stale_record_when_fenced_writer_appended_after_successor() {
+        // Arrange: replay skips the fenced writer's record as stale.
         let mut bytes = Vec::new();
         append_record_frame(&mut bytes, 1, 42);
         append_record_frame(&mut bytes, 2, 41);
+        append_record_frame(&mut bytes, 3, 42);
 
         // Act
-        let result = inspect_local_bytes("wal/00000000000000000001.wal", &bytes);
+        let readback = inspect_local_bytes("wal/00000000000000000001.wal", &bytes).unwrap();
 
         // Assert
-        let error = result.unwrap_err();
-        assert!(error.contains("regressed from 42 to 41"), "{error}");
+        assert_eq!(readback.validation.writer_epoch, 42);
+        assert_eq!(readback.validation.max_sequence, 3);
+        assert_eq!(readback.data_records.len(), 3);
     }
 
     #[test]

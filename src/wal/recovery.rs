@@ -151,6 +151,37 @@ impl From<MidgeError> for ReplayFailure {
     }
 }
 
+/// Which writer epochs one WAL file may hold.
+///
+/// Every WAL record carries the epoch of the writer that appended it. A file
+/// written in place (the active WAL, a locally rotated segment) can span a
+/// restart, and a paused, fenced writer can still append a lower-epoch record
+/// after its successor. Replay skips such records as stale, so every walker
+/// over a local file must accept them too, or validation would reject or
+/// truncate a file that replay recovers in full (#487).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EpochPolicy {
+    /// A published cloud segment object: one writer sealed every record.
+    SingleEpoch,
+    /// A local file: epochs may rise, and a lower-epoch record after a newer
+    /// one is stale. It is still validated but does not lower the newest epoch.
+    SkipStale,
+}
+
+impl EpochPolicy {
+    /// Checks `record_epoch` against the newest epoch seen so far in the file
+    /// and returns the newest epoch after this record.
+    pub(crate) fn admit(self, newest: Option<u64>, record_epoch: u64) -> Result<u64, String> {
+        match (self, newest) {
+            (_, None) => Ok(record_epoch),
+            (Self::SingleEpoch, Some(epoch)) if epoch != record_epoch => {
+                Err(format!("mixes writer epochs {epoch} and {record_epoch}"))
+            }
+            (_, Some(epoch)) => Ok(epoch.max(record_epoch)),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct VerifiedWalPrefix {
     pub(crate) max_sequence: u64,
@@ -186,48 +217,6 @@ fn wal_prefix_failure(
     WalPrefixInspectionFailure {
         verified_prefix,
         failure,
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn inspect_active_wal_bytes(
-    data: &[u8],
-) -> Result<VerifiedWalPrefix, WalPrefixInspectionFailure> {
-    let mut prefix = VerifiedWalPrefix::default();
-    loop {
-        let pos = u64::try_from(prefix.valid_bytes).unwrap_or(u64::MAX);
-        let step = crate::wal::frame::next_frame(
-            &data,
-            &"active WAL",
-            pos,
-            crate::wal::frame::FrameLimits::default(),
-        );
-        let (payload, next_pos) = match step {
-            Ok(crate::wal::frame::FrameStep::Eof) => return Ok(prefix),
-            Ok(crate::wal::frame::FrameStep::Frame { payload, next_pos }) => (payload, next_pos),
-            Err(error) => return Err(wal_prefix_failure(prefix, error.into())),
-        };
-        let record = match super::encoding::decode(payload.as_ref()) {
-            Ok(record) => record,
-            Err(error) => {
-                return Err(wal_prefix_failure(prefix, ReplayFailure::Error(error)));
-            }
-        };
-        // An active WAL may span a failover and therefore increase epochs,
-        // but it must never return to an older, fenced writer.
-        if prefix.record_count > 0 && record.writer_epoch < prefix.writer_epoch {
-            return Err(wal_prefix_failure(
-                prefix,
-                ReplayFailure::Error(MidgeError::Corruption(format!(
-                    "active WAL writer epoch regressed from {} to {}",
-                    prefix.writer_epoch, record.writer_epoch
-                ))),
-            ));
-        }
-        prefix.writer_epoch = record.writer_epoch;
-        prefix.max_sequence = prefix.max_sequence.max(record.seq);
-        prefix.record_count = prefix.record_count.saturating_add(1);
-        prefix.valid_bytes = usize::try_from(next_pos).unwrap_or(usize::MAX);
     }
 }
 

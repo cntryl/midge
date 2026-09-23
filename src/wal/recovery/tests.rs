@@ -75,26 +75,6 @@ fn put_record(key: &'static [u8], sequence: u64, writer_epoch: u64) -> WalRecord
     )
 }
 
-#[test]
-fn should_reject_active_wal_given_writer_epoch_regression() {
-    // Arrange
-    let bytes = [
-        encode_frame(&put_record(b"epoch-7", 1, 7)),
-        encode_frame(&put_record(b"epoch-8", 2, 8)),
-        encode_frame(&put_record(b"stale-epoch-7", 3, 7)),
-    ]
-    .concat();
-
-    // Act
-    let result = inspect_active_wal_bytes(&bytes);
-
-    // Assert
-    let failure = result.expect_err("regressing epoch must be corrupt");
-    assert!(matches!(failure.failure.error(), MidgeError::Corruption(_)));
-    assert_eq!(failure.verified_prefix.writer_epoch, 8);
-    assert_eq!(failure.verified_prefix.record_count, 2);
-}
-
 fn wal_with_corrupted_length_before_valid_suffix() -> Vec<u8> {
     let prefix = encode_frame(&put_record(b"prefix", 1, 1));
     let hidden = encode_frame(&put_record(b"hidden", 2, 1));
@@ -1798,4 +1778,112 @@ fn should_preserve_raw_value_given_forward_clock_skew_during_wal_replay_when_rec
             if value.as_ref() == b"ttl-value"
     ));
     assert_eq!(masked_at_expiration, crate::types::KeyState::Tombstone(7));
+}
+
+/// What one walker concluded about a local WAL file: whether it accepts the
+/// file and, if so, the newest writer epoch it saw.
+#[derive(Debug, PartialEq, Eq)]
+enum WalkerVerdict {
+    Accepted { newest_epoch: u64 },
+    Rejected,
+}
+
+/// Runs local replay and the cloud active-WAL inspector over the same
+/// `wal.log` bytes. Both walk local files, so they must agree (#413, #487).
+fn classify_with_both_walkers(bytes: &[u8]) -> (WalkerVerdict, WalkerVerdict) {
+    let dir = TempDir::new().expect("create temp dir");
+    std::fs::create_dir_all(dir.path().join("wal")).expect("create WAL dir");
+    std::fs::write(
+        dir.path().join("wal").join(crate::wal::ACTIVE_FILE_NAME),
+        bytes,
+    )
+    .expect("write WAL fixture");
+    let storage = RealFs::new(dir.path()).expect("open fs");
+
+    let replay =
+        match validate_wal_with_policy(&storage, &FsPath::new("wal"), ReplayPolicy::Strict, None) {
+            Ok(stats) => WalkerVerdict::Accepted {
+                newest_epoch: stats.max_epoch_seen,
+            },
+            Err(_) => WalkerVerdict::Rejected,
+        };
+
+    let path = FsPath::new(format!("wal/{}", crate::wal::ACTIVE_FILE_NAME));
+    let file = storage
+        .open(
+            &path,
+            OpenOptions {
+                mode: OpenMode::ReadOnly,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        )
+        .expect("open WAL fixture");
+    let limits = super::streaming::StreamingReplayLimits {
+        max_frame_bytes: 128 * 1_024,
+        max_pending_txn_bytes: 256 * 1_024,
+        max_memtable_encoded_bytes: 256 * 1_024,
+        target_memtable_encoded_bytes: 256 * 1_024,
+    };
+    let inspector = match super::streaming::inspect_wal_file(file.as_ref(), &path, limits) {
+        Ok(prefix) => WalkerVerdict::Accepted {
+            newest_epoch: prefix.writer_epoch,
+        },
+        // Cloud recovery truncates a torn tail to the verified prefix, as
+        // local replay tolerates it.
+        Err(failure) if failure.is_incomplete_tail() => WalkerVerdict::Accepted {
+            newest_epoch: failure.verified_prefix().writer_epoch,
+        },
+        Err(_) => WalkerVerdict::Rejected,
+    };
+    (replay, inspector)
+}
+
+fn wal_with_epochs(epochs: &[u64]) -> Vec<u8> {
+    epochs
+        .iter()
+        .zip(1..)
+        .map(|(epoch, sequence)| encode_frame(&put_record(b"key", sequence, *epoch)))
+        .collect::<Vec<_>>()
+        .concat()
+}
+
+#[test]
+fn should_classify_identically_across_walkers_when_fenced_writer_interleaves() {
+    // Arrange: a paused, fenced writer (epoch 5) appended into its
+    // successor's file between epoch-6 records.
+    let bytes = wal_with_epochs(&[6, 6, 5, 6, 6]);
+
+    // Act
+    let (replay, inspector) = classify_with_both_walkers(&bytes);
+
+    // Assert
+    assert_eq!(replay, WalkerVerdict::Accepted { newest_epoch: 6 });
+    assert_eq!(inspector, replay);
+}
+
+proptest::proptest! {
+    #[test]
+    fn should_classify_identically_across_walkers_when_given_fuzzed_wal_bytes(
+        epochs in proptest::collection::vec(1_u64..=4, 1..8),
+        damage in proptest::option::of((proptest::prelude::any::<proptest::sample::Index>(), 1_u8..=255)),
+        cut in proptest::option::of(proptest::prelude::any::<proptest::sample::Index>()),
+    ) {
+        // Arrange
+        let mut bytes = wal_with_epochs(&epochs);
+        if let Some((index, mask)) = damage {
+            let at = index.index(bytes.len());
+            bytes[at] ^= mask;
+        }
+        if let Some(index) = cut {
+            bytes.truncate(index.index(bytes.len()));
+        }
+
+        // Act
+        let (replay, inspector) = classify_with_both_walkers(&bytes);
+
+        // Assert
+        proptest::prop_assert_eq!(inspector, replay, "bytes: {:?}", bytes);
+    }
 }
