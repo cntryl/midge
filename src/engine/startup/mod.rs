@@ -101,17 +101,54 @@ pub(in crate::engine) struct CloudWalRecoveryPlan {
     /// open (the catalog's persisted floor), so new writes never reuse one.
     /// Zero when nothing was ever set aside.
     pub(in crate::engine) max_unreplayed_sequence: u64,
+    /// Local WAL files at or past the hole, including `wal.log`. Salvage
+    /// renames them aside only after the floor covering them is durable.
+    pub(in crate::engine) set_aside_local_paths: Vec<std::path::PathBuf>,
 }
 
 impl CloudWalRecoveryPlan {
-    /// Whether this open set WAL aside that the catalog does not yet record:
-    /// segments to retire, or a sequence floor above the persisted one.
-    pub(in crate::engine) fn sets_wal_aside(
+    /// Makes a salvage set-aside durable, in the one order that survives a
+    /// crash between any two steps:
+    ///
+    /// 1. Persist the sequence floor. Until the local files are renamed, the
+    ///    next open finds the same hole and recomputes it anyway.
+    /// 2. Rename the local files aside. After this they no longer parse as
+    ///    segments, so only the persisted floor remembers their sequences.
+    /// 3. Retire the cataloged segments. Retiring before step 2 would let the
+    ///    next open replay local copies past the hole.
+    pub(in crate::engine) fn commit_set_aside(
         &self,
+        persistence: &crate::runtime::hybrid_persistence::CloudPersistence,
+        writer_epoch: u64,
         catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
-    ) -> bool {
-        !self.unreplayed_segments.is_empty()
-            || self.max_unreplayed_sequence > catalog.sequence_floor
+        db_path: &std::path::Path,
+    ) -> crate::common::MidgeResult<()> {
+        if self.max_unreplayed_sequence > catalog.sequence_floor {
+            persistence.raise_wal_sequence_floor(writer_epoch, self.max_unreplayed_sequence)?;
+        }
+        self.set_aside_local_wal(db_path)?;
+        if !self.unreplayed_segments.is_empty() {
+            persistence.retire_unreplayed_wal_segments(writer_epoch, &self.unreplayed_segments)?;
+        }
+        Ok(())
+    }
+
+    /// Renames the local WAL files salvage stopped short of and syncs `wal/`.
+    pub(in crate::engine) fn set_aside_local_wal(
+        &self,
+        db_path: &std::path::Path,
+    ) -> crate::common::MidgeResult<()> {
+        let mut renamed = false;
+        for path in &self.set_aside_local_paths {
+            if path.try_exists()? {
+                CloudStartupRecovery::quarantine_local_wal_alias(path)?;
+                renamed = true;
+            }
+        }
+        if renamed {
+            std::fs::File::open(db_path.join("wal"))?.sync_all()?;
+        }
+        Ok(())
     }
 
     fn remote_max_sequences(&self) -> std::collections::BTreeMap<u64, u64> {

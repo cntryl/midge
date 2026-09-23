@@ -514,14 +514,12 @@ impl CloudPersistence {
     /// Drop the segments a salvage open stopped short of from catalog
     /// authority so later opens do not stop at the same hole and discard
     /// writes made after it. Their objects stay in place: retirement here is
-    /// not followed by a delete. The same commit raises the catalog's
-    /// sequence floor above everything set aside, so a crash before the
-    /// first flush cannot hand those sequences out again.
+    /// not followed by a delete. The sequence floor covering them must
+    /// already be persisted (`raise_wal_sequence_floor`).
     pub(crate) fn retire_unreplayed_wal_segments(
         &self,
         writer_epoch: u64,
         segments: &[PublishedWalSegment],
-        sequence_floor: u64,
     ) -> MidgeResult<()> {
         let deadline = crate::common::OperationDeadline::unbounded();
         let _catalog_mutation =
@@ -536,12 +534,30 @@ impl CloudPersistence {
                 .retire(writer_epoch, segment)
                 .map_err(MidgeError::Fenced)?;
         }
-        // The floor commits with the retirement: once these segments leave
-        // the catalog, nothing else records that their sequences were used.
-        changed |= catalog
-            .raise_sequence_floor(writer_epoch, sequence_floor)
-            .map_err(MidgeError::Fenced)?;
         if changed {
+            commit_catalog_within(self, Some(&authority.primary), &catalog, &deadline)?;
+        }
+        Ok(())
+    }
+
+    /// Persist a sequence floor above WAL that salvage sets aside, so a crash
+    /// before the first flush cannot hand those sequences out again (#529).
+    pub(crate) fn raise_wal_sequence_floor(
+        &self,
+        writer_epoch: u64,
+        sequence_floor: u64,
+    ) -> MidgeResult<()> {
+        let deadline = crate::common::OperationDeadline::unbounded();
+        let _catalog_mutation =
+            self.lock_wal_catalog_mutation_within(&deadline, "cloud WAL salvage floor")?;
+        let authority = load_and_repair_catalog_within(self, &deadline)?.ok_or_else(|| {
+            MidgeError::Internal("cloud WAL publication catalog is missing".to_string())
+        })?;
+        let mut catalog = authority.catalog;
+        if catalog
+            .raise_sequence_floor(writer_epoch, sequence_floor)
+            .map_err(MidgeError::Fenced)?
+        {
             commit_catalog_within(self, Some(&authority.primary), &catalog, &deadline)?;
         }
         Ok(())

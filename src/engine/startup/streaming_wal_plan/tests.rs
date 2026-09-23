@@ -68,7 +68,21 @@ impl Fixture {
         self.build_with_limits(policy, limits())
     }
 
+    /// Plans recovery and renames set-aside local WAL, as startup does once
+    /// the sequence floor is durable.
     fn build_with_limits(
+        &self,
+        policy: RecoveryPolicy,
+        limits: StreamingReplayLimits,
+    ) -> MidgeResult<StreamingCloudWalRecovery> {
+        let recovered = self.plan_only(policy, limits)?;
+        recovered
+            .plan
+            .set_aside_local_wal(&self.directory.path().join("local"))?;
+        Ok(recovered)
+    }
+
+    fn plan_only(
         &self,
         policy: RecoveryPolicy,
         limits: StreamingReplayLimits,
@@ -365,6 +379,7 @@ fn should_fail_open_without_truncating_active_wal_when_cloud_salvage_read_fails_
         opened_in_salvage_mode: false,
         unreplayed_segments: Vec::new(),
         max_unreplayed_sequence: 0,
+        set_aside_local_paths: Vec::new(),
     };
 
     // Act
@@ -454,6 +469,32 @@ fn should_lift_sequence_floor_over_verified_prefix_of_corrupt_local_segment_set_
     // Assert
     assert!(!path.exists());
     assert_eq!(recovered.plan.max_unreplayed_sequence, 8);
+    Ok(())
+}
+
+#[test]
+fn should_not_rename_local_wal_aside_before_startup_persists_its_floor() -> MidgeResult<()> {
+    // Arrange: a crash after planning must leave the hole visible, so the
+    // next open recomputes the floor instead of losing the local files'
+    // sequences.
+    let mut fixture = Fixture::new()?;
+    fixture.publish(1, 1, 7, &framed_wal(1, 7, b"one"))?;
+    fixture.publish(2, 2, 7, &framed_wal(2, 7, b"two"))?;
+    corrupt_publication(&mut fixture, 2);
+    let segment = fixture.local(
+        &crate::wal::segment_file_name(3),
+        &framed_wal(7, 7, b"seven"),
+    )?;
+    let active = fixture.local(crate::wal::ACTIVE_FILE_NAME, &framed_wal(8, 7, b"eight"))?;
+
+    // Act
+    let recovered = fixture.plan_only(RecoveryPolicy::Salvage, limits())?;
+
+    // Assert
+    assert!(segment.exists());
+    assert!(active.exists());
+    assert_eq!(recovered.plan.max_unreplayed_sequence, 8);
+    assert_eq!(recovered.plan.set_aside_local_paths.len(), 2);
     Ok(())
 }
 

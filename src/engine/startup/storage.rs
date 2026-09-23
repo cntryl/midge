@@ -319,14 +319,12 @@ impl RuntimeStorageMaterialization {
             )
         })?;
         let recovery_plan = streaming.plan;
-        if recovery_plan.sets_wal_aside(&wal_catalog) {
-            CloudPersistence::new(Arc::clone(&cloud.hybrid_storage))
-                .retire_unreplayed_wal_segments(
-                    startup_lease.writer_epoch,
-                    &recovery_plan.unreplayed_segments,
-                    recovery_plan.max_unreplayed_sequence,
-                )?;
-        }
+        recovery_plan.commit_set_aside(
+            &CloudPersistence::new(Arc::clone(&cloud.hybrid_storage)),
+            startup_lease.writer_epoch,
+            &wal_catalog,
+            &storage_path.db_path,
+        )?;
         let mut state = RuntimeState::try_new_before_cloud_replay(
             storage_path.db_path.clone(),
             opts.recovery_policy(),
@@ -464,13 +462,12 @@ impl RuntimeStorageMaterialization {
             )
         })?;
         let recovery_plan = streaming.plan;
-        if recovery_plan.sets_wal_aside(&wal_catalog) {
-            CloudPersistence::new(Arc::clone(&hybrid_storage)).retire_unreplayed_wal_segments(
-                startup_lease.writer_epoch,
-                &recovery_plan.unreplayed_segments,
-                recovery_plan.max_unreplayed_sequence,
-            )?;
-        }
+        recovery_plan.commit_set_aside(
+            &CloudPersistence::new(Arc::clone(&hybrid_storage)),
+            startup_lease.writer_epoch,
+            &wal_catalog,
+            &storage_path.db_path,
+        )?;
         let mut state = RuntimeState::try_new_before_cloud_replay(
             storage_path.db_path.clone(),
             opts.recovery_policy(),

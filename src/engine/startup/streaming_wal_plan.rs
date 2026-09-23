@@ -55,6 +55,7 @@ impl StreamingCloudWalRecovery {
             opened_in_salvage_mode: false,
             unreplayed_segments: Vec::new(),
             max_unreplayed_sequence: catalog.sequence_floor,
+            set_aside_local_paths: Vec::new(),
         };
         let mut sources = BTreeMap::new();
         let mut skipped = BTreeSet::new();
@@ -649,13 +650,11 @@ fn stop_at_first_hole(
             local_paths.push(entry.path());
         }
     }
-    let local_paths_empty = local_paths.is_empty();
     let local = crate::io::RealFs::new(db_path)?;
-    for path in local_paths {
+    for path in &local_paths {
         // A corrupt local-only file is in neither the catalog nor the plan;
         // its verified prefix is the best record of what it held.
-        max_sequence = max_sequence.max(verified_max_sequence(&local, &path, limits));
-        CloudStartupRecovery::quarantine_local_wal_alias(&path)?;
+        max_sequence = max_sequence.max(verified_max_sequence(&local, path, limits));
     }
     let dropped: Vec<u64> = sources.range(hole..).map(|(id, _)| *id).collect();
     for segment_id in dropped {
@@ -682,10 +681,11 @@ fn stop_at_first_hole(
         max_sequence = max_sequence.max(wal.max_sequence);
     }
     if active.take().is_some() {
-        quarantine_active(&local, &wal_dir.join(crate::wal::ACTIVE_FILE_NAME))?;
-    } else if !local_paths_empty {
-        std::fs::File::open(&wal_dir)?.sync_all()?;
+        local_paths.push(wal_dir.join(crate::wal::ACTIVE_FILE_NAME));
     }
+    // Renamed only after startup persists the floor that covers them; see
+    // `CloudWalRecoveryPlan::set_aside_local_wal`.
+    plan.set_aside_local_paths = local_paths;
     plan.max_unreplayed_sequence = plan.max_unreplayed_sequence.max(max_sequence);
     Ok(())
 }
