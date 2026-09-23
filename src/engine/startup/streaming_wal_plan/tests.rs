@@ -496,3 +496,54 @@ fn should_replay_cataloged_segments_when_corrupt_local_segment_predates_catalog(
     assert!(leaked.exists(), "the leftover stays where it was");
     Ok(())
 }
+
+#[test]
+fn should_reject_strict_recovery_when_later_segment_has_lower_writer_epoch() -> MidgeResult<()> {
+    // Arrange
+    let mut fixture = Fixture::new()?;
+    fixture.publish(1, 1, 8, &framed_wal(1, 8, b"newer epoch"))?;
+    let stale = fixture.local(
+        &crate::wal::segment_file_name(2),
+        &framed_wal(2, 7, b"stale epoch"),
+    )?;
+
+    // Act
+    let result = fixture.build(RecoveryPolicy::Strict);
+
+    // Assert
+    assert!(
+        matches!(&result, Err(MidgeError::RecoveryFailed(message)) if message.contains("epoch regression")),
+        "unexpected result: {:?}",
+        result.as_ref().err()
+    );
+    assert!(stale.exists());
+    Ok(())
+}
+
+#[test]
+fn should_reject_strict_recovery_when_active_wal_has_lower_writer_epoch() -> MidgeResult<()> {
+    // Arrange
+    let mut fixture = Fixture::new()?;
+    fixture.publish(1, 1, 8, &framed_wal(1, 8, b"newer epoch"))?;
+    let active = fixture.local(
+        crate::wal::ACTIVE_FILE_NAME,
+        &framed_wal(2, 7, b"stale active"),
+    )?;
+
+    // Act
+    let result = fixture.build(RecoveryPolicy::Strict);
+
+    // Assert
+    assert!(
+        matches!(&result, Err(MidgeError::RecoveryFailed(message)) if message.contains("epoch regression")),
+        "unexpected result: {:?}",
+        result.as_ref().err()
+    );
+    assert!(active.exists());
+    assert!(!fixture
+        .directory
+        .path()
+        .join("local/wal/wal.log.salvage-retained")
+        .exists());
+    Ok(())
+}
