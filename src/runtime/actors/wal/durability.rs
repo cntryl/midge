@@ -129,9 +129,10 @@ impl WalActor {
                 // error: this writer may already be stale. Keep it from
                 // accepting more WAL-backed work while the event loop pairs
                 // this actor fence with the transition protocol and waiters.
-                self.fence_transition(
+                self.fence_with_cause(
                     state,
                     format!("WAL writer authority validation failed: {error}"),
+                    true,
                 );
                 return Err(error);
             }

@@ -173,6 +173,9 @@ enum WalIoState {
         fs: Arc<dyn Fs>,
         reason: String,
         sealed_segment: Option<u64>,
+        /// This writer may be stale (lease or epoch check failed), as opposed
+        /// to a local I/O failure that poisoned the WAL.
+        authority_lost: bool,
     },
 }
 
@@ -465,7 +468,7 @@ impl WalActor {
                 operation,
                 sealed_segment,
                 ..
-            } => Some(MidgeError::Fenced(format!(
+            } => Some(MidgeError::RecoveryFailed(format!(
                 "WAL {operation:?} transition did not complete{}; restart is required",
                 sealed_segment.map_or_else(String::new, |segment| format!(
                     " after sealing segment {segment}"
@@ -474,17 +477,39 @@ impl WalActor {
             WalIoState::Fenced {
                 reason,
                 sealed_segment,
+                authority_lost,
                 ..
-            } => Some(MidgeError::Fenced(format!(
-                "{reason}{}",
-                sealed_segment.map_or_else(String::new, |segment| format!(
-                    "; sealed segment {segment} requires restart recovery"
-                ))
-            ))),
+            } => {
+                let message = format!(
+                    "{reason}{}",
+                    sealed_segment.map_or_else(String::new, |segment| format!(
+                        "; sealed segment {segment} requires restart recovery"
+                    ))
+                );
+                // Only lost authority is `Fenced`. A WAL poisoned by local
+                // I/O needs a restart, which is what `RecoveryFailed` says.
+                Some(if *authority_lost {
+                    MidgeError::Fenced(message)
+                } else {
+                    MidgeError::RecoveryFailed(format!("local WAL is poisoned: {message}"))
+                })
+            }
         }
     }
 
+    /// Stop the WAL after a local failure it cannot recover from in place.
     pub(crate) fn fence_transition(&mut self, state: &mut RuntimeState, reason: impl Into<String>) {
+        self.fence_with_cause(state, reason, false);
+    }
+
+    /// Stop the WAL, recording whether writer authority was lost (lease or
+    /// epoch) or the WAL was poisoned by I/O. Once lost, authority stays lost.
+    pub(crate) fn fence_with_cause(
+        &mut self,
+        state: &mut RuntimeState,
+        reason: impl Into<String>,
+        authority_lost: bool,
+    ) {
         let reason = reason.into();
         let previous = std::mem::replace(&mut self.io, WalIoState::Memory);
         self.io = match previous {
@@ -493,16 +518,26 @@ impl WalActor {
                 fs,
                 reason,
                 sealed_segment: None,
+                authority_lost,
             },
             WalIoState::Transitioning {
-                fs, sealed_segment, ..
-            }
-            | WalIoState::Fenced {
                 fs, sealed_segment, ..
             } => WalIoState::Fenced {
                 fs,
                 reason,
                 sealed_segment,
+                authority_lost,
+            },
+            WalIoState::Fenced {
+                fs,
+                sealed_segment,
+                authority_lost: already_lost,
+                ..
+            } => WalIoState::Fenced {
+                fs,
+                reason,
+                sealed_segment,
+                authority_lost: authority_lost || already_lost,
             },
         };
         if !matches!(self.io, WalIoState::Memory) {
