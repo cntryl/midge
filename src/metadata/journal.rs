@@ -535,7 +535,9 @@ fn replay_journal_with_mode(
     while offset < file_len {
         let status = match read_journal_record(&*file, offset, file_len) {
             Ok(status) => status,
-            Err(error) if mode == JournalReplayMode::SalvagePrefix => {
+            // A read error is not evidence of corruption: salvaging past it
+            // would drop durable edits whose bytes are fine.
+            Err(error) if mode == JournalReplayMode::SalvagePrefix && error.is_salvageable() => {
                 corruption = Some(format!("at byte {offset}: {error}"));
                 break;
             }
@@ -1181,6 +1183,36 @@ mod tests {
             .expect("open test manifest journal")
             .sync_all()
             .expect("sync test manifest journal");
+    }
+
+    #[test]
+    fn should_fail_salvage_not_drop_edits_when_journal_read_returns_transient_io_error() {
+        // Arrange: two durable edits; reads past the first record fail.
+        let td = tempdir().unwrap();
+        let db = td.path();
+        let edit = |seq| {
+            ManifestEdit::AddSst(FileMeta {
+                name: crate::cloud_layout::file_name(0, 0, seq),
+                size_bytes: 1024,
+                ..Default::default()
+            })
+        };
+        append_edit(db, &edit(1)).expect("append first edit");
+        let first_len = std::fs::metadata(db.join(JOURNAL_FILE)).unwrap().len();
+        append_edit(db, &edit(2)).expect("append second edit");
+        let fs: Arc<dyn Fs> = Arc::new(crate::io::transient_read::TransientReadFs {
+            inner: crate::io::real::RealFs::new(db).unwrap(),
+            fail_from: first_len,
+        });
+
+        // Act
+        let salvaged = salvage_edits_after_with_fs_unlocked(&fs, 0);
+
+        // Assert
+        assert!(
+            salvaged.is_err(),
+            "a transient read error is not corruption and must not drop later edits"
+        );
     }
 
     #[test]

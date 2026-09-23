@@ -339,3 +339,38 @@ fn should_preserve_skipped_wal_sources_for_safe_salvage() -> MidgeResult<()> {
     );
     Ok(())
 }
+
+#[test]
+fn should_fail_open_without_truncating_active_wal_when_cloud_salvage_read_fails_transiently(
+) -> MidgeResult<()> {
+    // Arrange: three acknowledged records; reads past the first one fail.
+    let fixture = Fixture::new()?;
+    let first = framed_wal(1, 7, b"one");
+    let mut bytes = first.clone();
+    bytes.extend(framed_wal(2, 7, b"two"));
+    bytes.extend(framed_wal(3, 7, b"three"));
+    let active = fixture.local(crate::wal::ACTIVE_FILE_NAME, &bytes)?;
+    let fs: Arc<dyn Fs> = Arc::new(crate::io::transient_read::TransientReadFs {
+        inner: crate::io::RealFs::new(fixture.directory.path().join("local"))?,
+        fail_from: first.len() as u64,
+    });
+    let mut plan = CloudWalRecoveryPlan {
+        replay_dir: fixture.directory.path().join("local/cloud_recovery/wal"),
+        remote_segments: BTreeMap::new(),
+        local_segments: BTreeMap::new(),
+        active_wal: None,
+        opened_in_salvage_mode: false,
+    };
+
+    // Act
+    let result = active_local_source(&fs, &active, RecoveryPolicy::Salvage, limits(), &mut plan);
+
+    // Assert
+    assert!(result.is_err(), "a transient read error must fail the open");
+    assert_eq!(
+        std::fs::read(&active)?,
+        bytes,
+        "wal.log must keep every byte"
+    );
+    Ok(())
+}

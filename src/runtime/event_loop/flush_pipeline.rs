@@ -190,7 +190,6 @@ impl EventLoop {
             sst_seq,
             sst_dir: self.state.sst_dir.clone(),
             fs: Arc::clone(&self.state.fs),
-            recovery_policy: self.state.recovery_policy(),
             hybrid_storage: self.hybrid_storage.clone(),
             cloud_metadata_storage: self.cloud_metadata_storage.clone(),
             metadata_publication_lock: self.metadata_publication_lock.clone(),

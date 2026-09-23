@@ -254,10 +254,7 @@ impl CloudStartupRecovery {
         db_path: &Path,
         recovery_policy: RecoveryPolicy,
     ) -> MidgeResult<()> {
-        let local_manifest = match Self::load_local_manifest_for_cloud_metadata_mirror(
-            db_path,
-            recovery_policy,
-        ) {
+        let local_manifest = match Self::load_local_manifest_for_cloud_metadata_mirror(db_path) {
             Ok(manifest) => manifest,
             Err(error) if recovery_policy == RecoveryPolicy::Salvage => {
                 tracing::warn!(%error, "skipping metadata mirror during salvage open because local manifest could not be loaded");

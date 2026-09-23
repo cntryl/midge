@@ -25,7 +25,6 @@ impl EventLoop {
                 cloud.clone(),
                 self.state.db_path.clone(),
                 self.state.fs.clone(),
-                self.state.recovery_policy(),
                 budget,
                 self.metadata_publication_lock.clone(),
             )

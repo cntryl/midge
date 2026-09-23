@@ -26,13 +26,17 @@ impl RuntimeState {
         if self.is_memory_mode() {
             return Ok(());
         }
-        let policy = self.recovery_policy();
-        self.manifest =
-            crate::metadata::ManifestPersistence::load_with_fs_and_policy(&self.fs, policy)
-                .map_err(crate::common::MidgeError::Internal)?;
-        self.intent_log =
-            crate::runtime::IntentPersistence::load_with_fs_and_policy(&self.fs, policy)
-                .map_err(crate::common::MidgeError::Internal)?;
+        // Strict: only startup may salvage-heal (see RuntimeState::load_manifest).
+        self.manifest = crate::metadata::ManifestPersistence::load_with_fs_and_policy(
+            &self.fs,
+            crate::config::RecoveryPolicy::Strict,
+        )
+        .map_err(crate::common::MidgeError::Internal)?;
+        self.intent_log = crate::runtime::IntentPersistence::load_with_fs_and_policy(
+            &self.fs,
+            crate::config::RecoveryPolicy::Strict,
+        )
+        .map_err(crate::common::MidgeError::Internal)?;
         Ok(())
     }
 

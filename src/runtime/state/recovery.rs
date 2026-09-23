@@ -292,6 +292,10 @@ impl RuntimeState {
                     "failed to load manifest strictly, retrying in salvage mode: {}",
                     error
                 );
+                // A manifest salvage cannot read at all opens empty; the
+                // salvage-mode orphan sweep then quarantines every SST rather
+                // than deleting it. Telling a transient read error apart
+                // from corruption here needs a typed load error (#494).
                 Ok(
                     crate::metadata::ManifestPersistence::load_with_fs_and_policy(
                         fs,

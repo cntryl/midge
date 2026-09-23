@@ -2558,6 +2558,111 @@ mod failure_injection {
         }
     }
 
+    #[test]
+    fn should_not_delete_sst_referenced_by_dropped_journal_edit_when_runtime_publish_hits_corrupt_journal(
+    ) {
+        // Arrange: two flushes whose AddSst edits stay in the journal because
+        // snapshot saves fail, then one of those journal records goes bad.
+        let _guard = failpoint_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp_dir = TempDir::new().expect("temp dir");
+        let db_path = temp_dir.path();
+        let open = |policy| {
+            Engine::open(
+                OpenOptions::local(db_path)
+                    .background_compaction(false)
+                    .recovery_policy(policy)
+                    .build()
+                    .expect("build options"),
+            )
+        };
+        let engine = open(RecoveryPolicy::Salvage).expect("open salvage engine");
+        let cf = default_cf(&engine);
+        let scenario = fail::FailScenario::setup();
+        fail::cfg("midge::manifest::inject_snapshot_write_failure", "return")
+            .expect("configure snapshot write failpoint");
+        write_cf_value(&engine, &cf, b"a", b"value-a");
+        engine.flush_cf(&cf).expect("flush a");
+        write_cf_value(&engine, &cf, b"b", b"value-b");
+        engine.flush_cf(&cf).expect("flush b");
+        fail::remove("midge::manifest::inject_snapshot_write_failure");
+        scenario.teardown();
+        let flushed = sst_file_names(db_path);
+        assert_eq!(flushed.len(), 2, "both flushes should publish an SST");
+        assert!(
+            corrupt_first_add_sst_journal_record(db_path) >= 2,
+            "journal should hold both flush batches"
+        );
+
+        // Act: a later runtime publication must not heal the journal, and a
+        // later open must not delete SSTs the damaged journal still names.
+        write_cf_value(&engine, &cf, b"c", b"value-c");
+        let _ = engine.flush_cf(&cf);
+        shutdown_engine(engine);
+        let healed_by_runtime = journal_corrupt_copies(db_path);
+        if open(RecoveryPolicy::Strict).is_err() {
+            drop(open(RecoveryPolicy::Salvage).expect("salvage reopen"));
+        }
+
+        // Assert
+        assert!(
+            healed_by_runtime.is_empty(),
+            "runtime publication salvage-healed the journal: {healed_by_runtime:?}"
+        );
+        for name in &flushed {
+            assert!(
+                sst_retained(db_path, name),
+                "SST {name} named by a durable journal edit was deleted"
+            );
+        }
+    }
+
+    fn corrupt_first_add_sst_journal_record(db_path: &Path) -> usize {
+        let journal_path = db_path.join("manifest.journal");
+        let mut bytes = std::fs::read(&journal_path).expect("read manifest journal");
+        let mut offset = 0usize;
+        let mut batches = 0usize;
+        while offset + 5 <= bytes.len() {
+            let record_type = bytes[offset];
+            let len = u32::from_le_bytes(
+                bytes[offset + 1..offset + 5]
+                    .try_into()
+                    .expect("record length"),
+            ) as usize;
+            let crc_at = offset + 5 + len;
+            let is_add_sst = bytes[offset + 5..crc_at]
+                .windows(6)
+                .any(|window| window == b"AddSst");
+            if record_type == 8 && is_add_sst {
+                if batches == 0 {
+                    bytes[crc_at] ^= 0xFF;
+                }
+                batches += 1;
+            }
+            offset = crc_at + 4;
+        }
+        std::fs::write(&journal_path, &bytes).expect("rewrite manifest journal");
+        batches
+    }
+
+    fn journal_corrupt_copies(db_path: &Path) -> Vec<String> {
+        std::fs::read_dir(db_path)
+            .expect("read db dir")
+            .flatten()
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter(|name| name.starts_with("manifest.journal.corrupt."))
+            .collect()
+    }
+
+    fn sst_retained(db_path: &Path, name: &str) -> bool {
+        if db_path.join("sst").join(name).exists() {
+            return true;
+        }
+        std::fs::read_dir(db_path.join("salvage-retained"))
+            .is_ok_and(|dirs| dirs.flatten().any(|dir| dir.path().join(name).exists()))
+    }
+
     fn sst_file_names(db_path: &Path) -> std::collections::BTreeSet<String> {
         let sst_dir = db_path.join("sst");
         let Ok(entries) = std::fs::read_dir(&sst_dir) else {
