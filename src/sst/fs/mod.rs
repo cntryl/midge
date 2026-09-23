@@ -33,21 +33,27 @@ pub fn finish_writer_to_path(writer: Box<dyn DynSstWriter>, path: &Path) -> Midg
     writer.finish_to_path(path)
 }
 
-/// Resolve an SST target into a host path whose *ancestors* are canonical.
+/// Express an SST target relative to a filesystem `root`, keeping every
+/// component below the root exactly as the caller wrote it.
 ///
 /// A relative target is resolved against `anchor`, the directory the
 /// filesystem's own root was resolved from, so the two are read in the same
 /// frame even if the host process later changes working directory.
 ///
-/// Only the target's existing ancestors are canonicalized, so that a root
-/// recorded in canonical form (as [`crate::io::RealFs`] records it) still
-/// matches a target that reaches the same directory through a symlink or an
-/// uncanonical prefix. The final component is deliberately left unresolved:
-/// [`crate::io::RealFs`] rejects a symlink in *any* component, including the
-/// last, and resolving the target here would turn that fail-closed rejection
-/// into a publish redirected to a path the caller never named — one the
-/// manifest would not record and no reader could open.
-fn canonical_host_path(anchor: Option<&Path>, path: &Path) -> MidgeResult<PathBuf> {
+/// The root is recorded in canonical form, so the target may reach it through
+/// a symlink or an uncanonical prefix (`/var` on macOS). The shallowest
+/// ancestor of the target that canonicalizes to the root marks where the root
+/// begins; everything after it is kept unresolved. Resolving it instead would
+/// turn an in-root symlink (in any component, not only the last) into a
+/// publish redirected to a path the caller never named, which the manifest
+/// would not record and no reader could open. [`crate::io::RealFs`] rejects a
+/// symlink in any component it is given, so keeping them makes that fail
+/// closed. `None` means no ancestor is the root: the target lies outside it.
+fn root_relative_path(
+    anchor: Option<&Path>,
+    root: &Path,
+    path: &Path,
+) -> MidgeResult<Option<PathBuf>> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -57,33 +63,16 @@ fn canonical_host_path(anchor: Option<&Path>, path: &Path) -> MidgeResult<PathBu
         };
         anchor.join(path)
     };
-    let (Some(parent), Some(name)) = (absolute.parent(), absolute.file_name()) else {
-        return Err(MidgeError::Internal(format!(
-            "SST target {} names no file",
-            path.display()
-        )));
-    };
-    let name = name.to_os_string();
-    let mut suffix: Vec<std::ffi::OsString> = Vec::new();
-    let mut current = parent;
-    loop {
-        if let Ok(resolved) = std::fs::canonicalize(current) {
-            let mut resolved = resolved;
-            for component in suffix.iter().rev() {
-                resolved.push(component);
-            }
-            resolved.push(name);
-            return Ok(resolved);
+    let ancestors: Vec<&Path> = absolute.ancestors().skip(1).collect();
+    for ancestor in ancestors.into_iter().rev() {
+        if std::fs::canonicalize(ancestor).is_ok_and(|resolved| resolved == root) {
+            let relative = absolute
+                .strip_prefix(ancestor)
+                .map_err(|error| MidgeError::Internal(format!("SST target prefix: {error}")))?;
+            return Ok(Some(relative.to_path_buf()));
         }
-        let (Some(parent), Some(component)) = (current.parent(), current.file_name()) else {
-            return Err(MidgeError::Internal(format!(
-                "SST target {} has no resolvable ancestor directory",
-                path.display()
-            )));
-        };
-        suffix.push(component.to_os_string());
-        current = parent;
     }
+    Ok(None)
 }
 
 /// Map an SST target path onto the path space of `fs`.
@@ -108,16 +97,14 @@ pub(crate) fn fs_relative_sst_path(fs: &Arc<dyn Fs>, path: &Path) -> MidgeResult
         })?;
         return Ok(FsPath::new(path));
     };
-    let relative = canonical_host_path(addressing.anchor, path)?
-        .strip_prefix(addressing.root)
-        .map_err(|_| {
+    let relative =
+        root_relative_path(addressing.anchor, addressing.root, path)?.ok_or_else(|| {
             MidgeError::Internal(format!(
                 "SST target {} lies outside the filesystem root {}",
                 path.display(),
                 addressing.root.display()
             ))
-        })?
-        .to_path_buf();
+        })?;
 
     // Reject rather than drop traversal components: a rooted filesystem
     // silently discards them, which would publish the SST somewhere other
