@@ -105,6 +105,14 @@ impl LeaseValidity {
         }
     }
 
+    /// A renewal that failed only because the store could not answer, while
+    /// this epoch is still validly held, may be retried; anything else loses
+    /// the lease.
+    pub(crate) fn is_transient_renewal_failure(&self, error: &LeaseError, epoch: u64) -> bool {
+        matches!(error, LeaseError::IoError(_) | LeaseError::Indeterminate(_))
+            && self.remaining(epoch).is_ok()
+    }
+
     pub(crate) fn deactivate(&self, epoch: u64) {
         let mut state = self
             .state

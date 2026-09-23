@@ -158,10 +158,6 @@ struct NoCasTokenBackend {
     inner: crate::storage::cloud::MockCloudBackend,
 }
 
-struct ValidateFailureLeaderStore {
-    inner: Arc<dyn LeaderStore>,
-}
-
 struct BlockingRenewalBackend {
     inner: crate::storage::cloud::MockCloudBackend,
     conditional_puts: std::sync::atomic::AtomicUsize,
@@ -373,38 +369,6 @@ impl crate::storage::cloud::CloudBackend for BlockingRenewalBackend {
 
     fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
         crate::storage::cloud::CloudBackend::submit_head(&self.inner, key, callback);
-    }
-}
-
-impl LeaderStore for ValidateFailureLeaderStore {
-    fn acquire_leadership(&self, holder_id: &str) -> Result<LeaderRecord, LeaseError> {
-        self.inner.acquire_leadership(holder_id)
-    }
-
-    fn read_current(&self) -> Result<Option<LeaderRecord>, LeaseError> {
-        self.inner.read_current()
-    }
-
-    fn renew_leadership(&self, holder_id: &str, expected_epoch: u64) -> Result<(), LeaseError> {
-        self.inner.renew_leadership(holder_id, expected_epoch)
-    }
-
-    fn release_leadership(&self, holder_id: &str, expected_epoch: u64) -> Result<(), LeaseError> {
-        self.inner.release_leadership(holder_id, expected_epoch)
-    }
-
-    fn set_clock_skew_tolerance(&self, tolerance: Duration) -> Result<(), LeaseError> {
-        self.inner.set_clock_skew_tolerance(tolerance)
-    }
-
-    fn validate_epoch(
-        &self,
-        _expected_holder_id: &str,
-        _expected_epoch: u64,
-    ) -> Result<(), LeaseError> {
-        Err(LeaseError::RenewalFailed(
-            "scripted post-renew validation failure".to_string(),
-        ))
     }
 }
 
@@ -883,27 +847,6 @@ fn should_not_extend_persisted_lease_given_watchdog_fenced_before_renewal() {
     // Assert
     assert!(matches!(result, Err(LeaseError::RenewalFailed(_))));
     assert_eq!(after, before);
-    assert!(!lease.acquired.load(Ordering::Acquire));
-    assert_eq!(lease.acquired_epoch.load(Ordering::Acquire), 0);
-    assert!(lease.validity.remaining(epoch).is_err());
-}
-
-#[test]
-fn should_clear_direct_lease_state_when_post_renew_validation_fails() {
-    // Arrange
-    let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());
-    let mut lease = CloudStorageLease::new_provider_backed(test_config(), temp_cache_path(), cloud);
-    let inner = Arc::clone(&lease.leader_store);
-    lease.leader_store = Arc::new(ValidateFailureLeaderStore { inner });
-    let lease = Arc::new(lease);
-    let _guard = Arc::clone(&lease).try_acquire().expect("acquire lease");
-    let epoch = lease.epoch();
-
-    // Act
-    let result = lease.renew();
-
-    // Assert
-    assert!(matches!(result, Err(LeaseError::RenewalFailed(_))));
     assert!(!lease.acquired.load(Ordering::Acquire));
     assert_eq!(lease.acquired_epoch.load(Ordering::Acquire), 0);
     assert!(lease.validity.remaining(epoch).is_err());
@@ -1839,4 +1782,123 @@ fn should_persist_expiry_not_before_local_validity_when_ttl_has_fractional_secon
         persisted >= ttl,
         "persisted lease duration {persisted:?} is shorter than the holder's validity {ttl:?}"
     );
+}
+
+/// Backend whose next lease GET fails with a provider outage once armed.
+struct FlakyGetBackend {
+    inner: crate::storage::cloud::MockCloudBackend,
+    fail_next_get: std::sync::atomic::AtomicBool,
+}
+
+impl FlakyGetBackend {
+    fn take_failure(&self, key: &str, callback: &crate::storage::cloud::CloudCallback) -> bool {
+        if !self.fail_next_get.swap(false, Ordering::AcqRel) {
+            return false;
+        }
+        let _ = callback.send(crate::storage::cloud::CloudEvent::Get {
+            key: key.to_string(),
+            result: Err(crate::storage::cloud::CloudError::ServerError(
+                "503 Service Unavailable".to_string(),
+            )),
+        });
+        true
+    }
+}
+
+impl crate::storage::cloud::CloudBackend for FlakyGetBackend {
+    fn submit_put(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        crate::storage::cloud::CloudBackend::submit_put(&self.inner, key, data, headers, callback);
+    }
+
+    fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        if !self.take_failure(key, &callback) {
+            crate::storage::cloud::CloudBackend::submit_get(&self.inner, key, callback);
+        }
+    }
+
+    fn submit_get_with_metadata(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        if !self.take_failure(key, &callback) {
+            crate::storage::cloud::CloudBackend::submit_get_with_metadata(
+                &self.inner,
+                key,
+                callback,
+            );
+        }
+    }
+
+    fn submit_get_range(
+        &self,
+        key: &str,
+        start: u64,
+        end: Option<u64>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        crate::storage::cloud::CloudBackend::submit_get_range(
+            &self.inner,
+            key,
+            start,
+            end,
+            callback,
+        );
+    }
+
+    fn submit_delete(
+        &self,
+        key: &str,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        crate::storage::cloud::CloudBackend::submit_delete(&self.inner, key, headers, callback);
+    }
+
+    fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
+        crate::storage::cloud::CloudBackend::submit_list(&self.inner, prefix, callback);
+    }
+
+    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        crate::storage::cloud::CloudBackend::submit_head(&self.inner, key, callback);
+    }
+}
+
+#[test]
+fn should_keep_cloud_lease_active_when_renewal_read_fails_transiently() {
+    // Arrange
+    let backend = Arc::new(FlakyGetBackend {
+        inner: crate::storage::cloud::MockCloudBackend::new(),
+        fail_next_get: std::sync::atomic::AtomicBool::new(false),
+    });
+    let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
+        Arc::clone(&backend) as Arc<dyn crate::storage::cloud::CloudBackend>,
+        "midge".to_string(),
+    ));
+    let lease = Arc::new(CloudStorageLease::new_provider_backed(
+        test_config(),
+        temp_cache_path(),
+        cloud,
+    ));
+    let _guard = Arc::clone(&lease).try_acquire().expect("acquire lease");
+    let epoch = lease.epoch();
+    backend.fail_next_get.store(true, Ordering::Release);
+
+    // Act
+    let failed = lease.renew();
+    let retried = lease.renew();
+
+    // Assert: nothing was written, so the lease stays valid for a retry.
+    assert!(
+        matches!(
+            failed,
+            Err(LeaseError::IoError(_) | LeaseError::Indeterminate(_))
+        ),
+        "{failed:?}"
+    );
+    assert!(retried.is_ok(), "{retried:?}");
+    assert!(lease.acquired.load(Ordering::Acquire));
+    assert!(lease.validity.remaining(epoch).is_ok());
 }

@@ -220,12 +220,17 @@ impl PrimaryLease for FileSystemLease {
             self.validity.remaining(our_epoch)?;
             let validity_anchor = std::time::Instant::now();
             self.leader_store
-                .refresh_timestamp(&self.holder_id, our_epoch)
-                .map_err(|error| LeaseError::RenewalFailed(error.to_string()))?;
+                .refresh_timestamp(&self.holder_id, our_epoch)?;
             self.validity
                 .advance(our_epoch, validity_anchor + self.ttl())
         })();
         if let Err(error) = result {
+            if self
+                .validity
+                .is_transient_renewal_failure(&error, our_epoch)
+            {
+                return Err(error);
+            }
             self.validity.fence(our_epoch);
             self.acquired.store(false, Ordering::Release);
             self.acquired_epoch.store(0, Ordering::Release);
@@ -291,6 +296,99 @@ unsafe impl Sync for FileSystemLease {}
 mod tests {
     use super::super::traits::{format_leader_record, LeaderRecord};
     use super::*;
+
+    /// In-memory filesystem whose next atomic rename fails once armed.
+    struct FlakyRenameFs {
+        inner: crate::io::MockFs,
+        fail_next_rename: AtomicBool,
+    }
+
+    impl crate::io::Fs for FlakyRenameFs {
+        fn open(
+            &self,
+            path: &crate::io::FsPath,
+            options: crate::io::OpenOptions,
+        ) -> crate::io::FsResult<Box<dyn crate::io::File + '_>> {
+            self.inner.open(path, options)
+        }
+
+        fn remove_file(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+            self.inner.remove_file(path)
+        }
+
+        fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
+            self.inner.exists(path)
+        }
+
+        fn metadata(
+            &self,
+            path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<crate::io::traits::Metadata> {
+            self.inner.metadata(path)
+        }
+
+        fn create_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+            self.inner.create_dir_all(path)
+        }
+
+        fn list_dir(
+            &self,
+            path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
+            self.inner.list_dir(path)
+        }
+
+        fn remove_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+            self.inner.remove_dir_all(path)
+        }
+
+        fn sync_dir(
+            &self,
+            path: &crate::io::FsPath,
+            durability: crate::io::Durability,
+        ) -> crate::io::FsResult<()> {
+            self.inner.sync_dir(path, durability)
+        }
+
+        fn rename_atomic(
+            &self,
+            from: &crate::io::FsPath,
+            to: &crate::io::FsPath,
+        ) -> crate::io::FsResult<()> {
+            if self.fail_next_rename.swap(false, Ordering::AcqRel) {
+                return Err(crate::io::FsError::Unavailable(
+                    "injected transient rename failure".to_string(),
+                ));
+            }
+            self.inner.rename_atomic(from, to)
+        }
+    }
+
+    #[test]
+    fn should_keep_filesystem_lease_active_when_one_timestamp_write_fails() {
+        // Arrange
+        let fs = Arc::new(FlakyRenameFs {
+            inner: crate::io::MockFs::new(),
+            fail_next_rename: AtomicBool::new(false),
+        });
+        let lease = Arc::new(FileSystemLease::new_with_fs_for_test(
+            Arc::clone(&fs) as Arc<dyn crate::io::Fs>,
+            Duration::from_secs(30),
+        ));
+        let _guard = Arc::clone(&lease).try_acquire().expect("acquire lease");
+        let epoch = lease.epoch();
+        fs.fail_next_rename.store(true, Ordering::Release);
+
+        // Act
+        let failed = lease.renew();
+        let retried = lease.renew();
+
+        // Assert
+        assert!(matches!(failed, Err(LeaseError::IoError(_))), "{failed:?}");
+        assert!(retried.is_ok(), "{retried:?}");
+        assert!(lease.acquired.load(Ordering::Acquire));
+        assert!(lease.validity.remaining(epoch).is_ok());
+    }
 
     #[test]
     fn should_acquire_release_lease_when_no_contention() {

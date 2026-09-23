@@ -201,6 +201,9 @@ impl LeaderStore for ProviderLeaderStore {
             provider_write_doc_with_timeout(&self.cloud, &document, headers, write_timeout)
         {
             if matches!(error, LeaseError::IoError(_) | LeaseError::Indeterminate(_)) {
+                // The PUT may still land. Fence before handing it to the
+                // reconciler, so no retry can race the expiry it writes.
+                self.validity.fence(expected_epoch);
                 spawn_ambiguous_renewal_reconciler(
                     Arc::clone(&self.cloud),
                     document,
@@ -833,15 +836,20 @@ impl PrimaryLease for CloudStorageLease {
                 return Err(LeaseError::RenewalFailed("lease not acquired".to_string()));
             }
             self.validity.remaining(expected_epoch)?;
+            // The conditional PUT proves ownership; no separate validation.
             self.leader_store
                 .renew_leadership(&self.holder_id, expected_epoch)?;
-            self.leader_store
-                .validate_epoch(&self.holder_id, expected_epoch)?;
             tracing::trace!("cloud storage lease renewed");
             Ok(())
         })();
 
         if let Err(error) = result {
+            if self
+                .validity
+                .is_transient_renewal_failure(&error, expected_epoch)
+            {
+                return Err(error);
+            }
             self.validity.fence(expected_epoch);
             self.acquired.store(false, Ordering::Release);
             self.acquired_epoch.store(0, Ordering::Release);
