@@ -221,6 +221,7 @@ fn is_temp_object_name(name: &str) -> bool {
 
 /// Make a directory's entries durable. Windows persists them with the file
 /// metadata journal and cannot open directories for syncing.
+#[cfg_attr(not(unix), allow(clippy::unnecessary_wraps))]
 fn sync_directory(dir: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
