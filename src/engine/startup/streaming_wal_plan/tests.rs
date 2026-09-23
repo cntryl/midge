@@ -547,3 +547,96 @@ fn should_reject_strict_recovery_when_active_wal_has_lower_writer_epoch() -> Mid
         .exists());
     Ok(())
 }
+
+#[test]
+fn should_accept_strict_recovery_when_active_wal_has_rising_writer_epochs() -> MidgeResult<()> {
+    // Arrange: an active WAL reopened in place after failover appends
+    // under a newer epoch; that is its normal shape, not corruption.
+    let fixture = Fixture::new()?;
+    let mut bytes = framed_wal(1, 7, b"before failover");
+    bytes.extend_from_slice(&framed_wal(2, 8, b"after failover"));
+    let path = fixture.local(crate::wal::ACTIVE_FILE_NAME, &bytes)?;
+
+    // Act
+    let recovered = fixture.build(RecoveryPolicy::Strict)?;
+
+    // Assert
+    let active = recovered.plan.active_wal.expect("active metadata");
+    assert_eq!(active.max_sequence, 2);
+    assert_eq!(active.writer_epoch, 8);
+    assert_eq!(active.record_count, 2);
+    assert!(!recovered.plan.opened_in_salvage_mode);
+    assert_eq!(std::fs::read(path)?, bytes);
+    Ok(())
+}
+
+#[test]
+fn should_recover_valid_active_wal_prefix_when_tail_is_zero_filled() -> MidgeResult<()> {
+    // Arrange
+    let fixture = Fixture::new()?;
+    let valid = framed_wal(3, 7, b"value");
+    let mut padded = valid.clone();
+    padded.extend_from_slice(&[0; 64]);
+    let path = fixture.local(crate::wal::ACTIVE_FILE_NAME, &padded)?;
+
+    // Act
+    let recovered = fixture.build(RecoveryPolicy::Strict)?;
+
+    // Assert
+    assert_eq!(
+        recovered
+            .plan
+            .active_wal
+            .expect("active metadata")
+            .max_sequence,
+        3
+    );
+    assert_eq!(std::fs::metadata(path)?.len(), valid.len() as u64);
+    Ok(())
+}
+
+#[test]
+fn should_fail_strict_recovery_without_truncating_when_corrupt_length_hides_valid_suffix(
+) -> MidgeResult<()> {
+    // Arrange
+    let fixture = Fixture::new()?;
+    let mut bytes = framed_wal(1, 7, b"first");
+    bytes.extend_from_slice(&framed_wal(2, 7, b"verified suffix"));
+    let corrupt_length = u32::try_from(bytes.len()).expect("WAL length fits u32");
+    bytes[..4].copy_from_slice(&corrupt_length.to_le_bytes());
+    let path = fixture.local(crate::wal::ACTIVE_FILE_NAME, &bytes)?;
+
+    // Act
+    let result = fixture.build(RecoveryPolicy::Strict);
+
+    // Assert
+    assert!(
+        matches!(&result, Err(MidgeError::RecoveryFailed(message)) if message.contains("hides a verified later frame")),
+        "unexpected result: {:?}",
+        result.as_ref().err()
+    );
+    assert_eq!(std::fs::read(path)?, bytes);
+    Ok(())
+}
+
+#[test]
+fn should_fail_strict_recovery_naming_object_when_cataloged_segment_is_missing() -> MidgeResult<()>
+{
+    // Arrange
+    let mut fixture = Fixture::new()?;
+    fixture.publish(1, 1, 7, &framed_wal(1, 7, b"present"))?;
+    fixture.publish(2, 2, 7, &framed_wal(2, 7, b"missing"))?;
+    let key = fixture.catalog.segments[&2].object_key.clone();
+    std::fs::remove_file(fixture.directory.path().join("cloud").join(&key))?;
+
+    // Act
+    let result = fixture.build(RecoveryPolicy::Strict);
+
+    // Assert
+    let error = result.err().expect("missing publication fails Strict");
+    assert!(
+        error.to_string().contains(&key),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
