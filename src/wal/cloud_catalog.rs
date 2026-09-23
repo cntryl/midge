@@ -346,21 +346,28 @@ mod tests {
     }
 
     #[test]
-    fn should_round_trip_sequence_floor_and_read_catalogs_written_without_it() {
+    fn should_round_trip_sequence_floor_when_encoded() {
         // Arrange
         let mut catalog = WalPublicationCatalog::empty(7).unwrap();
-        let without_floor = serde_json::to_vec(&catalog).unwrap();
         catalog.raise_sequence_floor(7, 9).unwrap();
 
         // Act
         let decoded = WalPublicationCatalog::decode(&catalog.encode().unwrap()).unwrap();
-        let legacy = WalPublicationCatalog::decode(&without_floor).unwrap();
 
         // Assert
         assert_eq!(decoded.sequence_floor, 9);
-        assert_eq!(legacy.sequence_floor, 0);
-        assert!(!String::from_utf8(without_floor)
-            .unwrap()
-            .contains("sequence_floor"));
+    }
+
+    #[test]
+    fn should_read_zero_sequence_floor_when_catalog_was_written_without_one() {
+        // Arrange
+        let bytes = serde_json::to_vec(&WalPublicationCatalog::empty(7).unwrap()).unwrap();
+
+        // Act
+        let decoded = WalPublicationCatalog::decode(&bytes).unwrap();
+
+        // Assert
+        assert!(!String::from_utf8(bytes).unwrap().contains("sequence_floor"));
+        assert_eq!(decoded.sequence_floor, 0);
     }
 }
