@@ -109,8 +109,10 @@ impl LeaseValidity {
     /// this epoch is still validly held, may be retried; anything else loses
     /// the lease.
     pub(crate) fn is_transient_renewal_failure(&self, error: &LeaseError, epoch: u64) -> bool {
-        matches!(error, LeaseError::IoError(_) | LeaseError::Indeterminate(_))
-            && self.remaining(epoch).is_ok()
+        matches!(
+            error,
+            LeaseError::IoError(_) | LeaseError::Indeterminate(_) | LeaseError::Timeout(_)
+        ) && self.remaining(epoch).is_ok()
     }
 
     pub(crate) fn deactivate(&self, epoch: u64) {
@@ -220,6 +222,9 @@ pub enum LeaseError {
     Internal(String),
     /// Lease was already released.
     AlreadyReleased,
+    /// The store did not answer within the caller's deadline. Like
+    /// `IoError`, the outcome is unknown.
+    Timeout(String),
 }
 
 impl fmt::Display for LeaseError {
@@ -233,6 +238,7 @@ impl fmt::Display for LeaseError {
             Self::AlreadyAcquired(msg) => write!(f, "lease already acquired: {msg}"),
             Self::Internal(msg) => write!(f, "lease internal error: {msg}"),
             Self::AlreadyReleased => write!(f, "lease already released"),
+            Self::Timeout(msg) => write!(f, "lease operation timed out: {msg}"),
         }
     }
 }

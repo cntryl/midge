@@ -111,7 +111,12 @@ impl StartupLease {
                         "another Midge instance is already running against this storage: {message}"
                     ))
                 }
-                crate::lease::LeaseError::IoError(message) => MidgeError::LeaseUnavailable(message),
+                // A store that did not answer in time is unavailable for
+                // acquisition, as before the timeout had its own variant.
+                crate::lease::LeaseError::IoError(message)
+                | crate::lease::LeaseError::Timeout(message) => {
+                    MidgeError::LeaseUnavailable(message)
+                }
                 crate::lease::LeaseError::RenewalFailed(message) => MidgeError::Fenced(message),
                 crate::lease::LeaseError::AlreadyReleased => {
                     MidgeError::Fenced("lease was released during acquisition".to_string())

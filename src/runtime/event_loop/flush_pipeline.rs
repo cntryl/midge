@@ -442,17 +442,11 @@ impl EventLoop {
                     self.fencing.leader_holder_id.as_deref().unwrap_or_default(),
                     identity.writer_epoch,
                 )
-                .map_err(|error| match error {
-                    // The store could not answer: authority is unknown, not
-                    // lost. Report it as retryable so the flush is retried.
-                    crate::lease::LeaseError::IoError(_)
-                    | crate::lease::LeaseError::Indeterminate(_) => {
-                        crate::common::MidgeError::Busy(format!(
-                            "flush {} writer validation could not complete: {error}",
-                            identity.flush_id
-                        ))
-                    }
-                    other => crate::common::MidgeError::Fenced(other.to_string()),
+                .map_err(|error| {
+                    error.into_validation_error(&format!(
+                        "flush {} writer validation",
+                        identity.flush_id
+                    ))
                 })?;
         }
         let Some((cf_id, flush)) = self.state.immutable_flush_by_id(identity.flush_id) else {
@@ -747,7 +741,7 @@ impl EventLoop {
                     self.fencing.leader_holder_id.as_deref().unwrap_or_default(),
                     self.fencing.writer_epoch,
                 )
-                .map_err(|error| crate::common::MidgeError::Fenced(error.to_string()))?;
+                .map_err(|error| error.into_validation_error("local WAL prune"))?;
         }
         Ok(())
     }

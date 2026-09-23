@@ -200,7 +200,10 @@ impl LeaderStore for ProviderLeaderStore {
         if let Err(error) =
             provider_write_doc_with_timeout(&self.cloud, &document, headers, write_timeout)
         {
-            if matches!(error, LeaseError::IoError(_) | LeaseError::Indeterminate(_)) {
+            if matches!(
+                error,
+                LeaseError::IoError(_) | LeaseError::Indeterminate(_) | LeaseError::Timeout(_)
+            ) {
                 // The PUT may still land. Fence before handing it to the
                 // reconciler, so no retry can race the expiry it writes.
                 self.validity.fence(expected_epoch);
@@ -1005,6 +1008,9 @@ fn classify_lease_read_error(
         CloudError::Protocol(msg) => {
             LeaseError::Indeterminate(format!("cloud lease {operation} response: {msg}"))
         }
+        CloudError::Timeout(_) => {
+            LeaseError::Timeout(format!("cloud lease {operation} failed: {error}"))
+        }
         other => LeaseError::IoError(format!("cloud lease {operation} failed: {other}")),
     }
 }
@@ -1049,9 +1055,7 @@ fn provider_read_doc_with_metadata(
         Ok(other) => Err(LeaseError::IoError(format!(
             "unexpected metadata-bearing cloud lease GET response: {other:?}"
         ))),
-        Err(error) => Err(LeaseError::IoError(format!(
-            "cloud lease GET timed out: {error}"
-        ))),
+        Err(error) => Err(LeaseError::Timeout(format!("cloud lease GET: {error}"))),
     }
 }
 
@@ -1077,9 +1081,7 @@ fn provider_read_doc_with_timeout(
         Ok(other) => Err(LeaseError::IoError(format!(
             "unexpected cloud lease GET response: {other:?}"
         ))),
-        Err(error) => Err(LeaseError::IoError(format!(
-            "cloud lease GET timed out: {error}"
-        ))),
+        Err(error) => Err(LeaseError::Timeout(format!("cloud lease GET: {error}"))),
     }
 }
 

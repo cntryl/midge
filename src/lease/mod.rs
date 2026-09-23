@@ -57,6 +57,27 @@ impl From<LeaseError> for crate::common::MidgeError {
             LeaseError::EpochExhausted => Self::LeaseEpochExhausted,
             LeaseError::AlreadyAcquired(message) => Self::Busy(message),
             LeaseError::Internal(message) => Self::Internal(message),
+            LeaseError::Timeout(message) => Self::Timeout(message),
+        }
+    }
+}
+
+impl LeaseError {
+    /// How a failed writer-authority check reaches the runtime. Only a proven
+    /// loss of ownership fences. A store that did not answer leaves authority
+    /// unknown, which callers retry, and the lease's own validity still
+    /// fences the writer if that lasts until it expires.
+    pub(crate) fn into_validation_error(self, context: &str) -> crate::common::MidgeError {
+        match self {
+            LeaseError::IoError(_) | LeaseError::Indeterminate(_) => {
+                crate::common::MidgeError::Busy(format!(
+                    "{context}: writer lease authority is unknown: {self}"
+                ))
+            }
+            LeaseError::Timeout(_) => {
+                crate::common::MidgeError::Timeout(format!("{context}: {self}"))
+            }
+            other => crate::common::MidgeError::Fenced(format!("{context}: {other}")),
         }
     }
 }

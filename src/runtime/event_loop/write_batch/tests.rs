@@ -1748,3 +1748,31 @@ fn should_not_apply_coalesced_transactions_when_lease_is_unhealthy() -> MidgeRes
     assert_eq!(fixture.event_loop.wal_actor.append_calls(), 0);
     Ok(())
 }
+
+#[test]
+fn should_sync_batched_wal_when_fairness_slot_runs_past_batch_window() -> MidgeResult<()> {
+    // Arrange: a Batched write is buffered and its batch window has passed,
+    // but the request queue never empties, so only the fairness slot runs.
+    let mut fixture = EventLoopFixture::batched()?;
+    let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
+    let _response = fixture.register(81);
+    fixture.event_loop.apply_transaction_with_coalescing(
+        &msg_rx,
+        txn_request(
+            81,
+            vec![put_op(0, b"fairness-sync", b"value")],
+            Some(DurabilityPolicy::Batched),
+        ),
+        1,
+    );
+    let window = fixture.event_loop.wal_actor.batch_config().max_delay_ms;
+    std::thread::sleep(Duration::from_millis(window + 20));
+    let syncs_before = fixture.event_loop.wal_actor.sync_calls();
+
+    // Act
+    fixture.event_loop.run_request_fairness_slot();
+
+    // Assert
+    assert!(fixture.event_loop.wal_actor.sync_calls() > syncs_before);
+    Ok(())
+}
