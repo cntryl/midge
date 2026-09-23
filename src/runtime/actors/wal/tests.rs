@@ -680,7 +680,7 @@ fn should_fence_rotation_when_active_segment_is_missing_with_pending_records() -
     assert_eq!(state.wal.local_durable_seq, 0);
     assert!(matches!(
         begin_sync_for_test(&mut wal_actor, &mut state),
-        Err(MidgeError::Fenced(_))
+        Err(MidgeError::RecoveryFailed(_))
     ));
     Ok(())
 }
@@ -768,7 +768,7 @@ fn should_fence_strict_transaction_when_sync_fails_after_records_are_appended() 
         .memtable
         .iter_all()
         .is_empty());
-    assert!(matches!(later, Err(MidgeError::Fenced(_))));
+    assert!(matches!(later, Err(MidgeError::RecoveryFailed(_))));
     assert_eq!(state.sequence, sequence_after_failure);
     Ok(())
 }
@@ -1634,7 +1634,7 @@ fn should_leave_rotation_operational_or_fenced_at_every_filesystem_boundary() ->
                 .exists());
             assert!(matches!(
                 wal_actor.rotate(&mut state, &ticket),
-                Err(MidgeError::Fenced(_))
+                Err(MidgeError::RecoveryFailed(_))
             ));
         }
     }
@@ -1733,7 +1733,7 @@ fn should_fence_each_append_path_after_physical_commit_before_accounting() -> Mi
             b"must-not-appear",
             DurabilityPolicy::CloudAsync,
         );
-        assert!(matches!(later, Err(MidgeError::Fenced(_))));
+        assert!(matches!(later, Err(MidgeError::RecoveryFailed(_))));
         assert_eq!(state.sequence, sequence_after_failure);
     }
 
@@ -1891,10 +1891,10 @@ fn should_fence_filesystem_wal_when_replacement_writer_open_fails_after_rename()
         rotate_error,
         MidgeError::Internal(message) if message.contains("replacement WAL writer open failed")
     ));
-    assert!(matches!(rejected, Err(MidgeError::Fenced(_))));
-    assert!(matches!(sync_error, MidgeError::Fenced(_)));
-    assert!(matches!(flush_error, MidgeError::Fenced(_)));
-    assert!(matches!(second_rotate_error, MidgeError::Fenced(_)));
+    assert!(matches!(rejected, Err(MidgeError::RecoveryFailed(_))));
+    assert!(matches!(sync_error, MidgeError::RecoveryFailed(_)));
+    assert!(matches!(flush_error, MidgeError::RecoveryFailed(_)));
+    assert!(matches!(second_rotate_error, MidgeError::RecoveryFailed(_)));
     assert!(state.persistence_anomaly_detected());
     assert_eq!(state.sequence, sequence_before_rejected);
     assert_eq!(state.wal.current_segment_id, 7);

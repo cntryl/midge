@@ -5733,7 +5733,7 @@ mod transaction_crash_boundaries {
             .expect("stage rejected value");
         assert!(matches!(
             rejected.commit(WriteOptions::buffered()),
-            Err(cntryl_midge::MidgeError::Fenced(_))
+            Err(cntryl_midge::MidgeError::RecoveryFailed(_))
         ));
         assert_eq!(
             engine
@@ -6510,7 +6510,7 @@ mod cloud_crash_recovery {
             .expect("stage rejected value");
         assert!(matches!(
             rejected.commit(WriteOptions::cloud_async()),
-            Err(cntryl_midge::MidgeError::Fenced(_))
+            Err(cntryl_midge::MidgeError::RecoveryFailed(_))
         ));
 
         abort_after_marking_ready(db_path, "cloud_async_after_rename_writer_loss");

@@ -22,7 +22,7 @@ impl File for PartialAppendFile {
         {
             let partial = data.slice(..data.len().div_ceil(2));
             self.inner.write_at(offset, partial)?;
-            return Err(FsError::Io("no space after partial test append".into()));
+            return Err(FsError::NoSpace("after partial test append".into()));
         }
         self.inner.write_at(offset, data)
     }
@@ -353,5 +353,54 @@ fn should_retain_wal_admission_when_failed_append_has_no_rollback_proof() -> Mid
             .iter_all()
             .is_empty());
     }
+    Ok(())
+}
+
+#[test]
+fn should_report_recovery_required_not_fenced_when_append_follows_poisoning_io_failure(
+) -> MidgeResult<()> {
+    // Arrange: the disk fills mid-append, which poisons the local WAL.
+    let temp = tempfile::tempdir()?;
+    let fs = Arc::new(PartialAppendFs::default());
+    let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
+    let mut actor = WalActor::new(
+        temp.path().join("unused-wal"),
+        DurabilityPolicy::Batched,
+        BatchConfig::default(),
+        false,
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    let dyn_fs: Arc<dyn Fs> = fs.clone();
+    actor.install_filesystem_for_test(
+        Arc::clone(&dyn_fs),
+        FsWalFactoryIo::new(dyn_fs).create_writer("wal.log")?,
+    );
+    fs.fail_next
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let put = |request_id| crate::runtime::actors::wal::AppendParams {
+        request_id,
+        cf_id: 0,
+        key: Bytes::from_static(b"key"),
+        value: Some(Bytes::from_static(b"value")),
+        insert_only: false,
+        ttl_seconds: None,
+    };
+
+    // Act
+    let first = actor.append(&mut state, put(1));
+    let second = actor.append(&mut state, put(2));
+
+    // Assert: the cause is reported first, then a restart requirement. Local
+    // disk trouble is never reported as lost lease authority.
+    assert!(matches!(first, Err(MidgeError::NoSpace(_))), "{first:?}");
+    let Err(second) = second else {
+        panic!("a poisoned WAL must reject later appends");
+    };
+    assert!(
+        matches!(second, MidgeError::RecoveryFailed(_)),
+        "{second:?}"
+    );
+    assert_eq!(second.severity(), crate::common::Severity::Fatal);
     Ok(())
 }

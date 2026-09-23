@@ -26,8 +26,11 @@ impl super::EventLoop {
     /// is the only outcome that avoids stranding them until shutdown.
     pub(super) fn fence_wal_transition(&mut self, error: &MidgeError, sealed_segment: Option<u64>) {
         let sealed_segment = sealed_segment.or_else(|| self.wal_actor.fenced_sealed_segment());
-        self.wal_actor
-            .fence_transition(&mut self.state, error.to_string());
+        self.wal_actor.fence_with_cause(
+            &mut self.state,
+            error.to_string(),
+            error.severity() == crate::common::Severity::Fenced,
+        );
         self.wal_transition.fence(error.to_string(), sealed_segment);
         self.state.mark_persistence_anomaly();
         let generation = self.durability.current_key();

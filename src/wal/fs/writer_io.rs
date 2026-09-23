@@ -166,22 +166,7 @@ impl FsWalWriterIo {
     }
 
     fn writer_failure(&self) -> Option<crate::common::MidgeError> {
-        let s = self.sync_state.lock();
-        if s.write_failed {
-            let msg = s
-                .last_write_error
-                .clone()
-                .unwrap_or_else(|| "WAL write failed persistently".to_string());
-            return Some(Self::error_from_message(msg));
-        }
-        if s.sync_failed {
-            let msg = s
-                .last_sync_error
-                .clone()
-                .unwrap_or_else(|| "WAL sync failed persistently".to_string());
-            return Some(Self::error_from_message(msg));
-        }
-        None
+        self.sync_state.lock().failure()
     }
 
     #[cfg(test)]
@@ -229,7 +214,8 @@ impl FsWalWriterIo {
                         );
                         let mut state = self.sync_state.lock();
                         state.write_failed = true;
-                        state.last_write_error = Some(message.clone());
+                        state.last_write_error =
+                            Some(crate::common::MidgeError::Timeout(message.clone()));
                         drop(state);
                         self.sync_cond.notify_all();
                         self.queue_cond.notify_all();
@@ -270,17 +256,6 @@ impl FsWalWriterIo {
         ))
     }
 
-    fn error_from_message(message: String) -> crate::common::MidgeError {
-        let lowered = message.to_ascii_lowercase();
-        if lowered.contains("no space") || lowered.contains("disk full") {
-            crate::common::MidgeError::NoSpace(message)
-        } else if lowered.contains("timed out") || lowered.contains("deadline exceeded") {
-            crate::common::MidgeError::Fenced(message)
-        } else {
-            crate::common::MidgeError::Internal(message)
-        }
-    }
-
     fn flush_with_timeout(&self, timeout: Duration) -> MidgeResult<()> {
         if let Some(error) = self.writer_failure() {
             return Err(error);
@@ -298,24 +273,13 @@ impl FsWalWriterIo {
         let started = std::time::Instant::now();
         let mut state = self.sync_state.lock();
         while state.completed_flushes < my_flush_id {
-            if state.write_failed {
-                let message = state
-                    .last_write_error
-                    .clone()
-                    .unwrap_or_else(|| "WAL write failed persistently".to_string());
-                return Err(Self::error_from_message(message));
-            }
-            if state.sync_failed {
-                let message = state
-                    .last_sync_error
-                    .clone()
-                    .unwrap_or_else(|| "WAL sync failed persistently".to_string());
-                return Err(Self::error_from_message(message));
+            if let Some(error) = state.failure() {
+                return Err(error);
             }
             let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
                 let message = format!("WAL flush timed out after {timeout:?}");
                 state.write_failed = true;
-                state.last_write_error = Some(message.clone());
+                state.last_write_error = Some(crate::common::MidgeError::Timeout(message.clone()));
                 return Err(crate::common::MidgeError::Timeout(message));
             };
             if self.sync_cond.wait_for(&mut state, remaining).timed_out()
@@ -323,7 +287,7 @@ impl FsWalWriterIo {
             {
                 let message = format!("WAL flush timed out after {timeout:?}");
                 state.write_failed = true;
-                state.last_write_error = Some(message.clone());
+                state.last_write_error = Some(crate::common::MidgeError::Timeout(message.clone()));
                 return Err(crate::common::MidgeError::Timeout(message));
             }
         }
@@ -397,26 +361,21 @@ impl WalWriter for FsWalWriterIo {
 
         let mut s = self.sync_state.lock();
         while s.completed_fsyncs < my_sync_id {
-            if s.sync_failed {
-                let msg = s
-                    .last_sync_error
-                    .clone()
-                    .unwrap_or_else(|| "WAL sync failed persistently".to_string());
-                return Err(Self::error_from_message(msg));
-            }
             // A failed batch write stops the writer thread, so this fsync
-            // will never complete; report the write error now.
-            if s.write_failed {
-                let msg = s
-                    .last_write_error
-                    .clone()
-                    .unwrap_or_else(|| "WAL write failed persistently".to_string());
-                return Err(Self::error_from_message(msg));
+            // will never complete; report either failure now.
+            if s.sync_failed {
+                return Err(s.last_sync_error.as_ref().map_or_else(
+                    || crate::common::MidgeError::Internal("WAL sync failed persistently".into()),
+                    crate::common::MidgeError::replay,
+                ));
+            }
+            if let Some(error) = s.failure() {
+                return Err(error);
             }
             let Some(remaining) = timeout.checked_sub(sync_start.elapsed()) else {
                 let message = format!("WAL sync timed out after {timeout:?}");
                 s.sync_failed = true;
-                s.last_sync_error = Some(message.clone());
+                s.last_sync_error = Some(crate::common::MidgeError::Timeout(message.clone()));
                 return Err(crate::common::MidgeError::Timeout(message));
             };
             if self.sync_cond.wait_for(&mut s, remaining).timed_out()
@@ -424,7 +383,7 @@ impl WalWriter for FsWalWriterIo {
             {
                 let message = format!("WAL sync timed out after {timeout:?}");
                 s.sync_failed = true;
-                s.last_sync_error = Some(message.clone());
+                s.last_sync_error = Some(crate::common::MidgeError::Timeout(message.clone()));
                 return Err(crate::common::MidgeError::Timeout(message));
             }
         }
@@ -627,7 +586,7 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .recv();
-            crate::io::FsError::Io("No space left on device".to_string())
+            crate::io::FsError::NoSpace("No space left on device".to_string())
         }
     }
 
@@ -790,7 +749,7 @@ mod tests {
         assert!(matches!(result, Err(crate::common::MidgeError::Timeout(_))));
         assert!(matches!(
             subsequent_result,
-            Err(crate::common::MidgeError::Fenced(_))
+            Err(crate::common::MidgeError::Timeout(_))
         ));
     }
 
@@ -813,10 +772,12 @@ mod tests {
             crate::common::MidgeError::Timeout(_)
         ));
         assert!(!timed_out.unchanged, "timed-out bytes may still be written");
-        assert!(matches!(
-            rejected.error,
-            crate::common::MidgeError::Fenced(_)
-        ));
+        // A slow local disk is not lost lease authority.
+        assert!(
+            matches!(rejected.error, crate::common::MidgeError::Timeout(_)),
+            "{:?}",
+            rejected.error
+        );
         assert!(rejected.unchanged, "only the new admission can be released");
         assert_eq!(writer.queue.lock().len(), 1);
     }

@@ -14,8 +14,52 @@ pub struct SyncState {
     pub write_failed: bool,
     /// Set to true when persistent fsync failures occur
     pub sync_failed: bool,
-    pub last_write_error: Option<String>,
-    pub last_sync_error: Option<String>,
+    /// The failure that set `write_failed`, replayed to every later caller.
+    pub last_write_error: Option<crate::common::MidgeError>,
+    /// The failure that set `sync_failed`, replayed to every later caller.
+    pub last_sync_error: Option<crate::common::MidgeError>,
+}
+
+impl SyncState {
+    /// The sticky failure, if any, as an error with its original class.
+    pub(crate) fn failure(&self) -> Option<crate::common::MidgeError> {
+        let replay = |error: &Option<crate::common::MidgeError>, fallback: &str| {
+            error.as_ref().map_or_else(
+                || crate::common::MidgeError::Internal(fallback.to_string()),
+                crate::common::MidgeError::replay,
+            )
+        };
+        if self.write_failed {
+            return Some(replay(
+                &self.last_write_error,
+                "WAL write failed persistently",
+            ));
+        }
+        if self.sync_failed {
+            return Some(replay(
+                &self.last_sync_error,
+                "WAL sync failed persistently",
+            ));
+        }
+        None
+    }
+}
+
+/// A WAL writer failure with context, keeping the class of the filesystem
+/// error that caused it. The writer never reports `Fenced`: lost authority is
+/// the lease layer's call, not the disk's.
+pub(crate) fn writer_error(
+    context: impl std::fmt::Display,
+    source: &crate::io::FsError,
+) -> crate::common::MidgeError {
+    use crate::common::MidgeError;
+    use crate::io::FsError;
+    let message = format!("{context}: {source}");
+    match source {
+        FsError::NoSpace(_) => MidgeError::NoSpace(message),
+        FsError::Timeout(_) => MidgeError::Timeout(message),
+        _ => MidgeError::Internal(message),
+    }
 }
 
 pub(crate) struct QueuedWrite {
@@ -34,7 +78,7 @@ impl QueuedWrite {
 
 #[derive(Debug)]
 struct WriteFailure {
-    message: String,
+    error: crate::common::MidgeError,
     unchanged: bool,
 }
 
@@ -219,7 +263,7 @@ impl WriterRunner {
             .load(std::sync::atomic::Ordering::SeqCst);
         self.ensure_file_handle(file_opt)
             .map_err(|message| WriteFailure {
-                message,
+                error: crate::common::MidgeError::Internal(message),
                 unchanged: true,
             })?;
 
@@ -229,8 +273,8 @@ impl WriterRunner {
                     let partial_len = (big_bytes.len() / 2).max(1);
                     file.write_at(start_pos, big_bytes.slice(..partial_len))
                         .and_then(|()| {
-                            Err(crate::io::FsError::Io(
-                                "no space after partial positional WAL write".to_string(),
+                            Err(crate::io::FsError::NoSpace(
+                                "after partial positional WAL write".to_string(),
                             ))
                         })
                 } else {
@@ -245,14 +289,16 @@ impl WriterRunner {
                         .and_then(|()| file.sync(Durability::Durable))
                     {
                         Ok(()) => Err(WriteFailure {
-                            message: format!(
-                                "wal writer write_at failed: {write_error}; partial WAL append rolled back to {start_pos}"
+                            error: writer_error(
+                                format!("wal writer write_at failed (partial WAL append rolled back to {start_pos})"),
+                                &write_error,
                             ),
                             unchanged: true,
                         }),
                         Err(rollback_error) => Err(WriteFailure {
-                            message: format!(
-                                "wal writer write_at failed: {write_error}; partial WAL rollback to {start_pos} failed: {rollback_error}"
+                            error: writer_error(
+                                format!("wal writer write_at failed (partial WAL rollback to {start_pos} failed: {rollback_error})"),
+                                &write_error,
                             ),
                             unchanged: false,
                         }),
@@ -262,7 +308,7 @@ impl WriterRunner {
         }
 
         Err(WriteFailure {
-            message: "wal writer has no file handle".to_string(),
+            error: crate::common::MidgeError::Internal("wal writer has no file handle".to_string()),
             unchanged: true,
         })
     }
@@ -320,10 +366,11 @@ impl WriterRunner {
             match self.open_file_handle() {
                 Ok(file) => *file_opt = Some(file),
                 Err(error) => {
-                    let message =
-                        format!("wal writer could not reopen file handle for fsync: {error}");
                     tracing::error!(error = ?error, "WAL fsync failed before sync - marking sync as failed");
-                    self.mark_sync_failure(message);
+                    self.mark_sync_failure(writer_error(
+                        "wal writer could not reopen file handle for fsync",
+                        &error,
+                    ));
                     return Err(());
                 }
             }
@@ -332,7 +379,7 @@ impl WriterRunner {
             let sync_start = Instant::now();
             if let Err(e) = file.sync(Durability::Durable) {
                 tracing::error!(error = ?e, "WAL fsync failed - marking sync as failed");
-                self.mark_sync_failure(format!("wal writer fsync failed: {e}"));
+                self.mark_sync_failure(writer_error("wal writer fsync failed", &e));
                 return Err(());
             }
             let sync_elapsed = sync_start.elapsed();
@@ -355,10 +402,10 @@ impl WriterRunner {
         s.pending_fsyncs > s.completed_fsyncs
     }
 
-    fn mark_sync_failure(&self, message: String) {
+    fn mark_sync_failure(&self, error: crate::common::MidgeError) {
         let mut s = self.config.sync_state.lock();
         s.sync_failed = true;
-        s.last_sync_error = Some(message);
+        s.last_sync_error = Some(error);
         self.config.sync_cond.notify_all();
         self.config.queue_cond.notify_all();
     }
@@ -400,27 +447,18 @@ impl WriterRunner {
     fn fail_writes(&self, batch: &[QueuedWrite], failure: &WriteFailure) {
         let mut state = self.config.sync_state.lock();
         state.write_failed = true;
-        state.last_write_error = Some(failure.message.clone());
+        state.last_write_error = Some(failure.error.replay());
         drop(state);
         // Publish the terminal state before acknowledging any failed append.
         // No further writes from this batch can occur after this proof is sent.
         for entry in batch {
             let _ = entry.ack.send(Err(WalAppendError {
-                error: Self::error_from_message(&failure.message),
+                error: failure.error.replay(),
                 unchanged: failure.unchanged,
             }));
         }
         self.config.sync_cond.notify_all();
         self.config.queue_cond.notify_all();
-    }
-
-    fn error_from_message(message: &str) -> crate::common::MidgeError {
-        let lowered = message.to_ascii_lowercase();
-        if lowered.contains("no space") || lowered.contains("disk full") {
-            crate::common::MidgeError::NoSpace(message.to_string())
-        } else {
-            crate::common::MidgeError::Internal(message.to_string())
-        }
     }
 }
 
@@ -448,7 +486,7 @@ mod tests {
                 offset + data.len() as u64 / 2,
                 std::sync::atomic::Ordering::SeqCst,
             );
-            Err(FsError::Io("no space after partial write".into()))
+            Err(FsError::NoSpace("after partial write".into()))
         }
         fn truncate(&mut self, len: u64) -> FsResult<()> {
             if !self.truncate_succeeds {
@@ -501,7 +539,7 @@ mod tests {
                 physical_bytes.load(std::sync::atomic::Ordering::SeqCst) == 0,
                 truncate_succeeds
             );
-            assert!(failure.message.contains("partial"));
+            assert!(failure.error.to_string().contains("partial"));
         }
     }
 
@@ -527,7 +565,7 @@ mod tests {
         }
 
         fn sync(&mut self, _durability: Durability) -> FsResult<()> {
-            Err(FsError::Io("No space left on device".to_string()))
+            Err(FsError::NoSpace("No space left on device".to_string()))
         }
 
         fn close(self: Box<Self>) -> FsResult<()> {
@@ -634,8 +672,8 @@ mod tests {
         assert_eq!(state.pending_fsyncs, 1);
         assert!(state
             .last_sync_error
-            .as_deref()
-            .is_some_and(|error| error.contains("could not reopen file handle")));
+            .as_ref()
+            .is_some_and(|error| error.to_string().contains("could not reopen file handle")));
     }
 
     #[test]
@@ -654,15 +692,12 @@ mod tests {
         // Assert
         assert!(result.is_err());
         let state = sync_state.lock();
-        let message = state
+        let error = state
             .last_sync_error
-            .as_deref()
+            .as_ref()
             .expect("physical fsync error should be retained");
-        assert!(message.contains("wal writer fsync failed"));
-        assert!(matches!(
-            WriterRunner::error_from_message(message),
-            crate::common::MidgeError::NoSpace(_)
-        ));
+        assert!(error.to_string().contains("wal writer fsync failed"));
+        assert!(matches!(error, crate::common::MidgeError::NoSpace(_)), "{error:?}");
     }
 
     #[test]
