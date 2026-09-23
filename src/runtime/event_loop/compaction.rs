@@ -753,17 +753,18 @@ impl CompactionCoordinator {
     }
 
     fn record_compaction_metrics(event_loop: &mut EventLoop, output_ssts: &[String]) {
-        event_loop.state.diagnostics.record(|m| {
-            let bytes_rewritten: u64 = event_loop
-                .state
-                .manifest
-                .files
-                .iter()
-                .filter(|file| output_ssts.contains(&file.name))
-                .map(|file| file.size_bytes)
-                .sum();
-            m.record_compaction(bytes_rewritten);
-        });
+        let bytes_rewritten: u64 = event_loop
+            .state
+            .manifest
+            .files
+            .iter()
+            .filter(|file| output_ssts.contains(&file.name))
+            .map(|file| file.size_bytes)
+            .sum();
+        event_loop
+            .state
+            .diagnostics
+            .record(|m| m.record_compaction(bytes_rewritten));
     }
 
     fn respond_publish_failure(
