@@ -729,6 +729,7 @@ impl EventLoop {
                     .into(),
             ));
         }
+        self.state.retry_metadata_reload()?;
         let plan = self.prepare_compaction_plan_for_launch(plan)?;
 
         let compaction_storage = self.hybrid_storage.as_ref().map(|storage| {

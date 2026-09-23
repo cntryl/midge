@@ -183,6 +183,12 @@ impl EventLoop {
             );
             return;
         };
+        // The worker's result is installed onto the in-memory manifest, so
+        // memory must be current before another publication starts (#500).
+        if let Err(error) = self.state.retry_metadata_reload() {
+            self.fail_flush_pipeline(flush.flush_id, build.reservation, &error, false);
+            return;
+        }
         self.publication_gate.active = true;
         let task = FlushPublishTask {
             build,
@@ -781,12 +787,15 @@ impl EventLoop {
             // The worker may have already appended the manifest journal batch
             // or the durable intent before failing, leaving disk ahead of the
             // in-memory copies this loop publishes from. Reconcile before the
-            // gate opens, or the next publication overwrites those edits.
+            // gate opens, or the next publication overwrites those edits. If
+            // the reload fails, state fences every publication from memory
+            // until a later reload succeeds.
             if let Err(error) = self.state.reload_persisted_metadata() {
                 tracing::error!(
                     flush_id,
                     %error,
-                    "failed to reload persisted metadata after a failed publication"
+                    "failed to reload persisted metadata after a failed publication; \
+                     publication is fenced until a reload succeeds"
                 );
             }
             self.publication_gate.active = false;
@@ -1361,6 +1370,47 @@ mod tests {
             );
             assert!(!event_loop.publication_gate.active);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn should_fence_publication_when_reload_fails_after_failed_flush_publication(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let directory = tempfile::tempdir()?;
+        let (mut event_loop, _hybrid) = event_loop_with_hybrid_storage(&directory)?;
+        event_loop.state.sequence = 1;
+        event_loop
+            .state
+            .get_cf(0)
+            .expect("family")
+            .memtable
+            .put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)?;
+        let flush_id = event_loop.freeze_active_memtable(0)?.expect("frozen");
+        std::fs::write(
+            event_loop
+                .state
+                .db_path
+                .join(crate::metadata::files::MANIFEST_SNAPSHOT),
+            b"not a manifest",
+        )?;
+        event_loop.publication_gate.active = true;
+
+        // Act
+        event_loop.fail_flush_pipeline(
+            flush_id,
+            None,
+            &crate::common::MidgeError::Internal("worker failed".into()),
+            true,
+        );
+
+        // Assert
+        assert!(!event_loop.publication_gate.active);
+        assert!(event_loop.state.persistence_anomaly_detected());
+        assert!(matches!(
+            event_loop.state.ensure_metadata_current(),
+            Err(crate::common::MidgeError::Fenced(_))
+        ));
         Ok(())
     }
 
