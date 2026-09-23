@@ -291,6 +291,10 @@ pub enum StorageErrorKind {
     Protocol,
     /// Local I/O failed.
     Io,
+    /// A memory or resource budget refused the operation.
+    ResourceLimit,
+    /// Bytes read back failed verification.
+    Corruption,
 }
 
 /// A storage failure with its classification.
@@ -392,6 +396,27 @@ impl From<&str> for StorageError {
     }
 }
 
+impl From<crate::common::MidgeError> for StorageError {
+    /// Keep the classes storage callers branch on; everything else is I/O.
+    fn from(error: crate::common::MidgeError) -> Self {
+        Self::new(StorageErrorKind::of(&error), error)
+    }
+}
+
+impl StorageErrorKind {
+    /// The storage class of an engine error: the classes storage callers
+    /// branch on are kept, everything else is I/O.
+    pub(crate) fn of(error: &crate::common::MidgeError) -> Self {
+        use crate::common::MidgeError;
+        match error {
+            MidgeError::Timeout(_) => Self::Timeout,
+            MidgeError::ResourceLimit(_) => Self::ResourceLimit,
+            MidgeError::Corruption(_) => Self::Corruption,
+            _ => Self::Io,
+        }
+    }
+}
+
 impl From<std::io::Error> for StorageError {
     fn from(error: std::io::Error) -> Self {
         match error.kind() {
@@ -478,9 +503,10 @@ pub trait StorageBackend: Send + Sync + 'static {
             Err(error) => {
                 let _ = callback.send(StorageEvent::WriteComplete {
                     key: key.to_string(),
-                    result: StorageOutcome::Err(
-                        format!("retain upload completion: {error}").into(),
-                    ),
+                    result: StorageOutcome::Err(StorageError::new(
+                        StorageErrorKind::of(&error),
+                        format!("retain upload completion: {error}"),
+                    )),
                 });
             }
         }
@@ -499,9 +525,13 @@ pub trait StorageBackend: Send + Sync + 'static {
         match retained_callback::retain(callback.clone(), reservation) {
             Ok(retained) => self.submit_read_range(key, start, end, expected, timeout, retained),
             Err(error) => {
-                let _ = callback.send(Err(StorageError::io(format!(
-                    "retain range completion: {error}"
-                ))));
+                // Keep the class: a blocked budget is a retryable resource
+                // limit, not an I/O failure.
+                let kind = StorageErrorKind::of(&error);
+                let _ = callback.send(Err(StorageError::new(
+                    kind,
+                    format!("retain range completion: {error}"),
+                )));
             }
         }
     }

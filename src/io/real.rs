@@ -137,8 +137,7 @@ impl RealFs {
 
         if opts.create || opts.create_new {
             if let Some(parent) = Self::parent_dir(&full) {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| super::traits::FsError::Io(format!("create_dir_all: {e}")))?;
+                std::fs::create_dir_all(parent).map_err(|e| io_error("create_dir_all", &e))?;
             }
         }
 
@@ -161,7 +160,7 @@ impl RealFs {
             if error.kind() == io::ErrorKind::NotFound {
                 super::traits::FsError::NotFound(format!("{}: {error}", full.display()))
             } else {
-                super::traits::FsError::Io(format!("open {}: {error}", full.display()))
+                io_error(format!("open {}", full.display()), &error)
             }
         })?;
         Ok(Box::new(RealFile { file }))
@@ -378,9 +377,9 @@ impl File for RealFile {
             use std::io::{Read, Seek, SeekFrom};
             let mut file = &self.file;
             file.seek(SeekFrom::Start(offset))
-                .map_err(|e| FsError::Io(format!("seek(read_at) offset={offset}: {e}")))?;
+                .map_err(|e| io_error(format!("seek(read_at) offset={offset}"), &e))?;
             file.read_exact(&mut buf)
-                .map_err(|e| FsError::Io(format!("read_exact(read_at) len={len}: {e}")))?;
+                .map_err(|e| io_error(format!("read_exact(read_at) len={len}"), &e))?;
             Ok(bytes::Bytes::from(buf))
         }
     }
@@ -406,10 +405,10 @@ impl File for RealFile {
             use std::io::{Seek, SeekFrom, Write};
             self.file
                 .seek(SeekFrom::Start(offset))
-                .map_err(|e| FsError::Io(format!("seek(write_at) offset={offset}: {e}")))?;
-            self.file.write_all(bytes).map_err(|e| {
-                FsError::Io(format!("write_all(write_at) len={}: {e}", bytes.len()))
-            })?;
+                .map_err(|e| io_error(format!("seek(write_at) offset={offset}"), &e))?;
+            self.file
+                .write_all(bytes)
+                .map_err(|e| io_error(format!("write_all(write_at) len={}", bytes.len()), &e))?;
             Ok(())
         }
     }
@@ -417,7 +416,7 @@ impl File for RealFile {
     fn truncate(&mut self, len: u64) -> FsResult<()> {
         self.file
             .set_len(len)
-            .map_err(|error| FsError::Io(format!("truncate len={len}: {error}")))
+            .map_err(|error| io_error(format!("truncate len={len}"), &error))
     }
 
     fn append(&mut self, data: bytes::Bytes) -> FsResult<u64> {
@@ -427,11 +426,11 @@ impl File for RealFile {
         let pos = self
             .file
             .seek(SeekFrom::End(0))
-            .map_err(|e| FsError::Io(format!("seek(append): {e}")))?;
+            .map_err(|e| io_error("seek(append)", &e))?;
 
         self.file
             .write_all(data.as_ref())
-            .map_err(|e| FsError::Io(format!("write_all(append) len={}: {e}", data.len())))?;
+            .map_err(|e| io_error(format!("write_all(append) len={}", data.len()), &e))?;
 
         Ok(pos)
     }
@@ -440,17 +439,14 @@ impl File for RealFile {
         let meta = self
             .file
             .metadata()
-            .map_err(|e| FsError::Io(format!("metadata(len): {e}")))?;
+            .map_err(|e| io_error("metadata(len)", &e))?;
         Ok(meta.len())
     }
 
     fn sync(&mut self, dur: Durability) -> FsResult<()> {
         match dur {
             Durability::Unsafe => Ok(()),
-            Durability::Durable => self
-                .file
-                .sync_all()
-                .map_err(|e| FsError::Io(format!("sync_all: {e}"))),
+            Durability::Durable => self.file.sync_all().map_err(|e| io_error("sync_all", &e)),
         }
     }
 
@@ -551,7 +547,7 @@ impl File for RealFile {
 // Helpers
 
 fn io_err(op: &str, path: &Path, e: &io::Error) -> FsError {
-    FsError::Io(format!("{op} {}: {e}", path.display()))
+    io_error(format!("{op} {}", path.display()), e)
 }
 
 fn file_op_err(op: &str, path: &Path, error: &io::Error) -> FsError {
@@ -559,7 +555,18 @@ fn file_op_err(op: &str, path: &Path, error: &io::Error) -> FsError {
     match error.kind() {
         io::ErrorKind::NotFound => FsError::NotFound(message),
         io::ErrorKind::AlreadyExists => FsError::AlreadyExists(message),
-        _ => FsError::Io(message),
+        _ => io_error(format!("{op} {}", path.display()), error),
+    }
+}
+
+/// The one place `RealFs` turns an OS error into an `FsError`, keeping the
+/// class callers act on (a full disk) as a variant rather than message text.
+pub(super) fn io_error(context: impl std::fmt::Display, error: &io::Error) -> FsError {
+    let message = format!("{context}: {error}");
+    if crate::common::is_no_space(error.kind()) {
+        FsError::NoSpace(message)
+    } else {
+        FsError::Io(message)
     }
 }
 
@@ -570,7 +577,7 @@ fn read_exact_at_unix(file: &fs::File, mut offset: u64, mut dst: &mut [u8]) -> F
     while !dst.is_empty() {
         let n = file
             .read_at(dst, offset)
-            .map_err(|e| FsError::Io(format!("pread offset={offset}: {e}")))?;
+            .map_err(|e| io_error(format!("pread offset={offset}"), &e))?;
         if n == 0 {
             return Err(FsError::Io(format!(
                 "pread offset={offset}: unexpected EOF"
@@ -589,7 +596,7 @@ fn write_all_at_unix(file: &fs::File, mut offset: u64, mut src: &[u8]) -> FsResu
     while !src.is_empty() {
         let n = file
             .write_at(src, offset)
-            .map_err(|e| FsError::Io(format!("pwrite offset={offset}: {e}")))?;
+            .map_err(|e| io_error(format!("pwrite offset={offset}"), &e))?;
         if n == 0 {
             return Err(FsError::Io(format!(
                 "pwrite offset={offset}: wrote 0 bytes"
@@ -608,7 +615,7 @@ fn read_exact_at_windows(file: &fs::File, mut offset: u64, mut dst: &mut [u8]) -
     while !dst.is_empty() {
         let n = file
             .seek_read(dst, offset)
-            .map_err(|e| FsError::Io(format!("seek_read offset={offset}: {e}")))?;
+            .map_err(|e| io_error(format!("seek_read offset={offset}"), &e))?;
         if n == 0 {
             return Err(FsError::Io(format!(
                 "seek_read offset={offset}: unexpected EOF"
@@ -627,7 +634,7 @@ fn write_all_at_windows(file: &fs::File, mut offset: u64, mut src: &[u8]) -> FsR
     while !src.is_empty() {
         let n = file
             .seek_write(src, offset)
-            .map_err(|e| FsError::Io(format!("seek_write offset={offset}: {e}")))?;
+            .map_err(|e| io_error(format!("seek_write offset={offset}"), &e))?;
         if n == 0 {
             return Err(FsError::Io(format!(
                 "seek_write offset={offset}: wrote 0 bytes"
@@ -641,6 +648,31 @@ fn write_all_at_windows(file: &fs::File, mut offset: u64, mut src: &[u8]) -> FsR
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn should_classify_storage_full_as_no_space_when_realfs_error_is_converted() {
+        // Arrange: neither message says "no space" or "disk full".
+        let errors = [
+            io::Error::from(io::ErrorKind::StorageFull),
+            io::Error::new(io::ErrorKind::StorageFull, "x"),
+            io::Error::from(io::ErrorKind::QuotaExceeded),
+        ];
+
+        // Act
+        let converted: Vec<_> = errors
+            .iter()
+            .map(|error| crate::common::MidgeError::from(super::io_error("write", error)))
+            .collect();
+
+        // Assert
+        assert!(
+            converted
+                .iter()
+                .all(|error| matches!(error, crate::common::MidgeError::NoSpace(_))),
+            "{converted:?}"
+        );
+    }
+
     use super::*;
     use crate::io::OpenMode;
     use tempfile::TempDir;

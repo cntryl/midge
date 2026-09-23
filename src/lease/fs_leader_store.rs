@@ -191,12 +191,9 @@ impl LeaderStore for FsLeaderStore {
 
         let file = match self.fs.open(&path, opts) {
             Ok(f) => f,
+            // The record may have been removed between exists() and open().
+            Err(crate::io::FsError::NotFound(_)) => return Ok(None),
             Err(e) => {
-                // File may have been removed between exists() and open()
-                let msg = e.to_string();
-                if msg.contains("not found") || msg.contains("No such file") {
-                    return Ok(None);
-                }
                 return Err(LeaseError::IoError(format!(
                     "failed to open leader record: {e}"
                 )));
@@ -950,10 +947,18 @@ mod lock_init_failure_tests {
     struct LockWriteFaultFs {
         inner: MockFs,
         fail_lock_writes: AtomicBool,
+        /// Opening the leader record fails with an I/O error whose path
+        /// happens to contain "not found".
+        fail_record_open: AtomicBool,
     }
 
     impl Fs for LockWriteFaultFs {
         fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
+            if path.0 == LEADER_RECORD_FILE && self.fail_record_open.load(Ordering::SeqCst) {
+                return Err(crate::io::FsError::Io(
+                    "open /srv/not found/db/.midge_leader: permission denied".into(),
+                ));
+            }
             let file = self.inner.open(path, opts)?;
             if path.0 == LEADER_LOCK_FILE && self.fail_lock_writes.load(Ordering::SeqCst) {
                 return Ok(Box::new(FailingLockWriteFile { inner: file }));
@@ -993,6 +998,7 @@ mod lock_init_failure_tests {
         let fs = Arc::new(LockWriteFaultFs {
             inner: MockFs::new(),
             fail_lock_writes: AtomicBool::new(true),
+            fail_record_open: AtomicBool::new(false),
         });
         let store = FsLeaderStore::new(fs.clone() as Arc<dyn Fs>);
 
@@ -1008,5 +1014,25 @@ mod lock_init_failure_tests {
         );
         recovered.expect("a failed lock initialization must not wedge later acquisitions");
         assert!(!fs.exists(&FsPath::new(LEADER_LOCK_FILE)).unwrap());
+    }
+
+    #[test]
+    fn should_report_leader_record_error_when_open_fails_with_io_error_on_path_containing_not_found(
+    ) {
+        // Arrange
+        let fs = Arc::new(LockWriteFaultFs {
+            inner: MockFs::new(),
+            fail_lock_writes: AtomicBool::new(false),
+            fail_record_open: AtomicBool::new(false),
+        });
+        let store = FsLeaderStore::new(fs.clone() as Arc<dyn Fs>);
+        store.acquire_leadership("writer-a").expect("acquire");
+        fs.fail_record_open.store(true, Ordering::SeqCst);
+
+        // Act
+        let result = store.read_current();
+
+        // Assert: a permission error is not an absent record.
+        assert!(matches!(result, Err(LeaseError::IoError(_))), "{result:?}");
     }
 }

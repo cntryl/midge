@@ -144,12 +144,7 @@ impl StorageBackend for CloudStorage {
     ) {
         let deadline = crate::common::OperationDeadline::from_budget(timeout);
         let result = blocking_cloud_object_proof_within(self, key, &deadline)
-            .map_err(|error| match error {
-                crate::common::MidgeError::Timeout(message) => {
-                    crate::storage::StorageError::timeout(message)
-                }
-                other => crate::storage::StorageError::io(other),
-            })
+            .map_err(crate::storage::StorageError::from)
             .and_then(|proof| {
                 proof
                     .map(|proof| (proof.bytes, proof.metadata))
