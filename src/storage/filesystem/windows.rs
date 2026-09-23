@@ -8,7 +8,9 @@ use winapi::um::fileapi::{FILE_BASIC_INFO, FILE_ID_INFO};
 use winapi::um::minwinbase::{FileBasicInfo, FileIdInfo};
 use winapi::um::winbase::GetFileInformationByHandleEx;
 
-pub(super) fn range_metadata(file: &File) -> Result<StorageObjectMetadata, String> {
+pub(super) fn range_metadata(
+    file: &File,
+) -> Result<StorageObjectMetadata, crate::storage::StorageError> {
     let metadata = file.metadata().map_err(|error| range_io_error(&error))?;
     if !metadata.is_file() {
         return Err("range reads require an ordinary immutable file".into());
@@ -36,7 +38,8 @@ pub(super) fn range_metadata(file: &File) -> Result<StorageObjectMetadata, Strin
         return Err(format!(
             "read Windows filesystem range identity: {}",
             std::io::Error::last_os_error()
-        ));
+        )
+        .into());
     }
     // SAFETY: the successful calls above initialized these exact structures;
     // LARGE_INTEGER exposes each native timestamp through its QuadPart member.
