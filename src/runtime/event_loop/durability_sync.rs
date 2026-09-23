@@ -378,12 +378,10 @@ impl EventLoop {
     ) -> crate::common::MidgeResult<()> {
         const MAX_DRAIN: usize = 4096;
 
-        // 🔑 Drain any pending writes so they are included in this sync.
-        // An unresolved remote DDL decision fences those writes in queue order
-        // until a DDL retry reconciles the durable prepare.
-        if !self.fencing.ddl_authority_ambiguous {
-            let _ = self.drain_pending_writes(msg_rx, MAX_DRAIN);
-        }
+        // 🔑 Drain any pending writes so they are included in this sync. The
+        // drain refuses while the runtime is fenced (including an unresolved
+        // remote DDL decision), leaving those writes to dispatch in order.
+        let _ = self.drain_pending_writes(msg_rx, MAX_DRAIN);
 
         self.sync_current_wal()
     }
