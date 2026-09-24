@@ -60,7 +60,7 @@ impl WalActor {
             || ticket.next_segment_id() != next_segment
             || ticket.max_sequence() != max_sequence
         {
-            let error = MidgeError::Fenced(format!(
+            let error = MidgeError::Internal(format!(
                 "WAL seal ticket (segment {}, next {}, max sequence {}) disagrees with the actor (segment {old_segment}, next {next_segment}, max sequence {max_sequence})",
                 ticket.segment_id(),
                 ticket.next_segment_id(),
@@ -73,7 +73,7 @@ impl WalActor {
         let Some(fs) = self.filesystem() else {
             if !self.is_open() {
                 return Err(self.io_error().unwrap_or_else(|| {
-                    MidgeError::Fenced("memory WAL transition is unavailable".to_string())
+                    MidgeError::Internal("memory WAL transition is unavailable".to_string())
                 }));
             }
             state.wal.current_segment_id = next_segment;
@@ -130,7 +130,7 @@ impl WalActor {
             }
         };
         if sealed_segment_exists {
-            let error = MidgeError::Fenced(format!(
+            let error = MidgeError::RecoveryFailed(format!(
                 "refusing to overwrite existing sealed WAL segment {old_segment}"
             ));
             self.fence_transition(state, error.to_string());
@@ -160,7 +160,7 @@ impl WalActor {
                 // Records were appended to a file that no longer exists. A
                 // later fsync could not make them durable, so the actor must
                 // not continue as though the accepted writes were intact.
-                let error = MidgeError::Fenced(format!(
+                let error = MidgeError::RecoveryFailed(format!(
                     "active WAL segment disappeared while {} buffered records (through sequence {}) were pending",
                     self.pending_sync_count, self.segment_max_sequence
                 ));

@@ -210,7 +210,7 @@ impl EventLoop {
         self.wal_transition.ensure_ready()?;
         if self.wal_actor.is_cloud_async() && sealed_generation != self.state.wal.current_segment_id
         {
-            let error = crate::common::MidgeError::Fenced(format!(
+            let error = crate::common::MidgeError::Internal(format!(
                 "cloud WAL generation drift: coordinator {sealed_generation}, active segment {}",
                 self.state.wal.current_segment_id
             ));
@@ -524,6 +524,29 @@ mod tests {
         }
     }
 
+    /// A leader store that cannot be reached, so writer authority cannot be
+    /// proven either way.
+    struct UnreachableLeaderStore;
+
+    impl crate::lease::LeaderStore for UnreachableLeaderStore {
+        fn acquire_leadership(
+            &self,
+            _holder_id: &str,
+        ) -> Result<crate::lease::LeaderRecord, crate::lease::LeaseError> {
+            Err(crate::lease::LeaseError::Internal(
+                "test leader store does not acquire leadership".to_string(),
+            ))
+        }
+
+        fn read_current(
+            &self,
+        ) -> Result<Option<crate::lease::LeaderRecord>, crate::lease::LeaseError> {
+            Err(crate::lease::LeaseError::IoError(
+                "leader store unreachable".to_string(),
+            ))
+        }
+    }
+
     impl crate::wal::WalWriter for PanickingSyncWriter {
         fn append_record(
             &self,
@@ -623,8 +646,70 @@ mod tests {
             event_loop
                 .sync_wal_generation(CompletionSource::WalSync)
                 .expect_err("fenced WAL must reject a later sync"),
-            crate::common::MidgeError::Fenced(_)
+            crate::common::MidgeError::RecoveryFailed(_)
         ));
+    }
+
+    #[test]
+    fn should_report_one_fence_cause_when_sync_cannot_prove_writer_authority(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange: an unreachable leader store is not a lost lease, but the
+        // actor conservatively fences as if authority were lost. The protocol
+        // must report the same cause, not a local poison (#537 review).
+        let directory = tempfile::tempdir()?;
+        let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
+        let leader_store: Arc<dyn crate::lease::LeaderStore> = Arc::new(UnreachableLeaderStore);
+        let config = RuntimeConfig {
+            wal_durability_policy: crate::wal::DurabilityPolicy::Batched,
+            writer_epoch: 1,
+            leader_store: Some(leader_store),
+            leader_holder_id: Some("writer".to_string()),
+            ..RuntimeConfig::default()
+        };
+        let mut event_loop = EventLoop::new(
+            state,
+            false,
+            Arc::new(ResponseRouter::new()),
+            config,
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
+        )?;
+        event_loop.wal_actor.append(
+            &mut event_loop.state,
+            crate::runtime::actors::wal::AppendParams {
+                request_id: 1,
+                cf_id: 0,
+                key: bytes::Bytes::from_static(b"unproven"),
+                value: Some(bytes::Bytes::from_static(b"value")),
+                insert_only: false,
+                ttl_seconds: None,
+            },
+        )?;
+        let _ = event_loop.sync_wal_generation(CompletionSource::WalSync);
+
+        // Act
+        let next_write = event_loop.wal_actor.append(
+            &mut event_loop.state,
+            crate::runtime::actors::wal::AppendParams {
+                request_id: 2,
+                cf_id: 0,
+                key: bytes::Bytes::from_static(b"after"),
+                value: Some(bytes::Bytes::from_static(b"value")),
+                insert_only: false,
+                ttl_seconds: None,
+            },
+        );
+        let next_sync = event_loop.wal_transition.ensure_ready();
+
+        // Assert
+        assert!(
+            matches!(next_write, Err(crate::common::MidgeError::Fenced(_))),
+            "{next_write:?}"
+        );
+        assert!(
+            matches!(next_sync, Err(crate::common::MidgeError::Fenced(_))),
+            "{next_sync:?}"
+        );
+        Ok(())
     }
 
     #[test]
@@ -858,7 +943,7 @@ mod tests {
                     ));
                     assert!(matches!(
                         event_loop.sync_wal_generation(CompletionSource::WalSync),
-                        Err(crate::common::MidgeError::Fenced(_))
+                        Err(crate::common::MidgeError::RecoveryFailed(_))
                     ));
                 }
             }
@@ -986,6 +1071,50 @@ mod tests {
         assert_eq!(event_loop.durability.current_key(), 1);
         assert!(!event_loop.state.persistence_anomaly_detected());
         assert!(!event_loop.durability.has_pending_waiters());
+    }
+
+    #[test]
+    fn should_report_recovery_required_when_cloud_wal_generation_drifts() {
+        // Arrange: a local bookkeeping drift, not a lost lease (#537).
+        let mut event_loop = super::super::tests::create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )
+        .expect("create cloud event loop");
+        event_loop.state.wal.current_segment_id += 1;
+
+        // Act
+        let drift = event_loop
+            .sync_wal_generation(CompletionSource::WalSync)
+            .expect_err("generation drift must fail the sync");
+        let next_write = event_loop.wal_actor.append(
+            &mut event_loop.state,
+            crate::runtime::actors::wal::AppendParams {
+                request_id: 1,
+                cf_id: 0,
+                key: bytes::Bytes::from_static(b"after-drift"),
+                value: Some(bytes::Bytes::from_static(b"value")),
+                insert_only: false,
+                ttl_seconds: None,
+            },
+        );
+        let next_sync = event_loop.wal_transition.ensure_ready();
+
+        // Assert
+        assert!(
+            matches!(drift, crate::common::MidgeError::Internal(_)),
+            "{drift:?}"
+        );
+        assert!(
+            matches!(
+                next_write,
+                Err(crate::common::MidgeError::RecoveryFailed(_))
+            ),
+            "{next_write:?}"
+        );
+        assert!(
+            matches!(next_sync, Err(crate::common::MidgeError::RecoveryFailed(_))),
+            "{next_sync:?}"
+        );
     }
 
     #[test]

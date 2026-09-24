@@ -31,7 +31,12 @@ impl super::EventLoop {
             error.to_string(),
             error.severity() == crate::common::Severity::Fenced,
         );
-        self.wal_transition.fence(error.to_string(), sealed_segment);
+        // Read the cause back from the actor: it may already have fenced
+        // itself as authority-lost (an epoch check that could not reach the
+        // leader store), and both views must report the same cause.
+        let authority_lost = self.wal_actor.authority_lost();
+        self.wal_transition
+            .fence(error.to_string(), sealed_segment, authority_lost);
         self.state.mark_persistence_anomaly();
         let generation = self.durability.current_key();
         let waiters = self.durability.drain_all_waiters_and_reset(generation);
@@ -114,7 +119,7 @@ impl super::EventLoop {
             }
         };
         if flushed != max_sequence {
-            let error = MidgeError::Fenced(
+            let error = MidgeError::Internal(
                 "cloud WAL fixture observed inconsistent seal accounting".to_string(),
             );
             self.fence_wal_transition(&error, None);
@@ -203,7 +208,7 @@ mod tests {
         assert!(event_loop.state.persistence_anomaly_detected());
         assert!(matches!(
             event_loop.rotate_local_wal_transition(),
-            Err(MidgeError::Fenced(_))
+            Err(MidgeError::RecoveryFailed(_))
         ));
     }
 
@@ -299,7 +304,7 @@ mod tests {
                 assert!(event_loop.wal_transition.segment_is_tracked(segment_id));
                 assert!(matches!(
                     event_loop.rotate_local_wal_transition(),
-                    Err(MidgeError::Fenced(_))
+                    Err(MidgeError::RecoveryFailed(_))
                 ));
             } else {
                 assert!(!event_loop.wal_transition.segment_is_tracked(segment_id));
