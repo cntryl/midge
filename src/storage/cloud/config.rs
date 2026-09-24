@@ -4,6 +4,9 @@ use std::time::Duration;
 /// Cloud-backed write tuning used by database open options.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CloudWritePolicy {
+    /// Flush a column family whose active memtable started this many WAL
+    /// segments ago. Applies in local mode too, where it bounds WAL
+    /// retention while a family stays idle.
     pub eventual_flush_segment_gap: u64,
     pub wal_seal_min_segment_bytes: usize,
     pub wal_seal_max_flush_delay: Duration,
@@ -25,7 +28,7 @@ impl CloudWritePolicy {
     pub(crate) fn validate(&self) -> MidgeResult<()> {
         if self.eventual_flush_segment_gap == 0 {
             return Err(MidgeError::InvalidArgument(
-                "cloud eventual-flush segment gap must be greater than zero".to_string(),
+                "eventual-flush segment gap must be greater than zero".to_string(),
             ));
         }
         if self.wal_seal_min_segment_bytes == 0 {

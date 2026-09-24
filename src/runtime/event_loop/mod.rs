@@ -379,8 +379,7 @@ impl EventLoop {
 
     fn apply_runtime_state_config(state: &mut RuntimeState, config: &super::RuntimeConfig) {
         state.install_ttl_clock(Arc::clone(&config.ttl_clock));
-        state.cloud_eventual_flush_segment_gap =
-            config.cloud_runtime_policy.eventual_flush_segment_gap;
+        state.eventual_flush_segment_gap = config.cloud_runtime_policy.eventual_flush_segment_gap;
         state.set_compaction_enabled(config.background_compaction);
         state.l0_compaction_trigger = config.l0_compaction_trigger.max(1);
     }

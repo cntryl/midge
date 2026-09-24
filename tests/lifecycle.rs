@@ -3296,14 +3296,29 @@ mod column_family_reclamation_hardening {
 }
 
 mod local_wal_retention {
-    //! Local WAL retention while one column family stays idle (#490, #549).
+    //! Local WAL retention while one column family stays idle (#490, #550).
+    //!
+    //! Retirement stays prefix-only: a segment goes only once every family
+    //! has flushed past it. Retiring out of order would drop a tombstone
+    //! while an older retained segment still holds the put it deletes, and a
+    //! later compaction would let recovery resurrect that put. The eventual
+    //! flush instead bounds how long an idle family can pin the floor.
 
-    use cntryl_midge::{ColumnFamilyHandle, Engine, OpenOptions, TransactionMode, WriteOptions};
+    use cntryl_midge::{
+        CloudWritePolicy, ColumnFamilyHandle, Engine, OpenOptions, TransactionMode, WriteOptions,
+    };
+    use std::path::Path;
     use std::time::Duration;
 
-    fn options(path: &std::path::Path) -> OpenOptions {
+    const EVENTUAL_FLUSH_GAP: u64 = 4;
+
+    fn options(path: &Path) -> OpenOptions {
         OpenOptions::local(path)
             .background_compaction(false)
+            .cloud_write_policy(CloudWritePolicy {
+                eventual_flush_segment_gap: EVENTUAL_FLUSH_GAP,
+                ..CloudWritePolicy::default()
+            })
             .build()
             .expect("options")
     }
@@ -3316,7 +3331,32 @@ mod local_wal_retention {
         tx.commit(WriteOptions::sync()).expect("commit");
     }
 
-    fn sealed_segments(path: &std::path::Path) -> usize {
+    fn delete(engine: &Engine, cf: &ColumnFamilyHandle, key: &[u8]) {
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin");
+        tx.delete(key.to_vec()).expect("delete");
+        tx.commit(WriteOptions::sync()).expect("commit");
+    }
+
+    fn delete_range(engine: &Engine, cf: &ColumnFamilyHandle, start: &[u8], end: &[u8]) {
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin");
+        tx.delete_range(start.to_vec(), end.to_vec())
+            .expect("delete range");
+        tx.commit(WriteOptions::sync()).expect("commit");
+    }
+
+    fn get(engine: &Engine, cf_name: &str, key: &[u8]) -> Option<Vec<u8>> {
+        let cf = engine.get_column_family(cf_name).expect("family");
+        let tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("read");
+        tx.get(key).expect("get").map(|value| value.to_vec())
+    }
+
+    fn sealed_segments(path: &Path) -> usize {
         std::fs::read_dir(path.join("wal"))
             .expect("read wal dir")
             .filter_map(Result::ok)
@@ -3324,11 +3364,31 @@ mod local_wal_retention {
             .count()
     }
 
+    /// Copies a live database directory as a crash image, leaving out the
+    /// leader record so the image opens as a takeover.
+    fn crash_image(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).expect("create image dir");
+        for entry in std::fs::read_dir(from).expect("read live dir") {
+            let entry = entry.expect("entry");
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".midge_leader")
+            {
+                continue;
+            }
+            let target = to.join(entry.file_name());
+            if entry.file_type().expect("file type").is_dir() {
+                crash_image(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), &target).expect("copy");
+            }
+        }
+    }
+
     #[test]
     fn should_retire_covered_wal_segments_when_an_idle_column_family_pins_the_floor() {
-        // Arrange: one write to a family that never writes or flushes again.
-        // It pins the recovery floor at the first segment, so every later
-        // segment must be retired by the per-record proof.
+        // Arrange: one write to a family that never writes again.
         let temp = tempfile::TempDir::new().expect("temp");
         let mut engine = Engine::open(options(temp.path())).expect("open");
         let default = engine.get_column_family("default").expect("default");
@@ -3353,16 +3413,124 @@ mod local_wal_retention {
         let retained = sealed_segments(temp.path());
         engine.shutdown(Duration::from_secs(10)).expect("shutdown");
 
-        // Assert
+        // Assert: the idle family is flushed within the gap, so retention
+        // is bounded by it instead of growing with every flush.
         assert!(
-            retained <= 2,
+            retained <= 2 * usize::try_from(EVENTUAL_FLUSH_GAP).expect("gap"),
             "{retained} sealed segments retained after 20 covered flushes"
         );
         let reopened = Engine::open(options(temp.path())).expect("reopen");
-        let idle = reopened.get_column_family("idle").expect("idle");
-        let tx = reopened
-            .begin_tx(idle.id(), TransactionMode::ReadOnly)
-            .expect("read");
-        assert!(tx.get(b"idle-key").expect("get").is_some());
+        assert!(get(&reopened, "idle", b"idle-key").is_some());
+    }
+
+    #[test]
+    fn should_retire_wal_segments_with_deletes_when_an_idle_column_family_pins_the_floor() {
+        // Arrange: deletes can never pass the per-record proof, so only the
+        // floor can retire their segments (#550).
+        let temp = tempfile::TempDir::new().expect("temp");
+        let mut engine = Engine::open(options(temp.path())).expect("open");
+        let default = engine.get_column_family("default").expect("default");
+        let idle = engine.create_column_family("idle").expect("idle");
+        put(&engine, &idle, b"idle-key");
+
+        // Act
+        for round in 0..20 {
+            let key = format!("busy-{round:03}");
+            put(&engine, &default, key.as_bytes());
+            delete(&engine, &default, key.as_bytes());
+            engine.flush_cf(&default).expect("flush default");
+            if round % 5 == 4 {
+                engine.compact_all().expect("compact");
+            }
+        }
+        let retained = sealed_segments(temp.path());
+        engine.shutdown(Duration::from_secs(10)).expect("shutdown");
+
+        // Assert
+        assert!(
+            retained <= 2 * usize::try_from(EVENTUAL_FLUSH_GAP).expect("gap"),
+            "{retained} sealed segments retained after 20 flushed rounds with deletes"
+        );
+        let reopened = Engine::open(options(temp.path())).expect("reopen");
+        assert!(get(&reopened, "idle", b"idle-key").is_some());
+        assert!(get(&reopened, "default", b"busy-019").is_none());
+    }
+
+    /// The #551 review scenario: the idle family's write shares the first
+    /// segment with a put that a later segment deletes. Compaction then
+    /// drops both from the SSTs. Only prefix retirement keeps the delete's
+    /// segment while the put's segment is retained.
+    fn deleted_key_after_recovery(delete_kind: &str, reopen: &str) -> Option<Vec<u8>> {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let live = temp.path().join("live");
+        let mut engine = Engine::open(options(&live)).expect("open");
+        let default = engine.get_column_family("default").expect("default");
+        let idle = engine.create_column_family("idle").expect("idle");
+        put(&engine, &idle, b"idle-key");
+        put(&engine, &default, b"k");
+        engine.flush_cf(&default).expect("flush put");
+        match delete_kind {
+            "delete" => delete(&engine, &default, b"k"),
+            _ => delete_range(&engine, &default, b"a", b"z"),
+        }
+        engine.flush_cf(&default).expect("flush delete");
+        engine.compact_all().expect("compact");
+        assert_eq!(get(&engine, "default", b"k"), None, "live engine");
+        let recovered = if reopen == "crash" {
+            let image = temp.path().join("image");
+            crash_image(&live, &image);
+            let recovered = Engine::open(options(&image)).expect("open crash image");
+            let value = get(&recovered, "default", b"k");
+            drop(recovered);
+            engine
+                .shutdown(Duration::from_secs(10))
+                .expect("shutdown live");
+            value
+        } else {
+            engine.shutdown(Duration::from_secs(10)).expect("shutdown");
+            drop(engine);
+            let reopened = Engine::open(options(&live)).expect("reopen");
+            get(&reopened, "default", b"k")
+        };
+        recovered
+    }
+
+    #[test]
+    fn should_not_resurrect_deleted_key_when_recovering_a_crash_image() {
+        // Arrange
+        let (delete_kind, reopen) = ("delete", "crash");
+
+        // Act
+        let value = deleted_key_after_recovery(delete_kind, reopen);
+
+        // Assert
+        assert_eq!(value, None, "deleted key resurrected after crash recovery");
+    }
+
+    #[test]
+    fn should_not_resurrect_deleted_key_when_reopening_after_clean_shutdown() {
+        // Arrange
+        let (delete_kind, reopen) = ("delete", "clean");
+
+        // Act
+        let value = deleted_key_after_recovery(delete_kind, reopen);
+
+        // Assert
+        assert_eq!(value, None, "deleted key resurrected after a clean restart");
+    }
+
+    #[test]
+    fn should_not_resurrect_range_deleted_key_when_recovering_a_crash_image() {
+        // Arrange
+        let (delete_kind, reopen) = ("delete_range", "crash");
+
+        // Act
+        let value = deleted_key_after_recovery(delete_kind, reopen);
+
+        // Assert
+        assert_eq!(
+            value, None,
+            "range-deleted key resurrected after crash recovery"
+        );
     }
 }

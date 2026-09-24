@@ -416,16 +416,13 @@ impl RuntimeState {
     }
 
     #[cfg(test)]
-    pub(crate) fn next_flush_candidate(
-        &self,
-        cloud_segment_gap_enabled: bool,
-    ) -> Option<FlushCandidate> {
-        self.next_flush_candidate_skipping(cloud_segment_gap_enabled, &HashSet::new())
+    pub(crate) fn next_flush_candidate(&self, segment_gap_enabled: bool) -> Option<FlushCandidate> {
+        self.next_flush_candidate_skipping(segment_gap_enabled, &HashSet::new())
     }
 
     pub(crate) fn next_flush_candidate_skipping(
         &self,
-        cloud_segment_gap_enabled: bool,
+        segment_gap_enabled: bool,
         attempted_cfs: &HashSet<crate::types::ColumnFamilyId>,
     ) -> Option<FlushCandidate> {
         let now = Instant::now();
@@ -467,7 +464,7 @@ impl RuntimeState {
             });
         }
 
-        if !cloud_segment_gap_enabled {
+        if !segment_gap_enabled {
             return None;
         }
 
@@ -483,12 +480,12 @@ impl RuntimeState {
                     .wal
                     .current_segment_id
                     .saturating_sub(cf_state.active_memtable_started_in_segment);
-                (gap >= self.cloud_eventual_flush_segment_gap).then_some((*cf_id, gap))
+                (gap >= self.eventual_flush_segment_gap).then_some((*cf_id, gap))
             })
             .max_by_key(|(cf_id, gap)| (*gap, std::cmp::Reverse(*cf_id)))
             .map(|(cf_id, _)| FlushCandidate {
                 cf_id,
-                reason: FlushReason::CloudSegmentGap,
+                reason: FlushReason::WalSegmentGap,
             })
     }
 

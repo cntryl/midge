@@ -437,12 +437,12 @@ fn should_cap_immutable_flush_retry_backoff_at_one_second() {
 }
 
 #[test]
-fn should_select_size_threshold_flush_candidate_before_cloud_gap_candidate() {
+fn should_select_size_threshold_flush_candidate_before_segment_gap_candidate() {
     // Arrange
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
     state.memtable_flush_threshold = 4 * 1024;
     state.memtable_size_limit = 1024 * 1024;
-    state.wal.current_segment_id = state.cloud_eventual_flush_segment_gap + 50;
+    state.wal.current_segment_id = state.eventual_flush_segment_gap + 50;
 
     grow_active_memtable(&mut state, 0, 5 * 1024);
 
@@ -471,12 +471,12 @@ fn should_select_size_threshold_flush_candidate_before_cloud_gap_candidate() {
 }
 
 #[test]
-fn should_select_cloud_gap_flush_candidate_when_cloud_mode_and_gap_exceeded() {
+fn should_select_segment_gap_flush_candidate_when_gap_exceeded() {
     // Arrange
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
     state.memtable_flush_threshold = 1024 * 1024;
     state.memtable_size_limit = 1024 * 1024;
-    state.wal.current_segment_id = state.cloud_eventual_flush_segment_gap + 1;
+    state.wal.current_segment_id = state.eventual_flush_segment_gap + 1;
 
     {
         let cf_state = state.get_cf(0).expect("default cf");
@@ -496,16 +496,16 @@ fn should_select_cloud_gap_flush_candidate_when_cloud_mode_and_gap_exceeded() {
     // Act
     // Assert
     assert_eq!(candidate.cf_id, 0);
-    assert_eq!(candidate.reason, FlushReason::CloudSegmentGap);
+    assert_eq!(candidate.reason, FlushReason::WalSegmentGap);
 }
 
 #[test]
-fn should_not_select_cloud_gap_flush_candidate_when_gap_mode_disabled() {
+fn should_not_select_segment_gap_flush_candidate_when_gap_mode_disabled() {
     // Arrange
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
     state.memtable_flush_threshold = 1024 * 1024;
     state.memtable_size_limit = 1024 * 1024;
-    state.wal.current_segment_id = state.cloud_eventual_flush_segment_gap + 10;
+    state.wal.current_segment_id = state.eventual_flush_segment_gap + 10;
 
     {
         let cf_state = state.get_cf(0).expect("default cf");
@@ -528,7 +528,7 @@ fn should_not_select_cloud_gap_flush_candidate_when_gap_mode_disabled() {
 fn should_report_max_memtable_wal_segment_gap_for_non_empty_memtables() {
     // Arrange
     let mut state = RuntimeState::new(isolated_test_db_path(), false);
-    state.wal.current_segment_id = state.cloud_eventual_flush_segment_gap + 20;
+    state.wal.current_segment_id = state.eventual_flush_segment_gap + 20;
 
     {
         let cf_state = state.get_cf(0).expect("default cf");

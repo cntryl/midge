@@ -1086,9 +1086,14 @@ impl EventLoop {
             }
         };
         let mut attempted_cfs = std::collections::HashSet::new();
+        // The segment-gap flush runs in every durable mode. In local mode it
+        // is what stops an idle family pinning the WAL recovery floor, and
+        // so bounds retention: retirement is prefix-only, because retiring a
+        // tombstone's segment ahead of an older retained put would let
+        // recovery resurrect that put once compaction drops both (#550).
         while let Some(candidate) = self
             .state
-            .next_flush_candidate_skipping(self.wal_actor.is_cloud_async(), &attempted_cfs)
+            .next_flush_candidate_skipping(true, &attempted_cfs)
         {
             attempted_cfs.insert(candidate.cf_id);
             if candidate.reason != crate::runtime::state::FlushReason::PendingImmutable {
