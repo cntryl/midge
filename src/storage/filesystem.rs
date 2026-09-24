@@ -274,8 +274,11 @@ fn create_dir_all_durably(dir: &Path) -> std::io::Result<()> {
 /// stamp three quick writes could repeat an old identity for new content
 /// (#557). The stamp is strictly later than the replaced version's modified
 /// time and than every time this process stamped before, which also covers
-/// a delete followed by a recreate. Other processes use the fine-grained
-/// clock, so they collide only on an identical nanosecond reading.
+/// a delete followed by a recreate. Other processes read the same clock, so
+/// they collide only on an identical clock reading (1 ns on Linux, 1 us on
+/// macOS, 100 ns on Windows) together with a delete, a recreate and inode
+/// reuse. [`stamp_after_replaced`] handles filesystems that keep coarser
+/// times.
 fn next_object_modified_time(replaced: Option<std::time::SystemTime>) -> std::time::SystemTime {
     use std::sync::atomic::Ordering;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -293,6 +296,41 @@ fn next_object_modified_time(replaced: Option<std::time::SystemTime>) -> std::ti
         Some(stamped)
     });
     UNIX_EPOCH + std::time::Duration::from_nanos(stamped)
+}
+
+/// Larger steps for filesystems that keep modified times at whole seconds
+/// (HFS+, some network mounts) or two seconds (FAT, exFAT).
+const COARSE_MODIFIED_STEPS: [std::time::Duration; 2] = [
+    std::time::Duration::from_secs(1),
+    std::time::Duration::from_secs(2),
+];
+
+/// Store `stamp` through `set`, which returns the time the filesystem kept,
+/// and make sure the kept time is later than the replaced version's. A
+/// filesystem coarser than [`OBJECT_MODIFIED_STEP_NANOS`] truncates the stamp
+/// back to the old time, so step past it in whole seconds instead; if even
+/// that cannot order the versions, fail the write rather than publish a
+/// version whose identity could repeat an old one (#557).
+fn stamp_after_replaced(
+    replaced: Option<std::time::SystemTime>,
+    stamp: std::time::SystemTime,
+    mut set: impl FnMut(std::time::SystemTime) -> std::io::Result<std::time::SystemTime>,
+) -> std::io::Result<()> {
+    let kept = set(stamp)?;
+    let Some(replaced) = replaced else {
+        return Ok(());
+    };
+    if kept > replaced {
+        return Ok(());
+    }
+    for step in COARSE_MODIFIED_STEPS {
+        if set(replaced + step)? > replaced {
+            return Ok(());
+        }
+    }
+    Err(std::io::Error::other(
+        "filesystem cannot order object versions by modified time",
+    ))
 }
 
 /// Write `data` to `full_path` so readers see either the previous object or
@@ -331,7 +369,10 @@ fn publish_object_atomically(full_path: &Path, data: &[u8], mode: Publish) -> St
         .open(&temp)
         .and_then(|mut file| {
             file.write_all(data)?;
-            file.set_modified(next_object_modified_time(replaced))?;
+            stamp_after_replaced(replaced, next_object_modified_time(replaced), |time| {
+                file.set_modified(time)?;
+                file.metadata()?.modified()
+            })?;
             file.sync_all()
         });
     if let Err(error) = written {

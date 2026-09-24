@@ -217,3 +217,47 @@ fn should_stamp_distinct_modified_times_when_object_is_deleted_and_recreated() -
     assert!(fs::metadata(&path)?.modified()? > middle);
     Ok(())
 }
+
+/// A filesystem that keeps modified times at whole-second resolution.
+fn whole_seconds(time: std::time::SystemTime) -> std::time::SystemTime {
+    let since = time
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time after epoch");
+    std::time::UNIX_EPOCH + Duration::from_secs(since.as_secs())
+}
+
+#[test]
+fn should_order_versions_when_filesystem_keeps_whole_second_modified_times() {
+    // Arrange: a 1 us step truncates back to the replaced version's second.
+    let replaced = std::time::UNIX_EPOCH + Duration::from_secs(1_000);
+    let mut stored = None;
+
+    // Act
+    let result = stamp_after_replaced(
+        Some(replaced),
+        replaced + Duration::from_micros(1),
+        |time| {
+            let kept = whole_seconds(time);
+            stored = Some(kept);
+            Ok(kept)
+        },
+    );
+
+    // Assert
+    assert!(result.is_ok(), "{result:?}");
+    assert!(stored.expect("a stamp was stored") > replaced);
+}
+
+#[test]
+fn should_fail_publish_when_filesystem_cannot_order_versions_by_modified_time() {
+    // Arrange: a filesystem that ignores every stamp.
+    let replaced = std::time::UNIX_EPOCH + Duration::from_secs(1_000);
+
+    // Act
+    let result = stamp_after_replaced(Some(replaced), replaced + Duration::from_micros(1), |_| {
+        Ok(replaced)
+    });
+
+    // Assert
+    assert!(result.is_err());
+}
