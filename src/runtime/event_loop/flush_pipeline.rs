@@ -74,6 +74,8 @@ impl EventLoop {
         }
 
         let current_segment_id = self.state.wal.current_segment_id;
+
+        let appended_bytes = self.state.wal.appended_bytes;
         let sequence = self.state.sequence;
         let frozen = {
             let cf = self.state.get_cf(cf_id).ok_or_else(|| {
@@ -99,6 +101,7 @@ impl EventLoop {
             .expect("tracked flush family exists");
         cf.memtable = Arc::new(crate::memtable::SkipListMemtable::new());
         cf.active_memtable_started_in_segment = current_segment_id;
+        cf.active_memtable_started_at_wal_bytes = appended_bytes;
         crate::failpoints::fail_point!("midge::flush_worker::after_freeze");
         self.publish_snapshot();
         Ok(Some(flush.flush_id))
@@ -1086,14 +1089,21 @@ impl EventLoop {
             }
         };
         let mut attempted_cfs = std::collections::HashSet::new();
-        // The segment-gap flush runs in every durable mode. In local mode it
-        // is what stops an idle family pinning the WAL recovery floor, and
-        // so bounds retention: retirement is prefix-only, because retiring a
+        // The eventual flush stops an idle family pinning the WAL recovery
+        // floor. Cloud measures the gap in segments, bounding the WAL
+        // catalog. Local measures it in WAL bytes appended since the memtable
+        // started (#552): flushes append none, so gap flushes cannot feed
+        // each other. Local retirement stays prefix-only, because retiring a
         // tombstone's segment ahead of an older retained put would let
         // recovery resurrect that put once compaction drops both (#550).
+        let rule = if self.wal_actor.is_cloud_async() {
+            crate::runtime::state::EventualFlush::SegmentGap
+        } else {
+            crate::runtime::state::EventualFlush::WalBytes
+        };
         while let Some(candidate) = self
             .state
-            .next_flush_candidate_skipping(true, &attempted_cfs)
+            .next_flush_candidate_skipping(rule, &attempted_cfs)
         {
             attempted_cfs.insert(candidate.cf_id);
             if candidate.reason != crate::runtime::state::FlushReason::PendingImmutable {
@@ -1945,6 +1955,103 @@ mod tests {
             current + 1,
             "active wal.log was {active_len_before} bytes on disk before prune"
         );
+        Ok(())
+    }
+
+    /// A local event loop whose WAL has already appended far more than the
+    /// eventual-flush byte bound, with every memtable empty (#552).
+    fn local_event_loop_after_long_wal_history(
+        directory: &std::path::Path,
+    ) -> crate::common::MidgeResult<EventLoop> {
+        let state = crate::runtime::state::RuntimeState::new(directory.to_path_buf(), false);
+        let router = Arc::new(crate::runtime::ResponseRouter::new());
+        let mut event_loop = EventLoop::new(
+            state,
+            false,
+            router,
+            crate::runtime::RuntimeConfig::default(),
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
+        )?;
+        let history = u64::try_from(event_loop.state.memtable_flush_threshold)
+            .unwrap_or(u64::MAX)
+            .saturating_mul(100);
+        event_loop.state.wal.appended_bytes = history;
+        Ok(event_loop)
+    }
+
+    #[test]
+    fn should_not_flush_memtable_started_by_a_put_when_wal_history_exceeds_the_byte_bound(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange: the byte gap counts from when this memtable started, not
+        // from the start of the WAL.
+        let directory = tempfile::tempdir()?;
+        let mut event_loop = local_event_loop_after_long_wal_history(directory.path())?;
+        event_loop.wal_actor.append(
+            &mut event_loop.state,
+            crate::runtime::actors::wal::AppendParams {
+                request_id: 1,
+                cf_id: 0,
+                key: bytes::Bytes::from_static(b"first"),
+                value: Some(bytes::Bytes::from_static(b"value")),
+                insert_only: false,
+                ttl_seconds: None,
+            },
+        )?;
+
+        // Act
+        let frozen = event_loop.drain_auto_flush_memtables();
+
+        // Assert
+        assert_eq!(frozen, 0, "a fresh memtable must not be flushed at once");
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_flush_memtable_started_by_a_range_delete_when_wal_history_exceeds_the_byte_bound(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let directory = tempfile::tempdir()?;
+        let mut event_loop = local_event_loop_after_long_wal_history(directory.path())?;
+        event_loop.wal_actor.append_delete_range(
+            &mut event_loop.state,
+            1,
+            0,
+            bytes::Bytes::from_static(b"a"),
+            bytes::Bytes::from_static(b"z"),
+            None,
+        )?;
+
+        // Act
+        let frozen = event_loop.drain_auto_flush_memtables();
+
+        // Assert
+        assert_eq!(frozen, 0, "a fresh memtable must not be flushed at once");
+        Ok(())
+    }
+
+    #[test]
+    fn should_count_put_bytes_toward_the_local_wal_gap_when_appending(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let directory = tempfile::tempdir()?;
+        let mut event_loop = local_event_loop_after_long_wal_history(directory.path())?;
+        let before = event_loop.state.wal.appended_bytes;
+
+        // Act
+        event_loop.wal_actor.append(
+            &mut event_loop.state,
+            crate::runtime::actors::wal::AppendParams {
+                request_id: 1,
+                cf_id: 0,
+                key: bytes::Bytes::from_static(b"counted"),
+                value: Some(bytes::Bytes::from_static(b"value")),
+                insert_only: false,
+                ttl_seconds: None,
+            },
+        )?;
+
+        // Assert
+        assert!(event_loop.state.wal.appended_bytes > before);
         Ok(())
     }
 

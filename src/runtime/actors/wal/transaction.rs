@@ -579,6 +579,10 @@ impl WalActor {
         }
 
         state.wal.pending_writes += pending_wal_records;
+        state.wal.appended_bytes = state
+            .wal
+            .appended_bytes
+            .saturating_add(total_wal_bytes as u64);
         self.pending_sync_count += pending_wal_records;
         self.bytes_since_sync += total_wal_bytes;
         Ok(())

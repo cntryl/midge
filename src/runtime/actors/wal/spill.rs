@@ -107,6 +107,7 @@ impl WalActor {
             }
         };
         state.wal.pending_writes = state.wal.pending_writes.saturating_add(wal_records);
+        state.wal.appended_bytes = state.wal.appended_bytes.saturating_add(wal_bytes as u64);
         self.pending_sync_count = self.pending_sync_count.saturating_add(wal_records);
         self.bytes_since_sync = self.bytes_since_sync.saturating_add(wal_bytes);
 

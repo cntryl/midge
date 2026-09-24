@@ -5,8 +5,8 @@ use std::time::Duration;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CloudWritePolicy {
     /// Flush a column family whose active memtable started this many WAL
-    /// segments ago. Applies in local mode too, where it bounds WAL
-    /// retention while a family stays idle.
+    /// segments ago, bounding the cloud WAL catalog. Local mode bounds WAL
+    /// retention in bytes instead (four memtable flush triggers' worth).
     pub eventual_flush_segment_gap: u64,
     pub wal_seal_min_segment_bytes: usize,
     pub wal_seal_max_flush_delay: Duration,

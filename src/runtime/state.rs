@@ -91,6 +91,9 @@ pub struct ColumnFamilyState {
     pub(crate) immutable_flushes: Vec<ImmutableFlush>,
     /// WAL segment ID when the active memtable first became non-empty.
     pub active_memtable_started_in_segment: u64,
+    /// `WalState::appended_bytes` when the active memtable first became
+    /// non-empty; set with `active_memtable_started_in_segment`.
+    pub(crate) active_memtable_started_at_wal_bytes: u64,
 }
 
 /// Root directory for SSTs a salvage open kept but could not prove
@@ -104,6 +107,7 @@ impl ColumnFamilyState {
             immutable_memtables: Vec::new(),
             immutable_flushes: Vec::new(),
             active_memtable_started_in_segment: 1,
+            active_memtable_started_at_wal_bytes: 0,
         }
     }
 }
@@ -138,6 +142,9 @@ pub struct WalState {
     /// proof. In memory only; an empty map just means re-proving (#490).
     pub(crate) local_segment_proofs:
         HashMap<u64, crate::runtime::hybrid_persistence::FailedWalProof>,
+    /// WAL bytes appended by this process, across segments. In memory only:
+    /// it measures how much local WAL a family's memtable pins (#552).
+    pub(crate) appended_bytes: u64,
 }
 
 impl Default for WalState {
@@ -149,6 +156,7 @@ impl Default for WalState {
             local_durable_seq: 0,
             cloud_durable_seq: 0,
             local_segment_proofs: HashMap::new(),
+            appended_bytes: 0,
         }
     }
 }
@@ -184,9 +192,30 @@ pub struct SnapshotState {
 pub(crate) enum FlushReason {
     PendingImmutable,
     SizeThreshold,
-    /// An active memtable started too many WAL segments ago.
+    /// An active memtable started too many WAL segments ago (cloud).
     WalSegmentGap,
+    /// An active memtable pins too many local WAL bytes (local).
+    WalBytesGap,
 }
+
+/// Which rule, if any, flushes an active memtable that no size threshold
+/// will flush soon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EventualFlush {
+    /// Only size thresholds and pending retries (tests).
+    #[cfg(test)]
+    Disabled,
+    /// Cloud: bounds the WAL catalog by segment count.
+    SegmentGap,
+    /// Local: bounds retained WAL by bytes. Local segments are sealed only
+    /// when a flush publishes, so a segment rule would let eventual flushes
+    /// trigger one another; flushes append no WAL bytes (#552).
+    WalBytes,
+}
+
+/// Local eventual flush: a family is flushed once this many memtable flush
+/// triggers' worth of WAL has been appended since its memtable started.
+pub(crate) const LOCAL_EVENTUAL_FLUSH_TRIGGER_MULTIPLE: u64 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FlushCandidate {
@@ -342,8 +371,8 @@ pub struct RuntimeState {
     pub intent_log: Vec<IntentLogEntry>,
     /// Maximum size of any memtable before write stall
     pub memtable_flush_threshold: usize,
-    /// Flush an active memtable once it started this many WAL segments ago.
-    /// Bounds WAL retention in local mode and the WAL catalog in cloud mode.
+    /// Cloud: flush an active memtable once it started this many WAL
+    /// segments ago, bounding the WAL catalog.
     pub eventual_flush_segment_gap: u64,
     pub write_pressure: WritePressureState,
     /// Total size of all memtables (in-memory)
@@ -1198,7 +1227,7 @@ impl RuntimeState {
 
     #[cfg(test)]
     pub fn needs_flush(&self) -> Option<u32> {
-        self.next_flush_candidate(false)
+        self.next_flush_candidate(EventualFlush::Disabled)
             .map(|candidate| candidate.cf_id)
     }
 }
