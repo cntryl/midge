@@ -2235,7 +2235,7 @@ mod tests {
                 .state
                 .db_path
                 .join(crate::metadata::files::INTENT_LOG),
-            b"{corrupt",
+            b"not json",
         )?;
         assert!(event_loop.state.reload_persisted_metadata().is_err());
 
