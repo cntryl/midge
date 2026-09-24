@@ -422,6 +422,22 @@ impl SkipListMemtable {
             .collect()
     }
 
+    /// The highest sequence of a range tombstone visible at `snapshot_seq`
+    /// that covers `key`, without copying any tombstone. A point read only
+    /// needs this maximum: a key is hidden when it is at least the key's own
+    /// sequence (#495).
+    #[must_use]
+    pub fn max_covering_tombstone_seq(&self, key: &[u8], snapshot_seq: u64) -> Option<u64> {
+        if self
+            .range_tombstone_count
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 0
+        {
+            return None;
+        }
+        max_covering_seq(self.range_tombstones.read().iter(), key, snapshot_seq)
+    }
+
     /// Return all range tombstones for flush/compaction publication.
     #[must_use]
     pub fn range_tombstones(&self) -> Vec<RangeTombstone> {
@@ -467,6 +483,20 @@ impl SkipListMemtable {
             Some(None) | None => None,
         })
     }
+}
+
+/// The highest sequence among `tombstones` visible at `snapshot_seq` that
+/// cover `key`.
+pub(crate) fn max_covering_seq<'a>(
+    tombstones: impl IntoIterator<Item = &'a RangeTombstone>,
+    key: &[u8],
+    snapshot_seq: u64,
+) -> Option<u64> {
+    tombstones
+        .into_iter()
+        .filter(|tombstone| tombstone.visible_at(snapshot_seq) && tombstone.covers(key))
+        .map(|tombstone| tombstone.seq)
+        .max()
 }
 
 #[cfg(test)]
@@ -709,5 +739,41 @@ mod tests {
         // Assert
         assert!(memtable.size_bytes() >= b"visible-key".len() + b"visible-value".len() + 16);
         writer.join().expect("join writer");
+    }
+
+    #[test]
+    fn should_return_max_covering_tombstone_seq_when_key_is_in_range(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange: three tombstones cover "cat"; one is above the snapshot.
+        let memtable = SkipListMemtable::new();
+        memtable.delete_range_with_seq(b"b", b"d", 4)?;
+        memtable.delete_range_with_seq(b"c", b"e", 7)?;
+        memtable.delete_range_with_seq(b"a", b"z", 12)?;
+        memtable.delete_range_with_seq(b"x", b"y", 20)?;
+
+        // Act
+        let at_ten = memtable.max_covering_tombstone_seq(b"cat", 10);
+        let unbounded = memtable.max_covering_tombstone_seq(b"cat", u64::MAX);
+        let below_all = memtable.max_covering_tombstone_seq(b"cat", 3);
+        let end_is_exclusive = memtable.max_covering_tombstone_seq(b"z", u64::MAX);
+
+        // Assert
+        assert_eq!(at_ten, Some(7));
+        assert_eq!(unbounded, Some(12));
+        assert_eq!(below_all, None);
+        assert_eq!(end_is_exclusive, None);
+        Ok(())
+    }
+
+    #[test]
+    fn should_return_no_covering_tombstone_when_memtable_has_none() {
+        // Arrange
+        let memtable = SkipListMemtable::new();
+
+        // Act
+        let covering = memtable.max_covering_tombstone_seq(b"key", u64::MAX);
+
+        // Assert
+        assert_eq!(covering, None);
     }
 }

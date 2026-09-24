@@ -47,7 +47,16 @@ impl WalActor {
                         "assert_value requires transaction start_sequence".to_string(),
                     )
                 })?;
-                Self::ensure_no_assertion_conflicts(state, &params.assertions, start_sequence)?;
+                let mut snapshots = super::transaction_state::ValidationSnapshots::new(
+                    state,
+                    self.read_resources.clone(),
+                );
+                Self::ensure_no_assertion_conflicts(
+                    state,
+                    &mut snapshots,
+                    &params.assertions,
+                    start_sequence,
+                )?;
             }
             return Ok((state.sequence, 0, false));
         }
@@ -124,6 +133,7 @@ impl WalActor {
 
         Self::validate_transaction_preconditions(
             state,
+            self.read_resources.clone(),
             &ops,
             &assertions,
             start_sequence,
@@ -236,12 +246,14 @@ impl WalActor {
 
     fn validate_transaction_preconditions(
         state: &RuntimeState,
+        resources: Option<std::sync::Arc<crate::runtime::read_resources::ReadResources>>,
         ops: &[crate::runtime::TransactionOp],
         assertions: &[crate::runtime::KeyAssertion],
         start_sequence: Option<u64>,
         conflict_policy: crate::runtime::ConflictPolicy,
     ) -> MidgeResult<()> {
-        let mut snapshots = super::transaction_state::ValidationSnapshots::new(state);
+        // One snapshot per family serves conflict checks and assertions.
+        let mut snapshots = super::transaction_state::ValidationSnapshots::new(state, resources);
         if matches!(
             conflict_policy,
             crate::runtime::ConflictPolicy::AbortOnWriteConflict
@@ -263,7 +275,7 @@ impl WalActor {
                     "assert_value requires transaction start_sequence".to_string(),
                 )
             })?;
-            Self::ensure_no_assertion_conflicts(state, assertions, start_sequence)?;
+            Self::ensure_no_assertion_conflicts(state, &mut snapshots, assertions, start_sequence)?;
         }
 
         let mut intents = Vec::with_capacity(ops.len());

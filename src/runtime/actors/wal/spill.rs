@@ -57,12 +57,22 @@ impl WalActor {
             // An assertion-only commit is validated here without ever
             // reaching sequence allocation, WAL append, or memtable apply.
             if !assertions.is_empty() {
-                Self::ensure_no_assertion_conflicts(state, &assertions, start_sequence)?;
+                let mut snapshots = super::transaction_state::ValidationSnapshots::new(
+                    state,
+                    self.read_resources.clone(),
+                );
+                Self::ensure_no_assertion_conflicts(
+                    state,
+                    &mut snapshots,
+                    &assertions,
+                    start_sequence,
+                )?;
             }
             return Ok((state.sequence, 0, false));
         }
         Self::validate_spilled_transaction(
             state,
+            self.read_resources.clone(),
             source,
             &assertions,
             start_sequence,
@@ -141,6 +151,7 @@ impl WalActor {
 
     fn validate_spilled_transaction(
         state: &RuntimeState,
+        resources: Option<std::sync::Arc<crate::runtime::read_resources::ReadResources>>,
         source: &crate::runtime::transaction_spill::TransactionOpSource,
         assertions: &[crate::runtime::KeyAssertion],
         start_sequence: u64,
@@ -148,10 +159,11 @@ impl WalActor {
     ) -> MidgeResult<()> {
         // Assertions are enforced regardless of ConflictPolicy — see the
         // in-memory counterpart in validate_transaction_preconditions.
+        // One snapshot per family serves assertions and conflict checks.
+        let mut snapshots = super::transaction_state::ValidationSnapshots::new(state, resources);
         if !assertions.is_empty() {
-            Self::ensure_no_assertion_conflicts(state, assertions, start_sequence)?;
+            Self::ensure_no_assertion_conflicts(state, &mut snapshots, assertions, start_sequence)?;
         }
-        let mut snapshots = super::transaction_state::ValidationSnapshots::new(state);
 
         let mut expected_ordinal = 0_u64;
         source.for_each(|ordinal, op| {

@@ -145,14 +145,27 @@ fn should_check_transaction_assertions_against_remote_sst_when_local_cache_is_em
         largest_seq: Some(9),
         ..Default::default()
     });
-    state.recovery_sst_fs = Some(Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
+    // Validation reads through the event loop's resources, which in
+    // ephemeral-cache cloud mode sit over the remote SST store.
+    let remote_fs: Arc<dyn crate::io::Fs> = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
         Arc::clone(&state.fs),
         Arc::new(crate::storage::filesystem::FileSystem::new(remote.path())?),
         Duration::from_secs(5),
-    )));
+    ));
+    let resources = Arc::new(
+        crate::runtime::read_resources::ReadResources::new_with_diagnostics(
+            remote_fs,
+            std::path::PathBuf::from("sst"),
+            64 * 1024,
+            crate::sst::cache::CachePolicyType::Lru,
+            Arc::new(crate::diagnostics::RuntimeDiagnostics::default()),
+        ),
+    );
+    let mut snapshots = super::transaction_state::ValidationSnapshots::new(&state, Some(resources));
     // Act
     let result = WalActor::ensure_no_assertion_conflicts(
         &state,
+        &mut snapshots,
         &[crate::runtime::KeyAssertion {
             cf_id: 0,
             key: Bytes::from_static(b"asserted"),
@@ -994,7 +1007,12 @@ fn should_build_one_read_snapshot_when_checking_multiple_assertions_in_one_colum
     WalActor::reset_assertion_snapshot_build_count();
 
     // Act
-    WalActor::ensure_no_assertion_conflicts(&state, &assertions, 0)?;
+    WalActor::ensure_no_assertion_conflicts(
+        &state,
+        &mut super::transaction_state::ValidationSnapshots::new(&state, None),
+        &assertions,
+        0,
+    )?;
 
     // Assert
     assert_eq!(
@@ -2236,5 +2254,176 @@ fn should_build_one_read_snapshot_per_cf_when_validating_insert_only_conflict_ch
 
     // Assert
     assert_eq!(WalActor::assertion_snapshot_build_count(), 1);
+    Ok(())
+}
+
+/// Counts SST file opens through the filesystem, whichever read path does them.
+struct SstOpenCountingFs {
+    inner: crate::io::RealFs,
+    sst_opens: std::sync::atomic::AtomicUsize,
+}
+
+impl crate::io::Fs for SstOpenCountingFs {
+    fn open(
+        &self,
+        path: &crate::io::FsPath,
+        opts: crate::io::OpenOptions,
+    ) -> crate::io::FsResult<Box<dyn crate::io::File + '_>> {
+        if std::path::Path::new(&path.0)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("sst"))
+        {
+            self.sst_opens
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.inner.open(path, opts)
+    }
+    fn remove_file(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+        self.inner.remove_file(path)
+    }
+    fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
+        self.inner.exists(path)
+    }
+    fn metadata(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<crate::io::traits::Metadata> {
+        self.inner.metadata(path)
+    }
+    fn create_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+        self.inner.create_dir_all(path)
+    }
+    fn list_dir(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
+        self.inner.list_dir(path)
+    }
+    fn remove_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+        self.inner.remove_dir_all(path)
+    }
+    fn sync_dir(
+        &self,
+        path: &crate::io::FsPath,
+        durability: crate::io::Durability,
+    ) -> crate::io::FsResult<()> {
+        self.inner.sync_dir(path, durability)
+    }
+    fn rename_atomic(
+        &self,
+        from: &crate::io::FsPath,
+        to: &crate::io::FsPath,
+    ) -> crate::io::FsResult<()> {
+        self.inner.rename_atomic(from, to)
+    }
+}
+
+/// SST opens to validate a 100-key `AbortOnWriteConflict` transaction that
+/// asserts every tenth key, over four published SSTs of 25 keys each,
+/// validating `keys_per_file` keys from each file.
+fn sst_opens_to_validate(keys_per_file: usize) -> MidgeResult<usize> {
+    use crate::sst::SstFactory;
+    let temp = tempfile::tempdir()?;
+    let counting = Arc::new(SstOpenCountingFs {
+        inner: crate::io::RealFs::new(temp.path())?,
+        sst_opens: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
+    state.fs = counting.clone();
+    std::fs::create_dir_all(temp.path().join("sst"))?;
+    let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
+    let mut keys = Vec::new();
+    for file in 0..4_u64 {
+        let mut writer = factory.create()?;
+        let file_keys: Vec<Vec<u8>> = (0..25)
+            .map(|index| format!("k{file}{index:02}").into_bytes())
+            .collect();
+        for key in &file_keys {
+            writer.add_with_meta(key, Some(b"value"), 1, EntryType::Put, None)?;
+        }
+        let bytes = writer.finish_bytes()?;
+        let name = crate::cloud_layout::file_name(0, 0, file + 1);
+        std::fs::write(temp.path().join("sst").join(&name), &bytes)?;
+        state.manifest.files.push(crate::metadata::FileMeta {
+            name,
+            cf_id: 0,
+            level: 1,
+            size_bytes: bytes.len() as u64,
+            content_crc32c: Some(crc32c::crc32c(&bytes)),
+            smallest_key: file_keys.first().cloned(),
+            largest_key: file_keys.last().cloned(),
+            smallest_seq: Some(1),
+            largest_seq: Some(1),
+            key_bounds_complete: true,
+            ..Default::default()
+        });
+        keys.extend(file_keys.into_iter().take(keys_per_file));
+    }
+    let mut actor = WalActor::new(
+        temp.path().join("wal"),
+        DurabilityPolicy::Batched,
+        BatchConfig::default(),
+        false,
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    let counting_fs: Arc<dyn crate::io::Fs> = counting.clone();
+    actor.set_read_resources(Some(Arc::new(
+        crate::runtime::read_resources::ReadResources::new_with_diagnostics(
+            counting_fs,
+            std::path::PathBuf::from("sst"),
+            64 * 1024,
+            crate::sst::cache::CachePolicyType::Lru,
+            Arc::new(crate::diagnostics::RuntimeDiagnostics::default()),
+        ),
+    )));
+    state.sequence = 1_000;
+    let ops = keys
+        .iter()
+        .map(|key| crate::runtime::TransactionOp::Put {
+            cf_id: 0,
+            key: Bytes::copy_from_slice(key),
+            value: Bytes::from_static(b"new"),
+            ttl_seconds: None,
+            insert_only: false,
+        })
+        .collect();
+    let assertions = keys
+        .iter()
+        .step_by(10)
+        .map(|key| crate::runtime::KeyAssertion {
+            cf_id: 0,
+            key: Bytes::copy_from_slice(key),
+        })
+        .collect();
+    actor.append_transaction(
+        &mut state,
+        TransactionAppendParams {
+            request_id: 1,
+            assertions,
+            ops,
+            durability_policy: Some(DurabilityPolicy::BestEffort),
+            start_sequence: Some(1_000),
+            conflict_policy: crate::runtime::ConflictPolicy::AbortOnWriteConflict,
+        },
+    )?;
+    Ok(counting.sst_opens.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+#[test]
+fn should_reuse_cached_sst_readers_when_validating_conflicting_transaction_ops() -> MidgeResult<()>
+{
+    // Arrange: one validated key per file, then 25 per file.
+    let (few, many) = (1, 25);
+
+    // Act
+    let one_key_per_file = sst_opens_to_validate(few)?;
+    let every_key = sst_opens_to_validate(many)?;
+
+    // Assert: SST opens depend on the files read, not on the op count.
+    assert_eq!(
+        every_key, one_key_per_file,
+        "{every_key} SST opens for 100 ops against {one_key_per_file} for 4 ops"
+    );
     Ok(())
 }

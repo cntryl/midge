@@ -411,3 +411,201 @@ fn should_scan_many_legacy_level_files_as_streamed_sources_with_newest_value_win
     }
     Ok(())
 }
+
+fn level_file(
+    path: &Path,
+    index: u64,
+    level: u32,
+    points: &[Point<'_>],
+    tombstones: &[Tombstone<'_>],
+    bounds: (&[u8], &[u8]),
+) -> MidgeResult<FileMeta> {
+    let mut meta = write_sst(path, index, points, tombstones, bounds)?;
+    meta.level = level;
+    Ok(meta)
+}
+
+#[test]
+fn should_open_only_files_reached_by_cursor_when_scan_is_limited() -> MidgeResult<()> {
+    // Arrange: 200 complete-bound L1 files, one key each (#390).
+    let directory = tempfile::tempdir()?;
+    let mut files = Vec::new();
+    for index in 0..200_u64 {
+        let key = format!("key-{index:03}").into_bytes();
+        files.push(level_file(
+            directory.path(),
+            index,
+            1,
+            &[(&key, &key, 1)],
+            &[],
+            (&key, &key),
+        )?);
+    }
+
+    for reverse in [false, true] {
+        let (snapshot, _) = snapshot(directory.path(), files.clone())?;
+
+        // Act
+        let first = snapshot
+            .state_scan(None, None, reverse, u64::MAX)
+            .next()
+            .transpose()?;
+
+        // Assert: the first row needs the first file, and at most the
+        // next one to establish the level cursor's following head.
+        assert!(first.is_some());
+        let opened = snapshot.diagnostics.snapshot().sst_reader_cache_misses;
+        assert!(opened <= 2, "opened {opened} SSTs to return one row");
+    }
+    Ok(())
+}
+
+/// L1 holds `a`, a range tombstone over `[k, p)` at sequence 10, and `z`,
+/// spread over three disjoint files. `m` (sequence 1) lives in L2. The
+/// middle L1 file's point keys are placed by `middle`.
+fn l1_tombstone_over_l2_key(path: &Path, middle: &[Point<'_>]) -> MidgeResult<Vec<FileMeta>> {
+    Ok(vec![
+        level_file(path, 1, 1, &[(b"a", b"a", 5)], &[], (b"a", b"a"))?,
+        level_file(path, 2, 1, middle, &[(b"k", b"p", 10)], (b"k", b"p"))?,
+        level_file(path, 3, 1, &[(b"z", b"z", 6)], &[], (b"z", b"z"))?,
+        level_file(path, 4, 2, &[(b"m", b"m", 1)], &[], (b"m", b"m"))?,
+    ])
+}
+
+#[test]
+fn should_hide_lower_level_key_when_upper_level_file_holds_covering_tombstone() -> MidgeResult<()> {
+    // The covering file holds only the tombstone, point keys after the
+    // covered key, or point keys before it.
+    let middles: [&[Point<'_>]; 3] = [&[], &[(b"o", b"o", 11)], &[(b"k", b"k", 11)]];
+    for middle in middles {
+        // Arrange
+        let directory = tempfile::tempdir()?;
+        let files = l1_tombstone_over_l2_key(directory.path(), middle)?;
+        let mut expected: Vec<&[u8]> = vec![b"a"];
+        expected.extend(middle.iter().map(|(key, _, _)| *key));
+        expected.push(b"z");
+
+        for reverse in [false, true] {
+            let (snapshot, _) = snapshot(directory.path(), files.clone())?;
+
+            // Act
+            let keys = snapshot
+                .state_scan(None, None, reverse, u64::MAX)
+                .map(|row| row.map(|(key, _)| key))
+                .collect::<MidgeResult<Vec<_>>>()?;
+
+            // Assert
+            let mut want: Vec<bytes::Bytes> = expected
+                .iter()
+                .map(|key| bytes::Bytes::copy_from_slice(key))
+                .collect();
+            if reverse {
+                want.reverse();
+            }
+            assert_eq!(keys, want, "middle={middle:?} reverse={reverse}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn should_hide_memtable_key_when_level_file_holds_covering_tombstone() -> MidgeResult<()> {
+    // Arrange: `m` sits in the memtable at a sequence below the L1
+    // tombstone, so only the level file's tombstone can hide it.
+    let directory = tempfile::tempdir()?;
+    let files = vec![
+        level_file(
+            directory.path(),
+            1,
+            1,
+            &[(b"a", b"a", 5)],
+            &[],
+            (b"a", b"a"),
+        )?,
+        level_file(
+            directory.path(),
+            2,
+            1,
+            &[],
+            &[(b"k", b"p", 10)],
+            (b"k", b"p"),
+        )?,
+        level_file(
+            directory.path(),
+            3,
+            1,
+            &[(b"z", b"z", 6)],
+            &[],
+            (b"z", b"z"),
+        )?,
+    ];
+
+    for reverse in [false, true] {
+        let (base, resources) = snapshot(directory.path(), files.clone())?;
+        let memtable = Arc::new(SkipListMemtable::new());
+        memtable.put_with_seq(b"m".to_vec(), b"m".to_vec(), 1, None)?;
+        let snapshot = Arc::new(ReadSnapshot::new_with_resources(
+            memtable,
+            Vec::new(),
+            files.clone(),
+            Arc::clone(&base.sst_fs),
+            std::path::PathBuf::new(),
+            false,
+            0,
+            Some(resources),
+        ));
+
+        // Act
+        let keys = snapshot
+            .state_scan(None, None, reverse, u64::MAX)
+            .map(|row| row.map(|(key, _)| key))
+            .collect::<MidgeResult<Vec<_>>>()?;
+
+        // Assert
+        let mut want = vec![
+            bytes::Bytes::from_static(b"a"),
+            bytes::Bytes::from_static(b"z"),
+        ];
+        if reverse {
+            want.reverse();
+        }
+        assert_eq!(keys, want, "reverse={reverse}");
+    }
+    Ok(())
+}
+
+#[test]
+fn should_fail_scan_before_returning_key_when_next_level_file_cannot_be_opened() -> MidgeResult<()>
+{
+    // Arrange: adjacent L1 files share the endpoint `b`. The second holds
+    // a tombstone over `b` but cannot be opened.
+    let directory = tempfile::tempdir()?;
+    let first = level_file(
+        directory.path(),
+        1,
+        1,
+        &[(b"b", b"old", 5)],
+        &[],
+        (b"b", b"b"),
+    )?;
+    let second = level_file(
+        directory.path(),
+        2,
+        1,
+        &[],
+        &[(b"b", b"d", 10)],
+        (b"b", b"d"),
+    )?;
+    std::fs::remove_file(directory.path().join(&second.name))?;
+    let (snapshot, _) = snapshot(directory.path(), vec![first, second])?;
+
+    // Act
+    let first_item = snapshot.state_scan(None, None, false, u64::MAX).next();
+
+    // Assert: the error comes first, never the possibly covered key.
+    assert!(
+        matches!(first_item, Some(Err(_))),
+        "covered key returned before the open error: {first_item:?}"
+    );
+    Ok(())
+}

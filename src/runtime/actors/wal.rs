@@ -231,6 +231,9 @@ pub struct WalActor {
     /// Operational counters of the owning engine; shared with every writer.
     counters: crate::telemetry::CounterSink,
     storage_budget: Option<Arc<crate::storage::HybridStorage>>,
+    /// The event loop's read resources (reader and block caches), shared by
+    /// transaction validation so its SST reads reuse cached readers (#492).
+    read_resources: Option<Arc<crate::runtime::read_resources::ReadResources>>,
     /// Buffered writes pending sync
     pending_sync_count: usize,
     /// Durability policy (determines sync behavior)
@@ -607,6 +610,7 @@ impl WalActor {
             io,
             counters,
             storage_budget: None,
+            read_resources: None,
             pending_sync_count: 0,
             durability_policy,
             bytes_since_sync: 0,
@@ -657,6 +661,20 @@ impl WalActor {
 
     pub(crate) fn set_storage_budget(&mut self, storage: Arc<crate::storage::HybridStorage>) {
         self.storage_budget = Some(storage);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_read_resources(&self) -> bool {
+        self.read_resources.is_some()
+    }
+
+    /// Lets transaction validation read through the event loop's reader and
+    /// block caches instead of opening SSTs per validated op (#492).
+    pub(crate) fn set_read_resources(
+        &mut self,
+        resources: Option<Arc<crate::runtime::read_resources::ReadResources>>,
+    ) {
+        self.read_resources = resources;
     }
 
     fn admit_wal_records(&self, records: &[WalRecord]) -> MidgeResult<u64> {

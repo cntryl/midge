@@ -71,6 +71,15 @@ struct SstLevelStateIterator {
     reverse: bool,
     sequence: u64,
     pending: Option<MidgeResult<(bytes::Bytes, KeyState)>>,
+    /// Range tombstones of files opened since the scan last collected them.
+    /// A file's tombstones join the scan when the cursor opens it, not up
+    /// front: bounds of ordered files include their tombstone extents, and
+    /// the cursor opens files in key order, so every file whose tombstone can
+    /// cover a key has been opened before that key is merged (#390).
+    opened_tombstones: Vec<RangeTombstone>,
+    /// False for fallback files, whose untrusted bounds force their
+    /// tombstones to be collected up front instead.
+    collect_tombstones: bool,
 }
 
 impl SstLevelStateIterator {
@@ -94,7 +103,15 @@ impl SstLevelStateIterator {
             reverse,
             sequence,
             pending: None,
+            opened_tombstones: Vec::new(),
+            collect_tombstones: true,
         }
+    }
+
+    /// For a file whose tombstones the scan already collected up front.
+    fn without_tombstone_collection(mut self) -> Self {
+        self.collect_tombstones = false;
+        self
     }
 
     fn next_raw(&mut self) -> Option<MidgeResult<(bytes::Bytes, KeyState)>> {
@@ -116,6 +133,26 @@ impl SstLevelStateIterator {
                 Ok(reader) => reader,
                 Err(error) => return Some(Err(error)),
             };
+            let tombstones = if self.collect_tombstones {
+                reader.range_tombstones()
+            } else {
+                Vec::new()
+            };
+            for tombstone in tombstones {
+                self.snapshot
+                    .diagnostics
+                    .sst_metrics()
+                    .record_range_tombstone_scan();
+                if tombstone.visible_at(self.sequence)
+                    && ReadSnapshot::range_tombstone_overlaps_query(
+                        &tombstone,
+                        self.start.as_deref(),
+                        self.end.as_deref(),
+                    )
+                {
+                    self.opened_tombstones.push(tombstone);
+                }
+            }
             self.current = Some(reader.state_scan(
                 self.start.clone(),
                 self.end.clone(),
@@ -147,6 +184,10 @@ impl SstLevelStateIterator {
                         self.snapshot.read_time_millis,
                     );
                 }
+                // The read-ahead may have failed opening the next file, whose
+                // tombstones could cover `key`. Fail closed: surface the error
+                // instead of returning a key that may be deleted (#554).
+                Err(error) => return Some(Err(error)),
                 other => {
                     self.pending = Some(other);
                     return Some(Ok((key, best.unwrap_or(KeyState::Absent))));
@@ -176,6 +217,14 @@ impl SnapshotStateSource {
         if self.needs_advance {
             self.head = self.iterator.next();
             self.needs_advance = false;
+        }
+    }
+
+    /// Moves tombstones of level files opened while computing heads into
+    /// `into`; see `SstLevelStateIterator::opened_tombstones`.
+    fn drain_opened_tombstones(&mut self, into: &mut Vec<RangeTombstone>) {
+        if let SnapshotStateIterator::SstLevel(level) = &mut self.iterator {
+            into.append(&mut level.opened_tombstones);
         }
     }
 
@@ -308,9 +357,9 @@ impl SnapshotScan {
         start: Option<&[u8]>,
         end: Option<&[u8]>,
     ) -> MidgeResult<()> {
-        for file_meta in &candidates.ordered {
-            let _reader = self.append_reader_tombstones(file_meta, start, end)?;
-        }
+        // Ordered files' tombstones are collected as the level cursor opens
+        // them (see `SstLevelStateIterator::opened_tombstones`), so a limited
+        // scan opens only the files it reaches (#390).
         if !candidates.ordered.is_empty() {
             self.sources
                 .push(SnapshotStateSource::new(SnapshotStateIterator::SstLevel(
@@ -345,14 +394,17 @@ impl SnapshotScan {
             let _reader = self.append_reader_tombstones(&file_meta, start, end)?;
             self.sources
                 .push(SnapshotStateSource::new(SnapshotStateIterator::SstLevel(
-                    Box::new(SstLevelStateIterator::new(
-                        Arc::clone(&self.snapshot),
-                        vec![file_meta],
-                        self.start.clone(),
-                        self.end.clone(),
-                        self.reverse,
-                        self.sequence,
-                    )),
+                    Box::new(
+                        SstLevelStateIterator::new(
+                            Arc::clone(&self.snapshot),
+                            vec![file_meta],
+                            self.start.clone(),
+                            self.end.clone(),
+                            self.reverse,
+                            self.sequence,
+                        )
+                        .without_tombstone_collection(),
+                    ),
                 )));
         }
         Ok(())
@@ -455,6 +507,12 @@ impl SnapshotScan {
         loop {
             for source in &mut self.sources {
                 source.advance_if_needed();
+                // Every head is now computed, so every level file that can
+                // cover the next key has been opened; collect its tombstones
+                // before any key is checked against them. (The level cursor
+                // also reads one entry ahead, which opens files a round early;
+                // draining here does not rely on that.)
+                source.drain_opened_tombstones(&mut self.range_tombstones);
             }
             if let Some(error) = self.take_source_error() {
                 return Err(error);
@@ -629,7 +687,10 @@ impl ReadSnapshot {
             .any(|tombstone| tombstone.covers(key) && tombstone.seq >= state_seq)
     }
 
-    /// Create a new read snapshot
+    /// Create a read snapshot that opens SST readers directly, bypassing the
+    /// runtime reader and block caches. Production reads go through
+    /// [`Self::new_with_resources`] (#492).
+    #[cfg(test)]
     pub fn new(
         memtable: Arc<SkipListMemtable>,
         immutable_memtables: Vec<Arc<SkipListMemtable>>,
@@ -747,7 +808,8 @@ impl ReadSnapshot {
     /// Perform a point read on this snapshot without copying the value.
     pub fn get_bytes(&self, key: &[u8], seq: u64) -> MidgeResult<Option<bytes::Bytes>> {
         let mut best_state = None;
-        let mut range_tombstones = Vec::new();
+        // Only the highest covering tombstone matters, so none is copied.
+        let mut covering_tombstone_seq = None;
         let mut ssts_touched = 0u64;
         let mut l0_ssts_touched = 0u64;
         let mut blocks_read = 0u64;
@@ -760,18 +822,11 @@ impl ReadSnapshot {
         for imm in &self.immutable_memtables {
             let state = imm.get_key_state_at_with_time(key, seq, self.read_time_millis)?;
             Self::merge_best_state(&mut best_state, state, self.read_time_millis);
-            range_tombstones.extend(
-                imm.range_tombstones_at(seq)
-                    .into_iter()
-                    .filter(|tombstone| tombstone.covers(key)),
-            );
+            covering_tombstone_seq =
+                covering_tombstone_seq.max(imm.max_covering_tombstone_seq(key, seq));
         }
-        range_tombstones.extend(
-            self.memtable
-                .range_tombstones_at(seq)
-                .into_iter()
-                .filter(|tombstone| tombstone.covers(key)),
-        );
+        covering_tombstone_seq =
+            covering_tombstone_seq.max(self.memtable.max_covering_tombstone_seq(key, seq));
 
         // Complete manifest bounds drive indexed selection. Legacy bounds stay
         // in the view's fallback bucket and are still opened conservatively.
@@ -794,9 +849,8 @@ impl ReadSnapshot {
                 Self::merge_best_state(&mut best_state, state, self.read_time_millis);
 
                 self.diagnostics.sst_metrics().record_range_tombstone_scan();
-                range_tombstones.extend(reader.range_tombstones().into_iter().filter(
-                    |tombstone| (seq == u64::MAX || tombstone.seq <= seq) && tombstone.covers(key),
-                ));
+                covering_tombstone_seq =
+                    covering_tombstone_seq.max(reader.max_covering_tombstone_seq(key, seq));
             }
         }
 
@@ -807,7 +861,8 @@ impl ReadSnapshot {
         let Some(state) = best_state else {
             return Ok(None);
         };
-        if Self::range_tombstone_covers_state(&range_tombstones, key, &state) {
+        let state_seq = Self::state_sequence(&state).unwrap_or(0);
+        if covering_tombstone_seq.is_some_and(|tombstone_seq| tombstone_seq >= state_seq) {
             return Ok(None);
         }
 

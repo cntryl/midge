@@ -891,3 +891,33 @@ fn should_reject_merge_entry_when_encoding_pending_sst_entry() {
         "encoder must never emit EntryType::Merge, got {result:?}"
     );
 }
+
+#[test]
+fn should_return_max_covering_tombstone_seq_when_key_is_in_range() -> MidgeResult<()> {
+    // Arrange: three tombstones cover "cat"; one is above the snapshot.
+    let temp_dir = tempfile::tempdir()?;
+    let fs = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+    let factory = FsSstFactoryIo::new(fs, 4096);
+    let path = temp_dir.path().join("tombstones.sst");
+    let mut writer = factory.create()?;
+    writer.add_with_meta(b"alpha", Some(b"value"), 1, EntryType::Put, None)?;
+    writer.add_range_tombstone(b"b", b"d", 4)?;
+    writer.add_range_tombstone(b"c", b"e", 7)?;
+    writer.add_range_tombstone(b"a", b"z", 12)?;
+    writer.add_range_tombstone(b"x", b"y", 20)?;
+    crate::sst::fs::finish_writer_to_path(writer, &path)?;
+    let reader = factory.open(std::path::Path::new("tombstones.sst"))?;
+
+    // Act
+    let at_ten = reader.max_covering_tombstone_seq(b"cat", 10);
+    let unbounded = reader.max_covering_tombstone_seq(b"cat", u64::MAX);
+    let below_all = reader.max_covering_tombstone_seq(b"cat", 3);
+    let end_is_exclusive = reader.max_covering_tombstone_seq(b"z", u64::MAX);
+
+    // Assert
+    assert_eq!(at_ten, Some(7));
+    assert_eq!(unbounded, Some(12));
+    assert_eq!(below_all, None);
+    assert_eq!(end_is_exclusive, None);
+    Ok(())
+}

@@ -314,6 +314,10 @@ impl crate::sst::SstStateReader for SstFileIo {
         self.range_tombstones.clone()
     }
 
+    fn max_covering_tombstone_seq(&self, key: &[u8], snapshot_seq: u64) -> Option<u64> {
+        crate::memtable::max_covering_seq(&self.range_tombstones, key, snapshot_seq)
+    }
+
     fn range_tombstone_memory_usage(&self) -> usize {
         self.range_tombstones.iter().fold(
             self.range_tombstones

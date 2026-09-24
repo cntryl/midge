@@ -115,6 +115,56 @@ fn put_batch_100(ctx: &mut StressContext) {
     );
 }
 
+const TOMBSTONE_LOOKUP_BATCH_SIZE: usize = 4096;
+const TOMBSTONE_LOOKUP_BATCH_OPS: u64 = 4096;
+
+/// A point read's covering-tombstone check with `tombstones` range
+/// tombstones, none covering the looked-up keys. Before #495 every lookup
+/// cloned every visible tombstone (two allocations each).
+fn measure_covering_tombstone_lookup(ctx: &mut StressContext, scenario: &str, tombstones: usize) {
+    let memtable = SkipListMemtable::new();
+    for i in 0..tombstones {
+        let start = format!("tomb_{i:010}_a").into_bytes();
+        let end = format!("tomb_{i:010}_b").into_bytes();
+        let _ = memtable.delete_range_with_seq(&start, &end, usize_to_u64(i) + 1);
+    }
+    let keys: Vec<Vec<u8>> = (0..1000).map(make_key).collect();
+    ctx.parameter("range_tombstones", tombstones);
+    ctx.parameter("lookup_batch_size", TOMBSTONE_LOOKUP_BATCH_SIZE);
+    stress_config::mark_validated_micro(ctx, "memtable_covering_tombstone_lookup");
+
+    ctx.benchmark(scenario)
+        .measure_batch(TOMBSTONE_LOOKUP_BATCH_OPS, || {
+            let mut covered = 0usize;
+            for i in 0..TOMBSTONE_LOOKUP_BATCH_SIZE {
+                let key = keys[i % keys.len()].as_slice();
+                if memtable
+                    .max_covering_tombstone_seq(black_box(key), u64::MAX)
+                    .is_some()
+                {
+                    covered += 1;
+                }
+            }
+            black_box(covered);
+        });
+}
+
+#[stress(
+    tier = 1,
+    metadata(component = "memtable", scenario = "covering_tombstone_lookup_1k")
+)]
+fn covering_tombstone_lookup_1k(ctx: &mut StressContext) {
+    measure_covering_tombstone_lookup(ctx, "covering_tombstone_lookup_1k", 1_000);
+}
+
+#[stress(
+    tier = 1,
+    metadata(component = "memtable", scenario = "covering_tombstone_lookup_10k")
+)]
+fn covering_tombstone_lookup_10k(ctx: &mut StressContext) {
+    measure_covering_tombstone_lookup(ctx, "covering_tombstone_lookup_10k", 10_000);
+}
+
 #[stress(tier = 1, metadata(component = "memtable", scenario = "get_hit"))]
 fn get_hit(ctx: &mut StressContext) {
     let keys: Vec<Vec<u8>> = (0..1000).map(make_key).collect();

@@ -74,6 +74,13 @@ impl RangeTombstone {
         Self { start, end, seq }
     }
 
+    /// Whether this tombstone is visible at `snapshot_seq` (`u64::MAX` reads
+    /// the latest state).
+    #[must_use]
+    pub fn visible_at(&self, snapshot_seq: u64) -> bool {
+        snapshot_seq == u64::MAX || self.seq <= snapshot_seq
+    }
+
     /// Check whether a key lies in the half-open tombstone range.
     #[must_use]
     pub fn covers(&self, key: &[u8]) -> bool {

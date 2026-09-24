@@ -281,12 +281,7 @@ impl EventLoop {
             config.storage_io_timeout,
         )?;
 
-        Self::attach_engine_counters(&state, &mut wal_actor, &config);
-
-        // Wire leader store for epoch validation at sync boundaries.
-        if let Some(store) = config.leader_store.clone() {
-            wal_actor.set_leader_store(store, config.leader_holder_id.clone().unwrap_or_default());
-        }
+        Self::configure_wal_actor(&state, &mut wal_actor, &config, read_resources.as_ref());
 
         // CloudAsync waiters are keyed by segment id. Local waiters start at
         // generation zero; the durability coordinator is the sole owner of
@@ -375,6 +370,22 @@ impl EventLoop {
         let mut actor = CompactionActor::new_with_config(sst_factory, compaction_config);
         actor.set_execution_limits(config.target_sst_size, config.compaction_memory_limit);
         actor
+    }
+
+    /// Wires the WAL actor to the engine: its counters, the read caches its
+    /// transaction validation reads through, and the leader store it
+    /// validates the writer epoch against at sync boundaries.
+    fn configure_wal_actor(
+        state: &RuntimeState,
+        wal_actor: &mut WalActor,
+        config: &super::RuntimeConfig,
+        read_resources: Option<&Arc<ReadResources>>,
+    ) {
+        Self::attach_engine_counters(state, wal_actor, config);
+        wal_actor.set_read_resources(read_resources.cloned());
+        if let Some(store) = config.leader_store.clone() {
+            wal_actor.set_leader_store(store, config.leader_holder_id.clone().unwrap_or_default());
+        }
     }
 
     fn apply_runtime_state_config(state: &mut RuntimeState, config: &super::RuntimeConfig) {
