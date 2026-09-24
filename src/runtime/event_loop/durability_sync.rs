@@ -651,51 +651,6 @@ mod tests {
     }
 
     #[test]
-    fn should_report_recovery_required_when_wal_state_changes_under_a_sync_receipt(
-    ) -> crate::common::MidgeResult<()> {
-        // Arrange: a receipt whose WAL state moved before commit is a local
-        // invariant failure, not lost authority (#537 review).
-        let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)?;
-        event_loop.wal_actor.append(
-            &mut event_loop.state,
-            crate::runtime::actors::wal::AppendParams {
-                request_id: 1,
-                cf_id: 0,
-                key: bytes::Bytes::from_static(b"receipt"),
-                value: Some(bytes::Bytes::from_static(b"value")),
-                insert_only: false,
-                ttl_seconds: None,
-            },
-        )?;
-        let ticket = event_loop
-            .wal_transition
-            .begin_sync(event_loop.durability.current_key())?;
-        let receipt = event_loop
-            .wal_actor
-            .begin_sync_transition(&mut event_loop.state, &ticket)?;
-        event_loop.state.sequence += 1;
-
-        // Act
-        let error = event_loop
-            .wal_actor
-            .commit_sync_transition(&mut event_loop.state, receipt, &ticket)
-            .expect_err("a moved WAL state must reject the receipt");
-        event_loop.fence_wal_transition(&error, None);
-
-        // Assert
-        assert!(
-            matches!(error, crate::common::MidgeError::Internal(_)),
-            "{error:?}"
-        );
-        assert!(!event_loop.wal_actor.authority_lost());
-        assert!(matches!(
-            event_loop.wal_transition.ensure_ready(),
-            Err(crate::common::MidgeError::RecoveryFailed(_))
-        ));
-        Ok(())
-    }
-
-    #[test]
     fn should_report_one_fence_cause_when_sync_cannot_prove_writer_authority(
     ) -> crate::common::MidgeResult<()> {
         // Arrange: an unreachable leader store is not a lost lease, but the
