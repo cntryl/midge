@@ -573,3 +573,39 @@ fn should_hide_memtable_key_when_level_file_holds_covering_tombstone() -> MidgeR
     }
     Ok(())
 }
+
+#[test]
+fn should_fail_scan_before_returning_key_when_next_level_file_cannot_be_opened() -> MidgeResult<()>
+{
+    // Arrange: adjacent L1 files share the endpoint `b`. The second holds
+    // a tombstone over `b` but cannot be opened.
+    let directory = tempfile::tempdir()?;
+    let first = level_file(
+        directory.path(),
+        1,
+        1,
+        &[(b"b", b"old", 5)],
+        &[],
+        (b"b", b"b"),
+    )?;
+    let second = level_file(
+        directory.path(),
+        2,
+        1,
+        &[],
+        &[(b"b", b"d", 10)],
+        (b"b", b"d"),
+    )?;
+    std::fs::remove_file(directory.path().join(&second.name))?;
+    let (snapshot, _) = snapshot(directory.path(), vec![first, second])?;
+
+    // Act
+    let first_item = snapshot.state_scan(None, None, false, u64::MAX).next();
+
+    // Assert: the error comes first, never the possibly covered key.
+    assert!(
+        matches!(first_item, Some(Err(_))),
+        "covered key returned before the open error: {first_item:?}"
+    );
+    Ok(())
+}

@@ -184,6 +184,10 @@ impl SstLevelStateIterator {
                         self.snapshot.read_time_millis,
                     );
                 }
+                // The read-ahead may have failed opening the next file, whose
+                // tombstones could cover `key`. Fail closed: surface the error
+                // instead of returning a key that may be deleted (#554).
+                Err(error) => return Some(Err(error)),
                 other => {
                     self.pending = Some(other);
                     return Some(Ok((key, best.unwrap_or(KeyState::Absent))));
