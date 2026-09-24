@@ -87,8 +87,8 @@ impl CloudStorage {
             tx,
         );
         let event = match rx.recv_timeout(timeout) {
-            Ok(CloudEvent::Put { key, result }) => StorageEvent::WriteComplete {
-                key,
+            Ok(CloudEvent::Put { result, .. }) => StorageEvent::WriteComplete {
+                key: key.to_string(),
                 result: cloud_to_storage_outcome(result),
             },
             Ok(other) => StorageEvent::WriteComplete {

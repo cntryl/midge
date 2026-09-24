@@ -2,6 +2,8 @@
 //!
 //! Every operation submits to the provider, blocks on the callback for the
 //! caller's budget, and maps the outcome into the storage layer's types.
+//! Completion events carry the caller's key, never the namespaced provider
+//! key (#514).
 
 #[allow(clippy::wildcard_imports)]
 use super::*;
@@ -33,8 +35,8 @@ pub(super) fn deliver_delete_outcome(
     callback: &StorageCallback,
 ) {
     let event = match await_cloud_event(rx, timeout, "DELETE") {
-        Ok(CloudEvent::Delete { key, result }) => StorageEvent::DeleteComplete {
-            key,
+        Ok(CloudEvent::Delete { result, .. }) => StorageEvent::DeleteComplete {
+            key: key.to_string(),
             result: cloud_to_storage_outcome(result),
         },
         Ok(other) => StorageEvent::DeleteComplete {
@@ -96,11 +98,7 @@ impl StorageBackend for CloudStorage {
             Ok(StorageEvent::HeadComplete {
                 key: actual,
                 result,
-            }) if actual == self.full_path(key)
-                || (actual == key && matches!(result, StorageOutcome::Err(_))) =>
-            {
-                result
-            }
+            }) if actual == key => result,
             Ok(event) => StorageOutcome::Err(
                 format!("range HEAD returned a different object: {event:?}").into(),
             ),
@@ -177,8 +175,8 @@ impl StorageBackend for CloudStorage {
         let (tx, rx) = std::sync::mpsc::channel();
         self.submit_get(key, tx);
         let event = match await_cloud_event(&rx, timeout, "GET") {
-            Ok(CloudEvent::Get { key, result }) => StorageEvent::ReadComplete {
-                key,
+            Ok(CloudEvent::Get { result, .. }) => StorageEvent::ReadComplete {
+                key: key.to_string(),
                 result: cloud_to_storage_outcome(result),
             },
             Ok(other) => StorageEvent::ReadComplete {
@@ -337,7 +335,7 @@ impl StorageBackend for CloudStorage {
         let (tx, rx) = std::sync::mpsc::channel();
         CloudStorage::submit_head_within(self, key, timeout, tx);
         let event = match await_cloud_event(&rx, timeout, "HEAD") {
-            Ok(CloudEvent::Head { key, result }) => {
+            Ok(CloudEvent::Head { result, .. }) => {
                 let outcome = match result {
                     CloudOutcome::Ok(metadata) => StorageOutcome::Ok(metadata),
                     CloudOutcome::Err(err) => {
@@ -345,7 +343,7 @@ impl StorageBackend for CloudStorage {
                     }
                 };
                 StorageEvent::HeadComplete {
-                    key,
+                    key: key.to_string(),
                     result: outcome,
                 }
             }

@@ -75,3 +75,41 @@ fn should_report_success_when_conditionally_deleting_missing_object_through_ever
         );
     }
 }
+
+/// The key a completion event reports.
+fn event_key(event: &StorageEvent) -> String {
+    match event {
+        StorageEvent::WriteComplete { key, .. }
+        | StorageEvent::DeleteComplete { key, .. }
+        | StorageEvent::HeadComplete { key, .. } => key.clone(),
+        other => panic!("unexpected completion event {other:?}"),
+    }
+}
+
+#[test]
+fn should_echo_caller_key_when_completing_operations_through_every_storage_backend() {
+    // Arrange: `CloudStorage` stores keys under its namespace, which callers
+    // never see. Read and list are left to their deletion in #516.
+    let root = tempfile::tempdir().expect("temp dir");
+    let key = "sst/000001.sst";
+
+    for (name, backend) in backends(root.path()) {
+        let run = |submit: &dyn Fn(mpsc::Sender<StorageEvent>)| {
+            let (tx, rx) = mpsc::channel();
+            submit(tx);
+            event_key(&rx.recv().expect("completion callback"))
+        };
+
+        // Act
+        let keys = [
+            ("write", run(&|tx| backend.submit_write(key, b"value".to_vec(), tx))),
+            ("head", run(&|tx| backend.submit_head(key, tx))),
+            ("delete", run(&|tx| backend.submit_delete(key, tx))),
+        ];
+
+        // Assert
+        for (operation, actual) in keys {
+            assert_eq!(actual, key, "{name}: {operation} completion key");
+        }
+    }
+}
