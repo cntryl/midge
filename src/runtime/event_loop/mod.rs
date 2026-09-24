@@ -80,6 +80,8 @@ impl FlushWorkerMode {
     }
 }
 
+/// SST names reserved per durable reservation (#491).
+const SST_NAME_RESERVATION_BLOCK: u64 = 16;
 const BACKGROUND_COMPACTION_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const STARTUP_CLOUD_MAINTENANCE_DELAY: Duration = Duration::from_millis(100);
 const HYBRID_STORAGE_POLL_INTERVAL: Duration = Duration::from_millis(5);
@@ -647,23 +649,38 @@ impl EventLoop {
     /// remotely. After a crash between upload and publication, a replacement
     /// must never reuse the orphan's name: immutable publication rejects an
     /// existing object with different bytes, which would wedge it forever.
+    ///
+    /// A name below `manifest.next_sst_seqs` is already covered: that counter
+    /// is only raised durably in hybrid mode. Otherwise reserve a block of
+    /// names with one journal append and one mirror, so the next flushes
+    /// reserve nothing. The journal replays on open, so no snapshot is needed
+    /// (#491).
     pub(super) fn reserve_sst_name_durably(
         &mut self,
         cf_id: crate::types::ColumnFamilyId,
         sst_seq: u64,
     ) -> crate::common::MidgeResult<()> {
-        let next = sst_seq.checked_add(1).ok_or_else(|| {
-            crate::common::MidgeError::ResourceLimit("SST filename allocation exhausted".into())
-        })?;
-        let counter = self.state.manifest.next_sst_seqs.entry(cf_id).or_insert(1);
-        *counter = (*counter).max(next);
-        let next_seq = *counter;
+        let durable_next = self
+            .state
+            .manifest
+            .next_sst_seqs
+            .get(&cf_id)
+            .copied()
+            .unwrap_or(1);
+        if sst_seq < durable_next {
+            return Ok(());
+        }
+        let next_seq = sst_seq
+            .checked_add(SST_NAME_RESERVATION_BLOCK)
+            .ok_or_else(|| {
+                crate::common::MidgeError::ResourceLimit("SST filename allocation exhausted".into())
+            })?;
         let edit_id = self
             .state
             .manifest_store
             .append(&crate::metadata::ManifestEdit::BumpNextSstSeq { cf_id, next_seq })?;
+        self.state.manifest.next_sst_seqs.insert(cf_id, next_seq);
         self.state.manifest.note_applied_journal_edit(edit_id);
-        crate::runtime::actors::ManifestActor::persist(&mut self.state)?;
         self.mirror_metadata_to_authoritative_cloud()
     }
 

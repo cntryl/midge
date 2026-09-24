@@ -329,6 +329,49 @@ impl EventLoop {
         Ok(crate::io::FsPath::new(relative))
     }
 
+    /// Picks the SST sequence for a flush output and, when the output can
+    /// reach remote storage before it is published, makes the name durable.
+    fn reserve_flush_sst_seq(
+        &mut self,
+        cf_id: crate::types::ColumnFamilyId,
+    ) -> crate::common::MidgeResult<u64> {
+        let durable_next = self
+            .state
+            .manifest
+            .next_sst_seqs
+            .get(&cf_id)
+            .copied()
+            .unwrap_or(1);
+        if self.hybrid_storage.is_some() {
+            // The publish worker uploads before it journals AddSst, so the
+            // name must already be durable (as compaction does) or a crash in
+            // that window leaves an orphan whose name the next flush reuses.
+            // Names come from a cursor inside a durably reserved block, so
+            // most flushes reserve nothing (#491). A restart resumes at the
+            // durable reservation, past every name this session handed out.
+            let cursor = self
+                .state
+                .sst_name_cursor
+                .entry(cf_id)
+                .or_insert(durable_next);
+            let sst_seq = *cursor;
+            *cursor = sst_seq.checked_add(1).ok_or_else(|| {
+                crate::common::MidgeError::ResourceLimit("SST filename allocation exhausted".into())
+            })?;
+            self.reserve_sst_name_durably(cf_id, sst_seq)?;
+            return Ok(sst_seq);
+        }
+        let sst_seq = durable_next;
+        let next_sst_seq = sst_seq.saturating_add(1);
+        self.state
+            .manifest
+            .next_sst_seqs
+            .entry(cf_id)
+            .and_modify(|next| *next = (*next).max(next_sst_seq))
+            .or_insert(next_sst_seq);
+        Ok(sst_seq)
+    }
+
     fn prepare_flush_publication(
         &mut self,
         identity: FlushIdentity,
@@ -336,29 +379,13 @@ impl EventLoop {
         reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
         file_meta: crate::runtime::FileMeta,
     ) {
-        let sst_seq = self
-            .state
-            .manifest
-            .next_sst_seqs
-            .get(&identity.cf_id)
-            .copied()
-            .unwrap_or(1);
-        let next_sst_seq = sst_seq.saturating_add(1);
-        self.state
-            .manifest
-            .next_sst_seqs
-            .entry(identity.cf_id)
-            .and_modify(|next| *next = (*next).max(next_sst_seq))
-            .or_insert(next_sst_seq);
-        if self.hybrid_storage.is_some() {
-            // The publish worker uploads before it journals AddSst, so the
-            // name must already be durable (as compaction does) or a crash in
-            // that window leaves an orphan whose name the next flush reuses.
-            if let Err(error) = self.reserve_sst_name_durably(identity.cf_id, sst_seq) {
+        let sst_seq = match self.reserve_flush_sst_seq(identity.cf_id) {
+            Ok(sst_seq) => sst_seq,
+            Err(error) => {
                 self.fail_flush_pipeline(identity.flush_id, reservation, &error, true);
                 return;
             }
-        }
+        };
         let sst_name = crate::cloud_layout::file_name(identity.cf_id, 0, sst_seq);
         let build = FlushBuildOutput {
             identity,
@@ -723,12 +750,24 @@ impl EventLoop {
         }
     }
 
-    /// Seals the active WAL segment when that can retire it. Sealing only
-    /// helps when all of its data is flushed: then it falls below the recovery
-    /// floor and goes whole. Otherwise the sync and rotation retire nothing
-    /// (#490). Returns false when pruning must stop.
+    /// Seals the active WAL segment so it can be retired later. In local
+    /// mode this is the only place segments are sealed, so it must happen
+    /// even while some memtable is unflushed, or `wal.log` would grow without
+    /// bound. An empty active segment has nothing to seal (#490): rotating it
+    /// would only create an empty sealed file for the loop below to delete.
+    ///
+    /// The on-disk length is a sound emptiness test because an append returns
+    /// only after the writer thread has written its bytes, and appends run on
+    /// this thread, so none is in flight here. A failed stat seals as before.
+    /// Returns false when pruning must stop.
     fn seal_active_wal_for_prune(&mut self) -> bool {
-        if self.state.has_unflushed_memtable_data() {
+        let active = crate::io::FsPath::new(format!("wal/{}", crate::wal::ACTIVE_FILE_NAME));
+        if self
+            .state
+            .fs
+            .metadata(&active)
+            .is_ok_and(|metadata| metadata.len == 0)
+        {
             return true;
         }
         if let Err(error) = self.sync_local_wal_before_prune_rotation() {
@@ -1701,10 +1740,61 @@ mod tests {
     }
 
     #[test]
-    fn should_not_rotate_local_wal_when_no_segment_is_below_the_recovery_floor(
-    ) -> crate::common::MidgeResult<()> {
-        // Arrange: an unflushed memtable started in the active segment pins
-        // the recovery floor there, so sealing that segment retires nothing.
+    fn should_seal_active_wal_when_a_memtable_is_still_unflushed() -> crate::common::MidgeResult<()>
+    {
+        // Arrange: prune is the only local seal trigger, so a column family
+        // that never goes quiet must not keep `wal.log` growing forever.
+        let directory = tempfile::tempdir()?;
+        let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
+        let router = Arc::new(crate::runtime::ResponseRouter::new());
+        let mut event_loop = EventLoop::new(
+            state,
+            false,
+            router,
+            crate::runtime::RuntimeConfig::default(),
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
+        )?;
+        event_loop.wal_actor.append(
+            &mut event_loop.state,
+            crate::runtime::actors::wal::AppendParams {
+                request_id: 1,
+                cf_id: 0,
+                key: bytes::Bytes::from_static(b"unflushed"),
+                value: Some(bytes::Bytes::from_static(b"value")),
+                insert_only: false,
+                ttl_seconds: None,
+            },
+        )?;
+        let current = event_loop.state.wal.current_segment_id;
+        let active = event_loop.state.wal_dir.join(crate::wal::ACTIVE_FILE_NAME);
+        let active_len_before = std::fs::metadata(&active)?.len();
+        assert!(
+            event_loop
+                .state
+                .get_cf(0)
+                .expect("default family")
+                .memtable
+                .size_bytes()
+                > 0,
+            "the appended record must be unflushed"
+        );
+
+        // Act
+        event_loop.prune_local_wal_segments_covered_by_manifest();
+
+        // Assert
+        assert_eq!(
+            event_loop.state.wal.current_segment_id,
+            current + 1,
+            "active wal.log was {active_len_before} bytes on disk before prune"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_rotate_local_wal_when_active_segment_is_empty() -> crate::common::MidgeResult<()>
+    {
+        // Arrange: nothing has been written since the last rotation.
         let directory = tempfile::tempdir()?;
         let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
         let router = Arc::new(crate::runtime::ResponseRouter::new());
@@ -1716,10 +1806,6 @@ mod tests {
             crate::runtime::event_loop::FlushWorkerMode::Inline,
         )?;
         let current = event_loop.state.wal.current_segment_id;
-        let cf = event_loop.state.get_cf_mut(0).expect("default family");
-        cf.memtable
-            .put_with_seq(b"unflushed".to_vec(), b"value".to_vec(), 1, None)?;
-        cf.active_memtable_started_in_segment = current;
 
         // Act
         event_loop.prune_local_wal_segments_covered_by_manifest();
@@ -1781,6 +1867,67 @@ mod tests {
                 .join(crate::wal::segment_file_name(segment_id))
                 .exists());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_checkpoint_manifest_on_event_loop_for_each_flush_name_reservation(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let directory = tempfile::tempdir()?;
+        let (mut event_loop, _hybrid) = event_loop_with_hybrid_storage(&directory)?;
+        let snapshot = directory
+            .path()
+            .join(crate::metadata::files::MANIFEST_SNAPSHOT);
+        let before = std::fs::read(&snapshot).ok();
+
+        // Act
+        let mut names = Vec::new();
+        for _ in 0..10 {
+            names.push(event_loop.reserve_flush_sst_seq(0)?);
+        }
+
+        // Assert: distinct names, no snapshot rewrite, one durable bump.
+        let mut unique = names.clone();
+        unique.dedup();
+        assert_eq!(unique, names);
+        assert_eq!(std::fs::read(&snapshot).ok(), before);
+        let journaled = crate::metadata::ManifestPersistence::load(directory.path())
+            .map_err(crate::common::MidgeError::Internal)?;
+        let durable = journaled.next_sst_seqs.get(&0).copied().unwrap_or(1);
+        assert!(
+            names.iter().all(|seq| *seq < durable),
+            "{names:?} vs {durable}"
+        );
+        let bumps = crate::metadata::journal::replay_journal(directory.path())?
+            .into_iter()
+            .filter(|edit| matches!(edit, crate::metadata::ManifestEdit::BumpNextSstSeq { .. }))
+            .count();
+        assert_eq!(bumps, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_reuse_reserved_flush_sst_name_when_reopened_after_crash(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange: hand out names, then lose the in-memory cursor.
+        let directory = tempfile::tempdir()?;
+        let (mut first, _hybrid) = event_loop_with_hybrid_storage(&directory)?;
+        let mut used = Vec::new();
+        for _ in 0..3 {
+            used.push(first.reserve_flush_sst_seq(0)?);
+        }
+        drop(first);
+
+        // Act
+        let (mut reopened, _hybrid) = event_loop_with_hybrid_storage(&directory)?;
+        let after_restart = reopened.reserve_flush_sst_seq(0)?;
+
+        // Assert
+        assert!(
+            used.iter().all(|seq| *seq < after_restart),
+            "{used:?} then {after_restart}"
+        );
         Ok(())
     }
 

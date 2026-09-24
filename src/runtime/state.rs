@@ -288,6 +288,10 @@ pub struct RuntimeState {
     pub fs: std::sync::Arc<dyn Fs>,
     /// The only runtime writer of the manifest journal and snapshot (#494).
     pub(crate) manifest_store: Arc<crate::metadata::store::ManifestStore>,
+    /// Next flush SST sequence to hand out per column family, in memory. In
+    /// hybrid mode `manifest.next_sst_seqs` is the durable reservation, which
+    /// runs ahead of this cursor by up to one block (#491).
+    pub(crate) sst_name_cursor: HashMap<crate::types::ColumnFamilyId, u64>,
     /// Authoritative SST views used during cloud intent replay. Local SST
     /// staging is disposable and is not a prerequisite for recovery.
     pub(crate) recovery_sst_fs: Option<Arc<dyn Fs>>,
