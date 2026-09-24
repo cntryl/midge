@@ -206,6 +206,13 @@ impl FileSystem {
 const TEMP_OBJECT_MARKER: &str = ".tmp.";
 
 static TEMP_OBJECT_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// The last modified time, in nanoseconds since the epoch, stamped on a
+/// published object by this process; see [`next_object_modified_time`].
+static LAST_OBJECT_MODIFIED_NANOS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+/// Step between stamped modified times: representable on every supported
+/// filesystem (NTFS stores 100 ns, the others 1 ns).
+const OBJECT_MODIFIED_STEP_NANOS: u64 = 1_000;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Publish {
@@ -258,12 +265,43 @@ fn create_dir_all_durably(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The modified time to stamp on a new version of an object.
+///
+/// Range identities (`fs:` etags) are built from the inode and timestamps,
+/// and they guard compare-and-swap on mutable control objects. Replacement
+/// frees the old inode, which the filesystem may hand to the next temp
+/// file, and the kernel's ctime advances on a coarse tick; so without this
+/// stamp three quick writes could repeat an old identity for new content
+/// (#557). The stamp is strictly later than the replaced version's modified
+/// time and than every time this process stamped before, which also covers
+/// a delete followed by a recreate. Other processes use the fine-grained
+/// clock, so they collide only on an identical nanosecond reading.
+fn next_object_modified_time(replaced: Option<std::time::SystemTime>) -> std::time::SystemTime {
+    use std::sync::atomic::Ordering;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = |time: SystemTime| {
+        time.duration_since(UNIX_EPOCH).map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX)
+        })
+    };
+    let floor = nanos(SystemTime::now()).max(replaced.map_or(0, |time| {
+        nanos(time).saturating_add(OBJECT_MODIFIED_STEP_NANOS)
+    }));
+    let mut stamped = floor;
+    let _ = LAST_OBJECT_MODIFIED_NANOS.fetch_update(Ordering::AcqRel, Ordering::Acquire, |last| {
+        stamped = floor.max(last.saturating_add(OBJECT_MODIFIED_STEP_NANOS));
+        Some(stamped)
+    });
+    UNIX_EPOCH + std::time::Duration::from_nanos(stamped)
+}
+
 /// Write `data` to `full_path` so readers see either the previous object or
 /// the complete new one, and the result survives a crash: the bytes go to a
 /// synced temp file in the same directory, which is then renamed (replace)
 /// or hard-linked (create-new, atomic against an existing object) into
-/// place before the directory is synced. Replacement also gives the object
-/// a new file identity, so identity-based etags change on every overwrite.
+/// place before the directory is synced. Every version is stamped with a
+/// modified time later than any earlier version's, so identity-based etags
+/// change on every overwrite even when the inode is reused.
 fn publish_object_atomically(full_path: &Path, data: &[u8], mode: Publish) -> StorageOutcome<()> {
     let Some(parent) = full_path
         .parent()
@@ -284,11 +322,18 @@ fn publish_object_atomically(full_path: &Path, data: &[u8], mode: Publish) -> St
         ".{file_name}{TEMP_OBJECT_MARKER}{}.{nonce}",
         std::process::id()
     ));
+    let replaced = fs::metadata(full_path)
+        .and_then(|metadata| metadata.modified())
+        .ok();
     let written = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&temp)
-        .and_then(|mut file| file.write_all(data).and_then(|()| file.sync_all()));
+        .and_then(|mut file| {
+            file.write_all(data)?;
+            file.set_modified(next_object_modified_time(replaced))?;
+            file.sync_all()
+        });
     if let Err(error) = written {
         let _ = fs::remove_file(&temp);
         return StorageOutcome::Err(format!("write {}: {error}", full_path.display()).into());

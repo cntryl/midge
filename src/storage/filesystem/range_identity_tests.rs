@@ -155,3 +155,65 @@ fn should_exclude_independent_lock_handles_when_conditional_mutation_lock_is_hel
     independent.unlock()?;
     Ok(())
 }
+
+#[test]
+fn should_advance_modified_time_when_replacing_object_stamped_ahead_of_the_clock() -> MidgeResult<()>
+{
+    // Arrange: a replaced version whose modified time is ahead of the clock,
+    // as a coarse timestamp tick or a clock step produces. If the next
+    // version could land on the same time, a reused inode would repeat the
+    // old version's identity for new content (#557).
+    let directory = tempfile::tempdir()?;
+    let backend = FileSystem::new(directory.path())?;
+    let path = directory.path().join(KEY);
+    let (tx, rx) = mpsc::channel();
+    backend.submit_write(KEY, b"older".to_vec(), tx);
+    rx.recv().expect("first write response");
+    let ahead = std::time::SystemTime::now() + Duration::from_secs(3600);
+    fs::File::options()
+        .write(true)
+        .open(&path)?
+        .set_modified(ahead)?;
+    let (tx, rx) = mpsc::channel();
+
+    // Act
+    backend.submit_write(KEY, b"newer".to_vec(), tx);
+    rx.recv().expect("replacement write response");
+
+    // Assert
+    assert!(fs::metadata(&path)?.modified()? > ahead);
+    Ok(())
+}
+
+#[test]
+fn should_stamp_distinct_modified_times_when_object_is_deleted_and_recreated() -> MidgeResult<()> {
+    // Arrange: no replaced file carries the old time across a delete, so the
+    // stamp must still move past every time this process has assigned.
+    let directory = tempfile::tempdir()?;
+    let backend = FileSystem::new(directory.path())?;
+    let path = directory.path().join(KEY);
+    let (tx, rx) = mpsc::channel();
+    backend.submit_write(KEY, b"older".to_vec(), tx);
+    rx.recv().expect("first write response");
+    let ahead = std::time::SystemTime::now() + Duration::from_secs(7200);
+    fs::File::options()
+        .write(true)
+        .open(&path)?
+        .set_modified(ahead)?;
+    let (tx, rx) = mpsc::channel();
+    backend.submit_write(KEY, b"middle".to_vec(), tx);
+    rx.recv().expect("second write response");
+    let middle = fs::metadata(&path)?.modified()?;
+    let (tx, rx) = mpsc::channel();
+    backend.submit_delete(KEY, tx);
+    rx.recv().expect("delete response");
+    let (tx, rx) = mpsc::channel();
+
+    // Act
+    backend.submit_write(KEY, b"newer".to_vec(), tx);
+    rx.recv().expect("recreate write response");
+
+    // Assert
+    assert!(fs::metadata(&path)?.modified()? > middle);
+    Ok(())
+}
