@@ -942,6 +942,18 @@ struct S3Backend {
     executor: CloudExecutor,
 }
 
+/// A path-style backend against a test HTTP endpoint, for the provider
+/// contract table.
+#[cfg(test)]
+pub(super) fn contract_test_backend(
+    endpoint: String,
+) -> std::sync::Arc<dyn crate::storage::cloud::CloudBackend> {
+    std::sync::Arc::new(S3Backend::new(
+        S3Config::custom("bucket".into(), "us-east-1".into(), endpoint, true),
+        CloudExecutor::new(None).expect("cloud executor"),
+    ))
+}
+
 impl S3Backend {
     fn new(config: S3Config, executor: CloudExecutor) -> Self {
         Self { config, executor }
@@ -1101,7 +1113,7 @@ impl CloudBackend for S3Backend {
             },
             Ok(resp) => CloudEvent::Put {
                 key: ctx,
-                result: CloudOutcome::Err(s3_response_error(&resp, "S3 PUT", conditional_mutation)),
+                result: CloudOutcome::Err(s3_put_response_error(&resp, conditional_mutation)),
             },
             Err(err) => CloudEvent::Put {
                 key: ctx,
@@ -1422,6 +1434,23 @@ impl CloudBackend for S3Backend {
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
+    }
+}
+
+/// A conditional PUT whose object is missing did not commit, exactly like a
+/// stale version, so it reports a lost precondition on every provider (#373).
+/// S3 answers it with 404 `NoSuchKey`; a missing bucket stays `NotFound`.
+fn s3_put_response_error(response: &CloudResponse, conditional_mutation: bool) -> CloudError {
+    let error = s3_response_error(response, "S3 PUT", conditional_mutation);
+    let body = String::from_utf8_lossy(&response.body);
+    let missing_object = extract_xml_tag_values(&body, "Code")
+        .first()
+        .is_some_and(|code| code.eq_ignore_ascii_case("NoSuchKey"));
+    match error {
+        CloudError::NotFound(detail) if conditional_mutation && missing_object => {
+            CloudError::PreconditionFailed(detail)
+        }
+        error => error,
     }
 }
 

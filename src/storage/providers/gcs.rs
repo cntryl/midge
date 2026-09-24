@@ -920,6 +920,32 @@ enum GcsBackendMode {
     Xml,
 }
 
+/// A JSON-API backend against a test HTTP endpoint, for the provider
+/// contract table.
+#[cfg(test)]
+pub(super) fn contract_test_json_backend(
+    endpoint: String,
+) -> std::sync::Arc<dyn crate::storage::cloud::CloudBackend> {
+    std::sync::Arc::new(GcsBackend::json(
+        "bucket".into(),
+        Some(endpoint),
+        CloudExecutor::new(None).expect("cloud executor"),
+    ))
+}
+
+/// An XML-API backend against a test HTTP endpoint, for the provider
+/// contract table.
+#[cfg(test)]
+pub(super) fn contract_test_xml_backend(
+    endpoint: String,
+) -> std::sync::Arc<dyn crate::storage::cloud::CloudBackend> {
+    std::sync::Arc::new(GcsBackend::xml(
+        "bucket".into(),
+        Some(endpoint),
+        CloudExecutor::new(None).expect("cloud executor"),
+    ))
+}
+
 impl GcsBackend {
     #[cfg(test)]
     fn new(bucket: String, executor: CloudExecutor) -> Self {

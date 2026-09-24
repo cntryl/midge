@@ -12,6 +12,10 @@ mod observation;
 const MAX_TRANSIENT_RETRIES: u32 = 3;
 const TRANSIENT_BACKOFF_BASE_MS: u64 = 50;
 pub(crate) const MAX_CLOUD_RESPONSE_BYTES: usize = 1024 * 1024 * 1024;
+/// Room for a provider's error document when a request's response limit is
+/// smaller. A range read's limit is the requested length, but an error answer
+/// must still reach the provider mapper so it can classify the failure (#373).
+const MAX_ERROR_RESPONSE_BYTES: usize = 64 * 1024;
 
 /// Represents a generic HTTP request issued by cloud providers.
 #[derive(Clone)]
@@ -565,8 +569,13 @@ impl CloudExecutor {
                         .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
                         .collect::<Vec<_>>();
 
+                    let response_limit = if status >= 400 {
+                        request.response_limit.max(MAX_ERROR_RESPONSE_BYTES)
+                    } else {
+                        request.response_limit
+                    };
                     if resp.content_length().is_some_and(|length| {
-                        length > u64::try_from(request.response_limit).unwrap_or(u64::MAX)
+                        length > u64::try_from(response_limit).unwrap_or(u64::MAX)
                     }) {
                         return Err(RequestError::permanent(oversized_response_message(
                             &request, status,
@@ -582,12 +591,13 @@ impl CloudExecutor {
                         observation.response_body_bytes = observation
                             .response_body_bytes
                             .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
-                        append_bounded_response_chunk(&mut body, &chunk, request.response_limit)
-                            .map_err(|_| {
+                        append_bounded_response_chunk(&mut body, &chunk, response_limit).map_err(
+                            |_| {
                                 RequestError::permanent(oversized_response_message(
                                     &request, status,
                                 ))
-                            })?;
+                            },
+                        )?;
                     }
 
                     Ok(CloudResponse {
@@ -1191,6 +1201,31 @@ mod tests {
         assert!(message.contains("200"), "{message}");
         assert!(message.contains("/wal/segment"), "{message}");
         assert!(!message.contains("secret"), "{message}");
+    }
+
+    #[test]
+    fn should_return_error_response_when_its_body_exceeds_the_range_length() {
+        // Arrange: the provider's error document is longer than the 10-byte
+        // range, and the provider mapper needs it to classify the failure.
+        let (endpoint, server) = serve_one_response(
+            "HTTP/1.1 412 Precondition Failed\r\nContent-Length: 61\r\nConnection: close\r\n\r\n<Error><Code>PreconditionFailed</Code><Message/></Error>     ",
+        );
+        let request = CloudRequest::new(Method::GET, endpoint)
+            .with_header("Range", "bytes=0-9")
+            .with_response_limit(10);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+
+        // Act
+        let result = runtime.block_on(CloudExecutor::execute_request(Client::new(), request));
+        server.join().expect("join test server");
+
+        // Assert
+        let response = result.unwrap_or_else(|error| panic!("error status was hidden: {error}"));
+        assert_eq!(response.status, 412);
+        assert!(String::from_utf8_lossy(&response.body).contains("PreconditionFailed"));
     }
 
     #[test]

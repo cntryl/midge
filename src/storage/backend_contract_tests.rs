@@ -54,8 +54,8 @@ fn should_report_success_when_deleting_missing_object_through_every_storage_back
 }
 
 #[test]
-fn should_report_success_when_conditionally_deleting_missing_object_through_every_storage_backend(
-) {
+fn should_report_success_when_conditionally_deleting_missing_object_through_every_storage_backend()
+{
     // Arrange: the object a conditional delete targets is already gone, so
     // no other version can be deleted by mistake.
     let root = tempfile::tempdir().expect("temp dir");

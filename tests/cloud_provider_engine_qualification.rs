@@ -96,6 +96,24 @@ fn should_recover_engine_from_sqrzl_gcs_json_after_local_cache_loss() {
 
 #[test]
 #[ignore = "requires Sqrzl; run the scheduled/manual Cloud Qualification workflow"]
+fn should_recover_engine_from_sqrzl_gcs_xml_after_local_cache_loss() {
+    // Arrange
+    let provider = CloudProviderConfig::sqrzl_gcs("midge-sqrzl-engine-gcs-xml");
+
+    // Act
+    engine_recovers_from_provider_after_local_cache_loss(
+        "sqrzl-engine-gcs-xml",
+        provider,
+        true,
+        true,
+    );
+
+    // Assert
+    // The helper performs first acquisition and cache-loss recovery assertions.
+}
+
+#[test]
+#[ignore = "requires Sqrzl; run the scheduled/manual Cloud Qualification workflow"]
 fn should_route_two_location_topology_through_sqrzl() {
     // Arrange
     require_sqrzl("sqrzl-two-location");
