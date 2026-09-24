@@ -8,6 +8,14 @@ use crate::runtime::RuntimeResponse;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// A sealed local WAL segment as read from disk.
+enum SealedSegmentRead {
+    Empty,
+    /// Unreadable or invalid; retained, and the anomaly is marked.
+    Unusable,
+    Records(crate::wal::cloud_segment::SegmentReadback),
+}
+
 /// What one local WAL prune pass did.
 #[derive(Debug, Default)]
 struct LocalWalPruneOutcome {
@@ -689,16 +697,17 @@ impl EventLoop {
         // is already in published SSTs, including deletes, which the
         // per-record proof below cannot certify.
         let flushed_floor = self.state.wal_recovery_floor_segment();
-        let mut proofs = std::mem::take(&mut self.state.wal.local_segment_proofs);
-        let outcome = self.retire_sealed_local_wal(&sealed_segments, flushed_floor, &mut proofs);
-        // Forget proofs for segments that are gone.
+        let mut segments = std::mem::take(&mut self.state.wal.local_segments);
+        let outcome = self.retire_sealed_local_wal(&sealed_segments, flushed_floor, &mut segments);
+        // Forget segments that are gone.
         let listed: std::collections::HashSet<u64> = sealed_segments
             .iter()
             .map(|(segment_id, _)| *segment_id)
             .collect();
         let removed: std::collections::HashSet<u64> = outcome.removed.iter().copied().collect();
-        proofs.retain(|segment_id, _| listed.contains(segment_id) && !removed.contains(segment_id));
-        self.state.wal.local_segment_proofs = proofs;
+        segments
+            .retain(|segment_id, _| listed.contains(segment_id) && !removed.contains(segment_id));
+        self.state.wal.local_segments = segments;
         if outcome.anomaly {
             self.state.mark_persistence_anomaly();
         }
@@ -715,28 +724,39 @@ impl EventLoop {
         }
     }
 
-    /// Retires sealed local WAL segments, oldest first. A segment below the
-    /// recovery floor goes whole; one at or above it goes only when every
-    /// record is exactly in the manifest's SSTs.
+    /// Retires sealed local WAL segments, oldest first. A segment goes when:
+    ///
+    /// - it is below the global recovery floor (no read needed);
+    /// - every column family with a record in it has flushed past it, so
+    ///   each of those records is in a published SST, deletes included (#550);
+    /// - or every record is exactly in the manifest's SSTs.
     ///
     /// Every segment is considered, not just a prefix: an idle column family
-    /// can keep the first one uncovered forever while later ones are covered.
-    /// A failed proof is remembered in `proofs` and not repeated until the
-    /// blocking family's SSTs change, so a pass reads only segments whose
-    /// answer could differ (#490).
+    /// can keep the first one forever while later ones are retirable. What a
+    /// pass learns (the segment's families, a failed proof) is kept in
+    /// `segments`, so a later pass re-reads a segment only to repeat a proof
+    /// whose answer could have changed (#490).
     fn retire_sealed_local_wal(
         &self,
         sealed_segments: &[(u64, crate::io::FsPath)],
         flushed_floor: Option<u64>,
-        proofs: &mut std::collections::HashMap<
+        segments: &mut std::collections::HashMap<
             u64,
-            crate::runtime::hybrid_persistence::FailedWalProof,
+            crate::runtime::hybrid_persistence::LocalSegmentFacts,
         >,
     ) -> LocalWalPruneOutcome {
         use crate::runtime::hybrid_persistence::{
-            coverage_fingerprint, FailedWalProof, VerifiedManifestWalCoverage,
+            coverage_fingerprint, FailedWalProof, LocalSegmentFacts, VerifiedManifestWalCoverage,
         };
         let mut outcome = LocalWalPruneOutcome::default();
+        let family_floors = self.state.wal_recovery_floor_by_family();
+        // A family missing from the floors was dropped (see
+        // `wal_recovery_floor_by_family`); one with an unknown floor keeps
+        // every segment it appears in.
+        let family_flushed_past = |cf_id: &u32, segment_id: u64| match family_floors.get(cf_id) {
+            None => true,
+            Some(floor) => floor.is_some_and(|floor| segment_id < floor),
+        };
         // One prover per pass, built only if a proof is needed, so each
         // covering SST is opened and verified once per pass.
         let coverage = std::cell::OnceCell::new();
@@ -756,36 +776,53 @@ impl EventLoop {
                 self.remove_local_wal_segment(segment_id, path, "flushed", &mut outcome);
                 continue;
             }
-            if proofs
-                .get(&segment_id)
+            let mut readback = None;
+            if let std::collections::hash_map::Entry::Vacant(slot) = segments.entry(segment_id) {
+                match self.read_sealed_local_wal(segment_id, path, &mut outcome) {
+                    SealedSegmentRead::Empty => {
+                        self.remove_local_wal_segment(segment_id, path, "empty", &mut outcome);
+                        continue;
+                    }
+                    SealedSegmentRead::Unusable => continue,
+                    SealedSegmentRead::Records(records) => {
+                        slot.insert(LocalSegmentFacts::of(&records.data_records));
+                        readback = Some(records);
+                    }
+                }
+            }
+            let facts = &segments[&segment_id];
+            if facts
+                .families
+                .iter()
+                .all(|cf_id| family_flushed_past(cf_id, segment_id))
+            {
+                self.remove_local_wal_segment(
+                    segment_id,
+                    path,
+                    "flushed by every family in it",
+                    &mut outcome,
+                );
+                continue;
+            }
+            if facts
+                .failed_proof
+                .as_ref()
                 .is_some_and(|proof| proof.still_fails(&mut fingerprint_of))
             {
                 continue;
             }
-            let bytes = match self.read_runtime_file(path) {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    outcome.anomaly = true;
-                    tracing::warn!(segment_id, %error, "retaining unreadable local WAL segment");
-                    continue;
-                }
-            };
-            if bytes.is_empty() {
-                self.remove_local_wal_segment(segment_id, path, "empty", &mut outcome);
-                continue;
-            }
-            let readback = match crate::wal::cloud_segment::inspect_local_bytes(&path.0, &bytes) {
-                Ok(readback) => readback,
-                Err(error) => {
-                    outcome.anomaly = true;
-                    tracing::warn!(segment_id, %error, "retaining invalid local WAL segment");
-                    continue;
-                }
+            let records = match readback {
+                Some(records) => records,
+                None => match self.read_sealed_local_wal(segment_id, path, &mut outcome) {
+                    SealedSegmentRead::Records(records) => records,
+                    // It was readable and non-empty when first inspected.
+                    SealedSegmentRead::Empty | SealedSegmentRead::Unusable => continue,
+                },
             };
             let prover = coverage.get_or_init(|| {
                 VerifiedManifestWalCoverage::open(&self.state.sst_dir, &self.state.manifest)
             });
-            match prover.first_uncovered(&readback.data_records) {
+            match prover.first_uncovered(&records.data_records) {
                 None => {
                     self.remove_local_wal_segment(
                         segment_id,
@@ -794,18 +831,45 @@ impl EventLoop {
                         &mut outcome,
                     );
                 }
-                Some(reason) => match FailedWalProof::remember(reason, &mut fingerprint_of) {
-                    Some(proof) => {
-                        proofs.insert(segment_id, proof);
+                Some(reason) => {
+                    // An unverifiable proof is not remembered: prove it again.
+                    let failed_proof = FailedWalProof::remember(reason, &mut fingerprint_of);
+                    if let Some(facts) = segments.get_mut(&segment_id) {
+                        facts.failed_proof = failed_proof;
                     }
-                    // Unverifiable: prove it again next pass.
-                    None => {
-                        proofs.remove(&segment_id);
-                    }
-                },
+                }
             }
         }
         outcome
+    }
+
+    /// Reads and inspects one sealed local segment. An unreadable or invalid
+    /// segment is retained and marks the persistence anomaly.
+    fn read_sealed_local_wal(
+        &self,
+        segment_id: u64,
+        path: &crate::io::FsPath,
+        outcome: &mut LocalWalPruneOutcome,
+    ) -> SealedSegmentRead {
+        let bytes = match self.read_runtime_file(path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                outcome.anomaly = true;
+                tracing::warn!(segment_id, %error, "retaining unreadable local WAL segment");
+                return SealedSegmentRead::Unusable;
+            }
+        };
+        if bytes.is_empty() {
+            return SealedSegmentRead::Empty;
+        }
+        match crate::wal::cloud_segment::inspect_local_bytes(&path.0, &bytes) {
+            Ok(readback) => SealedSegmentRead::Records(readback),
+            Err(error) => {
+                outcome.anomaly = true;
+                tracing::warn!(segment_id, %error, "retaining invalid local WAL segment");
+                SealedSegmentRead::Unusable
+            }
+        }
     }
 
     /// Removes one sealed segment. Every removal is preceded by a fresh
@@ -1964,6 +2028,148 @@ mod tests {
 
         // Assert
         assert_eq!(event_loop.state.wal.current_segment_id, current);
+        Ok(())
+    }
+
+    /// A local event loop with a second column family (1) whose active
+    /// memtable started in segment 1, pinning the global recovery floor there.
+    fn local_event_loop_with_pinning_family(
+        directory: &tempfile::TempDir,
+    ) -> crate::common::MidgeResult<EventLoop> {
+        let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
+        let router = Arc::new(crate::runtime::ResponseRouter::new());
+        let mut event_loop = EventLoop::new(
+            state,
+            false,
+            router,
+            crate::runtime::RuntimeConfig::default(),
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
+        )?;
+        let mut pinning = crate::runtime::state::ColumnFamilyState::new(1, "pinning".to_string());
+        pinning
+            .memtable
+            .put_with_seq(b"unflushed".to_vec(), b"value".to_vec(), 1, None)?;
+        pinning.active_memtable_started_in_segment = 1;
+        event_loop.state.column_families.insert(1, pinning);
+        event_loop.state.wal.current_segment_id = 4;
+        Ok(event_loop)
+    }
+
+    /// Writes a sealed local segment of point deletes, one per `(cf, seq)`.
+    /// The per-record proof can never retire deletes, so only a floor can.
+    fn write_delete_segment(
+        event_loop: &EventLoop,
+        segment_id: u64,
+        records: &[(u32, u64)],
+    ) -> crate::common::MidgeResult<std::path::PathBuf> {
+        let mut bytes = Vec::new();
+        for (cf_id, seq) in records {
+            let record = crate::wal::WalRecord::new_cf(
+                *cf_id,
+                crate::wal::WalOpKind::Delete,
+                bytes::Bytes::from(format!("key-{seq}")),
+                None,
+                *seq,
+                1,
+            );
+            crate::wal::frame::append_frame(&mut bytes, &crate::wal::encoding::encode(&record)?)?;
+        }
+        let path = event_loop
+            .state
+            .wal_dir
+            .join(crate::wal::segment_file_name(segment_id));
+        std::fs::write(&path, bytes)?;
+        Ok(path)
+    }
+
+    #[test]
+    fn should_retain_wal_segment_while_any_family_in_it_is_unflushed(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange: family 1 is unflushed from segment 1; family 0 has
+        // flushed everything.
+        let directory = tempfile::tempdir()?;
+        let mut event_loop = local_event_loop_with_pinning_family(&directory)?;
+        let mixed = write_delete_segment(&event_loop, 2, &[(0, 10), (1, 11)])?;
+        let family_zero_only = write_delete_segment(&event_loop, 3, &[(0, 12)])?;
+
+        // Act
+        event_loop.prune_local_wal_segments_covered_by_manifest();
+
+        // Assert: a segment holding any unflushed family's record stays.
+        assert!(mixed.exists());
+        assert!(!family_zero_only.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn should_retain_wal_segment_when_a_family_floor_is_unknown() -> crate::common::MidgeResult<()>
+    {
+        // Arrange: family 1's flush ledger is inconsistent, so its floor
+        // cannot be trusted.
+        let directory = tempfile::tempdir()?;
+        let mut event_loop = local_event_loop_with_pinning_family(&directory)?;
+        let pinning = event_loop.state.get_cf_mut(1).expect("family 1");
+        let orphan = Arc::new(crate::memtable::SkipListMemtable::new());
+        pinning.immutable_memtables.push(orphan);
+        let unknown = write_delete_segment(&event_loop, 2, &[(1, 10)])?;
+        let family_zero_only = write_delete_segment(&event_loop, 3, &[(0, 11)])?;
+
+        // Act
+        event_loop.prune_local_wal_segments_covered_by_manifest();
+
+        // Assert
+        assert!(unknown.exists());
+        assert!(!family_zero_only.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn should_retire_wal_segment_when_its_other_family_was_dropped(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange: family 7 is gone from runtime state (dropped); its WAL
+        // records are ignored by recovery.
+        let directory = tempfile::tempdir()?;
+        let mut event_loop = local_event_loop_with_pinning_family(&directory)?;
+        let segment = write_delete_segment(&event_loop, 2, &[(0, 10), (7, 11)])?;
+
+        // Act
+        event_loop.prune_local_wal_segments_covered_by_manifest();
+
+        // Assert
+        assert!(!segment.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn should_retire_wal_segment_without_rereading_once_its_family_flushes(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange: a segment of family 1's records, retained while family 1
+        // is unflushed. Family 2 keeps the global floor at segment 1
+        // throughout, so only the per-family rule can retire the segment.
+        let directory = tempfile::tempdir()?;
+        let mut event_loop = local_event_loop_with_pinning_family(&directory)?;
+        let mut other = crate::runtime::state::ColumnFamilyState::new(2, "other".to_string());
+        other
+            .memtable
+            .put_with_seq(b"unflushed".to_vec(), b"value".to_vec(), 2, None)?;
+        other.active_memtable_started_in_segment = 1;
+        event_loop.state.column_families.insert(2, other);
+        let segment = write_delete_segment(&event_loop, 2, &[(1, 10)])?;
+        RUNTIME_FILE_READS.with(|reads| reads.set(0));
+        event_loop.prune_local_wal_segments_covered_by_manifest();
+        assert!(segment.exists());
+        let first_pass_reads = RUNTIME_FILE_READS.with(|reads| reads.replace(0));
+
+        // Act: family 1 flushes everything.
+        event_loop.state.get_cf_mut(1).expect("family 1").memtable =
+            Arc::new(crate::memtable::SkipListMemtable::new());
+        event_loop.prune_local_wal_segments_covered_by_manifest();
+
+        // Assert: its family set was remembered, so no second read.
+        assert_eq!(event_loop.state.wal_recovery_floor_segment(), Some(1));
+        assert_eq!(first_pass_reads, 1);
+        assert_eq!(RUNTIME_FILE_READS.with(std::cell::Cell::get), 0);
+        assert!(!segment.exists());
         Ok(())
     }
 

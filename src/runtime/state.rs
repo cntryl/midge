@@ -134,10 +134,9 @@ pub struct WalState {
     pub local_durable_seq: u64,
     /// Cloud durability frontier - highest sequence number confirmed by cloud
     pub cloud_durable_seq: u64,
-    /// Why each retained sealed local WAL segment last failed its coverage
-    /// proof. In memory only; an empty map just means re-proving (#490).
-    pub(crate) local_segment_proofs:
-        HashMap<u64, crate::runtime::hybrid_persistence::FailedWalProof>,
+    /// What prune has learned about each retained sealed local WAL segment.
+    /// In memory only; an empty map just means re-reading (#490, #550).
+    pub(crate) local_segments: HashMap<u64, crate::runtime::hybrid_persistence::LocalSegmentFacts>,
 }
 
 impl Default for WalState {
@@ -148,7 +147,7 @@ impl Default for WalState {
             pending_writes: 0,
             local_durable_seq: 0,
             cloud_durable_seq: 0,
-            local_segment_proofs: HashMap::new(),
+            local_segments: HashMap::new(),
         }
     }
 }

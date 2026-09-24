@@ -945,6 +945,28 @@ pub(crate) fn coverage_fingerprint(manifest: &Manifest, cf_id: u32) -> u64 {
     hasher.finish()
 }
 
+/// What local WAL prune has learned about one sealed segment. Sealed
+/// segments never change, so this holds for the segment's lifetime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LocalSegmentFacts {
+    /// Every column family with a data record in the segment (sorted).
+    pub(crate) families: Vec<u32>,
+    /// The last failed coverage proof, while it may still apply.
+    pub(crate) failed_proof: Option<FailedWalProof>,
+}
+
+impl LocalSegmentFacts {
+    pub(crate) fn of(records: &[DataCoverageRecord]) -> Self {
+        let mut families: Vec<u32> = records.iter().map(|record| record.cf_id).collect();
+        families.sort_unstable();
+        families.dedup();
+        Self {
+            families,
+            failed_proof: None,
+        }
+    }
+}
+
 /// A local WAL segment whose coverage proof failed, and what it failed on,
 /// so prune repeats the proof only when the answer could change (#490).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

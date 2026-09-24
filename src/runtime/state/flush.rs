@@ -1,8 +1,9 @@
 //! Immutable flush lifecycle, retries, and write-pressure selection.
 
 use super::{
-    Arc, Duration, FlushCandidate, FlushReason, HashSet, ImmutableFlush, ImmutableFlushPhase,
-    Instant, RuntimeState, SkipListMemtable, INITIAL_FLUSH_RETRY_BACKOFF, MAX_FLUSH_RETRY_BACKOFF,
+    Arc, ColumnFamilyState, Duration, FlushCandidate, FlushReason, HashMap, HashSet,
+    ImmutableFlush, ImmutableFlushPhase, Instant, RuntimeState, SkipListMemtable,
+    INITIAL_FLUSH_RETRY_BACKOFF, MAX_FLUSH_RETRY_BACKOFF,
 };
 
 impl RuntimeState {
@@ -389,28 +390,57 @@ impl RuntimeState {
             return None;
         }
         for cf in self.column_families.values() {
-            // Recovery/legacy callers may expose an immutable without tracked
-            // provenance. A partial or mismatched ledger cannot advance the floor.
-            if cf.immutable_memtables.len() != cf.immutable_flushes.len() {
+            floor = floor.min(self.family_wal_floor(cf)?);
+        }
+        Some(floor)
+    }
+
+    /// Per column family, the first WAL segment that may still hold one of
+    /// its unflushed records (see [`Self::family_wal_floor`]). A family absent
+    /// here was dropped: the drop is durable in the manifest before the family
+    /// leaves runtime state, and recovery ignores its WAL records (#550).
+    pub(crate) fn wal_recovery_floor_by_family(&self) -> HashMap<u32, Option<u64>> {
+        self.column_families
+            .iter()
+            .map(|(cf_id, cf)| {
+                let floor = (self.wal.current_segment_id != 0)
+                    .then(|| self.family_wal_floor(cf))
+                    .flatten();
+                (*cf_id, floor)
+            })
+            .collect()
+    }
+
+    /// The first WAL segment that may still hold an unflushed record of
+    /// `cf`: its oldest immutable's first segment, else its active memtable's
+    /// start, else the current segment when it holds nothing unflushed. A
+    /// memtable's start is the segment of its first record, and records only
+    /// move forward through segments, so every record of `cf` in an earlier
+    /// segment belongs to a flushed memtable. `None` when the flush ledger
+    /// cannot be trusted.
+    fn family_wal_floor(&self, cf: &ColumnFamilyState) -> Option<u64> {
+        let mut floor = self.wal.current_segment_id;
+        // Recovery/legacy callers may expose an immutable without tracked
+        // provenance. A partial or mismatched ledger cannot advance the floor.
+        if cf.immutable_memtables.len() != cf.immutable_flushes.len() {
+            return None;
+        }
+        for (table, flush) in cf.immutable_memtables.iter().zip(&cf.immutable_flushes) {
+            if !Arc::ptr_eq(table, &flush.memtable) {
                 return None;
             }
-            for (table, flush) in cf.immutable_memtables.iter().zip(&cf.immutable_flushes) {
-                if !Arc::ptr_eq(table, &flush.memtable) {
-                    return None;
-                }
-                let first = flush.first_wal_segment?;
-                if first == 0 || first > self.wal.current_segment_id {
-                    return None;
-                }
-                floor = floor.min(first);
+            let first = flush.first_wal_segment?;
+            if first == 0 || first > self.wal.current_segment_id {
+                return None;
             }
-            if cf.memtable.size_bytes() > 0 {
-                let started = cf.active_memtable_started_in_segment;
-                if started == 0 || started > self.wal.current_segment_id {
-                    return None;
-                }
-                floor = floor.min(started);
+            floor = floor.min(first);
+        }
+        if cf.memtable.size_bytes() > 0 {
+            let started = cf.active_memtable_started_in_segment;
+            if started == 0 || started > self.wal.current_segment_id {
+                return None;
             }
+            floor = floor.min(started);
         }
         Some(floor)
     }
