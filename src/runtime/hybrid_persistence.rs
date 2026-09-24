@@ -909,6 +909,71 @@ impl ExactCoverageState {
     }
 }
 
+/// Why a WAL segment's records are not provably in the manifest's SSTs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UncoveredWal {
+    /// The segment holds a record the per-record proof can never certify (a
+    /// delete or range delete). Only the recovery floor can retire it.
+    Unprovable,
+    /// A value write is not exactly in this column family's SSTs. Whether it
+    /// is depends only on that family's manifest files (`file_covers_record`
+    /// matches on `cf_id`), so only a change to them can cover it.
+    MissingFrom(u32),
+}
+
+/// Fingerprint of the manifest metadata that decides whether a record of
+/// `cf_id` is covered: every field `file_covers_record` and the SST open in
+/// `state_for` read. SST contents are immutable by name. A collision or a
+/// reordering can only cause an extra proof or longer retention.
+pub(crate) fn coverage_fingerprint(manifest: &Manifest, cf_id: u32) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for file in manifest.files.iter().filter(|file| file.cf_id == cf_id) {
+        file.name.hash(&mut hasher);
+        file.size_bytes.hash(&mut hasher);
+        file.content_crc32c.hash(&mut hasher);
+        file.smallest_seq.hash(&mut hasher);
+        file.largest_seq.hash(&mut hasher);
+        file.smallest_key.hash(&mut hasher);
+        file.largest_key.hash(&mut hasher);
+        file.key_bounds_complete.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// A local WAL segment whose coverage proof failed, and what it failed on,
+/// so prune repeats the proof only when the answer could change (#490).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FailedWalProof {
+    reason: UncoveredWal,
+    /// For `MissingFrom(cf)`: that family's coverage fingerprint at the time.
+    fingerprint: Option<u64>,
+}
+
+impl FailedWalProof {
+    pub(crate) fn new(reason: UncoveredWal, manifest: &Manifest) -> Self {
+        let fingerprint = match reason {
+            UncoveredWal::Unprovable => None,
+            UncoveredWal::MissingFrom(cf_id) => Some(coverage_fingerprint(manifest, cf_id)),
+        };
+        Self {
+            reason,
+            fingerprint,
+        }
+    }
+
+    /// Whether repeating the proof must fail again. Skipping it only retains
+    /// the segment longer; nothing is removed on this answer.
+    pub(crate) fn still_fails(&self, manifest: &Manifest) -> bool {
+        match self.reason {
+            UncoveredWal::Unprovable => true,
+            UncoveredWal::MissingFrom(cf_id) => {
+                self.fingerprint == Some(coverage_fingerprint(manifest, cf_id))
+            }
+        }
+    }
+}
+
 pub(crate) struct VerifiedManifestWalCoverage<'a> {
     sst_dir: std::path::PathBuf,
     manifest: &'a Manifest,
@@ -949,23 +1014,33 @@ impl<'a> VerifiedManifestWalCoverage<'a> {
         reader.as_ref()?.get_state(key).ok()
     }
 
-    pub(crate) fn exactly_covers_data_records(&self, records: &[DataCoverageRecord]) -> bool {
-        records.iter().all(|record| {
-            if !matches!(record.op.role(), crate::wal::types::WalOpRole::ValueWrite) {
+    /// Why `records` are not all exactly in the manifest's SSTs, or `None`
+    /// when they are.
+    pub(crate) fn first_uncovered(&self, records: &[DataCoverageRecord]) -> Option<UncoveredWal> {
+        if records
+            .iter()
+            .any(|record| !matches!(record.op.role(), crate::wal::types::WalOpRole::ValueWrite))
+        {
+            return Some(UncoveredWal::Unprovable);
+        }
+        records
+            .iter()
+            .find(|record| !self.exactly_covers_value_write(record))
+            .map(|record| UncoveredWal::MissingFrom(record.cf_id))
+    }
+
+    fn exactly_covers_value_write(&self, record: &DataCoverageRecord) -> bool {
+        let mut state = ExactCoverageState::default();
+        for file in &self.manifest.files {
+            if !file_covers_record(file, record) {
+                continue;
+            }
+            let Some(observed) = self.state_for(file, &record.key) else {
                 return false;
-            }
-            let mut state = ExactCoverageState::default();
-            for file in &self.manifest.files {
-                if !file_covers_record(file, record) {
-                    continue;
-                }
-                let Some(observed) = self.state_for(file, &record.key) else {
-                    return false;
-                };
-                state.observe(observed);
-            }
-            state.exactly_covers(record)
-        })
+            };
+            state.observe(observed);
+        }
+        state.exactly_covers(record)
     }
 
     pub(crate) fn contains_wal_record(

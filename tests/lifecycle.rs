@@ -3294,3 +3294,75 @@ mod column_family_reclamation_hardening {
         }
     }
 }
+
+mod local_wal_retention {
+    //! Local WAL retention while one column family stays idle (#490, #549).
+
+    use cntryl_midge::{ColumnFamilyHandle, Engine, OpenOptions, TransactionMode, WriteOptions};
+    use std::time::Duration;
+
+    fn options(path: &std::path::Path) -> OpenOptions {
+        OpenOptions::local(path)
+            .background_compaction(false)
+            .build()
+            .expect("options")
+    }
+
+    fn put(engine: &Engine, cf: &ColumnFamilyHandle, key: &[u8]) {
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin");
+        tx.put(key.to_vec(), b"value".to_vec(), None).expect("put");
+        tx.commit(WriteOptions::sync()).expect("commit");
+    }
+
+    fn sealed_segments(path: &std::path::Path) -> usize {
+        std::fs::read_dir(path.join("wal"))
+            .expect("read wal dir")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name() != "wal.log")
+            .count()
+    }
+
+    #[test]
+    fn should_retire_covered_wal_segments_when_an_idle_column_family_pins_the_floor() {
+        // Arrange: one write to a family that never writes or flushes again.
+        // It pins the recovery floor at the first segment, so every later
+        // segment must be retired by the per-record proof.
+        let temp = tempfile::TempDir::new().expect("temp");
+        let mut engine = Engine::open(options(temp.path())).expect("open");
+        let default = engine.get_column_family("default").expect("default");
+        let idle = engine.create_column_family("idle").expect("idle");
+        put(&engine, &idle, b"idle-key");
+
+        // Act
+        for round in 0..20 {
+            for index in 0..5 {
+                put(
+                    &engine,
+                    &default,
+                    format!("busy-{round:03}-{index}").as_bytes(),
+                );
+            }
+            engine.flush_cf(&default).expect("flush default");
+            if round % 5 == 4 {
+                // Background compaction is off; keep L0 below its stall limit.
+                engine.compact_all().expect("compact");
+            }
+        }
+        let retained = sealed_segments(temp.path());
+        engine.shutdown(Duration::from_secs(10)).expect("shutdown");
+
+        // Assert
+        assert!(
+            retained <= 2,
+            "{retained} sealed segments retained after 20 covered flushes"
+        );
+        let reopened = Engine::open(options(temp.path())).expect("reopen");
+        let idle = reopened.get_column_family("idle").expect("idle");
+        let tx = reopened
+            .begin_tx(idle.id(), TransactionMode::ReadOnly)
+            .expect("read");
+        assert!(tx.get(b"idle-key").expect("get").is_some());
+    }
+}

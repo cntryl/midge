@@ -339,7 +339,6 @@ impl EventLoop {
             shutting_down: false,
             shutdown_cloud_drain_timeout: config.shutdown_cloud_drain_timeout,
             worker_msg_tx,
-
             write_stall_waiters: WriteStallWaiters::default(),
             snapshot_cache: None,
             read_resources,
@@ -679,6 +678,9 @@ impl EventLoop {
             .get(&cf_id)
             .copied()
             .unwrap_or(1);
+        // The mirror below publishes local metadata files; never publish
+        // them while memory is known to be behind disk (#500).
+        self.state.retry_metadata_reload()?;
         // Never lower the counter: the edit replays as a max, and memory must
         // match what the journal replays.
         let next_seq = sst_seq

@@ -108,7 +108,6 @@ impl ColumnFamilyState {
     }
 }
 
-/// WAL state
 /// How flush outputs get SST names in hybrid mode, per column family.
 ///
 /// Names come from `cursor` inside a block that `manifest.next_sst_seqs`
@@ -123,6 +122,7 @@ pub(crate) struct SstNameAllocation {
     pub(crate) reserved_through: HashMap<crate::types::ColumnFamilyId, u64>,
 }
 
+/// WAL state
 pub struct WalState {
     /// Current WAL segment ID
     pub current_segment_id: u64,
@@ -134,6 +134,10 @@ pub struct WalState {
     pub local_durable_seq: u64,
     /// Cloud durability frontier - highest sequence number confirmed by cloud
     pub cloud_durable_seq: u64,
+    /// Why each retained sealed local WAL segment last failed its coverage
+    /// proof. In memory only; an empty map just means re-proving (#490).
+    pub(crate) local_segment_proofs:
+        HashMap<u64, crate::runtime::hybrid_persistence::FailedWalProof>,
 }
 
 impl Default for WalState {
@@ -144,6 +148,7 @@ impl Default for WalState {
             pending_writes: 0,
             local_durable_seq: 0,
             cloud_durable_seq: 0,
+            local_segment_proofs: HashMap::new(),
         }
     }
 }

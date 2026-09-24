@@ -8,6 +8,14 @@ use crate::runtime::RuntimeResponse;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// What one local WAL prune pass did.
+#[derive(Debug, Default)]
+struct LocalWalPruneOutcome {
+    removed: Vec<u64>,
+    anomaly: bool,
+    lease_lost: bool,
+}
+
 #[cfg(test)]
 thread_local! {
     /// Whole-file reads of local WAL segments, for tests that bound a prune pass.
@@ -681,65 +689,21 @@ impl EventLoop {
         // is already in published SSTs, including deletes, which the
         // per-record proof below cannot certify.
         let flushed_floor = self.state.wal_recovery_floor_segment();
-        // One prover per pass, so each covering SST is opened and verified
-        // once rather than once per segment (#490).
-        let manifest = self.state.manifest.clone();
-        let coverage = crate::runtime::hybrid_persistence::VerifiedManifestWalCoverage::open(
-            &self.state.sst_dir,
-            &manifest,
-        );
-
-        for (segment_id, path) in sealed_segments {
-            if let Err(error) = self.validate_runtime_lease_for_wal_prune() {
-                tracing::warn!(segment_id, %error, "stopped local WAL pruning after lease validation failed");
-                return;
-            }
-            if flushed_floor.is_some_and(|floor| segment_id < floor) {
-                self.remove_flushed_local_wal_segment(segment_id, &path);
-                continue;
-            }
-            let bytes = match self.read_runtime_file(&path) {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    self.state.mark_persistence_anomaly();
-                    tracing::warn!(segment_id, %error, "retaining unreadable local WAL segment");
-                    continue;
-                }
-            };
-            if bytes.is_empty() {
-                if let Err(error) = self.state.fs.remove_file(&path) {
-                    if !matches!(error, crate::io::FsError::NotFound(_)) {
-                        self.state.mark_persistence_anomaly();
-                        tracing::warn!(segment_id, %error, "failed to remove empty local WAL segment");
-                    }
-                }
-                continue;
-            }
-            let readback = match crate::wal::cloud_segment::inspect_local_bytes(&path.0, &bytes) {
-                Ok(readback) => readback,
-                Err(error) => {
-                    self.state.mark_persistence_anomaly();
-                    tracing::warn!(segment_id, %error, "retaining invalid local WAL segment");
-                    continue;
-                }
-            };
-            if !coverage.exactly_covers_data_records(&readback.data_records) {
-                // Later segments hold newer records, which are no more
-                // likely to be covered; stop rather than re-read them all.
-                tracing::debug!(
-                    segment_id,
-                    "retaining local WAL from the first uncovered segment"
-                );
-                break;
-            }
-            match self.state.fs.remove_file(&path) {
-                Ok(()) => tracing::debug!(segment_id, "removed exactly covered local WAL segment"),
-                Err(crate::io::FsError::NotFound(_)) => {}
-                Err(error) => {
-                    self.state.mark_persistence_anomaly();
-                    tracing::warn!(segment_id, %error, "failed to remove exactly covered local WAL segment");
-                }
-            }
+        let mut proofs = std::mem::take(&mut self.state.wal.local_segment_proofs);
+        let outcome = self.retire_sealed_local_wal(&sealed_segments, flushed_floor, &mut proofs);
+        // Forget proofs for segments that are gone.
+        proofs.retain(|segment_id, _| {
+            sealed_segments
+                .iter()
+                .any(|(sealed, _)| sealed == segment_id)
+                && !outcome.removed.contains(segment_id)
+        });
+        self.state.wal.local_segment_proofs = proofs;
+        if outcome.anomaly {
+            self.state.mark_persistence_anomaly();
+        }
+        if outcome.lease_lost {
+            return;
         }
 
         if let Err(error) = self.state.fs.sync_dir(
@@ -748,6 +712,109 @@ impl EventLoop {
         ) {
             self.state.mark_persistence_anomaly();
             tracing::warn!(%error, "failed to sync local WAL directory after pruning");
+        }
+    }
+
+    /// Retires sealed local WAL segments, oldest first. A segment below the
+    /// recovery floor goes whole; one at or above it goes only when every
+    /// record is exactly in the manifest's SSTs.
+    ///
+    /// Every segment is considered, not just a prefix: an idle column family
+    /// can keep the first one uncovered forever while later ones are covered.
+    /// A failed proof is remembered in `proofs` and not repeated until the
+    /// blocking family's SSTs change, so a pass reads only segments whose
+    /// answer could differ (#490).
+    fn retire_sealed_local_wal(
+        &self,
+        sealed_segments: &[(u64, crate::io::FsPath)],
+        flushed_floor: Option<u64>,
+        proofs: &mut std::collections::HashMap<
+            u64,
+            crate::runtime::hybrid_persistence::FailedWalProof,
+        >,
+    ) -> LocalWalPruneOutcome {
+        use crate::runtime::hybrid_persistence::{FailedWalProof, VerifiedManifestWalCoverage};
+        let mut outcome = LocalWalPruneOutcome::default();
+        // One prover per pass, built only if a proof is needed, so each
+        // covering SST is opened and verified once per pass.
+        let coverage = std::cell::OnceCell::new();
+        for (segment_id, path) in sealed_segments {
+            let segment_id = *segment_id;
+            if let Err(error) = self.validate_runtime_lease_for_wal_prune() {
+                tracing::warn!(segment_id, %error, "stopped local WAL pruning after lease validation failed");
+                outcome.lease_lost = true;
+                return outcome;
+            }
+            if flushed_floor.is_some_and(|floor| segment_id < floor) {
+                self.remove_local_wal_segment(segment_id, path, "flushed", &mut outcome);
+                continue;
+            }
+            if proofs
+                .get(&segment_id)
+                .is_some_and(|proof| proof.still_fails(&self.state.manifest))
+            {
+                continue;
+            }
+            let bytes = match self.read_runtime_file(path) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    outcome.anomaly = true;
+                    tracing::warn!(segment_id, %error, "retaining unreadable local WAL segment");
+                    continue;
+                }
+            };
+            if bytes.is_empty() {
+                self.remove_local_wal_segment(segment_id, path, "empty", &mut outcome);
+                continue;
+            }
+            let readback = match crate::wal::cloud_segment::inspect_local_bytes(&path.0, &bytes) {
+                Ok(readback) => readback,
+                Err(error) => {
+                    outcome.anomaly = true;
+                    tracing::warn!(segment_id, %error, "retaining invalid local WAL segment");
+                    continue;
+                }
+            };
+            let prover = coverage.get_or_init(|| {
+                VerifiedManifestWalCoverage::open(&self.state.sst_dir, &self.state.manifest)
+            });
+            match prover.first_uncovered(&readback.data_records) {
+                None => {
+                    self.remove_local_wal_segment(
+                        segment_id,
+                        path,
+                        "exactly covered",
+                        &mut outcome,
+                    );
+                }
+                Some(reason) => {
+                    proofs.insert(
+                        segment_id,
+                        FailedWalProof::new(reason, &self.state.manifest),
+                    );
+                }
+            }
+        }
+        outcome
+    }
+
+    fn remove_local_wal_segment(
+        &self,
+        segment_id: u64,
+        path: &crate::io::FsPath,
+        why: &'static str,
+        outcome: &mut LocalWalPruneOutcome,
+    ) {
+        match self.state.fs.remove_file(path) {
+            Ok(()) => {
+                tracing::debug!(segment_id, why, "removed local WAL segment");
+                outcome.removed.push(segment_id);
+            }
+            Err(crate::io::FsError::NotFound(_)) => outcome.removed.push(segment_id),
+            Err(error) => {
+                outcome.anomaly = true;
+                tracing::warn!(segment_id, why, %error, "failed to remove local WAL segment");
+            }
         }
     }
 
@@ -782,17 +849,6 @@ impl EventLoop {
             return false;
         }
         true
-    }
-
-    fn remove_flushed_local_wal_segment(&mut self, segment_id: u64, path: &crate::io::FsPath) {
-        match self.state.fs.remove_file(path) {
-            Ok(()) => tracing::debug!(segment_id, "removed flushed local WAL segment"),
-            Err(crate::io::FsError::NotFound(_)) => {}
-            Err(error) => {
-                self.state.mark_persistence_anomaly();
-                tracing::warn!(segment_id, %error, "failed to remove flushed local WAL segment");
-            }
-        }
     }
 
     fn read_runtime_file(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bytes::Bytes> {
@@ -1817,9 +1873,54 @@ mod tests {
     }
 
     #[test]
-    fn should_stop_local_wal_prune_at_first_uncovered_segment() -> crate::common::MidgeResult<()> {
+    fn should_mark_anomaly_when_invalid_wal_segment_follows_an_uncovered_one(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange: segment 1 is valid but uncovered; segment 2 is corrupt.
+        let directory = tempfile::tempdir()?;
+        let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
+        let router = Arc::new(crate::runtime::ResponseRouter::new());
+        let mut event_loop = EventLoop::new(
+            state,
+            false,
+            router,
+            crate::runtime::RuntimeConfig::default(),
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
+        )?;
+        let record = crate::wal::WalRecord::new(
+            crate::wal::WalOpKind::Put,
+            bytes::Bytes::from_static(b"key"),
+            Some(bytes::Bytes::from_static(b"value")),
+            1,
+            1,
+        );
+        let mut frame = Vec::new();
+        crate::wal::frame::append_frame(&mut frame, &crate::wal::encoding::encode(&record)?)?;
+        let wal_dir = event_loop.state.wal_dir.clone();
+        std::fs::write(wal_dir.join(crate::wal::segment_file_name(1)), frame)?;
+        std::fs::write(
+            wal_dir.join(crate::wal::segment_file_name(2)),
+            b"not a WAL segment",
+        )?;
+        event_loop.state.wal.current_segment_id = 3;
+        let cf = event_loop.state.get_cf_mut(0).expect("default family");
+        cf.memtable
+            .put_with_seq(b"unflushed".to_vec(), b"value".to_vec(), 1, None)?;
+        cf.active_memtable_started_in_segment = 1;
+
+        // Act
+        event_loop.prune_local_wal_segments_covered_by_manifest();
+
+        // Assert
+        assert!(event_loop.state.persistence_anomaly_detected());
+        assert!(wal_dir.join(crate::wal::segment_file_name(2)).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_reprove_uncovered_wal_segments_until_their_column_family_changes(
+    ) -> crate::common::MidgeResult<()> {
         // Arrange: three sealed segments above the recovery floor, none
-        // covered by an SST. Proving the first one uncovered is enough.
+        // covered by an SST of their column family (0).
         let directory = tempfile::tempdir()?;
         let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
         let router = Arc::new(crate::runtime::ResponseRouter::new());
@@ -1858,9 +1959,24 @@ mod tests {
 
         // Act
         event_loop.prune_local_wal_segments_covered_by_manifest();
+        let first_pass = RUNTIME_FILE_READS.with(|reads| reads.replace(0));
+        event_loop.prune_local_wal_segments_covered_by_manifest();
+        let unchanged_pass = RUNTIME_FILE_READS.with(|reads| reads.replace(0));
+        event_loop
+            .state
+            .manifest
+            .add_file(crate::metadata::FileMeta {
+                name: crate::cloud_layout::file_name(0, 0, 1),
+                cf_id: 0,
+                size_bytes: 1,
+                ..Default::default()
+            });
+        event_loop.prune_local_wal_segments_covered_by_manifest();
+        let changed_pass = RUNTIME_FILE_READS.with(std::cell::Cell::get);
 
-        // Assert
-        assert_eq!(RUNTIME_FILE_READS.with(std::cell::Cell::get), 1);
+        // Assert: every segment is considered, none is re-read until family
+        // 0's SSTs change, and nothing uncovered is removed.
+        assert_eq!((first_pass, unchanged_pass, changed_pass), (3, 0, 3));
         for segment_id in 1..=3 {
             assert!(event_loop
                 .state
@@ -1936,6 +2052,100 @@ mod tests {
             "a name was handed out without a mirrored reservation: {retried:?}"
         );
         assert!(recovered.is_ok(), "{recovered:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_mirror_sst_name_reservation_while_metadata_reload_is_required(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange: a failed reload leaves memory behind disk (#500), and the
+        // on-disk intent log is unreadable.
+        let directory = tempfile::tempdir()?;
+        let (mut event_loop, _hybrid) = event_loop_with_hybrid_storage(&directory)?;
+        let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
+            Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+            String::new(),
+        ));
+        event_loop.cloud_metadata_storage = Some(Arc::clone(&cloud));
+        std::fs::write(
+            event_loop
+                .state
+                .db_path
+                .join(crate::metadata::files::INTENT_LOG),
+            b"{corrupt",
+        )?;
+        assert!(event_loop.state.reload_persisted_metadata().is_err());
+
+        // Act
+        let result = event_loop.reserve_sst_name_durably(0, 1);
+
+        // Assert: fenced, and nothing reached the authoritative mirror.
+        assert!(
+            matches!(result, Err(crate::common::MidgeError::Fenced(_))),
+            "{result:?}"
+        );
+        let key = crate::cloud_layout::CloudObjectLayout::metadata_key(
+            crate::metadata::files::INTENT_LOG,
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud.submit_get(&key, tx);
+        let uploaded = matches!(
+            rx.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(crate::storage::cloud::CloudEvent::Get {
+                result: crate::storage::cloud::CloudOutcome::Ok(_),
+                ..
+            })
+        );
+        assert!(!uploaded, "stale intent log was mirrored");
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_reuse_reserved_sst_names_when_replacement_restores_from_cloud_metadata(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange: hand out flush names and a compaction generation, then lose
+        // the machine. The replacement sees only the cloud metadata mirror.
+        let directory = tempfile::tempdir()?;
+        let (mut first, _hybrid) = event_loop_with_hybrid_storage(&directory)?;
+        let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
+            Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+            String::new(),
+        ));
+        first.cloud_metadata_storage = Some(Arc::clone(&cloud));
+        let mut used = Vec::new();
+        for _ in 0..20 {
+            used.push(first.reserve_flush_sst_seq(0)?);
+        }
+        let plan = first
+            .assign_compaction_output_sequence(crate::compaction::CompactionPlan::new(0, 0, 1))?;
+        drop(first);
+        let replacement = tempfile::tempdir()?;
+        for name in crate::metadata::files::CLOUD_MIRRORED {
+            let (tx, rx) = std::sync::mpsc::channel();
+            cloud.submit_get(
+                &crate::cloud_layout::CloudObjectLayout::metadata_key(name),
+                tx,
+            );
+            if let Ok(crate::storage::cloud::CloudEvent::Get {
+                result: crate::storage::cloud::CloudOutcome::Ok(data),
+                ..
+            }) = rx.recv_timeout(std::time::Duration::from_secs(1))
+            {
+                std::fs::write(replacement.path().join(name), data)?;
+            }
+        }
+
+        // Act
+        let (mut second, _hybrid) = event_loop_with_hybrid_storage(&replacement)?;
+        let first_name = second.reserve_flush_sst_seq(0)?;
+        let next_generation = second.state.next_compaction_output_generation()?;
+
+        // Assert
+        assert!(
+            used.iter().all(|seq| *seq < first_name),
+            "{used:?} then {first_name}"
+        );
+        assert!(next_generation > plan.output_seq);
         Ok(())
     }
 
