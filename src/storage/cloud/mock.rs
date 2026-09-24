@@ -242,13 +242,13 @@ impl CloudBackend for MockCloudBackend {
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("if-match"))
         {
+            // Deleting an absent object succeeds, conditional or not, as on
+            // every real provider.
             let exists = self.storage.lock().contains_key(&key);
             if !exists {
                 let event = CloudEvent::Delete {
                     key,
-                    result: CloudOutcome::Err(CloudError::PreconditionFailed(
-                        "precondition failed".to_string(),
-                    )),
+                    result: CloudOutcome::Ok(()),
                 };
                 let _ = callback.send(event);
                 return;

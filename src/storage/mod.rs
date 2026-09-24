@@ -702,6 +702,9 @@ pub trait StorageBackend: Send + Sync + 'static {
 }
 
 #[cfg(test)]
+mod backend_contract_tests;
+
+#[cfg(test)]
 mod identity_tests {
     use super::StorageObjectMetadata;
 
