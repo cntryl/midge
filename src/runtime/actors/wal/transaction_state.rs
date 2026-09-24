@@ -5,7 +5,7 @@ use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::state::RuntimeState;
 use crate::wal::{DurabilityPolicy, WalOpKind};
 use bytes::Bytes;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -20,6 +20,8 @@ thread_local! {
 /// of rebuilding a snapshot (manifest clone, read view, uncached SST opens).
 pub(super) struct ValidationSnapshots<'a> {
     state: &'a RuntimeState,
+    /// The event loop's reader and block caches, when running under it.
+    resources: Option<Arc<crate::runtime::read_resources::ReadResources>>,
     by_cf: std::collections::HashMap<
         crate::types::ColumnFamilyId,
         Option<crate::runtime::ReadSnapshot>,
@@ -27,9 +29,13 @@ pub(super) struct ValidationSnapshots<'a> {
 }
 
 impl<'a> ValidationSnapshots<'a> {
-    pub(super) fn new(state: &'a RuntimeState) -> Self {
+    pub(super) fn new(
+        state: &'a RuntimeState,
+        resources: Option<Arc<crate::runtime::read_resources::ReadResources>>,
+    ) -> Self {
         Self {
             state,
+            resources,
             by_cf: std::collections::HashMap::new(),
         }
     }
@@ -39,9 +45,10 @@ impl<'a> ValidationSnapshots<'a> {
         cf_id: crate::types::ColumnFamilyId,
     ) -> Option<&crate::runtime::ReadSnapshot> {
         let state = self.state;
+        let resources = self.resources.as_ref();
         self.by_cf
             .entry(cf_id)
-            .or_insert_with(|| WalActor::latest_sequence_snapshot(state, cf_id))
+            .or_insert_with(|| WalActor::latest_sequence_snapshot(state, cf_id, resources))
             .as_ref()
     }
 }
@@ -251,14 +258,11 @@ impl WalActor {
     /// value still bumps the sequence and is still correctly rejected.
     pub(super) fn ensure_no_assertion_conflicts(
         state: &RuntimeState,
+        snapshots: &mut ValidationSnapshots<'_>,
         assertions: &[crate::runtime::KeyAssertion],
         start_sequence: u64,
     ) -> MidgeResult<()> {
         let mut checked_keys: HashSet<(crate::types::ColumnFamilyId, Vec<u8>)> = HashSet::new();
-        let mut snapshots: HashMap<
-            crate::types::ColumnFamilyId,
-            Option<crate::runtime::ReadSnapshot>,
-        > = HashMap::new();
 
         for assertion in assertions {
             let dedupe_key = (assertion.cf_id, assertion.key.to_vec());
@@ -273,10 +277,7 @@ impl WalActor {
                 )));
             }
 
-            let snapshot = snapshots
-                .entry(assertion.cf_id)
-                .or_insert_with(|| Self::latest_sequence_snapshot(state, assertion.cf_id));
-            if let Some(snapshot) = snapshot {
+            if let Some(snapshot) = snapshots.get(assertion.cf_id) {
                 if let Some(latest_seq) = snapshot.latest_state_sequence(&assertion.key)? {
                     if latest_seq > start_sequence {
                         state
@@ -322,6 +323,7 @@ impl WalActor {
     fn latest_sequence_snapshot(
         state: &RuntimeState,
         cf_id: crate::types::ColumnFamilyId,
+        resources: Option<&Arc<crate::runtime::read_resources::ReadResources>>,
     ) -> Option<crate::runtime::ReadSnapshot> {
         let cf_state = state.column_families.get(&cf_id)?;
         let sst_files: Vec<_> = state
@@ -338,7 +340,10 @@ impl WalActor {
             .unwrap_or_else(|_| std::path::Path::new("sst"))
             .to_path_buf();
 
-        let mut snapshot = crate::runtime::ReadSnapshot::new(
+        // Read through the event loop's reader and block caches when given,
+        // so validating many ops opens each SST once (#492). Without them
+        // (tests only) the snapshot opens readers directly.
+        let mut snapshot = crate::runtime::ReadSnapshot::new_with_resources(
             cf_state.memtable.clone(),
             cf_state.immutable_memtables.clone(),
             sst_files,
@@ -346,6 +351,7 @@ impl WalActor {
             sst_path_prefix,
             state.is_memory_mode(),
             state.observed_time_millis(),
+            resources.cloned(),
         );
         snapshot.cf_id = cf_id;
         #[cfg(test)]
@@ -481,7 +487,7 @@ impl WalActor {
         cf_id: crate::types::ColumnFamilyId,
         key: &[u8],
     ) -> MidgeResult<bool> {
-        Self::key_exists(&mut ValidationSnapshots::new(state), cf_id, key)
+        Self::key_exists(&mut ValidationSnapshots::new(state, None), cf_id, key)
     }
 
     /// Checks the current view (memtables and SSTs) for existence.

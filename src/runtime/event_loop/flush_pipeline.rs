@@ -2342,6 +2342,28 @@ mod tests {
     }
 
     #[test]
+    fn should_validate_transactions_through_event_loop_read_resources(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let directory = tempfile::tempdir()?;
+        let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
+
+        // Act
+        let event_loop = EventLoop::new(
+            state,
+            false,
+            Arc::new(crate::runtime::ResponseRouter::new()),
+            crate::runtime::RuntimeConfig::default(),
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
+        )?;
+
+        // Assert: validation shares the loop's reader and block caches (#492).
+        assert!(event_loop.read_resources.is_some());
+        assert!(event_loop.wal_actor.has_read_resources());
+        Ok(())
+    }
+
+    #[test]
     fn should_mark_anomaly_when_local_wal_directory_sync_fails_after_pruning(
     ) -> crate::common::MidgeResult<()> {
         // Arrange

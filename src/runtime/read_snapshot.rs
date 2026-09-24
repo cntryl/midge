@@ -683,7 +683,10 @@ impl ReadSnapshot {
             .any(|tombstone| tombstone.covers(key) && tombstone.seq >= state_seq)
     }
 
-    /// Create a new read snapshot
+    /// Create a read snapshot that opens SST readers directly, bypassing the
+    /// runtime reader and block caches. Production reads go through
+    /// [`Self::new_with_resources`] (#492).
+    #[cfg(test)]
     pub fn new(
         memtable: Arc<SkipListMemtable>,
         immutable_memtables: Vec<Arc<SkipListMemtable>>,
