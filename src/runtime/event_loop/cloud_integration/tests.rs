@@ -6173,7 +6173,7 @@ fn should_retain_cloud_seal_ownership_at_every_cross_component_boundary(
                 );
                 assert!(matches!(
                     event_loop.seal_current_cloud_segment(),
-                    Err(crate::common::MidgeError::Fenced(_))
+                    Err(crate::common::MidgeError::RecoveryFailed(_))
                 ));
             }
             Outcome::FencedAfterReceipt => {
@@ -6369,7 +6369,7 @@ fn should_reject_cloud_durability_wait_once_the_runtime_is_fenced() -> crate::co
         response.recv_timeout(Duration::from_secs(1)),
         Ok(RuntimeResponse::Error {
             request_id: actual,
-            error: crate::common::MidgeError::Fenced(_),
+            error: crate::common::MidgeError::RecoveryFailed(_),
         }) if actual == request_id
     ));
     assert!(

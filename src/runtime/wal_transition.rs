@@ -147,6 +147,9 @@ enum WalLifecyclePhase {
     Fenced {
         reason: String,
         sealed_segment: Option<u64>,
+        /// Whether writer authority was lost (lease or epoch). Otherwise a
+        /// local failure poisoned the WAL, which needs a restart (#537).
+        authority_lost: bool,
     },
 }
 
@@ -170,15 +173,34 @@ impl WalTransitionProtocol {
             WalLifecyclePhase::Fenced {
                 reason,
                 sealed_segment,
-            } => Err(MidgeError::Fenced(format!(
-                "{reason}{}",
-                sealed_segment.map_or_else(String::new, |segment| {
-                    format!("; sealed segment {segment} requires restart recovery")
+                authority_lost,
+            } => {
+                let message = format!(
+                    "{reason}{}",
+                    sealed_segment.map_or_else(String::new, |segment| {
+                        format!("; sealed segment {segment} requires restart recovery")
+                    })
+                );
+                // Only lost authority is `Fenced`, matching the WAL actor.
+                Err(if *authority_lost {
+                    MidgeError::Fenced(message)
+                } else {
+                    MidgeError::RecoveryFailed(format!("local WAL is poisoned: {message}"))
                 })
-            ))),
-            phase => Err(MidgeError::Fenced(format!(
+            }
+            phase => Err(MidgeError::Internal(format!(
                 "WAL durability transition {phase:?} is incomplete"
             ))),
+        }
+    }
+
+    /// Why a transition cannot commit from the current phase: once fenced,
+    /// the fence's own cause (lost authority or a poisoned WAL); otherwise a
+    /// local invariant defect (#537).
+    fn phase_error(&self, message: String) -> MidgeError {
+        match (&self.phase, self.ensure_ready()) {
+            (WalLifecyclePhase::Fenced { .. }, Err(error)) => error,
+            _ => MidgeError::Internal(message),
         }
     }
 
@@ -196,7 +218,7 @@ impl WalTransitionProtocol {
     ) -> MidgeResult<WalSealTicket> {
         self.ensure_ready()?;
         if self.segments.contains_key(&segment_id) {
-            return Err(MidgeError::Fenced(format!(
+            return Err(MidgeError::Internal(format!(
                 "WAL segment {segment_id} already has a transition obligation"
             )));
         }
@@ -225,7 +247,7 @@ impl WalTransitionProtocol {
         receipt: WalRotationReceipt,
     ) -> MidgeResult<()> {
         if !ticket.matches(receipt) || !self.is_sealing(ticket) {
-            return Err(MidgeError::Fenced(
+            return Err(self.phase_error(
                 "WAL rotation receipt does not match the active seal transition".to_string(),
             ));
         }
@@ -237,7 +259,7 @@ impl WalTransitionProtocol {
 
     pub(crate) fn note_queued(&mut self, segment_id: u64) -> MidgeResult<()> {
         let obligation = self.segments.get_mut(&segment_id).ok_or_else(|| {
-            MidgeError::Fenced(format!(
+            MidgeError::Internal(format!(
                 "sealed WAL segment {segment_id} was queued without an obligation"
             ))
         })?;
@@ -246,7 +268,7 @@ impl WalTransitionProtocol {
                 obligation.state = SegmentObligationState::Queued;
                 Ok(())
             }
-            state => Err(MidgeError::Fenced(format!(
+            state => Err(MidgeError::Internal(format!(
                 "WAL segment {segment_id} cannot enter the upload queue from {state:?}"
             ))),
         }
@@ -254,7 +276,7 @@ impl WalTransitionProtocol {
 
     pub(crate) fn note_acknowledged(&mut self, segment_id: u64) -> MidgeResult<()> {
         let obligation = self.segments.get_mut(&segment_id).ok_or_else(|| {
-            MidgeError::Fenced(format!(
+            MidgeError::Internal(format!(
                 "cloud acknowledged unknown WAL segment {segment_id}"
             ))
         })?;
@@ -263,7 +285,7 @@ impl WalTransitionProtocol {
                 obligation.state = SegmentObligationState::Acknowledged;
                 Ok(())
             }
-            state => Err(MidgeError::Fenced(format!(
+            state => Err(MidgeError::Internal(format!(
                 "WAL segment {segment_id} cannot be acknowledged from {state:?}"
             ))),
         }
@@ -271,7 +293,7 @@ impl WalTransitionProtocol {
 
     pub(crate) fn note_requeued(&mut self, segment_id: u64) -> MidgeResult<()> {
         let obligation = self.segments.get_mut(&segment_id).ok_or_else(|| {
-            MidgeError::Fenced(format!(
+            MidgeError::Internal(format!(
                 "cloud failure referenced unknown WAL segment {segment_id}"
             ))
         })?;
@@ -280,7 +302,7 @@ impl WalTransitionProtocol {
                 obligation.state = SegmentObligationState::Queued;
                 Ok(())
             }
-            state => Err(MidgeError::Fenced(format!(
+            state => Err(MidgeError::Internal(format!(
                 "WAL segment {segment_id} cannot be requeued from {state:?}"
             ))),
         }
@@ -300,7 +322,7 @@ impl WalTransitionProtocol {
 
     pub(crate) fn note_cloud_durable(&mut self, segment_id: u64) -> MidgeResult<()> {
         let obligation = self.segments.get_mut(&segment_id).ok_or_else(|| {
-            MidgeError::Fenced(format!(
+            MidgeError::Internal(format!(
                 "cloud durability advanced through unknown WAL segment {segment_id}"
             ))
         })?;
@@ -309,7 +331,7 @@ impl WalTransitionProtocol {
                 obligation.state = SegmentObligationState::CloudDurable;
                 Ok(())
             }
-            state => Err(MidgeError::Fenced(format!(
+            state => Err(MidgeError::Internal(format!(
                 "WAL segment {segment_id} cannot become cloud durable from {state:?}"
             ))),
         }
@@ -322,7 +344,7 @@ impl WalTransitionProtocol {
                 self.phase = WalLifecyclePhase::Ready;
                 Ok(())
             }
-            _ => Err(MidgeError::Fenced(format!(
+            _ => Err(self.phase_error(format!(
                 "WAL sync generation {} cannot commit from phase {:?}",
                 ticket.generation, self.phase
             ))),
@@ -336,7 +358,7 @@ impl WalTransitionProtocol {
         receipt: WalRotationReceipt,
     ) -> MidgeResult<()> {
         if !ticket.matches(receipt) || !self.is_sealing(&ticket) {
-            return Err(MidgeError::Fenced(format!(
+            return Err(self.phase_error(format!(
                 "WAL seal receipt cannot commit from phase {:?}",
                 self.phase
             )));
@@ -353,7 +375,7 @@ impl WalTransitionProtocol {
                 self.phase = WalLifecyclePhase::Ready;
                 Ok(())
             }
-            _ => Err(MidgeError::Fenced(format!(
+            _ => Err(self.phase_error(format!(
                 "cloud WAL acknowledgement through segment {through_segment_id} cannot commit from phase {:?}",
                 self.phase
             ))),
@@ -380,14 +402,26 @@ impl WalTransitionProtocol {
         }
     }
 
-    pub(crate) fn fence(&mut self, reason: impl Into<String>, sealed_segment: Option<u64>) {
-        let sealed_segment = sealed_segment.or(match self.phase {
-            WalLifecyclePhase::Fenced { sealed_segment, .. } => sealed_segment,
-            _ => None,
-        });
+    /// Stop the protocol. `authority_lost` records a lease or epoch loss; once
+    /// lost, authority stays lost even if a later local failure fences again.
+    pub(crate) fn fence(
+        &mut self,
+        reason: impl Into<String>,
+        sealed_segment: Option<u64>,
+        authority_lost: bool,
+    ) {
+        let (previous_segment, previously_lost) = match self.phase {
+            WalLifecyclePhase::Fenced {
+                sealed_segment,
+                authority_lost,
+                ..
+            } => (sealed_segment, authority_lost),
+            _ => (None, false),
+        };
         self.phase = WalLifecyclePhase::Fenced {
             reason: reason.into(),
-            sealed_segment,
+            sealed_segment: sealed_segment.or(previous_segment),
+            authority_lost: authority_lost || previously_lost,
         };
     }
 
@@ -419,7 +453,7 @@ impl WalTransitionProtocol {
                 self.segments.remove(&segment_id);
                 Ok(())
             }
-            state => Err(MidgeError::Fenced(format!(
+            state => Err(MidgeError::Internal(format!(
                 "WAL segment {segment_id} cannot retire from {state:?}"
             ))),
         }
@@ -436,7 +470,7 @@ impl WalTransitionProtocol {
                 self.segments.remove(&segment_id);
                 Ok(())
             }
-            state => Err(MidgeError::Fenced(format!(
+            state => Err(MidgeError::Internal(format!(
                 "local WAL segment {segment_id} cannot retire from {state:?}"
             ))),
         }
@@ -490,7 +524,7 @@ mod tests {
         protocol.note_sealed(&ticket, receipt(7, 8, 42))?;
 
         // Act
-        protocol.fence("coordinator mismatch", Some(7));
+        protocol.fence("coordinator mismatch", Some(7), false);
         protocol.abandon_prepared_seal(ticket);
 
         // Assert
@@ -499,6 +533,36 @@ mod tests {
         assert_eq!(protocol.fenced_sealed_segment(), Some(7));
         assert!(protocol.ensure_ready().is_err());
         Ok(())
+    }
+
+    #[test]
+    fn should_report_recovery_required_when_protocol_is_fenced_by_a_local_failure() {
+        // Arrange
+        let mut protocol = WalTransitionProtocol::new();
+        protocol.fence("seal accounting drifted", Some(7), false);
+
+        // Act
+        let result = protocol.ensure_ready();
+
+        // Assert
+        assert!(
+            matches!(&result, Err(MidgeError::RecoveryFailed(message)) if message.contains("sealed segment 7")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn should_keep_reporting_fenced_when_authority_was_lost_before_a_local_failure() {
+        // Arrange
+        let mut protocol = WalTransitionProtocol::new();
+        protocol.fence("writer epoch is stale", None, true);
+        protocol.fence("seal accounting drifted", None, false);
+
+        // Act
+        let result = protocol.ensure_ready();
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::Fenced(_))), "{result:?}");
     }
 
     #[test]
@@ -515,9 +579,11 @@ mod tests {
         let wrong_seal = protocol.finish_seal(WalSealTicket::for_test(4, 6, 12), receipt(4, 6, 12));
 
         // Assert
-        assert!(matches!(wrong_sync, Err(MidgeError::Fenced(_))));
-        assert!(matches!(overlapping_seal, Err(MidgeError::Fenced(_))));
-        assert!(matches!(wrong_seal, Err(MidgeError::Fenced(_))));
+        // Out-of-order commits are local invariant defects, not authority
+        // loss (#537).
+        assert!(matches!(wrong_sync, Err(MidgeError::Internal(_))));
+        assert!(matches!(overlapping_seal, Err(MidgeError::Internal(_))));
+        assert!(matches!(wrong_seal, Err(MidgeError::Internal(_))));
         assert!(protocol.ensure_ready().is_err());
         Ok(())
     }
@@ -548,13 +614,13 @@ mod tests {
         // Arrange
         let mut protocol = WalTransitionProtocol::new();
         let ticket = protocol.begin_sync(9)?;
-        protocol.fence("fsync failed", None);
+        protocol.fence("fsync failed", None, false);
 
         // Act
         let result = protocol.finish_sync(ticket);
 
-        // Assert
-        assert!(matches!(result, Err(MidgeError::Fenced(_))));
+        // Assert: the commit reports the fence's local cause (#537).
+        assert!(matches!(result, Err(MidgeError::RecoveryFailed(_))));
         assert!(protocol.is_fenced());
         Ok(())
     }
@@ -580,9 +646,9 @@ mod tests {
         let stale_ack = protocol.note_acknowledged(3);
 
         // Assert
-        assert!(matches!(early_retire, Err(MidgeError::Fenced(_))));
+        assert!(matches!(early_retire, Err(MidgeError::Internal(_))));
         assert!(!protocol.segment_is_tracked(3));
-        assert!(matches!(stale_ack, Err(MidgeError::Fenced(_))));
+        assert!(matches!(stale_ack, Err(MidgeError::Internal(_))));
         protocol.ensure_ready()
     }
 }

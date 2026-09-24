@@ -210,7 +210,7 @@ impl EventLoop {
         self.wal_transition.ensure_ready()?;
         if self.wal_actor.is_cloud_async() && sealed_generation != self.state.wal.current_segment_id
         {
-            let error = crate::common::MidgeError::Fenced(format!(
+            let error = crate::common::MidgeError::Internal(format!(
                 "cloud WAL generation drift: coordinator {sealed_generation}, active segment {}",
                 self.state.wal.current_segment_id
             ));
@@ -623,7 +623,7 @@ mod tests {
             event_loop
                 .sync_wal_generation(CompletionSource::WalSync)
                 .expect_err("fenced WAL must reject a later sync"),
-            crate::common::MidgeError::Fenced(_)
+            crate::common::MidgeError::RecoveryFailed(_)
         ));
     }
 
@@ -858,7 +858,7 @@ mod tests {
                     ));
                     assert!(matches!(
                         event_loop.sync_wal_generation(CompletionSource::WalSync),
-                        Err(crate::common::MidgeError::Fenced(_))
+                        Err(crate::common::MidgeError::RecoveryFailed(_))
                     ));
                 }
             }
@@ -986,6 +986,50 @@ mod tests {
         assert_eq!(event_loop.durability.current_key(), 1);
         assert!(!event_loop.state.persistence_anomaly_detected());
         assert!(!event_loop.durability.has_pending_waiters());
+    }
+
+    #[test]
+    fn should_report_recovery_required_when_cloud_wal_generation_drifts() {
+        // Arrange: a local bookkeeping drift, not a lost lease (#537).
+        let mut event_loop = super::super::tests::create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )
+        .expect("create cloud event loop");
+        event_loop.state.wal.current_segment_id += 1;
+
+        // Act
+        let drift = event_loop
+            .sync_wal_generation(CompletionSource::WalSync)
+            .expect_err("generation drift must fail the sync");
+        let next_write = event_loop.wal_actor.append(
+            &mut event_loop.state,
+            crate::runtime::actors::wal::AppendParams {
+                request_id: 1,
+                cf_id: 0,
+                key: bytes::Bytes::from_static(b"after-drift"),
+                value: Some(bytes::Bytes::from_static(b"value")),
+                insert_only: false,
+                ttl_seconds: None,
+            },
+        );
+        let next_sync = event_loop.wal_transition.ensure_ready();
+
+        // Assert
+        assert!(
+            matches!(drift, crate::common::MidgeError::Internal(_)),
+            "{drift:?}"
+        );
+        assert!(
+            matches!(
+                next_write,
+                Err(crate::common::MidgeError::RecoveryFailed(_))
+            ),
+            "{next_write:?}"
+        );
+        assert!(
+            matches!(next_sync, Err(crate::common::MidgeError::RecoveryFailed(_))),
+            "{next_sync:?}"
+        );
     }
 
     #[test]

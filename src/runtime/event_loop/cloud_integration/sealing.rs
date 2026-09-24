@@ -87,7 +87,7 @@ impl EventLoop {
                 }
             };
         if max_sequence != expected_max_sequence {
-            let error = crate::common::MidgeError::Fenced(format!(
+            let error = crate::common::MidgeError::Internal(format!(
                 "cloud WAL accounting changed during seal: expected max sequence {expected_max_sequence}, flushed {max_sequence}"
             ));
             self.fence_wal_transition(&error, None);
