@@ -490,13 +490,12 @@ pub type RangeReadCallback = std::sync::mpsc::Sender<Result<Vec<u8>, StorageErro
 ///   version is already gone, so no other version can be deleted instead.
 /// - Completion events carry the caller's key, never a provider or
 ///   namespaced key.
-/// - `submit_head` and `submit_read_with_metadata` report a strong identity
-///   that changes whenever the content does, because it guards
-///   compare-and-swap on mutable objects. `submit_range_head` may report a
-///   cheaper version identity that is only valid for immutable objects; the
-///   local filesystem uses file metadata there and a content hash for HEAD,
-///   since a reused inode within one timestamp tick could otherwise repeat an
-///   old identity for new content.
+/// - Every identity a backend reports changes whenever the object is
+///   replaced, because identities guard compare-and-swap on mutable control
+///   objects. `submit_range_head` may use a cheaper identity than
+///   `submit_head`: the local filesystem uses file metadata there and a
+///   content hash for HEAD, and stamps each new version with a later modified
+///   time so a reused inode cannot repeat an old identity (#557).
 pub trait StorageBackend: Send + Sync + 'static {
     /// Keep a publication allowance alive until backend completion. Async
     /// adapters must override this if their ordinary callback can time out
