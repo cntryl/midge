@@ -692,12 +692,12 @@ impl EventLoop {
         let mut proofs = std::mem::take(&mut self.state.wal.local_segment_proofs);
         let outcome = self.retire_sealed_local_wal(&sealed_segments, flushed_floor, &mut proofs);
         // Forget proofs for segments that are gone.
-        proofs.retain(|segment_id, _| {
-            sealed_segments
-                .iter()
-                .any(|(sealed, _)| sealed == segment_id)
-                && !outcome.removed.contains(segment_id)
-        });
+        let listed: std::collections::HashSet<u64> = sealed_segments
+            .iter()
+            .map(|(segment_id, _)| *segment_id)
+            .collect();
+        let removed: std::collections::HashSet<u64> = outcome.removed.iter().copied().collect();
+        proofs.retain(|segment_id, _| listed.contains(segment_id) && !removed.contains(segment_id));
         self.state.wal.local_segment_proofs = proofs;
         if outcome.anomaly {
             self.state.mark_persistence_anomaly();
@@ -733,16 +733,23 @@ impl EventLoop {
             crate::runtime::hybrid_persistence::FailedWalProof,
         >,
     ) -> LocalWalPruneOutcome {
-        use crate::runtime::hybrid_persistence::{FailedWalProof, VerifiedManifestWalCoverage};
+        use crate::runtime::hybrid_persistence::{
+            coverage_fingerprint, FailedWalProof, VerifiedManifestWalCoverage,
+        };
         let mut outcome = LocalWalPruneOutcome::default();
         // One prover per pass, built only if a proof is needed, so each
         // covering SST is opened and verified once per pass.
         let coverage = std::cell::OnceCell::new();
+        // Each family's fingerprint once per pass, however many segments ask.
+        let mut fingerprints = std::collections::HashMap::new();
+        let mut fingerprint_of = |cf_id: u32| {
+            *fingerprints
+                .entry(cf_id)
+                .or_insert_with(|| coverage_fingerprint(&self.state.manifest, cf_id))
+        };
         for (segment_id, path) in sealed_segments {
             let segment_id = *segment_id;
-            if let Err(error) = self.validate_runtime_lease_for_wal_prune() {
-                tracing::warn!(segment_id, %error, "stopped local WAL pruning after lease validation failed");
-                outcome.lease_lost = true;
+            if outcome.lease_lost {
                 return outcome;
             }
             if flushed_floor.is_some_and(|floor| segment_id < floor) {
@@ -751,7 +758,7 @@ impl EventLoop {
             }
             if proofs
                 .get(&segment_id)
-                .is_some_and(|proof| proof.still_fails(&self.state.manifest))
+                .is_some_and(|proof| proof.still_fails(&mut fingerprint_of))
             {
                 continue;
             }
@@ -787,17 +794,23 @@ impl EventLoop {
                         &mut outcome,
                     );
                 }
-                Some(reason) => {
-                    proofs.insert(
-                        segment_id,
-                        FailedWalProof::new(reason, &self.state.manifest),
-                    );
-                }
+                Some(reason) => match FailedWalProof::remember(reason, &mut fingerprint_of) {
+                    Some(proof) => {
+                        proofs.insert(segment_id, proof);
+                    }
+                    // Unverifiable: prove it again next pass.
+                    None => {
+                        proofs.remove(&segment_id);
+                    }
+                },
             }
         }
         outcome
     }
 
+    /// Removes one sealed segment. Every removal is preceded by a fresh
+    /// writer-lease check, so a fenced writer stops deleting at once. Reads
+    /// and skipped segments mutate nothing and need no check.
     fn remove_local_wal_segment(
         &self,
         segment_id: u64,
@@ -805,6 +818,11 @@ impl EventLoop {
         why: &'static str,
         outcome: &mut LocalWalPruneOutcome,
     ) {
+        if let Err(error) = self.validate_runtime_lease_for_wal_prune() {
+            tracing::warn!(segment_id, %error, "stopped local WAL pruning after lease validation failed");
+            outcome.lease_lost = true;
+            return;
+        }
         match self.state.fs.remove_file(path) {
             Ok(()) => {
                 tracing::debug!(segment_id, why, "removed local WAL segment");
@@ -1434,6 +1452,83 @@ mod tests {
         }
     }
 
+    /// Answers the first `valid_reads` leader reads, then reports the lease
+    /// taken by another holder.
+    struct ExpiringLeaderStore {
+        epoch: u64,
+        valid_reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl crate::lease::LeaderStore for ExpiringLeaderStore {
+        fn acquire_leadership(
+            &self,
+            _holder_id: &str,
+        ) -> Result<crate::lease::LeaderRecord, crate::lease::LeaseError> {
+            Err(crate::lease::LeaseError::Internal("not used".into()))
+        }
+
+        fn read_current(
+            &self,
+        ) -> Result<Option<crate::lease::LeaderRecord>, crate::lease::LeaseError> {
+            let remaining = self.valid_reads.load(std::sync::atomic::Ordering::SeqCst);
+            let holder = if remaining == 0 {
+                "successor"
+            } else {
+                self.valid_reads
+                    .store(remaining - 1, std::sync::atomic::Ordering::SeqCst);
+                "writer"
+            };
+            Ok(Some(crate::lease::LeaderRecord {
+                epoch: self.epoch,
+                holder_id: holder.to_string(),
+                acquired_at: "test".to_string(),
+            }))
+        }
+    }
+
+    #[test]
+    fn should_stop_removing_local_wal_when_lease_is_lost_during_prune(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange: three flushed sealed segments, and a lease that stays
+        // valid for the pass preamble and one removal only.
+        let directory = tempfile::tempdir()?;
+        let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
+        let router = Arc::new(crate::runtime::ResponseRouter::new());
+        let mut event_loop = EventLoop::new(
+            state,
+            false,
+            router,
+            crate::runtime::RuntimeConfig::default(),
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
+        )?;
+        let wal_dir = event_loop.state.wal_dir.clone();
+        for segment_id in 1..=3 {
+            std::fs::write(
+                wal_dir.join(crate::wal::segment_file_name(segment_id)),
+                b"x",
+            )?;
+        }
+        event_loop.state.wal.current_segment_id = 4;
+        event_loop.fencing.leader_store = Some(Arc::new(ExpiringLeaderStore {
+            epoch: event_loop.fencing.writer_epoch,
+            valid_reads: std::sync::atomic::AtomicUsize::new(2),
+        }));
+        event_loop.fencing.leader_holder_id = Some("writer".to_string());
+
+        // Act
+        event_loop.prune_local_wal_segments_covered_by_manifest();
+
+        // Assert: the first removal ran under a valid lease; after the loss
+        // nothing else is deleted.
+        let exists = |segment_id| {
+            wal_dir
+                .join(crate::wal::segment_file_name(segment_id))
+                .exists()
+        };
+        assert_eq!((exists(1), exists(2), exists(3)), (false, true, true));
+        Ok(())
+    }
+
     #[test]
     fn should_retry_flush_publication_when_completion_validation_fails_transiently(
     ) -> crate::common::MidgeResult<()> {
@@ -1913,6 +2008,74 @@ mod tests {
         // Assert
         assert!(event_loop.state.persistence_anomaly_detected());
         assert!(wal_dir.join(crate::wal::segment_file_name(2)).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn should_reprove_wal_segment_when_its_covering_sst_could_not_be_read(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange: the manifest lists an SST covering the record, but it
+        // cannot be read. That says nothing about coverage, so the failed
+        // proof must not be remembered.
+        let directory = tempfile::tempdir()?;
+        let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
+        let router = Arc::new(crate::runtime::ResponseRouter::new());
+        let mut event_loop = EventLoop::new(
+            state,
+            false,
+            router,
+            crate::runtime::RuntimeConfig::default(),
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
+        )?;
+        let record = crate::wal::WalRecord::new(
+            crate::wal::WalOpKind::Put,
+            bytes::Bytes::from_static(b"key"),
+            Some(bytes::Bytes::from_static(b"value")),
+            5,
+            1,
+        );
+        let mut frame = Vec::new();
+        crate::wal::frame::append_frame(&mut frame, &crate::wal::encoding::encode(&record)?)?;
+        std::fs::write(
+            event_loop
+                .state
+                .wal_dir
+                .join(crate::wal::segment_file_name(1)),
+            frame,
+        )?;
+        event_loop
+            .state
+            .manifest
+            .add_file(crate::metadata::FileMeta {
+                name: crate::cloud_layout::file_name(0, 0, 9),
+                cf_id: 0,
+                size_bytes: 1,
+                content_crc32c: Some(1),
+                smallest_seq: Some(1),
+                largest_seq: Some(10),
+                smallest_key: Some(b"a".to_vec()),
+                largest_key: Some(b"z".to_vec()),
+                key_bounds_complete: true,
+                ..Default::default()
+            });
+        event_loop.state.wal.current_segment_id = 2;
+        let cf = event_loop.state.get_cf_mut(0).expect("default family");
+        cf.memtable
+            .put_with_seq(b"unflushed".to_vec(), b"value".to_vec(), 6, None)?;
+        cf.active_memtable_started_in_segment = 1;
+        RUNTIME_FILE_READS.with(|reads| reads.set(0));
+
+        // Act
+        event_loop.prune_local_wal_segments_covered_by_manifest();
+        event_loop.prune_local_wal_segments_covered_by_manifest();
+
+        // Assert: re-read on the second pass, and retained.
+        assert_eq!(RUNTIME_FILE_READS.with(std::cell::Cell::get), 2);
+        assert!(event_loop
+            .state
+            .wal_dir
+            .join(crate::wal::segment_file_name(1))
+            .exists());
         Ok(())
     }
 

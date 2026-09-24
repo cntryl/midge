@@ -671,6 +671,10 @@ impl EventLoop {
         if sst_seq < reserved_through {
             return Ok(());
         }
+        // The mirror below publishes local metadata files; never publish
+        // them while memory is known to be behind disk (#500). Reload first,
+        // so the counter read next is the reloaded one.
+        self.state.retry_metadata_reload()?;
         let durable_next = self
             .state
             .manifest
@@ -678,9 +682,6 @@ impl EventLoop {
             .get(&cf_id)
             .copied()
             .unwrap_or(1);
-        // The mirror below publishes local metadata files; never publish
-        // them while memory is known to be behind disk (#500).
-        self.state.retry_metadata_reload()?;
         // Never lower the counter: the edit replays as a max, and memory must
         // match what the journal replays.
         let next_seq = sst_seq

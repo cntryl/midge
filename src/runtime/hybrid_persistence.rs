@@ -919,6 +919,10 @@ pub(crate) enum UncoveredWal {
     /// is depends only on that family's manifest files (`file_covers_record`
     /// matches on `cf_id`), so only a change to them can cover it.
     MissingFrom(u32),
+    /// An SST the proof needed could not be read or verified. This may be
+    /// transient and says nothing about coverage, so it must not be
+    /// remembered as a failed proof.
+    Unverifiable,
 }
 
 /// Fingerprint of the manifest metadata that decides whether a record of
@@ -951,25 +955,30 @@ pub(crate) struct FailedWalProof {
 }
 
 impl FailedWalProof {
-    pub(crate) fn new(reason: UncoveredWal, manifest: &Manifest) -> Self {
+    /// The proof to remember for `reason`, or `None` when the failure must
+    /// not be remembered (`Unverifiable`).
+    pub(crate) fn remember(
+        reason: UncoveredWal,
+        fingerprint_of: &mut impl FnMut(u32) -> u64,
+    ) -> Option<Self> {
         let fingerprint = match reason {
             UncoveredWal::Unprovable => None,
-            UncoveredWal::MissingFrom(cf_id) => Some(coverage_fingerprint(manifest, cf_id)),
+            UncoveredWal::MissingFrom(cf_id) => Some(fingerprint_of(cf_id)),
+            UncoveredWal::Unverifiable => return None,
         };
-        Self {
+        Some(Self {
             reason,
             fingerprint,
-        }
+        })
     }
 
     /// Whether repeating the proof must fail again. Skipping it only retains
     /// the segment longer; nothing is removed on this answer.
-    pub(crate) fn still_fails(&self, manifest: &Manifest) -> bool {
+    pub(crate) fn still_fails(&self, fingerprint_of: &mut impl FnMut(u32) -> u64) -> bool {
         match self.reason {
             UncoveredWal::Unprovable => true,
-            UncoveredWal::MissingFrom(cf_id) => {
-                self.fingerprint == Some(coverage_fingerprint(manifest, cf_id))
-            }
+            UncoveredWal::MissingFrom(cf_id) => self.fingerprint == Some(fingerprint_of(cf_id)),
+            UncoveredWal::Unverifiable => false,
         }
     }
 }
@@ -1025,22 +1034,24 @@ impl<'a> VerifiedManifestWalCoverage<'a> {
         }
         records
             .iter()
-            .find(|record| !self.exactly_covers_value_write(record))
-            .map(|record| UncoveredWal::MissingFrom(record.cf_id))
+            .find_map(|record| self.value_write_gap(record))
     }
 
-    fn exactly_covers_value_write(&self, record: &DataCoverageRecord) -> bool {
+    /// `None` when `record` is exactly in its family's SSTs.
+    fn value_write_gap(&self, record: &DataCoverageRecord) -> Option<UncoveredWal> {
         let mut state = ExactCoverageState::default();
         for file in &self.manifest.files {
             if !file_covers_record(file, record) {
                 continue;
             }
             let Some(observed) = self.state_for(file, &record.key) else {
-                return false;
+                // The SST could not be read, sized, checksummed or queried:
+                // nothing is known about coverage.
+                return Some(UncoveredWal::Unverifiable);
             };
             state.observe(observed);
         }
-        state.exactly_covers(record)
+        (!state.exactly_covers(record)).then_some(UncoveredWal::MissingFrom(record.cf_id))
     }
 
     pub(crate) fn contains_wal_record(
