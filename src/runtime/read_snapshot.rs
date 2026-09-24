@@ -71,6 +71,15 @@ struct SstLevelStateIterator {
     reverse: bool,
     sequence: u64,
     pending: Option<MidgeResult<(bytes::Bytes, KeyState)>>,
+    /// Range tombstones of files opened since the scan last collected them.
+    /// A file's tombstones join the scan when the cursor opens it, not up
+    /// front: bounds of ordered files include their tombstone extents, and
+    /// the cursor opens files in key order, so every file whose tombstone can
+    /// cover a key has been opened before that key is merged (#390).
+    opened_tombstones: Vec<RangeTombstone>,
+    /// False for fallback files, whose untrusted bounds force their
+    /// tombstones to be collected up front instead.
+    collect_tombstones: bool,
 }
 
 impl SstLevelStateIterator {
@@ -94,7 +103,15 @@ impl SstLevelStateIterator {
             reverse,
             sequence,
             pending: None,
+            opened_tombstones: Vec::new(),
+            collect_tombstones: true,
         }
+    }
+
+    /// For a file whose tombstones the scan already collected up front.
+    fn without_tombstone_collection(mut self) -> Self {
+        self.collect_tombstones = false;
+        self
     }
 
     fn next_raw(&mut self) -> Option<MidgeResult<(bytes::Bytes, KeyState)>> {
@@ -116,6 +133,26 @@ impl SstLevelStateIterator {
                 Ok(reader) => reader,
                 Err(error) => return Some(Err(error)),
             };
+            let tombstones = if self.collect_tombstones {
+                reader.range_tombstones()
+            } else {
+                Vec::new()
+            };
+            for tombstone in tombstones {
+                self.snapshot
+                    .diagnostics
+                    .sst_metrics()
+                    .record_range_tombstone_scan();
+                if tombstone.visible_at(self.sequence)
+                    && ReadSnapshot::range_tombstone_overlaps_query(
+                        &tombstone,
+                        self.start.as_deref(),
+                        self.end.as_deref(),
+                    )
+                {
+                    self.opened_tombstones.push(tombstone);
+                }
+            }
             self.current = Some(reader.state_scan(
                 self.start.clone(),
                 self.end.clone(),
@@ -176,6 +213,14 @@ impl SnapshotStateSource {
         if self.needs_advance {
             self.head = self.iterator.next();
             self.needs_advance = false;
+        }
+    }
+
+    /// Moves tombstones of level files opened while computing heads into
+    /// `into`; see `SstLevelStateIterator::opened_tombstones`.
+    fn drain_opened_tombstones(&mut self, into: &mut Vec<RangeTombstone>) {
+        if let SnapshotStateIterator::SstLevel(level) = &mut self.iterator {
+            into.append(&mut level.opened_tombstones);
         }
     }
 
@@ -308,9 +353,9 @@ impl SnapshotScan {
         start: Option<&[u8]>,
         end: Option<&[u8]>,
     ) -> MidgeResult<()> {
-        for file_meta in &candidates.ordered {
-            let _reader = self.append_reader_tombstones(file_meta, start, end)?;
-        }
+        // Ordered files' tombstones are collected as the level cursor opens
+        // them (see `SstLevelStateIterator::opened_tombstones`), so a limited
+        // scan opens only the files it reaches (#390).
         if !candidates.ordered.is_empty() {
             self.sources
                 .push(SnapshotStateSource::new(SnapshotStateIterator::SstLevel(
@@ -345,14 +390,17 @@ impl SnapshotScan {
             let _reader = self.append_reader_tombstones(&file_meta, start, end)?;
             self.sources
                 .push(SnapshotStateSource::new(SnapshotStateIterator::SstLevel(
-                    Box::new(SstLevelStateIterator::new(
-                        Arc::clone(&self.snapshot),
-                        vec![file_meta],
-                        self.start.clone(),
-                        self.end.clone(),
-                        self.reverse,
-                        self.sequence,
-                    )),
+                    Box::new(
+                        SstLevelStateIterator::new(
+                            Arc::clone(&self.snapshot),
+                            vec![file_meta],
+                            self.start.clone(),
+                            self.end.clone(),
+                            self.reverse,
+                            self.sequence,
+                        )
+                        .without_tombstone_collection(),
+                    ),
                 )));
         }
         Ok(())
@@ -455,6 +503,12 @@ impl SnapshotScan {
         loop {
             for source in &mut self.sources {
                 source.advance_if_needed();
+                // Every head is now computed, so every level file that can
+                // cover the next key has been opened; collect its tombstones
+                // before any key is checked against them. (The level cursor
+                // also reads one entry ahead, which opens files a round early;
+                // draining here does not rely on that.)
+                source.drain_opened_tombstones(&mut self.range_tombstones);
             }
             if let Some(error) = self.take_source_error() {
                 return Err(error);
