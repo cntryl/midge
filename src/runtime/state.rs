@@ -134,9 +134,10 @@ pub struct WalState {
     pub local_durable_seq: u64,
     /// Cloud durability frontier - highest sequence number confirmed by cloud
     pub cloud_durable_seq: u64,
-    /// What prune has learned about each retained sealed local WAL segment.
-    /// In memory only; an empty map just means re-reading (#490, #550).
-    pub(crate) local_segments: HashMap<u64, crate::runtime::hybrid_persistence::LocalSegmentFacts>,
+    /// Why each retained sealed local WAL segment last failed its coverage
+    /// proof. In memory only; an empty map just means re-proving (#490).
+    pub(crate) local_segment_proofs:
+        HashMap<u64, crate::runtime::hybrid_persistence::FailedWalProof>,
 }
 
 impl Default for WalState {
@@ -147,7 +148,7 @@ impl Default for WalState {
             pending_writes: 0,
             local_durable_seq: 0,
             cloud_durable_seq: 0,
-            local_segments: HashMap::new(),
+            local_segment_proofs: HashMap::new(),
         }
     }
 }
@@ -183,7 +184,8 @@ pub struct SnapshotState {
 pub(crate) enum FlushReason {
     PendingImmutable,
     SizeThreshold,
-    CloudSegmentGap,
+    /// An active memtable started too many WAL segments ago.
+    WalSegmentGap,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -341,7 +343,7 @@ pub struct RuntimeState {
     /// Maximum size of any memtable before write stall
     pub memtable_flush_threshold: usize,
     /// Cloud-only runtime heuristic: flush active memtables after enough WAL segment churn.
-    pub cloud_eventual_flush_segment_gap: u64,
+    pub eventual_flush_segment_gap: u64,
     pub write_pressure: WritePressureState,
     /// Total size of all memtables (in-memory)
     pub total_memtable_bytes: usize,

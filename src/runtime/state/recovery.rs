@@ -173,7 +173,7 @@ impl RuntimeState {
             },
             intent_log,
             memtable_flush_threshold: 64 * 1024 * 1024, // 64MB
-            cloud_eventual_flush_segment_gap: crate::runtime::CloudRuntimePolicy::default()
+            eventual_flush_segment_gap: crate::runtime::CloudRuntimePolicy::default()
                 .eventual_flush_segment_gap,
             max_immutable_memtables: 10, // Hard limit on immutable memtable queue
             l0_compaction_trigger: crate::compaction::LeveledCompactionConfig::default()
