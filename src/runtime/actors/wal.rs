@@ -994,12 +994,13 @@ impl WalActor {
                     a_start.elapsed(),
                 );
                 self.record_segment_sequence(sequence);
+                state.wal.appended_bytes =
+                    state.wal.appended_bytes.saturating_add(record_size as u64);
             }
         }
 
         // Update state tracking
         state.wal.pending_writes += 1;
-        state.wal.appended_bytes = state.wal.appended_bytes.saturating_add(record_size as u64);
         self.pending_sync_count += 1;
         self.bytes_since_sync += record_size;
 

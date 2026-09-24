@@ -3413,8 +3413,9 @@ mod local_wal_retention {
         let retained = sealed_segments(temp.path());
         engine.shutdown(Duration::from_secs(10)).expect("shutdown");
 
-        // Assert: the idle family is flushed once it pins the byte bound, so
-        // retention stays bounded instead of growing with every flush.
+        // Assert: covered puts retire through their per-record proofs even
+        // while the idle family pins the floor; the deletes test below is
+        // the one that needs the byte-bound flush.
         assert!(
             retained <= RETENTION_BOUND,
             "{retained} sealed segments retained after 20 covered flushes"
