@@ -176,33 +176,44 @@ fn run_provider_contract_body(label: &str, provider: &CloudProviderConfig) {
 
     verify_metadata_proof_conditions(&backend, &conditional_key, &missing_key);
 
-    assert!(
-        matches!(get(&backend, &missing_key), Err(CloudError::NotFound(_))),
-        "{label}: missing object GET should be NotFound"
-    );
-    assert!(
-        matches!(head(&backend, &missing_key), Err(CloudError::NotFound(_))),
-        "{label}: missing object HEAD should be NotFound"
-    );
-    assert!(
-        matches!(
-            put(
-                &backend,
-                &missing_key,
-                b"never".to_vec(),
-                conditional_head_headers(&backend, &conditional_key),
-            ),
-            Err(CloudError::PreconditionFailed(_))
-        ),
-        "{label}: conditional update of a missing object should be PreconditionFailed"
-    );
-    delete(&backend, &missing_key).expect("DELETE of a missing object succeeds");
+    verify_missing_object_contract(label, &backend, &conditional_key, &missing_key);
 
     delete(&backend, &key).expect("DELETE");
     assert!(
         matches!(get(&backend, &key), Err(CloudError::NotFound(_))),
         "{label}: deleted object should be NotFound"
     );
+}
+
+/// A missing object reads as `NotFound`, a conditional update of it loses
+/// the precondition, and deleting it succeeds, on every provider (#373).
+fn verify_missing_object_contract(
+    label: &str,
+    backend: &CloudStorage,
+    conditional_key: &str,
+    missing_key: &str,
+) {
+    assert!(
+        matches!(get(backend, missing_key), Err(CloudError::NotFound(_))),
+        "{label}: missing object GET should be NotFound"
+    );
+    assert!(
+        matches!(head(backend, missing_key), Err(CloudError::NotFound(_))),
+        "{label}: missing object HEAD should be NotFound"
+    );
+    assert!(
+        matches!(
+            put(
+                backend,
+                missing_key,
+                b"never".to_vec(),
+                conditional_head_headers(backend, conditional_key),
+            ),
+            Err(CloudError::PreconditionFailed(_))
+        ),
+        "{label}: conditional update of a missing object should be PreconditionFailed"
+    );
+    delete(backend, missing_key).expect("DELETE of a missing object succeeds");
 }
 
 fn verify_metadata_proof_conditions(

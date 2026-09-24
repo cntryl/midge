@@ -102,7 +102,10 @@ fn should_echo_caller_key_when_completing_operations_through_every_storage_backe
 
         // Act
         let keys = [
-            ("write", run(&|tx| backend.submit_write(key, b"value".to_vec(), tx))),
+            (
+                "write",
+                run(&|tx| backend.submit_write(key, b"value".to_vec(), tx)),
+            ),
             ("head", run(&|tx| backend.submit_head(key, tx))),
             ("delete", run(&|tx| backend.submit_delete(key, tx))),
         ];

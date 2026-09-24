@@ -426,7 +426,7 @@ fn should_return_every_page_when_listing_across_two_pages_on_every_provider() {
         // Act
         backend.submit_list("p/", tx);
         let event = rx.recv_timeout(RESPONSE_WAIT).expect("list callback");
-        let served = server.finish();
+        let pages_served = server.finish();
 
         // Assert
         let CloudEvent::List { result, .. } = event else {
@@ -435,6 +435,10 @@ fn should_return_every_page_when_listing_across_two_pages_on_every_provider() {
         let mut keys = result.unwrap_or_else(|error| panic!("{}: {error:?}", provider.name));
         keys.sort();
         assert_eq!(keys, ["p/a", "p/b"], "{}", provider.name);
-        assert_eq!(served, 2, "{}: both pages must be requested", provider.name);
+        assert_eq!(
+            pages_served, 2,
+            "{}: both pages must be requested",
+            provider.name
+        );
     }
 }
