@@ -47,6 +47,8 @@
 pub mod azure;
 #[cfg(feature = "cloud-azure")]
 mod azure_resolver;
+#[cfg(all(test, feature = "cloud-all"))]
+mod contract_tests;
 #[cfg(feature = "cloud-common")]
 mod factory;
 #[cfg(feature = "cloud-gcp")]

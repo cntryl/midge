@@ -704,14 +704,10 @@ impl StorageBackend for FileSystem {
             }
         };
 
+        // Deleting an absent object succeeds, as on every cloud provider.
         let outcome = match fs::remove_file(&full_path) {
             Ok(()) => StorageOutcome::Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                StorageOutcome::Err(crate::storage::StorageError::not_found(format!(
-                    "delete {}: {e}",
-                    full_path.display()
-                )))
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => StorageOutcome::Ok(()),
             Err(e) => StorageOutcome::Err(format!("delete {}: {e}", full_path.display()).into()),
         };
 
@@ -769,6 +765,9 @@ impl StorageBackend for FileSystem {
                     if current == expected.trim_matches('"') {
                         match fs::remove_file(&full_path) {
                             Ok(()) => StorageOutcome::Ok(()),
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                                StorageOutcome::Ok(())
+                            }
                             Err(error) => StorageOutcome::Err(
                                 format!("delete {}: {error}", full_path.display()).into(),
                             ),
@@ -779,6 +778,9 @@ impl StorageBackend for FileSystem {
                         ))
                     }
                 }
+                // The targeted version is already gone, so no other version
+                // can be deleted by mistake.
+                Err(error) if error.is_not_found() => StorageOutcome::Ok(()),
                 Err(error) => StorageOutcome::Err(crate::storage::StorageError::new(
                     error.kind(),
                     format!("read {}: {error}", full_path.display()),
@@ -1295,7 +1297,7 @@ mod tests {
     }
 
     #[test]
-    fn should_fail_deleting_nonexistent_file() {
+    fn should_report_success_when_deleting_nonexistent_file() {
         // Arrange
         let temp_dir = TempDir::new().unwrap();
         let fs = FileSystem::new(temp_dir.path()).unwrap();
@@ -1308,7 +1310,7 @@ mod tests {
         // Assert
         match event {
             StorageEvent::DeleteComplete { result, .. } => {
-                assert!(result.is_err());
+                assert!(result.is_ok(), "an absent object is already deleted (#514)");
             }
             _ => panic!("Expected DeleteComplete"),
         }

@@ -8,7 +8,7 @@
 use super::build_cloud_storage;
 use crate::config::CloudProviderConfig;
 use crate::config::{CloudPreflightOptions, CloudStorageLocation};
-use crate::storage::cloud::{CloudEvent, CloudOutcome, CloudStorage, ObjectMetadata};
+use crate::storage::cloud::{CloudError, CloudEvent, CloudOutcome, CloudStorage, ObjectMetadata};
 use std::fmt::Write as _;
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
@@ -128,8 +128,8 @@ fn run_provider_contract_body(label: &str, provider: &CloudProviderConfig) {
     assert_eq!(head(&backend, &empty_key).expect("empty HEAD").size, 0);
     delete(&backend, &empty_key).expect("empty DELETE");
     assert!(
-        get(&backend, &empty_key).is_err(),
-        "deleted empty object should be missing"
+        matches!(get(&backend, &empty_key), Err(CloudError::NotFound(_))),
+        "{label}: deleted empty object should be NotFound"
     );
 
     put(&backend, &overwrite_key, b"first".to_vec(), vec![]).expect("initial overwrite PUT");
@@ -141,14 +141,16 @@ fn run_provider_contract_body(label: &str, provider: &CloudProviderConfig) {
 
     put(&backend, &conditional_key, b"created".to_vec(), vec![]).expect("conditional seed");
     assert!(
-        put(
-            &backend,
-            &conditional_key,
-            b"duplicate".to_vec(),
-            vec![("If-None-Match".to_string(), "*".to_string())],
-        )
-        .is_err(),
-        "conditional create should fail when object exists"
+        matches!(
+            put(
+                &backend,
+                &conditional_key,
+                b"duplicate".to_vec(),
+                vec![("If-None-Match".to_string(), "*".to_string())],
+            ),
+            Err(CloudError::PreconditionFailed(_))
+        ),
+        "{label}: conditional create on an existing object should be PreconditionFailed"
     );
     let conditional_head = head(&backend, &conditional_key).expect("conditional HEAD");
     assert!(
@@ -174,16 +176,44 @@ fn run_provider_contract_body(label: &str, provider: &CloudProviderConfig) {
 
     verify_metadata_proof_conditions(&backend, &conditional_key, &missing_key);
 
-    assert!(
-        get(&backend, &missing_key).is_err(),
-        "missing object GET should fail"
-    );
+    verify_missing_object_contract(label, &backend, &conditional_key, &missing_key);
 
     delete(&backend, &key).expect("DELETE");
     assert!(
-        get(&backend, &key).is_err(),
-        "deleted object should be missing"
+        matches!(get(&backend, &key), Err(CloudError::NotFound(_))),
+        "{label}: deleted object should be NotFound"
     );
+}
+
+/// A missing object reads as `NotFound`, a conditional update of it loses
+/// the precondition, and deleting it succeeds, on every provider (#373).
+fn verify_missing_object_contract(
+    label: &str,
+    backend: &CloudStorage,
+    conditional_key: &str,
+    missing_key: &str,
+) {
+    assert!(
+        matches!(get(backend, missing_key), Err(CloudError::NotFound(_))),
+        "{label}: missing object GET should be NotFound"
+    );
+    assert!(
+        matches!(head(backend, missing_key), Err(CloudError::NotFound(_))),
+        "{label}: missing object HEAD should be NotFound"
+    );
+    assert!(
+        matches!(
+            put(
+                backend,
+                missing_key,
+                b"never".to_vec(),
+                conditional_head_headers(backend, conditional_key),
+            ),
+            Err(CloudError::PreconditionFailed(_))
+        ),
+        "{label}: conditional update of a missing object should be PreconditionFailed"
+    );
+    delete(backend, missing_key).expect("DELETE of a missing object succeeds");
 }
 
 fn verify_metadata_proof_conditions(
@@ -204,13 +234,15 @@ fn verify_metadata_proof_conditions(
     put(backend, conditional_key, b"changed".to_vec(), vec![]).expect("same-length replacement");
     // A same-length replacement must invalidate both mutation forms, while
     // the proof continues to describe precisely the bytes originally read.
-    assert!(put(
-        backend,
-        conditional_key,
-        b"invalid".to_vec(),
-        stale_headers.clone()
-    )
-    .is_err());
+    assert!(matches!(
+        put(
+            backend,
+            conditional_key,
+            b"invalid".to_vec(),
+            stale_headers.clone()
+        ),
+        Err(CloudError::PreconditionFailed(_))
+    ));
     let (tx, rx) = std::sync::mpsc::channel();
     backend.submit_delete_with_headers(conditional_key, stale_headers, tx);
     assert!(matches!(
@@ -608,32 +640,46 @@ fn signed_azure_request(
     }
 }
 
+/// Precondition headers naming the current version of `key`.
+fn conditional_head_headers(backend: &CloudStorage, key: &str) -> Vec<(String, String)> {
+    let metadata = head(backend, key).expect("HEAD for a conditional identity");
+    crate::storage::cloud::object_match_precondition_headers(
+        &metadata.etag,
+        metadata.generation.as_deref(),
+    )
+    .expect("provider HEAD should provide a conditional identity token")
+}
+
 fn put(
     backend: &CloudStorage,
     key: &str,
     data: Vec<u8>,
     headers: Vec<(String, String)>,
-) -> Result<(), String> {
+) -> Result<(), CloudError> {
     let (tx, rx) = std::sync::mpsc::channel();
     backend.submit_put(key, data, headers, tx);
     match rx.recv_timeout(Duration::from_secs(30)) {
         Ok(CloudEvent::Put { result, .. }) => match result {
             CloudOutcome::Ok(()) => Ok(()),
-            CloudOutcome::Err(error) => Err(error.to_string()),
+            CloudOutcome::Err(error) => Err(error),
         },
-        other => Err(format!("unexpected PUT event: {other:?}")),
+        other => Err(CloudError::Protocol(format!(
+            "unexpected PUT event: {other:?}"
+        ))),
     }
 }
 
-fn get(backend: &CloudStorage, key: &str) -> Result<Vec<u8>, String> {
+fn get(backend: &CloudStorage, key: &str) -> Result<Vec<u8>, CloudError> {
     let (tx, rx) = std::sync::mpsc::channel();
     backend.submit_get(key, tx);
     match rx.recv_timeout(Duration::from_secs(30)) {
         Ok(CloudEvent::Get { result, .. }) => match result {
             CloudOutcome::Ok(data) => Ok(data),
-            CloudOutcome::Err(error) => Err(error.to_string()),
+            CloudOutcome::Err(error) => Err(error),
         },
-        other => Err(format!("unexpected GET event: {other:?}")),
+        other => Err(CloudError::Protocol(format!(
+            "unexpected GET event: {other:?}"
+        ))),
     }
 }
 
@@ -642,50 +688,58 @@ fn range(
     key: &str,
     start: u64,
     end: Option<u64>,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, CloudError> {
     let (tx, rx) = std::sync::mpsc::channel();
     backend.submit_get_range(key, start, end, tx);
     match rx.recv_timeout(Duration::from_secs(30)) {
         Ok(CloudEvent::GetRange { result, .. }) => match result {
             CloudOutcome::Ok(data) => Ok(data),
-            CloudOutcome::Err(error) => Err(error.to_string()),
+            CloudOutcome::Err(error) => Err(error),
         },
-        other => Err(format!("unexpected range event: {other:?}")),
+        other => Err(CloudError::Protocol(format!(
+            "unexpected range event: {other:?}"
+        ))),
     }
 }
 
-fn head(backend: &CloudStorage, key: &str) -> Result<ObjectMetadata, String> {
+fn head(backend: &CloudStorage, key: &str) -> Result<ObjectMetadata, CloudError> {
     let (tx, rx) = std::sync::mpsc::channel();
     backend.submit_head(key, tx);
     match rx.recv_timeout(Duration::from_secs(30)) {
         Ok(CloudEvent::Head { result, .. }) => match result {
             CloudOutcome::Ok(metadata) => Ok(metadata),
-            CloudOutcome::Err(error) => Err(error.to_string()),
+            CloudOutcome::Err(error) => Err(error),
         },
-        other => Err(format!("unexpected HEAD event: {other:?}")),
+        other => Err(CloudError::Protocol(format!(
+            "unexpected HEAD event: {other:?}"
+        ))),
     }
 }
 
-fn list(backend: &CloudStorage, prefix: &str) -> Result<Vec<String>, String> {
+fn list(backend: &CloudStorage, prefix: &str) -> Result<Vec<String>, CloudError> {
     let (tx, rx) = std::sync::mpsc::channel();
     backend.submit_list(prefix, tx);
     match rx.recv_timeout(Duration::from_secs(30)) {
         Ok(CloudEvent::List { result, .. }) => match result {
             CloudOutcome::Ok(keys) => Ok(keys),
-            CloudOutcome::Err(error) => Err(error.to_string()),
+            CloudOutcome::Err(error) => Err(error),
         },
-        other => Err(format!("unexpected LIST event: {other:?}")),
+        other => Err(CloudError::Protocol(format!(
+            "unexpected LIST event: {other:?}"
+        ))),
     }
 }
 
-fn delete(backend: &CloudStorage, key: &str) -> Result<(), String> {
+fn delete(backend: &CloudStorage, key: &str) -> Result<(), CloudError> {
     let (tx, rx) = std::sync::mpsc::channel();
     backend.submit_delete(key, tx);
     match rx.recv_timeout(Duration::from_secs(30)) {
         Ok(CloudEvent::Delete { result, .. }) => match result {
             CloudOutcome::Ok(()) => Ok(()),
-            CloudOutcome::Err(error) => Err(error.to_string()),
+            CloudOutcome::Err(error) => Err(error),
         },
-        other => Err(format!("unexpected DELETE event: {other:?}")),
+        other => Err(CloudError::Protocol(format!(
+            "unexpected DELETE event: {other:?}"
+        ))),
     }
 }

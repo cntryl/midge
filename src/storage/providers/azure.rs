@@ -724,6 +724,21 @@ struct AzureBackend {
     executor: CloudExecutor,
 }
 
+/// A path-style backend against a test HTTP endpoint, for the provider
+/// contract table.
+#[cfg(test)]
+pub(super) fn contract_test_backend(
+    endpoint: String,
+) -> std::sync::Arc<dyn crate::storage::cloud::CloudBackend> {
+    std::sync::Arc::new(AzureBackend::new(
+        "account".into(),
+        "container".into(),
+        Some(AzureEndpoint::PathStyleBase(endpoint)),
+        None,
+        CloudExecutor::new(None).expect("cloud executor"),
+    ))
+}
+
 impl AzureBackend {
     fn new(
         account_name: String,
@@ -887,11 +902,7 @@ impl CloudBackend for AzureBackend {
             },
             Ok(resp) => CloudEvent::Put {
                 key: ctx,
-                result: CloudOutcome::Err(azure_response_error(
-                    &resp,
-                    "Azure PUT",
-                    conditional_mutation,
-                )),
+                result: CloudOutcome::Err(azure_put_response_error(&resp, conditional_mutation)),
             },
             Err(err) => CloudEvent::Put {
                 key: ctx,
@@ -1197,6 +1208,31 @@ impl CloudBackend for AzureBackend {
             },
         };
         self.executor.spawn_request(request, key, callback, mapper);
+    }
+}
+
+/// A conditional PUT whose blob is missing did not commit, exactly like a
+/// stale version, so it reports a lost precondition on every provider (#373).
+/// Azure answers it with 404 `BlobNotFound`; a missing container stays
+/// `NotFound`.
+fn azure_put_response_error(response: &CloudResponse, conditional_mutation: bool) -> CloudError {
+    let missing_blob = response
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("x-ms-error-code"))
+        .map(|(_, value)| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            extract_xml_tag_values(&String::from_utf8_lossy(&response.body), "Code")
+                .into_iter()
+                .next()
+        })
+        .is_some_and(|code| code.eq_ignore_ascii_case("BlobNotFound"));
+    match azure_response_error(response, "Azure PUT", conditional_mutation) {
+        CloudError::NotFound(detail) if conditional_mutation && missing_blob => {
+            CloudError::PreconditionFailed(detail)
+        }
+        error => error,
     }
 }
 

@@ -483,6 +483,20 @@ pub type RangeReadCallback = std::sync::mpsc::Sender<Result<Vec<u8>, StorageErro
 /// - Deterministic runtime (events consumed in event loop)
 /// - No mutable references (works with Arc)
 /// - Ready for batching and pipelining
+///
+/// Behavior contract, the same for every implementation (#514; pinned by
+/// `backend_contract_tests`):
+/// - Deleting an absent object succeeds, conditional or not: the targeted
+///   version is already gone, so no other version can be deleted instead.
+/// - Completion events carry the caller's key, never a provider or
+///   namespaced key.
+/// - `submit_head` and `submit_read_with_metadata` report a strong identity
+///   that changes whenever the content does, because it guards
+///   compare-and-swap on mutable objects. `submit_range_head` may report a
+///   cheaper version identity that is only valid for immutable objects; the
+///   local filesystem uses file metadata there and a content hash for HEAD,
+///   since a reused inode within one timestamp tick could otherwise repeat an
+///   old identity for new content.
 pub trait StorageBackend: Send + Sync + 'static {
     /// Keep a publication allowance alive until backend completion. Async
     /// adapters must override this if their ordinary callback can time out
@@ -700,6 +714,9 @@ pub trait StorageBackend: Send + Sync + 'static {
         self.submit_head(key, callback);
     }
 }
+
+#[cfg(test)]
+mod backend_contract_tests;
 
 #[cfg(test)]
 mod identity_tests {
