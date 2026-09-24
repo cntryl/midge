@@ -350,6 +350,18 @@ impl WalActor {
         matches!(self.io, WalIoState::Fenced { .. })
     }
 
+    /// Whether the actor is fenced because writer authority was lost or could
+    /// not be proven, as opposed to a local failure poisoning the WAL.
+    pub(crate) fn authority_lost(&self) -> bool {
+        matches!(
+            self.io,
+            WalIoState::Fenced {
+                authority_lost: true,
+                ..
+            }
+        )
+    }
+
     pub(crate) fn fenced_sealed_segment(&self) -> Option<u64> {
         match self.io {
             WalIoState::Transitioning { sealed_segment, .. }
@@ -374,7 +386,7 @@ impl WalActor {
             } => self.finish_io_transition(),
             WalIoState::Memory | WalIoState::Open { .. } => Ok(()),
             _ => Err(self.io_error().unwrap_or_else(|| {
-                MidgeError::Fenced("WAL cloud flush cannot be rolled back".to_string())
+                MidgeError::Internal("WAL cloud flush cannot be rolled back".to_string())
             })),
         }
     }
@@ -412,7 +424,7 @@ impl WalActor {
             unavailable => {
                 self.io = unavailable;
                 Err(self.io_error().unwrap_or_else(|| {
-                    MidgeError::Fenced("WAL transition is unavailable".to_string())
+                    MidgeError::Internal("WAL transition is unavailable".to_string())
                 }))
             }
         }
@@ -433,7 +445,7 @@ impl WalActor {
             unavailable => {
                 self.io = unavailable;
                 Err(self.io_error().unwrap_or_else(|| {
-                    MidgeError::Fenced("WAL transition lost its writer".to_string())
+                    MidgeError::Internal("WAL transition lost its writer".to_string())
                 }))
             }
         }
@@ -460,7 +472,7 @@ impl WalActor {
                 *current = Some(writer);
                 Ok(())
             }
-            _ => Err(MidgeError::Fenced(
+            _ => Err(MidgeError::Internal(
                 "replacement WAL writer arrived outside rotation transition".to_string(),
             )),
         }

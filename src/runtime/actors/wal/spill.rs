@@ -134,7 +134,8 @@ impl WalActor {
             );
             self.fence_transition(state, message.clone());
             state.mark_persistence_anomaly();
-            return Err(MidgeError::Fenced(message));
+            // Durably logged but not applied: a restart applies it (#537).
+            return Err(MidgeError::RecoveryFailed(message));
         }
 
         let deferred = matches!(

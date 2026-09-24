@@ -686,7 +686,7 @@ fn should_fence_rotation_when_active_segment_is_missing_with_pending_records() -
         .expect_err("missing active segment with pending records must not rotate");
 
     // Assert
-    assert!(matches!(error, MidgeError::Fenced(message) if message.contains("disappeared")));
+    assert!(matches!(error, MidgeError::RecoveryFailed(message) if message.contains("disappeared")));
     assert!(wal_actor.is_fenced());
     assert!(state.persistence_anomaly_detected());
     assert_eq!(state.wal.current_segment_id, 4);
@@ -721,7 +721,7 @@ fn should_fence_rotation_when_seal_ticket_disagrees_with_actor_state() -> MidgeR
         .expect_err("ticket that disagrees with the actor must not rotate");
 
     // Assert
-    assert!(matches!(error, MidgeError::Fenced(message) if message.contains("disagrees")));
+    assert!(matches!(error, MidgeError::Internal(message) if message.contains("disagrees")));
     assert!(wal_actor.is_fenced());
     assert_eq!(state.wal.current_segment_id, segment_id);
     assert!(wal_dir.join(crate::wal::ACTIVE_FILE_NAME).exists());
@@ -1785,7 +1785,7 @@ fn should_fence_rotation_before_overwriting_existing_sealed_segment() -> MidgeRe
         .expect_err("existing sealed segment must reject rotation");
 
     // Assert
-    assert!(matches!(error, MidgeError::Fenced(_)));
+    assert!(matches!(error, MidgeError::RecoveryFailed(_)));
     assert!(wal_actor.is_fenced());
     assert!(state.persistence_anomaly_detected());
     assert_eq!(state.wal.current_segment_id, segment_id);
@@ -2147,7 +2147,7 @@ fn should_fence_when_spilled_apply_fails_after_durable_wal_commit() -> MidgeResu
 
     // Assert: the WAL already holds the whole transaction, so a partial
     // memtable apply must stop the writer instead of serving it silently.
-    assert!(matches!(result, Err(MidgeError::Fenced(_))), "{result:?}");
+    assert!(matches!(result, Err(MidgeError::RecoveryFailed(_))), "{result:?}");
     assert!(actor.is_fenced());
     assert!(state.persistence_anomaly_detected());
     Ok(())

@@ -168,7 +168,7 @@ impl WalActor {
 
             let sync_result = {
                 let writer = self.writer_mut().ok_or_else(|| {
-                    MidgeError::Fenced("WAL writer disappeared during fsync".to_string())
+                    MidgeError::Internal("WAL writer disappeared during fsync".to_string())
                 })?;
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     writer.sync_with_timeout(fsync_timeout)
@@ -249,7 +249,7 @@ impl WalActor {
         if state.sequence != receipt.durable_sequence
             || state.wal.pending_writes != receipt.pending_writes
         {
-            let error = MidgeError::Fenced(
+            let error = MidgeError::Internal(
                 "WAL state changed while a sync receipt awaited commit".to_string(),
             );
             self.fence_transition(state, error.to_string());
@@ -349,7 +349,7 @@ impl WalActor {
             let io_timeout = self.storage_io_timeout;
             let sync_result = self
                 .writer_mut()
-                .ok_or_else(|| MidgeError::Fenced("WAL writer disappeared during flush".into()))?
+                .ok_or_else(|| MidgeError::Internal("WAL writer disappeared during flush".into()))?
                 .sync_with_timeout(io_timeout);
             if let Err(error) = sync_result {
                 self.fence_transition(state, format!("WAL seal fsync failed: {error}"));

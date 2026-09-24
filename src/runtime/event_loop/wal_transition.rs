@@ -26,9 +26,15 @@ impl super::EventLoop {
     /// is the only outcome that avoids stranding them until shutdown.
     pub(super) fn fence_wal_transition(&mut self, error: &MidgeError, sealed_segment: Option<u64>) {
         let sealed_segment = sealed_segment.or_else(|| self.wal_actor.fenced_sealed_segment());
-        let authority_lost = error.severity() == crate::common::Severity::Fenced;
-        self.wal_actor
-            .fence_with_cause(&mut self.state, error.to_string(), authority_lost);
+        self.wal_actor.fence_with_cause(
+            &mut self.state,
+            error.to_string(),
+            error.severity() == crate::common::Severity::Fenced,
+        );
+        // Read the cause back from the actor: it may already have fenced
+        // itself as authority-lost (an epoch check that could not reach the
+        // leader store), and both views must report the same cause.
+        let authority_lost = self.wal_actor.authority_lost();
         self.wal_transition
             .fence(error.to_string(), sealed_segment, authority_lost);
         self.state.mark_persistence_anomaly();
@@ -113,7 +119,7 @@ impl super::EventLoop {
             }
         };
         if flushed != max_sequence {
-            let error = MidgeError::Fenced(
+            let error = MidgeError::Internal(
                 "cloud WAL fixture observed inconsistent seal accounting".to_string(),
             );
             self.fence_wal_transition(&error, None);

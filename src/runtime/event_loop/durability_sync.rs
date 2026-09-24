@@ -524,6 +524,29 @@ mod tests {
         }
     }
 
+    /// A leader store that cannot be reached, so writer authority cannot be
+    /// proven either way.
+    struct UnreachableLeaderStore;
+
+    impl crate::lease::LeaderStore for UnreachableLeaderStore {
+        fn acquire_leadership(
+            &self,
+            _holder_id: &str,
+        ) -> Result<crate::lease::LeaderRecord, crate::lease::LeaseError> {
+            Err(crate::lease::LeaseError::Internal(
+                "test leader store does not acquire leadership".to_string(),
+            ))
+        }
+
+        fn read_current(
+            &self,
+        ) -> Result<Option<crate::lease::LeaderRecord>, crate::lease::LeaseError> {
+            Err(crate::lease::LeaseError::IoError(
+                "leader store unreachable".to_string(),
+            ))
+        }
+    }
+
     impl crate::wal::WalWriter for PanickingSyncWriter {
         fn append_record(
             &self,
@@ -625,6 +648,113 @@ mod tests {
                 .expect_err("fenced WAL must reject a later sync"),
             crate::common::MidgeError::RecoveryFailed(_)
         ));
+    }
+
+    #[test]
+    fn should_report_recovery_required_when_wal_state_changes_under_a_sync_receipt(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange: a receipt whose WAL state moved before commit is a local
+        // invariant failure, not lost authority (#537 review).
+        let mut event_loop = create_event_loop_with_policy(crate::wal::DurabilityPolicy::Batched)?;
+        event_loop.wal_actor.append(
+            &mut event_loop.state,
+            crate::runtime::actors::wal::AppendParams {
+                request_id: 1,
+                cf_id: 0,
+                key: bytes::Bytes::from_static(b"receipt"),
+                value: Some(bytes::Bytes::from_static(b"value")),
+                insert_only: false,
+                ttl_seconds: None,
+            },
+        )?;
+        let ticket = event_loop
+            .wal_transition
+            .begin_sync(event_loop.durability.current_key())?;
+        let receipt = event_loop
+            .wal_actor
+            .begin_sync_transition(&mut event_loop.state, &ticket)?;
+        event_loop.state.sequence += 1;
+
+        // Act
+        let error = event_loop
+            .wal_actor
+            .commit_sync_transition(&mut event_loop.state, receipt, &ticket)
+            .expect_err("a moved WAL state must reject the receipt");
+        event_loop.fence_wal_transition(&error, None);
+
+        // Assert
+        assert!(
+            matches!(error, crate::common::MidgeError::Internal(_)),
+            "{error:?}"
+        );
+        assert!(!event_loop.wal_actor.authority_lost());
+        assert!(matches!(
+            event_loop.wal_transition.ensure_ready(),
+            Err(crate::common::MidgeError::RecoveryFailed(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn should_report_one_fence_cause_when_sync_cannot_prove_writer_authority(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange: an unreachable leader store is not a lost lease, but the
+        // actor conservatively fences as if authority were lost. The protocol
+        // must report the same cause, not a local poison (#537 review).
+        let directory = tempfile::tempdir()?;
+        let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
+        let leader_store: Arc<dyn crate::lease::LeaderStore> = Arc::new(UnreachableLeaderStore);
+        let config = RuntimeConfig {
+            wal_durability_policy: crate::wal::DurabilityPolicy::Batched,
+            writer_epoch: 1,
+            leader_store: Some(leader_store),
+            leader_holder_id: Some("writer".to_string()),
+            ..RuntimeConfig::default()
+        };
+        let mut event_loop = EventLoop::new(
+            state,
+            false,
+            Arc::new(ResponseRouter::new()),
+            config,
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
+        )?;
+        event_loop.wal_actor.append(
+            &mut event_loop.state,
+            crate::runtime::actors::wal::AppendParams {
+                request_id: 1,
+                cf_id: 0,
+                key: bytes::Bytes::from_static(b"unproven"),
+                value: Some(bytes::Bytes::from_static(b"value")),
+                insert_only: false,
+                ttl_seconds: None,
+            },
+        )?;
+        let _ = event_loop.sync_wal_generation(CompletionSource::WalSync);
+
+        // Act
+        let next_write = event_loop.wal_actor.append(
+            &mut event_loop.state,
+            crate::runtime::actors::wal::AppendParams {
+                request_id: 2,
+                cf_id: 0,
+                key: bytes::Bytes::from_static(b"after"),
+                value: Some(bytes::Bytes::from_static(b"value")),
+                insert_only: false,
+                ttl_seconds: None,
+            },
+        );
+        let next_sync = event_loop.wal_transition.ensure_ready();
+
+        // Assert
+        assert!(
+            matches!(next_write, Err(crate::common::MidgeError::Fenced(_))),
+            "{next_write:?}"
+        );
+        assert!(
+            matches!(next_sync, Err(crate::common::MidgeError::Fenced(_))),
+            "{next_sync:?}"
+        );
+        Ok(())
     }
 
     #[test]
