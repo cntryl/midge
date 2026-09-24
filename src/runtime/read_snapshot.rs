@@ -747,7 +747,8 @@ impl ReadSnapshot {
     /// Perform a point read on this snapshot without copying the value.
     pub fn get_bytes(&self, key: &[u8], seq: u64) -> MidgeResult<Option<bytes::Bytes>> {
         let mut best_state = None;
-        let mut range_tombstones = Vec::new();
+        // Only the highest covering tombstone matters, so none is copied.
+        let mut covering_tombstone_seq = None;
         let mut ssts_touched = 0u64;
         let mut l0_ssts_touched = 0u64;
         let mut blocks_read = 0u64;
@@ -760,18 +761,11 @@ impl ReadSnapshot {
         for imm in &self.immutable_memtables {
             let state = imm.get_key_state_at_with_time(key, seq, self.read_time_millis)?;
             Self::merge_best_state(&mut best_state, state, self.read_time_millis);
-            range_tombstones.extend(
-                imm.range_tombstones_at(seq)
-                    .into_iter()
-                    .filter(|tombstone| tombstone.covers(key)),
-            );
+            covering_tombstone_seq =
+                covering_tombstone_seq.max(imm.max_covering_tombstone_seq(key, seq));
         }
-        range_tombstones.extend(
-            self.memtable
-                .range_tombstones_at(seq)
-                .into_iter()
-                .filter(|tombstone| tombstone.covers(key)),
-        );
+        covering_tombstone_seq =
+            covering_tombstone_seq.max(self.memtable.max_covering_tombstone_seq(key, seq));
 
         // Complete manifest bounds drive indexed selection. Legacy bounds stay
         // in the view's fallback bucket and are still opened conservatively.
@@ -794,9 +788,8 @@ impl ReadSnapshot {
                 Self::merge_best_state(&mut best_state, state, self.read_time_millis);
 
                 self.diagnostics.sst_metrics().record_range_tombstone_scan();
-                range_tombstones.extend(reader.range_tombstones().into_iter().filter(
-                    |tombstone| (seq == u64::MAX || tombstone.seq <= seq) && tombstone.covers(key),
-                ));
+                covering_tombstone_seq =
+                    covering_tombstone_seq.max(reader.max_covering_tombstone_seq(key, seq));
             }
         }
 
@@ -807,7 +800,8 @@ impl ReadSnapshot {
         let Some(state) = best_state else {
             return Ok(None);
         };
-        if Self::range_tombstone_covers_state(&range_tombstones, key, &state) {
+        let state_seq = Self::state_sequence(&state).unwrap_or(0);
+        if covering_tombstone_seq.is_some_and(|tombstone_seq| tombstone_seq >= state_seq) {
             return Ok(None);
         }
 

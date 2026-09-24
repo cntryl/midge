@@ -193,6 +193,13 @@ pub trait SstStateReader: Send + Sync {
         Vec::new()
     }
 
+    /// The highest sequence of a range tombstone in this SST, visible at
+    /// `snapshot_seq`, that covers `key`. Readers that hold their tombstones
+    /// override this to avoid the copy.
+    fn max_covering_tombstone_seq(&self, key: &[u8], snapshot_seq: u64) -> Option<u64> {
+        crate::memtable::max_covering_seq(&self.range_tombstones(), key, snapshot_seq)
+    }
+
     /// Return the retained bytes required to clone this SST's range tombstones.
     /// Budgeted compaction reserves this amount before requesting the clone.
     fn range_tombstone_memory_usage(&self) -> usize {
