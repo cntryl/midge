@@ -351,7 +351,8 @@ impl EventLoop {
             // durable reservation, past every name this session handed out.
             let cursor = self
                 .state
-                .sst_name_cursor
+                .sst_names
+                .cursor
                 .entry(cf_id)
                 .or_insert(durable_next);
             let sst_seq = *cursor;
@@ -1904,6 +1905,37 @@ mod tests {
             .filter(|edit| matches!(edit, crate::metadata::ManifestEdit::BumpNextSstSeq { .. }))
             .count();
         assert_eq!(bumps, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn should_mirror_flush_sst_name_reservation_again_when_mirror_failed(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange: the journal append succeeds but the cloud mirror fails,
+        // so the cloud metadata never learns the reserved block.
+        let directory = tempfile::tempdir()?;
+        let (mut event_loop, _hybrid) = event_loop_with_hybrid_storage(&directory)?;
+        event_loop.cloud_metadata_storage =
+            Some(Arc::new(crate::storage::cloud::CloudStorage::new(
+                Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+                String::new(),
+            )));
+        let lease_healthy = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        event_loop.fencing.lease_healthy = Some(Arc::clone(&lease_healthy));
+        let failed = event_loop.reserve_flush_sst_seq(0);
+
+        // Act: a retry inside the same block must still reach the mirror.
+        let retried = event_loop.reserve_flush_sst_seq(0);
+        lease_healthy.store(true, std::sync::atomic::Ordering::SeqCst);
+        let recovered = event_loop.reserve_flush_sst_seq(0);
+
+        // Assert
+        assert!(failed.is_err());
+        assert!(
+            retried.is_err(),
+            "a name was handed out without a mirrored reservation: {retried:?}"
+        );
+        assert!(recovered.is_ok(), "{recovered:?}");
         Ok(())
     }
 

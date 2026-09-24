@@ -109,6 +109,20 @@ impl ColumnFamilyState {
 }
 
 /// WAL state
+/// How flush outputs get SST names in hybrid mode, per column family.
+///
+/// Names come from `cursor` inside a block that `manifest.next_sst_seqs`
+/// reserves durably. A name is safe to upload only below `reserved_through`:
+/// the reservation covering it was journaled and mirrored to cloud metadata
+/// by this session. Both start empty, so each session's first reservation
+/// journals and mirrors, and its cursor starts at the durable reservation,
+/// past every name an earlier session handed out.
+#[derive(Debug, Default)]
+pub(crate) struct SstNameAllocation {
+    pub(crate) cursor: HashMap<crate::types::ColumnFamilyId, u64>,
+    pub(crate) reserved_through: HashMap<crate::types::ColumnFamilyId, u64>,
+}
+
 pub struct WalState {
     /// Current WAL segment ID
     pub current_segment_id: u64,
@@ -288,10 +302,8 @@ pub struct RuntimeState {
     pub fs: std::sync::Arc<dyn Fs>,
     /// The only runtime writer of the manifest journal and snapshot (#494).
     pub(crate) manifest_store: Arc<crate::metadata::store::ManifestStore>,
-    /// Next flush SST sequence to hand out per column family, in memory. In
-    /// hybrid mode `manifest.next_sst_seqs` is the durable reservation, which
-    /// runs ahead of this cursor by up to one block (#491).
-    pub(crate) sst_name_cursor: HashMap<crate::types::ColumnFamilyId, u64>,
+    /// Flush SST name allocation in hybrid mode (#491).
+    pub(crate) sst_names: SstNameAllocation,
     /// Authoritative SST views used during cloud intent replay. Local SST
     /// staging is disposable and is not a prerequisite for recovery.
     pub(crate) recovery_sst_fs: Option<Arc<dyn Fs>>,
