@@ -1229,6 +1229,32 @@ mod tests {
     }
 
     #[test]
+    fn should_keep_transient_status_when_range_error_body_exceeds_the_range_length() {
+        // Arrange: the retry loop classifies by status, so a 503 whose error
+        // page is longer than the range must not become a permanent failure.
+        let (endpoint, server) = serve_one_response(
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 40\r\nConnection: close\r\n\r\n0123456789012345678901234567890123456789",
+        );
+        let request = CloudRequest::new(Method::GET, endpoint)
+            .with_header("Range", "bytes=0-9")
+            .with_response_limit(10);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+
+        // Act
+        let result = runtime.block_on(CloudExecutor::execute_request_once(Client::new(), request));
+        server.join().expect("join test server");
+
+        // Assert
+        let response =
+            result.unwrap_or_else(|error| panic!("status was hidden: {}", error.message));
+        assert_eq!(response.status, 503);
+        assert!(CloudExecutor::is_transient_status(response.status));
+    }
+
+    #[test]
     fn should_report_unhonored_range_when_provider_streams_whole_object_without_content_length() {
         // Arrange
         let response = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n28\r\n0123456789012345678901234567890123456789\r\n0\r\n\r\n";
