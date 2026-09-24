@@ -108,6 +108,20 @@ impl ColumnFamilyState {
     }
 }
 
+/// How flush outputs get SST names in hybrid mode, per column family.
+///
+/// Names come from `cursor` inside a block that `manifest.next_sst_seqs`
+/// reserves durably. A name is safe to upload only below `reserved_through`:
+/// the reservation covering it was journaled and mirrored to cloud metadata
+/// by this session. Both start empty, so each session's first reservation
+/// journals and mirrors, and its cursor starts at the durable reservation,
+/// past every name an earlier session handed out.
+#[derive(Debug, Default)]
+pub(crate) struct SstNameAllocation {
+    pub(crate) cursor: HashMap<crate::types::ColumnFamilyId, u64>,
+    pub(crate) reserved_through: HashMap<crate::types::ColumnFamilyId, u64>,
+}
+
 /// WAL state
 pub struct WalState {
     /// Current WAL segment ID
@@ -120,6 +134,10 @@ pub struct WalState {
     pub local_durable_seq: u64,
     /// Cloud durability frontier - highest sequence number confirmed by cloud
     pub cloud_durable_seq: u64,
+    /// Why each retained sealed local WAL segment last failed its coverage
+    /// proof. In memory only; an empty map just means re-proving (#490).
+    pub(crate) local_segment_proofs:
+        HashMap<u64, crate::runtime::hybrid_persistence::FailedWalProof>,
 }
 
 impl Default for WalState {
@@ -130,6 +148,7 @@ impl Default for WalState {
             pending_writes: 0,
             local_durable_seq: 0,
             cloud_durable_seq: 0,
+            local_segment_proofs: HashMap::new(),
         }
     }
 }
@@ -288,6 +307,8 @@ pub struct RuntimeState {
     pub fs: std::sync::Arc<dyn Fs>,
     /// The only runtime writer of the manifest journal and snapshot (#494).
     pub(crate) manifest_store: Arc<crate::metadata::store::ManifestStore>,
+    /// Flush SST name allocation in hybrid mode (#491).
+    pub(crate) sst_names: SstNameAllocation,
     /// Authoritative SST views used during cloud intent replay. Local SST
     /// staging is disposable and is not a prerequisite for recovery.
     pub(crate) recovery_sst_fs: Option<Arc<dyn Fs>>,
