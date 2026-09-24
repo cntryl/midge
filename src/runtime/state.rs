@@ -342,7 +342,8 @@ pub struct RuntimeState {
     pub intent_log: Vec<IntentLogEntry>,
     /// Maximum size of any memtable before write stall
     pub memtable_flush_threshold: usize,
-    /// Cloud-only runtime heuristic: flush active memtables after enough WAL segment churn.
+    /// Flush an active memtable once it started this many WAL segments ago.
+    /// Bounds WAL retention in local mode and the WAL catalog in cloud mode.
     pub eventual_flush_segment_gap: u64,
     pub write_pressure: WritePressureState,
     /// Total size of all memtables (in-memory)

@@ -28,7 +28,7 @@ impl CloudWritePolicy {
     pub(crate) fn validate(&self) -> MidgeResult<()> {
         if self.eventual_flush_segment_gap == 0 {
             return Err(MidgeError::InvalidArgument(
-                "cloud eventual-flush segment gap must be greater than zero".to_string(),
+                "eventual-flush segment gap must be greater than zero".to_string(),
             ));
         }
         if self.wal_seal_min_segment_bytes == 0 {
