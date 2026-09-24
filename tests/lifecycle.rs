@@ -3304,21 +3304,21 @@ mod local_wal_retention {
     //! later compaction would let recovery resurrect that put. The eventual
     //! flush instead bounds how long an idle family can pin the floor.
 
-    use cntryl_midge::{
-        CloudWritePolicy, ColumnFamilyHandle, Engine, OpenOptions, TransactionMode, WriteOptions,
-    };
+    use cntryl_midge::{ColumnFamilyHandle, Engine, OpenOptions, TransactionMode, WriteOptions};
     use std::path::Path;
     use std::time::Duration;
 
-    const EVENTUAL_FLUSH_GAP: u64 = 4;
+    /// Local eventual flush fires once a family pins four flush triggers'
+    /// worth of WAL (#552): 32 KiB here.
+    const FLUSH_TRIGGER_BYTES: usize = 8 * 1024;
+    /// Each round writes about 5 KiB, so an idle family is flushed within
+    /// about seven rounds.
+    const RETENTION_BOUND: usize = 10;
 
     fn options(path: &Path) -> OpenOptions {
         OpenOptions::local(path)
             .background_compaction(false)
-            .cloud_write_policy(CloudWritePolicy {
-                eventual_flush_segment_gap: EVENTUAL_FLUSH_GAP,
-                ..CloudWritePolicy::default()
-            })
+            .with_memtable_flush_threshold(FLUSH_TRIGGER_BYTES)
             .build()
             .expect("options")
     }
@@ -3327,7 +3327,7 @@ mod local_wal_retention {
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin");
-        tx.put(key.to_vec(), b"value".to_vec(), None).expect("put");
+        tx.put(key.to_vec(), vec![b'v'; 1024], None).expect("put");
         tx.commit(WriteOptions::sync()).expect("commit");
     }
 
@@ -3413,10 +3413,10 @@ mod local_wal_retention {
         let retained = sealed_segments(temp.path());
         engine.shutdown(Duration::from_secs(10)).expect("shutdown");
 
-        // Assert: the idle family is flushed within the gap, so retention
-        // is bounded by it instead of growing with every flush.
+        // Assert: the idle family is flushed once it pins the byte bound, so
+        // retention stays bounded instead of growing with every flush.
         assert!(
-            retained <= 2 * usize::try_from(EVENTUAL_FLUSH_GAP).expect("gap"),
+            retained <= RETENTION_BOUND,
             "{retained} sealed segments retained after 20 covered flushes"
         );
         let reopened = Engine::open(options(temp.path())).expect("reopen");
@@ -3436,7 +3436,9 @@ mod local_wal_retention {
         // Act
         for round in 0..20 {
             let key = format!("busy-{round:03}");
-            put(&engine, &default, key.as_bytes());
+            for _ in 0..5 {
+                put(&engine, &default, key.as_bytes());
+            }
             delete(&engine, &default, key.as_bytes());
             engine.flush_cf(&default).expect("flush default");
             if round % 5 == 4 {
@@ -3448,7 +3450,7 @@ mod local_wal_retention {
 
         // Assert
         assert!(
-            retained <= 2 * usize::try_from(EVENTUAL_FLUSH_GAP).expect("gap"),
+            retained <= RETENTION_BOUND,
             "{retained} sealed segments retained after 20 flushed rounds with deletes"
         );
         let reopened = Engine::open(options(temp.path())).expect("reopen");

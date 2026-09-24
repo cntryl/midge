@@ -1,8 +1,9 @@
 //! Immutable flush lifecycle, retries, and write-pressure selection.
 
 use super::{
-    Arc, Duration, FlushCandidate, FlushReason, HashSet, ImmutableFlush, ImmutableFlushPhase,
-    Instant, RuntimeState, SkipListMemtable, INITIAL_FLUSH_RETRY_BACKOFF, MAX_FLUSH_RETRY_BACKOFF,
+    Arc, Duration, EventualFlush, FlushCandidate, FlushReason, HashSet, ImmutableFlush,
+    ImmutableFlushPhase, Instant, RuntimeState, SkipListMemtable, INITIAL_FLUSH_RETRY_BACKOFF,
+    LOCAL_EVENTUAL_FLUSH_TRIGGER_MULTIPLE, MAX_FLUSH_RETRY_BACKOFF,
 };
 
 impl RuntimeState {
@@ -416,13 +417,13 @@ impl RuntimeState {
     }
 
     #[cfg(test)]
-    pub(crate) fn next_flush_candidate(&self, segment_gap_enabled: bool) -> Option<FlushCandidate> {
-        self.next_flush_candidate_skipping(segment_gap_enabled, &HashSet::new())
+    pub(crate) fn next_flush_candidate(&self, rule: EventualFlush) -> Option<FlushCandidate> {
+        self.next_flush_candidate_skipping(rule, &HashSet::new())
     }
 
     pub(crate) fn next_flush_candidate_skipping(
         &self,
-        segment_gap_enabled: bool,
+        rule: EventualFlush,
         attempted_cfs: &HashSet<crate::types::ColumnFamilyId>,
     ) -> Option<FlushCandidate> {
         let now = Instant::now();
@@ -464,10 +465,35 @@ impl RuntimeState {
             });
         }
 
-        if !segment_gap_enabled {
-            return None;
-        }
-
+        // A family's gap: WAL segments (cloud) or WAL bytes (local) since its
+        // active memtable started.
+        let (reason, limit, gap_of): (_, _, fn(&Self, &super::ColumnFamilyState) -> u64) =
+            match rule {
+                #[cfg(test)]
+                EventualFlush::Disabled => return None,
+                EventualFlush::SegmentGap => (
+                    FlushReason::WalSegmentGap,
+                    self.eventual_flush_segment_gap,
+                    |state, cf| {
+                        state
+                            .wal
+                            .current_segment_id
+                            .saturating_sub(cf.active_memtable_started_in_segment)
+                    },
+                ),
+                EventualFlush::WalBytes => (
+                    FlushReason::WalBytesGap,
+                    u64::try_from(flush_threshold)
+                        .unwrap_or(u64::MAX)
+                        .saturating_mul(LOCAL_EVENTUAL_FLUSH_TRIGGER_MULTIPLE),
+                    |state, cf| {
+                        state
+                            .wal
+                            .appended_bytes
+                            .saturating_sub(cf.active_memtable_started_at_wal_bytes)
+                    },
+                ),
+            };
         self.column_families
             .iter()
             .filter(|(cf_id, _cf_state)| !attempted_cfs.contains(cf_id))
@@ -475,23 +501,17 @@ impl RuntimeState {
                 if cf_state.memtable.size_bytes() == 0 {
                     return None;
                 }
-
-                let gap = self
-                    .wal
-                    .current_segment_id
-                    .saturating_sub(cf_state.active_memtable_started_in_segment);
-                (gap >= self.eventual_flush_segment_gap).then_some((*cf_id, gap))
+                let gap = gap_of(self, cf_state);
+                (gap >= limit).then_some((*cf_id, gap))
             })
             .max_by_key(|(cf_id, gap)| (*gap, std::cmp::Reverse(*cf_id)))
-            .map(|(cf_id, _)| FlushCandidate {
-                cf_id,
-                reason: FlushReason::WalSegmentGap,
-            })
+            .map(|(cf_id, _)| FlushCandidate { cf_id, reason })
     }
 
     pub(crate) fn reinitialize_active_memtable_segment_tracking(&mut self) {
         for cf_state in self.column_families.values_mut() {
             if cf_state.memtable.size_bytes() > 0 {
+                cf_state.active_memtable_started_at_wal_bytes = 0;
                 // Replay reconstructs table contents without exact per-generation
                 // source provenance. The next writable segment cannot describe
                 // older recovered records, so retain every earlier segment until

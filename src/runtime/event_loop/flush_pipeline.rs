@@ -74,6 +74,8 @@ impl EventLoop {
         }
 
         let current_segment_id = self.state.wal.current_segment_id;
+
+        let appended_bytes = self.state.wal.appended_bytes;
         let sequence = self.state.sequence;
         let frozen = {
             let cf = self.state.get_cf(cf_id).ok_or_else(|| {
@@ -99,6 +101,7 @@ impl EventLoop {
             .expect("tracked flush family exists");
         cf.memtable = Arc::new(crate::memtable::SkipListMemtable::new());
         cf.active_memtable_started_in_segment = current_segment_id;
+        cf.active_memtable_started_at_wal_bytes = appended_bytes;
         crate::failpoints::fail_point!("midge::flush_worker::after_freeze");
         self.publish_snapshot();
         Ok(Some(flush.flush_id))
@@ -1091,9 +1094,14 @@ impl EventLoop {
         // so bounds retention: retirement is prefix-only, because retiring a
         // tombstone's segment ahead of an older retained put would let
         // recovery resurrect that put once compaction drops both (#550).
+        let rule = if self.wal_actor.is_cloud_async() {
+            crate::runtime::state::EventualFlush::SegmentGap
+        } else {
+            crate::runtime::state::EventualFlush::WalBytes
+        };
         while let Some(candidate) = self
             .state
-            .next_flush_candidate_skipping(true, &attempted_cfs)
+            .next_flush_candidate_skipping(rule, &attempted_cfs)
         {
             attempted_cfs.insert(candidate.cf_id);
             if candidate.reason != crate::runtime::state::FlushReason::PendingImmutable {

@@ -396,7 +396,7 @@ fn should_select_due_pending_immutable_before_active_memtable() {
 
     // Act
     let candidate = state
-        .next_flush_candidate(false)
+        .next_flush_candidate(EventualFlush::Disabled)
         .expect("pending immutable candidate");
 
     // Assert
@@ -462,7 +462,7 @@ fn should_select_size_threshold_flush_candidate_before_segment_gap_candidate() {
         .active_memtable_started_in_segment = 1;
 
     let candidate = state
-        .next_flush_candidate(true)
+        .next_flush_candidate(EventualFlush::SegmentGap)
         .expect("flush candidate should exist");
     // Act
     // Assert
@@ -491,7 +491,7 @@ fn should_select_segment_gap_flush_candidate_when_gap_exceeded() {
         .active_memtable_started_in_segment = 1;
 
     let candidate = state
-        .next_flush_candidate(true)
+        .next_flush_candidate(EventualFlush::SegmentGap)
         .expect("cloud gap flush candidate should exist");
     // Act
     // Assert
@@ -521,7 +521,9 @@ fn should_not_select_segment_gap_flush_candidate_when_gap_mode_disabled() {
 
     // Act
     // Assert
-    assert!(state.next_flush_candidate(false).is_none());
+    assert!(state
+        .next_flush_candidate(EventualFlush::Disabled)
+        .is_none());
 }
 
 #[test]
@@ -2245,4 +2247,53 @@ fn should_keep_in_memory_manifest_when_intent_reload_fails() {
         !state.manifest_has_file("000000_00_00000000000000000009.sst"),
         "reload must assign both files or neither"
     );
+}
+
+fn state_with_unflushed_default_family(appended_since_start: u64) -> RuntimeState {
+    let mut state = RuntimeState::new(isolated_test_db_path(), false);
+    state.memtable_flush_threshold = 1024;
+    state.memtable_size_limit = 1024;
+    state
+        .get_cf(0)
+        .expect("default cf")
+        .memtable
+        .put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)
+        .expect("seed default cf");
+    state.wal.appended_bytes = 10_000 + appended_since_start;
+    let cf_state = state.get_cf_mut(0).expect("default cf");
+    cf_state.active_memtable_started_in_segment = 1;
+    cf_state.active_memtable_started_at_wal_bytes = 10_000;
+    state
+}
+
+#[test]
+fn should_select_wal_bytes_flush_candidate_when_family_pins_enough_local_wal() {
+    // Arrange: 4 x the 1 KiB flush trigger appended since the memtable
+    // started (#552).
+    let state = state_with_unflushed_default_family(4 * 1024);
+
+    // Act
+    let candidate = state.next_flush_candidate(EventualFlush::WalBytes);
+
+    // Assert
+    let candidate = candidate.expect("wal-bytes flush candidate");
+    assert_eq!(candidate.cf_id, 0);
+    assert_eq!(candidate.reason, FlushReason::WalBytesGap);
+}
+
+#[test]
+fn should_not_select_wal_bytes_flush_candidate_when_only_segments_advance() {
+    // Arrange: flushes seal segments without appending WAL, so a family
+    // far behind in segments but not in bytes must not be flushed. This is
+    // what keeps local eventual flushes from feeding each other (#552).
+    let mut state = state_with_unflushed_default_family(100);
+    state.wal.current_segment_id = state.eventual_flush_segment_gap + 100;
+
+    // Act
+    let by_bytes = state.next_flush_candidate(EventualFlush::WalBytes);
+    let by_segments = state.next_flush_candidate(EventualFlush::SegmentGap);
+
+    // Assert
+    assert!(by_bytes.is_none(), "{by_bytes:?}");
+    assert!(by_segments.is_some());
 }
