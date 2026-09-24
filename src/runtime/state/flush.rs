@@ -383,6 +383,16 @@ impl RuntimeState {
     /// Lowest WAL segment that may still hold unflushed data. Every sealed
     /// segment below it is covered by published SSTs. `None` when memtable
     /// provenance is incomplete, so callers must then retain everything.
+    /// Whether any column family holds data not yet in a published SST: a
+    /// non-empty active memtable or an immutable awaiting flush.
+    pub(crate) fn has_unflushed_memtable_data(&self) -> bool {
+        self.column_families.values().any(|cf| {
+            cf.memtable.size_bytes() > 0
+                || !cf.immutable_memtables.is_empty()
+                || !cf.immutable_flushes.is_empty()
+        })
+    }
+
     pub(crate) fn wal_recovery_floor_segment(&self) -> Option<u64> {
         let mut floor = self.wal.current_segment_id;
         if floor == 0 {

@@ -8,6 +8,12 @@ use crate::runtime::RuntimeResponse;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(test)]
+thread_local! {
+    /// Whole-file reads of local WAL segments, for tests that bound a prune pass.
+    static RUNTIME_FILE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl EventLoop {
     pub(super) fn column_family_flush_pipeline_active(&self, cf_id: u32) -> bool {
         self.state
@@ -616,14 +622,7 @@ impl EventLoop {
             tracing::warn!(%error, "retaining local WAL because the writer lease is no longer valid");
             return;
         }
-        if let Err(error) = self.sync_local_wal_before_prune_rotation() {
-            self.state.mark_persistence_anomaly();
-            tracing::warn!(%error, "retaining local WAL because buffered records could not be synced");
-            return;
-        }
-        if let Err(error) = self.rotate_local_wal_transition() {
-            self.state.mark_persistence_anomaly();
-            tracing::warn!(%error, "retaining local WAL because the active segment could not be sealed");
+        if !self.seal_active_wal_for_prune() {
             return;
         }
 
@@ -654,6 +653,13 @@ impl EventLoop {
         // is already in published SSTs, including deletes, which the
         // per-record proof below cannot certify.
         let flushed_floor = self.state.wal_recovery_floor_segment();
+        // One prover per pass, so each covering SST is opened and verified
+        // once rather than once per segment (#490).
+        let manifest = self.state.manifest.clone();
+        let coverage = crate::runtime::hybrid_persistence::VerifiedManifestWalCoverage::open(
+            &self.state.sst_dir,
+            &manifest,
+        );
 
         for (segment_id, path) in sealed_segments {
             if let Err(error) = self.validate_runtime_lease_for_wal_prune() {
@@ -689,8 +695,14 @@ impl EventLoop {
                     continue;
                 }
             };
-            if !self.local_wal_records_exactly_covered(&readback.data_records) {
-                continue;
+            if !coverage.exactly_covers_data_records(&readback.data_records) {
+                // Later segments hold newer records, which are no more
+                // likely to be covered; stop rather than re-read them all.
+                tracing::debug!(
+                    segment_id,
+                    "retaining local WAL from the first uncovered segment"
+                );
+                break;
             }
             match self.state.fs.remove_file(&path) {
                 Ok(()) => tracing::debug!(segment_id, "removed exactly covered local WAL segment"),
@@ -711,6 +723,27 @@ impl EventLoop {
         }
     }
 
+    /// Seals the active WAL segment when that can retire it. Sealing only
+    /// helps when all of its data is flushed: then it falls below the recovery
+    /// floor and goes whole. Otherwise the sync and rotation retire nothing
+    /// (#490). Returns false when pruning must stop.
+    fn seal_active_wal_for_prune(&mut self) -> bool {
+        if self.state.has_unflushed_memtable_data() {
+            return true;
+        }
+        if let Err(error) = self.sync_local_wal_before_prune_rotation() {
+            self.state.mark_persistence_anomaly();
+            tracing::warn!(%error, "retaining local WAL because buffered records could not be synced");
+            return false;
+        }
+        if let Err(error) = self.rotate_local_wal_transition() {
+            self.state.mark_persistence_anomaly();
+            tracing::warn!(%error, "retaining local WAL because the active segment could not be sealed");
+            return false;
+        }
+        true
+    }
+
     fn remove_flushed_local_wal_segment(&mut self, segment_id: u64, path: &crate::io::FsPath) {
         match self.state.fs.remove_file(path) {
             Ok(()) => tracing::debug!(segment_id, "removed flushed local WAL segment"),
@@ -723,6 +756,8 @@ impl EventLoop {
     }
 
     fn read_runtime_file(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bytes::Bytes> {
+        #[cfg(test)]
+        RUNTIME_FILE_READS.with(|reads| reads.set(reads.get() + 1));
         let length = self.state.fs.metadata(path)?.len;
         let file = self.state.fs.open(
             path,
@@ -734,17 +769,6 @@ impl EventLoop {
             },
         )?;
         file.read_at(0, length)
-    }
-
-    fn local_wal_records_exactly_covered(
-        &self,
-        records: &[crate::wal::cloud_segment::DataCoverageRecord],
-    ) -> bool {
-        crate::runtime::hybrid_persistence::VerifiedManifestWalCoverage::open(
-            &self.state.sst_dir,
-            &self.state.manifest,
-        )
-        .exactly_covers_data_records(records)
     }
 
     fn validate_runtime_lease_for_wal_prune(&self) -> crate::common::MidgeResult<()> {
@@ -1673,6 +1697,90 @@ mod tests {
 
         // Assert
         assert_eq!(hybrid.budget_snapshot().total_committed_bytes, 128);
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_rotate_local_wal_when_no_segment_is_below_the_recovery_floor(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange: an unflushed memtable started in the active segment pins
+        // the recovery floor there, so sealing that segment retires nothing.
+        let directory = tempfile::tempdir()?;
+        let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
+        let router = Arc::new(crate::runtime::ResponseRouter::new());
+        let mut event_loop = EventLoop::new(
+            state,
+            false,
+            router,
+            crate::runtime::RuntimeConfig::default(),
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
+        )?;
+        let current = event_loop.state.wal.current_segment_id;
+        let cf = event_loop.state.get_cf_mut(0).expect("default family");
+        cf.memtable
+            .put_with_seq(b"unflushed".to_vec(), b"value".to_vec(), 1, None)?;
+        cf.active_memtable_started_in_segment = current;
+
+        // Act
+        event_loop.prune_local_wal_segments_covered_by_manifest();
+
+        // Assert
+        assert_eq!(event_loop.state.wal.current_segment_id, current);
+        Ok(())
+    }
+
+    #[test]
+    fn should_stop_local_wal_prune_at_first_uncovered_segment() -> crate::common::MidgeResult<()> {
+        // Arrange: three sealed segments above the recovery floor, none
+        // covered by an SST. Proving the first one uncovered is enough.
+        let directory = tempfile::tempdir()?;
+        let state = crate::runtime::state::RuntimeState::new(directory.path().to_path_buf(), false);
+        let router = Arc::new(crate::runtime::ResponseRouter::new());
+        let mut event_loop = EventLoop::new(
+            state,
+            false,
+            router,
+            crate::runtime::RuntimeConfig::default(),
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
+        )?;
+        for segment_id in 1..=3 {
+            let record = crate::wal::WalRecord::new(
+                crate::wal::WalOpKind::Put,
+                bytes::Bytes::from(format!("key-{segment_id}")),
+                Some(bytes::Bytes::from_static(b"value")),
+                segment_id,
+                1,
+            );
+            let payload = crate::wal::encoding::encode(&record)?;
+            let mut frame = Vec::new();
+            crate::wal::frame::append_frame(&mut frame, &payload)?;
+            std::fs::write(
+                event_loop
+                    .state
+                    .wal_dir
+                    .join(crate::wal::segment_file_name(segment_id)),
+                frame,
+            )?;
+        }
+        event_loop.state.wal.current_segment_id = 4;
+        let cf = event_loop.state.get_cf_mut(0).expect("default family");
+        cf.memtable
+            .put_with_seq(b"unflushed".to_vec(), b"value".to_vec(), 1, None)?;
+        cf.active_memtable_started_in_segment = 1;
+        RUNTIME_FILE_READS.with(|reads| reads.set(0));
+
+        // Act
+        event_loop.prune_local_wal_segments_covered_by_manifest();
+
+        // Assert
+        assert_eq!(RUNTIME_FILE_READS.with(std::cell::Cell::get), 1);
+        for segment_id in 1..=3 {
+            assert!(event_loop
+                .state
+                .wal_dir
+                .join(crate::wal::segment_file_name(segment_id))
+                .exists());
+        }
         Ok(())
     }
 
