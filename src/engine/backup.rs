@@ -602,6 +602,9 @@ fn hash_file(path: &Path) -> MidgeResult<(u64, u32)> {
     Ok((size, checksum))
 }
 
+// Keep the fallible Unix directory-sync contract uniform at call sites even
+// though the standard library does not expose directory handles on Windows.
+#[allow(clippy::unnecessary_wraps)]
 fn sync_directory(path: &Path) -> MidgeResult<()> {
     #[cfg(unix)]
     File::open(path)?.sync_all()?;
