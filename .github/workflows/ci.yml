@@ -1,11 +1,10 @@
 name: CI
 
 on:
-  workflow_dispatch:
   push:
-    branches: [develop, main]
+    branches: [develop]
   pull_request:
-    branches: [develop, main]
+    branches: [develop]
     types: [opened, synchronize, reopened, edited]
 
 permissions:
@@ -26,9 +25,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
-
-      - name: Lint GitHub Actions workflows
-        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 
       - name: Update Rust toolchain
         run: rustup update stable

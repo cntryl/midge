@@ -328,6 +328,9 @@ pub enum RuntimeMsg {
     /// Acquire the runtime-wide publication barrier used by online verification.
     BeginStorageVerification { request_id: u64 },
 
+    /// Acquire a durable point-in-time barrier used by engine backup capture.
+    BeginBackupCapture { request_id: u64 },
+
     /// Release a previously acquired online-verification barrier.
     EndStorageVerification { request_id: u64, token: u64 },
 
@@ -630,6 +633,7 @@ impl RuntimeMsg {
             | RuntimeMsg::GetRuntimeMetrics { request_id }
             | RuntimeMsg::GetStorageLayout { request_id }
             | RuntimeMsg::BeginStorageVerification { request_id }
+            | RuntimeMsg::BeginBackupCapture { request_id }
             | RuntimeMsg::EndStorageVerification { request_id, .. }
             | RuntimeMsg::BeginTransaction { request_id, .. }
             | RuntimeMsg::SetRuntimeConfig { request_id, .. }
@@ -662,6 +666,7 @@ impl RuntimeMsg {
             RuntimeMsg::GetRuntimeMetrics { .. } => "GetRuntimeMetrics",
             RuntimeMsg::GetStorageLayout { .. } => "GetStorageLayout",
             RuntimeMsg::BeginStorageVerification { .. } => "BeginStorageVerification",
+            RuntimeMsg::BeginBackupCapture { .. } => "BeginBackupCapture",
             RuntimeMsg::EndStorageVerification { .. } => "EndStorageVerification",
             RuntimeMsg::BeginTransaction { .. } => "BeginTransaction",
             RuntimeMsg::SetRuntimeConfig { .. } => "SetRuntimeConfig",
@@ -863,6 +868,7 @@ pub enum RuntimeResponse {
         request_id: u64,
         token: u64,
         health: crate::config::EngineHealth,
+        sequence: u64,
     },
 
     /// Current authoritative runtime sequence.

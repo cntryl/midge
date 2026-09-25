@@ -152,8 +152,8 @@ pub use common::{MidgeError, MidgeResult, Severity};
 
 // Engine / Transactions
 pub use engine::{
-    ColumnFamilyHandle, ConflictPolicy, Engine, EngineMetrics, StorageVerifier, Transaction,
-    TransactionMode,
+    BackupManifest, BackupObject, BackupStorageKind, ColumnFamilyHandle, ConflictPolicy, Engine,
+    EngineMetrics, StorageVerifier, Transaction, TransactionMode,
 };
 pub use types::ColumnFamilyId;
 

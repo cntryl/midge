@@ -28,6 +28,7 @@ use std::time::Duration;
 static IN_MEMORY_OPEN_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) mod api;
+mod backup;
 mod ingest;
 mod lease_state;
 mod metrics;
@@ -43,6 +44,7 @@ pub use api::{
     IteratorState, Key, MemoryBudget, OpenOptions, OpenOptionsBuilder, Query, RecoveryPolicy,
     ScanIterator, Storage, Transaction, TransactionMode, Value, WorkloadProfile, WriteOptions,
 };
+pub use backup::{BackupManifest, BackupObject, BackupStorageKind};
 /// Registry of column families, keyed by column family ID
 type ColumnFamilyRegistry = dashmap::DashMap<ColumnFamilyId, ColumnFamilyHandle>;
 
@@ -89,6 +91,8 @@ pub struct Engine {
     memory_mode: bool,
     /// True when opened in cloud-backed mode.
     cloud_mode: bool,
+    /// True when cloud mode uses the in-process filesystem simulator.
+    simulated_cloud_mode: bool,
     /// Latest committed sequence observed by the engine.
     ///
     /// Sequence numbers are allocated inside the runtime (at WAL append time) and
