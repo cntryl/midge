@@ -126,6 +126,7 @@ impl Engine {
             ));
         }
         let durability_frontier = barrier.sequence();
+        let captured_at = chrono::Utc::now().to_rfc3339();
         barrier.release()?;
 
         let backup_id = uuid::Uuid::new_v4().to_string();
@@ -135,6 +136,7 @@ impl Engine {
             pinned,
             &staging,
             backup_id,
+            captured_at,
             durability_frontier,
             database_format_version,
             if self.simulated_cloud_mode {
@@ -142,7 +144,22 @@ impl Engine {
             } else {
                 BackupStorageKind::Local
             },
-        );
+        )
+        .and_then(|manifest| {
+            validate_backup(&staging)?;
+            // Offline verification may create provider lock files. Keep those
+            // out of the published, checksummed artifact.
+            let verification = tempfile::tempdir_in(parent)?;
+            copy_verified_objects(&staging, verification.path(), &manifest)?;
+            if self.simulated_cloud_mode {
+                crate::engine::verification::StorageVerifier::verify_simulated_cloud_path(
+                    verification.path(),
+                )?;
+            } else {
+                crate::engine::StorageVerifier::verify_path(verification.path())?;
+            }
+            Ok(manifest)
+        });
         let manifest = match result {
             Ok(manifest) => manifest,
             Err(error) => {
@@ -356,6 +373,7 @@ fn materialize_backup(
     mut pinned: Vec<PinnedFile>,
     staging: &Path,
     backup_id: String,
+    captured_at: String,
     durability_frontier: u64,
     database_format_version: u32,
     storage_kind: BackupStorageKind,
@@ -401,7 +419,7 @@ fn materialize_backup(
     let manifest = BackupManifest {
         backup_version: BACKUP_VERSION,
         backup_id,
-        captured_at: chrono::Utc::now().to_rfc3339(),
+        captured_at,
         durability_frontier,
         database_format_version,
         engine_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -658,6 +676,7 @@ mod tests {
             pinned,
             &staging,
             uuid::Uuid::new_v4().to_string(),
+            chrono::Utc::now().to_rfc3339(),
             0,
             crate::metadata::format::CURRENT_FORMAT_VERSION,
             BackupStorageKind::Local,

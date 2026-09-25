@@ -4710,7 +4710,9 @@ mod edge_cases {
 }
 
 mod consistent_cut_backup {
-    use cntryl_midge::{Engine, MidgeError, OpenOptions, TransactionMode, WriteOptions};
+    use cntryl_midge::{
+        Engine, MidgeError, OpenOptions, StorageVerifier, TransactionMode, WriteOptions,
+    };
     use std::sync::atomic::{AtomicBool, Ordering};
 
     #[test]
@@ -4827,6 +4829,36 @@ mod consistent_cut_backup {
         // Assert
         assert!(matches!(result, Err(MidgeError::Corruption(_))));
         assert!(!target.exists());
+    }
+
+    #[test]
+    fn should_not_publish_backup_given_corrupt_source_sst() {
+        // Arrange
+        let directory = tempfile::tempdir().expect("test directory");
+        let source = directory.path().join("source");
+        let artifact = directory.path().join("backup");
+        let engine = Engine::open(OpenOptions::local(&source).build().expect("options"))
+            .expect("source engine");
+        let default = engine.get_column_family("default").expect("default CF");
+        commit_value(&engine, default.id(), b"key", b"value");
+        engine.flush_cf(&default).expect("flush SST");
+        let sst = std::fs::read_dir(source.join("sst"))
+            .expect("list SST directory")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.extension().is_some_and(|extension| extension == "sst"))
+            .expect("flushed SST");
+        let mut bytes = std::fs::read(&sst).expect("read SST");
+        *bytes.last_mut().expect("non-empty SST") ^= 1;
+        std::fs::write(sst, bytes).expect("corrupt SST");
+        assert!(StorageVerifier::verify_path(&source).is_err());
+
+        // Act
+        let result = engine.backup_to(&artifact, std::time::Duration::from_secs(10));
+
+        // Assert
+        assert!(result.is_err(), "corrupt source must not produce a backup");
+        assert!(!artifact.exists());
     }
 
     #[test]

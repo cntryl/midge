@@ -2863,6 +2863,51 @@ mod backup_capture {
             .expect("get post-capture value")
             .is_none());
     }
+
+    #[test]
+    fn should_record_cut_time_before_bulk_copy_when_backup_copy_is_blocked() {
+        // Arrange
+        let directory = tempfile::tempdir().expect("test directory");
+        let source = directory.path().join("source");
+        let artifact = directory.path().join("backup");
+        let engine = Engine::open(OpenOptions::local(&source).build().expect("options"))
+            .expect("source engine");
+        let (entered_tx, entered_rx) = crossbeam::channel::bounded(1);
+        let (resume_tx, resume_rx) = crossbeam::channel::bounded(1);
+        let first_call = Arc::new(AtomicBool::new(true));
+        let callback_first_call = Arc::clone(&first_call);
+        let scenario = fail::FailScenario::setup();
+        fail::cfg_callback("midge::backup::after_object_copy", move || {
+            if callback_first_call.swap(false, Ordering::AcqRel) {
+                let _ = entered_tx.send(());
+                let _ = resume_rx.recv();
+            }
+        })
+        .expect("pause backup materialization");
+
+        // Act
+        let (backup, latest_cut_time) = std::thread::scope(|scope| {
+            let backup_task = scope.spawn(|| engine.backup_to(&artifact, Duration::from_secs(10)));
+            entered_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("backup reached post-capture materialization");
+            let latest_cut_time = chrono::Utc::now();
+            std::thread::sleep(Duration::from_millis(20));
+            resume_tx.send(()).expect("resume backup materialization");
+            (backup_task.join().expect("backup task"), latest_cut_time)
+        });
+        fail::remove("midge::backup::after_object_copy");
+        scenario.teardown();
+        let backup = backup.expect("finish backup");
+        let captured_at = chrono::DateTime::parse_from_rfc3339(&backup.captured_at)
+            .expect("RFC 3339 capture time");
+
+        // Assert
+        assert!(
+            captured_at <= latest_cut_time,
+            "capture time {captured_at} must precede materialization at {latest_cut_time}"
+        );
+    }
 }
 
 mod chaos_real {
