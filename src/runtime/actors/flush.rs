@@ -35,6 +35,92 @@ pub(crate) struct FlushBuildOutput {
     pub reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
 }
 
+/// Storage capabilities needed to publish a flush. The worker depends on
+/// this small contract so publication tests can supply provider and filesystem
+/// doubles without constructing the hybrid-storage coordinator.
+pub(crate) trait FlushStorage: Send + Sync {
+    fn has_hybrid_storage(&self) -> bool;
+
+    fn publish_sst(
+        &self,
+        key: &str,
+        path: &Path,
+        size_bytes: u64,
+        checksum: u32,
+        budget: &crate::common::resource_budget::ResourceBudget,
+    ) -> MidgeResult<()>;
+
+    fn mirror_control_metadata(
+        &self,
+        fs: &dyn crate::io::Fs,
+        publication_lock: &crate::runtime::MetadataPublicationLock,
+        manifest_sequence: u64,
+        deadline: &crate::common::OperationDeadline,
+        validate_lease: &mut dyn FnMut(&crate::common::OperationDeadline) -> MidgeResult<()>,
+    ) -> MidgeResult<bool>;
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct HybridFlushStorage {
+    hybrid: Option<Arc<crate::storage::HybridStorage>>,
+    cloud_metadata: Option<Arc<crate::storage::cloud::CloudStorage>>,
+}
+
+impl HybridFlushStorage {
+    pub(crate) fn new(
+        hybrid: Option<Arc<crate::storage::HybridStorage>>,
+        cloud_metadata: Option<Arc<crate::storage::cloud::CloudStorage>>,
+    ) -> Self {
+        Self {
+            hybrid,
+            cloud_metadata,
+        }
+    }
+}
+
+impl FlushStorage for HybridFlushStorage {
+    fn has_hybrid_storage(&self) -> bool {
+        self.hybrid.is_some()
+    }
+
+    fn publish_sst(
+        &self,
+        key: &str,
+        path: &Path,
+        size_bytes: u64,
+        checksum: u32,
+        budget: &crate::common::resource_budget::ResourceBudget,
+    ) -> MidgeResult<()> {
+        if let Some(hybrid) = &self.hybrid {
+            hybrid.publish_immutable_file(key, path, size_bytes, checksum, budget)?;
+        }
+        Ok(())
+    }
+
+    fn mirror_control_metadata(
+        &self,
+        fs: &dyn crate::io::Fs,
+        publication_lock: &crate::runtime::MetadataPublicationLock,
+        manifest_sequence: u64,
+        deadline: &crate::common::OperationDeadline,
+        validate_lease: &mut dyn FnMut(&crate::common::OperationDeadline) -> MidgeResult<()>,
+    ) -> MidgeResult<bool> {
+        let Some(cloud) = &self.cloud_metadata else {
+            return Ok(false);
+        };
+        crate::runtime::hybrid_persistence::mirror_control_metadata_within(
+            cloud,
+            fs,
+            publication_lock,
+            cloud.callback_timeout(),
+            manifest_sequence,
+            deadline,
+            validate_lease,
+        )?;
+        Ok(true)
+    }
+}
+
 pub(crate) struct FlushBuildCompletion {
     pub identity: FlushIdentity,
     pub memtable: Arc<crate::memtable::SkipListMemtable>,
@@ -53,12 +139,12 @@ pub(crate) struct FlushPublishTask {
     pub fs: Arc<dyn crate::io::Fs>,
     /// The database's manifest writer; the worker must not bypass it (#494).
     pub manifest_store: Arc<crate::metadata::store::ManifestStore>,
-    pub hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
-    pub cloud_metadata_storage: Option<Arc<crate::storage::cloud::CloudStorage>>,
+    pub storage: Arc<dyn FlushStorage>,
     pub metadata_publication_lock: crate::runtime::MetadataPublicationLock,
     pub lease_healthy: Option<Arc<AtomicBool>>,
     pub leader_store: Option<Arc<dyn crate::lease::LeaderStore>>,
     pub leader_holder_id: Option<String>,
+    pub runtime_response_timeout: std::time::Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -473,16 +559,16 @@ impl FlushActor {
         let (persistence_anomaly, journal_checkpoint) =
             save_worker_snapshot(task, &manifest, base_edit_id)?;
 
-        let cloud_metadata_published = if let Some(cloud) = &task.cloud_metadata_storage {
-            mirror_control_metadata(task, cloud, manifest.last_persisted_sequence)?;
-            true
-        } else {
-            // Filesystem-backed cloud simulation keeps control metadata in the
-            // durable local database while HybridStorage owns remote WAL/SST
-            // objects. The local manifest checkpoint above is its control
-            // publication acknowledgement.
-            task.hybrid_storage.is_some()
-        };
+        let deadline = crate::common::OperationDeadline::from_budget(task.runtime_response_timeout);
+        let mut validate_lease =
+            |_deadline: &crate::common::OperationDeadline| validate_task_lease(task);
+        let cloud_metadata_published = task.storage.mirror_control_metadata(
+            task.fs.as_ref(),
+            &task.metadata_publication_lock,
+            manifest.last_persisted_sequence,
+            &deadline,
+            &mut validate_lease,
+        )? || task.storage.has_hybrid_storage();
         crate::failpoints::fail_point!("midge::flush_worker::after_control_metadata_publication");
 
         Ok(FlushPublicationDelta {
@@ -501,19 +587,18 @@ fn upload(
     final_path: &Path,
     budget: &crate::common::resource_budget::ResourceBudget,
 ) -> MidgeResult<()> {
-    if let Some(hybrid) = &task.hybrid_storage {
-        hybrid.publish_immutable_file(
-            &crate::cloud_layout::object_key(&task.sst_name),
-            final_path,
-            task.build.file_meta.size_bytes,
-            task.build
-                .file_meta
-                .content_crc32c
-                .ok_or_else(|| MidgeError::Corruption("flush output lacks checksum".into()))?,
-            budget,
-        )?;
-    }
-    Ok(())
+    let checksum = task
+        .build
+        .file_meta
+        .content_crc32c
+        .ok_or_else(|| MidgeError::Corruption("flush output lacks checksum".into()))?;
+    task.storage.publish_sst(
+        &crate::cloud_layout::object_key(&task.sst_name),
+        final_path,
+        task.build.file_meta.size_bytes,
+        checksum,
+        budget,
+    )
 }
 
 fn elapsed_ns(started: Instant) -> u64 {
@@ -556,7 +641,7 @@ fn finalize_staged_sst(
         let staging_fs_path = db_relative_fs_path(task, &task.build.staging_path)?;
         task.fs.rename_atomic(&staging_fs_path, &final_fs_path)?;
     }
-    validate_final_sst(final_path, &task.build.file_meta, budget)?;
+    validate_final_sst(task, final_path, &task.build.file_meta, budget)?;
     task.fs.sync_dir(
         &crate::io::FsPath::new("sst"),
         crate::io::Durability::Durable,
@@ -590,6 +675,7 @@ fn cleanup_non_authoritative_staging(task: &FlushPublishTask) {
 }
 
 fn validate_final_sst(
+    task: &FlushPublishTask,
     path: &Path,
     expected: &crate::runtime::FileMeta,
     budget: &crate::common::resource_budget::ResourceBudget,
@@ -608,13 +694,9 @@ fn validate_final_sst(
                 path.display()
             ))
         })?;
-    let parent = path.parent().ok_or(MidgeError::InvalidPath)?;
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or(MidgeError::InvalidPath)?;
-    let fs = Arc::new(crate::io::RealFs::new(parent)?);
-    crate::sst::fs::SstFileIo::open_for_compaction(name, fs, budget.clone()).map(|_| ())
+    let fs_path = db_relative_fs_path(task, path)?;
+    crate::sst::fs::SstFileIo::open_for_compaction(&fs_path.0, Arc::clone(&task.fs), budget.clone())
+        .map(|_| ())
 }
 
 /// Writes the worker's manifest snapshot. Returns whether a local save
@@ -635,7 +717,7 @@ fn save_worker_snapshot(
                     written_edit_id: written.edit_checkpoint_id,
                 }),
         )),
-        Err(error) if task.cloud_metadata_storage.is_none() => {
+        Err(error) if !task.storage.has_hybrid_storage() => {
             tracing::warn!(%error, "manifest journal is durable but checkpoint save failed");
             Ok((true, None))
         }
@@ -725,39 +807,6 @@ fn same_manifest_file(left: &crate::metadata::FileMeta, right: &crate::metadata:
         && left.smallest_seq == right.smallest_seq
         && left.largest_seq == right.largest_seq
         && left.key_bounds_complete == right.key_bounds_complete
-}
-
-fn mirror_control_metadata(
-    task: &FlushPublishTask,
-    cloud: &crate::storage::cloud::CloudStorage,
-    local_manifest_sequence: u64,
-) -> MidgeResult<()> {
-    let _publication_guard = task.metadata_publication_lock.lock();
-    for file_name in crate::metadata::files::CLOUD_MIRRORED {
-        let path = crate::io::FsPath::new(*file_name);
-        if !task.fs.exists(&path)? {
-            continue;
-        }
-        validate_task_lease(task)?;
-        let file = task.fs.open(
-            &path,
-            crate::io::OpenOptions {
-                mode: crate::io::OpenMode::ReadOnly,
-                create: false,
-                create_new: false,
-                truncate: false,
-            },
-        )?;
-        let data = file.read_at(0, file.len()?)?.to_vec();
-        crate::runtime::hybrid_persistence::conditional_metadata_mirror_put(
-            cloud,
-            file_name,
-            data,
-            local_manifest_sequence,
-            &crate::common::OperationDeadline::unbounded(),
-        )?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -903,6 +952,7 @@ mod tests {
         directory: tempfile::TempDir,
         db_path: PathBuf,
         task: FlushPublishTask,
+        hybrid_storage: Arc<crate::storage::HybridStorage>,
         sst_backend: Arc<crate::storage::cloud::MockCloudBackend>,
         control_backend: Arc<crate::storage::cloud::MockCloudBackend>,
     }
@@ -975,17 +1025,21 @@ mod tests {
                 &publication_fs,
             ))),
             fs: publication_fs,
-            hybrid_storage: Some(hybrid),
-            cloud_metadata_storage: Some(control_cloud),
+            storage: Arc::new(HybridFlushStorage::new(
+                Some(Arc::clone(&hybrid)),
+                Some(control_cloud),
+            )),
             metadata_publication_lock: crate::runtime::MetadataPublicationLock::default(),
             lease_healthy: Some(Arc::new(AtomicBool::new(true))),
             leader_store: Some(leader_store),
             leader_holder_id: Some("flush-test".to_string()),
+            runtime_response_timeout: crate::config::DEFAULT_RUNTIME_RESPONSE_TIMEOUT,
         };
         Ok(PublicationFixture {
             directory,
             db_path,
             task,
+            hybrid_storage: hybrid,
             sst_backend,
             control_backend,
         })
@@ -1033,7 +1087,7 @@ mod tests {
             memtable,
             staging_path: fixture.directory.path().join("output.sst"),
             reservation: None,
-            hybrid_storage: fixture.task.hybrid_storage.clone(),
+            hybrid_storage: Some(fixture.hybrid_storage.clone()),
         };
         let (tx, rx) = crossbeam::channel::unbounded();
         let (completed, results) = crossbeam::channel::unbounded();
@@ -1063,10 +1117,7 @@ mod tests {
         assert!(!factory.compaction_scratch_cleanup_verified());
         assert!(
             fixture
-                .task
                 .hybrid_storage
-                .as_ref()
-                .unwrap()
                 .budget_snapshot()
                 .total_committed_bytes
                 > 0
@@ -1116,10 +1167,7 @@ mod tests {
         // Arrange
         let fixture = publication_fixture(usize::MAX)?;
         fixture
-            .task
             .hybrid_storage
-            .as_ref()
-            .unwrap()
             .enable_ephemeral_sst_cache(1024 * 1024);
         let budget = crate::common::resource_budget::ResourceBudget::new(128 * 1024);
 
@@ -1140,10 +1188,7 @@ mod tests {
         // Arrange
         let fixture = publication_fixture(usize::MAX)?;
         fixture
-            .task
             .hybrid_storage
-            .as_ref()
-            .unwrap()
             .enable_ephemeral_sst_cache(1024 * 1024);
         let budget = crate::common::resource_budget::ResourceBudget::new(1024 * 1024);
 
@@ -1192,11 +1237,7 @@ mod tests {
     ) -> MidgeResult<()> {
         // Arrange
         let fixture = publication_fixture(usize::MAX)?;
-        let hybrid = fixture
-            .task
-            .hybrid_storage
-            .as_ref()
-            .expect("hybrid storage");
+        let hybrid = &fixture.hybrid_storage;
         // The final SST itself fits; its concurrent readback copy does not.
         hybrid.enable_ephemeral_sst_cache(fixture.task.build.file_meta.size_bytes);
         let memtable = Arc::new(crate::memtable::SkipListMemtable::new());
@@ -1431,6 +1472,36 @@ mod tests {
             .iter()
             .any(|file| file.name == sst_name));
         assert!(fixture.control_backend.get_uploads().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn should_time_out_flush_metadata_mirror_when_publication_lock_is_held() -> MidgeResult<()> {
+        // Arrange
+        let fixture = publication_fixture(usize::MAX)?;
+        let publication_lock = fixture.task.metadata_publication_lock.clone();
+        let guard = publication_lock.lock();
+        let mut task = fixture.task.clone();
+        task.runtime_response_timeout = std::time::Duration::from_millis(100);
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+
+        // Act: keep the lock on this thread so the old blocking lock path
+        // cannot hang the test process.
+        let worker = std::thread::spawn(move || {
+            let result = FlushActor::publish(&task);
+            result_tx.send(result).expect("publish result receiver");
+        });
+        let result = result_rx.recv_timeout(std::time::Duration::from_secs(2));
+        drop(guard);
+        worker
+            .join()
+            .expect("flush publish worker exits after timeout");
+
+        // Assert
+        assert!(matches!(
+            result.expect("bounded publication result"),
+            Err(MidgeError::Timeout(_))
+        ));
         Ok(())
     }
 

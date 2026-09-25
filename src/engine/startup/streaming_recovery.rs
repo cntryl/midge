@@ -240,12 +240,15 @@ fn checkpoint_family(
             sst_dir: state.sst_dir.clone(),
             fs: Arc::clone(&state.fs),
             manifest_store: Arc::clone(&state.manifest_store),
-            hybrid_storage: config.hybrid_storage.clone(),
-            cloud_metadata_storage: config.cloud_metadata_storage.clone(),
+            storage: Arc::new(crate::runtime::actors::flush::HybridFlushStorage::new(
+                config.hybrid_storage.clone(),
+                config.cloud_metadata_storage.clone(),
+            )),
             metadata_publication_lock: config.metadata_publication_lock.clone(),
             lease_healthy: config.lease_healthy.clone(),
             leader_store: config.leader_store.clone(),
             leader_holder_id: config.leader_holder_id.clone(),
+            runtime_response_timeout: config.runtime_response_timeout,
         })?;
         let FlushWorkerResult::Publish(completion) = rx
             .recv()

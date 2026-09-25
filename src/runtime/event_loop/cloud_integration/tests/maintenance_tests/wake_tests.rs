@@ -23,7 +23,8 @@ fn should_complete_manual_waiter_when_prune_event_precedes_worker_exit(
         .lock()
         .insert(91_008, "CompactAll".into());
     el.cloud_wal.prune_inflight.insert(42);
-    el.publication_gate.active = true;
+    el.publication_gate
+        .try_acquire(crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune);
     let storage = el.hybrid_storage.clone().unwrap();
     let (event_sent, event_ready) = std::sync::mpsc::channel();
     let (release_worker, release) = std::sync::mpsc::channel();
@@ -37,7 +38,7 @@ fn should_complete_manual_waiter_when_prune_event_precedes_worker_exit(
     el.drain_hybrid_storage_events();
     assert!(el.cloud_wal.prune_inflight.is_empty());
     assert!(!el.cloud_wal_prune_worker.as_ref().unwrap().is_finished());
-    assert!(el.publication_gate.active);
+    assert!(el.publication_gate.is_active());
     let active_worker_poll = el.idle_progress_timeout();
     let (requests, request_rx) = crossbeam::channel::unbounded();
 
@@ -61,7 +62,7 @@ fn should_complete_manual_waiter_when_prune_event_precedes_worker_exit(
         "manual completion needs no additional request or 30-second maintenance tick: {completion:?}");
     assert!(active_worker_poll.is_some_and(|timeout| timeout <= Duration::from_millis(5)));
     assert!(el.cloud_wal_prune_worker.is_none());
-    assert!(!el.publication_gate.active);
+    assert!(!el.publication_gate.is_active());
     assert!(el.state.pending_compaction_waits.lock().is_empty());
     Ok(())
 }
@@ -71,7 +72,8 @@ fn should_observe_finished_prune_worker_when_no_other_work_can_wake_runtime(
 ) -> crate::common::MidgeResult<()> {
     // Arrange
     let mut el = idle_cloud_loop()?;
-    el.publication_gate.active = true;
+    el.publication_gate
+        .try_acquire(crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune);
     el.cloud_wal_prune_worker = Some(std::thread::spawn(|| {}));
     let deadline = Instant::now() + Duration::from_secs(1);
     while !el.cloud_wal_prune_worker.as_ref().unwrap().is_finished() {

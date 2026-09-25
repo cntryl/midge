@@ -20,6 +20,9 @@ use std::thread::JoinHandle;
 #[path = "compaction/publication_tests.rs"]
 mod publication_tests;
 
+#[path = "compaction/publication.rs"]
+pub(crate) mod publication;
+
 /// A finished compaction partition, summarized where it was written.
 ///
 /// Summarizing re-reads the partition and CRCs it, so it belongs on the
@@ -585,8 +588,27 @@ impl CompactionActor {
         // Invariant: completion only clears in-memory "running" state. The
         // actual authority switch happens when manifest publication removes the
         // old SSTs and adds the replacement set.
-        self.finish_active_bookkeeping(state, input_ssts);
+        self.join_completed_worker();
+        self.finish_publication(state, input_ssts, output_ssts)
+    }
+
+    /// Join the compute worker after it posts its terminal message, retaining
+    /// the active operation and its admission reservation until publication
+    /// has completed. A publication worker may still need to retain inputs if
+    /// its authoritative metadata handoff fails.
+    pub(crate) fn join_completed_worker(&mut self) {
         let _ = self.join_worker();
+    }
+
+    /// Settle the in-memory lifecycle only after every publication phase has
+    /// reached a terminal result.
+    pub(crate) fn finish_publication(
+        &mut self,
+        state: &mut RuntimeState,
+        input_ssts: &[String],
+        output_ssts: &[String],
+    ) -> Option<crate::storage::hybrid::actor::StorageReservationToken> {
+        self.finish_active_bookkeeping(state, input_ssts);
 
         tracing::info!(
             input_count = input_ssts.len(),
@@ -990,8 +1012,72 @@ impl CompactionActor {
             .collect()
     }
 
-    pub(crate) fn prepared_output(&self, name: &str) -> Option<PreparedCompactionOutput> {
-        self.prepared_outputs.lock().get(name).cloned()
+    /// Clone the exact outputs produced by the active worker. The runtime
+    /// must never rediscover this metadata by rereading output SSTs on the
+    /// event-loop thread.
+    pub(crate) fn prepared_outputs_exact(
+        &self,
+        output_ssts: &[String],
+        cf_id: crate::types::ColumnFamilyId,
+        target_level: u32,
+    ) -> MidgeResult<Vec<PreparedCompactionOutput>> {
+        let prepared = self.prepared_outputs.lock();
+        if prepared.len() != output_ssts.len() {
+            return Err(MidgeError::Corruption(format!(
+                "compaction worker prepared {} outputs for {} completion names",
+                prepared.len(),
+                output_ssts.len()
+            )));
+        }
+
+        output_ssts
+            .iter()
+            .map(|name| {
+                let output = prepared.get(name).cloned().ok_or_else(|| {
+                    MidgeError::Corruption(format!(
+                        "compaction completion is missing prepared output metadata for {name}"
+                    ))
+                })?;
+                if output.metadata.name != *name
+                    || output.metadata.cf_id != cf_id
+                    || output.metadata.level != target_level
+                {
+                    return Err(MidgeError::Corruption(format!(
+                        "prepared compaction output does not match completion identity: {name}"
+                    )));
+                }
+                Ok(output)
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prepare_outputs_from_local_files_for_test(
+        &self,
+        output_ssts: &[String],
+        cf_id: crate::types::ColumnFamilyId,
+        target_level: u32,
+        sst_dir: &std::path::Path,
+    ) -> MidgeResult<Vec<PreparedCompactionOutput>> {
+        let budget = crate::common::resource_budget::ResourceBudget::new(
+            self.compaction_memory_limit.max(1),
+        );
+        let mut prepared = self.prepared_outputs.lock();
+        for name in output_ssts {
+            if prepared.contains_key(name) {
+                continue;
+            }
+            let output = stage_local_output_partition(
+                cf_id,
+                target_level,
+                name,
+                &sst_dir.join(name),
+                &budget,
+            )?;
+            prepared.insert(name.clone(), output);
+        }
+        drop(prepared);
+        self.prepared_outputs_exact(output_ssts, cf_id, target_level)
     }
 
     /// Seed an output the worker would have staged, so a publication test can

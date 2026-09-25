@@ -54,16 +54,72 @@ impl CloudWalUploadTracker {
     }
 }
 
+/// Identity of the runtime operation that currently owns manifest publication.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ManifestPublicationOwner {
+    Flush {
+        flush_id: u64,
+    },
+    WalPrune,
+    Compaction {
+        request_id: u64,
+        output_generation: u64,
+    },
+}
+
 /// Serializes manifest-authority changes and retains deferred messages in FIFO order.
 #[derive(Default)]
 pub(crate) struct ManifestPublicationGate {
-    pub(super) deferred_messages: VecDeque<RuntimeMsg>,
-    pub(super) active: bool,
+    deferred_messages: VecDeque<RuntimeMsg>,
+    owner: Option<ManifestPublicationOwner>,
 }
 
 impl ManifestPublicationGate {
+    pub(super) fn is_active(&self) -> bool {
+        self.owner.is_some()
+    }
+
+    pub(super) fn try_acquire(&mut self, owner: ManifestPublicationOwner) -> bool {
+        if self.owner.is_some() {
+            return false;
+        }
+        self.owner = Some(owner);
+        true
+    }
+
+    /// Release only the current owner's token. A stale completion cannot
+    /// reopen the gate while another publication is in flight.
+    pub(super) fn release(&mut self, owner: &ManifestPublicationOwner) -> bool {
+        if self.owner.as_ref() != Some(owner) {
+            return false;
+        }
+        self.owner = None;
+        true
+    }
+
     pub(super) fn defer(&mut self, message: RuntimeMsg) {
         self.deferred_messages.push_back(message);
+    }
+
+    pub(super) fn deferred_messages_is_empty(&self) -> bool {
+        self.deferred_messages.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(super) fn deferred_messages_len(&self) -> usize {
+        self.deferred_messages.len()
+    }
+
+    pub(super) fn take_deferred(&mut self) -> Vec<RuntimeMsg> {
+        self.deferred_messages.drain(..).collect()
+    }
+
+    #[cfg(test)]
+    pub(super) fn deferred_request_ids(&self) -> Vec<Option<u64>> {
+        self.deferred_messages
+            .iter()
+            .map(RuntimeMsg::request_id)
+            .collect()
     }
 
     /// Index of the next deferred message that may run. A drop waits until
@@ -97,7 +153,10 @@ impl ManifestPublicationGate {
 
     /// End the gate and take the deferred message at `index` to run next.
     pub(super) fn finish_at(&mut self, index: usize) -> Option<RuntimeMsg> {
-        self.active = false;
+        debug_assert!(
+            self.owner.is_none(),
+            "publication owner must release the gate"
+        );
         self.deferred_messages.remove(index)
     }
 }
@@ -275,23 +334,39 @@ mod tests {
     #[test]
     fn should_release_manifest_publication_messages_in_fifo_order_when_finished() {
         // Arrange
-        let mut gate = ManifestPublicationGate {
-            active: true,
-            ..ManifestPublicationGate::default()
-        };
+        let mut gate = ManifestPublicationGate::default();
+        let owner = super::ManifestPublicationOwner::WalPrune;
+        assert!(gate.try_acquire(owner.clone()));
         gate.defer(shutdown_message(7));
         gate.defer(shutdown_message(8));
 
         // Act
+        assert!(gate.release(&owner));
         let released = gate.finish_at(0);
 
         // Assert
-        assert!(!gate.active);
+        assert!(!gate.is_active());
         assert!(matches!(
             released,
             Some(RuntimeMsg::ShutdownWithResponse { request_id: 7 })
         ));
-        assert_eq!(gate.deferred_messages.len(), 1);
+        assert_eq!(gate.deferred_messages_len(), 1);
+    }
+
+    #[test]
+    fn should_keep_publication_gate_closed_when_non_owner_releases() {
+        // Arrange
+        let mut gate = ManifestPublicationGate::default();
+        let owner = super::ManifestPublicationOwner::WalPrune;
+        let other_owner = super::ManifestPublicationOwner::Flush { flush_id: 7 };
+        assert!(gate.try_acquire(owner));
+
+        // Act
+        let released = gate.release(&other_owner);
+
+        // Assert
+        assert!(!released);
+        assert!(gate.is_active());
     }
 
     #[test]

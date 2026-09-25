@@ -35,6 +35,16 @@ impl EventLoop {
         // observe shutdown promptly instead of inheriting the worker budget.
         self.fail_shutdown_held_work();
 
+        // A compaction publisher may be between its durable intent, manifest
+        // installation, and mirrored clear, holding the publication gate that
+        // parks finished flushes. Settle it first so the flush drain below can
+        // publish them, and so it completes while this lease epoch is valid.
+        if let Err(error) = self.drain_shutdown_compaction_publication() {
+            if shutdown_error.is_none() {
+                shutdown_error = Some(error);
+            }
+        }
+
         let cloud_async = self.wal_actor.is_cloud_async();
         let cloud_shutdown_deadline =
             crate::common::OperationDeadline::from_budget(self.shutdown_cloud_drain_timeout);
@@ -196,6 +206,35 @@ impl EventLoop {
         }
     }
 
+    fn drain_shutdown_compaction_publication(&mut self) -> crate::common::MidgeResult<()> {
+        while self.compaction_publish_actor.is_inflight() {
+            match self
+                .compaction_publish_result_rx
+                .recv_timeout(std::time::Duration::from_millis(25))
+            {
+                Ok(completion) => {
+                    crate::runtime::event_loop::compaction::CompactionCoordinator::handle_publication_completion(
+                        self,
+                        completion,
+                    );
+                }
+                Err(crossbeam::channel::RecvTimeoutError::Timeout) => {}
+                Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
+                    return Err(MidgeError::Internal(
+                        "compaction publication worker disconnected during shutdown".to_string(),
+                    ));
+                }
+            }
+        }
+        if self.compaction_publication.is_some() {
+            return Err(MidgeError::Internal(
+                "compaction publication was left without a worker completion during shutdown"
+                    .to_string(),
+            ));
+        }
+        self.compaction_publish_actor.shutdown_and_join()
+    }
+
     fn checkpoint_active_cloud_memtables_within(
         &mut self,
         deadline: &crate::common::OperationDeadline,
@@ -250,7 +289,7 @@ impl EventLoop {
                 continue;
             }
 
-            if self.publication_gate.active {
+            if self.publication_gate.is_active() {
                 self.reap_cloud_wal_prune_worker();
                 let sleep_for = deadline
                     .remaining()
@@ -305,7 +344,7 @@ impl EventLoop {
             messages.push(message);
         }
         messages.extend(self.verification_barrier.deferred_messages.drain(..));
-        messages.extend(self.publication_gate.deferred_messages.drain(..));
+        messages.extend(self.publication_gate.take_deferred());
         for message in messages {
             self.fail_shutdown_message(message);
         }

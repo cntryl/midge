@@ -41,8 +41,8 @@ impl EventLoop {
     pub(super) fn schedule_cloud_maintenance(&mut self) -> Option<MaintenanceTask> {
         if self.cloud_maintenance.dispatching
             || self.pending_msg.is_some()
-            || !self.publication_gate.deferred_messages.is_empty()
-            || self.publication_gate.active
+            || !self.publication_gate.deferred_messages_is_empty()
+            || self.publication_gate.is_active()
             || self.flush_actor.is_inflight()
             || self.cloud_wal_prune_worker.is_some()
             || self

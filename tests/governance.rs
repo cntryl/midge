@@ -580,6 +580,34 @@ mod architecture_ladder {
     }
 
     #[test]
+    fn should_mutate_publication_gate_only_through_owner_methods() {
+        // Arrange
+        let paths = [
+            "src/runtime/event_loop/compaction.rs",
+            "src/runtime/event_loop/flush_pipeline.rs",
+            "src/runtime/event_loop/cloud_integration/prune.rs",
+        ];
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+
+        // Act
+        let violations: Vec<_> = paths
+            .iter()
+            .filter_map(|path| {
+                let source = production_source(&root.join(path));
+                source
+                    .contains("publication_gate.active =")
+                    .then_some(*path)
+            })
+            .collect();
+
+        // Assert
+        assert!(
+            violations.is_empty(),
+            "publication ownership changes must use ManifestPublicationGate methods: {violations:?}"
+        );
+    }
+
+    #[test]
     fn should_keep_config_independent_of_storage_when_lib_declares_crate_aliases() {
         // Arrange
         let lib = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"))

@@ -118,7 +118,7 @@ impl EventLoop {
         // publication gate. Give the run loop a chance to dispatch it before
         // another maintenance prune reacquires the gate; otherwise a steady
         // stream of eligible WAL segments can defer the same request forever.
-        if self.pending_msg.is_some() || !self.publication_gate.deferred_messages.is_empty() {
+        if self.pending_msg.is_some() || !self.publication_gate.deferred_messages_is_empty() {
             return;
         }
         if !self.wal_actor.is_cloud_async() || self.state.is_memory_mode() {
@@ -136,7 +136,7 @@ impl EventLoop {
             || !self.state.compaction.compacting_ssts.is_empty()
             || self.flush_actor.is_inflight();
         if self.cloud_wal_prune_worker.is_some()
-            || self.publication_gate.active
+            || self.publication_gate.is_active()
             || layout_publication_active
         {
             return;
@@ -175,10 +175,14 @@ impl EventLoop {
         let attempt_budget = self
             .runtime_response_timeout
             .min(self.shutdown_cloud_drain_timeout);
+        let publication_owner =
+            crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune;
+        if !self.publication_gate.try_acquire(publication_owner.clone()) {
+            return;
+        }
         for (segment_id, _) in &candidates {
             self.cloud_wal.prune_inflight.insert(*segment_id);
         }
-        self.publication_gate.active = true;
 
         let candidate_ids = candidates
             .iter()
@@ -210,7 +214,7 @@ impl EventLoop {
                 for segment_id in candidate_ids {
                     self.cloud_wal.prune_inflight.remove(&segment_id);
                 }
-                self.publication_gate.active = false;
+                self.publication_gate.release(&publication_owner);
                 self.state.mark_persistence_anomaly();
                 tracing::warn!(
                     %error,
@@ -263,7 +267,9 @@ impl EventLoop {
                 self.state.mark_persistence_anomaly();
                 tracing::warn!("cloud WAL prune preflight worker panicked during join");
             }
-            self.publication_gate.active = false;
+            self.publication_gate.release(
+                &crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune,
+            );
         }
     }
 }

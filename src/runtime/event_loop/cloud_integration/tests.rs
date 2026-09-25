@@ -4575,7 +4575,7 @@ fn should_release_publication_gate_before_post_cas_cloud_wal_delete_completes(
     delete_started_rx
         .recv_timeout(Duration::from_secs(1))
         .expect("post-CAS conditional WAL delete should start");
-    assert!(el.publication_gate.active);
+    assert!(el.publication_gate.is_active());
     assert!(el.cloud_wal_prune_worker.is_some());
     el.join_cloud_wal_prune_worker();
     el.tick_hybrid_storage();
@@ -4591,7 +4591,7 @@ fn should_release_publication_gate_before_post_cas_cloud_wal_delete_completes(
     // Assert: publication authority and its gate settle before the physical
     // cleanup completion. Local ACK state stays until that completion arrives.
     assert!(
-        !el.publication_gate.active,
+        !el.publication_gate.is_active(),
         "joining WAL prune preflight must release the publication gate"
     );
     assert!(el.cloud_wal_prune_worker.is_none());
@@ -4849,7 +4849,8 @@ fn should_dispatch_deferred_control_before_starting_next_wal_prune(
     seed_cloud_prune_candidate(&mut el, 81, 81);
     el.state.wal.cloud_durable_seq = 81;
     add_valid_manifest_sst_for_test(&mut el, "covered.sst", 81);
-    el.publication_gate.active = true;
+    el.publication_gate
+        .try_acquire(crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune);
     el.publication_gate
         .defer(crate::runtime::RuntimeMsg::CompactAll { request_id: 8105 });
     let completed_worker = std::thread::spawn(|| {});
@@ -4867,7 +4868,7 @@ fn should_dispatch_deferred_control_before_starting_next_wal_prune(
         Some(crate::runtime::RuntimeMsg::CompactAll { request_id: 8105 })
     ));
     assert!(
-        !el.publication_gate.active,
+        !el.publication_gate.is_active(),
         "a new prune must not reacquire the gate ahead of restored control work"
     );
     assert!(
@@ -8466,7 +8467,10 @@ fn should_head_each_compaction_output_once_when_publishing_prepared_remote_outpu
                 name: output_sst.clone(),
                 level: 1,
                 size_bytes: output_bytes.len() as u64,
-                content_crc32c: None,
+                // The worker always records the checksum it staged with.
+                content_crc32c: Some(
+                    crate::sst::fs::file_identity(&el.state.sst_dir.join(&output_sst))?.1,
+                ),
                 cf_id: 0,
                 smallest_key: Some(b"counted".to_vec()),
                 largest_key: Some(b"counted".to_vec()),

@@ -1233,6 +1233,8 @@ mod solid_cleanup {
         // Arrange
         let event_loop = read_source("src/runtime/event_loop/mod.rs");
         let publication = read_source("src/runtime/event_loop/compaction.rs");
+        let publication_worker = read_source("src/runtime/actors/compaction/publication.rs");
+        let compaction_worker = read_source("src/runtime/actors/compaction.rs");
         let admitted = read_source("src/storage/hybrid/backend/file_publication.rs");
         let reader = read_source("src/sst/fs/reader_io/mod.rs");
         let writer = read_source("src/sst/fs/factory_io.rs");
@@ -1240,16 +1242,28 @@ mod solid_cleanup {
         // Act
         let materializes_crc_input = event_loop.contains("crc32c::crc32c(&std::fs::read");
         let streaming_summary_is_used = reader.contains("into_streaming_summary()");
+        let completion_forbidden = [
+            "build_sst_file_meta",
+            "checksummed_file_crc",
+            "mirror_ssts_to_authoritative_cloud",
+            "verify_remote_object_guards_within",
+            "mirror_metadata_to_authoritative_cloud",
+            "OperationDeadline::unbounded",
+        ];
 
         // Assert
         assert!(!materializes_crc_input);
-        assert!(event_loop.contains("checksummed_file_crc"));
-        assert!(event_loop.contains("budget.reserve(CRC_BUFFER_SIZE, \"SST checksum buffer\")"));
+        assert!(completion_forbidden
+            .iter()
+            .all(|forbidden| !publication.contains(forbidden)));
         assert!(!event_loop.contains("read_file_with_budget"));
-        assert!(event_loop.contains("publish_immutable_file("));
+        assert!(compaction_worker.contains("summarize_output_partition"));
+        assert!(publication_worker.contains("verify_remote_object_guards_within"));
+        assert!(publication_worker.contains("publish_immutable_file("));
+        assert!(publication_worker.contains("mirror_control_metadata"));
+        assert!(publication_worker.contains("OperationDeadline::from_budget"));
         assert!(admitted.contains("submit_write_with_reservation("));
         assert!(admitted.contains("submit_read_range_with_reservation("));
-        assert!(publication.contains("mirror_ssts_to_authoritative_cloud(output_ssts, budget)"));
         assert!(streaming_summary_is_used);
         assert!(writer.contains("writer.streaming = Some(StreamingState::new"));
     }
