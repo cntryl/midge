@@ -16,6 +16,59 @@ mod frame_reader;
 #[cfg(test)]
 mod tests;
 
+/// Find verified record sequences after a corrupt boundary without replaying
+/// any of them. Candidate headers are found in bounded chunks; a candidate
+/// counts only after its complete payload passes CRC and record decoding.
+pub(crate) fn max_verified_suffix_sequence(
+    file: &dyn crate::io::File,
+    path: &FsPath,
+    start: u64,
+    limits: StreamingReplayLimits,
+) -> MidgeResult<Option<u64>> {
+    use crate::wal::frame::FrameBytes;
+
+    let source = crate::wal::frame::FileFrames::new(file, path);
+    let file_len = source.len()?;
+    let overlap = crate::wal::frame::WAL_FRAME_HEADER_LEN + 2;
+    let chunk_size = limits.max_frame_bytes.min(1024 * 1024).max(overlap + 1);
+    let mut pos = start;
+    let mut max_sequence = None;
+    while file_len.saturating_sub(pos) > overlap as u64 {
+        let len = usize::try_from((file_len - pos).min(chunk_size as u64)).map_err(|_| {
+            MidgeError::ResourceLimit("WAL suffix read length exceeds usize".into())
+        })?;
+        let bytes = source.read(pos, len as u64)?;
+        for payload_offset in crate::wal::frame::WAL_FRAME_HEADER_LEN..=len.saturating_sub(3) {
+            if !crate::wal::encoding::has_current_record_prefix(&bytes[payload_offset..]) {
+                continue;
+            }
+            let header_start = payload_offset - crate::wal::frame::WAL_FRAME_HEADER_LEN;
+            let Ok((payload_len, crc)) =
+                crate::wal::frame::decode_frame_header(&bytes[header_start..payload_offset])
+            else {
+                continue;
+            };
+            let payload_start = pos + payload_offset as u64;
+            if payload_len as u64 > file_len - payload_start {
+                continue;
+            }
+            if payload_len > limits.max_frame_bytes {
+                return Err(MidgeError::ResourceLimit(
+                    "WAL suffix candidate exceeds replay frame limit".into(),
+                ));
+            }
+            let payload = source.read(payload_start, payload_len as u64)?;
+            if crate::wal::frame::verify_frame_crc(&payload, crc).is_ok() {
+                if let Ok(record) = crate::wal::encoding::decode_view(&payload) {
+                    max_sequence = max_sequence.max(Some(record.seq));
+                }
+            }
+        }
+        pos += (len - overlap) as u64;
+    }
+    Ok(max_sequence)
+}
+
 // Explicit byte units distinguish allocation bounds from sequence/record limits.
 #[allow(clippy::struct_field_names)]
 #[derive(Clone, Copy)]
@@ -279,6 +332,21 @@ pub(crate) fn inspect_wal_file(
     limits: StreamingReplayLimits,
 ) -> Result<super::VerifiedWalPrefix, super::WalPrefixInspectionFailure> {
     inspect_file(file, path, limits, EpochPolicy::SkipStale, &mut |_| Ok(()))
+}
+
+/// A local sealed file has the same epoch rule as a local active file: it may
+/// span a restart or contain a late append from a fenced writer.
+pub(crate) fn inspect_local_sealed_wal_file(
+    file: &dyn crate::io::File,
+    path: &FsPath,
+    limits: StreamingReplayLimits,
+) -> MidgeResult<super::VerifiedWalPrefix> {
+    let prefix =
+        inspect_wal_file(file, path, limits).map_err(|failure| failure.failure.into_error())?;
+    if prefix.record_count == 0 {
+        return Err(MidgeError::Corruption("sealed WAL segment is empty".into()));
+    }
+    Ok(prefix)
 }
 
 /// Sealed cloud segments must contain complete frames from exactly one epoch.
