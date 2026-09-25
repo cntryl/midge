@@ -20,10 +20,19 @@ jobs:
     env:
       CARGO_INCREMENTAL: 0
       MIDGE_QUALIFICATION_ARTIFACT_DIR: ${{ github.workspace }}/target/cloud-qualification-evidence/${{ github.run_id }}-${{ github.run_attempt }}
-      MIDGE_QUALIFICATION_REVISION: ${{ github.sha }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'main' || github.ref }}
+
+      - name: Record qualified revision
+        id: revision
+        shell: bash
+        run: |
+          revision="$(git rev-parse HEAD)"
+          echo "MIDGE_QUALIFICATION_REVISION=${revision}" >> "$GITHUB_ENV"
+          echo "sha=${revision}" >> "$GITHUB_OUTPUT"
 
       - name: Update Rust toolchain
         run: rustup update stable
@@ -52,7 +61,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: cloud-qualification-${{ github.sha }}
+          name: cloud-qualification-${{ steps.revision.outputs.sha }}
           path: target/cloud-qualification-evidence/${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: ignore
 

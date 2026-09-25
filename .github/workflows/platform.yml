@@ -4,21 +4,19 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "41 3 * * 3"
-  workflow_run:
-    workflows: ["CI"]
-    types: [completed]
+  push:
+    branches: [main]
 
 permissions:
   contents: read
 
 concurrency:
-  group: platform-${{ github.event.workflow_run.head_sha || github.sha }}
+  group: platform-${{ github.sha }}
   cancel-in-progress: true
 
 jobs:
   matrix:
     name: Platform (${{ matrix.os }})
-    if: ${{ github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -28,8 +26,15 @@ jobs:
     env:
       CARGO_INCREMENTAL: 0
     steps:
-      - name: Checkout repository
+      - name: Checkout event revision
+        if: github.event_name != 'schedule'
         uses: actions/checkout@v7
+
+      - name: Checkout main for scheduled qualification
+        if: github.event_name == 'schedule'
+        uses: actions/checkout@v7
+        with:
+          ref: main
 
       - name: Update Rust toolchain
         run: rustup update stable

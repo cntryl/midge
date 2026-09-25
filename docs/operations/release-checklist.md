@@ -2,6 +2,11 @@
 
 Use this checklist before publishing a release candidate or stable release.
 
+- [ ] development work is merged into `develop` with passing current-head CI
+- [ ] the `develop` → `main` promotion PR has passing CI, repository and Docker qualification, promotion-source, and CodeQL checks on its current head
+- [ ] the promotion uses a merge commit and post-merge `main` checks pass
+- [ ] the release tag points to a commit on `main`
+
 - [ ] `cargo fmt --check`
 - [ ] `cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic`
 - [ ] `cargo clippy --workspace --all-targets --no-default-features -- -D warnings -D clippy::pedantic`

@@ -143,6 +143,9 @@ impl RuntimeDispatcher {
             &RuntimeMsg::BeginStorageVerification { request_id } => {
                 Some(event_loop.begin_storage_verification(request_id))
             }
+            &RuntimeMsg::BeginBackupCapture { request_id } => {
+                Some(event_loop.begin_backup_capture(request_id))
+            }
             &RuntimeMsg::EndStorageVerification { request_id, token } => {
                 Some(event_loop.end_storage_verification(request_id, token))
             }

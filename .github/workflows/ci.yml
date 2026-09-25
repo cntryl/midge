@@ -1,35 +1,11 @@
 name: CI
 
 on:
-  workflow_dispatch:
   push:
-    branches: [main]
-    paths:
-      - "src/**"
-      - "tests/**"
-      - "benches/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - ".cargo/**"
-      - "CONTRIBUTING.md"
-      - ".github/pull_request_template.md"
-      - ".github/workflows/ci.yml"
-      - ".github/workflows/publish.yml"
-      - ".github/workflows/platform.yml"
+    branches: [develop]
   pull_request:
-    branches: [main]
-    paths:
-      - "src/**"
-      - "tests/**"
-      - "benches/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - ".cargo/**"
-      - "CONTRIBUTING.md"
-      - ".github/pull_request_template.md"
-      - ".github/workflows/ci.yml"
-      - ".github/workflows/publish.yml"
-      - ".github/workflows/platform.yml"
+    branches: [develop]
+    types: [opened, synchronize, reopened, edited]
 
 permissions:
   contents: read
