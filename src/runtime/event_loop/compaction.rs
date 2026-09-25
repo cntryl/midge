@@ -290,7 +290,7 @@ impl CompactionCoordinator {
             event_loop.drain_auto_flush_memtables();
             event_loop.wake_write_stall_waiters();
         }
-        event_loop.drain_inline_compaction_publish_worker();
+        Self::drain_inline_publish_worker(event_loop);
         HandleOutcome::Continue
     }
 
@@ -1173,24 +1173,22 @@ impl CompactionCoordinator {
         });
         event_loop.state.mark_persistence_anomaly();
     }
-}
 
-impl EventLoop {
-    pub(super) fn drain_compaction_publish_results(&mut self) {
-        while let Ok(completion) = self.compaction_publish_result_rx.try_recv() {
-            CompactionCoordinator::handle_publication_completion(self, completion);
+    pub(super) fn drain_publish_results(event_loop: &mut EventLoop) {
+        while let Ok(completion) = event_loop.compaction_publish_result_rx.try_recv() {
+            Self::handle_publication_completion(event_loop, completion);
         }
     }
 
-    pub(super) fn drain_inline_compaction_publish_worker(&mut self) {
-        if !self.compaction_publish_actor.is_inline() {
+    fn drain_inline_publish_worker(event_loop: &mut EventLoop) {
+        if !event_loop.compaction_publish_actor.is_inline() {
             return;
         }
-        while self.compaction_publish_actor.is_inflight() {
-            let Ok(completion) = self.compaction_publish_result_rx.try_recv() else {
+        while event_loop.compaction_publish_actor.is_inflight() {
+            let Ok(completion) = event_loop.compaction_publish_result_rx.try_recv() else {
                 break;
             };
-            CompactionCoordinator::handle_publication_completion(self, completion);
+            Self::handle_publication_completion(event_loop, completion);
         }
     }
 }

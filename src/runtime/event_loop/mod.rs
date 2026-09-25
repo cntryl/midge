@@ -1299,7 +1299,7 @@ impl EventLoop {
     /// writes into its batched sync; the fairness slot runs after dispatch
     /// and leaves the queue in order.
     fn background_progress(&mut self, drain_writes_from: Option<&Receiver<RuntimeMsg>>) {
-        self.drain_compaction_publish_results();
+        compaction::CompactionCoordinator::drain_publish_results(self);
         self.drain_flush_worker_results();
         match drain_writes_from {
             Some(msg_rx) => self.sync_batched_wal_if_needed(msg_rx),
@@ -1367,7 +1367,7 @@ impl EventLoop {
 
     fn process_one(&mut self, msg: RuntimeMsg, msg_rx: &Receiver<RuntimeMsg>) -> HandleOutcome {
         if self.verification_barrier.token.is_none() && msg.is_mutation() {
-            self.drain_compaction_publish_results();
+            compaction::CompactionCoordinator::drain_publish_results(self);
             self.drain_flush_worker_results();
             self.maybe_flush_cloud_async_wal();
             self.tick_hybrid_storage();

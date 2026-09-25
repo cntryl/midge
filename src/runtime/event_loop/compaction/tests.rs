@@ -396,7 +396,7 @@ fn should_reject_compaction_publication_when_writer_lease_moved_to_newer_holder(
         0,
         1,
     )?;
-    event_loop.drain_inline_compaction_publish_worker();
+    CompactionCoordinator::drain_inline_publish_worker(&mut event_loop);
 
     // Assert
     assert!(
