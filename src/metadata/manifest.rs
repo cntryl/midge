@@ -135,9 +135,10 @@ pub struct FileMeta {
     pub cf_id: u32,
     #[serde(default)]
     pub sst_seq: u64,
-    #[serde(default)]
+    /// Serialized as hex (format version 4); legacy byte arrays still decode.
+    #[serde(default, with = "crate::metadata::key_bounds")]
     pub smallest_key: Option<Vec<u8>>,
-    #[serde(default)]
+    #[serde(default, with = "crate::metadata::key_bounds")]
     pub largest_key: Option<Vec<u8>>,
     #[serde(default)]
     pub smallest_seq: Option<u64>,

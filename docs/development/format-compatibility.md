@@ -14,7 +14,16 @@ The compatibility policy applies to:
 
 ## Current Local Format
 
-Database `FORMAT` version 3 requires SST V4. This is an intentional pre-1.0
+Database `FORMAT` version 4 is current. It differs from version 3 only in the
+manifest encoding: SST key bounds are stored as hex strings instead of JSON
+byte arrays. Current binaries read both encodings, accept a version 3
+database, and upgrade its `FORMAT` marker to 4 in place when they open it for
+writing, before any manifest write. Read-only paths (`midge verify`) validate
+the marker without rewriting it. The marker is upgraded even if the open then
+fails for another reason, so a version 3 binary cannot reopen a database that
+a current binary has opened for writing.
+
+FORMAT 3 and 4 both require SST V4. That was an intentional pre-1.0
 break: current binaries reject database FORMAT versions 1 and 2, SST versions
 1 through 3, and unknown future versions. There is no legacy decoder or
 best-effort fallback in the V4 reader.
@@ -111,6 +120,7 @@ new database, an older binary must not open it.
 ## Fixture Coverage
 
 Repository gates verify, open, and scan a checked-in populated FORMAT 3/SST V4
-fixture with a stable logical digest; they also reject a prior FORMAT 2 fixture
-and a synthetic future FORMAT 4 fixture. Format changes must update these
+fixture with a stable logical digest, and check that a writable open upgrades
+it to FORMAT 4 and reloads a manifest mixing both key-bound encodings; they
+also reject a prior FORMAT 2 fixture and a synthetic future FORMAT 5 fixture. Format changes must update these
 fixtures and their CI assertions together.

@@ -3,7 +3,11 @@ use crate::io::{staging, Fs, FsError, FsPath, RealFs};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-pub const CURRENT_FORMAT_VERSION: u32 = 3;
+pub const CURRENT_FORMAT_VERSION: u32 = 4;
+/// Oldest on-disk format this build opens. Version 4 changed only the
+/// manifest key-bound encoding (#546), which still decodes version 3
+/// manifests, so a writable open upgrades a version 3 marker in place.
+const MIN_SUPPORTED_FORMAT_VERSION: u32 = 3;
 const FORMAT_FILE: &str = "FORMAT";
 const FORMAT_FILE_TEMP: &str = "FORMAT.tmp";
 const FORMAT_PREFIX: &str = "midge-format-version=";
@@ -17,7 +21,12 @@ pub fn ensure_or_create_format_marker(db_path: &Path) -> MidgeResult<u32> {
 
     let marker_path = format_marker_path(db_path);
     if marker_path.exists() {
-        return validate_format_marker(db_path);
+        // Upgrade before this process writes any newer-format metadata, so
+        // an older build refuses the database instead of misreading it.
+        if validate_format_marker(db_path)? < CURRENT_FORMAT_VERSION {
+            publish_current_marker(db_path)?;
+        }
+        return Ok(CURRENT_FORMAT_VERSION);
     }
 
     if has_persisted_state_without_format_marker(db_path)? {
@@ -28,6 +37,12 @@ pub fn ensure_or_create_format_marker(db_path: &Path) -> MidgeResult<u32> {
         )));
     }
 
+    publish_current_marker(db_path)?;
+    Ok(CURRENT_FORMAT_VERSION)
+}
+
+/// Durably publish the current format marker, replacing any older one.
+fn publish_current_marker(db_path: &Path) -> MidgeResult<()> {
     let fs: Arc<dyn Fs> = Arc::new(RealFs::new(db_path)?);
     staging::stage_bytes_with_hook(
         &fs,
@@ -42,7 +57,7 @@ pub fn ensure_or_create_format_marker(db_path: &Path) -> MidgeResult<u32> {
         },
         FsError::Io,
     )?;
-    Ok(CURRENT_FORMAT_VERSION)
+    Ok(())
 }
 
 pub fn validate_format_marker(db_path: &Path) -> MidgeResult<u32> {
@@ -84,11 +99,12 @@ pub fn validate_format_marker(db_path: &Path) -> MidgeResult<u32> {
             ))
         })?;
 
-    if version != CURRENT_FORMAT_VERSION {
+    if !(MIN_SUPPORTED_FORMAT_VERSION..=CURRENT_FORMAT_VERSION).contains(&version) {
         return Err(MidgeError::CompatibilityError(format!(
-            "unsupported on-disk format version {} at '{}'; this build expects version {}",
+            "unsupported on-disk format version {} at '{}'; this build supports versions {}..={}",
             version,
             db_path.display(),
+            MIN_SUPPORTED_FORMAT_VERSION,
             CURRENT_FORMAT_VERSION
         )));
     }
@@ -189,6 +205,66 @@ mod tests {
 
         // Act
         let error = ensure_or_create_format_marker(temp_dir.path()).expect_err("legacy format");
+
+        // Assert
+        assert!(matches!(error, MidgeError::CompatibilityError(_)));
+    }
+
+    #[test]
+    fn should_upgrade_version_three_marker_when_opening_writable_database() {
+        // Arrange: version 4 only changed the manifest key-bound encoding,
+        // which still decodes version 3 manifests (#546).
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            format_marker_path(temp_dir.path()),
+            format!("{FORMAT_PREFIX}3\n"),
+        )
+        .expect("write version 3 marker");
+
+        // Act
+        let version = ensure_or_create_format_marker(temp_dir.path()).expect("open v3");
+
+        // Assert
+        assert_eq!(version, 4);
+        assert_eq!(
+            std::fs::read_to_string(format_marker_path(temp_dir.path())).expect("read marker"),
+            format!("{FORMAT_PREFIX}4\n")
+        );
+    }
+
+    #[test]
+    fn should_accept_version_three_marker_without_writing_when_validating() {
+        // Arrange: read-only paths such as verification must not mutate disk.
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            format_marker_path(temp_dir.path()),
+            format!("{FORMAT_PREFIX}3\n"),
+        )
+        .expect("write version 3 marker");
+
+        // Act
+        let version = validate_format_marker(temp_dir.path()).expect("validate v3");
+
+        // Assert
+        assert_eq!(version, 3);
+        assert_eq!(
+            std::fs::read_to_string(format_marker_path(temp_dir.path())).expect("read marker"),
+            format!("{FORMAT_PREFIX}3\n")
+        );
+    }
+
+    #[test]
+    fn should_reject_open_given_format_version_older_than_three() {
+        // Arrange
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            format_marker_path(temp_dir.path()),
+            format!("{FORMAT_PREFIX}2\n"),
+        )
+        .expect("write version 2 marker");
+
+        // Act
+        let error = validate_format_marker(temp_dir.path()).expect_err("too old");
 
         // Assert
         assert!(matches!(error, MidgeError::CompatibilityError(_)));
