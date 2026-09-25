@@ -46,7 +46,7 @@ image; CodeQL for Actions and Rust; and the promotion-source check. `Platform`
 covers macOS and Windows, `Compatibility` covers Rust 1.97 and provider-only
 features, and `Cloud Qualification` runs the Sqrzl emulator. Those extended
 workflows run manually or on schedules against `main`, and Platform and
-Compatibility also follow a successful `main` push CI run.
+Compatibility also run on every `main` push.
 
 Provider features are checked independently so one provider cannot hide a
 dependency on another provider's implementation:
