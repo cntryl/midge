@@ -197,7 +197,7 @@ impl EventLoop {
                 runtime_pending,
                 "Shutdown timeout: CloudAsync uploads remain owned"
             );
-            Some(MidgeError::Internal(format!(
+            Some(MidgeError::Timeout(format!(
                 "shutdown timed out with {storage_pending} storage-owned and {runtime_pending} runtime-owned cloud uploads"
             )))
         } else {

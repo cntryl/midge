@@ -789,7 +789,6 @@ impl EventLoop {
                 self.worker_msg_tx.clone(),
             )
             .map(|_| ())
-            .map_err(|error| crate::common::MidgeError::Internal(error.to_string()))
     }
 
     fn schedule_one_background_compaction_if_needed(

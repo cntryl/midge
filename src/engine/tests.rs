@@ -463,6 +463,43 @@ fn should_reap_engine_without_blocking_drop_when_transaction_is_live() -> MidgeR
 }
 
 #[test]
+fn should_preserve_fenced_kind_when_empty_sync_commit_loses_writer_authority() -> MidgeResult<()> {
+    // Arrange: replace this temporary database's leader record with a newer
+    // holder so the explicit WAL sync observes lost authority.
+    let temp_dir = tempfile::tempdir()?;
+    let engine = Engine::open(OpenOptions::local(temp_dir.path()).build()?)?;
+    let default_cf = engine
+        .get_column_family("default")
+        .ok_or_else(|| MidgeError::Internal("default column family missing".into()))?;
+    let transaction = engine.begin_tx(default_cf.id(), TransactionMode::ReadWrite)?;
+    let record_path = temp_dir.path().join(".midge_leader");
+    let record = std::fs::read_to_string(&record_path)?;
+    let epoch = record
+        .lines()
+        .find_map(|line| line.strip_prefix("epoch: "))
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| MidgeError::Internal("leader epoch missing".into()))?;
+    let acquired_at = record
+        .lines()
+        .find_map(|line| line.strip_prefix("acquired_at: "))
+        .ok_or_else(|| MidgeError::Internal("leader acquisition time missing".into()))?;
+    std::fs::write(
+        &record_path,
+        format!(
+            "epoch: {}\nholder_id: replacement-writer\nacquired_at: {acquired_at}\n",
+            epoch + 1
+        ),
+    )?;
+
+    // Act
+    let result = transaction.commit(WriteOptions::sync());
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::Fenced(_))), "{result:?}");
+    Ok(())
+}
+
+#[test]
 fn should_treat_flush_compact_as_noop_in_memory_mode() {
     // Arrange
     let opts = OpenOptions::in_memory().build().expect("build options");

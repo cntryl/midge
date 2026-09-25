@@ -722,11 +722,12 @@ impl Engine {
     /// Shutdown the engine gracefully within `timeout`.
     ///
     /// Once shutdown begins, the engine remains in the closing state and
-    /// rejects new work. `Busy` and `Timeout` leave it retryable; callers may
-    /// release active transactions or wait for blocked storage I/O and invoke
-    /// this method again. The timeout bounds the caller's wait; it does not
-    /// detach or cancel in-flight durability I/O. Writer fencing remains held
-    /// by the cleanup reaper until every runtime worker has actually exited.
+    /// rejects new work. `Busy` and caller-deadline `Timeout` leave cleanup
+    /// retryable; callers may release active transactions or wait for blocked
+    /// storage I/O and invoke this method again. A cloud-upload drain `Timeout`
+    /// is the runtime's terminal durability result and is replayed on later
+    /// calls. The caller timeout does not cancel in-flight durability I/O.
+    /// Writer fencing remains held until every runtime worker has exited.
     ///
     /// # Errors
     ///
@@ -753,13 +754,12 @@ impl Engine {
         if matches!(&shutdown_result, Err(MidgeError::Busy(_))) {
             return shutdown_result;
         }
-        if matches!(&shutdown_result, Err(MidgeError::Timeout(_))) {
-            self.schedule_runtime_fencing_cleanup()?;
-            return shutdown_result;
-        }
-
         let remaining = timeout.saturating_sub(started.elapsed());
         if !runtime.wait_for_exit(remaining) {
+            if matches!(&shutdown_result, Err(MidgeError::Timeout(_))) {
+                self.schedule_runtime_fencing_cleanup()?;
+                return shutdown_result;
+            }
             return Err(MidgeError::Timeout(
                 "runtime workers did not terminate before shutdown deadline".to_string(),
             ));
