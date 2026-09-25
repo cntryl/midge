@@ -1595,9 +1595,9 @@ mod compatibility_fixtures {
     }
 
     #[test]
-    fn should_reject_future_v4_fixture_given_unsupported_version_when_reopening() {
+    fn should_reject_future_v5_fixture_given_unsupported_version_when_reopening() {
         // Arrange
-        let temp = copy_fixture_dir("future_v4");
+        let temp = copy_fixture_dir("future_v5");
 
         // Act
         let verify_error =

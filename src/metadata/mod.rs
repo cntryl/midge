@@ -5,6 +5,7 @@
 pub mod files;
 pub mod format;
 pub mod journal;
+mod key_bounds;
 pub mod manifest;
 pub mod persistence;
 pub(crate) mod store;
