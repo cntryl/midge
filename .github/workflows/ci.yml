@@ -3,33 +3,10 @@ name: CI
 on:
   workflow_dispatch:
   push:
-    branches: [main]
-    paths:
-      - "src/**"
-      - "tests/**"
-      - "benches/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - ".cargo/**"
-      - "CONTRIBUTING.md"
-      - ".github/pull_request_template.md"
-      - ".github/workflows/ci.yml"
-      - ".github/workflows/publish.yml"
-      - ".github/workflows/platform.yml"
+    branches: [develop, main]
   pull_request:
-    branches: [main]
-    paths:
-      - "src/**"
-      - "tests/**"
-      - "benches/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - ".cargo/**"
-      - "CONTRIBUTING.md"
-      - ".github/pull_request_template.md"
-      - ".github/workflows/ci.yml"
-      - ".github/workflows/publish.yml"
-      - ".github/workflows/platform.yml"
+    branches: [develop, main]
+    types: [opened, synchronize, reopened, edited]
 
 permissions:
   contents: read
@@ -49,6 +26,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+
+      - name: Lint GitHub Actions workflows
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 
       - name: Update Rust toolchain
         run: rustup update stable

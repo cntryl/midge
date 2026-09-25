@@ -37,14 +37,16 @@ cargo package --locked
 docker build --file Dockerfile.tests --tag midge-tests:local .
 ```
 
-GitHub keeps the required checks separated by cost and responsibility. `CI`
-is the fast Ubuntu core suite. `Repository Qualification` covers docs,
-examples, benchmarks, packaging, and repository contracts; `Platform` covers
-macOS and Windows; `Compatibility` covers Rust 1.97 and provider-only
-features; `Cloud Qualification` runs the Sqrzl emulator; and `Docker
-Qualification` builds the test image. The extended workflows run manually,
-on their schedules, and after a successful main-branch core run where
-appropriate, so a pull request's core check stays focused.
+GitHub keeps the checks separated by cost and responsibility. Pull requests
+into `develop` run only `CI`, which covers the Ubuntu core suite and Windows
+compile and lint checks. Release promotion pull requests from `develop` into
+`main` also run `Repository Qualification` for docs, examples, benchmarks,
+packaging, and repository contracts; `Docker Qualification` for the test
+image; CodeQL for Actions and Rust; and the promotion-source check. `Platform`
+covers macOS and Windows, `Compatibility` covers Rust 1.97 and provider-only
+features, and `Cloud Qualification` runs the Sqrzl emulator. Those extended
+workflows run manually or on schedules against `main`, and Platform and
+Compatibility also follow a successful `main` push CI run.
 
 Provider features are checked independently so one provider cannot hide a
 dependency on another provider's implementation:

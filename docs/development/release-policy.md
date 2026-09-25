@@ -4,9 +4,12 @@ This document defines how Midge moves from development builds to release candida
 
 ## Branching Model
 
-- `main`: active development
-- `release-candidate/*`: release hardening branches with frozen durability semantics and format/API changes
-- tagged releases: only after qualification and release checks pass
+- `develop` (default): active development; feature and fix PRs target this branch and are squash merged after CI passes
+- `main`: release branch; promote only through a PR from this repository's `develop` branch, using a merge commit to preserve the tested commit history
+- `release-candidate/*`: optional release hardening branches; merge their changes into `develop` before promotion, with frozen durability semantics and format/API changes
+- tagged releases: create tags from commits on `main` only after qualification and release checks pass
+
+Only CI runs on PRs into `develop`. Promotion PRs into `main` run CI, repository and Docker qualification, and CodeQL. Require passing checks on the current PR head before merging; verify the resulting `main` checks before tagging or publishing. Scheduled release qualification checks out `main` explicitly.
 
 ## Versioning Rules
 
