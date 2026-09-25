@@ -250,12 +250,12 @@ fn validate_task_lease(
     store
         .validate_epoch_with_timeout(holder_id, task.token.writer_epoch, deadline.remaining())
         .map_err(|error| {
-            let mapped = if deadline.is_expired() || error.to_string().contains("timed out") {
+            let mapped = if deadline.is_expired() {
                 MidgeError::Timeout(format!(
                     "compaction lease validation exceeded the operation deadline: {error}"
                 ))
             } else {
-                MidgeError::Fenced(error.to_string())
+                error.into_validation_error("compaction lease validation failed")
             };
             if matches!(mapped, MidgeError::Fenced(_)) {
                 if let Some(healthy) = &task.lease_healthy {
