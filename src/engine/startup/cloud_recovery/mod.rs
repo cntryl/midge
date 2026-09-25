@@ -10,6 +10,9 @@ use std::sync::Arc;
 mod metadata;
 mod sst_proof;
 
+#[cfg(test)]
+mod tests;
+
 type LocalWalPaths = (
     std::collections::BTreeMap<u64, Vec<PathBuf>>,
     Option<PathBuf>,
@@ -22,6 +25,11 @@ enum SstLoss {
     /// The check itself failed (timeout, I/O, permissions), so nothing is known
     /// about the object.
     Indeterminate(MidgeError),
+}
+
+fn local_sst_is_definitively_missing(sst_dir: &Path, error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound
+        && std::fs::metadata(sst_dir).is_ok_and(|metadata| metadata.is_dir())
 }
 
 /// What salvage recovery does with one manifest SST after validating it.
@@ -120,7 +128,7 @@ impl CloudStartupRecovery {
                         "authoritative cloud SST '{}' is unavailable: {error}",
                         file.name
                     ));
-                    if error.kind() == std::io::ErrorKind::NotFound {
+                    if local_sst_is_definitively_missing(&remote_sst_dir, &error) {
                         SstLoss::Definitive(loss)
                     } else {
                         SstLoss::Indeterminate(loss)
