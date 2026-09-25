@@ -1054,36 +1054,33 @@ impl<'a> VerifiedManifestWalCoverage<'a> {
         (!state.exactly_covers(record)).then_some(UncoveredWal::MissingFrom(record.cf_id))
     }
 
-    pub(crate) fn contains_wal_record(
-        &self,
-        file: &FileMeta,
-        record: &crate::wal::WalRecord,
-    ) -> bool {
-        let Some(state) = self.state_for(file, record.key.as_ref()) else {
+    /// Whether recovery may skip replaying `record` because the manifest's
+    /// SSTs already hold it.
+    ///
+    /// This is the same exact-coverage rule WAL pruning uses (#503): every
+    /// covering SST must be readable and agree, and one must hold exactly
+    /// this value and expiration, or a newer version must supersede it.
+    /// Deletes and transaction markers are never skipped: replaying one is
+    /// sequence-safe, while suppressing a delete can resurrect an older
+    /// value. Replaying a covered record is harmless, so every doubt replays.
+    /// A record that disagrees with an SST at its own sequence (a different
+    /// expiration, say) is not covered: replaying it surfaces the
+    /// disagreement later as a compaction conflict instead of silently
+    /// dropping the WAL's version.
+    pub(crate) fn covers_wal_record(&self, record: &crate::wal::WalRecord) -> bool {
+        if !matches!(record.op.role(), crate::wal::types::WalOpRole::ValueWrite) {
             return false;
-        };
-        match state {
-            crate::types::KeyState::Value(value, sequence, _, _) => {
-                sequence > record.seq
-                    || sequence == record.seq
-                        && record
-                            .value
-                            .as_ref()
-                            .is_some_and(|expected| expected == &value)
-            }
-            // A newer tombstone supersedes a value write. At the same sequence a
-            // value write and a delete contradict each other, so only a delete
-            // record is covered by it; skipping the value on that evidence could
-            // lose data, and replaying it is the safe direction.
-            crate::types::KeyState::Tombstone(sequence) => {
-                if matches!(record.op.role(), crate::wal::types::WalOpRole::ValueWrite) {
-                    sequence > record.seq
-                } else {
-                    sequence >= record.seq
-                }
-            }
-            crate::types::KeyState::Absent => false,
         }
+        let coverage = DataCoverageRecord {
+            cf_id: record.cf_id,
+            op: record.op,
+            key: record.key.to_vec(),
+            value: record.value.as_ref().map(|value| value.to_vec()),
+            expiration: record.expiration,
+            range_end: None,
+            seq: record.seq,
+        };
+        self.value_write_gap(&coverage).is_none()
     }
 }
 
@@ -1132,48 +1129,6 @@ pub(crate) fn wal_data_records_covered_by_manifest(
             .iter()
             .any(|file| file_covers_record(file, record))
     })
-}
-
-#[cfg(test)]
-pub(crate) fn wal_record_covered_by_manifest(
-    record: &crate::wal::WalRecord,
-    manifest: &Manifest,
-) -> bool {
-    wal_record_covered_by_verified_manifest(record, manifest, &|_, _| true)
-}
-
-pub(crate) fn wal_record_covered_by_verified_manifest(
-    record: &crate::wal::WalRecord,
-    manifest: &Manifest,
-    contains_record: &dyn Fn(&FileMeta, &crate::wal::WalRecord) -> bool,
-) -> bool {
-    use crate::wal::types::WalOpRole;
-
-    let range_end = match record.op.role() {
-        WalOpRole::ValueWrite => None,
-        // An SST's key and sequence bounds do not prove that a particular
-        // tombstone was included: a concurrent flush can publish unrelated
-        // entries on both sides of it. Replaying deletes is conservative and
-        // sequence-safe, whereas suppressing one can resurrect an older value.
-        WalOpRole::PointDelete
-        | WalOpRole::RangeDelete
-        | WalOpRole::TransactionBegin
-        | WalOpRole::TransactionCommit
-        | WalOpRole::TransactionBatch => return false,
-    };
-    let coverage = DataCoverageRecord {
-        cf_id: record.cf_id,
-        op: record.op,
-        key: record.key.to_vec(),
-        value: record.value.as_ref().map(|value| value.to_vec()),
-        expiration: record.expiration,
-        range_end,
-        seq: record.seq,
-    };
-    manifest
-        .files
-        .iter()
-        .any(|file| file_covers_record(file, &coverage) && contains_record(file, record))
 }
 
 fn file_covers_record(file: &FileMeta, record: &DataCoverageRecord) -> bool {

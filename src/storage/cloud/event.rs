@@ -8,6 +8,9 @@ use super::*;
 pub enum CloudEvent {
     #[cfg_attr(not(any(test, feature = "cloud-common")), allow(dead_code))]
     Put {
+        /// The provider's key, kept for diagnostics: adapters report the
+        /// caller's key instead (#514).
+        #[cfg_attr(not(test), allow(dead_code))]
         key: String,
         result: CloudOutcome<()>,
     },
@@ -26,6 +29,9 @@ pub enum CloudEvent {
         result: CloudOutcome<Vec<u8>>,
     },
     Delete {
+        /// The provider's key, kept for diagnostics: adapters report the
+        /// caller's key instead (#514).
+        #[cfg_attr(not(test), allow(dead_code))]
         key: String,
         result: CloudOutcome<()>,
     },
@@ -34,6 +40,9 @@ pub enum CloudEvent {
         result: CloudOutcome<Vec<String>>,
     },
     Head {
+        /// The provider's key, kept for diagnostics: adapters report the
+        /// caller's key instead (#514).
+        #[cfg_attr(not(test), allow(dead_code))]
         key: String,
         result: CloudOutcome<ObjectMetadata>,
     },
