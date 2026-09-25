@@ -2309,8 +2309,12 @@ fn should_sync_database_root_when_creating_wal_and_sst_directories() {
     // Act
     let _state = RuntimeState::new(db_path.clone(), false);
 
-    // Assert
+    // Assert: one root sync for each of `wal/` and `sst/`.
     let synced = crate::io::durable_dir::take_synced_dirs();
     assert!(db_path.join("wal").is_dir());
-    assert!(synced.contains(&db_path), "{synced:?}");
+    assert_eq!(
+        synced.iter().filter(|dir| **dir == db_path).count(),
+        2,
+        "{synced:?}"
+    );
 }

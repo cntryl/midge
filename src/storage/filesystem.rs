@@ -222,8 +222,10 @@ enum Publish {
     CreateNew,
 }
 
-/// Make a directory's entries durable. Windows persists them with the file
-/// metadata journal and cannot open directories for syncing.
+/// Make a directory's entries durable after publishing into it. On Windows
+/// this relies on the file metadata journal. New ancestor directories go
+/// through `io::durable_dir`, which flushes directory handles on Windows the
+/// same way `RealFs::sync_dir` does.
 #[cfg_attr(not(unix), allow(clippy::unnecessary_wraps))]
 fn sync_directory(dir: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
