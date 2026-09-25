@@ -3377,6 +3377,29 @@ mod recovery_wal_coverage {
     }
 
     #[test]
+    fn should_replay_wal_value_when_its_sequence_is_outside_the_sst_range() {
+        // Arrange: the SST holds the key only at sequence 7; the WAL write at
+        // 12 is newer than anything the file covers.
+        let dir = tempfile::tempdir().expect("create SST directory");
+        let mut manifest = crate::metadata::Manifest::default();
+        manifest.files.push(manifest_file(
+            dir.path(),
+            "000001.sst",
+            &value_sst(b"k", b"v", 7, None),
+            7,
+            false,
+        ));
+        let put = record(crate::wal::WalOpKind::Put, Some(b"v"), 12);
+
+        // Act
+        let skipped =
+            VerifiedManifestWalCoverage::open(dir.path(), &manifest).covers_wal_record(&put);
+
+        // Assert
+        assert!(!skipped);
+    }
+
+    #[test]
     fn should_replay_transaction_marker_when_sst_holds_its_key() {
         // Arrange
         let dir = tempfile::tempdir().expect("create SST directory");

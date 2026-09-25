@@ -1063,6 +1063,10 @@ impl<'a> VerifiedManifestWalCoverage<'a> {
     /// Deletes and transaction markers are never skipped: replaying one is
     /// sequence-safe, while suppressing a delete can resurrect an older
     /// value. Replaying a covered record is harmless, so every doubt replays.
+    /// A record that disagrees with an SST at its own sequence (a different
+    /// expiration, say) is not covered: replaying it surfaces the
+    /// disagreement later as a compaction conflict instead of silently
+    /// dropping the WAL's version.
     pub(crate) fn covers_wal_record(&self, record: &crate::wal::WalRecord) -> bool {
         if !matches!(record.op.role(), crate::wal::types::WalOpRole::ValueWrite) {
             return false;
