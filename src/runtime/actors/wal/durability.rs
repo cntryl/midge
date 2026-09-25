@@ -36,14 +36,13 @@ impl WalActor {
         state: &mut RuntimeState,
         effective_durability: DurabilityPolicy,
         last_sequence: u64,
-        begin_seq: u64,
     ) -> MidgeResult<()> {
         match effective_durability {
             DurabilityPolicy::Strict | DurabilityPolicy::CloudMirrored => {
                 self.apply_strict_transaction_group_durability(state, last_sequence)?;
             }
             DurabilityPolicy::Batched => {
-                state.begin_pending_transaction(begin_seq);
+                state.begin_pending_transaction();
                 self.counters.record(|m| {
                     m.record_pending_txn_started();
                 });

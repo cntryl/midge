@@ -22,9 +22,6 @@ mod manifest;
 mod recovery;
 mod snapshots;
 
-/// Maximum size of idempotency cache to prevent unbounded growth under cloud stall
-#[cfg(test)]
-const MAX_IDEMPOTENCY_CACHE_SIZE: usize = 100_000;
 const MAX_RECENT_DELETE_RANGES: usize = 4096;
 #[derive(Debug, Clone)]
 pub struct RecentDeleteRange {
@@ -284,9 +281,7 @@ pub struct WritePressureState {
 
 struct TransactionCoordination {
     next_id: u64,
-    pending_min_sequence: Option<u64>,
     pending_started_at: Option<std::time::Instant>,
-    idempotency_cache: HashMap<u64, (u64, usize, u64)>,
 }
 
 struct RecoveryLoadState {
@@ -1009,139 +1004,6 @@ impl RuntimeState {
         self.wal.cloud_durable_seq = Self::manifest_visible_sequence_floor(&self.manifest);
     }
 
-    /// Check if we have cached sequences for this `request_id`.
-    /// Returns (`first_sequence`, count) if found and not yet confirmed.
-    #[cfg(test)]
-    pub fn get_cached_sequences(&self, request_id: u64) -> Option<(u64, usize)> {
-        self.transaction
-            .idempotency_cache
-            .get(&request_id)
-            .map(|(first_seq, count, _confirmed_at)| (*first_seq, *count))
-    }
-
-    /// Allocate sequences idempotently.
-    /// If `request_id` is already in cache, return cached sequences.
-    /// Otherwise, allocate count new sequences and cache them.
-    ///
-    /// PHASE 0 GUARDRAIL: Enforces `MAX_IDEMPOTENCY_CACHE_SIZE` to prevent unbounded
-    /// memory growth under cloud upload stalls. Evicts oldest confirmed entries
-    /// when limit is exceeded.
-    #[cfg(test)]
-    pub fn allocate_sequences_idempotent(&mut self, request_id: u64, count: usize) -> (u64, usize) {
-        // Record telemetry
-        self.diagnostics.record(|m| {
-            m.record_idempotency_alloc();
-        });
-
-        // Check if we have cached sequences for this request
-        if let Some((first_seq, cnt)) = self.get_cached_sequences(request_id) {
-            // Cache hit!
-            self.diagnostics.record(|m| {
-                m.record_idempotency_cache_hit();
-            });
-
-            tracing::debug!(
-                request_id = request_id,
-                first_seq = first_seq,
-                count = cnt,
-                "reusing cached sequences for retry"
-            );
-            return (first_seq, cnt);
-        }
-
-        // PHASE 0 GUARDRAIL: Enforce cache size limit
-        if self.transaction.idempotency_cache.len() >= MAX_IDEMPOTENCY_CACHE_SIZE {
-            // Evict oldest confirmed entries (LRU strategy)
-            let mut entries: Vec<_> = self
-                .transaction
-                .idempotency_cache
-                .iter()
-                .filter(|(_, (_, _, confirmed_at))| *confirmed_at > 0)
-                .map(|(k, v)| (*k, *v))
-                .collect();
-
-            // Sort by confirmed_at (oldest first)
-            entries.sort_by_key(|(_, (_, _, confirmed_at))| *confirmed_at);
-
-            // Evict oldest 10% to avoid thrashing
-            let evict_count = (MAX_IDEMPOTENCY_CACHE_SIZE / 10).max(1);
-            for (req_id, _) in entries.iter().take(evict_count) {
-                self.transaction.idempotency_cache.remove(req_id);
-            }
-
-            tracing::warn!(
-                cache_size = self.transaction.idempotency_cache.len(),
-                evicted = evict_count,
-                "idempotency cache at capacity; evicted oldest confirmed entries"
-            );
-
-            // Record eviction metric
-            self.diagnostics.record(|m| {
-                m.record_idempotency_cache_evictions(evict_count as u64);
-            });
-        }
-
-        // Allocate new sequences
-        let first_seq = self.sequence + 1;
-        self.sequence += count as u64;
-
-        // Cache the allocation with current timestamp
-        // We use local_durable_seq as the confirmation frontier for cleanup
-        self.transaction
-            .idempotency_cache
-            .insert(request_id, (first_seq, count, 0)); // 0 = not confirmed yet
-
-        tracing::debug!(
-            request_id = request_id,
-            first_seq = first_seq,
-            count = count,
-            "allocated new sequences"
-        );
-
-        (first_seq, count)
-    }
-
-    /// Confirm sequences for a `request_id` (mark as durable).
-    /// This updates the `confirmed_at` frontier to current `local_durable_seq`.
-    pub fn confirm_sequences(&mut self, request_id: u64) {
-        if let Some(entry) = self.transaction.idempotency_cache.get_mut(&request_id) {
-            entry.2 = self.wal.local_durable_seq;
-            tracing::debug!(
-                request_id = request_id,
-                confirmed_at = self.wal.local_durable_seq,
-                "confirmed sequences for request"
-            );
-        }
-    }
-
-    /// Confirm sequences for a `request_id` with an explicit `confirmed_at` sequence
-    /// Useful for `CloudAsync` paths where the confirmation frontier is `cloud_durable_seq`.
-    pub fn confirm_sequences_at(&mut self, request_id: u64, confirmed_at_seq: u64) {
-        if let Some(entry) = self.transaction.idempotency_cache.get_mut(&request_id) {
-            entry.2 = confirmed_at_seq;
-            tracing::debug!(
-                request_id = request_id,
-                confirmed_at = confirmed_at_seq,
-                "confirmed sequences for request at explicit frontier"
-            );
-        }
-    }
-
-    /// Clean up idempotency cache entries that have been confirmed and are now old.
-    /// Called periodically as durability frontier advances.
-    pub fn cleanup_old_idempotency_entries(&mut self) {
-        let current_frontier = self.wal.local_durable_seq;
-        self.transaction.idempotency_cache.retain(
-            |_request_id, (_first_seq, _count, confirmed_at)| {
-                // Keep entries that are either:
-                // 1. Not yet confirmed (confirmed_at == 0)
-                // 2. Recently confirmed (confirmed_at > frontier - 100)
-                // Remove old confirmed entries beyond the frontier
-                *confirmed_at == 0 || *confirmed_at > current_frontier.saturating_sub(100)
-            },
-        );
-    }
-
     /// Get the next transaction ID
     pub fn next_txn_id(&mut self) -> MidgeResult<u64> {
         let next = self.transaction.next_id.checked_add(1).ok_or_else(|| {
@@ -1151,30 +1013,16 @@ impl RuntimeState {
         Ok(next)
     }
 
-    pub(crate) fn begin_pending_transaction(&mut self, begin_sequence: u64) {
-        self.transaction.pending_min_sequence = Some(
-            self.transaction
-                .pending_min_sequence
-                .map_or(begin_sequence, |pending| pending.min(begin_sequence)),
-        );
+    /// Start timing the oldest transaction still waiting for durability.
+    pub(crate) fn begin_pending_transaction(&mut self) {
         self.transaction
             .pending_started_at
             .get_or_insert_with(std::time::Instant::now);
     }
 
     #[cfg(test)]
-    pub(crate) fn pending_transaction_min_sequence(&self) -> Option<u64> {
-        self.transaction.pending_min_sequence
-    }
-
-    #[cfg(test)]
-    pub(crate) fn idempotency_entry(&self, request_id: u64) -> Option<(u64, usize, u64)> {
-        self.transaction.idempotency_cache.get(&request_id).copied()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn cache_sequences_for_test(&mut self, request_id: u64, entry: (u64, usize, u64)) {
-        self.transaction.idempotency_cache.insert(request_id, entry);
+    pub(crate) fn pending_transaction_started(&self) -> bool {
+        self.transaction.pending_started_at.is_some()
     }
 
     #[cfg(test)]
@@ -1187,7 +1035,8 @@ impl RuntimeState {
         self.transaction.next_id = next_id;
     }
 
-    /// Clear pending transaction barrier and record duration metrics (Phase 3)
+    /// Record how long pending transactions waited for durability, and stop
+    /// timing.
     pub fn clear_pending_transaction_barrier(&mut self) {
         if let Some(start_time) = self.transaction.pending_started_at {
             let duration_ms = u64::try_from(start_time.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -1195,7 +1044,6 @@ impl RuntimeState {
                 m.record_pending_txn_duration_ms(duration_ms);
             });
         }
-        self.transaction.pending_min_sequence = None;
         self.transaction.pending_started_at = None;
     }
 

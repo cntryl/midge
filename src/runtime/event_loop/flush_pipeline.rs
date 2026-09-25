@@ -1921,7 +1921,7 @@ mod tests {
             crate::runtime::RuntimeConfig::default(),
             crate::runtime::event_loop::FlushWorkerMode::Inline,
         )?;
-        event_loop.wal_actor.append(
+        event_loop.wal_actor.append_single_op(
             &mut event_loop.state,
             crate::runtime::actors::wal::AppendParams {
                 request_id: 1,
@@ -1986,7 +1986,7 @@ mod tests {
         // from the start of the WAL.
         let directory = tempfile::tempdir()?;
         let mut event_loop = local_event_loop_after_long_wal_history(directory.path())?;
-        event_loop.wal_actor.append(
+        event_loop.wal_actor.append_single_op(
             &mut event_loop.state,
             crate::runtime::actors::wal::AppendParams {
                 request_id: 1,
@@ -2012,7 +2012,7 @@ mod tests {
         // Arrange
         let directory = tempfile::tempdir()?;
         let mut event_loop = local_event_loop_after_long_wal_history(directory.path())?;
-        event_loop.wal_actor.append_delete_range(
+        event_loop.wal_actor.append_single_range_delete(
             &mut event_loop.state,
             1,
             0,
@@ -2038,7 +2038,7 @@ mod tests {
         let before = event_loop.state.wal.appended_bytes;
 
         // Act
-        event_loop.wal_actor.append(
+        event_loop.wal_actor.append_single_op(
             &mut event_loop.state,
             crate::runtime::actors::wal::AppendParams {
                 request_id: 1,
@@ -2533,7 +2533,7 @@ mod tests {
             config,
             crate::runtime::event_loop::FlushWorkerMode::Inline,
         )?;
-        event_loop.wal_actor.append(
+        event_loop.wal_actor.append_single_op(
             &mut event_loop.state,
             crate::runtime::actors::wal::AppendParams {
                 request_id: 1,
@@ -2546,7 +2546,7 @@ mod tests {
         )?;
         event_loop.sync_local_wal_before_prune_rotation()?;
         event_loop.rotate_local_wal_transition()?;
-        event_loop.wal_actor.append(
+        event_loop.wal_actor.append_single_op(
             &mut event_loop.state,
             crate::runtime::actors::wal::AppendParams {
                 request_id: 2,

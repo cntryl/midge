@@ -480,16 +480,6 @@ impl WalActor {
         Ok(())
     }
 
-    /// Insert-only check for a single write, which needs one snapshot.
-    #[cfg(test)]
-    pub(super) fn key_exists_for_single_write(
-        state: &RuntimeState,
-        cf_id: crate::types::ColumnFamilyId,
-        key: &[u8],
-    ) -> MidgeResult<bool> {
-        Self::key_exists(&mut ValidationSnapshots::new(state, None), cf_id, key)
-    }
-
     /// Checks the current view (memtables and SSTs) for existence.
     ///
     /// Fails closed: a read error is returned instead of being treated as

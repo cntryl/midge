@@ -225,7 +225,7 @@ impl WalCoordinator {
             return HandleOutcome::Continue;
         }
 
-        let result = event_loop.wal_actor.append(
+        let result = event_loop.wal_actor.append_single_op(
             &mut event_loop.state,
             crate::runtime::actors::wal::AppendParams {
                 request_id,
@@ -275,7 +275,7 @@ impl WalCoordinator {
             return HandleOutcome::Continue;
         }
 
-        let result = event_loop.wal_actor.append_delete_range(
+        let result = event_loop.wal_actor.append_single_range_delete(
             &mut event_loop.state,
             request_id,
             cf_id,
@@ -426,20 +426,6 @@ impl WalCoordinator {
         HandleOutcome::Continue
     }
 
-    #[cfg(test)]
-    pub(super) fn sync_complete(
-        event_loop: &mut EventLoop,
-        request_id: u64,
-        segment_id: u64,
-    ) -> HandleOutcome {
-        crate::runtime::actors::wal::WalActor::handle_sync_complete(
-            &mut event_loop.state,
-            segment_id,
-        );
-        event_loop.respond(request_id, RuntimeResponse::Ok { request_id });
-        HandleOutcome::Continue
-    }
-
     fn accept_write(event_loop: &mut EventLoop, request_id: u64) -> bool {
         if let Err(error) = event_loop.check_lease_health() {
             event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
@@ -492,13 +478,7 @@ impl WalCoordinator {
     ) {
         event_loop.publish_snapshot();
 
-        if event_loop.wal_actor.is_cloud_async() {
-            event_loop.state.confirm_sequences(request_id);
-        } else if deferred {
-            event_loop.maybe_queue_confirm_only_waiter(deferred, request_id, false);
-        } else {
-            event_loop.state.confirm_sequences(request_id);
-        }
+        event_loop.settle_applied_write(request_id, deferred);
 
         event_loop.respond(
             request_id,

@@ -367,8 +367,7 @@ fn shutdown_waiter_request_id(waiter: &DurabilityWaiter) -> Option<u64> {
     match waiter {
         DurabilityWaiter::Test(waiter) => Some(shutdown_test_waiter_request_id(waiter)),
         DurabilityWaiter::CloudDurability { request_id } => Some(*request_id),
-        DurabilityWaiter::ConfirmWalAppend { .. }
-        | DurabilityWaiter::ConfirmTransactionApply { .. } => None,
+        DurabilityWaiter::ConfirmTransactionApply { .. } => None,
     }
 }
 

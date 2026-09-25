@@ -151,23 +151,6 @@ impl EventLoop {
     ) {
         let visible_up_to = sequence;
 
-        // === Phase 0 Guardrail #3: Transaction atomicity barrier ===
-        // If a transaction is pending commit (Batched mode), block reads at sequences
-        // >= pending_txn_min_seq to prevent seeing partial transaction state.
-        if let Some(pending_min) = self.state.pending_transaction_min_sequence() {
-            if sequence >= pending_min {
-                // Defer this read until transaction completes
-                self.durability
-                    .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::Read {
-                        request_id,
-                        cf_id,
-                        key,
-                        sequence,
-                    }));
-                return;
-            }
-        }
-
         if visible_up_to <= self.state.sequence
             || self.is_sequence_durable(sequence, requested_durability)
         {
@@ -198,25 +181,6 @@ impl EventLoop {
         requested_durability: crate::types::ReadDurability,
     ) {
         let visible_up_to = sequence;
-
-        // === Phase 0 Guardrail #3: Transaction atomicity barrier ===
-        // If a transaction is pending commit (Batched mode), block scans at sequences
-        // >= pending_txn_min_seq to prevent seeing partial transaction state.
-        if let Some(pending_min) = self.state.pending_transaction_min_sequence() {
-            if sequence >= pending_min {
-                // Defer this scan until transaction completes
-                self.durability.queue_waiter(DurabilityWaiter::Test(
-                    TestDurabilityWaiter::RangeScan {
-                        request_id,
-                        cf_id,
-                        start,
-                        end,
-                        sequence,
-                    },
-                ));
-                return;
-            }
-        }
 
         if visible_up_to <= self.state.sequence
             || self.is_sequence_durable(sequence, requested_durability)
@@ -278,7 +242,7 @@ pub(super) struct LegacyBoundBackfill {
 
 impl LegacyBoundBackfill {
     const BASE_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
-    const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(600);
+    const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_mins(10);
     pub(super) const ANOMALY_AFTER_FAILURES: u32 = 3;
 
     fn is_eligible(&self, name: &str, now: std::time::Instant) -> bool {

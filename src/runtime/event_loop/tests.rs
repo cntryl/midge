@@ -2009,7 +2009,7 @@ fn should_sleep_until_cloud_seal_deadline_without_spinning_given_subthreshold_wa
         ..crate::runtime::CloudRuntimePolicy::default()
     };
     event_loop.durability = crate::runtime::durability::DurabilityCoordinator::new(0, true, policy);
-    let (_, deferred) = event_loop.wal_actor.append(
+    let (_, deferred) = event_loop.wal_actor.append_single_op(
         &mut event_loop.state,
         crate::runtime::actors::wal::AppendParams {
             request_id: 901,
@@ -2882,7 +2882,7 @@ fn should_fsync_batched_wal_while_verification_barrier_is_held() -> crate::commo
     // still run once the batch window elapses, or a crash during a long
     // verification loses writes that should already be durable.
     let mut event_loop = create_test_local_event_loop()?;
-    event_loop.wal_actor.append(
+    event_loop.wal_actor.append_single_op(
         &mut event_loop.state,
         crate::runtime::actors::wal::AppendParams {
             request_id: 1,

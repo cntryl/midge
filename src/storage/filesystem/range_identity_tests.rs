@@ -169,7 +169,7 @@ fn should_advance_modified_time_when_replacing_object_stamped_ahead_of_the_clock
     let (tx, rx) = mpsc::channel();
     backend.submit_write(KEY, b"older".to_vec(), tx);
     rx.recv().expect("first write response");
-    let ahead = std::time::SystemTime::now() + Duration::from_secs(3600);
+    let ahead = std::time::SystemTime::now() + Duration::from_hours(1);
     fs::File::options()
         .write(true)
         .open(&path)?
@@ -195,7 +195,7 @@ fn should_stamp_distinct_modified_times_when_object_is_deleted_and_recreated() -
     let (tx, rx) = mpsc::channel();
     backend.submit_write(KEY, b"older".to_vec(), tx);
     rx.recv().expect("first write response");
-    let ahead = std::time::SystemTime::now() + Duration::from_secs(7200);
+    let ahead = std::time::SystemTime::now() + Duration::from_hours(2);
     fs::File::options()
         .write(true)
         .open(&path)?

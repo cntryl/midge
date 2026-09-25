@@ -66,11 +66,8 @@ pub enum DurabilityWaiter {
     /// Test-only waiter wrapper; unconstructible outside `cfg(test)`.
     #[allow(dead_code)]
     Test(TestDurabilityWaiter),
-    /// Internal waiter used when caller already acknowledged but needs cleanup.
-    ConfirmWalAppend {
-        request_id: u64,
-    },
-    /// Internal waiter used when caller already acknowledged but needs cleanup.
+    /// A transaction the caller already saw applied; completing it records
+    /// how long durability took.
     ConfirmTransactionApply {
         request_id: u64,
     },

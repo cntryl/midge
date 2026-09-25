@@ -629,7 +629,7 @@ mod tests {
 
         // Act
         heartbeat.start();
-        std::thread::sleep(Duration::from_millis(1_000));
+        std::thread::sleep(Duration::from_secs(1));
         let healthy = heartbeat.is_healthy();
         heartbeat.stop();
 
