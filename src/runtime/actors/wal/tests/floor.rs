@@ -5,7 +5,7 @@ fn should_protect_spilled_transaction_participants_until_all_generations_publish
 {
     // Arrange
     let directory = tempfile::tempdir()?;
-    let setup = crate::storage::test_support::build_cloud_backed_filesystem_simulation(
+    let setup = crate::storage::simulated::build_simulated_cloud_stores(
         directory.path(),
         Some(1024 * 1024),
     )?;
