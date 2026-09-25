@@ -1948,3 +1948,36 @@ fn should_rescan_only_overlapping_records_when_segments_repeat_after_rotation() 
     assert_eq!(stats.record_count, 3);
     assert_eq!(streaming::duplicate_rescans(), 1);
 }
+
+#[test]
+fn should_not_rescan_fresh_records_when_a_stale_record_carries_a_higher_sequence() {
+    // Arrange: a fenced writer (epoch 1) appends a high sequence after its
+    // successor (epoch 2) started. Every later fresh record sits below that
+    // stale sequence; counting it would rescan the WAL once per record.
+    let directory = TempDir::new().expect("create WAL recovery directory");
+    let wal_dir = directory.path().join("wal");
+    std::fs::create_dir_all(&wal_dir).expect("create WAL directory");
+    let mut bytes = encode_frame(&put_record(b"fresh", 1, 2));
+    bytes.extend(encode_frame(&put_record(b"stale", 100_000, 1)));
+    for sequence in 2..=200 {
+        bytes.extend(encode_frame(&put_record(b"fresh", sequence, 2)));
+    }
+    std::fs::write(wal_dir.join(crate::wal::ACTIVE_FILE_NAME), bytes).expect("write WAL");
+    let storage = RealFs::new(directory.path()).expect("create recovery filesystem");
+    let mut memtables = HashMap::new();
+    streaming::reset_duplicate_rescans();
+
+    // Act
+    let stats = replay_wal_with_policy(
+        &storage,
+        &FsPath::new("wal"),
+        &mut memtables,
+        ReplayPolicy::Strict,
+    )
+    .expect("replay WAL with a stale high sequence");
+
+    // Assert
+    assert_eq!(stats.stale_records_skipped, 1);
+    assert_eq!(stats.record_count, 200);
+    assert_eq!(streaming::duplicate_rescans(), 0);
+}

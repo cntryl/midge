@@ -498,15 +498,19 @@ fn replay_paths(
             };
             let record_ordinal = ordinal;
             ordinal = ordinal.saturating_add(1);
-            let may_repeat = max_seen_sequence.is_some_and(|sequence| frame.record.seq <= sequence);
-            max_seen_sequence = Some(max_seen_sequence.unwrap_or(0).max(frame.record.seq));
             // A stale record is skipped whether or not an earlier file carried
-            // it, and it can never conflict, so it needs no rescan.
+            // it, and it can never conflict, so it needs no rescan. It also
+            // must not raise the high-water mark: a fenced writer's high
+            // sequence would push every later fresh record into the rescan.
+            // For one epoch and sequence, staleness only grows with ordinal,
+            // so a fresh copy's earlier copy was fresh and still counts.
             if frontiers.is_stale(&frame.record, record_ordinal) {
                 state.stats.stale_records_skipped += 1;
                 pos = frame.next_pos;
                 continue;
             }
+            let may_repeat = max_seen_sequence.is_some_and(|sequence| frame.record.seq <= sequence);
+            max_seen_sequence = Some(max_seen_sequence.unwrap_or(0).max(frame.record.seq));
             let replayed = if may_repeat {
                 duplicate_before(
                     storage,

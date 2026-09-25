@@ -1377,8 +1377,8 @@ mod salvage_quarantine_tests {
         // Act
         let recovered = salvage_replay(&wal_dir, &directory.path().join("sst"));
 
-        // Assert: the first write survives; replay stops at the conflict
-        // instead of quarantining everything and opening empty.
+        // Assert: the first write survives and replay stops at the
+        // conflicting frame, which is not counted as replayed.
         assert!(recovered.opened_in_salvage_mode);
         assert_eq!(recovered.records_replayed, 1);
     }
