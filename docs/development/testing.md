@@ -45,8 +45,8 @@ packaging, and repository contracts; `Docker Qualification` for the test
 image; CodeQL for Actions and Rust; and the promotion-source check. `Platform`
 covers macOS and Windows, `Compatibility` covers Rust 1.97 and provider-only
 features, and `Cloud Qualification` runs the Sqrzl emulator. Those extended
-workflows run manually or on schedules against `main`, and Platform and
-Compatibility also run on every `main` push.
+workflows run on schedules against `main` or manually against the selected ref.
+Platform and Compatibility also run on every `main` push.
 
 Provider features are checked independently so one provider cannot hide a
 dependency on another provider's implementation:

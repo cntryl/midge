@@ -20,12 +20,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: Checkout pushed main revision
-        if: github.event_name == 'push'
+      - name: Checkout event revision
+        if: github.event_name != 'schedule'
         uses: actions/checkout@v7
 
-      - name: Checkout main for scheduled or manual qualification
-        if: github.event_name != 'push'
+      - name: Checkout main for scheduled qualification
+        if: github.event_name == 'schedule'
         uses: actions/checkout@v7
         with:
           ref: main
@@ -53,12 +53,12 @@ jobs:
       matrix:
         provider: [cloud-aws, cloud-azure, cloud-gcp, cloud-oci]
     steps:
-      - name: Checkout pushed main revision
-        if: github.event_name == 'push'
+      - name: Checkout event revision
+        if: github.event_name != 'schedule'
         uses: actions/checkout@v7
 
-      - name: Checkout main for scheduled or manual qualification
-        if: github.event_name != 'push'
+      - name: Checkout main for scheduled qualification
+        if: github.event_name == 'schedule'
         uses: actions/checkout@v7
         with:
           ref: main
