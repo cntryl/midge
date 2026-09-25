@@ -79,6 +79,9 @@ jobs:
           fi
           cargo check --release
 
+      - name: Public API names every type it exposes
+        run: RUSTFLAGS="-D unnameable_types" cargo check --lib
+
   windows-check:
     name: Windows check (windows-latest)
     runs-on: windows-latest

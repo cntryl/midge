@@ -7,7 +7,7 @@
 #[path = "./stress_config.rs"]
 mod stress_config;
 
-use cntryl_midge::{Bytes, MidgeEngine, Query, TransactionMode, WriteOptions};
+use cntryl_midge::{Bytes, Engine, Query, TransactionMode, WriteOptions};
 use cntryl_stress::{stress, stress_main, StressContext};
 
 const KEYS_PER_FLUSH: usize = 256;
@@ -38,12 +38,7 @@ impl Layout {
     }
 }
 
-fn write_flush(
-    engine: &MidgeEngine,
-    cf: &cntryl_midge::ColumnFamilyHandle,
-    batch: usize,
-    mode: &str,
-) {
+fn write_flush(engine: &Engine, cf: &cntryl_midge::ColumnFamilyHandle, batch: usize, mode: &str) {
     let mut tx = engine
         .begin_tx(cf.id(), TransactionMode::ReadWrite)
         .expect("begin layout write");
@@ -66,11 +61,7 @@ fn write_flush(
     engine.flush_cf(cf).expect("flush layout batch");
 }
 
-fn prepare_layout(
-    engine: &MidgeEngine,
-    layout: Layout,
-    mode: &str,
-) -> cntryl_midge::ColumnFamilyHandle {
+fn prepare_layout(engine: &Engine, layout: Layout, mode: &str) -> cntryl_midge::ColumnFamilyHandle {
     let cf = engine.create_column_family("scan").expect("create scan CF");
     write_flush(engine, &cf, 0, mode);
     if matches!(layout, Layout::L0PlusL1 | Layout::FullyCompacted) {

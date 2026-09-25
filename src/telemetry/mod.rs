@@ -48,6 +48,32 @@ impl std::fmt::Debug for CounterSink {
 static TELEMETRY: OnceLock<Option<Arc<Telemetry>>> = OnceLock::new();
 static TELEMETRY_INIT: Mutex<()> = Mutex::new(());
 
+/// Why [`Telemetry::init`] did not install telemetry.
+#[derive(Debug)]
+pub(crate) enum TelemetryInitError {
+    /// Telemetry was already initialized in this process.
+    AlreadyInitialized,
+    /// The configuration was invalid or the exporter could not be set up.
+    Failed(crate::common::MidgeError),
+}
+
+impl From<crate::common::MidgeError> for TelemetryInitError {
+    fn from(error: crate::common::MidgeError) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl From<TelemetryInitError> for crate::common::MidgeError {
+    fn from(error: TelemetryInitError) -> Self {
+        match error {
+            TelemetryInitError::AlreadyInitialized => {
+                Self::Internal("Telemetry already initialized".to_string())
+            }
+            TelemetryInitError::Failed(error) => error,
+        }
+    }
+}
+
 /// Central telemetry coordinator
 pub struct Telemetry {
     metrics: Metrics,
@@ -55,7 +81,7 @@ pub struct Telemetry {
 
 impl Telemetry {
     /// Initialize global telemetry
-    pub fn init(config: &TelemetryConfig) -> crate::common::MidgeResult<()> {
+    pub(crate) fn init(config: &TelemetryConfig) -> Result<(), TelemetryInitError> {
         config.validate()?;
 
         // Subscriber installation and publication of the telemetry singleton
@@ -66,9 +92,7 @@ impl Telemetry {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if TELEMETRY.get().is_some() {
-            return Err(crate::common::MidgeError::Internal(
-                "Telemetry already initialized".to_string(),
-            ));
+            return Err(TelemetryInitError::AlreadyInitialized);
         }
 
         let enabled = config.enabled;
@@ -83,9 +107,7 @@ impl Telemetry {
 
         TELEMETRY
             .set(if enabled { Some(telemetry) } else { None })
-            .map_err(|_| {
-                crate::common::MidgeError::Internal("Telemetry already initialized".to_string())
-            })?;
+            .map_err(|_| TelemetryInitError::AlreadyInitialized)?;
 
         Ok(())
     }
@@ -181,9 +203,7 @@ mod tests {
         // Act: call the real init path. Guard against this test binary
         // having already run a successful init elsewhere (order-independent).
         let result = Telemetry::init(&config);
-        if let Err(crate::common::MidgeError::Internal(message)) = &result {
-            assert_eq!(message, "Telemetry already initialized");
-        } else {
+        if !matches!(result, Err(TelemetryInitError::AlreadyInitialized)) {
             result.expect("valid enabled config must initialize successfully");
         }
 
@@ -191,5 +211,23 @@ mod tests {
         // Telemetry::global(), with a working metrics collector.
         let global = Telemetry::global().expect("enabled telemetry must be published globally");
         let _ = global.metrics();
+    }
+
+    #[test]
+    fn should_report_already_initialized_when_telemetry_is_initialized_twice() {
+        // Arrange
+        let mut config = TelemetryConfig::new().with_enabled(true);
+        config.features.enable_logging = false;
+        config.features.enable_tracing = false;
+        let _ = Telemetry::init(&config);
+
+        // Act
+        let second = Telemetry::init(&config);
+
+        // Assert
+        assert!(matches!(
+            second,
+            Err(TelemetryInitError::AlreadyInitialized)
+        ));
     }
 }

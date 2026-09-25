@@ -52,6 +52,9 @@ mod compaction;
 #[cfg_attr(not(feature = "internal-testing"), allow(dead_code, unused_imports))]
 mod diagnostics;
 mod failpoints;
+// Parts of the filesystem abstraction (vectored and ranged I/O) are used only
+// by tests and by `__internal` consumers.
+#[cfg_attr(not(feature = "internal-testing"), allow(dead_code))]
 mod io;
 mod lease;
 #[doc(hidden)]
@@ -63,6 +66,9 @@ mod runtime;
 #[cfg_attr(not(feature = "internal-testing"), allow(dead_code, unused_imports))]
 mod sst;
 mod storage;
+// Only `init_benchmark_telemetry`, which `internal-testing` gates, initializes
+// telemetry today; #355 tracks a supported initialization API.
+#[cfg_attr(not(feature = "internal-testing"), allow(dead_code))]
 mod telemetry;
 #[doc(hidden)]
 #[cfg_attr(not(feature = "internal-testing"), allow(dead_code, unused_imports))]
@@ -138,9 +144,6 @@ pub use engine::{
 };
 pub use types::ColumnFamilyId;
 
-// Backward-compatible alias
-pub type MidgeEngine = Engine;
-
 // Scan API
 pub use engine::{Direction, IteratorState, Query, ScanIterator};
 
@@ -171,6 +174,9 @@ pub use engine::{
 // Key/value types
 pub use engine::{Key, Value};
 
+// TTL clock injection (`OpenOptionsBuilder::ttl_clock`)
+pub use common::time::{Clock, SystemClock};
+
 // Re-export Bytes and BytesMut at crate root so external consumers (including
 // generated stress binaries) can refer to `cntryl_midge::Bytes` without needing
 // to depend on the `bytes` crate directly.
@@ -180,6 +186,14 @@ pub use engine::Key as Bytes;
 // Re-export BytesMut directly from the `bytes` crate.
 pub use bytes::BytesMut;
 
+/// Enable metrics-only telemetry for this crate's benches and tests. Succeeds
+/// when telemetry is already enabled.
+///
+/// # Errors
+///
+/// Returns an error when telemetry cannot be initialized, or was already
+/// initialized with telemetry disabled.
+#[cfg(feature = "internal-testing")]
 #[doc(hidden)]
 pub fn init_benchmark_telemetry() -> MidgeResult<()> {
     let mut config = telemetry::TelemetryConfig::new()
@@ -191,21 +205,14 @@ pub fn init_benchmark_telemetry() -> MidgeResult<()> {
 
     match telemetry::Telemetry::init(&config) {
         Ok(()) => Ok(()),
-        Err(MidgeError::Internal(message))
-            if message == "Telemetry already initialized"
-                && telemetry::Telemetry::global().is_some() =>
+        Err(telemetry::TelemetryInitError::AlreadyInitialized)
+            if telemetry::Telemetry::global().is_some() =>
         {
             Ok(())
         }
-        Err(error) => Err(error),
+        Err(error) => Err(error.into()),
     }
 }
-
-// Low-level filesystem abstraction exports for advanced/testing use.
-pub use io::{
-    traits::ReadObserver, Durability as FsDurability, Fs, FsPath, OpenMode as FsOpenMode,
-    OpenOptions as FsOpenOptions,
-};
 
 #[cfg(test)]
 mod internal_path_guards {

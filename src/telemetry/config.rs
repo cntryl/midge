@@ -157,7 +157,9 @@ mod tests {
         for error in errors {
             assert!(matches!(
                 error,
-                crate::common::MidgeError::InvalidArgument(_)
+                super::super::TelemetryInitError::Failed(
+                    crate::common::MidgeError::InvalidArgument(_)
+                )
             ));
         }
     }

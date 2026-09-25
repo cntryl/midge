@@ -15,7 +15,7 @@ mod engine_init {
 
         // Act
         for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
-            let result = cntryl_midge::MidgeEngine::open(opts.to_open_options());
+            let result = cntryl_midge::Engine::open(opts.to_open_options());
 
             // Assert: construction succeeded...
             let engine = match result {
@@ -60,7 +60,7 @@ mod engine_basic {
     //! Core KV Engine Integration Tests
     //!
     //! Tests the basic put/get/delete operations end-to-end using the public
-    //! `MidgeEngine` API. These tests are **storage-mode invariant**: every supported
+    //! `Engine` API. These tests are **storage-mode invariant**: every supported
     //! backend (Memory, FS, Cloud) must pass with identical behavior.
     //!
     //! Naming convention:
@@ -668,10 +668,8 @@ mod engine_ttl {
 
     use crate::common::*;
     use bytes::Bytes;
-    use cntryl_midge::__internal::common::time::Clock;
-    use cntryl_midge::{
-        MemoryBudget, MidgeEngine, OpenOptions, Query, TransactionMode, WriteOptions,
-    };
+    use cntryl_midge::Clock;
+    use cntryl_midge::{Engine, MemoryBudget, OpenOptions, Query, TransactionMode, WriteOptions};
 
     #[derive(Debug)]
     struct ManualClock(AtomicU64);
@@ -692,8 +690,8 @@ mod engine_ttl {
         }
     }
 
-    fn open_with_clock(clock: Arc<ManualClock>) -> MidgeEngine {
-        MidgeEngine::open(
+    fn open_with_clock(clock: Arc<ManualClock>) -> Engine {
+        Engine::open(
             OpenOptions::in_memory()
                 .ttl_clock(clock)
                 .build()
@@ -823,7 +821,7 @@ mod engine_ttl {
         let clock = Arc::new(ManualClock::new(60_000));
         let resident = open_with_clock(Arc::clone(&clock));
         let spill_dir = tempfile::TempDir::new().expect("spill directory");
-        let spilled = MidgeEngine::open(
+        let spilled = Engine::open(
             OpenOptions::local(spill_dir.path())
                 .memory_budget(MemoryBudget::Bytes(128 * 1024))
                 .ttl_clock(clock.clone())
@@ -873,7 +871,7 @@ mod engine_ttl {
         let clock = Arc::new(ManualClock::new(u64::MAX - 500));
         let resident = open_with_clock(Arc::clone(&clock));
         let spill_dir = tempfile::TempDir::new().expect("spill directory");
-        let spilled = MidgeEngine::open(
+        let spilled = Engine::open(
             OpenOptions::local(spill_dir.path())
                 .memory_budget(MemoryBudget::Bytes(64 * 1024 * 1024))
                 .transaction_memory_pool_size(32 * 1024)
@@ -964,7 +962,7 @@ mod engine_ttl {
         // Arrange
         let directory = tempfile::TempDir::new().expect("database directory");
         let clock = Arc::new(ManualClock::new(u64::MAX - 500));
-        let mut engine = MidgeEngine::open(
+        let mut engine = Engine::open(
             OpenOptions::local(directory.path())
                 .ttl_clock(clock.clone())
                 .background_compaction(false)
@@ -1010,7 +1008,7 @@ mod engine_ttl {
         engine.shutdown(Duration::from_secs(5)).expect("shutdown");
 
         // Act
-        let reopened = MidgeEngine::open(
+        let reopened = Engine::open(
             OpenOptions::local(directory.path())
                 .ttl_clock(clock)
                 .background_compaction(false)
@@ -1036,7 +1034,7 @@ mod engine_ttl {
         // Arrange
         let directory = tempfile::TempDir::new().expect("database directory");
         let clock = Arc::new(ManualClock::new(1_000));
-        let mut engine = MidgeEngine::open(
+        let mut engine = Engine::open(
             OpenOptions::local(directory.path())
                 .ttl_clock(clock.clone())
                 .build()
@@ -1070,7 +1068,7 @@ mod engine_ttl {
         engine.compact_all().expect("compact");
         engine.shutdown(Duration::from_secs(5)).expect("shutdown");
         clock.set(50_000);
-        let reopened = MidgeEngine::open(
+        let reopened = Engine::open(
             OpenOptions::local(directory.path())
                 .ttl_clock(clock)
                 .build()
@@ -2555,7 +2553,7 @@ mod engine_iterators {
 mod engine_delete_range {
     //! Delete Range Integration Tests
     //!
-    //! Tests range deletion operations end-to-end using the public `MidgeEngine` API.
+    //! Tests range deletion operations end-to-end using the public `Engine` API.
 
     use crate::common::*;
     use bytes::Bytes;

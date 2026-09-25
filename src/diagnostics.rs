@@ -165,22 +165,10 @@ impl crate::io::traits::ReadObserver for RuntimeDiagnostics {
     }
 }
 
-/// Diagnostics for direct standalone readers and the legacy global snapshot
-/// helper. Engines always receive an independent `RuntimeDiagnostics` value.
+/// Diagnostics for direct standalone readers. Engines always receive an
+/// independent `RuntimeDiagnostics` value.
 pub(crate) fn legacy_runtime_diagnostics() -> Arc<RuntimeDiagnostics> {
     Arc::clone(LEGACY_RUNTIME_DIAGNOSTICS.get_or_init(|| Arc::new(RuntimeDiagnostics::default())))
-}
-
-/// Capture legacy process-wide read-path counters for benchmark diagnostics.
-///
-/// New benchmark code should call `Engine::read_path_diagnostics_snapshot_for_benchmarks`
-/// so a concurrent engine cannot contaminate its measurement window. This
-/// function is retained for existing doc-hidden consumers and standalone SST
-/// readers that have no runtime owner.
-#[must_use]
-#[doc(hidden)]
-pub fn read_path_diagnostics_snapshot_for_benchmarks() -> ReadPathDiagnosticsSnapshot {
-    legacy_runtime_diagnostics().snapshot()
 }
 
 /// One internal timing sample for `Transaction::commit`.

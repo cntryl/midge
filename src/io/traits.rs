@@ -18,6 +18,11 @@ use std::path::Path;
 use thiserror::Error;
 
 /// Filesystem errors
+///
+/// Only `internal-testing` builds can name this type. Default builds still
+/// reach it through `impl From<FsError> for MidgeError`, which about 150
+/// internal `?` conversions rely on; see #572 for making that crate-private.
+#[cfg_attr(not(feature = "internal-testing"), allow(unnameable_types))]
 #[derive(Error, Debug)]
 pub enum FsError {
     #[error("not found: {0}")]

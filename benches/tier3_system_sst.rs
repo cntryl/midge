@@ -8,7 +8,7 @@ mod stress_config;
 
 use cntryl_stress::{stress, stress_main, StressContext};
 
-use cntryl_midge::MidgeEngine;
+use cntryl_midge::Engine;
 use stress_config::MidgeOptions;
 
 const KEY_SIZE: usize = stress_config::bench_stress::KEY_SIZE;
@@ -19,7 +19,7 @@ const SST_RANGE_SEEK_BATCH_SIZE: usize = 64;
 const SST_FIXTURE_MEMTABLE_SIZE_BYTES: usize = 4 * 1024 * 1024;
 const SST_POINT_SEEK_SAMPLE_COUNT: usize = 12;
 
-fn setup_engine(opts: MidgeOptions) -> MidgeEngine {
+fn setup_engine(opts: MidgeOptions) -> Engine {
     stress_config::bench_stress::open_engine_no_compaction(opts)
 }
 

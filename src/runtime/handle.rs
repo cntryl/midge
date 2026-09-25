@@ -82,6 +82,7 @@ impl RuntimeHandle {
         self.lifecycle.state() == RuntimeLifecycleState::Open
     }
 
+    #[cfg(feature = "internal-testing")]
     pub(crate) fn read_path_diagnostics_snapshot(
         &self,
     ) -> crate::diagnostics::ReadPathDiagnosticsSnapshot {

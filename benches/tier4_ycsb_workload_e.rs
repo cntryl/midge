@@ -39,11 +39,7 @@ const CLIENTS_64: usize = 64;
 
 const WORKLOAD_SEED: u64 = 0xE0E0_EA5E_5678_9ABC;
 
-fn run_workload_e_warmup(
-    engine: &Arc<cntryl_midge::MidgeEngine>,
-    clients: usize,
-    initial_keys: usize,
-) {
+fn run_workload_e_warmup(engine: &Arc<cntryl_midge::Engine>, clients: usize, initial_keys: usize) {
     let write_opts = cntryl_midge::WriteOptions::best_effort();
     let _warmup_ops =
         ycsb::run_multi_client_for_duration(engine, clients, WARMUP, |client_id, stop| {
@@ -92,7 +88,7 @@ fn run_workload_e_warmup(
 
 fn run_workload_e_measured(
     ctx: &mut StressContext,
-    engine: &Arc<cntryl_midge::MidgeEngine>,
+    engine: &Arc<cntryl_midge::Engine>,
     clients: usize,
     initial_keys: usize,
     profile: &str,

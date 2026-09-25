@@ -5,7 +5,7 @@
 #[path = "./stress_config.rs"]
 mod stress_config;
 
-use cntryl_midge::{Bytes, MidgeEngine};
+use cntryl_midge::{Bytes, Engine};
 use cntryl_stress::{black_box, stress, stress_main, StressContext};
 use stress_config::{MidgeOptions, StorageMode};
 
@@ -38,7 +38,7 @@ fn make_fixed_kv(size: usize) -> (Vec<Bytes>, Vec<Bytes>) {
     (keys, vals)
 }
 
-fn setup_db() -> MidgeEngine {
+fn setup_db() -> Engine {
     let opts = MidgeOptions {
         storage_mode: StorageMode::Memory,
         wal_sync: false,
@@ -51,7 +51,7 @@ fn setup_db() -> MidgeEngine {
         simulated_cloud_overrides: None,
     };
 
-    MidgeEngine::open(opts.to_open_options()).unwrap()
+    Engine::open(opts.to_open_options()).unwrap()
 }
 
 fn run_batch_put(ctx: &mut StressContext, scenario: &'static str, batch_size: usize) {
@@ -98,12 +98,7 @@ fn batch_put_1000(ctx: &mut StressContext) {
     run_batch_put(ctx, "batch_put_1000", 1_000);
 }
 
-fn setup_get_fixture() -> (
-    MidgeEngine,
-    cntryl_midge::ColumnFamilyId,
-    Vec<Bytes>,
-    Vec<Bytes>,
-) {
+fn setup_get_fixture() -> (Engine, cntryl_midge::ColumnFamilyId, Vec<Bytes>, Vec<Bytes>) {
     let engine = setup_db();
     let cf = engine.create_column_family("cf1").unwrap();
     let num_keys = 1_000;

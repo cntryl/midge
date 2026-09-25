@@ -35,8 +35,9 @@ pub use filesystem::FileSystemLease;
 pub use heartbeat::LeaseHeartbeat;
 #[cfg(test)]
 pub(crate) use traits::LeaderRecord;
+pub(crate) use traits::LeaseError;
 pub(crate) use traits::LeaseValidity;
-pub use traits::{LeaderStore, LeaseError, LeaseGuard, PrimaryLease};
+pub use traits::{LeaderStore, LeaseGuard, PrimaryLease};
 
 use crate::config::Storage;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -52,7 +53,6 @@ impl From<LeaseError> for crate::common::MidgeError {
             LeaseError::AcquisitionFailed(message) => Self::LeaseHeld(message),
             LeaseError::IoError(message) => Self::LeaseUnavailable(message),
             LeaseError::RenewalFailed(message) => Self::Fenced(message),
-            LeaseError::AlreadyReleased => Self::Fenced("lease already released".to_string()),
             LeaseError::Indeterminate(message) => Self::LeaseIndeterminate(message),
             LeaseError::EpochExhausted => Self::LeaseEpochExhausted,
             LeaseError::AlreadyAcquired(message) => Self::Busy(message),

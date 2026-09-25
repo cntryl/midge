@@ -13,7 +13,7 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use cntryl_midge::MidgeEngine;
+use cntryl_midge::Engine;
 use stress_config::{ycsb, MidgeOptions};
 
 const VALUE_SIZE: usize = 256;
@@ -58,7 +58,7 @@ struct PhaseResult {
 }
 
 fn spawn_writer(
-    engine: Arc<MidgeEngine>,
+    engine: Arc<Engine>,
     cf_id: cntryl_midge::ColumnFamilyId,
     write_opts: cntryl_midge::WriteOptions,
     head: Arc<AtomicU64>,
@@ -107,7 +107,7 @@ fn spawn_writer(
 }
 
 fn spawn_reader(
-    engine: Arc<MidgeEngine>,
+    engine: Arc<Engine>,
     cf_id: cntryl_midge::ColumnFamilyId,
     head: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
@@ -164,7 +164,7 @@ fn spawn_reader(
 }
 
 fn run_streaming_phase(
-    engine: &Arc<MidgeEngine>,
+    engine: &Arc<Engine>,
     cf_id: cntryl_midge::ColumnFamilyId,
     write_opts: cntryl_midge::WriteOptions,
     head: &Arc<AtomicU64>,

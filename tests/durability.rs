@@ -2406,14 +2406,14 @@ mod best_effort_durability {
     //! 4. Lose data on crash before flush (documented trade-off)
 
     use crate::common::*;
-    use cntryl_midge::{MidgeEngine, TransactionMode, WriteOptions};
+    use cntryl_midge::{Engine, TransactionMode, WriteOptions};
     use std::time::Duration;
 
     #[test]
     fn should_skip_wal_when_using_best_effort() -> cntryl_midge::MidgeResult<()> {
         // Arrange
         let opts = opts_for_mode("local");
-        let engine = MidgeEngine::open(opts.to_open_options())?;
+        let engine = Engine::open(opts.to_open_options())?;
         let cf = engine.create_column_family("test")?;
 
         // Act - Write with BestEffort (should skip WAL)
@@ -2436,7 +2436,7 @@ mod best_effort_durability {
     fn should_persist_best_effort_data_when_flushed() -> cntryl_midge::MidgeResult<()> {
         // Arrange
         let opts = opts_for_mode("local");
-        let mut engine = MidgeEngine::open(opts.clone().to_open_options())?;
+        let mut engine = Engine::open(opts.clone().to_open_options())?;
         let cf = engine.create_column_family("test")?;
         let cf_id = cf.id();
 
@@ -2462,7 +2462,7 @@ mod best_effort_durability {
 
         // Reopen engine (simulates restart)
         engine.shutdown(Duration::from_secs(2))?;
-        let engine = MidgeEngine::open(opts.to_open_options())?;
+        let engine = Engine::open(opts.to_open_options())?;
 
         // Assert - Once flush_cf() succeeds, flushed data must be durable across restart
         let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly)?;
@@ -2482,7 +2482,7 @@ mod best_effort_durability {
     fn should_lose_best_effort_data_when_not_flushed() -> cntryl_midge::MidgeResult<()> {
         // Arrange
         let opts = opts_for_mode("local");
-        let mut engine = MidgeEngine::open(opts.clone().to_open_options())?;
+        let mut engine = Engine::open(opts.clone().to_open_options())?;
         let cf = engine.create_column_family("test")?;
         let cf_id = cf.id();
 
@@ -2501,7 +2501,7 @@ mod best_effort_durability {
         engine.shutdown(Duration::from_secs(2))?;
 
         // Reopen engine
-        let engine = MidgeEngine::open(opts.to_open_options())?;
+        let engine = Engine::open(opts.to_open_options())?;
 
         // Assert - Data is lost (not in WAL, not in SST)
         let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly)?;
@@ -2518,7 +2518,7 @@ mod best_effort_durability {
     fn should_handle_large_batches_with_best_effort() -> cntryl_midge::MidgeResult<()> {
         // Arrange - This tests the original YCSB issue: large batches shouldn't overflow WAL queue
         let opts = opts_for_mode("local");
-        let engine = MidgeEngine::open(opts.to_open_options())?;
+        let engine = Engine::open(opts.to_open_options())?;
         let cf = engine.create_column_family("test")?;
 
         // Act - Write 50,000 ops (same size as YCSB batch that triggered the bug)
