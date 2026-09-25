@@ -27,6 +27,7 @@
 pub(crate) mod buffered_read;
 #[cfg(test)]
 mod conformance_tests;
+pub(crate) mod durable_dir;
 pub mod mock;
 pub mod real;
 pub mod staging;

@@ -947,10 +947,13 @@ impl RuntimeState {
             if let Err(e) = std::fs::create_dir_all(db_path) {
                 tracing::warn!(error = %e, path = ?db_path, "failed to create database directory");
             }
-            if let Err(e) = std::fs::create_dir_all(&wal_dir) {
+            // Durable: the entries must survive a crash before the first
+            // acknowledged write, whatever else syncs the database root (#519).
+            // A failure surfaces again when the WAL writer opens its directory.
+            if let Err(e) = crate::io::durable_dir::create_dir_all_durably(db_path, &wal_dir) {
                 tracing::warn!(error = %e, path = ?wal_dir, "failed to create WAL directory");
             }
-            if let Err(e) = std::fs::create_dir_all(&sst_dir) {
+            if let Err(e) = crate::io::durable_dir::create_dir_all_durably(db_path, &sst_dir) {
                 tracing::warn!(error = %e, path = ?sst_dir, "failed to create SST directory");
             }
         }

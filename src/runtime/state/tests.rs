@@ -2297,3 +2297,24 @@ fn should_not_select_wal_bytes_flush_candidate_when_only_segments_advance() {
     assert!(by_bytes.is_none(), "{by_bytes:?}");
     assert!(by_segments.is_some());
 }
+
+#[test]
+fn should_sync_database_root_when_creating_wal_and_sst_directories() {
+    // Arrange: `wal/` and `sst/` must be durable before the first write,
+    // not only because some later step happens to sync the root (#519).
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_path = std::fs::canonicalize(temp.path()).expect("canonical db path");
+    crate::io::durable_dir::take_synced_dirs();
+
+    // Act
+    let _state = RuntimeState::new(db_path.clone(), false);
+
+    // Assert: one root sync for each of `wal/` and `sst/`.
+    let synced = crate::io::durable_dir::take_synced_dirs();
+    assert!(db_path.join("wal").is_dir());
+    assert_eq!(
+        synced.iter().filter(|dir| **dir == db_path).count(),
+        2,
+        "{synced:?}"
+    );
+}

@@ -137,7 +137,8 @@ impl RealFs {
 
         if opts.create || opts.create_new {
             if let Some(parent) = Self::parent_dir(&full) {
-                std::fs::create_dir_all(parent).map_err(|e| io_error("create_dir_all", &e))?;
+                super::durable_dir::create_dir_all_durably(&self.base_path, parent)
+                    .map_err(|e| io_error("create_dir_all", &e))?;
             }
         }
 
@@ -212,9 +213,12 @@ impl Fs for RealFs {
         Ok(Metadata { len: meta.len() })
     }
 
+    /// Creates missing directories durably: each new entry's parent is
+    /// fsynced before this returns (#519).
     fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
         let full = self.full_path(path)?;
-        fs::create_dir_all(&full).map_err(|e| io_err("create_dir_all", &full, &e))
+        super::durable_dir::create_dir_all_durably(&self.base_path, &full)
+            .map_err(|e| io_err("create_dir_all", &full, &e))
     }
 
     fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
@@ -289,7 +293,8 @@ impl Fs for RealFs {
 
         // Ensure destination parent exists (helps callers that assume it).
         if let Some(parent) = Self::parent_dir(&to_full) {
-            fs::create_dir_all(parent).map_err(|e| io_err("create_dir_all", parent, &e))?;
+            super::durable_dir::create_dir_all_durably(&self.base_path, parent)
+                .map_err(|e| io_err("create_dir_all", parent, &e))?;
         }
 
         #[cfg(windows)]
@@ -648,6 +653,25 @@ fn write_all_at_windows(file: &fs::File, mut offset: u64, mut src: &[u8]) -> FsR
 
 #[cfg(test)]
 mod tests {
+    use crate::io::FsPath;
+
+    #[test]
+    fn should_sync_parent_of_each_new_directory_when_creating_nested_directories() {
+        // Arrange (#519)
+        let temp = tempfile::tempdir().expect("temp dir");
+        let fs = RealFs::new(temp.path()).expect("real fs");
+        let root = std::fs::canonicalize(temp.path()).expect("canonical root");
+        crate::io::durable_dir::take_synced_dirs();
+
+        // Act
+        crate::io::Fs::create_dir_all(&fs, &FsPath::new("wal/epochs/3")).expect("create");
+
+        // Assert
+        assert_eq!(
+            crate::io::durable_dir::take_synced_dirs(),
+            [root.clone(), root.join("wal"), root.join("wal/epochs")]
+        );
+    }
 
     #[test]
     fn should_classify_storage_full_as_no_space_when_realfs_error_is_converted() {
