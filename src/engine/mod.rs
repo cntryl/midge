@@ -172,7 +172,7 @@ impl Engine {
         let mut backoff = Duration::from_millis(1);
         loop {
             match lease.release() {
-                Ok(()) | Err(crate::lease::LeaseError::AlreadyReleased) => {
+                Ok(()) => {
                     tracing::trace!("Engine: lease released");
                     return Ok(());
                 }
@@ -671,6 +671,7 @@ impl Engine {
     /// This doc-hidden benchmark hook deliberately scopes the snapshot to one
     /// engine, so another engine in the same process cannot contaminate a
     /// before/after measurement window.
+    #[cfg(feature = "internal-testing")]
     #[must_use]
     #[doc(hidden)]
     pub fn read_path_diagnostics_snapshot_for_benchmarks(

@@ -3,8 +3,8 @@
 pub mod crash;
 
 use cntryl_midge::{
-    CloudWritePolicy, ColumnFamilyHandle, Engine, Goal, MemoryBudget, MidgeEngine, MidgeResult,
-    OpenOptions, Storage, WorkloadProfile, WriteOptions,
+    CloudWritePolicy, ColumnFamilyHandle, Engine, Goal, MemoryBudget, MidgeResult, OpenOptions,
+    Storage, WorkloadProfile, WriteOptions,
 };
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -292,12 +292,7 @@ where
     }
 }
 
-pub fn assert_get_equals(
-    engine: &MidgeEngine,
-    cf: &ColumnFamilyHandle,
-    key: &[u8],
-    expected: &[u8],
-) {
+pub fn assert_get_equals(engine: &Engine, cf: &ColumnFamilyHandle, key: &[u8], expected: &[u8]) {
     let tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .expect("begin_tx failed");
@@ -308,7 +303,7 @@ pub fn assert_get_equals(
     );
 }
 
-pub fn assert_key_absent(engine: &MidgeEngine, cf: &ColumnFamilyHandle, key: &[u8]) {
+pub fn assert_key_absent(engine: &Engine, cf: &ColumnFamilyHandle, key: &[u8]) {
     let tx = engine
         .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
         .expect("begin_tx failed");
@@ -320,7 +315,7 @@ pub fn assert_key_absent(engine: &MidgeEngine, cf: &ColumnFamilyHandle, key: &[u
 }
 
 pub fn bulk_put(
-    engine: &MidgeEngine,
+    engine: &Engine,
     cf: &ColumnFamilyHandle,
     kvs: &[(&[u8], &[u8])],
 ) -> MidgeResult<()> {

@@ -27,7 +27,7 @@ const CLIENTS_64: usize = 64;
 const WORKLOAD_SEED: u64 = 0xF0F0_EA5E_5678_9ABC;
 
 fn run_workload_f_warmup(
-    engine: &Arc<cntryl_midge::MidgeEngine>,
+    engine: &Arc<cntryl_midge::Engine>,
     cf_id: cntryl_midge::ColumnFamilyId,
     clients: usize,
     initial_keys: usize,

@@ -32,7 +32,7 @@ const CLIENTS_64: usize = 64;
 const WORKLOAD_SEED: u64 = 0xA0A0_EA5E_5678_9ABC;
 
 fn run_workload_a_warmup(
-    engine: &Arc<cntryl_midge::MidgeEngine>,
+    engine: &Arc<cntryl_midge::Engine>,
     clients: usize,
     initial_keys: usize,
     distribution: KeyDistribution,
@@ -85,7 +85,7 @@ fn run_workload_a_warmup(
 
 fn run_workload_a_measured(
     ctx: &mut StressContext,
-    engine: &Arc<cntryl_midge::MidgeEngine>,
+    engine: &Arc<cntryl_midge::Engine>,
     clients: usize,
     initial_keys: usize,
     profile: &str,

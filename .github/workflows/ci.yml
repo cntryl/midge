@@ -79,6 +79,11 @@ jobs:
           fi
           cargo check --release
 
+      - name: Public API names every type it exposes
+        run: |
+          cargo rustc --lib -- -D unnameable_types
+          cargo rustc --lib --no-default-features -- -D unnameable_types
+
   windows-check:
     name: Windows check (windows-latest)
     runs-on: windows-latest

@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use hdrhistogram::Histogram;
 
 use cntryl_midge::{
-    ColumnFamilyHandle, Engine, MidgeEngine, MidgeError, MidgeResult, TransactionMode, WriteOptions,
+    ColumnFamilyHandle, Engine, MidgeError, MidgeResult, TransactionMode, WriteOptions,
 };
 use cntryl_stress::StressContext;
 
@@ -818,7 +818,7 @@ pub fn deterministic_u64(seed: u64, client_id: usize, op_index: u64, draw_index:
 /// Returns any non-`WriteStall` engine error from `op`, or any error returned
 /// while waiting for backpressure to clear.
 pub fn retry_write_stall<F>(
-    engine: &MidgeEngine,
+    engine: &Engine,
     cf_id: cntryl_midge::ColumnFamilyId,
     stop: &AtomicBool,
     mut op: F,
@@ -857,7 +857,7 @@ where
 /// Returns any non-`WriteStall` engine error from `op`, or any error returned
 /// while waiting for backpressure to clear.
 pub fn retry_write_stall_observed<F>(
-    engine: &MidgeEngine,
+    engine: &Engine,
     cf_id: cntryl_midge::ColumnFamilyId,
     stop: &AtomicBool,
     mut op: F,
@@ -898,14 +898,14 @@ where
 /// watchdog detects a stall, or a client thread panics before reporting its
 /// completed operation count.
 pub fn run_multi_client_for_duration<MakeClient, Step>(
-    engine: &Arc<MidgeEngine>,
+    engine: &Arc<Engine>,
     clients: usize,
     duration: Duration,
     make_client: MakeClient,
 ) -> u64
 where
     MakeClient: Fn(usize, Arc<AtomicBool>) -> Step,
-    Step: FnMut(&MidgeEngine, &ColumnFamilyHandle, u64) + Send + 'static,
+    Step: FnMut(&Engine, &ColumnFamilyHandle, u64) + Send + 'static,
 {
     run_multi_client_for_duration_with_stats(engine, clients, duration, make_client).operations
 }
@@ -917,14 +917,14 @@ where
 /// # Panics
 /// Panics under the same conditions as [`run_multi_client_for_duration`].
 pub fn run_multi_client_for_duration_with_stats<MakeClient, Step>(
-    engine: &Arc<MidgeEngine>,
+    engine: &Arc<Engine>,
     clients: usize,
     duration: Duration,
     make_client: MakeClient,
 ) -> MultiClientRunStats
 where
     MakeClient: Fn(usize, Arc<AtomicBool>) -> Step,
-    Step: FnMut(&MidgeEngine, &ColumnFamilyHandle, u64) + Send + 'static,
+    Step: FnMut(&Engine, &ColumnFamilyHandle, u64) + Send + 'static,
 {
     let stop = Arc::new(AtomicBool::new(false));
     let barrier = Arc::new(Barrier::new(clients + 1));
@@ -1066,14 +1066,14 @@ where
 /// client thread panics before reporting its completed operation count.
 #[must_use]
 pub fn run_multi_client_for_operations_with_stats<MakeClient, Step>(
-    engine: &Arc<MidgeEngine>,
+    engine: &Arc<Engine>,
     clients: usize,
     operations_per_client: u64,
     make_client: MakeClient,
 ) -> (MultiClientRunStats, Duration)
 where
     MakeClient: Fn(usize, Arc<AtomicBool>) -> Step,
-    Step: FnMut(&MidgeEngine, &ColumnFamilyHandle, u64) + Send + 'static,
+    Step: FnMut(&Engine, &ColumnFamilyHandle, u64) + Send + 'static,
 {
     let stop = Arc::new(AtomicBool::new(false));
     let barrier = Arc::new(Barrier::new(clients + 1));

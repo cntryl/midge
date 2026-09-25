@@ -7,7 +7,7 @@ mod stress_config;
 
 use cntryl_stress::{stress, stress_main, StressContext};
 
-use cntryl_midge::{ColumnFamilyId, MidgeEngine};
+use cntryl_midge::{ColumnFamilyId, Engine};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -45,7 +45,7 @@ fn workload_c_read_key(
 
 fn measure_duration(
     ctx: &mut StressContext,
-    engine: &Arc<MidgeEngine>,
+    engine: &Arc<Engine>,
     cf_id: ColumnFamilyId,
     initial_keys: usize,
     clients: usize,

@@ -118,9 +118,6 @@ impl StartupLease {
                     MidgeError::LeaseUnavailable(message)
                 }
                 crate::lease::LeaseError::RenewalFailed(message) => MidgeError::Fenced(message),
-                crate::lease::LeaseError::AlreadyReleased => {
-                    MidgeError::Fenced("lease was released during acquisition".to_string())
-                }
                 crate::lease::LeaseError::Indeterminate(message) => {
                     MidgeError::LeaseIndeterminate(message)
                 }

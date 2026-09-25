@@ -319,9 +319,9 @@ After recovery, `RuntimeState.sequence` is set to the maximum sequence number fo
 ## Simple example
 
 ```rust
-use cntryl_midge::{MidgeEngine, MidgeResult, OpenOptions, TransactionMode, WriteOptions};
+use cntryl_midge::{Engine, MidgeResult, OpenOptions, TransactionMode, WriteOptions};
 
-fn example(engine: &MidgeEngine, cf_id: u32) -> MidgeResult<()> {
+fn example(engine: &Engine, cf_id: u32) -> MidgeResult<()> {
     // Start a read-write transaction.
     // Captures the current snapshot sequence synchronously (no event loop round-trip).
     let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite)?;

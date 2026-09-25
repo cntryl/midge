@@ -18,7 +18,7 @@ mod stress_config;
 use cntryl_stress::{stress, stress_main, StressContext};
 use std::time::Duration;
 
-use cntryl_midge::MidgeEngine;
+use cntryl_midge::Engine;
 use stress_config::MidgeOptions;
 
 const VALUE_SIZE: usize = 64;
@@ -26,7 +26,7 @@ const TARGET_BATCH: usize = 1_000;
 const RECOVERY_FIXTURE_MEMTABLE_SIZE_BYTES: usize = 2 * 1024 * 1024;
 const REOPENS_PER_SAMPLE: u64 = 10;
 
-fn setup_engine(opts: MidgeOptions) -> MidgeEngine {
+fn setup_engine(opts: MidgeOptions) -> Engine {
     stress_config::bench_stress::open_engine_no_compaction(opts)
 }
 
@@ -39,7 +39,7 @@ fn recovery_opts_for_mode(mode: &str) -> MidgeOptions {
     opts
 }
 
-fn write_some(engine: &MidgeEngine, num_keys: usize) {
+fn write_some(engine: &Engine, num_keys: usize) {
     let cf = engine.create_column_family("cf1").unwrap();
     let cf_id = cf.id();
     let write_opts = cntryl_midge::WriteOptions::best_effort(); // Fast setup: skip WAL I/O

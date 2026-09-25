@@ -17,11 +17,11 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use cntryl_midge::{MidgeEngine, OpenOptions};
+//! use cntryl_midge::{Engine, OpenOptions};
 //!
 //! // Open a database with default options
 //! let opts = OpenOptions::local("./my_db").build()?;
-//! let engine = MidgeEngine::open(opts)?;
+//! let engine = Engine::open(opts)?;
 //! # Ok::<(), cntryl_midge::MidgeError>(())
 //! ```
 
@@ -388,7 +388,7 @@ impl OpenOptions {
 
     /// Return the derived compression policy.
     #[must_use]
-    pub fn compression_policy(&self) -> &CompressionPolicy {
+    pub(crate) fn compression_policy(&self) -> &CompressionPolicy {
         &self.compaction.compression
     }
 
@@ -639,7 +639,7 @@ impl OpenOptionsBuilder {
     /// Override the engine TTL wall clock, primarily for deterministic hosts
     /// and tests. Midge applies a process-local nondecreasing floor to it.
     #[must_use]
-    pub fn ttl_clock(mut self, clock: Arc<dyn crate::common::time::Clock>) -> Self {
+    pub fn ttl_clock(mut self, clock: Arc<dyn crate::Clock>) -> Self {
         self.ttl_clock = crate::common::time::ClockHandle(Arc::new(
             crate::common::time::ObservedClock::new(clock),
         ));
@@ -656,6 +656,7 @@ impl OpenOptionsBuilder {
 
     /// Override the cloud local storage budget for compatibility with older
     /// simulation tests. Prefer [`Self::local_storage_budget`].
+    #[cfg(feature = "internal-testing")]
     #[doc(hidden)]
     #[must_use]
     pub fn with_simulated_cloud_local_storage_budget(self, bytes: u64) -> Self {

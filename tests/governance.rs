@@ -1610,6 +1610,193 @@ mod public_api_surface {
         assert_eq!(offenders, vec!["wal".to_string()]);
     }
 
+    /// Return the `pub fn` names in `source` whose attribute block marks them
+    /// `#[doc(hidden)]` without a `#[cfg(feature = ...)]` gate. Hidden hooks on
+    /// the public surface must not ship in default builds.
+    fn ungated_hidden_public_fns(source: &str) -> Vec<String> {
+        const GATES: [&str; 2] = ["\"internal-testing\"", "\"failpoints\""];
+        const FN_PREFIXES: [&str; 4] = [
+            "pub fn ",
+            "pub const fn ",
+            "pub async fn ",
+            "pub unsafe fn ",
+        ];
+        let mut offenders = Vec::new();
+        let mut hidden = false;
+        let mut gated = false;
+        for line in source.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with("//") {
+                continue;
+            }
+            if trimmed.starts_with("#[") {
+                hidden |= trimmed.contains("doc(hidden)");
+                gated |= trimmed.starts_with("#[cfg(")
+                    && GATES.iter().any(|gate| trimmed.contains(gate));
+                continue;
+            }
+            if hidden && !gated {
+                if let Some(rest) = FN_PREFIXES
+                    .iter()
+                    .find_map(|prefix| trimmed.strip_prefix(prefix))
+                {
+                    let name: String = rest
+                        .chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect();
+                    offenders.push(name);
+                }
+            }
+            hidden = false;
+            gated = false;
+        }
+        offenders
+    }
+
+    fn rust_sources(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("read source dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                rust_sources(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn should_gate_hidden_public_functions_when_on_the_public_surface() {
+        // Arrange: lib.rs and the engine API are the only public surface;
+        // other modules are private and reachable only through `__internal`.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = vec![root.join("lib.rs")];
+        rust_sources(&root.join("engine"), &mut files);
+
+        // Act
+        let offenders: Vec<String> = files
+            .iter()
+            .flat_map(|path| {
+                let source = std::fs::read_to_string(path).expect("read source");
+                ungated_hidden_public_fns(&source)
+                    .into_iter()
+                    .map(move |name| format!("{}: {name}", path.display()))
+            })
+            .collect();
+
+        // Assert
+        assert!(
+            offenders.is_empty(),
+            "`#[doc(hidden)] pub fn` on the public surface must be gated with \
+             `#[cfg(feature = \"internal-testing\")]`: {offenders:#?}"
+        );
+    }
+
+    #[test]
+    fn should_flag_hidden_public_function_when_feature_gate_is_missing() {
+        // Arrange
+        let source = concat!(
+            "#[doc(hidden)]\n",
+            "#[must_use]\n",
+            "pub fn leaked_hook() {}\n",
+            "#[cfg(feature = \"internal-testing\")]\n",
+            "#[doc(hidden)]\n",
+            "pub fn gated_hook() {}\n",
+            "    /// Documented.\n",
+            "    #[doc(hidden)] #[must_use]\n",
+            "\n",
+            "    pub const fn leaked_method(&self) {}\n",
+            "#[cfg(feature = \"cloud-aws\")]\n",
+            "#[doc(hidden)]\n",
+            "pub fn default_feature_hook() {}\n",
+            "#[cfg(any(test, feature = \"failpoints\"))]\n",
+            "#[doc(hidden)]\n",
+            "pub fn failpoint_hook() {}\n",
+        );
+
+        // Act
+        let offenders = ungated_hidden_public_fns(source);
+
+        // Assert
+        assert_eq!(
+            offenders,
+            vec!["leaked_hook", "leaked_method", "default_feature_hook"]
+        );
+    }
+
+    /// Every `pub use ...;` statement in `source`, joined onto one line.
+    fn public_use_statements(source: &str) -> Vec<String> {
+        let mut statements = Vec::new();
+        let mut current: Option<String> = None;
+        for line in source.lines() {
+            let trimmed = line.trim();
+            if current.is_none() && trimmed.starts_with("pub use ") {
+                current = Some(String::new());
+            }
+            if let Some(statement) = current.as_mut() {
+                statement.push_str(trimmed);
+                statement.push(' ');
+                if trimmed.ends_with(';') {
+                    statements.push(current.take().unwrap_or_default());
+                }
+            }
+        }
+        statements
+    }
+
+    /// Whether a use statement names the crate's `io` module in any form:
+    /// `io::`, `crate::io`, `self::io`, `{io::...}` or `io as ...`.
+    fn names_io_module(statement: &str) -> bool {
+        statement
+            .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':'))
+            .any(|path| {
+                let path = path
+                    .trim_start_matches("crate::")
+                    .trim_start_matches("self::")
+                    .trim_start_matches("::");
+                path == "io" || path.starts_with("io::")
+            })
+    }
+
+    #[test]
+    fn should_flag_io_reexport_when_written_in_any_path_form() {
+        // Arrange
+        let source = concat!(
+            "pub use engine::{Key, Value};\n",
+            "pub use crate::{\n",
+            "    io::Fs,\n",
+            "};\n",
+            "pub use self::io::FsPath;\n",
+            "pub use io as fs;\n",
+            "pub use std::io::Error;\n",
+        );
+
+        // Act
+        let flagged: Vec<bool> = public_use_statements(source)
+            .iter()
+            .map(|statement| names_io_module(statement))
+            .collect();
+
+        // Assert
+        assert_eq!(flagged, vec![false, true, true, true, false]);
+    }
+
+    #[test]
+    fn should_not_reexport_filesystem_abstraction_when_building_public_surface() {
+        // Arrange
+        let source = crate_root_source();
+
+        // Act
+        let reexports_io = public_use_statements(&source)
+            .iter()
+            .any(|statement| names_io_module(statement));
+
+        // Assert
+        assert!(
+            !reexports_io,
+            "src/lib.rs must not re-export the internal `io` filesystem abstraction"
+        );
+    }
+
     #[test]
     fn should_reach_internals_only_through_the_gated_module() {
         // Arrange

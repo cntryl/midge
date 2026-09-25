@@ -196,7 +196,7 @@ impl LeaseValidity {
 /// fencing epoch is exhausted", or "this shouldn't be reachable" (an
 /// internal invariant violation, not an environmental condition).
 #[derive(Debug)]
-pub enum LeaseError {
+pub(crate) enum LeaseError {
     /// Confirmed, safe-to-retry contention: another live holder genuinely
     /// owns the lease, or a conditional write/delete genuinely lost a race
     /// to a concurrent acquirer.
@@ -220,8 +220,6 @@ pub enum LeaseError {
     /// own state machine, not an environmental condition another retry
     /// could resolve.
     Internal(String),
-    /// Lease was already released.
-    AlreadyReleased,
     /// The store did not answer within the caller's deadline. Like
     /// `IoError`, the outcome is unknown.
     Timeout(String),
@@ -237,7 +235,6 @@ impl fmt::Display for LeaseError {
             Self::EpochExhausted => write!(f, "lease fencing epoch is exhausted"),
             Self::AlreadyAcquired(msg) => write!(f, "lease already acquired: {msg}"),
             Self::Internal(msg) => write!(f, "lease internal error: {msg}"),
-            Self::AlreadyReleased => write!(f, "lease already released"),
             Self::Timeout(msg) => write!(f, "lease operation timed out: {msg}"),
         }
     }

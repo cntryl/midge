@@ -6,7 +6,7 @@
 #[path = "./stress_config.rs"]
 mod stress_config;
 
-use cntryl_midge::{MidgeEngine, MidgeError, WriteOptions};
+use cntryl_midge::{Engine, MidgeError, WriteOptions};
 use cntryl_stress::{stress, stress_main, LogicalUnit, OperationOutcome, StressContext};
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -35,14 +35,14 @@ const WRITERS: usize = 1;
 const WARMUP: Duration = Duration::from_secs(1);
 const MEASURED: Duration = Duration::from_secs(8);
 
-fn open_compaction_engine(mut opts: MidgeOptions) -> MidgeEngine {
+fn open_compaction_engine(mut opts: MidgeOptions) -> Engine {
     opts.enable_compaction = true;
     opts.memtable_size = COMPACTION_MEMTABLE_SIZE_BYTES;
-    MidgeEngine::open(opts.to_open_options()).expect("open compaction backpressure engine")
+    Engine::open(opts.to_open_options()).expect("open compaction backpressure engine")
 }
 
 fn run_write_phase(
-    engine: &Arc<MidgeEngine>,
+    engine: &Arc<Engine>,
     cf_id: cntryl_midge::ColumnFamilyId,
     write_options: fn() -> WriteOptions,
     next_key: &Arc<AtomicU64>,
