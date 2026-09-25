@@ -811,7 +811,7 @@ fn should_apply_wal_sequence_to_memtable() -> MidgeResult<()> {
     )?;
 
     // Act: append a single put
-    let (seq, deferred) = wal_actor.append(
+    let (seq, deferred) = wal_actor.append_single_op(
         &mut state,
         AppendParams {
             request_id: 1,
@@ -823,7 +823,8 @@ fn should_apply_wal_sequence_to_memtable() -> MidgeResult<()> {
         },
     )?;
 
-    // Assert: memtable contains one entry and its seq equals WAL seq
+    // Assert: memtable contains one entry at the transaction's operation
+    // sequence, one below its commit sequence.
     assert!(!deferred);
     let cf_state = state.get_cf(0).expect("cf exists");
     let entries = cf_state.memtable.iter_all();
@@ -831,7 +832,7 @@ fn should_apply_wal_sequence_to_memtable() -> MidgeResult<()> {
     let (key, value, m_seq) = &entries[0];
     assert_eq!(key.as_slice(), b"k");
     assert_eq!(value.as_ref().unwrap().as_slice(), b"v");
-    assert_eq!(*m_seq, seq);
+    assert_eq!(*m_seq + 1, seq);
 
     Ok(())
 }
@@ -966,7 +967,7 @@ fn should_append_multiple_prepared_transactions_with_one_physical_call() -> Midg
     assert_eq!(wal_actor.append_calls(), 1);
     assert_eq!(state.wal.pending_writes, 2);
     assert_eq!(wal_actor.pending_sync_count(), 2);
-    assert!(state.pending_transaction_min_sequence().is_some());
+    assert!(state.pending_transaction_started());
 
     let cf_state = state.get_cf(0).expect("cf exists");
     let entries = cf_state.memtable.iter_all();
@@ -1380,7 +1381,7 @@ fn should_fail_all_prepared_transactions_when_batch_append_hits_no_space() -> Mi
             0,
             "a rejected append must not consume local disk admission"
         );
-        assert_eq!(state.pending_transaction_min_sequence(), None);
+        assert!(!state.pending_transaction_started());
         assert!(
             state
                 .get_cf(0)
@@ -1456,7 +1457,7 @@ fn should_not_report_local_batch_work_given_pending_cloud_async_wal() -> MidgeRe
         1,
         crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
-    let (_, deferred) = wal_actor.append(
+    let (_, deferred) = wal_actor.append_single_op(
         &mut state,
         AppendParams {
             request_id: 581,

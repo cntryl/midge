@@ -490,9 +490,7 @@ impl RuntimeDispatcher {
             | TestRuntimeMsg::UnregisterSnapshot { .. } => {
                 Self::handle_test_snapshot_message(event_loop, msg)
             }
-            TestRuntimeMsg::WalAppend { .. }
-            | TestRuntimeMsg::WalAppendDeleteRange { .. }
-            | TestRuntimeMsg::WalSyncComplete { .. } => {
+            TestRuntimeMsg::WalAppend { .. } | TestRuntimeMsg::WalAppendDeleteRange { .. } => {
                 Self::handle_test_wal_message(event_loop, msg, msg_rx)
             }
             TestRuntimeMsg::FlushComplete { .. }
@@ -613,10 +611,6 @@ impl RuntimeDispatcher {
                 end_key,
                 durability_policy,
             ),
-            TestRuntimeMsg::WalSyncComplete {
-                request_id,
-                segment_id,
-            } => WalCoordinator::sync_complete(event_loop, request_id, segment_id),
             _ => unreachable!("non-WAL hook routed to handle_test_wal_message"),
         }
     }

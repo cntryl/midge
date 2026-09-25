@@ -354,7 +354,7 @@ fn should_not_add_confirmation_waiter_when_cloud_assertion_only_sequence_has_pen
     event_loop.state.wal.cloud_durable_seq = 0;
     event_loop
         .durability
-        .queue_waiter(DurabilityWaiter::ConfirmWalAppend { request_id: 40 });
+        .queue_waiter(DurabilityWaiter::ConfirmTransactionApply { request_id: 40 });
 
     // Act
     let response = apply_assertion_only_cloud_request(&mut event_loop, 42, 1);
@@ -373,7 +373,7 @@ fn should_not_add_confirmation_waiter_when_cloud_assertion_only_sequence_has_pen
     assert_eq!(waiters.len(), 1, "only the earlier write should remain");
     assert!(matches!(
         &waiters[0],
-        DurabilityWaiter::ConfirmWalAppend { request_id: 40 }
+        DurabilityWaiter::ConfirmTransactionApply { request_id: 40 }
     ));
     Ok(())
 }
@@ -482,9 +482,6 @@ fn should_retain_cloud_retry_state_given_storage_owned_upload_failure(
     event_loop
         .durability
         .queue_waiter_for_key(segment_id, DurabilityWaiter::CloudDurability { request_id });
-    event_loop
-        .state
-        .cache_sequences_for_test(request_id, (max_sequence, 1, 0));
 
     // Act
     event_loop.handle_storage_event(crate::storage::StorageEvent::CloudFail {
@@ -509,7 +506,6 @@ fn should_retain_cloud_retry_state_given_storage_owned_upload_failure(
         event_loop.durability.cloud_segment_max_sequence(segment_id),
         Some(max_sequence)
     );
-    assert!(event_loop.state.idempotency_entry(request_id).is_some());
     assert!(!event_loop.state.persistence_anomaly_detected());
     Ok(())
 }
@@ -4960,7 +4956,7 @@ fn should_validate_uncached_cloud_ack_before_local_wal_removal() -> crate::commo
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     let request_id = 501u64;
-    let (seq, deferred) = el.wal_actor.append(
+    let (seq, deferred) = el.wal_actor.append_single_op(
         &mut el.state,
         crate::runtime::actors::wal::AppendParams {
             request_id,
@@ -5010,7 +5006,7 @@ fn should_reject_cloud_ack_given_remote_wal_from_different_writer_epoch(
     let mut event_loop = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    let (sequence, _) = event_loop.wal_actor.append(
+    let (sequence, _) = event_loop.wal_actor.append_single_op(
         &mut event_loop.state,
         crate::runtime::actors::wal::AppendParams {
             request_id: 502,
@@ -5064,7 +5060,7 @@ fn should_reject_cloud_ack_given_writer_fenced_after_upload_was_enqueued(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     event_loop.fencing.lease_healthy = Some(Arc::clone(&healthy));
-    let (sequence, _) = event_loop.wal_actor.append(
+    let (sequence, _) = event_loop.wal_actor.append_single_op(
         &mut event_loop.state,
         crate::runtime::actors::wal::AppendParams {
             request_id: 503,
@@ -5105,7 +5101,7 @@ fn should_not_advance_cloud_durability_across_unacked_segment_gap() -> crate::co
     )?;
 
     let first_request = 601u64;
-    let (first_seq, first_deferred) = el.wal_actor.append(
+    let (first_seq, first_deferred) = el.wal_actor.append_single_op(
         &mut el.state,
         crate::runtime::actors::wal::AppendParams {
             request_id: first_request,
@@ -5127,7 +5123,7 @@ fn should_not_advance_cloud_durability_across_unacked_segment_gap() -> crate::co
     let (first_segment, first_max_sequence) = seal_segment_for_test(&mut el)?;
 
     let second_request = 602u64;
-    let (second_seq, second_deferred) = el.wal_actor.append(
+    let (second_seq, second_deferred) = el.wal_actor.append_single_op(
         &mut el.state,
         crate::runtime::actors::wal::AppendParams {
             request_id: second_request,
@@ -5200,7 +5196,7 @@ fn should_drop_buffered_cloud_acks_when_earlier_segment_fails() -> crate::common
     )?;
 
     let first_request = 611u64;
-    let (first_seq, first_deferred) = el.wal_actor.append(
+    let (first_seq, first_deferred) = el.wal_actor.append_single_op(
         &mut el.state,
         crate::runtime::actors::wal::AppendParams {
             request_id: first_request,
@@ -5222,7 +5218,7 @@ fn should_drop_buffered_cloud_acks_when_earlier_segment_fails() -> crate::common
     let (first_segment, _) = seal_segment_for_test(&mut el)?;
 
     let second_request = 612u64;
-    let (second_seq, second_deferred) = el.wal_actor.append(
+    let (second_seq, second_deferred) = el.wal_actor.append_single_op(
         &mut el.state,
         crate::runtime::actors::wal::AppendParams {
             request_id: second_request,
@@ -5278,7 +5274,7 @@ fn should_keep_local_wal_when_cached_remote_wal_proof_becomes_stale_before_cloud
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     let request_id = 502u64;
-    let (seq, deferred) = el.wal_actor.append(
+    let (seq, deferred) = el.wal_actor.append_single_op(
         &mut el.state,
         crate::runtime::actors::wal::AppendParams {
             request_id,
@@ -5447,221 +5443,12 @@ fn should_retry_auto_flush_when_backpressure_releases() -> crate::common::MidgeR
 }
 
 #[test]
-fn should_cloud_async_ack_confirm_idempotent_request() -> crate::common::MidgeResult<()> {
-    // Arrange
-    let mut el = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-    )?;
-
-    // Act
-
-    // Add a wal append with a specific request_id
-    let request_id = 123u64;
-    let cf_id = 0u32;
-
-    let (seq, deferred) = el.wal_actor.append(
-        &mut el.state,
-        crate::runtime::actors::wal::AppendParams {
-            request_id,
-            cf_id,
-            key: bytes::Bytes::from("k1"),
-            value: Some(bytes::Bytes::from("v1")),
-            insert_only: false,
-            ttl_seconds: None,
-        },
-    )?;
-
-    assert!(
-        deferred,
-        "CloudAsync append should be deferred waiting for CloudAck"
-    );
-
-    // Queue waiter for this append (simulates EventLoop behavior)
-    el.durability
-        .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
-            request_id,
-            sequence: seq,
-        }));
-
-    // Simulate sealing & uploading segment for CloudAsync as EventLoop would do
-    let (seg_id, max_sequence) = seal_segment_for_test(&mut el)?;
-
-    // Now simulate the storage CloudAck for that segment
-    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
-        segment_id: seg_id,
-        max_sequence,
-    });
-
-    // Assert: After handling, the idempotency entry for request_id should be confirmed at cloud frontier
-    assert!(
-        el.state.idempotency_entry(request_id).is_some(),
-        "idempotency entry missing"
-    );
-    if let Some(entry) = el.state.idempotency_entry(request_id) {
-        assert!(entry.2 >= el.state.wal.cloud_durable_seq);
-    }
-
-    Ok(())
-}
-
-#[test]
-fn should_cloud_async_retry_after_ack_return_same_sequence_without_queueing(
-) -> crate::common::MidgeResult<()> {
-    // Arrange
-    let mut el = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-    )?;
-
-    // Act
-
-    // Add a wal append with a specific request_id
-    let request_id = 124u64;
-    let cf_id = 0u32;
-
-    let (seq1, deferred1) = el.wal_actor.append(
-        &mut el.state,
-        crate::runtime::actors::wal::AppendParams {
-            request_id,
-            cf_id,
-            key: bytes::Bytes::from("k1"),
-            value: Some(bytes::Bytes::from("v1")),
-            insert_only: false,
-            ttl_seconds: None,
-        },
-    )?;
-
-    assert!(
-        deferred1,
-        "CloudAsync append should be deferred waiting for CloudAck"
-    );
-
-    // Queue waiter for this append (simulates EventLoop behavior)
-    el.durability
-        .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
-            request_id,
-            sequence: seq1,
-        }));
-
-    // Simulate sealing & uploading segment for CloudAsync as EventLoop would do
-    let (seg_id, max_sequence) = seal_segment_for_test(&mut el)?;
-
-    // Now simulate the storage CloudAck for that segment
-    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
-        segment_id: seg_id,
-        max_sequence,
-    });
-
-    // After handling, the idempotency entry for request_id should be confirmed at cloud frontier
-    assert!(
-        el.state.idempotency_entry(request_id).is_some(),
-        "idempotency entry missing"
-    );
-    if let Some(entry) = el.state.idempotency_entry(request_id) {
-        assert!(entry.2 >= el.state.wal.cloud_durable_seq);
-    }
-
-    // Assert: Retry the same request_id: should return the same sequence and NOT be deferred
-    // Retry the same request_id: should return the same sequence and NOT be deferred
-    let (seq2, deferred2) = el.wal_actor.append(
-        &mut el.state,
-        crate::runtime::actors::wal::AppendParams {
-            request_id,
-            cf_id,
-            key: bytes::Bytes::from("k1"),
-            value: Some(bytes::Bytes::from("v1")),
-            insert_only: false,
-            ttl_seconds: None,
-        },
-    )?;
-
-    assert_eq!(seq1, seq2, "retry should return same sequence");
-    assert!(
-        !deferred2,
-        "retry after confirmation should not be deferred"
-    );
-    assert_eq!(el.state.wal.pending_writes, 0);
-
-    Ok(())
-}
-
-#[test]
-fn should_preserve_idempotency_allocation_when_failed_cloud_wal_remains_retryable(
-) -> crate::common::MidgeResult<()> {
-    // Arrange: create state and event loop with CloudAsync policy
-    let tmp = tempfile::tempdir().expect("create tmpdir");
-    let state = RuntimeState::new(tmp.path().to_path_buf(), false);
-    let router = Arc::new(ResponseRouter::new());
-    let config = crate::runtime::RuntimeConfig {
-        wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
-        ..Default::default()
-    };
-    let mut el = EventLoop::new(
-        state,
-        false,
-        router,
-        config,
-        crate::runtime::event_loop::FlushWorkerMode::Inline,
-    )?;
-
-    // Act
-
-    // Add a wal append with a specific request_id
-    let request_id = 200u64;
-    let cf_id = 0u32;
-
-    let (seq1, deferred1) = el.wal_actor.append(
-        &mut el.state,
-        crate::runtime::actors::wal::AppendParams {
-            request_id,
-            cf_id,
-            key: bytes::Bytes::from("k2"),
-            value: Some(bytes::Bytes::from("v2")),
-            insert_only: false,
-            ttl_seconds: None,
-        },
-    )?;
-
-    assert!(
-        deferred1,
-        "CloudAsync append should be deferred waiting for CloudAck"
-    );
-
-    // Queue waiter for this append (simulates EventLoop behavior)
-    el.durability
-        .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::WalAppend {
-            request_id,
-            sequence: seq1,
-        }));
-
-    // Simulate sealing & uploading segment for CloudAsync as EventLoop would do
-    let (seg_id, _max_sequence) = seal_segment_for_test(&mut el)?;
-
-    // Now simulate the storage CloudFail for that segment
-    el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
-        segment_id: seg_id,
-        error: "upload_failed".to_string(),
-        terminal: true,
-        failure_kind: crate::storage::CloudUploadFailureKind::Other,
-    });
-
-    // Assert: the original allocation remains the identity of the accepted
-    // mutation while its local WAL is still owned for callerless publication.
-    assert_eq!(
-        el.state.get_cached_sequences(request_id),
-        Some((seq1, 1)),
-        "requeued WAL publication must retain its original sequence allocation"
-    );
-
-    Ok(())
-}
-
-#[test]
 fn should_not_advance_cloud_frontier_across_failed_segment_gap() -> crate::common::MidgeResult<()> {
     // Arrange
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    let (first_seq, first_deferred) = el.wal_actor.append(
+    let (first_seq, first_deferred) = el.wal_actor.append_single_op(
         &mut el.state,
         crate::runtime::actors::wal::AppendParams {
             request_id: 701,
@@ -5680,7 +5467,7 @@ fn should_not_advance_cloud_frontier_across_failed_segment_gap() -> crate::commo
         }));
     let (first_segment, first_max_sequence) = seal_segment_for_test(&mut el)?;
 
-    let (second_seq, second_deferred) = el.wal_actor.append(
+    let (second_seq, second_deferred) = el.wal_actor.append_single_op(
         &mut el.state,
         crate::runtime::actors::wal::AppendParams {
             request_id: 702,
@@ -5893,7 +5680,7 @@ fn should_retain_upload_obligation_given_failure_after_cloud_wal_rotation(
     let mut event_loop = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    let (sequence, deferred) = event_loop.wal_actor.append(
+    let (sequence, deferred) = event_loop.wal_actor.append_single_op(
         &mut event_loop.state,
         crate::runtime::actors::wal::AppendParams {
             request_id: 302,
@@ -7279,8 +7066,7 @@ fn should_preserve_earlier_waiter_when_later_segment_upload_fails() -> crate::co
     append_cloud_async_put(&mut el)?;
     let (first_segment, first_max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
     append_cloud_async_put(&mut el)?;
-    let (second_segment, second_max_sequence) =
-        seal_segment_without_remote_proof_for_test(&mut el)?;
+    let (second_segment, _) = seal_segment_without_remote_proof_for_test(&mut el)?;
     let first_request_id = 91_021;
     let second_request_id = 91_022;
     let first_rx = el.router.register(first_request_id, "SealWalForCloud");
@@ -7297,10 +7083,6 @@ fn should_preserve_earlier_waiter_when_later_segment_upload_fails() -> crate::co
             request_id: second_request_id,
         },
     );
-    el.state
-        .cache_sequences_for_test(first_request_id, (first_max_sequence, 1, 0));
-    el.state
-        .cache_sequences_for_test(second_request_id, (second_max_sequence, 1, 0));
 
     // Act: storage reports the later upload failure before the first
     // acknowledgement arrives.
@@ -7324,14 +7106,6 @@ fn should_preserve_earlier_waiter_when_later_segment_upload_fails() -> crate::co
         first_rx.try_recv(),
         Err(crossbeam::channel::TryRecvError::Empty)
     ));
-    assert!(
-        el.state.idempotency_entry(first_request_id).is_some(),
-        "later upload failure must preserve the earlier request's retry identity"
-    );
-    assert!(
-        el.state.idempotency_entry(second_request_id).is_some(),
-        "the requeued segment must preserve its request identity while publication remains owned"
-    );
 
     el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
         segment_id: first_segment,
@@ -8252,7 +8026,7 @@ fn assert_cloud_waiter_survives_admission_pressure(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     let request_id = 90501;
-    let (_, _) = el.wal_actor.append(
+    let (_, _) = el.wal_actor.append_single_op(
         &mut el.state,
         crate::runtime::actors::wal::AppendParams {
             request_id,
@@ -8357,7 +8131,7 @@ fn should_complete_cloud_ack_waiter_but_defer_local_wal_retirement_under_verific
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     let request_id = 777u64;
-    let (seq, deferred) = el.wal_actor.append(
+    let (seq, deferred) = el.wal_actor.append_single_op(
         &mut el.state,
         crate::runtime::actors::wal::AppendParams {
             request_id,
@@ -8520,7 +8294,7 @@ fn should_report_timeout_when_the_cloud_never_answers_the_event_loop_mirror(
         crate::storage::cloud::CloudStorage::new_with_timeout(
             Arc::new(SilentBackend::default()),
             "silent-metadata".to_string(),
-            Duration::from_secs(120),
+            Duration::from_mins(2),
         ),
     ));
     crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)

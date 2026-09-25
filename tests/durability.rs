@@ -2294,30 +2294,11 @@ mod durability_atomicity {
         });
     }
 
-    // ============================================================================
-    // PHASE 0 GUARDRAILS - IDEMPOTENCY CACHE
-    // ============================================================================
-
-    /// Phase 0 Guardrail #2: Idempotency cache bounded growth
-    ///
-    /// Removed: the eviction mechanism (`allocate_sequences_idempotent` /
-    /// `MAX_IDEMPOTENCY_CACHE_SIZE` in `src/runtime/state.rs`) is only reachable
-    /// through a `#[cfg(test)]`-gated internal API, invisible to this
-    /// integration-test binary, and is not driven by any public engine API:
-    /// ordinary commits are periodically cleaned up by
-    /// `cleanup_old_idempotency_entries` well before the 100k-entry cap, so no
-    /// sequence of public writes can deterministically force eviction here. There
-    /// is no reasonable way to exercise the real eviction path from this crate
-    /// without adding new production surface area purely for testability, so this
-    /// test — which only performed 2k non-evicting writes and asserted nothing
-    /// beyond an `eprintln!` — was removed rather than kept as a false signal.
-    /// Real coverage for this path would belong in a `#[cfg(test)]` unit test
-    /// inside `src/runtime/state.rs`, which does not currently exist.
     /// Phase 0 Guardrail #3: Transaction atomicity barrier enforcement
     ///
     /// Validates that reads see consistent state when a transaction is committed
-    /// in Batched mode. The `pending_txn_min_seq` barrier prevents seeing partial
-    /// transaction state.
+    /// in Batched mode: a transaction's operations reach the memtables together,
+    /// so no read observes part of one.
     ///
     /// NOTE: This test validates that the transaction is atomic - the read sees
     /// either the old value or the new value, never partial state. The actual

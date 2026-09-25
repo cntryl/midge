@@ -128,9 +128,7 @@ impl RuntimeState {
             compaction_output_generation: recovered_compaction_output_generation,
             transaction: TransactionCoordination {
                 next_id: 0,
-                pending_min_sequence: None,
                 pending_started_at: None,
-                idempotency_cache: HashMap::new(),
             },
             column_families: wal_recovery.column_families,
             manifest,

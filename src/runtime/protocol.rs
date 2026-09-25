@@ -432,8 +432,6 @@ pub enum TestRuntimeMsg {
     },
     /// Rotate WAL segment.
     WalRotate { request_id: u64 },
-    /// WAL sync completed.
-    WalSyncComplete { request_id: u64, segment_id: u64 },
 
     // === GC Actor ===
     /// Check for garbage collection opportunities.
@@ -698,7 +696,6 @@ impl TestRuntimeMsg {
     fn verification_barrier_action(&self) -> VerificationBarrierAction {
         match self {
             TestRuntimeMsg::FlushComplete { .. }
-            | TestRuntimeMsg::WalSyncComplete { .. }
             | TestRuntimeMsg::DeleteObsoleteSsts { .. }
             | TestRuntimeMsg::ManifestAddSst { .. }
             | TestRuntimeMsg::ManifestCompactionComplete { .. } => VerificationBarrierAction::Defer,
@@ -723,7 +720,6 @@ impl TestRuntimeMsg {
             | TestRuntimeMsg::WalAppend { request_id, .. }
             | TestRuntimeMsg::WalAppendDeleteRange { request_id, .. }
             | TestRuntimeMsg::WalRotate { request_id }
-            | TestRuntimeMsg::WalSyncComplete { request_id, .. }
             | TestRuntimeMsg::CheckGc { request_id }
             | TestRuntimeMsg::DeleteObsoleteSsts { request_id, .. }
             | TestRuntimeMsg::ManifestAddSst { request_id, .. }
@@ -752,7 +748,6 @@ impl TestRuntimeMsg {
             TestRuntimeMsg::WalAppend { .. } => "WalAppend",
             TestRuntimeMsg::WalAppendDeleteRange { .. } => "WalAppendDeleteRange",
             TestRuntimeMsg::WalRotate { .. } => "WalRotate",
-            TestRuntimeMsg::WalSyncComplete { .. } => "WalSyncComplete",
             TestRuntimeMsg::CheckGc { .. } => "CheckGc",
             TestRuntimeMsg::DeleteObsoleteSsts { .. } => "DeleteObsoleteSsts",
             TestRuntimeMsg::ManifestAddSst { .. } => "ManifestAddSst",

@@ -121,10 +121,6 @@ pub struct Metrics {
     pub write_conflicts_point: Arc<AtomicU64>,
     pub write_conflicts_range: Arc<AtomicU64>,
 
-    // Phase 0 guardrails: Idempotency cache telemetry
-    #[cfg(test)]
-    pub idempotency_cache_evictions: Arc<AtomicU64>,
-
     // Phase 3 observability: Transaction and sequence metrics
     /// Total number of pending transactions started (set `pending_txn_min_seq`)
     pub pending_txn_started: Arc<AtomicU64>,
@@ -132,14 +128,6 @@ pub struct Metrics {
     pub pending_txn_duration_ms_total: Arc<AtomicU64>,
     /// Maximum pending transaction duration seen (milliseconds)
     pub pending_txn_duration_ms_max: Arc<AtomicU64>,
-
-    // Phase 3 observability: Idempotency cache metrics
-    /// Total sequence allocations requested
-    #[cfg(test)]
-    pub idempotency_alloc_total: Arc<AtomicU64>,
-    /// Cache hits (reused cached sequences)
-    #[cfg(test)]
-    pub idempotency_cache_hits: Arc<AtomicU64>,
 
     // Event loop
     pub event_loop_wakes: Arc<AtomicU64>,
@@ -230,15 +218,9 @@ impl Metrics {
             write_conflicts: Arc::new(AtomicU64::new(0)),
             write_conflicts_point: Arc::new(AtomicU64::new(0)),
             write_conflicts_range: Arc::new(AtomicU64::new(0)),
-            #[cfg(test)]
-            idempotency_cache_evictions: Arc::new(AtomicU64::new(0)),
             pending_txn_started: Arc::new(AtomicU64::new(0)),
             pending_txn_duration_ms_total: Arc::new(AtomicU64::new(0)),
             pending_txn_duration_ms_max: Arc::new(AtomicU64::new(0)),
-            #[cfg(test)]
-            idempotency_alloc_total: Arc::new(AtomicU64::new(0)),
-            #[cfg(test)]
-            idempotency_cache_hits: Arc::new(AtomicU64::new(0)),
             event_loop_wakes: Arc::new(AtomicU64::new(0)),
             event_loop_batch_total: Arc::new(AtomicU64::new(0)),
             enabled: config.enabled && config.features.enable_metrics,
@@ -651,16 +633,6 @@ impl Metrics {
         }
     }
 
-    /// Record idempotency cache evictions (Phase 0 guardrail telemetry)
-    #[inline]
-    #[cfg(test)]
-    pub fn record_idempotency_cache_evictions(&self, count: u64) {
-        if self.enabled {
-            self.idempotency_cache_evictions
-                .saturating_add(count, Ordering::Relaxed);
-        }
-    }
-
     // === Phase 3 Observability Metrics ===
 
     /// Record pending transaction started
@@ -686,38 +658,6 @@ impl Metrics {
                     .store(duration_ms, Ordering::Relaxed);
             }
         }
-    }
-
-    /// Record sequence allocation (for cache hit rate calculation)
-    #[inline]
-    #[cfg(test)]
-    pub fn record_idempotency_alloc(&self) {
-        if self.enabled {
-            self.idempotency_alloc_total
-                .saturating_add(1, Ordering::Relaxed);
-        }
-    }
-
-    /// Record idempotency cache hit
-    #[inline]
-    #[cfg(test)]
-    pub fn record_idempotency_cache_hit(&self) {
-        if self.enabled {
-            self.idempotency_cache_hits
-                .saturating_add(1, Ordering::Relaxed);
-        }
-    }
-
-    /// Get idempotency cache hit rate (hits / total allocations)
-    /// Returns None if no allocations have been made
-    #[cfg(test)]
-    pub fn idempotency_cache_hit_rate(&self) -> Option<f64> {
-        let total = self.idempotency_alloc_total.load(Ordering::Relaxed);
-        if total == 0 {
-            return None;
-        }
-        let hits = self.idempotency_cache_hits.load(Ordering::Relaxed);
-        Some(u64_to_f64(hits) / u64_to_f64(total))
     }
 
     /// Get average pending transaction duration in milliseconds
@@ -1072,8 +1012,6 @@ mod tests {
         metrics.record_cloud_upload(256);
         metrics.record_cloud_download(512);
         metrics.record_write_stall();
-        metrics.record_idempotency_alloc();
-        metrics.record_idempotency_cache_hit();
         metrics.record_pending_txn_started();
         metrics.record_pending_txn_duration_ms(9);
 
@@ -1097,7 +1035,6 @@ mod tests {
         assert_eq!(snap.write_stalls, 1);
         assert_eq!(metrics.wal_lock_wait_count.load(Ordering::Relaxed), 1);
         assert_eq!(metrics.wal_lock_wait_ns_total.load(Ordering::Relaxed), 3);
-        assert_eq!(metrics.idempotency_cache_hit_rate(), Some(1.0));
         assert_eq!(metrics.pending_txn_duration_ms_avg(), Some(9.0));
     }
 }

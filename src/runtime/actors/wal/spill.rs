@@ -111,12 +111,7 @@ impl WalActor {
         self.pending_sync_count = self.pending_sync_count.saturating_add(wal_records);
         self.bytes_since_sync = self.bytes_since_sync.saturating_add(wal_bytes);
 
-        self.apply_transaction_durability(
-            state,
-            effective_durability,
-            sequence_plan.commit_seq,
-            sequence_plan.begin_seq,
-        )?;
+        self.apply_transaction_durability(state, effective_durability, sequence_plan.commit_seq)?;
         if let Err(error) = self.apply_spilled_transaction_ops(
             state,
             source,

@@ -769,10 +769,6 @@ fn write_side_request_response_messages() -> Vec<RuntimeMsg> {
             durability_policy: None,
         }),
         RuntimeMsg::Test(TestRuntimeMsg::WalRotate { request_id: 7 }),
-        RuntimeMsg::Test(TestRuntimeMsg::WalSyncComplete {
-            request_id: 8,
-            segment_id: 1,
-        }),
         RuntimeMsg::Test(TestRuntimeMsg::CheckGc { request_id: 12 }),
         RuntimeMsg::Test(TestRuntimeMsg::DeleteObsoleteSsts {
             request_id: 13,
@@ -1577,9 +1573,9 @@ fn should_classify_messages_when_verification_barrier_is_active() {
 fn should_classify_test_hooks_through_the_test_table_when_verification_barrier_classifies() {
     // Arrange
     let rejected = RuntimeMsg::Test(TestRuntimeMsg::WalRotate { request_id: 1 });
-    let deferred = RuntimeMsg::Test(TestRuntimeMsg::WalSyncComplete {
+    let deferred = RuntimeMsg::Test(TestRuntimeMsg::DeleteObsoleteSsts {
         request_id: 2,
-        segment_id: 1,
+        sst_names: Vec::new(),
     });
     let allowed = RuntimeMsg::Test(TestRuntimeMsg::Noop { request_id: 3 });
 
@@ -1861,5 +1857,59 @@ mod production_tables_have_no_cfg_test_arms {
 
         // Assert
         assert_no_cfg_test(&gate, "verification::EventLoop");
+    }
+
+    #[test]
+    fn should_keep_test_appends_on_the_production_transaction_path() {
+        // Arrange
+        let actor = include_str!("actors/wal.rs");
+
+        // Act
+        let parallel_paths = [
+            "fn append(",
+            "fn append_delete_range(",
+            "fn apply_append_policy(",
+            "fn apply_delete_range_policy(",
+            "fn handle_sync_complete(",
+        ]
+        .into_iter()
+        .filter(|path| actor.contains(path))
+        .collect::<Vec<_>>();
+
+        // Assert: tests append through one-op transactions (#504).
+        assert!(
+            parallel_paths.is_empty(),
+            "a test-only WAL append path returned: {parallel_paths:?}"
+        );
+    }
+
+    #[test]
+    fn should_not_reintroduce_the_test_only_idempotency_protocol() {
+        // Arrange
+        let sources = [
+            ("state.rs", include_str!("state.rs")),
+            ("durability.rs", include_str!("durability.rs")),
+            (
+                "event_loop/durability_sync.rs",
+                include_str!("event_loop/durability_sync.rs"),
+            ),
+        ];
+
+        // Act
+        let found = sources
+            .iter()
+            .flat_map(|(file, source)| {
+                ["idempotency_cache", "ConfirmWalAppend", "confirm_sequences"]
+                    .into_iter()
+                    .filter(|needle| source.contains(needle))
+                    .map(move |needle| format!("{file}: {needle}"))
+            })
+            .collect::<Vec<_>>();
+
+        // Assert: no release build could drive it (#501).
+        assert!(
+            found.is_empty(),
+            "dead idempotency protocol returned: {found:?}"
+        );
     }
 }

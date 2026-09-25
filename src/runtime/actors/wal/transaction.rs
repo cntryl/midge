@@ -207,12 +207,7 @@ impl WalActor {
             let apply_op_count = apply_ops.len();
 
             if !strict_group {
-                self.apply_transaction_durability(
-                    state,
-                    effective_durability,
-                    last_sequence,
-                    sequence_plan.begin_seq,
-                )?;
+                self.apply_transaction_durability(state, effective_durability, last_sequence)?;
             }
             Self::apply_prevalidated_transaction_ops(
                 state,

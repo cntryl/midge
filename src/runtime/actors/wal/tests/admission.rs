@@ -388,8 +388,8 @@ fn should_report_recovery_required_not_fenced_when_append_follows_poisoning_io_f
     };
 
     // Act
-    let first = actor.append(&mut state, put(1));
-    let second = actor.append(&mut state, put(2));
+    let first = actor.append_single_op(&mut state, put(1));
+    let second = actor.append_single_op(&mut state, put(2));
 
     // Assert: the cause is reported first, then a restart requirement. Local
     // disk trouble is never reported as lost lease authority.
