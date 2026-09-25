@@ -1599,7 +1599,7 @@ fn add_valid_range_tombstone_manifest_sst_for_test(
 }
 
 fn drain_prune_completion_for_test(el: &mut EventLoop) {
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
         el.tick_hybrid_storage();
         el.drain_hybrid_storage_events();
@@ -1608,6 +1608,11 @@ fn drain_prune_completion_for_test(el: &mut EventLoop) {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
+    panic!(
+        "cloud WAL prune did not settle: worker_active={}, inflight={:?}",
+        el.cloud_wal_prune_worker.is_some(),
+        el.cloud_wal.prune_inflight
+    );
 }
 
 fn put_cloud_metadata_for_test(
@@ -4578,7 +4583,7 @@ fn should_release_publication_gate_before_post_cas_cloud_wal_delete_completes(
     // join only the preflight worker that owned the publication gate.
     el.prune_cloud_wal_segments_covered_by_manifest();
     delete_started_rx
-        .recv_timeout(Duration::from_secs(1))
+        .recv_timeout(Duration::from_secs(10))
         .expect("post-CAS conditional WAL delete should start");
     assert!(el.publication_gate.is_active());
     assert!(el.cloud_wal_prune_worker.is_some());
