@@ -827,6 +827,76 @@ fn should_not_rewrite_unchanged_cloud_metadata_during_engine_mirror() {
 }
 
 #[test]
+fn should_not_mirror_manifest_when_format_marker_upload_fails_under_salvage() {
+    // Arrange: a local FORMAT 4 upgrade must reach cloud before its manifest.
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    crate::metadata::ensure_or_create_format_marker(temp_dir.path())
+        .expect("create FORMAT 4 marker");
+    crate::metadata::ManifestPersistence::save(
+        temp_dir.path(),
+        &crate::metadata::Manifest::default(),
+    )
+    .expect("save local manifest");
+    let inner = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+    let original_cloud =
+        crate::storage::cloud::CloudStorage::new(inner.clone(), "midge".to_string());
+    let old_format = b"midge-format-version=3\n".to_vec();
+    Engine::blocking_cloud_put(&original_cloud, "metadata/FORMAT", old_format.clone())
+        .expect("upload prior FORMAT marker");
+    inner.clear_history();
+    let cloud = crate::storage::cloud::CloudStorage::new(
+        Arc::new(FormatPutFailBackend {
+            inner: inner.clone(),
+        }),
+        "midge".to_string(),
+    );
+
+    // Act
+    Engine::mirror_cloud_metadata(&cloud, temp_dir.path(), RecoveryPolicy::Salvage)
+        .expect("salvage open tolerates failed FORMAT mirror");
+
+    // Assert
+    assert_eq!(
+        Engine::blocking_cloud_get(&original_cloud, "metadata/FORMAT")
+            .expect("read old FORMAT marker"),
+        old_format
+    );
+    assert!(
+        inner.get_uploads().is_empty(),
+        "a failed FORMAT put must block every newer manifest object"
+    );
+}
+
+struct FormatPutFailBackend {
+    inner: Arc<crate::storage::cloud::MockCloudBackend>,
+}
+
+impl crate::storage::cloud::CloudBackend for FormatPutFailBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity, submit_delete, submit_list, submit_head);
+
+    fn submit_put(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        if key.ends_with("/metadata/FORMAT") {
+            let _ = callback.send(crate::storage::cloud::CloudEvent::Put {
+                key: key.to_string(),
+                result: crate::storage::cloud::CloudOutcome::Err(
+                    crate::storage::cloud::CloudError::Transport(
+                        "injected FORMAT put failure".into(),
+                    ),
+                ),
+            });
+            return;
+        }
+        self.inner.submit_put(key, data, headers, callback);
+    }
+}
+
+#[test]
 fn should_hydrate_cloud_metadata_when_listing_is_stale_but_object_is_readable() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
