@@ -32,10 +32,7 @@ fn should_reject_wal_append_before_disk_growth_when_ephemeral_budget_is_exhauste
 ) -> MidgeResult<()> {
     // Arrange
     let temp = tempfile::tempdir()?;
-    let setup = crate::storage::test_support::build_cloud_backed_filesystem_simulation(
-        temp.path(),
-        Some(1),
-    )?;
+    let setup = crate::storage::simulated::build_simulated_cloud_stores(temp.path(), Some(1))?;
     setup.hybrid_storage.enable_ephemeral_sst_cache(1);
     let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
     let mut actor = WalActor::new(
@@ -74,10 +71,7 @@ fn should_reject_wal_append_before_disk_growth_when_ephemeral_budget_is_exhauste
 fn should_charge_actual_wal_bytes_when_successful_append_compresses_payload() -> MidgeResult<()> {
     // Arrange
     let temp = tempfile::tempdir()?;
-    let setup = crate::storage::test_support::build_cloud_backed_filesystem_simulation(
-        temp.path(),
-        Some(8192),
-    )?;
+    let setup = crate::storage::simulated::build_simulated_cloud_stores(temp.path(), Some(8192))?;
     setup.hybrid_storage.enable_ephemeral_sst_cache(8192);
     let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
     let mut actor = WalActor::new(
@@ -1317,10 +1311,7 @@ fn should_fail_all_prepared_transactions_when_batch_append_hits_no_space() -> Mi
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
-    let setup = crate::storage::test_support::build_cloud_backed_filesystem_simulation(
-        temp.path(),
-        Some(8192),
-    )?;
+    let setup = crate::storage::simulated::build_simulated_cloud_stores(temp.path(), Some(8192))?;
     setup.hybrid_storage.enable_ephemeral_sst_cache(8192);
     let db_path = temp.path().to_path_buf();
     let wal_dir = db_path.join("wal");

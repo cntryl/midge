@@ -133,10 +133,7 @@ fn should_keep_spilled_append_retryable_when_wal_admission_fails_before_first_fr
 ) -> MidgeResult<()> {
     // Arrange
     let temp = tempfile::tempdir()?;
-    let setup = crate::storage::test_support::build_cloud_backed_filesystem_simulation(
-        temp.path(),
-        Some(1024),
-    )?;
+    let setup = crate::storage::simulated::build_simulated_cloud_stores(temp.path(), Some(1024))?;
     setup.hybrid_storage.enable_ephemeral_sst_cache(1024);
     let fs: Arc<dyn Fs> = Arc::new(MockFs::new());
     let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
@@ -223,10 +220,8 @@ fn should_release_wal_admission_when_failed_append_is_durably_rolled_back() -> M
     for spilled in [false, true] {
         // Arrange
         let temp = tempfile::tempdir()?;
-        let setup = crate::storage::test_support::build_cloud_backed_filesystem_simulation(
-            temp.path(),
-            Some(8192),
-        )?;
+        let setup =
+            crate::storage::simulated::build_simulated_cloud_stores(temp.path(), Some(8192))?;
         setup.hybrid_storage.enable_ephemeral_sst_cache(8192);
         let fs = Arc::new(PartialAppendFs::default());
         let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
@@ -314,10 +309,8 @@ fn should_retain_wal_admission_when_failed_append_has_no_rollback_proof() -> Mid
     for (spilled, timeout) in [(false, false), (false, true), (true, false), (true, true)] {
         // Arrange
         let temp = tempfile::tempdir()?;
-        let setup = crate::storage::test_support::build_cloud_backed_filesystem_simulation(
-            temp.path(),
-            Some(8192),
-        )?;
+        let setup =
+            crate::storage::simulated::build_simulated_cloud_stores(temp.path(), Some(8192))?;
         setup.hybrid_storage.enable_ephemeral_sst_cache(8192);
         let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
         let mut actor = WalActor::new(

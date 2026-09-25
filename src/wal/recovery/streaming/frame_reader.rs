@@ -21,7 +21,9 @@ pub(super) fn next_frame(
         pos,
         frame::FrameLimits {
             max_frame_bytes: Some(limits.max_frame_bytes),
-            zero_tail_scan_bytes: Some(limits.max_frame_bytes),
+            // Scan a zero-filled tail in bounded chunks; a whole-frame chunk
+            // would allocate up to the WAL record limit per scan.
+            zero_tail_scan_bytes: Some(limits.max_frame_bytes.min(1024 * 1024)),
         },
     );
     *read_ns = read_ns.saturating_add(source.read_ns());

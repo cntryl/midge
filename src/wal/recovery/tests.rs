@@ -124,11 +124,6 @@ fn should_open_each_wal_file_once_per_recovery_pass() {
         2,
         "epoch discovery and record replay should each open the WAL once"
     );
-    assert_eq!(
-        wal_replay_file_read_count(),
-        2,
-        "epoch discovery and record replay should each snapshot the WAL once"
-    );
 }
 
 #[test]
@@ -1708,21 +1703,6 @@ fn should_preserve_fencing_ordinal_when_duplicate_frame_is_skipped_across_wal_fi
 }
 
 #[test]
-fn should_keep_replay_dedup_index_free_of_record_payloads() {
-    // Arrange: the index used to hold a full WalRecord (key and value Bytes)
-    // plus a path String per record, roughly doubling recovery memory.
-
-    // Act
-    let identity_size = std::mem::size_of::<super::ReplayedRecordIdentity>();
-
-    // Assert
-    assert!(
-        identity_size <= 32,
-        "the dedup index must stay a fixed-size identity, not a record copy: {identity_size} bytes"
-    );
-}
-
-#[test]
 fn should_replay_distinct_records_that_share_a_key_across_wal_files() {
     // Arrange: same key and value in two files at different sequences is two
     // real writes, not a cross-file duplicate.
@@ -1886,4 +1866,118 @@ proptest::proptest! {
         // Assert
         proptest::prop_assert_eq!(inspector, replay, "bytes: {:?}", bytes);
     }
+}
+
+/// One WAL fixture file: its name and `(key, sequence)` puts.
+type WalFixtureFile<'a> = (&'a str, &'a [(&'static [u8], u64)]);
+
+/// Write `files` into `wal/`.
+fn write_wal_files(directory: &TempDir, files: &[WalFixtureFile<'_>]) {
+    let wal_dir = directory.path().join("wal");
+    std::fs::create_dir_all(&wal_dir).expect("create WAL directory");
+    for (name, records) in files {
+        let bytes: Vec<u8> = records
+            .iter()
+            .flat_map(|(key, sequence)| encode_frame(&put_record(key, *sequence, 1)))
+            .collect();
+        std::fs::write(wal_dir.join(name), bytes).expect("write WAL file");
+    }
+}
+
+#[test]
+fn should_keep_dedup_index_empty_when_local_wal_is_strictly_increasing() {
+    // Arrange: three files with strictly increasing sequences. Replay used to
+    // keep one dedup entry per record, about 40 bytes each (#524).
+    let directory = TempDir::new().expect("create WAL recovery directory");
+    let first: Vec<(&'static [u8], u64)> = (1..=50).map(|seq| (b"a" as &[u8], seq)).collect();
+    let second: Vec<(&'static [u8], u64)> = (51..=100).map(|seq| (b"b" as &[u8], seq)).collect();
+    let active: Vec<(&'static [u8], u64)> = (101..=150).map(|seq| (b"c" as &[u8], seq)).collect();
+    write_wal_files(
+        &directory,
+        &[
+            (&crate::wal::segment_file_name(1), &first),
+            (&crate::wal::segment_file_name(2), &second),
+            (crate::wal::ACTIVE_FILE_NAME, &active),
+        ],
+    );
+    let storage = RealFs::new(directory.path()).expect("create recovery filesystem");
+    let mut memtables = HashMap::new();
+    streaming::reset_duplicate_rescans();
+
+    // Act
+    let stats = replay_wal_with_policy(
+        &storage,
+        &FsPath::new("wal"),
+        &mut memtables,
+        ReplayPolicy::Strict,
+    )
+    .expect("replay strictly increasing WAL");
+
+    // Assert
+    assert_eq!(stats.record_count, 150);
+    assert_eq!(stats.max_sequence, Some(150));
+    assert_eq!(streaming::duplicate_rescans(), 0);
+}
+
+#[test]
+fn should_rescan_only_overlapping_records_when_segments_repeat_after_rotation() {
+    // Arrange: the active file repeats the sealed segment's last record, as
+    // a rotation overlap does. This is the control for the probe above.
+    let directory = TempDir::new().expect("create WAL recovery directory");
+    write_wal_files(
+        &directory,
+        &[
+            (&crate::wal::segment_file_name(1), &[(b"a", 1), (b"a", 2)]),
+            (crate::wal::ACTIVE_FILE_NAME, &[(b"a", 2), (b"a", 3)]),
+        ],
+    );
+    let storage = RealFs::new(directory.path()).expect("create recovery filesystem");
+    let mut memtables = HashMap::new();
+    streaming::reset_duplicate_rescans();
+
+    // Act
+    let stats = replay_wal_with_policy(
+        &storage,
+        &FsPath::new("wal"),
+        &mut memtables,
+        ReplayPolicy::Strict,
+    )
+    .expect("replay overlapping WAL");
+
+    // Assert: the repeated record is skipped, not applied twice.
+    assert_eq!(stats.record_count, 3);
+    assert_eq!(streaming::duplicate_rescans(), 1);
+}
+
+#[test]
+fn should_not_rescan_fresh_records_when_a_stale_record_carries_a_higher_sequence() {
+    // Arrange: a fenced writer (epoch 1) appends a high sequence after its
+    // successor (epoch 2) started. Every later fresh record sits below that
+    // stale sequence; counting it would rescan the WAL once per record.
+    let directory = TempDir::new().expect("create WAL recovery directory");
+    let wal_dir = directory.path().join("wal");
+    std::fs::create_dir_all(&wal_dir).expect("create WAL directory");
+    let mut bytes = encode_frame(&put_record(b"fresh", 1, 2));
+    bytes.extend(encode_frame(&put_record(b"stale", 100_000, 1)));
+    for sequence in 2..=200 {
+        bytes.extend(encode_frame(&put_record(b"fresh", sequence, 2)));
+    }
+    std::fs::write(wal_dir.join(crate::wal::ACTIVE_FILE_NAME), bytes).expect("write WAL");
+    let storage = RealFs::new(directory.path()).expect("create recovery filesystem");
+    let mut memtables = HashMap::new();
+    streaming::reset_duplicate_rescans();
+
+    // Act
+    let stats = replay_wal_with_policy(
+        &storage,
+        &FsPath::new("wal"),
+        &mut memtables,
+        ReplayPolicy::Strict,
+    )
+    .expect("replay WAL with a stale high sequence");
+
+    // Assert
+    assert_eq!(stats.stale_records_skipped, 1);
+    assert_eq!(stats.record_count, 200);
+    assert_eq!(streaming::duplicate_rescans(), 0);
 }

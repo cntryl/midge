@@ -497,6 +497,35 @@ fn mutation_lock(full_path: &Path) -> MutationGuard {
 }
 
 impl StorageBackend for FileSystem {
+    /// Every filesystem call completes before it returns, so the reservation
+    /// only has to outlive the call: no completion thread is needed (#518).
+    fn submit_write_with_reservation(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        timeout: std::time::Duration,
+        reservation: std::sync::Arc<crate::common::resource_budget::ResourceReservation>,
+        callback: StorageCallback,
+    ) {
+        self.submit_write_with_headers_and_timeout(key, data, headers, timeout, callback);
+        drop(reservation);
+    }
+
+    /// See [`Self::submit_write_with_reservation`].
+    fn submit_read_range_with_reservation(
+        &self,
+        key: &str,
+        range: std::ops::Range<u64>,
+        expected: StorageObjectMetadata,
+        timeout: std::time::Duration,
+        reservation: std::sync::Arc<crate::common::resource_budget::ResourceReservation>,
+        callback: crate::storage::RangeReadCallback,
+    ) {
+        self.submit_read_range(key, range.start, range.end, expected, timeout, callback);
+        drop(reservation);
+    }
+
     fn submit_range_head(
         &self,
         key: &str,
@@ -1278,6 +1307,61 @@ mod tests {
             }
         ));
         assert!(crate::io::durable_dir::take_synced_dirs().contains(&root));
+    }
+
+    #[test]
+    fn should_complete_reserved_calls_inline_when_backend_is_filesystem() {
+        // Arrange: the filesystem finishes every call before returning, so a
+        // reservation needs no completion thread to outlive it (#518).
+        let temp_dir = TempDir::new().unwrap();
+        let fs = FileSystem::new(temp_dir.path()).unwrap();
+        let budget = crate::common::resource_budget::ResourceBudget::new(1024 * 1024);
+        let before = crate::storage::retained_callback::retain_calls_on_this_thread();
+        let (write_tx, write_rx) = mpsc::channel();
+
+        // Act
+        fs.submit_write_with_reservation(
+            "object.bin",
+            b"payload".to_vec(),
+            Vec::new(),
+            std::time::Duration::from_secs(5),
+            std::sync::Arc::new(budget.reserve(7, "reserved write").unwrap()),
+            write_tx,
+        );
+        let write = write_rx.recv().unwrap();
+        let (head_tx, head_rx) = mpsc::channel();
+        fs.submit_range_head("object.bin", std::time::Duration::from_secs(5), head_tx);
+        let StorageEvent::HeadComplete {
+            result: StorageOutcome::Ok(metadata),
+            ..
+        } = head_rx.recv().unwrap()
+        else {
+            panic!("range HEAD failed");
+        };
+        let (read_tx, read_rx) = mpsc::channel();
+        fs.submit_read_range_with_reservation(
+            "object.bin",
+            0..7,
+            metadata,
+            std::time::Duration::from_secs(5),
+            std::sync::Arc::new(budget.reserve(7, "reserved read").unwrap()),
+            read_tx,
+        );
+        let read = read_rx.recv().unwrap();
+
+        // Assert
+        assert!(matches!(
+            write,
+            StorageEvent::WriteComplete {
+                result: StorageOutcome::Ok(()),
+                ..
+            }
+        ));
+        assert_eq!(read.unwrap(), b"payload");
+        assert_eq!(
+            crate::storage::retained_callback::retain_calls_on_this_thread(),
+            before
+        );
     }
 
     // =========== Delete Tests ===========

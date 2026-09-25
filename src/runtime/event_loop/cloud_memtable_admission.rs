@@ -204,7 +204,7 @@ mod tests {
         Arc<crate::storage::HybridStorage>,
     )> {
         let directory = tempfile::tempdir()?;
-        let setup = crate::storage::test_support::build_cloud_backed_filesystem_simulation(
+        let setup = crate::storage::simulated::build_simulated_cloud_stores(
             directory.path(),
             Some(256 * 1024),
         )?;
