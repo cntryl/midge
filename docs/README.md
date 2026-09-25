@@ -11,6 +11,7 @@ pre-1.0 and uses self-contained Sqrzl qualification.
 2. [Quick start](user-guides/quick-start.md)
 3. [API guide](user-guides/api-guide.md)
 4. [Transaction durability contract](user-guides/transaction-durability-contract.md)
+5. [Backup and restore](user-guides/backup-and-restore.md)
 
 ## By audience
 

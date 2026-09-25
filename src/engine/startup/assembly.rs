@@ -80,6 +80,7 @@ impl FacadeAssembly {
                 opts.storage(),
                 Storage::Cloud { .. } | Storage::CloudSimulated { .. }
             ),
+            simulated_cloud_mode: matches!(opts.storage(), Storage::CloudSimulated { .. }),
             sequence: Arc::new(std::sync::atomic::AtomicU64::new(
                 started.recovered_sequence,
             )),

@@ -2725,6 +2725,146 @@ mod failure_injection {
     }
 }
 
+mod backup_capture {
+    use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[test]
+    fn should_not_publish_backup_given_interrupted_object_materialization() {
+        // Arrange
+        let directory = tempfile::tempdir().expect("test directory");
+        let source = directory.path().join("source");
+        let artifact = directory.path().join("backup");
+        let engine = Engine::open(OpenOptions::local(&source).build().expect("options"))
+            .expect("source engine");
+        let scenario = fail::FailScenario::setup();
+        fail::cfg("midge::backup::after_object_copy", "return")
+            .expect("configure interrupted backup failpoint");
+
+        // Act
+        let result = engine.backup_to(&artifact, Duration::from_secs(10));
+        fail::remove("midge::backup::after_object_copy");
+        scenario.teardown();
+
+        // Assert
+        assert!(result.is_err());
+        assert!(!artifact.exists());
+        assert!(std::fs::read_dir(directory.path())
+            .expect("temporary directories")
+            .all(|entry| !entry
+                .expect("directory entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".midge-backup-")));
+    }
+
+    #[test]
+    fn should_not_publish_restore_target_given_interrupted_object_copy() {
+        // Arrange
+        let directory = tempfile::tempdir().expect("test directory");
+        let source = directory.path().join("source");
+        let artifact = directory.path().join("backup");
+        let target = directory.path().join("restored");
+        let engine = Engine::open(OpenOptions::local(&source).build().expect("options"))
+            .expect("source engine");
+        engine
+            .backup_to(&artifact, Duration::from_secs(10))
+            .expect("capture backup");
+        drop(engine);
+        let options = OpenOptions::local(&target)
+            .build()
+            .expect("restore options");
+        let scenario = fail::FailScenario::setup();
+        fail::cfg("midge::backup::after_restore_object_copy", "return")
+            .expect("configure interrupted restore failpoint");
+
+        // Act
+        let result = Engine::restore_backup(&artifact, options);
+        fail::remove("midge::backup::after_restore_object_copy");
+        scenario.teardown();
+
+        // Assert
+        assert!(result.is_err());
+        assert!(!target.exists());
+        assert!(std::fs::read_dir(directory.path())
+            .expect("temporary directories")
+            .all(|entry| !entry
+                .expect("directory entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".midge-restore-")));
+    }
+
+    #[test]
+    fn should_allow_writes_after_capture_given_backup_copy_is_blocked() {
+        // Arrange
+        let directory = tempfile::tempdir().expect("test directory");
+        let source = directory.path().join("source");
+        let artifact = directory.path().join("backup");
+        let target = directory.path().join("restored");
+        let engine = Engine::open(OpenOptions::local(&source).build().expect("options"))
+            .expect("source engine");
+        let (entered_tx, entered_rx) = crossbeam::channel::bounded(1);
+        let (resume_tx, resume_rx) = crossbeam::channel::bounded(1);
+        let first_call = Arc::new(AtomicBool::new(true));
+        let callback_first_call = Arc::clone(&first_call);
+        let scenario = fail::FailScenario::setup();
+        fail::cfg_callback("midge::backup::after_object_copy", move || {
+            if callback_first_call.swap(false, Ordering::AcqRel) {
+                let _ = entered_tx.send(());
+                let _ = resume_rx.recv();
+            }
+        })
+        .expect("pause backup materialization");
+
+        // Act
+        let backup = std::thread::scope(|scope| {
+            let backup_task = scope.spawn(|| engine.backup_to(&artifact, Duration::from_secs(10)));
+            entered_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("backup reached post-capture materialization");
+            let default = engine.get_column_family("default").expect("default CF");
+            let mut transaction = engine
+                .begin_tx(default.id(), TransactionMode::ReadWrite)
+                .expect("begin post-capture write");
+            transaction
+                .put(b"post-capture".to_vec(), b"value".to_vec(), None)
+                .expect("put post-capture value");
+            transaction
+                .commit(WriteOptions::sync())
+                .expect("commit while backup copy is blocked");
+            engine
+                .get_runtime_metrics()
+                .expect("metrics remain responsive during backup copy");
+            resume_tx.send(()).expect("resume backup materialization");
+            backup_task.join().expect("backup task")
+        });
+        fail::remove("midge::backup::after_object_copy");
+        scenario.teardown();
+        backup.expect("finish backup");
+        drop(engine);
+
+        let options = OpenOptions::local(&target)
+            .build()
+            .expect("restore options");
+        Engine::restore_backup(&artifact, options).expect("restore captured cut");
+        let restored = Engine::open(OpenOptions::local(&target).build().expect("options"))
+            .expect("open restored engine");
+        let default = restored.get_column_family("default").expect("default CF");
+        let transaction = restored
+            .begin_tx(default.id(), TransactionMode::ReadOnly)
+            .expect("read captured cut");
+
+        // Assert
+        assert!(transaction
+            .get(b"post-capture")
+            .expect("get post-capture value")
+            .is_none());
+    }
+}
+
 mod chaos_real {
     use std::collections::HashMap;
     use std::fs;

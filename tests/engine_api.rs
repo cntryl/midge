@@ -4708,3 +4708,236 @@ mod edge_cases {
         });
     }
 }
+
+mod consistent_cut_backup {
+    use cntryl_midge::{Engine, MidgeError, OpenOptions, TransactionMode, WriteOptions};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn should_preserve_cross_family_frontier_given_concurrent_backup_capture() {
+        // Arrange
+        let directory = tempfile::tempdir().expect("test directory");
+        let source = directory.path().join("source");
+        let artifact = directory.path().join("backup");
+        let restored_path = directory.path().join("restored");
+        let engine = Engine::open(OpenOptions::local(&source).build().expect("options"))
+            .expect("source engine");
+        let events = engine.create_column_family("events").expect("events CF");
+        let checkpoint = engine
+            .create_column_family("checkpoint")
+            .expect("checkpoint CF");
+        commit_value(&engine, events.id(), &0_u64.to_be_bytes(), b"event");
+        commit_value(&engine, checkpoint.id(), b"frontier", &0_u64.to_be_bytes());
+        engine.flush_cf(&events).expect("flush event baseline");
+        engine
+            .flush_cf(&checkpoint)
+            .expect("flush checkpoint baseline");
+        let running = std::sync::Arc::new(AtomicBool::new(true));
+        let writer_running = std::sync::Arc::clone(&running);
+        let writer_engine = &engine;
+        let writer = std::thread::scope(|scope| {
+            let handle = scope.spawn(move || {
+                let mut next = 1_u64;
+                while writer_running.load(Ordering::Acquire) {
+                    commit_value(writer_engine, events.id(), &next.to_be_bytes(), b"event");
+                    commit_value(
+                        writer_engine,
+                        checkpoint.id(),
+                        b"frontier",
+                        &next.to_be_bytes(),
+                    );
+                    next += 1;
+                }
+            });
+
+            // Act
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            let backup = engine
+                .backup_to(&artifact, std::time::Duration::from_secs(10))
+                .expect("capture backup");
+            assert!(backup
+                .objects
+                .iter()
+                .any(|object| object.path.starts_with("sst/")));
+            running.store(false, Ordering::Release);
+            handle.join().expect("writer thread");
+            backup
+        });
+        assert!(writer.durability_frontier > 0);
+        drop(engine);
+
+        let options = OpenOptions::local(&restored_path)
+            .build()
+            .expect("restore options");
+        Engine::restore_backup(&artifact, options).expect("restore backup");
+        let restored = Engine::open(OpenOptions::local(&restored_path).build().expect("options"))
+            .expect("open restored engine");
+        let events = restored
+            .get_column_family("events")
+            .expect("restored events CF");
+        let checkpoint = restored
+            .get_column_family("checkpoint")
+            .expect("restored checkpoint CF");
+        let checkpoint_tx = restored
+            .begin_tx(checkpoint.id(), TransactionMode::ReadOnly)
+            .expect("read checkpoint");
+        let frontier = checkpoint_tx
+            .get(b"frontier")
+            .expect("read checkpoint value")
+            .map(|bytes| u64::from_be_bytes(bytes.as_ref().try_into().expect("frontier bytes")))
+            .unwrap_or_default();
+        let events_tx = restored
+            .begin_tx(events.id(), TransactionMode::ReadOnly)
+            .expect("read events");
+
+        // Assert
+        for sequence in 1..=frontier {
+            assert!(
+                events_tx
+                    .get(&sequence.to_be_bytes())
+                    .expect("read event")
+                    .is_some(),
+                "restored checkpoint {frontier} points past missing event {sequence}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_leave_restore_target_absent_given_corrupt_backup_object() {
+        // Arrange
+        let directory = tempfile::tempdir().expect("test directory");
+        let source = directory.path().join("source");
+        let artifact = directory.path().join("backup");
+        let target = directory.path().join("restored");
+        let engine = Engine::open(OpenOptions::local(&source).build().expect("options"))
+            .expect("source engine");
+        engine
+            .backup_to(&artifact, std::time::Duration::from_secs(10))
+            .expect("capture backup");
+        drop(engine);
+        let object = artifact.join("objects/FORMAT");
+        std::fs::write(object, b"corrupt").expect("corrupt object");
+
+        // Act
+        let options = OpenOptions::local(&target)
+            .build()
+            .expect("restore options");
+        let result = Engine::restore_backup(&artifact, options);
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::Corruption(_))));
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn should_leave_restore_target_absent_given_incomplete_backup_artifact() {
+        // Arrange
+        let directory = tempfile::tempdir().expect("test directory");
+        let source = directory.path().join("source");
+        let artifact = directory.path().join("backup");
+        let target = directory.path().join("restored");
+        let engine = Engine::open(OpenOptions::local(&source).build().expect("options"))
+            .expect("source engine");
+        let inventory = engine
+            .backup_to(&artifact, std::time::Duration::from_secs(10))
+            .expect("capture backup");
+        drop(engine);
+        let first_object = inventory.objects.first().expect("captured object");
+        std::fs::remove_file(artifact.join("objects").join(&first_object.path))
+            .expect("remove object to interrupt artifact copy");
+
+        // Act
+        let options = OpenOptions::local(&target)
+            .build()
+            .expect("restore options");
+        let result = Engine::restore_backup(&artifact, options);
+
+        // Assert
+        assert!(result.is_err());
+        assert!(!target.exists());
+        assert!(std::fs::read_dir(directory.path())
+            .expect("temporary directories")
+            .all(|entry| !entry
+                .expect("directory entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".midge-restore-")));
+    }
+
+    #[test]
+    fn should_restore_split_cloud_simulation_layout_given_valid_backup() {
+        // Arrange
+        let directory = tempfile::tempdir().expect("test directory");
+        let source = directory.path().join("source");
+        let artifact = directory.path().join("backup");
+        let target = directory.path().join("restored");
+        let source_options = OpenOptions::cloud_simulated(&source, "bucket", "prefix")
+            .build()
+            .expect("source options");
+        let engine = Engine::open(source_options).expect("source engine");
+        let default = engine.get_column_family("default").expect("default CF");
+        loop {
+            let attempt = (|| {
+                let mut transaction = engine.begin_tx(default.id(), TransactionMode::ReadWrite)?;
+                transaction.put(b"key".to_vec(), b"value".to_vec(), None)?;
+                transaction.commit(WriteOptions::cloud_async())
+            })();
+            match attempt {
+                Ok(()) => break,
+                Err(MidgeError::Busy(_)) => std::thread::yield_now(),
+                Err(error) => panic!("simulated cloud writer failed: {error}"),
+            }
+        }
+        engine.flush_cf(&default).expect("flush simulated SST");
+        let inventory = engine
+            .backup_to(&artifact, std::time::Duration::from_secs(10))
+            .expect("capture backup");
+        assert!(inventory
+            .objects
+            .iter()
+            .any(|object| object.path.starts_with("cloud_store/sst/")));
+        assert!(inventory
+            .objects
+            .iter()
+            .all(|object| !object.path.contains("lease")));
+        drop(engine);
+
+        // Act
+        let restore_options = OpenOptions::cloud_simulated(&target, "bucket", "prefix")
+            .build()
+            .expect("restore options");
+        Engine::restore_backup(&artifact, restore_options).expect("restore backup");
+        let restored = Engine::open(
+            OpenOptions::cloud_simulated(&target, "bucket", "prefix")
+                .build()
+                .expect("reopen options"),
+        )
+        .expect("open restored engine");
+        assert!(restored.is_primary_lease_healthy());
+        let default = restored.get_column_family("default").expect("default CF");
+        let transaction = restored
+            .begin_tx(default.id(), TransactionMode::ReadOnly)
+            .expect("read restored value");
+
+        // Assert
+        assert_eq!(
+            transaction.get(b"key").expect("get value").as_deref(),
+            Some(&b"value"[..])
+        );
+    }
+
+    fn commit_value(engine: &Engine, cf_id: u32, key: &[u8], value: &[u8]) {
+        loop {
+            let attempt = (|| {
+                let mut transaction = engine.begin_tx(cf_id, TransactionMode::ReadWrite)?;
+                transaction.put(key.to_vec(), value.to_vec(), None)?;
+                transaction.commit(WriteOptions::sync())
+            })();
+            match attempt {
+                Ok(()) => return,
+                Err(MidgeError::Busy(_)) => std::thread::yield_now(),
+                Err(error) => panic!("concurrent writer failed: {error}"),
+            }
+        }
+    }
+}

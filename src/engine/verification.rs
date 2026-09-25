@@ -57,6 +57,69 @@ impl StorageVerifier {
         verify_storage_path(&path.into(), None)
     }
 
+    pub(super) fn verify_simulated_cloud_path(
+        path: &Path,
+    ) -> MidgeResult<StorageVerificationReport> {
+        Self::verify_simulated_cloud_wal_catalog(path)?;
+        let cloud_backend = Arc::new(crate::storage::filesystem::FileSystem::new(
+            crate::storage::simulated::simulated_cloud_root(path),
+        )?);
+        let local_backend: Arc<dyn Fs> = Arc::new(crate::io::RealFs::open_existing(path)?);
+        let cloud_backend: Arc<dyn crate::storage::StorageBackend> = cloud_backend;
+        let sst_fs: Arc<dyn Fs> = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
+            local_backend,
+            cloud_backend,
+            Duration::from_secs(30),
+        ));
+        verify_storage_path_with_sst_fs(path, None, Some(&sst_fs), None)
+    }
+
+    fn verify_simulated_cloud_wal_catalog(path: &Path) -> MidgeResult<()> {
+        let cloud_root = crate::storage::simulated::simulated_cloud_root(path);
+        let candidates = [
+            crate::wal::cloud_catalog::OBJECT_KEY,
+            crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
+        ];
+        let mut decoded_catalog = None;
+        let mut saw_catalog = false;
+        for key in candidates {
+            let catalog_path = cloud_root.join(key);
+            match std::fs::read(&catalog_path) {
+                Ok(bytes) => {
+                    saw_catalog = true;
+                    if let Ok(catalog) =
+                        crate::wal::cloud_catalog::WalPublicationCatalog::decode(&bytes)
+                    {
+                        decoded_catalog = Some(catalog);
+                        break;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(MidgeError::Io(error)),
+            }
+        }
+        let catalog = decoded_catalog.ok_or_else(|| {
+            let detail = if saw_catalog {
+                "simulated cloud WAL catalog copies are invalid"
+            } else {
+                "simulated cloud WAL publication catalog is missing"
+            };
+            MidgeError::Corruption(detail.to_string())
+        })?;
+        for segment in catalog.segments.values() {
+            let bytes = std::fs::read(cloud_root.join(&segment.object_key)).map_err(|error| {
+                MidgeError::RecoveryFailed(format!(
+                    "simulated cloud WAL object '{}' is missing: {error}",
+                    segment.object_key
+                ))
+            })?;
+            segment
+                .validate_bytes(&bytes)
+                .map_err(MidgeError::Corruption)?;
+        }
+        Ok(())
+    }
+
     fn validate_online_request(memory_mode: bool, timeout: Duration) -> MidgeResult<()> {
         if memory_mode {
             return Err(MidgeError::NotSupported(
@@ -232,10 +295,11 @@ fn verify_storage_path_with_sst_fs(
     })
 }
 
-struct VerificationBarrierGuard {
+pub(super) struct VerificationBarrierGuard {
     runtime_handle: crate::runtime::RuntimeHandle,
     token: u64,
     health: EngineHealth,
+    sequence: u64,
     released: bool,
 }
 
@@ -245,6 +309,7 @@ impl VerificationBarrierGuard {
             runtime_handle: runtime_handle.clone(),
             token,
             health: EngineHealth::Healthy,
+            sequence: 0,
             released: false,
         }
     }
@@ -253,9 +318,36 @@ impl VerificationBarrierGuard {
         self.released = true;
     }
 
+    pub(super) fn health(&self) -> EngineHealth {
+        self.health
+    }
+
+    pub(super) fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
     fn acquire(
         runtime_handle: &crate::runtime::RuntimeHandle,
         timeout: Duration,
+    ) -> MidgeResult<Self> {
+        Self::acquire_with_message(runtime_handle, timeout, |request_id| {
+            crate::runtime::RuntimeMsg::BeginStorageVerification { request_id }
+        })
+    }
+
+    pub(super) fn acquire_for_backup(
+        runtime_handle: &crate::runtime::RuntimeHandle,
+        timeout: Duration,
+    ) -> MidgeResult<Self> {
+        Self::acquire_with_message(runtime_handle, timeout, |request_id| {
+            crate::runtime::RuntimeMsg::BeginBackupCapture { request_id }
+        })
+    }
+
+    fn acquire_with_message(
+        runtime_handle: &crate::runtime::RuntimeHandle,
+        timeout: Duration,
+        message: impl Fn(u64) -> crate::runtime::RuntimeMsg,
     ) -> MidgeResult<Self> {
         let started = Instant::now();
         loop {
@@ -268,25 +360,25 @@ impl VerificationBarrierGuard {
 
             let request_id = crate::runtime::next_request_id()?;
             let mut pending_barrier = Self::pending(runtime_handle, request_id);
-            let response = match runtime_handle.send_and_wait_timeout(
-                crate::runtime::RuntimeMsg::BeginStorageVerification { request_id },
-                remaining,
-            ) {
-                Ok(response) => response,
-                Err(error) => {
-                    pending_barrier.disarm();
-                    return Err(error);
-                }
-            };
+            let response =
+                match runtime_handle.send_and_wait_timeout(message(request_id), remaining) {
+                    Ok(response) => response,
+                    Err(error) => {
+                        pending_barrier.disarm();
+                        return Err(error);
+                    }
+                };
             match response {
                 Some(crate::runtime::RuntimeResponse::StorageVerificationBarrier {
                     token,
                     health,
+                    sequence,
                     ..
                 }) => {
                     debug_assert_eq!(token, request_id);
                     pending_barrier.token = token;
                     pending_barrier.health = health;
+                    pending_barrier.sequence = sequence;
                     return Ok(pending_barrier);
                 }
                 Some(crate::runtime::RuntimeResponse::Error {
@@ -314,7 +406,7 @@ impl VerificationBarrierGuard {
         }
     }
 
-    fn release(&mut self) -> MidgeResult<()> {
+    pub(super) fn release(&mut self) -> MidgeResult<()> {
         if self.released {
             return Ok(());
         }
