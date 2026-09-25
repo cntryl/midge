@@ -1455,6 +1455,7 @@ mod compression_compatibility {
 mod compatibility_fixtures {
     use cntryl_midge::{
         Engine, EngineHealth, MidgeError, OpenOptions, Query, RecoveryPolicy, TransactionMode,
+        WriteOptions,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1614,6 +1615,57 @@ mod compatibility_fixtures {
         };
         // Assert
         assert_compatibility_error(open_error);
+    }
+
+    #[test]
+    fn should_reload_mixed_key_bound_encodings_when_v3_fixture_upgrades_to_v4() {
+        // Arrange: the v3 fixture's manifest stores key bounds as byte arrays.
+        let temp = copy_fixture_dir("v3_populated_v4_sst_db");
+        let options = || {
+            OpenOptions::local(temp.path())
+                .recovery_policy(RecoveryPolicy::Strict)
+                .build()
+                .expect("build options")
+        };
+
+        // Act: a writable open upgrades FORMAT, then a flush adds a hex-encoded entry.
+        let mut engine = Engine::open(options()).expect("open v3 fixture");
+        let cf = engine
+            .get_column_family("default")
+            .expect("fixture default column family");
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin write");
+        tx.put(b"upgrade/key".to_vec(), b"v4".to_vec(), None)
+            .expect("put");
+        tx.commit(WriteOptions::sync()).expect("commit");
+        engine.flush_cf(&cf).expect("flush");
+        engine
+            .shutdown(Duration::from_secs(5))
+            .expect("shutdown after upgrade");
+        let marker = fs::read_to_string(temp.path().join("FORMAT")).expect("read FORMAT");
+
+        let mut reopened = Engine::open(options()).expect("reopen upgraded fixture");
+        let cf = reopened
+            .get_column_family("default")
+            .expect("default column family");
+        let read = reopened
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("begin read");
+        let rows = read
+            .scan(&Query::new())
+            .expect("scan")
+            .try_collect()
+            .expect("collect rows");
+        drop(read);
+        reopened
+            .shutdown(Duration::from_secs(5))
+            .expect("shutdown reopened engine");
+
+        // Assert
+        assert_eq!(marker.trim(), "midge-format-version=4");
+        assert_eq!(rows.len(), 4);
+        assert!(rows.iter().any(|(key, _)| key.as_ref() == b"upgrade/key"));
     }
 }
 

@@ -125,4 +125,31 @@ mod tests {
         assert_eq!(decoded.smallest_key, None);
         assert_eq!(decoded.largest_key, None);
     }
+
+    #[test]
+    fn should_reject_key_bound_when_hex_is_malformed() {
+        // Arrange
+        let odd = r#"{"name":"a.sst","level":0,"size_bytes":1,"smallest_key":"abc"}"#;
+        let non_hex = r#"{"name":"a.sst","level":0,"size_bytes":1,"smallest_key":"zz"}"#;
+
+        // Act
+        let odd_result = serde_json::from_str::<FileMeta>(odd);
+        let non_hex_result = serde_json::from_str::<FileMeta>(non_hex);
+
+        // Assert
+        assert!(odd_result.is_err());
+        assert!(non_hex_result.is_err());
+    }
+
+    #[test]
+    fn should_reject_key_bound_when_value_is_a_number() {
+        // Arrange
+        let json = r#"{"name":"a.sst","level":0,"size_bytes":1,"smallest_key":7}"#;
+
+        // Act
+        let result = serde_json::from_str::<FileMeta>(json);
+
+        // Assert
+        assert!(result.is_err());
+    }
 }
