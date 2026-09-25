@@ -516,15 +516,24 @@ impl CloudStartupRecovery {
     /// it, so the discarded bytes stay available for inspection.
     pub(super) fn retain_local_wal_copy(path: &Path) -> MidgeResult<()> {
         let retained_path = Self::unused_retained_path(path)?;
-        std::fs::copy(path, &retained_path)
-            .and_then(|_| std::fs::File::open(&retained_path)?.sync_all())
-            .map_err(|error| {
-                MidgeError::RecoveryFailed(format!(
-                    "failed to retain a copy of local WAL '{}' as '{}': {error}",
-                    path.display(),
-                    retained_path.display()
-                ))
-            })
+        (|| {
+            // Use ordinary file handles for Windows sharing semantics and a
+            // bounded copy, including when the source WAL is open elsewhere.
+            let mut source = std::fs::File::open(path)?;
+            let mut retained = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&retained_path)?;
+            std::io::copy(&mut source, &mut retained)?;
+            retained.sync_all()
+        })()
+        .map_err(|error| {
+            MidgeError::RecoveryFailed(format!(
+                "failed to retain a copy of local WAL '{}' as '{}': {error}",
+                path.display(),
+                retained_path.display()
+            ))
+        })
     }
 
     fn unused_retained_path(path: &Path) -> MidgeResult<PathBuf> {
