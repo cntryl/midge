@@ -2213,10 +2213,8 @@ fn should_publish_again_when_a_later_metadata_reload_succeeds() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn should_keep_in_memory_manifest_when_intent_reload_fails() {
-    use std::os::unix::fs::PermissionsExt as _;
     // Arrange: the manifest half of the reload would succeed.
     let temp_dir = tempfile::tempdir().expect("create state directory");
     let (mut state, _) = state_with_worker_intent(&temp_dir);
@@ -2233,13 +2231,10 @@ fn should_keep_in_memory_manifest_when_intent_reload_fails() {
     )
     .expect("append worker journal edit");
     let intents = temp_dir.path().join("intent_log.json");
-    std::fs::set_permissions(&intents, std::fs::Permissions::from_mode(0o000))
-        .expect("make intent log unreadable");
+    std::fs::write(&intents, b"not an intent log").expect("corrupt intent log");
 
     // Act
     let reload = state.reload_persisted_metadata();
-    std::fs::set_permissions(&intents, std::fs::Permissions::from_mode(0o644))
-        .expect("restore intent log permissions");
 
     // Assert
     assert!(reload.is_err());
