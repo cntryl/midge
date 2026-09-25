@@ -2,7 +2,8 @@
 
 use super::{
     apply_record, collect_replay_paths, open_wal_replay_file, replay_error_action, EpochPolicy,
-    NextWalFrame, RecoveryStats, ReplayErrorAction, ReplayFile, ReplayPolicy, WriterEpochFrontiers,
+    NextWalFrame, RecoveryStats, ReplayErrorAction, ReplayFailure, ReplayFile, ReplayPolicy,
+    ToleratedActiveTail, WalSalvageStop, WriterEpochFrontiers,
 };
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::{Fs, FsPath};
@@ -26,6 +27,18 @@ pub(crate) struct StreamingReplayLimits {
 }
 
 impl StreamingReplayLimits {
+    /// Local recovery: no frame bound beyond the WAL record limit (which the
+    /// frame header already enforces) and no memory checkpoints. Split-marker
+    /// transactions spill to disk instead (`ReplayOptions::spill_pending_txns`).
+    pub(crate) fn local() -> Self {
+        Self {
+            max_frame_bytes: crate::wal::frame::WAL_MAX_RECORD_LEN,
+            max_pending_txn_bytes: usize::MAX,
+            max_memtable_encoded_bytes: usize::MAX,
+            target_memtable_encoded_bytes: usize::MAX,
+        }
+    }
+
     /// Largest transaction WAL footprint these limits can replay, whether it
     /// is one batch frame or a split-marker transaction buffered until commit.
     pub(crate) fn max_replayable_txn_bytes(self) -> usize {
@@ -46,12 +59,101 @@ impl StreamingReplayLimits {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many records took the slow duplicate rescan.
+    static DUPLICATE_RESCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_duplicate_rescans() {
+    DUPLICATE_RESCANS.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn duplicate_rescans() -> usize {
+    DUPLICATE_RESCANS.get()
+}
+
+/// Replay behaviour only local recovery needs; cloud replay uses the defaults.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ReplayOptions<'a> {
+    /// Stop with `Timeout` between frames once this expires.
+    pub deadline: Option<&'a crate::common::OperationDeadline>,
+    /// Under `SalvageValidPrefix`, stop at the start of a frame whose record
+    /// fails to replay (a conflicting sequence, a corrupt batch payload) and
+    /// keep the verified prefix, as for a corrupt frame, instead of failing.
+    pub salvage_record_errors: bool,
+    /// Spool split-marker transactions to an anonymous temporary file rather
+    /// than buffering them in memory. Local writers spill transactions too
+    /// large to hold, so local replay must not need to hold them. Requires
+    /// unbounded memtable limits: a spooled transaction applies without
+    /// checkpoint accounting.
+    pub spill_pending_txns: bool,
+}
+
 type Memtables = HashMap<u32, Arc<SkipListMemtable>>;
 type Checkpoint<'a> = dyn FnMut(&mut Memtables, &RecoveryStats) -> MidgeResult<()> + 'a;
 
 struct PendingTxn {
-    records: Vec<WalRecord>,
+    records: PendingRecords,
     bytes: usize,
+}
+
+enum PendingRecords {
+    Memory(Vec<WalRecord>),
+    Spool(TxnSpool),
+}
+
+/// A split-marker transaction buffered on disk until its commit.
+struct TxnSpool {
+    file: std::fs::File,
+    record_count: usize,
+}
+
+impl TxnSpool {
+    fn new() -> MidgeResult<Self> {
+        Ok(Self {
+            // Anonymous, delete-on-close storage cannot leak a named recovery
+            // artifact if the process crashes during replay.
+            file: tempfile::tempfile()?,
+            record_count: 0,
+        })
+    }
+
+    fn append(&mut self, record: &WalRecord) -> MidgeResult<()> {
+        use std::io::Write as _;
+        let payload = crate::wal::encoding::encode(record)?;
+        let mut frame = Vec::with_capacity(
+            crate::wal::frame::WAL_FRAME_HEADER_LEN.saturating_add(payload.len()),
+        );
+        crate::wal::frame::append_frame(&mut frame, &payload)?;
+        self.file.write_all(&frame)?;
+        self.record_count = self.record_count.saturating_add(1);
+        Ok(())
+    }
+
+    fn replay(mut self, mut visitor: impl FnMut(WalRecord) -> MidgeResult<()>) -> MidgeResult<()> {
+        use std::io::{Read as _, Seek as _, Write as _};
+        self.file.flush()?;
+        self.file.seek(std::io::SeekFrom::Start(0))?;
+        for _ in 0..self.record_count {
+            let mut header = [0_u8; crate::wal::frame::WAL_FRAME_HEADER_LEN];
+            self.file.read_exact(&mut header)?;
+            let (payload_len, expected_crc) = crate::wal::frame::decode_frame_header(&header)?;
+            let mut payload = vec![0_u8; payload_len];
+            self.file.read_exact(&mut payload)?;
+            crate::wal::frame::verify_frame_crc(&payload, expected_crc)?;
+            visitor(crate::wal::encoding::decode(payload.as_slice())?)?;
+        }
+        let mut trailing = [0_u8; 1];
+        if self.file.read(&mut trailing)? != 0 {
+            return Err(MidgeError::Corruption(
+                "transaction recovery spool has trailing bytes".to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 struct ReplayState<'a> {
@@ -61,6 +163,7 @@ struct ReplayState<'a> {
     pending_bytes: usize,
     committed_sequence: Option<u64>,
     limits: StreamingReplayLimits,
+    options: ReplayOptions<'a>,
     should_apply: Option<&'a dyn Fn(&WalRecord) -> bool>,
     checkpoint: &'a mut Checkpoint<'a>,
 }
@@ -76,10 +179,40 @@ pub(crate) fn replay_wal_with_checkpoint(
     limits: StreamingReplayLimits,
     checkpoint: &mut Checkpoint<'_>,
 ) -> MidgeResult<RecoveryStats> {
+    replay_wal_with_options(
+        storage,
+        wal_dir,
+        memtables,
+        replay_policy,
+        should_apply,
+        limits,
+        ReplayOptions::default(),
+        checkpoint,
+    )
+}
+
+/// `replay_wal_with_checkpoint` with local-recovery behaviour selected.
+#[allow(clippy::too_many_arguments)] // Each input is a distinct replay contract.
+pub(crate) fn replay_wal_with_options(
+    storage: &dyn Fs,
+    wal_dir: &FsPath,
+    memtables: &mut Memtables,
+    replay_policy: ReplayPolicy,
+    should_apply: Option<&dyn Fn(&WalRecord) -> bool>,
+    limits: StreamingReplayLimits,
+    options: ReplayOptions<'_>,
+    checkpoint: &mut Checkpoint<'_>,
+) -> MidgeResult<RecoveryStats> {
     limits.validate()?;
+    if options.spill_pending_txns && limits.target_memtable_encoded_bytes != usize::MAX {
+        return Err(MidgeError::InvalidArgument(
+            "spooled WAL transactions require unbounded replay memtable limits".into(),
+        ));
+    }
     let started = std::time::Instant::now();
     let paths = collect_replay_paths(storage, wal_dir)?;
-    let (frontiers, had_corruption) = discover_frontiers(storage, &paths, replay_policy, limits)?;
+    let (frontiers, had_corruption) =
+        discover_frontiers(storage, &paths, replay_policy, limits, options.deadline)?;
     let mut state = ReplayState {
         stats: RecoveryStats {
             max_epoch_seen: frontiers.max_epoch_seen(),
@@ -91,12 +224,50 @@ pub(crate) fn replay_wal_with_checkpoint(
         pending_bytes: 0,
         committed_sequence: None,
         limits,
+        options,
         should_apply,
         checkpoint,
     };
     replay_paths(storage, &paths, replay_policy, &frontiers, &mut state)?;
     state.stats.total_replay_ns = started.elapsed().as_nanos();
+    tracing::info!(
+        dir = %wal_dir,
+        records = state.stats.record_count,
+        bytes = state.stats.bytes,
+        max_sequence = ?state.stats.max_sequence,
+        max_epoch = state.stats.max_epoch_seen,
+        stale_skipped = state.stats.stale_records_skipped,
+        had_corruption = state.stats.had_corruption,
+        "wal replay completed"
+    );
     Ok(state.stats)
+}
+
+fn ensure_deadline(deadline: Option<&crate::common::OperationDeadline>) -> MidgeResult<()> {
+    if deadline.is_some_and(crate::common::OperationDeadline::is_expired) {
+        return Err(MidgeError::Timeout("WAL replay deadline expired".into()));
+    }
+    Ok(())
+}
+
+/// Highest sequence among the leading verified frames of `path`. Used only to
+/// keep new writes above sequences that salvage set aside unreplayed.
+fn max_verified_prefix_sequence(
+    storage: &dyn Fs,
+    path: &FsPath,
+    limits: StreamingReplayLimits,
+) -> Option<u64> {
+    let mut read_ns = 0;
+    let file = open_wal_replay_file(storage, path, &mut read_ns).ok()??;
+    let mut pos = 0;
+    let mut max_sequence = None;
+    while let Ok(NextWalFrame::Frame(frame)) =
+        frame_reader::next_frame(&*file, path, pos, limits, &mut read_ns)
+    {
+        max_sequence = max_sequence.max(Some(frame.record.seq));
+        pos = frame.next_pos;
+    }
+    max_sequence
 }
 
 /// Inspect one stable WAL file with the same tail and epoch contracts as the
@@ -257,11 +428,12 @@ fn validate_record_contents(record: &WalRecord, max_bytes: usize) -> MidgeResult
     Ok(())
 }
 
-fn discover_frontiers(
+pub(super) fn discover_frontiers(
     storage: &dyn Fs,
     paths: &[ReplayFile],
     policy: ReplayPolicy,
     limits: StreamingReplayLimits,
+    deadline: Option<&crate::common::OperationDeadline>,
 ) -> MidgeResult<(WriterEpochFrontiers, bool)> {
     let mut frontiers = WriterEpochFrontiers::default();
     let mut ordinal = 0_u64;
@@ -272,6 +444,7 @@ fn discover_frontiers(
         };
         let mut pos = 0;
         loop {
+            ensure_deadline(deadline)?;
             match frame_reader::next_frame(&*file, &path.path, pos, limits, &mut read_ns) {
                 Ok(NextWalFrame::Eof) => break,
                 Ok(NextWalFrame::Frame(frame)) => {
@@ -306,8 +479,10 @@ fn replay_paths(
         else {
             continue;
         };
+        // End of the last frame this file replayed: the verified prefix.
         let mut pos = 0;
         loop {
+            ensure_deadline(state.options.deadline)?;
             let frame = match frame_reader::next_frame(
                 &*file,
                 &path.path,
@@ -318,46 +493,124 @@ fn replay_paths(
                 Ok(NextWalFrame::Eof) => break,
                 Ok(NextWalFrame::Frame(frame)) => frame,
                 Err(failure) => {
-                    return match replay_error_action(path, policy, &failure) {
-                        ReplayErrorAction::TolerateFinalActiveTail => Ok(()),
-                        ReplayErrorAction::SalvageVerifiedPrefix => {
-                            state.stats.mark_corruption();
-                            Ok(())
-                        }
-                        ReplayErrorAction::Fail => Err(failure.into_error()),
-                    }
+                    return state.stop_at(storage, paths, index, pos, policy, failure);
                 }
             };
             let record_ordinal = ordinal;
             ordinal = ordinal.saturating_add(1);
-            let duplicate = max_seen_sequence.is_some_and(|sequence| frame.record.seq <= sequence)
-                && duplicate_before(
+            // A stale record is skipped whether or not an earlier file carried
+            // it, and it can never conflict, so it needs no rescan. It also
+            // must not raise the high-water mark: a fenced writer's high
+            // sequence would push every later fresh record into the rescan.
+            // For one epoch and sequence, staleness only grows with ordinal,
+            // so a fresh copy's earlier copy was fresh and still counts.
+            if frontiers.is_stale(&frame.record, record_ordinal) {
+                state.stats.stale_records_skipped += 1;
+                pos = frame.next_pos;
+                continue;
+            }
+            let may_repeat = max_seen_sequence.is_some_and(|sequence| frame.record.seq <= sequence);
+            max_seen_sequence = Some(max_seen_sequence.unwrap_or(0).max(frame.record.seq));
+            let replayed = if may_repeat {
+                duplicate_before(
                     storage,
                     &paths[..=index],
                     pos,
                     (&frame.record, record_ordinal),
                     frontiers,
                     state.limits,
+                    state.options.deadline,
                     &mut state.stats.wal_read_ns,
-                )?;
-            max_seen_sequence = Some(max_seen_sequence.unwrap_or(0).max(frame.record.seq));
+                )
+            } else {
+                Ok(false)
+            }
+            .and_then(|duplicate| {
+                if duplicate {
+                    Ok(())
+                } else {
+                    state.process(frame.record)
+                }
+            });
+            if let Err(error) = replayed {
+                if state.options.salvage_record_errors {
+                    return state.stop_at(
+                        storage,
+                        paths,
+                        index,
+                        pos,
+                        policy,
+                        ReplayFailure::Error(error),
+                    );
+                }
+                return Err(error);
+            }
             pos = frame.next_pos;
-            if duplicate {
-                continue;
-            }
-            if frontiers.is_stale(&frame.record, record_ordinal) {
-                state.stats.stale_records_skipped += 1;
-                continue;
-            }
-            state.process(frame.record)?;
         }
     }
     Ok(())
 }
 
+impl ReplayState<'_> {
+    /// Stop replay at `valid_bytes` into `paths[index]` after `failure`:
+    /// tolerate a torn final active tail, salvage the verified prefix, or fail.
+    fn stop_at(
+        &mut self,
+        storage: &dyn Fs,
+        paths: &[ReplayFile],
+        index: usize,
+        valid_bytes: u64,
+        policy: ReplayPolicy,
+        failure: ReplayFailure,
+    ) -> MidgeResult<()> {
+        let path = &paths[index];
+        match replay_error_action(path, policy, &failure) {
+            ReplayErrorAction::TolerateFinalActiveTail => {
+                tracing::info!(
+                    path = %path.path,
+                    error = %failure.error(),
+                    valid_bytes,
+                    "wal replay dropped an incomplete final active tail"
+                );
+                self.stats.tolerated_active_tail = Some(ToleratedActiveTail {
+                    path: path.path.clone(),
+                    valid_bytes,
+                });
+                Ok(())
+            }
+            ReplayErrorAction::SalvageVerifiedPrefix => {
+                self.stats.mark_corruption();
+                tracing::warn!(
+                    path = %path.path,
+                    error = %failure.error(),
+                    valid_bytes,
+                    "wal replay stopped at corrupt verified-prefix boundary"
+                );
+                let unreplayed_paths: Vec<FsPath> = paths[index + 1..]
+                    .iter()
+                    .map(|file| file.path.clone())
+                    .collect();
+                let max_unreplayed_sequence = unreplayed_paths
+                    .iter()
+                    .filter_map(|path| max_verified_prefix_sequence(storage, path, self.limits))
+                    .max();
+                self.stats.salvage_stop = Some(WalSalvageStop {
+                    path: path.path.clone(),
+                    valid_bytes,
+                    unreplayed_paths,
+                    max_unreplayed_sequence,
+                });
+                Ok(())
+            }
+            ReplayErrorAction::Fail => Err(failure.into_error()),
+        }
+    }
+}
+
 /// Normal monotonically sequenced files never enter this slow path. Rotation
 /// overlap is resolved by exact comparisons against earlier immutable bytes,
 /// avoiding a record/value-sized deduplication index for the entire backlog.
+#[allow(clippy::too_many_arguments)] // The rescan needs the replay position and its bounds.
 fn duplicate_before(
     storage: &dyn Fs,
     paths: &[ReplayFile],
@@ -365,8 +618,11 @@ fn duplicate_before(
     record_with_ordinal: (&WalRecord, u64),
     frontiers: &WriterEpochFrontiers,
     limits: StreamingReplayLimits,
+    deadline: Option<&crate::common::OperationDeadline>,
     read_ns: &mut u128,
 ) -> MidgeResult<bool> {
+    #[cfg(test)]
+    DUPLICATE_RESCANS.set(DUPLICATE_RESCANS.get().saturating_add(1));
     let (record, record_ordinal) = record_with_ordinal;
     let mut prior_ordinal = 0_u64;
     for (index, path) in paths.iter().enumerate() {
@@ -376,6 +632,7 @@ fn duplicate_before(
         };
         let mut pos = 0;
         while !current_file || pos < current_pos {
+            ensure_deadline(deadline)?;
             let frame = match frame_reader::next_frame(&*file, &path.path, pos, limits, read_ns)
                 .map_err(super::ReplayFailure::into_error)?
             {
@@ -451,36 +708,51 @@ impl ReplayState<'_> {
                             "duplicate transaction begin during streaming replay".into(),
                         ));
                     }
-                    let bytes = pending_txn_overhead_bytes();
-                    self.reserve_pending(bytes)?;
-                    self.open_txns.insert(
-                        key,
+                    let pending = if self.options.spill_pending_txns {
                         PendingTxn {
-                            records: Vec::new(),
+                            records: PendingRecords::Spool(TxnSpool::new()?),
+                            bytes: 0,
+                        }
+                    } else {
+                        let bytes = pending_txn_overhead_bytes();
+                        self.reserve_pending(bytes)?;
+                        PendingTxn {
+                            records: PendingRecords::Memory(Vec::new()),
                             bytes,
-                        },
-                    );
+                        }
+                    };
+                    self.open_txns.insert(key, pending);
                 }
             }
             WalOpRole::TransactionCommit => {
                 if let Some(txn_id) = record.txn_id {
                     if let Some(pending) = self.open_txns.remove(&(record.writer_epoch, txn_id)) {
                         self.pending_bytes = self.pending_bytes.saturating_sub(pending.bytes);
-                        self.apply_atomic(&pending.records)?;
+                        match pending.records {
+                            PendingRecords::Memory(records) => self.apply_atomic(&records)?,
+                            PendingRecords::Spool(spool) => self.apply_spooled(spool)?,
+                        }
                     }
                 }
             }
             WalOpRole::ValueWrite | WalOpRole::PointDelete | WalOpRole::RangeDelete => {
                 let key = record.txn_id.map(|id| (record.writer_epoch, id));
                 if let Some(key) = key.filter(|key| self.open_txns.contains_key(key)) {
-                    let bytes = record_bytes(&record);
+                    let spooled = matches!(
+                        self.open_txns.get(&key).map(|pending| &pending.records),
+                        Some(PendingRecords::Spool(_))
+                    );
+                    let bytes = if spooled { 0 } else { record_bytes(&record) };
                     self.reserve_pending(bytes)?;
                     let pending = self
                         .open_txns
                         .get_mut(&key)
                         .expect("checked pending transaction");
                     pending.bytes = pending.bytes.saturating_add(bytes);
-                    pending.records.push(record);
+                    match &mut pending.records {
+                        PendingRecords::Memory(records) => records.push(record),
+                        PendingRecords::Spool(spool) => spool.append(&record)?,
+                    }
                 } else {
                     self.apply_atomic(std::slice::from_ref(&record))?;
                 }
@@ -508,6 +780,12 @@ impl ReplayState<'_> {
     }
 
     fn apply_atomic(&mut self, records: &[WalRecord]) -> MidgeResult<()> {
+        if self.limits.max_memtable_encoded_bytes == usize::MAX
+            && self.limits.target_memtable_encoded_bytes == usize::MAX
+        {
+            // Unbounded (local) replay never checkpoints: skip the accounting.
+            return self.apply_unchecked(records);
+        }
         let mut growth = HashMap::<u32, usize>::new();
         for record in records
             .iter()
@@ -561,6 +839,40 @@ impl ReplayState<'_> {
         {
             apply_record(record, self.memtables)?;
         }
+        self.stats.apply_ns = self
+            .stats
+            .apply_ns
+            .saturating_add(started.elapsed().as_nanos());
+        Ok(())
+    }
+
+    fn apply_unchecked(&mut self, records: &[WalRecord]) -> MidgeResult<()> {
+        let started = std::time::Instant::now();
+        for record in records
+            .iter()
+            .filter(|record| self.should_apply.is_none_or(|filter| filter(record)))
+        {
+            apply_record(record, self.memtables)?;
+        }
+        self.stats.apply_ns = self
+            .stats
+            .apply_ns
+            .saturating_add(started.elapsed().as_nanos());
+        Ok(())
+    }
+
+    /// Apply a spooled transaction record by record. Spooling requires
+    /// unbounded memtable limits, so no checkpoint can fall inside it.
+    fn apply_spooled(&mut self, spool: TxnSpool) -> MidgeResult<()> {
+        let started = std::time::Instant::now();
+        let should_apply = self.should_apply;
+        let memtables = &mut *self.memtables;
+        spool.replay(|record| {
+            if should_apply.is_none_or(|filter| filter(&record)) {
+                apply_record(&record, memtables)?;
+            }
+            Ok(())
+        })?;
         self.stats.apply_ns = self
             .stats
             .apply_ns

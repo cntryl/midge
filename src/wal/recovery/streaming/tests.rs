@@ -149,15 +149,6 @@ fn should_checkpoint_single_wal_object_larger_than_configured_local_capacity() {
     assert!(bytes.len() > 10 * limits().max_memtable_encoded_bytes);
     let storage = fixture(&[("1.wal", bytes)], limits().max_frame_bytes);
     let mut memtables = HashMap::new();
-    // The prior snapshot entrypoint fails the same bounded-read contract.
-    assert!(super::super::replay_wal_with_policy(
-        &storage,
-        &FsPath::new("wal"),
-        &mut memtables,
-        ReplayPolicy::Strict
-    )
-    .is_err());
-    storage.largest_read.store(0, Ordering::SeqCst);
     let mut checkpoint_count = 0;
     let mut recovered_entries = 0;
 

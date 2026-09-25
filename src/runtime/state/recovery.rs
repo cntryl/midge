@@ -1308,6 +1308,81 @@ mod salvage_quarantine_tests {
         frame
     }
 
+    fn frame_with_value(key: &'static [u8], value: &'static [u8], seq: u64) -> Vec<u8> {
+        let record = crate::wal::WalRecord::new(
+            crate::wal::types::WalOpKind::Put,
+            bytes::Bytes::from_static(key),
+            Some(bytes::Bytes::from_static(value)),
+            seq,
+            1,
+        );
+        let payload = crate::wal::encoding::encode(&record).expect("encode record");
+        let mut frame = Vec::new();
+        crate::wal::frame::append_frame(&mut frame, &payload).expect("frame record");
+        frame
+    }
+
+    /// `1.wal` writes `k` at sequence 7; `wal.log` writes a different value
+    /// for `k` at the same sequence.
+    fn conflicting_repeated_sequence(wal_dir: &std::path::Path) {
+        write(
+            &wal_dir.join(crate::wal::segment_file_name(1)),
+            &[frame_with_value(b"k", b"a", 7)],
+        );
+        write(
+            &wal_dir.join(crate::wal::ACTIVE_FILE_NAME),
+            &[frame_with_value(b"k", b"b", 7)],
+        );
+    }
+
+    #[test]
+    fn should_reject_conflicting_repeated_sequence_when_replaying_local_wal() {
+        // Arrange: the same sequence carrying two values breaks MVCC; local
+        // and cloud replay must refuse it the same way (#524).
+        let directory = tempfile::tempdir().expect("temp dir");
+        let wal_dir = directory.path().join("wal");
+        std::fs::create_dir(&wal_dir).expect("create wal dir");
+        conflicting_repeated_sequence(&wal_dir);
+
+        // Act
+        let result = RuntimeState::replay_wal(
+            false,
+            &wal_dir,
+            &directory.path().join("sst"),
+            crate::config::RecoveryPolicy::Strict,
+            &Manifest::default(),
+            HashMap::new(),
+        );
+
+        // Assert
+        let Err(error) = result else {
+            panic!("strict replay must reject a conflicting repeated sequence");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("conflicting or repeated WAL sequence 7"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn should_keep_prefix_when_salvage_meets_conflicting_repeated_sequence() {
+        // Arrange
+        let directory = tempfile::tempdir().expect("temp dir");
+        let wal_dir = directory.path().join("wal");
+        std::fs::create_dir(&wal_dir).expect("create wal dir");
+        conflicting_repeated_sequence(&wal_dir);
+
+        // Act
+        let recovered = salvage_replay(&wal_dir, &directory.path().join("sst"));
+
+        // Assert: the first write survives and replay stops at the
+        // conflicting frame, which is not counted as replayed.
+        assert!(recovered.opened_in_salvage_mode);
+        assert_eq!(recovered.records_replayed, 1);
+    }
+
     fn write(path: &std::path::Path, parts: &[Vec<u8>]) {
         let mut file = std::fs::File::create(path).expect("create wal file");
         for part in parts {
