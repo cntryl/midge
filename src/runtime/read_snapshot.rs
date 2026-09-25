@@ -11,6 +11,7 @@ use crate::runtime::read_resources::ReadResources;
 use crate::runtime::sst_read_view::{LevelRangeCandidates, RangeCandidates, SstReadView};
 use crate::sst::fs::reader_io::SstStateScan;
 use crate::sst::fs::SstFileIo;
+use crate::sst::read_path_metrics::SstReadObserver as _;
 use crate::sst::traits::SstStateReader;
 #[cfg(test)]
 use crate::types::EntryType;
@@ -750,7 +751,7 @@ impl ReadSnapshot {
         read_resources: Option<Arc<ReadResources>>,
     ) -> Self {
         let diagnostics = read_resources.as_ref().map_or_else(
-            crate::diagnostics::legacy_runtime_diagnostics,
+            || Arc::new(crate::diagnostics::RuntimeDiagnostics::default()),
             |resources| resources.diagnostics(),
         );
         Self {
@@ -792,7 +793,7 @@ impl ReadSnapshot {
         self.diagnostics.sst_metrics().record_reader_cache_miss();
         Ok(Arc::new(
             crate::sst::fs::SstFileIo::open(&path_str, Arc::clone(&self.sst_fs))?
-                .with_read_path_diagnostics(Arc::clone(&self.diagnostics)),
+                .with_read_path_diagnostics(self.diagnostics.clone()),
         ))
     }
 

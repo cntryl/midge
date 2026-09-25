@@ -3,7 +3,7 @@
 //! Extracted from `EventLoop` to reduce cognitive load and improve testability.
 //! Owns the policy-independent parts of durability enforcement.
 
-use crate::common::KeyedGroupCommit;
+use crate::runtime::keyed_group_commit::KeyedGroupCommit;
 #[cfg(test)]
 use crate::types::ReadDurability;
 use std::collections::{BTreeMap, HashMap};
@@ -168,7 +168,7 @@ impl DurabilityCoordinator {
     pub(crate) fn current_key(&self) -> u64 {
         self.waiters
             .as_ref()
-            .map_or(0, crate::common::KeyedGroupCommit::current_key)
+            .map_or(0, KeyedGroupCommit::current_key)
     }
 
     /// Request ids of the cloud-durability waiters queued at `key`.
@@ -237,7 +237,7 @@ impl DurabilityCoordinator {
     pub fn drain_all_waiters(&self) -> Vec<DurabilityWaiter> {
         self.waiters
             .as_ref()
-            .map(super::super::common::KeyedGroupCommit::drain_all)
+            .map(KeyedGroupCommit::drain_all)
             .unwrap_or_default()
     }
 

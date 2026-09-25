@@ -2,6 +2,32 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// Where an SST reader reports read-path activity.
+///
+/// The runtime implements this once per engine, so the SST layer never
+/// depends on runtime diagnostics. A reader that no runtime has attached
+/// reports into a [`DetachedSstReadObserver`], whose counters nobody reads.
+pub(crate) trait SstReadObserver: Send + Sync + std::fmt::Debug {
+    /// Counters for the reads this observer's readers perform.
+    fn sst_metrics(&self) -> &SstReadMetrics;
+
+    /// One block-cache lookup, for the owner's operational counters. The
+    /// per-read counters in [`Self::sst_metrics`] are recorded separately.
+    fn record_block_cache_lookup(&self, hit: bool);
+}
+
+/// Observer for a reader no runtime owns: counts privately, exports nothing.
+#[derive(Debug, Default)]
+pub(crate) struct DetachedSstReadObserver(SstReadMetrics);
+
+impl SstReadObserver for DetachedSstReadObserver {
+    fn sst_metrics(&self) -> &SstReadMetrics {
+        &self.0
+    }
+
+    fn record_block_cache_lookup(&self, _hit: bool) {}
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct SstReadMetrics {
     reader_cache_hits: AtomicU64,

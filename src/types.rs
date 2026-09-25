@@ -301,7 +301,7 @@ pub struct RuntimeMetricsSnapshot {
     pub hybrid_usage_percent: u32,
     pub hybrid_pending_evictions: usize,
     /// Local disk charges and observed admission blocks; absent outside hybrid storage.
-    pub local_storage: Option<crate::storage::hybrid::backend::HybridStorageBudgetSnapshot>,
+    pub local_storage: Option<HybridStorageBudgetSnapshot>,
     /// Submitted range requests from this engine's runtime SST readers.
     /// Excludes HEAD requests, startup recovery, and WAL maintenance.
     pub remote_range_requests_total: u64,
@@ -382,6 +382,76 @@ pub struct StorageVerificationReport {
     /// Whether the pass covered authoritative storage rather than a cloud cache.
     pub authoritative: bool,
     pub health: EngineHealth,
+}
+
+// ---------------------------------------------------------------------------
+// Local storage budget DTOs (filled by storage::hybrid)
+// ---------------------------------------------------------------------------
+
+/// The local operation whose admission most recently failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+#[repr(usize)]
+pub enum StorageAdmissionKind {
+    Wal,
+    TransactionSpill,
+    Flush,
+    Compaction,
+    FlushHeadroom,
+    StartupResidue,
+}
+
+/// Why a local operation could not reserve its working space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageAdmissionReason {
+    LocalCapacity,
+    CloudUpload,
+    Compaction,
+}
+
+/// Oldest rejected admission class that has not subsequently succeeded.
+///
+/// This records observed admission failures, not a queue of caller requests.
+/// A caller can retry or abandon its operation; successful admission of the
+/// same class clears its observation without hiding failures of other classes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct StorageAdmissionBlock {
+    pub operation: StorageAdmissionKind,
+    pub reason: StorageAdmissionReason,
+    pub requested_bytes: u64,
+    pub free_bytes_at_rejection: u64,
+    pub age_millis: u64,
+    pub attempts: u64,
+}
+
+/// Non-overlapping charges in the local disk reservation ledger.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+pub struct LocalStorageUsage {
+    pub wal_bytes: u64,
+    pub transaction_spill_bytes: u64,
+    pub resident_sst_bytes: u64,
+    pub startup_residue_bytes: u64,
+    pub flush_staging_reserved_bytes: u64,
+    pub flush_headroom_reserved_bytes: u64,
+    pub compaction_staging_reserved_bytes: u64,
+    pub wal_headroom_reserved_bytes: u64,
+    /// Outstanding flush/compaction reservations, excluding reusable headroom.
+    /// Includes retained allowances whose scratch cleanup remains unverified.
+    pub reservations: usize,
+}
+
+/// Local working-storage budget of a hybrid (cloud-backed) engine.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+pub struct HybridStorageBudgetSnapshot {
+    pub max_local_bytes: u64,
+    pub total_committed_bytes: u64,
+    pub free_bytes: u64,
+    pub usage_percent: u32,
+    pub pending_evictions: usize,
+    pub usage: LocalStorageUsage,
+    pub blocked_admission: Option<StorageAdmissionBlock>,
+    pub admission_rejections_total: u64,
 }
 
 #[cfg(test)]

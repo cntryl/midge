@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 mod admission;
+use crate::sst::read_path_metrics::SstReadObserver as _;
 use admission::{OpenAdmission, OpenAttempt};
 
 pub(crate) struct ReadResources {
@@ -57,7 +58,7 @@ impl ReadResources {
             sst_path_prefix,
             block_cache_size,
             block_cache_policy,
-            crate::diagnostics::legacy_runtime_diagnostics(),
+            Arc::new(crate::diagnostics::RuntimeDiagnostics::default()),
         )
     }
 
@@ -186,7 +187,7 @@ impl ReadResources {
         let reader = Arc::new(
             opened
                 .with_block_cache(Arc::clone(&self.block_cache), cache_key.sst_id)
-                .with_read_path_diagnostics(Arc::clone(&self.diagnostics)),
+                .with_read_path_diagnostics(self.diagnostics.clone()),
         );
         let mut readers = self
             .readers

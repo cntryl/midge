@@ -279,15 +279,11 @@ impl SstFileIo {
         if let Some(ref cache) = self.block_cache {
             if let Some(cached_value) = cache.get(&cache_key) {
                 read_metrics.record_block_cache_hit();
-                self.diagnostics.record(|m| {
-                    m.record_cache_hit();
-                });
+                self.diagnostics.record_block_cache_lookup(true);
                 Ok(cached_value.data)
             } else {
                 read_metrics.record_block_cache_miss();
-                self.diagnostics.record(|m| {
-                    m.record_cache_miss();
-                });
+                self.diagnostics.record_block_cache_lookup(false);
                 let bytes = file.map_or_else(
                     || self.read_block(handle),
                     |file| self.read_block_from(file, handle),

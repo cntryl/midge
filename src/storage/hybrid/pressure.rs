@@ -3,42 +3,7 @@
 use super::actor::ReservationResult;
 use std::time::Instant;
 
-/// The local operation whose admission most recently failed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-#[repr(usize)]
-pub enum StorageAdmissionKind {
-    Wal,
-    TransactionSpill,
-    Flush,
-    Compaction,
-    FlushHeadroom,
-    StartupResidue,
-}
-
-/// Why a local operation could not reserve its working space.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StorageAdmissionReason {
-    LocalCapacity,
-    CloudUpload,
-    Compaction,
-}
-
-/// Oldest rejected admission class that has not subsequently succeeded.
-///
-/// This records observed admission failures, not a queue of caller requests.
-/// A caller can retry or abandon its operation; successful admission of the
-/// same class clears its observation without hiding failures of other classes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-pub struct StorageAdmissionBlock {
-    pub operation: StorageAdmissionKind,
-    pub reason: StorageAdmissionReason,
-    pub requested_bytes: u64,
-    pub free_bytes_at_rejection: u64,
-    pub age_millis: u64,
-    pub attempts: u64,
-}
+pub use crate::types::{StorageAdmissionBlock, StorageAdmissionKind, StorageAdmissionReason};
 
 #[derive(Clone, Copy)]
 struct RejectedAdmission {
