@@ -5150,13 +5150,13 @@ mod shutdown_orchestration {
         // Assert: every later caller observes the runtime's terminal error rather
         // than a synthetic cleanup success.
         let terminal_message = match terminal_shutdown {
-            Err(MidgeError::Internal(message)) => message,
+            Err(MidgeError::Timeout(message)) => message,
             other => panic!("expected terminal cloud-drain error, got {other:?}"),
         };
         assert!(terminal_message.contains("cloud uploads"));
         assert!(matches!(
             replayed_shutdown,
-            Err(MidgeError::Internal(message)) if message == terminal_message
+            Err(MidgeError::Timeout(message)) if message == terminal_message
         ));
         assert!(
             !db_path.join(".midge_leader.lock").exists(),
@@ -7932,7 +7932,7 @@ mod cloud_persistence_hardening {
         let elapsed = started.elapsed();
 
         match error {
-            MidgeError::Internal(message) => assert!(
+            MidgeError::Timeout(message) => assert!(
                 message.contains("cloud uploads")
                     && (message.contains("storage-owned") || message.contains("runtime-owned")),
                 "expected pending cloud-upload shutdown error, got: {message}"

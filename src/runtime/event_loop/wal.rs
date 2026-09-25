@@ -307,10 +307,7 @@ impl WalCoordinator {
     pub(super) fn sync(event_loop: &mut EventLoop, request_id: u64) -> HandleOutcome {
         let result = event_loop.sync_wal_generation(CompletionSource::SealedGeneration);
         let resp = result.map_or_else(
-            |error| RuntimeResponse::Error {
-                request_id,
-                error: crate::common::MidgeError::Internal(error.to_string()),
-            },
+            |error| RuntimeResponse::Error { request_id, error },
             |()| RuntimeResponse::Ok { request_id },
         );
         event_loop.respond(request_id, resp);

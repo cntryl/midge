@@ -21,6 +21,59 @@ fn should_dispatch_compact_all_before_background_cloud_progress() {
 }
 
 #[test]
+fn should_preserve_fenced_kind_when_wal_sync_detects_stale_writer() -> crate::common::MidgeResult<()>
+{
+    // Arrange
+    let mut event_loop = create_test_local_event_loop()?;
+    event_loop
+        .wal_transition
+        .fence("writer lease lost", None, true);
+    let request_id = 9_001;
+    let response = event_loop.router.register(request_id, "WalSync");
+
+    // Act
+    super::wal::WalCoordinator::sync(&mut event_loop, request_id);
+
+    // Assert
+    let result = response.recv_timeout(Duration::from_secs(1));
+    assert!(
+        matches!(
+            &result,
+            Ok(RuntimeResponse::Error {
+                error: crate::common::MidgeError::Fenced(_),
+                ..
+            })
+        ),
+        "unexpected WAL sync response: {result:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn should_preserve_resource_limit_when_compaction_launch_is_refused(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut event_loop = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    event_loop
+        .hybrid_storage
+        .as_ref()
+        .expect("cloud storage")
+        .enable_ephemeral_sst_cache(7);
+
+    // Act
+    let result = event_loop.launch_compaction(crate::compaction::CompactionPlan::new(0, 0, 1));
+
+    // Assert
+    assert!(
+        matches!(&result, Err(crate::common::MidgeError::ResourceLimit(_))),
+        "unexpected compaction launch result: {result:?}"
+    );
+    Ok(())
+}
+
+#[test]
 fn should_wait_for_active_compaction_before_declaring_debt_clear() -> crate::common::MidgeResult<()>
 {
     // Arrange
