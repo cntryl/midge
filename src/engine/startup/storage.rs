@@ -277,7 +277,7 @@ impl RuntimeStorageMaterialization {
         startup_lease: &StartupLease,
         cloud_runtime_policy: crate::runtime::CloudRuntimePolicy,
     ) -> MidgeResult<Self> {
-        let cloud = crate::storage::test_support::build_cloud_backed_filesystem_simulation(
+        let cloud = crate::storage::simulated::build_simulated_cloud_stores(
             &storage_path.db_path,
             opts.simulated_cloud_local_storage_budget_bytes(),
         )?;

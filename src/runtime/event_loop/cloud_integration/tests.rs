@@ -8000,9 +8000,60 @@ fn should_preserve_cloud_waiter_when_catalog_admission_is_temporarily_blocked(
 }
 
 #[test]
-fn should_preserve_cloud_waiter_when_completion_adapter_admission_is_temporarily_blocked(
+fn should_complete_cloud_waiter_when_only_completion_adapter_headroom_is_missing(
 ) -> crate::common::MidgeResult<()> {
-    assert_cloud_waiter_survives_admission_pressure(32 * 1024)
+    // Arrange: 32 KiB of headroom used to block the 64 KiB completion-adapter
+    // stack. The filesystem store completes inline and needs no adapter
+    // (#518), so the small proof read fits.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let request_id = 90502;
+    let (_, _) = el.wal_actor.append_single_op(
+        &mut el.state,
+        crate::runtime::actors::wal::AppendParams {
+            request_id,
+            cf_id: 0,
+            key: Bytes::from_static(b"admission"),
+            value: Some(Bytes::from_static(b"retained")),
+            insert_only: false,
+            ttl_seconds: None,
+        },
+    )?;
+    el.durability
+        .queue_waiter(crate::runtime::durability::DurabilityWaiter::CloudDurability { request_id });
+    let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    let local_wal = el
+        .state
+        .wal_dir
+        .join(crate::wal::segment_file_name(segment_id));
+    let budget = el
+        .hybrid_storage
+        .as_ref()
+        .unwrap()
+        .maintenance_memory()
+        .unwrap();
+    let _held = budget.reserve(
+        budget
+            .limit()
+            .saturating_sub(budget.used())
+            .saturating_sub(32 * 1024),
+        "active compaction fixture",
+    )?;
+
+    // Act
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id,
+        max_sequence,
+    });
+
+    // Assert
+    assert!(!local_wal.exists());
+    assert!(el
+        .durability
+        .cloud_durability_request_ids_at(segment_id)
+        .is_empty());
+    Ok(())
 }
 
 fn assert_cloud_waiter_survives_admission_pressure(

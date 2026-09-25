@@ -43,7 +43,7 @@ impl StartupEpochFloor {
             }
             Storage::CloudSimulated { .. } => {
                 let cloud_root =
-                    crate::storage::test_support::simulated_cloud_root(&storage_path.db_path);
+                    crate::storage::simulated::simulated_cloud_root(&storage_path.db_path);
                 if cloud_root.exists() {
                     let backend: Arc<dyn crate::storage::StorageBackend> =
                         Arc::new(crate::storage::filesystem::FileSystem::new(cloud_root)?);
