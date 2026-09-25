@@ -357,7 +357,7 @@ fn should_summarize_compaction_output_on_the_worker_when_there_is_no_cloud_stora
 }
 
 #[test]
-fn should_keep_compaction_completion_free_of_full_file_and_cloud_publication_io() {
+fn should_keep_compaction_completion_free_of_synchronous_publication_work() {
     // Arrange
     let completion = include_str!("../../event_loop/compaction.rs");
 
