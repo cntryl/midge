@@ -6,7 +6,7 @@ use crate::common::{MidgeError, MidgeResult};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
@@ -62,9 +62,9 @@ struct PinnedFile {
 impl Engine {
     /// Capture a consistent, durable database image into a new backup directory.
     ///
-    /// The event loop briefly fences mutations while it syncs the current WAL
-    /// and opens all files in the captured layout. File content is copied after
-    /// the mutation barrier is released.
+    /// The event loop fences mutations while it syncs the current WAL, opens
+    /// durable files, and freezes the mutable manifest journal. Bulk file
+    /// content is copied after the mutation barrier is released.
     ///
     /// # Errors
     ///
@@ -119,7 +119,7 @@ impl Engine {
         }
         let database_format_version =
             crate::metadata::format::validate_format_marker(&self.db_path)?;
-        let pinned = pin_durable_files(&self.db_path, self.simulated_cloud_mode)?;
+        let pinned = pin_durable_files(&self.db_path, self.simulated_cloud_mode, parent)?;
         if !self.is_primary_lease_healthy() {
             return Err(MidgeError::Fenced(
                 "primary lease became unhealthy during backup capture".to_string(),
@@ -252,7 +252,11 @@ impl Engine {
     }
 }
 
-fn pin_durable_files(root: &Path, simulated_cloud: bool) -> MidgeResult<Vec<PinnedFile>> {
+fn pin_durable_files(
+    root: &Path,
+    simulated_cloud: bool,
+    scratch_dir: &Path,
+) -> MidgeResult<Vec<PinnedFile>> {
     let mut paths = Vec::new();
     for name in [
         "FORMAT",
@@ -289,13 +293,26 @@ fn pin_durable_files(root: &Path, simulated_cloud: bool) -> MidgeResult<Vec<Pinn
                 MidgeError::Corruption("backup path escaped database root".to_string())
             })?;
             validate_relative_path(relative)?;
-            let file = File::open(&path)?;
+            let mut file = File::open(&path)?;
             let metadata = file.metadata()?;
             if !metadata.is_file() {
                 return Err(MidgeError::Corruption(format!(
                     "backup object '{}' is not a regular file",
                     path.display()
                 )));
+            }
+            // Checkpointing truncates this inode in place. An open handle
+            // alone cannot preserve its bytes after the capture barrier ends.
+            if relative == Path::new("manifest.journal") {
+                let mut frozen = tempfile::tempfile_in(scratch_dir)?;
+                let copied = std::io::copy(&mut file, &mut frozen)?;
+                if copied != metadata.len() {
+                    return Err(MidgeError::Corruption(
+                        "manifest journal changed during backup capture".to_string(),
+                    ));
+                }
+                frozen.seek(SeekFrom::Start(0))?;
+                file = frozen;
             }
             Ok(PinnedFile {
                 relative: relative.to_path_buf(),
@@ -611,4 +628,46 @@ fn sync_directory(path: &Path) -> MidgeResult<()> {
     #[cfg(not(unix))]
     let _ = path;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_preserve_captured_journal_when_live_journal_is_truncated() {
+        // Arrange
+        let directory = tempfile::tempdir().expect("test directory");
+        let source = directory.path().join("source");
+        let staging = directory.path().join("staging");
+        fs::create_dir(&source).expect("source directory");
+        fs::create_dir(&staging).expect("staging directory");
+        let journal = source.join("manifest.journal");
+        let captured = b"durable manifest edit";
+        fs::write(&journal, captured).expect("seed journal");
+        let pinned =
+            pin_durable_files(&source, false, directory.path()).expect("pin captured files");
+
+        // Act: a later manifest checkpoint truncates this inode in place.
+        File::options()
+            .write(true)
+            .truncate(true)
+            .open(&journal)
+            .expect("truncate live journal");
+        let result = materialize_backup(
+            pinned,
+            &staging,
+            uuid::Uuid::new_v4().to_string(),
+            0,
+            crate::metadata::format::CURRENT_FORMAT_VERSION,
+            BackupStorageKind::Local,
+        );
+
+        // Assert
+        result.expect("materialize captured journal");
+        assert_eq!(
+            fs::read(staging.join("objects/manifest.journal")).expect("copied journal"),
+            captured
+        );
+    }
 }
