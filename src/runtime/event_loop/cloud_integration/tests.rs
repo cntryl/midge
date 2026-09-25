@@ -91,6 +91,11 @@ fn should_resume_retirement_when_cloud_recovers_under_continuous_flush_demand(
         .recv_timeout(Duration::from_secs(2))
         .expect("flush publish");
     el.handle_flush_worker_result(published);
+    let mirrored = el
+        .flush_worker_result_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("flush metadata mirror");
+    el.handle_flush_worker_result(mirrored);
     drain_prune_completion_for_test(&mut el);
 
     // Assert: an immutable remains ready throughout the second proof attempt.
