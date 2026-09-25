@@ -164,25 +164,11 @@ impl BoundedEventQueue {
 
     pub(super) fn event_bytes(event: &StorageEvent) -> usize {
         let dynamic = match event {
-            StorageEvent::ReadComplete { key, result } => {
-                key.len()
-                    + match result {
-                        StorageOutcome::Ok(data) => data.len(),
-                        StorageOutcome::Err(error) => error.message().len(),
-                    }
-            }
             StorageEvent::WriteComplete { key, result }
             | StorageEvent::DeleteComplete { key, result } => {
                 key.len()
                     + match result {
                         StorageOutcome::Ok(()) => 0,
-                        StorageOutcome::Err(error) => error.message().len(),
-                    }
-            }
-            StorageEvent::ListComplete { prefix, result } => {
-                prefix.len()
-                    + match result {
-                        StorageOutcome::Ok(keys) => keys.iter().map(String::len).sum(),
                         StorageOutcome::Err(error) => error.message().len(),
                     }
             }

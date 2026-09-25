@@ -598,10 +598,6 @@ impl StorageBackend for BudgetConsumingProofBackend {
         self.retained_metadata_callbacks.lock().push(callback);
     }
 
-    fn submit_read(&self, _key: &str, callback: StorageCallback) {
-        self.retain_callback(callback);
-    }
-
     fn submit_write(&self, key: &str, _data: Vec<u8>, callback: StorageCallback) {
         let _ = callback.send(StorageEvent::WriteComplete {
             key: key.to_string(),
@@ -621,13 +617,6 @@ impl StorageBackend for BudgetConsumingProofBackend {
                     .to_string()
                     .into(),
             ),
-        });
-    }
-
-    fn submit_list(&self, prefix: &str, callback: StorageCallback) {
-        let _ = callback.send(StorageEvent::ListComplete {
-            prefix: prefix.to_string(),
-            result: StorageOutcome::Ok(Vec::new()),
         });
     }
 
@@ -659,10 +648,6 @@ impl NeverCompletesBackend {
 }
 
 impl StorageBackend for NeverCompletesBackend {
-    fn submit_read(&self, _key: &str, callback: StorageCallback) {
-        self.retain_callback(callback);
-    }
-
     fn submit_write(&self, _key: &str, _data: Vec<u8>, callback: StorageCallback) {
         self.retain_callback(callback);
     }
@@ -687,10 +672,6 @@ impl StorageBackend for NeverCompletesBackend {
         _headers: Vec<(String, String)>,
         callback: StorageCallback,
     ) {
-        self.retain_callback(callback);
-    }
-
-    fn submit_list(&self, _prefix: &str, callback: StorageCallback) {
         self.retain_callback(callback);
     }
 

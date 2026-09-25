@@ -205,15 +205,6 @@ impl StorageObjectMetadata {
 /// This unified event type works for both filesystem and cloud backends.
 #[derive(Debug, Clone)]
 pub enum StorageEvent {
-    /// Read operation completed
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "retained for complete object-I/O implementations")
-    )]
-    ReadComplete {
-        key: String,
-        result: StorageOutcome<Vec<u8>>,
-    },
     /// Write operation completed
     WriteComplete {
         key: String,
@@ -223,15 +214,6 @@ pub enum StorageEvent {
     DeleteComplete {
         key: String,
         result: StorageOutcome<()>,
-    },
-    /// List operation completed
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "retained for complete object-I/O implementations")
-    )]
-    ListComplete {
-        prefix: String,
-        result: StorageOutcome<Vec<String>>,
     },
     /// Metadata lookup completed
     HeadComplete {
@@ -588,13 +570,6 @@ pub trait StorageBackend: Send + Sync + 'static {
         panic!("test backend received undeclared range-read capability");
     }
 
-    /// Submit a read operation. Returns immediately.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "implemented by complete object-I/O backends")
-    )]
-    fn submit_read(&self, key: &str, callback: StorageCallback);
-
     /// Read bytes and identity from one version. Unsupported backends fail closed;
     /// synthesizing this response from independent GET and HEAD calls is unsafe.
     #[cfg(not(test))]
@@ -612,22 +587,6 @@ pub trait StorageBackend: Send + Sync + 'static {
         _callback: MetadataReadCallback,
     ) {
         panic!("test backend received undeclared metadata-read capability");
-    }
-
-    /// Submit a read whose callback adapter must not wait longer than
-    /// `timeout`. Backends whose submission path is already non-blocking may
-    /// retain this default; blocking adapters must override it.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "implemented by complete object-I/O backends")
-    )]
-    fn submit_read_with_timeout(
-        &self,
-        key: &str,
-        _timeout: std::time::Duration,
-        callback: StorageCallback,
-    ) {
-        self.submit_read(key, callback);
     }
 
     /// Submit a write operation. Returns immediately.
@@ -687,13 +646,6 @@ pub trait StorageBackend: Send + Sync + 'static {
     ) {
         panic!("test backend received undeclared conditional-delete capability");
     }
-
-    /// Submit a prefix list operation.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "implemented by complete object-I/O backends")
-    )]
-    fn submit_list(&self, prefix: &str, callback: StorageCallback);
 
     /// Submit an object metadata lookup.
     #[cfg(not(test))]

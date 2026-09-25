@@ -333,17 +333,10 @@ fn should_not_submit_cloud_operations_given_operation_timeout_is_zero() {
         "tenant".to_string(),
         std::time::Duration::from_secs(1),
     );
-    let (read_sender, read_receiver) = mpsc::channel();
     let (write_sender, write_receiver) = mpsc::channel();
     let (head_sender, head_receiver) = mpsc::channel();
 
     // Act
-    StorageBackend::submit_read_with_timeout(
-        &storage,
-        "metadata/manifest.json",
-        std::time::Duration::ZERO,
-        read_sender,
-    );
     StorageBackend::submit_write_with_headers_and_timeout(
         &storage,
         "metadata/manifest.json",
@@ -358,9 +351,6 @@ fn should_not_submit_cloud_operations_given_operation_timeout_is_zero() {
         std::time::Duration::ZERO,
         head_sender,
     );
-    let read = read_receiver
-        .recv()
-        .expect("receive zero-budget read result");
     let write = write_receiver
         .recv()
         .expect("receive zero-budget write result");
@@ -372,13 +362,6 @@ fn should_not_submit_cloud_operations_given_operation_timeout_is_zero() {
     assert_eq!(backend.gets.load(Ordering::SeqCst), 0);
     assert_eq!(backend.puts.load(Ordering::SeqCst), 0);
     assert_eq!(backend.heads.load(Ordering::SeqCst), 0);
-    assert!(matches!(
-        read,
-        StorageEvent::ReadComplete {
-            result: StorageOutcome::Err(message),
-            ..
-        } if message.is_timeout()
-    ));
     assert!(matches!(
         write,
         StorageEvent::WriteComplete {
@@ -396,7 +379,7 @@ fn should_not_submit_cloud_operations_given_operation_timeout_is_zero() {
 }
 
 #[test]
-fn should_not_submit_delete_or_list_given_configured_callback_timeout_is_zero() {
+fn should_not_submit_delete_given_configured_callback_timeout_is_zero() {
     // Arrange
     let backend = Arc::new(ConditionalPutOnlyBackend::default());
     let storage = CloudStorage::new_with_timeout(
@@ -406,7 +389,6 @@ fn should_not_submit_delete_or_list_given_configured_callback_timeout_is_zero() 
     );
     let (delete_sender, delete_receiver) = mpsc::channel();
     let (conditional_delete_sender, conditional_delete_receiver) = mpsc::channel();
-    let (list_sender, list_receiver) = mpsc::channel();
 
     // Act
     StorageBackend::submit_delete(&storage, "metadata/manifest.json", delete_sender);
@@ -416,20 +398,15 @@ fn should_not_submit_delete_or_list_given_configured_callback_timeout_is_zero() 
         vec![("If-Match".to_string(), "etag".to_string())],
         conditional_delete_sender,
     );
-    StorageBackend::submit_list(&storage, "metadata/", list_sender);
     let delete = delete_receiver
         .recv()
         .expect("receive zero-budget delete result");
     let conditional_delete = conditional_delete_receiver
         .recv()
         .expect("receive zero-budget conditional delete result");
-    let list = list_receiver
-        .recv()
-        .expect("receive zero-budget list result");
 
     // Assert
     assert_eq!(backend.deletes.load(Ordering::SeqCst), 0);
-    assert_eq!(backend.lists.load(Ordering::SeqCst), 0);
     assert!(matches!(
         delete,
         StorageEvent::DeleteComplete {
@@ -440,13 +417,6 @@ fn should_not_submit_delete_or_list_given_configured_callback_timeout_is_zero() 
     assert!(matches!(
         conditional_delete,
         StorageEvent::DeleteComplete {
-            result: StorageOutcome::Err(message),
-            ..
-        } if message.is_timeout()
-    ));
-    assert!(matches!(
-        list,
-        StorageEvent::ListComplete {
             result: StorageOutcome::Err(message),
             ..
         } if message.is_timeout()
@@ -705,45 +675,13 @@ fn should_report_storage_callback_timeout_when_cloud_backend_is_slow() {
     let (sender, receiver) = mpsc::channel();
 
     // Act
-    StorageBackend::submit_read(&storage, "metadata/manifest.json", sender);
+    StorageBackend::submit_head(&storage, "metadata/manifest.json", sender);
     let event = receiver.recv().expect("receive bounded adapter result");
 
     // Assert
     assert!(matches!(
         event,
-        StorageEvent::ReadComplete {
-            result: StorageOutcome::Err(message),
-            ..
-        } if message.to_string().contains("timed out")
-    ));
-}
-
-#[test]
-fn should_apply_operation_timeout_to_cloud_read_adapter_when_shorter_than_configured_timeout() {
-    // Arrange: the one-second provider response stays well beyond both the
-    // 5 ms operation budget and the scheduler-tolerant 500 ms assertion.
-    let storage = CloudStorage::new_with_timeout(
-        Arc::new(DelayedMissingGetBackend),
-        "tenant".to_string(),
-        std::time::Duration::from_secs(1),
-    );
-    let (sender, receiver) = mpsc::channel();
-
-    // Act
-    let started = std::time::Instant::now();
-    StorageBackend::submit_read_with_timeout(
-        &storage,
-        "metadata/manifest.json",
-        std::time::Duration::from_millis(5),
-        sender,
-    );
-    let event = receiver.recv().expect("receive bounded adapter result");
-
-    // Assert
-    assert!(started.elapsed() < std::time::Duration::from_millis(500));
-    assert!(matches!(
-        event,
-        StorageEvent::ReadComplete {
+        StorageEvent::HeadComplete {
             result: StorageOutcome::Err(message),
             ..
         } if message.to_string().contains("timed out")
@@ -1654,7 +1592,7 @@ fn should_bound_provider_read_requests_by_caller_timeout() {
         std::time::Duration::from_millis(250),
         head_sender,
     );
-    StorageBackend::submit_list(&storage, "sst/", list_sender);
+    storage.submit_list("sst/", list_sender);
 
     // Assert
     assert!(matches!(
@@ -1666,10 +1604,7 @@ fn should_bound_provider_read_requests_by_caller_timeout() {
     ));
     assert!(matches!(
         list_receiver.recv_timeout(std::time::Duration::from_secs(1)),
-        Ok(StorageEvent::ListComplete {
-            result: StorageOutcome::Ok(_),
-            ..
-        })
+        Ok(CloudEvent::List { result: Ok(_), .. })
     ));
     assert_eq!(
         HeaderRecordingBackend::timeout_header(&backend.heads.lock()[0]).as_deref(),

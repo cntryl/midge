@@ -36,6 +36,8 @@ pub enum CloudEvent {
         result: CloudOutcome<()>,
     },
     List {
+        /// The listed provider prefix, kept for diagnostics.
+        #[cfg_attr(not(test), allow(dead_code))]
         prefix: String,
         result: CloudOutcome<Vec<String>>,
     },

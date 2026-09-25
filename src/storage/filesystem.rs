@@ -222,10 +222,6 @@ enum Publish {
     CreateNew,
 }
 
-fn is_temp_object_name(name: &str) -> bool {
-    name.starts_with('.') && name.contains(TEMP_OBJECT_MARKER)
-}
-
 /// Make a directory's entries durable. Windows persists them with the file
 /// metadata journal and cannot open directories for syncing.
 #[cfg_attr(not(unix), allow(clippy::unnecessary_wraps))]
@@ -626,35 +622,6 @@ impl StorageBackend for FileSystem {
         let _ = callback.send(result);
     }
 
-    fn submit_read(&self, key: &str, callback: StorageCallback) {
-        let full_path = match self.full_path(key) {
-            Ok(path) => path,
-            Err(error) => {
-                let _ = callback.send(StorageEvent::ReadComplete {
-                    key: key.to_string(),
-                    result: StorageOutcome::Err(error),
-                });
-                return;
-            }
-        };
-
-        let outcome = match fs::read(&full_path) {
-            Ok(bytes) => StorageOutcome::Ok(bytes),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                StorageOutcome::Err(crate::storage::StorageError::not_found(format!(
-                    "read {}: {e}",
-                    full_path.display()
-                )))
-            }
-            Err(e) => StorageOutcome::Err(format!("read {}: {e}", full_path.display()).into()),
-        };
-
-        let _ = callback.send(StorageEvent::ReadComplete {
-            key: key.to_string(),
-            result: outcome,
-        });
-    }
-
     fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback) {
         let full_path = match self.full_path(key) {
             Ok(path) => path,
@@ -914,45 +881,6 @@ impl StorageBackend for FileSystem {
         let _ = callback.send(StorageEvent::HeadComplete {
             key: key.to_string(),
             result,
-        });
-    }
-
-    fn submit_list(&self, prefix: &str, callback: StorageCallback) {
-        let full = match self.full_path(prefix) {
-            Ok(path) => path,
-            Err(error) => {
-                let _ = callback.send(StorageEvent::ListComplete {
-                    prefix: prefix.to_string(),
-                    result: StorageOutcome::Err(error),
-                });
-                return;
-            }
-        };
-
-        let outcome = if full.is_dir() {
-            match fs::read_dir(&full) {
-                Ok(iter) => {
-                    let mut items: Vec<String> = Vec::new();
-
-                    for entry in iter.flatten() {
-                        if let Some(name) = entry.file_name().to_str() {
-                            if name != ".midge-locks" && !is_temp_object_name(name) {
-                                items.push(name.to_string());
-                            }
-                        }
-                    }
-
-                    StorageOutcome::Ok(items)
-                }
-                Err(e) => StorageOutcome::Err(format!("list {}: {e}", full.display()).into()),
-            }
-        } else {
-            StorageOutcome::Ok(Vec::new())
-        };
-
-        let _ = callback.send(StorageEvent::ListComplete {
-            prefix: prefix.to_string(),
-            result: outcome,
         });
     }
 }
@@ -1253,19 +1181,13 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_read("test.txt", tx);
+        fs.submit_read_with_metadata("test.txt", std::time::Duration::from_secs(5), tx);
         let event = rx.recv().unwrap();
 
         // Assert
         match event {
-            StorageEvent::ReadComplete { key, result } => {
-                assert_eq!(key, "test.txt");
-                match result {
-                    StorageOutcome::Ok(content) => assert_eq!(content, data),
-                    StorageOutcome::Err(e) => panic!("Read failed: {e}"),
-                }
-            }
-            _ => panic!("Expected ReadComplete"),
+            Ok((content, _metadata)) => assert_eq!(content, data),
+            Err(e) => panic!("Read failed: {e}"),
         }
     }
 
@@ -1277,16 +1199,11 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_read("nonexistent.txt", tx);
+        fs.submit_read_with_metadata("nonexistent.txt", std::time::Duration::from_secs(5), tx);
         let event = rx.recv().unwrap();
 
         // Assert
-        match event {
-            StorageEvent::ReadComplete { result, .. } => {
-                assert!(result.is_err());
-            }
-            _ => panic!("Expected ReadComplete"),
-        }
+        assert!(matches!(event, Err(error) if error.is_not_found()));
     }
 
     #[test]
@@ -1299,16 +1216,13 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_read("large.bin", tx);
+        fs.submit_read_with_metadata("large.bin", std::time::Duration::from_secs(5), tx);
         let event = rx.recv().unwrap();
 
         // Assert
         match event {
-            StorageEvent::ReadComplete { result, .. } => match result {
-                StorageOutcome::Ok(content) => assert_eq!(content, data),
-                StorageOutcome::Err(e) => panic!("Read failed: {e}"),
-            },
-            _ => panic!("Expected ReadComplete"),
+            Ok((content, _metadata)) => assert_eq!(content, data),
+            Err(e) => panic!("Read failed: {e}"),
         }
     }
 
@@ -1321,16 +1235,13 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_read("empty.txt", tx);
+        fs.submit_read_with_metadata("empty.txt", std::time::Duration::from_secs(5), tx);
         let event = rx.recv().unwrap();
 
         // Assert
         match event {
-            StorageEvent::ReadComplete { result, .. } => match result {
-                StorageOutcome::Ok(content) => assert!(content.is_empty()),
-                StorageOutcome::Err(e) => panic!("Read failed: {e}"),
-            },
-            _ => panic!("Expected ReadComplete"),
+            Ok((content, _metadata)) => assert!(content.is_empty()),
+            Err(e) => panic!("Read failed: {e}"),
         }
     }
 
@@ -1344,16 +1255,13 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_read("binary.bin", tx);
+        fs.submit_read_with_metadata("binary.bin", std::time::Duration::from_secs(5), tx);
         let event = rx.recv().unwrap();
 
         // Assert
         match event {
-            StorageEvent::ReadComplete { result, .. } => match result {
-                StorageOutcome::Ok(content) => assert_eq!(content, data),
-                StorageOutcome::Err(e) => panic!("Read failed: {e}"),
-            },
-            _ => panic!("Expected ReadComplete"),
+            Ok((content, _metadata)) => assert_eq!(content, data),
+            Err(e) => panic!("Read failed: {e}"),
         }
     }
 
@@ -1481,106 +1389,6 @@ mod tests {
     // =========== List Tests ===========
 
     #[test]
-    fn should_list_directory_contents() {
-        // Arrange
-        let temp_dir = TempDir::new().unwrap();
-        std::fs::write(temp_dir.path().join("file1.txt"), b"data1").unwrap();
-        std::fs::write(temp_dir.path().join("file2.txt"), b"data2").unwrap();
-        let fs = FileSystem::new(temp_dir.path()).unwrap();
-        let (tx, rx) = mpsc::channel();
-
-        // Act
-        fs.submit_list("", tx);
-        let event = rx.recv().unwrap();
-
-        // Assert
-        match event {
-            StorageEvent::ListComplete { result, .. } => match result {
-                StorageOutcome::Ok(items) => {
-                    assert_eq!(items.len(), 2);
-                    assert!(items.contains(&"file1.txt".to_string()));
-                    assert!(items.contains(&"file2.txt".to_string()));
-                }
-                StorageOutcome::Err(e) => panic!("List failed: {e}"),
-            },
-            _ => panic!("Expected ListComplete"),
-        }
-    }
-
-    #[test]
-    fn should_hide_internal_process_lock_directory_from_list_results() {
-        // Arrange
-        let temp_dir = TempDir::new().unwrap();
-        let fs = FileSystem::new(temp_dir.path()).unwrap();
-        let (write_tx, write_rx) = mpsc::channel();
-        fs.submit_write("visible.txt", b"data".to_vec(), write_tx);
-        assert!(matches!(
-            write_rx.recv().expect("write response"),
-            StorageEvent::WriteComplete {
-                result: StorageOutcome::Ok(()),
-                ..
-            }
-        ));
-        let (list_tx, list_rx) = mpsc::channel();
-
-        // Act
-        fs.submit_list("", list_tx);
-
-        // Assert
-        match list_rx.recv().expect("list response") {
-            StorageEvent::ListComplete {
-                result: StorageOutcome::Ok(items),
-                ..
-            } => {
-                assert_eq!(items, vec!["visible.txt".to_string()]);
-            }
-            other => panic!("unexpected list response: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn should_list_empty_directory() {
-        // Arrange
-        let temp_dir = TempDir::new().unwrap();
-        let fs = FileSystem::new(temp_dir.path()).unwrap();
-        let (tx, rx) = mpsc::channel();
-
-        // Act
-        fs.submit_list("", tx);
-        let event = rx.recv().unwrap();
-
-        // Assert
-        match event {
-            StorageEvent::ListComplete { result, .. } => match result {
-                StorageOutcome::Ok(items) => assert!(items.is_empty()),
-                StorageOutcome::Err(e) => panic!("List failed: {e}"),
-            },
-            _ => panic!("Expected ListComplete"),
-        }
-    }
-
-    #[test]
-    fn should_list_nonexistent_directory() {
-        // Arrange
-        let temp_dir = TempDir::new().unwrap();
-        let fs = FileSystem::new(temp_dir.path()).unwrap();
-        let (tx, rx) = mpsc::channel();
-
-        // Act
-        fs.submit_list("nonexistent", tx);
-        let event = rx.recv().unwrap();
-
-        // Assert
-        match event {
-            StorageEvent::ListComplete { result, .. } => match result {
-                StorageOutcome::Ok(items) => assert!(items.is_empty()),
-                StorageOutcome::Err(e) => panic!("List failed: {e}"),
-            },
-            _ => panic!("Expected ListComplete"),
-        }
-    }
-
-    #[test]
     fn should_sanitize_path_traversal() {
         // Arrange
         let temp_dir = TempDir::new().unwrap();
@@ -1703,22 +1511,10 @@ mod atomic_publish_tests {
 
     fn read(fs: &FileSystem, key: &str) -> StorageOutcome<Vec<u8>> {
         let (tx, rx) = std::sync::mpsc::channel();
-        fs.submit_read(key, tx);
+        fs.submit_read_with_metadata(key, std::time::Duration::from_secs(5), tx);
         match rx.recv().expect("read completion") {
-            StorageEvent::ReadComplete { result, .. } => result,
-            other => panic!("unexpected event {other:?}"),
-        }
-    }
-
-    fn list(fs: &FileSystem, prefix: &str) -> Vec<String> {
-        let (tx, rx) = std::sync::mpsc::channel();
-        fs.submit_list(prefix, tx);
-        match rx.recv().expect("list completion") {
-            StorageEvent::ListComplete {
-                result: StorageOutcome::Ok(items),
-                ..
-            } => items,
-            other => panic!("unexpected event {other:?}"),
+            Ok((bytes, _metadata)) => StorageOutcome::Ok(bytes),
+            Err(error) => StorageOutcome::Err(error),
         }
     }
 
@@ -1740,7 +1536,6 @@ mod atomic_publish_tests {
         assert!(
             matches!(read(&fs, "wal/1.wal"), StorageOutcome::Err(error) if error.is_not_found())
         );
-        assert!(list(&fs, "wal").is_empty(), "temp files must not be listed");
         assert!(matches!(
             write(&fs, "wal/1.wal", b"segment", create()),
             StorageOutcome::Ok(())
