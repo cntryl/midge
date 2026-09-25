@@ -67,7 +67,7 @@ fn complete_compaction(el: &mut EventLoop, worker: &crossbeam::channel::Receiver
 }
 
 fn complete_flush(el: &mut EventLoop) {
-    for phase in ["build", "publish"] {
+    for phase in ["build", "publish", "mirror"] {
         let completion = el
             .flush_worker_result_rx
             .recv_timeout(Duration::from_secs(3))

@@ -1,7 +1,7 @@
 use super::EventLoop;
 use crate::runtime::actors::flush::{
-    FlushBuildCompletion, FlushBuildOutput, FlushIdentity, FlushPublicationDelta,
-    FlushPublishCompletion, FlushPublishTask, FlushWorkerResult,
+    FlushBuildCompletion, FlushBuildOutput, FlushIdentity, FlushMirrorCompletion, FlushMirrorTask,
+    FlushPublicationDelta, FlushPublishCompletion, FlushPublishTask, FlushWorkerResult,
 };
 use crate::runtime::state::{ImmutableFlush, ImmutableFlushPhase};
 use crate::runtime::RuntimeResponse;
@@ -152,7 +152,7 @@ impl EventLoop {
                 ) {
                     Ok(reservation) => reservation,
                     Err(error) => {
-                        self.fail_flush_pipeline(flush.flush_id, None, &error, true);
+                        self.fail_flush_pipeline(flush.flush_id, None, &error);
                         return;
                     }
                 };
@@ -184,7 +184,7 @@ impl EventLoop {
             staging_path,
             self.hybrid_storage.clone(),
         ) {
-            self.fail_flush_pipeline(flush.flush_id, None, &error, false);
+            self.fail_flush_pipeline(flush.flush_id, None, &error);
         }
     }
 
@@ -196,14 +196,13 @@ impl EventLoop {
                 &crate::common::MidgeError::Internal(
                     "built flush has no canonical SST identity".to_string(),
                 ),
-                false,
             );
             return;
         };
         // The worker's result is installed onto the in-memory manifest, so
         // memory must be current before another publication starts (#500).
         if let Err(error) = self.state.retry_metadata_reload() {
-            self.fail_flush_pipeline(flush.flush_id, build.reservation, &error, false);
+            self.fail_flush_pipeline(flush.flush_id, build.reservation, &error);
             return;
         }
         let publication_owner =
@@ -216,26 +215,27 @@ impl EventLoop {
             }
             return;
         }
+        if let Err(error) = self.validate_flush_completion(build.identity) {
+            self.fail_flush_pipeline(flush.flush_id, build.reservation, &error);
+            return;
+        }
         let task = FlushPublishTask {
             build,
             sst_name,
             sst_seq,
             sst_dir: self.state.sst_dir.clone(),
             fs: Arc::clone(&self.state.fs),
-            manifest_store: Arc::clone(&self.state.manifest_store),
             storage: Arc::new(crate::runtime::actors::flush::HybridFlushStorage::new(
                 self.hybrid_storage.clone(),
                 self.cloud_metadata_storage.clone(),
             )),
-            metadata_publication_lock: self.metadata_publication_lock.clone(),
             lease_healthy: self.fencing.lease_healthy.clone(),
             leader_store: self.fencing.leader_store.clone(),
             leader_holder_id: self.fencing.leader_holder_id.clone(),
-            runtime_response_timeout: self.runtime_response_timeout,
         };
         if let Err(error) = self.flush_actor.submit_publish(task) {
             self.publication_gate.release(&publication_owner);
-            self.fail_flush_pipeline(flush.flush_id, None, &error, false);
+            self.fail_flush_pipeline(flush.flush_id, None, &error);
         }
     }
 
@@ -244,6 +244,9 @@ impl EventLoop {
             FlushWorkerResult::Build(completion) => self.handle_flush_build_completion(completion),
             FlushWorkerResult::Publish(completion) => {
                 self.handle_flush_publish_completion(completion)
+            }
+            FlushWorkerResult::Mirror(completion) => {
+                self.handle_flush_mirror_completion(completion)
             }
         };
         if !should_continue {
@@ -277,22 +280,12 @@ impl EventLoop {
                 "flush {} build completion no longer owns its immutable",
                 completion.identity.flush_id
             ));
-            self.fail_flush_pipeline(
-                completion.identity.flush_id,
-                completion.reservation,
-                &error,
-                false,
-            );
+            self.fail_flush_pipeline(completion.identity.flush_id, completion.reservation, &error);
             return false;
         }
         if let Err(error) = self.validate_flush_completion(completion.identity) {
             self.cleanup_failed_flush_build(&mut completion);
-            self.fail_flush_pipeline(
-                completion.identity.flush_id,
-                completion.reservation,
-                &error,
-                false,
-            );
+            self.fail_flush_pipeline(completion.identity.flush_id, completion.reservation, &error);
             return false;
         }
         if completion.result.is_err() {
@@ -309,7 +302,6 @@ impl EventLoop {
                 completion.identity.flush_id,
                 completion.reservation,
                 &error,
-                false,
             ),
         }
         true
@@ -406,7 +398,7 @@ impl EventLoop {
         let sst_seq = match self.reserve_flush_sst_seq(identity.cf_id) {
             Ok(sst_seq) => sst_seq,
             Err(error) => {
-                self.fail_flush_pipeline(identity.flush_id, reservation, &error, true);
+                self.fail_flush_pipeline(identity.flush_id, reservation, &error);
                 return;
             }
         };
@@ -423,7 +415,7 @@ impl EventLoop {
                     "flush {} lost immutable ownership before publication",
                     identity.flush_id
                 ));
-                self.fail_flush_pipeline(identity.flush_id, reservation, &error, false);
+                self.fail_flush_pipeline(identity.flush_id, reservation, &error);
                 return;
             };
             flush.sst_name = Some(sst_name);
@@ -464,12 +456,6 @@ impl EventLoop {
             .flush_metrics
             .publish_ns_max
             .max(completion.publish_ns);
-        self.publication_gate.release(
-            &crate::runtime::event_loop::coordination::ManifestPublicationOwner::Flush {
-                flush_id: completion.identity.flush_id,
-            },
-        );
-
         if let Err(error) = self.validate_flush_completion(completion.identity) {
             // Busy and Timeout both mean the store did not answer: authority
             // is unknown, not lost.
@@ -488,12 +474,16 @@ impl EventLoop {
                     completion.identity.flush_id,
                     completion.reservation,
                     &error,
-                    true,
                 );
                 return true;
             }
             self.settle_stale_publish_reservation(&completion);
             self.flush_actor.finish_pipeline();
+            self.publication_gate.release(
+                &crate::runtime::event_loop::coordination::ManifestPublicationOwner::Flush {
+                    flush_id: completion.identity.flush_id,
+                },
+            );
             self.fail_flush_waiters(
                 completion.identity.cf_id,
                 completion.identity.sequence,
@@ -502,12 +492,105 @@ impl EventLoop {
             return false;
         }
         match completion.result {
-            Ok(delta) => self.install_flush_publication(&delta, completion.reservation),
+            Ok(delta) => {
+                if let Err(error) = self.commit_flush_metadata(&delta) {
+                    self.state.fence_metadata_until_reloaded();
+                    self.fail_flush_pipeline(
+                        completion.identity.flush_id,
+                        completion.reservation,
+                        &error,
+                    );
+                    return true;
+                }
+                if let Err(error) = self.submit_flush_mirror(delta, completion.reservation) {
+                    self.fail_flush_pipeline(
+                        completion.identity.flush_id,
+                        completion.reservation,
+                        &error,
+                    );
+                    return true;
+                }
+                return false;
+            }
             Err(error) => self.fail_flush_pipeline(
                 completion.identity.flush_id,
                 completion.reservation,
                 &error,
-                true,
+            ),
+        }
+        true
+    }
+
+    fn commit_flush_metadata(
+        &mut self,
+        delta: &FlushPublicationDelta,
+    ) -> crate::common::MidgeResult<()> {
+        self.validate_flush_completion(delta.identity)?;
+        self.state.record_flush_publication_intent(
+            delta.identity.cf_id,
+            delta.identity.sequence,
+            &delta.file_meta,
+        )?;
+        self.state.commit_flush_publication(
+            delta.identity.cf_id,
+            delta.identity.sequence,
+            &delta.file_meta,
+            delta.next_sst_seq,
+            self.hybrid_storage.is_some(),
+        )?;
+        self.invalidate_sst_read_views();
+        Ok(())
+    }
+
+    fn submit_flush_mirror(
+        &mut self,
+        delta: FlushPublicationDelta,
+        reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
+    ) -> crate::common::MidgeResult<()> {
+        let task = FlushMirrorTask {
+            delta,
+            reservation,
+            fs: Arc::clone(&self.state.fs),
+            storage: Arc::new(crate::runtime::actors::flush::HybridFlushStorage::new(
+                self.hybrid_storage.clone(),
+                self.cloud_metadata_storage.clone(),
+            )),
+            metadata_publication_lock: self.metadata_publication_lock.clone(),
+            lease_healthy: self.fencing.lease_healthy.clone(),
+            leader_store: self.fencing.leader_store.clone(),
+            leader_holder_id: self.fencing.leader_holder_id.clone(),
+            manifest_sequence: self.state.manifest.last_persisted_sequence,
+            runtime_response_timeout: self.runtime_response_timeout,
+        };
+        self.flush_actor.submit_mirror(task)
+    }
+
+    fn handle_flush_mirror_completion(&mut self, completion: FlushMirrorCompletion) -> bool {
+        if let Err(error) = self.validate_flush_completion(completion.delta.identity) {
+            self.fail_flush_pipeline(
+                completion.delta.identity.flush_id,
+                completion.reservation,
+                &error,
+            );
+            return true;
+        }
+        match completion.result {
+            Ok(cloud_metadata_published) => {
+                self.publication_gate.release(
+                    &crate::runtime::event_loop::coordination::ManifestPublicationOwner::Flush {
+                        flush_id: completion.delta.identity.flush_id,
+                    },
+                );
+                self.install_flush_publication(
+                    &completion.delta,
+                    completion.reservation,
+                    cloud_metadata_published,
+                );
+            }
+            Err(error) => self.fail_flush_pipeline(
+                completion.delta.identity.flush_id,
+                completion.reservation,
+                &error,
             ),
         }
         true
@@ -556,6 +639,7 @@ impl EventLoop {
         &mut self,
         delta: &FlushPublicationDelta,
         reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
+        cloud_metadata_published: bool,
     ) {
         let Some((cf_id, flush)) = self.state.immutable_flush_by_id(delta.identity.flush_id) else {
             if let (Some(hybrid), Some(token)) = (&self.hybrid_storage, reservation) {
@@ -565,37 +649,6 @@ impl EventLoop {
             return;
         };
         let frozen = Arc::clone(&flush.memtable);
-        self.state
-            .manifest
-            .next_sst_seqs
-            .entry(cf_id)
-            .and_modify(|next| *next = (*next).max(delta.next_sst_seq))
-            .or_insert(delta.next_sst_seq);
-        self.state.manifest.add_file(crate::metadata::FileMeta {
-            name: delta.file_meta.name.clone(),
-            level: delta.file_meta.level,
-            size_bytes: delta.file_meta.size_bytes,
-            content_crc32c: delta.file_meta.content_crc32c,
-            cf_id: delta.file_meta.cf_id,
-            smallest_key: delta.file_meta.smallest_key.clone(),
-            largest_key: delta.file_meta.largest_key.clone(),
-            smallest_seq: delta.file_meta.smallest_seq,
-            largest_seq: delta.file_meta.largest_seq,
-            key_bounds_complete: delta.file_meta.key_bounds_complete,
-            ..Default::default()
-        });
-        self.invalidate_sst_read_views();
-        self.state.manifest.last_persisted_sequence = self
-            .state
-            .manifest
-            .last_persisted_sequence
-            .max(delta.identity.sequence);
-        if let Some(checkpoint) = delta.journal_checkpoint {
-            checkpoint.advance(&mut self.state.manifest);
-        }
-        if delta.persistence_anomaly {
-            self.state.mark_persistence_anomaly();
-        }
         if let Some(removed_size) = self.state.complete_immutable_flush(cf_id, &frozen) {
             self.state.total_memtable_bytes =
                 self.state.total_memtable_bytes.saturating_sub(removed_size);
@@ -606,7 +659,7 @@ impl EventLoop {
         if let (Some(hybrid), Some(token)) = (&self.hybrid_storage, reservation) {
             hybrid.flush_completed_with_token(token, delta.file_meta.size_bytes);
         }
-        if delta.cloud_metadata_published {
+        if cloud_metadata_published {
             self.evict_published_sst_cache(std::slice::from_ref(&delta.file_meta.name));
         }
         self.flush_actor.finish_pipeline();
@@ -616,7 +669,7 @@ impl EventLoop {
         self.complete_flush_waiters(cf_id);
         self.schedule_compaction_after_flush_publication(&delta.file_meta.name);
         crate::failpoints::fail_point!("midge::flush_worker::before_wal_prune");
-        if delta.cloud_metadata_published {
+        if cloud_metadata_published {
             self.prune_cloud_wal_segments_covered_by_manifest();
         } else {
             self.prune_local_wal_segments_covered_by_manifest();
@@ -935,7 +988,6 @@ impl EventLoop {
         flush_id: u64,
         reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
         error: &crate::common::MidgeError,
-        publication_phase: bool,
     ) {
         let identity = self
             .state
@@ -957,25 +1009,9 @@ impl EventLoop {
             );
         }
         self.flush_actor.finish_pipeline();
-        let released_publication = self.publication_gate.release(
+        self.publication_gate.release(
             &crate::runtime::event_loop::coordination::ManifestPublicationOwner::Flush { flush_id },
         );
-        if publication_phase && released_publication {
-            // The worker may have already appended the manifest journal batch
-            // or the durable intent before failing, leaving disk ahead of the
-            // in-memory copies this loop publishes from. Reconcile before the
-            // gate opens, or the next publication overwrites those edits. If
-            // the reload fails, state fences every publication from memory
-            // until a later reload succeeds.
-            if let Err(error) = self.state.reload_persisted_metadata() {
-                tracing::error!(
-                    flush_id,
-                    %error,
-                    "failed to reload persisted metadata after a failed publication; \
-                     publication is fenced until a reload succeeds"
-                );
-            }
-        }
         let retry_after = self.state.mark_immutable_flush_failed(flush_id);
         tracing::warn!(flush_id, ?retry_after, %error, "flush pipeline failed; immutable retained");
         if let Some((cf_id, sequence)) = identity {
@@ -1710,8 +1746,7 @@ mod tests {
     }
 
     #[test]
-    fn should_fence_publication_when_reload_fails_after_failed_flush_publication(
-    ) -> crate::common::MidgeResult<()> {
+    fn should_not_reload_metadata_after_flush_worker_failure() -> crate::common::MidgeResult<()> {
         // Arrange
         let directory = tempfile::tempdir()?;
         let (mut event_loop, _hybrid) = event_loop_with_hybrid_storage(&directory)?;
@@ -1739,8 +1774,72 @@ mod tests {
             flush_id,
             None,
             &crate::common::MidgeError::Internal("worker failed".into()),
-            true,
         );
+
+        // Assert
+        assert!(!event_loop.publication_gate.is_active());
+        assert!(!event_loop.state.persistence_anomaly_detected());
+        assert!(event_loop.state.ensure_metadata_current().is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn should_fence_metadata_when_flush_commit_result_is_uncertain(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let directory = tempfile::tempdir()?;
+        let (mut event_loop, _hybrid) = event_loop_with_hybrid_storage(&directory)?;
+        event_loop.state.sequence = 1;
+        event_loop
+            .state
+            .get_cf(0)
+            .expect("family")
+            .memtable
+            .put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)?;
+        let flush_id = event_loop.freeze_active_memtable(0)?.expect("frozen");
+        let (_, flush) = event_loop
+            .state
+            .immutable_flush_by_id(flush_id)
+            .expect("owned");
+        let identity = FlushIdentity {
+            flush_id,
+            writer_epoch: flush.writer_epoch,
+            cf_id: 0,
+            sequence: flush.sequence,
+        };
+        std::fs::write(
+            event_loop
+                .state
+                .db_path
+                .join(crate::metadata::files::MANIFEST_SNAPSHOT),
+            b"not a manifest",
+        )?;
+        event_loop.publication_gate.try_acquire(
+            crate::runtime::event_loop::coordination::ManifestPublicationOwner::Flush { flush_id },
+        );
+
+        // Act
+        event_loop.handle_flush_publish_completion(FlushPublishCompletion {
+            identity,
+            reservation: None,
+            publish_ns: 0,
+            result: Ok(FlushPublicationDelta {
+                identity,
+                file_meta: crate::runtime::FileMeta {
+                    name: crate::cloud_layout::file_name(0, 0, 1),
+                    level: 0,
+                    size_bytes: 10,
+                    content_crc32c: Some(1),
+                    cf_id: 0,
+                    smallest_key: Some(b"key".to_vec()),
+                    largest_key: Some(b"key".to_vec()),
+                    smallest_seq: Some(1),
+                    largest_seq: Some(1),
+                    key_bounds_complete: true,
+                },
+                next_sst_seq: 2,
+            }),
+        });
 
         // Assert
         assert!(!event_loop.publication_gate.is_active());
@@ -1777,13 +1876,11 @@ mod tests {
             crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune;
         assert!(event_loop.publication_gate.try_acquire(prune_owner.clone()));
 
-        // Act: this flush never acquired the gate, but its failure is marked
-        // as publication-related by the reservation path.
+        // Act: this flush never acquired the gate.
         event_loop.fail_flush_pipeline(
             flush_id,
             None,
             &crate::common::MidgeError::Internal("flush admission failed".into()),
-            true,
         );
 
         // Assert: a non-owner cannot open the gate or trigger a metadata reload.
@@ -2041,13 +2138,10 @@ mod tests {
                 key_bounds_complete: true,
             },
             next_sst_seq: 2,
-            cloud_metadata_published: false,
-            persistence_anomaly: false,
-            journal_checkpoint: None,
         };
 
         // Act
-        event_loop.install_flush_publication(&delta, Some(reservation));
+        event_loop.install_flush_publication(&delta, Some(reservation), false);
 
         // Assert
         assert_eq!(hybrid.budget_snapshot().total_committed_bytes, 128);
@@ -2807,9 +2901,6 @@ mod tests {
                         key_bounds_complete: true,
                     },
                     next_sst_seq: 2,
-                    cloud_metadata_published: false,
-                    persistence_anomaly: false,
-                    journal_checkpoint: None,
                 }),
             });
 

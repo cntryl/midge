@@ -5,7 +5,8 @@ use crate::common::{MidgeError, MidgeResult};
 use crate::io::{Fs, FsPath};
 use crate::memtable::SkipListMemtable;
 use crate::runtime::actors::flush::{
-    FlushActor, FlushBuildOutput, FlushIdentity, FlushPublishTask, FlushWorkerResult,
+    FlushActor, FlushBuildOutput, FlushIdentity, FlushMirrorTask, FlushPublicationDelta,
+    FlushPublishTask, FlushWorkerResult,
 };
 use crate::wal::recovery::streaming::{replay_wal_with_checkpoint, StreamingReplayLimits};
 use std::collections::HashMap;
@@ -239,16 +240,13 @@ fn checkpoint_family(
             sst_seq,
             sst_dir: state.sst_dir.clone(),
             fs: Arc::clone(&state.fs),
-            manifest_store: Arc::clone(&state.manifest_store),
             storage: Arc::new(crate::runtime::actors::flush::HybridFlushStorage::new(
                 config.hybrid_storage.clone(),
                 config.cloud_metadata_storage.clone(),
             )),
-            metadata_publication_lock: config.metadata_publication_lock.clone(),
             lease_healthy: config.lease_healthy.clone(),
             leader_store: config.leader_store.clone(),
             leader_holder_id: config.leader_holder_id.clone(),
-            runtime_response_timeout: config.runtime_response_timeout,
         })?;
         let FlushWorkerResult::Publish(completion) = rx
             .recv()
@@ -262,11 +260,67 @@ fn checkpoint_family(
     })?;
     let delta = completion.result?;
     actor.finish_pipeline();
+    let cloud_metadata_published =
+        commit_and_mirror_checkpoint(state, config, actor, rx, &delta, completion.reservation)?;
     super::timing::measure("recovery_checkpoint_installation", || {
-        install_checkpoint_output(materialized, &delta, completion.reservation)
+        install_checkpoint_output(
+            materialized,
+            &delta,
+            completion.reservation,
+            cloud_metadata_published,
+        )
     })?;
     crate::failpoints::fail_point!("midge::recovery::after_checkpoint");
     Ok(())
+}
+
+fn commit_and_mirror_checkpoint(
+    state: &mut crate::runtime::state::RuntimeState,
+    config: &crate::runtime::RuntimeConfig,
+    actor: &mut FlushActor,
+    rx: &crossbeam::channel::Receiver<FlushWorkerResult>,
+    delta: &FlushPublicationDelta,
+    reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
+) -> MidgeResult<bool> {
+    validate_lease(config)?;
+    state.record_flush_publication_intent(
+        delta.identity.cf_id,
+        delta.identity.sequence,
+        &delta.file_meta,
+    )?;
+    state.commit_flush_publication(
+        delta.identity.cf_id,
+        delta.identity.sequence,
+        &delta.file_meta,
+        delta.next_sst_seq,
+        config.hybrid_storage.is_some(),
+    )?;
+    actor.submit_mirror(FlushMirrorTask {
+        delta: delta.clone(),
+        reservation,
+        fs: Arc::clone(&state.fs),
+        storage: Arc::new(crate::runtime::actors::flush::HybridFlushStorage::new(
+            config.hybrid_storage.clone(),
+            config.cloud_metadata_storage.clone(),
+        )),
+        metadata_publication_lock: config.metadata_publication_lock.clone(),
+        lease_healthy: config.lease_healthy.clone(),
+        leader_store: config.leader_store.clone(),
+        leader_holder_id: config.leader_holder_id.clone(),
+        manifest_sequence: state.manifest.last_persisted_sequence,
+        runtime_response_timeout: config.runtime_response_timeout,
+    })?;
+    let FlushWorkerResult::Mirror(mirror) = rx
+        .recv()
+        .map_err(|error| MidgeError::Internal(format!("recovery flush mirror: {error}")))?
+    else {
+        return Err(MidgeError::Internal(
+            "unexpected recovery mirror completion".into(),
+        ));
+    };
+    let cloud_metadata_published = mirror.result?;
+    actor.finish_pipeline();
+    Ok(cloud_metadata_published)
 }
 
 fn reserve_sst_sequence(
@@ -313,23 +367,16 @@ fn install_checkpoint_output(
     materialized: &mut RuntimeStorageMaterialization,
     delta: &crate::runtime::actors::flush::FlushPublicationDelta,
     reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
+    cloud_metadata_published: bool,
 ) -> MidgeResult<()> {
     let state = &mut materialized.state;
     let config = &materialized.runtime_config;
     let name = &delta.file_meta.name;
-    state.manifest = crate::metadata::ManifestPersistence::load_with_fs_and_policy(
-        &state.fs,
-        crate::config::RecoveryPolicy::Strict,
-    )
-    .map_err(MidgeError::Internal)?;
-    if delta.persistence_anomaly {
-        state.mark_persistence_anomaly();
-    }
     if let Some(storage) = &config.hybrid_storage {
         if let Some(token) = reservation {
             storage.flush_completed_with_token(token, delta.file_meta.size_bytes);
         }
-        if delta.cloud_metadata_published {
+        if cloud_metadata_published {
             std::fs::remove_file(state.sst_dir.join(name))?;
             storage.evict_local_object_cache(&crate::cloud_layout::object_key(name))?;
             storage.reconcile_local_disk_usage(

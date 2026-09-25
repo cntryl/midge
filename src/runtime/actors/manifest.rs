@@ -624,11 +624,10 @@ mod tests {
         assert!(!logs.contains("stale caller"), "{logs}");
     }
 
-    /// Review of #544: the flush worker's snapshot is built from disk, so it
-    /// can hold an orphan journal edit memory never applied. Installing the
-    /// worker's checkpoint must not let the next memory snapshot drop it.
+    /// The owned flush commit must keep an orphan journal edit that was
+    /// appended before a different metadata operation failed.
     #[test]
-    fn should_keep_orphan_journal_edit_when_flush_checkpoint_installs_before_persist() {
+    fn should_keep_orphan_journal_edit_when_flush_owner_commits() {
         // Arrange
         let tmp = tempfile::tempdir().expect("create tmpdir");
         let mut state = crate::runtime::state::RuntimeState::new(tmp.path().to_path_buf(), false);
@@ -645,33 +644,15 @@ mod tests {
                 created_at: 1,
             })
             .expect("orphan append whose writer then failed");
-        // The worker: load from disk, journal and apply its own edit, snapshot.
-        let mut worker = crate::metadata::ManifestPersistence::load(&state.db_path).expect("load");
-        let base_edit_id = worker.edit_checkpoint_id;
-        let flushed = crate::metadata::FileMeta {
-            name: crate::cloud_layout::file_name(0, 0, 2),
-            size_bytes: 10,
-            ..Default::default()
-        };
-        state
-            .manifest_store
-            .append(&crate::metadata::ManifestEdit::AddSst(flushed.clone()))
-            .expect("worker append");
-        worker.add_file(flushed.clone());
-        let written = state
-            .manifest_store
-            .save_snapshot(&worker)
-            .expect("worker snapshot");
-        state.manifest.add_file(flushed);
+        let flushed = sst_meta(2);
 
         // Act
-        if written.caller_was_current {
-            crate::runtime::actors::flush::FlushJournalCheckpoint {
-                base_edit_id,
-                written_edit_id: written.edit_checkpoint_id,
-            }
-            .advance(&mut state.manifest);
-        }
+        state
+            .record_flush_publication_intent(0, 2, &flushed)
+            .expect("record output intent");
+        state
+            .commit_flush_publication(0, 2, &flushed, 3, false)
+            .expect("commit flush");
         ManifestActor::persist(&mut state).expect("persist after flush install");
 
         // Assert
@@ -680,5 +661,6 @@ mod tests {
             reloaded.column_families.iter().any(|cf| cf.id == 7),
             "orphan journal edit was truncated away"
         );
+        assert!(reloaded.files.iter().any(|file| file.name == flushed.name));
     }
 }

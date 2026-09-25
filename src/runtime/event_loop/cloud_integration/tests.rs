@@ -159,7 +159,7 @@ fn should_give_ready_compaction_a_turn_before_continuing_flushes() -> crate::com
         el.flush_actor.is_inflight(),
         "flush work resumes after the compaction and retirement turns"
     );
-    for phase in ["build", "publish"] {
+    for phase in ["build", "publish", "mirror"] {
         let completion = el
             .flush_worker_result_rx
             .recv_timeout(Duration::from_secs(3))
