@@ -279,6 +279,9 @@ impl CloudStartupRecovery {
                 Ok(data) => data,
                 Err(error) if recovery_policy == RecoveryPolicy::Salvage => {
                     tracing::warn!(%error, file = %local_path.display(), "skipping metadata mirror during salvage open");
+                    if *file_name == crate::metadata::files::FORMAT {
+                        return Ok(());
+                    }
                     continue;
                 }
                 Err(error) => {
@@ -300,6 +303,9 @@ impl CloudStartupRecovery {
             ) {
                 if recovery_policy == RecoveryPolicy::Salvage {
                     tracing::warn!(%error, key = %key, "skipping metadata mirror during salvage open");
+                    if *file_name == crate::metadata::files::FORMAT {
+                        return Ok(());
+                    }
                     continue;
                 }
                 return Err(MidgeError::RecoveryFailed(format!(
