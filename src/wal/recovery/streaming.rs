@@ -250,16 +250,17 @@ fn ensure_deadline(deadline: Option<&crate::common::OperationDeadline>) -> Midge
     Ok(())
 }
 
-/// Highest sequence among the leading verified frames of `path`. Used only to
+/// Highest sequence among verified frames beginning at `offset`. Used only to
 /// keep new writes above sequences that salvage set aside unreplayed.
-fn max_verified_prefix_sequence(
+fn max_verified_sequence_from_offset(
     storage: &dyn Fs,
     path: &FsPath,
     limits: StreamingReplayLimits,
+    offset: u64,
 ) -> Option<u64> {
     let mut read_ns = 0;
     let file = open_wal_replay_file(storage, path, &mut read_ns).ok()??;
-    let mut pos = 0;
+    let mut pos = offset;
     let mut max_sequence = None;
     while let Ok(NextWalFrame::Frame(frame)) =
         frame_reader::next_frame(&*file, path, pos, limits, &mut read_ns)
@@ -540,7 +541,7 @@ fn replay_paths(
                         index,
                         pos,
                         policy,
-                        ReplayFailure::Error(error),
+                        ReplayFailure::Record(error),
                     );
                 }
                 return Err(error);
@@ -590,10 +591,24 @@ impl ReplayState<'_> {
                     .iter()
                     .map(|file| file.path.clone())
                     .collect();
-                let max_unreplayed_sequence = unreplayed_paths
+                let mut max_unreplayed_sequence = unreplayed_paths
                     .iter()
-                    .filter_map(|path| max_verified_prefix_sequence(storage, path, self.limits))
+                    .filter_map(|path| {
+                        max_verified_sequence_from_offset(storage, path, self.limits, 0)
+                    })
                     .max();
+                if failure.is_record_failure() {
+                    // The failing record was decoded, so later frames in this
+                    // file can still be read. Keep their sequence range above
+                    // the next writer even though the file is quarantined.
+                    max_unreplayed_sequence =
+                        max_unreplayed_sequence.max(max_verified_sequence_from_offset(
+                            storage,
+                            &path.path,
+                            self.limits,
+                            valid_bytes,
+                        ));
+                }
                 self.stats.salvage_stop = Some(WalSalvageStop {
                     path: path.path.clone(),
                     valid_bytes,
