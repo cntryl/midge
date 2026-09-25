@@ -1383,6 +1383,36 @@ mod salvage_quarantine_tests {
         assert_eq!(recovered.records_replayed, 1);
     }
 
+    #[test]
+    fn should_raise_sequence_floor_over_frames_after_a_record_level_salvage_stop() {
+        // Arrange: all four frames are individually readable. Replay stops
+        // at the conflicting second frame, leaving the later two quarantined.
+        let directory = tempfile::tempdir().expect("temp dir");
+        let wal_dir = directory.path().join("wal");
+        std::fs::create_dir(&wal_dir).expect("create wal dir");
+        write(
+            &wal_dir.join(crate::wal::ACTIVE_FILE_NAME),
+            &[
+                frame_with_value(b"k", b"a", 7),
+                frame_with_value(b"k", b"b", 7),
+                frame_with_value(b"x", b"x", 8),
+                frame_with_value(b"y", b"y", 9),
+            ],
+        );
+
+        // Act
+        let recovered = salvage_replay(&wal_dir, &directory.path().join("sst"));
+
+        // Assert
+        assert!(recovered.opened_in_salvage_mode);
+        assert_eq!(recovered.records_replayed, 1);
+        assert!(
+            recovered.recovered_sequence >= 9,
+            "new writes must not reuse quarantined sequences: {}",
+            recovered.recovered_sequence
+        );
+    }
+
     fn write(path: &std::path::Path, parts: &[Vec<u8>]) {
         let mut file = std::fs::File::create(path).expect("create wal file");
         for part in parts {

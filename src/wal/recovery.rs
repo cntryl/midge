@@ -60,6 +60,7 @@ enum ReplayErrorAction {
 enum ReplayFailure {
     IncompleteTail(MidgeError),
     Error(MidgeError),
+    Record(MidgeError),
 }
 
 impl From<crate::wal::frame::FrameError> for ReplayFailure {
@@ -75,18 +76,22 @@ impl From<crate::wal::frame::FrameError> for ReplayFailure {
 impl ReplayFailure {
     fn error(&self) -> &MidgeError {
         match self {
-            Self::IncompleteTail(error) | Self::Error(error) => error,
+            Self::IncompleteTail(error) | Self::Error(error) | Self::Record(error) => error,
         }
     }
 
     fn into_error(self) -> MidgeError {
         match self {
-            Self::IncompleteTail(error) | Self::Error(error) => error,
+            Self::IncompleteTail(error) | Self::Error(error) | Self::Record(error) => error,
         }
     }
 
     fn is_incomplete_tail(&self) -> bool {
         matches!(self, Self::IncompleteTail(_))
+    }
+
+    fn is_record_failure(&self) -> bool {
+        matches!(self, Self::Record(_))
     }
 }
 
@@ -239,7 +244,8 @@ pub(crate) struct WalSalvageStop {
     pub(crate) valid_bytes: u64,
     /// Files after `path` in replay order, never replayed.
     pub(crate) unreplayed_paths: Vec<FsPath>,
-    /// Highest sequence in the verified prefixes of `unreplayed_paths`.
+    /// Highest verified sequence in the unreplayed files and, for a decoded
+    /// record failure, in the readable remainder of the stop file.
     pub(crate) max_unreplayed_sequence: Option<u64>,
 }
 
