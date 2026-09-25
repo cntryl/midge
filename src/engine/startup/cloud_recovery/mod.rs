@@ -24,6 +24,11 @@ enum SstLoss {
     Indeterminate(MidgeError),
 }
 
+fn local_sst_is_definitively_missing(sst_dir: &Path, error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound
+        && std::fs::metadata(sst_dir).is_ok_and(|metadata| metadata.is_dir())
+}
+
 /// What salvage recovery does with one manifest SST after validating it.
 enum SstDisposition {
     Retain,
@@ -120,7 +125,7 @@ impl CloudStartupRecovery {
                         "authoritative cloud SST '{}' is unavailable: {error}",
                         file.name
                     ));
-                    if error.kind() == std::io::ErrorKind::NotFound {
+                    if local_sst_is_definitively_missing(&remote_sst_dir, &error) {
                         SstLoss::Definitive(loss)
                     } else {
                         SstLoss::Indeterminate(loss)
@@ -946,5 +951,43 @@ impl CloudStartupRecovery {
             }
         }
         proofs.into_values().collect()
+    }
+}
+
+#[cfg(test)]
+mod local_sst_loss_tests {
+    use super::*;
+
+    #[test]
+    fn should_treat_missing_child_as_indeterminate_when_sst_parent_is_a_file() -> MidgeResult<()> {
+        // Arrange
+        let temp = tempfile::tempdir()?;
+        let sst_dir = temp.path().join("sst");
+        std::fs::write(&sst_dir, b"blocked parent")?;
+        let child_error = std::io::Error::from(std::io::ErrorKind::NotFound);
+
+        // Act
+        let definitive = local_sst_is_definitively_missing(&sst_dir, &child_error);
+
+        // Assert
+        assert!(!definitive);
+        Ok(())
+    }
+
+    #[test]
+    fn should_treat_missing_child_as_definitive_when_sst_parent_is_a_directory() -> MidgeResult<()>
+    {
+        // Arrange
+        let temp = tempfile::tempdir()?;
+        let sst_dir = temp.path().join("sst");
+        std::fs::create_dir(&sst_dir)?;
+        let child_error = std::io::Error::from(std::io::ErrorKind::NotFound);
+
+        // Act
+        let definitive = local_sst_is_definitively_missing(&sst_dir, &child_error);
+
+        // Assert
+        assert!(definitive);
+        Ok(())
     }
 }
