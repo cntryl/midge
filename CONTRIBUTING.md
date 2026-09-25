@@ -99,6 +99,10 @@ git checkout -b fix/issue-123
 - `docs/` - Documentation changes
 - `test/` - Test improvements
 
+Create work branches from `develop`. Open feature and fix PRs against `develop`;
+its PR gate runs `.github/workflows/ci.yml`. Maintainers promote `develop` to
+the release branch `main` through a separate PR after release qualification.
+
 ### 2. Make Changes
 
 Follow [Code Standards](#code-standards) and [Testing Requirements](#testing-requirements).
@@ -180,7 +184,7 @@ Fixes #456
 git push origin feature/my-feature
 ```
 
-Open a Pull Request on GitHub with:
+Open a Pull Request against `develop` on GitHub with:
 
 - Clear title describing the change
 - Description of what and why (not just how)
@@ -476,7 +480,8 @@ Use draft PRs for work-in-progress:
 - At least one maintainer approval required
 - All CI checks must pass
 - Maintainers will merge (not contributors)
-- Squash merge preferred for clean history
+- Squash merge work into `develop`; merge release promotions from `develop` to
+  `main` with a merge commit to preserve the qualified history
 
 ## Style Guide
 

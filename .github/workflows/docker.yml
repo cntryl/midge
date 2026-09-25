@@ -6,18 +6,8 @@ on:
     - cron: "29 4 * * 5"
   push:
     branches: [main]
-    paths:
-      - "compose.yml"
-      - ".dockerignore"
-      - "Dockerfile*"
-      - ".github/workflows/docker.yml"
   pull_request:
     branches: [main]
-    paths:
-      - "compose.yml"
-      - ".dockerignore"
-      - "Dockerfile*"
-      - ".github/workflows/docker.yml"
 
 permissions:
   contents: read
@@ -34,6 +24,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'main' || github.ref }}
 
       - name: Build test image
         run: docker build --file Dockerfile.tests --tag midge-tests:ci .

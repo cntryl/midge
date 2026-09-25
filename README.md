@@ -1,4 +1,4 @@
-[![CI](https://github.com/cntryl/midge/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/cntryl/midge/actions/workflows/ci.yml)
+[![CI](https://github.com/cntryl/midge/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/cntryl/midge/actions/workflows/ci.yml)
 
 # Midge
 

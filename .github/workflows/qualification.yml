@@ -6,38 +6,8 @@ on:
     - cron: "0 1 * * *"
   push:
     branches: [main]
-    paths:
-      - "docs/**"
-      - "examples/**"
-      - "benches/**"
-      - "fuzz/**"
-      - "*.md"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - ".cargo/**"
-      - ".cntryl/**"
-      - "src/**"
-      - "tests/**"
-      - ".github/workflows/qualification.yml"
-      - ".github/workflows/publish.yml"
-      - ".github/workflows/platform.yml"
   pull_request:
     branches: [main]
-    paths:
-      - "docs/**"
-      - "examples/**"
-      - "benches/**"
-      - "fuzz/**"
-      - "*.md"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - ".cargo/**"
-      - ".cntryl/**"
-      - "src/**"
-      - "tests/**"
-      - ".github/workflows/qualification.yml"
-      - ".github/workflows/publish.yml"
-      - ".github/workflows/platform.yml"
 
 permissions:
   contents: read
@@ -54,6 +24,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'main' || github.ref }}
 
       - name: Update Rust toolchain
         run: rustup update stable
