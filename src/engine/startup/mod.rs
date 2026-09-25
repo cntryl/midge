@@ -5,6 +5,7 @@ use std::sync::Arc;
 use super::OpenOptions;
 #[cfg(test)]
 use crate::common::MidgeResult;
+use crate::io::Fs;
 use crate::runtime::{Runtime, RuntimeState};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,7 +147,10 @@ impl CloudWalRecoveryPlan {
             }
         }
         if renamed {
-            std::fs::File::open(db_path.join("wal"))?.sync_all()?;
+            crate::io::RealFs::open_existing(db_path)?.sync_dir(
+                &crate::io::FsPath::new("wal"),
+                crate::io::Durability::Durable,
+            )?;
         }
         Ok(())
     }

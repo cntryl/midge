@@ -82,5 +82,8 @@ jobs:
       - name: Check all targets
         run: cargo check --workspace --all-targets --all-features
 
+      - name: Test cloud WAL salvage on Windows
+        run: cargo test --lib streaming_wal_plan::tests --all-features
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic
