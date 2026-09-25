@@ -137,14 +137,10 @@ pub(crate) struct FlushPublishTask {
     pub sst_seq: u64,
     pub sst_dir: PathBuf,
     pub fs: Arc<dyn crate::io::Fs>,
-    /// The database's manifest writer; the worker must not bypass it (#494).
-    pub manifest_store: Arc<crate::metadata::store::ManifestStore>,
     pub storage: Arc<dyn FlushStorage>,
-    pub metadata_publication_lock: crate::runtime::MetadataPublicationLock,
     pub lease_healthy: Option<Arc<AtomicBool>>,
     pub leader_store: Option<Arc<dyn crate::lease::LeaderStore>>,
     pub leader_holder_id: Option<String>,
-    pub runtime_response_timeout: std::time::Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -152,37 +148,6 @@ pub(crate) struct FlushPublicationDelta {
     pub identity: FlushIdentity,
     pub file_meta: crate::runtime::FileMeta,
     pub next_sst_seq: u64,
-    pub cloud_metadata_published: bool,
-    pub persistence_anomaly: bool,
-    /// The snapshot the worker wrote, when it may advance the event loop's
-    /// checkpoint horizon; see `FlushJournalCheckpoint::advance`.
-    pub journal_checkpoint: Option<FlushJournalCheckpoint>,
-}
-
-/// What the flush worker's manifest snapshot covers.
-///
-/// The worker builds its snapshot from disk, not from the event loop's
-/// memory, so the snapshot can hold a journal edit memory never applied: an
-/// orphan left by a writer that failed after appending. Claiming such an
-/// edit would let the next snapshot from memory truncate it away.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct FlushJournalCheckpoint {
-    /// The horizon of the manifest the worker loaded from disk: every
-    /// journaled edit up to here, orphans included.
-    pub base_edit_id: u64,
-    /// The edit id the snapshot covers. Present only when the snapshot is
-    /// exactly the loaded manifest plus the worker's own edits.
-    pub written_edit_id: u64,
-}
-
-impl FlushJournalCheckpoint {
-    /// Advances the event loop's horizon once it has installed the worker's
-    /// edits, but only if memory already held everything the worker loaded.
-    pub(crate) fn advance(self, manifest: &mut crate::metadata::Manifest) {
-        if manifest.edit_checkpoint_id >= self.base_edit_id {
-            manifest.edit_checkpoint_id = manifest.edit_checkpoint_id.max(self.written_edit_id);
-        }
-    }
 }
 
 pub(crate) struct FlushPublishCompletion {
@@ -192,9 +157,29 @@ pub(crate) struct FlushPublishCompletion {
     pub result: MidgeResult<FlushPublicationDelta>,
 }
 
+pub(crate) struct FlushMirrorTask {
+    pub delta: FlushPublicationDelta,
+    pub reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
+    pub fs: Arc<dyn crate::io::Fs>,
+    pub storage: Arc<dyn FlushStorage>,
+    pub metadata_publication_lock: crate::runtime::MetadataPublicationLock,
+    pub lease_healthy: Option<Arc<AtomicBool>>,
+    pub leader_store: Option<Arc<dyn crate::lease::LeaderStore>>,
+    pub leader_holder_id: Option<String>,
+    pub manifest_sequence: u64,
+    pub runtime_response_timeout: std::time::Duration,
+}
+
+pub(crate) struct FlushMirrorCompletion {
+    pub delta: FlushPublicationDelta,
+    pub reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
+    pub result: MidgeResult<bool>,
+}
+
 pub(crate) enum FlushWorkerResult {
     Build(FlushBuildCompletion),
     Publish(FlushPublishCompletion),
+    Mirror(FlushMirrorCompletion),
 }
 
 #[derive(Clone)]
@@ -209,6 +194,7 @@ struct FlushBuildTask {
 enum FlushWorkerTask {
     Build(FlushBuildTask),
     Publish(Box<FlushPublishTask>),
+    Mirror(Box<FlushMirrorTask>),
     Shutdown,
 }
 
@@ -319,6 +305,16 @@ impl FlushActor {
             .ok_or_else(|| MidgeError::Internal("flush worker is unavailable".to_string()))?
             .send(FlushWorkerTask::Publish(Box::new(task)))
             .map_err(|error| MidgeError::Internal(format!("submit flush publication: {error}")))?;
+        self.in_progress = 1;
+        Ok(())
+    }
+
+    pub(crate) fn submit_mirror(&mut self, task: FlushMirrorTask) -> MidgeResult<()> {
+        self.task_tx
+            .as_ref()
+            .ok_or_else(|| MidgeError::Internal("flush worker is unavailable".to_string()))?
+            .send(FlushWorkerTask::Mirror(Box::new(task)))
+            .map_err(|error| MidgeError::Internal(format!("submit flush mirror: {error}")))?;
         self.in_progress = 1;
         Ok(())
     }
@@ -458,6 +454,26 @@ impl FlushActor {
                             result,
                         }));
                 }
+                FlushWorkerTask::Mirror(task) => {
+                    let task = *task;
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        mirror_after_local_commit(&task)
+                    }));
+                    let result = match result {
+                        Ok(result) => result,
+                        Err(panic) => {
+                            tracing::error!(?panic, "flush mirror task panicked");
+                            Err(MidgeError::Internal(
+                                "flush mirror task panicked".to_string(),
+                            ))
+                        }
+                    };
+                    let _ = completion_tx.send(FlushWorkerResult::Mirror(FlushMirrorCompletion {
+                        delta: task.delta,
+                        reservation: task.reservation,
+                        result,
+                    }));
+                }
                 FlushWorkerTask::Shutdown => break,
             }
         }
@@ -500,84 +516,15 @@ impl FlushActor {
         let mut file_meta = task.build.file_meta.clone();
         file_meta.name.clone_from(&task.sst_name);
         validate_task_lease(task)?;
-        persist_output_durable_intent(task, &file_meta)?;
-
-        crate::failpoints::fail_point!("midge::flush_worker::before_manifest_persist");
-        validate_task_lease(task)?;
-        let mut manifest = load_manifest(task)?;
-        let base_edit_id = manifest.edit_checkpoint_id;
-        let manifest_meta = runtime_to_manifest_meta(&file_meta);
         let next_sst_seq = task
             .sst_seq
             .checked_add(1)
-            .ok_or_else(|| MidgeError::ResourceLimit("SST sequence space exhausted".to_string()))?
-            .max(
-                manifest
-                    .next_sst_seqs
-                    .get(&task.build.identity.cf_id)
-                    .copied()
-                    .unwrap_or(1),
-            );
-        match manifest
-            .files
-            .iter()
-            .find(|file| file.name == task.sst_name)
-        {
-            Some(existing) if same_manifest_file(existing, &manifest_meta) => {}
-            Some(_) => {
-                return Err(MidgeError::Corruption(format!(
-                    "flush identity {} conflicts with existing SST {}",
-                    task.build.identity.flush_id, task.sst_name
-                )))
-            }
-            None => {
-                task.manifest_store.append_batch(&[
-                    crate::metadata::ManifestEdit::BumpNextSstSeq {
-                        cf_id: task.build.identity.cf_id,
-                        next_seq: next_sst_seq,
-                    },
-                    crate::metadata::ManifestEdit::AddSst(manifest_meta.clone()),
-                ])?;
-                manifest
-                    .next_sst_seqs
-                    .insert(task.build.identity.cf_id, next_sst_seq);
-                manifest.add_file(manifest_meta);
-            }
-        }
-        manifest
-            .next_sst_seqs
-            .entry(task.build.identity.cf_id)
-            .and_modify(|next| *next = (*next).max(next_sst_seq))
-            .or_insert(next_sst_seq);
-        manifest.last_persisted_sequence = manifest
-            .last_persisted_sequence
-            .max(task.build.identity.sequence);
-        crate::failpoints::fail_point!("midge::flush_worker::after_manifest_journal");
-
-        validate_task_lease(task)?;
-        clear_manifest_published_intent(task, &task.sst_name)?;
-        let (persistence_anomaly, journal_checkpoint) =
-            save_worker_snapshot(task, &manifest, base_edit_id)?;
-
-        let deadline = crate::common::OperationDeadline::from_budget(task.runtime_response_timeout);
-        let mut validate_lease =
-            |_deadline: &crate::common::OperationDeadline| validate_task_lease(task);
-        let cloud_metadata_published = task.storage.mirror_control_metadata(
-            task.fs.as_ref(),
-            &task.metadata_publication_lock,
-            manifest.last_persisted_sequence,
-            &deadline,
-            &mut validate_lease,
-        )? || task.storage.has_hybrid_storage();
-        crate::failpoints::fail_point!("midge::flush_worker::after_control_metadata_publication");
+            .ok_or_else(|| MidgeError::ResourceLimit("SST sequence space exhausted".to_string()))?;
 
         Ok(FlushPublicationDelta {
             identity: task.build.identity,
             file_meta,
             next_sst_seq,
-            cloud_metadata_published,
-            persistence_anomaly,
-            journal_checkpoint,
         })
     }
 }
@@ -606,28 +553,59 @@ fn elapsed_ns(started: Instant) -> u64 {
 }
 
 fn validate_task_lease(task: &FlushPublishTask) -> MidgeResult<()> {
-    if let Some(healthy) = &task.lease_healthy {
+    validate_publication_lease(
+        task.build.identity,
+        task.lease_healthy.as_ref(),
+        task.leader_store.as_ref(),
+        task.leader_holder_id.as_deref(),
+    )
+}
+
+fn validate_publication_lease(
+    identity: FlushIdentity,
+    lease_healthy: Option<&Arc<AtomicBool>>,
+    leader_store: Option<&Arc<dyn crate::lease::LeaderStore>>,
+    leader_holder_id: Option<&str>,
+) -> MidgeResult<()> {
+    if let Some(healthy) = lease_healthy {
         if !healthy.load(Ordering::Acquire) {
             return Err(MidgeError::Fenced(format!(
                 "flush {} observed a failed lease heartbeat",
-                task.build.identity.flush_id
+                identity.flush_id
             )));
         }
     }
-    if let Some(store) = &task.leader_store {
+    if let Some(store) = leader_store {
         store
-            .validate_epoch(
-                task.leader_holder_id.as_deref().unwrap_or_default(),
-                task.build.identity.writer_epoch,
-            )
+            .validate_epoch(leader_holder_id.unwrap_or_default(), identity.writer_epoch)
             .map_err(|error| {
-                error.into_validation_error(&format!(
-                    "flush {} publish",
-                    task.build.identity.flush_id
-                ))
+                error.into_validation_error(&format!("flush {} publish", identity.flush_id))
             })?;
     }
     Ok(())
+}
+
+fn mirror_after_local_commit(task: &FlushMirrorTask) -> MidgeResult<bool> {
+    let validate = || {
+        validate_publication_lease(
+            task.delta.identity,
+            task.lease_healthy.as_ref(),
+            task.leader_store.as_ref(),
+            task.leader_holder_id.as_deref(),
+        )
+    };
+    validate()?;
+    let deadline = crate::common::OperationDeadline::from_budget(task.runtime_response_timeout);
+    let mut validate_lease = |_deadline: &crate::common::OperationDeadline| validate();
+    let mirrored = task.storage.mirror_control_metadata(
+        task.fs.as_ref(),
+        &task.metadata_publication_lock,
+        task.manifest_sequence,
+        &deadline,
+        &mut validate_lease,
+    )?;
+    crate::failpoints::fail_point!("midge::flush_worker::after_control_metadata_publication");
+    Ok(mirrored || task.storage.has_hybrid_storage())
 }
 
 fn finalize_staged_sst(
@@ -697,116 +675,6 @@ fn validate_final_sst(
     let fs_path = db_relative_fs_path(task, path)?;
     crate::sst::fs::SstFileIo::open_for_compaction(&fs_path.0, Arc::clone(&task.fs), budget.clone())
         .map(|_| ())
-}
-
-/// Writes the worker's manifest snapshot. Returns whether a local save
-/// failure left only the journal durable, and the checkpoint the event loop
-/// may adopt.
-fn save_worker_snapshot(
-    task: &FlushPublishTask,
-    manifest: &crate::metadata::Manifest,
-    base_edit_id: u64,
-) -> MidgeResult<(bool, Option<FlushJournalCheckpoint>)> {
-    match task.manifest_store.save_snapshot(manifest) {
-        Ok(written) => Ok((
-            false,
-            written
-                .caller_was_current
-                .then_some(FlushJournalCheckpoint {
-                    base_edit_id,
-                    written_edit_id: written.edit_checkpoint_id,
-                }),
-        )),
-        Err(error) if !task.storage.has_hybrid_storage() => {
-            tracing::warn!(%error, "manifest journal is durable but checkpoint save failed");
-            Ok((true, None))
-        }
-        Err(error) => Err(error),
-    }
-}
-
-fn load_manifest(task: &FlushPublishTask) -> MidgeResult<crate::metadata::Manifest> {
-    // Runtime loads are always strict: only startup may salvage-heal the
-    // journal, because only startup records that it opened in salvage mode.
-    crate::metadata::ManifestPersistence::load_with_fs_and_policy(
-        &task.fs,
-        crate::config::RecoveryPolicy::Strict,
-    )
-    .map_err(MidgeError::Internal)
-}
-
-fn load_intents(task: &FlushPublishTask) -> MidgeResult<Vec<crate::runtime::IntentLogEntry>> {
-    crate::runtime::IntentPersistence::load_with_fs_and_policy(
-        &task.fs,
-        crate::config::RecoveryPolicy::Strict,
-    )
-    .map_err(MidgeError::Internal)
-}
-
-fn persist_output_durable_intent(
-    task: &FlushPublishTask,
-    file_meta: &crate::runtime::FileMeta,
-) -> MidgeResult<()> {
-    let mut intents = load_intents(task)?;
-    intents.retain(|entry| {
-        !matches!(
-            entry,
-            crate::runtime::IntentLogEntry::FlushPublish {
-                file_meta: existing,
-                ..
-            } if existing.name == file_meta.name
-        )
-    });
-    intents.push(crate::runtime::IntentLogEntry::FlushPublish {
-        phase: crate::runtime::PublicationPhase::OutputDurable,
-        cf_id: task.build.identity.cf_id,
-        sequence: task.build.identity.sequence,
-        file_meta: file_meta.clone(),
-    });
-    crate::runtime::IntentPersistence::save_with_fs(&task.fs, &intents)
-        .map_err(MidgeError::Internal)
-}
-
-fn clear_manifest_published_intent(task: &FlushPublishTask, sst_name: &str) -> MidgeResult<()> {
-    let mut intents = load_intents(task)?;
-    intents.retain(|entry| {
-        !matches!(
-            entry,
-            crate::runtime::IntentLogEntry::FlushPublish { file_meta, .. }
-                if file_meta.name == sst_name
-        )
-    });
-    crate::runtime::IntentPersistence::save_with_fs(&task.fs, &intents)
-        .map_err(MidgeError::Internal)
-}
-
-fn runtime_to_manifest_meta(file: &crate::runtime::FileMeta) -> crate::metadata::FileMeta {
-    crate::metadata::FileMeta {
-        name: file.name.clone(),
-        level: file.level,
-        size_bytes: file.size_bytes,
-        content_crc32c: file.content_crc32c,
-        cf_id: file.cf_id,
-        smallest_key: file.smallest_key.clone(),
-        largest_key: file.largest_key.clone(),
-        smallest_seq: file.smallest_seq,
-        largest_seq: file.largest_seq,
-        key_bounds_complete: file.key_bounds_complete,
-        ..Default::default()
-    }
-}
-
-fn same_manifest_file(left: &crate::metadata::FileMeta, right: &crate::metadata::FileMeta) -> bool {
-    left.name == right.name
-        && left.level == right.level
-        && left.size_bytes == right.size_bytes
-        && left.content_crc32c == right.content_crc32c
-        && left.cf_id == right.cf_id
-        && left.smallest_key == right.smallest_key
-        && left.largest_key == right.largest_key
-        && left.smallest_seq == right.smallest_seq
-        && left.largest_seq == right.largest_seq
-        && left.key_bounds_complete == right.key_bounds_complete
 }
 
 #[cfg(test)]
@@ -955,11 +823,13 @@ mod tests {
         hybrid_storage: Arc<crate::storage::HybridStorage>,
         sst_backend: Arc<crate::storage::cloud::MockCloudBackend>,
         control_backend: Arc<crate::storage::cloud::MockCloudBackend>,
+        metadata_publication_lock: crate::runtime::MetadataPublicationLock,
     }
 
     fn publication_fixture(fail_at_validation: usize) -> MidgeResult<PublicationFixture> {
         let directory = tempfile::tempdir()?;
         let db_path = directory.path().join("db");
+        crate::metadata::ensure_or_create_format_marker(&db_path)?;
         let sst_dir = db_path.join("sst");
         std::fs::create_dir_all(&sst_dir)?;
         let staging_path = db_path.join("staging").join("flush-1.sst");
@@ -1021,19 +891,14 @@ mod tests {
             sst_name: crate::cloud_layout::file_name(identity.cf_id, 0, 1),
             sst_seq: 1,
             sst_dir,
-            manifest_store: Arc::new(crate::metadata::store::ManifestStore::new(Arc::clone(
-                &publication_fs,
-            ))),
             fs: publication_fs,
             storage: Arc::new(HybridFlushStorage::new(
                 Some(Arc::clone(&hybrid)),
                 Some(control_cloud),
             )),
-            metadata_publication_lock: crate::runtime::MetadataPublicationLock::default(),
             lease_healthy: Some(Arc::new(AtomicBool::new(true))),
             leader_store: Some(leader_store),
             leader_holder_id: Some("flush-test".to_string()),
-            runtime_response_timeout: crate::config::DEFAULT_RUNTIME_RESPONSE_TIMEOUT,
         };
         Ok(PublicationFixture {
             directory,
@@ -1042,7 +907,23 @@ mod tests {
             hybrid_storage: hybrid,
             sst_backend,
             control_backend,
+            metadata_publication_lock: crate::runtime::MetadataPublicationLock::default(),
         })
+    }
+
+    fn mirror_task(fixture: &PublicationFixture, delta: FlushPublicationDelta) -> FlushMirrorTask {
+        FlushMirrorTask {
+            delta,
+            reservation: None,
+            fs: Arc::clone(&fixture.task.fs),
+            storage: Arc::clone(&fixture.task.storage),
+            metadata_publication_lock: fixture.metadata_publication_lock.clone(),
+            lease_healthy: fixture.task.lease_healthy.clone(),
+            leader_store: fixture.task.leader_store.clone(),
+            leader_holder_id: fixture.task.leader_holder_id.clone(),
+            manifest_sequence: 1,
+            runtime_response_timeout: crate::config::DEFAULT_RUNTIME_RESPONSE_TIMEOUT,
+        }
     }
 
     #[cfg(feature = "failpoints")]
@@ -1196,7 +1077,7 @@ mod tests {
         let result = FlushActor::publish_with_budget(&fixture.task, &budget)?;
 
         // Assert
-        assert!(result.cloud_metadata_published);
+        assert_eq!(result.identity, fixture.task.build.identity);
         assert_eq!(fixture.sst_backend.get_uploads().len(), 1);
         // A compatibility adapter may still be unwinding its completion. The
         // reservation must eventually return after all callbacks have finished.
@@ -1205,6 +1086,28 @@ mod tests {
             std::thread::yield_now();
         }
         assert_eq!(budget.used(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_write_manifest_from_flush_worker_when_publishing() -> MidgeResult<()> {
+        // Arrange
+        let fixture = publication_fixture(usize::MAX)?;
+
+        // Act
+        FlushActor::publish(&fixture.task)?;
+
+        // Assert
+        for name in [
+            crate::metadata::files::JOURNAL,
+            crate::metadata::files::MANIFEST_SNAPSHOT,
+            "intent_log.json",
+        ] {
+            assert!(
+                !fixture.db_path.join(name).exists(),
+                "flush worker wrote {name}"
+            );
+        }
         Ok(())
     }
 
@@ -1226,9 +1129,9 @@ mod tests {
             .map_err(MidgeError::Internal)?;
 
         // Assert
-        assert_eq!(delta.next_sst_seq, 100);
+        assert_eq!(delta.next_sst_seq, 2);
         assert_eq!(persisted.next_sst_seqs[&0], 100);
-        assert_eq!(persisted.files.len(), 1);
+        assert!(persisted.files.is_empty());
         Ok(())
     }
 
@@ -1402,39 +1305,49 @@ mod tests {
     }
 
     #[test]
-    fn should_fence_flush_before_manifest_persistence_when_epoch_changes() -> MidgeResult<()> {
+    fn should_leave_manifest_to_event_loop_when_epoch_changes_after_upload() -> MidgeResult<()> {
         // Arrange
         let fixture = publication_fixture(4)?;
         let db_path = fixture.db_path.clone();
 
         // Act
-        let error = FlushActor::publish(&fixture.task).expect_err("publication must be fenced");
+        let delta = FlushActor::publish(&fixture.task)?;
 
         // Assert
-        assert!(matches!(error, MidgeError::Fenced(_)));
+        assert_eq!(delta.identity, fixture.task.build.identity);
         assert_eq!(fixture.sst_backend.get_uploads().len(), 1);
         assert!(crate::metadata::ManifestPersistence::load(&db_path)
             .map_err(MidgeError::Internal)?
             .files
             .is_empty());
-        assert_eq!(
-            crate::runtime::IntentPersistence::load(&db_path)
-                .map_err(MidgeError::Internal)?
-                .len(),
-            1
-        );
+        assert!(!db_path.join("intent_log.json").exists());
         Ok(())
     }
 
     #[test]
-    fn should_recover_durable_publication_without_accepting_stale_completion() -> MidgeResult<()> {
+    fn should_retain_committed_manifest_when_mirror_is_fenced() -> MidgeResult<()> {
         // Arrange
         let fixture = publication_fixture(5)?;
         let db_path = fixture.db_path.clone();
         let sst_name = fixture.task.sst_name.clone();
 
         // Act
-        let error = FlushActor::publish(&fixture.task).expect_err("completion must be fenced");
+        let delta = FlushActor::publish(&fixture.task)?;
+        let mut state = crate::runtime::state::RuntimeState::new(db_path.clone(), false);
+        state.record_flush_publication_intent(
+            delta.identity.cf_id,
+            delta.identity.sequence,
+            &delta.file_meta,
+        )?;
+        state.commit_flush_publication(
+            delta.identity.cf_id,
+            delta.identity.sequence,
+            &delta.file_meta,
+            delta.next_sst_seq,
+            true,
+        )?;
+        let error = mirror_after_local_commit(&mirror_task(&fixture, delta))
+            .expect_err("mirror must be fenced");
 
         // Assert
         assert!(matches!(error, MidgeError::Fenced(_)));
@@ -1443,34 +1356,29 @@ mod tests {
             .files
             .iter()
             .any(|file| file.name == sst_name));
-        assert_eq!(
-            crate::runtime::IntentPersistence::load(&db_path)
-                .map_err(MidgeError::Internal)?
-                .len(),
-            1
-        );
+        assert!(crate::runtime::IntentPersistence::load(&db_path)
+            .map_err(MidgeError::Internal)?
+            .is_empty());
         assert!(fixture.control_backend.get_uploads().is_empty());
         Ok(())
     }
 
     #[test]
-    fn should_fence_flush_before_control_metadata_publication_when_epoch_changes() -> MidgeResult<()>
-    {
+    fn should_not_mirror_control_metadata_during_sst_upload() -> MidgeResult<()> {
         // Arrange
-        let fixture = publication_fixture(6)?;
+        let fixture = publication_fixture(usize::MAX)?;
         let db_path = fixture.db_path.clone();
         let sst_name = fixture.task.sst_name.clone();
 
         // Act
-        let error = FlushActor::publish(&fixture.task).expect_err("publication must be fenced");
+        let delta = FlushActor::publish(&fixture.task)?;
 
         // Assert
-        assert!(matches!(error, MidgeError::Fenced(_)));
+        assert_eq!(delta.file_meta.name, sst_name);
         assert!(crate::metadata::ManifestPersistence::load(&db_path)
             .map_err(MidgeError::Internal)?
             .files
-            .iter()
-            .any(|file| file.name == sst_name));
+            .is_empty());
         assert!(fixture.control_backend.get_uploads().is_empty());
         Ok(())
     }
@@ -1479,16 +1387,17 @@ mod tests {
     fn should_time_out_flush_metadata_mirror_when_publication_lock_is_held() -> MidgeResult<()> {
         // Arrange
         let fixture = publication_fixture(usize::MAX)?;
-        let publication_lock = fixture.task.metadata_publication_lock.clone();
+        let delta = FlushActor::publish(&fixture.task)?;
+        let publication_lock = fixture.metadata_publication_lock.clone();
         let guard = publication_lock.lock();
-        let mut task = fixture.task.clone();
+        let mut task = mirror_task(&fixture, delta);
         task.runtime_response_timeout = std::time::Duration::from_millis(100);
         let (result_tx, result_rx) = std::sync::mpsc::channel();
 
         // Act: keep the lock on this thread so the old blocking lock path
         // cannot hang the test process.
         let worker = std::thread::spawn(move || {
-            let result = FlushActor::publish(&task);
+            let result = mirror_after_local_commit(&task);
             result_tx.send(result).expect("publish result receiver");
         });
         let result = result_rx.recv_timeout(std::time::Duration::from_secs(2));
@@ -1520,7 +1429,23 @@ mod tests {
         .expect("configure intent save observer");
 
         // Act
-        let result = FlushActor::publish(&fixture.task);
+        let delta = FlushActor::publish(&fixture.task)?;
+        let mut state = crate::runtime::state::RuntimeState::new(fixture.db_path.clone(), false);
+        let result = state
+            .record_flush_publication_intent(
+                delta.identity.cf_id,
+                delta.identity.sequence,
+                &delta.file_meta,
+            )
+            .and_then(|()| {
+                state.commit_flush_publication(
+                    delta.identity.cf_id,
+                    delta.identity.sequence,
+                    &delta.file_meta,
+                    delta.next_sst_seq,
+                    true,
+                )
+            });
         fail::remove("midge::intent::before_save");
         scenario.teardown();
 
