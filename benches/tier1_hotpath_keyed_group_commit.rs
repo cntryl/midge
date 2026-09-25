@@ -5,7 +5,7 @@
 #[path = "./stress_config.rs"]
 mod stress_config;
 
-use cntryl_midge::__internal::common::KeyedGroupCommit;
+use cntryl_midge::__internal::runtime::KeyedGroupCommit;
 use cntryl_stress::{black_box, stress, stress_main, StressContext};
 
 // Keep each measured sample comfortably above the microbenchmark runtime floor.

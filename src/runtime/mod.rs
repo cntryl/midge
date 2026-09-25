@@ -16,6 +16,7 @@ pub mod durability;
 pub mod event_loop;
 pub(crate) mod hybrid_persistence;
 pub mod intent_persistence;
+pub(crate) mod keyed_group_commit;
 pub(crate) mod read_resources;
 pub mod read_snapshot;
 pub mod snapshot_cache;

@@ -2,17 +2,27 @@
 //!
 //! # Architecture
 //!
-//! Internal modules (implementation details):
-//!   - `common`      - foundational types with zero dependencies
+//! Internal modules (implementation details), roughly lowest layer first:
+//!   - `common`      - errors, deadlines, clocks and budgets; imports no
+//!     other midge subsystem
+//!   - `types`, `config` - shared DTOs and configuration; no storage or
+//!     runtime imports
 //!   - `io`          - base filesystem abstraction
-//!   - `engine`      - main KV store and public API surface
-//!   - `runtime`     - background actors (compaction, flush, metrics)
-//!   - `metadata`    - manifest + version mgmt
-//!   - `wal`         - write-ahead log
-//!   - `sst`         - sorted-string table
-//!   - `storage`     - storage orchestration layer
-//!   - `compaction`  - compaction planning + execution
-//!   - `metrics`     - performance instrumentation
+//!   - `telemetry`   - process-global metrics and tracing export
+//!   - `memtable`    - in-memory skiplist tables
+//!   - `sst`         - sorted-string table format and readers; reports read
+//!     activity through `sst::read_path_metrics::SstReadObserver`
+//!   - `wal`         - write-ahead log; records to `telemetry`, and recovery
+//!     replays into a `memtable::SkipListMemtable`
+//!   - `diagnostics` - per-engine read-path and operational counters; sits
+//!     above `sst` and implements its observer
+//!   - `metadata`    - manifest and version management
+//!   - `storage`     - local, cloud and hybrid object storage
+//!   - `compaction`  - compaction planning and execution
+//!   - `runtime`     - event loop, actors and durability coordination
+//!   - `engine`      - the public `Engine` API
+//!
+//! `tests/governance.rs` (`architecture_ladder`) enforces the forbidden edges.
 //!
 //! # Public API Surface
 //!
@@ -106,6 +116,9 @@ pub mod __internal {
     pub mod memtable {
         pub use crate::memtable::*;
     }
+    pub mod runtime {
+        pub use crate::runtime::keyed_group_commit::KeyedGroupCommit;
+    }
     pub mod sst {
         pub use crate::sst::*;
     }
@@ -155,10 +168,9 @@ pub use config::{
     CloudValidationReport, EngineHealth, GcsApiStyle, GcsConfig, GcsCredentialSource,
     OciCredentialSource, OciObjectStorageConfig, S3CompatibleConfig, S3CredentialSource,
 };
-pub use storage::hybrid::{
-    backend::HybridStorageBudgetSnapshot,
-    pressure::{StorageAdmissionBlock, StorageAdmissionKind, StorageAdmissionReason},
-    state::LocalStorageUsage,
+pub use types::{
+    HybridStorageBudgetSnapshot, LocalStorageUsage, StorageAdmissionBlock, StorageAdmissionKind,
+    StorageAdmissionReason,
 };
 pub use types::{
     ReadAmpMetricsSnapshot, RecoveryMetricsSnapshot, RuntimeMetricsSnapshot, SnapshotPinSnapshot,

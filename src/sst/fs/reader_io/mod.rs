@@ -57,9 +57,9 @@ pub struct SstFileIo {
     read_amp_metrics: ReadAmpMetrics,
     trie_reader: Option<Arc<TrieReader>>,
     block_cache: Option<Arc<BlockCache>>,
-    /// Runtime-owned read-path counters. Standalone readers use the legacy
-    /// compatibility bucket until a runtime supplies its own state.
-    diagnostics: Arc<crate::diagnostics::RuntimeDiagnostics>,
+    /// Where read-path activity is reported. Standalone readers count into a
+    /// detached observer until a runtime attaches its own.
+    diagnostics: Arc<dyn crate::sst::read_path_metrics::SstReadObserver>,
     /// Immutable index publication. The common lookup path loads this
     /// atomically without taking a reader-wide mutex.
     index_entries: ArcSwapOption<Vec<(Vec<u8>, BlockHandle)>>,
@@ -643,7 +643,9 @@ impl SstFileIo {
             read_amp_metrics: ReadAmpMetrics::new(),
             trie_reader: None,
             block_cache: None,
-            diagnostics: crate::diagnostics::legacy_runtime_diagnostics(),
+            diagnostics: Arc::new(
+                crate::sst::read_path_metrics::DetachedSstReadObserver::default(),
+            ),
             index_entries: ArcSwapOption::empty(),
             format_version: SST_FORMAT_V4,
             index_kind: IndexKind::Sparse,
@@ -793,7 +795,7 @@ impl SstFileIo {
     #[must_use]
     pub(crate) fn with_read_path_diagnostics(
         mut self,
-        diagnostics: Arc<crate::diagnostics::RuntimeDiagnostics>,
+        diagnostics: Arc<dyn crate::sst::read_path_metrics::SstReadObserver>,
     ) -> Self {
         self.diagnostics = diagnostics;
         self

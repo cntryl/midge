@@ -76,6 +76,11 @@ where
 
     /// Seal `expected_current` and begin `new_key`, failing without mutation
     /// when the caller's external generation has drifted from this primitive.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KeyTransitionMismatch`] when the current key is not
+    /// `expected_current`; nothing is changed.
     pub fn rotate_from_to(
         &self,
         expected_current: &K,

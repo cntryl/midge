@@ -56,6 +56,22 @@ pub(crate) struct RuntimeDiagnostics {
     read_amp: crate::sst::ReadAmpMetrics,
 }
 
+impl crate::sst::read_path_metrics::SstReadObserver for RuntimeDiagnostics {
+    fn sst_metrics(&self) -> &crate::sst::read_path_metrics::SstReadMetrics {
+        &self.sst
+    }
+
+    fn record_block_cache_lookup(&self, hit: bool) {
+        self.record(|metrics| {
+            if hit {
+                metrics.record_cache_hit();
+            } else {
+                metrics.record_cache_miss();
+            }
+        });
+    }
+}
+
 /// Operational counters owned by one engine: WAL, compaction, stalls,
 /// conflicts, cache and cloud WAL activity. Always on, so the runtime metrics
 /// snapshot works without any telemetry setup and never mixes engines.
@@ -119,10 +135,6 @@ impl RuntimeDiagnostics {
         }
     }
 
-    pub(crate) fn sst_metrics(&self) -> &crate::sst::read_path_metrics::SstReadMetrics {
-        &self.sst
-    }
-
     pub(crate) fn read_amp_metrics(&self) -> &crate::sst::ReadAmpMetrics {
         &self.read_amp
     }
@@ -152,8 +164,6 @@ impl RuntimeDiagnostics {
     }
 }
 
-static LEGACY_RUNTIME_DIAGNOSTICS: OnceLock<Arc<RuntimeDiagnostics>> = OnceLock::new();
-
 impl crate::io::traits::ReadObserver for RuntimeDiagnostics {
     fn remote_range_started(&self) {
         self.sst.record_remote_range_started();
@@ -163,12 +173,6 @@ impl crate::io::traits::ReadObserver for RuntimeDiagnostics {
         self.sst
             .record_remote_range_completed(returned_bytes, elapsed, failed);
     }
-}
-
-/// Diagnostics for direct standalone readers. Engines always receive an
-/// independent `RuntimeDiagnostics` value.
-pub(crate) fn legacy_runtime_diagnostics() -> Arc<RuntimeDiagnostics> {
-    Arc::clone(LEGACY_RUNTIME_DIAGNOSTICS.get_or_init(|| Arc::new(RuntimeDiagnostics::default())))
 }
 
 /// One internal timing sample for `Transaction::commit`.
