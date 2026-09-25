@@ -20,6 +20,8 @@ jobs:
     steps:
       - name: Check out release tag
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Verify tag matches crate version
         shell: bash
@@ -27,6 +29,11 @@ jobs:
           test "${GITHUB_REF_TYPE}" = "tag"
           crate_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
           test "${GITHUB_REF_NAME}" = "v${crate_version}"
+
+      - name: Verify tag belongs to main
+        run: |
+          git fetch origin main:refs/remotes/origin/main
+          git merge-base --is-ancestor HEAD refs/remotes/origin/main
 
       - name: Install stable Rust toolchain
         run: rustup update stable
