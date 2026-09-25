@@ -473,6 +473,68 @@ fn should_lift_sequence_floor_over_verified_prefix_of_corrupt_local_segment_set_
 }
 
 #[test]
+fn should_lift_floor_over_valid_suffix_in_corrupt_local_segment_set_aside() -> MidgeResult<()> {
+    // Arrange: a missing catalog segment puts a later local-only segment
+    // aside. Its final frame is valid even though a middle frame is damaged.
+    let mut fixture = Fixture::new()?;
+    fixture.publish(1, 1, 7, &framed_wal(1, 7, b"one"))?;
+    fixture.publish(2, 2, 7, &framed_wal(2, 7, b"two"))?;
+    corrupt_publication(&mut fixture, 2);
+    let mut local = framed_wal(7, 7, b"seven");
+    let mut damaged = framed_wal(8, 7, b"eight");
+    damaged[8] ^= 1;
+    local.extend_from_slice(&damaged);
+    local.extend_from_slice(&framed_wal(10, 7, b"ten"));
+    let path = fixture.local(&crate::wal::segment_file_name(3), &local)?;
+
+    // Act
+    let recovered = fixture.build(RecoveryPolicy::Salvage)?;
+
+    // Assert
+    assert!(!path.exists());
+    assert!(recovered.plan.max_unreplayed_sequence >= 10);
+    Ok(())
+}
+
+#[test]
+fn should_lift_floor_over_valid_frames_after_corrupt_frame_in_retained_active_wal(
+) -> MidgeResult<()> {
+    // Arrange: salvage keeps the first frame and retains the original copy.
+    // The third frame is still verifiable after the damaged second frame.
+    let fixture = Fixture::new()?;
+    let first = framed_wal(1, 7, b"one");
+    let mut damaged = framed_wal(2, 7, b"two");
+    damaged[8] ^= 1;
+    let mut bytes = first.clone();
+    bytes.extend_from_slice(&damaged);
+    bytes.extend_from_slice(&framed_wal(3, 7, b"three"));
+    let active = fixture.local(crate::wal::ACTIVE_FILE_NAME, &bytes)?;
+
+    // Act
+    let recovered = fixture.build(RecoveryPolicy::Salvage)?;
+
+    // Assert
+    assert_eq!(
+        recovered
+            .plan
+            .active_wal
+            .expect("salvaged prefix")
+            .max_sequence,
+        1
+    );
+    assert_eq!(std::fs::read(&active)?, first);
+    assert_eq!(
+        std::fs::read(active.with_file_name("wal.log.salvage-retained"))?,
+        bytes
+    );
+    assert!(
+        recovered.plan.max_unreplayed_sequence >= 3,
+        "new writes must not reuse sequence 3 in the retained copy"
+    );
+    Ok(())
+}
+
+#[test]
 fn should_not_rename_local_wal_aside_before_startup_persists_its_floor() -> MidgeResult<()> {
     // Arrange: a crash after planning must leave the hole visible, so the
     // next open recomputes the floor instead of losing the local files'
@@ -634,6 +696,33 @@ fn should_accept_strict_recovery_when_active_wal_has_rising_writer_epochs() -> M
     assert_eq!(active.max_sequence, 2);
     assert_eq!(active.writer_epoch, 8);
     assert_eq!(active.record_count, 2);
+    assert!(!recovered.plan.opened_in_salvage_mode);
+    assert_eq!(std::fs::read(path)?, bytes);
+    Ok(())
+}
+
+#[test]
+fn should_accept_local_sealed_segment_when_fenced_writer_record_is_stale() -> MidgeResult<()> {
+    // Arrange: a local segment spans a restart, then the old writer appends
+    // late. Cloud objects still use the separate single-epoch contract.
+    let fixture = Fixture::new()?;
+    let mut bytes = framed_wal(1, 7, b"old writer");
+    bytes.extend_from_slice(&framed_wal(2, 8, b"new writer"));
+    bytes.extend_from_slice(&framed_wal(3, 7, b"fenced writer"));
+    bytes.extend_from_slice(&framed_wal(4, 8, b"new writer again"));
+    let path = fixture.local(&crate::wal::segment_file_name(1), &bytes)?;
+
+    // Act
+    let recovered = fixture.build(RecoveryPolicy::Strict)?;
+
+    // Assert
+    let local = recovered
+        .plan
+        .local_segments
+        .get(&1)
+        .expect("local segment");
+    assert_eq!(local.max_sequence, 4);
+    assert_eq!(local.writer_epoch, 8);
     assert!(!recovered.plan.opened_in_salvage_mode);
     assert_eq!(std::fs::read(path)?, bytes);
     Ok(())

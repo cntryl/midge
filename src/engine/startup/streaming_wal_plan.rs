@@ -7,7 +7,8 @@ use crate::config::RecoveryPolicy;
 use crate::io::{Fs, FsPath, OpenMode, OpenOptions};
 use crate::storage::{StorageBackend, StorageEvent, StorageOutcome};
 use crate::wal::recovery::streaming::{
-    inspect_sealed_wal_file, inspect_wal_file, StreamingReplayLimits,
+    inspect_local_sealed_wal_file, inspect_sealed_wal_file, inspect_wal_file,
+    max_verified_suffix_sequence, StreamingReplayLimits,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -354,7 +355,7 @@ fn select_local_segment(
         let source_path = local_path(&path)?;
         let result = (|| {
             let file = fs.open(&source_path, READ_ONLY)?;
-            inspect_sealed_wal_file(file.as_ref(), &source_path, limits)
+            inspect_local_sealed_wal_file(file.as_ref(), &source_path, limits)
         })();
         let Some(prefix) = recover_or_salvage(result, policy, salvaged)? else {
             aliases.push(path);
@@ -485,6 +486,11 @@ fn active_local_source(
             )))
         }
     };
+    if salvaged {
+        let suffix_max =
+            max_verified_suffix_sequence(file.as_ref(), &path, prefix.valid_bytes as u64, limits)?;
+        plan.max_unreplayed_sequence = plan.max_unreplayed_sequence.max(suffix_max.unwrap_or(0));
+    }
     drop(file);
     if prefix.record_count == 0 {
         if length > 0 {
@@ -582,23 +588,32 @@ fn enforce_epoch_order(
     Ok(())
 }
 
-/// Highest sequence in the verified prefix of a WAL file being set aside, or
-/// zero when it cannot be read. Best effort: it only lifts the sequence floor.
-fn verified_max_sequence(local: &dyn Fs, path: &Path, limits: StreamingReplayLimits) -> u64 {
+/// Highest verified sequence anywhere in a WAL file being set aside. If the
+/// file cannot be scanned, salvage must not reuse an unknown sequence range.
+fn verified_max_sequence(
+    local: &dyn Fs,
+    path: &Path,
+    limits: StreamingReplayLimits,
+) -> MidgeResult<u64> {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return 0;
+        return Err(MidgeError::RecoveryFailed(
+            "local WAL filename is not UTF-8".into(),
+        ));
     };
     let wal_path = FsPath::new(format!("wal/{name}"));
-    let file = match local.open(&wal_path, READ_ONLY) {
-        Ok(file) => file,
-        Err(error) => {
-            tracing::warn!(%error, path = %path.display(), "cannot read WAL set aside by salvage");
-            return 0;
-        }
-    };
+    let file = local.open(&wal_path, READ_ONLY)?;
     match inspect_wal_file(file.as_ref(), &wal_path, limits) {
-        Ok(prefix) => prefix.max_sequence,
-        Err(failure) => failure.verified_prefix().max_sequence,
+        Ok(prefix) => Ok(prefix.max_sequence),
+        Err(failure) => {
+            let prefix = failure.verified_prefix();
+            let suffix = max_verified_suffix_sequence(
+                file.as_ref(),
+                &wal_path,
+                prefix.valid_bytes as u64,
+                limits,
+            )?;
+            Ok(prefix.max_sequence.max(suffix.unwrap_or(0)))
+        }
     }
 }
 
@@ -654,7 +669,7 @@ fn stop_at_first_hole(
     for path in &local_paths {
         // A corrupt local-only file is in neither the catalog nor the plan;
         // its verified prefix is the best record of what it held.
-        max_sequence = max_sequence.max(verified_max_sequence(&local, path, limits));
+        max_sequence = max_sequence.max(verified_max_sequence(&local, path, limits)?);
     }
     let dropped: Vec<u64> = sources.range(hole..).map(|(id, _)| *id).collect();
     for segment_id in dropped {
