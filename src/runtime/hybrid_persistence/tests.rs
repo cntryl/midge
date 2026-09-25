@@ -221,89 +221,6 @@ fn should_require_manifest_coverage_for_wal_records() {
 }
 
 #[test]
-fn should_classify_individual_wal_record_coverage_from_manifest_proof() {
-    // Arrange
-    let manifest = Manifest {
-        files: vec![FileMeta {
-            cf_id: 7,
-            smallest_key: Some(b"a".to_vec()),
-            largest_key: Some(b"m".to_vec()),
-            smallest_seq: Some(10),
-            largest_seq: Some(20),
-            ..FileMeta::default()
-        }],
-        ..Manifest::default()
-    };
-    let covered = crate::wal::WalRecord::new_cf(
-        7,
-        crate::wal::WalOpKind::Put,
-        bytes::Bytes::from_static(b"b"),
-        Some(bytes::Bytes::from_static(b"old")),
-        12,
-        1,
-    );
-    let outside_sequence = crate::wal::WalRecord {
-        seq: 21,
-        ..covered.clone()
-    };
-    let transaction_marker = crate::wal::WalRecord {
-        op: crate::wal::WalOpKind::TxnBatch,
-        ..covered.clone()
-    };
-    let point_tombstone = crate::wal::WalRecord {
-        op: crate::wal::WalOpKind::Delete,
-        value: None,
-        ..covered.clone()
-    };
-
-    // Act
-    let covered_result = wal_record_covered_by_manifest(&covered, &manifest);
-    let outside_result = wal_record_covered_by_manifest(&outside_sequence, &manifest);
-    let marker_result = wal_record_covered_by_manifest(&transaction_marker, &manifest);
-    let tombstone_result = wal_record_covered_by_manifest(&point_tombstone, &manifest);
-    let unverified_result =
-        wal_record_covered_by_verified_manifest(&covered, &manifest, &|_, _| false);
-
-    // Assert
-    assert!(covered_result);
-    assert!(!outside_result);
-    assert!(!marker_result);
-    assert!(!tombstone_result);
-    assert!(!unverified_result);
-}
-
-#[test]
-fn should_not_treat_manifest_bounds_as_exact_value_coverage() {
-    // Arrange: a concurrent flush can place unrelated entries on both
-    // sides of this WAL write without persisting the write itself.
-    let manifest = Manifest {
-        files: vec![FileMeta {
-            cf_id: 7,
-            smallest_key: Some(b"a".to_vec()),
-            largest_key: Some(b"z".to_vec()),
-            smallest_seq: Some(10),
-            largest_seq: Some(20),
-            ..FileMeta::default()
-        }],
-        ..Manifest::default()
-    };
-    let overwrite = crate::wal::WalRecord::new_cf(
-        7,
-        crate::wal::WalOpKind::Put,
-        bytes::Bytes::from_static(b"target"),
-        Some(bytes::Bytes::from_static(b"new")),
-        15,
-        1,
-    );
-
-    // Act
-    let covered = wal_record_covered_by_verified_manifest(&overwrite, &manifest, &|_, _| false);
-
-    // Assert
-    assert!(!covered, "bounds alone cannot prove exact value coverage");
-}
-
-#[test]
 fn should_require_full_range_coverage_for_wal_tombstones() {
     // Arrange
     let file = FileMeta {
@@ -3216,7 +3133,7 @@ fn should_bound_sst_publication_with_shared_deadline_when_remote_preflight_consu
     );
 }
 
-mod contains_wal_record {
+mod recovery_wal_coverage {
     use super::*;
 
     fn tombstone_sst(key: &[u8], seq: u64) -> Vec<u8> {
@@ -3259,13 +3176,15 @@ mod contains_wal_record {
             cf_id: 0,
             smallest_key: Some(record.key.to_vec()),
             largest_key: Some(record.key.to_vec()),
-            smallest_seq: Some(tombstone_seq),
-            largest_seq: Some(tombstone_seq),
+            // A flush spanning both sequences, whose newest entry for the
+            // key is the tombstone.
+            smallest_seq: Some(tombstone_seq.min(record.seq)),
+            largest_seq: Some(tombstone_seq.max(record.seq)),
             ..Default::default()
         };
         let mut manifest = crate::metadata::Manifest::default();
-        manifest.files.push(file.clone());
-        VerifiedManifestWalCoverage::open(dir.path(), &manifest).contains_wal_record(&file, record)
+        manifest.files.push(file);
+        VerifiedManifestWalCoverage::open(dir.path(), &manifest).covers_wal_record(record)
     }
 
     #[test]
@@ -3305,15 +3224,177 @@ mod contains_wal_record {
         assert!(!is_covered);
     }
 
+    fn value_sst(key: &[u8], value: &[u8], seq: u64, expiration: Option<u64>) -> Vec<u8> {
+        use crate::sst::SstFactory;
+
+        let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
+        let mut writer = factory.create().expect("create test SST writer");
+        writer
+            .add_with_meta(
+                key,
+                Some(value),
+                seq,
+                crate::types::EntryType::Put,
+                expiration,
+            )
+            .expect("add value");
+        writer.finish_bytes().expect("finish test SST bytes")
+    }
+
+    /// Write `bytes` as `name` and describe it as a manifest file for key
+    /// `k` at `seq`; `corrupt` stores a checksum the bytes do not match.
+    fn manifest_file(
+        dir: &std::path::Path,
+        name: &str,
+        bytes: &[u8],
+        seq: u64,
+        corrupt: bool,
+    ) -> crate::metadata::FileMeta {
+        std::fs::write(dir.join(name), bytes).expect("write SST");
+        let crc = crc32c::crc32c(bytes);
+        crate::metadata::FileMeta {
+            name: name.to_string(),
+            level: 0,
+            size_bytes: bytes.len() as u64,
+            content_crc32c: Some(if corrupt { crc ^ 1 } else { crc }),
+            cf_id: 0,
+            smallest_key: Some(b"k".to_vec()),
+            largest_key: Some(b"k".to_vec()),
+            smallest_seq: Some(seq),
+            largest_seq: Some(seq),
+            ..Default::default()
+        }
+    }
+
     #[test]
-    fn should_treat_a_same_sequence_tombstone_as_covering_a_delete_record() {
-        // Arrange: the exact delete the WAL recorded is the tombstone the SST holds.
+    fn should_replay_wal_value_when_sst_matches_bytes_but_not_expiration() {
+        // Arrange: skipping on byte equality alone would drop the WAL
+        // record's TTL (#503).
+        let dir = tempfile::tempdir().expect("create SST directory");
+        let mut manifest = crate::metadata::Manifest::default();
+        manifest.files.push(manifest_file(
+            dir.path(),
+            "000001.sst",
+            &value_sst(b"k", b"v", 7, None),
+            7,
+            false,
+        ));
+        let mut put = record(crate::wal::WalOpKind::Put, Some(b"v"), 7);
+        put.expiration = Some(4_102_444_800_000);
+
+        // Act
+        let skipped =
+            VerifiedManifestWalCoverage::open(dir.path(), &manifest).covers_wal_record(&put);
+
+        // Assert
+        assert!(!skipped);
+    }
+
+    #[test]
+    fn should_replay_wal_value_when_one_covering_sst_is_unreadable_and_another_matches() {
+        // Arrange: nothing is known about the unreadable file, so the other
+        // file's evidence cannot prove the record is covered (#503).
+        let dir = tempfile::tempdir().expect("create SST directory");
+        let bytes = value_sst(b"k", b"v", 7, None);
+        let mut manifest = crate::metadata::Manifest::default();
+        manifest
+            .files
+            .push(manifest_file(dir.path(), "000001.sst", &bytes, 7, true));
+        manifest
+            .files
+            .push(manifest_file(dir.path(), "000002.sst", &bytes, 7, false));
+        let put = record(crate::wal::WalOpKind::Put, Some(b"v"), 7);
+
+        // Act
+        let skipped =
+            VerifiedManifestWalCoverage::open(dir.path(), &manifest).covers_wal_record(&put);
+
+        // Assert
+        assert!(!skipped);
+    }
+
+    #[test]
+    fn should_replay_delete_record_when_sst_holds_the_same_tombstone() {
+        // Arrange: an SST's contents do not prove this delete was the one
+        // published, and suppressing a delete can resurrect an older value.
         let delete = record(crate::wal::WalOpKind::Delete, None, 7);
 
         // Act
         let is_covered = covered(&delete, 7);
 
         // Assert
-        assert!(is_covered);
+        assert!(!is_covered);
+    }
+
+    #[test]
+    fn should_skip_wal_value_when_sst_holds_it_exactly() {
+        // Arrange
+        let dir = tempfile::tempdir().expect("create SST directory");
+        let expiration = Some(4_102_444_800_000);
+        let mut manifest = crate::metadata::Manifest::default();
+        manifest.files.push(manifest_file(
+            dir.path(),
+            "000001.sst",
+            &value_sst(b"k", b"v", 7, expiration),
+            7,
+            false,
+        ));
+        let mut put = record(crate::wal::WalOpKind::Put, Some(b"v"), 7);
+        put.expiration = expiration;
+
+        // Act
+        let skipped =
+            VerifiedManifestWalCoverage::open(dir.path(), &manifest).covers_wal_record(&put);
+
+        // Assert
+        assert!(skipped);
+    }
+
+    #[test]
+    fn should_replay_wal_value_when_sst_bounds_cover_it_without_holding_it() {
+        // Arrange: a concurrent flush can place unrelated entries on both
+        // sides of this write without persisting the write itself.
+        let dir = tempfile::tempdir().expect("create SST directory");
+        let mut file = manifest_file(
+            dir.path(),
+            "000001.sst",
+            &value_sst(b"a", b"other", 7, None),
+            7,
+            false,
+        );
+        file.smallest_key = Some(b"a".to_vec());
+        file.largest_key = Some(b"z".to_vec());
+        let mut manifest = crate::metadata::Manifest::default();
+        manifest.files.push(file);
+        let put = record(crate::wal::WalOpKind::Put, Some(b"v"), 7);
+
+        // Act
+        let skipped =
+            VerifiedManifestWalCoverage::open(dir.path(), &manifest).covers_wal_record(&put);
+
+        // Assert
+        assert!(!skipped);
+    }
+
+    #[test]
+    fn should_replay_transaction_marker_when_sst_holds_its_key() {
+        // Arrange
+        let dir = tempfile::tempdir().expect("create SST directory");
+        let mut manifest = crate::metadata::Manifest::default();
+        manifest.files.push(manifest_file(
+            dir.path(),
+            "000001.sst",
+            &value_sst(b"k", b"v", 7, None),
+            7,
+            false,
+        ));
+        let marker = record(crate::wal::WalOpKind::TxnBatch, Some(b"v"), 7);
+
+        // Act
+        let skipped =
+            VerifiedManifestWalCoverage::open(dir.path(), &manifest).covers_wal_record(&marker);
+
+        // Assert
+        assert!(!skipped);
     }
 }

@@ -432,13 +432,7 @@ impl RuntimeState {
         let coverage = crate::runtime::hybrid_persistence::VerifiedManifestWalCoverage::open(
             sst_dir, manifest,
         );
-        let should_apply = |record: &crate::wal::WalRecord| {
-            !crate::runtime::hybrid_persistence::wal_record_covered_by_verified_manifest(
-                record,
-                manifest,
-                &|file, record| coverage.contains_wal_record(file, record),
-            )
-        };
+        let should_apply = |record: &crate::wal::WalRecord| !coverage.covers_wal_record(record);
         let stats = match crate::wal::recovery::replay_wal_with_manifest_filter(
             &storage,
             &crate::io::FsPath::new(""),
