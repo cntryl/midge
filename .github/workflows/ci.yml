@@ -80,7 +80,9 @@ jobs:
           cargo check --release
 
       - name: Public API names every type it exposes
-        run: RUSTFLAGS="-D unnameable_types" cargo check --lib
+        run: |
+          cargo rustc --lib -- -D unnameable_types
+          cargo rustc --lib --no-default-features -- -D unnameable_types
 
   windows-check:
     name: Windows check (windows-latest)
