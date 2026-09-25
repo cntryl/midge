@@ -83,16 +83,7 @@ impl SstFileIo {
             },
         )?;
         let buffer = file.read_at(handle.offset, handle.size)?;
-        let prefix: [u8; 4] = buffer
-            .get(..4)
-            .and_then(|bytes| bytes.try_into().ok())
-            .ok_or_else(|| MidgeError::Corruption("recovery block too short".into()))?;
-        if (u32::from_le_bytes(prefix) as usize).checked_add(4) != Some(buffer.len()) {
-            return Err(MidgeError::Corruption(
-                "recovery block length disagrees with handle".into(),
-            ));
-        }
-        let raw = &buffer[4..];
+        let raw = SstFileIo::split_block_frame(&buffer)?;
         let decoded_size = crate::codec::decompressed_size_with_trailer(raw)?;
         let reservation = budget.reserve(
             decoded_size
@@ -100,12 +91,7 @@ impl SstFileIo {
                 .saturating_add(std::mem::size_of::<usize>()),
             "recovery decoded block",
         )?;
-        let decoded = crate::codec::decompress_block_with_trailer(raw)?;
-        if decoded.len() > decoded_size {
-            return Err(MidgeError::Corruption(
-                "recovery block exceeded declared decoded size".into(),
-            ));
-        }
+        let decoded = SstFileIo::decode_block_payload(raw, decoded_size)?;
         drop(buffer);
         drop(compressed_reservation);
         // Slices returned as KeyState values retain this owner and its charge.

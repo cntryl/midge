@@ -308,25 +308,11 @@ impl SstFileIo {
             },
         )?;
         let buffer = file.read_at(handle.offset, handle.size)?;
-        if buffer.len() < 4 {
-            return Err(MidgeError::Corruption("Block too short".into()));
-        }
-        let payload_len = u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
-        if payload_len.checked_add(4) != Some(buffer.len()) {
-            return Err(MidgeError::Corruption(
-                "SST block length prefix does not exactly match its handle".into(),
-            ));
-        }
-        let raw = &buffer[4..];
+        let raw = Self::split_block_frame(&buffer)?;
         let decoded_size = crate::codec::decompressed_size_with_trailer(raw)?;
         let retained_size = decoded_size.saturating_mul(4).saturating_add(256);
         let retained_reservation = budget.reserve(retained_size, resource)?;
-        let decoded = crate::codec::decompress_block_with_trailer(raw)?;
-        if decoded.len() > decoded_size {
-            return Err(MidgeError::Corruption(format!(
-                "decoded {resource} exceeded its declared size"
-            )));
-        }
+        let decoded = Self::decode_block_payload(raw, decoded_size)?;
         drop(compressed_reservation);
         // The decoded bytes are transient, but their decoded reader structure
         // remains live (index, filter, trie, or range tombstones). Keep this
@@ -342,21 +328,60 @@ impl SstFileIo {
     ) -> MidgeResult<bytes::Bytes> {
         Self::validate_block_handle(*handle, self.block_region_end, "referenced")?;
         let buffer = file.read_at(handle.offset, handle.size)?;
+        Self::decompress_raw_block(Self::split_block_frame(&buffer)?)
+    }
 
-        // First 4 bytes are length prefix
-        if buffer.len() < 4 {
-            return Err(MidgeError::Corruption("Block too short".into()));
-        }
-
-        let len = u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
-        if len.checked_add(4) != Some(buffer.len()) {
+    /// Split a block frame read from its handle: a `u32` length prefix that
+    /// covers the rest exactly, then the payload with its trailer. Every
+    /// block reader goes through this (#510).
+    pub(super) fn split_block_frame(buffer: &[u8]) -> MidgeResult<&[u8]> {
+        let prefix: [u8; 4] = buffer
+            .get(..4)
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or_else(|| MidgeError::Corruption("Block too short".into()))?;
+        let payload_len = u32::from_le_bytes(prefix) as usize;
+        if payload_len.checked_add(4) != Some(buffer.len()) {
             return Err(MidgeError::Corruption(
                 "SST block length prefix does not exactly match its handle".into(),
             ));
         }
+        let payload = &buffer[4..];
+        if payload.len() < crate::codec::BLOCK_TRAILER_SIZE {
+            return Err(MidgeError::Corruption(
+                "SST V4 block is too short for its mandatory trailer".into(),
+            ));
+        }
+        Ok(payload)
+    }
 
-        let raw = &buffer[4..4 + len];
-        Self::decompress_raw_block(raw)
+    /// The number of leading bytes an entry shares with the previous key,
+    /// checked against that key. Every entry decoder goes through this.
+    pub(super) fn shared_prefix_len(
+        shared_len: usize,
+        previous_key_len: usize,
+    ) -> MidgeResult<usize> {
+        if shared_len > previous_key_len {
+            return Err(MidgeError::Corruption(
+                "Invalid shared prefix length in SST entry".into(),
+            ));
+        }
+        Ok(shared_len)
+    }
+
+    /// Decompress a block payload whose trailer declares `declared` decoded
+    /// bytes (from `crate::codec::decompressed_size_with_trailer`), rejecting
+    /// output that exceeds it.
+    pub(super) fn decode_block_payload(
+        payload: &[u8],
+        declared: usize,
+    ) -> MidgeResult<bytes::Bytes> {
+        let decoded = crate::codec::decompress_block_with_trailer(payload)?;
+        if decoded.len() > declared {
+            return Err(MidgeError::Corruption(
+                "decoded SST block exceeded its declared size".into(),
+            ));
+        }
+        Ok(decoded)
     }
 
     /// Decompress a raw block payload, stripping the block trailer if present.
@@ -364,14 +389,15 @@ impl SstFileIo {
     /// Every V4 block carries `[payload][algo:u8][crc32c:u32]` and is rejected
     /// if that trailer cannot be verified and decoded.
     fn decompress_raw_block(raw: &[u8]) -> MidgeResult<bytes::Bytes> {
-        use crate::codec as compression;
-
-        if raw.len() < compression::BLOCK_TRAILER_SIZE {
+        // Decode first: that verifies the trailer checksum, so the declared
+        // size is read only from bytes already proven intact.
+        let decoded = crate::codec::decompress_block_with_trailer(raw)?;
+        if decoded.len() > crate::codec::decompressed_size_with_trailer(raw)? {
             return Err(MidgeError::Corruption(
-                "SST V4 block is too short for its mandatory trailer".into(),
+                "decoded SST block exceeded its declared size".into(),
             ));
         }
-        compression::decompress_block_with_trailer(raw)
+        Ok(decoded)
     }
 
     /// Read multiple contiguous blocks in a single IO operation for cold-cache scans.
@@ -464,27 +490,9 @@ impl SstFileIo {
             }
 
             let block_slice = &buffer[buf_offset..buf_end];
-
-            // Parse length prefix (same logic as read_block)
-            if block_slice.len() < 4 {
-                return Err(MidgeError::Corruption("Block too short".into()));
-            }
-
-            let len = u32::from_le_bytes([
-                block_slice[0],
-                block_slice[1],
-                block_slice[2],
-                block_slice[3],
-            ]) as usize;
-
-            if len.checked_add(4) != Some(block_slice.len()) {
-                return Err(MidgeError::Corruption(
-                    "SST block length prefix does not exactly match its handle".into(),
-                ));
-            }
-
-            let raw = &block_slice[4..4 + len];
-            result.push(Self::decompress_raw_block(raw)?);
+            result.push(Self::decompress_raw_block(Self::split_block_frame(
+                block_slice,
+            )?)?);
         }
 
         Ok(result)

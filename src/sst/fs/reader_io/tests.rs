@@ -1246,3 +1246,74 @@ fn should_charge_summary_key_bounds_while_raw_cursor_advances() -> MidgeResult<(
     assert!(temp_dir.path().join("summary-bounds.sst").is_file());
     Ok(())
 }
+
+#[test]
+fn should_reject_corrupt_block_trailer_identically_on_every_block_read_path() -> MidgeResult<()> {
+    // Arrange: flip the stored CRC of the first data block. Every block
+    // reader decodes frames through one helper, so each must report the
+    // same class (#510).
+    let temp_dir = tempfile::tempdir()?;
+    write_unique_key_sst(&temp_dir, "corrupt-trailer.sst")?;
+    let fs: Arc<dyn Fs> = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+    let (first_key, handle) = {
+        let reader = SstFileIo::open("corrupt-trailer.sst", Arc::clone(&fs))?;
+        let index = reader.index_entries()?;
+        index[0].clone()
+    };
+    let path = temp_dir.path().join("corrupt-trailer.sst");
+    let mut bytes = std::fs::read(&path)?;
+    let crc_byte = usize::try_from(handle.offset + handle.size - 1).unwrap_or(usize::MAX);
+    bytes[crc_byte] ^= 0xFF;
+    std::fs::write(&path, bytes)?;
+    let reader = Arc::new(SstFileIo::open("corrupt-trailer.sst", Arc::clone(&fs))?);
+    let raw_reader = Box::new(SstFileIo::open("corrupt-trailer.sst", Arc::clone(&fs))?);
+
+    // Act
+    let point = reader.get_state_at(&first_key, u64::MAX);
+    let scan = reader
+        .state_scan(None, None, false, u64::MAX, 0)
+        .collect::<MidgeResult<Vec<_>>>();
+    let raw = raw_reader
+        .raw_version_cursor(None, None)
+        .and_then(Iterator::collect::<MidgeResult<Vec<_>>>);
+
+    // Assert
+    assert!(matches!(point, Err(MidgeError::Corruption(_))), "{point:?}");
+    assert!(matches!(scan, Err(MidgeError::Corruption(_))), "{scan:?}");
+    assert!(matches!(raw, Err(MidgeError::Corruption(_))), "{raw:?}");
+    Ok(())
+}
+
+#[test]
+fn should_keep_block_frame_decoding_in_one_place() {
+    // Arrange: framing and key-prefix rules drifted across five and three
+    // copies before (#510).
+    let sources = [
+        include_str!("io.rs"),
+        include_str!("mod.rs"),
+        include_str!("recovery.rs"),
+        include_str!("scan.rs"),
+        include_str!("state.rs"),
+        include_str!("progress.rs"),
+    ];
+
+    // Act
+    let frame_decoders: usize = sources
+        .iter()
+        .map(|source| source.matches("u32::from_le_bytes").count())
+        .sum();
+    let prefix_checks: usize = sources
+        .iter()
+        .map(|source| source.matches("Invalid shared prefix length").count())
+        .sum();
+
+    // Assert
+    assert_eq!(
+        frame_decoders, 1,
+        "block length prefixes are decoded only in split_block_frame"
+    );
+    assert_eq!(
+        prefix_checks, 1,
+        "shared prefixes are checked only in shared_prefix_len"
+    );
+}
