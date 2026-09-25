@@ -44,14 +44,14 @@ jobs:
       - name: Strict no-default Clippy
         run: rustup run 1.97 cargo clippy --workspace --all-targets --no-default-features -- -D warnings -D clippy::pedantic
 
-  provider-features:
-    name: Provider feature (${{ matrix.provider }})
+  isolated-features:
+    name: Isolated feature (${{ matrix.feature }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        provider: [cloud-aws, cloud-azure, cloud-gcp, cloud-oci]
+        feature: [cloud-aws, cloud-azure, cloud-gcp, cloud-oci, telemetry]
     steps:
       - name: Checkout event revision
         if: github.event_name != 'schedule'
@@ -69,7 +69,7 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "compatibility-provider-${{ matrix.provider }}"
+          shared-key: "compatibility-feature-${{ matrix.feature }}"
 
-      - name: Check isolated provider feature
-        run: cargo check --workspace --all-targets --no-default-features --features ${{ matrix.provider }}
+      - name: Check isolated feature
+        run: cargo check --workspace --all-targets --no-default-features --features ${{ matrix.feature }}
