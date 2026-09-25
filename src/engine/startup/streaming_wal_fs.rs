@@ -265,9 +265,6 @@ mod tests {
             submit_head,
         );
 
-        fn submit_read(&self, _key: &str, _callback: crate::storage::StorageCallback) {
-            panic!("whole-object recovery GET is forbidden");
-        }
         fn submit_write(
             &self,
             _key: &str,
@@ -278,9 +275,6 @@ mod tests {
         }
         fn submit_delete(&self, _key: &str, _callback: crate::storage::StorageCallback) {
             panic!("replay cannot delete cloud objects");
-        }
-        fn submit_list(&self, _prefix: &str, _callback: crate::storage::StorageCallback) {
-            panic!("replay must use catalog-authorized objects");
         }
         fn submit_range_head(
             &self,

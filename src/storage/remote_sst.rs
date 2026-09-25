@@ -438,17 +438,11 @@ mod tests {
             submit_head,
         );
 
-        fn submit_read(&self, _key: &str, _callback: super::super::StorageCallback) {
-            panic!("whole SST read is forbidden");
-        }
         fn submit_write(&self, key: &str, bytes: Vec<u8>, callback: super::super::StorageCallback) {
             self.inner.submit_write(key, bytes, callback);
         }
         fn submit_delete(&self, key: &str, callback: super::super::StorageCallback) {
             self.inner.submit_delete(key, callback);
-        }
-        fn submit_list(&self, prefix: &str, callback: super::super::StorageCallback) {
-            self.inner.submit_list(prefix, callback);
         }
         fn submit_range_head(
             &self,

@@ -153,46 +153,6 @@ impl StorageBackend for CloudStorage {
         let _ = callback.send(result);
     }
 
-    fn submit_read(&self, key: &str, callback: StorageCallback) {
-        self.submit_read_with_timeout(key, self.callback_timeout, callback);
-    }
-
-    fn submit_read_with_timeout(
-        &self,
-        key: &str,
-        timeout: std::time::Duration,
-        callback: StorageCallback,
-    ) {
-        if timeout.is_zero() {
-            let _ = callback.send(StorageEvent::ReadComplete {
-                key: key.to_string(),
-                result: StorageOutcome::Err(crate::storage::storage_timeout_error(
-                    "cloud GET refused because no callback budget remained",
-                )),
-            });
-            return;
-        }
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.submit_get(key, tx);
-        let event = match await_cloud_event(&rx, timeout, "GET") {
-            Ok(CloudEvent::Get { result, .. }) => StorageEvent::ReadComplete {
-                key: key.to_string(),
-                result: cloud_to_storage_outcome(result),
-            },
-            Ok(other) => StorageEvent::ReadComplete {
-                key: key.to_string(),
-                result: StorageOutcome::Err(
-                    format!("unexpected cloud GET response: {other:?}").into(),
-                ),
-            },
-            Err(error) => StorageEvent::ReadComplete {
-                key: key.to_string(),
-                result: StorageOutcome::Err(error),
-            },
-        };
-        let _ = callback.send(event);
-    }
-
     fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback) {
         self.submit_write_with_headers_and_timeout(
             key,
@@ -277,40 +237,6 @@ impl StorageBackend for CloudStorage {
         set_request_timeout_header(&mut headers, self.callback_timeout);
         CloudStorage::submit_delete_with_headers(self, key, headers, tx);
         deliver_delete_outcome(key, &rx, self.callback_timeout, &callback);
-    }
-
-    fn submit_list(&self, prefix: &str, callback: StorageCallback) {
-        if self.callback_timeout.is_zero() {
-            let _ = callback.send(StorageEvent::ListComplete {
-                prefix: prefix.to_string(),
-                result: StorageOutcome::Err(crate::storage::storage_timeout_error(
-                    "cloud LIST refused because no callback budget remained",
-                )),
-            });
-            return;
-        }
-        let (tx, rx) = std::sync::mpsc::channel();
-        CloudStorage::submit_list(self, prefix, tx);
-        let event = match await_cloud_event(&rx, self.callback_timeout, "LIST") {
-            Ok(CloudEvent::List {
-                prefix: key_prefix,
-                result,
-            }) => StorageEvent::ListComplete {
-                prefix: key_prefix,
-                result: cloud_to_storage_outcome(result),
-            },
-            Ok(other) => StorageEvent::ListComplete {
-                prefix: prefix.to_string(),
-                result: StorageOutcome::Err(
-                    format!("unexpected cloud LIST response: {other:?}").into(),
-                ),
-            },
-            Err(error) => StorageEvent::ListComplete {
-                prefix: prefix.to_string(),
-                result: StorageOutcome::Err(error),
-            },
-        };
-        let _ = callback.send(event);
     }
 
     fn submit_head(&self, key: &str, callback: StorageCallback) {

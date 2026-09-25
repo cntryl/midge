@@ -290,7 +290,8 @@ fn run_read_checks(
         );
         return;
     };
-    let Some(size) = preflight_head(findings, location, roles, backend, key, remaining()) else {
+    let Some(metadata) = preflight_head(findings, location, roles, backend, key, remaining())
+    else {
         return;
     };
     finding(
@@ -302,7 +303,15 @@ fn run_read_checks(
         CloudCheckOutcome::Passed,
         "object HEAD passed",
     );
-    preflight_read(findings, location, roles, backend, key, size, remaining());
+    preflight_read(
+        findings,
+        location,
+        roles,
+        backend,
+        key,
+        metadata,
+        remaining(),
+    );
 }
 
 #[cfg(feature = "cloud-common")]
@@ -312,15 +321,19 @@ fn preflight_read(
     roles: &[CloudStorageRole],
     backend: &dyn crate::storage::cloud::CloudBackend,
     key: &str,
-    size: u64,
+    metadata: crate::storage::StorageObjectMetadata,
     timeout: Duration,
 ) {
     use crate::storage::cloud::CloudEvent;
+    let size = metadata.size;
     let (tx, rx) = std::sync::mpsc::channel();
     if size == 0 {
         backend.submit_get(key, tx);
     } else {
-        backend.submit_get_range(key, 0, Some(1), tx);
+        // The identity-pinned range read production uses: it requires a
+        // 206 answering exactly this slice, so a proxy that ignores `Range`
+        // fails here instead of passing on a one-byte object (#516).
+        backend.submit_get_range_with_identity(key, 0, 1, metadata, timeout, tx);
     }
     let passed = match rx.recv_timeout(timeout) {
         Ok(CloudEvent::Get {
@@ -406,7 +419,7 @@ fn preflight_head(
     backend: &dyn crate::storage::cloud::CloudBackend,
     key: &str,
     timeout: Duration,
-) -> Option<u64> {
+) -> Option<crate::storage::StorageObjectMetadata> {
     use crate::storage::cloud::CloudEvent;
     let (tx, rx) = std::sync::mpsc::channel();
     backend.submit_head(key, tx);
@@ -435,7 +448,7 @@ fn preflight_head(
         );
         return None;
     };
-    Some(metadata.size)
+    Some(metadata)
 }
 
 fn unverified_reads(
@@ -538,6 +551,84 @@ mod tests {
                 finding.code,
                 CloudCheckCode::ObjectHead | CloudCheckCode::RangedRead
             ) && finding.outcome == CloudCheckOutcome::Passed
+        }));
+    }
+
+    /// A provider that ignores `Range` and answers with the whole object.
+    /// For a one-byte object the unconditional read cannot tell; the
+    /// identity-pinned range read production uses rejects the answer.
+    #[cfg(feature = "cloud-common")]
+    struct RangeIgnoringBackend {
+        inner: crate::storage::cloud::MockCloudBackend,
+    }
+
+    #[cfg(feature = "cloud-common")]
+    impl crate::storage::cloud::CloudBackend for RangeIgnoringBackend {
+        crate::storage::cloud::forward_cloud_backend!(
+            inner;
+            submit_put,
+            submit_get,
+            submit_get_with_metadata,
+            submit_get_range,
+            submit_delete,
+            submit_list,
+            submit_head,
+        );
+
+        fn submit_get_range_with_identity(
+            &self,
+            key: &str,
+            start: u64,
+            end: u64,
+            _expected: crate::storage::StorageObjectMetadata,
+            _timeout: Duration,
+            callback: crate::storage::cloud::CloudCallback,
+        ) {
+            let _ = callback.send(crate::storage::cloud::CloudEvent::GetRange {
+                key: key.to_string(),
+                start,
+                end: Some(end),
+                result: Err(crate::storage::cloud::CloudError::Protocol(
+                    "range request not honored: expected 206 Partial Content, got 200".into(),
+                )),
+            });
+        }
+    }
+
+    #[cfg(feature = "cloud-common")]
+    #[test]
+    fn should_fail_preflight_ranged_read_when_provider_answers_200_with_full_body() {
+        use crate::storage::cloud::{CloudBackend, CloudEvent, MockCloudBackend};
+
+        // Arrange: a one-byte object, so a whole-object answer has the
+        // requested length (#516).
+        let backend = RangeIgnoringBackend {
+            inner: MockCloudBackend::new(),
+        };
+        let (sender, receiver) = std::sync::mpsc::channel();
+        backend.submit_put("prefix/object", vec![7], Vec::new(), sender);
+        assert!(matches!(
+            receiver.recv(),
+            Ok(CloudEvent::Put { result: Ok(()), .. })
+        ));
+        let location =
+            CloudStorageLocation::new(AwsS3Config::new("valid-bucket", "us-east-1"), "prefix");
+        let mut findings = Vec::new();
+
+        // Act
+        run_read_checks(
+            &mut findings,
+            &location,
+            &[CloudStorageRole::Standalone],
+            &backend,
+            Instant::now(),
+            Duration::from_secs(1),
+        );
+
+        // Assert
+        assert!(findings.iter().any(|finding| {
+            finding.code == CloudCheckCode::RangedRead
+                && finding.outcome == CloudCheckOutcome::Failed
         }));
     }
 

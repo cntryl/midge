@@ -646,7 +646,6 @@ impl crate::storage::StorageBackend for PostRetirementDependencyChangeBackend {
         submit_range_head,
         submit_read_range,
         submit_read_with_metadata,
-        submit_read,
         submit_write,
     );
 
@@ -670,10 +669,9 @@ impl crate::storage::StorageBackend for PostRetirementDependencyChangeBackend {
     }
 
     crate::storage::forward_storage_backend!(
-        inner;
-        submit_delete,
-        submit_delete_with_headers,
-        submit_list,
+    inner;
+    submit_delete,
+    submit_delete_with_headers,
     );
 
     fn submit_head(&self, key: &str, callback: crate::storage::StorageCallback) {
@@ -812,15 +810,13 @@ impl crate::storage::StorageBackend for ArmedDelayedHeadStorageBackend {
         );
     }
     crate::storage::forward_storage_backend!(
-        inner;
-        submit_read_range,
-        submit_read_with_metadata,
-        submit_read,
-        submit_write,
-        submit_write_with_headers,
-        submit_delete,
-        submit_delete_with_headers,
-        submit_list,
+    inner;
+    submit_read_range,
+    submit_read_with_metadata,
+    submit_write,
+    submit_write_with_headers,
+    submit_delete,
+    submit_delete_with_headers,
     );
 
     fn submit_head(&self, key: &str, callback: crate::storage::StorageCallback) {
@@ -844,7 +840,6 @@ impl crate::storage::StorageBackend for CommitThenBlockCatalogCasCallbackBackend
         submit_range_head,
         submit_read_range,
         submit_read_with_metadata,
-        submit_read,
         submit_write,
     );
 
@@ -899,7 +894,6 @@ impl crate::storage::StorageBackend for CommitThenBlockCatalogCasCallbackBackend
         inner;
         submit_delete,
         submit_delete_with_headers,
-        submit_list,
         submit_head,
     );
 }
@@ -910,7 +904,6 @@ impl crate::storage::StorageBackend for BudgetConsumingDdlBackend {
         submit_range_head,
         submit_read_range,
         submit_read_with_metadata,
-        submit_read,
         submit_write,
     );
 
@@ -970,10 +963,9 @@ impl crate::storage::StorageBackend for BudgetConsumingDdlBackend {
     }
 
     crate::storage::forward_storage_backend!(
-        inner;
-        submit_delete,
-        submit_delete_with_headers,
-        submit_list,
+    inner;
+    submit_delete,
+    submit_delete_with_headers,
     );
 
     fn submit_head(&self, key: &str, callback: crate::storage::StorageCallback) {
@@ -999,7 +991,6 @@ impl crate::storage::StorageBackend for DelayedCommitDdlBackend {
         submit_range_head,
         submit_read_range,
         submit_read_with_metadata,
-        submit_read,
         submit_write,
         submit_write_with_headers,
     );
@@ -1059,7 +1050,6 @@ impl crate::storage::StorageBackend for DelayedCommitDdlBackend {
         inner;
         submit_delete,
         submit_delete_with_headers,
-        submit_list,
         submit_head,
     );
 }
@@ -1100,7 +1090,6 @@ impl crate::storage::StorageBackend for BlockingDeleteStorageBackend {
         submit_range_head,
         submit_read_range,
         submit_read_with_metadata,
-        submit_read,
         submit_write,
         submit_write_with_headers,
     );
@@ -1127,7 +1116,6 @@ impl crate::storage::StorageBackend for BlockingDeleteStorageBackend {
 
     crate::storage::forward_storage_backend!(
         inner;
-        submit_list,
         submit_head,
     );
 }
@@ -1165,7 +1153,6 @@ impl crate::storage::StorageBackend for FailOnceDeleteStorageBackend {
         submit_range_head,
         submit_read_range,
         submit_read_with_metadata,
-        submit_read,
         submit_write,
         submit_write_with_headers,
     );
@@ -1208,7 +1195,7 @@ impl crate::storage::StorageBackend for FailOnceDeleteStorageBackend {
         );
     }
 
-    crate::storage::forward_storage_backend!(inner; submit_list, submit_head);
+    crate::storage::forward_storage_backend!(inner; submit_head);
 }
 
 fn seal_segment_for_test(el: &mut EventLoop) -> crate::common::MidgeResult<(u64, u64)> {
@@ -8351,12 +8338,10 @@ impl crate::storage::StorageBackend for CountingSstHeadBackend {
         inner;
         submit_read_range,
         submit_read_with_metadata,
-        submit_read,
         submit_write,
         submit_write_with_headers,
         submit_delete,
         submit_delete_with_headers,
-        submit_list,
         submit_head,
     );
 }

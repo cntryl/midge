@@ -23,22 +23,13 @@ impl HybridStorage {
         callback_timeout: Duration,
     ) -> Result<Vec<u8>, crate::storage::StorageError> {
         let (tx, rx) = std::sync::mpsc::channel();
-        backend.submit_read_with_timeout(key, callback_timeout, tx);
+        backend.submit_read_with_metadata(key, callback_timeout, tx);
         match rx.recv_timeout(callback_timeout) {
-            Ok(StorageEvent::ReadComplete {
-                result: StorageOutcome::Ok(data),
-                ..
-            }) => Ok(data),
-            Ok(StorageEvent::ReadComplete {
-                result: StorageOutcome::Err(error),
-                ..
-            }) => Err(crate::storage::StorageError::new(
+            Ok(Ok((data, _metadata))) => Ok(data),
+            Ok(Err(error)) => Err(crate::storage::StorageError::new(
                 error.kind(),
                 format!("cloud object '{key}' unreadable: {error}"),
             )),
-            Ok(other) => Err(crate::storage::StorageError::protocol(format!(
-                "unexpected cloud read response for '{key}': {other:?}"
-            ))),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(
                 crate::storage::storage_timeout_error(format!("cloud read timed out for '{key}'")),
             ),

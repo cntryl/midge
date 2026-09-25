@@ -48,10 +48,6 @@ impl StorageBackend for SlowWalRanges {
         self.inner.submit_read_with_metadata(key, timeout, callback);
     }
 
-    fn submit_read(&self, key: &str, callback: StorageCallback) {
-        self.inner.submit_read(key, callback);
-    }
-
     fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback) {
         self.inner.submit_write(key, data, callback);
     }
@@ -79,10 +75,6 @@ impl StorageBackend for SlowWalRanges {
     ) {
         self.inner
             .submit_delete_with_headers(key, headers, callback);
-    }
-
-    fn submit_list(&self, prefix: &str, callback: StorageCallback) {
-        self.inner.submit_list(prefix, callback);
     }
 
     fn submit_head(&self, key: &str, callback: StorageCallback) {

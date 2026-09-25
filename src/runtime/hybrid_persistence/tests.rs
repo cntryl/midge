@@ -1346,13 +1346,6 @@ impl PanickingWriteBackend {
 }
 
 impl StorageBackend for PanickingWriteBackend {
-    fn submit_read(&self, key: &str, callback: StorageCallback) {
-        let _ = callback.send(StorageEvent::ReadComplete {
-            key: key.to_string(),
-            result: StorageOutcome::Err("read unavailable".to_string().into()),
-        });
-    }
-
     fn submit_write(&self, _key: &str, _data: Vec<u8>, _callback: StorageCallback) {
         self.write_attempts.fetch_add(1, Ordering::SeqCst);
         panic!("injected cloud upload worker panic");
@@ -1374,23 +1367,9 @@ impl StorageBackend for PanickingWriteBackend {
             result: StorageOutcome::Ok(()),
         });
     }
-
-    fn submit_list(&self, prefix: &str, callback: StorageCallback) {
-        let _ = callback.send(StorageEvent::ListComplete {
-            prefix: prefix.to_string(),
-            result: StorageOutcome::Ok(Vec::new()),
-        });
-    }
 }
 
 impl StorageBackend for AlwaysFailingWriteBackend {
-    fn submit_read(&self, key: &str, callback: StorageCallback) {
-        let _ = callback.send(StorageEvent::ReadComplete {
-            key: key.to_string(),
-            result: StorageOutcome::Err("read unavailable".to_string().into()),
-        });
-    }
-
     fn submit_write(&self, key: &str, _data: Vec<u8>, callback: StorageCallback) {
         self.write_attempts.fetch_add(1, Ordering::SeqCst);
         let _ = callback.send(StorageEvent::WriteComplete {
@@ -1413,13 +1392,6 @@ impl StorageBackend for AlwaysFailingWriteBackend {
         let _ = callback.send(StorageEvent::DeleteComplete {
             key: key.to_string(),
             result: StorageOutcome::Ok(()),
-        });
-    }
-
-    fn submit_list(&self, prefix: &str, callback: StorageCallback) {
-        let _ = callback.send(StorageEvent::ListComplete {
-            prefix: prefix.to_string(),
-            result: StorageOutcome::Ok(Vec::new()),
         });
     }
 
@@ -1457,10 +1429,6 @@ impl BudgetConsumingSstPublicationBackend {
 }
 
 impl StorageBackend for BudgetConsumingSstPublicationBackend {
-    fn submit_read(&self, _key: &str, callback: StorageCallback) {
-        self.retain_callback(callback);
-    }
-
     fn submit_write(&self, _key: &str, _data: Vec<u8>, callback: StorageCallback) {
         self.retain_callback(callback);
     }
@@ -1477,13 +1445,6 @@ impl StorageBackend for BudgetConsumingSstPublicationBackend {
 
     fn submit_delete(&self, _key: &str, callback: StorageCallback) {
         self.retain_callback(callback);
-    }
-
-    fn submit_list(&self, prefix: &str, callback: StorageCallback) {
-        let _ = callback.send(StorageEvent::ListComplete {
-            prefix: prefix.to_string(),
-            result: StorageOutcome::Ok(Vec::new()),
-        });
     }
 
     fn submit_head(&self, key: &str, callback: StorageCallback) {
@@ -1548,18 +1509,6 @@ impl StorageBackend for RacingReadDeleteBackend {
         let _ = callback.send(result);
     }
 
-    fn submit_read(&self, key: &str, callback: StorageCallback) {
-        let key = key.to_string();
-        let snapshot = self.object.lock().clone();
-        self.read_started.wait();
-        self.release_read.wait();
-        let result = snapshot.map_or_else(
-            || StorageOutcome::Err("object not found".to_string().into()),
-            StorageOutcome::Ok,
-        );
-        let _ = callback.send(StorageEvent::ReadComplete { key, result });
-    }
-
     fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback) {
         *self.object.lock() = Some(data);
         let _ = callback.send(StorageEvent::WriteComplete {
@@ -1594,19 +1543,6 @@ impl StorageBackend for RacingReadDeleteBackend {
         });
     }
 
-    #[cfg(test)]
-    fn submit_list(&self, prefix: &str, callback: StorageCallback) {
-        let objects = self
-            .object
-            .lock()
-            .as_ref()
-            .map_or_else(Vec::new, |_| vec![prefix.to_string()]);
-        let _ = callback.send(StorageEvent::ListComplete {
-            prefix: prefix.to_string(),
-            result: StorageOutcome::Ok(objects),
-        });
-    }
-
     fn submit_head(&self, key: &str, callback: StorageCallback) {
         let result = self.object.lock().as_deref().map_or_else(
             || StorageOutcome::Err("object not found".to_string().into()),
@@ -1626,10 +1562,6 @@ impl NeverCompletesBackend {
 }
 
 impl StorageBackend for NeverCompletesBackend {
-    fn submit_read(&self, _key: &str, callback: StorageCallback) {
-        self.retain_callback(callback);
-    }
-
     fn submit_write(&self, _key: &str, _data: Vec<u8>, callback: StorageCallback) {
         self.retain_callback(callback);
     }
@@ -1654,10 +1586,6 @@ impl StorageBackend for NeverCompletesBackend {
         _headers: Vec<(String, String)>,
         callback: StorageCallback,
     ) {
-        self.retain_callback(callback);
-    }
-
-    fn submit_list(&self, _prefix: &str, callback: StorageCallback) {
         self.retain_callback(callback);
     }
 
@@ -1692,24 +1620,22 @@ fn write_local_object(storage: &HybridStorage, key: &str, data: Vec<u8>) {
 
 fn read_local_object(storage: &HybridStorage, key: &str) -> Vec<u8> {
     let (tx, rx) = std::sync::mpsc::channel();
-    storage.local_store().submit_read(key, tx);
+    storage
+        .local_store()
+        .submit_read_with_metadata(key, Duration::from_secs(1), tx);
     match rx.recv_timeout(Duration::from_secs(1)) {
-        Ok(StorageEvent::ReadComplete {
-            result: StorageOutcome::Ok(data),
-            ..
-        }) => data,
+        Ok(Ok((data, _metadata))) => data,
         other => panic!("local read for '{key}' failed: {other:?}"),
     }
 }
 
 fn read_cloud_object(storage: &HybridStorage, key: &str) -> Vec<u8> {
     let (tx, rx) = std::sync::mpsc::channel();
-    storage.sst_store().submit_read(key, tx);
+    storage
+        .sst_store()
+        .submit_read_with_metadata(key, Duration::from_secs(1), tx);
     match rx.recv_timeout(Duration::from_secs(1)) {
-        Ok(StorageEvent::ReadComplete {
-            result: StorageOutcome::Ok(data),
-            ..
-        }) => data,
+        Ok(Ok((data, _metadata))) => data,
         other => panic!("cloud read for '{key}' failed: {other:?}"),
     }
 }
