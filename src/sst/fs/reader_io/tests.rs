@@ -1317,3 +1317,28 @@ fn should_keep_block_frame_decoding_in_one_place() {
         "shared prefixes are checked only in shared_prefix_len"
     );
 }
+
+#[test]
+fn should_select_clamped_block_span_when_range_bounds_vary() -> MidgeResult<()> {
+    // Arrange (#510): every range reader selects blocks through `block_span`.
+    let temp_dir = tempfile::tempdir()?;
+    write_unique_key_sst(&temp_dir, "span.sst")?;
+    let reader = SstFileIo::open(
+        "span.sst",
+        Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+    )?;
+    let index = reader.index_entries()?;
+    let last = index.len() - 1;
+
+    // Act
+    let unbounded = reader.block_span(index.as_ref(), None, None);
+    let inverted = reader.block_span(index.as_ref(), Some(b"key_0090"), Some(b"key_0005"));
+    let empty = reader.block_span(&[], None, None);
+
+    // Assert
+    assert!(last >= 1, "fixture spans several blocks");
+    assert_eq!(unbounded, Some(0..=last));
+    assert_eq!(inverted, None);
+    assert_eq!(empty, None);
+    Ok(())
+}
