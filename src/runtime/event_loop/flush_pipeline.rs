@@ -122,7 +122,7 @@ impl EventLoop {
         (self.shutting_down && !allow_during_shutdown)
             || self.state.is_memory_mode()
             || self.flush_actor.is_inflight()
-            || self.publication_gate.active
+            || self.publication_gate.is_active()
             || (!allow_during_shutdown && self.pending_msg.is_some())
     }
 
@@ -206,7 +206,16 @@ impl EventLoop {
             self.fail_flush_pipeline(flush.flush_id, build.reservation, &error, false);
             return;
         }
-        self.publication_gate.active = true;
+        let publication_owner =
+            crate::runtime::event_loop::coordination::ManifestPublicationOwner::Flush {
+                flush_id: flush.flush_id,
+            };
+        if !self.publication_gate.try_acquire(publication_owner.clone()) {
+            if let Some((_, current)) = self.state.immutable_flush_by_id_mut(flush.flush_id) {
+                current.phase = ImmutableFlushPhase::Queued;
+            }
+            return;
+        }
         let task = FlushPublishTask {
             build,
             sst_name,
@@ -214,16 +223,19 @@ impl EventLoop {
             sst_dir: self.state.sst_dir.clone(),
             fs: Arc::clone(&self.state.fs),
             manifest_store: Arc::clone(&self.state.manifest_store),
-            hybrid_storage: self.hybrid_storage.clone(),
-            cloud_metadata_storage: self.cloud_metadata_storage.clone(),
+            storage: Arc::new(crate::runtime::actors::flush::HybridFlushStorage::new(
+                self.hybrid_storage.clone(),
+                self.cloud_metadata_storage.clone(),
+            )),
             metadata_publication_lock: self.metadata_publication_lock.clone(),
             lease_healthy: self.fencing.lease_healthy.clone(),
             leader_store: self.fencing.leader_store.clone(),
             leader_holder_id: self.fencing.leader_holder_id.clone(),
+            runtime_response_timeout: self.runtime_response_timeout,
         };
         if let Err(error) = self.flush_actor.submit_publish(task) {
-            self.publication_gate.active = false;
-            self.fail_flush_pipeline(flush.flush_id, None, &error, true);
+            self.publication_gate.release(&publication_owner);
+            self.fail_flush_pipeline(flush.flush_id, None, &error, false);
         }
     }
 
@@ -420,6 +432,19 @@ impl EventLoop {
             flush.phase = ImmutableFlushPhase::Built;
             flush.clone()
         };
+        // A compaction publication owns the metadata turn from its durable
+        // intent through the final mirrored clear. Park this completed flush
+        // as Queued with its build retained so it cannot start a second
+        // metadata writer mid-turn; the scheduler resumes queued flushes when
+        // the gate is released and publishes a retained build directly. The
+        // build is done, so release the worker; publication re-arms it.
+        if self.publication_gate.is_active() {
+            if let Some((_, current)) = self.state.immutable_flush_by_id_mut(identity.flush_id) {
+                current.phase = ImmutableFlushPhase::Queued;
+            }
+            self.flush_actor.finish_pipeline();
+            return;
+        }
         if let Some((_, current)) = self.state.immutable_flush_by_id_mut(identity.flush_id) {
             current.phase = ImmutableFlushPhase::Publishing;
         }
@@ -439,7 +464,11 @@ impl EventLoop {
             .flush_metrics
             .publish_ns_max
             .max(completion.publish_ns);
-        self.publication_gate.active = false;
+        self.publication_gate.release(
+            &crate::runtime::event_loop::coordination::ManifestPublicationOwner::Flush {
+                flush_id: completion.identity.flush_id,
+            },
+        );
 
         if let Err(error) = self.validate_flush_completion(completion.identity) {
             // Busy and Timeout both mean the store did not answer: authority
@@ -928,7 +957,10 @@ impl EventLoop {
             );
         }
         self.flush_actor.finish_pipeline();
-        if publication_phase {
+        let released_publication = self.publication_gate.release(
+            &crate::runtime::event_loop::coordination::ManifestPublicationOwner::Flush { flush_id },
+        );
+        if publication_phase && released_publication {
             // The worker may have already appended the manifest journal batch
             // or the durable intent before failing, leaving disk ahead of the
             // in-memory copies this loop publishes from. Reconcile before the
@@ -943,7 +975,6 @@ impl EventLoop {
                      publication is fenced until a reload succeeds"
                 );
             }
-            self.publication_gate.active = false;
         }
         let retry_after = self.state.mark_immutable_flush_failed(flush_id);
         tracing::warn!(flush_id, ?retry_after, %error, "flush pipeline failed; immutable retained");
@@ -956,7 +987,7 @@ impl EventLoop {
 
     fn fail_deferred_column_family_drops(&mut self, cf_id: u32, error: &crate::common::MidgeError) {
         let mut retained = std::collections::VecDeque::new();
-        while let Some(message) = self.publication_gate.deferred_messages.pop_front() {
+        for message in self.publication_gate.take_deferred() {
             match message {
                 crate::runtime::RuntimeMsg::ManifestDropColumnFamily {
                     request_id,
@@ -969,7 +1000,9 @@ impl EventLoop {
                 other => retained.push_back(other),
             }
         }
-        self.publication_gate.deferred_messages = retained;
+        for message in retained {
+            self.publication_gate.defer(message);
+        }
     }
 
     /// Translate a flush-pipeline failure into the error a deferred
@@ -1229,13 +1262,13 @@ mod tests {
         let response = event_loop
             .router
             .register(request_id, "ManifestDropColumnFamily");
-        event_loop.publication_gate.deferred_messages.push_back(
-            crate::runtime::RuntimeMsg::ManifestDropColumnFamily {
+        event_loop
+            .publication_gate
+            .defer(crate::runtime::RuntimeMsg::ManifestDropColumnFamily {
                 request_id,
                 cf_id: 0,
                 discard_unflushed: false,
-            },
-        );
+            });
 
         // Act
         event_loop.fail_deferred_column_family_drops(
@@ -1267,7 +1300,7 @@ mod tests {
             }
             other => panic!("unexpected deferred drop response: {other:?}"),
         }
-        assert!(event_loop.publication_gate.deferred_messages.is_empty());
+        assert!(event_loop.publication_gate.deferred_messages_is_empty());
         Ok(())
     }
 
@@ -1355,6 +1388,71 @@ mod tests {
             cf.memtable.get_bytes(b"after")?,
             Some(bytes::Bytes::from_static(b"new"))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn should_resume_built_flush_when_compaction_publication_releases_the_gate(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let directory = tempfile::tempdir()?;
+        let (mut event_loop, _hybrid) = event_loop_with_hybrid_storage(&directory)?;
+        event_loop.state.sequence = 1;
+        event_loop
+            .state
+            .get_cf(0)
+            .expect("family")
+            .memtable
+            .put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)?;
+        let flush_id = event_loop.freeze_active_memtable(0)?.expect("frozen");
+        event_loop
+            .state
+            .immutable_flush_by_id_mut(flush_id)
+            .expect("immutable")
+            .1
+            .phase = ImmutableFlushPhase::Building;
+        let identity = FlushIdentity {
+            flush_id,
+            writer_epoch: event_loop.fencing.writer_epoch,
+            cf_id: 0,
+            sequence: 1,
+        };
+        event_loop.publication_gate.try_acquire(
+            crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune,
+        );
+        event_loop.prepare_flush_publication(
+            identity,
+            directory.path().join("built.sst"),
+            None,
+            crate::runtime::FileMeta {
+                name: String::new(),
+                level: 0,
+                size_bytes: 1,
+                content_crc32c: Some(0),
+                cf_id: 0,
+                smallest_key: Some(b"key".to_vec()),
+                largest_key: Some(b"key".to_vec()),
+                smallest_seq: Some(1),
+                largest_seq: Some(1),
+                key_bounds_complete: true,
+            },
+        );
+
+        // Act: the compaction publication finishes and releases the gate.
+        event_loop
+            .publication_gate
+            .release(&crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune);
+        let start_blocked = event_loop.flush_start_blocked(false);
+        let resumed = event_loop.state.begin_next_immutable_flush();
+
+        // Assert
+        assert!(
+            !start_blocked,
+            "a parked flush must not hold the flush worker"
+        );
+        let resumed = resumed.expect("a flush held behind the gate must be resumable");
+        assert_eq!(resumed.flush_id, flush_id);
+        assert!(resumed.built.is_some(), "the resumed flush keeps its build");
         Ok(())
     }
 
@@ -1580,7 +1678,11 @@ mod tests {
                 .immutable_flush_by_id_mut(flush_id)
                 .expect("immutable");
             flush.phase = ImmutableFlushPhase::Publishing;
-            event_loop.publication_gate.active = true;
+            event_loop.publication_gate.try_acquire(
+                crate::runtime::event_loop::coordination::ManifestPublicationOwner::Flush {
+                    flush_id,
+                },
+            );
 
             // Act: the leader-store read behind validation fails once. The flush
             // may already be durably published, so it must be retried, not
@@ -1602,7 +1704,7 @@ mod tests {
                 "phase after transient validation failure: {:?}",
                 flush.phase
             );
-            assert!(!event_loop.publication_gate.active);
+            assert!(!event_loop.publication_gate.is_active());
         }
         Ok(())
     }
@@ -1628,7 +1730,9 @@ mod tests {
                 .join(crate::metadata::files::MANIFEST_SNAPSHOT),
             b"not a manifest",
         )?;
-        event_loop.publication_gate.active = true;
+        event_loop.publication_gate.try_acquire(
+            crate::runtime::event_loop::coordination::ManifestPublicationOwner::Flush { flush_id },
+        );
 
         // Act
         event_loop.fail_flush_pipeline(
@@ -1639,12 +1743,56 @@ mod tests {
         );
 
         // Assert
-        assert!(!event_loop.publication_gate.active);
+        assert!(!event_loop.publication_gate.is_active());
         assert!(event_loop.state.persistence_anomaly_detected());
         assert!(matches!(
             event_loop.state.ensure_metadata_current(),
             Err(crate::common::MidgeError::Fenced(_))
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn should_keep_gate_owned_by_wal_prune_when_flush_failure_did_not_acquire_it(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let directory = tempfile::tempdir()?;
+        let (mut event_loop, _hybrid) = event_loop_with_hybrid_storage(&directory)?;
+        event_loop.state.sequence = 1;
+        event_loop
+            .state
+            .get_cf(0)
+            .expect("family")
+            .memtable
+            .put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)?;
+        let flush_id = event_loop.freeze_active_memtable(0)?.expect("frozen");
+        std::fs::write(
+            event_loop
+                .state
+                .db_path
+                .join(crate::metadata::files::MANIFEST_SNAPSHOT),
+            b"not a manifest",
+        )?;
+        let prune_owner =
+            crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune;
+        assert!(event_loop.publication_gate.try_acquire(prune_owner.clone()));
+
+        // Act: this flush never acquired the gate, but its failure is marked
+        // as publication-related by the reservation path.
+        event_loop.fail_flush_pipeline(
+            flush_id,
+            None,
+            &crate::common::MidgeError::Internal("flush admission failed".into()),
+            true,
+        );
+
+        // Assert: a non-owner cannot open the gate or trigger a metadata reload.
+        assert!(event_loop.publication_gate.is_active());
+        assert!(
+            !event_loop.state.persistence_anomaly_detected(),
+            "a pre-publication flush failure must not reload persisted metadata"
+        );
+        assert!(event_loop.publication_gate.release(&prune_owner));
         Ok(())
     }
 

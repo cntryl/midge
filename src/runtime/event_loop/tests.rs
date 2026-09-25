@@ -241,6 +241,7 @@ fn should_require_cloud_filename_allocation_when_compacting_in_salvage_mode(
         crate::runtime::event_loop::FlushWorkerMode::Inline,
     )?;
     let publication_lock = event_loop.metadata_publication_lock.clone();
+    event_loop.runtime_response_timeout = std::time::Duration::from_millis(10);
     let _publication = publication_lock
         .try_lock()
         .expect("hold metadata publication");
@@ -250,7 +251,10 @@ fn should_require_cloud_filename_allocation_when_compacting_in_salvage_mode(
         .assign_compaction_output_sequence(crate::compaction::CompactionPlan::new(0, 0, 1));
 
     // Assert
-    assert!(matches!(result, Err(crate::common::MidgeError::Busy(_))));
+    assert!(matches!(
+        result,
+        Err(crate::common::MidgeError::Busy(_) | crate::common::MidgeError::Timeout(_))
+    ));
     assert!(event_loop.state.manifest.files.is_empty());
     Ok(())
 }
@@ -276,8 +280,7 @@ fn should_fail_every_held_request_when_shutdown_drain_restores_deferred_work() {
     });
     event_loop
         .publication_gate
-        .deferred_messages
-        .push_back(RuntimeMsg::ManifestDropColumnFamily {
+        .defer(RuntimeMsg::ManifestDropColumnFamily {
             request_id: 8102,
             cf_id: 1,
             discard_unflushed: false,
@@ -330,7 +333,7 @@ fn should_fail_every_held_request_when_shutdown_drain_restores_deferred_work() {
         );
     }
     assert!(event_loop.pending_msg.is_none());
-    assert!(event_loop.publication_gate.deferred_messages.is_empty());
+    assert!(event_loop.publication_gate.deferred_messages_is_empty());
     assert!(event_loop.verification_barrier.deferred_messages.is_empty());
     assert!(event_loop.flush_barrier_waiters.is_empty());
     assert!(event_loop.state.pending_compaction_waits.lock().is_empty());
@@ -1016,7 +1019,11 @@ fn should_preserve_compaction_gates_when_recovering_live_l0_pressure() {
         match gate {
             "ingest" => event_loop.state.ingest_active.store(true, Ordering::SeqCst),
             "ddl" => event_loop.fencing.ddl_authority_ambiguous = true,
-            "publication" => event_loop.publication_gate.active = true,
+            "publication" => {
+                event_loop.publication_gate.try_acquire(
+                    crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune,
+                );
+            }
             _ => event_loop.compaction_publication_degraded = true,
         }
         // Act
@@ -1473,7 +1480,9 @@ fn should_capture_runtime_health_at_verification_barrier_acquisition() {
 fn should_reject_storage_verification_while_flush_publication_is_active() {
     // Arrange
     let mut event_loop = create_test_local_event_loop().expect("create local event loop");
-    event_loop.publication_gate.active = true;
+    event_loop
+        .publication_gate
+        .try_acquire(crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune);
     let request_id = 104;
     let response_rx = event_loop.router.register(request_id, "TestRequest");
 
@@ -2238,7 +2247,7 @@ fn should_defer_column_family_drop_until_compaction_publication_finishes() {
     // Assert: publication must win the authority race before drop snapshots files.
     assert_eq!(outcome, HandleOutcome::Continue);
     assert!(response_rx.try_recv().is_err());
-    assert_eq!(event_loop.publication_gate.deferred_messages.len(), 1);
+    assert_eq!(event_loop.publication_gate.deferred_messages_len(), 1);
     assert!(event_loop.state.get_cf(cf_id).is_some());
 
     // Arrange: simulate the serialized compaction authority switch.
@@ -2355,7 +2364,7 @@ fn should_restore_deferred_column_family_drop_before_emergent_compaction_followu
         },
         &msg_rx,
     );
-    assert_eq!(event_loop.publication_gate.deferred_messages.len(), 1);
+    assert_eq!(event_loop.publication_gate.deferred_messages_len(), 1);
 
     // Act
     event_loop.handle_runtime_msg(
@@ -2379,7 +2388,7 @@ fn should_restore_deferred_column_family_drop_before_emergent_compaction_followu
             .load(std::sync::atomic::Ordering::SeqCst),
         0
     );
-    assert_eq!(event_loop.publication_gate.deferred_messages.len(), 1);
+    assert_eq!(event_loop.publication_gate.deferred_messages_len(), 1);
     event_loop.restore_publication_deferred_message();
     let deferred = event_loop
         .pending_msg
@@ -2732,7 +2741,10 @@ fn should_reject_sst_checksum_buffer_before_exceeding_compaction_pool(
     let budget = crate::common::resource_budget::ResourceBudget::new(64);
 
     // Act
-    let result = EventLoop::checksummed_file_crc(&path, &budget);
+    let result =
+        crate::runtime::actors::compaction::publication::checksummed_file_crc_for_publication_test(
+            &path, &budget,
+        );
 
     // Assert
     assert!(matches!(
@@ -2811,12 +2823,11 @@ fn should_restore_compaction_completion_deferred_behind_waiting_cf_drop() {
             succeeded: false,
         },
     ] {
-        event_loop
-            .publication_gate
-            .deferred_messages
-            .push_back(message);
+        event_loop.publication_gate.defer(message);
     }
-    event_loop.publication_gate.active = false;
+    event_loop
+        .publication_gate
+        .release(&crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune);
 
     // Act
     event_loop.restore_publication_deferred_message();
@@ -2832,12 +2843,7 @@ fn should_restore_compaction_completion_deferred_behind_waiting_cf_drop() {
         ),
         "the completion that drains the pipeline must not wait behind the drop"
     );
-    let remaining: Vec<_> = event_loop
-        .publication_gate
-        .deferred_messages
-        .iter()
-        .map(RuntimeMsg::request_id)
-        .collect();
+    let remaining = event_loop.publication_gate.deferred_request_ids();
     assert_eq!(
         remaining,
         vec![Some(3451), Some(3452)],
@@ -2860,7 +2866,9 @@ fn should_wait_in_select_when_queued_flush_cannot_start() -> crate::common::Midg
         .put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)?;
     event_loop.freeze_active_memtable(0)?;
     assert!(event_loop.state.has_due_immutable_flush());
-    event_loop.publication_gate.active = true;
+    event_loop
+        .publication_gate
+        .try_acquire(crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune);
 
     // Act
     let actionable = event_loop.has_actionable_work();

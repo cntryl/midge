@@ -5058,8 +5058,29 @@ mod compaction_snapshot_publication {
     use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
     use std::sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Barrier,
+        Arc, Barrier, Condvar, Mutex,
     };
+    use std::time::Duration;
+
+    struct PublicationPauseRelease {
+        gate: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl PublicationPauseRelease {
+        fn release(&self) {
+            let (released, changed) = &*self.gate;
+            *released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+            changed.notify_all();
+        }
+    }
+
+    impl Drop for PublicationPauseRelease {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
 
     #[test]
     fn should_publish_replacement_snapshot_before_obsolete_sst_deletion() {
@@ -5142,6 +5163,87 @@ mod compaction_snapshot_publication {
                 "replacement snapshot must serve batch {batch} before old inputs disappear"
             );
         }
+    }
+
+    #[test]
+    fn should_serve_runtime_metrics_while_compaction_output_publication_is_paused() {
+        // Arrange
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let engine = Engine::open(
+            OpenOptions::local(temp_dir.path())
+                .background_compaction(false)
+                .build()
+                .expect("build options"),
+        )
+        .expect("open engine");
+        let cf = engine
+            .get_column_family("default")
+            .expect("default column family");
+        for batch in 0..4 {
+            let mut tx = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .expect("begin write transaction");
+            for index in 0..25 {
+                tx.put(
+                    format!("publication_key_{batch}_{index:04}").into_bytes(),
+                    format!("value_{batch}").into_bytes(),
+                    None,
+                )
+                .expect("seed compaction input");
+            }
+            tx.commit(WriteOptions::buffered()).expect("commit batch");
+            engine.flush_cf(&cf).expect("flush L0 generation");
+        }
+
+        let scenario = fail::FailScenario::setup();
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+        let release_gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let callback_gate = Arc::clone(&release_gate);
+        let paused_once = Arc::new(AtomicBool::new(false));
+        let callback_paused_once = Arc::clone(&paused_once);
+        fail::cfg_callback(
+            "slice7::after_compaction_output_durable_before_manifest_publish",
+            move || {
+                if callback_paused_once.swap(true, Ordering::AcqRel) {
+                    return;
+                }
+                let _ = entered_tx.try_send(());
+                let (released, changed) = &*callback_gate;
+                let mut released = released
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                while !*released {
+                    released = changed
+                        .wait(released)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
+            },
+        )
+        .expect("configure compaction publication pause");
+
+        // Act
+        let (metrics, compaction_result) = std::thread::scope(|scope| {
+            // This guard must live inside the scope: if an assertion below
+            // unwinds, it releases the worker before scope joins its thread.
+            let release = PublicationPauseRelease {
+                gate: Arc::clone(&release_gate),
+            };
+            let compaction = scope.spawn(|| engine.compact_all());
+            entered_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("compaction publisher must reach its paused boundary");
+            let metrics = engine.get_runtime_metrics_with_timeout(Duration::from_millis(200));
+            release.release();
+            let compaction_result = compaction.join().expect("join compaction thread");
+            (metrics, compaction_result)
+        });
+
+        fail::remove("slice7::after_compaction_output_durable_before_manifest_publish");
+        scenario.teardown();
+
+        // Assert
+        metrics.expect("runtime metrics must remain responsive during publication");
+        compaction_result.expect("compaction completes after publication resumes");
     }
 }
 

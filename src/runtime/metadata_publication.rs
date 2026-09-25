@@ -12,14 +12,16 @@ use std::sync::Arc;
 pub(crate) struct MetadataPublicationLock(Arc<Mutex<()>>);
 
 impl MetadataPublicationLock {
-    pub(crate) fn try_lock(&self) -> Option<MutexGuard<'_, ()>> {
-        self.0.try_lock()
-    }
-
     pub(crate) fn lock_for(&self, timeout: std::time::Duration) -> Option<MutexGuard<'_, ()>> {
         self.0.try_lock_for(timeout)
     }
 
+    #[cfg(test)]
+    pub(crate) fn try_lock(&self) -> Option<MutexGuard<'_, ()>> {
+        self.0.try_lock()
+    }
+
+    #[cfg(test)]
     pub(crate) fn lock(&self) -> MutexGuard<'_, ()> {
         self.0.lock()
     }

@@ -259,6 +259,85 @@ pub(crate) fn conditional_metadata_mirror_put(
     io.put_with_headers(&key, data, headers)
 }
 
+/// Mirror the local control files under one shared, bounded publication turn.
+///
+/// All runtime-owned mirror workers use this protocol so the upfront
+/// remote-ahead fence, lease checks, lock timeout, source filesystem and
+/// aggregate operation deadline stay consistent.
+pub(crate) fn mirror_control_metadata_within(
+    cloud: &CloudStorage,
+    fs: &dyn crate::io::traits::Fs,
+    publication_lock: &crate::runtime::MetadataPublicationLock,
+    lock_wait_budget: std::time::Duration,
+    local_manifest_sequence: u64,
+    deadline: &crate::common::OperationDeadline,
+    mut validate_lease: impl FnMut(&crate::common::OperationDeadline) -> MidgeResult<()>,
+) -> MidgeResult<()> {
+    let lock_timeout = if lock_wait_budget.is_zero() {
+        if deadline.is_expired() {
+            return Err(MidgeError::Timeout(
+                "metadata mirror deadline exhausted before publication lock".into(),
+            ));
+        }
+        std::time::Duration::ZERO
+    } else {
+        deadline
+            .clamp_nonzero(lock_wait_budget.min(cloud.callback_timeout()))
+            .ok_or_else(|| {
+                MidgeError::Timeout(
+                    "metadata mirror deadline exhausted before publication lock".into(),
+                )
+            })?
+    };
+    let _publication_guard = publication_lock.lock_for(lock_timeout).ok_or_else(|| {
+        MidgeError::Timeout("metadata mirror timed out acquiring publication lock".into())
+    })?;
+
+    validate_lease(deadline)?;
+    ensure_remote_manifest_metadata_not_ahead(cloud, local_manifest_sequence, deadline)?;
+
+    for file_name in crate::metadata::files::CLOUD_MIRRORED {
+        if deadline.is_expired() {
+            return Err(MidgeError::Timeout(format!(
+                "operation deadline exhausted before cloud metadata local mirror preparation for '{file_name}'"
+            )));
+        }
+        let path = crate::io::FsPath::new(*file_name);
+        if !fs.exists(&path)? {
+            continue;
+        }
+        let file = fs.open(
+            &path,
+            crate::io::OpenOptions {
+                mode: crate::io::OpenMode::ReadOnly,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        )?;
+        let data = file.read_at(0, file.len()?)?.to_vec();
+        validate_lease(deadline)?;
+        conditional_metadata_mirror_put(cloud, file_name, data, local_manifest_sequence, deadline)?;
+    }
+    Ok(())
+}
+
+fn ensure_remote_manifest_metadata_not_ahead(
+    cloud: &CloudStorage,
+    local_manifest_sequence: u64,
+    deadline: &crate::common::OperationDeadline,
+) -> MidgeResult<()> {
+    let blocking = crate::storage::cloud::BlockingCloud::new(cloud, deadline);
+    for file_name in crate::metadata::files::MANIFEST_BODIES {
+        let key = crate::cloud_layout::CloudObjectLayout::metadata_key(file_name);
+        let Some(data) = blocking.get_optional(&key)? else {
+            continue;
+        };
+        crate::metadata::files::ensure_remote_not_ahead(file_name, &data, local_manifest_sequence)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,6 +449,57 @@ mod tests {
         assert!(
             matches!(error, MidgeError::Fenced(_)),
             "remote-ahead mirror must fence, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn should_check_remote_manifest_before_writing_any_mirror_file() {
+        // Arrange
+        let directory = tempfile::tempdir().unwrap();
+        let manifest = Manifest {
+            last_persisted_sequence: 5,
+            ..Manifest::default()
+        };
+        crate::metadata::ManifestPersistence::save(directory.path(), &manifest).unwrap();
+        let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+        let cloud = CloudStorage::new(backend.clone(), String::new());
+        let remote = serde_json::to_vec(&Manifest {
+            last_persisted_sequence: 10,
+            ..Manifest::default()
+        })
+        .unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        cloud.submit_put(
+            &crate::cloud_layout::CloudObjectLayout::metadata_key(crate::metadata::files::MANIFEST),
+            remote,
+            Vec::new(),
+            tx,
+        );
+        assert!(matches!(
+            rx.recv().unwrap(),
+            crate::storage::cloud::CloudEvent::Put { result: Ok(()), .. }
+        ));
+        let fs: Arc<dyn crate::io::traits::Fs> =
+            Arc::new(crate::io::real::RealFs::new(directory.path()).unwrap());
+
+        // Act
+        let error = mirror_control_metadata_within(
+            &cloud,
+            fs.as_ref(),
+            &crate::runtime::MetadataPublicationLock::default(),
+            std::time::Duration::from_secs(1),
+            manifest.last_persisted_sequence,
+            &crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(1)),
+            |_| Ok(()),
+        )
+        .expect_err("remote-ahead metadata must fence the mirror before any write");
+
+        // Assert
+        assert!(matches!(error, MidgeError::Fenced(_)));
+        assert_eq!(
+            backend.get_uploads().len(),
+            1,
+            "only the ahead remote manifest setup upload should exist"
         );
     }
 

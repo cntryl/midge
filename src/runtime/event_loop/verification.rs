@@ -6,7 +6,7 @@ impl EventLoop {
         &mut self,
         msg: RuntimeMsg,
     ) -> Option<RuntimeMsg> {
-        if !self.publication_gate.active {
+        if !self.publication_gate.is_active() {
             return Some(msg);
         }
         if msg.defers_under_publication_gate() {

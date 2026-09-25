@@ -353,6 +353,7 @@ fn stale_writer_event_loop(directory: &tempfile::TempDir) -> MidgeResult<EventLo
     let leader_store: Arc<dyn crate::lease::LeaderStore> = Arc::new(NewerHolderLeaderStore);
     let config = crate::runtime::RuntimeConfig {
         writer_epoch: 1,
+        lease_healthy: Some(Arc::new(std::sync::atomic::AtomicBool::new(false))),
         leader_store: Some(leader_store),
         leader_holder_id: Some("old-writer".to_string()),
         ..crate::runtime::RuntimeConfig::default()
@@ -372,28 +373,40 @@ fn should_reject_compaction_publication_when_writer_lease_moved_to_newer_holder(
     // Arrange
     let directory = tempfile::tempdir()?;
     let mut event_loop = stale_writer_event_loop(&directory)?;
-    let intents_before = event_loop.state.intent_log.len();
-    let budget = crate::common::resource_budget::ResourceBudget::new(64);
+    let input = "input.sst".to_string();
+    event_loop
+        .state
+        .manifest
+        .files
+        .push(crate::metadata::FileMeta {
+            name: input.clone(),
+            level: 0,
+            cf_id: 0,
+            smallest_key: Some(b"a".to_vec()),
+            largest_key: Some(b"z".to_vec()),
+            ..Default::default()
+        });
 
     // Act
-    let result = CompactionCoordinator::publish_compaction_manifest(
+    CompactionCoordinator::start_publication(
         &mut event_loop,
-        &["input.sst".to_string()],
+        7_329,
+        std::slice::from_ref(&input),
         &[],
         0,
-        &[],
-        &budget,
-    );
+        1,
+    )?;
+    event_loop.drain_inline_compaction_publish_worker();
 
     // Assert
     assert!(
-        matches!(result, Err(MidgeError::Fenced(_))),
-        "a stale writer must not publish compaction output: {result:?}"
+        event_loop.compaction_publication_degraded,
+        "a stale writer must retain the durable publication obligation"
     );
     assert_eq!(
         event_loop.state.intent_log.len(),
-        intents_before,
-        "a fenced publication must not record a publication intent"
+        1,
+        "a fenced publisher must not discard the recovery intent"
     );
     Ok(())
 }

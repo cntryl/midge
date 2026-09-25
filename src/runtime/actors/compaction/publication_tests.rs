@@ -355,3 +355,26 @@ fn should_summarize_compaction_output_on_the_worker_when_there_is_no_cloud_stora
     assert!(path.exists());
     Ok(())
 }
+
+#[test]
+fn should_keep_compaction_completion_free_of_full_file_and_cloud_publication_io() {
+    // Arrange
+    let completion = include_str!("../../event_loop/compaction.rs");
+
+    // Act
+    let performs_full_file_or_provider_work = [
+        "build_sst_file_meta",
+        "checksummed_file_crc",
+        "mirror_ssts_to_authoritative_cloud",
+        "verify_remote_object_guards_within",
+        "mirror_metadata_to_authoritative_cloud",
+    ]
+    .into_iter()
+    .any(|forbidden| completion.contains(forbidden));
+
+    // Assert
+    assert!(
+        !performs_full_file_or_provider_work,
+        "the compaction completion path must hand full-file and cloud work to a publication worker"
+    );
+}
