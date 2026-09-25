@@ -237,30 +237,6 @@ fn sync_directory(dir: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Create `dir` and every missing ancestor, then make each new directory
-/// entry durable so a crash cannot drop the path to a durable object.
-fn create_dir_all_durably(dir: &Path) -> std::io::Result<()> {
-    let mut missing = Vec::new();
-    let mut probe = Some(dir);
-    while let Some(path) = probe {
-        if path.as_os_str().is_empty() || path.exists() {
-            break;
-        }
-        missing.push(path.to_path_buf());
-        probe = path.parent();
-    }
-    fs::create_dir_all(dir)?;
-    for created in missing.iter().rev() {
-        if let Some(parent) = created
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-        {
-            sync_directory(parent)?;
-        }
-    }
-    Ok(())
-}
-
 /// The modified time to stamp on a new version of an object.
 ///
 /// Range identities (`fs:` etags) are built from the inode and timestamps,
@@ -336,7 +312,12 @@ fn stamp_after_replaced(
 /// place before the directory is synced. Every version is stamped with a
 /// modified time later than any earlier version's, so identity-based etags
 /// change on every overwrite even when the inode is reused.
-fn publish_object_atomically(full_path: &Path, data: &[u8], mode: Publish) -> StorageOutcome<()> {
+fn publish_object_atomically(
+    root: &Path,
+    full_path: &Path,
+    data: &[u8],
+    mode: Publish,
+) -> StorageOutcome<()> {
     let Some(parent) = full_path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -345,7 +326,7 @@ fn publish_object_atomically(full_path: &Path, data: &[u8], mode: Publish) -> St
             format!("object path has no parent: {}", full_path.display()).into(),
         );
     };
-    if let Err(error) = create_dir_all_durably(parent) {
+    if let Err(error) = crate::io::durable_dir::create_dir_all_durably(root, parent) {
         return StorageOutcome::Err(format!("mkdir {}: {error}", parent.display()).into());
     }
     let file_name = full_path
@@ -645,7 +626,8 @@ impl StorageBackend for FileSystem {
             }
         };
 
-        let outcome = publish_object_atomically(&full_path, &data, Publish::Replace);
+        let outcome =
+            publish_object_atomically(&self.base_path, &full_path, &data, Publish::Replace);
 
         let _ = callback.send(StorageEvent::WriteComplete {
             key: key.to_string(),
@@ -706,7 +688,12 @@ impl StorageBackend for FileSystem {
             match identity {
                 Ok(current) => {
                     if current == expected {
-                        publish_object_atomically(&full_path, &data, Publish::Replace)
+                        publish_object_atomically(
+                            &self.base_path,
+                            &full_path,
+                            &data,
+                            Publish::Replace,
+                        )
                     } else {
                         StorageOutcome::Err(crate::storage::StorageError::precondition_failed(
                             "etag mismatch",
@@ -719,7 +706,7 @@ impl StorageBackend for FileSystem {
                 )),
             }
         } else if if_none_match.as_deref() == Some("*") {
-            publish_object_atomically(&full_path, &data, Publish::CreateNew)
+            publish_object_atomically(&self.base_path, &full_path, &data, Publish::CreateNew)
         } else {
             StorageOutcome::Err(
                 "conditional write requires a supported precondition"
@@ -1263,6 +1250,32 @@ mod tests {
             Ok((content, _metadata)) => assert_eq!(content, data),
             Err(e) => panic!("Read failed: {e}"),
         }
+    }
+
+    #[test]
+    fn should_sync_store_root_when_publishing_into_directory_not_yet_made_durable() {
+        // Arrange: another thread created `sst/` and has not yet synced the
+        // store root; finding the directory present proves nothing (#519).
+        let temp_dir = TempDir::new().unwrap();
+        let fs = FileSystem::new(temp_dir.path()).unwrap();
+        let root = std::fs::canonicalize(temp_dir.path()).unwrap();
+        std::fs::create_dir(root.join("sst")).unwrap();
+        crate::io::durable_dir::take_synced_dirs();
+        let (tx, rx) = mpsc::channel();
+
+        // Act
+        fs.submit_write("sst/000001.sst", b"table".to_vec(), tx);
+        let event = rx.recv().unwrap();
+
+        // Assert
+        assert!(matches!(
+            event,
+            StorageEvent::WriteComplete {
+                result: StorageOutcome::Ok(()),
+                ..
+            }
+        ));
+        assert!(crate::io::durable_dir::take_synced_dirs().contains(&root));
     }
 
     // =========== Delete Tests ===========
