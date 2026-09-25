@@ -1145,10 +1145,12 @@ mod architecture_ladder {
     fn should_keep_sst_below_read_layers() {
         // Arrange
         let forbidden = [
+            "crate::diagnostics",
             "crate::engine",
             "crate::metadata",
             "crate::runtime",
             "crate::storage",
+            "crate::telemetry",
             "crate::wal",
         ];
 
@@ -1159,6 +1161,52 @@ mod architecture_ladder {
         assert!(
             violations.is_empty(),
             "SST format and readers must not depend on iterator facades or orchestration: {violations:#?}"
+        );
+    }
+
+    #[test]
+    fn should_keep_shared_dtos_independent_of_storage() {
+        // Arrange
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/types.rs");
+        let source = production_source(&path);
+        let forbidden = ["crate::storage", "crate::runtime", "crate::engine"];
+
+        // Act
+        let violations: Vec<_> = forbidden
+            .iter()
+            .filter(|edge| source.contains(**edge))
+            .collect();
+
+        // Assert
+        assert!(
+            violations.is_empty(),
+            "shared DTOs in src/types.rs must not be defined by or import higher layers: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn should_keep_diagnostics_below_runtime_orchestration() {
+        // Arrange: diagnostics sits above sst (it aggregates SST read counters
+        // through `SstReadObserver`) and below the runtime that owns it.
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/diagnostics.rs");
+        let source = production_source(&path);
+        let forbidden = [
+            "crate::engine",
+            "crate::runtime",
+            "crate::storage",
+            "crate::metadata",
+        ];
+
+        // Act
+        let violations: Vec<_> = forbidden
+            .iter()
+            .filter(|edge| source.contains(**edge))
+            .collect();
+
+        // Assert
+        assert!(
+            violations.is_empty(),
+            "diagnostics must not depend on orchestration layers: {violations:?}"
         );
     }
 
