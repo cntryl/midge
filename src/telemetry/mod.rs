@@ -124,7 +124,9 @@ impl Telemetry {
 
     #[cfg(feature = "telemetry")]
     fn setup_tracing(config: &TelemetryConfig) -> crate::common::MidgeResult<()> {
+        #[cfg(feature = "telemetry-otlp")]
         use opentelemetry::global;
+        #[cfg(feature = "telemetry-otlp")]
         use opentelemetry::trace::TracerProvider as _;
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
@@ -138,6 +140,9 @@ impl Telemetry {
             );
 
         let registry = tracing_subscriber::registry().with(fmt_layer);
+
+        #[cfg(not(feature = "telemetry-otlp"))]
+        let _ = config;
 
         #[cfg(feature = "telemetry-otlp")]
         if let Some(otel_config) = &config.otlp_config {
