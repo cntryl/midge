@@ -179,6 +179,25 @@ impl SstFileIo {
         Some((0, last_index))
     }
 
+    /// The blocks that can hold keys in `[start, end]`, clamped to `index`;
+    /// `None` when no block can. Every range reader selects blocks here.
+    pub(super) fn block_span(
+        &self,
+        index: &[(Vec<u8>, BlockHandle)],
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+    ) -> Option<std::ops::RangeInclusive<usize>> {
+        let last = index.len().checked_sub(1)?;
+        let first_block = start
+            .and_then(|key| self.candidate_block_indices(index, key))
+            .map_or(0, |range| *range.start());
+        let last_block = end
+            .and_then(|key| self.candidate_block_indices(index, key))
+            .map_or(last, |range| *range.end())
+            .min(last);
+        (first_block <= last_block).then_some(first_block..=last_block)
+    }
+
     pub(super) fn candidate_block_indices(
         &self,
         index: &[(Vec<u8>, BlockHandle)],

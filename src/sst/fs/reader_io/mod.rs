@@ -206,21 +206,15 @@ impl SstRawVersionScan {
             self.lifecycle = SstScanLifecycle::Exhausted;
             return Ok(());
         }
-        self.first_block = self
-            .start
-            .as_deref()
-            .and_then(|start| self.reader.candidate_block_indices(index.as_ref(), start))
-            .map_or(0, |range| *range.start());
-        self.last_block = self
-            .end
-            .as_deref()
-            .and_then(|end| self.reader.candidate_block_indices(index.as_ref(), end))
-            .map_or_else(|| index.len().saturating_sub(1), |range| *range.end());
-        if self.first_block >= index.len() || self.first_block > self.last_block {
+        let Some(span) =
+            self.reader
+                .block_span(index.as_ref(), self.start.as_deref(), self.end.as_deref())
+        else {
             self.lifecycle = SstScanLifecycle::Exhausted;
             return Ok(());
-        }
-        self.last_block = self.last_block.min(index.len() - 1);
+        };
+        self.first_block = *span.start();
+        self.last_block = *span.end();
         self.next_block = self.first_block;
         self.index = Some(index);
         Ok(())
@@ -269,28 +263,14 @@ impl SstRawVersionScan {
             )?;
             file.read_at(handle.offset, handle.size)?
         };
-        if buffer.len() < 4 {
-            return Err(MidgeError::Corruption("Block too short".into()));
-        }
-        let payload_len = u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
-        if payload_len.checked_add(4) != Some(buffer.len()) {
-            return Err(MidgeError::Corruption(
-                "SST block length prefix does not exactly match its handle".into(),
-            ));
-        }
-        let raw = &buffer[4..];
+        let raw = SstFileIo::split_block_frame(&buffer)?;
         let decompressed_size = crate::codec::decompressed_size_with_trailer(raw)?;
         let decompressed_reservation = self
             .budget
             .as_ref()
             .map(|budget| budget.reserve(decompressed_size, "decompressed SST block"))
             .transpose()?;
-        let block = crate::codec::decompress_block_with_trailer(raw)?;
-        if block.len() > decompressed_size {
-            return Err(MidgeError::Corruption(
-                "decoded SST block exceeded its declared size".into(),
-            ));
-        }
+        let block = SstFileIo::decode_block_payload(raw, decompressed_size)?;
         drop(compressed_reservation);
 
         self.reader
@@ -332,12 +312,10 @@ impl SstRawVersionScan {
                 self.block_offset,
                 self.reader.format_version,
             )?;
-            let shared_len = usize::from(entry.shared_len);
-            if shared_len > self.previous_key.len() {
-                return Err(MidgeError::Corruption(
-                    "Invalid shared prefix length in SST entry".into(),
-                ));
-            }
+            let shared_len = SstFileIo::shared_prefix_len(
+                usize::from(entry.shared_len),
+                self.previous_key.len(),
+            )?;
             let key_len = shared_len.saturating_add(entry.key_delta.len());
             let value_len = entry.value.map_or(0, <[u8]>::len);
             let decoder_reservation = self
@@ -480,22 +458,15 @@ impl SstStateScan {
             return Ok(());
         }
 
-        self.first_block = self
-            .start
-            .as_deref()
-            .and_then(|start| self.reader.candidate_block_indices(index.as_ref(), start))
-            .map_or(0, |range| *range.start());
-        self.last_block = self
-            .end
-            .as_deref()
-            .and_then(|end| self.reader.candidate_block_indices(index.as_ref(), end))
-            .map_or_else(|| index.len().saturating_sub(1), |range| *range.end());
-
-        if self.first_block >= index.len() || self.first_block > self.last_block {
+        let Some(span) =
+            self.reader
+                .block_span(index.as_ref(), self.start.as_deref(), self.end.as_deref())
+        else {
             self.lifecycle = SstScanLifecycle::Exhausted;
             return Ok(());
-        }
-        self.last_block = self.last_block.min(index.len() - 1);
+        };
+        self.first_block = *span.start();
+        self.last_block = *span.end();
         self.next_block = if self.reverse {
             self.last_block
         } else {

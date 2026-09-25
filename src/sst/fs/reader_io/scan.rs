@@ -31,21 +31,11 @@ impl crate::sst::SstReader for SstFileIo {
             std::collections::BTreeMap::new();
         let now_millis = crate::common::time::unix_time_millis();
 
-        let start_block = start
-            .and_then(|start_key| self.candidate_block_indices(index.as_ref(), start_key))
-            .map_or(0, |range| *range.start());
-        let end_block = end
-            .and_then(|end_key| self.candidate_block_indices(index.as_ref(), end_key))
-            .map_or_else(|| index.len().saturating_sub(1), |range| *range.end());
-
-        if index.is_empty() || start_block >= index.len() || start_block > end_block {
+        let Some(span) = self.block_span(index.as_ref(), start, end) else {
             return Ok(Vec::new());
-        }
+        };
 
-        let handles: Vec<BlockHandle> = index[start_block..=end_block]
-            .iter()
-            .map(|(_, handle)| *handle)
-            .collect();
+        let handles: Vec<BlockHandle> = index[span].iter().map(|(_, handle)| *handle).collect();
         self.diagnostics
             .sst_metrics()
             .record_candidate_blocks_checked(handles.len());
@@ -171,16 +161,10 @@ impl crate::sst::SstStateReader for SstFileIo {
         }
         let index = self.index_entries()?;
         let mut result = Vec::new();
-        let start_block = start
-            .and_then(|key| self.candidate_block_indices(index.as_ref(), key))
-            .map_or(0, |range| *range.start());
-        let end_block = end
-            .and_then(|key| self.candidate_block_indices(index.as_ref(), key))
-            .map_or_else(|| index.len().saturating_sub(1), |range| *range.end());
-        if index.is_empty() || start_block >= index.len() || start_block > end_block {
+        let Some(span) = self.block_span(index.as_ref(), start, end) else {
             return Ok(result);
-        }
-        for (_first_key, handle) in &index[start_block..=end_block] {
+        };
+        for (_first_key, handle) in &index[span] {
             let block_data = self.read_cached_data_block(handle)?;
             for entry in self.scan_block_entries_from_bytes(&block_data)? {
                 if start.is_some_and(|bound| entry.key.as_slice() < bound)
@@ -258,18 +242,11 @@ impl crate::sst::SstStateReader for SstFileIo {
         let index = self.index_entries()?;
         let mut result = Vec::new();
 
-        let start_block = start
-            .and_then(|start_key| self.candidate_block_indices(index.as_ref(), start_key))
-            .map_or(0, |range| *range.start());
-        let end_block = end
-            .and_then(|end_key| self.candidate_block_indices(index.as_ref(), end_key))
-            .map_or_else(|| index.len().saturating_sub(1), |range| *range.end());
-
-        if index.is_empty() || start_block >= index.len() || start_block > end_block {
+        let Some(span) = self.block_span(index.as_ref(), start, end) else {
             return Ok(Vec::new());
-        }
+        };
 
-        let handles = &index[start_block..=end_block];
+        let handles = &index[span];
         self.diagnostics
             .sst_metrics()
             .record_candidate_blocks_checked(handles.len());

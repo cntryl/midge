@@ -18,12 +18,8 @@ impl SstFileIo {
             let (entry, next_offset) =
                 encoding::decode_with_format(block_data.as_ref(), offset, self.format_version)?;
 
-            let shared_len = entry.shared_len as usize;
-            if shared_len > previous_key.len() {
-                return Err(MidgeError::Corruption(
-                    "Invalid shared prefix length in SST entry".into(),
-                ));
-            }
+            let shared_len =
+                SstFileIo::shared_prefix_len(usize::from(entry.shared_len), previous_key.len())?;
 
             let mut full_key = Vec::with_capacity(shared_len + entry.key_delta.len());
             full_key.extend_from_slice(&previous_key[..shared_len]);
@@ -119,12 +115,10 @@ impl SstFileIo {
         while offset < block_data.len() {
             let (entry, next_offset) =
                 encoding::decode_with_format(block_data.as_ref(), offset, self.format_version)?;
-            let shared_len = usize::from(entry.shared_len);
-            if shared_len > reconstructed_key.len() {
-                return Err(MidgeError::Corruption(
-                    "Invalid shared prefix length in SST entry".into(),
-                ));
-            }
+            let shared_len = SstFileIo::shared_prefix_len(
+                usize::from(entry.shared_len),
+                reconstructed_key.len(),
+            )?;
 
             let key_len = shared_len
                 .checked_add(entry.key_delta.len())
