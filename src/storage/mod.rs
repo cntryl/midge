@@ -605,72 +605,14 @@ pub trait StorageBackend: Send + Sync + 'static {
         }
     }
 
-    /// Submit one typed write while preserving the caller's deadline and
-    /// retention reservation through the existing callback adapter.
+    /// Submit one typed write, retaining its deadline, condition and reservation.
     fn submit_write_request(
         &self,
         request: StorageRequest,
         data: Vec<u8>,
         callback: StorageCallback,
-    ) {
-        let headers = match request.precondition.headers() {
-            Ok(headers) => headers,
-            Err(error) => {
-                let _ = callback.send(StorageEvent::WriteComplete {
-                    key: request.key,
-                    result: StorageOutcome::Err(error),
-                });
-                return;
-            }
-        };
-        let timeout = request.remaining_timeout();
-        if let Some(reservation) = request.reservation {
-            self.submit_write_with_reservation(
-                &request.key,
-                data,
-                headers,
-                timeout,
-                reservation,
-                callback,
-            );
-        } else {
-            self.submit_write_with_headers_and_timeout(
-                &request.key,
-                data,
-                headers,
-                timeout,
-                callback,
-            );
-        }
-    }
+    );
 
-    /// Keep a publication allowance alive until backend completion. Async
-    /// adapters must override this if their ordinary callback can time out
-    /// before the underlying upload has released its payload.
-    fn submit_write_with_reservation(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        timeout: std::time::Duration,
-        reservation: std::sync::Arc<crate::common::resource_budget::ResourceReservation>,
-        callback: StorageCallback,
-    ) {
-        match retained_callback::retain(callback.clone(), reservation) {
-            Ok(retained) => {
-                self.submit_write_with_headers_and_timeout(key, data, headers, timeout, retained);
-            }
-            Err(error) => {
-                let _ = callback.send(StorageEvent::WriteComplete {
-                    key: key.to_string(),
-                    result: StorageOutcome::Err(StorageError::new(
-                        StorageErrorKind::of(&error),
-                        format!("retain upload completion: {error}"),
-                    )),
-                });
-            }
-        }
-    }
     fn submit_read_range_with_reservation(
         &self,
         key: &str,

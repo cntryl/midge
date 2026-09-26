@@ -589,6 +589,15 @@ impl BudgetConsumingProofBackend {
 }
 
 impl StorageBackend for BudgetConsumingProofBackend {
+    fn submit_write_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        data: Vec<u8>,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_write_to_legacy(self, request, data, callback);
+    }
+
     fn submit_read_with_metadata(
         &self,
         _key: &str,
@@ -648,6 +657,15 @@ impl NeverCompletesBackend {
 }
 
 impl StorageBackend for NeverCompletesBackend {
+    fn submit_write_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        data: Vec<u8>,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_write_to_legacy(self, request, data, callback);
+    }
+
     fn submit_write(&self, _key: &str, _data: Vec<u8>, callback: StorageCallback) {
         self.retain_callback(callback);
     }

@@ -233,18 +233,6 @@ impl StorageBackend for CloudStorage {
         );
     }
 
-    fn submit_write_with_reservation(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        timeout: std::time::Duration,
-        reservation: Arc<crate::common::resource_budget::ResourceReservation>,
-        callback: StorageCallback,
-    ) {
-        self.write_admitted(key, data, headers, timeout, Some(reservation), &callback);
-    }
-
     fn submit_write_with_headers_and_timeout(
         &self,
         key: &str,

@@ -5,9 +5,70 @@
 /// `StorageBackend` trait. `$inner` names a field holding the delegate; both
 /// `T` and `Arc<T>` work, because forwarding uses method-call syntax.
 #[cfg(test)]
+pub(crate) fn forward_typed_write_to_legacy<B: super::StorageBackend + ?Sized>(
+    backend: &B,
+    request: super::StorageRequest,
+    data: Vec<u8>,
+    callback: super::StorageCallback,
+) {
+    let timeout = request.remaining_timeout();
+    if timeout.is_zero() {
+        let _ = callback.send(super::StorageEvent::WriteComplete {
+            key: request.key,
+            result: super::StorageOutcome::Err(super::storage_timeout_error("write timed out")),
+        });
+        return;
+    }
+    let headers = match request.precondition.headers() {
+        Ok(headers) => headers,
+        Err(error) => {
+            let _ = callback.send(super::StorageEvent::WriteComplete {
+                key: request.key,
+                result: super::StorageOutcome::Err(error),
+            });
+            return;
+        }
+    };
+    if let Some(reservation) = request.reservation {
+        match super::retained_callback::retain(callback.clone(), reservation) {
+            Ok(retained) => backend.submit_write_with_headers_and_timeout(
+                &request.key,
+                data,
+                headers,
+                timeout,
+                retained,
+            ),
+            Err(error) => {
+                let _ = callback.send(super::StorageEvent::WriteComplete {
+                    key: request.key,
+                    result: super::StorageOutcome::Err(super::StorageError::new(
+                        super::StorageErrorKind::of(&error),
+                        format!("retain upload completion: {error}"),
+                    )),
+                });
+            }
+        }
+    } else {
+        backend.submit_write_with_headers_and_timeout(
+            &request.key,
+            data,
+            headers,
+            timeout,
+            callback,
+        );
+    }
+}
+
+#[cfg(test)]
 macro_rules! forward_storage_backend {
     ($inner:ident; $($method:ident),+ $(,)?) => {
         $($crate::storage::forward_storage_backend!(@method $inner, $method);)+
+    };
+    (@method $inner:ident, submit_write_request) => {
+        fn submit_write_request(&self, request: $crate::storage::StorageRequest,
+            data: Vec<u8>, callback: $crate::storage::StorageCallback) {
+            self.$inner.submit_write_request(request, data, callback);
+        }
     };
     (@method $inner:ident, submit_read_with_metadata) => {
         fn submit_read_with_metadata(&self, key: &str, timeout: std::time::Duration, callback: $crate::storage::MetadataReadCallback) {
@@ -50,14 +111,6 @@ macro_rules! forward_storage_backend {
             headers: Vec<(String, String)>, timeout: std::time::Duration,
             callback: $crate::storage::StorageCallback) {
             self.$inner.submit_write_with_headers_and_timeout(key, data, headers, timeout, callback);
-        }
-    };
-    (@method $inner:ident, submit_write_with_reservation) => {
-        fn submit_write_with_reservation(&self, key: &str, data: Vec<u8>,
-            headers: Vec<(String, String)>, timeout: std::time::Duration,
-            reservation: std::sync::Arc<$crate::common::resource_budget::ResourceReservation>,
-            callback: $crate::storage::StorageCallback) {
-            self.$inner.submit_write_with_reservation(key, data, headers, timeout, reservation, callback);
         }
     };
     (@method $inner:ident, submit_delete) => {

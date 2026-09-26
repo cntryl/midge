@@ -684,6 +684,19 @@ impl crate::storage::StorageBackend for PostRetirementDependencyChangeBackend {
         submit_write,
     );
 
+    fn submit_write_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        data: Vec<u8>,
+        callback: crate::storage::StorageCallback,
+    ) {
+        if self.armed.load(Ordering::SeqCst) && request.key == crate::wal::cloud_catalog::OBJECT_KEY
+        {
+            self.catalog_retired.store(true, Ordering::SeqCst);
+        }
+        self.inner.submit_write_request(request, data, callback);
+    }
+
     fn submit_write_with_headers(
         &self,
         key: &str,
@@ -846,7 +859,7 @@ impl crate::storage::StorageBackend for ArmedDelayedHeadStorageBackend {
     }
     crate::storage::forward_storage_backend!(
     inner;
-    submit_read_range,
+    submit_write_request, submit_read_range,
     submit_read_with_metadata,
     submit_write,
     submit_write_with_headers,
@@ -877,6 +890,39 @@ impl crate::storage::StorageBackend for CommitThenBlockCatalogCasCallbackBackend
         submit_read_with_metadata,
         submit_write,
     );
+
+    fn submit_write_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        data: Vec<u8>,
+        callback: crate::storage::StorageCallback,
+    ) {
+        if request.key == crate::wal::cloud_catalog::OBJECT_KEY
+            && self.arm_catalog_write.swap(false, Ordering::SeqCst)
+        {
+            let (inner_tx, inner_rx) = std::sync::mpsc::channel();
+            self.inner.submit_write_request(request, data, inner_tx);
+            let event = inner_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("catalog CAS fixture completion");
+            if matches!(
+                event,
+                crate::storage::StorageEvent::WriteComplete {
+                    result: crate::storage::StorageOutcome::Ok(()),
+                    ..
+                }
+            ) {
+                self.retained_callbacks
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(callback);
+                return;
+            }
+            let _ = callback.send(event);
+            return;
+        }
+        self.inner.submit_write_request(request, data, callback);
+    }
 
     fn submit_write_with_headers(
         &self,
@@ -941,6 +987,28 @@ impl crate::storage::StorageBackend for BudgetConsumingDdlBackend {
         submit_read_with_metadata,
         submit_write,
     );
+
+    fn submit_write_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        data: Vec<u8>,
+        callback: crate::storage::StorageCallback,
+    ) {
+        if request.key == crate::runtime::ddl::REMOTE_DDL_REGISTRY_KEY {
+            self.registry_cas_timeouts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(request.remaining_timeout());
+            let _ = callback.send(crate::storage::StorageEvent::WriteComplete {
+                key: request.key,
+                result: crate::storage::StorageOutcome::Err(crate::storage::storage_timeout_error(
+                    "remote request timed out before mutation",
+                )),
+            });
+            return;
+        }
+        self.inner.submit_write_request(request, data, callback);
+    }
 
     fn submit_write_with_headers(
         &self,
@@ -1029,6 +1097,43 @@ impl crate::storage::StorageBackend for DelayedCommitDdlBackend {
         submit_write,
         submit_write_with_headers,
     );
+
+    fn submit_write_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        data: Vec<u8>,
+        callback: crate::storage::StorageCallback,
+    ) {
+        if request.key == crate::runtime::ddl::REMOTE_DDL_REGISTRY_KEY
+            && self.delay_first_registry_cas.swap(false, Ordering::SeqCst)
+        {
+            let timeout = request.remaining_timeout();
+            let key = request.key.clone();
+            let inner = Arc::clone(&self.inner);
+            let commit_complete = Arc::clone(&self.commit_complete);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                let (tx, rx) = std::sync::mpsc::channel();
+                inner.submit_write_request(request, data, tx);
+                let committed = matches!(
+                    rx.recv_timeout(Duration::from_secs(1)),
+                    Ok(crate::storage::StorageEvent::WriteComplete {
+                        result: crate::storage::StorageOutcome::Ok(()),
+                        ..
+                    })
+                );
+                commit_complete.store(committed, Ordering::SeqCst);
+            });
+            let _ = callback.send(crate::storage::StorageEvent::WriteComplete {
+                key,
+                result: crate::storage::StorageOutcome::Err(crate::storage::storage_timeout_error(
+                    format!("remote request timed out after submission (budget {timeout:?})"),
+                )),
+            });
+            return;
+        }
+        self.inner.submit_write_request(request, data, callback);
+    }
 
     fn submit_write_with_headers_and_timeout(
         &self,
@@ -1122,7 +1227,7 @@ impl BlockingDeleteStorageBackend {
 impl crate::storage::StorageBackend for BlockingDeleteStorageBackend {
     crate::storage::forward_storage_backend!(
         inner;
-        submit_range_head,
+        submit_write_request, submit_range_head,
         submit_read_range,
         submit_read_with_metadata,
         submit_write,
@@ -1185,7 +1290,7 @@ impl FailOnceDeleteStorageBackend {
 impl crate::storage::StorageBackend for FailOnceDeleteStorageBackend {
     crate::storage::forward_storage_backend!(
         inner;
-        submit_range_head,
+        submit_write_request, submit_range_head,
         submit_read_range,
         submit_read_with_metadata,
         submit_write,
@@ -2111,13 +2216,17 @@ fn should_keep_ddl_fenced_until_delayed_cas_commit_is_observed() -> crate::commo
         },
         &msg_rx,
     );
-    assert!(matches!(
-        first_response.recv_deadline(async_deadline),
-        Ok(RuntimeResponse::Error {
-            error: crate::common::MidgeError::Fenced(_),
-            ..
-        })
-    ));
+    let first_result = first_response.recv_deadline(async_deadline);
+    assert!(
+        matches!(
+            first_result,
+            Ok(RuntimeResponse::Error {
+                error: crate::common::MidgeError::Fenced(_),
+                ..
+            })
+        ),
+        "unexpected first DDL response: {first_result:?}"
+    );
     assert!(el.fencing.ddl_authority_ambiguous);
     assert!(el.state.db_path.join("ddl.prepare.json").exists());
 
@@ -8811,7 +8920,7 @@ impl crate::storage::StorageBackend for CountingSstHeadBackend {
 
     crate::storage::forward_storage_backend!(
         inner;
-        submit_read_range,
+        submit_write_request, submit_read_range,
         submit_read_with_metadata,
         submit_write,
         submit_write_with_headers,

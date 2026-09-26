@@ -634,22 +634,7 @@ impl StorageBackend for FileSystem {
         let _ = callback.send(StorageEvent::WriteComplete { key, result });
     }
 
-    /// Every filesystem call completes before it returns, so the reservation
-    /// only has to outlive the call: no completion thread is needed (#518).
-    fn submit_write_with_reservation(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        timeout: std::time::Duration,
-        reservation: std::sync::Arc<crate::common::resource_budget::ResourceReservation>,
-        callback: StorageCallback,
-    ) {
-        self.submit_write_with_headers_and_timeout(key, data, headers, timeout, callback);
-        drop(reservation);
-    }
-
-    /// See [`Self::submit_write_with_reservation`].
+    /// Local calls complete inline, so the reservation outlives the call.
     fn submit_read_range_with_reservation(
         &self,
         key: &str,
@@ -1457,12 +1442,16 @@ mod tests {
         let (write_tx, write_rx) = mpsc::channel();
 
         // Act
-        fs.submit_write_with_reservation(
-            "object.bin",
+        fs.submit_write_request(
+            crate::storage::StorageRequest::new(
+                "object.bin",
+                crate::common::OperationDeadline::unbounded(),
+                std::time::Duration::from_secs(5),
+            )
+            .with_reservation(std::sync::Arc::new(
+                budget.reserve(7, "reserved write").unwrap(),
+            )),
             b"payload".to_vec(),
-            Vec::new(),
-            std::time::Duration::from_secs(5),
-            std::sync::Arc::new(budget.reserve(7, "reserved write").unwrap()),
             write_tx,
         );
         let write = write_rx.recv().unwrap();

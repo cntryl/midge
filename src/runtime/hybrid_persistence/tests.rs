@@ -1346,6 +1346,15 @@ impl PanickingWriteBackend {
 }
 
 impl StorageBackend for PanickingWriteBackend {
+    fn submit_write_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        data: Vec<u8>,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_write_to_legacy(self, request, data, callback);
+    }
+
     fn submit_write(&self, _key: &str, _data: Vec<u8>, _callback: StorageCallback) {
         self.write_attempts.fetch_add(1, Ordering::SeqCst);
         panic!("injected cloud upload worker panic");
@@ -1370,6 +1379,15 @@ impl StorageBackend for PanickingWriteBackend {
 }
 
 impl StorageBackend for AlwaysFailingWriteBackend {
+    fn submit_write_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        data: Vec<u8>,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_write_to_legacy(self, request, data, callback);
+    }
+
     fn submit_write(&self, key: &str, _data: Vec<u8>, callback: StorageCallback) {
         self.write_attempts.fetch_add(1, Ordering::SeqCst);
         let _ = callback.send(StorageEvent::WriteComplete {
@@ -1429,6 +1447,15 @@ impl BudgetConsumingSstPublicationBackend {
 }
 
 impl StorageBackend for BudgetConsumingSstPublicationBackend {
+    fn submit_write_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        data: Vec<u8>,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_write_to_legacy(self, request, data, callback);
+    }
+
     fn submit_write(&self, _key: &str, _data: Vec<u8>, callback: StorageCallback) {
         self.retain_callback(callback);
     }
@@ -1491,6 +1518,15 @@ impl RacingReadDeleteBackend {
 }
 
 impl StorageBackend for RacingReadDeleteBackend {
+    fn submit_write_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        data: Vec<u8>,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_write_to_legacy(self, request, data, callback);
+    }
+
     fn submit_read_with_metadata(
         &self,
         _key: &str,
@@ -1562,6 +1598,15 @@ impl NeverCompletesBackend {
 }
 
 impl StorageBackend for NeverCompletesBackend {
+    fn submit_write_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        data: Vec<u8>,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_write_to_legacy(self, request, data, callback);
+    }
+
     fn submit_write(&self, _key: &str, _data: Vec<u8>, callback: StorageCallback) {
         self.retain_callback(callback);
     }
