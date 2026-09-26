@@ -423,12 +423,9 @@ impl SnapshotScan {
 
         self.sources
             .push(SnapshotStateSource::new(Self::memory_iterator(
-                snapshot.memtable.range_state_at_with_time(
-                    start,
-                    end,
-                    self.sequence,
-                    snapshot.read_time_millis,
-                ),
+                snapshot
+                    .memtable
+                    .range_raw_state_at(start, end, self.sequence),
                 self.reverse,
             )));
         self.range_tombstones.extend(
@@ -444,12 +441,7 @@ impl SnapshotScan {
         for immutable in &snapshot.immutable_memtables {
             self.sources
                 .push(SnapshotStateSource::new(Self::memory_iterator(
-                    immutable.range_state_at_with_time(
-                        start,
-                        end,
-                        self.sequence,
-                        snapshot.read_time_millis,
-                    ),
+                    immutable.range_raw_state_at(start, end, self.sequence),
                     self.reverse,
                 )));
             self.range_tombstones.extend(
@@ -811,13 +803,11 @@ impl ReadSnapshot {
         let mut l0_ssts_touched = 0u64;
         let mut blocks_read = 0u64;
 
-        let state = self
-            .memtable
-            .get_key_state_at_with_time(key, seq, self.read_time_millis)?;
+        let state = self.memtable.get_raw_key_state_at(key, seq);
         Self::merge_best_state(&mut best_state, state)?;
 
         for imm in &self.immutable_memtables {
-            let state = imm.get_key_state_at_with_time(key, seq, self.read_time_millis)?;
+            let state = imm.get_raw_key_state_at(key, seq);
             Self::merge_best_state(&mut best_state, state)?;
             covering_tombstone_seq =
                 covering_tombstone_seq.max(imm.max_covering_tombstone_seq(key, seq));
@@ -886,13 +876,11 @@ impl ReadSnapshot {
         let mut best_state = None;
         let mut range_tombstones = Vec::new();
 
-        let state =
-            self.memtable
-                .get_key_state_at_with_time(key, u64::MAX, self.read_time_millis)?;
+        let state = self.memtable.get_raw_key_state_at(key, u64::MAX);
         Self::merge_best_state(&mut best_state, state)?;
 
         for imm in &self.immutable_memtables {
-            let state = imm.get_key_state_at_with_time(key, u64::MAX, self.read_time_millis)?;
+            let state = imm.get_raw_key_state_at(key, u64::MAX);
             Self::merge_best_state(&mut best_state, state)?;
             range_tombstones.extend(
                 imm.range_tombstones_at(u64::MAX)
@@ -1034,17 +1022,12 @@ impl ReadSnapshot {
         let start_opt = if start.is_empty() { None } else { Some(start) };
         let end_opt = if end.is_empty() { None } else { Some(end) };
 
-        for (key, state) in
-            self.memtable
-                .range_state_at_with_time(start_opt, end_opt, seq, self.read_time_millis)
-        {
+        for (key, state) in self.memtable.range_raw_state_at(start_opt, end_opt, seq) {
             Self::merge_state(&mut states, key, state)?;
         }
 
         for imm in &self.immutable_memtables {
-            for (key, state) in
-                imm.range_state_at_with_time(start_opt, end_opt, seq, self.read_time_millis)
-            {
+            for (key, state) in imm.range_raw_state_at(start_opt, end_opt, seq) {
                 Self::merge_state(&mut states, key, state)?;
             }
         }
@@ -1331,6 +1314,56 @@ mod tests {
                 .next(),
             Some(Err(MidgeError::Corruption(_)))
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn should_accept_identical_expired_value_replayed_in_memtable() -> MidgeResult<()> {
+        // Arrange
+        let dir = tempfile::tempdir()?;
+        let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new(dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096);
+        let mut writer = factory.create()?;
+        writer.add_with_meta(b"key", Some(b"value"), 5, EntryType::Put, Some(1))?;
+        crate::sst::fs::finish_writer_to_path(writer, &dir.path().join("expired.sst"))?;
+        let memtable = Arc::new(SkipListMemtable::new());
+        memtable.put_bytes_with_seq(
+            bytes::Bytes::from_static(b"key"),
+            bytes::Bytes::from_static(b"value"),
+            5,
+            Some(1),
+        )?;
+        let snapshot = Arc::new(ReadSnapshot::new(
+            memtable,
+            Vec::new(),
+            vec![FileMeta {
+                name: "expired.sst".into(),
+                level: 0,
+                cf_id: 0,
+                size_bytes: std::fs::metadata(dir.path().join("expired.sst"))?.len(),
+                smallest_key: Some(b"key".to_vec()),
+                largest_key: Some(b"key".to_vec()),
+                smallest_seq: Some(5),
+                largest_seq: Some(5),
+                key_bounds_complete: true,
+                ..Default::default()
+            }],
+            fs,
+            std::path::PathBuf::new(),
+            false,
+            2,
+        ));
+
+        // Act
+        let result = snapshot.get(b"key", u64::MAX);
+
+        // Assert
+        assert_eq!(result?, None);
+        assert!(snapshot.range_scan(b"", b"", u64::MAX)?.is_empty());
+        assert!(snapshot
+            .state_scan(None, None, false, u64::MAX)
+            .next()
+            .is_none());
         Ok(())
     }
 
