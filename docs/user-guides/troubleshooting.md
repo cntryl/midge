@@ -7,7 +7,7 @@ before attempting recovery.
 ## Open or recovery failure
 
 Stop competing processes and verify ownership, permissions, free space, and the
-configured path. Copy the database for diagnosis. Use `Engine::verify_path` on
+configured path. Copy the database for diagnosis. Use `StorageVerifier::verify_path` on
 the copy when appropriate and inspect recovery metrics after a successful open.
 Do not delete the directory, WAL, manifest, or lock as a generic recovery step.
 

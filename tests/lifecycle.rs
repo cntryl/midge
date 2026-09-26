@@ -415,7 +415,10 @@ mod engine_gc {
             // segment is now orphaned and eligible for GC (the same contract
             // `observability_api.rs` checks after an explicit flush).
             if mode != "memory" {
-                let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+                let metrics = engine
+                    .metrics()
+                    .get_runtime_metrics()
+                    .expect("runtime metrics");
                 assert_eq!(
                     metrics.max_memtable_wal_segment_gap, 0,
                     "flush should leave no outstanding WAL segment gap in mode: {mode}"
@@ -1168,7 +1171,10 @@ mod memory_management {
                     .compact_all()
                     .expect("clear L0 debt after sustained memory pressure");
             }
-            let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+            let metrics = engine
+                .metrics()
+                .get_runtime_metrics()
+                .expect("runtime metrics");
 
             // Assert
             if !mode.eq("memory") {
@@ -1713,7 +1719,10 @@ mod backpressure {
                 .expect("wait for final stall clear"),
             "runtime should not remain permanently stalled"
         );
-        let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+        let metrics = engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("runtime metrics");
         assert!(
             metrics.sst_count >= 1,
             "natural auto-flush should publish at least one SST"
@@ -1743,7 +1752,10 @@ mod backpressure {
 
         let _observed_stalls = write_until_committed(&engine, cf.id(), 300, 1024);
 
-        let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+        let metrics = engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("runtime metrics");
         // Act
         // Assert
         assert_eq!(metrics.memtable_size_limit, 1024 * 1024);
@@ -1801,7 +1813,7 @@ mod backpressure {
                 }
                 Err(error) => panic!("unexpected write result: {error}"),
             }
-            let layout = engine.get_storage_layout().expect("live layout");
+            let layout = engine.metrics().get_storage_layout().expect("live layout");
             let l0_files = layout
                 .levels
                 .iter()
@@ -1816,7 +1828,10 @@ mod backpressure {
         // Assert
         assert_eq!(accepted, hard_ceiling * 2);
         engine.compact_all().expect("manual compaction clears debt");
-        let drained_layout = engine.get_storage_layout().expect("drained layout");
+        let drained_layout = engine
+            .metrics()
+            .get_storage_layout()
+            .expect("drained layout");
         assert_eq!(
             drained_layout
                 .levels
@@ -2011,7 +2026,10 @@ mod backpressure {
             // condition instead of assuming a fixed sleep covers hosted-runner contention.
             let deadline = Instant::now() + Duration::from_secs(30);
             let metrics = loop {
-                let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+                let metrics = engine
+                    .metrics()
+                    .get_runtime_metrics()
+                    .expect("runtime metrics");
                 if total_stalls > 0 || (metrics.sst_count > 0 && !metrics.write_stalled) {
                     break metrics;
                 }
@@ -2203,7 +2221,10 @@ mod column_family_reclamation_hardening {
             .expect("commit retained value");
         engine.flush_cf(cf).expect("flush column family");
 
-        let layout = engine.get_storage_layout().expect("storage layout");
+        let layout = engine
+            .metrics()
+            .get_storage_layout()
+            .expect("storage layout");
         let files = layout
             .levels
             .iter()
@@ -2217,6 +2238,7 @@ mod column_family_reclamation_hardening {
 
     fn manifest_contains_cf_files(engine: &Engine, cf_id: u32) -> bool {
         engine
+            .metrics()
             .get_storage_layout()
             .expect("storage layout")
             .levels

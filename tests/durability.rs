@@ -1579,6 +1579,7 @@ mod durability_recovery {
                 // Recovery must have restored the sequence counter to at least the
                 // two commits made before shutdown, not reset it to zero.
                 let sequence_after_reopen = engine
+                    .metrics()
                     .get_runtime_metrics()
                     .expect("runtime metrics after reopen")
                     .current_sequence;
@@ -1603,6 +1604,7 @@ mod durability_recovery {
                 tx.commit(buffered_write_options(mode)).expect("commit");
 
                 let sequence_after_new_writes = engine
+                    .metrics()
                     .get_runtime_metrics()
                     .expect("runtime metrics after new writes")
                     .current_sequence;
@@ -2711,7 +2713,10 @@ mod recovery_policy_api {
         .expect("salvage open");
 
         // Assert
-        let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+        let metrics = engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("runtime metrics");
         assert_eq!(metrics.health, EngineHealth::SalvageMode);
         assert_eq!(metrics.salvage_mode_opens, 1);
     }
@@ -2786,7 +2791,11 @@ mod recovery_policy_api {
 
         // Assert
         assert_eq!(
-            engine.get_runtime_metrics().expect("metrics").health,
+            engine
+                .metrics()
+                .get_runtime_metrics()
+                .expect("metrics")
+                .health,
             EngineHealth::SalvageMode
         );
         assert_eq!(
@@ -2877,7 +2886,10 @@ mod recovery_policy_api {
         .expect("salvage open");
 
         // Assert
-        let metrics = engine.get_runtime_metrics().expect("runtime metrics");
+        let metrics = engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("runtime metrics");
         assert_eq!(metrics.health, EngineHealth::SalvageMode);
         assert_eq!(metrics.salvage_mode_opens, 1);
     }

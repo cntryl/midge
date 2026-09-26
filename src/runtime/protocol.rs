@@ -831,24 +831,12 @@ pub enum RuntimeResponse {
     },
     ReadAmpMetricsSnapshot {
         request_id: u64,
-        reads_total: u64,
-        ssts_touched_total: u64,
-        l0_ssts_touched_total: u64,
-        blocks_read_total: u64,
-        avg_ssts_per_read: f64,
-        avg_l0_ssts_per_read: f64,
-        avg_blocks_per_read: f64,
-        l0_overlap_rate: f64,
-        sst_budget_violation_rate: f64,
-        block_budget_violation_rate: f64,
+        snapshot: crate::types::ReadAmpMetricsSnapshot,
     },
 
     RecoveryMetricsSnapshot {
         request_id: u64,
-        wal_recovery_records_replayed: u64,
-        wal_recovery_bytes_replayed: u64,
-        intent_log_replay_runs: u64,
-        intent_log_entries_replayed: u64,
+        snapshot: crate::types::RecoveryMetricsSnapshot,
     },
 
     /// Stable operator-facing runtime metrics snapshot.

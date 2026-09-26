@@ -11,12 +11,14 @@ pub(super) fn wait(engine: &Engine, deadline: Instant) -> RuntimeMetricsSnapshot
             !remaining.is_zero(),
             "maintenance did not become idle before the campaign deadline"
         );
-        let metrics =
-            match engine.get_runtime_metrics_with_timeout(remaining.min(Duration::from_secs(5))) {
-                Ok(metrics) => metrics,
-                Err(cntryl_midge::MidgeError::Timeout(_)) => continue,
-                Err(error) => panic!("quiescence metrics failed: {error}"),
-            };
+        let metrics = match engine
+            .metrics()
+            .get_runtime_metrics_with_timeout(remaining.min(Duration::from_secs(5)))
+        {
+            Ok(metrics) => metrics,
+            Err(cntryl_midge::MidgeError::Timeout(_)) => continue,
+            Err(error) => panic!("quiescence metrics failed: {error}"),
+        };
         if inspect(&metrics).unwrap_or_else(|error| panic!("{error}: {metrics:?}")) {
             return metrics;
         }
@@ -62,7 +64,10 @@ fn empty_snapshot() -> RuntimeMetricsSnapshot {
             .build()
             .expect("snapshot options");
     let mut engine = Engine::open(options).expect("snapshot engine");
-    let metrics = engine.get_runtime_metrics().expect("empty runtime metrics");
+    let metrics = engine
+        .metrics()
+        .get_runtime_metrics()
+        .expect("empty runtime metrics");
     engine
         .shutdown(Duration::from_secs(5))
         .expect("close snapshot engine");

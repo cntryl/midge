@@ -61,16 +61,18 @@ impl EventLoop {
             request_id,
             RuntimeResponse::ReadAmpMetricsSnapshot {
                 request_id,
-                reads_total: metrics.reads_total(),
-                ssts_touched_total: metrics.ssts_touched_total(),
-                l0_ssts_touched_total: metrics.l0_ssts_touched_total(),
-                blocks_read_total: metrics.blocks_read_total(),
-                avg_ssts_per_read: metrics.avg_ssts_per_read(),
-                avg_l0_ssts_per_read: metrics.avg_l0_ssts_per_read(),
-                avg_blocks_per_read: metrics.avg_blocks_per_read(),
-                l0_overlap_rate: metrics.l0_overlap_rate(),
-                sst_budget_violation_rate: metrics.sst_budget_violation_rate(),
-                block_budget_violation_rate: metrics.block_budget_violation_rate(),
+                snapshot: crate::types::ReadAmpMetricsSnapshot {
+                    reads_total: metrics.reads_total(),
+                    ssts_touched_total: metrics.ssts_touched_total(),
+                    l0_ssts_touched_total: metrics.l0_ssts_touched_total(),
+                    blocks_read_total: metrics.blocks_read_total(),
+                    avg_ssts_per_read: metrics.avg_ssts_per_read(),
+                    avg_l0_ssts_per_read: metrics.avg_l0_ssts_per_read(),
+                    avg_blocks_per_read: metrics.avg_blocks_per_read(),
+                    l0_overlap_rate: metrics.l0_overlap_rate(),
+                    sst_budget_violation_rate: metrics.sst_budget_violation_rate(),
+                    block_budget_violation_rate: metrics.block_budget_violation_rate(),
+                },
             },
         );
     }
@@ -80,10 +82,12 @@ impl EventLoop {
             request_id,
             RuntimeResponse::RecoveryMetricsSnapshot {
                 request_id,
-                wal_recovery_records_replayed: self.state.wal_recovery_records_replayed,
-                wal_recovery_bytes_replayed: self.state.wal_recovery_bytes_replayed,
-                intent_log_replay_runs: self.state.intent_log_replay_runs,
-                intent_log_entries_replayed: self.state.intent_log_entries_replayed,
+                snapshot: crate::types::RecoveryMetricsSnapshot {
+                    wal_recovery_records_replayed: self.state.wal_recovery_records_replayed,
+                    wal_recovery_bytes_replayed: self.state.wal_recovery_bytes_replayed,
+                    intent_log_replay_runs: self.state.intent_log_replay_runs,
+                    intent_log_entries_replayed: self.state.intent_log_entries_replayed,
+                },
             },
         );
     }

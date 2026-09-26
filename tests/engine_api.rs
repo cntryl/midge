@@ -511,6 +511,7 @@ mod engine_wal {
             batch_count += 1;
             segment_ids.push(
                 engine
+                    .metrics()
                     .get_runtime_metrics()
                     .expect("runtime metrics")
                     .wal_current_segment_id,
@@ -3728,7 +3729,10 @@ mod engine_compaction {
         engine.compact_all().expect("compact all seeded L0 files");
 
         // Assert
-        let layout = engine.get_storage_layout().expect("storage layout");
+        let layout = engine
+            .metrics()
+            .get_storage_layout()
+            .expect("storage layout");
         let compacted_names: Vec<String> = layout
             .levels
             .iter()
@@ -4631,6 +4635,7 @@ mod edge_cases {
             let total_puts: usize = threads * puts_per_thread;
 
             let before_uploads = engine
+                .metrics()
                 .get_runtime_metrics()
                 .expect("runtime metrics before puts")
                 .cloud_async_wal_uploads_completed;
@@ -4674,12 +4679,14 @@ mod edge_cases {
             let mut after_uploads;
             loop {
                 after_uploads = engine
+                    .metrics()
                     .get_runtime_metrics()
                     .expect("runtime metrics after puts")
                     .cloud_async_wal_uploads_completed;
                 if after_uploads > before_uploads {
                     std::thread::sleep(std::time::Duration::from_millis(250));
                     let settled = engine
+                        .metrics()
                         .get_runtime_metrics()
                         .expect("runtime metrics after settling")
                         .cloud_async_wal_uploads_completed;

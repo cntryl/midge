@@ -7,7 +7,7 @@ mod common;
 mod telemetry_integration {
     //! Operation-integrity checks for code paths that are expected to emit
     //! telemetry when instrumentation is available, plus direct assertions
-    //! against the real runtime-metrics/telemetry API (`Engine::get_runtime_metrics`,
+    //! against the real runtime-metrics/telemetry API (`engine.metrics().get_runtime_metrics()`,
     //! `Engine::flush_cf`'s flush counters, `Engine::compact_all`'s compaction
     //! counters) where such an API exists.
 
@@ -79,7 +79,10 @@ mod telemetry_integration {
             }
             drop(tx);
 
-            let before = engine.get_runtime_metrics().expect("runtime metrics");
+            let before = engine
+                .metrics()
+                .get_runtime_metrics()
+                .expect("runtime metrics");
 
             let tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadOnly)
@@ -95,7 +98,10 @@ mod telemetry_integration {
 
             // Assert: repeatedly accessing the same values must register block
             // cache hits in the telemetry runtime metrics.
-            let after = engine.get_runtime_metrics().expect("runtime metrics");
+            let after = engine
+                .metrics()
+                .get_runtime_metrics()
+                .expect("runtime metrics");
             assert!(
                 after.cache_hits > before.cache_hits,
                 "mode: {mode} repeated reads should register block cache hits (before: {}, after: {})",
@@ -133,14 +139,20 @@ mod telemetry_integration {
                 engine.flush_cf(&cf).expect("flush batch");
             }
 
-            let before = engine.get_runtime_metrics().expect("runtime metrics");
+            let before = engine
+                .metrics()
+                .get_runtime_metrics()
+                .expect("runtime metrics");
 
             // Act
             engine.compact_all().ok();
 
             // Assert: compaction must be recorded in the telemetry runtime
             // metrics, not just leave the data intact.
-            let after = engine.get_runtime_metrics().expect("runtime metrics");
+            let after = engine
+                .metrics()
+                .get_runtime_metrics()
+                .expect("runtime metrics");
             assert!(
                 after.compactions_run > before.compactions_run,
                 "mode: {mode} compact_all should increment compactions_run (before: {}, after: {})",
@@ -174,7 +186,10 @@ mod telemetry_integration {
 
             let value = vec![b'W'; 1024];
 
-            let before = engine.get_runtime_metrics().expect("runtime metrics");
+            let before = engine
+                .metrics()
+                .get_runtime_metrics()
+                .expect("runtime metrics");
 
             // Act
             let mut tx = engine
@@ -190,7 +205,10 @@ mod telemetry_integration {
 
             // Assert: flushing the WAL-backed write batch to an SST must be
             // recorded by the flush build/publish runtime metrics.
-            let after = engine.get_runtime_metrics().expect("runtime metrics");
+            let after = engine
+                .metrics()
+                .get_runtime_metrics()
+                .expect("runtime metrics");
             assert!(
                 after.flush_build_count > before.flush_build_count,
                 "mode: {mode} flush_cf should increment flush_build_count (before: {}, after: {})",
@@ -263,7 +281,7 @@ mod read_amp_api {
         for _ in 0..5 {
             assert_eq!(tx.get(b"hot-key")?.as_deref(), Some(b"value-00".as_slice()));
         }
-        let metrics = engine.get_read_amp_metrics()?;
+        let metrics = engine.metrics().get_read_amp_metrics()?;
 
         // Assert
         assert_eq!(metrics.reads_total, 5);
@@ -290,7 +308,7 @@ mod read_amp_api {
 
         // Act
         let value = tx.get(b"hot-key")?;
-        let metrics = engine.get_read_amp_metrics()?;
+        let metrics = engine.metrics().get_read_amp_metrics()?;
 
         // Assert
         assert_eq!(value.as_deref(), Some(b"value-02".as_slice()));
@@ -310,7 +328,7 @@ mod read_amp_api {
         let engine = open_local_without_compaction(&temp_dir);
 
         // Act
-        let metrics = engine.get_read_amp_metrics()?;
+        let metrics = engine.metrics().get_read_amp_metrics()?;
 
         // Assert
         assert_eq!(metrics.reads_total, 0);
@@ -341,7 +359,7 @@ mod read_amp_api {
         for _ in 0..10 {
             let _ = tx.get(b"hot-key")?;
         }
-        let metrics = engine.get_read_amp_metrics()?;
+        let metrics = engine.metrics().get_read_amp_metrics()?;
 
         // Assert
         assert_eq!(metrics.reads_total, 10);
@@ -365,7 +383,7 @@ mod read_amp_api {
 
         // Act
         let value = tx.get(b"hot-key")?;
-        let metrics = engine.get_read_amp_metrics()?;
+        let metrics = engine.metrics().get_read_amp_metrics()?;
 
         // Assert
         assert_eq!(value.as_deref(), Some(b"value-10".as_slice()));
@@ -484,10 +502,10 @@ mod read_path_diagnostics {
         // Act: find a deterministic in-range miss that the persisted bloom rejects.
         let mut observed_reject = false;
         for index in (1..399).step_by(2) {
-            let before = engine.get_runtime_metrics()?;
+            let before = engine.metrics().get_runtime_metrics()?;
             let read = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
             assert!(read.get(format!("key-{index:04}").as_bytes())?.is_none());
-            let after = engine.get_runtime_metrics()?;
+            let after = engine.metrics().get_runtime_metrics()?;
             if after.sst_bloom_rejects_total > before.sst_bloom_rejects_total {
                 assert!(after.sst_bloom_checks_total > before.sst_bloom_checks_total);
                 assert_eq!(
@@ -596,6 +614,7 @@ mod recovery_metrics_api {
         let reopened = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
             .expect("reopen engine");
         let recovery = reopened
+            .metrics()
             .get_recovery_metrics()
             .expect("get recovery metrics");
 
@@ -623,7 +642,10 @@ mod recovery_metrics_api {
         // Act
         let engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
             .expect("open engine");
-        let recovery = engine.get_recovery_metrics().expect("get recovery metrics");
+        let recovery = engine
+            .metrics()
+            .get_recovery_metrics()
+            .expect("get recovery metrics");
 
         // Assert
         assert_eq!(recovery.wal_recovery_records_replayed, 0);
@@ -656,7 +678,10 @@ mod recovery_metrics_api {
         // Act
         let engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
             .expect("open engine");
-        let recovery = engine.get_recovery_metrics().expect("get recovery metrics");
+        let recovery = engine
+            .metrics()
+            .get_recovery_metrics()
+            .expect("get recovery metrics");
 
         // Assert
         assert_eq!(

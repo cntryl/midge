@@ -48,6 +48,7 @@ mod durability_sync_count {
 
     fn wal_fsync_count(engine: &Engine) -> u64 {
         engine
+            .metrics()
             .get_runtime_metrics()
             .expect("read runtime metrics")
             .wal_fsync_count
@@ -55,6 +56,7 @@ mod durability_sync_count {
 
     fn wal_append_count(engine: &Engine) -> u64 {
         engine
+            .metrics()
             .get_runtime_metrics()
             .expect("read runtime metrics")
             .wal_append_count
@@ -64,6 +66,7 @@ mod durability_sync_count {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             let metrics = engine
+                .metrics()
                 .get_runtime_metrics()
                 .expect("read buffered durability metrics");
             if metrics.wal_local_durable_seq >= minimum_sequence {
@@ -182,6 +185,7 @@ mod durability_sync_count {
         let _guard = sync_count_test_guard();
         let (_temp_dir, mut engine, cf) = open_engine();
         let before = engine
+            .metrics()
             .get_runtime_metrics()
             .expect("read baseline runtime metrics");
         let empty = engine
@@ -206,11 +210,13 @@ mod durability_sync_count {
             .commit(WriteOptions::buffered())
             .expect("commit buffered value");
         let committed = engine
+            .metrics()
             .get_runtime_metrics()
             .expect("read committed runtime metrics")
             .current_sequence;
         wait_for_buffered_durability(&engine, committed);
         let after = engine
+            .metrics()
             .get_runtime_metrics()
             .expect("read synced runtime metrics");
 
@@ -292,6 +298,7 @@ mod durability_sync_count {
             .commit(WriteOptions::sync())
             .expect("establish assertion-only synchronous barrier");
         let before = engine
+            .metrics()
             .get_runtime_metrics()
             .expect("read post-barrier runtime metrics");
 
@@ -310,11 +317,13 @@ mod durability_sync_count {
             .commit(WriteOptions::buffered())
             .expect("commit buffered value");
         let committed = engine
+            .metrics()
             .get_runtime_metrics()
             .expect("read committed runtime metrics")
             .current_sequence;
         wait_for_buffered_durability(&engine, committed);
         let after = engine
+            .metrics()
             .get_runtime_metrics()
             .expect("read synced runtime metrics");
 

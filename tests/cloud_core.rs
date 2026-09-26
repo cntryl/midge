@@ -494,6 +494,7 @@ mod cloud_remote_sst {
         }
         drop(tx);
         reopened
+            .storage_verifier()
             .verify_storage(Duration::from_secs(30))
             .expect("verify remote-only SSTs");
         reopened
@@ -633,11 +634,16 @@ mod cloud_salvage_local {
                     "salvage must preserve the only verified SST copy"
                 );
                 assert_eq!(
-                    reopened.get_runtime_metrics().expect("metrics").health,
+                    reopened
+                        .metrics()
+                        .get_runtime_metrics()
+                        .expect("metrics")
+                        .health,
                     EngineHealth::SalvageMode
                 );
                 drop(tx);
                 reopened
+                    .storage_verifier()
                     .verify_storage(Duration::from_secs(30))
                     .expect("verify salvage local copy");
                 reopened
@@ -1180,6 +1186,7 @@ mod cloud_wal_salvage_prefix {
             put(&engine, cf.id(), key);
         }
         let set_aside_max = engine
+            .metrics()
             .get_runtime_metrics()
             .expect("runtime metrics")
             .current_sequence;
@@ -1215,6 +1222,7 @@ mod cloud_wal_salvage_prefix {
         let cf = reopened.get_column_family("data").expect("column family");
         put(&reopened, cf.id(), b"w");
         let new_sequence = reopened
+            .metrics()
             .get_runtime_metrics()
             .expect("runtime metrics")
             .current_sequence;

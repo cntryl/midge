@@ -454,7 +454,7 @@ pub fn open_tier4_engine(mut opts: MidgeOptions) -> Engine {
 ///
 /// Panics if runtime metrics cannot be captured.
 pub fn capture_runtime_perf_snapshot(engine: &Engine) -> RuntimePerfSnapshot {
-    let metrics = retry_transient_runtime_request(|| engine.get_runtime_metrics())
+    let metrics = retry_transient_runtime_request(|| engine.metrics().get_runtime_metrics())
         .expect("capture runtime performance snapshot");
     let read_path = engine.read_path_diagnostics_snapshot_for_benchmarks();
     RuntimePerfSnapshot {
@@ -499,7 +499,7 @@ pub fn capture_runtime_perf_snapshot(engine: &Engine) -> RuntimePerfSnapshot {
 ///
 /// Panics if runtime metrics cannot be captured.
 pub fn runtime_perf_report(engine: &Engine, start: RuntimePerfSnapshot) -> RuntimePerfReport {
-    let end = retry_transient_runtime_request(|| engine.get_runtime_metrics())
+    let end = retry_transient_runtime_request(|| engine.metrics().get_runtime_metrics())
         .expect("capture runtime performance report");
     let read_path = engine.read_path_diagnostics_snapshot_for_benchmarks();
     RuntimePerfReport {

@@ -251,6 +251,7 @@ mod sst_regressions {
             .get(b"")
             .unwrap();
         let verification = engine
+            .storage_verifier()
             .verify_storage(std::time::Duration::from_secs(30))
             .unwrap();
         assert!(verification.authoritative);
@@ -1250,7 +1251,8 @@ mod compression_compatibility {
         economy
             .shutdown(Duration::from_secs(10))
             .expect("shutdown economy engine");
-        let report = Engine::verify_path(temp.path()).expect("verify compacted database");
+        let report = cntryl_midge::StorageVerifier::verify_path(temp.path())
+            .expect("verify compacted database");
         let compacted_ssts = sorted_sst_files(temp.path());
         let reopened = Engine::open(local_options(temp.path(), Goal::Throughput))
             .expect("reopen compacted engine");
@@ -1300,8 +1302,8 @@ mod compression_compatibility {
         fs::write(&sst_path, bytes).expect("corrupt footer");
 
         // Act
-        let error =
-            Engine::verify_path(temp.path()).expect_err("footer corruption must fail verify");
+        let error = cntryl_midge::StorageVerifier::verify_path(temp.path())
+            .expect_err("footer corruption must fail verify");
 
         // Assert
         assert!(matches!(error, cntryl_midge::MidgeError::Corruption(_)));
@@ -1325,7 +1327,8 @@ mod compression_compatibility {
         write_fresh_adaptive_database(temp.path(), &records);
 
         // Act
-        let report = Engine::verify_path(temp.path()).expect("verify candidate adaptive database");
+        let report = cntryl_midge::StorageVerifier::verify_path(temp.path())
+            .expect("verify candidate adaptive database");
         let mut reopened = Engine::open(local_options(temp.path(), Goal::Throughput))
             .expect("strictly reopen candidate");
         let column_family = reopened
@@ -1394,7 +1397,8 @@ mod compression_compatibility {
         engine
             .shutdown(Duration::from_secs(10))
             .expect("cleanly shut down compacted database");
-        let report = Engine::verify_path(temp.path()).expect("verify compacted database");
+        let report = cntryl_midge::StorageVerifier::verify_path(temp.path())
+            .expect("verify compacted database");
         let mut reopened = Engine::open(local_options(temp.path(), Goal::Throughput))
             .expect("strictly reopen compaction");
         let column_family = reopened
@@ -1534,7 +1538,8 @@ mod compatibility_fixtures {
         let temp = copy_fixture_dir("v3_populated_v4_sst_db");
 
         // Act
-        let report = Engine::verify_path(temp.path()).expect("verify release fixture");
+        let report = cntryl_midge::StorageVerifier::verify_path(temp.path())
+            .expect("verify release fixture");
         assert_eq!(report.health, EngineHealth::Healthy);
         assert_eq!(report.manifest_files_verified, 1);
         assert_eq!(report.sst_files_verified, 1);
@@ -1562,7 +1567,10 @@ mod compatibility_fixtures {
             .expect("scan fixture")
             .try_collect()
             .expect("collect fixture rows");
-        let runtime = engine.get_runtime_metrics().expect("runtime metrics");
+        let runtime = engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("runtime metrics");
 
         // Assert
         assert_eq!(runtime.health, EngineHealth::Healthy);
@@ -1580,7 +1588,8 @@ mod compatibility_fixtures {
         let temp = copy_fixture_dir("v2_empty_db");
 
         // Act
-        let verify_error = Engine::verify_path(temp.path()).expect_err("V2 verify must fail");
+        let verify_error = cntryl_midge::StorageVerifier::verify_path(temp.path())
+            .expect_err("V2 verify must fail");
         let Err(open_error) = Engine::open(
             OpenOptions::local(temp.path())
                 .recovery_policy(RecoveryPolicy::Strict)
@@ -1601,8 +1610,8 @@ mod compatibility_fixtures {
         let temp = copy_fixture_dir("future_v5");
 
         // Act
-        let verify_error =
-            Engine::verify_path(temp.path()).expect_err("future fixture should fail verify");
+        let verify_error = cntryl_midge::StorageVerifier::verify_path(temp.path())
+            .expect_err("future fixture should fail verify");
         assert_compatibility_error(verify_error);
 
         let Err(open_error) = Engine::open(

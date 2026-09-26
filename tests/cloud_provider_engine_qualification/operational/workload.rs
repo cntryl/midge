@@ -121,6 +121,7 @@ impl WorkloadProgress {
             return;
         }
         match engine
+            .metrics()
             .get_runtime_metrics_with_timeout(self.remaining(now).min(PROGRESS_REPORT_INTERVAL))
         {
             Ok(metrics) => self.report(stage, &metrics, Instant::now()),
@@ -256,7 +257,10 @@ fn fail_uploads_then_resume(
     campaign: &Campaign,
     progress: &mut WorkloadProgress,
 ) {
-    let before = engine.get_runtime_metrics().expect("pre-outage metrics");
+    let before = engine
+        .metrics()
+        .get_runtime_metrics()
+        .expect("pre-outage metrics");
     fail::cfg("midge::cloud::inject_fail_sst_upload", "return").expect("SST upload outage");
     let initial_error = engine
         .flush_cf(cf)
@@ -272,11 +276,15 @@ fn fail_uploads_then_resume(
     let until = Instant::now() + Duration::from_secs(duration);
     while Instant::now() < until {
         progress.require_time("injected SST upload outage");
-        let metrics = engine.get_runtime_metrics().expect("outage metrics");
+        let metrics = engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("outage metrics");
         assert!(metrics.hybrid_total_committed_bytes <= campaign.profile.local_bytes);
         std::thread::sleep(Duration::from_millis(25));
     }
     let failed = engine
+        .metrics()
         .get_runtime_metrics()
         .expect("retained outage metrics");
     assert!(failed.flush_failures_total > before.flush_failures_total);
@@ -294,6 +302,7 @@ fn fail_uploads_then_resume(
     let settled = loop {
         progress.require_time("SST publication after upload outage");
         let metrics = engine
+            .metrics()
             .get_runtime_metrics()
             .expect("retry progress metrics");
         progress.report("flush_retry", &metrics, Instant::now());
