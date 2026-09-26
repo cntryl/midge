@@ -7,6 +7,63 @@ use crate::storage::cloud::{
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+struct PanicLocalBackend;
+
+impl StorageBackend for PanicLocalBackend {
+    fn submit_write(&self, _key: &str, _data: Vec<u8>, _callback: crate::storage::StorageCallback) {
+        panic!("ephemeral publication called the retired local backend");
+    }
+
+    fn submit_delete(&self, _key: &str, _callback: crate::storage::StorageCallback) {
+        panic!("ephemeral deletion called the retired local backend");
+    }
+
+    fn submit_range_head(
+        &self,
+        _key: &str,
+        _timeout: Duration,
+        _callback: crate::storage::StorageCallback,
+    ) {
+        panic!("ephemeral lookup called the retired local backend");
+    }
+}
+
+#[test]
+fn should_not_call_local_backend_when_publishing_with_ephemeral_cache() -> MidgeResult<()> {
+    // Arrange
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("source");
+    let bytes = b"immutable bytes";
+    std::fs::write(&path, bytes)?;
+    let storage = HybridStorage::with_policy(
+        Arc::new(PanicLocalBackend),
+        Arc::new(CloudStorage::new(
+            Arc::new(MockCloudBackend::new()),
+            String::new(),
+        )),
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    );
+    storage.enable_ephemeral_sst_cache(1024 * 1024);
+    // Startup has already swept any legacy copy before runtime publication.
+    storage.retire_legacy_local_store();
+    let budget = ResourceBudget::new(2 * 1024 * 1024);
+
+    // Act
+    storage.publish_immutable_file(
+        "sst/retired.sst",
+        &path,
+        bytes.len() as u64,
+        crc32c::crc32c(bytes),
+        &budget,
+    )?;
+    assert!(storage.local_object_cache_is_absent("sst/retired.sst")?);
+    storage.evict_local_object_cache("sst/retired.sst")?;
+    storage.delete_immutable_object_blocking("sst/retired.sst")?;
+
+    // Assert: the local backend panics on every operation.
+    Ok(())
+}
+
 #[test]
 fn should_leave_three_quarters_of_maintenance_pool_for_live_compaction_inputs() {
     // Arrange

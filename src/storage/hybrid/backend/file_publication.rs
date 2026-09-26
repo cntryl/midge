@@ -81,16 +81,24 @@ impl HybridStorage {
             ));
         }
         drop(source);
-        let local = self.file_publication_head(&self.stores.local, key, &admission)?;
-        if let Some(metadata) = &local {
-            self.verify_publication_ranges(&self.stores.local, key, &bytes, metadata, &admission)?;
-        }
+        let local_store = self.local_store_if_active();
+        let local = if let Some(backend) = &local_store {
+            let local = self.file_publication_head(backend, key, &admission)?;
+            if let Some(metadata) = &local {
+                self.verify_publication_ranges(backend, key, &bytes, metadata, &admission)?;
+            }
+            local
+        } else {
+            None
+        };
         crate::failpoints::fail_point!("midge::cloud::inject_fail_sst_upload", |_| Err(
             MidgeError::Internal("failpoint: cloud SST upload failed".into())
         ));
         let metadata = self.publish_file_bytes(&self.stores.sst, key, &bytes, &admission)?;
         if local.is_none() && !self.ephemeral_sst_cache_enabled() {
-            self.publish_file_bytes(&self.stores.local, key, &bytes, &admission)?;
+            if let Some(backend) = &local_store {
+                self.publish_file_bytes(backend, key, &bytes, &admission)?;
+            }
         }
         Ok(super::GuardedObjectProof::range_identity(
             Arc::clone(&self.stores.sst),

@@ -27,9 +27,6 @@ pub struct KeyStructureProfile {
     /// Variance in key lengths
     pub key_length_variance: f32,
 
-    /// Sample of hot prefixes (prefix → count)
-    pub prefix_heat: Vec<(Vec<u8>, usize)>,
-
     /// Total number of keys profiled
     pub key_count: usize,
 }
@@ -155,7 +152,6 @@ impl KeyStructureProfiler {
                 entropy: 0.0,
                 common_prefix_len: 0,
                 key_length_variance: 0.0,
-                prefix_heat: Vec::new(),
                 key_count: 0,
             };
         }
@@ -179,11 +175,6 @@ impl KeyStructureProfiler {
         // Calculate key length variance from online aggregates.
         let key_length_variance = self.key_length_standard_deviation();
 
-        // Get top prefix samples
-        let mut prefix_heat: Vec<_> = self.prefix_freq.into_iter().collect();
-        prefix_heat.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
-        prefix_heat.truncate(10); // Keep top 10
-
         KeyStructureProfile {
             avg_shared_prefix,
             max_shared_prefix: self.max_shared_prefix,
@@ -191,7 +182,6 @@ impl KeyStructureProfiler {
             entropy,
             common_prefix_len,
             key_length_variance,
-            prefix_heat,
             key_count,
         }
     }
@@ -402,12 +392,10 @@ mod tests {
         profiler.add_key(b"aa_key1");
         profiler.add_key(b"aa_key2");
         profiler.add_key(b"bb_key1");
-        let profile = profiler.finish();
 
         // Assert
-        assert!(!profile.prefix_heat.is_empty());
-        let (_, count) = &profile.prefix_heat[0];
-        assert_eq!(*count, 2); // "aa__" appears twice
+        assert_eq!(profiler.prefix_freq.get(b"aa_k".as_slice()), Some(&2));
+        assert_eq!(profiler.prefix_freq.len(), 2);
     }
 
     #[test]
@@ -500,22 +488,6 @@ mod tests {
 
         // Assert
         assert_eq!(profile.key_count, 1);
-    }
-
-    #[test]
-    fn should_maintain_prefix_heat_top_10() {
-        // Arrange
-        let mut profiler = KeyStructureProfiler::new();
-
-        // Act
-        for i in 0..100 {
-            let key = format!("prefix_{i:02}_tail");
-            profiler.add_key(key.as_bytes());
-        }
-        let profile = profiler.finish();
-
-        // Assert
-        assert!(profile.prefix_heat.len() <= 10); // Truncated to top 10
     }
 
     #[test]

@@ -8,7 +8,8 @@ use std::collections::HashMap;
 
 impl EventLoop {
     pub(super) fn cloud_flush_staging_window(&self) -> Option<u64> {
-        self.hybrid_storage
+        self.cloud_coordinator
+            .hybrid_storage
             .as_ref()
             .filter(|storage| storage.ephemeral_sst_cache_enabled())
             // The other half remains available to compaction staging.
@@ -79,7 +80,8 @@ impl EventLoop {
             }
         }
         let required = self.pending_cloud_flush_headroom(growth, window);
-        self.hybrid_storage
+        self.cloud_coordinator
+            .hybrid_storage
             .as_ref()
             .expect("cloud staging storage")
             .set_flush_headroom(required)?;
@@ -130,7 +132,8 @@ impl EventLoop {
             return Ok(());
         };
         let required = self.pending_cloud_flush_headroom(&HashMap::new(), window);
-        self.hybrid_storage
+        self.cloud_coordinator
+            .hybrid_storage
             .as_ref()
             .expect("cloud staging storage")
             .set_flush_headroom(required)

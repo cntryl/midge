@@ -137,7 +137,6 @@ impl DurabilityCoordinator {
         sequence: u64,
         requested_durability: ReadDurability,
         local_durable_seq: u64,
-        cloud_durable_seq: u64,
     ) -> bool {
         if sequence == u64::MAX {
             // "Latest available" reads proceed immediately; no durability guarantee needed
@@ -145,8 +144,7 @@ impl DurabilityCoordinator {
         }
 
         match requested_durability {
-            ReadDurability::Strict | ReadDurability::Steady => sequence <= local_durable_seq,
-            ReadDurability::CloudPersisted => sequence <= cloud_durable_seq,
+            ReadDurability::Strict => sequence <= local_durable_seq,
         }
     }
 

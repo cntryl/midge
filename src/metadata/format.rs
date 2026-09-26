@@ -43,7 +43,7 @@ pub fn ensure_or_create_format_marker(db_path: &Path) -> MidgeResult<u32> {
 
 /// Durably publish the current format marker, replacing any older one.
 fn publish_current_marker(db_path: &Path) -> MidgeResult<()> {
-    let fs: Arc<dyn Fs> = Arc::new(RealFs::new(db_path)?);
+    let fs: Arc<dyn Fs> = Arc::new(RealFs::new(db_path).map_err(FsError::into_midge)?);
     staging::stage_bytes_with_hook(
         &fs,
         &FsPath::new(FORMAT_FILE_TEMP),
@@ -56,7 +56,8 @@ fn publish_current_marker(db_path: &Path) -> MidgeResult<()> {
             Ok(())
         },
         FsError::Io,
-    )?;
+    )
+    .map_err(FsError::into_midge)?;
     Ok(())
 }
 

@@ -1,4 +1,5 @@
 use super::{BlockingCloudIo, CloudStartupRecovery, MidgeError, MidgeResult, RecoveryPolicy};
+use crate::io::FsError;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -6,7 +7,8 @@ impl CloudStartupRecovery {
     pub(super) fn load_local_manifest_for_cloud_metadata_mirror(
         db_path: &Path,
     ) -> MidgeResult<crate::metadata::Manifest> {
-        let fs: Arc<dyn crate::io::traits::Fs> = Arc::new(crate::io::RealFs::new(db_path)?);
+        let fs: Arc<dyn crate::io::traits::Fs> =
+            Arc::new(crate::io::RealFs::new(db_path).map_err(FsError::into_midge)?);
         crate::metadata::ManifestPersistence::load_with_fs_and_policy(&fs, RecoveryPolicy::Strict)
             .map_err(MidgeError::Internal)
     }

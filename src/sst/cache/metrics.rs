@@ -1,5 +1,6 @@
 //! Cache metrics for observability
 
+#[cfg(any(test, feature = "internal-testing"))]
 use std::convert::TryFrom;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -41,6 +42,7 @@ impl CacheMetrics {
     }
 
     /// Update memory usage
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn set_memory_bytes(&self, bytes: u64) {
         self.memory_bytes.store(bytes, Ordering::Relaxed);
     }
@@ -68,18 +70,21 @@ impl CacheMetrics {
     }
 
     /// Get hit count
+    #[cfg(any(test, feature = "internal-testing"))]
     #[must_use]
     pub fn hit_count(&self) -> u64 {
         self.hits.load(Ordering::Relaxed)
     }
 
     /// Get miss count
+    #[cfg(any(test, feature = "internal-testing"))]
     #[must_use]
     pub fn miss_count(&self) -> u64 {
         self.misses.load(Ordering::Relaxed)
     }
 
     /// Get eviction count
+    #[cfg(any(test, feature = "internal-testing"))]
     #[must_use]
     pub fn eviction_count(&self) -> u64 {
         self.evictions.load(Ordering::Relaxed)
@@ -92,6 +97,7 @@ impl CacheMetrics {
     }
 
     /// Calculate hit rate as percentage (0.0-100.0)
+    #[cfg(any(test, feature = "internal-testing"))]
     #[must_use]
     pub fn hit_rate(&self) -> f64 {
         let hits = self.hit_count();
@@ -105,6 +111,7 @@ impl CacheMetrics {
     }
 }
 
+#[cfg(any(test, feature = "internal-testing"))]
 fn u64_to_f64(value: u64) -> f64 {
     let upper = u32::try_from(value >> 32).unwrap_or(u32::MAX);
     let lower = u32::try_from(value & u64::from(u32::MAX)).unwrap_or(u32::MAX);

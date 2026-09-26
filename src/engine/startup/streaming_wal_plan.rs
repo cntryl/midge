@@ -4,6 +4,7 @@ use super::streaming_wal_fs::{validate_wal_source, wal_sources_equal, StreamingW
 use super::{CloudStartupRecovery, CloudWalRecoveryPlan};
 use crate::common::{MidgeError, MidgeResult};
 use crate::config::RecoveryPolicy;
+use crate::io::FsError;
 use crate::io::{Fs, FsPath, OpenMode, OpenOptions};
 use crate::storage::{StorageBackend, StorageEvent, StorageOutcome};
 use crate::wal::recovery::streaming::{
@@ -48,7 +49,8 @@ impl StreamingCloudWalRecovery {
     ) -> MidgeResult<Self> {
         let next_remote_id = next_segment_id(catalog.segments.keys().copied().max())?;
         let mut replay_fs = StreamingWalFs::new(read_window)?;
-        let local: Arc<dyn Fs> = Arc::new(crate::io::RealFs::new(db_path)?);
+        let local: Arc<dyn Fs> =
+            Arc::new(crate::io::RealFs::new(db_path).map_err(FsError::into_midge)?);
         let mut plan = CloudWalRecoveryPlan {
             remote_segments: BTreeMap::new(),
             local_segments: BTreeMap::new(),
@@ -311,7 +313,9 @@ fn remote_source(
     let mut buffered = StreamingWalFs::new(read_window)?;
     let canonical = crate::wal::segment_file_name(publication.segment_id);
     buffered.insert(canonical.clone(), Arc::clone(&fs), path.clone())?;
-    let file = buffered.open(&FsPath::new(canonical), READ_ONLY)?;
+    let file = buffered
+        .open(&FsPath::new(canonical), READ_ONLY)
+        .map_err(FsError::into_midge)?;
     let prefix = inspect_sealed_wal_file(file.as_ref(), &path, limits)?;
     if prefix.max_sequence != publication.max_sequence
         || prefix.writer_epoch != publication.writer_epoch
@@ -354,7 +358,9 @@ fn select_local_segment(
     for path in paths {
         let source_path = local_path(&path)?;
         let result = (|| {
-            let file = fs.open(&source_path, READ_ONLY)?;
+            let file = fs
+                .open(&source_path, READ_ONLY)
+                .map_err(FsError::into_midge)?;
             inspect_local_sealed_wal_file(file.as_ref(), &source_path, limits)
         })();
         let Some(prefix) = recover_or_salvage(result, policy, salvaged)? else {
@@ -438,7 +444,8 @@ fn canonicalize_aliases(
         changed = true;
     }
     if changed {
-        fs.sync_dir(&FsPath::new("wal"), crate::io::Durability::Durable)?;
+        fs.sync_dir(&FsPath::new("wal"), crate::io::Durability::Durable)
+            .map_err(FsError::into_midge)?;
     }
     Ok(())
 }
@@ -452,7 +459,7 @@ fn active_local_source(
 ) -> MidgeResult<Option<ReplaySource>> {
     let path = local_path(active)?;
     let Some(file) = recover_or_salvage(
-        fs.open(&path, READ_ONLY).map_err(MidgeError::from),
+        fs.open(&path, READ_ONLY).map_err(FsError::into_midge),
         policy,
         &mut plan.opened_in_salvage_mode,
     )?
@@ -460,7 +467,7 @@ fn active_local_source(
         quarantine_active(fs.as_ref(), active)?;
         return Ok(None);
     };
-    let length = file.len()?;
+    let length = file.len().map_err(FsError::into_midge)?;
     let mut salvaged = false;
     let prefix = match inspect_wal_file(file.as_ref(), &path, limits) {
         Ok(prefix) => prefix,
@@ -503,7 +510,8 @@ fn active_local_source(
             // Salvage drops acknowledged records past the corruption; keep the
             // original bytes before cutting the only copy.
             CloudStartupRecovery::retain_local_wal_copy(active)?;
-            fs.sync_dir(&FsPath::new("wal"), crate::io::Durability::Durable)?;
+            fs.sync_dir(&FsPath::new("wal"), crate::io::Durability::Durable)
+                .map_err(FsError::into_midge)?;
         }
         let file = std::fs::OpenOptions::new().write(true).open(active)?;
         file.set_len(prefix.valid_bytes as u64)?;
@@ -524,7 +532,8 @@ fn active_local_source(
 fn quarantine_active(fs: &dyn Fs, active: &Path) -> MidgeResult<()> {
     if active.try_exists()? {
         CloudStartupRecovery::quarantine_local_wal_alias(active)?;
-        fs.sync_dir(&FsPath::new("wal"), crate::io::Durability::Durable)?;
+        fs.sync_dir(&FsPath::new("wal"), crate::io::Durability::Durable)
+            .map_err(FsError::into_midge)?;
     }
     Ok(())
 }
@@ -601,7 +610,9 @@ fn verified_max_sequence(
         ));
     };
     let wal_path = FsPath::new(format!("wal/{name}"));
-    let file = local.open(&wal_path, READ_ONLY)?;
+    let file = local
+        .open(&wal_path, READ_ONLY)
+        .map_err(FsError::into_midge)?;
     match inspect_wal_file(file.as_ref(), &wal_path, limits) {
         Ok(prefix) => Ok(prefix.max_sequence),
         Err(failure) => {
@@ -665,7 +676,7 @@ fn stop_at_first_hole(
             local_paths.push(entry.path());
         }
     }
-    let local = crate::io::RealFs::new(db_path)?;
+    let local = crate::io::RealFs::new(db_path).map_err(FsError::into_midge)?;
     for path in &local_paths {
         // A corrupt local-only file is in neither the catalog nor the plan;
         // its verified prefix is the best record of what it held.

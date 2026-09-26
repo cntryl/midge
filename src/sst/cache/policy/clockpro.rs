@@ -257,6 +257,7 @@ impl CachePolicy for ClockProPolicy {
         *hand = (*hand + 1) % slots.len().max(1);
     }
 
+    #[cfg(any(test, feature = "internal-testing"))]
     fn clear(&self) {
         let mut slots = self.slots.lock();
         let mut key_to_slot = self.key_to_slot.lock();

@@ -187,8 +187,8 @@ pub(super) fn validate_wal_source(
     range_buffer_bytes: usize,
 ) -> MidgeResult<()> {
     validate_buffer_size(range_buffer_bytes)?;
-    let file = fs.open(path, READ_ONLY)?;
-    if file.len()? != expected_len {
+    let file = fs.open(path, READ_ONLY).map_err(FsError::into_midge)?;
+    if file.len().map_err(FsError::into_midge)? != expected_len {
         return Err(MidgeError::Corruption(format!(
             "WAL source {path} does not match catalog length {expected_len}"
         )));
@@ -201,7 +201,7 @@ pub(super) fn validate_wal_source(
         crc = crc32c::crc32c_append(crc, &bytes);
         offset += length;
     }
-    if file.len()? != expected_len || crc != expected_crc {
+    if file.len().map_err(FsError::into_midge)? != expected_len || crc != expected_crc {
         return Err(MidgeError::Corruption(format!(
             "WAL source {path} does not match its catalog content checksum"
         )));
@@ -216,10 +216,16 @@ pub(super) fn wal_sources_equal(
     range_buffer_bytes: usize,
 ) -> MidgeResult<bool> {
     validate_buffer_size(range_buffer_bytes)?;
-    let left_file = left.0.open(left.1, READ_ONLY)?;
-    let right_file = right.0.open(right.1, READ_ONLY)?;
-    let size = left_file.len()?;
-    if right_file.len()? != size {
+    let left_file = left
+        .0
+        .open(left.1, READ_ONLY)
+        .map_err(FsError::into_midge)?;
+    let right_file = right
+        .0
+        .open(right.1, READ_ONLY)
+        .map_err(FsError::into_midge)?;
+    let size = left_file.len().map_err(FsError::into_midge)?;
+    if right_file.len().map_err(FsError::into_midge)? != size {
         return Ok(false);
     }
     let mut offset = 0_u64;
@@ -232,11 +238,12 @@ pub(super) fn wal_sources_equal(
         }
         offset += length;
     }
-    Ok(left_file.len()? == size && right_file.len()? == size)
+    Ok(left_file.len().map_err(FsError::into_midge)? == size
+        && right_file.len().map_err(FsError::into_midge)? == size)
 }
 
 fn read_exact_range(file: &dyn File, offset: u64, length: u64) -> MidgeResult<Bytes> {
-    let bytes = file.read_at(offset, length)?;
+    let bytes = file.read_at(offset, length).map_err(FsError::into_midge)?;
     if bytes.len() as u64 != length {
         return Err(MidgeError::RecoveryFailed(
             "WAL source changed or returned a truncated range".into(),
@@ -311,7 +318,10 @@ mod tests {
         fn new() -> MidgeResult<Self> {
             let directory = tempfile::tempdir()?;
             let cloud_root = directory.path().join("cloud");
-            let local = Arc::new(crate::io::RealFs::new(directory.path().join("local"))?);
+            let local = Arc::new(
+                crate::io::RealFs::new(directory.path().join("local"))
+                    .map_err(FsError::into_midge)?,
+            );
             let backend = Arc::new(RecordingBackend {
                 inner: crate::storage::filesystem::FileSystem::new(&cloud_root)?,
                 ranges: parking_lot::Mutex::new(Vec::new()),
@@ -362,12 +372,12 @@ mod tests {
             fixture.path.clone(),
         )?;
         let path = FsPath::new(format!("wal/{name}"));
-        let file = fs.open(&path, READ_ONLY)?;
+        let file = fs.open(&path, READ_ONLY).map_err(FsError::into_midge)?;
 
         // Act
-        let bytes = file.read_at(9, 9_973)?;
+        let bytes = file.read_at(9, 9_973).map_err(FsError::into_midge)?;
         let requests = fixture.backend.ranges.lock().len();
-        let cached = file.read_at(9_981, 1)?;
+        let cached = file.read_at(9_981, 1).map_err(FsError::into_midge)?;
 
         // Assert
         assert_eq!(bytes.as_ref(), &fixture.bytes[9..9_982]);
@@ -383,7 +393,12 @@ mod tests {
             std::fs::read_dir(fixture.directory.path().join("local"))?.count(),
             0
         );
-        assert_eq!(fs.list_dir(&FsPath::new("wal"))?[0].name, name);
+        assert_eq!(
+            fs.list_dir(&FsPath::new("wal"))
+                .map_err(FsError::into_midge)?[0]
+                .name,
+            name
+        );
         Ok(())
     }
 
@@ -433,7 +448,8 @@ mod tests {
     {
         // Arrange
         let fixture = Fixture::new()?;
-        let local = crate::io::RealFs::new(fixture.directory.path().join("aliases"))?;
+        let local = crate::io::RealFs::new(fixture.directory.path().join("aliases"))
+            .map_err(FsError::into_midge)?;
         std::fs::write(
             fixture.directory.path().join("aliases/equal.wal"),
             &fixture.bytes,
@@ -476,7 +492,7 @@ mod tests {
             fixture.path.clone(),
         )?;
         let path = FsPath::new(name.clone());
-        let mut file = fs.open(&path, READ_ONLY)?;
+        let mut file = fs.open(&path, READ_ONLY).map_err(FsError::into_midge)?;
 
         // Act
         let mutation = file.write_at(0, Bytes::from_static(b"invalid"));

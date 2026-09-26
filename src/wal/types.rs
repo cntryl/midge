@@ -151,6 +151,7 @@ pub struct WalRecord {
 
 impl WalRecord {
     /// Create a new WAL record for the default column family.
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn new(
         op: WalOpKind,
         key: Bytes,

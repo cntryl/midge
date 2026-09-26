@@ -87,14 +87,6 @@ pub trait WalWriter: Send + Sync {
         self.append_batch(records).map_err(WalAppendError::unknown)
     }
 
-    /// Flush any buffered data to the underlying storage (but not necessarily
-    /// fsync). Implementations should ensure records are visible after flush.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when buffered WAL data cannot be flushed.
-    fn flush(&self) -> MidgeResult<()>;
-
     /// Ensure durability to permanent storage (fsync or equivalent).
     ///
     /// # Errors
@@ -111,30 +103,8 @@ pub trait WalWriter: Send + Sync {
         self.sync()
     }
 
-    /// Sync only to *local* WAL storage (fsync/local durability) without
-    /// waiting for any external/cloud uploads.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when local WAL durability cannot be reached.
-    fn sync_local(&self) -> MidgeResult<()> {
-        self.sync()
-    }
-
     /// Current append position in the WAL.
     fn current_pos(&self) -> WalPos;
-
-    /// Close the WAL writer and release resources.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the writer cannot be closed cleanly.
-    fn close(&self) -> MidgeResult<()>;
-
-    /// Signal shutdown to background workers (optional, no-op by default).
-    fn shutdown(&self) {
-        // Default: no-op for synchronous implementations
-    }
 }
 
 // Reading a WAL back is recovery's job, not a writer-side capability: the
@@ -206,7 +176,7 @@ mod tests {
 
         // Act
         writer.append_record(&record).expect("append record");
-        writer.close().expect("close writer");
+        drop(writer);
 
         // Assert
         assert_eq!(persisted_writer_epochs(&fs, "wal.log"), vec![3]);

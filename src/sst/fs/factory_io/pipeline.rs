@@ -236,6 +236,7 @@ impl BlockPipeline {
 }
 
 impl FsSstWriter {
+    #[cfg(test)]
     pub(super) fn new(
         fs: Arc<dyn Fs>,
         compression_policy: CompressionPolicy,

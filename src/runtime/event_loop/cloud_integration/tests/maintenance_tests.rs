@@ -1,4 +1,5 @@
 use super::*;
+use crate::io::FsError;
 use crate::runtime::event_loop::compaction::CompactionCoordinator;
 
 mod quantum_tests;
@@ -17,13 +18,18 @@ fn cloud_debt_with_wal_records(
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.hybrid_storage
+    el.cloud_coordinator
+        .hybrid_storage
         .as_ref()
         .unwrap()
         .enable_ephemeral_sst_cache(64 * 1024 * 1024);
     let reads = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
-        Arc::new(crate::io::RealFs::new(&el.state.db_path)?),
-        el.hybrid_storage.as_ref().unwrap().remote_sst_backend(),
+        Arc::new(crate::io::RealFs::new(&el.state.db_path).map_err(FsError::into_midge)?),
+        el.cloud_coordinator
+            .hybrid_storage
+            .as_ref()
+            .unwrap()
+            .remote_sst_backend(),
         Duration::from_secs(3),
     ));
     el.compaction_actor = crate::runtime::actors::CompactionActor::new(Arc::new(
@@ -39,7 +45,7 @@ fn cloud_debt_with_wal_records(
         el.state.writer_epoch,
     );
     seed_cloud_prune_candidate_with_records(&mut el, 81, 81, vec![record; wal_record_count]);
-    el.state.wal.cloud_durable_seq = 81;
+    el.state.wal.frontiers.set_cloud_durable_for_test(81);
     for cf_id in [0, other] {
         el.state
             .manifest
@@ -86,7 +92,7 @@ fn should_resume_due_flush_when_compaction_debt_remains_in_another_family(
     let flush_id = el.state.get_cf(0).unwrap().immutable_flushes[0].flush_id;
     el.state.mark_immutable_flush_failed(flush_id).unwrap();
     el.state.make_immutable_flush_retry_due(0);
-    el.cloud_maintenance.next =
+    el.cloud_coordinator.cloud_maintenance.next =
         crate::runtime::event_loop::cloud_maintenance::MaintenanceTask::Compaction;
 
     // Act
@@ -105,7 +111,11 @@ fn should_resume_due_flush_when_compaction_debt_remains_in_another_family(
         4
     );
     drain_prune_completion_for_test(&mut el);
-    assert!(!el.cloud_wal.acked_segments.contains_key(&81));
+    assert!(!el
+        .cloud_coordinator
+        .cloud_wal
+        .acked_segments
+        .contains_key(&81));
     el.schedule_next_flush_worker();
     assert!(el.flush_actor.is_inflight());
     complete_flush(&mut el);

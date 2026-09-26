@@ -1,3 +1,4 @@
+use crate::io::FsError;
 use std::sync::Arc;
 
 use super::super::{RuntimeConfig, RuntimeState};
@@ -24,7 +25,7 @@ pub(super) fn assemble_sst_resources(
     } else {
         let fs: Arc<dyn crate::io::Fs> = match &config.sst_read_fs {
             Some(fs) => Arc::clone(fs),
-            None => Arc::new(crate::io::RealFs::new(sst_dir)?),
+            None => Arc::new(crate::io::RealFs::new(sst_dir).map_err(FsError::into_midge)?),
         };
         let fs = fs
             .with_read_observer(

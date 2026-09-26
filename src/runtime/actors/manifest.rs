@@ -106,7 +106,7 @@ impl ManifestActor {
 
         // Now that intent is durable, apply mutations to in-memory manifest
         // Remove old files
-        state.manifest.files.retain(|f| !removed.contains(&f.name));
+        state.manifest.retain_files(|f| !removed.contains(&f.name));
 
         // Add new files
         for file_meta in added {
@@ -206,6 +206,7 @@ impl Default for ManifestActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::io::FsError;
     use crate::sst::traits::SstFactory;
 
     #[test]
@@ -484,7 +485,9 @@ mod tests {
         let sst_path = state.sst_dir.join(&sst_name);
 
         let factory = crate::sst::FsSstFactoryIo::new(
-            std::sync::Arc::new(crate::io::RealFs::new(&state.sst_dir)?),
+            std::sync::Arc::new(
+                crate::io::RealFs::new(&state.sst_dir).map_err(FsError::into_midge)?,
+            ),
             4096,
         );
         let mut writer = factory.create()?;

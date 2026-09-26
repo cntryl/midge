@@ -14,6 +14,7 @@ pub mod actors;
 pub(crate) mod ddl;
 pub mod durability;
 pub mod event_loop;
+pub mod frontiers;
 pub(crate) mod hybrid_persistence;
 pub mod intent_persistence;
 pub(crate) mod keyed_group_commit;

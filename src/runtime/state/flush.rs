@@ -173,26 +173,28 @@ impl RuntimeState {
     }
 
     pub fn memtable_flush_trigger_bytes(&self) -> usize {
-        self.memtable_size_limit
-            .min(self.memtable_flush_threshold)
+        self.limits
+            .memtable_size_limit
+            .min(self.limits.memtable_flush_threshold)
             .max(1)
     }
 
     pub fn is_immutable_memtable_queue_full(&self, cf_id: crate::types::ColumnFamilyId) -> bool {
         self.column_families.get(&cf_id).is_some_and(|cf_state| {
-            cf_state.immutable_memtables.len() >= self.max_immutable_memtables
+            cf_state.immutable_memtables.len() >= self.limits.max_immutable_memtables
         })
     }
 
     pub fn is_total_memtable_hard_limit_exceeded(&self) -> bool {
-        self.total_memtable_bytes >= self.memtable_flush_threshold.saturating_mul(2)
+        self.total_memtable_bytes >= self.limits.memtable_flush_threshold.saturating_mul(2)
     }
 
     /// Maximum number of published or reserved L0 generations for one column
     /// family. The extra slot is the active memtable generation.
     pub(crate) fn l0_hard_ceiling(&self) -> usize {
-        self.l0_compaction_trigger
-            .saturating_add(self.max_immutable_memtables)
+        self.limits
+            .l0_compaction_trigger
+            .saturating_add(self.limits.max_immutable_memtables)
             .saturating_add(1)
     }
 
@@ -343,11 +345,11 @@ impl RuntimeState {
     }
 
     pub fn compaction_enabled(&self) -> bool {
-        self.compaction_config.enabled
+        self.limits.compaction_config.enabled
     }
 
     pub fn set_compaction_enabled(&mut self, enabled: bool) {
-        self.compaction_config.enabled = enabled;
+        self.limits.compaction_config.enabled = enabled;
     }
 
     pub fn write_stalled(&self) -> bool {
@@ -473,7 +475,7 @@ impl RuntimeState {
                 EventualFlush::Disabled => return None,
                 EventualFlush::SegmentGap => (
                     FlushReason::WalSegmentGap,
-                    self.eventual_flush_segment_gap,
+                    self.limits.eventual_flush_segment_gap,
                     |state, cf| {
                         state
                             .wal

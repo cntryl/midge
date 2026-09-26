@@ -163,6 +163,7 @@ impl ReadAmpMetrics {
     }
 
     /// Reset all metrics to zero
+    #[cfg(test)]
     pub fn reset(&self) {
         self.reads_total.store(0, Ordering::Relaxed);
         self.ssts_touched_total.store(0, Ordering::Relaxed);

@@ -117,7 +117,7 @@ impl WalActor {
         let sealed_segment_exists = match fs.exists(&new_path) {
             Ok(exists) => exists,
             Err(error) => {
-                let error = MidgeError::from(error);
+                let error = FsError::into_midge(error);
                 if let Err(rollback_error) = self.finish_io_transition() {
                     self.fence_transition(
                         state,
@@ -172,7 +172,7 @@ impl WalActor {
                 return Err(error);
             }
             Err(error) => {
-                let original = MidgeError::from(error);
+                let original = FsError::into_midge(error);
                 if let Err(reopen_error) = self.restore_active_writer_after_failed_rotate(fs) {
                     self.fence_transition(
                         state,
@@ -193,7 +193,7 @@ impl WalActor {
                 return Err(error);
             }
             if let Err(error) = fs.sync_dir(&FsPath::new("."), Durability::Durable) {
-                let error = MidgeError::from(error);
+                let error = FsError::into_midge(error);
                 self.fence_transition(state, format!("sealed WAL directory sync failed: {error}"));
                 return Err(error);
             }
@@ -231,7 +231,7 @@ impl WalActor {
                     return Err(error);
                 }
                 if let Err(error) = fs.sync_dir(&FsPath::new("."), Durability::Durable) {
-                    let error = MidgeError::from(error);
+                    let error = FsError::into_midge(error);
                     self.fence_transition(
                         state,
                         format!("replacement WAL directory sync failed: {error}"),

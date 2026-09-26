@@ -51,12 +51,14 @@ impl TrieWriter {
     }
 
     /// Check if trie is enabled
+    #[cfg(test)]
     #[must_use]
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
 
     /// Get number of nodes in trie
+    #[cfg(test)]
     #[must_use]
     pub fn node_count(&self) -> usize {
         self.builder.node_count()

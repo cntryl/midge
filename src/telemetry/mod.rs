@@ -9,7 +9,9 @@ pub mod metrics;
 pub use config::TelemetryConfig;
 pub use metrics::Metrics;
 
-use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(any(test, feature = "internal-testing"))]
+use std::sync::Mutex;
+use std::sync::{Arc, OnceLock};
 
 /// Where a component that outlives or predates its runtime records
 /// operational events. The runtime attaches its engine counters once it
@@ -46,12 +48,14 @@ impl std::fmt::Debug for CounterSink {
 
 /// Global telemetry instance
 static TELEMETRY: OnceLock<Option<Arc<Telemetry>>> = OnceLock::new();
+#[cfg(any(test, feature = "internal-testing"))]
 static TELEMETRY_INIT: Mutex<()> = Mutex::new(());
 
 /// Why [`Telemetry::init`] did not install telemetry.
 #[derive(Debug)]
 pub(crate) enum TelemetryInitError {
     /// Telemetry was already initialized in this process.
+    #[cfg(any(test, feature = "internal-testing"))]
     AlreadyInitialized,
     /// The configuration was invalid or the exporter could not be set up.
     Failed(crate::common::MidgeError),
@@ -66,6 +70,7 @@ impl From<crate::common::MidgeError> for TelemetryInitError {
 impl From<TelemetryInitError> for crate::common::MidgeError {
     fn from(error: TelemetryInitError) -> Self {
         match error {
+            #[cfg(any(test, feature = "internal-testing"))]
             TelemetryInitError::AlreadyInitialized => {
                 Self::Internal("Telemetry already initialized".to_string())
             }
@@ -81,6 +86,7 @@ pub struct Telemetry {
 
 impl Telemetry {
     /// Initialize global telemetry
+    #[cfg(any(test, feature = "internal-testing"))]
     pub(crate) fn init(config: &TelemetryConfig) -> Result<(), TelemetryInitError> {
         config.validate()?;
 

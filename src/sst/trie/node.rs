@@ -52,6 +52,7 @@ impl TrieNode {
     }
 
     /// Check if this is a leaf node (maps to a block)
+    #[cfg(test)]
     #[must_use]
     pub fn is_leaf(&self) -> bool {
         self.block_id.is_some()

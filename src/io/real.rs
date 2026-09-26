@@ -10,7 +10,7 @@
 //! - `sync_dir` uses a directory durability barrier on Unix and Windows.
 
 use super::traits::{
-    DirEntry, Durability, File, FileCaps, Fs, FsError, FsPath, FsResult, HostAddressing, Metadata,
+    DirEntry, Durability, File, Fs, FsError, FsPath, FsResult, HostAddressing, Metadata,
     OpenOptions,
 };
 use std::fs;
@@ -454,98 +454,6 @@ impl File for RealFile {
             Durability::Durable => self.file.sync_all().map_err(|e| io_error("sync_all", &e)),
         }
     }
-
-    fn close(self: Box<Self>) -> FsResult<()> {
-        Ok(())
-    }
-
-    fn caps(&self) -> FileCaps {
-        // Keep conservative. If your FileCaps has flags, add them here.
-        FileCaps::empty()
-    }
-
-    fn try_lock_exclusive(&self) -> FsResult<()> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            let fd = self.file.as_raw_fd();
-            let result = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-            if result != 0 {
-                let err = std::io::Error::last_os_error();
-                if err.kind() == std::io::ErrorKind::WouldBlock {
-                    return Err(FsError::AlreadyExists("file is already locked".to_string()));
-                }
-                return Err(FsError::Io(format!("flock failed: {err}")));
-            }
-            Ok(())
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::io::AsRawHandle;
-            use winapi::um::fileapi::LockFileEx;
-
-            const LOCKFILE_EXCLUSIVE_LOCK: u32 = 0x0000_0002;
-            const LOCKFILE_FAIL_IMMEDIATELY: u32 = 0x0000_0001;
-
-            let handle = self.file.as_raw_handle();
-            let mut overlapped: winapi::um::minwinbase::OVERLAPPED = unsafe { std::mem::zeroed() };
-            let result = unsafe {
-                LockFileEx(
-                    handle.cast(),
-                    LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-                    0,
-                    !0,
-                    !0,
-                    std::ptr::addr_of_mut!(overlapped),
-                )
-            };
-            if result == 0 {
-                return Err(FsError::AlreadyExists("file is already locked".to_string()));
-            }
-            Ok(())
-        }
-        #[cfg(not(any(unix, windows)))]
-        {
-            Err(FsError::Unsupported(
-                "file locking not supported on this platform".to_string(),
-            ))
-        }
-    }
-
-    fn unlock(&self) -> FsResult<()> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            let fd = self.file.as_raw_fd();
-            let result = unsafe { libc::flock(fd, libc::LOCK_UN) };
-            if result != 0 {
-                return Err(FsError::Io(format!(
-                    "unlock failed: {}",
-                    std::io::Error::last_os_error()
-                )));
-            }
-            Ok(())
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::io::AsRawHandle;
-            use winapi::um::fileapi::UnlockFileEx;
-
-            let handle = self.file.as_raw_handle();
-            let mut overlapped: winapi::um::minwinbase::OVERLAPPED = unsafe { std::mem::zeroed() };
-            let result = unsafe {
-                UnlockFileEx(handle.cast(), 0, !0, !0, std::ptr::addr_of_mut!(overlapped))
-            };
-            if result == 0 {
-                return Err(FsError::Io("unlock failed".to_string()));
-            }
-            Ok(())
-        }
-        #[cfg(not(any(unix, windows)))]
-        {
-            Ok(()) // No-op on unsupported platforms
-        }
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -685,7 +593,7 @@ mod tests {
         // Act
         let converted: Vec<_> = errors
             .iter()
-            .map(|error| crate::common::MidgeError::from(super::io_error("write", error)))
+            .map(|error| FsError::into_midge(super::io_error("write", error)))
             .collect();
 
         // Assert

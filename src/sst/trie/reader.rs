@@ -147,6 +147,7 @@ impl TrieReader {
     /// Find block IDs for prefix range
     ///
     /// Returns all block IDs that contain keys with the given prefix.
+    #[cfg(any(test, feature = "internal-testing"))]
     #[must_use]
     pub fn find_prefix_range(&self, prefix: &[u8]) -> Vec<u32> {
         let mut result = Vec::new();
@@ -198,6 +199,7 @@ impl TrieReader {
         result
     }
 
+    #[cfg(any(test, feature = "internal-testing"))]
     fn collect_subtree(&self, node_index: usize, result: &mut Vec<u32>) {
         // The graph was validated at open. Iteration preserves traversal order
         // without imposing a key-depth limit on valid writer-generated tries.
@@ -218,6 +220,7 @@ impl TrieReader {
         }
     }
 
+    #[cfg(any(test, feature = "internal-testing"))]
     fn collect_all_leaves(&self, result: &mut Vec<u32>) {
         for node in &self.nodes {
             if let Some(block_id) = node.block_id {
@@ -362,6 +365,7 @@ impl TrieReader {
     }
 
     /// Get number of nodes in trie
+    #[cfg(any(test, feature = "internal-testing"))]
     #[must_use]
     pub fn node_count(&self) -> usize {
         self.nodes.len()

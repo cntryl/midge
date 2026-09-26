@@ -31,6 +31,7 @@ impl crate::sst::SstFactory for UnknownScratchFactory {
         unreachable!("completion fixture does not read inputs")
     }
 
+    #[cfg(test)]
     fn create(&self) -> MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
         unreachable!("completion fixture already ran its worker")
     }

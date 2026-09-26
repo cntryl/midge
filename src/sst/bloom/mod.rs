@@ -13,11 +13,9 @@
 //! selection. Persisted key-range metadata provides the coarse SST-level gate.
 
 pub mod block_bloom;
-pub mod metrics;
 pub mod reader;
 pub mod writer;
 
 pub use block_bloom::BlockBloomFilter;
-pub use metrics::BloomMetrics;
 pub use reader::BloomReader;
 pub use writer::BloomWriter;

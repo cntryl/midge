@@ -17,12 +17,11 @@ pub(crate) const INTENT_LOG: &str = "intent_log.json";
 
 /// Metadata files mirrored to cloud storage, ordered so a reader that stops
 /// early still sees a consistent prefix.
-pub(crate) const CLOUD_MIRRORED: &[&str] =
-    &[FORMAT, MANIFEST_SNAPSHOT, MANIFEST, JOURNAL, INTENT_LOG];
+pub(crate) const CLOUD_MIRRORED: &[&str] = &[FORMAT, MANIFEST_SNAPSHOT, JOURNAL, INTENT_LOG];
 
 /// Manifest bodies, newest authority first. A reader compares its local
 /// state against these to decide whether another writer moved ahead.
-pub(crate) const MANIFEST_BODIES: &[&str] = &[MANIFEST_SNAPSHOT, MANIFEST];
+pub(crate) const MANIFEST_BODIES: &[&str] = &[MANIFEST_SNAPSHOT];
 
 /// Whether `file_name` carries a manifest body, and so a sequence to compare.
 #[must_use]
@@ -92,7 +91,7 @@ mod tests {
         let body = serde_json::to_vec(&manifest).expect("encode manifest");
 
         // Act
-        let error = ensure_remote_not_ahead(MANIFEST, &body, 4)
+        let error = ensure_remote_not_ahead(MANIFEST_SNAPSHOT, &body, 4)
             .expect_err("a newer remote manifest means lost authority");
 
         // Assert
@@ -109,7 +108,7 @@ mod tests {
         let body = serde_json::to_vec(&manifest).expect("encode manifest");
 
         // Act
-        let accepted = ensure_remote_not_ahead(MANIFEST, &body, 4);
+        let accepted = ensure_remote_not_ahead(MANIFEST_SNAPSHOT, &body, 4);
 
         // Assert
         assert!(accepted.is_ok());
@@ -133,7 +132,8 @@ mod tests {
         let corrupt = b"not-json";
 
         // Act
-        let error = manifest_sequence(MANIFEST, corrupt).expect_err("a manifest body must parse");
+        let error =
+            manifest_sequence(MANIFEST_SNAPSHOT, corrupt).expect_err("a manifest body must parse");
 
         // Assert
         assert!(matches!(error, crate::common::MidgeError::Corruption(_)));
@@ -148,9 +148,6 @@ mod tests {
         let mirrored = CLOUD_MIRRORED;
 
         // Assert
-        assert_eq!(
-            mirrored,
-            &[FORMAT, MANIFEST_SNAPSHOT, MANIFEST, JOURNAL, INTENT_LOG]
-        );
+        assert_eq!(mirrored, &[FORMAT, MANIFEST_SNAPSHOT, JOURNAL, INTENT_LOG]);
     }
 }

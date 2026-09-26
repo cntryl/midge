@@ -1,5 +1,6 @@
 use super::*;
 use crate::common::MidgeError;
+use crate::io::FsError;
 
 struct StartupWatchdogLease {
     validity: std::sync::Arc<crate::lease::LeaseValidity>,
@@ -311,8 +312,9 @@ fn should_grant_epoch_above_wal_writer_epoch_when_leader_record_is_deleted() -> 
     drop(engine);
     let wal_epoch = 7;
     {
-        let fs: std::sync::Arc<dyn crate::io::Fs> =
-            std::sync::Arc::new(crate::io::RealFs::new(dir.path().join("wal"))?);
+        let fs: std::sync::Arc<dyn crate::io::Fs> = std::sync::Arc::new(
+            crate::io::RealFs::new(dir.path().join("wal")).map_err(FsError::into_midge)?,
+        );
         let writer = crate::wal::fs::FsWalWriterIo::new(&crate::wal::segment_file_name(1_000), fs)?;
         crate::wal::WalWriter::append_record(
             &writer,

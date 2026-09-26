@@ -1,4 +1,5 @@
 use super::*;
+use crate::io::FsError;
 use crate::io::RealFs;
 use crate::sst::traits::SstFactory;
 use crate::sst::FsSstFactoryIo;
@@ -16,7 +17,10 @@ fn write_sst(
     bounds: (&[u8], &[u8]),
 ) -> MidgeResult<FileMeta> {
     let name = format!("scan-{index}.sst");
-    let factory = FsSstFactoryIo::new(Arc::new(RealFs::new(path)?), 4096);
+    let factory = FsSstFactoryIo::new(
+        Arc::new(RealFs::new(path).map_err(FsError::into_midge)?),
+        4096,
+    );
     let mut writer = factory.create()?;
     for (key, value, sequence) in points {
         writer.add_with_meta(key, Some(value), *sequence, EntryType::Put, None)?;
@@ -41,7 +45,7 @@ fn snapshot(
     path: &Path,
     files: Vec<FileMeta>,
 ) -> MidgeResult<(Arc<ReadSnapshot>, Arc<ReadResources>)> {
-    let fs: Arc<dyn Fs> = Arc::new(RealFs::new(path)?);
+    let fs: Arc<dyn Fs> = Arc::new(RealFs::new(path).map_err(FsError::into_midge)?);
     let resources = Arc::new(ReadResources::new_with_diagnostics(
         Arc::clone(&fs),
         std::path::PathBuf::new(),

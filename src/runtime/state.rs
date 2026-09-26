@@ -127,18 +127,22 @@ pub(crate) struct SstNameAllocation {
 pub struct WalState {
     /// Current WAL segment ID
     pub current_segment_id: u64,
-    /// Last synced sequence number (local durability)
-    pub last_synced_seq: u64,
     /// Pending writes waiting for sync
     pub pending_writes: usize,
-    /// Local durability frontier - highest sequence number fsynced locally
-    pub local_durable_seq: u64,
-    /// Cloud durability frontier - highest sequence number confirmed by cloud
-    pub cloud_durable_seq: u64,
+    /// Synced, locally durable and cloud durable sequences; they only move
+    /// forward outside recovery.
+    pub frontiers: crate::runtime::frontiers::WalFrontiers,
     /// Why each retained sealed local WAL segment last failed its coverage
     /// proof. In memory only; an empty map just means re-proving (#490).
     pub(crate) local_segment_proofs:
         HashMap<u64, crate::runtime::hybrid_persistence::FailedWalProof>,
+    /// Manifest SSTs whose identity a local prune proof has already checked
+    /// by reading them in full, so later passes do not reread them (#548).
+    pub(crate) proven_coverage_ssts: crate::runtime::hybrid_persistence::ProvenSstIdentities,
+    /// The last sealed local WAL segment a prune pass read for a proof. The
+    /// next pass starts after it, so a bounded pass cannot starve later
+    /// segments (#548). In memory only.
+    pub(crate) local_prune_cursor: u64,
     /// WAL bytes appended by this process, across segments. In memory only:
     /// it measures how much local WAL a family's memtable pins (#552).
     pub(crate) appended_bytes: u64,
@@ -148,11 +152,12 @@ impl Default for WalState {
     fn default() -> Self {
         Self {
             current_segment_id: 1,
-            last_synced_seq: 0,
             pending_writes: 0,
-            local_durable_seq: 0,
-            cloud_durable_seq: 0,
+            frontiers: crate::runtime::frontiers::WalFrontiers::default(),
             local_segment_proofs: HashMap::new(),
+            proven_coverage_ssts: crate::runtime::hybrid_persistence::ProvenSstIdentities::default(
+            ),
+            local_prune_cursor: 0,
             appended_bytes: 0,
         }
     }
@@ -275,6 +280,110 @@ pub struct CompactionConfig {
     pub enabled: bool,
 }
 
+/// Runtime limits and policies observed by admission, flush, and compaction.
+pub struct RuntimeLimits {
+    pub memtable_size_limit: usize,
+    pub memtable_flush_threshold: usize,
+    pub eventual_flush_segment_gap: u64,
+    pub max_immutable_memtables: usize,
+    pub(crate) l0_compaction_trigger: usize,
+    pub compaction_config: CompactionConfig,
+}
+
+impl RuntimeLimits {
+    fn for_persistence(persistence: RuntimePersistence) -> Self {
+        Self {
+            memtable_size_limit: 64 * 1024 * 1024,
+            memtable_flush_threshold: 64 * 1024 * 1024,
+            eventual_flush_segment_gap: crate::runtime::CloudRuntimePolicy::default()
+                .eventual_flush_segment_gap,
+            max_immutable_memtables: 10,
+            l0_compaction_trigger: crate::compaction::LeveledCompactionConfig::default()
+                .l0_file_count_threshold,
+            compaction_config: CompactionConfig {
+                enabled: persistence.compaction_enabled(),
+            },
+        }
+    }
+}
+
+/// Counters populated during startup recovery and intent replay.
+#[derive(Default)]
+pub struct RecoveryStats {
+    pub wal_recovery_records_replayed: u64,
+    pub wal_recovery_bytes_replayed: u64,
+    pub intent_log_replay_runs: u64,
+    pub intent_log_entries_replayed: u64,
+}
+
+/// The manifest and its derived SST read view share one invalidation owner.
+pub struct ManifestRuntimeState {
+    manifest: Manifest,
+    read_views: std::cell::RefCell<crate::runtime::sst_read_view::SstReadViewCache>,
+}
+
+impl ManifestRuntimeState {
+    pub fn new(manifest: Manifest) -> Self {
+        Self {
+            manifest,
+            read_views: std::cell::RefCell::new(
+                crate::runtime::sst_read_view::SstReadViewCache::new(),
+            ),
+        }
+    }
+
+    pub(crate) fn replace(&mut self, manifest: Manifest) {
+        self.read_views.get_mut().invalidate();
+        self.manifest = manifest;
+    }
+
+    pub(crate) fn replace_files(&mut self, files: Vec<crate::metadata::FileMeta>) {
+        self.read_views.get_mut().invalidate();
+        self.manifest.files = files;
+    }
+
+    pub(crate) fn add_file(&mut self, file: crate::metadata::FileMeta) {
+        self.read_views.get_mut().invalidate();
+        self.manifest.add_file(file);
+    }
+
+    pub(crate) fn retain_files(
+        &mut self,
+        mut keep: impl FnMut(&crate::metadata::FileMeta) -> bool,
+    ) {
+        self.read_views.get_mut().invalidate();
+        self.manifest.files.retain(|file| keep(file));
+    }
+
+    pub(crate) fn read_view_for(
+        &self,
+        cf_id: crate::types::ColumnFamilyId,
+    ) -> std::sync::Arc<crate::runtime::sst_read_view::SstReadView> {
+        self.read_views.borrow_mut().view_for(&self.manifest, cf_id)
+    }
+
+    pub(crate) fn take_rebuilt_live_names(&self) -> Option<std::sync::Arc<HashSet<String>>> {
+        self.read_views
+            .borrow_mut()
+            .take_rebuilt_live_names(&self.manifest)
+    }
+}
+
+impl std::ops::Deref for ManifestRuntimeState {
+    type Target = Manifest;
+
+    fn deref(&self) -> &Self::Target {
+        &self.manifest
+    }
+}
+
+impl std::ops::DerefMut for ManifestRuntimeState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.read_views.get_mut().invalidate();
+        &mut self.manifest
+    }
+}
+
 pub struct WritePressureState {
     pub stalled: bool,
 }
@@ -326,7 +435,7 @@ pub struct RuntimeState {
     pub column_families: HashMap<u32, ColumnFamilyState>,
 
     // === Metadata ===
-    pub manifest: Manifest,
+    pub manifest: ManifestRuntimeState,
 
     // Filesystem abstraction for all IO (never call std::fs directly)
     pub fs: std::sync::Arc<dyn Fs>,
@@ -356,39 +465,23 @@ pub struct RuntimeState {
     pub recent_delete_ranges: Vec<RecentDeleteRange>,
 
     // === Configuration ===
-    pub memtable_size_limit: usize,
+    pub limits: RuntimeLimits,
     pub mode: RuntimeMode,
     pub recovery: RecoveryStatus,
-    pub compaction_config: CompactionConfig,
 
     // === Intent Log & Determinism ===
     /// Deterministic intent log for recovery and replay
     pub intent_log: Vec<IntentLogEntry>,
-    /// Maximum size of any memtable before write stall
-    pub memtable_flush_threshold: usize,
-    /// Cloud: flush an active memtable once it started this many WAL
-    /// segments ago, bounding the WAL catalog.
-    pub eventual_flush_segment_gap: u64,
     pub write_pressure: WritePressureState,
     /// Total size of all memtables (in-memory)
     pub total_memtable_bytes: usize,
-    /// Maximum number of immutable memtables per CF before write stall
-    pub max_immutable_memtables: usize,
-    /// Soft L0 file-count trigger used to derive the internal hard admission
-    /// ceiling. Kept in runtime state so WAL admission and compaction planning
-    /// observe one value.
-    pub(crate) l0_compaction_trigger: usize,
     /// Next process-local flush identity. Flush identities are stable for the
     /// lifetime of an immutable and are never inferred from SST sequence state.
     pub(crate) next_flush_id: u64,
     pub(crate) writer_epoch: u64,
     pub(crate) flush_metrics: FlushRuntimeMetrics,
 
-    // Startup recovery metrics
-    pub wal_recovery_records_replayed: u64,
-    pub wal_recovery_bytes_replayed: u64,
-    pub intent_log_replay_runs: u64,
-    pub intent_log_entries_replayed: u64,
+    pub recovery_stats: RecoveryStats,
 
     /// Number of active compaction jobs.
     pub active_compactions: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -491,15 +584,15 @@ impl RuntimeState {
             active_memtables,
             immutable_memtables,
             total_memtable_bytes: self.total_memtable_bytes,
-            memtable_size_limit: self.memtable_size_limit,
-            memtable_flush_threshold: self.memtable_flush_threshold,
+            memtable_size_limit: self.limits.memtable_size_limit,
+            memtable_flush_threshold: self.limits.memtable_flush_threshold,
             max_memtable_wal_segment_gap: self.max_memtable_wal_segment_gap(),
             write_stalled: self.has_any_hard_write_stall(),
             wal_current_segment_id: self.wal.current_segment_id,
             wal_pending_writes: self.wal.pending_writes,
-            wal_last_synced_seq: self.wal.last_synced_seq,
-            wal_local_durable_seq: self.wal.local_durable_seq,
-            wal_cloud_durable_seq: self.wal.cloud_durable_seq,
+            wal_last_synced_seq: self.wal.frontiers.last_synced(),
+            wal_local_durable_seq: self.wal.frontiers.local_durable(),
+            wal_cloud_durable_seq: self.wal.frontiers.cloud_durable(),
             compacting_ssts: self.compaction.compacting_ssts.len(),
             active_compactions: self
                 .active_compactions
@@ -597,10 +690,10 @@ impl RuntimeState {
             remote_range_failures_total: 0,
             remote_range_latency_ns_total: 0,
             remote_range_latency_ns_max: 0,
-            wal_recovery_records_replayed: self.wal_recovery_records_replayed,
-            wal_recovery_bytes_replayed: self.wal_recovery_bytes_replayed,
-            intent_log_replay_runs: self.intent_log_replay_runs,
-            intent_log_entries_replayed: self.intent_log_entries_replayed,
+            wal_recovery_records_replayed: self.recovery_stats.wal_recovery_records_replayed,
+            wal_recovery_bytes_replayed: self.recovery_stats.wal_recovery_bytes_replayed,
+            intent_log_replay_runs: self.recovery_stats.intent_log_replay_runs,
+            intent_log_entries_replayed: self.recovery_stats.intent_log_entries_replayed,
         }
     }
 
@@ -891,7 +984,7 @@ impl RuntimeState {
         let mut directories = vec![root.clone()];
         let mut bytes = 0_u64;
         while let Some(directory) = directories.pop() {
-            for entry in self.fs.list_dir(&directory)? {
+            for entry in self.fs.list_dir(&directory).map_err(FsError::into_midge)? {
                 if directory == root {
                     let is_scratch = if entry.is_dir {
                         matches!(entry.name.as_str(), "cloud_recovery" | "txn")
@@ -913,7 +1006,7 @@ impl RuntimeState {
                     directories.push(path);
                 } else {
                     bytes = bytes
-                        .checked_add(self.fs.metadata(&path)?.len)
+                        .checked_add(self.fs.metadata(&path).map_err(FsError::into_midge)?.len)
                         .ok_or_else(|| {
                             MidgeError::NoSpace("startup scratch byte accounting overflow".into())
                         })?;
@@ -974,12 +1067,8 @@ impl RuntimeState {
         if self.sequence < sequence_floor {
             self.sequence = sequence_floor;
         }
-        if self.wal.local_durable_seq < sequence_floor {
-            self.wal.local_durable_seq = sequence_floor;
-        }
-        if self.wal.cloud_durable_seq < sequence_floor {
-            self.wal.cloud_durable_seq = sequence_floor;
-        }
+        self.wal.frontiers.advance_local_to(sequence_floor);
+        self.wal.frontiers.advance_cloud_to(sequence_floor);
         self.compaction_output_generation =
             self.compaction_output_generation.max(self.sequence).max(
                 Self::manifest_compaction_output_generation_floor(&self.manifest),
@@ -991,7 +1080,9 @@ impl RuntimeState {
     /// validated remote WAL segments; local-only replay must never contribute
     /// to this frontier until its resumed upload is acknowledged.
     pub(crate) fn reset_cloud_durable_sequence_for_recovery(&mut self) {
-        self.wal.cloud_durable_seq = Self::manifest_visible_sequence_floor(&self.manifest);
+        self.wal
+            .frontiers
+            .reset_cloud_for_recovery(Self::manifest_visible_sequence_floor(&self.manifest));
     }
 
     /// Get the next transaction ID

@@ -86,12 +86,12 @@ impl EventLoop {
             CloudWalPruneGuard::admitted_local_snapshot(
                 &self.state.manifest,
                 &budget,
-                &self.cloud_wal_prune_progress,
+                &self.cloud_coordinator.cloud_wal_prune_progress,
             )?
         };
         Ok(guard
             .with_memory_limit(self.compaction_actor.compaction_memory_limit())
-            .with_progress(self.cloud_wal_prune_progress.clone()))
+            .with_progress(self.cloud_coordinator.cloud_wal_prune_progress.clone()))
     }
 
     fn cloud_wal_prune_guards(
@@ -108,9 +108,19 @@ impl EventLoop {
         Ok((metadata_snapshot, local_guard))
     }
 
+    fn cloud_wal_prune_layout_publication_active(&self) -> bool {
+        self.state
+            .active_compactions
+            .load(std::sync::atomic::Ordering::Acquire)
+            > 0
+            || !self.state.compaction.compacting_ssts.is_empty()
+            || self.flush_actor.is_inflight()
+    }
+
     pub(crate) fn prune_cloud_wal_segments_covered_by_manifest(&mut self) {
         self.reap_cloud_wal_prune_worker();
-        if self.cloud_maintenance_enabled() && !self.cloud_maintenance.dispatching {
+        if self.cloud_maintenance_enabled() && !self.cloud_coordinator.cloud_maintenance.dispatching
+        {
             self.schedule_cloud_maintenance();
             return;
         }
@@ -128,21 +138,14 @@ impl EventLoop {
         // A flush publication mutates the local control files on its worker.
         // Start only between publication phases, then own the gate until the
         // worker has verified metadata and retired catalog authority.
-        let layout_publication_active = self
-            .state
-            .active_compactions
-            .load(std::sync::atomic::Ordering::Acquire)
-            > 0
-            || !self.state.compaction.compacting_ssts.is_empty()
-            || self.flush_actor.is_inflight();
-        if self.cloud_wal_prune_worker.is_some()
+        if self.cloud_coordinator.cloud_wal_prune_worker.is_some()
             || self.publication_gate.is_active()
-            || layout_publication_active
+            || self.cloud_wal_prune_layout_publication_active()
         {
             return;
         }
 
-        let Some(storage) = self.hybrid_storage.clone() else {
+        let Some(storage) = self.cloud_coordinator.hybrid_storage.clone() else {
             return;
         };
         storage.configure_maintenance_memory(self.compaction_actor.compaction_memory_limit());
@@ -181,7 +184,10 @@ impl EventLoop {
             return;
         }
         for (segment_id, _) in &candidates {
-            self.cloud_wal.prune_inflight.insert(*segment_id);
+            self.cloud_coordinator
+                .cloud_wal
+                .prune_inflight
+                .insert(*segment_id);
         }
 
         let candidate_ids = candidates
@@ -209,10 +215,13 @@ impl EventLoop {
             });
 
         match worker {
-            Ok(worker) => self.cloud_wal_prune_worker = Some(worker),
+            Ok(worker) => self.cloud_coordinator.cloud_wal_prune_worker = Some(worker),
             Err(error) => {
                 for segment_id in candidate_ids {
-                    self.cloud_wal.prune_inflight.remove(&segment_id);
+                    self.cloud_coordinator
+                        .cloud_wal
+                        .prune_inflight
+                        .remove(&segment_id);
                 }
                 self.publication_gate.release(&publication_owner);
                 self.state.mark_persistence_anomaly();
@@ -233,14 +242,19 @@ impl EventLoop {
         // record may mask an older authoritative WAL record for the same key;
         // removing the newer segment across a gap can resurrect that older
         // state after a later tombstone/TTL compaction.
-        self.cloud_wal
+        self.cloud_coordinator
+            .cloud_wal
             .acked_segments
             .iter()
             .take_while(|(segment_id, max_sequence)| {
                 **segment_id < recovery_floor_segment
-                    && **max_sequence <= self.state.wal.cloud_durable_seq
+                    && **max_sequence <= self.state.wal.frontiers.cloud_durable()
                     && **max_sequence <= persisted_sequence
-                    && !self.cloud_wal.prune_inflight.contains(segment_id)
+                    && !self
+                        .cloud_coordinator
+                        .cloud_wal
+                        .prune_inflight
+                        .contains(segment_id)
             })
             .take(CLOUD_WAL_PRUNE_BATCH_SIZE)
             .map(|(segment_id, max_sequence)| (*segment_id, *max_sequence))
@@ -249,6 +263,7 @@ impl EventLoop {
 
     pub(in crate::runtime::event_loop) fn reap_cloud_wal_prune_worker(&mut self) {
         if self
+            .cloud_coordinator
             .cloud_wal_prune_worker
             .as_ref()
             .is_none_or(std::thread::JoinHandle::is_finished)
@@ -262,7 +277,7 @@ impl EventLoop {
     }
 
     pub(in crate::runtime::event_loop) fn join_cloud_wal_prune_worker(&mut self) {
-        if let Some(worker) = self.cloud_wal_prune_worker.take() {
+        if let Some(worker) = self.cloud_coordinator.cloud_wal_prune_worker.take() {
             if worker.join().is_err() {
                 self.state.mark_persistence_anomaly();
                 tracing::warn!("cloud WAL prune preflight worker panicked during join");
@@ -306,7 +321,9 @@ impl EventLoop {
                     tracing::warn!(segment_id, %error, "local WAL deletion directory sync failed; retained ownership for restart reconciliation");
                     return false;
                 }
-                if let (Some(storage), Some(bytes)) = (&self.hybrid_storage, local_bytes) {
+                if let (Some(storage), Some(bytes)) =
+                    (&self.cloud_coordinator.hybrid_storage, local_bytes)
+                {
                     storage.release_local_wal_bytes(bytes);
                 }
                 tracing::debug!(

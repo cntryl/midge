@@ -196,6 +196,7 @@ impl CacheShard {
     }
 
     /// Remove a key from the cache
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn remove(&self, key: &CacheKey) -> Option<CacheValue> {
         let _lock = self.lock_mutation();
         if let Some((_, value)) = self.entries.remove(key) {
@@ -233,6 +234,7 @@ impl CacheShard {
     }
 
     /// Clear all entries from the cache
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn clear(&self) {
         let _lock = self.lock_mutation();
         self.entries.clear();
@@ -248,6 +250,7 @@ impl CacheShard {
     }
 
     /// Get cache metrics
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn metrics(&self) -> CacheMetrics {
         self.metrics.clone()
     }
@@ -256,21 +259,25 @@ impl CacheShard {
     ///
     /// Each entry charges its payload plus
     /// [`crate::sst::cache::value::ENTRY_OVERHEAD_BYTES`].
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn size_bytes(&self) -> u64 {
         self.metrics.memory_bytes()
     }
 
     /// Get this shard's capacity in bytes.
+    #[cfg(test)]
     pub fn capacity_bytes(&self) -> u64 {
         self.max_bytes
     }
 
     /// Get number of entries
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
     /// Check if cache is empty
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

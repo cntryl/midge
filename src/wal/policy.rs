@@ -30,11 +30,6 @@ pub enum DurabilityPolicy {
     #[default]
     Batched,
 
-    /// Write to local WAL + async persist to cloud.
-    /// Durability = local fsync (cloud upload is background optimization).
-    /// Use for: cloud-native deployments with geo-persistence.
-    CloudMirrored,
-
     /// Write to local WAL, make the write visible after the local append barrier,
     /// and upload sealed WAL segments to cloud asynchronously.
     /// Durability = local append visibility now, cloud durability later via

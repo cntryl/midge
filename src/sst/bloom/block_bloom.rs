@@ -174,6 +174,7 @@ impl BlockBloomFilter {
     }
 
     /// Get the number of blocks
+    #[cfg(test)]
     #[must_use]
     pub fn num_blocks(&self) -> usize {
         self.num_blocks

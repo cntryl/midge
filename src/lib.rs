@@ -33,53 +33,41 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
 // Implementation modules are private. The ones re-exported through
 // `__internal` carry `#[doc(hidden)]` so rustdoc and the pedantic
-// documentation lints treat them as the internals they are, and they relax
-// `dead_code`/`unused_imports` when `internal-testing` is off, because their
-// only remaining callers (tests, benches, fuzz targets) are then unreachable.
-// Both lints stay active in every build that enables the feature, which is
-// every build CI and developers run.
+// documentation lints treat them as the internals they are. `dead_code` stays
+// active in every build: `__internal` lists individual items rather than glob
+// re-exporting modules, and helpers used only by tests or benches carry
+// `#[cfg(any(test, feature = "internal-testing"))]`.
 
 // Foundation - no dependencies
 mod cloud_layout;
 #[doc(hidden)]
-#[cfg_attr(not(feature = "internal-testing"), allow(dead_code, unused_imports))]
 mod codec;
 #[doc(hidden)]
-#[cfg_attr(not(feature = "internal-testing"), allow(dead_code, unused_imports))]
 mod common;
 #[doc(hidden)]
-#[cfg_attr(not(feature = "internal-testing"), allow(dead_code, unused_imports))]
 mod config;
 #[doc(hidden)]
-#[cfg_attr(not(feature = "internal-testing"), allow(dead_code, unused_imports))]
 mod types;
 
 // Internal modules used by engine/runtime.
 mod compaction;
 #[doc(hidden)]
-#[cfg_attr(not(feature = "internal-testing"), allow(dead_code, unused_imports))]
 mod diagnostics;
 mod failpoints;
-// Parts of the filesystem abstraction (vectored and ranged I/O) are used only
-// by tests and by `__internal` consumers.
-#[cfg_attr(not(feature = "internal-testing"), allow(dead_code))]
 mod io;
 mod lease;
 #[doc(hidden)]
-#[cfg_attr(not(feature = "internal-testing"), allow(dead_code, unused_imports))]
 mod memtable;
 mod metadata;
 mod runtime;
 #[doc(hidden)]
-#[cfg_attr(not(feature = "internal-testing"), allow(dead_code, unused_imports))]
 mod sst;
 mod storage;
 // Only `init_benchmark_telemetry`, which `internal-testing` gates, initializes
-// telemetry today; #355 tracks a supported initialization API.
-#[cfg_attr(not(feature = "internal-testing"), allow(dead_code))]
+// telemetry today, so its initialization path carries the same gate; #355
+// tracks a supported initialization API.
 mod telemetry;
 #[doc(hidden)]
-#[cfg_attr(not(feature = "internal-testing"), allow(dead_code, unused_imports))]
 mod wal;
 
 // Main engine (canonical public API — re-exported below)
@@ -99,26 +87,48 @@ mod engine;
 #[cfg(feature = "internal-testing")]
 #[doc(hidden)]
 pub mod __internal {
+    // Each module lists the items its tests, benches and fuzz targets use.
+    // Glob re-exports would make every `pub` item reachable from outside the
+    // crate and so hide dead code from the compiler.
     pub mod codec {
-        pub use crate::codec::*;
-    }
-    pub mod common {
-        pub use crate::common::*;
-    }
-    pub mod config {
-        pub use crate::config::*;
+        pub use crate::codec::{
+            compress_block, compress_block_with_trailer, compress_wal_value, decompress_block,
+            decompress_block_with_trailer, decompress_wal_value, CompressionAlgo,
+            CompressionPolicy, BLOCK_TRAILER_SIZE,
+        };
     }
     pub mod diagnostics {
-        pub use crate::diagnostics::*;
+        pub use crate::diagnostics::{
+            disable_transaction_commit_timing_for_benchmarks,
+            drain_transaction_commit_timings_for_benchmarks,
+            enable_transaction_commit_timing_for_benchmarks, TransactionCommitTimingSample,
+        };
     }
     pub mod memtable {
-        pub use crate::memtable::*;
+        pub use crate::memtable::{bench, SkipListMemtable};
     }
     pub mod runtime {
         pub use crate::runtime::keyed_group_commit::KeyedGroupCommit;
     }
     pub mod sst {
-        pub use crate::sst::*;
+        pub mod bloom {
+            pub use crate::sst::bloom::{BloomReader, BloomWriter};
+            pub mod writer {
+                pub use crate::sst::bloom::writer::BloomFilterOps;
+            }
+        }
+        pub mod cache {
+            pub use crate::sst::cache::{BlockCache, CacheKey, CachePolicyType};
+        }
+        pub mod encoding {
+            pub use crate::sst::encoding::{decode, encode};
+        }
+        pub mod trie {
+            pub use crate::sst::trie::{TrieBuilder, TrieReader};
+        }
+        pub mod types {
+            pub use crate::sst::types::{decode_range_tombstones, Footer};
+        }
     }
     /// Cloud-boundary types exposed only to this crate's compile-contract
     /// tests. They remain outside Midge's supported public API.
@@ -129,10 +139,23 @@ pub mod __internal {
         }
     }
     pub mod types {
-        pub use crate::types::*;
+        pub use crate::types::{EntryType, KeyState};
     }
     pub mod wal {
-        pub use crate::wal::*;
+        pub use crate::wal::{
+            cloud_segment_object_key, parse_segment_id, segment_file_name, WalOpKind, WalRecord,
+        };
+        pub mod encoding {
+            pub use crate::wal::encoding::{decode, decode_view, encode, encode_into};
+        }
+        pub mod frame {
+            pub use crate::wal::frame::{
+                append_frame, decode_frame_header, verify_frame_crc, WAL_FRAME_HEADER_LEN,
+            };
+        }
+        pub mod policy {
+            pub use crate::wal::policy::BatchConfig;
+        }
     }
 }
 

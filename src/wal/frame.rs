@@ -1,4 +1,5 @@
 use crate::common::{MidgeError, MidgeResult};
+use crate::io::FsError;
 
 pub const WAL_FRAME_HEADER_LEN: usize = 8;
 pub const WAL_MAX_RECORD_LEN: usize = 64 * 1024 * 1024;
@@ -445,7 +446,7 @@ impl<'a> FileFrames<'a> {
 
     fn read_file(&self, pos: u64, len: u64) -> Result<bytes::Bytes, MidgeError> {
         let started = std::time::Instant::now();
-        let bytes = self.file.read_at(pos, len).map_err(MidgeError::from)?;
+        let bytes = self.file.read_at(pos, len).map_err(FsError::into_midge)?;
         self.read_ns.set(
             self.read_ns
                 .get()
@@ -473,7 +474,7 @@ impl FrameBytes for FileFrames<'_> {
         if let Some(len) = self.file_len.get() {
             return Ok(len);
         }
-        let len = self.file.len().map_err(MidgeError::from)?;
+        let len = self.file.len().map_err(FsError::into_midge)?;
         self.file_len.set(Some(len));
         Ok(len)
     }

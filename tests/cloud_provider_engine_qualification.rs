@@ -222,8 +222,8 @@ fn should_rollback_partition_set_after_partial_sqrzl_compaction_upload() {
             .expect("commit compaction seed");
         engine.flush_cf(&cf).expect("force SST upload");
     }
-    let metrics = engine.metrics();
-    let pre_failure_layout = metrics
+    let pre_failure_layout = engine
+        .metrics()
         .get_storage_layout()
         .expect("pre-failure storage layout");
     let scenario = fail::FailScenario::setup();
@@ -237,7 +237,8 @@ fn should_rollback_partition_set_after_partial_sqrzl_compaction_upload() {
 
     // Assert: surface the exact error and retain the old authority.
     assert_exact_sst_upload_failure(compaction_result);
-    let failed_layout = metrics
+    let failed_layout = engine
+        .metrics()
         .get_storage_layout()
         .expect("post-failure storage layout");
     assert!(
@@ -255,7 +256,21 @@ fn should_rollback_partition_set_after_partial_sqrzl_compaction_upload() {
     // Cache-loss recovery must land on the pre-compaction remote authority,
     // never a partially mirrored replacement set.
     std::fs::remove_dir_all(&cache_path).expect("delete local cache");
-    let mut reopened = open_engine();
+    let expected_compacted_files = pre_failure_layout
+        .levels
+        .iter()
+        .filter(|level| level.level > 0)
+        .map(|level| level.file_count)
+        .sum();
+    verify_recovered_partition_set(open_engine(), &cache_path, expected_compacted_files);
+}
+
+#[cfg(feature = "failpoints")]
+fn verify_recovered_partition_set(
+    mut reopened: Engine,
+    cache_path: &std::path::Path,
+    expected_compacted_files: usize,
+) {
     let reopened_cf = default_cf(&reopened);
     for batch in 0..4u8 {
         let key = format!("sqrzl-partial-mirror-{batch}");
@@ -267,8 +282,10 @@ fn should_rollback_partition_set_after_partial_sqrzl_compaction_upload() {
             Some(Bytes::from(vec![batch; 512]))
         );
     }
-    let view = reopened.metrics();
-    let reopened_layout = view.get_storage_layout().expect("reopened layout");
+    let reopened_layout = reopened
+        .metrics()
+        .get_storage_layout()
+        .expect("reopened storage layout");
     assert_eq!(
         reopened_layout
             .levels
@@ -276,18 +293,13 @@ fn should_rollback_partition_set_after_partial_sqrzl_compaction_upload() {
             .filter(|level| level.level > 0)
             .map(|level| level.file_count)
             .sum::<usize>(),
-        pre_failure_layout
-            .levels
-            .iter()
-            .filter(|level| level.level > 0)
-            .map(|level| level.file_count)
-            .sum::<usize>(),
+        expected_compacted_files,
         "recovered layout must match the pre-compaction, pre-failure layout"
     );
     reopened
         .shutdown(Duration::from_secs(10))
         .expect("shutdown recovered engine");
-    let _ = std::fs::remove_dir_all(&cache_path);
+    let _ = std::fs::remove_dir_all(cache_path);
 }
 
 #[cfg(feature = "failpoints")]

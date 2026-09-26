@@ -21,8 +21,11 @@ pub mod value;
 pub use config::BlockCachePolicy;
 pub(crate) use config::CachePolicyConfig;
 pub use key::{CacheBlockKind, CacheKey};
+#[cfg(any(test, feature = "internal-testing"))]
 pub use metrics::CacheMetrics;
-pub use policy::{CachePolicy, CachePolicyType};
+#[cfg(any(test, feature = "internal-testing"))]
+pub use policy::CachePolicy;
+pub use policy::CachePolicyType;
 pub use shard::CacheShard;
 pub use value::CacheValue;
 
@@ -74,6 +77,7 @@ impl BlockCache {
     }
 
     /// Create a new block cache with default settings (16 shards, LRU)
+    #[cfg(any(test, feature = "internal-testing"))]
     #[must_use]
     pub fn new_default(capacity_bytes: u64) -> Self {
         Self::new(capacity_bytes, 16, CachePolicyType::Lru)
@@ -99,6 +103,7 @@ impl BlockCache {
     }
 
     /// Remove a block from the cache
+    #[cfg(any(test, feature = "internal-testing"))]
     #[must_use]
     pub fn remove(&self, key: &CacheKey) -> Option<CacheValue> {
         self.get_shard(key).remove(key)
@@ -114,6 +119,7 @@ impl BlockCache {
     }
 
     /// Clear all entries from all shards
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn clear(&self) {
         for shard in &self.shards {
             shard.clear();
@@ -121,6 +127,7 @@ impl BlockCache {
     }
 
     /// Get aggregated metrics across all shards
+    #[cfg(any(test, feature = "internal-testing"))]
     #[must_use]
     pub fn metrics(&self) -> CacheMetrics {
         let mut total_hits = 0u64;
@@ -157,24 +164,28 @@ impl BlockCache {
     /// Each entry charges its payload plus
     /// [`value::ENTRY_OVERHEAD_BYTES`], so this is the memory the cache
     /// accounts for rather than the sum of the cached payloads.
+    #[cfg(any(test, feature = "internal-testing"))]
     #[must_use]
     pub fn size_bytes(&self) -> u64 {
         self.shards.iter().map(|s| s.size_bytes()).sum()
     }
 
     /// Get total number of entries
+    #[cfg(any(test, feature = "internal-testing"))]
     #[must_use]
     pub fn len(&self) -> usize {
         self.shards.iter().map(|s| s.len()).sum()
     }
 
     /// Check if cache is empty
+    #[cfg(any(test, feature = "internal-testing"))]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.shards.iter().all(|s| s.is_empty())
     }
 
     /// Get number of shards
+    #[cfg(any(test, feature = "internal-testing"))]
     #[must_use]
     pub fn num_shards(&self) -> usize {
         self.num_shards

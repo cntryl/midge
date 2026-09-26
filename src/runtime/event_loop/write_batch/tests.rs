@@ -452,7 +452,7 @@ fn should_coalesce_independent_strict_transactions_with_one_durable_append() -> 
     assert_eq!(fixture.event_loop.wal_actor.sync_calls(), 1);
     assert_eq!(fixture.event_loop.state.wal.pending_writes, 0);
     assert_eq!(
-        fixture.event_loop.state.wal.local_durable_seq,
+        fixture.event_loop.state.wal.frontiers.local_durable(),
         fixture.event_loop.state.sequence
     );
     assert_eq!(expect_transaction_applied(&first_rx, 13), (3, 1));
@@ -1495,7 +1495,7 @@ fn should_report_stall_hint_for_transaction_actual_column_family() -> MidgeResul
         .event_loop
         .state
         .create_cf("stalled-secondary".to_string())?;
-    fixture.event_loop.state.max_immutable_memtables = 1;
+    fixture.event_loop.state.limits.max_immutable_memtables = 1;
     fixture
         .event_loop
         .state
@@ -1536,9 +1536,9 @@ fn should_report_stall_hint_for_transaction_actual_column_family() -> MidgeResul
 fn should_stall_before_wal_when_transaction_would_exceed_hard_l0_ceiling() -> MidgeResult<()> {
     // Arrange
     let mut fixture = EventLoopFixture::batched()?;
-    fixture.event_loop.state.l0_compaction_trigger = 1;
-    fixture.event_loop.state.max_immutable_memtables = 1;
-    fixture.event_loop.state.memtable_flush_threshold = 1;
+    fixture.event_loop.state.limits.l0_compaction_trigger = 1;
+    fixture.event_loop.state.limits.max_immutable_memtables = 1;
+    fixture.event_loop.state.limits.memtable_flush_threshold = 1;
     fixture
         .event_loop
         .state

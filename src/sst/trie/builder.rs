@@ -177,6 +177,7 @@ impl TrieBuilder {
     }
 
     /// Get number of nodes in trie
+    #[cfg(any(test, feature = "internal-testing"))]
     #[must_use]
     pub fn node_count(&self) -> usize {
         self.nodes.len()

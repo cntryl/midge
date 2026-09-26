@@ -47,6 +47,7 @@ pub(crate) fn entry_type_of(op: OpType) -> EntryType {
     }
 }
 
+#[cfg(any(test, feature = "internal-testing"))]
 type MemtableEntryWithMeta = (Vec<u8>, Option<Vec<u8>>, u64, Option<u64>, EntryType);
 
 /// SkipList-based Memtable (lock-free, MVCC-aware)
@@ -471,6 +472,7 @@ impl SkipListMemtable {
     }
 
     /// Return all range tombstones for flush/compaction publication.
+    #[cfg(any(test, feature = "internal-testing"))]
     #[must_use]
     pub fn range_tombstones(&self) -> Vec<RangeTombstone> {
         if self
