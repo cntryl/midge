@@ -87,7 +87,7 @@ impl Runtime {
     /// Returns the Runtime (which owns the thread) and a handle for submitting work.
     pub fn start_with_config(
         mut self,
-        mut state: RuntimeState,
+        state: RuntimeState,
         config: RuntimeConfig,
     ) -> MidgeResult<(Self, RuntimeHandle)> {
         let trace_enabled = self.trace_enabled;
@@ -100,7 +100,9 @@ impl Runtime {
         let snapshot_cache = Arc::new(snapshot_cache::SnapshotCache::new());
         let ingest_active = Arc::clone(&state.ingest_active);
         let snapshot_pins = Arc::clone(&state.snapshot_pins);
-        state.diagnostics = Arc::clone(&self.diagnostics);
+        // Startup recovery has already recorded counters into this diagnostics
+        // instance. Hand the same instance to runtime handles and actors.
+        self.diagnostics = Arc::clone(&state.diagnostics);
         let lifecycle = Arc::clone(&self.lifecycle);
         let lifecycle_for_thread = Arc::clone(&lifecycle);
 

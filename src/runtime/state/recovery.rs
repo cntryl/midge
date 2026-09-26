@@ -190,6 +190,12 @@ impl RuntimeState {
             ingest_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pending_compaction_waits: parking_lot::Mutex::new(std::collections::HashMap::new()),
         };
+        state.diagnostics.record(|metrics| {
+            metrics.record_wal_recovery(
+                state.wal_recovery_records_replayed,
+                state.wal_recovery_bytes_replayed,
+            );
+        });
         state.reinitialize_active_memtable_segment_tracking();
         Ok(state)
     }
@@ -646,9 +652,6 @@ impl RuntimeState {
         replay_dir: &std::path::Path,
         stats: &crate::wal::recovery::RecoveryStats,
     ) {
-        crate::telemetry::CounterSink::default().record(|m| {
-            m.record_wal_recovery(stats.record_count, stats.bytes);
-        });
         tracing::info!(
             records_recovered = stats.record_count,
             bytes_recovered = stats.bytes,

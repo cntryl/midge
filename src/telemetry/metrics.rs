@@ -710,7 +710,9 @@ impl Metrics {
             cloud_bytes_uploaded: self.cloud_bytes_uploaded.load(Ordering::Relaxed),
             #[cfg(test)]
             cloud_bytes_downloaded: self.cloud_bytes_downloaded.load(Ordering::Relaxed),
+            #[cfg(test)]
             cache_hits: self.cache_hits.load(Ordering::Relaxed),
+            #[cfg(test)]
             cache_misses: self.cache_misses.load(Ordering::Relaxed),
             write_stalls: self.write_stalls.load(Ordering::Relaxed),
             write_stalls_memory: self.write_stalls_memory.load(Ordering::Relaxed),
@@ -802,7 +804,9 @@ pub struct MetricsSnapshot {
     pub cloud_bytes_uploaded: u64,
     #[cfg(test)]
     pub cloud_bytes_downloaded: u64,
+    #[cfg(test)]
     pub cache_hits: u64,
+    #[cfg(test)]
     pub cache_misses: u64,
     pub write_stalls: u64,
     pub write_stalls_memory: u64,

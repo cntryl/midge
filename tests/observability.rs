@@ -413,6 +413,7 @@ mod read_path_diagnostics {
         write.commit(WriteOptions::best_effort())?;
         engine.flush_cf(&cf)?;
         let start = engine.read_path_diagnostics_snapshot_for_benchmarks();
+        let runtime_start = engine.metrics().get_runtime_metrics()?;
 
         // Act - the first read opens/populates caches; the second verifies hits.
         for _ in 0..2 {
@@ -420,12 +421,21 @@ mod read_path_diagnostics {
             assert_eq!(read.get(b"key")?.as_deref(), Some(b"value".as_slice()));
         }
         let end = engine.read_path_diagnostics_snapshot_for_benchmarks();
+        let runtime_end = engine.metrics().get_runtime_metrics()?;
 
         // Assert - only the measured window contributes to each delta.
         assert!(end.read_only_begin_tx_count > start.read_only_begin_tx_count);
         assert!(end.read_only_snapshot_cache_hits > start.read_only_snapshot_cache_hits);
         assert!(end.sst_reader_cache_hits > start.sst_reader_cache_hits);
         assert!(end.sst_block_cache_hits > start.sst_block_cache_hits);
+        assert_eq!(
+            runtime_end.cache_hits - runtime_start.cache_hits,
+            end.sst_block_cache_hits - start.sst_block_cache_hits,
+        );
+        assert_eq!(
+            runtime_end.cache_misses - runtime_start.cache_misses,
+            end.sst_block_cache_misses - start.sst_block_cache_misses,
+        );
         assert!(end.candidate_blocks_checked > start.candidate_blocks_checked);
         assert!(end.data_blocks_read > start.data_blocks_read);
         Ok(())
@@ -582,7 +592,7 @@ mod recovery_metrics_api {
     }
 
     #[test]
-    fn should_report_wal_recovery_metrics_after_reopen_when_wal_replay_occurs() {
+    fn should_report_wal_recovery_counters_when_engine_replays_wal() {
         // Arrange
         let temp_dir = TempDir::new().expect("temp dir");
         let db_path = temp_dir.path();
@@ -617,6 +627,10 @@ mod recovery_metrics_api {
             .metrics()
             .get_recovery_metrics()
             .expect("get recovery metrics");
+        let runtime = reopened
+            .metrics()
+            .get_runtime_metrics()
+            .expect("get runtime metrics");
 
         // Assert
         assert!(
@@ -626,6 +640,14 @@ mod recovery_metrics_api {
         assert!(
             recovery.wal_recovery_bytes_replayed > 0,
             "expected WAL recovery to replay at least one byte"
+        );
+        assert_eq!(
+            runtime.wal_recovery_records_replayed,
+            recovery.wal_recovery_records_replayed,
+        );
+        assert_eq!(
+            runtime.wal_recovery_bytes_replayed,
+            recovery.wal_recovery_bytes_replayed,
         );
         assert!(
             recovery.intent_log_replay_runs <= 1,
