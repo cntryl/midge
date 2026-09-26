@@ -154,12 +154,11 @@ impl SstLevelStateIterator {
                     self.opened_tombstones.push(tombstone);
                 }
             }
-            self.current = Some(reader.state_scan(
+            self.current = Some(reader.raw_state_scan(
                 self.start.clone(),
                 self.end.clone(),
                 self.reverse,
                 self.sequence,
-                self.snapshot.read_time_millis,
             ));
         }
     }
@@ -171,7 +170,9 @@ impl SstLevelStateIterator {
             Err(error) => return Some(Err(error)),
         };
         let mut best = None;
-        ReadSnapshot::merge_best_state(&mut best, first_state, self.snapshot.read_time_millis);
+        if let Err(error) = ReadSnapshot::merge_best_state(&mut best, first_state) {
+            return Some(Err(error));
+        }
 
         loop {
             let Some(next) = self.next_raw() else {
@@ -179,11 +180,9 @@ impl SstLevelStateIterator {
             };
             match next {
                 Ok((candidate_key, candidate_state)) if candidate_key == key => {
-                    ReadSnapshot::merge_best_state(
-                        &mut best,
-                        candidate_state,
-                        self.snapshot.read_time_millis,
-                    );
+                    if let Err(error) = ReadSnapshot::merge_best_state(&mut best, candidate_state) {
+                        return Some(Err(error));
+                    }
                 }
                 // The read-ahead may have failed opening the next file, whose
                 // tombstones could cover `key`. Fail closed: surface the error
@@ -340,12 +339,11 @@ impl SnapshotScan {
             let reader = self.append_reader_tombstones(&file_meta, start, end)?;
             self.sources
                 .push(SnapshotStateSource::new(SnapshotStateIterator::Sst(
-                    Box::new(reader.state_scan(
+                    Box::new(reader.raw_state_scan(
                         self.start.clone(),
                         self.end.clone(),
                         self.reverse,
                         self.sequence,
-                        self.snapshot.read_time_millis,
                     )),
                 )));
         }
@@ -538,7 +536,7 @@ impl SnapshotScan {
                     .take_head()
                     .and_then(Result::ok)
                     .map_or(KeyState::Absent, |(_, state)| state);
-                ReadSnapshot::merge_best_state(&mut best, state, self.snapshot.read_time_millis);
+                ReadSnapshot::merge_best_state(&mut best, state)?;
             }
 
             let Some(best) = best else {
@@ -598,25 +596,24 @@ impl ReadSnapshot {
         }
     }
 
-    fn normalize_state(state: KeyState, now_millis: u64) -> KeyState {
-        match state {
-            KeyState::Value(_, seq, exp, _)
-                if crate::common::time::is_expired_at(exp, now_millis) =>
-            {
-                KeyState::Tombstone(seq)
-            }
-            _ => state,
-        }
-    }
-
-    fn candidate_wins(existing: &KeyState, candidate: &KeyState) -> bool {
+    fn candidate_wins(existing: &KeyState, candidate: &KeyState) -> MidgeResult<bool> {
         let existing_seq = Self::state_sequence(existing).unwrap_or(0);
         let candidate_seq = Self::state_sequence(candidate).unwrap_or(0);
-
-        candidate_seq > existing_seq
-            || (candidate_seq == existing_seq
-                && matches!(candidate, KeyState::Tombstone(_))
-                && !matches!(existing, KeyState::Tombstone(_)))
+        if !matches!(existing, KeyState::Absent)
+            && !matches!(candidate, KeyState::Absent)
+            && candidate_seq == existing_seq
+        {
+            crate::types::resolve_same_sequence(
+                crate::types::VersionContent::from_state(existing).expect("present state"),
+                crate::types::VersionContent::from_state(candidate).expect("present state"),
+            )
+            .map_err(|()| {
+                MidgeError::Corruption(format!(
+                    "conflicting read versions at sequence {candidate_seq}"
+                ))
+            })?;
+        }
+        Ok(candidate_seq > existing_seq || matches!(existing, KeyState::Absent))
     }
 
     #[cfg(test)]
@@ -624,33 +621,32 @@ impl ReadSnapshot {
         states: &mut BTreeMap<Vec<u8>, KeyState>,
         key: Vec<u8>,
         state: KeyState,
-        now_millis: u64,
-    ) {
-        let normalized = Self::normalize_state(state, now_millis);
-        if matches!(normalized, KeyState::Absent) {
-            return;
+    ) -> MidgeResult<()> {
+        if matches!(state, KeyState::Absent) {
+            return Ok(());
         }
 
         match states.get(&key) {
-            Some(existing) if !Self::candidate_wins(existing, &normalized) => {}
+            Some(existing) if !Self::candidate_wins(existing, &state)? => {}
             _ => {
-                states.insert(key, normalized);
+                states.insert(key, state);
             }
         }
+        Ok(())
     }
 
-    fn merge_best_state(best_state: &mut Option<KeyState>, state: KeyState, now_millis: u64) {
-        let normalized = Self::normalize_state(state, now_millis);
-        if matches!(normalized, KeyState::Absent) {
-            return;
+    fn merge_best_state(best_state: &mut Option<KeyState>, state: KeyState) -> MidgeResult<()> {
+        if matches!(state, KeyState::Absent) {
+            return Ok(());
         }
 
         if best_state
             .as_ref()
-            .is_none_or(|existing| Self::candidate_wins(existing, &normalized))
+            .map_or(Ok(true), |existing| Self::candidate_wins(existing, &state))?
         {
-            *best_state = Some(normalized);
+            *best_state = Some(state);
         }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -818,11 +814,11 @@ impl ReadSnapshot {
         let state = self
             .memtable
             .get_key_state_at_with_time(key, seq, self.read_time_millis)?;
-        Self::merge_best_state(&mut best_state, state, self.read_time_millis);
+        Self::merge_best_state(&mut best_state, state)?;
 
         for imm in &self.immutable_memtables {
             let state = imm.get_key_state_at_with_time(key, seq, self.read_time_millis)?;
-            Self::merge_best_state(&mut best_state, state, self.read_time_millis);
+            Self::merge_best_state(&mut best_state, state)?;
             covering_tombstone_seq =
                 covering_tombstone_seq.max(imm.max_covering_tombstone_seq(key, seq));
         }
@@ -838,8 +834,7 @@ impl ReadSnapshot {
                     .sst_metrics()
                     .record_candidate_sst_file_checked();
                 let reader = self.sst_reader(&file_meta)?;
-                let (state, read_stats) =
-                    reader.get_state_at_with_time_and_stats(key, seq, self.read_time_millis)?;
+                let (state, read_stats) = reader.get_raw_state_at_with_stats(key, seq)?;
                 if read_stats.sst_touched {
                     ssts_touched = ssts_touched.saturating_add(1);
                     if file_meta.level == 0 {
@@ -847,7 +842,7 @@ impl ReadSnapshot {
                     }
                 }
                 blocks_read = blocks_read.saturating_add(read_stats.blocks_read);
-                Self::merge_best_state(&mut best_state, state, self.read_time_millis);
+                Self::merge_best_state(&mut best_state, state)?;
 
                 self.diagnostics.sst_metrics().record_range_tombstone_scan();
                 covering_tombstone_seq =
@@ -894,11 +889,11 @@ impl ReadSnapshot {
         let state =
             self.memtable
                 .get_key_state_at_with_time(key, u64::MAX, self.read_time_millis)?;
-        Self::merge_best_state(&mut best_state, state, self.read_time_millis);
+        Self::merge_best_state(&mut best_state, state)?;
 
         for imm in &self.immutable_memtables {
             let state = imm.get_key_state_at_with_time(key, u64::MAX, self.read_time_millis)?;
-            Self::merge_best_state(&mut best_state, state, self.read_time_millis);
+            Self::merge_best_state(&mut best_state, state)?;
             range_tombstones.extend(
                 imm.range_tombstones_at(u64::MAX)
                     .into_iter()
@@ -915,8 +910,8 @@ impl ReadSnapshot {
         if !self.memory_mode {
             for file_meta in self.sst_view.point_candidates(key) {
                 let reader = self.sst_reader(&file_meta)?;
-                let state = reader.get_state_at_with_time(key, u64::MAX, self.read_time_millis)?;
-                Self::merge_best_state(&mut best_state, state, self.read_time_millis);
+                let (state, _) = reader.get_raw_state_at_with_stats(key, u64::MAX)?;
+                Self::merge_best_state(&mut best_state, state)?;
 
                 range_tombstones.extend(
                     reader
@@ -991,8 +986,7 @@ impl ReadSnapshot {
             );
             for file_meta in files {
                 let reader = self.sst_reader(&file_meta)?;
-                let entries =
-                    reader.scan_range_state_with_time(start_opt, end_opt, self.read_time_millis)?;
+                let entries = reader.scan_range_raw_state(start_opt, end_opt)?;
                 for (_key, state) in entries {
                     if let Some(seq) = Self::state_sequence(&state) {
                         max_seq = max_seq.max(seq);
@@ -1033,14 +1027,14 @@ impl ReadSnapshot {
             self.memtable
                 .range_state_at_with_time(start_opt, end_opt, seq, self.read_time_millis)
         {
-            Self::merge_state(&mut states, key, state, self.read_time_millis);
+            Self::merge_state(&mut states, key, state)?;
         }
 
         for imm in &self.immutable_memtables {
             for (key, state) in
                 imm.range_state_at_with_time(start_opt, end_opt, seq, self.read_time_millis)
             {
-                Self::merge_state(&mut states, key, state, self.read_time_millis);
+                Self::merge_state(&mut states, key, state)?;
             }
         }
 
@@ -1070,11 +1064,10 @@ impl ReadSnapshot {
                 self.diagnostics
                     .sst_metrics()
                     .record_candidate_sst_file_checked();
-                let entries =
-                    reader.scan_range_state_with_time(start_opt, end_opt, self.read_time_millis)?;
+                let entries = reader.scan_range_raw_state(start_opt, end_opt)?;
                 for (key, state) in entries {
                     if Self::is_visible_state(&state, seq) {
-                        Self::merge_state(&mut states, key.to_vec(), state, self.read_time_millis);
+                        Self::merge_state(&mut states, key.to_vec(), state)?;
                     }
                 }
 
@@ -1131,6 +1124,116 @@ mod l0_scan_tests;
 mod tests {
     use super::*;
     use crate::sst::traits::SstFactory;
+
+    #[test]
+    fn should_reject_conflicting_equal_sequence_ssts_for_point_and_scans(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange
+        let dir = tempfile::tempdir()?;
+        let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new(dir.path())?);
+        let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096);
+        let mut files = Vec::new();
+        for (name, value, op) in [
+            ("put.sst", Some(b"value".as_slice()), EntryType::Put),
+            ("delete.sst", None, EntryType::Delete),
+        ] {
+            let mut writer = factory.create()?;
+            writer.add_with_meta(b"key", value, 5, op, None)?;
+            crate::sst::fs::finish_writer_to_path(writer, &dir.path().join(name))?;
+            files.push(FileMeta {
+                name: name.to_string(),
+                level: 0,
+                cf_id: 0,
+                size_bytes: std::fs::metadata(dir.path().join(name))?.len(),
+                smallest_key: Some(b"key".to_vec()),
+                largest_key: Some(b"key".to_vec()),
+                smallest_seq: Some(5),
+                largest_seq: Some(5),
+                key_bounds_complete: true,
+                ..Default::default()
+            });
+        }
+        let snapshot = Arc::new(ReadSnapshot::new(
+            Arc::new(SkipListMemtable::new()),
+            Vec::new(),
+            files.clone(),
+            fs,
+            std::path::PathBuf::new(),
+            false,
+            0,
+        ));
+
+        // Act and assert
+        assert!(matches!(
+            snapshot.get(b"key", u64::MAX),
+            Err(MidgeError::Corruption(_))
+        ));
+        assert!(matches!(
+            snapshot.range_scan(b"", b"", u64::MAX),
+            Err(MidgeError::Corruption(_))
+        ));
+        assert!(matches!(
+            snapshot.state_scan(None, None, false, u64::MAX).next(),
+            Some(Err(MidgeError::Corruption(_)))
+        ));
+
+        // Recovery can legitimately replay a delete at its original sequence.
+        let mut writer = factory.create()?;
+        writer.add_with_meta(b"key", None, 5, EntryType::Delete, None)?;
+        crate::sst::fs::finish_writer_to_path(writer, &dir.path().join("duplicate.sst"))?;
+        let mut duplicate = files[1].clone();
+        duplicate.name = "duplicate.sst".to_string();
+        duplicate.size_bytes = std::fs::metadata(dir.path().join("duplicate.sst"))?.len();
+        let duplicate_snapshot = Arc::new(ReadSnapshot::new(
+            Arc::new(SkipListMemtable::new()),
+            Vec::new(),
+            vec![files[1].clone(), duplicate],
+            Arc::new(crate::io::RealFs::new(dir.path())?),
+            std::path::PathBuf::new(),
+            false,
+            0,
+        ));
+        assert_eq!(duplicate_snapshot.get(b"key", u64::MAX)?, None);
+        assert!(duplicate_snapshot
+            .range_scan(b"", b"", u64::MAX)?
+            .is_empty());
+        assert!(duplicate_snapshot
+            .state_scan(None, None, false, u64::MAX)
+            .next()
+            .is_none());
+
+        // TTL interpretation must not hide differing persisted metadata.
+        let mut expired_files = Vec::new();
+        for (name, expiration) in [("expired-a.sst", 1), ("expired-b.sst", 2)] {
+            let mut writer = factory.create()?;
+            writer.add_with_meta(b"key", Some(b"value"), 5, EntryType::Put, Some(expiration))?;
+            crate::sst::fs::finish_writer_to_path(writer, &dir.path().join(name))?;
+            let mut file = files[0].clone();
+            file.name = name.to_string();
+            file.size_bytes = std::fs::metadata(dir.path().join(name))?.len();
+            expired_files.push(file);
+        }
+        let expired_snapshot = Arc::new(ReadSnapshot::new(
+            Arc::new(SkipListMemtable::new()),
+            Vec::new(),
+            expired_files,
+            Arc::new(crate::io::RealFs::new(dir.path())?),
+            std::path::PathBuf::new(),
+            false,
+            0,
+        ));
+        assert!(matches!(
+            expired_snapshot.get(b"key", u64::MAX),
+            Err(MidgeError::Corruption(_))
+        ));
+        assert!(matches!(
+            expired_snapshot
+                .state_scan(None, None, false, u64::MAX)
+                .next(),
+            Some(Err(MidgeError::Corruption(_)))
+        ));
+        Ok(())
+    }
 
     #[test]
     fn should_use_shared_block_cache_for_snapshot_sst_reads() -> crate::common::MidgeResult<()> {

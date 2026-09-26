@@ -985,12 +985,26 @@ fn select_newest_version<'a>(
         };
         match selected {
             None => selected = Some(version),
-            Some(current) if current.seq == version.seq && current != version => {
-                return Err(crate::common::MidgeError::Corruption(format!(
-                    "conflicting compaction versions for key {:?} at sequence {}",
-                    String::from_utf8_lossy(&version.key),
-                    version.seq
-                )));
+            Some(current) if current.seq == version.seq => {
+                crate::types::resolve_same_sequence(
+                    crate::types::VersionContent {
+                        is_tombstone: current.is_tombstone,
+                        value: current.value.as_deref(),
+                        expiration: current.expiration,
+                    },
+                    crate::types::VersionContent {
+                        is_tombstone: version.is_tombstone,
+                        value: version.value.as_deref(),
+                        expiration: version.expiration,
+                    },
+                )
+                .map_err(|()| {
+                    crate::common::MidgeError::Corruption(format!(
+                        "conflicting compaction versions for key {:?} at sequence {}",
+                        String::from_utf8_lossy(&version.key),
+                        version.seq
+                    ))
+                })?;
             }
             Some(current) if version.seq > current.seq => selected = Some(version),
             Some(_) => {}

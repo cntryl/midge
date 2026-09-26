@@ -146,6 +146,7 @@ pub(crate) struct SstStateScan {
     reverse: bool,
     snapshot_seq: u64,
     now_millis: u64,
+    raw_state: bool,
     initialized: bool,
     lifecycle: SstScanLifecycle,
     file: Option<Box<dyn File>>,
@@ -453,6 +454,7 @@ impl SstStateScan {
             reverse,
             snapshot_seq,
             now_millis,
+            raw_state: false,
             initialized: false,
             lifecycle,
             file,
@@ -568,17 +570,17 @@ impl SstStateScan {
         }
     }
 
-    fn consider_entry(&self, best: &mut KeyState, entry: SstEntry) {
+    fn consider_entry(&self, best: &mut KeyState, entry: SstEntry) -> MidgeResult<()> {
         if self.snapshot_seq != u64::MAX && entry.sequence > self.snapshot_seq {
-            return;
+            return Ok(());
         }
 
-        let candidate = if entry.is_tombstone() || entry.is_expired(self.now_millis) {
+        let candidate = if entry.is_tombstone() {
             KeyState::Tombstone(entry.sequence)
         } else {
             SstFileIo::state_from_entry(entry)
         };
-        SstFileIo::merge_newer_state(best, candidate);
+        SstFileIo::merge_newer_state(best, candidate)
     }
 
     fn next_state(&mut self) -> MidgeResult<Option<(Bytes, KeyState)>> {
@@ -593,11 +595,11 @@ impl SstStateScan {
 
             let key = first.key.clone();
             let mut best = KeyState::Absent;
-            self.consider_entry(&mut best, first);
+            self.consider_entry(&mut best, first)?;
 
             while let Some(entry) = self.next_raw_entry()? {
                 if entry.key == key {
-                    self.consider_entry(&mut best, entry);
+                    self.consider_entry(&mut best, entry)?;
                 } else {
                     self.pending_entry = Some(entry);
                     break;
@@ -605,7 +607,19 @@ impl SstStateScan {
             }
 
             if !matches!(best, KeyState::Absent) {
-                return Ok(Some((Bytes::from(key), best)));
+                let state = if !self.raw_state {
+                    match best {
+                        KeyState::Value(_, seq, expiration, _)
+                            if crate::common::time::is_expired_at(expiration, self.now_millis) =>
+                        {
+                            KeyState::Tombstone(seq)
+                        }
+                        state => state,
+                    }
+                } else {
+                    best
+                };
+                return Ok(Some((Bytes::from(key), state)));
             }
         }
     }
@@ -842,6 +856,18 @@ impl SstFileIo {
             snapshot_seq,
             now_millis,
         )
+    }
+
+    pub(crate) fn raw_state_scan(
+        self: &Arc<Self>,
+        start: Option<Vec<u8>>,
+        end: Option<Vec<u8>>,
+        reverse: bool,
+        snapshot_seq: u64,
+    ) -> SstStateScan {
+        let mut scan = self.state_scan(start, end, reverse, snapshot_seq, 0);
+        scan.raw_state = true;
+        scan
     }
 
     fn into_streaming_summary(self) -> MidgeResult<SstFileSummary> {

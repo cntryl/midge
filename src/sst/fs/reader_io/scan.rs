@@ -9,6 +9,23 @@ impl SstFileIo {
         snapshot_seq: u64,
         now_millis: u64,
     ) -> MidgeResult<(crate::types::KeyState, SstPointReadStats)> {
+        let (raw, stats) = self.get_raw_state_at_with_stats(key, snapshot_seq)?;
+        let state = match raw {
+            KeyState::Value(_, sequence, expiration, _)
+                if crate::common::time::is_expired_at(expiration, now_millis) =>
+            {
+                KeyState::Tombstone(sequence)
+            }
+            state => state,
+        };
+        Ok((state, stats))
+    }
+
+    pub(crate) fn get_raw_state_at_with_stats(
+        &self,
+        key: &[u8],
+        snapshot_seq: u64,
+    ) -> MidgeResult<(crate::types::KeyState, SstPointReadStats)> {
         if self.key_outside_persisted_range(key) {
             return Ok((KeyState::Absent, SstPointReadStats::default()));
         }
@@ -30,19 +47,11 @@ impl SstFileIo {
             blocks_read = blocks_read.saturating_add(1);
             let block_data = self.read_cached_data_block(&handle)?;
             let candidate = self.key_state_from_encoded_block(&block_data, key, snapshot_seq)?;
-            Self::merge_newer_state(&mut best_state, candidate);
+            Self::merge_newer_state(&mut best_state, candidate)?;
         }
 
-        let state = match best_state {
-            KeyState::Value(_, sequence, expiration, _)
-                if crate::common::time::is_expired_at(expiration, now_millis) =>
-            {
-                KeyState::Tombstone(sequence)
-            }
-            state => state,
-        };
         Ok((
-            state,
+            best_state,
             SstPointReadStats {
                 sst_touched: true,
                 blocks_read,
@@ -113,7 +122,7 @@ impl crate::sst::SstStateReader for SstFileIo {
         for (_idx, handle) in candidate_blocks {
             let block_data = self.read_cached_data_block(&handle)?;
             let candidate = self.key_state_from_encoded_block(&block_data, key, u64::MAX)?;
-            Self::merge_newer_state(&mut best_state, candidate);
+            Self::merge_newer_state(&mut best_state, candidate)?;
         }
 
         let now_millis = crate::common::time::unix_time_millis();

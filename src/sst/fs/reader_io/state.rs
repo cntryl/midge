@@ -77,17 +77,30 @@ impl SstFileIo {
         }
     }
 
-    pub(super) fn merge_newer_state(best_state: &mut KeyState, candidate: KeyState) {
+    pub(super) fn merge_newer_state(
+        best_state: &mut KeyState,
+        candidate: KeyState,
+    ) -> MidgeResult<()> {
         let candidate_sequence = Self::state_sequence(&candidate);
         let best_sequence = Self::state_sequence(best_state);
-        if matches!(best_state, KeyState::Absent)
-            || candidate_sequence > best_sequence
-            || (candidate_sequence == best_sequence
-                && matches!(&candidate, KeyState::Tombstone(_))
-                && !matches!(best_state, KeyState::Tombstone(_)))
+        if !matches!(best_state, KeyState::Absent)
+            && !matches!(candidate, KeyState::Absent)
+            && candidate_sequence == best_sequence
         {
+            crate::types::resolve_same_sequence(
+                crate::types::VersionContent::from_state(best_state).expect("present state"),
+                crate::types::VersionContent::from_state(&candidate).expect("present state"),
+            )
+            .map_err(|()| {
+                crate::common::MidgeError::Corruption(format!(
+                    "conflicting SST versions at sequence {candidate_sequence}"
+                ))
+            })?;
+        }
+        if matches!(best_state, KeyState::Absent) || candidate_sequence > best_sequence {
             *best_state = candidate;
         }
+        Ok(())
     }
 
     pub(super) fn key_state_from_encoded_block(
@@ -115,7 +128,7 @@ impl SstFileIo {
                 std::cmp::Ordering::Equal => {
                     if snapshot_seq == u64::MAX || entry.sequence <= snapshot_seq {
                         let candidate = Self::state_from_entry_view(block_data, entry);
-                        Self::merge_newer_state(&mut best_state, candidate);
+                        Self::merge_newer_state(&mut best_state, candidate)?;
                     }
                 }
             }
