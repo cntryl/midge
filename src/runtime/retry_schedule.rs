@@ -91,7 +91,7 @@ mod tests {
     }
 
     #[test]
-    fn should_wake_at_retry_deadline_and_clear_after_attempt() {
+    fn should_wake_when_retry_deadline_arrives() {
         // Arrange
         let start = Instant::now();
         let clock = Arc::new(FakeClock(Mutex::new(start)));
@@ -106,7 +106,19 @@ mod tests {
         // Assert
         assert!(schedule.is_ready());
         assert_eq!(schedule.remaining(), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn should_clear_retry_deadline_after_attempt() {
+        // Arrange
+        let clock = Arc::new(FakeClock(Mutex::new(Instant::now())));
+        let mut schedule = RetrySchedule::with_clock(Duration::from_secs(1), clock);
+        schedule.defer();
+
+        // Act
         schedule.clear();
+
+        // Assert
         assert!(schedule.is_ready());
         assert_eq!(schedule.remaining(), None);
     }
