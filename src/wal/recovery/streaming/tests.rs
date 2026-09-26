@@ -9,16 +9,21 @@ struct BoundedFs {
     inner: MockFs,
     max_read: usize,
     largest_read: Arc<AtomicUsize>,
+    read_calls: Arc<AtomicUsize>,
+    len_calls: Arc<AtomicUsize>,
 }
 
 struct BoundedFile<'a> {
     inner: Box<dyn File + 'a>,
     max_read: usize,
     largest_read: Arc<AtomicUsize>,
+    read_calls: Arc<AtomicUsize>,
+    len_calls: Arc<AtomicUsize>,
 }
 
 impl File for BoundedFile<'_> {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
+        self.read_calls.fetch_add(1, Ordering::SeqCst);
         self.largest_read
             .fetch_max(usize::try_from(len).unwrap_or(usize::MAX), Ordering::SeqCst);
         if len > self.max_read as u64 {
@@ -33,6 +38,7 @@ impl File for BoundedFile<'_> {
         self.inner.append(bytes)
     }
     fn len(&self) -> FsResult<u64> {
+        self.len_calls.fetch_add(1, Ordering::SeqCst);
         self.inner.len()
     }
     fn sync(&mut self, durability: Durability) -> FsResult<()> {
@@ -49,6 +55,8 @@ impl Fs for BoundedFs {
             inner: self.inner.open(path, opts)?,
             max_read: self.max_read,
             largest_read: Arc::clone(&self.largest_read),
+            read_calls: Arc::clone(&self.read_calls),
+            len_calls: Arc::clone(&self.len_calls),
         }))
     }
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {
@@ -111,6 +119,8 @@ fn fixture(files: &[(&str, Vec<u8>)], max_read: usize) -> BoundedFs {
         inner,
         max_read,
         largest_read: Arc::new(AtomicUsize::new(0)),
+        read_calls: Arc::new(AtomicUsize::new(0)),
+        len_calls: Arc::new(AtomicUsize::new(0)),
     }
 }
 
@@ -189,6 +199,89 @@ fn should_checkpoint_single_wal_object_larger_than_configured_local_capacity() {
     assert_eq!(recovered_entries, 2000);
     assert!(checkpoint_count > 100);
     assert!(storage.largest_read.load(Ordering::SeqCst) <= limits().max_frame_bytes);
+    assert!(
+        storage.read_calls.load(Ordering::SeqCst) < 1000,
+        "2000 small frames should reuse bounded read-ahead windows"
+    );
+    assert!(
+        storage.len_calls.load(Ordering::SeqCst) <= 4,
+        "file length should be cached for each replay pass"
+    );
+}
+
+#[test]
+fn should_read_many_local_wal_frames_with_one_window_per_file_pass() {
+    // Arrange
+    let bytes = (1..=2000)
+        .flat_map(|seq| encode(&put(format!("key-{seq:04}"), seq, 1)))
+        .collect();
+    let storage = fixture(&[("1.wal", bytes)], 1024 * 1024);
+    let mut memtables = HashMap::new();
+
+    // Act
+    let stats = replay_wal_with_checkpoint(
+        &storage,
+        &FsPath::new("wal"),
+        &mut memtables,
+        ReplayPolicy::Strict,
+        None,
+        StreamingReplayLimits::local(),
+        &mut |_, _| Ok(()),
+    )
+    .expect("local replay");
+
+    // Assert
+    assert_eq!(stats.record_count, 2000);
+    assert!(storage.read_calls.load(Ordering::SeqCst) <= 4);
+    assert!(storage.len_calls.load(Ordering::SeqCst) <= 4);
+    assert!(storage.largest_read.load(Ordering::SeqCst) <= 1024 * 1024);
+}
+
+#[test]
+fn should_read_large_frame_directly_when_payload_exceeds_read_ahead_window() {
+    // Arrange
+    let payload_bytes = 2 * 1024 * 1024;
+    let mut seed = 0x1234_5678_9abc_def0_u64;
+    let value = (0..payload_bytes)
+        .map(|_| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 32) as u8
+        })
+        .collect::<Vec<_>>();
+    let record = WalRecord::new(
+        WalOpKind::Put,
+        Bytes::from_static(b"large"),
+        Some(Bytes::from(value)),
+        1,
+        1,
+    );
+    let storage = fixture(&[("1.wal", encode(&record))], 3 * 1024 * 1024);
+    let replay_limits = StreamingReplayLimits {
+        max_frame_bytes: 3 * 1024 * 1024,
+        max_pending_txn_bytes: 8 * 1024 * 1024,
+        max_memtable_encoded_bytes: 8 * 1024 * 1024,
+        target_memtable_encoded_bytes: 8 * 1024 * 1024,
+    };
+    let mut memtables = HashMap::new();
+
+    // Act
+    let stats = replay_wal_with_checkpoint(
+        &storage,
+        &FsPath::new("wal"),
+        &mut memtables,
+        ReplayPolicy::Strict,
+        None,
+        replay_limits,
+        &mut |_, _| Ok(()),
+    )
+    .expect("large WAL frame");
+
+    // Assert
+    assert_eq!(stats.record_count, 1);
+    assert!(storage.largest_read.load(Ordering::SeqCst) > 1024 * 1024);
+    assert!(storage.read_calls.load(Ordering::SeqCst) <= 6);
 }
 
 #[test]
