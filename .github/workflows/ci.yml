@@ -51,8 +51,21 @@ jobs:
       - name: Build
         run: cargo build --all-targets --all-features
 
-      - name: Test
-        run: cargo test --all-targets --all-features -- --test-threads=1
+      - name: Unit and binary tests
+        run: cargo test --lib --bins --all-features -- --test-threads=1
+
+      - name: Integration tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          for source in tests/*.rs; do
+            target="${source#tests/}"
+            target="${target%.rs}"
+            if [[ "$target" == "fault_injection" ]]; then
+              continue
+            fi
+            cargo test --test "$target" --all-features -- --test-threads=1
+          done
 
       - name: Fault injection suite (serial; failpoints are process-global)
         run: cargo test --test fault_injection --all-features -- --test-threads=1
