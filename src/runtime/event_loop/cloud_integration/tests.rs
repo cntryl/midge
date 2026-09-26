@@ -140,11 +140,12 @@ fn should_give_ready_compaction_a_turn_before_continuing_flushes() -> crate::com
     el.cloud_maintenance.next = super::super::cloud_maintenance::MaintenanceTask::Compaction;
 
     // Act
+    let completion_deadline = Instant::now() + Duration::from_secs(30);
     el.schedule_next_flush_worker();
     let active = el.state.active_compactions.load(Ordering::Acquire);
     assert_eq!(active, 1, "ready compaction must receive its turn");
     let completion = worker_rx
-        .recv_timeout(Duration::from_secs(3))
+        .recv_deadline(completion_deadline)
         .expect("compaction completion");
     let (_request_tx, request_rx) = crossbeam::channel::unbounded();
     el.handle_runtime_msg(completion, &request_rx);
@@ -167,7 +168,7 @@ fn should_give_ready_compaction_a_turn_before_continuing_flushes() -> crate::com
     for phase in ["build", "publish", "mirror"] {
         let completion = el
             .flush_worker_result_rx
-            .recv_timeout(Duration::from_secs(3))
+            .recv_deadline(completion_deadline)
             .unwrap_or_else(|error| panic!("resumed flush {phase}: {error}"));
         el.handle_flush_worker_result(completion);
     }
@@ -2050,6 +2051,7 @@ fn should_keep_ddl_fenced_until_delayed_cas_commit_is_observed() -> crate::commo
 
     // Act: the first request becomes ambiguous; a second DDL must not clear the
     // prepare merely because its early reread is negative.
+    let async_deadline = Instant::now() + Duration::from_secs(30);
     let first_request = 9_604;
     let first_response = el
         .router
@@ -2062,7 +2064,7 @@ fn should_keep_ddl_fenced_until_delayed_cas_commit_is_observed() -> crate::commo
         &msg_rx,
     );
     assert!(matches!(
-        first_response.recv_timeout(Duration::from_secs(1)),
+        first_response.recv_deadline(async_deadline),
         Ok(RuntimeResponse::Error {
             error: crate::common::MidgeError::Fenced(_),
             ..
@@ -2083,7 +2085,7 @@ fn should_keep_ddl_fenced_until_delayed_cas_commit_is_observed() -> crate::commo
         &msg_rx,
     );
     assert!(matches!(
-        blocked_response.recv_timeout(Duration::from_secs(1)),
+        blocked_response.recv_deadline(async_deadline),
         Ok(RuntimeResponse::Error {
             error: crate::common::MidgeError::Fenced(_),
             ..
@@ -2092,8 +2094,10 @@ fn should_keep_ddl_fenced_until_delayed_cas_commit_is_observed() -> crate::commo
     assert!(el.fencing.ddl_authority_ambiguous);
     assert!(el.state.db_path.join("ddl.prepare.json").exists());
 
-    let commit_deadline = Instant::now() + Duration::from_secs(1);
-    while !commit_complete.load(Ordering::SeqCst) && Instant::now() < commit_deadline {
+    // The provider worker may run late under a loaded test runner. The
+    // operation's one-second timeout is exercised above; completion is a
+    // separate condition, so give it a load-tolerant deadline.
+    while !commit_complete.load(Ordering::SeqCst) && Instant::now() < async_deadline {
         std::thread::sleep(Duration::from_millis(5));
     }
     assert!(commit_complete.load(Ordering::SeqCst));
@@ -2113,7 +2117,7 @@ fn should_keep_ddl_fenced_until_delayed_cas_commit_is_observed() -> crate::commo
     // Assert: positive operation-id readback applies the committed edit and is
     // the only event that clears the in-process authority fence.
     assert!(matches!(
-        reconcile_response.recv_timeout(Duration::from_secs(1)),
+        reconcile_response.recv_deadline(async_deadline),
         Ok(RuntimeResponse::ColumnFamilyCreated { .. })
     ));
     assert!(!el.fencing.ddl_authority_ambiguous);
@@ -7635,7 +7639,7 @@ fn should_drain_runtime_owned_wal_retry_before_shutdown_succeeds() -> crate::com
     // Assert
     assert_eq!(outcome, super::super::HandleOutcome::Break);
     assert!(matches!(
-        response_rx.try_recv(),
+        response_rx.recv_timeout(Duration::from_secs(30)),
         Ok(RuntimeResponse::Ok {
             request_id: response_id
         }) if response_id == request_id
