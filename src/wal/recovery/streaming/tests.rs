@@ -247,7 +247,7 @@ fn should_read_large_frame_directly_when_payload_exceeds_read_ahead_window() {
             seed ^= seed << 13;
             seed ^= seed >> 7;
             seed ^= seed << 17;
-            (seed >> 32) as u8
+            u8::try_from((seed >> 32) & 0xff).expect("masked byte fits u8")
         })
         .collect::<Vec<_>>();
     let record = WalRecord::new(
