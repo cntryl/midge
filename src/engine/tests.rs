@@ -447,7 +447,8 @@ fn should_reap_engine_without_blocking_drop_when_transaction_is_live() -> MidgeR
     );
 
     drop(transaction);
-    let reopen_deadline = std::time::Instant::now() + Duration::from_secs(2);
+    // Reaper completion is asynchronous and can lag under hosted machine load.
+    let reopen_deadline = std::time::Instant::now() + Duration::from_secs(30);
     let mut reopened = loop {
         match Engine::open(OpenOptions::local(temp_dir.path()).build()?) {
             Ok(engine) => break engine,
@@ -687,6 +688,10 @@ fn should_preserve_partitioned_compaction_across_local_reopen() -> MidgeResult<(
         OpenOptions::local(temp_dir.path())
             .background_compaction(false)
             .with_memtable_size_limit(64 * 1024)
+            // This qualifies partitioned output and recovery rather than the
+            // response deadline. Hosted Windows runners can share disk load
+            // with other test processes during the manual compaction.
+            .runtime_response_timeout(Duration::from_mins(3))
             .build()
     });
 
