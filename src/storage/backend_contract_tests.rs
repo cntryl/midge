@@ -419,6 +419,100 @@ fn should_reject_expired_or_conditional_typed_range_head_for_every_storage_backe
 }
 
 #[test]
+fn should_read_exact_typed_range_for_every_storage_backend() {
+    // Arrange
+    let root = tempfile::tempdir().expect("temp dir");
+    for (name, backend) in backends(root.path()) {
+        let key = format!("{name}/typed-range");
+        let (write_tx, write_rx) = mpsc::channel();
+        backend.submit_write_request(
+            super::StorageRequest::new(
+                &key,
+                crate::common::OperationDeadline::unbounded(),
+                std::time::Duration::from_secs(1),
+            ),
+            b"abcdef".to_vec(),
+            write_tx,
+        );
+        assert!(matches!(
+            write_rx.recv().expect("write callback"),
+            StorageEvent::WriteComplete {
+                result: StorageOutcome::Ok(()),
+                ..
+            }
+        ));
+        let (head_tx, head_rx) = mpsc::channel();
+        backend.submit_range_head_request(
+            super::StorageRequest::new(
+                &key,
+                crate::common::OperationDeadline::unbounded(),
+                std::time::Duration::from_secs(1),
+            ),
+            head_tx,
+        );
+        let StorageEvent::HeadComplete {
+            result: StorageOutcome::Ok(metadata),
+            ..
+        } = head_rx.recv().expect("range HEAD callback")
+        else {
+            panic!("{name}: expected range identity");
+        };
+
+        // Act
+        let (read_tx, read_rx) = mpsc::channel();
+        backend.submit_range_read_request(
+            super::StorageRequest::new(
+                &key,
+                crate::common::OperationDeadline::unbounded(),
+                std::time::Duration::from_secs(1),
+            )
+            .with_precondition(super::StoragePrecondition::IfMatch(metadata)),
+            1..4,
+            read_tx,
+        );
+        // Assert
+        assert_eq!(
+            read_rx
+                .recv()
+                .expect("range callback")
+                .expect("exact range"),
+            b"bcd",
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn should_reject_typed_range_without_identity_for_every_storage_backend() {
+    // Arrange
+    let root = tempfile::tempdir().expect("temp dir");
+    for (name, backend) in backends(root.path()) {
+        let (tx, rx) = mpsc::channel();
+
+        // Act
+        backend.submit_range_read_request(
+            super::StorageRequest::new(
+                "missing/range",
+                crate::common::OperationDeadline::unbounded(),
+                std::time::Duration::from_secs(1),
+            ),
+            1..4,
+            tx,
+        );
+
+        // Assert
+        assert_eq!(
+            rx.recv()
+                .expect("invalid range callback")
+                .expect_err("missing identity must fail")
+                .kind(),
+            super::StorageErrorKind::Protocol,
+            "{name}"
+        );
+    }
+}
+
+#[test]
 fn should_reject_expired_or_conditional_typed_metadata_read_for_every_storage_backend() {
     // Arrange
     let root = tempfile::tempdir().expect("temp dir");

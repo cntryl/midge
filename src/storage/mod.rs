@@ -638,6 +638,14 @@ pub(crate) fn dispatch_head_request(
 ///   content hash for HEAD, and stamps each new version with a later modified
 ///   time so a reused inode cannot repeat an old identity (#557).
 pub trait StorageBackend: Send + Sync + 'static {
+    /// Read an exact range from the version named by `IfMatch`.
+    fn submit_range_read_request(
+        &self,
+        request: StorageRequest,
+        range: std::ops::Range<u64>,
+        callback: RangeReadCallback,
+    );
+
     /// Look up a cheap identity for exact range reads under one typed request.
     fn submit_range_head_request(&self, request: StorageRequest, callback: StorageCallback);
 
@@ -657,31 +665,6 @@ pub trait StorageBackend: Send + Sync + 'static {
         data: Vec<u8>,
         callback: StorageCallback,
     );
-
-    fn submit_read_range_with_reservation(
-        &self,
-        key: &str,
-        range: std::ops::Range<u64>,
-        expected: StorageObjectMetadata,
-        timeout: std::time::Duration,
-        reservation: std::sync::Arc<crate::common::resource_budget::ResourceReservation>,
-        callback: RangeReadCallback,
-    ) {
-        let start = range.start;
-        let end = range.end;
-        match retained_callback::retain(callback.clone(), reservation) {
-            Ok(retained) => self.submit_read_range(key, start, end, expected, timeout, retained),
-            Err(error) => {
-                // Keep the class: a blocked budget is a retryable resource
-                // limit, not an I/O failure.
-                let kind = StorageErrorKind::of(&error);
-                let _ = callback.send(Err(StorageError::new(
-                    kind,
-                    format!("retain range completion: {error}"),
-                )));
-            }
-        }
-    }
 
     /// Return a version usable by exact range reads without reading the body.
     /// Unsupported backends must not fall back to whole-object reads.

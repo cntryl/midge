@@ -498,6 +498,36 @@ fn mutation_lock(full_path: &Path) -> MutationGuard {
 }
 
 impl StorageBackend for FileSystem {
+    fn submit_range_read_request(
+        &self,
+        request: StorageRequest,
+        range: std::ops::Range<u64>,
+        callback: crate::storage::RangeReadCallback,
+    ) {
+        let timeout = request.remaining_timeout();
+        if timeout.is_zero() {
+            let _ = callback.send(Err(crate::storage::storage_timeout_error(
+                "range read timed out",
+            )));
+            return;
+        }
+        let StoragePrecondition::IfMatch(expected) = request.precondition else {
+            let _ = callback.send(Err(crate::storage::StorageError::protocol(
+                "range read requires an object identity",
+            )));
+            return;
+        };
+        let _reservation = request.reservation;
+        self.submit_read_range(
+            &request.key,
+            range.start,
+            range.end,
+            expected,
+            timeout,
+            callback,
+        );
+    }
+
     fn submit_metadata_read_request(
         &self,
         request: StorageRequest,
@@ -658,20 +688,6 @@ impl StorageBackend for FileSystem {
             Err(error) => StorageOutcome::Err(error),
         };
         let _ = callback.send(StorageEvent::WriteComplete { key, result });
-    }
-
-    /// Local calls complete inline, so the reservation outlives the call.
-    fn submit_read_range_with_reservation(
-        &self,
-        key: &str,
-        range: std::ops::Range<u64>,
-        expected: StorageObjectMetadata,
-        timeout: std::time::Duration,
-        reservation: std::sync::Arc<crate::common::resource_budget::ResourceReservation>,
-        callback: crate::storage::RangeReadCallback,
-    ) {
-        self.submit_read_range(key, range.start, range.end, expected, timeout, callback);
-        drop(reservation);
     }
 
     fn submit_range_head(
@@ -1491,12 +1507,17 @@ mod tests {
             panic!("range HEAD failed");
         };
         let (read_tx, read_rx) = mpsc::channel();
-        fs.submit_read_range_with_reservation(
-            "object.bin",
+        fs.submit_range_read_request(
+            StorageRequest::new(
+                "object.bin",
+                crate::common::OperationDeadline::unbounded(),
+                std::time::Duration::from_secs(5),
+            )
+            .with_precondition(StoragePrecondition::IfMatch(metadata))
+            .with_reservation(std::sync::Arc::new(
+                budget.reserve(7, "reserved read").unwrap(),
+            )),
             0..7,
-            metadata,
-            std::time::Duration::from_secs(5),
-            std::sync::Arc::new(budget.reserve(7, "reserved read").unwrap()),
             read_tx,
         );
         let read = read_rx.recv().unwrap();

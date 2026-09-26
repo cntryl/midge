@@ -86,6 +86,35 @@ pub(super) fn storage_error_from_cloud(error: CloudError) -> crate::storage::Sto
 }
 
 impl StorageBackend for CloudStorage {
+    fn submit_range_read_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        range: std::ops::Range<u64>,
+        callback: crate::storage::RangeReadCallback,
+    ) {
+        let timeout = request.remaining_timeout();
+        if timeout.is_zero() {
+            let _ = callback.send(Err(crate::storage::storage_timeout_error(
+                "range read timed out",
+            )));
+            return;
+        }
+        let crate::storage::StoragePrecondition::IfMatch(expected) = request.precondition else {
+            let _ = callback.send(Err(crate::storage::StorageError::protocol(
+                "range read requires an object identity",
+            )));
+            return;
+        };
+        self.read_range_admitted(
+            &request.key,
+            range,
+            expected,
+            timeout,
+            request.reservation,
+            &callback,
+        );
+    }
+
     fn submit_metadata_read_request(
         &self,
         request: crate::storage::StorageRequest,
@@ -196,18 +225,6 @@ impl StorageBackend for CloudStorage {
             key: key.to_string(),
             result,
         });
-    }
-
-    fn submit_read_range_with_reservation(
-        &self,
-        key: &str,
-        range: std::ops::Range<u64>,
-        expected: StorageObjectMetadata,
-        timeout: std::time::Duration,
-        reservation: Arc<crate::common::resource_budget::ResourceReservation>,
-        callback: crate::storage::RangeReadCallback,
-    ) {
-        self.read_range_admitted(key, range, expected, timeout, Some(reservation), &callback);
     }
 
     fn submit_read_range(

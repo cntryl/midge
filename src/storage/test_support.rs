@@ -130,6 +130,45 @@ pub(crate) fn forward_typed_range_head_to_legacy<B: super::StorageBackend + ?Siz
 }
 
 #[cfg(test)]
+pub(crate) fn forward_typed_range_read_to_legacy<B: super::StorageBackend + ?Sized>(
+    backend: &B,
+    request: super::StorageRequest,
+    range: std::ops::Range<u64>,
+    callback: super::RangeReadCallback,
+) {
+    let timeout = request.remaining_timeout();
+    if timeout.is_zero() {
+        let _ = callback.send(Err(super::storage_timeout_error("range read timed out")));
+        return;
+    }
+    let super::StoragePrecondition::IfMatch(expected) = request.precondition else {
+        let _ = callback.send(Err(super::StorageError::protocol(
+            "range read requires an object identity",
+        )));
+        return;
+    };
+    let callback = if let Some(reservation) = request.reservation {
+        match super::retained_callback::retain(callback.clone(), reservation) {
+            Ok(retained) => retained,
+            Err(error) => {
+                let _ = callback.send(Err(super::StorageError::from(error)));
+                return;
+            }
+        }
+    } else {
+        callback
+    };
+    backend.submit_read_range(
+        &request.key,
+        range.start,
+        range.end,
+        expected,
+        timeout,
+        callback,
+    );
+}
+
+#[cfg(test)]
 pub(crate) fn forward_typed_metadata_read_to_legacy<B: super::StorageBackend + ?Sized>(
     backend: &B,
     request: super::StorageRequest,
@@ -169,6 +208,12 @@ macro_rules! forward_storage_backend {
             self.$inner.submit_range_head_request(request, callback);
         }
     };
+    (@method $inner:ident, submit_range_read_request) => {
+        fn submit_range_read_request(&self, request: $crate::storage::StorageRequest,
+            range: std::ops::Range<u64>, callback: $crate::storage::RangeReadCallback) {
+            self.$inner.submit_range_read_request(request, range, callback);
+        }
+    };
     (@method $inner:ident, submit_metadata_read_request) => {
         fn submit_metadata_read_request(&self, request: $crate::storage::StorageRequest,
             callback: $crate::storage::MetadataReadCallback) {
@@ -185,14 +230,6 @@ macro_rules! forward_storage_backend {
             expected: $crate::storage::StorageObjectMetadata, timeout: std::time::Duration,
             callback: $crate::storage::RangeReadCallback) {
             self.$inner.submit_read_range(key, start, end, expected, timeout, callback);
-        }
-    };
-    (@method $inner:ident, submit_read_range_with_reservation) => {
-        fn submit_read_range_with_reservation(&self, key: &str, range: std::ops::Range<u64>,
-            expected: $crate::storage::StorageObjectMetadata, timeout: std::time::Duration,
-            reservation: std::sync::Arc<$crate::common::resource_budget::ResourceReservation>,
-            callback: $crate::storage::RangeReadCallback) {
-            self.$inner.submit_read_range_with_reservation(key, range, expected, timeout, reservation, callback);
         }
     };
     (@method $inner:ident, submit_range_head) => {

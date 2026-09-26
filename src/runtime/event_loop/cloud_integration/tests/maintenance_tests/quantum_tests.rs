@@ -9,6 +9,17 @@ struct SlowWalRanges {
 }
 
 impl StorageBackend for SlowWalRanges {
+    fn submit_range_read_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        range: std::ops::Range<u64>,
+        callback: crate::storage::RangeReadCallback,
+    ) {
+        crate::storage::test_support::forward_typed_range_read_to_legacy(
+            self, request, range, callback,
+        );
+    }
+
     fn submit_range_head_request(
         &self,
         request: crate::storage::StorageRequest,

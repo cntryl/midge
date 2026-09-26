@@ -208,12 +208,13 @@ impl HybridStorage {
             let end = start + expected.len() as u64;
             let timeout = admission.timeout(self, key)?;
             let (tx, rx) = mpsc::channel();
-            backend.submit_read_range_with_reservation(
-                key,
+            backend.submit_range_read_request(
+                crate::storage::StorageRequest::new(key, admission.deadline, timeout)
+                    .with_precondition(crate::storage::StoragePrecondition::IfMatch(
+                        metadata.clone(),
+                    ))
+                    .with_reservation(Arc::clone(&admission.memory)),
                 start..end,
-                metadata.clone(),
-                timeout,
-                Arc::clone(&admission.memory),
                 tx,
             );
             let actual = rx

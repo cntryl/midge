@@ -222,8 +222,17 @@ impl File for Arc<RemoteSstFile> {
         if let Some(observer) = observation.observer {
             observer.remote_range_started();
         }
-        self.cloud
-            .submit_read_range(&self.key, offset, end, self.metadata.clone(), timeout, tx);
+        self.cloud.submit_range_read_request(
+            super::StorageRequest::new(
+                &self.key,
+                self.deadline
+                    .unwrap_or_else(|| crate::common::OperationDeadline::from_budget(timeout)),
+                timeout,
+            )
+            .with_precondition(super::StoragePrecondition::IfMatch(self.metadata.clone())),
+            offset..end,
+            tx,
+        );
         let bytes = rx
             .recv_timeout(timeout)
             .map_err(|error| match error {
@@ -465,6 +474,17 @@ mod tests {
     }
 
     impl StorageBackend for RecordingBackend {
+        fn submit_range_read_request(
+            &self,
+            request: super::super::StorageRequest,
+            range: std::ops::Range<u64>,
+            callback: super::super::RangeReadCallback,
+        ) {
+            crate::storage::test_support::forward_typed_range_read_to_legacy(
+                self, request, range, callback,
+            );
+        }
+
         crate::storage::forward_storage_backend!(
             inner;
             submit_write_request, submit_delete_request, submit_head_request, submit_range_head_request, submit_metadata_read_request, submit_read_with_metadata,
