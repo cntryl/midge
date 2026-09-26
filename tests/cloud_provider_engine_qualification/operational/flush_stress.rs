@@ -82,8 +82,8 @@ pub(super) fn exercise(
     campaign: &Campaign,
     progress: &mut workload::WorkloadProgress,
 ) {
-    let metrics = engine.metrics();
-    let before = metrics
+    let before = engine
+        .metrics()
         .get_runtime_metrics()
         .expect("initial stress metrics");
     let families = seed(engine);
@@ -144,28 +144,21 @@ pub(super) fn exercise(
         maintenance.join().expect("concurrent stress compaction");
         workload::compact_all(engine, progress);
     });
-    let after = metrics
+    let after = engine
+        .metrics()
         .get_runtime_metrics()
         .expect("completed stress metrics");
     let flushes = after.flush_publish_count - before.flush_publish_count;
     let compactions = after.compactions_run - before.compactions_run;
-    let evidence = serde_json::json!({
-        "families": FAMILIES,
-        "flush_publications": flushes,
-        "completed_compactions": compactions,
-        "rounds": ROUNDS,
-        "value_bytes": value_size(campaign),
-        "acknowledged_transactions": acknowledged.load(Ordering::Relaxed),
-        "delayed_uploads": delayed.load(Ordering::Relaxed).min(32),
-        "verified_maintenance_scans": scans.load(Ordering::Relaxed),
-        "flush_compaction_overlap_samples": overlap.load(Ordering::Relaxed),
-    });
-    std::fs::write(
-        campaign.artifacts.join("flush-stress.json"),
-        serde_json::to_vec_pretty(&evidence).unwrap(),
-    )
-    .unwrap();
-    eprintln!("MIDGE_FLUSH_STRESS {evidence}");
+    write_stress_evidence(
+        campaign,
+        flushes,
+        compactions,
+        acknowledged.load(Ordering::Relaxed),
+        delayed.load(Ordering::Relaxed).min(32),
+        scans.load(Ordering::Relaxed),
+        overlap.load(Ordering::Relaxed),
+    );
     assert_eq!(
         acknowledged.load(Ordering::Relaxed),
         u64::from(FAMILIES) * u64::from(ROUNDS)
@@ -182,6 +175,34 @@ pub(super) fn exercise(
         "cloud maintenance must retain its serialized dispatch contract"
     );
     verify(engine, campaign);
+}
+
+fn write_stress_evidence(
+    campaign: &Campaign,
+    flushes: u64,
+    compactions: u64,
+    acknowledged: u64,
+    delayed: u64,
+    scans: u64,
+    overlap: u64,
+) {
+    let evidence = serde_json::json!({
+        "families": FAMILIES,
+        "flush_publications": flushes,
+        "completed_compactions": compactions,
+        "rounds": ROUNDS,
+        "value_bytes": value_size(campaign),
+        "acknowledged_transactions": acknowledged,
+        "delayed_uploads": delayed,
+        "verified_maintenance_scans": scans,
+        "flush_compaction_overlap_samples": overlap,
+    });
+    std::fs::write(
+        campaign.artifacts.join("flush-stress.json"),
+        serde_json::to_vec_pretty(&evidence).unwrap(),
+    )
+    .unwrap();
+    eprintln!("MIDGE_FLUSH_STRESS {evidence}");
 }
 
 fn observe(

@@ -1,12 +1,13 @@
 //! WAL, manifest, and intent-log recovery construction.
 
 use super::{
-    Arc, CloudState, ColumnFamilyState, CompactionConfig, CompactionState, Fs, HashMap,
-    IntentLogEntry, Manifest, MidgeError, MidgeResult, PathBuf, PublicationPhase,
-    RecoveryLoadState, RecoveryStatus, RuntimeDiagnostics, RuntimeMode, RuntimePersistence,
-    RuntimeState, SkipListMemtable, SnapshotPinRegistry, SnapshotState, TransactionCoordination,
-    WalRecoveryState, WalState, WritePressureState,
+    Arc, CloudState, ColumnFamilyState, CompactionState, Fs, HashMap, IntentLogEntry, Manifest,
+    MidgeError, MidgeResult, PathBuf, PublicationPhase, RecoveryLoadState, RecoveryStatus,
+    RuntimeDiagnostics, RuntimeMode, RuntimePersistence, RuntimeState, SkipListMemtable,
+    SnapshotPinRegistry, SnapshotState, TransactionCoordination, WalRecoveryState, WalState,
+    WritePressureState,
 };
+use crate::io::FsError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CompactionManifestState {
@@ -119,7 +120,6 @@ impl RuntimeState {
         let recovered_compaction_output_generation =
             Self::manifest_compaction_output_generation_floor(&manifest)
                 .max(wal_recovery.recovered_sequence);
-        let diagnostics = Self::diagnostics_for_recovered_wal(&wal_recovery);
 
         let mut state = Self {
             db_path,
@@ -132,7 +132,7 @@ impl RuntimeState {
                 pending_started_at: None,
             },
             column_families: wal_recovery.column_families,
-            manifest,
+            manifest: super::ManifestRuntimeState::new(manifest),
             fs: fs.clone(),
             manifest_store: Arc::new(crate::metadata::store::ManifestStore::new(fs.clone())),
             sst_names: super::SstNameAllocation::default(),
@@ -141,8 +141,9 @@ impl RuntimeState {
             ttl_clock: Arc::new(crate::common::time::ObservedClock::default()),
             wal: WalState {
                 current_segment_id: wal_recovery.next_segment_id,
-                local_durable_seq: wal_recovery.recovered_sequence,
-                cloud_durable_seq: wal_recovery.recovered_sequence,
+                frontiers: crate::runtime::frontiers::WalFrontiers::recovered_at(
+                    wal_recovery.recovered_sequence,
+                ),
                 ..WalState::default()
             },
             compaction: CompactionState::default(),
@@ -151,9 +152,9 @@ impl RuntimeState {
                 max_snapshot_lifetime: std::time::Duration::from_hours(1), // 1 hour default
             },
             snapshot_pins: Arc::new(SnapshotPinRegistry::default()),
-            diagnostics,
+            diagnostics: Arc::new(RuntimeDiagnostics::default()),
             recent_delete_ranges: Vec::new(),
-            memtable_size_limit: 64 * 1024 * 1024, // 64MB
+            limits: super::RuntimeLimits::for_persistence(persistence),
             mode: RuntimeMode {
                 #[cfg(test)]
                 read_only: false,
@@ -167,38 +168,33 @@ impl RuntimeState {
                 ddl_authority_ambiguous: false,
                 metadata: super::MetadataSync::Current,
             },
-            compaction_config: CompactionConfig {
-                enabled: persistence.compaction_enabled(),
-            },
             intent_log,
-            memtable_flush_threshold: 64 * 1024 * 1024, // 64MB
-            eventual_flush_segment_gap: crate::runtime::CloudRuntimePolicy::default()
-                .eventual_flush_segment_gap,
-            max_immutable_memtables: 10, // Hard limit on immutable memtable queue
-            l0_compaction_trigger: crate::compaction::LeveledCompactionConfig::default()
-                .l0_file_count_threshold,
             next_flush_id: 1,
             writer_epoch: 0,
             flush_metrics: super::FlushRuntimeMetrics::default(),
             write_pressure: WritePressureState { stalled: false },
             total_memtable_bytes: recovered_memtable_bytes,
-            wal_recovery_records_replayed: wal_recovery.records_replayed,
-            wal_recovery_bytes_replayed: wal_recovery.bytes_replayed,
-            intent_log_replay_runs: 0,
-            intent_log_entries_replayed: 0,
+            recovery_stats: super::RecoveryStats {
+                wal_recovery_records_replayed: wal_recovery.records_replayed,
+                wal_recovery_bytes_replayed: wal_recovery.bytes_replayed,
+                intent_log_replay_runs: 0,
+                intent_log_entries_replayed: 0,
+            },
             active_compactions: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             pending_compaction_waits: std::collections::HashSet::new(),
         };
+        state.record_recovery_metrics();
         state.reinitialize_active_memtable_segment_tracking();
         Ok(state)
     }
 
-    fn diagnostics_for_recovered_wal(wal_recovery: &WalRecoveryState) -> Arc<RuntimeDiagnostics> {
-        let diagnostics = Arc::new(RuntimeDiagnostics::default());
-        diagnostics.record(|metrics| {
-            metrics.record_wal_recovery(wal_recovery.records_replayed, wal_recovery.bytes_replayed);
+    fn record_recovery_metrics(&self) {
+        self.diagnostics.record(|metrics| {
+            metrics.record_wal_recovery(
+                self.recovery_stats.wal_recovery_records_replayed,
+                self.recovery_stats.wal_recovery_bytes_replayed,
+            );
         });
-        diagnostics
     }
 
     fn recovered_memtable_bytes(wal_recovery: &WalRecoveryState) -> usize {
@@ -400,6 +396,25 @@ impl RuntimeState {
         Ok(wal_recovery)
     }
 
+    /// The prover recovery uses to skip WAL records the manifest's SSTs
+    /// already hold. Without a readable SST directory nothing is proven
+    /// covered, so every record replays.
+    fn recovery_wal_coverage<'a>(
+        sst_dir: &std::path::Path,
+        manifest: &'a Manifest,
+        proven: &'a mut crate::runtime::hybrid_persistence::ProvenSstIdentities,
+    ) -> Option<crate::runtime::hybrid_persistence::VerifiedManifestWalCoverage<'a>> {
+        let fs = crate::io::RealFs::new(sst_dir).ok()?;
+        Some(
+            crate::runtime::hybrid_persistence::VerifiedManifestWalCoverage::open(
+                Arc::new(fs),
+                "",
+                manifest,
+                proven,
+            ),
+        )
+    }
+
     fn replay_wal(
         memory_mode: bool,
         replay_dir: &std::path::Path,
@@ -436,10 +451,13 @@ impl RuntimeState {
                 crate::wal::recovery::ReplayPolicy::SalvageValidPrefix
             }
         };
-        let coverage = crate::runtime::hybrid_persistence::VerifiedManifestWalCoverage::open(
-            sst_dir, manifest,
-        );
-        let should_apply = |record: &crate::wal::WalRecord| !coverage.covers_wal_record(record);
+        let mut proven = crate::runtime::hybrid_persistence::ProvenSstIdentities::default();
+        let coverage = Self::recovery_wal_coverage(sst_dir, manifest, &mut proven);
+        let should_apply = |record: &crate::wal::WalRecord| {
+            !coverage
+                .as_ref()
+                .is_some_and(|coverage| coverage.covers_wal_record(record))
+        };
         let stats = match crate::wal::recovery::replay_wal_with_manifest_filter(
             &storage,
             &crate::io::FsPath::new(""),
@@ -513,7 +531,8 @@ impl RuntimeState {
     /// WAL files that replay would read, relative to the WAL directory.
     fn replayable_wal_files(storage: &dyn crate::io::Fs) -> MidgeResult<Vec<crate::io::FsPath>> {
         let mut files: Vec<_> = storage
-            .list_dir(&crate::io::FsPath::new(""))?
+            .list_dir(&crate::io::FsPath::new(""))
+            .map_err(FsError::into_midge)?
             .into_iter()
             .filter(|entry| {
                 !entry.is_dir
@@ -544,51 +563,70 @@ impl RuntimeState {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_millis());
         let quarantine = FsPath::new(format!("salvaged-{millis}"));
-        storage.create_dir_all(&quarantine)?;
+        storage
+            .create_dir_all(&quarantine)
+            .map_err(FsError::into_midge)?;
         let target = |path: &FsPath| FsPath::new(format!("{}/{}", quarantine.0, path.0));
 
         if let Some(stop) = stop {
-            let file = storage.open(
-                &stop.path,
-                crate::io::OpenOptions {
-                    mode: crate::io::OpenMode::ReadOnly,
-                    create: false,
-                    create_new: false,
-                    truncate: false,
-                },
-            )?;
-            let bytes = file.read_at(0, file.len()?)?;
+            let file = storage
+                .open(
+                    &stop.path,
+                    crate::io::OpenOptions {
+                        mode: crate::io::OpenMode::ReadOnly,
+                        create: false,
+                        create_new: false,
+                        truncate: false,
+                    },
+                )
+                .map_err(FsError::into_midge)?;
+            let bytes = file
+                .read_at(0, file.len().map_err(FsError::into_midge)?)
+                .map_err(FsError::into_midge)?;
             drop(file);
-            let mut copy = storage.open(
-                &target(&stop.path),
-                crate::io::OpenOptions {
-                    mode: crate::io::OpenMode::ReadWrite,
-                    create: true,
-                    create_new: true,
-                    truncate: false,
-                },
-            )?;
-            copy.write_at(0, bytes)?;
-            copy.sync(Durability::Durable)?;
+            let mut copy = storage
+                .open(
+                    &target(&stop.path),
+                    crate::io::OpenOptions {
+                        mode: crate::io::OpenMode::ReadWrite,
+                        create: true,
+                        create_new: true,
+                        truncate: false,
+                    },
+                )
+                .map_err(FsError::into_midge)?;
+            copy.write_at(0, bytes).map_err(FsError::into_midge)?;
+            copy.sync(Durability::Durable)
+                .map_err(FsError::into_midge)?;
         }
         for path in unreplayed {
-            storage.rename_atomic(path, &target(path))?;
+            storage
+                .rename_atomic(path, &target(path))
+                .map_err(FsError::into_midge)?;
         }
-        storage.sync_dir(&quarantine, Durability::Durable)?;
-        storage.sync_dir(&FsPath::new(""), Durability::Durable)?;
+        storage
+            .sync_dir(&quarantine, Durability::Durable)
+            .map_err(FsError::into_midge)?;
+        storage
+            .sync_dir(&FsPath::new(""), Durability::Durable)
+            .map_err(FsError::into_midge)?;
 
         if let Some(stop) = stop {
-            let mut file = storage.open(
-                &stop.path,
-                crate::io::OpenOptions {
-                    mode: crate::io::OpenMode::ReadWrite,
-                    create: false,
-                    create_new: false,
-                    truncate: false,
-                },
-            )?;
-            file.truncate(stop.valid_bytes)?;
-            file.sync(Durability::Durable)?;
+            let mut file = storage
+                .open(
+                    &stop.path,
+                    crate::io::OpenOptions {
+                        mode: crate::io::OpenMode::ReadWrite,
+                        create: false,
+                        create_new: false,
+                        truncate: false,
+                    },
+                )
+                .map_err(FsError::into_midge)?;
+            file.truncate(stop.valid_bytes)
+                .map_err(FsError::into_midge)?;
+            file.sync(Durability::Durable)
+                .map_err(FsError::into_midge)?;
         }
         tracing::warn!(
             quarantine = %quarantine.0,
@@ -606,21 +644,25 @@ impl RuntimeState {
         storage: &dyn crate::io::Fs,
         tail: &crate::wal::recovery::ToleratedActiveTail,
     ) -> MidgeResult<()> {
-        let mut file = storage.open(
-            &tail.path,
-            crate::io::OpenOptions {
-                mode: crate::io::OpenMode::ReadWrite,
-                create: false,
-                create_new: false,
-                truncate: false,
-            },
-        )?;
-        let length = file.len()?;
+        let mut file = storage
+            .open(
+                &tail.path,
+                crate::io::OpenOptions {
+                    mode: crate::io::OpenMode::ReadWrite,
+                    create: false,
+                    create_new: false,
+                    truncate: false,
+                },
+            )
+            .map_err(FsError::into_midge)?;
+        let length = file.len().map_err(FsError::into_midge)?;
         if length <= tail.valid_bytes {
             return Ok(());
         }
-        file.truncate(tail.valid_bytes)?;
-        file.sync(crate::io::Durability::Durable)?;
+        file.truncate(tail.valid_bytes)
+            .map_err(FsError::into_midge)?;
+        file.sync(crate::io::Durability::Durable)
+            .map_err(FsError::into_midge)?;
         tracing::warn!(
             path = %tail.path,
             discarded_bytes = length - tail.valid_bytes,
@@ -744,17 +786,22 @@ impl RuntimeState {
         file_meta: &crate::runtime::FileMeta,
     ) -> MidgeResult<()> {
         let path = crate::io::FsPath::new(crate::cloud_layout::object_key(&file_meta.name));
-        let pinned = fs.immutable_read_view(&path)?.unwrap_or(fs);
-        let file = pinned.open(
-            &path,
-            crate::io::OpenOptions {
-                mode: crate::io::OpenMode::ReadOnly,
-                create: false,
-                create_new: false,
-                truncate: false,
-            },
-        )?;
-        let size = file.len()?;
+        let pinned = fs
+            .immutable_read_view(&path)
+            .map_err(FsError::into_midge)?
+            .unwrap_or(fs);
+        let file = pinned
+            .open(
+                &path,
+                crate::io::OpenOptions {
+                    mode: crate::io::OpenMode::ReadOnly,
+                    create: false,
+                    create_new: false,
+                    truncate: false,
+                },
+            )
+            .map_err(FsError::into_midge)?;
+        let size = file.len().map_err(FsError::into_midge)?;
         // Recovery keeps readable data an older writer never proved, so a
         // manifest entry with no recorded size or CRC is accepted.
         crate::sst::identity::SstIdentity::of_file(file.as_ref(), size, None)
@@ -1190,8 +1237,10 @@ impl RuntimeState {
             m.record_intent_log_replay(self.intent_log.len() as u64);
         });
 
-        self.intent_log_replay_runs = self.intent_log_replay_runs.saturating_add(1);
-        self.intent_log_entries_replayed = self
+        self.recovery_stats.intent_log_replay_runs =
+            self.recovery_stats.intent_log_replay_runs.saturating_add(1);
+        self.recovery_stats.intent_log_entries_replayed = self
+            .recovery_stats
             .intent_log_entries_replayed
             .saturating_add(self.intent_log.len() as u64);
 

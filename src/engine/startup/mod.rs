@@ -1,3 +1,4 @@
+use crate::io::FsError;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -147,10 +148,13 @@ impl CloudWalRecoveryPlan {
             }
         }
         if renamed {
-            crate::io::RealFs::open_existing(db_path)?.sync_dir(
-                &crate::io::FsPath::new("wal"),
-                crate::io::Durability::Durable,
-            )?;
+            crate::io::RealFs::open_existing(db_path)
+                .map_err(FsError::into_midge)?
+                .sync_dir(
+                    &crate::io::FsPath::new("wal"),
+                    crate::io::Durability::Durable,
+                )
+                .map_err(FsError::into_midge)?;
         }
         Ok(())
     }

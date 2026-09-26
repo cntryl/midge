@@ -20,7 +20,7 @@ impl EventLoop {
 
     fn tick_hybrid_storage_with_deadline(&mut self, deadline: Option<&OperationDeadline>) {
         self.reap_cloud_wal_prune_worker();
-        let Some(storage) = &self.hybrid_storage else {
+        let Some(storage) = &self.cloud_coordinator.hybrid_storage else {
             return;
         };
 
@@ -46,7 +46,7 @@ impl EventLoop {
     }
 
     fn drain_hybrid_storage_events_with_deadline(&mut self, deadline: Option<&OperationDeadline>) {
-        let Some(rx) = &self.hybrid_storage_events else {
+        let Some(rx) = &self.cloud_coordinator.hybrid_storage_events else {
             return;
         };
 
@@ -124,7 +124,10 @@ impl EventLoop {
                 self.handle_storage_event_cloud_wal_prune_complete(segment_id, result);
             }
             crate::storage::StorageEvent::CloudWalPruneAttemptFailed { segment_id, error } => {
-                self.cloud_wal.prune_inflight.remove(&segment_id);
+                self.cloud_coordinator
+                    .cloud_wal
+                    .prune_inflight
+                    .remove(&segment_id);
                 tracing::debug!(
                     segment_id,
                     error = %error,
@@ -155,13 +158,15 @@ impl EventLoop {
         deadline: &OperationDeadline,
     ) -> bool {
         let contention = self
+            .cloud_coordinator
             .hybrid_storage
             .as_ref()
             .and_then(|storage| storage.maintenance_memory())
             .and_then(|budget| budget.take_contention(error));
         if !deadline.is_expired()
             && contention.is_some_and(|contention| {
-                self.hybrid_storage
+                self.cloud_coordinator
+                    .hybrid_storage
                     .as_ref()
                     .and_then(|storage| storage.maintenance_memory())
                     .is_some_and(|budget| contention.is_blocked_by(&budget))
@@ -170,11 +175,14 @@ impl EventLoop {
             // Shared maintenance pressure is backpressure, not a failed
             // accepted write. Keep its waiter and sealed local WAL while
             // the existing upload backlog owns a bounded retry.
-            self.cloud_wal_prune_progress.discard_idle_proofs();
-            self.cloud_wal
+            self.cloud_coordinator
+                .cloud_wal_prune_progress
+                .discard_idle_proofs();
+            self.cloud_coordinator
+                .cloud_wal
                 .upload_backlog
                 .insert(segment_id, max_sequence);
-            self.cloud_wal.defer_upload_retry();
+            self.cloud_coordinator.cloud_wal.defer_upload_retry();
             tracing::debug!(segment_id, %error, "deferring WAL catalog publication for shared memory");
             return true;
         }
@@ -229,11 +237,12 @@ impl EventLoop {
         self.state.cloud.pending_uploads.retain(|item| {
             crate::wal::parse_segment_id(item).is_none_or(|pending| pending != segment_id)
         });
-        self.cloud_wal
+        self.cloud_coordinator
+            .cloud_wal
             .acked_segments
             .insert(segment_id, max_sequence);
         if let Err(error) = self.wal_transition.note_acknowledged(segment_id) {
-            if self.state.wal.cloud_durable_seq >= max_sequence {
+            if self.state.wal.frontiers.cloud_durable() >= max_sequence {
                 tracing::debug!(segment_id, "ignored duplicate cloud WAL acknowledgement");
                 return;
             }
@@ -243,11 +252,14 @@ impl EventLoop {
 
         let ready_segments = match self
             .durability
-            .contiguous_acked_cloud_segments(&self.cloud_wal.acked_segments)
+            .contiguous_acked_cloud_segments(&self.cloud_coordinator.cloud_wal.acked_segments)
         {
             Ok(ready_segments) => ready_segments,
             Err(error) => {
-                self.cloud_wal.acked_segments.remove(&segment_id);
+                self.cloud_coordinator
+                    .cloud_wal
+                    .acked_segments
+                    .remove(&segment_id);
                 self.handle_cloud_upload_failure(
                     segment_id,
                     &crate::common::MidgeError::Internal(error),
@@ -285,11 +297,13 @@ impl EventLoop {
             return;
         }
 
-        self.state.wal.cloud_durable_seq =
-            self.state.wal.cloud_durable_seq.max(durable_max_sequence);
+        self.state
+            .wal
+            .frontiers
+            .advance_cloud_to(durable_max_sequence);
         tracing::debug!(
             segment_id = durable_segment_id,
-            cloud_durable_seq = self.state.wal.cloud_durable_seq,
+            cloud_durable_seq = self.state.wal.frontiers.cloud_durable(),
             "Cloud upload complete"
         );
         if let Err(error) = WalTransitionBoundary::AfterAccountingTransfer.check() {
@@ -383,10 +397,16 @@ impl EventLoop {
         segment_id: u64,
         result: crate::storage::StorageOutcome<()>,
     ) {
-        self.cloud_wal.prune_inflight.remove(&segment_id);
+        self.cloud_coordinator
+            .cloud_wal
+            .prune_inflight
+            .remove(&segment_id);
         match result {
             crate::storage::StorageOutcome::Ok(()) => {
-                self.cloud_wal.acked_segments.remove(&segment_id);
+                self.cloud_coordinator
+                    .cloud_wal
+                    .acked_segments
+                    .remove(&segment_id);
                 self.next_background_compaction_check = std::time::Instant::now();
                 tracing::debug!(segment_id, "Pruned cloud-covered remote WAL segment");
             }
@@ -395,7 +415,10 @@ impl EventLoop {
                 // deletion is attempted. A failed delete is therefore a safe
                 // storage leak, not a recovery obligation that may be retried
                 // through a now-absent catalog entry.
-                self.cloud_wal.acked_segments.remove(&segment_id);
+                self.cloud_coordinator
+                    .cloud_wal
+                    .acked_segments
+                    .remove(&segment_id);
                 self.state.mark_persistence_anomaly();
                 tracing::warn!(
                     segment_id,
@@ -440,7 +463,7 @@ impl EventLoop {
         max_sequence: u64,
         deadline: &OperationDeadline,
     ) -> crate::common::MidgeResult<()> {
-        let Some(storage) = self.hybrid_storage.as_ref() else {
+        let Some(storage) = self.cloud_coordinator.hybrid_storage.as_ref() else {
             return Err(crate::common::MidgeError::Internal(
                 "CloudAck received without HybridStorage".to_string(),
             ));
@@ -504,7 +527,10 @@ impl EventLoop {
             crate::wal::parse_segment_id(item).is_none_or(|pending| pending != segment_id)
         });
         self.state.mark_persistence_anomaly();
-        self.cloud_wal.acked_segments.remove(&segment_id);
+        self.cloud_coordinator
+            .cloud_wal
+            .acked_segments
+            .remove(&segment_id);
 
         // Keep the segment in the inflight frontier and preserve its request
         // identities. The accepted local WAL remains owned for callerless
@@ -535,8 +561,11 @@ impl EventLoop {
                     .wal_dir
                     .join(crate::wal::segment_file_name(segment_id));
                 if local_path.exists() {
-                    self.cloud_wal.upload_backlog.insert(segment_id, max_seq);
-                    self.cloud_wal.defer_upload_retry();
+                    self.cloud_coordinator
+                        .cloud_wal
+                        .upload_backlog
+                        .insert(segment_id, max_seq);
+                    self.cloud_coordinator.cloud_wal.defer_upload_retry();
                 } else {
                     tracing::error!(
                         segment_id,
@@ -572,6 +601,7 @@ mod tests {
         )
         .unwrap();
         let budget = el
+            .cloud_coordinator
             .hybrid_storage
             .as_ref()
             .unwrap()
@@ -585,7 +615,7 @@ mod tests {
 
         // Assert
         assert!(!deferred);
-        assert!(el.cloud_wal.upload_backlog.is_empty());
+        assert!(el.cloud_coordinator.cloud_wal.upload_backlog.is_empty());
     }
 
     #[test]
@@ -596,6 +626,7 @@ mod tests {
         )
         .unwrap();
         let budget = el
+            .cloud_coordinator
             .hybrid_storage
             .as_ref()
             .unwrap()
@@ -611,7 +642,7 @@ mod tests {
 
         // Assert
         assert!(!deferred);
-        assert!(el.cloud_wal.upload_backlog.is_empty());
+        assert!(el.cloud_coordinator.cloud_wal.upload_backlog.is_empty());
     }
 
     #[test]
@@ -622,6 +653,7 @@ mod tests {
         )
         .unwrap();
         let shared = el
+            .cloud_coordinator
             .hybrid_storage
             .as_ref()
             .unwrap()
@@ -640,7 +672,7 @@ mod tests {
 
         // Assert
         assert!(!deferred);
-        assert!(el.cloud_wal.upload_backlog.is_empty());
+        assert!(el.cloud_coordinator.cloud_wal.upload_backlog.is_empty());
     }
 
     #[test]
@@ -651,6 +683,7 @@ mod tests {
         )
         .unwrap();
         let budget = el
+            .cloud_coordinator
             .hybrid_storage
             .as_ref()
             .unwrap()
@@ -681,6 +714,6 @@ mod tests {
 
         // Assert
         assert!(!deferred);
-        assert!(el.cloud_wal.upload_backlog.is_empty());
+        assert!(el.cloud_coordinator.cloud_wal.upload_backlog.is_empty());
     }
 }

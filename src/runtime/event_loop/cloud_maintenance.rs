@@ -28,23 +28,19 @@ pub(super) struct CloudMaintenance {
 
 impl EventLoop {
     pub(super) fn cloud_maintenance_enabled(&self) -> bool {
-        self.wal_actor.is_cloud_async()
-            && !self.state.is_memory_mode()
-            && self
-                .hybrid_storage
-                .as_ref()
-                .is_some_and(|storage| storage.ephemeral_sst_cache_enabled())
+        self.cloud_coordinator
+            .maintenance_enabled(self.wal_actor.is_cloud_async(), self.state.is_memory_mode())
     }
 
     /// Dispatch at most one ready worker. A missing or retry-delayed task does
     /// not hold the turn; a successful launch advances the preferred task.
     pub(super) fn schedule_cloud_maintenance(&mut self) -> Option<MaintenanceTask> {
-        if self.cloud_maintenance.dispatching
+        if self.cloud_coordinator.cloud_maintenance.dispatching
             || self.pending_msg.is_some()
             || !self.publication_gate.deferred_messages_is_empty()
             || self.publication_gate.is_active()
             || self.flush_actor.is_inflight()
-            || self.cloud_wal_prune_worker.is_some()
+            || self.cloud_coordinator.cloud_wal_prune_worker.is_some()
             || self
                 .state
                 .active_compactions
@@ -54,8 +50,8 @@ impl EventLoop {
         {
             return None;
         }
-        self.cloud_maintenance.dispatching = true;
-        let mut task = self.cloud_maintenance.next;
+        self.cloud_coordinator.cloud_maintenance.dispatching = true;
+        let mut task = self.cloud_coordinator.cloud_maintenance.next;
         let mut started = None;
         for _ in 0..3 {
             let launched = match task {
@@ -80,17 +76,17 @@ impl EventLoop {
                 }
                 MaintenanceTask::WalRetirement => {
                     self.prune_cloud_wal_segments_covered_by_manifest();
-                    self.cloud_wal_prune_worker.is_some()
+                    self.cloud_coordinator.cloud_wal_prune_worker.is_some()
                 }
             };
             if launched {
-                self.cloud_maintenance.next = task.following();
+                self.cloud_coordinator.cloud_maintenance.next = task.following();
                 started = Some(task);
                 break;
             }
             task = task.following();
         }
-        self.cloud_maintenance.dispatching = false;
+        self.cloud_coordinator.cloud_maintenance.dispatching = false;
         started
     }
 }

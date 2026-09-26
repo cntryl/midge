@@ -3,6 +3,7 @@ use super::{CloudSstRecoveryProof, CloudStartupRecovery};
 use crate::common::{MidgeError, MidgeResult};
 use crate::config::RecoveryPolicy;
 use crate::io::Fs as _;
+use crate::io::FsError;
 use crate::runtime::RuntimeState;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -85,7 +86,7 @@ impl CloudStartupRecovery {
                             &crate::io::FsPath::new("sst"),
                             crate::io::Durability::Durable,
                         )
-                        .map_err(MidgeError::from)?,
+                        .map_err(FsError::into_midge)?,
                     Err(crate::io::FsError::NotFound(_)) => {}
                     Err(error) => {
                         return Err(MidgeError::RecoveryFailed(format!(
@@ -175,9 +176,6 @@ impl CloudStartupRecovery {
     ) -> MidgeResult<()> {
         let staging_fs = Self::recovery_staging_fs(db_path)?;
         let mut metadata_objects = Vec::new();
-        let mut snapshot_sequence = None;
-        let mut manifest_sequence = None;
-        let mut has_manifest_journal = false;
 
         for file_name in crate::metadata::files::CLOUD_MIRRORED {
             let key = crate::cloud_layout::CloudObjectLayout::metadata_key(file_name);
@@ -195,49 +193,41 @@ impl CloudStartupRecovery {
                 }
             };
 
-            if file_name == &crate::metadata::files::JOURNAL {
-                has_manifest_journal = true;
-            }
-            if let Some(sequence) = crate::metadata::files::manifest_sequence(file_name, &data)? {
-                match *file_name {
-                    crate::metadata::files::MANIFEST_SNAPSHOT => snapshot_sequence = Some(sequence),
-                    crate::metadata::files::MANIFEST => manifest_sequence = Some(sequence),
-                    _ => {}
-                }
-            }
+            crate::metadata::files::manifest_sequence(file_name, &data)?;
 
             metadata_objects.push((*file_name, data));
         }
 
-        let mut metadata_to_skip = None;
-        if !has_manifest_journal {
-            if let (Some(snapshot), Some(manifest)) = (snapshot_sequence, manifest_sequence) {
-                if snapshot != manifest {
-                    if recovery_policy == RecoveryPolicy::Strict {
-                        return Err(MidgeError::RecoveryFailed(format!(
-                            "mixed cloud manifest metadata without journal: manifest.snapshot.json sequence {snapshot}, manifest.json sequence {manifest}"
-                        )));
-                    }
-                    let skip_metadata = if manifest >= snapshot {
-                        "manifest.snapshot.json"
-                    } else {
-                        "manifest.json"
-                    };
-                    metadata_to_skip = Some(skip_metadata);
-                    tracing::warn!(
-                        snapshot_sequence = snapshot,
-                        manifest_sequence = manifest,
-                        skip = skip_metadata,
-                        "skipping mixed cloud manifest metadata during salvage open"
-                    );
+        if !metadata_objects
+            .iter()
+            .any(|(name, _)| *name == crate::metadata::files::MANIFEST_SNAPSHOT)
+        {
+            let legacy_key = crate::cloud_layout::CloudObjectLayout::metadata_key(
+                crate::metadata::files::MANIFEST,
+            );
+            match BlockingCloudIo::new(cloud).get_optional(&legacy_key) {
+                Ok(Some(_)) if recovery_policy == RecoveryPolicy::Strict => {
+                    return Err(MidgeError::RecoveryFailed(
+                        "cloud manifest snapshot is missing while a legacy manifest mirror exists"
+                            .into(),
+                    ));
+                }
+                Ok(Some(_)) => {
+                    tracing::warn!(key = %legacy_key, "ignoring legacy manifest mirror without an authoritative snapshot during salvage open");
+                }
+                Ok(None) => {}
+                Err(error) if recovery_policy == RecoveryPolicy::Salvage => {
+                    tracing::warn!(%error, key = %legacy_key, "could not inspect legacy manifest mirror during salvage open");
+                }
+                Err(error) => {
+                    return Err(MidgeError::RecoveryFailed(format!(
+                        "failed to inspect legacy cloud manifest mirror '{legacy_key}': {error}"
+                    )));
                 }
             }
         }
 
         for (file_name, data) in metadata_objects {
-            if metadata_to_skip == Some(file_name) {
-                continue;
-            }
             let temp_path = crate::io::traits::FsPath::new(format!("{file_name}.tmp"));
             let target_path = crate::io::traits::FsPath::new(file_name);
             crate::io::staging::stage_bytes(
@@ -649,7 +639,7 @@ impl CloudStartupRecovery {
         definitively_lost: &[String],
     ) -> MidgeResult<()> {
         if definitively_lost.is_empty() {
-            state.manifest.files = retained_files;
+            state.manifest.replace_files(retained_files);
             return crate::metadata::ManifestPersistence::save(&state.db_path, &state.manifest)
                 .map_err(MidgeError::Internal);
         }
@@ -664,7 +654,7 @@ impl CloudStartupRecovery {
             .retain(|file| !definitively_lost.contains(&file.name));
         durable.note_applied_journal_edit(edit_id);
         state.manifest_store.save_snapshot(&durable)?;
-        state.manifest.files = retained_files;
+        state.manifest.replace_files(retained_files);
         state.manifest.note_applied_journal_edit(edit_id);
         Ok(())
     }
@@ -725,19 +715,22 @@ impl CloudStartupRecovery {
         }
         // Move the verified secondary into the canonical read path without
         // allocating another full SST. A failed rename preserves its source.
-        let fs = crate::io::RealFs::open_existing(&state.db_path)?;
+        let fs = crate::io::RealFs::open_existing(&state.db_path).map_err(FsError::into_midge)?;
         fs.rename_atomic(
             &crate::io::FsPath::new(format!("hybrid_local/sst/{}", file.name)),
             &crate::io::FsPath::new(format!("sst/{}", file.name)),
-        )?;
+        )
+        .map_err(FsError::into_midge)?;
         fs.sync_dir(
             &crate::io::FsPath::new("sst"),
             crate::io::Durability::Durable,
-        )?;
+        )
+        .map_err(FsError::into_midge)?;
         fs.sync_dir(
             &crate::io::FsPath::new("hybrid_local/sst"),
             crate::io::Durability::Durable,
-        )?;
+        )
+        .map_err(FsError::into_midge)?;
         Ok(true)
     }
 

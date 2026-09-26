@@ -3,7 +3,6 @@
 use super::{mpsc, HybridStorage, StorageEvent, StorageOutcome};
 #[cfg(test)]
 use super::{Arc, StorageBackend};
-#[cfg(test)]
 use crate::common::OperationDeadline;
 use crate::common::{MidgeError, MidgeResult};
 
@@ -11,10 +10,18 @@ impl HybridStorage {
     /// A failed publisher can release staging only after its backend confirms
     /// there is no secondary local copy. Unsupported metadata fails closed.
     pub(crate) fn local_object_cache_is_absent(&self, key: &str) -> MidgeResult<bool> {
+        let Some(local) = self.local_store_if_active() else {
+            return Ok(true);
+        };
         let (tx, rx) = mpsc::channel();
-        self.stores
-            .local
-            .submit_range_head(key, self.callback_timeout, tx);
+        local.submit_range_head_request(
+            crate::storage::StorageRequest::new(
+                key,
+                OperationDeadline::from_budget(self.callback_timeout),
+                self.callback_timeout,
+            ),
+            tx,
+        );
         match rx.recv_timeout(self.callback_timeout) {
             Ok(StorageEvent::HeadComplete {
                 key: actual,
@@ -61,7 +68,10 @@ impl HybridStorage {
     /// Drop a disposable local object copy. Remote authority and remote
     /// deletion are deliberately outside this operation.
     pub(crate) fn evict_local_object_cache(&self, key: &str) -> MidgeResult<()> {
-        Self::delete_object_from_backend_blocking(&self.stores.local, key, self.callback_timeout)
+        let Some(local) = self.local_store_if_active() else {
+            return Ok(());
+        };
+        Self::delete_object_from_backend_blocking(&local, key, self.callback_timeout)
             .map(|_| ())
             .map_err(|error| {
                 MidgeError::Internal(format!("local object cache eviction failed: {error}"))
@@ -75,23 +85,20 @@ impl HybridStorage {
         data: &[u8],
         deadline: &OperationDeadline,
     ) -> MidgeResult<bool> {
-        let exists = Self::object_exists_in_backend_within(
-            &self.stores.local,
-            key,
-            self.callback_timeout,
-            deadline,
-        )
-        .map_err(|error| Self::publication_error("local immutable cache preflight", error))?;
+        let local = self
+            .local_store_if_active()
+            .expect("local fixture backend active");
+        let exists =
+            Self::object_exists_in_backend_within(&local, key, self.callback_timeout, deadline)
+                .map_err(|error| {
+                    Self::publication_error("local immutable cache preflight", error)
+                })?;
         if !exists {
             return Ok(false);
         }
 
-        let existing = Self::read_object_from_backend_within(
-            &self.stores.local,
-            key,
-            self.callback_timeout,
-            deadline,
-        )?;
+        let existing =
+            Self::read_object_from_backend_within(&local, key, self.callback_timeout, deadline)?;
         if existing != data {
             return Err(MidgeError::Internal(format!(
                 "local cache already exists with different bytes for immutable object '{key}'"
@@ -131,7 +138,6 @@ impl HybridStorage {
             deadline,
         )?;
         let upload = data.to_vec();
-        let headers = vec![("If-None-Match".into(), "*".into())];
         let (tx, rx) = std::sync::mpsc::channel();
         let timeout = Self::deadline_timeout(
             key,
@@ -139,9 +145,12 @@ impl HybridStorage {
             self.callback_timeout,
             deadline,
         )?;
-        self.stores
-            .sst
-            .submit_write_with_headers_and_timeout(key, upload, headers, timeout, tx);
+        self.stores.sst.submit_write_request(
+            crate::storage::StorageRequest::new(key, *deadline, timeout)
+                .with_precondition(crate::storage::StoragePrecondition::IfAbsent),
+            upload,
+            tx,
+        );
         let event = rx.recv_timeout(timeout).map_err(|error| match error {
             mpsc::RecvTimeoutError::Timeout => {
                 MidgeError::Timeout("cloud immutable upload callback timed out".to_string())
@@ -216,7 +225,6 @@ impl HybridStorage {
         data: Vec<u8>,
         deadline: &OperationDeadline,
     ) -> MidgeResult<()> {
-        let headers = vec![("If-None-Match".into(), "*".into())];
         let (tx, rx) = std::sync::mpsc::channel();
         let timeout = Self::deadline_timeout(
             key,
@@ -224,9 +232,14 @@ impl HybridStorage {
             self.callback_timeout,
             deadline,
         )?;
-        self.stores
-            .local
-            .submit_write_with_headers_and_timeout(key, data, headers, timeout, tx);
+        self.local_store_if_active()
+            .expect("local fixture backend active")
+            .submit_write_request(
+                crate::storage::StorageRequest::new(key, *deadline, timeout)
+                    .with_precondition(crate::storage::StoragePrecondition::IfAbsent),
+                data,
+                tx,
+            );
         let event = rx.recv_timeout(timeout).map_err(|error| match error {
             mpsc::RecvTimeoutError::Timeout => {
                 MidgeError::Timeout("local immutable cache write callback timed out".to_string())
@@ -294,11 +307,10 @@ impl HybridStorage {
 
         // This runs inside the tracked GC worker that owns this deletion.
         // Avoid a detached local-cache delete that could outlive the lease.
-        match Self::delete_object_from_backend_blocking(
-            &self.stores.local,
-            key,
-            self.callback_timeout,
-        ) {
+        let Some(local) = self.local_store_if_active() else {
+            return Ok(());
+        };
+        match Self::delete_object_from_backend_blocking(&local, key, self.callback_timeout) {
             Ok(true) => {
                 tracing::debug!(key, "deleted obsolete local immutable cache object");
             }

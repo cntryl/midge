@@ -85,15 +85,15 @@ pub(super) fn storage_error_from_cloud(error: CloudError) -> crate::storage::Sto
     crate::storage::StorageError::new(kind, error)
 }
 
-impl StorageBackend for CloudStorage {
-    fn submit_range_head(
+impl CloudStorage {
+    fn range_head_within(
         &self,
         key: &str,
         timeout: std::time::Duration,
-        callback: StorageCallback,
+        callback: &StorageCallback,
     ) {
         let (tx, rx) = std::sync::mpsc::channel();
-        self.submit_head_with_timeout(key, timeout, tx);
+        self.head_with_timeout(key, timeout, &tx);
         let result = match rx.recv_timeout(timeout) {
             Ok(StorageEvent::HeadComplete {
                 key: actual,
@@ -110,35 +110,11 @@ impl StorageBackend for CloudStorage {
         });
     }
 
-    fn submit_read_range_with_reservation(
-        &self,
-        key: &str,
-        range: std::ops::Range<u64>,
-        expected: StorageObjectMetadata,
-        timeout: std::time::Duration,
-        reservation: Arc<crate::common::resource_budget::ResourceReservation>,
-        callback: crate::storage::RangeReadCallback,
-    ) {
-        self.read_range_admitted(key, range, expected, timeout, Some(reservation), &callback);
-    }
-
-    fn submit_read_range(
-        &self,
-        key: &str,
-        start: u64,
-        end: u64,
-        expected: StorageObjectMetadata,
-        timeout: std::time::Duration,
-        callback: crate::storage::RangeReadCallback,
-    ) {
-        self.read_range_admitted(key, start..end, expected, timeout, None, &callback);
-    }
-
-    fn submit_read_with_metadata(
+    fn metadata_read_within(
         &self,
         key: &str,
         timeout: std::time::Duration,
-        callback: crate::storage::MetadataReadCallback,
+        callback: &crate::storage::MetadataReadCallback,
     ) {
         let deadline = crate::common::OperationDeadline::from_budget(timeout);
         let result = blocking_cloud_object_proof_within(self, key, &deadline)
@@ -152,14 +128,134 @@ impl StorageBackend for CloudStorage {
             });
         let _ = callback.send(result);
     }
+}
+
+impl StorageBackend for CloudStorage {
+    fn submit_range_read_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        range: std::ops::Range<u64>,
+        callback: crate::storage::RangeReadCallback,
+    ) {
+        let timeout = request.remaining_timeout();
+        if timeout.is_zero() {
+            let _ = callback.send(Err(crate::storage::storage_timeout_error(
+                "range read timed out",
+            )));
+            return;
+        }
+        let crate::storage::StoragePrecondition::IfMatch(expected) = request.precondition else {
+            let _ = callback.send(Err(crate::storage::StorageError::protocol(
+                "range read requires an object identity",
+            )));
+            return;
+        };
+        self.read_range_admitted(
+            &request.key,
+            range,
+            expected,
+            timeout,
+            request.reservation,
+            &callback,
+        );
+    }
+
+    fn submit_metadata_read_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::MetadataReadCallback,
+    ) {
+        crate::storage::dispatch_metadata_read_request(
+            request,
+            callback,
+            |key, timeout, callback| {
+                self.metadata_read_within(key, timeout, &callback);
+            },
+        );
+    }
+
+    fn submit_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: StorageCallback,
+    ) {
+        crate::storage::dispatch_head_request(request, callback, |key, timeout, callback| {
+            self.head_with_timeout(key, timeout, &callback);
+        });
+    }
+
+    fn submit_range_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: StorageCallback,
+    ) {
+        crate::storage::dispatch_head_request(request, callback, |key, timeout, callback| {
+            self.range_head_within(key, timeout, &callback);
+        });
+    }
+
+    fn submit_delete_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: StorageCallback,
+    ) {
+        let timeout = request.remaining_timeout();
+        let key = request.key;
+        if timeout.is_zero() {
+            let _ = callback.send(StorageEvent::DeleteComplete {
+                key,
+                result: StorageOutcome::Err(crate::storage::storage_timeout_error(
+                    "cloud DELETE refused because no callback budget remained",
+                )),
+            });
+            return;
+        }
+        let mut headers = match request.precondition.delete_headers() {
+            Ok(headers) => headers,
+            Err(error) => {
+                let _ = callback.send(StorageEvent::DeleteComplete {
+                    key,
+                    result: StorageOutcome::Err(error),
+                });
+                return;
+            }
+        };
+        let _reservation = request.reservation;
+        set_request_timeout_header(&mut headers, timeout);
+        let (tx, rx) = std::sync::mpsc::channel();
+        CloudStorage::submit_delete_with_headers(self, &key, headers, tx);
+        deliver_delete_outcome(&key, &rx, timeout, &callback);
+    }
+
+    fn submit_write_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        data: Vec<u8>,
+        callback: StorageCallback,
+    ) {
+        let timeout = request.remaining_timeout();
+        let key = request.key;
+        let headers = match request.precondition.headers() {
+            Ok(headers) => headers,
+            Err(error) => {
+                let _ = callback.send(StorageEvent::WriteComplete {
+                    key,
+                    result: StorageOutcome::Err(error),
+                });
+                return;
+            }
+        };
+        self.write_admitted(&key, data, headers, timeout, request.reservation, &callback);
+    }
 
     fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback) {
-        self.submit_write_with_headers_and_timeout(
+        self.write_admitted(
             key,
             data,
             Vec::new(),
             self.callback_timeout,
-            callback,
+            None,
+            &callback,
         );
     }
 
@@ -170,36 +266,7 @@ impl StorageBackend for CloudStorage {
         headers: Vec<(String, String)>,
         callback: StorageCallback,
     ) {
-        self.submit_write_with_headers_and_timeout(
-            key,
-            data,
-            headers,
-            self.callback_timeout,
-            callback,
-        );
-    }
-
-    fn submit_write_with_reservation(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        timeout: std::time::Duration,
-        reservation: Arc<crate::common::resource_budget::ResourceReservation>,
-        callback: StorageCallback,
-    ) {
-        self.write_admitted(key, data, headers, timeout, Some(reservation), &callback);
-    }
-
-    fn submit_write_with_headers_and_timeout(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        timeout: std::time::Duration,
-        callback: StorageCallback,
-    ) {
-        self.write_admitted(key, data, headers, timeout, None, &callback);
+        self.write_admitted(key, data, headers, self.callback_timeout, None, &callback);
     }
 
     fn submit_delete(&self, key: &str, callback: StorageCallback) {
@@ -240,14 +307,16 @@ impl StorageBackend for CloudStorage {
     }
 
     fn submit_head(&self, key: &str, callback: StorageCallback) {
-        self.submit_head_with_timeout(key, self.callback_timeout, callback);
+        self.head_with_timeout(key, self.callback_timeout, &callback);
     }
+}
 
-    fn submit_head_with_timeout(
+impl CloudStorage {
+    fn head_with_timeout(
         &self,
         key: &str,
         timeout: std::time::Duration,
-        callback: StorageCallback,
+        callback: &StorageCallback,
     ) {
         if timeout.is_zero() {
             let _ = callback.send(StorageEvent::HeadComplete {

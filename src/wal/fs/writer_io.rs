@@ -15,6 +15,7 @@
 //! • All concurrency protection is via `Mutex` — do NOT add async constructs.
 
 use crate::common::MidgeResult;
+use crate::io::FsError;
 use crate::io::{Fs, FsPath};
 use crate::wal::encoding;
 use crate::wal::traits::{WalAppendError, WalWriter};
@@ -78,12 +79,12 @@ impl FsWalWriterIo {
         )
     }
 
-    #[cfg(test)]
     /// Create a writer with an explicit storage acknowledgement timeout.
     ///
     /// # Errors
     ///
     /// Returns an error if the WAL file cannot be created or opened.
+    #[cfg(test)]
     pub fn new_with_timeout(
         path_str: &str,
         fs: Arc<dyn Fs>,
@@ -111,23 +112,26 @@ impl FsWalWriterIo {
         let path = FsPath::new(path_str);
 
         // Verify file exists or can be created by checking metadata
-        let mut file = fs.open(
-            &path,
-            crate::io::OpenOptions {
-                mode: crate::io::OpenMode::ReadWrite,
-                create: true,
-                create_new: false,
-                truncate: false,
-            },
-        )?;
+        let mut file = fs
+            .open(
+                &path,
+                crate::io::OpenOptions {
+                    mode: crate::io::OpenMode::ReadWrite,
+                    create: true,
+                    create_new: false,
+                    truncate: false,
+                },
+            )
+            .map_err(FsError::into_midge)?;
 
         // Get current file size
-        let metadata = fs.metadata(&path)?;
+        let metadata = fs.metadata(&path).map_err(FsError::into_midge)?;
         let current_pos = metadata.len;
         if current_pos == 0 {
             // A new (or still empty) active WAL: frames fsynced into it later
             // are lost after a crash unless its directory entry is durable.
-            file.sync(crate::io::Durability::Durable)?;
+            file.sync(crate::io::Durability::Durable)
+                .map_err(FsError::into_midge)?;
             let parent = std::path::Path::new(path_str)
                 .parent()
                 .filter(|parent| !parent.as_os_str().is_empty())
@@ -135,7 +139,8 @@ impl FsWalWriterIo {
                     || FsPath::new("."),
                     |parent| FsPath::new(parent.to_string_lossy()),
                 );
-            fs.sync_dir(&parent, crate::io::Durability::Durable)?;
+            fs.sync_dir(&parent, crate::io::Durability::Durable)
+                .map_err(FsError::into_midge)?;
         }
         drop(file);
 
@@ -283,48 +288,6 @@ impl FsWalWriterIo {
             )),
         ))
     }
-
-    fn flush_with_timeout(&self, timeout: Duration) -> MidgeResult<()> {
-        if let Some(error) = self.writer_failure() {
-            return Err(error);
-        }
-        // A queue-empty check is insufficient because the writer drains into a
-        // local batch before the file append completes. Track a generation and
-        // wait for that generation's completion instead.
-        let my_flush_id = {
-            let mut state = self.sync_state.lock();
-            state.pending_flushes = state.pending_flushes.saturating_add(1);
-            state.pending_flushes
-        };
-        self.queue_cond.notify_one();
-
-        let started = std::time::Instant::now();
-        let mut state = self.sync_state.lock();
-        while state.completed_flushes < my_flush_id {
-            if let Some(error) = state.failure() {
-                return Err(error);
-            }
-            let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
-                let message = format!("WAL flush timed out after {timeout:?}");
-                state.write_failed = true;
-                state.last_write_error = Some(crate::common::MidgeError::Timeout(message.clone()));
-                return Err(crate::common::MidgeError::Timeout(message));
-            };
-            if self.sync_cond.wait_for(&mut state, remaining).timed_out()
-                && state.completed_flushes < my_flush_id
-            {
-                let message = format!("WAL flush timed out after {timeout:?}");
-                state.write_failed = true;
-                state.last_write_error = Some(crate::common::MidgeError::Timeout(message.clone()));
-                return Err(crate::common::MidgeError::Timeout(message));
-            }
-        }
-
-        self.counters.record(|m| {
-            m.record_wal_flush();
-        });
-        Ok(())
-    }
 }
 
 impl WalWriter for FsWalWriterIo {
@@ -362,10 +325,6 @@ impl WalWriter for FsWalWriterIo {
         }
         let batch_start = self.enqueue_encoded_accounted(buf, self.io_timeout)?;
         Ok(batch_start.saturating_add(last_record_offset))
-    }
-
-    fn flush(&self) -> MidgeResult<()> {
-        self.flush_with_timeout(self.io_timeout)
     }
 
     fn sync(&self) -> MidgeResult<()> {
@@ -423,42 +382,6 @@ impl WalWriter for FsWalWriterIo {
     fn current_pos(&self) -> WalPos {
         self.current_pos.load(std::sync::atomic::Ordering::SeqCst)
     }
-
-    fn close(&self) -> MidgeResult<()> {
-        self.close_with_timeout(self.io_timeout)
-    }
-}
-
-impl FsWalWriterIo {
-    fn close_with_timeout(&self, timeout: Duration) -> MidgeResult<()> {
-        // Signal shutdown to the writer thread
-        self.shutdown
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        // Wake the writer thread so it can exit
-        self.queue_cond.notify_all();
-
-        // Keep the handle on timeout. Engine cleanup moves the owning runtime
-        // to a reaper, which later joins this worker before releasing fencing.
-        let start = std::time::Instant::now();
-        let mut writer_thread = self.writer_thread.lock();
-        while writer_thread
-            .as_ref()
-            .is_some_and(|handle| !handle.is_finished())
-        {
-            if start.elapsed() >= timeout {
-                return Err(crate::common::MidgeError::Timeout(format!(
-                    "WAL writer did not terminate within {timeout:?}"
-                )));
-            }
-            drop(writer_thread);
-            std::thread::sleep(std::time::Duration::from_millis(1));
-            writer_thread = self.writer_thread.lock();
-        }
-        if let Some(handle) = writer_thread.take() {
-            let _ = handle.join();
-        }
-        Ok(())
-    }
 }
 
 impl Drop for FsWalWriterIo {
@@ -479,7 +402,7 @@ impl Drop for FsWalWriterIo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io::traits::{DirEntry, FileCaps, Metadata};
+    use crate::io::traits::{DirEntry, Metadata};
     use crate::io::{Durability, File, FsResult, OpenOptions};
     use crate::wal::types::{WalOpKind, WalRecord};
     use bytes::Bytes;
@@ -529,14 +452,6 @@ mod tests {
                 self.durable_sync_count.fetch_add(1, Ordering::SeqCst);
             }
             Ok(())
-        }
-
-        fn close(self: Box<Self>) -> FsResult<()> {
-            self.inner.close()
-        }
-
-        fn caps(&self) -> FileCaps {
-            self.inner.caps()
         }
     }
 
@@ -640,14 +555,6 @@ mod tests {
 
         fn sync(&mut self, durability: Durability) -> FsResult<()> {
             self.inner.sync(durability)
-        }
-
-        fn close(self: Box<Self>) -> FsResult<()> {
-            self.inner.close()
-        }
-
-        fn caps(&self) -> FileCaps {
-            self.inner.caps()
         }
     }
 
@@ -754,9 +661,8 @@ mod tests {
             1,
         );
         writer.append_record(&record)?;
-        writer.close()?;
-        let written_len = fs.get_file("wal.log").expect("wal file should exist").len() as u64;
         drop(writer);
+        let written_len = fs.get_file("wal.log").expect("wal file should exist").len() as u64;
 
         // Reopening the same file must resume from its existing length
         // instead of always defaulting current_pos to zero.
@@ -838,59 +744,6 @@ mod tests {
     }
 
     #[test]
-    fn should_retain_stuck_writer_handle_when_close_times_out() -> MidgeResult<()> {
-        // Arrange
-        let writer = writer_without_background_worker();
-        let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let release_for_worker = Arc::clone(&release);
-        let handle = std::thread::spawn(move || {
-            while !release_for_worker.load(std::sync::atomic::Ordering::Acquire) {
-                std::thread::yield_now();
-            }
-        });
-        *writer.writer_thread.lock() = Some(handle);
-
-        // Act
-        let result = writer.close_with_timeout(std::time::Duration::from_millis(5));
-
-        // Assert
-        assert!(matches!(result, Err(crate::common::MidgeError::Timeout(_))));
-        assert!(writer.writer_thread.lock().is_some());
-
-        release.store(true, std::sync::atomic::Ordering::Release);
-        writer.close_with_timeout(std::time::Duration::from_secs(1))?;
-        Ok(())
-    }
-
-    #[test]
-    fn should_support_flush() -> MidgeResult<()> {
-        // Arrange
-        let fs = Arc::new(crate::io::MockFs::new());
-        let writer = FsWalWriterIo::new("wal.log", Arc::clone(&fs) as Arc<dyn crate::io::Fs>)?;
-        let record = WalRecord::new(
-            WalOpKind::Put,
-            Bytes::from_static(b"flush-key"),
-            Some(Bytes::from_static(b"flush-value")),
-            1,
-            1,
-        );
-        writer.append_record(&record)?;
-
-        // Act
-        writer.flush()?;
-
-        // Assert: the appended bytes must actually be visible in the backing
-        // file once flush returns, not merely queued.
-        let on_disk = fs.get_file("wal.log").expect("wal file should exist");
-        assert!(
-            !on_disk.is_empty(),
-            "flush() returned before data reached the backing filesystem"
-        );
-        assert_eq!(on_disk.len() as u64, writer.current_pos());
-        Ok(())
-    }
-
-    #[test]
     fn should_sync_durably_when_legacy_skip_variable_is_set() -> MidgeResult<()> {
         // Arrange
         let _environment_guard = EnvVarGuard::set("MIDGE_SKIP_WAL_SYNC", "1");
@@ -907,7 +760,7 @@ mod tests {
     }
 
     #[test]
-    fn should_support_close() -> MidgeResult<()> {
+    fn should_drain_pending_records_when_writer_drops() -> MidgeResult<()> {
         // Arrange
         let fs = Arc::new(crate::io::MockFs::new());
         let writer = FsWalWriterIo::new("wal.log", Arc::clone(&fs) as Arc<dyn crate::io::Fs>)?;
@@ -919,18 +772,19 @@ mod tests {
             1,
         );
         writer.append_record(&record)?;
+        let appended_pos = writer.current_pos();
 
         // Act
-        writer.close()?;
+        drop(writer);
 
-        // Assert: close() must drain and durably write pending data before
-        // returning, not merely report success.
+        // Assert: dropping the writer must drain pending data before the
+        // writer thread exits, not discard the queue.
         let on_disk = fs.get_file("wal.log").expect("wal file should exist");
         assert!(
             !on_disk.is_empty(),
-            "close() returned before pending data reached the backing filesystem"
+            "drop returned before pending data reached the backing filesystem"
         );
-        assert_eq!(on_disk.len() as u64, writer.current_pos());
+        assert_eq!(on_disk.len() as u64, appended_pos);
         Ok(())
     }
 

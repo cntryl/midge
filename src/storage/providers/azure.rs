@@ -8,10 +8,13 @@
 //! - All operations routed through the same `CloudBackend` trait as S3
 
 use super::super::cloud::{
-    CloudBackend, CloudCallback, CloudError, CloudEvent, CloudExecutor, CloudListBudget,
-    CloudOutcome, CloudRequest, CloudResponse, CloudSigner,
+    CloudBackend, CloudCallback, CloudError, CloudEvent, CloudExecutor, CloudOutcome, CloudRequest,
+    CloudResponse, CloudSigner,
 };
-use super::rest::{conditional_range_preconditions, object_metadata_from_response};
+use super::rest::{
+    conditional_range_request, finish_paged_list, map_response, object_metadata_from_response,
+    ListPageParser, PagedList, ProviderDialect,
+};
 use super::xml::extract_xml_tag_values;
 use crate::common::{MidgeError, MidgeResult};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as Base64Engine};
@@ -810,24 +813,19 @@ impl AzureBackend {
     }
 }
 
-struct AzureListState {
-    prefix: String,
+struct AzureListContext {
     base_url: String,
     sas_token: Option<String>,
-    marker: Option<String>,
-    items: Vec<String>,
-    budget: CloudListBudget,
-    error: Option<CloudError>,
 }
 
-impl AzureListState {
-    fn url(&self) -> String {
+impl ListPageParser for AzureListContext {
+    fn url(&self, prefix: &str, token: Option<&str>) -> String {
         let mut url = format!(
             "{}?restype=container&comp=list&prefix={}",
             self.base_url,
-            urlencoding::encode(&self.prefix)
+            urlencoding::encode(prefix)
         );
-        if let Some(marker) = self.marker.as_deref() {
+        if let Some(marker) = token {
             url.push_str("&marker=");
             url.push_str(&urlencoding::encode(marker));
         }
@@ -836,6 +834,21 @@ impl AzureListState {
             url.push_str(token);
         }
         url
+    }
+
+    fn parse_page(&self, response: &CloudResponse) -> MidgeResult<(Vec<String>, Option<String>)> {
+        let body = String::from_utf8_lossy(&response.body);
+        super::validate_list_xml(&body, "EnumerationResults")?;
+        let items = extract_xml_tag_values(&body, "Name");
+        let marker = extract_xml_tag_values(&body, "NextMarker")
+            .into_iter()
+            .next()
+            .filter(|marker| !marker.is_empty());
+        Ok((items, marker))
+    }
+
+    fn response_error(&self, response: &CloudResponse) -> CloudError {
+        azure_response_error(response, "Azure LIST", false)
     }
 }
 
@@ -873,41 +886,31 @@ impl CloudBackend for AzureBackend {
             .with_reservation(reservation)
             .with_header("x-ms-blob-type", "BlockBlob")
             .with_header("Content-Length", len.to_string());
-        // Merge provided headers into the request (caller-controlled; e.g. If-None-Match)
-        for (name, value) in headers {
-            if name.eq_ignore_ascii_case(crate::storage::cloud::REQUEST_TIMEOUT_HEADER) {
-                match value.parse::<u64>() {
-                    Ok(milliseconds) => {
-                        request =
-                            request.with_timeout(std::time::Duration::from_millis(milliseconds));
-                    }
-                    Err(error) => {
-                        let _ = callback.send(CloudEvent::Put {
-                            key,
-                            result: CloudOutcome::Err(CloudError::Protocol(format!(
-                                "invalid internal request timeout: {error}"
-                            ))),
-                        });
-                        return;
-                    }
-                }
-            } else {
-                request = request.with_header(name, value);
+        let (headers, timeout) = match crate::storage::cloud::split_request_timeout_header(headers)
+        {
+            Ok(parts) => parts,
+            Err(error) => {
+                let _ = callback.send(CloudEvent::Put {
+                    key,
+                    result: CloudOutcome::Err(CloudError::Protocol(error)),
+                });
+                return;
             }
+        };
+        if let Some(timeout) = timeout {
+            request = request.with_timeout(timeout);
         }
-        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status == 201 => CloudEvent::Put {
-                key: ctx,
-                result: CloudOutcome::Ok(()),
-            },
-            Ok(resp) => CloudEvent::Put {
-                key: ctx,
-                result: CloudOutcome::Err(azure_put_response_error(&resp, conditional_mutation)),
-            },
-            Err(err) => CloudEvent::Put {
-                key: ctx,
-                result: CloudOutcome::Err(CloudError::from_transport_error(err)),
-            },
+        for (name, value) in headers {
+            request = request.with_header(name, value);
+        }
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::Put {
+            key: ctx,
+            result: map_response(
+                result,
+                |status| AzureDialect.put_ok(status),
+                |_| Ok(()),
+                |resp| azure_put_response_error(resp, conditional_mutation),
+            ),
         };
         self.executor.spawn_request(request, key, callback, mapper);
     }
@@ -916,19 +919,14 @@ impl CloudBackend for AzureBackend {
         let key = key.to_string();
         let url = self.object_url(&key);
         let request = CloudRequest::new(Method::GET, url);
-        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status == 200 => CloudEvent::Get {
-                key: ctx,
-                result: CloudOutcome::Ok(resp.body),
-            },
-            Ok(resp) => CloudEvent::Get {
-                key: ctx,
-                result: CloudOutcome::Err(azure_response_error(&resp, "Azure GET", false)),
-            },
-            Err(err) => CloudEvent::Get {
-                key: ctx,
-                result: CloudOutcome::Err(CloudError::from_transport_error(err)),
-            },
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::Get {
+            key: ctx,
+            result: map_response(
+                result,
+                |status| status == 200,
+                |resp| Ok(resp.body),
+                |resp| azure_response_error(resp, "Azure GET", false),
+            ),
         };
         self.executor.spawn_request(request, key, callback, mapper);
     }
@@ -936,27 +934,23 @@ impl CloudBackend for AzureBackend {
     fn submit_get_with_metadata(&self, key: &str, callback: CloudCallback) {
         let key = key.to_string();
         let request = CloudRequest::new(Method::GET, self.object_url(&key));
-        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status == 200 => {
-                let metadata = object_metadata_from_response(
-                    &resp,
-                    Some(u64::try_from(resp.body.len()).unwrap_or(u64::MAX)),
-                    "Azure",
-                );
-                CloudEvent::GetWithMetadata {
-                    key: ctx,
-                    result: metadata.map(|metadata| (resp.body, metadata)),
-                }
-            }
-            Ok(resp) => CloudEvent::GetWithMetadata {
+        let mapper =
+            move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::GetWithMetadata {
                 key: ctx,
-                result: CloudOutcome::Err(azure_response_error(&resp, "Azure GET", false)),
-            },
-            Err(err) => CloudEvent::GetWithMetadata {
-                key: ctx,
-                result: CloudOutcome::Err(CloudError::from_transport_error(err)),
-            },
-        };
+                result: map_response(
+                    result,
+                    |status| status == 200,
+                    |resp| {
+                        object_metadata_from_response(
+                            &resp,
+                            Some(u64::try_from(resp.body.len()).unwrap_or(u64::MAX)),
+                            "Azure",
+                        )
+                        .map(|metadata| (resp.body, metadata))
+                    },
+                    |resp| azure_response_error(resp, "Azure GET", false),
+                ),
+            };
         self.executor.spawn_request(request, key, callback, mapper);
     }
 
@@ -984,8 +978,15 @@ impl CloudBackend for AzureBackend {
         let start = range.start;
         let end = range.end;
         let key = key.to_string();
-        let conditions = match conditional_range_preconditions(&range, &expected) {
-            Ok(conditions) => conditions,
+        let request = match conditional_range_request(&range, &expected, timeout, |conditions| {
+            let mut request =
+                CloudRequest::new(Method::GET, self.object_url(&key)).with_reservation(reservation);
+            for (name, value) in conditions {
+                request = request.with_header(name, value);
+            }
+            request
+        }) {
+            Ok(request) => request,
             Err(error) => {
                 let _ = callback.send(CloudEvent::GetRange {
                     key,
@@ -996,26 +997,18 @@ impl CloudBackend for AzureBackend {
                 return;
             }
         };
-        let mut request =
-            CloudRequest::new(Method::GET, self.object_url(&key)).with_reservation(reservation);
-        for (name, value) in conditions {
-            request = request.with_header(name, value);
-        }
-        request = request
-            .with_header("Range", format!("bytes={start}-{}", end - 1))
-            .with_timeout(timeout)
-            .with_response_limit(usize::try_from(end - start).unwrap_or(usize::MAX));
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| {
-            let result = match result {
-                Ok(resp) if resp.status == 206 => {
+            let result = map_response(
+                result,
+                |status| status == 206,
+                |resp| {
                     crate::storage::cloud::range::validate_range_response(
                         &resp, start, end, &expected,
                     )
                     .map(|()| resp.body)
-                }
-                Ok(resp) => Err(azure_response_error(&resp, "AZURE conditional RANGE", true)),
-                Err(error) => Err(CloudError::from_transport_error(error)),
-            };
+                },
+                |resp| azure_response_error(resp, "AZURE conditional RANGE", true),
+            );
             CloudEvent::GetRange {
                 key: ctx,
                 start,
@@ -1035,25 +1028,16 @@ impl CloudBackend for AzureBackend {
             None => format!("bytes={start}-"),
         };
         let request = CloudRequest::new(Method::GET, url).with_header("x-ms-range", range);
-        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status == 206 || resp.status == 200 => CloudEvent::GetRange {
-                key: ctx,
-                start,
-                end,
-                result: CloudOutcome::Ok(resp.body),
-            },
-            Ok(resp) => CloudEvent::GetRange {
-                key: ctx,
-                start,
-                end,
-                result: CloudOutcome::Err(azure_response_error(&resp, "Azure GET_RANGE", false)),
-            },
-            Err(err) => CloudEvent::GetRange {
-                key: ctx,
-                start,
-                end,
-                result: CloudOutcome::Err(CloudError::from_transport_error(err)),
-            },
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::GetRange {
+            key: ctx,
+            start,
+            end,
+            result: map_response(
+                result,
+                |status| matches!(status, 200 | 206),
+                |resp| Ok(resp.body),
+                |resp| azure_response_error(resp, "Azure GET_RANGE", false),
+            ),
         };
         self.executor.spawn_request(request, key, callback, mapper);
     }
@@ -1082,23 +1066,14 @@ impl CloudBackend for AzureBackend {
         for (name, value) in headers {
             request = request.with_header(name, value);
         }
-        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if matches!(resp.status, 202 | 404) => CloudEvent::Delete {
-                key: ctx,
-                result: CloudOutcome::Ok(()),
-            },
-            Ok(resp) => CloudEvent::Delete {
-                key: ctx,
-                result: CloudOutcome::Err(azure_response_error(
-                    &resp,
-                    "Azure DELETE",
-                    conditional_mutation,
-                )),
-            },
-            Err(err) => CloudEvent::Delete {
-                key: ctx,
-                result: CloudOutcome::Err(CloudError::from_transport_error(err)),
-            },
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::Delete {
+            key: ctx,
+            result: map_response(
+                result,
+                |status| AzureDialect.delete_ok(status),
+                |_| Ok(()),
+                |resp| azure_response_error(resp, "Azure DELETE", conditional_mutation),
+            ),
         };
         self.executor.spawn_request(request, key, callback, mapper);
     }
@@ -1119,15 +1094,13 @@ impl CloudBackend for AzureBackend {
             return;
         };
         let prefix = prefix.to_string();
-        let state = AzureListState {
-            prefix: prefix.clone(),
-            base_url: self.base_url(),
-            sas_token: self.sas_token.clone(),
-            marker: None,
-            items: Vec::new(),
-            budget: CloudListBudget::default(),
-            error: None,
-        };
+        let state = PagedList::new(
+            prefix.clone(),
+            AzureListContext {
+                base_url: self.base_url(),
+                sas_token: self.sas_token.clone(),
+            },
+        );
         self.executor.spawn_request_loop(
             state,
             prefix,
@@ -1139,37 +1112,8 @@ impl CloudBackend for AzureBackend {
                 }
                 Ok(request)
             },
-            |state, resp| {
-                if resp.status != 200 {
-                    state.error = Some(azure_response_error(&resp, "Azure LIST", false));
-                    return Ok(false);
-                }
-                let body = String::from_utf8_lossy(&resp.body);
-                super::validate_list_xml(&body, "EnumerationResults")?;
-                let page_items = extract_xml_tag_values(&body, "Name");
-                let marker = extract_xml_tag_values(&body, "NextMarker")
-                    .into_iter()
-                    .next()
-                    .filter(|marker| !marker.is_empty());
-                state.budget.record_page(&page_items, marker.as_deref())?;
-                state.items.extend(page_items);
-                state.marker = marker;
-                Ok(state.marker.is_some())
-            },
-            |ctx, result| match result {
-                Ok(state) if state.error.is_none() => CloudEvent::List {
-                    prefix: ctx,
-                    result: CloudOutcome::Ok(state.items),
-                },
-                Ok(mut state) => CloudEvent::List {
-                    prefix: ctx,
-                    result: CloudOutcome::Err(state.error.take().expect("checked list error")),
-                },
-                Err(err) => CloudEvent::List {
-                    prefix: ctx,
-                    result: CloudOutcome::Err(CloudError::from_protocol_or_timeout_error(err)),
-                },
-            },
+            |state, resp| state.accept_page(&resp),
+            finish_paged_list,
         );
     }
 
@@ -1194,19 +1138,14 @@ impl CloudBackend for AzureBackend {
         if let Some(timeout) = request_timeout {
             request = request.with_timeout(timeout);
         }
-        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status == 200 => CloudEvent::Head {
-                key: ctx,
-                result: object_metadata_from_response(&resp, None, "Azure"),
-            },
-            Ok(resp) => CloudEvent::Head {
-                key: ctx,
-                result: CloudOutcome::Err(azure_response_error(&resp, "Azure HEAD", false)),
-            },
-            Err(err) => CloudEvent::Head {
-                key: ctx,
-                result: CloudOutcome::Err(CloudError::from_transport_error(err)),
-            },
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::Head {
+            key: ctx,
+            result: map_response(
+                result,
+                |status| status == 200,
+                |resp| object_metadata_from_response(&resp, None, "Azure"),
+                |resp| azure_response_error(resp, "Azure HEAD", false),
+            ),
         };
         self.executor.spawn_request(request, key, callback, mapper);
     }
@@ -1242,37 +1181,44 @@ fn azure_response_error(
     operation: &str,
     conditional_mutation: bool,
 ) -> CloudError {
-    let body = String::from_utf8_lossy(&response.body);
-    let code = response
-        .headers
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("x-ms-error-code"))
-        .map(|(_, value)| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .or_else(|| extract_xml_tag_values(&body, "Code").into_iter().next());
-    let message = extract_xml_tag_values(&body, "Message").into_iter().next();
-    let detail = match (code.as_deref(), message.as_deref()) {
-        (Some(code), Some(message)) => format!("{operation}: {code}: {message}"),
-        (Some(code), None) => format!("{operation}: {code}"),
-        (None, _) => operation.to_string(),
-    };
-    let predicate_failed = code.as_deref().is_some_and(|code| {
-        code.eq_ignore_ascii_case("ConditionNotMet")
-            || code.eq_ignore_ascii_case("TargetConditionNotMet")
-    });
+    AzureDialect.response_error(response, operation, conditional_mutation)
+}
 
-    // A create guarded by If-None-Match: * that finds the blob already there
-    // fails with 409 BlobAlreadyExists rather than 412; it is the same lost
-    // race as a failed precondition on the other providers.
-    let create_conflict = response.status == 409
-        && code
-            .as_deref()
-            .is_some_and(|code| code.eq_ignore_ascii_case("BlobAlreadyExists"));
+struct AzureDialect;
 
-    if conditional_mutation && ((response.status == 412 && predicate_failed) || create_conflict) {
-        CloudError::PreconditionFailed(format!("status {}: {detail}", response.status))
-    } else {
-        CloudError::from_http_status(response.status, detail)
+impl ProviderDialect for AzureDialect {
+    fn put_ok(&self, status: u16) -> bool {
+        status == 201
+    }
+
+    fn delete_ok(&self, status: u16) -> bool {
+        matches!(status, 202 | 404)
+    }
+
+    fn error_parts(&self, response: &CloudResponse) -> (Option<String>, Option<String>) {
+        let body = String::from_utf8_lossy(&response.body);
+        let code = response
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("x-ms-error-code"))
+            .map(|(_, value)| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .or_else(|| extract_xml_tag_values(&body, "Code").into_iter().next());
+        (
+            code,
+            extract_xml_tag_values(&body, "Message").into_iter().next(),
+        )
+    }
+
+    fn precondition_failed(&self, status: u16, code: Option<&str>) -> bool {
+        let predicate_failed = code.is_some_and(|code| {
+            code.eq_ignore_ascii_case("ConditionNotMet")
+                || code.eq_ignore_ascii_case("TargetConditionNotMet")
+        });
+        // Azure reports an existing blob on create as a 409 rather than 412.
+        let create_conflict = status == 409
+            && code.is_some_and(|code| code.eq_ignore_ascii_case("BlobAlreadyExists"));
+        (status == 412 && predicate_failed) || create_conflict
     }
 }
 

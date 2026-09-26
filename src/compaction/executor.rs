@@ -11,6 +11,7 @@
 //! SST, the aggregate plan, or a second deduplicated output vector.
 
 use crate::common::MidgeResult;
+use crate::io::FsError;
 use crate::sst::traits::{RawSstVersion, RawSstVersionCursor, SstFactory};
 #[cfg(test)]
 use crate::types::EntryType;
@@ -526,7 +527,7 @@ impl Drop for OutputSetCleanup {
         }
         for path in &self.paths {
             let result = crate::sst::fs::fs_relative_sst_path(&self.fs, path)
-                .and_then(|fs_path| self.fs.remove_file(&fs_path).map_err(Into::into));
+                .and_then(|fs_path| self.fs.remove_file(&fs_path).map_err(FsError::into_midge));
             match result {
                 Ok(()) | Err(crate::common::MidgeError::NotFound) => {}
                 Err(error) => tracing::warn!(
@@ -615,11 +616,13 @@ fn finish_partition(
             if let Err(cleanup_error) = output_fs.remove_file(&fs_path) {
                 tracing::warn!(file = %path.display(), %cleanup_error, "retaining unverified compaction output");
             }
-            return Err(error.into());
+            return Err(error.into_midge());
         }
     };
     if output_size_limit.is_some_and(|limit| size > limit as u64) {
-        output_fs.remove_file(&fs_path)?;
+        output_fs
+            .remove_file(&fs_path)
+            .map_err(FsError::into_midge)?;
         return Err(crate::common::MidgeError::ResourceLimit(
             "encoded compaction partition exceeds its local staging limit".into(),
         ));
@@ -1838,6 +1841,7 @@ mod tests {
                 Ok(KeyState::Absent)
             }
 
+            #[cfg(test)]
             fn scan_range_state(
                 &self,
                 _start: Option<&[u8]>,
@@ -1857,6 +1861,7 @@ mod tests {
                 ])
             }
 
+            #[cfg(test)]
             fn scan_range_raw_state(
                 &self,
                 start: Option<&[u8]>,
@@ -1954,6 +1959,7 @@ mod tests {
                 Some(start.len().saturating_add(end.len()))
             }
 
+            #[cfg(test)]
             fn add_with_meta(
                 &mut self,
                 _key: &[u8],
@@ -2140,7 +2146,9 @@ mod tests {
         // Arrange
         let directory = tempfile::tempdir()?;
         let factory = crate::sst::FsSstFactoryIo::new(
-            std::sync::Arc::new(crate::io::RealFs::new(directory.path())?),
+            std::sync::Arc::new(
+                crate::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?,
+            ),
             4096,
         );
         let budget = crate::common::resource_budget::ResourceBudget::new(1024 * 1024);

@@ -229,6 +229,7 @@ impl CachePolicy for LruPolicy {
     }
 
     /// Clear all state
+    #[cfg(any(test, feature = "internal-testing"))]
     fn clear(&self) {
         let mut state = self.state.lock();
         *state = LruState::new();

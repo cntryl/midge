@@ -100,7 +100,7 @@ pub struct DurabilityCoordinator {
     cloud_seal_retry_needed: bool,
 
     /// Earliest time at which a failed cloud seal may be attempted again.
-    cloud_seal_retry_at: Option<Instant>,
+    cloud_seal_retry: crate::runtime::retry_schedule::RetrySchedule,
 
     /// Is `CloudAsync` enabled? (read from `wal_actor.is_cloud_async()`)
     is_cloud_async: bool,
@@ -121,7 +121,9 @@ impl DurabilityCoordinator {
             inflight: HashMap::new(),
             last_cloud_flush: Instant::now(),
             cloud_seal_retry_needed: false,
-            cloud_seal_retry_at: None,
+            cloud_seal_retry: crate::runtime::retry_schedule::RetrySchedule::new(
+                CLOUD_SEAL_RETRY_DELAY,
+            ),
             is_cloud_async,
             cloud_runtime_policy,
             waiters_fanned_out: AtomicU64::new(0),
@@ -137,7 +139,6 @@ impl DurabilityCoordinator {
         sequence: u64,
         requested_durability: ReadDurability,
         local_durable_seq: u64,
-        cloud_durable_seq: u64,
     ) -> bool {
         if sequence == u64::MAX {
             // "Latest available" reads proceed immediately; no durability guarantee needed
@@ -145,8 +146,7 @@ impl DurabilityCoordinator {
         }
 
         match requested_durability {
-            ReadDurability::Strict | ReadDurability::Steady => sequence <= local_durable_seq,
-            ReadDurability::CloudPersisted => sequence <= cloud_durable_seq,
+            ReadDurability::Strict => sequence <= local_durable_seq,
         }
     }
 
@@ -405,9 +405,7 @@ impl DurabilityCoordinator {
             return None;
         }
         if self.cloud_seal_retry_needed {
-            return Some(self.cloud_seal_retry_at.map_or(Duration::ZERO, |retry_at| {
-                retry_at.saturating_duration_since(Instant::now())
-            }));
+            return Some(self.cloud_seal_retry.remaining().unwrap_or(Duration::ZERO));
         }
 
         Some(
@@ -424,13 +422,13 @@ impl DurabilityCoordinator {
 
     pub fn defer_cloud_seal_retry(&mut self) {
         if self.cloud_seal_retry_needed {
-            self.cloud_seal_retry_at = Some(Instant::now() + CLOUD_SEAL_RETRY_DELAY);
+            self.cloud_seal_retry.defer();
         }
     }
 
     pub fn clear_cloud_seal_retry_needed(&mut self) {
         self.cloud_seal_retry_needed = false;
-        self.cloud_seal_retry_at = None;
+        self.cloud_seal_retry.clear();
     }
 
     #[must_use]
@@ -440,10 +438,7 @@ impl DurabilityCoordinator {
 
     #[must_use]
     pub fn cloud_seal_retry_due(&self) -> bool {
-        self.cloud_seal_retry_needed
-            && self
-                .cloud_seal_retry_at
-                .is_none_or(|retry_at| Instant::now() >= retry_at)
+        self.cloud_seal_retry_needed && self.cloud_seal_retry.is_ready()
     }
 
     /// Update last flush timestamp (call after `CloudAsync` segment is enqueued).

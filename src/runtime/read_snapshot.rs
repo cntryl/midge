@@ -1117,6 +1117,7 @@ mod l0_scan_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::io::FsError;
     use crate::sst::traits::SstFactory;
 
     #[test]
@@ -1138,7 +1139,7 @@ mod tests {
             Arc::new(SkipListMemtable::new()),
             Vec::new(),
             vec![file.clone()],
-            Arc::new(crate::io::RealFs::new(dir.path())?),
+            Arc::new(crate::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?),
             std::path::PathBuf::new(),
             false,
             0,
@@ -1156,7 +1157,7 @@ mod tests {
                 key_bounds_complete: false,
                 ..file
             }],
-            Arc::new(crate::io::RealFs::new(dir.path())?),
+            Arc::new(crate::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?),
             std::path::PathBuf::new(),
             false,
             0,
@@ -1169,7 +1170,8 @@ mod tests {
     fn should_detect_range_conflict_from_newer_range_tombstone_in_sst() -> MidgeResult<()> {
         // Arrange
         let dir = tempfile::tempdir()?;
-        let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new(dir.path())?);
+        let fs: Arc<dyn crate::io::Fs> =
+            Arc::new(crate::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?);
         let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096);
         let mut writer = factory.create()?;
         writer.add_with_meta(b"m", Some(b"old"), 5, EntryType::Put, None)?;
@@ -1211,7 +1213,8 @@ mod tests {
     {
         // Arrange
         let dir = tempfile::tempdir()?;
-        let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new(dir.path())?);
+        let fs: Arc<dyn crate::io::Fs> =
+            Arc::new(crate::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?);
         let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096);
         let mut files = Vec::new();
         for (name, value, op) in [
@@ -1270,7 +1273,7 @@ mod tests {
             Arc::new(SkipListMemtable::new()),
             Vec::new(),
             vec![files[1].clone(), duplicate],
-            Arc::new(crate::io::RealFs::new(dir.path())?),
+            Arc::new(crate::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?),
             std::path::PathBuf::new(),
             false,
             0,
@@ -1299,7 +1302,7 @@ mod tests {
             Arc::new(SkipListMemtable::new()),
             Vec::new(),
             expired_files,
-            Arc::new(crate::io::RealFs::new(dir.path())?),
+            Arc::new(crate::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?),
             std::path::PathBuf::new(),
             false,
             0,
@@ -1321,7 +1324,8 @@ mod tests {
     fn should_accept_identical_expired_value_replayed_in_memtable() -> MidgeResult<()> {
         // Arrange
         let dir = tempfile::tempdir()?;
-        let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new(dir.path())?);
+        let fs: Arc<dyn crate::io::Fs> =
+            Arc::new(crate::io::RealFs::new(dir.path()).map_err(FsError::into_midge)?);
         let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096);
         let mut writer = factory.create()?;
         writer.add_with_meta(b"key", Some(b"value"), 5, EntryType::Put, Some(1))?;
@@ -1371,7 +1375,8 @@ mod tests {
     fn should_use_shared_block_cache_for_snapshot_sst_reads() -> crate::common::MidgeResult<()> {
         // Arrange
         let temp_dir = tempfile::tempdir()?;
-        let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs: Arc<dyn crate::io::Fs> =
+            Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
         let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
         let mut writer = factory.create()?;
         writer.add_with_meta(b"cache-key", Some(b"cache-value"), 10, EntryType::Put, None)?;
@@ -1389,7 +1394,7 @@ mod tests {
             ..Default::default()
         };
         let read_resources = Arc::new(ReadResources::new(
-            Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+            Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
             std::path::PathBuf::new(),
             1024 * 1024,
             crate::sst::cache::CachePolicyType::Lru,
@@ -1398,7 +1403,7 @@ mod tests {
             Arc::new(SkipListMemtable::new()),
             Vec::new(),
             vec![file_meta],
-            Arc::new(crate::io::RealFs::new(temp_dir.path())?),
+            Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
             std::path::PathBuf::new(),
             false,
             0,
@@ -1470,7 +1475,8 @@ mod tests {
     ) -> crate::common::MidgeResult<()> {
         // Arrange
         let temp_dir = tempfile::tempdir()?;
-        let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs: Arc<dyn crate::io::Fs> =
+            Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
         let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096);
         let mut files = Vec::new();
         for index in 0..128_u64 {
@@ -1530,7 +1536,8 @@ mod tests {
     ) -> crate::common::MidgeResult<()> {
         // Arrange
         let temp_dir = tempfile::tempdir()?;
-        let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs: Arc<dyn crate::io::Fs> =
+            Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
         let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096);
         let mut files = Vec::new();
         for index in 0..64_u64 {
@@ -1621,7 +1628,8 @@ mod tests {
     ) -> crate::common::MidgeResult<()> {
         // Arrange
         let temp_dir = tempfile::tempdir()?;
-        let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs: Arc<dyn crate::io::Fs> =
+            Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
         let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096);
         let mut first_writer = factory.create()?;
         first_writer.add_with_meta(b"a", Some(b"first-a"), 1, EntryType::Put, None)?;
@@ -1691,7 +1699,8 @@ mod tests {
         // Arrange: model an older manifest whose second SST recorded only its
         // point key `m`, even though the SST itself contains [a, c) tombstone.
         let temp_dir = tempfile::tempdir()?;
-        let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new(temp_dir.path())?);
+        let fs: Arc<dyn crate::io::Fs> =
+            Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
         let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), 4096);
 
         let mut old_writer = factory.create()?;

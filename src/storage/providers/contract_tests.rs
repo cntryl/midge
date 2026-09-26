@@ -87,6 +87,7 @@ struct Provider {
     stale_version: Response,
     missing_object: Response,
     missing_container: Response,
+    empty_put_status: u16,
     list_pages: [(u16, String, String); 2],
 }
 
@@ -113,6 +114,7 @@ fn providers() -> Vec<Provider> {
             stale_version: xml_error(412, "PreconditionFailed"),
             missing_object: xml_error(404, "NoSuchKey"),
             missing_container: xml_error(404, "NoSuchBucket"),
+            empty_put_status: 200,
             list_pages: [
                 xml("<ListBucketResult><Contents><Key>p/a</Key></Contents><IsTruncated>true</IsTruncated><NextContinuationToken>t1</NextContinuationToken></ListBucketResult>"),
                 xml("<ListBucketResult><Contents><Key>p/b</Key></Contents><IsTruncated>false</IsTruncated></ListBucketResult>"),
@@ -127,6 +129,7 @@ fn providers() -> Vec<Provider> {
             stale_version: azure_error(412, "ConditionNotMet"),
             missing_object: azure_error(404, "BlobNotFound"),
             missing_container: azure_error(404, "ContainerNotFound"),
+            empty_put_status: 201,
             list_pages: [
                 xml("<EnumerationResults><Blobs><Blob><Name>p/a</Name></Blob></Blobs><NextMarker>m1</NextMarker></EnumerationResults>"),
                 xml("<EnumerationResults><Blobs><Blob><Name>p/b</Name></Blob></Blobs><NextMarker></NextMarker></EnumerationResults>"),
@@ -142,6 +145,7 @@ fn providers() -> Vec<Provider> {
             // GCS answers a generation match on a missing object with 412.
             missing_object: gcs_json_error(412, "conditionNotMet"),
             missing_container: gcs_json_error(404, "notFound"),
+            empty_put_status: 200,
             list_pages: [
                 json(r#"{"items":[{"name":"p/a"}],"nextPageToken":"t1"}"#),
                 json(r#"{"items":[{"name":"p/b"}]}"#),
@@ -156,6 +160,7 @@ fn providers() -> Vec<Provider> {
             stale_version: xml_error(412, "PreconditionFailed"),
             missing_object: xml_error(412, "PreconditionFailed"),
             missing_container: xml_error(404, "NoSuchBucket"),
+            empty_put_status: 200,
             list_pages: [
                 xml("<ListBucketResult><Contents><Key>p/a</Key></Contents><IsTruncated>true</IsTruncated><NextMarker>p/a</NextMarker></ListBucketResult>"),
                 xml("<ListBucketResult><Contents><Key>p/b</Key></Contents><IsTruncated>false</IsTruncated></ListBucketResult>"),
@@ -168,6 +173,7 @@ fn providers() -> Vec<Provider> {
 #[derive(Clone, Copy)]
 enum Op {
     CreateOnly,
+    PutEmpty,
     PutIfMatch,
     Get,
     Head,
@@ -187,6 +193,7 @@ fn submit(provider: &Provider, op: Op, backend: &dyn CloudBackend) -> mpsc::Rece
             vec![("If-None-Match".into(), "*".into())],
             tx,
         ),
+        Op::PutEmpty => backend.submit_put("p/object", Vec::new(), Vec::new(), tx),
         Op::PutIfMatch => backend.submit_put("p/object", b"value".to_vec(), if_match, tx),
         Op::Get => backend.submit_get("p/object", tx),
         Op::Head => backend.submit_head("p/object", tx),
@@ -371,6 +378,48 @@ fn should_report_precondition_failed_when_range_reading_a_stale_version_on_every
         response,
         &Class::PreconditionFailed,
     );
+}
+
+#[test]
+fn should_accept_exact_range_response_on_every_provider() {
+    // Arrange
+    let response = |provider: &Provider| {
+        let mut headers = vec![
+            ("Content-Range".to_string(), "bytes 0-4/100".to_string()),
+            ("ETag".to_string(), "v1".to_string()),
+        ];
+        if let Some(generation) = &provider.identity.generation {
+            headers.push(("x-goog-generation".to_string(), generation.clone()));
+        }
+        (206, headers, "01234".to_string())
+    };
+
+    // Act
+    // Assert
+    assert_every_provider(
+        "exact conditional range",
+        Op::RangeWithIdentity,
+        response,
+        &Class::Ok,
+    );
+}
+
+#[test]
+fn should_accept_empty_put_response_on_every_provider() {
+    // Arrange
+    let providers = providers();
+
+    for provider in &providers {
+        // Act
+        let result = outcome(
+            provider,
+            Op::PutEmpty,
+            &(provider.empty_put_status, Vec::new(), String::new()),
+        );
+
+        // Assert
+        assert_eq!(result, Class::Ok, "{}", provider.name);
+    }
 }
 
 #[test]

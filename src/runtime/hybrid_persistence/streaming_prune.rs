@@ -8,6 +8,7 @@ use super::{
     StorageObjectMetadata, ValidatedWalObject, ValidatedWalPruneCandidate, WalPublicationCatalog,
 };
 use crate::common::resource_budget::{ResourceBudget, ResourceReservation};
+use crate::io::FsError;
 use crate::io::{Fs, FsPath, OpenMode, OpenOptions};
 use crate::wal::recovery::streaming::{visit_sealed_wal_records_from, StreamingReplayLimits};
 use std::collections::BTreeMap;
@@ -232,19 +233,22 @@ fn validate_segment_progress(
         &mut || coverage.work.checkpoint(),
     )?;
     let path = FsPath::new(&entry.object_key);
-    let file = fs.open(
-        &path,
-        OpenOptions {
-            mode: OpenMode::ReadOnly,
-            create: false,
-            create_new: false,
-            truncate: false,
-        },
-    )?;
+    let file = fs
+        .open(
+            &path,
+            OpenOptions {
+                mode: OpenMode::ReadOnly,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        )
+        .map_err(FsError::into_midge)?;
     let _read_window = coverage
         .budget
         .reserve(coverage.window, "WAL retirement read window")?;
-    let file = crate::io::buffered_read::BufferedReadFile::new(file, coverage.window)?;
+    let file = crate::io::buffered_read::BufferedReadFile::new(file, coverage.window)
+        .map_err(FsError::into_midge)?;
     let SegmentProgress {
         prefix,
         operation,

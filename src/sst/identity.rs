@@ -14,6 +14,7 @@
 //! error kind their layer reports.
 
 use crate::common::{MidgeError, MidgeResult};
+use crate::io::FsError;
 use crate::sst::fs::SstFileSummary;
 use crate::types::ExpectedSst;
 
@@ -117,7 +118,7 @@ impl SstIdentity {
                 }
             }
             let want = std::cmp::min(READ_CHUNK_BYTES as u64, file_len - offset);
-            let chunk = file.read_at(offset, want)?;
+            let chunk = file.read_at(offset, want).map_err(FsError::into_midge)?;
             if chunk.len() as u64 != want {
                 return Err(MidgeError::Corruption(format!(
                     "short read at offset {offset}: wanted {want} bytes, read {}",

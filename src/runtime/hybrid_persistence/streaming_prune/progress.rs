@@ -5,6 +5,7 @@ use super::{
     Manifest, MidgeError, MidgeResult, OpenMode, OpenOptions, PublishedWalSegment, ResourceBudget,
     ResourceReservation, StorageObjectMetadata, ValidatedWalPruneCandidate, WalPublicationCatalog,
 };
+use crate::io::FsError;
 use crate::sst::fs::reader_io::{SstCursorPosition, SstSummaryProgress};
 
 /// A cooperative work target, separate from provider and shutdown deadlines.
@@ -93,18 +94,22 @@ impl CrcProgress {
         window: usize,
         checkpoint: &mut dyn FnMut() -> MidgeResult<()>,
     ) -> MidgeResult<()> {
-        let file = fs.open(
-            &FsPath::new(name),
-            OpenOptions {
-                mode: OpenMode::ReadOnly,
-                create: false,
-                create_new: false,
-                truncate: false,
-            },
-        )?;
+        let file = fs
+            .open(
+                &FsPath::new(name),
+                OpenOptions {
+                    mode: OpenMode::ReadOnly,
+                    create: false,
+                    create_new: false,
+                    truncate: false,
+                },
+            )
+            .map_err(FsError::into_midge)?;
         while self.offset < length {
             let count = (length - self.offset).min(window as u64);
-            let bytes = file.read_at(self.offset, count)?;
+            let bytes = file
+                .read_at(self.offset, count)
+                .map_err(FsError::into_midge)?;
             if bytes.len() as u64 != count {
                 return Err(MidgeError::Corruption(format!(
                     "cloud object '{name}' CRC range was truncated"

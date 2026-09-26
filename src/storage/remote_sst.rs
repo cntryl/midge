@@ -135,7 +135,15 @@ impl RemoteSstFs {
         let timeout = self
             .deadline
             .map_or(self.timeout, |deadline| deadline.clamp(self.timeout));
-        self.cloud.submit_range_head(&key, timeout, tx);
+        self.cloud.submit_range_head_request(
+            super::StorageRequest::new(
+                &key,
+                self.deadline
+                    .unwrap_or_else(|| crate::common::OperationDeadline::from_budget(timeout)),
+                timeout,
+            ),
+            tx,
+        );
         let metadata = match rx.recv_timeout(timeout) {
             Ok(StorageEvent::HeadComplete {
                 result: StorageOutcome::Ok(metadata),
@@ -222,8 +230,17 @@ impl File for Arc<RemoteSstFile> {
         if let Some(observer) = observation.observer {
             observer.remote_range_started();
         }
-        self.cloud
-            .submit_read_range(&self.key, offset, end, self.metadata.clone(), timeout, tx);
+        self.cloud.submit_range_read_request(
+            super::StorageRequest::new(
+                &self.key,
+                self.deadline
+                    .unwrap_or_else(|| crate::common::OperationDeadline::from_budget(timeout)),
+                timeout,
+            )
+            .with_precondition(super::StoragePrecondition::IfMatch(self.metadata.clone())),
+            offset..end,
+            tx,
+        );
         let bytes = rx
             .recv_timeout(timeout)
             .map_err(|error| match error {
@@ -254,9 +271,6 @@ impl File for Arc<RemoteSstFile> {
         Ok(self.metadata.size)
     }
     fn sync(&mut self, _dur: Durability) -> FsResult<()> {
-        Ok(())
-    }
-    fn close(self: Box<Self>) -> FsResult<()> {
         Ok(())
     }
 }
@@ -468,41 +482,16 @@ mod tests {
     }
 
     impl StorageBackend for RecordingBackend {
-        crate::storage::forward_storage_backend!(
-            inner;
-            submit_read_with_metadata,
-            submit_write_with_headers,
-            submit_delete_with_headers,
-            submit_head,
-        );
-
-        fn submit_write(&self, key: &str, bytes: Vec<u8>, callback: super::super::StorageCallback) {
-            self.inner.submit_write(key, bytes, callback);
-        }
-        fn submit_delete(&self, key: &str, callback: super::super::StorageCallback) {
-            self.inner.submit_delete(key, callback);
-        }
-        fn submit_range_head(
+        fn submit_range_read_request(
             &self,
-            key: &str,
-            timeout: Duration,
-            callback: super::super::StorageCallback,
-        ) {
-            self.inner.submit_range_head(key, timeout, callback);
-        }
-        fn submit_read_range(
-            &self,
-            key: &str,
-            start: u64,
-            end: u64,
-            expected: StorageObjectMetadata,
-            timeout: Duration,
+            request: super::super::StorageRequest,
+            range: std::ops::Range<u64>,
             callback: super::super::RangeReadCallback,
         ) {
             self.ranges
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push((start, end));
+                .push((range.start, range.end));
             match self
                 .next_range_failure
                 .swap(0, std::sync::atomic::Ordering::SeqCst)
@@ -519,7 +508,22 @@ mod tests {
                 _ => {}
             }
             self.inner
-                .submit_read_range(key, start, end, expected, timeout, callback);
+                .submit_range_read_request(request, range, callback);
+        }
+
+        crate::storage::forward_storage_backend!(
+            inner;
+            submit_write_request, submit_delete_request, submit_head_request, submit_range_head_request, submit_metadata_read_request,
+            submit_write_with_headers,
+            submit_delete_with_headers,
+            submit_head,
+        );
+
+        fn submit_write(&self, key: &str, bytes: Vec<u8>, callback: super::super::StorageCallback) {
+            self.inner.submit_write(key, bytes, callback);
+        }
+        fn submit_delete(&self, key: &str, callback: super::super::StorageCallback) {
+            self.inner.submit_delete(key, callback);
         }
     }
 
@@ -534,7 +538,7 @@ mod tests {
             ranges: std::sync::Mutex::new(Vec::new()),
             next_range_failure: std::sync::atomic::AtomicU8::new(0),
         });
-        let local_fs = Arc::new(crate::io::RealFs::new(local.path())?);
+        let local_fs = Arc::new(crate::io::RealFs::new(local.path()).map_err(FsError::into_midge)?);
         let factory = crate::sst::FsSstFactoryIo::new(local_fs.clone(), 4096);
         let mut writer = factory.create()?;
         writer.add_with_meta(b"key", Some(b"value"), 9, EntryType::Put, None)?;
@@ -604,16 +608,21 @@ mod tests {
         });
         let diagnostics = Arc::new(crate::diagnostics::RuntimeDiagnostics::default());
         let fs = RemoteSstFs::new(
-            Arc::new(crate::io::RealFs::new(local.path())?),
+            Arc::new(crate::io::RealFs::new(local.path()).map_err(FsError::into_midge)?),
             cloud.clone(),
             Duration::from_secs(5),
         )
         .with_read_observer(diagnostics.clone())
         .expect("remote observation view");
-        let file = fs.open(&FsPath::new("remote.sst"), read_options())?;
+        let file = fs
+            .open(&FsPath::new("remote.sst"), read_options())
+            .map_err(FsError::into_midge)?;
         // Act
-        assert_eq!(file.read_at(0, 3)?.as_ref(), b"abc");
-        assert!(file.read_at(0, 0)?.is_empty());
+        assert_eq!(
+            file.read_at(0, 3).map_err(FsError::into_midge)?.as_ref(),
+            b"abc"
+        );
+        assert!(file.read_at(0, 0).map_err(FsError::into_midge)?.is_empty());
         assert!(file.read_at(8, 1).is_err());
         for failure in 1..=3 {
             cloud
@@ -648,12 +657,15 @@ mod tests {
         std::fs::create_dir_all(remote.path().join("sst"))?;
         std::fs::write(remote.path().join("sst/remote.sst"), b"abcdefgh")?;
         let fs = RemoteSstFs::new(
-            Arc::new(crate::io::RealFs::new(local.path())?),
+            Arc::new(crate::io::RealFs::new(local.path()).map_err(FsError::into_midge)?),
             Arc::new(super::super::filesystem::FileSystem::new(remote.path())?),
             Duration::from_secs(5),
         );
         let path = FsPath::new("remote.sst");
-        let pinned = fs.immutable_read_view(&path)?.expect("pinned view");
+        let pinned = fs
+            .immutable_read_view(&path)
+            .map_err(FsError::into_midge)?
+            .expect("pinned view");
         let first = Arc::new(crate::diagnostics::RuntimeDiagnostics::default());
         let second = Arc::new(crate::diagnostics::RuntimeDiagnostics::default());
         let first_view = pinned
@@ -663,8 +675,16 @@ mod tests {
             .with_read_observer(second.clone())
             .expect("second observer");
         // Act
-        first_view.open(&path, read_options())?.read_at(0, 3)?;
-        second_view.open(&path, read_options())?.read_at(3, 5)?;
+        first_view
+            .open(&path, read_options())
+            .map_err(FsError::into_midge)?
+            .read_at(0, 3)
+            .map_err(FsError::into_midge)?;
+        second_view
+            .open(&path, read_options())
+            .map_err(FsError::into_midge)?
+            .read_at(3, 5)
+            .map_err(FsError::into_midge)?;
         // Assert
         assert_eq!(first.snapshot().remote_range_requests_total, 1);
         assert_eq!(first.snapshot().remote_range_bytes_total, 3);
@@ -688,7 +708,7 @@ mod tests {
         // Arrange
         let local = tempfile::tempdir()?;
         let remote = tempfile::tempdir()?;
-        let local_fs = Arc::new(crate::io::RealFs::new(local.path())?);
+        let local_fs = Arc::new(crate::io::RealFs::new(local.path()).map_err(FsError::into_midge)?);
         let factory = crate::sst::FsSstFactoryIo::new(local_fs.clone(), 4096);
         let mut writer = factory.create()?;
         writer.add_with_meta(b"key", Some(b"verified"), 9, EntryType::Put, None)?;
@@ -734,7 +754,7 @@ mod tests {
             ranges: std::sync::Mutex::new(Vec::new()),
             next_range_failure: std::sync::atomic::AtomicU8::new(0),
         });
-        let local_fs = Arc::new(crate::io::RealFs::new(local.path())?);
+        let local_fs = Arc::new(crate::io::RealFs::new(local.path()).map_err(FsError::into_midge)?);
         let factory = crate::sst::FsSstFactoryIo::new(local_fs.clone(), 4096);
         let mut writer = factory.create()?;
         for index in 0_u32..1024 {
@@ -803,20 +823,26 @@ mod tests {
         std::fs::create_dir_all(remote.path().join("sst"))?;
         std::fs::write(remote.path().join("sst/remote.sst"), b"old bytes")?;
         let fs = RemoteSstFs::new(
-            Arc::new(crate::io::RealFs::new(local.path())?),
+            Arc::new(crate::io::RealFs::new(local.path()).map_err(FsError::into_midge)?),
             cloud,
             Duration::from_secs(5),
         );
         let path = FsPath::new("remote.sst");
-        let pinned = fs.immutable_read_view(&path)?.unwrap();
+        let pinned = fs
+            .immutable_read_view(&path)
+            .map_err(FsError::into_midge)?
+            .unwrap();
         let opts = OpenOptions {
             mode: OpenMode::ReadOnly,
             create: false,
             create_new: false,
             truncate: false,
         };
-        let file = pinned.open(&path, opts)?;
-        assert_eq!(file.read_at(0, 3)?.as_ref(), b"old");
+        let file = pinned.open(&path, opts).map_err(FsError::into_midge)?;
+        assert_eq!(
+            file.read_at(0, 3).map_err(FsError::into_midge)?.as_ref(),
+            b"old"
+        );
         // Act
         std::fs::write(remote.path().join("replacement"), b"new bytes")?;
         std::fs::rename(
@@ -835,7 +861,7 @@ mod tests {
         let local = tempfile::tempdir()?;
         let remote = tempfile::tempdir()?;
         let cloud = Arc::new(super::super::filesystem::FileSystem::new(remote.path())?);
-        let fs = Arc::new(crate::io::RealFs::new(local.path())?);
+        let fs = Arc::new(crate::io::RealFs::new(local.path()).map_err(FsError::into_midge)?);
         let factory = crate::sst::FsSstFactoryIo::new(fs.clone(), 4096);
         let mut writer = factory.create()?;
         writer.add_with_meta(b"key", Some(b"value"), 9, EntryType::Put, None)?;
@@ -866,7 +892,7 @@ mod tests {
     impl PublicationRecordingFs {
         fn new(root: &Path) -> crate::common::MidgeResult<Self> {
             Ok(Self {
-                inner: crate::io::RealFs::new(root)?,
+                inner: crate::io::RealFs::new(root).map_err(FsError::into_midge)?,
                 renames: std::sync::Mutex::new(Vec::new()),
                 directory_syncs: std::sync::Mutex::new(Vec::new()),
             })

@@ -105,7 +105,6 @@ mod tests {
             entropy: 0.0,
             common_prefix_len: 0,
             key_length_variance: 0.0,
-            prefix_heat: Vec::new(),
             key_count: 1000,
         }
     }

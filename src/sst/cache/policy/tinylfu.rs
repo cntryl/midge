@@ -135,6 +135,7 @@ impl CachePolicy for TinyLfuPolicy {
         self.state.lock().forget(&key);
     }
 
+    #[cfg(any(test, feature = "internal-testing"))]
     fn clear(&self) {
         let mut state = self.state.lock();
         state.entries.clear();

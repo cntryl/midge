@@ -1,5 +1,6 @@
 use super::{KeyState, SstFileIo, SstPointReadStats};
 use crate::common::MidgeResult;
+#[cfg(test)]
 use bytes::Bytes;
 
 impl SstFileIo {
@@ -73,6 +74,7 @@ impl crate::sst::SstStateReader for SstFileIo {
         )?))
     }
 
+    #[cfg(test)]
     fn scan_range_raw_state(
         &self,
         start: Option<&[u8]>,
@@ -146,11 +148,13 @@ impl crate::sst::SstStateReader for SstFileIo {
             .map(|(state, _stats)| state)
     }
 
+    #[cfg(test)]
     fn get_state_at(&self, key: &[u8], snapshot_seq: u64) -> MidgeResult<crate::types::KeyState> {
         let now_millis = crate::common::time::unix_time_millis();
         self.get_state_at_with_time(key, snapshot_seq, now_millis)
     }
 
+    #[cfg(test)]
     fn scan_range_state_with_time(
         &self,
         start: Option<&[u8]>,
@@ -200,6 +204,7 @@ impl crate::sst::SstStateReader for SstFileIo {
         Ok(result)
     }
 
+    #[cfg(test)]
     fn scan_range_state(
         &self,
         start: Option<&[u8]>,

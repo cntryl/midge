@@ -1015,44 +1015,91 @@ impl FailedWalProof {
     }
 }
 
+/// Manifest SSTs this process has read in full and matched against their
+/// recorded size and CRC32C, keyed by that identity.
+///
+/// SST names are never reused, so a file proven once stays the file its
+/// manifest entry names; later passes re-check only its length. Block
+/// checksums still guard every block a proof reads. An entry whose recorded
+/// identity changes is proven again.
+#[derive(Debug, Default)]
+pub(crate) struct ProvenSstIdentities(std::collections::HashSet<(String, u64, u32)>);
+
 pub(crate) struct VerifiedManifestWalCoverage<'a> {
-    sst_dir: std::path::PathBuf,
+    fs: Arc<dyn crate::io::Fs>,
+    sst_prefix: &'a str,
     manifest: &'a Manifest,
+    proven: std::cell::RefCell<&'a mut ProvenSstIdentities>,
     readers: std::cell::RefCell<
         std::collections::HashMap<String, Option<Box<dyn crate::sst::traits::SstReaderExt>>>,
     >,
 }
 
 impl<'a> VerifiedManifestWalCoverage<'a> {
-    pub(crate) fn open(sst_dir: &Path, manifest: &'a Manifest) -> Self {
+    /// A prover reading the manifest's SSTs through `fs`, where each file
+    /// lives at `sst_prefix` followed by its name.
+    pub(crate) fn open(
+        fs: Arc<dyn crate::io::Fs>,
+        sst_prefix: &'a str,
+        manifest: &'a Manifest,
+        proven: &'a mut ProvenSstIdentities,
+    ) -> Self {
         Self {
-            sst_dir: sst_dir.to_path_buf(),
+            fs,
+            sst_prefix,
             manifest,
+            proven: std::cell::RefCell::new(proven),
             readers: std::cell::RefCell::new(std::collections::HashMap::new()),
         }
     }
 
     fn state_for(&self, file: &FileMeta, key: &[u8]) -> Option<crate::types::KeyState> {
         let mut readers = self.readers.borrow_mut();
-        let reader = readers.entry(file.name.clone()).or_insert_with(|| {
-            let name = crate::cloud_layout::PersistedSstName::parse(&file.name).ok()?;
-            let bytes = std::fs::read(self.sst_dir.join(name.as_str())).ok()?;
-            if file.size_bytes != 0
-                && u64::try_from(bytes.len()).unwrap_or(u64::MAX) != file.size_bytes
-            {
-                return None;
-            }
-            if file
-                .content_crc32c
-                .is_none_or(|expected| crc32c::crc32c(&bytes) != expected)
-            {
-                return None;
-            }
-            let fs = crate::io::RealFs::new(&self.sst_dir).ok()?;
-            let factory = crate::sst::FsSstFactoryIo::new(Arc::new(fs), 64 * 1024);
-            crate::sst::SstFactory::open(&factory, Path::new(&file.name)).ok()
-        });
+        let reader = readers
+            .entry(file.name.clone())
+            .or_insert_with(|| self.open_verified(file));
         reader.as_ref()?.get_state(key).ok()
+    }
+
+    /// A reader over `file`, or `None` when it cannot be shown to be the SST
+    /// the manifest names: unreadable, a different length, no recorded
+    /// CRC32C, or a CRC32C that does not match.
+    fn open_verified(&self, file: &FileMeta) -> Option<Box<dyn crate::sst::traits::SstReaderExt>> {
+        let name = crate::cloud_layout::PersistedSstName::parse(&file.name).ok()?;
+        let expected_crc = file.content_crc32c?;
+        let path = crate::io::FsPath::new(format!("{}{}", self.sst_prefix, name.as_str()));
+        let pinned = self
+            .fs
+            .immutable_read_view(&path)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| Arc::clone(&self.fs));
+        let identity = (file.name.clone(), file.size_bytes, expected_crc);
+        let len = pinned.metadata(&path).ok()?.len;
+        if file.size_bytes != 0 && len != file.size_bytes {
+            return None;
+        }
+        if !self.proven.borrow().0.contains(&identity) {
+            let handle = pinned
+                .open(
+                    &path,
+                    crate::io::OpenOptions {
+                        mode: crate::io::OpenMode::ReadOnly,
+                        create: false,
+                        create_new: false,
+                        truncate: false,
+                    },
+                )
+                .ok()?;
+            let actual =
+                crate::sst::identity::SstIdentity::of_file(handle.as_ref(), len, None).ok()?;
+            if actual.crc32c != expected_crc {
+                return None;
+            }
+            self.proven.borrow_mut().0.insert(identity);
+        }
+        let factory = crate::sst::FsSstFactoryIo::new(pinned, 64 * 1024);
+        crate::sst::SstFactory::open(&factory, Path::new(&path.0)).ok()
     }
 
     /// Why `records` are not all exactly in the manifest's SSTs, or `None`

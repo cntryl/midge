@@ -4,6 +4,56 @@ use std::sync::{
     mpsc,
 };
 
+#[test]
+fn should_fail_closed_when_mock_cannot_match_generation_precondition() {
+    // Arrange
+    let storage = CloudStorage::new(Arc::new(MockCloudBackend::new()), "tenant".into());
+    let (seed_tx, seed_rx) = mpsc::channel();
+    storage.submit_put("object", b"old".to_vec(), Vec::new(), seed_tx);
+    assert!(matches!(
+        seed_rx.recv().expect("seed completion"),
+        CloudEvent::Put {
+            result: CloudOutcome::Ok(()),
+            ..
+        }
+    ));
+    let request = crate::storage::StorageRequest::new(
+        "object",
+        crate::common::OperationDeadline::unbounded(),
+        std::time::Duration::from_secs(1),
+    )
+    .with_precondition(crate::storage::StoragePrecondition::IfMatch(
+        crate::storage::StorageObjectMetadata {
+            size: 3,
+            etag: "ignored-when-generation-is-present".into(),
+            generation: Some("42".into()),
+        },
+    ));
+
+    // Act
+    let (write_tx, write_rx) = mpsc::channel();
+    StorageBackend::submit_write_request(&storage, request, b"new".to_vec(), write_tx);
+    let write = write_rx.recv().expect("conditional write completion");
+    let (read_tx, read_rx) = mpsc::channel();
+    storage.submit_get("object", read_tx);
+
+    // Assert
+    assert!(matches!(
+        write,
+        StorageEvent::WriteComplete {
+            result: StorageOutcome::Err(ref error),
+            ..
+        } if error.kind() == crate::storage::StorageErrorKind::PreconditionFailed
+    ));
+    assert!(matches!(
+        read_rx.recv().expect("read completion"),
+        CloudEvent::Get {
+            result: CloudOutcome::Ok(ref bytes),
+            ..
+        } if bytes == b"old"
+    ));
+}
+
 #[derive(Default)]
 struct ConditionalPutOnlyBackend {
     puts: AtomicUsize,
@@ -303,10 +353,13 @@ fn should_not_classify_disconnected_cloud_callback_as_timeout() {
     let (sender, receiver) = mpsc::channel();
 
     // Act
-    StorageBackend::submit_head_with_timeout(
+    StorageBackend::submit_head_request(
         &storage,
-        "metadata/manifest.json",
-        std::time::Duration::from_secs(1),
+        crate::storage::StorageRequest::new(
+            "metadata/manifest.json",
+            crate::common::OperationDeadline::unbounded(),
+            std::time::Duration::from_secs(1),
+        ),
         sender,
     );
     let event = receiver
@@ -337,18 +390,24 @@ fn should_not_submit_cloud_operations_given_operation_timeout_is_zero() {
     let (head_sender, head_receiver) = mpsc::channel();
 
     // Act
-    StorageBackend::submit_write_with_headers_and_timeout(
+    StorageBackend::submit_write_request(
         &storage,
-        "metadata/manifest.json",
+        crate::storage::StorageRequest::new(
+            "metadata/manifest.json",
+            crate::common::OperationDeadline::unbounded(),
+            std::time::Duration::ZERO,
+        )
+        .with_precondition(crate::storage::StoragePrecondition::IfAbsent),
         b"manifest".to_vec(),
-        vec![("If-None-Match".to_string(), "*".to_string())],
-        std::time::Duration::ZERO,
         write_sender,
     );
-    StorageBackend::submit_head_with_timeout(
+    StorageBackend::submit_head_request(
         &storage,
-        "metadata/manifest.json",
-        std::time::Duration::ZERO,
+        crate::storage::StorageRequest::new(
+            "metadata/manifest.json",
+            crate::common::OperationDeadline::unbounded(),
+            std::time::Duration::ZERO,
+        ),
         head_sender,
     );
     let write = write_receiver
@@ -700,10 +759,13 @@ fn should_apply_operation_timeout_to_cloud_head_adapter_when_shorter_than_config
 
     // Act
     let started = std::time::Instant::now();
-    StorageBackend::submit_head_with_timeout(
+    StorageBackend::submit_head_request(
         &storage,
-        "metadata/manifest.json",
-        std::time::Duration::from_millis(5),
+        crate::storage::StorageRequest::new(
+            "metadata/manifest.json",
+            crate::common::OperationDeadline::unbounded(),
+            std::time::Duration::from_millis(5),
+        ),
         sender,
     );
     let event = receiver.recv().expect("receive bounded adapter result");
@@ -731,12 +793,15 @@ fn should_apply_operation_timeout_to_cloud_cas_adapter_when_shorter_than_configu
 
     // Act
     let started = std::time::Instant::now();
-    StorageBackend::submit_write_with_headers_and_timeout(
+    StorageBackend::submit_write_request(
         &storage,
-        "metadata/manifest.json",
+        crate::storage::StorageRequest::new(
+            "metadata/manifest.json",
+            crate::common::OperationDeadline::unbounded(),
+            std::time::Duration::from_millis(5),
+        )
+        .with_precondition(crate::storage::StoragePrecondition::IfAbsent),
         b"manifest".to_vec(),
-        vec![("If-None-Match".to_string(), "*".to_string())],
-        std::time::Duration::from_millis(5),
         sender,
     );
     let event = receiver.recv().expect("receive bounded adapter result");
@@ -1508,12 +1573,21 @@ fn should_bound_provider_put_by_caller_timeout_when_write_is_unreserved() {
     let (sender, receiver) = mpsc::channel();
 
     // Act
-    StorageBackend::submit_write_with_headers_and_timeout(
+    StorageBackend::submit_write_request(
         &storage,
-        "metadata/registry.json",
+        crate::storage::StorageRequest::new(
+            "metadata/registry.json",
+            crate::common::OperationDeadline::unbounded(),
+            std::time::Duration::from_millis(200),
+        )
+        .with_precondition(crate::storage::StoragePrecondition::IfMatch(
+            crate::storage::StorageObjectMetadata {
+                size: 0,
+                etag: "\"e1\"".to_string(),
+                generation: None,
+            },
+        )),
         b"payload".to_vec(),
-        vec![("If-Match".to_string(), "\"e1\"".to_string())],
-        std::time::Duration::from_millis(200),
         sender,
     );
 
@@ -1586,10 +1660,13 @@ fn should_bound_provider_read_requests_by_caller_timeout() {
     let (list_sender, list_receiver) = mpsc::channel();
 
     // Act
-    StorageBackend::submit_head_with_timeout(
+    StorageBackend::submit_head_request(
         &storage,
-        "sst/000001.sst",
-        std::time::Duration::from_millis(250),
+        crate::storage::StorageRequest::new(
+            "sst/000001.sst",
+            crate::common::OperationDeadline::unbounded(),
+            std::time::Duration::from_millis(250),
+        ),
         head_sender,
     );
     storage.submit_list("sst/", list_sender);

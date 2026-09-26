@@ -508,9 +508,6 @@ mod tests {
                 Err(FsError::Io("rollback sync failed".into()))
             }
         }
-        fn close(self: Box<Self>) -> FsResult<()> {
-            Ok(())
-        }
     }
 
     #[test]
@@ -563,10 +560,6 @@ mod tests {
 
         fn sync(&mut self, _durability: Durability) -> FsResult<()> {
             Err(FsError::NoSpace("No space left on device".to_string()))
-        }
-
-        fn close(self: Box<Self>) -> FsResult<()> {
-            Ok(())
         }
     }
 

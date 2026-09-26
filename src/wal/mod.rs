@@ -61,6 +61,7 @@ pub fn segment_object_key(segment_id: u64, writer_epoch: u64) -> String {
 }
 
 /// Alias for callers that operate specifically on cloud WAL objects.
+#[cfg(test)]
 #[must_use]
 pub fn cloud_segment_file_name(segment_id: u64) -> String {
     segment_file_name(segment_id)

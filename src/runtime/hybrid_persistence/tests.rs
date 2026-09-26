@@ -605,7 +605,7 @@ fn should_publish_sst_without_duplicate_local_copy_when_ephemeral_cache_is_enabl
     // Assert
     assert_eq!(read_cloud_object(&storage, &key), bytes);
     let exists = HybridStorage::object_exists_in_backend_within(
-        storage.local_store(),
+        &storage.local_store(),
         &key,
         storage.callback_timeout(),
         &crate::common::OperationDeadline::unbounded(),
@@ -1346,6 +1346,59 @@ impl PanickingWriteBackend {
 }
 
 impl StorageBackend for PanickingWriteBackend {
+    fn submit_range_read_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        range: std::ops::Range<u64>,
+        callback: crate::storage::RangeReadCallback,
+    ) {
+        let _ = (request, range, callback);
+        panic!("test backend received undeclared range-read capability");
+    }
+
+    fn submit_range_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        let _ = (request, callback);
+        panic!("test backend received undeclared range HEAD capability");
+    }
+
+    fn submit_metadata_read_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::MetadataReadCallback,
+    ) {
+        let _ = (request, callback);
+        panic!("test backend received undeclared metadata-read capability");
+    }
+
+    fn submit_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
+    }
+
+    fn submit_delete_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_delete_to_legacy(self, request, callback);
+    }
+
+    fn submit_write_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        data: Vec<u8>,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_write_to_legacy(self, request, data, callback);
+    }
+
     fn submit_write(&self, _key: &str, _data: Vec<u8>, _callback: StorageCallback) {
         self.write_attempts.fetch_add(1, Ordering::SeqCst);
         panic!("injected cloud upload worker panic");
@@ -1370,6 +1423,59 @@ impl StorageBackend for PanickingWriteBackend {
 }
 
 impl StorageBackend for AlwaysFailingWriteBackend {
+    fn submit_range_read_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        range: std::ops::Range<u64>,
+        callback: crate::storage::RangeReadCallback,
+    ) {
+        let _ = (request, range, callback);
+        panic!("test backend received undeclared range-read capability");
+    }
+
+    fn submit_range_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        let _ = (request, callback);
+        panic!("test backend received undeclared range HEAD capability");
+    }
+
+    fn submit_metadata_read_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::MetadataReadCallback,
+    ) {
+        let _ = (request, callback);
+        panic!("test backend received undeclared metadata-read capability");
+    }
+
+    fn submit_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
+    }
+
+    fn submit_delete_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_delete_to_legacy(self, request, callback);
+    }
+
+    fn submit_write_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        data: Vec<u8>,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_write_to_legacy(self, request, data, callback);
+    }
+
     fn submit_write(&self, key: &str, _data: Vec<u8>, callback: StorageCallback) {
         self.write_attempts.fetch_add(1, Ordering::SeqCst);
         let _ = callback.send(StorageEvent::WriteComplete {
@@ -1429,6 +1535,59 @@ impl BudgetConsumingSstPublicationBackend {
 }
 
 impl StorageBackend for BudgetConsumingSstPublicationBackend {
+    fn submit_range_read_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        range: std::ops::Range<u64>,
+        callback: crate::storage::RangeReadCallback,
+    ) {
+        let _ = (request, range, callback);
+        panic!("test backend received undeclared range-read capability");
+    }
+
+    fn submit_range_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        let _ = (request, callback);
+        panic!("test backend received undeclared range HEAD capability");
+    }
+
+    fn submit_metadata_read_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::MetadataReadCallback,
+    ) {
+        let _ = (request, callback);
+        panic!("test backend received undeclared metadata-read capability");
+    }
+
+    fn submit_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
+    }
+
+    fn submit_delete_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_delete_to_legacy(self, request, callback);
+    }
+
+    fn submit_write_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        data: Vec<u8>,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_write_to_legacy(self, request, data, callback);
+    }
+
     fn submit_write(&self, _key: &str, _data: Vec<u8>, callback: StorageCallback) {
         self.retain_callback(callback);
     }
@@ -1491,22 +1650,67 @@ impl RacingReadDeleteBackend {
 }
 
 impl StorageBackend for RacingReadDeleteBackend {
-    fn submit_read_with_metadata(
+    fn submit_range_read_request(
         &self,
-        _key: &str,
-        _timeout: Duration,
+        request: crate::storage::StorageRequest,
+        range: std::ops::Range<u64>,
+        callback: crate::storage::RangeReadCallback,
+    ) {
+        let _ = (request, range, callback);
+        panic!("test backend received undeclared range-read capability");
+    }
+
+    fn submit_range_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        let _ = (request, callback);
+        panic!("test backend received undeclared range HEAD capability");
+    }
+
+    fn submit_metadata_read_request(
+        &self,
+        request: crate::storage::StorageRequest,
         callback: crate::storage::MetadataReadCallback,
     ) {
-        let snapshot = self.object.lock().clone();
-        self.read_started.wait();
-        self.release_read.wait();
-        let result = snapshot
-            .map(|bytes| {
-                let metadata = Self::metadata(&bytes);
-                (bytes, metadata)
-            })
-            .ok_or_else(|| crate::storage::StorageError::not_found("object"));
-        let _ = callback.send(result);
+        crate::storage::dispatch_metadata_read_request(request, callback, |_, _, callback| {
+            let snapshot = self.object.lock().clone();
+            self.read_started.wait();
+            self.release_read.wait();
+            let result = snapshot
+                .map(|bytes| {
+                    let metadata = Self::metadata(&bytes);
+                    (bytes, metadata)
+                })
+                .ok_or_else(|| crate::storage::StorageError::not_found("object"));
+            let _ = callback.send(result);
+        });
+    }
+
+    fn submit_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
+    }
+
+    fn submit_delete_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_delete_to_legacy(self, request, callback);
+    }
+
+    fn submit_write_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        data: Vec<u8>,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_write_to_legacy(self, request, data, callback);
     }
 
     fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback) {
@@ -1562,6 +1766,59 @@ impl NeverCompletesBackend {
 }
 
 impl StorageBackend for NeverCompletesBackend {
+    fn submit_range_read_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        range: std::ops::Range<u64>,
+        callback: crate::storage::RangeReadCallback,
+    ) {
+        let _ = (request, range, callback);
+        panic!("test backend received undeclared range-read capability");
+    }
+
+    fn submit_range_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        let _ = (request, callback);
+        panic!("test backend received undeclared range HEAD capability");
+    }
+
+    fn submit_metadata_read_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::MetadataReadCallback,
+    ) {
+        let _ = (request, callback);
+        panic!("test backend received undeclared metadata-read capability");
+    }
+
+    fn submit_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
+    }
+
+    fn submit_delete_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_delete_to_legacy(self, request, callback);
+    }
+
+    fn submit_write_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        data: Vec<u8>,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_write_to_legacy(self, request, data, callback);
+    }
+
     fn submit_write(&self, _key: &str, _data: Vec<u8>, callback: StorageCallback) {
         self.retain_callback(callback);
     }
@@ -1620,9 +1877,14 @@ fn write_local_object(storage: &HybridStorage, key: &str, data: Vec<u8>) {
 
 fn read_local_object(storage: &HybridStorage, key: &str) -> Vec<u8> {
     let (tx, rx) = std::sync::mpsc::channel();
-    storage
-        .local_store()
-        .submit_read_with_metadata(key, Duration::from_secs(1), tx);
+    storage.local_store().submit_metadata_read_request(
+        crate::storage::StorageRequest::new(
+            key,
+            crate::common::OperationDeadline::unbounded(),
+            Duration::from_secs(1),
+        ),
+        tx,
+    );
     match rx.recv_timeout(Duration::from_secs(1)) {
         Ok(Ok((data, _metadata))) => data,
         other => panic!("local read for '{key}' failed: {other:?}"),
@@ -1631,9 +1893,14 @@ fn read_local_object(storage: &HybridStorage, key: &str) -> Vec<u8> {
 
 fn read_cloud_object(storage: &HybridStorage, key: &str) -> Vec<u8> {
     let (tx, rx) = std::sync::mpsc::channel();
-    storage
-        .sst_store()
-        .submit_read_with_metadata(key, Duration::from_secs(1), tx);
+    storage.sst_store().submit_metadata_read_request(
+        crate::storage::StorageRequest::new(
+            key,
+            crate::common::OperationDeadline::unbounded(),
+            Duration::from_secs(1),
+        ),
+        tx,
+    );
     match rx.recv_timeout(Duration::from_secs(1)) {
         Ok(Ok((data, _metadata))) => data,
         other => panic!("cloud read for '{key}' failed: {other:?}"),
@@ -2018,7 +2285,7 @@ fn should_not_overwrite_remote_object_given_different_content_when_authoritative
         "authoritative SST upload must not overwrite an existing remote object"
     );
     let local_entry = HybridStorage::object_exists_in_backend_within(
-        storage.local_store(),
+        &storage.local_store(),
         &key,
         storage.callback_timeout(),
         &crate::common::OperationDeadline::unbounded(),
@@ -3110,7 +3377,13 @@ mod recovery_wal_coverage {
         };
         let mut manifest = crate::metadata::Manifest::default();
         manifest.files.push(file);
-        VerifiedManifestWalCoverage::open(dir.path(), &manifest).covers_wal_record(record)
+        VerifiedManifestWalCoverage::open(
+            Arc::new(crate::io::RealFs::new(dir.path()).expect("open SST directory")),
+            "",
+            &manifest,
+            &mut ProvenSstIdentities::default(),
+        )
+        .covers_wal_record(record)
     }
 
     #[test]
@@ -3209,8 +3482,13 @@ mod recovery_wal_coverage {
         put.expiration = Some(4_102_444_800_000);
 
         // Act
-        let skipped =
-            VerifiedManifestWalCoverage::open(dir.path(), &manifest).covers_wal_record(&put);
+        let skipped = VerifiedManifestWalCoverage::open(
+            Arc::new(crate::io::RealFs::new(dir.path()).expect("open SST directory")),
+            "",
+            &manifest,
+            &mut ProvenSstIdentities::default(),
+        )
+        .covers_wal_record(&put);
 
         // Assert
         assert!(!skipped);
@@ -3232,8 +3510,13 @@ mod recovery_wal_coverage {
         let put = record(crate::wal::WalOpKind::Put, Some(b"v"), 7);
 
         // Act
-        let skipped =
-            VerifiedManifestWalCoverage::open(dir.path(), &manifest).covers_wal_record(&put);
+        let skipped = VerifiedManifestWalCoverage::open(
+            Arc::new(crate::io::RealFs::new(dir.path()).expect("open SST directory")),
+            "",
+            &manifest,
+            &mut ProvenSstIdentities::default(),
+        )
+        .covers_wal_record(&put);
 
         // Assert
         assert!(!skipped);
@@ -3269,8 +3552,13 @@ mod recovery_wal_coverage {
         put.expiration = expiration;
 
         // Act
-        let skipped =
-            VerifiedManifestWalCoverage::open(dir.path(), &manifest).covers_wal_record(&put);
+        let skipped = VerifiedManifestWalCoverage::open(
+            Arc::new(crate::io::RealFs::new(dir.path()).expect("open SST directory")),
+            "",
+            &manifest,
+            &mut ProvenSstIdentities::default(),
+        )
+        .covers_wal_record(&put);
 
         // Assert
         assert!(skipped);
@@ -3295,8 +3583,13 @@ mod recovery_wal_coverage {
         let put = record(crate::wal::WalOpKind::Put, Some(b"v"), 7);
 
         // Act
-        let skipped =
-            VerifiedManifestWalCoverage::open(dir.path(), &manifest).covers_wal_record(&put);
+        let skipped = VerifiedManifestWalCoverage::open(
+            Arc::new(crate::io::RealFs::new(dir.path()).expect("open SST directory")),
+            "",
+            &manifest,
+            &mut ProvenSstIdentities::default(),
+        )
+        .covers_wal_record(&put);
 
         // Assert
         assert!(!skipped);
@@ -3318,8 +3611,13 @@ mod recovery_wal_coverage {
         let put = record(crate::wal::WalOpKind::Put, Some(b"v"), 12);
 
         // Act
-        let skipped =
-            VerifiedManifestWalCoverage::open(dir.path(), &manifest).covers_wal_record(&put);
+        let skipped = VerifiedManifestWalCoverage::open(
+            Arc::new(crate::io::RealFs::new(dir.path()).expect("open SST directory")),
+            "",
+            &manifest,
+            &mut ProvenSstIdentities::default(),
+        )
+        .covers_wal_record(&put);
 
         // Assert
         assert!(!skipped);
@@ -3340,10 +3638,169 @@ mod recovery_wal_coverage {
         let marker = record(crate::wal::WalOpKind::TxnBatch, Some(b"v"), 7);
 
         // Act
-        let skipped =
-            VerifiedManifestWalCoverage::open(dir.path(), &manifest).covers_wal_record(&marker);
+        let skipped = VerifiedManifestWalCoverage::open(
+            Arc::new(crate::io::RealFs::new(dir.path()).expect("open SST directory")),
+            "",
+            &manifest,
+            &mut ProvenSstIdentities::default(),
+        )
+        .covers_wal_record(&marker);
 
         // Assert
         assert!(!skipped);
+    }
+
+    /// Counts whole-file reads through the injected filesystem. Persistent
+    /// handles are refused so every SST read goes through `open`.
+    struct WholeFileReadCountingFs {
+        inner: crate::io::RealFs,
+        whole_file_reads: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    struct WholeFileReadCountingFile<'a> {
+        inner: Box<dyn crate::io::File + 'a>,
+        whole_file_reads: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl crate::io::File for WholeFileReadCountingFile<'_> {
+        fn read_at(&self, offset: u64, len: u64) -> crate::io::FsResult<bytes::Bytes> {
+            if offset == 0 && len == self.inner.len()? {
+                self.whole_file_reads
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            self.inner.read_at(offset, len)
+        }
+
+        fn write_at(&mut self, offset: u64, data: bytes::Bytes) -> crate::io::FsResult<()> {
+            self.inner.write_at(offset, data)
+        }
+
+        fn append(&mut self, data: bytes::Bytes) -> crate::io::FsResult<u64> {
+            self.inner.append(data)
+        }
+
+        fn len(&self) -> crate::io::FsResult<u64> {
+            self.inner.len()
+        }
+
+        fn sync(&mut self, durability: crate::io::Durability) -> crate::io::FsResult<()> {
+            self.inner.sync(durability)
+        }
+    }
+
+    impl crate::io::Fs for WholeFileReadCountingFs {
+        fn host_addressing(&self) -> Option<crate::io::HostAddressing<'_>> {
+            self.inner.host_addressing()
+        }
+
+        fn open(
+            &self,
+            path: &crate::io::FsPath,
+            options: crate::io::OpenOptions,
+        ) -> crate::io::FsResult<Box<dyn crate::io::File + '_>> {
+            Ok(Box::new(WholeFileReadCountingFile {
+                inner: self.inner.open(path, options)?,
+                whole_file_reads: Arc::clone(&self.whole_file_reads),
+            }))
+        }
+
+        fn open_persistent_handle(
+            &self,
+            _path: &crate::io::FsPath,
+            _options: crate::io::OpenOptions,
+        ) -> crate::io::FsResult<Box<dyn crate::io::File>> {
+            Err(crate::io::FsError::Unsupported(
+                "test filesystem counts path-based reads only".to_string(),
+            ))
+        }
+
+        fn remove_file(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+            self.inner.remove_file(path)
+        }
+
+        fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
+            self.inner.exists(path)
+        }
+
+        fn metadata(
+            &self,
+            path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<crate::io::traits::Metadata> {
+            self.inner.metadata(path)
+        }
+
+        fn create_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+            self.inner.create_dir_all(path)
+        }
+
+        fn list_dir(
+            &self,
+            path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
+            self.inner.list_dir(path)
+        }
+
+        fn remove_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+            self.inner.remove_dir_all(path)
+        }
+
+        fn sync_dir(
+            &self,
+            path: &crate::io::FsPath,
+            durability: crate::io::Durability,
+        ) -> crate::io::FsResult<()> {
+            self.inner.sync_dir(path, durability)
+        }
+
+        fn rename_atomic(
+            &self,
+            from: &crate::io::FsPath,
+            to: &crate::io::FsPath,
+        ) -> crate::io::FsResult<()> {
+            self.inner.rename_atomic(from, to)
+        }
+    }
+
+    #[test]
+    fn should_read_each_covering_sst_at_most_once_per_local_prune_pass() {
+        // Arrange: the covering SST lives behind the runtime's injected
+        // filesystem, under its `sst/` prefix, not in a directory the prover
+        // may read directly.
+        let root = tempfile::tempdir().expect("create database root");
+        let sst_dir = root.path().join("sst");
+        std::fs::create_dir_all(&sst_dir).expect("create SST directory");
+        let bytes = value_sst(b"k", b"v", 7, None);
+        let mut manifest = crate::metadata::Manifest::default();
+        manifest
+            .files
+            .push(manifest_file(&sst_dir, "000001.sst", &bytes, 7, false));
+        let whole_file_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let fs: Arc<dyn crate::io::Fs> = Arc::new(WholeFileReadCountingFs {
+            inner: crate::io::RealFs::new(root.path()).expect("open database root"),
+            whole_file_reads: Arc::clone(&whole_file_reads),
+        });
+        let put = record(crate::wal::WalOpKind::Put, Some(b"v"), 7);
+        let mut proven = ProvenSstIdentities::default();
+
+        // Act: two prune passes, each with its own prover.
+        let covered: Vec<bool> = (0..2)
+            .map(|_| {
+                VerifiedManifestWalCoverage::open(
+                    Arc::clone(&fs),
+                    crate::cloud_layout::CloudObjectLayout::SST_PREFIX,
+                    &manifest,
+                    &mut proven,
+                )
+                .covers_wal_record(&put)
+            })
+            .collect();
+
+        // Assert: both passes prove coverage through the injected filesystem,
+        // and only the first reads the whole SST to check its identity.
+        assert_eq!(covered, vec![true, true]);
+        assert_eq!(
+            whole_file_reads.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
     }
 }

@@ -574,10 +574,6 @@ impl crate::wal::WalWriter for FsyncFailingWriter {
         self.inner.append_batch(records)
     }
 
-    fn flush(&self) -> MidgeResult<()> {
-        self.inner.flush()
-    }
-
     fn sync(&self) -> MidgeResult<()> {
         Err(MidgeError::Io(std::io::Error::other(
             "injected fsync failure",
@@ -586,10 +582,6 @@ impl crate::wal::WalWriter for FsyncFailingWriter {
 
     fn current_pos(&self) -> u64 {
         self.inner.current_pos()
-    }
-
-    fn close(&self) -> MidgeResult<()> {
-        self.inner.close()
     }
 }
 
@@ -686,7 +678,7 @@ fn should_fence_rotation_when_active_segment_is_missing_with_pending_records() -
     assert!(wal_actor.is_fenced());
     assert!(state.persistence_anomaly_detected());
     assert_eq!(state.wal.current_segment_id, 4);
-    assert_eq!(state.wal.local_durable_seq, 0);
+    assert_eq!(state.wal.frontiers.local_durable(), 0);
     assert!(matches!(
         begin_sync_for_test(&mut wal_actor, &mut state),
         Err(MidgeError::RecoveryFailed(_))
@@ -770,7 +762,7 @@ fn should_fence_strict_transaction_when_sync_fails_after_records_are_appended() 
     assert!(matches!(error, MidgeError::Io(_)));
     assert!(wal_actor.is_fenced());
     assert!(state.persistence_anomaly_detected());
-    assert_eq!(state.wal.local_durable_seq, 0);
+    assert_eq!(state.wal.frontiers.local_durable(), 0);
     assert!(state
         .get_cf(0)
         .expect("default column family")
@@ -1065,7 +1057,7 @@ fn should_durably_append_strict_transaction_group_once_before_memtable_apply() -
     assert_eq!(wal_actor.append_calls(), 1);
     assert_eq!(wal_actor.sync_calls(), 1);
     assert_eq!(state.wal.pending_writes, 0);
-    assert_eq!(state.wal.local_durable_seq, state.sequence);
+    assert_eq!(state.wal.frontiers.local_durable(), state.sequence);
     let entries = state
         .get_cf(0)
         .expect("default column family")
@@ -1730,7 +1722,7 @@ fn should_fence_each_append_path_after_physical_commit_before_accounting() -> Mi
         assert!(actor.is_fenced());
         assert!(state.persistence_anomaly_detected());
         assert_eq!(state.wal.pending_writes, 0);
-        assert_eq!(state.wal.local_durable_seq, 0);
+        assert_eq!(state.wal.frontiers.local_durable(), 0);
         assert!(state
             .get_cf(0)
             .expect("default column family")
@@ -1856,7 +1848,7 @@ fn should_fence_filesystem_wal_when_replacement_writer_open_fails_after_rename()
     wal_actor.append_prepared_transactions(&mut state, vec![prepared])?;
     let ticket = seal_ticket_for_test(&wal_actor, &state);
     wal_actor.flush_for_cloud_upload(&mut state, &ticket)?;
-    let durable_before = state.wal.local_durable_seq;
+    let durable_before = state.wal.frontiers.local_durable();
     let pending_before = state.wal.pending_writes;
     let entries_before = state
         .get_cf(0)
@@ -1910,7 +1902,7 @@ fn should_fence_filesystem_wal_when_replacement_writer_open_fails_after_rename()
     assert!(state.persistence_anomaly_detected());
     assert_eq!(state.sequence, sequence_before_rejected);
     assert_eq!(state.wal.current_segment_id, 7);
-    assert_eq!(state.wal.local_durable_seq, durable_before);
+    assert_eq!(state.wal.frontiers.local_durable(), durable_before);
     assert_eq!(state.wal.pending_writes, pending_before);
     assert_eq!(
         state
@@ -1922,8 +1914,12 @@ fn should_fence_filesystem_wal_when_replacement_writer_open_fails_after_rename()
         entries_before,
         "rejected write must not mutate the memtable"
     );
-    assert!(fs.exists(&FsPath::new(crate::wal::segment_file_name(7)))?);
-    assert!(!fs.exists(&FsPath::new(crate::wal::ACTIVE_FILE_NAME))?);
+    assert!(fs
+        .exists(&FsPath::new(crate::wal::segment_file_name(7)))
+        .map_err(FsError::into_midge)?);
+    assert!(!fs
+        .exists(&FsPath::new(crate::wal::ACTIVE_FILE_NAME))
+        .map_err(FsError::into_midge)?);
 
     let best_effort = wal_actor.append_transaction(
         &mut state,
@@ -1987,9 +1983,6 @@ impl File for DurableSyncCountingFile<'_> {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         self.inner.sync(dur)
-    }
-    fn close(self: Box<Self>) -> FsResult<()> {
-        self.inner.close()
     }
 }
 
@@ -2322,7 +2315,7 @@ fn sst_opens_to_validate(keys_per_file: usize) -> MidgeResult<usize> {
     use crate::sst::SstFactory;
     let temp = tempfile::tempdir()?;
     let counting = Arc::new(SstOpenCountingFs {
-        inner: crate::io::RealFs::new(temp.path())?,
+        inner: crate::io::RealFs::new(temp.path()).map_err(FsError::into_midge)?,
         sst_opens: std::sync::atomic::AtomicUsize::new(0),
     });
     let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
@@ -2461,5 +2454,33 @@ fn should_fence_as_local_failure_when_wal_state_changes_under_a_sync_receipt() -
     assert!(matches!(error, MidgeError::Internal(_)), "{error:?}");
     assert!(wal_actor.is_fenced());
     assert!(!wal_actor.authority_lost());
+    Ok(())
+}
+
+#[test]
+fn should_not_regress_local_durable_seq_when_older_sync_receipt_completes_after_newer(
+) -> MidgeResult<()> {
+    // Arrange: the local frontier has already reached 20.
+    let mut state = RuntimeState::new("/tmp/test_midge_frontier_regression".into(), true);
+    let mut actor = WalActor::new(
+        state.wal_dir.clone(),
+        DurabilityPolicy::BestEffort,
+        BatchConfig::default(),
+        true,
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    state.wal.frontiers.set_last_synced_for_test(20);
+    state.wal.frontiers.set_local_durable_for_test(20);
+
+    // Act: a seal receipt for an older segment completes afterwards.
+    actor.complete_cloud_upload_seal(
+        &mut state,
+        crate::runtime::actors::wal::WalRotationReceipt::for_test(1, 2, 10),
+    );
+
+    // Assert
+    assert_eq!(state.wal.frontiers.local_durable(), 20);
+    assert_eq!(state.wal.frontiers.last_synced(), 20);
     Ok(())
 }

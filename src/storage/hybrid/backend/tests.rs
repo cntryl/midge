@@ -589,13 +589,58 @@ impl BudgetConsumingProofBackend {
 }
 
 impl StorageBackend for BudgetConsumingProofBackend {
-    fn submit_read_with_metadata(
+    fn submit_range_read_request(
         &self,
-        _key: &str,
-        _timeout: Duration,
+        request: crate::storage::StorageRequest,
+        range: std::ops::Range<u64>,
+        callback: crate::storage::RangeReadCallback,
+    ) {
+        let _ = (request, range, callback);
+        panic!("test backend received undeclared range-read capability");
+    }
+
+    fn submit_range_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        let _ = (request, callback);
+        panic!("test backend received undeclared range HEAD capability");
+    }
+
+    fn submit_metadata_read_request(
+        &self,
+        request: crate::storage::StorageRequest,
         callback: crate::storage::MetadataReadCallback,
     ) {
-        self.retained_metadata_callbacks.lock().push(callback);
+        crate::storage::dispatch_metadata_read_request(request, callback, |_, _, callback| {
+            self.retained_metadata_callbacks.lock().push(callback);
+        });
+    }
+
+    fn submit_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
+    }
+
+    fn submit_delete_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_delete_to_legacy(self, request, callback);
+    }
+
+    fn submit_write_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        data: Vec<u8>,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_write_to_legacy(self, request, data, callback);
     }
 
     fn submit_write(&self, key: &str, _data: Vec<u8>, callback: StorageCallback) {
@@ -648,6 +693,59 @@ impl NeverCompletesBackend {
 }
 
 impl StorageBackend for NeverCompletesBackend {
+    fn submit_range_read_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        range: std::ops::Range<u64>,
+        callback: crate::storage::RangeReadCallback,
+    ) {
+        let _ = (request, range, callback);
+        panic!("test backend received undeclared range-read capability");
+    }
+
+    fn submit_range_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        let _ = (request, callback);
+        panic!("test backend received undeclared range HEAD capability");
+    }
+
+    fn submit_metadata_read_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::MetadataReadCallback,
+    ) {
+        let _ = (request, callback);
+        panic!("test backend received undeclared metadata-read capability");
+    }
+
+    fn submit_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_head_to_legacy(self, request, callback);
+    }
+
+    fn submit_delete_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_delete_to_legacy(self, request, callback);
+    }
+
+    fn submit_write_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        data: Vec<u8>,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_write_to_legacy(self, request, data, callback);
+    }
+
     fn submit_write(&self, _key: &str, _data: Vec<u8>, callback: StorageCallback) {
         self.retain_callback(callback);
     }

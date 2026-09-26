@@ -938,9 +938,6 @@ mod lock_init_failure_tests {
         fn sync(&mut self, dur: Durability) -> FsResult<()> {
             self.inner.sync(dur)
         }
-        fn close(self: Box<Self>) -> FsResult<()> {
-            self.inner.close()
-        }
     }
 
     /// Fails writes to the leader lock file while `fail_lock_writes` is set.

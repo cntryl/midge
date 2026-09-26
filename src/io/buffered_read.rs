@@ -92,7 +92,4 @@ impl File for BufferedReadFile<'_> {
     fn sync(&mut self, _durability: Durability) -> FsResult<()> {
         Err(read_only_error())
     }
-    fn close(self: Box<Self>) -> FsResult<()> {
-        self.inner.close()
-    }
 }

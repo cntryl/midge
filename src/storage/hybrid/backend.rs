@@ -1,14 +1,8 @@
-//! Hybrid storage backend - combines local and cloud storage
+//! Hybrid storage backend for cloud object publication and bounded uploads.
 //!
 //! CRITICAL ARCHITECTURE:
 //!
-//! `HybridStorage` has TWO FORMAT-NEUTRAL ROLES:
-//!
-//! 1. OBJECT STORAGE:
-//!    - `submit_read/write/delete/list` for keyed bytes
-//!    - Local + cloud merging/fallback
-//!
-//! 2. BOUNDED UPLOAD PIPELINE:
+//! `HybridStorage` owns the bounded upload pipeline:
 //!    - `enqueue_object_upload()` - queue an explicit object key
 //!    - `process_uploads()` - initiate cloud uploads
 //!    - retain/coalesce terminal acknowledgements without unbounded channels
@@ -117,7 +111,8 @@ pub use crate::types::HybridStorageBudgetSnapshot;
 /// - Emits `CloudAck` when cloud confirms durability
 /// - Handles retries and failure reporting
 struct ObjectStores {
-    local: Arc<dyn StorageBackend>,
+    /// Legacy local immutable copies are swept during startup, then this handle is retired.
+    local: parking_lot::RwLock<Option<Arc<dyn StorageBackend>>>,
     sst: Arc<dyn StorageBackend>,
     wal: Arc<dyn StorageBackend>,
     control: Arc<dyn StorageBackend>,
@@ -319,7 +314,7 @@ impl HybridStorage {
         Self {
             counters,
             stores: ObjectStores {
-                local,
+                local: parking_lot::RwLock::new(Some(local)),
                 sst: cloud,
                 wal: wal_cloud,
                 control: control_cloud,
@@ -386,6 +381,15 @@ impl HybridStorage {
                 ))
             })
     }
+    fn local_store_if_active(&self) -> Option<Arc<dyn StorageBackend>> {
+        self.stores.local.read().clone()
+    }
+
+    /// Startup calls this only after legacy local SST sweep and WAL replay.
+    pub(crate) fn retire_legacy_local_store(&self) {
+        debug_assert!(self.ephemeral_sst_cache_enabled());
+        self.stores.local.write().take();
+    }
 }
 
 /// Raw per-class object-store handles for tests that assert object placement.
@@ -398,8 +402,8 @@ impl HybridStorage {
         self.callback_timeout
     }
 
-    pub(crate) fn local_store(&self) -> &Arc<dyn StorageBackend> {
-        &self.stores.local
+    pub(crate) fn local_store(&self) -> Arc<dyn StorageBackend> {
+        self.local_store_if_active().expect("local store active")
     }
 
     pub(crate) fn sst_store(&self) -> &Arc<dyn StorageBackend> {

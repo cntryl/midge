@@ -167,7 +167,7 @@ impl ManifestStore {
         match self.fs.metadata(&FsPath::new(name)) {
             Ok(metadata) => Ok(metadata.len),
             Err(FsError::NotFound(_)) => Ok(0),
-            Err(error) => Err(error.into()),
+            Err(error) => Err(error.into_midge()),
         }
     }
 }

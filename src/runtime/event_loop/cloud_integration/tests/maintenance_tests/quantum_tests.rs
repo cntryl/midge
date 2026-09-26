@@ -1,7 +1,5 @@
 use super::*;
-use crate::storage::{
-    MetadataReadCallback, RangeReadCallback, StorageBackend, StorageCallback, StorageObjectMetadata,
-};
+use crate::storage::{StorageBackend, StorageCallback};
 
 struct SlowWalRanges {
     inner: Arc<crate::storage::filesystem::FileSystem>,
@@ -9,43 +7,67 @@ struct SlowWalRanges {
 }
 
 impl StorageBackend for SlowWalRanges {
-    fn submit_read_range(
+    fn submit_range_read_request(
         &self,
-        key: &str,
-        start: u64,
-        end: u64,
-        expected: StorageObjectMetadata,
-        timeout: Duration,
-        callback: RangeReadCallback,
+        request: crate::storage::StorageRequest,
+        range: std::ops::Range<u64>,
+        callback: crate::storage::RangeReadCallback,
     ) {
-        if key.starts_with("wal/") {
+        if request.key.starts_with("wal/") {
             let inner = self.inner.clone();
-            let key = key.to_string();
             let calls = self.calls.clone();
             std::thread::spawn(move || {
                 // One successful provider request exceeds the cooperative
                 // quantum but fits its unchanged three-second hard deadline.
                 std::thread::sleep(Duration::from_millis(250));
                 calls.fetch_add(1, Ordering::AcqRel);
-                inner.submit_read_range(&key, start, end, expected, timeout, callback);
+                inner.submit_range_read_request(request, range, callback);
             });
         } else {
             self.inner
-                .submit_read_range(key, start, end, expected, timeout, callback);
+                .submit_range_read_request(request, range, callback);
         }
     }
 
-    fn submit_range_head(&self, key: &str, timeout: Duration, callback: StorageCallback) {
-        self.inner.submit_range_head(key, timeout, callback);
+    fn submit_range_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: StorageCallback,
+    ) {
+        self.inner.submit_range_head_request(request, callback);
     }
 
-    fn submit_read_with_metadata(
+    fn submit_metadata_read_request(
         &self,
-        key: &str,
-        timeout: Duration,
-        callback: MetadataReadCallback,
+        request: crate::storage::StorageRequest,
+        callback: crate::storage::MetadataReadCallback,
     ) {
-        self.inner.submit_read_with_metadata(key, timeout, callback);
+        self.inner.submit_metadata_read_request(request, callback);
+    }
+
+    fn submit_head_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: StorageCallback,
+    ) {
+        self.inner.submit_head_request(request, callback);
+    }
+
+    fn submit_delete_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: StorageCallback,
+    ) {
+        self.inner.submit_delete_request(request, callback);
+    }
+
+    fn submit_write_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        data: Vec<u8>,
+        callback: crate::storage::StorageCallback,
+    ) {
+        crate::storage::test_support::forward_typed_write_to_legacy(self, request, data, callback);
     }
 
     fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback) {
@@ -102,7 +124,7 @@ fn should_release_shared_maintenance_turn_when_retirement_proof_outlasts_its_qua
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
     hybrid.enable_ephemeral_sst_cache(64 * 1024 * 1024);
-    el.hybrid_storage = Some(hybrid);
+    el.cloud_coordinator.hybrid_storage = Some(hybrid);
     el.runtime_response_timeout = Duration::from_secs(3);
     el.shutdown_cloud_drain_timeout = Duration::from_secs(3);
     el.compaction_actor
@@ -112,19 +134,21 @@ fn should_release_shared_maintenance_turn_when_retirement_proof_outlasts_its_qua
     let flush_id = el.state.get_cf(0).unwrap().immutable_flushes[0].flush_id;
     el.state.mark_immutable_flush_failed(flush_id).unwrap();
     el.state.make_immutable_flush_retry_due(0);
-    el.cloud_maintenance.next =
+    el.cloud_coordinator.cloud_maintenance.next =
         crate::runtime::event_loop::cloud_maintenance::MaintenanceTask::WalRetirement;
 
     // Act: the proof has far more ranges than fit a turn. Observe actual
     // worker completion, rather than checking the configured duration alone.
     let started = Instant::now();
     el.schedule_next_flush_worker();
-    assert!(el.cloud_wal_prune_worker.is_some());
+    assert!(el.cloud_coordinator.cloud_wal_prune_worker.is_some());
     assert!(matches!(
         el.available_compaction_memory(),
         Err(crate::common::MidgeError::Busy(_))
     ));
-    while el.cloud_wal_prune_worker.is_some() && started.elapsed() < Duration::from_millis(1500) {
+    while el.cloud_coordinator.cloud_wal_prune_worker.is_some()
+        && started.elapsed() < Duration::from_millis(1500)
+    {
         el.tick_hybrid_storage();
         std::thread::sleep(Duration::from_millis(2));
     }
@@ -132,12 +156,16 @@ fn should_release_shared_maintenance_turn_when_retirement_proof_outlasts_its_qua
     // Assert: successful slow reads count as progress, then due work gets a
     // turn while the unfinished WAL proof retains its recovery authority.
     assert!(
-        el.cloud_wal_prune_worker.is_none(),
+        el.cloud_coordinator.cloud_wal_prune_worker.is_none(),
         "retirement held the shared turn for {:?}",
         started.elapsed()
     );
     assert!(cloud.calls.load(Ordering::Acquire) > 0);
-    assert!(el.cloud_wal.acked_segments.contains_key(&81));
+    assert!(el
+        .cloud_coordinator
+        .cloud_wal
+        .acked_segments
+        .contains_key(&81));
     assert!(remote_wal_path_for_test(&el, 81).exists());
     assert_compaction_shares_retained_budget(&mut el)?;
     el.schedule_next_flush_worker();
@@ -148,12 +176,20 @@ fn should_release_shared_maintenance_turn_when_retirement_proof_outlasts_its_qua
     assert_eq!(el.state.active_compactions.load(Ordering::Acquire), 1);
     complete_compaction(&mut el, &worker);
     assert!(el.state.manifest.files.iter().any(|file| file.level > 0));
-    assert!(el.cloud_wal.acked_segments.contains_key(&81));
+    assert!(el
+        .cloud_coordinator
+        .cloud_wal
+        .acked_segments
+        .contains_key(&81));
     Ok(())
 }
 
 fn assert_compaction_shares_retained_budget(el: &mut EventLoop) -> crate::common::MidgeResult<()> {
-    let retained = el.cloud_wal_prune_progress.retained_bytes().unwrap();
+    let retained = el
+        .cloud_coordinator
+        .cloud_wal_prune_progress
+        .retained_bytes()
+        .unwrap();
     assert!(retained > 0, "the yielded proof must keep resumable state");
     let configured = el.compaction_actor.compaction_memory_limit();
     let target = el.compaction_actor.target_sst_size();
@@ -190,7 +226,12 @@ fn should_preserve_full_compaction_allowance_when_no_proof_state_is_retained(
     let prepared = el.prepare_compaction_plan_for_launch(plan)?;
 
     // Assert
-    assert_eq!(el.cloud_wal_prune_progress.retained_bytes(), Some(0));
+    assert_eq!(
+        el.cloud_coordinator
+            .cloud_wal_prune_progress
+            .retained_bytes(),
+        Some(0)
+    );
     assert_eq!(
         prepared.compaction_memory_limit,
         el.compaction_actor.compaction_memory_limit()

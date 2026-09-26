@@ -213,7 +213,14 @@ impl HybridStorage {
         timeout: Duration,
     ) -> Result<StorageObjectMetadata, crate::storage::StorageError> {
         let (tx, rx) = mpsc::channel();
-        backend.submit_range_head(key, timeout, tx);
+        backend.submit_range_head_request(
+            crate::storage::StorageRequest::new(
+                key,
+                OperationDeadline::from_budget(timeout),
+                timeout,
+            ),
+            tx,
+        );
         match rx.recv_timeout(timeout) {
             Ok(StorageEvent::HeadComplete {
                 result: StorageOutcome::Ok(metadata),
@@ -264,7 +271,10 @@ impl HybridStorage {
         let read_timeout =
             Self::deadline_timeout(key, "GET during object proof", callback_timeout, deadline)?;
         let (tx, rx) = mpsc::channel();
-        backend.submit_read_with_metadata(key, read_timeout, tx);
+        backend.submit_metadata_read_request(
+            crate::storage::StorageRequest::new(key, *deadline, read_timeout),
+            tx,
+        );
         let (bytes, metadata) = rx
             .recv_timeout(read_timeout)
             .map_err(|error| match error {
@@ -388,8 +398,10 @@ impl HybridStorage {
         let timeout =
             Self::deadline_timeout(key, "optional object HEAD", self.callback_timeout, deadline)?;
         let (tx, rx) = std::sync::mpsc::channel();
-        self.cloud_backend_for_key(key)
-            .submit_head_with_timeout(key, timeout, tx);
+        self.cloud_backend_for_key(key).submit_head_request(
+            crate::storage::StorageRequest::new(key, *deadline, timeout),
+            tx,
+        );
         match rx.recv_timeout(timeout) {
             Ok(StorageEvent::HeadComplete {
                 result: StorageOutcome::Ok(_),
@@ -469,8 +481,8 @@ impl HybridStorage {
         // Nothing has been submitted yet, so every failure here is definite.
         Self::deadline_timeout(key, "remote CAS", self.callback_timeout, deadline)
             .map_err(RemoteCasFailure::not_committed)?;
-        let headers = if let Some(expected) = expected {
-            crate::storage::cloud::object_match_precondition_headers(
+        let precondition = if let Some(expected) = expected {
+            crate::storage::conditional_object_identity(
                 &expected.etag,
                 expected.generation.as_deref(),
             )
@@ -478,16 +490,21 @@ impl HybridStorage {
                 RemoteCasFailure::not_committed(crate::common::MidgeError::InvalidArgument(
                     format!("remote CAS for '{key}' requires a non-empty identity token"),
                 ))
-            })?
+            })?;
+            crate::storage::StoragePrecondition::IfMatch(expected.clone())
         } else {
-            vec![("If-None-Match".to_string(), "*".to_string())]
+            crate::storage::StoragePrecondition::IfAbsent
         };
         let expected_bytes = data.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         let timeout = Self::deadline_timeout(key, "remote CAS", self.callback_timeout, deadline)
             .map_err(RemoteCasFailure::not_committed)?;
-        self.cloud_backend_for_key(key)
-            .submit_write_with_headers_and_timeout(key, data, headers, timeout, tx);
+        self.cloud_backend_for_key(key).submit_write_request(
+            crate::storage::StorageRequest::new(key, *deadline, self.callback_timeout)
+                .with_precondition(precondition),
+            data,
+            tx,
+        );
         match rx.recv_timeout(timeout) {
             Ok(StorageEvent::WriteComplete {
                 result: StorageOutcome::Ok(()),

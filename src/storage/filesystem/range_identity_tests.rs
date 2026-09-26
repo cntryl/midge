@@ -6,7 +6,14 @@ const KEY: &str = "immutable.sst";
 
 fn head(backend: &FileSystem) -> StorageObjectMetadata {
     let (tx, rx) = mpsc::channel();
-    backend.submit_range_head(KEY, Duration::from_secs(2), tx);
+    backend.submit_range_head_request(
+        crate::storage::StorageRequest::new(
+            KEY,
+            crate::common::OperationDeadline::from_budget(Duration::from_secs(2)),
+            Duration::from_secs(2),
+        ),
+        tx,
+    );
     match rx.recv().expect("range HEAD response") {
         StorageEvent::HeadComplete {
             result: StorageOutcome::Ok(metadata),
@@ -21,7 +28,16 @@ fn read(
     metadata: StorageObjectMetadata,
 ) -> Result<Vec<u8>, crate::storage::StorageError> {
     let (tx, rx) = mpsc::channel();
-    backend.submit_read_range(KEY, 1, 4, metadata, Duration::from_secs(2), tx);
+    backend.submit_range_read_request(
+        crate::storage::StorageRequest::new(
+            KEY,
+            crate::common::OperationDeadline::from_budget(Duration::from_secs(2)),
+            Duration::from_secs(2),
+        )
+        .with_precondition(crate::storage::StoragePrecondition::IfMatch(metadata)),
+        1..4,
+        tx,
+    );
     rx.recv().expect("range read response")
 }
 

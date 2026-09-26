@@ -56,6 +56,7 @@ fn should_preserve_resource_limit_when_compaction_launch_is_refused(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     event_loop
+        .cloud_coordinator
         .hybrid_storage
         .as_ref()
         .expect("cloud storage")
@@ -439,7 +440,7 @@ fn should_hold_cloud_frontier_at_local_recovery_gap_until_resumed_upload_is_ackn
 
     let mut state = RuntimeState::new(db_path.clone(), false);
     state.sequence = 3;
-    state.wal.local_durable_seq = 3;
+    state.wal.frontiers.set_local_durable_for_test(3);
     state.reset_cloud_durable_sequence_for_recovery();
     let local = Arc::new(
         crate::storage::filesystem::FileSystem::new(db_path.join("hybrid_local"))
@@ -475,8 +476,15 @@ fn should_hold_cloud_frontier_at_local_recovery_gap_until_resumed_upload_is_ackn
     )?;
 
     // Assert
-    assert_eq!(event_loop.state.wal.cloud_durable_seq, 1);
-    assert_eq!(event_loop.cloud_wal.upload_backlog.get(&2), Some(&2));
+    assert_eq!(event_loop.state.wal.frontiers.cloud_durable(), 1);
+    assert_eq!(
+        event_loop
+            .cloud_coordinator
+            .cloud_wal
+            .upload_backlog
+            .get(&2),
+        Some(&2)
+    );
     event_loop.drain_cloud_wal_upload_backlog();
     assert_eq!(hybrid_storage.pending_upload_count(), 1);
     assert_eq!(
@@ -494,7 +502,7 @@ fn should_hold_cloud_frontier_at_local_recovery_gap_until_resumed_upload_is_ackn
         segment_id: 2,
         max_sequence: 2,
     });
-    assert_eq!(event_loop.state.wal.cloud_durable_seq, 3);
+    assert_eq!(event_loop.state.wal.frontiers.cloud_durable(), 3);
     Ok(())
 }
 
@@ -745,14 +753,18 @@ fn should_not_treat_blocked_auto_flush_candidate_as_standalone_actionable_work()
         crate::storage::hybrid::policy::StorageBudgetPolicy::new(1_000_000),
     )
     .expect("create cloud event loop");
-    let hybrid = event_loop.hybrid_storage.as_ref().expect("hybrid storage");
+    let hybrid = event_loop
+        .cloud_coordinator
+        .hybrid_storage
+        .as_ref()
+        .expect("hybrid storage");
     let reservation = hybrid
         .reserve_for_flush_with_token(960_000)
         .expect("test flush reservation");
     hybrid.flush_completed_with_token(reservation, 960_000);
 
-    event_loop.state.memtable_flush_threshold = 1024;
-    event_loop.state.memtable_size_limit = 1024 * 1024;
+    event_loop.state.limits.memtable_flush_threshold = 1024;
+    event_loop.state.limits.memtable_size_limit = 1024 * 1024;
     event_loop.state.sequence = 1;
     {
         let cf = event_loop.state.get_cf(0).expect("default cf");
@@ -871,8 +883,8 @@ fn should_schedule_recovery_compaction_above_hard_l0_ceiling_when_background_dis
     let (worker_tx, _worker_rx) = crossbeam::channel::unbounded();
     event_loop.worker_msg_tx = Some(worker_tx);
     event_loop.state.set_compaction_enabled(false);
-    event_loop.state.l0_compaction_trigger = 2;
-    event_loop.state.max_immutable_memtables = 0;
+    event_loop.state.limits.l0_compaction_trigger = 2;
+    event_loop.state.limits.max_immutable_memtables = 0;
     event_loop.compaction_actor.set_l0_file_count_threshold(2);
     assert_eq!(event_loop.state.l0_hard_ceiling(), 3);
     for sequence in 1..=4 {
@@ -907,8 +919,8 @@ fn should_schedule_live_compaction_at_hard_l0_ceiling_when_background_disabled()
     let (worker_tx, worker_rx) = crossbeam::channel::unbounded();
     event_loop.worker_msg_tx = Some(worker_tx);
     event_loop.state.set_compaction_enabled(false);
-    event_loop.state.l0_compaction_trigger = 2;
-    event_loop.state.max_immutable_memtables = 0;
+    event_loop.state.limits.l0_compaction_trigger = 2;
+    event_loop.state.limits.max_immutable_memtables = 0;
     event_loop.compaction_actor.set_l0_file_count_threshold(2);
     for sequence in 1..=3 {
         let name = format!("live-ceiling-{sequence}.sst");
@@ -982,8 +994,8 @@ fn should_preserve_compaction_gates_when_recovering_live_l0_pressure() {
     for gate in ["ddl", "publication", "unsettled"] {
         let mut event_loop = create_test_local_event_loop().expect("create local event loop");
         event_loop.state.set_compaction_enabled(false);
-        event_loop.state.l0_compaction_trigger = 2;
-        event_loop.state.max_immutable_memtables = 0;
+        event_loop.state.limits.l0_compaction_trigger = 2;
+        event_loop.state.limits.max_immutable_memtables = 0;
         event_loop.compaction_actor.set_l0_file_count_threshold(2);
         event_loop
             .state
@@ -1096,7 +1108,7 @@ fn should_apply_l0_compaction_trigger_from_runtime_config() {
         "runtime config should update the compaction actor L0 file-count trigger"
     );
     assert_eq!(
-        event_loop.state.l0_compaction_trigger, 2,
+        event_loop.state.limits.l0_compaction_trigger, 2,
         "runtime config should update the admission ceiling from the same trigger"
     );
 }
@@ -1108,8 +1120,8 @@ fn should_reject_runtime_config_atomically_given_invalid_memtable_candidate() {
     let request_id = 100;
     let response_rx = event_loop.router.register(request_id, "TestRequest");
     let (_tx, msg_rx) = crossbeam::channel::unbounded();
-    let original_size = event_loop.state.memtable_size_limit;
-    let original_threshold = event_loop.state.memtable_flush_threshold;
+    let original_size = event_loop.state.limits.memtable_size_limit;
+    let original_threshold = event_loop.state.limits.memtable_flush_threshold;
     let original_compaction = event_loop.state.compaction_enabled();
     let original_trigger = event_loop.compaction_actor.l0_file_count_threshold();
     let original_wal_policy = event_loop.wal_actor.durability_policy();
@@ -1142,9 +1154,9 @@ fn should_reject_runtime_config_atomically_given_invalid_memtable_candidate() {
             ..
         }
     ));
-    assert_eq!(event_loop.state.memtable_size_limit, original_size);
+    assert_eq!(event_loop.state.limits.memtable_size_limit, original_size);
     assert_eq!(
-        event_loop.state.memtable_flush_threshold,
+        event_loop.state.limits.memtable_flush_threshold,
         original_threshold
     );
     assert_eq!(event_loop.state.compaction_enabled(), original_compaction);
@@ -1173,10 +1185,10 @@ fn should_reject_runtime_config_atomically_given_cross_mode_wal_policy() {
     let request_id = 101;
     let response_rx = event_loop.router.register(request_id, "TestRequest");
     let (_tx, msg_rx) = crossbeam::channel::unbounded();
-    let original_size = event_loop.state.memtable_size_limit;
-    let original_threshold = event_loop.state.memtable_flush_threshold;
+    let original_size = event_loop.state.limits.memtable_size_limit;
+    let original_threshold = event_loop.state.limits.memtable_flush_threshold;
     let original_compaction = event_loop.state.compaction_enabled();
-    let original_state_trigger = event_loop.state.l0_compaction_trigger;
+    let original_state_trigger = event_loop.state.limits.l0_compaction_trigger;
     let original_actor_trigger = event_loop.compaction_actor.l0_file_count_threshold();
     let original_wal_policy = event_loop.wal_actor.durability_policy();
     let original_batch_config = event_loop.wal_actor.batch_config();
@@ -1210,14 +1222,14 @@ fn should_reject_runtime_config_atomically_given_cross_mode_wal_policy() {
             ..
         }
     ));
-    assert_eq!(event_loop.state.memtable_size_limit, original_size);
+    assert_eq!(event_loop.state.limits.memtable_size_limit, original_size);
     assert_eq!(
-        event_loop.state.memtable_flush_threshold,
+        event_loop.state.limits.memtable_flush_threshold,
         original_threshold
     );
     assert_eq!(event_loop.state.compaction_enabled(), original_compaction);
     assert_eq!(
-        event_loop.state.l0_compaction_trigger,
+        event_loop.state.limits.l0_compaction_trigger,
         original_state_trigger
     );
     assert_eq!(
@@ -1421,8 +1433,8 @@ fn should_block_for_messages_when_manifest_retry_is_due_during_verification() {
 fn should_not_spin_auto_flush_drain_in_memory_mode() {
     // Arrange
     let mut event_loop = create_test_event_loop().expect("create memory event loop");
-    event_loop.state.memtable_flush_threshold = 1024;
-    event_loop.state.memtable_size_limit = 1024 * 1024;
+    event_loop.state.limits.memtable_flush_threshold = 1024;
+    event_loop.state.limits.memtable_size_limit = 1024 * 1024;
 
     {
         let cf = event_loop.state.get_cf(0).expect("default cf");
@@ -1460,8 +1472,8 @@ fn should_not_spin_auto_flush_drain_in_memory_mode() {
 fn should_drain_all_current_flush_candidates_in_single_auto_flush_pass() {
     // Arrange
     let mut event_loop = create_test_local_event_loop().expect("create local event loop");
-    event_loop.state.memtable_flush_threshold = 1024;
-    event_loop.state.memtable_size_limit = 1024 * 1024;
+    event_loop.state.limits.memtable_flush_threshold = 1024;
+    event_loop.state.limits.memtable_size_limit = 1024 * 1024;
 
     let second_cf_id = event_loop
         .state
@@ -1518,8 +1530,8 @@ fn should_drain_all_current_flush_candidates_in_single_auto_flush_pass() {
 fn should_publish_all_flushable_cfs_given_local_write_burst_without_further_writes() {
     // Arrange
     let mut event_loop = create_test_local_event_loop().expect("create local event loop");
-    event_loop.state.memtable_flush_threshold = 2048;
-    event_loop.state.memtable_size_limit = 1024 * 1024;
+    event_loop.state.limits.memtable_flush_threshold = 2048;
+    event_loop.state.limits.memtable_size_limit = 1024 * 1024;
     let second_cf_id = event_loop
         .state
         .create_cf("burst-second".to_string())
@@ -1823,7 +1835,7 @@ fn should_initialize_actors_with_expected_starting_state() {
         "GcActor must start with no recorded GC run"
     );
     assert!(
-        event_loop.hybrid_storage.is_none(),
+        event_loop.cloud_coordinator.hybrid_storage.is_none(),
         "hybrid storage is optional and unset by default"
     );
 }
@@ -1972,11 +1984,16 @@ fn should_incrementally_drain_recovered_wal_given_bounded_upload_queue_at_open(
         config,
         crate::runtime::event_loop::FlushWorkerMode::Inline,
     )?;
-    let backlog_after_open = event_loop.cloud_wal.upload_backlog.len();
+    let backlog_after_open = event_loop.cloud_coordinator.cloud_wal.upload_backlog.len();
     let queued_after_open = storage.pending_upload_count();
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline
-        && (!event_loop.cloud_wal.upload_backlog.is_empty() || storage.pending_upload_count() > 0)
+        && (!event_loop
+            .cloud_coordinator
+            .cloud_wal
+            .upload_backlog
+            .is_empty()
+            || storage.pending_upload_count() > 0)
     {
         event_loop.tick_hybrid_storage();
         event_loop.drain_cloud_wal_upload_backlog();
@@ -1992,9 +2009,13 @@ fn should_incrementally_drain_recovered_wal_given_bounded_upload_queue_at_open(
         backlog_after_open, 2,
         "remaining sealed and active WAL obligations must stay recoverable"
     );
-    assert!(event_loop.cloud_wal.upload_backlog.is_empty());
+    assert!(event_loop
+        .cloud_coordinator
+        .cloud_wal
+        .upload_backlog
+        .is_empty());
     assert_eq!(storage.pending_upload_count(), 0);
-    assert_eq!(event_loop.state.wal.cloud_durable_seq, 3);
+    assert_eq!(event_loop.state.wal.frontiers.cloud_durable(), 3);
     Ok(())
 }
 
@@ -2040,7 +2061,7 @@ fn should_remove_validated_local_copy_when_remote_recovery_segment_is_initially_
 
     // Assert
     assert!(!local_path.exists());
-    assert_eq!(event_loop.state.wal.cloud_durable_seq, 1);
+    assert_eq!(event_loop.state.wal.frontiers.cloud_durable(), 1);
     Ok(())
 }
 
@@ -2807,7 +2828,13 @@ fn should_not_prune_reader_cache_when_publishing_after_plain_write() {
         event_loop.process_wake_msg(msg, &msg_rx, 16);
     }
     let after_writes = read_resources.prune_call_count();
-    event_loop.invalidate_sst_read_views();
+    event_loop
+        .state
+        .manifest
+        .add_file(crate::metadata::FileMeta {
+            name: "cache-invalidation.sst".to_owned(),
+            ..crate::metadata::FileMeta::default()
+        });
     event_loop.publish_snapshot();
     let after_manifest_change = read_resources.prune_call_count();
     drop(msg_tx);

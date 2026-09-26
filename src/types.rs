@@ -21,6 +21,9 @@ pub enum EntryType {
     Put = 0,
     Insert = 1,
     Delete = 2,
+    // Reserved on-disk discriminant. Writers and readers reject it (#404), so
+    // only tests construct it.
+    #[cfg_attr(not(feature = "internal-testing"), allow(dead_code))]
     Merge = 3,
 }
 
@@ -162,14 +165,6 @@ pub(crate) struct ExpectedSst<'a> {
     pub(crate) largest_seq: Option<u64>,
 }
 
-/// Key-value pair produced by internal ordered read sources.
-#[derive(Clone, Debug)]
-pub struct KvPair {
-    pub key: Vec<u8>,
-    pub value: Option<Vec<u8>>,
-    pub sequence: u64,
-}
-
 /// Conflict handling policy for read-write transaction commits.
 ///
 /// This type is shared by the public API and the runtime so the engine does not
@@ -186,14 +181,11 @@ pub enum ConflictPolicy {
 ///
 /// This enum is for internal runtime durability tracking. Write-time
 /// durability decisions use `WriteOptions::DurabilityPolicy` instead.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadDurability {
     /// Strict - fsync on every write.
     Strict,
-    /// Steady - fsync every N ms.
-    Steady,
-    /// `CloudPersisted` - wait for cloud backup.
-    CloudPersisted,
 }
 
 /// Snapshot of read amplification metrics.

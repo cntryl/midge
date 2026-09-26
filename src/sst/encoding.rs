@@ -28,12 +28,6 @@ use crate::common::{MidgeError, MidgeResult};
 use crate::types::EntryType;
 use bytes::{BufMut, BytesMut};
 
-/// Restart point interval for block building
-///
-/// This constant is used by block builders/readers to decide restart sampling
-/// of prefix-compressed entries within a block.
-pub const RESTART_INTERVAL: usize = 16;
-
 const EXTENDED_KEY_DELTA_LEN_MARKER: u16 = u16::MAX;
 const EXTENDED_VALUE_LEN_MARKER: u32 = u32::MAX;
 const V4_BASE_HEADER_LEN: usize = 26;
@@ -41,27 +35,6 @@ const V4_EXTENDED_LENGTH_LEN: usize = 8;
 
 /// Maximum key-delta length that can be stored directly in the legacy inline field.
 pub const MAX_INLINE_ENTRY_KEY_DELTA_LEN: usize = 65_535;
-
-/// Maximum key-delta length representable by the SST V4 extended entry format.
-pub const MAX_ENTRY_KEY_DELTA_LEN: usize = u32::MAX as usize;
-
-/// Validate that an SST entry key delta can be represented by the V4 on-disk format.
-///
-/// # Errors
-///
-/// Returns `InvalidArgument` when the key delta exceeds the extended `u32` length field used by
-/// SST data-block entries. Ordinary writers should not need this helper; the V4 codec handles
-/// key deltas larger than the legacy inline field.
-pub fn validate_entry_key_delta_len(key_delta: &[u8]) -> MidgeResult<()> {
-    if key_delta.len() > MAX_ENTRY_KEY_DELTA_LEN {
-        return Err(MidgeError::InvalidArgument(format!(
-            "SST entry key delta length {} exceeds format limit {}",
-            key_delta.len(),
-            MAX_ENTRY_KEY_DELTA_LEN
-        )));
-    }
-    Ok(())
-}
 
 /// Validate the worst-case entry size at a block restart, before admission.
 /// Prefix compression cannot be relied on: flush and compaction may put any
@@ -88,6 +61,7 @@ pub(crate) fn validate_entry_size(key_len: usize, value_len: usize) -> MidgeResu
 /// Encode a single SST entry into `buf`.
 ///
 /// This appends bytes to the provided buffer (block builder style).
+#[cfg(any(test, feature = "internal-testing"))]
 #[inline]
 #[must_use]
 pub fn encode(
@@ -107,8 +81,6 @@ pub struct EntryView<'a> {
     pub shared_len: u16,
     /// Borrowed slice for key delta
     pub key_delta: &'a [u8],
-    /// Absolute offset of `key_delta` in the original buffer
-    pub key_offset: usize,
     /// Borrowed slice for value (if present)
     pub value: Option<&'a [u8]>,
     /// Absolute offset of value in the original buffer (if present)
@@ -116,7 +88,6 @@ pub struct EntryView<'a> {
     pub sequence: u64,
     pub entry_type: EntryType,
     pub expiration: Option<u64>,
-    pub bytes_consumed: usize,
 }
 
 /// Decode a single entry starting at `offset`.
@@ -126,6 +97,7 @@ pub struct EntryView<'a> {
 /// # Errors
 ///
 /// Returns an error if the entry is truncated or malformed.
+#[cfg(any(test, feature = "internal-testing"))]
 pub fn decode(data: &[u8], offset: usize) -> MidgeResult<(EntryView<'_>, usize)> {
     decode_with_format(data, offset, crate::sst::types::SST_FORMAT_V4)
 }
@@ -220,25 +192,21 @@ fn decode_v4(data: &[u8], offset: usize) -> MidgeResult<(EntryView<'_>, usize)> 
         )));
     }
 
-    let key_offset = p;
     let key = &data[p..key_end];
     p = key_end;
 
     let (value_offset, value) = decode_value(data, p, value_end, val_len, entry_type);
     p = value_end;
 
-    let consumed = p - offset;
     Ok((
         EntryView {
             shared_len: shared,
             key_delta: key,
-            key_offset,
             value,
             value_offset,
             sequence: seq,
             entry_type,
             expiration,
-            bytes_consumed: consumed,
         },
         p,
     ))
@@ -504,16 +472,15 @@ mod tests {
     }
 
     #[test]
-    fn should_return_bytes_consumed() {
+    fn should_return_next_entry_offset() {
         // Arrange
         let encoded = encode(b"key", 0u16, Some(b"val"), 42, EntryType::Put);
 
         // Act
-        let (entry, consumed) = decode(&encoded, 0).unwrap();
+        let (_, next_offset) = decode(&encoded, 0).unwrap();
 
         // Assert
-        assert_eq!(entry.bytes_consumed, encoded.len());
-        assert_eq!(consumed, encoded.len());
+        assert_eq!(next_offset, encoded.len());
     }
 
     #[test]

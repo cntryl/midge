@@ -14,6 +14,7 @@
 use crate::common::MidgeResult;
 use crate::storage::{
     StorageBackend, StorageCallback, StorageEvent, StorageObjectMetadata, StorageOutcome,
+    StoragePrecondition, StorageRequest,
 };
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -496,41 +497,12 @@ fn mutation_lock(full_path: &Path) -> MutationGuard {
     }
 }
 
-impl StorageBackend for FileSystem {
-    /// Every filesystem call completes before it returns, so the reservation
-    /// only has to outlive the call: no completion thread is needed (#518).
-    fn submit_write_with_reservation(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        timeout: std::time::Duration,
-        reservation: std::sync::Arc<crate::common::resource_budget::ResourceReservation>,
-        callback: StorageCallback,
-    ) {
-        self.submit_write_with_headers_and_timeout(key, data, headers, timeout, callback);
-        drop(reservation);
-    }
-
-    /// See [`Self::submit_write_with_reservation`].
-    fn submit_read_range_with_reservation(
-        &self,
-        key: &str,
-        range: std::ops::Range<u64>,
-        expected: StorageObjectMetadata,
-        timeout: std::time::Duration,
-        reservation: std::sync::Arc<crate::common::resource_budget::ResourceReservation>,
-        callback: crate::storage::RangeReadCallback,
-    ) {
-        self.submit_read_range(key, range.start, range.end, expected, timeout, callback);
-        drop(reservation);
-    }
-
-    fn submit_range_head(
+impl FileSystem {
+    fn range_head_within(
         &self,
         key: &str,
         timeout: std::time::Duration,
-        callback: StorageCallback,
+        callback: &StorageCallback,
     ) {
         let result = (|| {
             if timeout.is_zero() {
@@ -553,14 +525,14 @@ impl StorageBackend for FileSystem {
         });
     }
 
-    fn submit_read_range(
+    fn read_range_within(
         &self,
         key: &str,
         start: u64,
         end: u64,
-        expected: StorageObjectMetadata,
+        expected: &StorageObjectMetadata,
         timeout: std::time::Duration,
-        callback: crate::storage::RangeReadCallback,
+        callback: &crate::storage::RangeReadCallback,
     ) {
         use std::io::{Read, Seek, SeekFrom};
         let result = (|| {
@@ -577,7 +549,7 @@ impl StorageBackend for FileSystem {
             let _process_lock = self.acquire_process_lock(&path)?;
             let mut file = fs::File::open(&path).map_err(|error| range_io_error(&error))?;
             let metadata = range_file_metadata(&file)?;
-            if !metadata.same_version(&expected) {
+            if !metadata.same_version(expected) {
                 return Err(crate::storage::StorageError::precondition_failed(
                     "remote SST version changed",
                 ));
@@ -593,7 +565,7 @@ impl StorageBackend for FileSystem {
             file.read_exact(&mut bytes)
                 .map_err(|error| range_io_error(&error))?;
             let after = range_file_metadata(&file)?;
-            if !after.same_version(&expected) {
+            if !after.same_version(expected) {
                 return Err(crate::storage::StorageError::precondition_failed(
                     "remote SST changed during range read",
                 ));
@@ -603,11 +575,11 @@ impl StorageBackend for FileSystem {
         let _ = callback.send(result);
     }
 
-    fn submit_read_with_metadata(
+    fn metadata_read_within(
         &self,
         key: &str,
         timeout: std::time::Duration,
-        callback: crate::storage::MetadataReadCallback,
+        callback: &crate::storage::MetadataReadCallback,
     ) {
         let result = (|| {
             if timeout.is_zero() {
@@ -632,6 +604,200 @@ impl StorageBackend for FileSystem {
             Ok((bytes, metadata))
         })();
         let _ = callback.send(result);
+    }
+}
+
+impl StorageBackend for FileSystem {
+    fn submit_range_read_request(
+        &self,
+        request: StorageRequest,
+        range: std::ops::Range<u64>,
+        callback: crate::storage::RangeReadCallback,
+    ) {
+        let timeout = request.remaining_timeout();
+        if timeout.is_zero() {
+            let _ = callback.send(Err(crate::storage::storage_timeout_error(
+                "range read timed out",
+            )));
+            return;
+        }
+        let StoragePrecondition::IfMatch(expected) = request.precondition else {
+            let _ = callback.send(Err(crate::storage::StorageError::protocol(
+                "range read requires an object identity",
+            )));
+            return;
+        };
+        let _reservation = request.reservation;
+        self.read_range_within(
+            &request.key,
+            range.start,
+            range.end,
+            &expected,
+            timeout,
+            &callback,
+        );
+    }
+
+    fn submit_metadata_read_request(
+        &self,
+        request: StorageRequest,
+        callback: crate::storage::MetadataReadCallback,
+    ) {
+        crate::storage::dispatch_metadata_read_request(
+            request,
+            callback,
+            |key, timeout, callback| {
+                self.metadata_read_within(key, timeout, &callback);
+            },
+        );
+    }
+
+    fn submit_head_request(&self, request: StorageRequest, callback: StorageCallback) {
+        crate::storage::dispatch_head_request(request, callback, |key, _, callback| {
+            self.submit_head(key, callback);
+        });
+    }
+
+    fn submit_range_head_request(&self, request: StorageRequest, callback: StorageCallback) {
+        crate::storage::dispatch_head_request(request, callback, |key, timeout, callback| {
+            self.range_head_within(key, timeout, &callback);
+        });
+    }
+
+    fn submit_delete_request(&self, request: StorageRequest, callback: StorageCallback) {
+        let timeout = request.remaining_timeout();
+        let key = request.key;
+        let result = (|| {
+            if timeout.is_zero() {
+                return Err(crate::storage::storage_timeout_error("delete timed out"));
+            }
+            let path = self.full_path(&key)?;
+            let _lock = mutation_lock(&path);
+            let _process_lock = self.acquire_process_lock(&path)?;
+            match request.precondition {
+                StoragePrecondition::None => {}
+                StoragePrecondition::IfAbsent => {
+                    return Err(crate::storage::StorageError::precondition_failed(
+                        "delete cannot enforce absence precondition",
+                    ));
+                }
+                StoragePrecondition::IfMatch(expected) => {
+                    if expected.generation.is_some() {
+                        if matches!(fs::symlink_metadata(&path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+                        {
+                            return Ok(());
+                        }
+                        return Err(crate::storage::StorageError::precondition_failed(
+                            "filesystem cannot enforce generation precondition",
+                        ));
+                    }
+                    let etag = expected.etag.trim().trim_matches('"');
+                    if etag.is_empty() {
+                        return Err(crate::storage::StorageError::precondition_failed(
+                            "object identity is missing",
+                        ));
+                    }
+                    let current = if etag.starts_with("fs:") {
+                        range_path_metadata(&path).map(|metadata| metadata.etag)
+                    } else {
+                        fs::read(&path)
+                            .map_err(crate::storage::StorageError::from)
+                            .map(|bytes| {
+                                StorageObjectMetadata::content_crc(bytes.len() as u64, &bytes).etag
+                            })
+                    };
+                    match current {
+                        Ok(current) if current == etag => {}
+                        Ok(_) => {
+                            return Err(crate::storage::StorageError::precondition_failed(
+                                "etag mismatch",
+                            ));
+                        }
+                        Err(error) if error.is_not_found() => return Ok(()),
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+            match fs::remove_file(&path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(crate::storage::StorageError::io(format!(
+                    "delete {}: {error}",
+                    path.display()
+                ))),
+            }
+        })();
+        let _reservation = request.reservation;
+        let _ = callback.send(StorageEvent::DeleteComplete {
+            key,
+            result: match result {
+                Ok(()) => StorageOutcome::Ok(()),
+                Err(error) => StorageOutcome::Err(error),
+            },
+        });
+    }
+
+    fn submit_write_request(
+        &self,
+        request: StorageRequest,
+        data: Vec<u8>,
+        callback: StorageCallback,
+    ) {
+        let timeout = request.remaining_timeout();
+        let key = request.key;
+        let result = (|| {
+            if timeout.is_zero() {
+                return Err(crate::storage::storage_timeout_error("write timed out"));
+            }
+            let path = self.full_path(&key)?;
+            let _lock = mutation_lock(&path);
+            let _process_lock = self.acquire_process_lock(&path)?;
+            let outcome = match request.precondition {
+                StoragePrecondition::None => {
+                    publish_object_atomically(&self.base_path, &path, &data, Publish::Replace)
+                }
+                StoragePrecondition::IfAbsent => {
+                    publish_object_atomically(&self.base_path, &path, &data, Publish::CreateNew)
+                }
+                StoragePrecondition::IfMatch(expected) => {
+                    if expected.generation.is_some() {
+                        return Err(crate::storage::StorageError::precondition_failed(
+                            "filesystem cannot enforce generation precondition",
+                        ));
+                    }
+                    let etag = expected.etag.trim().trim_matches('"');
+                    if etag.is_empty() {
+                        return Err(crate::storage::StorageError::precondition_failed(
+                            "object identity is missing",
+                        ));
+                    }
+                    let current = if etag.starts_with("fs:") {
+                        range_path_metadata(&path).map(|metadata| metadata.etag)
+                    } else {
+                        fs::read(&path)
+                            .map_err(crate::storage::StorageError::from)
+                            .map(|bytes| {
+                                StorageObjectMetadata::content_crc(bytes.len() as u64, &bytes).etag
+                            })
+                    }?;
+                    if current != etag {
+                        return Err(crate::storage::StorageError::precondition_failed(
+                            "etag mismatch",
+                        ));
+                    }
+                    publish_object_atomically(&self.base_path, &path, &data, Publish::Replace)
+                }
+            };
+            Ok(outcome)
+        })();
+        // Local I/O and its callback complete inline; holding the reservation
+        // through the send is sufficient.
+        let _reservation = request.reservation;
+        let result = match result {
+            Ok(outcome) => outcome,
+            Err(error) => StorageOutcome::Err(error),
+        };
+        let _ = callback.send(StorageEvent::WriteComplete { key, result });
     }
 
     fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback) {
@@ -1199,7 +1365,14 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_read_with_metadata("test.txt", std::time::Duration::from_secs(5), tx);
+        fs.submit_metadata_read_request(
+            StorageRequest::new(
+                "test.txt",
+                crate::common::OperationDeadline::unbounded(),
+                std::time::Duration::from_secs(5),
+            ),
+            tx,
+        );
         let event = rx.recv().unwrap();
 
         // Assert
@@ -1217,7 +1390,14 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_read_with_metadata("nonexistent.txt", std::time::Duration::from_secs(5), tx);
+        fs.submit_metadata_read_request(
+            StorageRequest::new(
+                "nonexistent.txt",
+                crate::common::OperationDeadline::unbounded(),
+                std::time::Duration::from_secs(5),
+            ),
+            tx,
+        );
         let event = rx.recv().unwrap();
 
         // Assert
@@ -1234,7 +1414,14 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_read_with_metadata("large.bin", std::time::Duration::from_secs(5), tx);
+        fs.submit_metadata_read_request(
+            StorageRequest::new(
+                "large.bin",
+                crate::common::OperationDeadline::unbounded(),
+                std::time::Duration::from_secs(5),
+            ),
+            tx,
+        );
         let event = rx.recv().unwrap();
 
         // Assert
@@ -1253,7 +1440,14 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_read_with_metadata("empty.txt", std::time::Duration::from_secs(5), tx);
+        fs.submit_metadata_read_request(
+            StorageRequest::new(
+                "empty.txt",
+                crate::common::OperationDeadline::unbounded(),
+                std::time::Duration::from_secs(5),
+            ),
+            tx,
+        );
         let event = rx.recv().unwrap();
 
         // Assert
@@ -1273,7 +1467,14 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_read_with_metadata("binary.bin", std::time::Duration::from_secs(5), tx);
+        fs.submit_metadata_read_request(
+            StorageRequest::new(
+                "binary.bin",
+                crate::common::OperationDeadline::unbounded(),
+                std::time::Duration::from_secs(5),
+            ),
+            tx,
+        );
         let event = rx.recv().unwrap();
 
         // Assert
@@ -1320,17 +1521,28 @@ mod tests {
         let (write_tx, write_rx) = mpsc::channel();
 
         // Act
-        fs.submit_write_with_reservation(
-            "object.bin",
+        fs.submit_write_request(
+            crate::storage::StorageRequest::new(
+                "object.bin",
+                crate::common::OperationDeadline::unbounded(),
+                std::time::Duration::from_secs(5),
+            )
+            .with_reservation(std::sync::Arc::new(
+                budget.reserve(7, "reserved write").unwrap(),
+            )),
             b"payload".to_vec(),
-            Vec::new(),
-            std::time::Duration::from_secs(5),
-            std::sync::Arc::new(budget.reserve(7, "reserved write").unwrap()),
             write_tx,
         );
         let write = write_rx.recv().unwrap();
         let (head_tx, head_rx) = mpsc::channel();
-        fs.submit_range_head("object.bin", std::time::Duration::from_secs(5), head_tx);
+        fs.submit_range_head_request(
+            StorageRequest::new(
+                "object.bin",
+                crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5)),
+                std::time::Duration::from_secs(5),
+            ),
+            head_tx,
+        );
         let StorageEvent::HeadComplete {
             result: StorageOutcome::Ok(metadata),
             ..
@@ -1339,12 +1551,17 @@ mod tests {
             panic!("range HEAD failed");
         };
         let (read_tx, read_rx) = mpsc::channel();
-        fs.submit_read_range_with_reservation(
-            "object.bin",
+        fs.submit_range_read_request(
+            StorageRequest::new(
+                "object.bin",
+                crate::common::OperationDeadline::unbounded(),
+                std::time::Duration::from_secs(5),
+            )
+            .with_precondition(StoragePrecondition::IfMatch(metadata))
+            .with_reservation(std::sync::Arc::new(
+                budget.reserve(7, "reserved read").unwrap(),
+            )),
             0..7,
-            metadata,
-            std::time::Duration::from_secs(5),
-            std::sync::Arc::new(budget.reserve(7, "reserved read").unwrap()),
             read_tx,
         );
         let read = read_rx.recv().unwrap();
@@ -1610,7 +1827,14 @@ mod atomic_publish_tests {
 
     fn read(fs: &FileSystem, key: &str) -> StorageOutcome<Vec<u8>> {
         let (tx, rx) = std::sync::mpsc::channel();
-        fs.submit_read_with_metadata(key, std::time::Duration::from_secs(5), tx);
+        fs.submit_metadata_read_request(
+            StorageRequest::new(
+                key,
+                crate::common::OperationDeadline::unbounded(),
+                std::time::Duration::from_secs(5),
+            ),
+            tx,
+        );
         match rx.recv().expect("read completion") {
             Ok((bytes, _metadata)) => StorageOutcome::Ok(bytes),
             Err(error) => StorageOutcome::Err(error),

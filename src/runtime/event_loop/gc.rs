@@ -9,7 +9,7 @@ impl GcCoordinator {
         event_loop: &mut EventLoop,
         deadline: &crate::common::OperationDeadline,
     ) -> HandleOutcome {
-        let hybrid_storage = event_loop.hybrid_storage.clone();
+        let hybrid_storage = event_loop.cloud_coordinator.hybrid_storage.clone();
         event_loop.gc_actor.begin_manifest_reclamation_attempt();
         match event_loop.state.reclaim_dropped_column_families() {
             Ok(names) => event_loop.gc_actor.queue_manifest_reclamation(names),
@@ -36,7 +36,6 @@ impl GcCoordinator {
             let reclaimed = event_loop.gc_actor.take_manifest_reclamation();
             // Stop new transactions from capturing the reclaimed generation
             // before GC samples the pins held by older snapshots.
-            event_loop.invalidate_sst_read_views();
             event_loop.publish_snapshot();
             event_loop.gc_actor.delete_ssts(
                 &mut event_loop.state,
@@ -71,7 +70,7 @@ impl GcCoordinator {
         request_id: u64,
         sst_names: &[String],
     ) -> HandleOutcome {
-        let hybrid_storage = event_loop.hybrid_storage.clone();
+        let hybrid_storage = event_loop.cloud_coordinator.hybrid_storage.clone();
         event_loop
             .gc_actor
             .delete_ssts(&mut event_loop.state, sst_names, hybrid_storage);

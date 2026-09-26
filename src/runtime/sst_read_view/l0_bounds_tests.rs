@@ -1,6 +1,7 @@
 use super::*;
 use crate::common::MidgeResult;
 use crate::diagnostics::RuntimeDiagnostics;
+use crate::io::FsError;
 use crate::io::{Fs, RealFs};
 use crate::memtable::SkipListMemtable;
 use crate::runtime::read_resources::ReadResources;
@@ -15,7 +16,10 @@ const CACHE_BYTES: usize = 64 * 1024;
 fn write_point_sst(path: &Path, index: u64) -> MidgeResult<FileMeta> {
     let key = format!("key-{index:03}").into_bytes();
     let name = format!("disjoint-{index}.sst");
-    let factory = FsSstFactoryIo::new(Arc::new(RealFs::new(path)?), 4096);
+    let factory = FsSstFactoryIo::new(
+        Arc::new(RealFs::new(path).map_err(FsError::into_midge)?),
+        4096,
+    );
     let mut writer = factory.create()?;
     writer.add_with_meta(&key, Some(b"value"), 7, EntryType::Put, None)?;
     let bytes = writer.finish_bytes()?;
@@ -36,7 +40,7 @@ fn snapshot(
     directory: &Path,
     files: Vec<FileMeta>,
 ) -> MidgeResult<(ReadSnapshot, Arc<RuntimeDiagnostics>)> {
-    let fs: Arc<dyn Fs> = Arc::new(RealFs::new(directory)?);
+    let fs: Arc<dyn Fs> = Arc::new(RealFs::new(directory).map_err(FsError::into_midge)?);
     let diagnostics = Arc::new(RuntimeDiagnostics::default());
     let resources = Arc::new(ReadResources::new_with_diagnostics(
         fs.clone(),
@@ -141,7 +145,10 @@ fn should_keep_uncertain_l0_bounds_in_newest_first_fallback_order() {
 fn should_preserve_range_tombstones_when_l0_file_endpoints_are_inclusive() -> MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir()?;
-    let factory = FsSstFactoryIo::new(Arc::new(RealFs::new(directory.path())?), 4096);
+    let factory = FsSstFactoryIo::new(
+        Arc::new(RealFs::new(directory.path()).map_err(FsError::into_midge)?),
+        4096,
+    );
     let mut files = Vec::new();
     for tombstone in [false, true] {
         let name = format!("endpoint-{tombstone}.sst");

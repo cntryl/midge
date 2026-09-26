@@ -11,79 +11,9 @@ use super::{
     wal::{ApplyTransactionRequest, SpilledTransactionRequest, WalCoordinator},
     EventLoop, HandleOutcome,
 };
+use crate::runtime::RuntimeMsg;
 use crate::runtime::TestRuntimeMsg;
-use crate::runtime::{RuntimeMsg, RuntimeResponse};
-use crossbeam::channel::{Receiver, Sender};
-
-#[derive(Clone, Copy)]
-enum RuntimeRoute {
-    CheckWriteStall {
-        request_id: u64,
-        cf_id: crate::types::ColumnFamilyId,
-    },
-    WaitForWriteStallClear {
-        request_id: u64,
-        cf_id: crate::types::ColumnFamilyId,
-    },
-    CancelWaitForWriteStallClear {
-        wait_request_id: u64,
-    },
-    GetReadAmpMetrics {
-        request_id: u64,
-    },
-    GetRecoveryMetrics {
-        request_id: u64,
-    },
-    GetRuntimeMetrics {
-        request_id: u64,
-    },
-    GetStorageLayout {
-        request_id: u64,
-    },
-}
-
-#[derive(Clone, Copy)]
-enum SnapshotRoute {
-    BeginTransaction {
-        request_id: u64,
-        cf_id: crate::types::ColumnFamilyId,
-    },
-}
-
-enum WalRoute {
-    ApplyTransaction {
-        request: ApplyTransactionRequest,
-        response_tx: Option<Sender<RuntimeResponse>>,
-    },
-    ApplySpilledTransaction {
-        request: SpilledTransactionRequest,
-        response_tx: Option<Sender<RuntimeResponse>>,
-    },
-}
-
-#[derive(Clone, Copy)]
-enum FlushRoute {
-    FlushMemtable {
-        request_id: u64,
-        cf_id: crate::types::ColumnFamilyId,
-    },
-}
-
-enum CompactionRoute {
-    Complete(CompactionCompleteRequest),
-}
-
-enum ManifestRoute {
-    CreateColumnFamily {
-        request_id: u64,
-        name: String,
-    },
-    DropColumnFamily {
-        request_id: u64,
-        cf_id: crate::types::ColumnFamilyId,
-        discard_unflushed: bool,
-    },
-}
+use crossbeam::channel::Receiver;
 
 pub(super) struct RuntimeDispatcher;
 
@@ -104,29 +34,80 @@ impl RuntimeDispatcher {
         };
 
         match msg {
-            RuntimeMsg::CheckWriteStall { .. }
-            | RuntimeMsg::WaitForWriteStallClear { .. }
-            | RuntimeMsg::CancelWaitForWriteStallClear { .. }
-            | RuntimeMsg::GetReadAmpMetrics { .. }
-            | RuntimeMsg::GetRecoveryMetrics { .. }
-            | RuntimeMsg::GetRuntimeMetrics { .. }
-            | RuntimeMsg::GetStorageLayout { .. }
-            | RuntimeMsg::WalSync { .. }
-            | RuntimeMsg::SealWalForCloud { .. }
-            | RuntimeMsg::CompactAll { .. }
-            | RuntimeMsg::ManifestPersist { .. }
-            | RuntimeMsg::SetRuntimeConfig { .. } => Self::handle_control_message(event_loop, &msg),
-            RuntimeMsg::BeginTransaction { .. } => Self::handle_snapshot_message(event_loop, &msg),
-            RuntimeMsg::ApplyTransaction { .. } | RuntimeMsg::ApplySpilledTransaction { .. } => {
-                Self::handle_wal_message(event_loop, msg, msg_rx)
+            RuntimeMsg::CheckWriteStall { request_id, cf_id } => {
+                event_loop.handle_check_write_stall(request_id, cf_id);
+                HandleOutcome::Continue
             }
-            RuntimeMsg::FlushMemtable { .. } => Self::handle_flush_message(event_loop, &msg),
-            RuntimeMsg::CompactionComplete { .. } => {
-                Self::handle_compaction_message(event_loop, msg)
+            RuntimeMsg::WaitForWriteStallClear { request_id, cf_id } => {
+                event_loop.handle_wait_for_write_stall_clear(request_id, cf_id);
+                HandleOutcome::Continue
             }
-            RuntimeMsg::ManifestCreateColumnFamily { .. }
-            | RuntimeMsg::ManifestDropColumnFamily { .. } => {
-                Self::handle_manifest_message(event_loop, msg, msg_rx)
+            RuntimeMsg::CancelWaitForWriteStallClear { wait_request_id } => {
+                event_loop.handle_cancel_wait_for_write_stall_clear(wait_request_id);
+                HandleOutcome::Continue
+            }
+            RuntimeMsg::GetReadAmpMetrics { request_id } => {
+                event_loop.handle_get_read_amp_metrics(request_id);
+                HandleOutcome::Continue
+            }
+            RuntimeMsg::GetRecoveryMetrics { request_id } => {
+                event_loop.handle_get_recovery_metrics(request_id);
+                HandleOutcome::Continue
+            }
+            RuntimeMsg::GetRuntimeMetrics { request_id } => {
+                event_loop.handle_get_runtime_metrics(request_id);
+                HandleOutcome::Continue
+            }
+            RuntimeMsg::GetStorageLayout { request_id } => {
+                event_loop.handle_get_storage_layout(request_id);
+                HandleOutcome::Continue
+            }
+            RuntimeMsg::WalSync { request_id } => WalCoordinator::sync(event_loop, request_id),
+            RuntimeMsg::SealWalForCloud {
+                request_id,
+                sequence,
+                wait_for_ack,
+            } => WalCoordinator::seal_for_cloud(event_loop, request_id, sequence, wait_for_ack),
+            RuntimeMsg::CompactAll { request_id } => {
+                CompactionCoordinator::compact_all(event_loop, request_id)
+            }
+            RuntimeMsg::ManifestPersist { request_id } => {
+                ManifestCoordinator::persist(event_loop, request_id)
+            }
+            msg @ RuntimeMsg::SetRuntimeConfig { .. } => Self::set_runtime_config(event_loop, &msg),
+            RuntimeMsg::BeginTransaction { request_id, cf_id } => {
+                SnapshotCoordinator::begin_transaction(event_loop, request_id, cf_id)
+            }
+            msg @ (RuntimeMsg::ApplyTransaction { .. }
+            | RuntimeMsg::ApplySpilledTransaction { .. }) => {
+                Self::apply_transaction(event_loop, msg, msg_rx)
+            }
+            RuntimeMsg::FlushMemtable { request_id, cf_id } => {
+                FlushCoordinator::flush_memtable(event_loop, request_id, cf_id)
+            }
+            RuntimeMsg::CompactionComplete {
+                request_id,
+                input_ssts,
+                output_ssts,
+                cf_id,
+                target_level,
+                succeeded,
+            } => CompactionCoordinator::complete(
+                event_loop,
+                CompactionCompleteRequest {
+                    request_id,
+                    input_ssts,
+                    output_ssts,
+                    cf_id,
+                    target_level,
+                    succeeded,
+                },
+            ),
+            RuntimeMsg::ManifestCreateColumnFamily { request_id, name } => {
+                ManifestCoordinator::create_column_family(event_loop, msg_rx, request_id, &name)
+            }
+            msg @ RuntimeMsg::ManifestDropColumnFamily { .. } => {
+                Self::drop_column_family(event_loop, msg, msg_rx)
             }
             RuntimeMsg::RetryGc => event_loop.retry_gc(),
             RuntimeMsg::Test(msg) => Self::handle_test_message(event_loop, msg, msg_rx),
@@ -153,79 +134,31 @@ impl RuntimeDispatcher {
         }
     }
 
-    fn handle_control_message(event_loop: &mut EventLoop, msg: &RuntimeMsg) -> HandleOutcome {
-        match *msg {
-            RuntimeMsg::CheckWriteStall { request_id, cf_id } => Self::dispatch_runtime(
-                event_loop,
-                RuntimeRoute::CheckWriteStall { request_id, cf_id },
-            ),
-            RuntimeMsg::WaitForWriteStallClear { request_id, cf_id } => Self::dispatch_runtime(
-                event_loop,
-                RuntimeRoute::WaitForWriteStallClear { request_id, cf_id },
-            ),
-            RuntimeMsg::CancelWaitForWriteStallClear { wait_request_id } => Self::dispatch_runtime(
-                event_loop,
-                RuntimeRoute::CancelWaitForWriteStallClear { wait_request_id },
-            ),
-            RuntimeMsg::GetReadAmpMetrics { request_id } => {
-                Self::dispatch_runtime(event_loop, RuntimeRoute::GetReadAmpMetrics { request_id })
-            }
-            RuntimeMsg::GetRecoveryMetrics { request_id } => {
-                Self::dispatch_runtime(event_loop, RuntimeRoute::GetRecoveryMetrics { request_id })
-            }
-            RuntimeMsg::GetRuntimeMetrics { request_id } => {
-                Self::dispatch_runtime(event_loop, RuntimeRoute::GetRuntimeMetrics { request_id })
-            }
-            RuntimeMsg::GetStorageLayout { request_id } => {
-                Self::dispatch_runtime(event_loop, RuntimeRoute::GetStorageLayout { request_id })
-            }
-            RuntimeMsg::WalSync { request_id } => WalCoordinator::sync(event_loop, request_id),
-            RuntimeMsg::SealWalForCloud {
-                request_id,
-                sequence,
-                wait_for_ack,
-            } => WalCoordinator::seal_for_cloud(event_loop, request_id, sequence, wait_for_ack),
-            RuntimeMsg::CompactAll { request_id } => {
-                CompactionCoordinator::compact_all(event_loop, request_id)
-            }
-            RuntimeMsg::ManifestPersist { request_id } => {
-                ManifestCoordinator::persist(event_loop, request_id)
-            }
-            RuntimeMsg::SetRuntimeConfig {
-                request_id,
-                memtable_size_limit,
-                memtable_flush_threshold,
-                enable_compaction,
-                l0_compaction_trigger,
-                wal_durability_policy,
-                wal_batch_config,
-            } => {
-                let update = RuntimeConfigUpdate {
-                    request_id,
-                    memtable_size_limit,
-                    memtable_flush_threshold,
-                    enable_compaction,
-                    l0_compaction_trigger,
-                    wal_durability_policy,
-                    wal_batch_config,
-                };
-                Self::dispatch_config(event_loop, &update)
-            }
-            _ => unreachable!("non-control message routed to handle_control_message"),
-        }
+    fn set_runtime_config(event_loop: &mut EventLoop, msg: &RuntimeMsg) -> HandleOutcome {
+        let &RuntimeMsg::SetRuntimeConfig {
+            request_id,
+            memtable_size_limit,
+            memtable_flush_threshold,
+            enable_compaction,
+            l0_compaction_trigger,
+            wal_durability_policy,
+            wal_batch_config,
+        } = msg
+        else {
+            unreachable!("non-config message routed to set_runtime_config");
+        };
+        event_loop.handle_set_runtime_config(&RuntimeConfigUpdate {
+            request_id,
+            memtable_size_limit,
+            memtable_flush_threshold,
+            enable_compaction,
+            l0_compaction_trigger,
+            wal_durability_policy,
+            wal_batch_config,
+        })
     }
 
-    fn handle_snapshot_message(event_loop: &mut EventLoop, msg: &RuntimeMsg) -> HandleOutcome {
-        match *msg {
-            RuntimeMsg::BeginTransaction { request_id, cf_id } => Self::dispatch_snapshot(
-                event_loop,
-                SnapshotRoute::BeginTransaction { request_id, cf_id },
-            ),
-            _ => unreachable!("non-snapshot message routed to handle_snapshot_message"),
-        }
-    }
-
-    fn handle_wal_message(
+    fn apply_transaction(
         event_loop: &mut EventLoop,
         msg: RuntimeMsg,
         msg_rx: &Receiver<RuntimeMsg>,
@@ -239,20 +172,18 @@ impl RuntimeDispatcher {
                 start_sequence,
                 conflict_policy,
                 response_tx,
-            } => Self::dispatch_wal(
+            } => WalCoordinator::apply_transaction(
                 event_loop,
-                WalRoute::ApplyTransaction {
-                    request: ApplyTransactionRequest {
-                        request_id,
-                        ops,
-                        assertions,
-                        durability_policy,
-                        start_sequence,
-                        conflict_policy,
-                    },
-                    response_tx,
-                },
                 msg_rx,
+                ApplyTransactionRequest {
+                    request_id,
+                    ops,
+                    assertions,
+                    durability_policy,
+                    start_sequence,
+                    conflict_policy,
+                },
+                response_tx,
             ),
             RuntimeMsg::ApplySpilledTransaction {
                 request_id,
@@ -262,187 +193,48 @@ impl RuntimeDispatcher {
                 start_sequence,
                 conflict_policy,
                 response_tx,
-            } => Self::dispatch_wal(
+            } => WalCoordinator::apply_spilled_transaction(
                 event_loop,
-                WalRoute::ApplySpilledTransaction {
-                    request: SpilledTransactionRequest {
-                        request_id,
-                        source,
-                        assertions,
-                        durability_policy,
-                        start_sequence,
-                        conflict_policy,
-                    },
-                    response_tx,
-                },
                 msg_rx,
-            ),
-            _ => unreachable!("non-WAL message routed to handle_wal_message"),
-        }
-    }
-
-    fn handle_flush_message(event_loop: &mut EventLoop, msg: &RuntimeMsg) -> HandleOutcome {
-        match *msg {
-            RuntimeMsg::FlushMemtable { request_id, cf_id } => {
-                Self::dispatch_flush(event_loop, FlushRoute::FlushMemtable { request_id, cf_id })
-            }
-            _ => unreachable!("non-flush message routed to handle_flush_message"),
-        }
-    }
-
-    fn handle_compaction_message(event_loop: &mut EventLoop, msg: RuntimeMsg) -> HandleOutcome {
-        match msg {
-            RuntimeMsg::CompactionComplete {
-                request_id,
-                input_ssts,
-                output_ssts,
-                cf_id,
-                target_level,
-                succeeded,
-            } => Self::dispatch_compaction(
-                event_loop,
-                CompactionRoute::Complete(CompactionCompleteRequest {
+                SpilledTransactionRequest {
                     request_id,
-                    input_ssts,
-                    output_ssts,
-                    cf_id,
-                    target_level,
-                    succeeded,
-                }),
+                    source,
+                    assertions,
+                    durability_policy,
+                    start_sequence,
+                    conflict_policy,
+                },
+                response_tx,
             ),
-            _ => unreachable!("non-compaction message routed to handle_compaction_message"),
+            _ => unreachable!("non-transaction message routed to apply_transaction"),
         }
     }
 
-    fn handle_manifest_message(
+    /// Dropping a family waits until its publication pipeline drains.
+    fn drop_column_family(
         event_loop: &mut EventLoop,
         msg: RuntimeMsg,
         msg_rx: &Receiver<RuntimeMsg>,
     ) -> HandleOutcome {
-        if let RuntimeMsg::ManifestDropColumnFamily { cf_id, .. } = &msg {
-            if event_loop.column_family_publication_pipeline_active(*cf_id) {
-                event_loop.publication_gate.defer(msg);
-                return HandleOutcome::Continue;
-            }
+        let RuntimeMsg::ManifestDropColumnFamily {
+            request_id,
+            cf_id,
+            discard_unflushed,
+        } = msg
+        else {
+            unreachable!("non-drop message routed to drop_column_family");
+        };
+        if event_loop.column_family_publication_pipeline_active(cf_id) {
+            event_loop.publication_gate.defer(msg);
+            return HandleOutcome::Continue;
         }
-        match msg {
-            RuntimeMsg::ManifestCreateColumnFamily { request_id, name } => Self::dispatch_manifest(
-                event_loop,
-                msg_rx,
-                ManifestRoute::CreateColumnFamily { request_id, name },
-            ),
-            RuntimeMsg::ManifestDropColumnFamily {
-                request_id,
-                cf_id,
-                discard_unflushed,
-            } => Self::dispatch_manifest(
-                event_loop,
-                msg_rx,
-                ManifestRoute::DropColumnFamily {
-                    request_id,
-                    cf_id,
-                    discard_unflushed,
-                },
-            ),
-            _ => unreachable!("non-manifest message routed to handle_manifest_message"),
-        }
-    }
-
-    fn dispatch_runtime(event_loop: &mut EventLoop, route: RuntimeRoute) -> HandleOutcome {
-        match route {
-            RuntimeRoute::CheckWriteStall { request_id, cf_id } => {
-                event_loop.handle_check_write_stall(request_id, cf_id);
-            }
-            RuntimeRoute::WaitForWriteStallClear { request_id, cf_id } => {
-                event_loop.handle_wait_for_write_stall_clear(request_id, cf_id);
-            }
-            RuntimeRoute::CancelWaitForWriteStallClear { wait_request_id } => {
-                event_loop.handle_cancel_wait_for_write_stall_clear(wait_request_id);
-            }
-            RuntimeRoute::GetReadAmpMetrics { request_id } => {
-                event_loop.handle_get_read_amp_metrics(request_id);
-            }
-            RuntimeRoute::GetRecoveryMetrics { request_id } => {
-                event_loop.handle_get_recovery_metrics(request_id);
-            }
-            RuntimeRoute::GetRuntimeMetrics { request_id } => {
-                event_loop.handle_get_runtime_metrics(request_id);
-            }
-            RuntimeRoute::GetStorageLayout { request_id } => {
-                event_loop.handle_get_storage_layout(request_id);
-            }
-        }
-        HandleOutcome::Continue
-    }
-
-    fn dispatch_config(event_loop: &mut EventLoop, update: &RuntimeConfigUpdate) -> HandleOutcome {
-        event_loop.handle_set_runtime_config(update)
-    }
-
-    fn dispatch_snapshot(event_loop: &mut EventLoop, route: SnapshotRoute) -> HandleOutcome {
-        match route {
-            SnapshotRoute::BeginTransaction { request_id, cf_id } => {
-                SnapshotCoordinator::begin_transaction(event_loop, request_id, cf_id)
-            }
-        }
-    }
-
-    fn dispatch_wal(
-        event_loop: &mut EventLoop,
-        route: WalRoute,
-        msg_rx: &Receiver<RuntimeMsg>,
-    ) -> HandleOutcome {
-        match route {
-            WalRoute::ApplyTransaction {
-                request,
-                response_tx,
-            } => WalCoordinator::apply_transaction(event_loop, msg_rx, request, response_tx),
-            WalRoute::ApplySpilledTransaction {
-                request,
-                response_tx,
-            } => {
-                WalCoordinator::apply_spilled_transaction(event_loop, msg_rx, request, response_tx)
-            }
-        }
-    }
-
-    fn dispatch_flush(event_loop: &mut EventLoop, route: FlushRoute) -> HandleOutcome {
-        match route {
-            FlushRoute::FlushMemtable { request_id, cf_id } => {
-                FlushCoordinator::flush_memtable(event_loop, request_id, cf_id)
-            }
-        }
-    }
-
-    fn dispatch_compaction(event_loop: &mut EventLoop, route: CompactionRoute) -> HandleOutcome {
-        match route {
-            CompactionRoute::Complete(request) => {
-                CompactionCoordinator::complete(event_loop, request)
-            }
-        }
-    }
-
-    fn dispatch_manifest(
-        event_loop: &mut EventLoop,
-        msg_rx: &Receiver<RuntimeMsg>,
-        route: ManifestRoute,
-    ) -> HandleOutcome {
-        match route {
-            ManifestRoute::CreateColumnFamily { request_id, name } => {
-                ManifestCoordinator::create_column_family(event_loop, msg_rx, request_id, &name)
-            }
-            ManifestRoute::DropColumnFamily {
-                request_id,
-                cf_id,
-                discard_unflushed,
-            } => ManifestCoordinator::drop_column_family(
-                event_loop,
-                msg_rx,
-                request_id,
-                cf_id,
-                discard_unflushed,
-            ),
-        }
+        ManifestCoordinator::drop_column_family(
+            event_loop,
+            msg_rx,
+            request_id,
+            cf_id,
+            discard_unflushed,
+        )
     }
 }
 

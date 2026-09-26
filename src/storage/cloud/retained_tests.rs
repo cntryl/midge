@@ -50,12 +50,14 @@ fn should_keep_upload_charged_when_callback_adapter_times_out_before_backend_com
     let (tx, rx) = mpsc::channel();
 
     // Act
-    cloud.submit_write_with_reservation(
-        "object",
+    cloud.submit_write_request(
+        crate::storage::StorageRequest::new(
+            "object",
+            crate::common::OperationDeadline::unbounded(),
+            std::time::Duration::from_millis(1),
+        )
+        .with_reservation(reservation),
         vec![7; 128],
-        Vec::new(),
-        std::time::Duration::from_millis(1),
-        reservation,
         tx,
     );
     let result = rx.recv().unwrap();

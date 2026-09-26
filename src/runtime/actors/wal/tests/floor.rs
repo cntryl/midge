@@ -145,7 +145,7 @@ fn should_keep_conservative_generation_floor_when_reconstructing_startup_memtabl
         .unwrap();
 
     // Assert
-    assert!(recovered.wal_recovery_records_replayed > 0);
+    assert!(recovered.recovery_stats.wal_recovery_records_replayed > 0);
     assert_eq!(generation.first_wal_segment, Some(1));
     assert_eq!(recovered.wal_recovery_floor_segment(), Some(1));
     Ok(())

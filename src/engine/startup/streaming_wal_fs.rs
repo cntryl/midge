@@ -187,8 +187,8 @@ pub(super) fn validate_wal_source(
     range_buffer_bytes: usize,
 ) -> MidgeResult<()> {
     validate_buffer_size(range_buffer_bytes)?;
-    let file = fs.open(path, READ_ONLY)?;
-    if file.len()? != expected_len {
+    let file = fs.open(path, READ_ONLY).map_err(FsError::into_midge)?;
+    if file.len().map_err(FsError::into_midge)? != expected_len {
         return Err(MidgeError::Corruption(format!(
             "WAL source {path} does not match catalog length {expected_len}"
         )));
@@ -201,7 +201,7 @@ pub(super) fn validate_wal_source(
         crc = crc32c::crc32c_append(crc, &bytes);
         offset += length;
     }
-    if file.len()? != expected_len || crc != expected_crc {
+    if file.len().map_err(FsError::into_midge)? != expected_len || crc != expected_crc {
         return Err(MidgeError::Corruption(format!(
             "WAL source {path} does not match its catalog content checksum"
         )));
@@ -216,10 +216,16 @@ pub(super) fn wal_sources_equal(
     range_buffer_bytes: usize,
 ) -> MidgeResult<bool> {
     validate_buffer_size(range_buffer_bytes)?;
-    let left_file = left.0.open(left.1, READ_ONLY)?;
-    let right_file = right.0.open(right.1, READ_ONLY)?;
-    let size = left_file.len()?;
-    if right_file.len()? != size {
+    let left_file = left
+        .0
+        .open(left.1, READ_ONLY)
+        .map_err(FsError::into_midge)?;
+    let right_file = right
+        .0
+        .open(right.1, READ_ONLY)
+        .map_err(FsError::into_midge)?;
+    let size = left_file.len().map_err(FsError::into_midge)?;
+    if right_file.len().map_err(FsError::into_midge)? != size {
         return Ok(false);
     }
     let mut offset = 0_u64;
@@ -232,11 +238,12 @@ pub(super) fn wal_sources_equal(
         }
         offset += length;
     }
-    Ok(left_file.len()? == size && right_file.len()? == size)
+    Ok(left_file.len().map_err(FsError::into_midge)? == size
+        && right_file.len().map_err(FsError::into_midge)? == size)
 }
 
 fn read_exact_range(file: &dyn File, offset: u64, length: u64) -> MidgeResult<Bytes> {
-    let bytes = file.read_at(offset, length)?;
+    let bytes = file.read_at(offset, length).map_err(FsError::into_midge)?;
     if bytes.len() as u64 != length {
         return Err(MidgeError::RecoveryFailed(
             "WAL source changed or returned a truncated range".into(),
@@ -248,7 +255,7 @@ fn read_exact_range(file: &dyn File, offset: u64, length: u64) -> MidgeResult<By
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{StorageBackend, StorageEvent, StorageObjectMetadata, StorageOutcome};
+    use crate::storage::{StorageBackend, StorageEvent, StorageOutcome};
     use std::time::Duration;
 
     struct RecordingBackend {
@@ -257,9 +264,20 @@ mod tests {
     }
 
     impl StorageBackend for RecordingBackend {
+        fn submit_range_read_request(
+            &self,
+            request: crate::storage::StorageRequest,
+            range: std::ops::Range<u64>,
+            callback: crate::storage::RangeReadCallback,
+        ) {
+            self.ranges.lock().push((range.start, range.end));
+            self.inner
+                .submit_range_read_request(request, range, callback);
+        }
+
         crate::storage::forward_storage_backend!(
             inner;
-            submit_read_with_metadata,
+            submit_write_request, submit_delete_request, submit_head_request, submit_range_head_request, submit_metadata_read_request,
             submit_write_with_headers,
             submit_delete_with_headers,
             submit_head,
@@ -276,27 +294,6 @@ mod tests {
         fn submit_delete(&self, _key: &str, _callback: crate::storage::StorageCallback) {
             panic!("replay cannot delete cloud objects");
         }
-        fn submit_range_head(
-            &self,
-            key: &str,
-            timeout: Duration,
-            callback: crate::storage::StorageCallback,
-        ) {
-            self.inner.submit_range_head(key, timeout, callback);
-        }
-        fn submit_read_range(
-            &self,
-            key: &str,
-            start: u64,
-            end: u64,
-            expected: StorageObjectMetadata,
-            timeout: Duration,
-            callback: crate::storage::RangeReadCallback,
-        ) {
-            self.ranges.lock().push((start, end));
-            self.inner
-                .submit_read_range(key, start, end, expected, timeout, callback);
-        }
     }
 
     struct Fixture {
@@ -311,7 +308,10 @@ mod tests {
         fn new() -> MidgeResult<Self> {
             let directory = tempfile::tempdir()?;
             let cloud_root = directory.path().join("cloud");
-            let local = Arc::new(crate::io::RealFs::new(directory.path().join("local"))?);
+            let local = Arc::new(
+                crate::io::RealFs::new(directory.path().join("local"))
+                    .map_err(FsError::into_midge)?,
+            );
             let backend = Arc::new(RecordingBackend {
                 inner: crate::storage::filesystem::FileSystem::new(&cloud_root)?,
                 ranges: parking_lot::Mutex::new(Vec::new()),
@@ -324,7 +324,14 @@ mod tests {
                 .collect();
             std::fs::write(&full_path, &bytes)?;
             let (tx, rx) = std::sync::mpsc::channel();
-            backend.submit_range_head(&key, Duration::from_secs(5), tx);
+            backend.submit_range_head_request(
+                crate::storage::StorageRequest::new(
+                    &key,
+                    crate::common::OperationDeadline::from_budget(Duration::from_secs(5)),
+                    Duration::from_secs(5),
+                ),
+                tx,
+            );
             let metadata = match rx.recv_timeout(Duration::from_secs(5)).expect("range HEAD") {
                 StorageEvent::HeadComplete {
                     result: StorageOutcome::Ok(metadata),
@@ -362,12 +369,12 @@ mod tests {
             fixture.path.clone(),
         )?;
         let path = FsPath::new(format!("wal/{name}"));
-        let file = fs.open(&path, READ_ONLY)?;
+        let file = fs.open(&path, READ_ONLY).map_err(FsError::into_midge)?;
 
         // Act
-        let bytes = file.read_at(9, 9_973)?;
+        let bytes = file.read_at(9, 9_973).map_err(FsError::into_midge)?;
         let requests = fixture.backend.ranges.lock().len();
-        let cached = file.read_at(9_981, 1)?;
+        let cached = file.read_at(9_981, 1).map_err(FsError::into_midge)?;
 
         // Assert
         assert_eq!(bytes.as_ref(), &fixture.bytes[9..9_982]);
@@ -383,7 +390,12 @@ mod tests {
             std::fs::read_dir(fixture.directory.path().join("local"))?.count(),
             0
         );
-        assert_eq!(fs.list_dir(&FsPath::new("wal"))?[0].name, name);
+        assert_eq!(
+            fs.list_dir(&FsPath::new("wal"))
+                .map_err(FsError::into_midge)?[0]
+                .name,
+            name
+        );
         Ok(())
     }
 
@@ -433,7 +445,8 @@ mod tests {
     {
         // Arrange
         let fixture = Fixture::new()?;
-        let local = crate::io::RealFs::new(fixture.directory.path().join("aliases"))?;
+        let local = crate::io::RealFs::new(fixture.directory.path().join("aliases"))
+            .map_err(FsError::into_midge)?;
         std::fs::write(
             fixture.directory.path().join("aliases/equal.wal"),
             &fixture.bytes,
@@ -476,7 +489,7 @@ mod tests {
             fixture.path.clone(),
         )?;
         let path = FsPath::new(name.clone());
-        let mut file = fs.open(&path, READ_ONLY)?;
+        let mut file = fs.open(&path, READ_ONLY).map_err(FsError::into_midge)?;
 
         // Act
         let mutation = file.write_at(0, Bytes::from_static(b"invalid"));

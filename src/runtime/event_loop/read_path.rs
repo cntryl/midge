@@ -31,6 +31,7 @@ impl EventLoop {
             })
             .cloned()
         else {
+            self.checkpoint_backfilled_bounds()?;
             return Ok(false);
         };
 
@@ -80,13 +81,23 @@ impl EventLoop {
         let name = updated.name.clone();
         self.state.manifest.add_file(updated);
         self.state.manifest.note_applied_journal_edit(edit_id);
-        self.invalidate_sst_read_views();
         self.publish_snapshot();
-
-        crate::runtime::actors::ManifestActor::persist(&mut self.state)?;
-        self.mirror_metadata_after_local_commit("SST key-bound backfill")?;
         self.legacy_bound_backfill.record_success(&name);
         Ok(true)
+    }
+
+    /// Checkpoint and mirror the manifest once no legacy file is left to
+    /// backfill, rather than once per file (#548). Each bound edit is already
+    /// durable in the journal; until the checkpoint lands, recovery replays
+    /// it, and a stale mirror only keeps a file on the conservative read path.
+    fn checkpoint_backfilled_bounds(&mut self) -> crate::common::MidgeResult<()> {
+        if !self.legacy_bound_backfill.uncheckpointed {
+            return Ok(());
+        }
+        crate::runtime::actors::ManifestActor::persist(&mut self.state)?;
+        self.mirror_metadata_after_local_commit("SST key-bound backfill")?;
+        self.legacy_bound_backfill.uncheckpointed = false;
+        Ok(())
     }
 
     /// Create an immutable read snapshot for a column family
@@ -96,10 +107,7 @@ impl EventLoop {
     ) -> Option<super::super::ReadSnapshot> {
         let cf_state = self.state.column_families.get(&cf_id)?;
 
-        let sst_view = self
-            .sst_read_views
-            .borrow_mut()
-            .view_for(&self.state.manifest, cf_id);
+        let sst_view = self.state.manifest.read_view_for(cf_id);
 
         let sst_path_prefix = self
             .state
@@ -133,8 +141,7 @@ impl EventLoop {
         crate::runtime::durability::DurabilityCoordinator::is_durable(
             sequence,
             requested_durability,
-            self.state.wal.local_durable_seq,
-            self.state.wal.cloud_durable_seq,
+            self.state.wal.frontiers.local_durable(),
         )
     }
 
@@ -237,7 +244,10 @@ impl EventLoop {
 /// summary keeps failing does not block every other legacy file.
 #[derive(Default)]
 pub(super) struct LegacyBoundBackfill {
-    failures: std::collections::HashMap<String, (u32, std::time::Instant)>,
+    failures:
+        std::collections::HashMap<String, (u32, crate::runtime::retry_schedule::RetrySchedule)>,
+    /// Bound edits have been journaled since the last manifest checkpoint.
+    uncheckpointed: bool,
 }
 
 impl LegacyBoundBackfill {
@@ -248,22 +258,28 @@ impl LegacyBoundBackfill {
     fn is_eligible(&self, name: &str, now: std::time::Instant) -> bool {
         self.failures
             .get(name)
-            .is_none_or(|(_, retry_at)| *retry_at <= now)
+            .is_none_or(|(_, retry)| retry.is_ready_at(now))
     }
 
     /// Record a failed summary and return the file's failure count.
     fn record_failure(&mut self, name: &str, now: std::time::Instant) -> u32 {
-        let entry = self.failures.entry(name.to_string()).or_insert((0, now));
+        let entry = self.failures.entry(name.to_string()).or_insert_with(|| {
+            (
+                0,
+                crate::runtime::retry_schedule::RetrySchedule::new(Self::BASE_BACKOFF),
+            )
+        });
         entry.0 = entry.0.saturating_add(1);
         let backoff = Self::BASE_BACKOFF
             .saturating_mul(1_u32 << entry.0.saturating_sub(1).min(16))
             .min(Self::MAX_BACKOFF);
-        entry.1 = now + backoff;
+        entry.1.defer_from(now, backoff);
         entry.0
     }
 
     fn record_success(&mut self, name: &str) {
         self.failures.remove(name);
+        self.uncheckpointed = true;
     }
 }
 
@@ -302,6 +318,7 @@ mod tests {
             })
         }
 
+        #[cfg(test)]
         fn scan_range_state(
             &self,
             start: Option<&[u8]>,
@@ -324,6 +341,7 @@ mod tests {
             }
         }
 
+        #[cfg(test)]
         fn scan_range_raw_state(
             &self,
             start: Option<&[u8]>,
@@ -361,6 +379,7 @@ mod tests {
             self.open(path)
         }
 
+        #[cfg(test)]
         fn create(&self) -> crate::common::MidgeResult<Box<dyn crate::sst::traits::DynSstWriter>> {
             Err(crate::common::MidgeError::NotSupported(
                 "create not supported in test".into(),
@@ -392,7 +411,9 @@ mod tests {
 
         let sst_name = "00000001.sst".to_string();
         let sst_path = el.state.sst_dir.join(&sst_name);
-        let fs = std::sync::Arc::new(crate::io::RealFs::new(&el.state.sst_dir)?);
+        let fs = std::sync::Arc::new(
+            crate::io::RealFs::new(&el.state.sst_dir).map_err(crate::io::FsError::into_midge)?,
+        );
         let factory = std::sync::Arc::new(crate::sst::FsSstFactoryIo::new(fs, 64 * 1024));
         let mut writer = factory.create()?;
         writer.add_with_meta(b"a", Some(b"va".as_ref()), 10, EntryType::Put, None)?;
@@ -522,6 +543,52 @@ mod tests {
         );
         assert_eq!(file.smallest_seq, Some(9));
         assert_eq!(file.largest_seq, Some(10));
+        Ok(())
+    }
+
+    #[test]
+    fn should_backfill_many_legacy_files_with_bounded_manifest_checkpoints(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange: four legacy files without complete key bounds.
+        let (tmp, mut event_loop, sst_path) = create_event_loop_with_test_sst()?;
+        let template = event_loop.state.manifest.files[0].clone();
+        event_loop.state.manifest.files.clear();
+        for index in 1..=4 {
+            let name = format!("{index:08}.sst");
+            if index > 1 {
+                std::fs::copy(&sst_path, event_loop.state.sst_dir.join(&name))?;
+            }
+            let mut file = template.clone();
+            file.name = name;
+            file.key_bounds_complete = false;
+            event_loop.state.manifest.files.push(file);
+        }
+        crate::runtime::actors::ManifestActor::persist(&mut event_loop.state)?;
+
+        // Act: run maintenance passes until no legacy file remains.
+        let snapshot = tmp.path().join(crate::metadata::files::MANIFEST_SNAPSHOT);
+        let mut checkpoints = 0;
+        let mut passes = 0;
+        loop {
+            let before = std::fs::read(&snapshot)?;
+            let changed = event_loop.backfill_one_legacy_sst_bounds()?;
+            if std::fs::read(&snapshot)? != before {
+                checkpoints += 1;
+            }
+            passes += 1;
+            if !changed || passes > 10 {
+                break;
+            }
+        }
+        let reopened = crate::metadata::ManifestPersistence::load(tmp.path())
+            .map_err(crate::common::MidgeError::Internal)?;
+
+        // Assert: every file is migrated durably with one checkpoint, not
+        // one full manifest rewrite per file.
+        assert_eq!(passes, 5);
+        assert_eq!(checkpoints, 1);
+        assert!(reopened.files.iter().all(|file| file.key_bounds_complete));
+        assert_eq!(reopened.files.len(), 4);
         Ok(())
     }
 

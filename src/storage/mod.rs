@@ -134,6 +134,90 @@ pub struct StorageObjectMetadata {
     pub generation: Option<String>,
 }
 
+/// A mutation condition interpreted by the storage adapter, never by callers
+/// constructing provider-specific HTTP header names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoragePrecondition {
+    None,
+    IfAbsent,
+    IfMatch(StorageObjectMetadata),
+}
+
+impl StoragePrecondition {
+    fn headers(&self) -> Result<Vec<(String, String)>, StorageError> {
+        match self {
+            Self::None => Ok(Vec::new()),
+            Self::IfAbsent => Ok(vec![("If-None-Match".into(), "*".into())]),
+            Self::IfMatch(metadata) => {
+                let (name, value) =
+                    conditional_object_identity(&metadata.etag, metadata.generation.as_deref())
+                        .ok_or_else(|| {
+                            StorageError::precondition_failed("object identity is missing")
+                        })?;
+                Ok(vec![(name.into(), value.into())])
+            }
+        }
+    }
+
+    fn delete_headers(&self) -> Result<Vec<(String, String)>, StorageError> {
+        if matches!(self, Self::IfAbsent) {
+            return Err(StorageError::precondition_failed(
+                "delete cannot enforce absence precondition",
+            ));
+        }
+        self.headers()
+    }
+}
+
+/// Shared context for one storage operation. The absolute deadline remains
+/// valid across queueing and callback waits; a reservation stays owned until
+/// the backend's terminal completion.
+#[derive(Clone)]
+pub struct StorageRequest {
+    pub key: String,
+    pub deadline: crate::common::OperationDeadline,
+    pub timeout: std::time::Duration,
+    pub precondition: StoragePrecondition,
+    pub reservation: Option<std::sync::Arc<crate::common::resource_budget::ResourceReservation>>,
+}
+
+impl StorageRequest {
+    #[must_use]
+    pub fn new(
+        key: impl Into<String>,
+        deadline: crate::common::OperationDeadline,
+        timeout: std::time::Duration,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            deadline,
+            timeout,
+            precondition: StoragePrecondition::None,
+            reservation: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_precondition(mut self, precondition: StoragePrecondition) -> Self {
+        self.precondition = precondition;
+        self
+    }
+
+    #[must_use]
+    pub fn with_reservation(
+        mut self,
+        reservation: std::sync::Arc<crate::common::resource_budget::ResourceReservation>,
+    ) -> Self {
+        self.reservation = Some(reservation);
+        self
+    }
+
+    #[must_use]
+    pub fn remaining_timeout(&self) -> std::time::Duration {
+        self.deadline.clamp(self.timeout)
+    }
+}
+
 impl StorageObjectMetadata {
     /// Metadata for a provider that reports no object generation.
     #[cfg(any(
@@ -454,6 +538,79 @@ pub type MetadataReadCallback =
 /// Completion of an exact, conditionally versioned object range.
 pub type RangeReadCallback = std::sync::mpsc::Sender<Result<Vec<u8>, StorageError>>;
 
+/// Preserve the typed request's deadline and reservation around a versioned read.
+pub(crate) fn dispatch_metadata_read_request(
+    request: StorageRequest,
+    callback: MetadataReadCallback,
+    submit: impl FnOnce(&str, std::time::Duration, MetadataReadCallback),
+) {
+    let timeout = request.remaining_timeout();
+    if timeout.is_zero() {
+        let _ = callback.send(Err(storage_timeout_error(
+            "metadata read has no remaining budget",
+        )));
+        return;
+    }
+    if !matches!(request.precondition, StoragePrecondition::None) {
+        let _ = callback.send(Err(StorageError::protocol(
+            "metadata read does not accept a mutation precondition",
+        )));
+        return;
+    }
+    let callback = if let Some(reservation) = request.reservation {
+        match retained_callback::retain(callback.clone(), reservation) {
+            Ok(retained) => retained,
+            Err(error) => {
+                let _ = callback.send(Err(StorageError::from(error)));
+                return;
+            }
+        }
+    } else {
+        callback
+    };
+    submit(&request.key, timeout, callback);
+}
+
+/// Preserve deadline, precondition rejection and reservation for either HEAD verb.
+pub(crate) fn dispatch_head_request(
+    request: StorageRequest,
+    callback: StorageCallback,
+    submit: impl FnOnce(&str, std::time::Duration, StorageCallback),
+) {
+    let timeout = request.remaining_timeout();
+    if timeout.is_zero() {
+        let _ = callback.send(StorageEvent::HeadComplete {
+            key: request.key,
+            result: StorageOutcome::Err(storage_timeout_error("head timed out")),
+        });
+        return;
+    }
+    if !matches!(request.precondition, StoragePrecondition::None) {
+        let _ = callback.send(StorageEvent::HeadComplete {
+            key: request.key,
+            result: StorageOutcome::Err(StorageError::protocol(
+                "HEAD does not accept a mutation precondition",
+            )),
+        });
+        return;
+    }
+    let callback = if let Some(reservation) = request.reservation {
+        match retained_callback::retain(callback.clone(), reservation) {
+            Ok(retained) => retained,
+            Err(error) => {
+                let _ = callback.send(StorageEvent::HeadComplete {
+                    key: request.key,
+                    result: StorageOutcome::Err(StorageError::from(error)),
+                });
+                return;
+            }
+        }
+    } else {
+        callback
+    };
+    submit(&request.key, timeout, callback);
+}
+
 /// Version-aware object I/O required by engine persistence paths.
 ///
 /// CRITICAL DESIGN:
@@ -481,115 +638,33 @@ pub type RangeReadCallback = std::sync::mpsc::Sender<Result<Vec<u8>, StorageErro
 ///   content hash for HEAD, and stamps each new version with a later modified
 ///   time so a reused inode cannot repeat an old identity (#557).
 pub trait StorageBackend: Send + Sync + 'static {
-    /// Keep a publication allowance alive until backend completion. Async
-    /// adapters must override this if their ordinary callback can time out
-    /// before the underlying upload has released its payload.
-    fn submit_write_with_reservation(
+    /// Read an exact range from the version named by `IfMatch`.
+    fn submit_range_read_request(
         &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        timeout: std::time::Duration,
-        reservation: std::sync::Arc<crate::common::resource_budget::ResourceReservation>,
-        callback: StorageCallback,
-    ) {
-        match retained_callback::retain(callback.clone(), reservation) {
-            Ok(retained) => {
-                self.submit_write_with_headers_and_timeout(key, data, headers, timeout, retained);
-            }
-            Err(error) => {
-                let _ = callback.send(StorageEvent::WriteComplete {
-                    key: key.to_string(),
-                    result: StorageOutcome::Err(StorageError::new(
-                        StorageErrorKind::of(&error),
-                        format!("retain upload completion: {error}"),
-                    )),
-                });
-            }
-        }
-    }
-    fn submit_read_range_with_reservation(
-        &self,
-        key: &str,
+        request: StorageRequest,
         range: std::ops::Range<u64>,
-        expected: StorageObjectMetadata,
-        timeout: std::time::Duration,
-        reservation: std::sync::Arc<crate::common::resource_budget::ResourceReservation>,
-        callback: RangeReadCallback,
-    ) {
-        let start = range.start;
-        let end = range.end;
-        match retained_callback::retain(callback.clone(), reservation) {
-            Ok(retained) => self.submit_read_range(key, start, end, expected, timeout, retained),
-            Err(error) => {
-                // Keep the class: a blocked budget is a retryable resource
-                // limit, not an I/O failure.
-                let kind = StorageErrorKind::of(&error);
-                let _ = callback.send(Err(StorageError::new(
-                    kind,
-                    format!("retain range completion: {error}"),
-                )));
-            }
-        }
-    }
-
-    /// Return a version usable by exact range reads without reading the body.
-    /// Unsupported backends must not fall back to whole-object reads.
-    #[cfg(not(test))]
-    fn submit_range_head(&self, key: &str, timeout: std::time::Duration, callback: StorageCallback);
-    #[cfg(test)]
-    fn submit_range_head(
-        &self,
-        _key: &str,
-        _timeout: std::time::Duration,
-        _callback: StorageCallback,
-    ) {
-        panic!("test backend received undeclared range HEAD capability");
-    }
-
-    /// Read precisely [start, end) from the expected immutable object version.
-    /// Implementations must reject unsupported conditions and short responses.
-    #[cfg(not(test))]
-    fn submit_read_range(
-        &self,
-        key: &str,
-        start: u64,
-        end: u64,
-        expected: StorageObjectMetadata,
-        timeout: std::time::Duration,
         callback: RangeReadCallback,
     );
-    #[cfg(test)]
-    fn submit_read_range(
-        &self,
-        _key: &str,
-        _start: u64,
-        _end: u64,
-        _expected: StorageObjectMetadata,
-        _timeout: std::time::Duration,
-        _callback: RangeReadCallback,
-    ) {
-        panic!("test backend received undeclared range-read capability");
-    }
 
-    /// Read bytes and identity from one version. Unsupported backends fail closed;
-    /// synthesizing this response from independent GET and HEAD calls is unsafe.
-    #[cfg(not(test))]
-    fn submit_read_with_metadata(
+    /// Look up a cheap identity for exact range reads under one typed request.
+    fn submit_range_head_request(&self, request: StorageRequest, callback: StorageCallback);
+
+    /// Read the body and identity from one version under one typed request.
+    fn submit_metadata_read_request(&self, request: StorageRequest, callback: MetadataReadCallback);
+
+    /// Submit one typed metadata lookup with the caller's remaining budget.
+    fn submit_head_request(&self, request: StorageRequest, callback: StorageCallback);
+
+    /// Submit one typed delete, retaining its deadline, condition and reservation.
+    fn submit_delete_request(&self, request: StorageRequest, callback: StorageCallback);
+
+    /// Submit one typed write, retaining its deadline, condition and reservation.
+    fn submit_write_request(
         &self,
-        key: &str,
-        timeout: std::time::Duration,
-        callback: MetadataReadCallback,
+        request: StorageRequest,
+        data: Vec<u8>,
+        callback: StorageCallback,
     );
-    #[cfg(test)]
-    fn submit_read_with_metadata(
-        &self,
-        _key: &str,
-        _timeout: std::time::Duration,
-        _callback: MetadataReadCallback,
-    ) {
-        panic!("test backend received undeclared metadata-read capability");
-    }
 
     /// Submit a write operation. Returns immediately.
     fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback);
@@ -613,18 +688,6 @@ pub trait StorageBackend: Send + Sync + 'static {
         _callback: StorageCallback,
     ) {
         panic!("test backend received undeclared conditional-write capability");
-    }
-
-    /// Submit a conditional write with a bounded callback-adapter wait.
-    fn submit_write_with_headers_and_timeout(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        _timeout: std::time::Duration,
-        callback: StorageCallback,
-    ) {
-        self.submit_write_with_headers(key, data, headers, callback);
     }
 
     /// Submit a delete operation. Returns immediately.
@@ -655,16 +718,6 @@ pub trait StorageBackend: Send + Sync + 'static {
     #[cfg(test)]
     fn submit_head(&self, _key: &str, _callback: StorageCallback) {
         panic!("test backend received undeclared HEAD capability");
-    }
-
-    /// Submit an object metadata lookup with a bounded callback-adapter wait.
-    fn submit_head_with_timeout(
-        &self,
-        key: &str,
-        _timeout: std::time::Duration,
-        callback: StorageCallback,
-    ) {
-        self.submit_head(key, callback);
     }
 }
 
