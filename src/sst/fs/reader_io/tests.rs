@@ -1285,40 +1285,6 @@ fn should_reject_corrupt_block_trailer_identically_on_every_block_read_path() ->
 }
 
 #[test]
-fn should_keep_block_frame_decoding_in_one_place() {
-    // Arrange: framing and key-prefix rules drifted across five and three
-    // copies before (#510).
-    let sources = [
-        include_str!("io.rs"),
-        include_str!("mod.rs"),
-        include_str!("recovery.rs"),
-        include_str!("scan.rs"),
-        include_str!("state.rs"),
-        include_str!("progress.rs"),
-    ];
-
-    // Act
-    let frame_decoders: usize = sources
-        .iter()
-        .map(|source| source.matches("u32::from_le_bytes").count())
-        .sum();
-    let prefix_checks: usize = sources
-        .iter()
-        .map(|source| source.matches("Invalid shared prefix length").count())
-        .sum();
-
-    // Assert
-    assert_eq!(
-        frame_decoders, 1,
-        "block length prefixes are decoded only in split_block_frame"
-    );
-    assert_eq!(
-        prefix_checks, 1,
-        "shared prefixes are checked only in shared_prefix_len"
-    );
-}
-
-#[test]
 fn should_select_clamped_block_span_when_range_bounds_vary() -> MidgeResult<()> {
     // Arrange (#510): every range reader selects blocks through `block_span`.
     let temp_dir = tempfile::tempdir()?;

@@ -2,10 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [develop]
+    branches: [develop, main]
   pull_request:
-    branches: [develop]
-    types: [opened, synchronize, reopened, edited]
+    branches: [develop, main]
 
 permissions:
   contents: read
@@ -18,7 +17,7 @@ jobs:
   core:
     name: Core (ubuntu-latest)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       CARGO_INCREMENTAL: 0
 
@@ -34,17 +33,23 @@ jobs:
         with:
           shared-key: "ci-core"
 
+      - name: Install test validator
+        run: cargo install --git https://github.com/cntryl/tools --rev 1ceecf1a6501793080235d2d46b2982f1424727c --locked
+
       - name: Rustfmt
         run: cargo fmt --check
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic
 
+      - name: Validate test contracts
+        run: cntryl-tools validate-tests
+
       - name: Check telemetry without a cloud provider
         run: cargo check --lib --no-default-features --features telemetry
 
-      - name: Test
-        run: cargo test --workspace --features telemetry,telemetry-otlp,cloud-common,cloud-aws,sqrzl-tests,cloud-azure,cloud-gcp,cloud-oci,cloud-all,cloud_integration
+      - name: Full mock-backed test suite
+        run: cargo test --workspace --features telemetry-otlp,sqrzl-tests,cloud_integration
 
       - name: Fault injection suite (serial; failpoints are process-global)
         run: cargo test --test fault_injection --all-features -- --test-threads=1
@@ -62,42 +67,3 @@ jobs:
         run: |
           cargo rustc --lib -- -D unnameable_types
           cargo rustc --lib --no-default-features -- -D unnameable_types
-
-  windows-check:
-    name: Windows check (windows-latest)
-    runs-on: windows-latest
-    timeout-minutes: 20
-    env:
-      CARGO_INCREMENTAL: 0
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-
-      - name: Update Rust toolchain
-        run: rustup update stable
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "ci-windows"
-
-      - name: Check all targets
-        run: cargo check --workspace --all-targets --all-features
-
-      - name: Test cloud WAL salvage on Windows
-        run: cargo test --lib streaming_wal_plan::tests --all-features
-
-      - name: Test cloud SST loss classification on Windows
-        run: cargo test --lib should_treat_missing_child --all-features
-
-      - name: Test cloud SST salvage on Windows
-        run: cargo test --lib salvage_removes_definitively_lost_ssts --all-features
-
-      - name: Test consistent-cut backup and restore on Windows
-        run: |
-          cargo test --lib engine::backup::tests --all-features
-          cargo test --test engine_api consistent_cut_backup --all-features -- --test-threads=1
-
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic

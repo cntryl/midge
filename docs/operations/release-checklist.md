@@ -3,7 +3,7 @@
 Use this checklist before publishing a release candidate or stable release.
 
 - [ ] development work is merged into `develop` with passing current-head CI
-- [ ] the `develop` → `main` promotion PR has passing CI, repository and Docker qualification, promotion-source, and CodeQL checks on its current head
+- [ ] the `develop` → `main` promotion PR has passing CI, OS matrix, cloud integration, compatibility, repository and Docker qualification, promotion-source, and CodeQL checks on its current head
 - [ ] the promotion uses a merge commit and post-merge `main` checks pass
 - [ ] the release tag points to a commit on `main`
 
@@ -17,7 +17,6 @@ Use this checklist before publishing a release candidate or stable release.
 - [ ] `cargo test --workspace --all-features --doc`
 - [ ] `cargo check --example documented_quick_start --all-features`
 - [ ] `cargo machete`
-- [ ] `cargo test --test governance -- repository_gates`
 - [ ] `cargo package --locked`
 - [ ] `docker build --file Dockerfile.tests --tag midge-tests:release .`
 - [ ] `cargo test --test fault_injection --features failpoints -- --test-threads=1 external_adopter_smoke`

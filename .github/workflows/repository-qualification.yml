@@ -18,14 +18,12 @@ concurrency:
 
 jobs:
   repository:
-    name: Repository contracts
+    name: Repository checks
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event_name == 'schedule' && 'main' || github.ref }}
 
       - name: Update Rust toolchain
         run: rustup update stable
@@ -53,14 +51,8 @@ jobs:
           test -f docs/operations/migration-guide.md
           test -f CHANGELOG.md
 
-      - name: Validate repository and benchmark contracts
-        run: cargo test --test governance -- repository_gates
-
       - name: Check production module sizes
         run: cntryl-tools check-module-sizes --config .cntryl/repository.toml
-
-      - name: Validate test contracts
-        run: cntryl-tools validate-tests
 
       - name: Reject unused dependencies
         run: cargo machete

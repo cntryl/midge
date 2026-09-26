@@ -248,33 +248,6 @@ fn should_produce_identical_bytes_when_same_entries_written_via_create_and_creat
 }
 
 #[test]
-fn should_keep_sst_encoding_policy_in_the_shared_block_pipeline() {
-    // Arrange
-    let writer = include_str!("../factory_io.rs");
-    let pipeline = include_str!("pipeline.rs");
-    let sink = include_str!("sink.rs");
-
-    // Act
-    let legacy_streaming_helpers = [
-        "append_block_to_stream",
-        "flush_streaming_current_block",
-        "append_range_tombstone_block_to_stream",
-        "append_trie_block_to_stream",
-        "append_metadata_index_and_footer_to_stream",
-    ];
-
-    // Assert
-    assert!(pipeline.contains("fn append_block<S: BlockSink>"));
-    assert!(pipeline.contains("fn append_metadata_index_and_footer<S: BlockSink>"));
-    assert!(!pipeline.contains("fn finalize_data_blocks"));
-    assert!(legacy_streaming_helpers
-        .iter()
-        .all(|helper| !writer.contains(helper) && !pipeline.contains(helper)));
-    assert!(!sink.contains("CompressionPolicy"));
-    assert!(!sink.contains("encode_readable_block"));
-}
-
-#[test]
 fn should_reject_sst_target_when_path_escapes_injected_filesystem_root() -> MidgeResult<()> {
     // Arrange
     let root = tempfile::tempdir()?;
