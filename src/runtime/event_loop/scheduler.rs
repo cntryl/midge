@@ -101,7 +101,6 @@ impl EventLoop {
             self.compaction_publish_actor
                 .is_inflight()
                 .then_some(Duration::from_millis(1)),
-            Some(self.background_maintenance_timeout()),
         ]
         .into_iter()
         .flatten()
@@ -118,6 +117,7 @@ impl EventLoop {
                 .cloud_wal
                 .upload_retry_deadline_timeout(),
             self.state.flush_retry_deadline_timeout(),
+            Some(self.background_maintenance_timeout()),
         ]
         .into_iter()
         .flatten()

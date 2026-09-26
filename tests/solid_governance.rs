@@ -581,3 +581,21 @@ fn should_keep_cloud_fields_in_cloud_coordinator() {
     assert!(loose.is_empty(), "EventLoop still owns {loose:?} directly");
     assert!(body.contains("cloud_coordinator: CloudCoordinator,"));
 }
+
+#[test]
+fn should_register_background_maintenance_with_retry_deadlines() {
+    // Arrange
+    let event_loop = include_str!("../src/runtime/event_loop/mod.rs");
+    let compaction = include_str!("../src/runtime/event_loop/compaction.rs");
+    let scheduler = include_str!("../src/runtime/event_loop/scheduler.rs");
+
+    // Act
+    let uses_raw_timer = event_loop.contains("next_background_compaction_check")
+        || compaction.contains("next_background_compaction_check");
+
+    // Assert
+    assert!(!uses_raw_timer);
+    assert!(event_loop
+        .contains("background_compaction_schedule: crate::runtime::retry_schedule::RetrySchedule"));
+    assert!(scheduler.contains("Some(self.background_maintenance_timeout())"));
+}

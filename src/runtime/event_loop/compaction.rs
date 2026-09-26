@@ -11,7 +11,7 @@ use crate::runtime::actors::compaction::PreparedCompactionOutput;
 use crate::runtime::CompactionPlan;
 use crate::runtime::RuntimeResponse;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 impl EventLoop {
     pub(super) fn assign_compaction_output_sequence(
@@ -195,8 +195,9 @@ impl EventLoop {
     }
 
     pub(super) fn background_maintenance_timeout(&self) -> Duration {
-        self.next_background_compaction_check
-            .saturating_duration_since(Instant::now())
+        self.background_compaction_schedule
+            .remaining()
+            .unwrap_or(Duration::ZERO)
     }
 
     pub(super) fn run_background_compaction_maintenance_if_due(&mut self) {
@@ -204,15 +205,15 @@ impl EventLoop {
             return;
         }
 
-        self.next_background_compaction_check =
-            Instant::now() + BACKGROUND_COMPACTION_CHECK_INTERVAL;
+        self.background_compaction_schedule
+            .defer_for(BACKGROUND_COMPACTION_CHECK_INTERVAL);
         match self.backfill_one_legacy_sst_bounds() {
             Ok(true) => {
                 // Continue migrating one file per event-loop turn without
                 // making one maintenance invocation proportional to catalog
                 // size.
-                self.next_background_compaction_check =
-                    Instant::now() + STARTUP_CLOUD_MAINTENANCE_DELAY;
+                self.background_compaction_schedule
+                    .defer_for(STARTUP_CLOUD_MAINTENANCE_DELAY);
             }
             Ok(false) => {}
             Err(error) => {
@@ -230,7 +231,8 @@ impl EventLoop {
     }
 
     pub(in crate::runtime) fn schedule_background_compaction_on_startup(&mut self) {
-        self.next_background_compaction_check = Instant::now() + STARTUP_CLOUD_MAINTENANCE_DELAY;
+        self.background_compaction_schedule
+            .defer_for(STARTUP_CLOUD_MAINTENANCE_DELAY);
         match self.schedule_one_background_compaction_if_needed("runtime startup") {
             Ok(true) => tracing::debug!("Scheduled compaction during runtime startup"),
             Ok(false) => {}

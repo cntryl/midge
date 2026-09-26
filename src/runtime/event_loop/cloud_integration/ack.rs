@@ -407,7 +407,7 @@ impl EventLoop {
                     .cloud_wal
                     .acked_segments
                     .remove(&segment_id);
-                self.next_background_compaction_check = std::time::Instant::now();
+                self.background_compaction_schedule.mark_due();
                 tracing::debug!(segment_id, "Pruned cloud-covered remote WAL segment");
             }
             crate::storage::StorageOutcome::Err(error) => {

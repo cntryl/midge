@@ -4,6 +4,7 @@ use crate::runtime::TestRuntimeMsg;
 use crate::runtime::{state::RuntimeState, ResponseRouter};
 use crate::types::EntryType;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 static TEST_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -932,7 +933,7 @@ fn should_schedule_live_compaction_at_hard_l0_ceiling_when_background_disabled()
             .push(test_manifest_l0_file_meta(&name, sequence));
     }
     assert!(event_loop.state.l0_write_slot_unavailable(0));
-    event_loop.next_background_compaction_check = std::time::Instant::now();
+    event_loop.background_compaction_schedule.mark_due();
     // Act
     event_loop.run_background_compaction_maintenance_if_due();
     for _ in 0..16 {

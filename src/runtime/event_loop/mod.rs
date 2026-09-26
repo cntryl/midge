@@ -48,7 +48,7 @@ use crossbeam::channel::Sender;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// How flush work is executed for one `EventLoop`.
 ///
@@ -160,7 +160,7 @@ pub struct EventLoop {
     pub(super) loop_debug: bool,
     pub(super) loop_debug_wakes: u64,
     pub(super) loop_debug_batch_total: u64,
-    next_background_compaction_check: Instant,
+    background_compaction_schedule: crate::runtime::retry_schedule::RetrySchedule,
 
     // Durability coordination (extracted to reduce EventLoop cognitive load)
     pub(super) durability: DurabilityCoordinator,
@@ -294,6 +294,10 @@ impl EventLoop {
         gc_actor.set_retry_notifier(worker_msg_tx.clone());
         let durability =
             Self::create_durability_coordinator(&wal_actor, initial_segment_id, &config);
+        let mut background_compaction_schedule = crate::runtime::retry_schedule::RetrySchedule::new(
+            BACKGROUND_COMPACTION_CHECK_INTERVAL,
+        );
+        background_compaction_schedule.defer();
 
         let mut event_loop = Self {
             state,
@@ -309,7 +313,7 @@ impl EventLoop {
             loop_debug: std::env::var_os("MIDGE_LOOP_DEBUG").is_some(),
             loop_debug_wakes: 0,
             loop_debug_batch_total: 0,
-            next_background_compaction_check: Instant::now() + BACKGROUND_COMPACTION_CHECK_INTERVAL,
+            background_compaction_schedule,
             durability,
             wal_transition: crate::runtime::wal_transition::WalTransitionProtocol::new(),
             router,

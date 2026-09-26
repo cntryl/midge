@@ -49,7 +49,6 @@ impl RetrySchedule {
         self.at = Some(now + delay);
     }
 
-    #[cfg(test)]
     pub(crate) fn mark_due(&mut self) {
         self.at = Some(self.clock.now());
     }
