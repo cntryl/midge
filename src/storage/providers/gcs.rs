@@ -11,8 +11,8 @@ use super::super::cloud::{
     CloudResponse, CloudSigner, ObjectMetadata,
 };
 use super::rest::{
-    classify_response_error, conditional_range_preconditions, current_unix_secs, finish_paged_list,
-    response_error_detail, ListPageParser, PagedList,
+    conditional_range_preconditions, current_unix_secs, finish_paged_list, ListPageParser,
+    PagedList, ProviderDialect,
 };
 use super::xml::extract_xml_tag_values;
 use crate::common::{MidgeError, MidgeResult};
@@ -1235,7 +1235,7 @@ impl CloudBackend for GcsBackend {
         }
         request.url = url;
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status == 200 => CloudEvent::Put {
+            Ok(resp) if GcsDialect(mode).put_ok(resp.status) => CloudEvent::Put {
                 key: ctx,
                 result: CloudOutcome::Ok(()),
             },
@@ -1463,11 +1463,7 @@ impl CloudBackend for GcsBackend {
         }
         request.url = url;
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status == 204 || resp.status == 200 => CloudEvent::Delete {
-                key: ctx,
-                result: CloudOutcome::Ok(()),
-            },
-            Ok(resp) if resp.status == 404 => CloudEvent::Delete {
+            Ok(resp) if GcsDialect(mode).delete_ok(resp.status) => CloudEvent::Delete {
                 key: ctx,
                 result: CloudOutcome::Ok(()), // idempotent delete
             },
@@ -1586,48 +1582,76 @@ fn gcs_response_error(
     mode: GcsBackendMode,
     conditional_mutation: bool,
 ) -> CloudError {
-    let body = String::from_utf8_lossy(&response.body);
-    let (reason, message) = match mode {
-        GcsBackendMode::Json => serde_json::from_slice::<serde_json::Value>(&response.body)
-            .ok()
-            .map_or((None, None), |json| {
-                let reason = json
-                    .pointer("/error/errors/0/reason")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string);
-                let message = json
-                    .pointer("/error/message")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string);
-                (reason, message)
-            }),
-        GcsBackendMode::Xml => (
-            extract_xml_tag_values(&body, "Code").into_iter().next(),
-            extract_xml_tag_values(&body, "Message").into_iter().next(),
-        ),
-    };
-    let detail = response_error_detail(operation, reason.as_deref(), message.as_deref(), true);
-    let predicate_failed = reason.as_deref().is_some_and(|reason| {
-        reason.eq_ignore_ascii_case("conditionNotMet")
-            || reason.eq_ignore_ascii_case("PreconditionFailed")
-    });
-    let policy_failure = reason.as_deref().is_some_and(|reason| {
-        [
-            "retentionPolicyNotMet",
-            "orgPolicyConstraintFailed",
-            "objectUnderActiveHold",
-            "userProjectMissing",
-            "billingNotEnabled",
-        ]
-        .iter()
-        .any(|candidate| reason.eq_ignore_ascii_case(candidate))
-    });
-    if conditional_mutation && response.status == 412 && predicate_failed {
-        classify_response_error(response.status, detail, true)
-    } else if policy_failure && matches!(response.status, 403 | 409 | 412) {
-        CloudError::InvalidRequest(format!("status {}: {detail}", response.status))
-    } else {
-        classify_response_error(response.status, detail, false)
+    GcsDialect(mode).response_error(response, operation, conditional_mutation)
+}
+
+struct GcsDialect(GcsBackendMode);
+
+impl ProviderDialect for GcsDialect {
+    fn put_ok(&self, status: u16) -> bool {
+        status == 200
+    }
+
+    fn delete_ok(&self, status: u16) -> bool {
+        matches!(status, 200 | 204 | 404)
+    }
+
+    fn error_parts(&self, response: &CloudResponse) -> (Option<String>, Option<String>) {
+        match self.0 {
+            GcsBackendMode::Json => serde_json::from_slice::<serde_json::Value>(&response.body)
+                .ok()
+                .map_or((None, None), |json| {
+                    let reason = json
+                        .pointer("/error/errors/0/reason")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string);
+                    let message = json
+                        .pointer("/error/message")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string);
+                    (reason, message)
+                }),
+            GcsBackendMode::Xml => {
+                let body = String::from_utf8_lossy(&response.body);
+                (
+                    extract_xml_tag_values(&body, "Code").into_iter().next(),
+                    extract_xml_tag_values(&body, "Message").into_iter().next(),
+                )
+            }
+        }
+    }
+
+    fn precondition_failed(&self, status: u16, code: Option<&str>) -> bool {
+        status == 412
+            && code.is_some_and(|code| {
+                code.eq_ignore_ascii_case("conditionNotMet")
+                    || code.eq_ignore_ascii_case("PreconditionFailed")
+            })
+    }
+
+    fn message_without_code(&self) -> bool {
+        true
+    }
+
+    fn special_error(&self, status: u16, code: Option<&str>, detail: &str) -> Option<CloudError> {
+        let policy_failure = code.is_some_and(|reason| {
+            [
+                "retentionPolicyNotMet",
+                "orgPolicyConstraintFailed",
+                "objectUnderActiveHold",
+                "userProjectMissing",
+                "billingNotEnabled",
+            ]
+            .iter()
+            .any(|candidate| reason.eq_ignore_ascii_case(candidate))
+        });
+        if policy_failure && matches!(status, 403 | 409 | 412) {
+            Some(CloudError::InvalidRequest(format!(
+                "status {status}: {detail}"
+            )))
+        } else {
+            None
+        }
     }
 }
 

@@ -10,8 +10,8 @@
 use super::super::cloud::{CloudBackend, CloudExecutor, CloudRequest, CloudResponse, CloudSigner};
 use super::super::cloud::{CloudCallback, CloudError, CloudEvent, CloudOutcome};
 use super::rest::{
-    classify_response_error, conditional_range_preconditions, current_unix_secs, finish_paged_list,
-    object_metadata_from_response, response_error_detail, ListPageParser, PagedList,
+    conditional_range_preconditions, current_unix_secs, finish_paged_list,
+    object_metadata_from_response, ListPageParser, PagedList, ProviderDialect,
 };
 use super::xml::extract_xml_tag_values;
 use crate::common::{MidgeError, MidgeResult};
@@ -1115,7 +1115,7 @@ impl CloudBackend for S3Backend {
             request = request.with_header(name, value);
         }
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status == 200 => CloudEvent::Put {
+            Ok(resp) if S3Dialect.put_ok(resp.status) => CloudEvent::Put {
                 key: ctx,
                 result: CloudOutcome::Ok(()),
             },
@@ -1306,7 +1306,7 @@ impl CloudBackend for S3Backend {
             request = request.with_header(name, value);
         }
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if matches!(resp.status, 200 | 204 | 404) => CloudEvent::Delete {
+            Ok(resp) if S3Dialect.delete_ok(resp.status) => CloudEvent::Delete {
                 key: ctx,
                 result: CloudOutcome::Ok(()),
             },
@@ -1421,16 +1421,31 @@ fn s3_response_error(
     operation: &str,
     conditional_mutation: bool,
 ) -> CloudError {
-    let body = String::from_utf8_lossy(&response.body);
-    let code = extract_xml_tag_values(&body, "Code").into_iter().next();
-    let message = extract_xml_tag_values(&body, "Message").into_iter().next();
-    let detail = response_error_detail(operation, code.as_deref(), message.as_deref(), false);
-    let precondition_failed = conditional_mutation
-        && response.status == 412
-        && code
-            .as_deref()
-            .is_some_and(|code| code.eq_ignore_ascii_case("PreconditionFailed"));
-    classify_response_error(response.status, detail, precondition_failed)
+    S3Dialect.response_error(response, operation, conditional_mutation)
+}
+
+struct S3Dialect;
+
+impl ProviderDialect for S3Dialect {
+    fn put_ok(&self, status: u16) -> bool {
+        status == 200
+    }
+
+    fn delete_ok(&self, status: u16) -> bool {
+        matches!(status, 200 | 204 | 404)
+    }
+
+    fn error_parts(&self, response: &CloudResponse) -> (Option<String>, Option<String>) {
+        let body = String::from_utf8_lossy(&response.body);
+        (
+            extract_xml_tag_values(&body, "Code").into_iter().next(),
+            extract_xml_tag_values(&body, "Message").into_iter().next(),
+        )
+    }
+
+    fn precondition_failed(&self, status: u16, code: Option<&str>) -> bool {
+        status == 412 && code.is_some_and(|code| code.eq_ignore_ascii_case("PreconditionFailed"))
+    }
 }
 
 impl CloudSigner for SigV4Signer {

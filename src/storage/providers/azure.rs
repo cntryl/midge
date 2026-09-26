@@ -12,8 +12,8 @@ use super::super::cloud::{
     CloudResponse, CloudSigner,
 };
 use super::rest::{
-    classify_response_error, conditional_range_preconditions, finish_paged_list,
-    object_metadata_from_response, response_error_detail, ListPageParser, PagedList,
+    conditional_range_preconditions, finish_paged_list, object_metadata_from_response,
+    ListPageParser, PagedList, ProviderDialect,
 };
 use super::xml::extract_xml_tag_values;
 use crate::common::{MidgeError, MidgeResult};
@@ -904,7 +904,7 @@ impl CloudBackend for AzureBackend {
             request = request.with_header(name, value);
         }
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if resp.status == 201 => CloudEvent::Put {
+            Ok(resp) if AzureDialect.put_ok(resp.status) => CloudEvent::Put {
                 key: ctx,
                 result: CloudOutcome::Ok(()),
             },
@@ -1091,7 +1091,7 @@ impl CloudBackend for AzureBackend {
             request = request.with_header(name, value);
         }
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| match result {
-            Ok(resp) if matches!(resp.status, 202 | 404) => CloudEvent::Delete {
+            Ok(resp) if AzureDialect.delete_ok(resp.status) => CloudEvent::Delete {
                 key: ctx,
                 result: CloudOutcome::Ok(()),
             },
@@ -1219,34 +1219,45 @@ fn azure_response_error(
     operation: &str,
     conditional_mutation: bool,
 ) -> CloudError {
-    let body = String::from_utf8_lossy(&response.body);
-    let code = response
-        .headers
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("x-ms-error-code"))
-        .map(|(_, value)| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .or_else(|| extract_xml_tag_values(&body, "Code").into_iter().next());
-    let message = extract_xml_tag_values(&body, "Message").into_iter().next();
-    let detail = response_error_detail(operation, code.as_deref(), message.as_deref(), false);
-    let predicate_failed = code.as_deref().is_some_and(|code| {
-        code.eq_ignore_ascii_case("ConditionNotMet")
-            || code.eq_ignore_ascii_case("TargetConditionNotMet")
-    });
+    AzureDialect.response_error(response, operation, conditional_mutation)
+}
 
-    // A create guarded by If-None-Match: * that finds the blob already there
-    // fails with 409 BlobAlreadyExists rather than 412; it is the same lost
-    // race as a failed precondition on the other providers.
-    let create_conflict = response.status == 409
-        && code
-            .as_deref()
-            .is_some_and(|code| code.eq_ignore_ascii_case("BlobAlreadyExists"));
+struct AzureDialect;
 
-    classify_response_error(
-        response.status,
-        detail,
-        conditional_mutation && ((response.status == 412 && predicate_failed) || create_conflict),
-    )
+impl ProviderDialect for AzureDialect {
+    fn put_ok(&self, status: u16) -> bool {
+        status == 201
+    }
+
+    fn delete_ok(&self, status: u16) -> bool {
+        matches!(status, 202 | 404)
+    }
+
+    fn error_parts(&self, response: &CloudResponse) -> (Option<String>, Option<String>) {
+        let body = String::from_utf8_lossy(&response.body);
+        let code = response
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("x-ms-error-code"))
+            .map(|(_, value)| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .or_else(|| extract_xml_tag_values(&body, "Code").into_iter().next());
+        (
+            code,
+            extract_xml_tag_values(&body, "Message").into_iter().next(),
+        )
+    }
+
+    fn precondition_failed(&self, status: u16, code: Option<&str>) -> bool {
+        let predicate_failed = code.is_some_and(|code| {
+            code.eq_ignore_ascii_case("ConditionNotMet")
+                || code.eq_ignore_ascii_case("TargetConditionNotMet")
+        });
+        // Azure reports an existing blob on create as a 409 rather than 412.
+        let create_conflict = status == 409
+            && code.is_some_and(|code| code.eq_ignore_ascii_case("BlobAlreadyExists"));
+        (status == 412 && predicate_failed) || create_conflict
+    }
 }
 
 // ---------------------------------------------------------------------------

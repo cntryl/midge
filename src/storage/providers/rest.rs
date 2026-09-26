@@ -158,6 +158,62 @@ pub(super) fn classify_response_error(
     }
 }
 
+/// Provider-specific status and error-code rules around the common REST error
+/// detail and HTTP fallback mapping.
+#[cfg(any(
+    feature = "cloud-aws",
+    feature = "cloud-oci",
+    feature = "cloud-azure",
+    feature = "cloud-gcp"
+))]
+pub(super) trait ProviderDialect {
+    fn put_ok(&self, status: u16) -> bool;
+
+    fn delete_ok(&self, status: u16) -> bool;
+
+    fn error_parts(
+        &self,
+        response: &crate::storage::cloud::CloudResponse,
+    ) -> (Option<String>, Option<String>);
+
+    fn precondition_failed(&self, status: u16, code: Option<&str>) -> bool;
+
+    fn message_without_code(&self) -> bool {
+        false
+    }
+
+    fn special_error(
+        &self,
+        _status: u16,
+        _code: Option<&str>,
+        _detail: &str,
+    ) -> Option<CloudError> {
+        None
+    }
+
+    fn response_error(
+        &self,
+        response: &crate::storage::cloud::CloudResponse,
+        operation: &str,
+        conditional_mutation: bool,
+    ) -> CloudError {
+        let (code, message) = self.error_parts(response);
+        let detail = response_error_detail(
+            operation,
+            code.as_deref(),
+            message.as_deref(),
+            self.message_without_code(),
+        );
+        if conditional_mutation && self.precondition_failed(response.status, code.as_deref()) {
+            return classify_response_error(response.status, detail, true);
+        }
+        if let Some(error) = self.special_error(response.status, code.as_deref(), &detail) {
+            return error;
+        }
+        classify_response_error(response.status, detail, false)
+    }
+}
+
 /// Current Unix time in whole seconds, or zero if the clock is before the epoch.
 #[cfg(any(feature = "cloud-aws", feature = "cloud-oci", feature = "cloud-gcp"))]
 pub(super) fn current_unix_secs() -> u64 {
