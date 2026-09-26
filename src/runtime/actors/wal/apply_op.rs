@@ -177,7 +177,7 @@ mod tests {
     use bytes::Bytes;
 
     #[test]
-    fn should_encode_matching_batch_and_spill_records_for_every_transaction_op() {
+    fn should_encode_matching_records_for_every_transaction_op() {
         // Arrange
         let ops = [
             TransactionOp::Put {

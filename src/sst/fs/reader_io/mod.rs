@@ -90,7 +90,7 @@ impl BlockEntryCursor {
 struct BlockEntryDecoder {
     offset: usize,
     previous_key: Vec<u8>,
-    _key_reservation: Option<crate::common::resource_budget::ResourceReservation>,
+    key_reservation: Option<crate::common::resource_budget::ResourceReservation>,
 }
 
 impl BlockEntryDecoder {
@@ -119,7 +119,7 @@ impl BlockEntryDecoder {
             key.extend_from_slice(&self.previous_key[..shared_len]);
             key.extend_from_slice(entry.key_delta);
             self.previous_key = key;
-            self._key_reservation = Some(reservation);
+            self.key_reservation = Some(reservation);
         } else {
             self.previous_key.truncate(shared_len);
             self.previous_key.extend_from_slice(entry.key_delta);
@@ -298,7 +298,7 @@ impl SstRawVersionScan {
         let file = self
             .file
             .as_deref()
-            .or_else(|| opened_file.as_deref())
+            .or(opened_file.as_deref())
             .expect("SST file opened");
         let (block, decompressed_reservation) = self.reader.read_framed_block(
             file,
@@ -607,7 +607,9 @@ impl SstStateScan {
             }
 
             if !matches!(best, KeyState::Absent) {
-                let state = if !self.raw_state {
+                let state = if self.raw_state {
+                    best
+                } else {
                     match best {
                         KeyState::Value(_, seq, expiration, _)
                             if crate::common::time::is_expired_at(expiration, self.now_millis) =>
@@ -616,8 +618,6 @@ impl SstStateScan {
                         }
                         state => state,
                     }
-                } else {
-                    best
                 };
                 return Ok(Some((Bytes::from(key), state)));
             }

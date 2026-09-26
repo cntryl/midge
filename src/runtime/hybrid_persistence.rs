@@ -838,7 +838,7 @@ impl ExactCoverageState {
                 )
                 .is_err() =>
             {
-                self.ambiguous = true
+                self.ambiguous = true;
             }
             std::cmp::Ordering::Equal | std::cmp::Ordering::Less => {}
         }

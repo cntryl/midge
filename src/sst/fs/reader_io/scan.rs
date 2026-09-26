@@ -9,16 +9,16 @@ impl SstFileIo {
         snapshot_seq: u64,
         now_millis: u64,
     ) -> MidgeResult<(crate::types::KeyState, SstPointReadStats)> {
-        let (raw, stats) = self.get_raw_state_at_with_stats(key, snapshot_seq)?;
-        let state = match raw {
+        let (raw_state, read_stats) = self.get_raw_state_at_with_stats(key, snapshot_seq)?;
+        let visible_state = match raw_state {
             KeyState::Value(_, sequence, expiration, _)
                 if crate::common::time::is_expired_at(expiration, now_millis) =>
             {
                 KeyState::Tombstone(sequence)
             }
-            state => state,
+            other_state => other_state,
         };
-        Ok((state, stats))
+        Ok((visible_state, read_stats))
     }
 
     pub(crate) fn get_raw_state_at_with_stats(

@@ -4,7 +4,6 @@ use crate::runtime::actors::compaction::publication::{
     CompactionPublishTask,
 };
 use crate::runtime::actors::compaction::PreparedCompactionOutput;
-use crate::runtime::state::CompactionWait;
 #[cfg(test)]
 use crate::runtime::CompactionPlan;
 use crate::runtime::RuntimeResponse;
@@ -87,10 +86,7 @@ impl CompactionCoordinator {
         }
 
         if event_loop.cloud_maintenance_enabled() {
-            event_loop
-                .state
-                .pending_compaction_waits
-                .insert(request_id, CompactionWait::CompactAll);
+            event_loop.state.pending_compaction_waits.insert(request_id);
             event_loop.schedule_cloud_maintenance();
             return HandleOutcome::Continue;
         }
@@ -101,10 +97,7 @@ impl CompactionCoordinator {
             .load(std::sync::atomic::Ordering::SeqCst)
             > 0
         {
-            event_loop
-                .state
-                .pending_compaction_waits
-                .insert(request_id, CompactionWait::CompactAll);
+            event_loop.state.pending_compaction_waits.insert(request_id);
             return HandleOutcome::Continue;
         }
 
@@ -136,10 +129,7 @@ impl CompactionCoordinator {
             return HandleOutcome::Continue;
         }
 
-        event_loop
-            .state
-            .pending_compaction_waits
-            .insert(request_id, CompactionWait::CompactAll);
+        event_loop.state.pending_compaction_waits.insert(request_id);
         HandleOutcome::Continue
     }
 
@@ -1067,9 +1057,7 @@ impl CompactionCoordinator {
         if !include_manual {
             return;
         }
-        for (request_id, CompactionWait::CompactAll) in
-            event_loop.state.pending_compaction_waits.drain()
-        {
+        for request_id in event_loop.state.pending_compaction_waits.drain() {
             event_loop
                 .router
                 .complete(RuntimeResponse::Ok { request_id });
@@ -1080,9 +1068,7 @@ impl CompactionCoordinator {
         event_loop: &mut EventLoop,
         error: &crate::common::MidgeError,
     ) {
-        for (request_id, CompactionWait::CompactAll) in
-            event_loop.state.pending_compaction_waits.drain()
-        {
+        for request_id in event_loop.state.pending_compaction_waits.drain() {
             event_loop.router.complete(RuntimeResponse::Error {
                 request_id,
                 error: error.replay(),

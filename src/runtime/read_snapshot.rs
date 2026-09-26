@@ -968,19 +968,19 @@ impl ReadSnapshot {
                 }
             }
             for tombstone in imm.range_tombstones_at(u64::MAX) {
-                if Self::range_tombstone_overlaps_query(&tombstone, start_opt, end_opt) {
-                    if tombstone.seq > threshold {
-                        return Ok(Some(tombstone.seq));
-                    }
+                if Self::range_tombstone_overlaps_query(&tombstone, start_opt, end_opt)
+                    && tombstone.seq > threshold
+                {
+                    return Ok(Some(tombstone.seq));
                 }
             }
         }
 
         for tombstone in self.memtable.range_tombstones_at(u64::MAX) {
-            if Self::range_tombstone_overlaps_query(&tombstone, start_opt, end_opt) {
-                if tombstone.seq > threshold {
-                    return Ok(Some(tombstone.seq));
-                }
+            if Self::range_tombstone_overlaps_query(&tombstone, start_opt, end_opt)
+                && tombstone.seq > threshold
+            {
+                return Ok(Some(tombstone.seq));
             }
         }
 
@@ -1161,7 +1161,8 @@ mod tests {
             0,
         );
 
-        // Act / Assert
+        // Act
+        // Assert
         assert_eq!(snapshot.any_sequence_after_in_range(b"b", b"y", 10)?, None);
 
         // Incomplete legacy metadata cannot justify the skip.
@@ -1213,7 +1214,8 @@ mod tests {
             0,
         );
 
-        // Act / Assert
+        // Act
+        // Assert
         assert_eq!(
             snapshot.any_sequence_after_in_range(b"b", b"y", 10)?,
             Some(15)
@@ -1222,8 +1224,8 @@ mod tests {
     }
 
     #[test]
-    fn should_reject_conflicting_equal_sequence_ssts_for_point_and_scans(
-    ) -> crate::common::MidgeResult<()> {
+    fn should_reject_conflicting_equal_sequence_ssts_across_reads() -> crate::common::MidgeResult<()>
+    {
         // Arrange
         let dir = tempfile::tempdir()?;
         let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::RealFs::new(dir.path())?);
@@ -1259,7 +1261,8 @@ mod tests {
             0,
         ));
 
-        // Act and assert
+        // Act
+        // Assert
         assert!(matches!(
             snapshot.get(b"key", u64::MAX),
             Err(MidgeError::Corruption(_))

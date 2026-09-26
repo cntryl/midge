@@ -11,7 +11,7 @@ impl ManifestCoordinator {
     pub(super) fn add_sst(
         event_loop: &mut EventLoop,
         request_id: u64,
-        file_meta: FileMeta,
+        file_meta: &FileMeta,
     ) -> HandleOutcome {
         let deadline = event_loop.registered_request_deadline(request_id);
         let result = event_loop

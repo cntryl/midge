@@ -187,7 +187,7 @@ impl RuntimeState {
             intent_log_replay_runs: 0,
             intent_log_entries_replayed: 0,
             active_compactions: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            pending_compaction_waits: std::collections::HashMap::new(),
+            pending_compaction_waits: std::collections::HashSet::new(),
         };
         state.reinitialize_active_memtable_segment_tracking();
         Ok(state)

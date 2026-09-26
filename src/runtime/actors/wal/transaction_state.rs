@@ -8,6 +8,8 @@ use bytes::Bytes;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+type PreflightPoint<'a> = (crate::types::ColumnFamilyId, Option<(&'a [u8], u64)>);
+
 #[cfg(test)]
 thread_local! {
     static ASSERTION_SNAPSHOT_BUILD_COUNT: std::cell::Cell<usize> = const {
@@ -78,7 +80,7 @@ impl WalActor {
     pub(super) fn preflight_point<'a>(
         state: &RuntimeState,
         apply_op: &'a TransactionApplyOp,
-    ) -> MidgeResult<(crate::types::ColumnFamilyId, Option<(&'a [u8], u64)>)> {
+    ) -> MidgeResult<PreflightPoint<'a>> {
         let (cf_id, point) = match apply_op {
             TransactionApplyOp::Put {
                 cf_id,

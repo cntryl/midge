@@ -528,8 +528,7 @@ impl Drop for OutputSetCleanup {
             let result = crate::sst::fs::fs_relative_sst_path(&self.fs, path)
                 .and_then(|fs_path| self.fs.remove_file(&fs_path).map_err(Into::into));
             match result {
-                Ok(()) => {}
-                Err(crate::common::MidgeError::NotFound) => {}
+                Ok(()) | Err(crate::common::MidgeError::NotFound) => {}
                 Err(error) => tracing::warn!(
                     file = %path.display(),
                     %error,

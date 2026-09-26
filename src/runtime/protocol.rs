@@ -149,7 +149,7 @@ mod file_meta_conversion_tests {
     use super::FileMeta;
 
     #[test]
-    fn should_round_trip_every_proof_field_between_runtime_and_manifest_file_meta() {
+    fn should_round_trip_every_proof_field_across_file_meta_conversion() {
         // Arrange
         let runtime = FileMeta {
             name: "proof.sst".into(),

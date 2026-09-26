@@ -54,20 +54,7 @@ impl WalActor {
         } = params;
 
         if source.is_empty() {
-            // An assertion-only commit is validated here without ever
-            // reaching sequence allocation, WAL append, or memtable apply.
-            if !assertions.is_empty() {
-                let mut snapshots = super::transaction_state::ValidationSnapshots::new(
-                    state,
-                    self.read_resources.clone(),
-                );
-                Self::ensure_no_assertion_conflicts(
-                    state,
-                    &mut snapshots,
-                    &assertions,
-                    start_sequence,
-                )?;
-            }
+            self.validate_assertion_only_spill(state, &assertions, start_sequence)?;
             return Ok((state.sequence, 0, false));
         }
         Self::validate_spilled_transaction(
@@ -124,7 +111,7 @@ impl WalActor {
         self.bytes_since_sync = self.bytes_since_sync.saturating_add(wal_bytes);
 
         self.apply_transaction_durability(state, effective_durability, sequence_plan.commit_seq)?;
-        if let Err(error) = self.apply_spilled_transaction_ops(
+        if let Err(error) = Self::apply_spilled_transaction_ops(
             state,
             source,
             &sequence_plan,
@@ -156,6 +143,21 @@ impl WalActor {
             "streamed spilled WAL transaction apply"
         );
         Ok((sequence_plan.commit_seq, source.len(), deferred))
+    }
+
+    fn validate_assertion_only_spill(
+        &self,
+        state: &RuntimeState,
+        assertions: &[crate::runtime::KeyAssertion],
+        start_sequence: u64,
+    ) -> MidgeResult<()> {
+        // An assertion-only commit does not allocate sequences or append to the WAL.
+        if assertions.is_empty() {
+            return Ok(());
+        }
+        let mut snapshots =
+            super::transaction_state::ValidationSnapshots::new(state, self.read_resources.clone());
+        Self::ensure_no_assertion_conflicts(state, &mut snapshots, assertions, start_sequence)
     }
 
     fn validate_spilled_transaction(
@@ -369,7 +371,6 @@ impl WalActor {
     }
 
     fn apply_spilled_transaction_ops(
-        &mut self,
         state: &mut RuntimeState,
         source: &crate::runtime::transaction_spill::TransactionOpSource,
         sequence_plan: &TxnSequencePlan,

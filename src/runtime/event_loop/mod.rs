@@ -998,7 +998,7 @@ impl EventLoop {
             return Ok(());
         };
         if !self.state.manifest_has_file(sst_name) {
-            self.manifest_actor.add_sst(&mut self.state, file_meta)?;
+            self.manifest_actor.add_sst(&mut self.state, &file_meta)?;
             self.invalidate_sst_read_views();
         }
         self.state.transition_flush_publication_intent(

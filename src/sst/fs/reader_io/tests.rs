@@ -1241,7 +1241,7 @@ fn should_charge_summary_key_bounds_while_raw_cursor_advances() -> MidgeResult<(
 }
 
 #[test]
-fn should_match_summary_bounds_across_streaming_and_resumable_reads() -> MidgeResult<()> {
+fn should_match_summary_bounds_across_reader_modes() -> MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir()?;
     let fs: Arc<dyn Fs> = Arc::new(crate::io::RealFs::new(directory.path())?);

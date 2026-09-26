@@ -24,14 +24,15 @@ fn should_keep_metric_verification_delegates_off_engine() {
 }
 
 #[test]
-fn should_keep_test_only_ingest_and_idempotency_protocols_out_of_runtime() {
+fn should_keep_test_only_protocols_out_of_runtime() {
     // Arrange
     let state = include_str!("../src/runtime/state.rs");
     let protocol = include_str!("../src/runtime/protocol.rs");
     let durability = include_str!("../src/runtime/durability.rs");
     let engine = include_str!("../src/engine/mod.rs");
 
-    // Act / Assert
+    // Act
+    // Assert
     for (name, source) in [
         ("state", state),
         ("protocol", protocol),
@@ -49,27 +50,28 @@ fn should_keep_test_only_ingest_and_idempotency_protocols_out_of_runtime() {
             assert!(!source.contains(forbidden), "{name} retains {forbidden}");
         }
     }
-    assert!(state.contains("HashMap<u64, CompactionWait>"));
+    assert!(state.contains("HashSet<u64>"));
     assert!(!state.contains("HashMap<u64, String>"));
 }
 
 #[test]
-fn should_require_explicit_sst_tombstone_and_filesystem_behavior() {
+fn should_require_explicit_sst_reader_behavior() {
     // Arrange
     let traits = include_str!("../src/sst/traits.rs");
 
-    // Act / Assert
+    // Act
     let reader_contract = traits
         .split("/// Materializing cursor for explicit test doubles.")
         .next()
         .expect("reader contract");
-    assert!(!reader_contract.contains("fn range_tombstones(&self) -> Vec<RangeTombstone> {"));
+    // Assert
+    assert!(reader_contract.contains("fn range_tombstones(&self) -> Vec<RangeTombstone>;"));
     assert!(!traits.contains("persist_sst_bytes_with_host_fs"));
     assert!(traits.contains("fn finish_to_path(self: Box<Self>, path: &Path) -> MidgeResult<()>;"));
 }
 
 #[test]
-fn should_decode_sst_frames_and_prefix_keys_in_one_reader_path() {
+fn should_use_one_sst_reader_decode_path() {
     // Arrange
     let reader = include_str!("../src/sst/fs/reader_io/mod.rs");
     let io = include_str!("../src/sst/fs/reader_io/io.rs");
@@ -77,8 +79,9 @@ fn should_decode_sst_frames_and_prefix_keys_in_one_reader_path() {
     let state = include_str!("../src/sst/fs/reader_io/state.rs");
     let scan = include_str!("../src/sst/fs/reader_io/scan.rs");
 
-    // Act / Assert
+    // Act
     let sources = [reader, io, recovery, state, scan];
+    // Assert
     assert_eq!(
         sources
             .iter()
@@ -100,14 +103,15 @@ fn should_decode_sst_frames_and_prefix_keys_in_one_reader_path() {
 }
 
 #[test]
-fn should_keep_dead_sst_and_skiplist_interfaces_out_of_production() {
+fn should_keep_dead_interfaces_out_of_production() {
     // Arrange
     let types = include_str!("../src/sst/types.rs");
     let traits = include_str!("../src/sst/traits.rs");
     let reader = include_str!("../src/sst/fs/reader_io/mod.rs");
     let skiplist = include_str!("../src/memtable/skiplist.rs");
 
-    // Act / Assert
+    // Act
+    // Assert
     assert!(!types.contains("enum SstBlockType"));
     assert!(!traits.contains("pub trait SstReader: "));
     assert!(!reader.contains("    bloom_metrics: BloomMetrics"));
@@ -130,8 +134,9 @@ fn should_route_compaction_output_checks_through_injected_fs() {
     let flush = include_str!("../src/runtime/actors/flush/build.rs");
     let reader = include_str!("../src/sst/fs/reader_io/mod.rs");
 
-    // Act / Assert
+    // Act
     let output_code = executor.split("#[cfg(test)]\nmod tests").next().unwrap();
+    // Assert
     assert!(!output_code.contains("std::fs::metadata("));
     assert!(!output_code.contains("std::fs::remove_file("));
     assert!(!actor.contains("std::fs::remove_file("));
@@ -150,7 +155,8 @@ fn should_include_range_tombstones_in_skippable_sst_sequence_bounds() {
     let backfill = include_str!("../src/runtime/event_loop/read_path.rs");
     let snapshot = include_str!("../src/runtime/read_snapshot.rs");
 
-    // Act / Assert
+    // Act
+    // Assert
     assert!(flush.contains("largest_seq = largest_seq.max(range.seq)"));
     assert!(summary.contains("accumulator.observe(size_bytes, &range.start, range.seq"));
     assert!(summary.contains("accumulator.observe(size_bytes, &range.end, range.seq"));
@@ -178,7 +184,8 @@ fn should_copy_file_meta_proofs_only_in_central_conversions() {
         include_str!("../src/engine/startup/storage.rs"),
     ];
 
-    // Act / Assert
+    // Act
+    // Assert
     for source in producers {
         assert!(source.lines().all(|line| {
             !(line.contains("key_bounds_complete:") && line.contains(".key_bounds_complete"))

@@ -30,7 +30,7 @@ fn should_summarize_compaction_output_through_injected_mock_fs() -> MidgeResult<
     assert_eq!(prepared.metadata.name, name);
     assert_eq!(prepared.metadata.largest_seq, Some(7));
     assert_eq!(
-        prepared.metadata.size_bytes as usize,
+        usize::try_from(prepared.metadata.size_bytes).unwrap(),
         mock.get_file(name).unwrap().len()
     );
     assert!(prepared.metadata.content_crc32c.is_some());

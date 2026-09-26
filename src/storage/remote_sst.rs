@@ -455,7 +455,7 @@ mod tests {
         // Assert
         assert_eq!(summary.largest_seq, 9);
         assert_eq!(
-            summary.size_bytes as usize,
+            usize::try_from(summary.size_bytes).unwrap(),
             local.get_file("unpublished.sst").unwrap().len()
         );
         Ok(())

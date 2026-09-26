@@ -136,12 +136,12 @@ pub trait SstStateReader: Send + Sync {
 /// implement bounded streaming in their own reader implementation.
 #[cfg(test)]
 pub(crate) fn materialized_raw_cursor_for_test<R: SstStateReader + ?Sized>(
-    reader: Box<R>,
-    start: Option<Vec<u8>>,
-    end: Option<Vec<u8>>,
+    reader: &R,
+    start: Option<&[u8]>,
+    end: Option<&[u8]>,
     budget: Option<crate::common::resource_budget::ResourceBudget>,
 ) -> MidgeResult<RawSstVersionCursor> {
-    let states = reader.scan_range_raw_state(start.as_deref(), end.as_deref())?;
+    let states = reader.scan_range_raw_state(start, end)?;
     let versions = states
         .into_iter()
         .filter_map(|(key, state)| match state {
@@ -205,7 +205,12 @@ macro_rules! test_reader_required_methods {
             end: Option<Vec<u8>>,
             budget: Option<crate::common::resource_budget::ResourceBudget>,
         ) -> crate::common::MidgeResult<crate::sst::traits::RawSstVersionCursor> {
-            crate::sst::traits::materialized_raw_cursor_for_test(self, start, end, budget)
+            crate::sst::traits::materialized_raw_cursor_for_test(
+                self.as_ref(),
+                start.as_deref(),
+                end.as_deref(),
+                budget,
+            )
         }
 
         fn get_state_at(
@@ -416,15 +421,11 @@ mod tests {
     }
 
     impl MockSstReader {
-        fn get(&self, key: &[u8]) -> MidgeResult<Option<Bytes>> {
-            Ok(self.data.get(key).map(|v| Bytes::copy_from_slice(v)))
+        fn get(&self, key: &[u8]) -> Option<Bytes> {
+            self.data.get(key).map(|v| Bytes::copy_from_slice(v))
         }
 
-        fn scan_range(
-            &self,
-            start: Option<&[u8]>,
-            end: Option<&[u8]>,
-        ) -> MidgeResult<Vec<(Bytes, Bytes)>> {
+        fn scan_range(&self, start: Option<&[u8]>, end: Option<&[u8]>) -> Vec<(Bytes, Bytes)> {
             let mut results = Vec::new();
 
             for (k, v) in &self.data {
@@ -447,7 +448,7 @@ mod tests {
                 results.push((Bytes::copy_from_slice(k), Bytes::copy_from_slice(v)));
             }
 
-            Ok(results)
+            results
         }
     }
 
@@ -477,7 +478,7 @@ mod tests {
             end: Option<&[u8]>,
         ) -> MidgeResult<Vec<(Bytes, KeyState)>> {
             Ok(self
-                .scan_range(start, end)?
+                .scan_range(start, end)
                 .into_iter()
                 .map(|(key, value)| (key, KeyState::Value(value, 0, None, EntryType::Put)))
                 .collect())
@@ -628,7 +629,7 @@ mod tests {
         // Assert
         assert!(result.is_ok());
         assert!(
-            matches!(result.expect("get failed"), KeyState::Value(value, _, _, _) if value == Bytes::from("value1"))
+            matches!(result.expect("get failed"), KeyState::Value(value, _, _, _) if value == "value1")
         );
     }
 
@@ -644,10 +645,7 @@ mod tests {
         let result = reader.get(b"key1");
 
         // Assert
-        assert!(result.is_ok());
-        let value = result.unwrap();
-        assert!(value.is_some());
-        assert_eq!(value.unwrap(), Bytes::from("value1"));
+        assert_eq!(result, Some(Bytes::from("value1")));
     }
 
     #[test]
@@ -659,8 +657,7 @@ mod tests {
         let result = reader.get(b"nonexistent");
 
         // Assert
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_none());
+        assert!(result.is_none());
     }
 
     #[test]
@@ -676,8 +673,7 @@ mod tests {
         let result = reader.scan_range(Some(b"b"), Some(b"d"));
 
         // Assert
-        assert!(result.is_ok());
-        let pairs = result.unwrap();
+        let pairs = result;
         assert_eq!(pairs.len(), 2);
         assert_eq!(pairs[0].0, Bytes::from("b"));
         assert_eq!(pairs[1].0, Bytes::from("c"));
@@ -695,8 +691,7 @@ mod tests {
         let result = reader.scan_range(Some(b"banana"), None);
 
         // Assert
-        assert!(result.is_ok());
-        let pairs = result.unwrap();
+        let pairs = result;
         assert_eq!(pairs.len(), 2);
         assert_eq!(pairs[0].0, Bytes::from("banana"));
     }
@@ -713,8 +708,7 @@ mod tests {
         let result = reader.scan_range(None, Some(b"cherry"));
 
         // Assert
-        assert!(result.is_ok());
-        let pairs = result.unwrap();
+        let pairs = result;
         assert_eq!(pairs.len(), 2);
         assert!(pairs.iter().all(|(k, _)| k.as_ref() < b"cherry".as_ref()));
     }
@@ -731,8 +725,7 @@ mod tests {
         let result = reader.scan_range(None, None);
 
         // Assert
-        assert!(result.is_ok());
-        let pairs = result.unwrap();
+        let pairs = result;
         assert_eq!(pairs.len(), 3);
     }
 
@@ -745,8 +738,7 @@ mod tests {
         let result = reader.scan_range(Some(b"a"), Some(b"z"));
 
         // Assert
-        assert!(result.is_ok());
-        let pairs = result.unwrap();
+        let pairs = result;
         assert!(pairs.is_empty());
     }
 
@@ -759,7 +751,7 @@ mod tests {
         reader.insert(b"key2".to_vec(), b"v2".to_vec());
 
         // Act
-        let result = reader.scan_range(None, None).unwrap();
+        let result = reader.scan_range(None, None);
 
         // Assert - BTreeMap maintains sorted order
         assert_eq!(result.len(), 3);
@@ -780,7 +772,7 @@ mod tests {
         let result = reader.get(&binary_key).unwrap();
 
         // Assert
-        assert_eq!(result.unwrap().to_vec(), binary_value);
+        assert_eq!(result.to_vec(), binary_value);
     }
 
     #[test]
@@ -791,7 +783,7 @@ mod tests {
         reader.insert(b"key".to_vec(), large_value.clone());
 
         // Act
-        let result = reader.get(b"key").unwrap();
+        let result = reader.get(b"key");
 
         // Assert
         assert_eq!(result.unwrap().to_vec(), large_value);
@@ -898,7 +890,7 @@ mod tests {
         reader.insert(b"key1".to_vec(), b"v".to_vec());
 
         // Act - [key1, key1) should be empty
-        let result = reader.scan_range(Some(b"key1"), Some(b"key1")).unwrap();
+        let result = reader.scan_range(Some(b"key1"), Some(b"key1"));
 
         // Assert
         assert!(result.is_empty());
@@ -912,7 +904,7 @@ mod tests {
         reader.insert(b"z".to_vec(), b"v".to_vec());
 
         // Act - [z, a) is invalid range
-        let result = reader.scan_range(Some(b"z"), Some(b"a")).unwrap();
+        let result = reader.scan_range(Some(b"z"), Some(b"a"));
 
         // Assert
         assert!(result.is_empty());
@@ -926,10 +918,7 @@ mod tests {
         reader.insert(b"key".to_vec(), original_value.clone());
 
         // Act
-        let result = reader
-            .get(b"key")
-            .expect("get failed")
-            .expect("key not found");
+        let result = reader.get(b"key").expect("key not found");
 
         // Assert
         assert_eq!(result.to_vec(), original_value);

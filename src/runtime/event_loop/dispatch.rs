@@ -631,7 +631,7 @@ impl RuntimeDispatcher {
             TestRuntimeMsg::ManifestAddSst {
                 request_id,
                 file_meta,
-            } => ManifestCoordinator::add_sst(event_loop, request_id, file_meta),
+            } => ManifestCoordinator::add_sst(event_loop, request_id, &file_meta),
             TestRuntimeMsg::ManifestCompactionComplete {
                 request_id,
                 removed,
