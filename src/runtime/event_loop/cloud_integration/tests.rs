@@ -723,7 +723,7 @@ impl crate::storage::StorageBackend for PostRetirementDependencyChangeBackend {
         inner;
         submit_range_head,
         submit_read_range,
-        submit_read_with_metadata,
+
         submit_write,
     );
 
@@ -930,7 +930,7 @@ impl crate::storage::StorageBackend for ArmedDelayedHeadStorageBackend {
     crate::storage::forward_storage_backend!(
     inner;
     submit_write_request, submit_delete_request, submit_metadata_read_request, submit_read_range,
-    submit_read_with_metadata,
+
     submit_write,
     submit_write_with_headers,
     submit_delete,
@@ -1000,7 +1000,7 @@ impl crate::storage::StorageBackend for CommitThenBlockCatalogCasCallbackBackend
         inner;
         submit_range_head,
         submit_read_range,
-        submit_read_with_metadata,
+
         submit_write,
     );
 
@@ -1140,7 +1140,7 @@ impl crate::storage::StorageBackend for BudgetConsumingDdlBackend {
         inner;
         submit_range_head,
         submit_read_range,
-        submit_read_with_metadata,
+
         submit_write,
     );
 
@@ -1268,7 +1268,7 @@ impl crate::storage::StorageBackend for DelayedCommitDdlBackend {
         inner;
         submit_range_head,
         submit_read_range,
-        submit_read_with_metadata,
+
         submit_write,
         submit_write_with_headers,
     );
@@ -1388,7 +1388,7 @@ impl crate::storage::StorageBackend for BlockingDeleteStorageBackend {
         inner;
         submit_write_request, submit_range_head,
         submit_read_range,
-        submit_read_with_metadata,
+
         submit_write,
         submit_write_with_headers,
     );
@@ -1495,7 +1495,7 @@ impl crate::storage::StorageBackend for FailOnceDeleteStorageBackend {
         inner;
         submit_write_request, submit_range_head,
         submit_read_range,
-        submit_read_with_metadata,
+
         submit_write,
         submit_write_with_headers,
     );
@@ -9160,7 +9160,7 @@ impl crate::storage::StorageBackend for CountingSstHeadBackend {
     crate::storage::forward_storage_backend!(
         inner;
         submit_write_request, submit_delete_request, submit_head_request, submit_metadata_read_request, submit_read_range,
-        submit_read_with_metadata,
+
         submit_write,
         submit_write_with_headers,
         submit_delete,

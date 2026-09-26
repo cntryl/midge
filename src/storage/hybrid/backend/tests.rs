@@ -613,9 +613,9 @@ impl StorageBackend for BudgetConsumingProofBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::MetadataReadCallback,
     ) {
-        crate::storage::test_support::forward_typed_metadata_read_to_legacy(
-            self, request, callback,
-        );
+        crate::storage::dispatch_metadata_read_request(request, callback, |_, _, callback| {
+            self.retained_metadata_callbacks.lock().push(callback);
+        });
     }
 
     fn submit_head_request(
@@ -641,15 +641,6 @@ impl StorageBackend for BudgetConsumingProofBackend {
         callback: crate::storage::StorageCallback,
     ) {
         crate::storage::test_support::forward_typed_write_to_legacy(self, request, data, callback);
-    }
-
-    fn submit_read_with_metadata(
-        &self,
-        _key: &str,
-        _timeout: Duration,
-        callback: crate::storage::MetadataReadCallback,
-    ) {
-        self.retained_metadata_callbacks.lock().push(callback);
     }
 
     fn submit_write(&self, key: &str, _data: Vec<u8>, callback: StorageCallback) {
@@ -726,9 +717,8 @@ impl StorageBackend for NeverCompletesBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::MetadataReadCallback,
     ) {
-        crate::storage::test_support::forward_typed_metadata_read_to_legacy(
-            self, request, callback,
-        );
+        let _ = (request, callback);
+        panic!("test backend received undeclared metadata-read capability");
     }
 
     fn submit_head_request(

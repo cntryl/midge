@@ -1370,9 +1370,8 @@ impl StorageBackend for PanickingWriteBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::MetadataReadCallback,
     ) {
-        crate::storage::test_support::forward_typed_metadata_read_to_legacy(
-            self, request, callback,
-        );
+        let _ = (request, callback);
+        panic!("test backend received undeclared metadata-read capability");
     }
 
     fn submit_head_request(
@@ -1448,9 +1447,8 @@ impl StorageBackend for AlwaysFailingWriteBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::MetadataReadCallback,
     ) {
-        crate::storage::test_support::forward_typed_metadata_read_to_legacy(
-            self, request, callback,
-        );
+        let _ = (request, callback);
+        panic!("test backend received undeclared metadata-read capability");
     }
 
     fn submit_head_request(
@@ -1561,9 +1559,8 @@ impl StorageBackend for BudgetConsumingSstPublicationBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::MetadataReadCallback,
     ) {
-        crate::storage::test_support::forward_typed_metadata_read_to_legacy(
-            self, request, callback,
-        );
+        let _ = (request, callback);
+        panic!("test backend received undeclared metadata-read capability");
     }
 
     fn submit_head_request(
@@ -1677,9 +1674,18 @@ impl StorageBackend for RacingReadDeleteBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::MetadataReadCallback,
     ) {
-        crate::storage::test_support::forward_typed_metadata_read_to_legacy(
-            self, request, callback,
-        );
+        crate::storage::dispatch_metadata_read_request(request, callback, |_, _, callback| {
+            let snapshot = self.object.lock().clone();
+            self.read_started.wait();
+            self.release_read.wait();
+            let result = snapshot
+                .map(|bytes| {
+                    let metadata = Self::metadata(&bytes);
+                    (bytes, metadata)
+                })
+                .ok_or_else(|| crate::storage::StorageError::not_found("object"));
+            let _ = callback.send(result);
+        });
     }
 
     fn submit_head_request(
@@ -1705,24 +1711,6 @@ impl StorageBackend for RacingReadDeleteBackend {
         callback: crate::storage::StorageCallback,
     ) {
         crate::storage::test_support::forward_typed_write_to_legacy(self, request, data, callback);
-    }
-
-    fn submit_read_with_metadata(
-        &self,
-        _key: &str,
-        _timeout: Duration,
-        callback: crate::storage::MetadataReadCallback,
-    ) {
-        let snapshot = self.object.lock().clone();
-        self.read_started.wait();
-        self.release_read.wait();
-        let result = snapshot
-            .map(|bytes| {
-                let metadata = Self::metadata(&bytes);
-                (bytes, metadata)
-            })
-            .ok_or_else(|| crate::storage::StorageError::not_found("object"));
-        let _ = callback.send(result);
     }
 
     fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback) {
@@ -1802,9 +1790,8 @@ impl StorageBackend for NeverCompletesBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::MetadataReadCallback,
     ) {
-        crate::storage::test_support::forward_typed_metadata_read_to_legacy(
-            self, request, callback,
-        );
+        let _ = (request, callback);
+        panic!("test backend received undeclared metadata-read capability");
     }
 
     fn submit_head_request(
@@ -1890,9 +1877,14 @@ fn write_local_object(storage: &HybridStorage, key: &str, data: Vec<u8>) {
 
 fn read_local_object(storage: &HybridStorage, key: &str) -> Vec<u8> {
     let (tx, rx) = std::sync::mpsc::channel();
-    storage
-        .local_store()
-        .submit_read_with_metadata(key, Duration::from_secs(1), tx);
+    storage.local_store().submit_metadata_read_request(
+        crate::storage::StorageRequest::new(
+            key,
+            crate::common::OperationDeadline::unbounded(),
+            Duration::from_secs(1),
+        ),
+        tx,
+    );
     match rx.recv_timeout(Duration::from_secs(1)) {
         Ok(Ok((data, _metadata))) => data,
         other => panic!("local read for '{key}' failed: {other:?}"),
@@ -1901,9 +1893,14 @@ fn read_local_object(storage: &HybridStorage, key: &str) -> Vec<u8> {
 
 fn read_cloud_object(storage: &HybridStorage, key: &str) -> Vec<u8> {
     let (tx, rx) = std::sync::mpsc::channel();
-    storage
-        .sst_store()
-        .submit_read_with_metadata(key, Duration::from_secs(1), tx);
+    storage.sst_store().submit_metadata_read_request(
+        crate::storage::StorageRequest::new(
+            key,
+            crate::common::OperationDeadline::unbounded(),
+            Duration::from_secs(1),
+        ),
+        tx,
+    );
     match rx.recv_timeout(Duration::from_secs(1)) {
         Ok(Ok((data, _metadata))) => data,
         other => panic!("cloud read for '{key}' failed: {other:?}"),

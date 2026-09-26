@@ -497,6 +497,39 @@ fn mutation_lock(full_path: &Path) -> MutationGuard {
     }
 }
 
+impl FileSystem {
+    fn metadata_read_within(
+        &self,
+        key: &str,
+        timeout: std::time::Duration,
+        callback: &crate::storage::MetadataReadCallback,
+    ) {
+        let result = (|| {
+            if timeout.is_zero() {
+                return Err(crate::storage::storage_timeout_error(
+                    "metadata read has no remaining budget",
+                ));
+            }
+            let path = self.full_path(key)?;
+            let _lock = mutation_lock(&path);
+            let _process_lock = self.acquire_process_lock(&path)?;
+            let bytes = fs::read(&path).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    crate::storage::StorageError::not_found(format!(
+                        "read {}: {error}",
+                        path.display()
+                    ))
+                } else {
+                    crate::storage::StorageError::io(format!("read {}: {error}", path.display()))
+                }
+            })?;
+            let metadata = StorageObjectMetadata::content_crc(bytes.len() as u64, &bytes);
+            Ok((bytes, metadata))
+        })();
+        let _ = callback.send(result);
+    }
+}
+
 impl StorageBackend for FileSystem {
     fn submit_range_read_request(
         &self,
@@ -537,7 +570,7 @@ impl StorageBackend for FileSystem {
             request,
             callback,
             |key, timeout, callback| {
-                self.submit_read_with_metadata(key, timeout, callback);
+                self.metadata_read_within(key, timeout, &callback);
             },
         );
     }
@@ -763,37 +796,6 @@ impl StorageBackend for FileSystem {
                 ));
             }
             Ok(bytes)
-        })();
-        let _ = callback.send(result);
-    }
-
-    fn submit_read_with_metadata(
-        &self,
-        key: &str,
-        timeout: std::time::Duration,
-        callback: crate::storage::MetadataReadCallback,
-    ) {
-        let result = (|| {
-            if timeout.is_zero() {
-                return Err(crate::storage::storage_timeout_error(
-                    "metadata read has no remaining budget",
-                ));
-            }
-            let path = self.full_path(key)?;
-            let _lock = mutation_lock(&path);
-            let _process_lock = self.acquire_process_lock(&path)?;
-            let bytes = fs::read(&path).map_err(|error| {
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    crate::storage::StorageError::not_found(format!(
-                        "read {}: {error}",
-                        path.display()
-                    ))
-                } else {
-                    crate::storage::StorageError::io(format!("read {}: {error}", path.display()))
-                }
-            })?;
-            let metadata = StorageObjectMetadata::content_crc(bytes.len() as u64, &bytes);
-            Ok((bytes, metadata))
         })();
         let _ = callback.send(result);
     }
@@ -1363,7 +1365,14 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_read_with_metadata("test.txt", std::time::Duration::from_secs(5), tx);
+        fs.submit_metadata_read_request(
+            StorageRequest::new(
+                "test.txt",
+                crate::common::OperationDeadline::unbounded(),
+                std::time::Duration::from_secs(5),
+            ),
+            tx,
+        );
         let event = rx.recv().unwrap();
 
         // Assert
@@ -1381,7 +1390,14 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_read_with_metadata("nonexistent.txt", std::time::Duration::from_secs(5), tx);
+        fs.submit_metadata_read_request(
+            StorageRequest::new(
+                "nonexistent.txt",
+                crate::common::OperationDeadline::unbounded(),
+                std::time::Duration::from_secs(5),
+            ),
+            tx,
+        );
         let event = rx.recv().unwrap();
 
         // Assert
@@ -1398,7 +1414,14 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_read_with_metadata("large.bin", std::time::Duration::from_secs(5), tx);
+        fs.submit_metadata_read_request(
+            StorageRequest::new(
+                "large.bin",
+                crate::common::OperationDeadline::unbounded(),
+                std::time::Duration::from_secs(5),
+            ),
+            tx,
+        );
         let event = rx.recv().unwrap();
 
         // Assert
@@ -1417,7 +1440,14 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_read_with_metadata("empty.txt", std::time::Duration::from_secs(5), tx);
+        fs.submit_metadata_read_request(
+            StorageRequest::new(
+                "empty.txt",
+                crate::common::OperationDeadline::unbounded(),
+                std::time::Duration::from_secs(5),
+            ),
+            tx,
+        );
         let event = rx.recv().unwrap();
 
         // Assert
@@ -1437,7 +1467,14 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         // Act
-        fs.submit_read_with_metadata("binary.bin", std::time::Duration::from_secs(5), tx);
+        fs.submit_metadata_read_request(
+            StorageRequest::new(
+                "binary.bin",
+                crate::common::OperationDeadline::unbounded(),
+                std::time::Duration::from_secs(5),
+            ),
+            tx,
+        );
         let event = rx.recv().unwrap();
 
         // Assert
@@ -1783,7 +1820,14 @@ mod atomic_publish_tests {
 
     fn read(fs: &FileSystem, key: &str) -> StorageOutcome<Vec<u8>> {
         let (tx, rx) = std::sync::mpsc::channel();
-        fs.submit_read_with_metadata(key, std::time::Duration::from_secs(5), tx);
+        fs.submit_metadata_read_request(
+            StorageRequest::new(
+                key,
+                crate::common::OperationDeadline::unbounded(),
+                std::time::Duration::from_secs(5),
+            ),
+            tx,
+        );
         match rx.recv().expect("read completion") {
             Ok((bytes, _metadata)) => StorageOutcome::Ok(bytes),
             Err(error) => StorageOutcome::Err(error),

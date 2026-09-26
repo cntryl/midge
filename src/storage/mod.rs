@@ -705,25 +705,6 @@ pub trait StorageBackend: Send + Sync + 'static {
         panic!("test backend received undeclared range-read capability");
     }
 
-    /// Read bytes and identity from one version. Unsupported backends fail closed;
-    /// synthesizing this response from independent GET and HEAD calls is unsafe.
-    #[cfg(not(test))]
-    fn submit_read_with_metadata(
-        &self,
-        key: &str,
-        timeout: std::time::Duration,
-        callback: MetadataReadCallback,
-    );
-    #[cfg(test)]
-    fn submit_read_with_metadata(
-        &self,
-        _key: &str,
-        _timeout: std::time::Duration,
-        _callback: MetadataReadCallback,
-    ) {
-        panic!("test backend received undeclared metadata-read capability");
-    }
-
     /// Submit a write operation. Returns immediately.
     fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback);
 

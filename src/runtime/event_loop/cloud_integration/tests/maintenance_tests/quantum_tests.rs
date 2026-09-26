@@ -1,7 +1,5 @@
 use super::*;
-use crate::storage::{
-    MetadataReadCallback, RangeReadCallback, StorageBackend, StorageCallback, StorageObjectMetadata,
-};
+use crate::storage::{RangeReadCallback, StorageBackend, StorageCallback, StorageObjectMetadata};
 
 struct SlowWalRanges {
     inner: Arc<crate::storage::filesystem::FileSystem>,
@@ -89,15 +87,6 @@ impl StorageBackend for SlowWalRanges {
 
     fn submit_range_head(&self, key: &str, timeout: Duration, callback: StorageCallback) {
         self.inner.submit_range_head(key, timeout, callback);
-    }
-
-    fn submit_read_with_metadata(
-        &self,
-        key: &str,
-        timeout: Duration,
-        callback: MetadataReadCallback,
-    ) {
-        self.inner.submit_read_with_metadata(key, timeout, callback);
     }
 
     fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback) {

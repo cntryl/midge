@@ -85,6 +85,27 @@ pub(super) fn storage_error_from_cloud(error: CloudError) -> crate::storage::Sto
     crate::storage::StorageError::new(kind, error)
 }
 
+impl CloudStorage {
+    fn metadata_read_within(
+        &self,
+        key: &str,
+        timeout: std::time::Duration,
+        callback: &crate::storage::MetadataReadCallback,
+    ) {
+        let deadline = crate::common::OperationDeadline::from_budget(timeout);
+        let result = blocking_cloud_object_proof_within(self, key, &deadline)
+            .map_err(crate::storage::StorageError::from)
+            .and_then(|proof| {
+                proof
+                    .map(|proof| (proof.bytes, proof.metadata))
+                    .ok_or_else(|| {
+                        crate::storage::StorageError::not_found(format!("cloud object '{key}'"))
+                    })
+            });
+        let _ = callback.send(result);
+    }
+}
+
 impl StorageBackend for CloudStorage {
     fn submit_range_read_request(
         &self,
@@ -124,7 +145,7 @@ impl StorageBackend for CloudStorage {
             request,
             callback,
             |key, timeout, callback| {
-                self.submit_read_with_metadata(key, timeout, callback);
+                self.metadata_read_within(key, timeout, &callback);
             },
         );
     }
@@ -237,25 +258,6 @@ impl StorageBackend for CloudStorage {
         callback: crate::storage::RangeReadCallback,
     ) {
         self.read_range_admitted(key, start..end, expected, timeout, None, &callback);
-    }
-
-    fn submit_read_with_metadata(
-        &self,
-        key: &str,
-        timeout: std::time::Duration,
-        callback: crate::storage::MetadataReadCallback,
-    ) {
-        let deadline = crate::common::OperationDeadline::from_budget(timeout);
-        let result = blocking_cloud_object_proof_within(self, key, &deadline)
-            .map_err(crate::storage::StorageError::from)
-            .and_then(|proof| {
-                proof
-                    .map(|proof| (proof.bytes, proof.metadata))
-                    .ok_or_else(|| {
-                        crate::storage::StorageError::not_found(format!("cloud object '{key}'"))
-                    })
-            });
-        let _ = callback.send(result);
     }
 
     fn submit_write(&self, key: &str, data: Vec<u8>, callback: StorageCallback) {
