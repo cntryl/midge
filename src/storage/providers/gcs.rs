@@ -11,7 +11,8 @@ use super::super::cloud::{
     CloudResponse, CloudSigner, ObjectMetadata,
 };
 use super::rest::{
-    conditional_range_preconditions, current_unix_secs, finish_paged_list, PagedList,
+    classify_response_error, conditional_range_preconditions, current_unix_secs, finish_paged_list,
+    response_error_detail, PagedList,
 };
 use super::xml::extract_xml_tag_values;
 use crate::common::{MidgeError, MidgeResult};
@@ -1619,20 +1620,11 @@ fn gcs_response_error(
             extract_xml_tag_values(&body, "Message").into_iter().next(),
         ),
     };
-    let detail = match (reason.as_deref(), message.as_deref()) {
-        (Some(reason), Some(message)) => format!("{operation}: {reason}: {message}"),
-        (Some(reason), None) => format!("{operation}: {reason}"),
-        (None, Some(message)) => format!("{operation}: {message}"),
-        (None, None) => operation.to_string(),
-    };
+    let detail = response_error_detail(operation, reason.as_deref(), message.as_deref(), true);
     let predicate_failed = reason.as_deref().is_some_and(|reason| {
         reason.eq_ignore_ascii_case("conditionNotMet")
             || reason.eq_ignore_ascii_case("PreconditionFailed")
     });
-    if conditional_mutation && response.status == 412 && predicate_failed {
-        return CloudError::PreconditionFailed(format!("status {}: {detail}", response.status));
-    }
-
     let policy_failure = reason.as_deref().is_some_and(|reason| {
         [
             "retentionPolicyNotMet",
@@ -1644,10 +1636,12 @@ fn gcs_response_error(
         .iter()
         .any(|candidate| reason.eq_ignore_ascii_case(candidate))
     });
-    if policy_failure && matches!(response.status, 403 | 409 | 412) {
+    if conditional_mutation && response.status == 412 && predicate_failed {
+        classify_response_error(response.status, detail, true)
+    } else if policy_failure && matches!(response.status, 403 | 409 | 412) {
         CloudError::InvalidRequest(format!("status {}: {detail}", response.status))
     } else {
-        CloudError::from_http_status(response.status, detail)
+        classify_response_error(response.status, detail, false)
     }
 }
 

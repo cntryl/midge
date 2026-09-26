@@ -87,6 +87,46 @@ pub(super) fn finish_paged_list<P>(
     CloudEvent::List { prefix, result }
 }
 
+/// The three providers use the same error text layout, but S3 and Azure
+/// intentionally omit a message when the response has no error code.
+#[cfg(any(
+    feature = "cloud-aws",
+    feature = "cloud-oci",
+    feature = "cloud-azure",
+    feature = "cloud-gcp"
+))]
+pub(super) fn response_error_detail(
+    operation: &str,
+    code: Option<&str>,
+    message: Option<&str>,
+    message_without_code: bool,
+) -> String {
+    match (code, message) {
+        (Some(code), Some(message)) => format!("{operation}: {code}: {message}"),
+        (Some(code), None) => format!("{operation}: {code}"),
+        (None, Some(message)) if message_without_code => format!("{operation}: {message}"),
+        (None, _) => operation.to_string(),
+    }
+}
+
+#[cfg(any(
+    feature = "cloud-aws",
+    feature = "cloud-oci",
+    feature = "cloud-azure",
+    feature = "cloud-gcp"
+))]
+pub(super) fn classify_response_error(
+    status: u16,
+    detail: String,
+    precondition_failed: bool,
+) -> CloudError {
+    if precondition_failed {
+        CloudError::PreconditionFailed(format!("status {status}: {detail}"))
+    } else {
+        CloudError::from_http_status(status, detail)
+    }
+}
+
 /// Current Unix time in whole seconds, or zero if the clock is before the epoch.
 #[cfg(any(feature = "cloud-aws", feature = "cloud-oci", feature = "cloud-gcp"))]
 pub(super) fn current_unix_secs() -> u64 {

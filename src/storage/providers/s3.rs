@@ -10,8 +10,8 @@
 use super::super::cloud::{CloudBackend, CloudExecutor, CloudRequest, CloudResponse, CloudSigner};
 use super::super::cloud::{CloudCallback, CloudError, CloudEvent, CloudOutcome};
 use super::rest::{
-    conditional_range_preconditions, current_unix_secs, finish_paged_list,
-    object_metadata_from_response, PagedList,
+    classify_response_error, conditional_range_preconditions, current_unix_secs, finish_paged_list,
+    object_metadata_from_response, response_error_detail, PagedList,
 };
 use super::xml::extract_xml_tag_values;
 use crate::common::{MidgeError, MidgeResult};
@@ -1428,22 +1428,13 @@ fn s3_response_error(
     let body = String::from_utf8_lossy(&response.body);
     let code = extract_xml_tag_values(&body, "Code").into_iter().next();
     let message = extract_xml_tag_values(&body, "Message").into_iter().next();
-    let detail = match (code.as_deref(), message.as_deref()) {
-        (Some(code), Some(message)) => format!("{operation}: {code}: {message}"),
-        (Some(code), None) => format!("{operation}: {code}"),
-        (None, _) => operation.to_string(),
-    };
-
-    if conditional_mutation
+    let detail = response_error_detail(operation, code.as_deref(), message.as_deref(), false);
+    let precondition_failed = conditional_mutation
         && response.status == 412
         && code
             .as_deref()
-            .is_some_and(|code| code.eq_ignore_ascii_case("PreconditionFailed"))
-    {
-        CloudError::PreconditionFailed(format!("status {}: {detail}", response.status))
-    } else {
-        CloudError::from_http_status(response.status, detail)
-    }
+            .is_some_and(|code| code.eq_ignore_ascii_case("PreconditionFailed"));
+    classify_response_error(response.status, detail, precondition_failed)
 }
 
 impl CloudSigner for SigV4Signer {

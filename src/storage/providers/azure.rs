@@ -12,7 +12,8 @@ use super::super::cloud::{
     CloudResponse, CloudSigner,
 };
 use super::rest::{
-    conditional_range_preconditions, finish_paged_list, object_metadata_from_response, PagedList,
+    classify_response_error, conditional_range_preconditions, finish_paged_list,
+    object_metadata_from_response, response_error_detail, PagedList,
 };
 use super::xml::extract_xml_tag_values;
 use crate::common::{MidgeError, MidgeResult};
@@ -1225,11 +1226,7 @@ fn azure_response_error(
         .filter(|value| !value.is_empty())
         .or_else(|| extract_xml_tag_values(&body, "Code").into_iter().next());
     let message = extract_xml_tag_values(&body, "Message").into_iter().next();
-    let detail = match (code.as_deref(), message.as_deref()) {
-        (Some(code), Some(message)) => format!("{operation}: {code}: {message}"),
-        (Some(code), None) => format!("{operation}: {code}"),
-        (None, _) => operation.to_string(),
-    };
+    let detail = response_error_detail(operation, code.as_deref(), message.as_deref(), false);
     let predicate_failed = code.as_deref().is_some_and(|code| {
         code.eq_ignore_ascii_case("ConditionNotMet")
             || code.eq_ignore_ascii_case("TargetConditionNotMet")
@@ -1243,11 +1240,11 @@ fn azure_response_error(
             .as_deref()
             .is_some_and(|code| code.eq_ignore_ascii_case("BlobAlreadyExists"));
 
-    if conditional_mutation && ((response.status == 412 && predicate_failed) || create_conflict) {
-        CloudError::PreconditionFailed(format!("status {}: {detail}", response.status))
-    } else {
-        CloudError::from_http_status(response.status, detail)
-    }
+    classify_response_error(
+        response.status,
+        detail,
+        conditional_mutation && ((response.status == 412 && predicate_failed) || create_conflict),
+    )
 }
 
 // ---------------------------------------------------------------------------
