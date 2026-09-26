@@ -165,7 +165,14 @@ impl HybridStorage {
         callback_timeout: Duration,
     ) -> Result<bool, crate::storage::StorageError> {
         let (tx, rx) = std::sync::mpsc::channel();
-        backend.submit_delete(key, tx);
+        backend.submit_delete_request(
+            crate::storage::StorageRequest::new(
+                key,
+                crate::common::OperationDeadline::from_budget(callback_timeout),
+                callback_timeout,
+            ),
+            tx,
+        );
         match rx.recv_timeout(callback_timeout) {
             Ok(StorageEvent::DeleteComplete {
                 key: returned_key,

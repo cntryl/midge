@@ -86,6 +86,39 @@ pub(super) fn storage_error_from_cloud(error: CloudError) -> crate::storage::Sto
 }
 
 impl StorageBackend for CloudStorage {
+    fn submit_delete_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        callback: StorageCallback,
+    ) {
+        let timeout = request.remaining_timeout();
+        let key = request.key;
+        if timeout.is_zero() {
+            let _ = callback.send(StorageEvent::DeleteComplete {
+                key,
+                result: StorageOutcome::Err(crate::storage::storage_timeout_error(
+                    "cloud DELETE refused because no callback budget remained",
+                )),
+            });
+            return;
+        }
+        let mut headers = match request.precondition.delete_headers() {
+            Ok(headers) => headers,
+            Err(error) => {
+                let _ = callback.send(StorageEvent::DeleteComplete {
+                    key,
+                    result: StorageOutcome::Err(error),
+                });
+                return;
+            }
+        };
+        let _reservation = request.reservation;
+        set_request_timeout_header(&mut headers, timeout);
+        let (tx, rx) = std::sync::mpsc::channel();
+        CloudStorage::submit_delete_with_headers(self, &key, headers, tx);
+        deliver_delete_outcome(&key, &rx, timeout, &callback);
+    }
+
     fn submit_write_request(
         &self,
         request: crate::storage::StorageRequest,

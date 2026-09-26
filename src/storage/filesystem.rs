@@ -498,6 +498,79 @@ fn mutation_lock(full_path: &Path) -> MutationGuard {
 }
 
 impl StorageBackend for FileSystem {
+    fn submit_delete_request(&self, request: StorageRequest, callback: StorageCallback) {
+        let timeout = request.remaining_timeout();
+        let key = request.key;
+        let result = (|| {
+            if timeout.is_zero() {
+                return Err(crate::storage::storage_timeout_error("delete timed out"));
+            }
+            let path = self.full_path(&key)?;
+            let _lock = mutation_lock(&path);
+            let _process_lock = self.acquire_process_lock(&path)?;
+            match request.precondition {
+                StoragePrecondition::None => {}
+                StoragePrecondition::IfAbsent => {
+                    return Err(crate::storage::StorageError::precondition_failed(
+                        "delete cannot enforce absence precondition",
+                    ));
+                }
+                StoragePrecondition::IfMatch(expected) => {
+                    if expected.generation.is_some() {
+                        if matches!(fs::symlink_metadata(&path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+                        {
+                            return Ok(());
+                        }
+                        return Err(crate::storage::StorageError::precondition_failed(
+                            "filesystem cannot enforce generation precondition",
+                        ));
+                    }
+                    let etag = expected.etag.trim().trim_matches('"');
+                    if etag.is_empty() {
+                        return Err(crate::storage::StorageError::precondition_failed(
+                            "object identity is missing",
+                        ));
+                    }
+                    let current = if etag.starts_with("fs:") {
+                        range_path_metadata(&path).map(|metadata| metadata.etag)
+                    } else {
+                        fs::read(&path)
+                            .map_err(crate::storage::StorageError::from)
+                            .map(|bytes| {
+                                StorageObjectMetadata::content_crc(bytes.len() as u64, &bytes).etag
+                            })
+                    };
+                    match current {
+                        Ok(current) if current == etag => {}
+                        Ok(_) => {
+                            return Err(crate::storage::StorageError::precondition_failed(
+                                "etag mismatch",
+                            ));
+                        }
+                        Err(error) if error.is_not_found() => return Ok(()),
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+            match fs::remove_file(&path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(crate::storage::StorageError::io(format!(
+                    "delete {}: {error}",
+                    path.display()
+                ))),
+            }
+        })();
+        let _reservation = request.reservation;
+        let _ = callback.send(StorageEvent::DeleteComplete {
+            key,
+            result: match result {
+                Ok(()) => StorageOutcome::Ok(()),
+                Err(error) => StorageOutcome::Err(error),
+            },
+        });
+    }
+
     fn submit_write_request(
         &self,
         request: StorageRequest,

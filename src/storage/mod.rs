@@ -158,6 +158,15 @@ impl StoragePrecondition {
             }
         }
     }
+
+    fn delete_headers(&self) -> Result<Vec<(String, String)>, StorageError> {
+        if matches!(self, Self::IfAbsent) {
+            return Err(StorageError::precondition_failed(
+                "delete cannot enforce absence precondition",
+            ));
+        }
+        self.headers()
+    }
 }
 
 /// Shared context for one storage operation. The absolute deadline remains
@@ -556,6 +565,46 @@ pub type RangeReadCallback = std::sync::mpsc::Sender<Result<Vec<u8>, StorageErro
 ///   content hash for HEAD, and stamps each new version with a later modified
 ///   time so a reused inode cannot repeat an old identity (#557).
 pub trait StorageBackend: Send + Sync + 'static {
+    /// Submit a typed delete. Legacy adapters delegate while implementations
+    /// migrate to direct precondition and deadline handling.
+    fn submit_delete_request(&self, request: StorageRequest, callback: StorageCallback) {
+        let timeout = request.remaining_timeout();
+        let key = request.key;
+        if timeout.is_zero() {
+            let _ = callback.send(StorageEvent::DeleteComplete {
+                key,
+                result: StorageOutcome::Err(storage_timeout_error("delete timed out")),
+            });
+            return;
+        }
+        let headers = match request.precondition.delete_headers() {
+            Ok(headers) => headers,
+            Err(error) => {
+                let _ = callback.send(StorageEvent::DeleteComplete {
+                    key,
+                    result: StorageOutcome::Err(error),
+                });
+                return;
+            }
+        };
+        if let Some(reservation) = request.reservation {
+            match retained_callback::retain(callback.clone(), reservation) {
+                Ok(retained) => self.submit_delete_with_headers(&key, headers, retained),
+                Err(error) => {
+                    let _ = callback.send(StorageEvent::DeleteComplete {
+                        key,
+                        result: StorageOutcome::Err(StorageError::new(
+                            StorageErrorKind::of(&error),
+                            format!("retain delete completion: {error}"),
+                        )),
+                    });
+                }
+            }
+        } else {
+            self.submit_delete_with_headers(&key, headers, callback);
+        }
+    }
+
     /// Submit one typed write while preserving the caller's deadline and
     /// retention reservation through the existing callback adapter.
     fn submit_write_request(

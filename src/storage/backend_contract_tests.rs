@@ -111,6 +111,166 @@ fn should_replace_matching_object_when_typed_write_uses_current_identity() {
 }
 
 #[test]
+fn should_preserve_replaced_object_when_typed_delete_uses_stale_identity() {
+    // Arrange
+    let root = tempfile::tempdir().expect("temp dir");
+    for (name, backend) in backends(root.path()) {
+        let key = format!("{name}/delete-guard");
+        let (seed_tx, seed_rx) = mpsc::channel();
+        backend.submit_write(&key, b"old".to_vec(), seed_tx);
+        let _ = seed_rx.recv().expect("seed callback");
+        let (head_tx, head_rx) = mpsc::channel();
+        backend.submit_head(&key, head_tx);
+        let StorageEvent::HeadComplete {
+            result: StorageOutcome::Ok(identity),
+            ..
+        } = head_rx.recv().expect("head callback")
+        else {
+            panic!("{name}: expected a current identity");
+        };
+        let (replace_tx, replace_rx) = mpsc::channel();
+        backend.submit_write(&key, b"new".to_vec(), replace_tx);
+        let _ = replace_rx.recv().expect("replace callback");
+        let request = super::StorageRequest::new(
+            &key,
+            crate::common::OperationDeadline::unbounded(),
+            std::time::Duration::from_secs(1),
+        )
+        .with_precondition(super::StoragePrecondition::IfMatch(identity));
+
+        // Act
+        let (delete_tx, delete_rx) = mpsc::channel();
+        backend.submit_delete_request(request, delete_tx);
+
+        // Assert
+        assert!(
+            matches!(
+                delete_rx.recv().expect("delete callback"),
+                StorageEvent::DeleteComplete {
+                    result: StorageOutcome::Err(_),
+                    ..
+                }
+            ),
+            "{name}"
+        );
+        let (read_tx, read_rx) = mpsc::channel();
+        backend.submit_read_with_metadata(&key, std::time::Duration::from_secs(1), read_tx);
+        let (bytes, _) = read_rx.recv().expect("read callback").expect("read object");
+        assert_eq!(bytes, b"new", "{name}");
+    }
+}
+
+#[test]
+fn should_reject_typed_delete_when_callback_budget_is_zero() {
+    // Arrange
+    let root = tempfile::tempdir().expect("temp dir");
+    for (name, backend) in backends(root.path()) {
+        let key = format!("{name}/expired-delete");
+        let (seed_tx, seed_rx) = mpsc::channel();
+        backend.submit_write(&key, b"value".to_vec(), seed_tx);
+        let _ = seed_rx.recv().expect("seed callback");
+        let request = super::StorageRequest::new(
+            &key,
+            crate::common::OperationDeadline::unbounded(),
+            std::time::Duration::ZERO,
+        );
+
+        // Act
+        let (delete_tx, delete_rx) = mpsc::channel();
+        backend.submit_delete_request(request, delete_tx);
+
+        // Assert
+        assert!(
+            matches!(
+                delete_rx.recv().expect("delete callback"),
+                StorageEvent::DeleteComplete {
+                    result: StorageOutcome::Err(_),
+                    ..
+                }
+            ),
+            "{name}"
+        );
+        let (read_tx, read_rx) = mpsc::channel();
+        backend.submit_read_with_metadata(&key, std::time::Duration::from_secs(1), read_tx);
+        assert!(read_rx.recv().expect("read callback").is_ok(), "{name}");
+    }
+}
+
+#[test]
+fn should_preserve_object_when_typed_delete_uses_absence_precondition() {
+    // Arrange
+    let root = tempfile::tempdir().expect("temp dir");
+    for (name, backend) in backends(root.path()) {
+        let key = format!("{name}/delete-absence-guard");
+        let (seed_tx, seed_rx) = mpsc::channel();
+        backend.submit_write(&key, b"value".to_vec(), seed_tx);
+        let _ = seed_rx.recv().expect("seed callback");
+        let request = super::StorageRequest::new(
+            &key,
+            crate::common::OperationDeadline::unbounded(),
+            std::time::Duration::from_secs(1),
+        )
+        .with_precondition(super::StoragePrecondition::IfAbsent);
+
+        // Act
+        let (delete_tx, delete_rx) = mpsc::channel();
+        backend.submit_delete_request(request, delete_tx);
+
+        // Assert
+        assert!(
+            matches!(
+                delete_rx.recv().expect("delete callback"),
+                StorageEvent::DeleteComplete {
+                    result: StorageOutcome::Err(_),
+                    ..
+                }
+            ),
+            "{name}"
+        );
+        let (read_tx, read_rx) = mpsc::channel();
+        backend.submit_read_with_metadata(&key, std::time::Duration::from_secs(1), read_tx);
+        assert!(read_rx.recv().expect("read callback").is_ok(), "{name}");
+    }
+}
+
+#[test]
+fn should_succeed_when_typed_generation_delete_targets_missing_object() {
+    // Arrange
+    let root = tempfile::tempdir().expect("temp dir");
+    for (name, backend) in backends(root.path()) {
+        let key = format!("{name}/missing-generation-delete");
+        let request = super::StorageRequest::new(
+            &key,
+            crate::common::OperationDeadline::unbounded(),
+            std::time::Duration::from_secs(1),
+        )
+        .with_precondition(super::StoragePrecondition::IfMatch(
+            super::StorageObjectMetadata {
+                size: 1,
+                etag: String::new(),
+                generation: Some("7".into()),
+            },
+        ));
+
+        // Act
+        let (delete_tx, delete_rx) = mpsc::channel();
+        backend.submit_delete_request(request, delete_tx);
+
+        // Assert
+        assert!(
+            matches!(
+                delete_rx.recv().expect("delete callback"),
+                StorageEvent::DeleteComplete {
+                    result: StorageOutcome::Ok(()),
+                    ..
+                }
+            ),
+            "{name}"
+        );
+    }
+}
+
+#[test]
 fn should_keep_existing_bytes_when_generation_precondition_is_unsupported_or_stale() {
     // Arrange
     let root = tempfile::tempdir().expect("temp dir");
